@@ -1863,7 +1863,8 @@ fn build_swap_plan(
                             }
                         }
                     }
-                    None => None,
+                    None => source_textures.get(entity).ok()
+                        .and_then(|textures| textures.0.get("_EmissionMaskTex")).cloned(),
                 };
                 planned.push(Planned {
                     force_emission: resolved.force_emission,
@@ -1912,7 +1913,8 @@ impl Plugin for FixtureMaterialPlugin {
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)
-                .after(crate::fixture::FixtureLayoutSet));
+                .after(crate::fixture::FixtureLayoutSet).after(crate::fixture_colors::prepare)
+                .run_if(crate::fixture_colors::ready));
         bevy::asset::embedded_asset!(app, "shaders/fixture_material.wgsl");
     }
 }

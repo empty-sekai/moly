@@ -439,7 +439,7 @@ fn build_floor(
             }
             let mut add_using = areas
                 .entries
-                .get(row.package)
+                .get(&row.package)
                 .ok_or("AddUsingGrid package record is missing")?
                 .clone()?;
             add_using.rotate(row.direction, true);

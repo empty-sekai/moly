@@ -366,6 +366,12 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+impl MenuMock {
+    pub(crate) fn set_player_rank(&mut self, rank: Option<u32>) {
+        self.rank_level = rank.unwrap_or_else(|| env_u32("MOLY_MENU_MOCK_RANK_LEVEL", 3));
+    }
+}
+
 impl Default for MenuMock {
     fn default() -> Self {
         MenuMock {
@@ -373,7 +379,7 @@ impl Default for MenuMock {
             stamina_enhance: env_i32("MOLY_MENU_MOCK_STAMINA_ENHANCE", 0),
             stamina_boost: env_i32("MOLY_MENU_MOCK_STAMINA_BOOST", 0),
             stamina_max: env_u32("MOLY_MENU_MOCK_STAMINA_MAX", 240),
-            rank_level: env_u32("MOLY_MENU_MOCK_RANK_LEVEL", 3),
+            rank_level: crate::player_data::saved_rank().unwrap_or_else(|| env_u32("MOLY_MENU_MOCK_RANK_LEVEL", 3)),
             rank_exp_next: env_u32("MOLY_MENU_MOCK_RANK_EXP_NEXT", 450),
             visiting: env_bool("MOLY_MENU_MOCK_VISITING", false),
             photo_shot_allowed: env_bool("MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED", true),

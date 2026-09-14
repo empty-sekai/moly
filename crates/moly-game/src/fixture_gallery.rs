@@ -100,7 +100,7 @@ pub(super) fn append_preview(rows: &mut Vec<PlacementMock>) {
             .unwrap_or_else(|| panic!("家具预览参数无效：{selection:?}；支持 surface-0..{} 或 gimmick-0..{}", SURFACES.len() - 1, GIMMICKS.len() - 1));
         let (package, [width, height, depth], id) = catalog[index];
         let min = GridPosition { x: -16, y: 0, z: 14 };
-        rows.push(PlacementMock { package, min,
+        rows.push(PlacementMock { texture_id: 1, package, min,
             max: GridPosition { x: min.x + width - 1, y: height - 1, z: min.z + depth - 1 },
             center_y: 0, layout: layout_type::FLOOR, direction: Direction::Front, fixture_id: id });
         bevy::log::info!("家具预览：{package}，master fixture {id}");
@@ -124,7 +124,7 @@ pub(super) fn append_preview(rows: &mut Vec<PlacementMock>) {
     for &(x, z, direction) in cells {
         // CN master: all fences occupy 2x2 floor cells; green hedge is one
         // cell high (fixture117), the other six are two cells high.
-        rows.push(PlacementMock {
+        rows.push(PlacementMock { texture_id: 1,
             package: catalog[index],
             min: GridPosition { x, y: 0, z },
             max: GridPosition { x: x + 1, y: if road || index == 1 { 0 } else { 1 }, z: z + 1 },
@@ -133,10 +133,4 @@ pub(super) fn append_preview(rows: &mut Vec<PlacementMock>) {
         });
     }
     bevy::log::info!("家具预览：{} {layout}，{} 个实例；道路/围栏使用源邻接规则", catalog[index], cells.len());
-}
-
-pub(super) fn canonical_package(name: &str) -> Option<&'static str> {
-    FENCES.iter().chain(ROADS.iter()).copied()
-        .chain(SURFACES.iter().chain(GIMMICKS.iter()).map(|(package, _, _)| *package))
-        .find(|package| *package == name)
 }

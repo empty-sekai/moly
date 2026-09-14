@@ -1,7 +1,8 @@
-//! 入口库：native 与 wasm 共用一条启动路径。wasm 业务导出面为 0——
-//! 仅 `start` 一个导出；native 走 `main.rs`。
+//! Shared application startup. The browser supplies its preflighted renderer
+//! and the lifetime of its exclusive storage lease.
 
 pub mod asset_source;
+pub mod player_data_input;
 pub mod site_request;
 
 #[cfg(target_arch = "wasm32")]
@@ -15,7 +16,9 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// 起一次 app。资产源与站点选择在这里解析、经 `moly_game::app` 装上——
 /// 消费方读资源，不要再各自去读 env 或 URL（拒绝点全树只在 `asset_source`
 /// 与 `site_request` 两处入口）。
-pub fn run() {
+fn run_app(
+    #[cfg(target_arch = "wasm32")] web_render_settings: bevy::render::settings::WgpuSettings,
+) {
     let source = match asset_source::resolve() {
         Ok(source) => source,
         Err(message) => fail_loud(&message),
@@ -27,12 +30,29 @@ pub fn run() {
     // 渲染后端只在 wasm 分支选（取舍在 `render_backend`）；native 展开后
     // 与双后端升级前逐行一致。
     #[cfg(target_arch = "wasm32")]
-    let mut app = moly_game::app(source, site, render_backend::settings());
+    let mut app = moly_game::app(source, site, web_render_settings);
     #[cfg(not(target_arch = "wasm32"))]
     let mut app = moly_game::app(source, site);
+    if let Err(message) = player_data_input::configure(&mut app) {
+        fail_loud(&message);
+    }
     #[cfg(target_arch = "wasm32")]
-    attach_canvas(&mut app);
+    {
+        attach_canvas(&mut app);
+        app.add_systems(Startup, || {
+            if let Some(window) = web_sys::window() {
+                if let Ok(event) = web_sys::Event::new("moly-ready") {
+                    let _ = window.dispatch_event(&event);
+                }
+            }
+        });
+    }
     app.run();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run() {
+    run_app();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -67,10 +87,34 @@ fn attach_canvas(app: &mut App) {
     window.fit_canvas_to_parent = true;
 }
 
-/// wasm 侧唯一导出：起一次 app。
+/// Starts one browser application synchronously inside the trusted click.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn start() {
-    console_error_panic_hook::set_once();
-    run();
+pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue> {
+    std::panic::set_hook(Box::new(|info| {
+        // Disable writes before notifying JavaScript; the host may release its lease.
+        moly_game::set_browser_storage_writable(false);
+        if let Some(window) = web_sys::window() {
+            let message = info.payload().downcast_ref::<String>().map(String::as_str)
+                .or_else(|| info.payload().downcast_ref::<&str>().copied())
+                .unwrap_or("Unexpected game error");
+            let init = web_sys::CustomEventInit::new();
+            init.set_detail(&message.into());
+            if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict("moly-error", &init) {
+                let _ = window.dispatch_event(&event);
+            }
+        }
+        console_error_panic_hook::hook(info);
+    }));
+    let settings = render_backend::settings(backend)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    set_storage_writable(writable);
+    run_app(settings);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_storage_writable(writable: bool) {
+    moly_game::set_browser_storage_writable(writable);
 }

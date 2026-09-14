@@ -4,3 +4,5 @@
 !/screenshots/readme.png
 /*.exe
 /build-guarded.log
+/balloon-order-*.log
+/balloon-order-*.json

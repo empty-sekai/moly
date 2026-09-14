@@ -500,9 +500,9 @@ pub(crate) fn click(
 
 fn source_world_position(selection: &EditSelectionView) -> Option<Vec3> {
     let item = &selection.item;
-    let pose = EditableFixture {
+    let pose = EditableFixture { texture_id: item.texture_id,
         uid: item.uid.clone(),
-        package: item.package,
+        package: item.package.clone(),
         fixture_id: item.fixture_id,
         center: item.center,
         grid_size: item.grid_size,

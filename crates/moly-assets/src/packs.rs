@@ -1,5 +1,9 @@
 //! Resolve logical asset paths through versioned manifests without preloading a package.
 
+use crate::read_limits::{
+    self, Budget, Buffer, SharedReader, MAX_ASSET_BYTES, MAX_BLOB_BYTES, MAX_DOCUMENT_BYTES,
+    MAX_EXPANSION_RATIO,
+};
 use async_lock::OnceCell;
 use bevy::asset::io::{
     AssetReader, AssetReaderError, ErasedAssetReader, PathStream, Reader, VecReader,
@@ -65,12 +69,29 @@ struct Entry {
     xf: Option<String>,
 }
 
-type InFlight = OnceCell<Arc<[u8]>>;
+#[derive(Hash, PartialEq, Eq)]
+struct Representation {
+    path: String,
+    codec: String,
+    blob_bytes: usize,
+    bytes: usize,
+    blob_sha256: String,
+    content_sha256: String,
+}
+
+type InFlight = OnceCell<Arc<Buffer>>;
+
+enum Source {
+    Reader(Box<dyn ErasedAssetReader>),
+    #[cfg(target_arch = "wasm32")]
+    Http(String),
+}
 
 pub(crate) struct PackReader {
-    inner: Box<dyn ErasedAssetReader>,
+    source: Source,
     catalog: OnceCell<Catalog>,
-    in_flight: Mutex<HashMap<String, Weak<InFlight>>>,
+    in_flight: Mutex<HashMap<Representation, Weak<InFlight>>>,
+    budget: Arc<Budget>,
 }
 
 fn invalid(message: impl Into<String>) -> AssetReaderError {
@@ -99,25 +120,66 @@ fn key(path: &Path) -> Result<String, AssetReaderError> {
 impl PackReader {
     pub(crate) fn new(inner: Box<dyn ErasedAssetReader>) -> Self {
         Self {
-            inner,
+            source: Source::Reader(inner),
             catalog: OnceCell::new(),
             in_flight: Mutex::new(HashMap::new()),
+            budget: read_limits::shared_budget(),
         }
     }
 
-    async fn bytes(&self, path: &str) -> Result<Vec<u8>, AssetReaderError> {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn http(root: String) -> Self {
+        Self {
+            source: Source::Http(root),
+            catalog: OnceCell::new(),
+            in_flight: Mutex::new(HashMap::new()),
+            budget: read_limits::shared_budget(),
+        }
+    }
+
+    async fn bytes(&self, path: &str, limit: usize) -> Result<Vec<u8>, AssetReaderError> {
         let path = key(Path::new(path))?;
-        let mut reader = self.inner.read(Path::new(&path)).await?;
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await?;
+        let inner = match &self.source {
+            Source::Reader(inner) => inner,
+            #[cfg(target_arch = "wasm32")]
+            Source::Http(root) => return crate::http::read_bytes(root, &path, limit).await,
+        };
+        let mut reader = inner.read(Path::new(&path)).await?;
+        let mut bytes = read_limits::buffer(
+            limit
+                .checked_add(1)
+                .ok_or_else(|| invalid("Asset byte limit overflow"))?,
+        )?;
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let remaining = (limit + 1 - bytes.len()).min(chunk.len());
+            let count =
+                futures_lite::AsyncReadExt::read(&mut reader, &mut chunk[..remaining]).await?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            if bytes.len() > limit {
+                return Err(invalid(format!("Asset exceeds its byte limit: {path}")));
+            }
+        }
         Ok(bytes)
+    }
+
+    async fn document_bytes(&self, path: &str) -> Result<Buffer, AssetReaderError> {
+        let _slot = self.budget.slots.acquire().await;
+        let reservation = self.budget.reserve(MAX_DOCUMENT_BYTES + 1)?;
+        Ok(Buffer {
+            bytes: self.bytes(path, MAX_DOCUMENT_BYTES).await?,
+            _reservation: reservation,
+        })
     }
 
     async fn catalog(&self) -> Result<&Catalog, AssetReaderError> {
         self.catalog
             .get_or_try_init(|| async {
-                let bytes = self.bytes("asset-packs.json").await?;
-                let document: CatalogDocument = serde_json::from_slice(&bytes)
+                let bytes = self.document_bytes("asset-packs.json").await?;
+                let document: CatalogDocument = serde_json::from_slice(&bytes.bytes)
                     .map_err(|e| invalid(format!("asset pack catalog: {e}")))?;
                 if document.schema != "moly-asset-packs/1" {
                     return Err(invalid("unsupported asset pack catalog"));
@@ -170,8 +232,8 @@ impl PackReader {
         package
             .loaded
             .get_or_try_init(|| async {
-                let bytes = self.bytes(&package.document.manifest).await?;
-                let document: ManifestDocument = serde_json::from_slice(&bytes)
+                let bytes = self.document_bytes(&package.document.manifest).await?;
+                let document: ManifestDocument = serde_json::from_slice(&bytes.bytes)
                     .map_err(|e| invalid(format!("package {}: {e}", package.document.id)))?;
                 if document.schema != "moly-asset-manifest/1" || document.version != version {
                     return Err(invalid(format!(
@@ -182,6 +244,12 @@ impl PackReader {
                 let mut entries = HashMap::new();
                 for entry in document.entries {
                     let path = key(Path::new(&entry.path))?;
+                    let expansion_limit = entry.blob_bytes.checked_mul(MAX_EXPANSION_RATIO)
+                        .and_then(|value| value.checked_add(64 * 1024))
+                        .ok_or_else(|| invalid("Asset expansion limit overflow"))?;
+                    if entry.blob_bytes > MAX_BLOB_BYTES || entry.bytes > MAX_ASSET_BYTES || entry.bytes > expansion_limit {
+                        return Err(invalid(format!("Packed asset exceeds transfer, decoded-size or expansion budget: {path}")));
+                    }
                     if entry.xf.is_some()
                         || entry.http_encoding != "identity"
                         || !matches!(entry.codec.as_str(), "identity" | "gzip")
@@ -222,24 +290,39 @@ impl PackReader {
             .await
     }
 
-    async fn payload(&self, path: &str, entry: &Entry) -> Result<Arc<[u8]>, AssetReaderError> {
+    async fn payload(&self, path: &str, entry: &Entry) -> Result<Arc<Buffer>, AssetReaderError> {
+        let identity = Representation {
+            path: key(Path::new(path))?,
+            codec: entry.codec.clone(),
+            blob_bytes: entry.blob_bytes,
+            bytes: entry.bytes,
+            blob_sha256: entry.blob_sha256.clone(),
+            content_sha256: entry.content_sha256.clone(),
+        };
         let flight = {
             let mut flights = self
                 .in_flight
                 .lock()
                 .map_err(|_| invalid("asset request state unavailable"))?;
-            if let Some(flight) = flights.get(path).and_then(Weak::upgrade) {
+            if let Some(flight) = flights.get(&identity).and_then(Weak::upgrade) {
                 flight
             } else {
                 flights.retain(|_, value| value.strong_count() != 0);
                 let flight = Arc::new(InFlight::new());
-                flights.insert(path.to_owned(), Arc::downgrade(&flight));
+                flights.insert(identity, Arc::downgrade(&flight));
                 flight
             }
         };
         let bytes = flight
             .get_or_try_init(|| async {
-                let bytes = self.bytes(path).await?;
+                let _slot = self.budget.slots.acquire().await;
+                let peak = entry
+                    .blob_bytes
+                    .checked_add(entry.bytes)
+                    .and_then(|value| value.checked_add(2))
+                    .ok_or_else(|| invalid("Asset buffer size overflow"))?;
+                let mut reservation = self.budget.reserve(peak)?;
+                let bytes = self.bytes(path, entry.blob_bytes).await?;
                 if bytes.len() != entry.blob_bytes
                     || format!("{:x}", Sha256::digest(&bytes)) != entry.blob_sha256
                 {
@@ -249,10 +332,11 @@ impl PackReader {
                     )));
                 }
                 let decoded = if entry.codec == "gzip" {
-                    let mut decoded = Vec::with_capacity(entry.bytes);
+                    let mut decoded = read_limits::buffer(entry.bytes + 1)?;
                     flate2::read::GzDecoder::new(bytes.as_slice())
                         .take(entry.bytes as u64 + 1)
                         .read_to_end(&mut decoded)?;
+                    drop(bytes);
                     decoded
                 } else {
                     bytes
@@ -265,7 +349,11 @@ impl PackReader {
                         entry.path
                     )));
                 }
-                Ok::<Arc<[u8]>, AssetReaderError>(decoded.into())
+                reservation.shrink_to(decoded.capacity());
+                Ok::<Arc<Buffer>, AssetReaderError>(Arc::new(Buffer {
+                    bytes: decoded,
+                    _reservation: reservation,
+                }))
             })
             .await?;
         Ok(bytes.clone())
@@ -289,7 +377,7 @@ impl AssetReader for PackReader {
             .ok_or_else(|| AssetReaderError::NotFound(path.to_owned()))?;
         let path = format!("{}{}", manifest.blob_prefix, entry.blob);
         let bytes = self.payload(&path, entry).await?;
-        Ok(VecReader::new(bytes.to_vec()))
+        Ok(SharedReader::new(bytes))
     }
 
     async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {

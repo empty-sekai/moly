@@ -56,6 +56,7 @@ pub(super) fn read(document: &Value) -> Result<Vec<EditableFixture>, String> {
             .and_then(|v| i32::try_from(v).ok())
             .ok_or("returned mysekaiFixtureId must be i32")?;
         let item = EditableFixture {
+            texture_id: record.get("textureId").map(|v| super::positive_u32(v, "textureId")).transpose()?.unwrap_or(1),
             uid: uid.into(),
             package,
             fixture_id,
@@ -179,6 +180,7 @@ pub(super) fn encode(
             ("centerY", json!(item.center.y)),
             ("layoutType", json!(item.layout)),
             ("rotation", json!(item.direction as u8)),
+            ("textureId", json!(item.texture_id)),
         ] {
             object.insert(key.to_owned(), value);
         }

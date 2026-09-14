@@ -133,7 +133,7 @@ pub(super) fn save(
         return Err("地图等级尺寸尚未就绪".into());
     };
     for owner in rows {
-        if let Some(meta) = areas.cutscene.get(owner.package) {
+        if let Some(meta) = areas.cutscene.get(&owner.package) {
             let protected = cutscene_cells(meta, owner);
             if protected
                 .iter()
@@ -155,8 +155,8 @@ pub(super) fn save(
     }
     const ANIMATION_SPACE_ENFORCED: [&str; 0] = [];
     for item in rows {
-        if ANIMATION_SPACE_ENFORCED.contains(&item.package) {
-            let Some(meta) = areas.motion.get(item.package) else {
+        if ANIMATION_SPACE_ENFORCED.contains(&item.package.as_str()) {
+            let Some(meta) = areas.motion.get(&item.package) else {
                 return Err(format!(
                     "ErrorAnimationSpace(2)：{}缺少源动作区域",
                     item.uid

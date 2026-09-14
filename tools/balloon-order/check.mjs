@@ -21,15 +21,17 @@
 //
 // 用法：node tools/balloon-order/check.mjs [moly-app.exe]
 //   exe 缺省取仓根的 moly-app-*.exe。每臂的完整日志落在仓根
-//   balloon-order-arm-*.log 供复查。
+//   balloon-order-<run-id>-*.log 及对应 JSON 状态供复查。
 
 import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
 const WINDOW_SECS = '10.0';
-const RUN_TIMEOUT_MS = 90_000;
+const RUN_TIMEOUT_MS = Number(process.env.MOLY_BALLOON_ORDER_TIMEOUT_MS ?? 90_000);
+if (!Number.isSafeInteger(RUN_TIMEOUT_MS) || RUN_TIMEOUT_MS <= 0) throw new Error('Invalid probe timeout');
 const STRIDE = 4.0;
 
 const READY_RE =
@@ -54,7 +56,12 @@ function findExe() {
 }
 
 function runArm(exe, armName, extraEnv) {
-  const env = { ...process.env, MOLY_BALLOON_ORDER_SECS: WINDOW_SECS, ...extraEnv };
+  const runId = randomUUID();
+  const env = { ...process.env, MOLY_BALLOON_ORDER_SECS: WINDOW_SECS, MOLY_BALLOON_ORDER_RUN_ID: runId };
+  env.RUST_LOG = `${process.env.RUST_LOG ?? 'warn'},moly_game::balloon=info`;
+  delete env.MOLY_BALLOON_ORDER_NO_LAYER;
+  Object.assign(env, extraEnv);
+  const executableSha256 = createHash('sha256').update(fs.readFileSync(exe)).digest('hex');
   const proc = spawnSync(exe, [], {
     env,
     cwd: path.dirname(exe),
@@ -63,9 +70,21 @@ function runArm(exe, armName, extraEnv) {
     maxBuffer: 64 * 1024 * 1024,
   });
   const out = `${proc.stdout ?? ''}${proc.stderr ?? ''}`;
-  const logPath = path.join(path.dirname(exe), `balloon-order-arm-${armName}.log`);
+  const logPath = path.join(path.dirname(exe), `balloon-order-${runId}-${armName}.log`);
   fs.writeFileSync(logPath, out, 'utf8');
-  return { out, logPath };
+  const result = { runId, armName, executableSha256, logPath,
+    status: proc.status, signal: proc.signal,
+    error: proc.error ? { code: proc.error.code, message: proc.error.message } : null };
+  fs.writeFileSync(logPath.replace(/\.log$/, '.json'), JSON.stringify(result, null, 2) + '\n');
+  console.log(`[${armName}] log: ${logPath}`);
+  if (result.error || result.signal || result.status !== 0) {
+    throw new Error(`Probe process failed: ${JSON.stringify(result)}`);
+  }
+  const identity = /\[tweet-order\] run=([0-9a-f-]+) version=(\S+)/.exec(out);
+  if (!identity || identity[1] !== runId || identity[2] !== expectedVersion) {
+    throw new Error(`Probe run/version identity differs; see ${logPath}`);
+  }
+  return { out, ...result };
 }
 
 function parse(out) {
@@ -137,6 +156,9 @@ function checkSelf(parts, ready, arm) {
   const nearD = Number(ready[2]);
   const farD = Number(ready[4]);
   const probeParts = parts.filter((p) => p.probe === 1);
+  if (![near, far, nearD, farD, ...parts.flatMap(p => [p.tweet, p.base, p.k, p.z])].every(Number.isFinite)) {
+    errors.push('探针包含非有限数值');
+  }
   for (const [tweet, name] of [
     [near, '近'],
     [far, '远'],
@@ -163,7 +185,11 @@ function checkSelf(parts, ready, arm) {
   return { errors, near, far };
 }
 
-const exe = findExe();
+const root = path.resolve(import.meta.dirname, '..', '..');
+const expectedVersion = /\[workspace\.package\][\s\S]*?\bversion\s*=\s*"([^"]+)"/
+  .exec(fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8'))?.[1];
+if (!expectedVersion) throw new Error('Workspace version is missing');
+const exe = path.resolve(findExe());
 const failures = [];
 
 // 正向臂：接线在——C1 绿、C2 绿、自检绿。
@@ -206,7 +232,6 @@ const failures = [];
   }
 }
 
-console.log(`[check] 日志：${path.join(path.dirname(exe), 'balloon-order-arm-a.log')} / ${path.join(path.dirname(exe), 'balloon-order-arm-b.log')}`);
 if (failures.length > 0) {
   console.log('[check] 未通过：');
   for (const f of failures) console.log(`  - ${f}`);

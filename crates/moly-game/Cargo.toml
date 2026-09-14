@@ -11,12 +11,19 @@ bevy = { workspace = true }
 serde_json = "1"
 # 字形光栅化与度量：bevy_text 的同源光栅器，锁内已有 0.2.10，不新增下载。
 swash = "0.2.10"
+ehttp = "0.6"
+rfd = "0.15"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = { version = "3", default-features = false }
+tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # 生日门要读墙钟的 epoch 毫秒；wasm 上 std 的 SystemTime 是未实现的桩
 # （sys/pal/unsupported：SystemTime::now() 运行时 panic），epoch 走 JS 的
 # Date.now。版本与 moly-app 同源（锁内 0.3.104，不新增下载）。
 js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
 # 本地档（音量设置持久化）在浏览器侧落 localStorage：Window + Storage
 # 绑定。与 moly-app 同一版本源（锁内已有，不新增下载）。
-web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard"] }

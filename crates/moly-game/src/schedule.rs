@@ -95,6 +95,8 @@ pub fn install(app: &mut App) {
             .after(crate::fixture_activity_provider::advance)
             .run_if(common_conditions::on_timer(Duration::from_secs(2))));
     crate::game_settings::install(app);
+    crate::player_data::install(app);
+    crate::fixture_colors::install(app);
     app.add_message::<crate::frame_capture::CaptureFrame>()
         .add_systems(PostUpdate, crate::frame_capture::capture);
     app.add_systems(
@@ -252,19 +254,19 @@ pub fn install(app: &mut App) {
                     // 约束面构建收尾站点域：玩家铺位与推进读它（面与地表
                     // 同批网格，地表顶点可查的当帧它也齐）。
                     site::parse_masters,
-                    site::read_switch.run_if(crate::game_settings::scene_input_enabled),
-                    site::plan,
-                    site::spawn_when_ready,
+                    site::read_switch.after(site::parse_masters).run_if(crate::game_settings::scene_input_enabled),
+                    site::plan.after(site::read_switch),
+                    site::spawn_when_ready.after(site::plan),
                     inactive_nodes::parse,
                     site_sound::parse,
-                    site_sound::apply,
-                    site::report_anchor,
-                    walk_face::build,
+                    site_sound::apply.after(site_sound::parse).after(inactive_nodes::parse),
+                    site::report_anchor.after(site::spawn_when_ready),
+                    walk_face::build.after(site::spawn_when_ready),
                     // 目标面构建（保留高度的三角网 + 格桶 + 可行走格）：
                     // 与约束面同批网格、同批就绪；名册落位与目标机都读它。
-                    npc_objective::build_face,
+                    npc_objective::build_face.after(walk_face::build),
                     // 摆放保存后整场重烘挖洞：保存回执落台账 → 重烘 → 对账行。
-                    walk_face::rebake_on_save,
+                    walk_face::rebake_on_save.after(walk_face::build),
                 ),
                 (
                     // 手势与摇杆链（0 层输入，先于相机与对话的消费）：
@@ -320,13 +322,13 @@ pub fn install(app: &mut App) {
                     // （命令同步点），目标机的资源门挡那一帧的空窗。
                     fixture_attach::parse,
                     npc::parse,
-                    npc::spawn_when_ready,
-                    npc::reseed,
+                    npc::spawn_when_ready.after(npc::parse).after(fixture_attach::parse),
+                    npc::reseed.after(npc::spawn_when_ready),
                     // 目标机决策（停顿计时、决策梯、抽签、目的地解算、出发——
                     // 写路径槽与相位）。决策先于推进：当帧决策当帧起步。
-                    npc_objective::decide.before(npc::advance),
+                    npc_objective::decide.after(npc::reseed).before(npc::advance),
                     npc::advance,
-                    npc::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                    npc::report.after(npc::advance).run_if(common_conditions::on_timer(Duration::from_secs(2))),
                 ),
                 (
                     // 相机 JSON 解析：装载面（七曲线 + 静态机位）。资产
@@ -336,7 +338,7 @@ pub fn install(app: &mut App) {
                     // 相机手势输入：吃手势层的 DRAG 逐帧 Moved（激活阈值
                     // 在手势层）+ 滚轮捏合，跟随律在 PostUpdate 当帧消费
                     // ——输入当帧生效。
-                    camera::apply_input.run_if(crate::game_settings::scene_input_enabled),
+                    camera::apply_input.after(camera::parse).run_if(crate::game_settings::scene_input_enabled),
                 ),
                 (
                     // 角色链：计划（发包装载）→ 挂载 → 装配（插播放器与驱动）→
@@ -344,25 +346,25 @@ pub fn install(app: &mut App) {
                     // 摘 Standard 换 Character）。链内命令自动同步点逐级生效：
                     // 前一级插的组件，后一级当帧读得到。
                     player::parse,
-                    player::spawn_when_ready,
-                    character::plan_when_ready,
-                    character::attach_when_ready,
-                    character::wire_when_ready,
-                    character_material::plan_when_wired,
-                    character_material::swap_when_planned,
+                    player::spawn_when_ready.after(player::parse),
+                    character::plan_when_ready.after(player::spawn_when_ready).after(npc::spawn_when_ready),
+                    character::attach_when_ready.after(character::plan_when_ready),
+                    character::wire_when_ready.after(character::attach_when_ready),
+                    character_material::plan_when_wired.after(character::wire_when_ready),
+                    character_material::swap_when_planned.after(character_material::plan_when_wired),
                     // 骨布装配：解析 rig 的 cloth 节、绑骨、建链（等装配闩
                     // MotionDriver——场景已展开、动画目标已插）。
-                    cloth_runtime::plan_when_wired,
+                    cloth_runtime::plan_when_wired.after(character::wire_when_ready),
                     // 玩家逻辑仍在自己的根：换站重定位 → 输入 → 位移，
                     // 只将SD外观与角色共用，不加入NPC决策/路径名册。
-                    player::reseed,
+                    player::reseed.after(player::spawn_when_ready),
                     // 读输入 → 推进位移这一对必须显式链上：两者对 PlayerInput
                     // 一写一读构成冲突，但冲突只保证串行、不保证次序——
                     // executor 让推进先跑时读到的是上一帧的输入，起手/收场
                     // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
                     // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
                     (
-                        player::read_input,
+                        player::read_input.after(player::reseed),
                         player::advance,
                     )
                         .chain(),
@@ -378,8 +380,11 @@ pub fn install(app: &mut App) {
                     // 位移驱动整名让位）。
                     alone_action_runtime::parse_alone_actions,
                     alone_action_runtime::parse_facial_tables,
-                    alone_action_runtime::attach,
-                    alone_action_runtime::report,
+                    alone_action_runtime::attach
+                        .after(alone_action_runtime::parse_alone_actions)
+                        .after(alone_action_runtime::parse_facial_tables)
+                        .after(character_material::swap_when_planned),
+                    alone_action_runtime::report.after(alone_action_runtime::attach),
                 ),
                 (
                     // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
@@ -387,13 +392,13 @@ pub fn install(app: &mut App) {
                     // 真源式。其后气泡链：解析主表
                     // → 烘图集 → 驻留沿触发（读 npc 推进写好的相位）→ 存活
                     // 计时与淡坡。读相位所以排推进之后。
-                    player_avatar::drive,
-                    player::tune_animation_speed,
-                    character::probe_playback,
-                    player_avatar::probe_playback,
-                    player::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                    player_avatar::drive.after(player::advance).after(character::wire_when_ready),
+                    player::tune_animation_speed.after(player_avatar::drive),
+                    character::probe_playback.after(character::drive),
+                    player_avatar::probe_playback.after(player::tune_animation_speed),
+                    player::report.after(player::advance).run_if(common_conditions::on_timer(Duration::from_secs(2))),
                     balloon::parse_master,
-                    balloon::bake_atlas,
+                    balloon::bake_atlas.after(balloon::parse_master).after(player_talk::parse),
                     // 问候触发 → 显式同步点 → after-edit 反应：同一根
                     // objective 槽位的两条写入沿。链式定序 + 同步点让
                     // 反应的让位门看得见问候触发本帧铺的气泡——不定序
@@ -401,7 +406,7 @@ pub fn install(app: &mut App) {
                     // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
                     // （真源单状态字段，构造上不允许两只并存）。
                     (
-                        balloon::trigger,
+                        balloon::trigger.after(balloon::bake_atlas).after(npc::advance),
                         ApplyDeferred,
                         // after-edit 反应链：保存回执 → 池选取
                         // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源
@@ -409,15 +414,15 @@ pub fn install(app: &mut App) {
                         balloon::after_edit_reaction,
                     )
                         .chain(),
-                    balloon::tick,
+                    balloon::tick.after(balloon::after_edit_reaction),
                     // 层序探针（MOLY_BALLOON_ORDER_SECS > 0 才活）：造一对
                     // 同屏点重叠的探针气泡，到秒数自动退出（无头验收）。
-                    balloon::order_smoke,
+                    balloon::order_smoke.after(balloon::tick),
                 ),
                 (
                     // The Rest driver owns script selection; this chain only prepares visuals.
                     emoticon::parse,
-                    emoticon::spawn_when_ready,
+                    emoticon::spawn_when_ready.after(emoticon::parse),
                 ),
                 (
                     // 对话链：剧本表解析 → 时间轴三件套装载计划（锚定
@@ -453,7 +458,7 @@ pub fn install(app: &mut App) {
                         player_talk::consume_trigger,
                         ApplyDeferred,
                         // Dispose a departing Rest before a new conversation writes animation.
-                        npc::sync_rest_lifecycle,
+                        npc::sync_rest_lifecycle.after(npc::advance),
                         alone_action_runtime::advance,
                         character::drive,
                         emoticon::serve_rest,

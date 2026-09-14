@@ -1,0 +1,35 @@
+name: Static checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check workspace version
+        run: python tools/version/check.py
+      - name: Check JavaScript syntax
+        shell: bash
+        run: git ls-files -z '*.mjs' | xargs -0 -r -n1 node --check
+      - name: Check public source boundary
+        run: node tools/boundary/check.mjs
+      - name: Check commit whitespace
+        run: git show --format= --check

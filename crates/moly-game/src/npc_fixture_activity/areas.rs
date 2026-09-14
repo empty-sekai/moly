@@ -52,7 +52,7 @@ impl NpcFixtureAreas {
         rows: &[OccupancyRow],
         floor: &FixtureFloorTiles,
     ) -> Result<bool, String> {
-        let mut motion = self.row(row.package)?.0.clone();
+        let mut motion = self.row(&row.package)?.0.clone();
         motion.rotate(row.direction, true);
         // FixtureManager first collects the other fixtures through the floor
         // grid cells of UpdateMotionAreaBoundList. Rugs do not become floor
@@ -81,7 +81,7 @@ impl NpcFixtureAreas {
             if others.next().is_some() {
                 return Err(format!("motion-area occupant {uid} is ambiguous"));
             }
-            let mut add = self.row(other.package)?.1.clone();
+            let mut add = self.row(&other.package)?.1.clone();
             add.rotate(other.direction, true);
             let add_center =
                 rotated_center_grid(other.layout_center, other.layout_grid_size, other.direction);

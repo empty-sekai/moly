@@ -387,6 +387,12 @@ fn env_f32_range(name: &str, default: f32, lo: f32, hi: f32) -> f32 {
     }
 }
 
+impl InfoMock {
+    pub(crate) fn set_player_rank(&mut self, rank: Option<u32>) {
+        self.rank_level = rank.unwrap_or_else(|| env_u32("MOLY_INFO_MOCK_RANK_LEVEL", 1));
+    }
+}
+
 impl Default for InfoMock {
     fn default() -> Self {
         let access_permission = match std::env::var("MOLY_INFO_MOCK_ACCESS_PERMISSION") {
@@ -404,7 +410,7 @@ impl Default for InfoMock {
         };
         InfoMock {
             access_permission,
-            rank_level: env_u32("MOLY_INFO_MOCK_RANK_LEVEL", 1),
+            rank_level: crate::player_data::saved_rank().unwrap_or_else(|| env_u32("MOLY_INFO_MOCK_RANK_LEVEL", 1)),
             rank_gauge: env_f32_range("MOLY_INFO_MOCK_RANK_GAUGE", 0.0, 0.0, 1.0),
             fixture_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT", 20),
             fixture_joint_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT", 10),

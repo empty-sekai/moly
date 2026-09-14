@@ -56,9 +56,13 @@ pub(crate) fn read_document() -> Result<Value, String> {
 /// Also callable by the legacy Option audio writer without a World borrow.
 /// A fresh read on each synchronous write preserves changes from other domains.
 pub(crate) fn save_sections(sections: &[(&str, Value)]) -> Result<(), String> {
-    save_sections_checked(|_| Ok(sections.iter()
-        .map(|(name, patch)| ((*name).to_owned(), patch.clone())).collect()))
-        .map(|_| ())
+    save_sections_checked(|_| {
+        Ok(sections
+            .iter()
+            .map(|(name, patch)| ((*name).to_owned(), patch.clone()))
+            .collect())
+    })
+    .map(|_| ())
 }
 
 /// One synchronous read -> caller preflight/patch preparation -> merge ->
@@ -67,22 +71,31 @@ pub(crate) fn save_sections(sections: &[(&str, Value)]) -> Result<(), String> {
 /// The successful receipt is exactly the document passed to write_text, not
 /// a fallible reread after a write has already committed.
 ///
-/// This is not compare-and-swap: another process/tab can still write between
-/// this read and write. No file lock, Web Lock or cross-process CAS is claimed.
+/// The transaction guard excludes other native writers. Browser writes require
+/// the exclusive Web Lock held by the page for its lifetime.
 pub(crate) fn save_sections_checked(
     prepare: impl FnOnce(&Value) -> Result<Vec<(String, Value)>, String>,
 ) -> Result<Value, String> {
+    update_document_checked(|document| {
+        let sections = prepare(document)?;
+        let object = document
+            .as_object_mut()
+            .expect("read_document returns an object");
+        for (name, patch) in sections {
+            merge(object.entry(name).or_insert(Value::Null), &patch);
+        }
+        Ok(())
+    })
+}
+
+/// Replace complete domain records after validation against the fresh document.
+/// Other domains are retained, and no in-memory state changes before this returns.
+pub(crate) fn update_document_checked(
+    update: impl FnOnce(&mut Value) -> Result<(), String>,
+) -> Result<Value, String> {
+    let _guard = transaction_guard()?;
     let mut document = read_document()?;
-    let sections = prepare(&document)?;
-    let object = document
-        .as_object_mut()
-        .expect("read_document returns an object");
-    for (name, patch) in sections {
-        merge(
-            object.entry(name).or_insert(Value::Null),
-            &patch,
-        );
-    }
+    update(&mut document)?;
     let text = serde_json::to_string_pretty(&document)
         .map_err(|error| format!("Encode settings: {error}"))?;
     write_text(&text)?;
@@ -129,18 +142,70 @@ pub(crate) fn read_text() -> Result<Option<String>, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_text(text: &str) -> Result<(), String> {
+fn transaction_guard() -> Result<std::fs::File, String> {
     let destination = path()?;
-    if let Some(parent) = destination
+    let parent = destination
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Create settings directory: {error}"))?;
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Create settings directory: {error}"))?;
+    let mut lock_path = destination.into_os_string();
+    lock_path.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| format!("Open settings lock: {error}"))?;
+    file.try_lock()
+        .map_err(|error| format!("Another process is saving these settings; retry: {error}"))?;
+    Ok(file)
+}
+
+#[cfg(target_arch = "wasm32")]
+static BROWSER_WRITABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The browser host sets this only while it holds the exclusive storage lock.
+#[cfg(target_arch = "wasm32")]
+pub fn set_browser_storage_writable(writable: bool) {
+    BROWSER_WRITABLE.store(writable, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn transaction_guard() -> Result<(), String> {
+    if BROWSER_WRITABLE.load(std::sync::atomic::Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err("This tab is read-only. Exclusive browser storage access is unavailable; close other moly tabs and reload to save.".into())
     }
-    let temporary = destination.with_extension("json.tmp");
-    std::fs::write(&temporary, text).map_err(|error| format!("Write settings: {error}"))?;
-    std::fs::rename(&temporary, &destination).map_err(|error| format!("Replace settings: {error}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_text(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let destination = path()?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".moly-settings-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|error| format!("Create temporary settings: {error}"))?;
+    temporary
+        .write_all(text.as_bytes())
+        .map_err(|error| format!("Write settings: {error}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("Sync settings: {error}"))?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| format!("Replace settings: {error}"))?;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]

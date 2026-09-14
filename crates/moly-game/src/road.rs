@@ -129,12 +129,12 @@ fn update_materials(
     if revision.is_changed() { cache.clear(); }
     if surfaces.is_empty() || (!placements.is_changed() && !surfaces.iter().any(|(_, s)| s.is_added())) { return; }
     let rows: Vec<_> = placements.rows.iter().filter(|r| r.layout == layout_type::ROAD)
-        .map(|r| (r.package, r.placed())).collect();
+        .map(|r| (r.package.as_str(), r.placed())).collect();
     let mut next = MaterialCache::new();
     let mut prepared = HashSet::new();
     let mut clipped = 0;
     for (entity, surface) in &surfaces {
-        let row = placements.rows[surface.row];
+        let row = &placements.rows[surface.row];
         let bounds = row.placed();
         let (dx, dz) = CELL_OFFSETS[surface.cell];
         let x = bounds.min.x.wrapping_add(dx);
@@ -173,5 +173,6 @@ pub(super) fn install(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/road_material.wgsl");
     app.add_plugins(MaterialPlugin::<RoadMaterial>::default())
         .add_systems(Update, (bind_surfaces, update_materials).chain()
-            .after(super::FixtureLayoutSet).before(crate::fixture_material::FixtureMaterialSet));
+            .after(super::FixtureLayoutSet).after(crate::fixture_colors::prepare)
+            .run_if(crate::fixture_colors::ready).before(crate::fixture_material::FixtureMaterialSet));
 }

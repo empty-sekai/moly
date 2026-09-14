@@ -201,12 +201,12 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
             continue;
         }
         let handle = world.resource_scope(|world, mut candidates: Mut<CandidateAssets>| {
-            if let Some(handle) = candidates.glbs.get(row.package) {
+            if let Some(handle) = candidates.glbs.get(&row.package) {
                 return Some(handle.clone());
             }
-            let path = candidates.paths.get(row.package)?.clone();
+            let path = candidates.paths.get(&row.package)?.clone();
             let handle = world.resource::<AssetServer>().load::<Gltf>(path);
-            candidates.glbs.insert(row.package.into(), handle.clone());
+            candidates.glbs.insert(row.package.clone(), handle.clone());
             Some(handle)
         });
         let Some(handle) = handle else {
@@ -234,6 +234,7 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
         world.spawn((
             SceneRoot(scene),
             crate::fixture::FixtureVisualRoot { layout: row.layout },
+            crate::fixture_colors::FixtureColorChoice { package: row.package.clone(), texture_id: row.texture_id },
             DraftPreview {
                 uid: row.uid.clone(),
             },

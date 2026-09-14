@@ -19,6 +19,7 @@ fn main() {
     let source = moly_app::asset_source::resolve().expect("asset source");
     let site = moly_app::site_request::resolve().expect("site request");
     let mut app = moly_game::app(source, site);
+    moly_app::player_data_input::configure(&mut app).expect("player data inputs");
     app.add_systems(
         Update,
         move |mut commands: Commands, time: Res<Time<Real>>, mut requested: Local<bool>| {

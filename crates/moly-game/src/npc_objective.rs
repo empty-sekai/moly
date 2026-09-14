@@ -586,8 +586,9 @@ impl objective::Permute for PermuteSource<'_> {
 /// 靠近家具链的环带按盒算，抽签按 fixtureId 记账，动作点支按包取
 /// 挂点条目。
 struct AnchoredFixture {
+    uid: String,
     fixture_id: i32,
-    package: &'static str,
+    package: String,
     min: Cell,
     max: Cell,
 }
@@ -599,25 +600,16 @@ pub(crate) struct AnchoredFixtureCache {
     rows: Option<Vec<AnchoredFixture>>,
 }
 
-/// 锚定摆放联结表：锚定行（fixtureId 非 0）按包名对上占用行取格界。
-/// 包名是摆放表的主键（一条摆放一个包），对不上即响亮拒绝。
+/// Preserve each placed instance's footprint, including repeated furniture IDs.
 fn anchored_fixtures(placements: &FixturePlacements) -> Vec<AnchoredFixture> {
-    let rows = placements.occupancy_rows();
-    placements
-        .anchored()
-        .into_iter()
-        .map(|(fixture_id, package)| {
-            let Some(row) = rows.iter().find(|row| row.package == package) else {
-                panic!("锚定家具 {fixture_id} 的摆放包 {package} 不在占用表里");
-            };
-            AnchoredFixture {
-                fixture_id,
-                package,
-                min: (row.min.x as i32, row.min.z as i32),
-                max: (row.max.x as i32, row.max.z as i32),
-            }
-        })
-        .collect()
+    placements.occupancy_rows().into_iter().zip(placements.fixture_ids())
+        .filter(|(_, id)| *id != 0)
+        .map(|(row, fixture_id)| AnchoredFixture {
+            uid: row.uid,
+            fixture_id, package: row.package,
+            min: (row.min.x as i32, row.min.z as i32),
+            max: (row.max.x as i32, row.max.z as i32),
+        }).collect()
 }
 
 /// 道别 → 槽位类型（替身映射，见模块注释）。
@@ -704,7 +696,7 @@ enum FixtureOutcome {
     ActionPoint {
         fixture_id: i32,
         seat: i32,
-        package: &'static str,
+        package: String,
         landing: [f32; 3],
     },
     /// 环带兜底命中：`reason` 是动作点支落空的理由（无行 / 挂点条目
@@ -744,7 +736,7 @@ fn fixture_target(
     // —— 动作点支：座位查表 → 挂点条目 → 面 0.3 门；命中即返回，任一
     // 环落空回落环带（理由词具名，随环带行报出）。
     let fallback_reason: &'static str = match seat_of(fixture.fixture_id) {
-        Some(seat) => match attach.entry(fixture.package, seat) {
+        Some(seat) => match attach.entry(&fixture.uid, seat) {
             Some(world) => {
                 // 面采样门：查询点 = 挂点 x/z + 参考高度，容差 0.3；命中
                 // 取采样 y（挂点 local 的 y 恒零，落点高度走面——同全部
@@ -755,7 +747,7 @@ fn fixture_target(
                         return FixtureOutcome::ActionPoint {
                             fixture_id: fixture.fixture_id,
                             seat,
-                            package: fixture.package,
+                            package: fixture.package.clone(),
                             landing: [world.position[0], landed[1], world.position[2]],
                         };
                     }
@@ -1192,7 +1184,7 @@ pub(crate) fn decide(
                                 unit.0,
                                 fixture_id,
                                 seat,
-                                package,
+                                &package,
                                 landing,
                             );
                             detail = format!(

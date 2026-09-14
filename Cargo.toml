@@ -9,16 +9,13 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0"
+version = "0.0.1"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
-# webgl2 + webgpu 两个后端都编进同一份 wasm 产物，运行时二选一
-# （moly-app 的 render_backend 探测后钉死；只开 webgpu 会让无 WebGPU 的
-# 浏览器在 adapter 请求上启动即 panic——0.18 的后端选择是编译期三选一，
-# 且失败无重试）。debug 特性开着不关：翻转让共享缓存的 bevy 指纹整族
-# 失效、全员重编几百 MB。
-bevy = { version = "0.18.1", features = ["3d", "debug", "webgl2", "webgpu"] }
+# The application adds WebGPU for its default build. The WebGL2 build omits
+# that feature so the engine uses its required uniform padding and limits.
+bevy = { version = "0.18.1", features = ["3d", "debug", "webgl2"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.dev]

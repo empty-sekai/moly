@@ -31,7 +31,6 @@ use bevy::asset::{AssetPath, LoadState, RecursiveDependencyLoadState};
 use bevy::asset::uuid::Uuid;
 use bevy::gltf::{Gltf, GltfMesh};
 use bevy::image::ImageLoaderSettings;
-use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
@@ -56,15 +55,15 @@ pub struct SkyDome;
 /// 律的权威算式在 `moly_law::weather::sky`；这里的字段只是它的喂入。
 #[derive(Asset, TypePath, Debug, Clone, AsBindGroup)]
 pub(crate) struct SkyGradient {
-    /// (minY, maxY)，材质记录现取，不缓存不造默认。
+    /// (minY, maxY, padding, padding); full 16-byte binding for WebGL2.
     #[uniform(0)]
-    window: Vec2,
+    window: Vec4,
     /// 材质 `_AdditiveColor`，时间轴驱动前的底值。
     #[uniform(1)]
     additive_color: Vec4,
-    /// (附加强度, 淡化进度)：D7 之前恒 (0, 0)。
+    /// (intensity, fade progress, padding, padding).
     #[uniform(2)]
-    params: Vec2,
+    params: Vec4,
     #[texture(4)]
     #[sampler(5)]
     ramp1: Handle<Image>,
@@ -454,9 +453,9 @@ pub(crate) fn spawn_when_ready(
     // 渐变条两个槽先同绑默认现象、淡化进度恒 0：不切换，mix 退化为直通。
     // 附加强度底值 0：没有时间轴驱动时附加项整项不出力。
     let material = materials.add(SkyGradient {
-        window: Vec2::new(plan.window.min_y, plan.window.max_y),
+        window: Vec4::new(plan.window.min_y, plan.window.max_y, 0.0, 0.0),
         additive_color: Vec4::from(plan.additive),
-        params: Vec2::ZERO,
+        params: Vec4::ZERO,
         ramp1: ramp.handle.clone(),
         ramp2: ramp.handle.clone(),
     });
