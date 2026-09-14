@@ -51,11 +51,17 @@ pub(crate) struct GameSettings {
 #[derive(Resource, Default)]
 pub(crate) struct SettingsPanel {
     pub(crate) open: bool,
+    pub(crate) player_data: bool,
     release_guard: u8,
     status: String,
 }
 
 impl SettingsPanel {
+    pub(crate) fn close_after_import(&mut self) {
+        self.open = false;
+        self.release_guard = 2;
+    }
+
     pub(crate) fn blocks_world_input(&self) -> bool {
         self.open || self.release_guard != 0
     }
@@ -70,6 +76,8 @@ pub(crate) enum SettingsPanelRequest {
 
 #[derive(Component)]
 pub(crate) struct PanelRoot;
+#[derive(Component)]
+pub(crate) struct SettingsBody;
 #[derive(Component)]
 struct SettingsUiCamera;
 #[derive(Component)]
@@ -100,6 +108,8 @@ pub(crate) enum Action {
     Save,
     Defaults,
     Capture,
+    PlayerData,
+    SettingsPage,
 }
 
 #[derive(Component)]
@@ -225,8 +235,15 @@ pub(crate) fn setup(
         .id();
     commands.entity(root).add_child(content);
     let heading = row(&mut commands, content);
-    add_text(&mut commands, heading, &font, "GAME SETTINGS", 23., None);
+    add_text(&mut commands, heading, &font, &format!("moly v{}", crate::VERSION), 23., None);
+    add_button(&mut commands, heading, &font, "Audio/video", Action::SettingsPage);
+    add_button(&mut commands, heading, &font, "Player data", Action::PlayerData);
     add_button(&mut commands, heading, &font, "Close", Action::Close);
+    crate::player_data_ui::spawn(&mut commands, content, &font);
+    let settings_body = commands.spawn((Node { width: percent(100),
+        flex_direction: FlexDirection::Column, row_gap: px(12), ..default() }, SettingsBody)).id();
+    commands.entity(content).add_child(settings_body);
+    let content = settings_body;
     for (index, title) in ["Music", "Sound effects", "Voice"].into_iter().enumerate() {
         let line = row(&mut commands, content);
         add_text(&mut commands, line, &font, title, 18., None);
@@ -449,6 +466,8 @@ pub(crate) fn input(
                 captures.write(crate::frame_capture::CaptureFrame);
             }
             _ if !panel.open => continue,
+            Action::PlayerData => panel.player_data = true,
+            Action::SettingsPage => panel.player_data = false,
             Action::AudioOptions => {
                 dialogs.menu_open = false;
                 dialogs.option_open = true;
@@ -490,7 +509,8 @@ pub(crate) fn input(
                 panel.status = if store.save(&sections) {
                     "Saved.".into()
                 } else {
-                    "Save failed. Session values are still active.".into()
+                    format!("Save failed: {}. Session values are still active.",
+                        store.last_error.as_deref().unwrap_or("storage unavailable"))
                 };
                 if let Some(error) = &store.last_error {
                     warn!("[game-settings] {error}");
@@ -505,6 +525,7 @@ pub(crate) fn refresh_ui(
     settings: Res<GameSettings>,
     volumes: Res<LocalVolumeSettings>,
     mut roots: Query<&mut Node, With<PanelRoot>>,
+    mut bodies: Query<&mut Node, (With<SettingsBody>, Without<PanelRoot>)>,
     mut labels: Query<(&ValueLabel, &mut Text)>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     time: Res<Time<Real>>,
@@ -518,6 +539,9 @@ pub(crate) fn refresh_ui(
         };
     }
     if !panel.open { return; }
+    for mut body in &mut bodies {
+        body.display = if panel.player_data { Display::None } else { Display::Flex };
+    }
     let refresh_performance = time.elapsed_secs_f64() - *last_performance >= 0.5;
     if refresh_performance { *last_performance = time.elapsed_secs_f64(); }
     for (label, mut text) in &mut labels {

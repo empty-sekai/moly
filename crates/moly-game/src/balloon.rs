@@ -2154,6 +2154,9 @@ pub(crate) fn order_smoke(
         _ => panic!("layer-order probe needs 2+ master rows"),
     };
     *spawned = true;
+    if let Ok(run_id) = std::env::var("MOLY_BALLOON_ORDER_RUN_ID") {
+        info!("[tweet-order] run={} version={}", run_id, crate::VERSION);
+    }
     let eye = cam_transform.translation();
     let fwd = cam_transform.forward();
     // 近锚 = 眼 + 视线 × 近距 + 投影偏移（与真实气泡同一偏移）；远锚 =

@@ -36,7 +36,7 @@ use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::scene::{SceneInstanceReady, SceneRoot};
 use moly_law::fixture::position::{
-    direction_yaw_degrees, field_position, layout_type, placed_footprint, WALL_LAYOUT_MASK,
+    direction_yaw_degrees, field_position, layout_type, WALL_LAYOUT_MASK,
 };
 use moly_law::fixture::{Direction, GridPosition};
 
@@ -56,20 +56,20 @@ use moly_law::fixture::{Direction, GridPosition};
 const PLACEMENTS: [PlacementMock; 38] = [
     // Rug coverage: a rectangular picnic sheet under the birthday chair,
     // and an alpha-clipped star beside the player, in the initial camera.
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_env0001_rug_picnicsheet1",
         min: GridPosition { x: -22, y: 0, z: 3 },
         max: GridPosition { x: -17, y: 0, z: 8 },
         center_y: 0, layout: layout_type::RUG, direction: Direction::Front, fixture_id: 0,
     },
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_cncollect_rug_star3",
         min: GridPosition { x: -12, y: 0, z: 9 },
         max: GridPosition { x: -9, y: 0, z: 12 },
         center_y: 0, layout: layout_type::RUG, direction: Direction::Front, fixture_id: 0,
     },
     // 生日椅：不透明、无 clip 的基形。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_chair1",
         min: GridPosition { x: -20, y: 0, z: 6 },
         max: GridPosition { x: -19, y: 0, z: 6 },
@@ -79,7 +79,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 生日蛋糕：clip 变体；同包还有一条粒子族材质（范围外保留桶）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_cake1",
         min: GridPosition { x: -13, y: 0, z: 0 },
         max: GridPosition { x: -12, y: 0, z: 0 },
@@ -89,7 +89,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 生日气球：基形。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_balloon1",
         min: GridPosition { x: 1, y: 0, z: -31 },
         max: GridPosition { x: 1, y: 0, z: -31 },
@@ -99,7 +99,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 生日花饰：基形。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_flower1",
         min: GridPosition { x: 3, y: 0, z: -31 },
         max: GridPosition { x: 3, y: 0, z: -31 },
@@ -110,7 +110,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 墙架：墙布局（前墙，法线 (0,0,1)，z −= 0.125），Center.Y=6
     // （世界 y=1.5，墙面高度）。墙布局的 ShadowCaster 标记面挂在这条。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_con0004_fixture_wallshelf1",
         min: GridPosition { x: 0, y: 6, z: -34 },
         max: GridPosition { x: 0, y: 6, z: -34 },
@@ -122,7 +122,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 窗：墙布局（后墙，法线 (0,0,−1)，z += 0.125），Center.Y=8（世界
     // y=2.0）。窗外观材质是二维选择表 usage=1 的两格（26/27），同包
     // 还有 Object 族模板材质（范围外保留桶）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_env0002_window_window1",
         min: GridPosition { x: 4, y: 8, z: -36 },
         max: GridPosition { x: 4, y: 8, z: -36 },
@@ -134,7 +134,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 屏风（对话锚定，fixtureId 455）：单人/两人对话剧本的锚点。格
     // 足迹 4 宽 × 2 深（motionArea 同形），落在广场中部——名册三名
     // 成员的巡区最近路点都在配对半径内（世界位 (0.75, 0, −7.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_env0002_fixture_byoubu1",
         min: GridPosition { x: 1, y: 0, z: -30 },
         max: GridPosition { x: 4, y: 0, z: -29 },
@@ -145,7 +145,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 沙发（对话锚定，fixtureId 695）：三人目两人剧本的锚点，与屏风
     // 对称放在广场另一侧（世界位 (−0.5, 0, −7.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0019_fixture_sofa1",
         min: GridPosition { x: -4, y: 0, z: -30 },
         max: GridPosition { x: -1, y: 0, z: -29 },
@@ -164,7 +164,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 恒落两人档，蛋锚定的单人段（语料里该族全部单人）永远中不了签。
     // 摆在簇半径之外（4.1m）让「近蛋」成为独占状态：unit1 每圈路过东
     // 角，期间池里没有两人档段，单人段进得去也抽得出。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg1",
         min: GridPosition { x: 19, y: 0, z: -31 },
         max: GridPosition { x: 19, y: 0, z: -31 },
@@ -180,7 +180,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // （3.3m）之外 ⇒ 走到北腿期间池里只有蛋锚定的单人段，单人段抽得出。
     // unit1 的环西北角 (1, −6) 也会进蛋 2 半径（2.7m）——那是附带的
     // 现场族，不破坏独占带。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg2",
         min: GridPosition { x: 1, y: 0, z: -14 },
         max: GridPosition { x: 1, y: 0, z: -14 },
@@ -195,7 +195,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 南段。蛋 4（840）不放：三个角位里剩下的一族离 455/695 簇都在
     // 半径内（3.4m 边缘以内），摆不出独占带；语料族在，后续换巡逻域
     // 布局即可达。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg3",
         min: GridPosition { x: -14, y: 0, z: -43 },
         max: GridPosition { x: -14, y: 0, z: -43 },
@@ -213,7 +213,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 与出生清空带只读非 0 行 ⇒ 这批对对话域零扰动；个别件落在蛋锚
     // 的配对半径（3.3m）内也只改光照面，不进配对池。
     // 立灯与椅、蛋糕共同置于近景。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0001_fixture_lamp1",
         min: GridPosition { x: -19, y: 0, z: 0 },
         max: GridPosition { x: -19, y: 0, z: 0 },
@@ -224,7 +224,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 路灯（ext0009）：0.89m 立灯，屏风东北侧（世界位
     // (1.625, 0, −7.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0009_fixture_lamp1",
         min: GridPosition { x: 6, y: 0, z: -30 },
         max: GridPosition { x: 6, y: 0, z: -30 },
@@ -234,7 +234,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 路灯（ext0010）：广场西北（世界位 (−2.125, 0, −8.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0010_fixture_lamp1",
         min: GridPosition { x: -9, y: 0, z: -34 },
         max: GridPosition { x: -9, y: 0, z: -34 },
@@ -244,7 +244,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 路灯（ext0008）：广场西南（世界位 (−2.125, 0, −6.875)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0008_fixture_lamp1",
         min: GridPosition { x: -9, y: 0, z: -28 },
         max: GridPosition { x: -9, y: 0, z: -28 },
@@ -255,7 +255,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 路灯（ext0019）：细杆形（杆身 0.03m 见方），广场东北（世界位
     // (2.375, 0, −8.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0019_fixture_lamp1",
         min: GridPosition { x: 9, y: 0, z: -34 },
         max: GridPosition { x: 9, y: 0, z: -34 },
@@ -266,7 +266,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 灯（env0002）：立灯，广场中部（世界位 (−0.375, 0, −8.125)）。
     // 同包的 motionArea 是普查里唯一非空的一条（6×3 里 4 格真）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_env0002_fixture_lamp1",
         min: GridPosition { x: -2, y: 0, z: -33 },
         max: GridPosition { x: -2, y: 0, z: -33 },
@@ -276,7 +276,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 灯（env0012）：立灯，广场东南（世界位 (2.375, 0, −6.625)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_env0012_fixture_lamp1",
         min: GridPosition { x: 9, y: 0, z: -27 },
         max: GridPosition { x: 9, y: 0, z: -27 },
@@ -288,7 +288,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 台灯（mis0001）：mis 族六件同尺寸（实测包围盒 0.209×0.305×0.209m、
     // motionArea 空 ⇒ 足迹退化单格）之一，广场中部（世界位
     // (−0.375, 0, −7.625)）。同族余五件见下，铺桌群一侧。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0001_fixture_lamp1",
         min: GridPosition { x: -2, y: 0, z: -31 },
         max: GridPosition { x: -2, y: 0, z: -31 },
@@ -299,7 +299,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 台灯（mis0002）：mis 族第二员，桌（西）与桌面电脑（东）之间的
     // 中缝南位（世界位 (3.125, 0, −8.125)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0002_fixture_lamp1",
         min: GridPosition { x: 12, y: 0, z: -33 },
         max: GridPosition { x: 12, y: 0, z: -33 },
@@ -310,7 +310,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 台灯（mis0003）：中缝北位，与 mis0002 同列（世界位
     // (3.125, 0, −8.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0003_fixture_lamp1",
         min: GridPosition { x: 12, y: 0, z: -34 },
         max: GridPosition { x: 12, y: 0, z: -34 },
@@ -320,7 +320,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 台灯（mis0004）：笔记本电脑东侧（世界位 (3.625, 0, −7.875)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0004_fixture_lamp1",
         min: GridPosition { x: 14, y: 0, z: -32 },
         max: GridPosition { x: 14, y: 0, z: -32 },
@@ -331,7 +331,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 台灯（mis0005）：桌面电脑东端、桌群北缘（世界位
     // (3.875, 0, −8.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0005_fixture_lamp1",
         min: GridPosition { x: 15, y: 0, z: -34 },
         max: GridPosition { x: 15, y: 0, z: -34 },
@@ -343,7 +343,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 台灯（mis0006）：桌群东南角（世界位 (3.875, 0, −7.875)）。与
     // mis0001 的包围盒逐轴相同、两 mesh 之一字节全同，另一 mesh 顶点
     // 数据不同——同形族里的近亲件，不是同一模型。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0006_fixture_lamp1",
         min: GridPosition { x: 15, y: 0, z: -32 },
         max: GridPosition { x: 15, y: 0, z: -32 },
@@ -355,7 +355,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 壁灯（env0004）：墙布局（前墙，法线 (0,0,1)，z −= 0.125），
     // Center.Y=6（世界 y=1.5）。扁平壁灯壳（0.33×0.38×0.15m），与
     // 墙架同一面墙线（世界位 (0.625, 1.5, −8.5)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_env0004_fixture_lamp1",
         min: GridPosition { x: 2, y: 6, z: -34 },
         max: GridPosition { x: 2, y: 6, z: -34 },
@@ -366,7 +366,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 地灯（non9001）：2cm 薄圆盘，贴地单格（世界位
     // (0.125, 0, −6.625)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_non9001_fixture_groundlight1",
         min: GridPosition { x: 0, y: 0, z: -27 },
         max: GridPosition { x: 0, y: 0, z: -27 },
@@ -376,7 +376,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 桌（twcollect）：1.02m 高，2×2 足迹。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_twcollect_fixture_table1",
         min: GridPosition { x: -6, y: 0, z: 5 },
         max: GridPosition { x: -5, y: 0, z: 6 },
@@ -387,7 +387,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 桌面电脑（non0005）：2×1 足迹，桌东北侧（世界位
     // (3.5, 0, −8.375)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_non0005_system_desktop1",
         min: GridPosition { x: 13, y: 0, z: -34 },
         max: GridPosition { x: 14, y: 0, z: -34 },
@@ -397,7 +397,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 笔记本电脑（non0005）：单格，放在近景桌面高度。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_non0005_system_laptop1",
         min: GridPosition { x: -5, y: 4, z: 5 },
         max: GridPosition { x: -5, y: 4, z: 5 },
@@ -408,7 +408,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 盆栽（twcollect）：0.85×0.72m，带水面材质，3×3 足迹（世界位
     // (1.625, 0, −6.625)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_twcollect_fixture_planter1",
         min: GridPosition { x: 5, y: 0, z: -28 },
         max: GridPosition { x: 7, y: 0, z: -26 },
@@ -419,7 +419,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 茶摊（cncollect）：带 On/Off 动画的立件，2×1 足迹（世界位
     // (−0.75, 0, −8.125)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_cncollect_fixture_tea3",
         min: GridPosition { x: -4, y: 0, z: -33 },
         max: GridPosition { x: -3, y: 0, z: -33 },
@@ -429,7 +429,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 珊瑚（con0002）：2×2 足迹，广场西侧（世界位 (−2.0, 0, −7.5)）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_con0002_fixture_coral1",
         min: GridPosition { x: -9, y: 0, z: -31 },
         max: GridPosition { x: -8, y: 0, z: -30 },
@@ -447,7 +447,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 盘外、丢掉第一圈过境，见 `npc.rs` 的 `tour_seed`）。
     // 锚定序号进对话抽签种子（`talk.rs` 的 `seed_for` 按锚序给成员
     // 号移位），重排本表条目会换掉抽签序列——追加在尾，别插队。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_chr0004_fixture_nenerobo1",
         min: GridPosition { x: -46, y: 0, z: -17 },
         max: GridPosition { x: -37, y: 0, z: -13 },
@@ -462,7 +462,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 同蛋 1–3。蛋 3 注里「蛋 4 不放」是三员巡逻代的取位结论（角位
     // 离广场簇摆不出独占带）；31 员巡游环下该族的 30 段单员对话靠
     // 整环逐圈过境进池，不依赖独占带。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg4",
         min: GridPosition { x: 41, y: 0, z: 0 },
         max: GridPosition { x: 41, y: 0, z: 0 },
@@ -479,7 +479,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 站定报出——冒烟照实抓到后迁到这里）。与全部既有摆放不重叠（最近
     // 的蛋 1 在 (19,-31)，距 15 格）。追加在尾：锚定序号进对话抽签种子，
     // 重排本表条目会换掉抽签序列。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_mis0001_fixture_chair1",
         min: GridPosition { x: 33, y: 0, z: -25 },
         max: GridPosition { x: 34, y: 0, z: -24 },
@@ -493,7 +493,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 里），动作点解算按「挂点条目缺」回落环带并照实报。它是 1×1 格
     // 件，与椅隔一格摆在 (31, -24)，同在可行走面上（环带八格全中；
     // 对话道的座 13 挂点面门也过——unit 12 抽中它时走正臂）。
-    PlacementMock {
+    PlacementMock { texture_id: 1,
         package: "mysekai__fixture__mdl_ext0008_fixture_gameconsole1",
         min: GridPosition { x: 31, y: 0, z: -24 },
         max: GridPosition { x: 31, y: 0, z: -24 },
@@ -506,8 +506,9 @@ const PLACEMENTS: [PlacementMock; 38] = [
 
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
 #[derive(Clone, Copy)]
-struct PlacementMock {
-    package: &'static str,
+struct PlacementMock<P = &'static str> {
+    package: P,
+    texture_id: u32,
     min: GridPosition,
     max: GridPosition,
     center_y: i8,
@@ -536,7 +537,7 @@ struct PlacedRow {
     yaw: f32,
 }
 
-impl PlacementMock {
+impl<P: std::fmt::Display> PlacementMock<P> {
     /// 本条摆放的落位。位置与足迹都过律，不在这里算。
     ///
     /// 足迹先按朝向重算再喂位置式：源里 min/max 不是存档列，而是从
@@ -546,7 +547,10 @@ impl PlacementMock {
     /// 足迹颠倒是摆放表的数据断点，具名 panic —— 与本模块其余对账同一
     /// 处置（静默取一个错落点远差于响亮拒绝）。
     fn placed(&self) -> PlacedRow {
-        let (min, max) = placed_footprint(self.min, self.max, self.direction)
+        let (mut center, size) = moly_law::fixture::position::footprint_to_center_size(self.min, self.max)
+            .expect("validated fixture grid");
+        center.y = self.center_y;
+        let (min, max) = moly_law::fixture::position::layout_footprint(center, size, self.direction, self.layout)
             .unwrap_or_else(|err| panic!("摆放 mock 的足迹无效（{}）：{err}", self.package));
         let position = field_position(min, max, self.center_y, self.layout)
             .unwrap_or_else(|err| panic!("摆放 mock 的布局无格类别（{}）：{err}", self.package));
@@ -556,6 +560,14 @@ impl PlacementMock {
             position,
             yaw: direction_yaw_degrees(self.direction).to_radians(),
         }
+    }
+}
+
+impl PlacementMock {
+    fn into_owned(self) -> PlacementMock<String> {
+        PlacementMock { texture_id: self.texture_id, package: self.package.to_owned(), min: self.min, max: self.max,
+            center_y: self.center_y, layout: self.layout, direction: self.direction,
+            fixture_id: self.fixture_id }
     }
 }
 
@@ -586,7 +598,7 @@ fn direction_override() -> Option<Direction> {
 /// 摆放表资源（可下发形态：解析自上表；接服务端下发时换成回包解析）。
 #[derive(Resource, Clone, Default)]
 pub struct FixturePlacements {
-    rows: Vec<PlacementMock>,
+    rows: Vec<PlacementMock<String>>,
     /// Opaque identities allocated by the offline layout owner. They do not
     /// change when a placed instance moves or rotates.
     instance_uids: Vec<String>,
@@ -597,13 +609,21 @@ pub struct FixturePlacements {
     floor: Option<crate::site::FloorGridLayout>,
 }
 
+pub struct PlacedFixture<'a> {
+    pub uid: &'a str,
+    pub package: &'a str,
+    pub position: [f32; 3],
+    pub yaw: f32,
+}
+
 /// Owned editable record. UID is the placed/offline item identity, not a
 /// package or a screen-space proxy. Center/grid_size stay in the source's
 /// unrotated layout frame; all readers derive the footprint through the law.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditableFixture {
     pub uid: String,
-    pub package: &'static str,
+    pub package: String,
+    pub texture_id: u32,
     pub fixture_id: i32,
     pub center: GridPosition,
     pub grid_size: moly_law::fixture::Vector3Int,
@@ -612,21 +632,22 @@ pub(crate) struct EditableFixture {
 }
 
 impl EditableFixture {
-    pub(crate) fn footprint(&self) -> (GridPosition, GridPosition) {
-        moly_law::fixture::position::footprint_rotated(self.center, self.grid_size, self.direction)
+    /// Editor candidates can leave the grid domain before Decide validates them.
+    pub(crate) fn footprint(&self) -> Result<(GridPosition, GridPosition), String> {
+        moly_law::fixture::position::layout_footprint(self.center, self.grid_size, self.direction, self.layout)
     }
 
-    pub(crate) fn occupancy(&self) -> OccupancyRow {
-        let (min, max) = self.footprint();
-        OccupancyRow {
-            uid: self.uid.clone(), package: self.package, min, max,
+    pub(crate) fn occupancy(&self) -> Result<OccupancyRow, String> {
+        let (min, max) = self.footprint()?;
+        Ok(OccupancyRow {
+            uid: self.uid.clone(), package: self.package.clone(), min, max,
             center_y: self.center.y, layout: self.layout, direction: self.direction,
             layout_center: self.center, layout_grid_size: self.grid_size,
-        }
+        })
     }
 
     pub(crate) fn pose(&self) -> Result<Transform, String> {
-        let (min, max) = self.footprint();
+        let (min, max) = self.footprint()?;
         let position = field_position(min, max, self.center.y, self.layout)?;
         Ok(Transform::from_translation(Vec3::from(position)).with_rotation(
             Quat::from_rotation_y(direction_yaw_degrees(self.direction).to_radians())))
@@ -642,6 +663,13 @@ pub(crate) struct FixtureLayoutRevision(pub u64);
 pub(crate) struct FixtureLayoutSet;
 
 impl FixturePlacements {
+    #[cfg(test)]
+    pub(crate) fn test_layout(rows: &[EditableFixture], floor: crate::site::FloorGridLayout) -> Self {
+        Self { site_id: 1, site_type: "first_floor".into(), level: floor.level,
+            floor: Some(floor), ..Default::default() }
+            .with_editor_rows(rows, 1).expect("valid synthetic layout")
+    }
+
     pub(crate) fn site_id(&self) -> u32 { self.site_id }
     pub(crate) fn site_type(&self) -> &str { &self.site_type }
     pub(crate) fn floor_grid(&self) -> Option<crate::site::FloorGridLayout> { self.floor }
@@ -653,7 +681,7 @@ impl FixturePlacements {
             let (mut center, grid_size) = moly_law::fixture::position::footprint_to_center_size(row.min, row.max)
                 .expect("validated offline layout footprint");
             center.y = row.center_y;
-            EditableFixture { uid: uid.clone(), package: row.package, fixture_id: row.fixture_id,
+            EditableFixture { texture_id: row.texture_id, uid: uid.clone(), package: row.package.clone(), fixture_id: row.fixture_id,
                 center, grid_size, layout: row.layout, direction: row.direction }
         }).collect()
     }
@@ -681,7 +709,7 @@ impl FixturePlacements {
                 return Err(format!("{} footprint exceeds the signed grid domain", row.uid));
             }
             row.pose()?;
-            next.rows.push(PlacementMock { package: row.package, fixture_id: row.fixture_id,
+            next.rows.push(PlacementMock { texture_id: row.texture_id, package: row.package.clone(), fixture_id: row.fixture_id,
                 min, max, center_y: row.center.y, layout: row.layout, direction: row.direction });
             next.instance_uids.push(row.uid.clone());
         }
@@ -699,7 +727,7 @@ impl FixturePlacements {
         }
         let (min, max) = moly_law::fixture::position::footprint_front(center, grid_size);
         moly_law::fixture::position::footprint_to_center_size(min, max)?;
-        self.rows.push(PlacementMock { package, min, max, center_y: center.y,
+        self.rows.push(PlacementMock { texture_id: 1, package: package.to_owned(), min, max, center_y: center.y,
             layout: layout_type::FLOOR, direction, fixture_id });
         self.instance_uids.push(uid);
         Ok(())
@@ -715,11 +743,11 @@ impl FixturePlacements {
     }
 
     /// 锚定摆放（fixtureId 非 0）：对话演出侧按 (id, 模型包名) 取件。
-    pub fn anchored(&self) -> Vec<(i32, &'static str)> {
+    pub fn anchored(&self) -> Vec<(i32, &str)> {
         self.rows
             .iter()
             .filter(|row| row.fixture_id != 0)
-            .map(|row| (row.fixture_id, row.package))
+            .map(|row| (row.fixture_id, row.package.as_str()))
             .collect()
     }
 
@@ -738,14 +766,21 @@ impl FixturePlacements {
     /// 世界位的组合表按它算（`fixture_attach`）——扫描面是**全部已
     /// 摆放实例**（含未锚定的普通摆放），与对话锚定面（[`Self::anchored`]）
     /// 是两个口径。
-    pub fn placed_rows(&self) -> Vec<(&'static str, [f32; 3], f32)> {
+    pub fn placed_rows(&self) -> Vec<(&str, [f32; 3], f32)> {
         self.rows
             .iter()
             .map(|row| {
                 let placed = row.placed();
-                (row.package, placed.position, placed.yaw)
+                (row.package.as_str(), placed.position, placed.yaw)
             })
             .collect()
+    }
+
+    pub fn placed_instances(&self) -> Vec<PlacedFixture<'_>> {
+        self.rows.iter().zip(&self.instance_uids).map(|(row, uid)| {
+            let placed = row.placed();
+            PlacedFixture { uid, package: &row.package, position: placed.position, yaw: placed.yaw }
+        }).collect()
     }
 
     /// 已摆放行的占用面（摆放编辑面对账用：重叠校验要把这些行的格占
@@ -764,7 +799,7 @@ impl FixturePlacements {
                     uid: self.instance_uids[index].clone(),
                     layout_center: center,
                     layout_grid_size: grid_size,
-                    package: row.package,
+                    package: row.package.clone(),
                     min: placed.min,
                     max: placed.max,
                     center_y: row.center_y,
@@ -784,7 +819,7 @@ pub struct OccupancyRow {
     pub layout_center: GridPosition,
     /// The owner's declared footprint; consumers compare it to the master.
     pub layout_grid_size: moly_law::fixture::Vector3Int,
-    pub package: &'static str,
+    pub package: String,
     pub min: GridPosition,
     pub max: GridPosition,
     pub center_y: i8,
@@ -813,7 +848,7 @@ pub struct FixtureSource(pub Handle<Gltf>);
 #[derive(Component)]
 struct FixtureInstanceSeed {
     uid: String,
-    package: &'static str,
+    package: String,
     master: i32,
 }
 
@@ -987,7 +1022,7 @@ fn plan_when_ready(
         .unwrap_or_else(|| panic!("家具包清单缺 packages 对象"));
     let mut handles = Vec::with_capacity(placements.total());
     for row in &placements.rows {
-        let entry = packages.get(row.package).unwrap_or_else(|| {
+        let entry = packages.get(&row.package).unwrap_or_else(|| {
             panic!("摆放 mock 点名的包不在清单里：{}", row.package)
         });
         let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -1040,6 +1075,7 @@ fn spawn_when_ready(
     if assets.0.is_empty() && scenes_ready.is_none() {
         commands.insert_resource(FixtureScenesReady);
     }
+    let occupancy = placements.occupancy_rows();
     for (index, handle) in assets.0.iter().enumerate() {
         if index < spawned.0 {
             continue;
@@ -1064,7 +1100,7 @@ fn spawn_when_ready(
         let Some(gltf) = gltfs.get(handle) else {
             return;
         };
-        let row = placements.rows[index];
+        let row = &placements.rows[index];
         // 默认 scene = fixture 视图变体（提取侧约定，实测 999 包全对上）。
         let Some(scene) = gltf.default_scene.clone() else {
             panic!("家具 glb 没有默认 scene：{}", row.package);
@@ -1074,14 +1110,15 @@ fn spawn_when_ready(
             SceneRoot(scene),
             FixtureRoot,
             FixtureVisualRoot { layout: row.layout },
+            crate::fixture_colors::FixtureColorChoice { package: row.package.clone(), texture_id: row.texture_id },
             fence::FixtureRow(index),
             FixturePlacement {
                 layout: row.layout,
                 fixture_id: row.fixture_id,
             },
             FixtureSource(handle.clone()),
-            FixtureInstanceSeed { uid: placements.instance_uids[index].clone(), package: row.package, master: row.fixture_id },
-            crate::fixture_scene_inputs::FixtureScenePlacement(placements.occupancy_rows()[index].clone()),
+            FixtureInstanceSeed { uid: placements.instance_uids[index].clone(), package: row.package.clone(), master: row.fixture_id },
+            crate::fixture_scene_inputs::FixtureScenePlacement(occupancy[index].clone()),
             Transform::from_translation(Vec3::from(placed.position))
                 .with_rotation(Quat::from_rotation_y(placed.yaw)),
             // Imported vertex colors encode shader masks, not albedo. Reveal
@@ -1224,7 +1261,7 @@ fn bind_activity_identities(
         } else { tables.unique_fixture_master_for_model(model) };
         if let Some(master) = master {
             commands.entity(entity).insert(crate::fixture_activity_state::FixtureActivityIdentity {
-                uid: seed.uid.clone(), master_id: master.id, model_package: seed.package.into(),
+                uid: seed.uid.clone(), master_id: master.id, model_package: seed.package.clone(),
             });
         } else {
             warn!("[fixture-activity] offline layout needs an explicit matching master: {} ({})", seed.uid, seed.package);
@@ -1243,7 +1280,7 @@ fn bind_source_views(
 ) {
     let (Some(_), Some(points)) = (ready, points) else { return; };
     for (root, seed) in &roots {
-        let Some(source) = points.instance_view(seed.package) else { continue; };
+        let Some(source) = points.instance_view(&seed.package) else { continue; };
         let mut stack = vec![root];
         let mut matches = Vec::new();
         while let Some(entity) = stack.pop() {

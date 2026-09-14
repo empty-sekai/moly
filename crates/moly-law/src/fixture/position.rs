@@ -36,6 +36,70 @@ pub const WALL_PUSHOUT: f32 = 0.125;
 /// 墙布局掩码：LayoutType 的 wall 四位任一命中即视为墙摆放。
 pub const WALL_LAYOUT_MASK: u8 = 0xF0;
 
+/// Wall loading derives orientation from the layer, independently of saved yaw.
+pub fn wall_direction(layout: u8) -> Option<Direction> {
+    match layout {
+        layout_type::WALL_FRONT => Some(Direction::Back),
+        layout_type::WALL_BACK => Some(Direction::Front),
+        layout_type::WALL_RIGHT => Some(Direction::Left),
+        layout_type::WALL_LEFT => Some(Direction::Right),
+        _ => None,
+    }
+}
+
+/// Layout tiles use different construction rules on walls and on the floor.
+/// Wall coordinates here are already converted from the saved wall-local frame.
+pub fn layout_footprint(
+    center: GridPosition, size: Vector3Int, direction: Direction, layout: u8,
+) -> Result<(GridPosition, GridPosition), String> {
+    if [size.x, size.y, size.z].iter().any(|v| !(1..=127).contains(v)) {
+        return Err("fixture dimensions must fit the signed grid domain".into());
+    }
+    let (x, y, z) = (i32::from(center.x), i32::from(center.y), i32::from(center.z));
+    let checked = |v: [i32; 3]| -> Result<GridPosition, String> {
+        let axis = |n| i8::try_from(n).map_err(|_| "fixture footprint exceeds the signed grid domain".to_owned());
+        Ok(GridPosition::new(axis(v[0])?, axis(v[1])?, axis(v[2])?))
+    };
+    if layout & WALL_LAYOUT_MASK == 0 {
+        checked([x - (size.x - 1) / 2, y, z - (size.z - 1) / 2])?;
+        checked([x - (size.x - 1) / 2 + size.x - 1, y + size.y - 1,
+            z - (size.z - 1) / 2 + size.z - 1])?;
+        let (min, max) = footprint_rotated(center, size, direction);
+        let expected = if matches!(direction, Direction::Left | Direction::Right) {
+            (size.z, size.x)
+        } else { (size.x, size.z) };
+        if i32::from(max.x) - i32::from(min.x) + 1 != expected.0
+            || i32::from(max.z) - i32::from(min.z) + 1 != expected.1 {
+            return Err("rotated fixture footprint exceeds the signed grid domain".into());
+        }
+        return Ok((min, max));
+    }
+    let (width, depth) = if matches!(direction, Direction::Left | Direction::Right) {
+        (size.z, size.x)
+    } else { (size.x, size.z) };
+    let (a, b) = match layout {
+        layout_type::WALL_FRONT => {
+            let start = x + (width - 1) / 2;
+            ([start, y, z], [start - width + 1, y + size.y - 1, z])
+        }
+        layout_type::WALL_BACK => {
+            let start = x - (width - 1) / 2;
+            ([start, y, z - 1], [start + width - 1, y + size.y - 1, z - 1])
+        }
+        layout_type::WALL_LEFT => {
+            let start = z - (depth - 1) / 2;
+            ([x, y, start], [x, y + size.y - 1, start + depth - 1])
+        }
+        layout_type::WALL_RIGHT => {
+            let start = z + (depth - 1) / 2;
+            ([x - 1, y, start], [x - 1, y + size.y - 1, start - depth + 1])
+        }
+        _ => return Err("fixture must belong to one wall layout".into()),
+    };
+    Ok((checked([a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])])?,
+        checked([a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])])?))
+}
+
 /// 源 MysekaiLayoutType 的取值，按位组合。
 pub mod layout_type {
     pub const NONE: u8 = 1;

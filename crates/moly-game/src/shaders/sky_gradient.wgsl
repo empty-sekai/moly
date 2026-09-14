@@ -13,9 +13,9 @@
 
 #import bevy_pbr::forward_io::VertexOutput
 
-@group(3) @binding(0) var<uniform> gradient_window: vec2<f32>; // (minY, maxY)
+@group(3) @binding(0) var<uniform> gradient_window: vec4<f32>; // (minY, maxY, padding, padding)
 @group(3) @binding(1) var<uniform> additive_color: vec4<f32>;
-@group(3) @binding(2) var<uniform> additive_params: vec2<f32>; // (intensity, fadeProgress)
+@group(3) @binding(2) var<uniform> additive_params: vec4<f32>; // (intensity, fadeProgress, padding, padding)
 @group(3) @binding(4) var ramp1: texture_2d<f32>;
 @group(3) @binding(5) var ramp1_sampler: sampler;
 @group(3) @binding(6) var ramp2: texture_2d<f32>;

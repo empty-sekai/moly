@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["webgpu"]
+webgpu = ["bevy/webgpu"]
+
 [dependencies]
 bevy = { workspace = true }
 moly-assets = { path = "../moly-assets" }
@@ -16,8 +20,6 @@ moly-game = { path = "../moly-game" }
 wasm-bindgen = "=0.2.127"
 # wasm 的 panic 默认只剩一句 RuntimeError；资产源的拒绝要整句落进控制台。
 console_error_panic_hook = "0.1"
-# Navigator 供 render_backend 取 navigator 对象；gpu 属性本身用 js-sys 的
-# Reflect 读（见该模块注释——web-sys 的 Gpu 绑定还挂在 web_sys_unstable_apis
-# 门后，不为此开 rustflags）。
-web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams", "Navigator"] }
+# Browser startup events and same-origin page parameters.
+web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams", "Navigator", "Event", "EventTarget", "CustomEvent", "CustomEventInit", "Url"] }
 js-sys = "0.3"

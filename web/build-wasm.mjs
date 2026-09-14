@@ -51,9 +51,8 @@ const WASM_BINDGEN = resolveTool("WASM_BINDGEN", "wasm-bindgen");
 
 // 工件名随包名原样带连字符（native exe 同为 moly-app.exe）；wasm-bindgen
 // 的输出则归一成下划线（moly_app.js / moly_app_bg.wasm）。target 目录不写
-// 死 `target/`：仓库 `.cargo/config.toml` 已把 target-dir 相对下发到全体
-// 工作树共享的 `moly/shared-target`（2026-09-07 起），写死会在缓存切换后
-// 失配——让 cargo 自己裁决（metadata 读出的 target_directory 即真值）。
+// 死 `target/`：让 cargo metadata 给出 target_directory，也尊重使用者
+// 通过 CARGO_TARGET_DIR 配置的缓存目录。
 const metadata = spawnSync(
   CARGO,
   [
@@ -103,27 +102,19 @@ if (lockMatch[1] !== cliMatch[1]) {
 console.log(`wasm-bindgen version check: Cargo.lock and CLI both ${cliMatch[1]}`);
 
 // release：这份产物就是浏览器要下载的东西；dev 档的 bevy wasm 体积大到不可用。
-run(CARGO, [
-  "build",
-  "--release",
-  "--target",
-  "wasm32-unknown-unknown",
-  "-p",
-  "moly-app",
-  "--manifest-path",
-  path.join(workspaceRoot, "Cargo.toml"),
-]);
-
-if (!existsSync(cargoWasmPath)) {
-  throw new Error(`cargo build did not produce ${cargoWasmPath}`);
-}
-
-mkdirSync(outDir, { recursive: true });
-run(WASM_BINDGEN, ["--target", "web", "--out-dir", outDir, cargoWasmPath]);
-
-for (const name of ["moly-app.js", "moly-app_bg.wasm"]) {
-  const file = path.join(outDir, name);
-  if (!existsSync(file)) throw new Error(`wasm-bindgen did not produce ${file}`);
-  console.log(`${name}: ${statSync(file).size} bytes`);
+// Engine buffer layouts depend on these features at compile time. Each module
+// has the layout for its backend; the bootstrap downloads only the chosen one.
+for (const [backend, features] of [["webgpu", ["--features", "webgpu"]], ["webgl2", ["--no-default-features"]]]) {
+  run(CARGO, ["build", "--release", "--target", "wasm32-unknown-unknown", "-p", "moly-app",
+    ...features, "--manifest-path", path.join(workspaceRoot, "Cargo.toml")]);
+  if (!existsSync(cargoWasmPath)) throw new Error(`cargo build did not produce ${cargoWasmPath}`);
+  const backendDir = path.join(outDir, backend);
+  mkdirSync(backendDir, { recursive: true });
+  run(WASM_BINDGEN, ["--target", "web", "--out-dir", backendDir, cargoWasmPath]);
+  for (const name of ["moly-app.js", "moly-app_bg.wasm"]) {
+    const file = path.join(backendDir, name);
+    if (!existsSync(file)) throw new Error(`wasm-bindgen did not produce ${file}`);
+    console.log(`${backend}/${name}: ${statSync(file).size} bytes`);
+  }
 }
 console.log(`output: ${outDir}`);

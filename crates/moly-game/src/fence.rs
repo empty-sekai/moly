@@ -60,12 +60,12 @@ pub(super) fn update_connections(
         return;
     }
     let mut rows: Vec<_> = fences.iter().map(|(entity, index, _)| {
-        let row = placements.rows[index.0];
+        let row = &placements.rows[index.0];
         (index.0, entity.to_bits(), row, row.placed())
     }).collect();
     rows.sort_by_key(|r| r.0);
     for (_, index, nodes) in &fences {
-        let row = placements.rows[index.0];
+        let row = &placements.rows[index.0];
         let placed = row.placed();
         let positions = neighbor_positions(placed.min, placed.max, row.direction);
         let neighbors = positions.map(|p| {

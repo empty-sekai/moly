@@ -251,8 +251,9 @@ fn read_quat(cell: Option<&serde_json::Value>) -> Option<Quat> {
 /// 旋转——摆放表朝向绕 Y、档案侧朝向实测全为恒等或纯绕 Y——所以
 /// 组合朝向恒纯绕 Y，贴合支的朝向律可以按欧拉 y 直读）。
 pub struct AttachWorld {
+    pub uid: String,
     /// 摆放包名（组合表的键的一半）。
-    pub package: &'static str,
+    pub package: String,
     /// 挂点 id（StartLoc 名字数字）。
     pub id_value: i32,
     pub position: [f32; 3],
@@ -268,10 +269,10 @@ pub struct AttachWorlds {
 
 impl AttachWorlds {
     /// 某摆放实例某 id 的挂点世界位（决策侧动作点支的取件面）。
-    pub(crate) fn entry(&self, package: &str, id_value: i32) -> Option<&AttachWorld> {
+    pub(crate) fn entry(&self, uid: &str, id_value: i32) -> Option<&AttachWorld> {
         self.worlds
             .iter()
-            .find(|world| world.package == package && world.id_value == id_value)
+            .find(|world| world.uid == uid && world.id_value == id_value)
     }
 
     /// 身份判定过滤器：目标位与全表挂点比 x/z 两维（引擎 Approximately
@@ -291,7 +292,8 @@ impl AttachWorlds {
 /// 后者的形状是键在、表空）。
 fn compose(placements: &FixturePlacements, points: &AttachPoints) -> AttachWorlds {
     let mut worlds = Vec::new();
-    for (package, position, yaw) in placements.placed_rows() {
+    for placed in placements.placed_instances() {
+        let (package, position, yaw) = (placed.package, placed.position, placed.yaw);
         let entries = points.packages.get(package).unwrap_or_else(|| {
             panic!("摆放包 {package} 不在挂点档案的键上（两份清单不一致）")
         });
@@ -299,7 +301,8 @@ fn compose(placements: &FixturePlacements, points: &AttachPoints) -> AttachWorld
         for entry in entries {
             let world_position = Vec3::from(position) + instance * Vec3::from(entry.position);
             worlds.push(AttachWorld {
-                package,
+                uid: placed.uid.to_owned(),
+                package: package.to_owned(),
                 id_value: entry.id_value,
                 position: [world_position.x, world_position.y, world_position.z],
                 rotation: instance * entry.rotation,

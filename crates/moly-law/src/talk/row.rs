@@ -382,11 +382,13 @@ mod tests {
                     who: "Characters.A".to_string(),
                     pattern: "EyePresets.normal".to_string(),
                     alias: "EyePresets.normal".to_string(),
+                    delay_seconds: 0.0,
                 },
                 TalkStep::ChangeNpcMouth {
                     who: "Characters.A".to_string(),
                     pattern: "MouthPresets.smile01".to_string(),
                     alias: "MouthPresets.smile01".to_string(),
+                    delay_seconds: 0.0,
                 },
             ],
         };

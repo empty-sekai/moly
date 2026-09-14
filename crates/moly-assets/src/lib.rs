@@ -8,8 +8,12 @@ pub mod material_passes;
 pub mod material_textures;
 pub mod scene_state;
 pub mod source_navigation;
+pub mod player_data;
 pub mod ui_layout;
 mod packs;
+mod read_limits;
+#[cfg(target_arch = "wasm32")]
+mod http;
 
 use bevy::app::App;
 use bevy::asset::{io::AssetSourceBuilder, AssetApp, AssetPath};
@@ -38,6 +42,13 @@ pub enum AssetSource {
 /// 必须在 `DefaultPlugins` 之前调用：AssetPlugin 构建时固化全部资产源，
 /// 之后注册只打一行 error 并被丢弃。
 pub fn install(app: &mut App, source: AssetSource) {
+    #[cfg(target_arch = "wasm32")]
+    if let AssetSource::HttpPacks { url } = &source {
+        let root = url.clone();
+        app.register_asset_source(SOURCE, AssetSourceBuilder::new(move || Box::new(packs::PackReader::http(root.clone()))));
+        app.insert_resource(source);
+        return;
+    }
     let root = match &source {
         AssetSource::NativeDir { path } | AssetSource::NativePacks { path } => path.to_string_lossy().to_string(),
         AssetSource::HttpBase { url } | AssetSource::HttpPacks { url } => url.clone(),

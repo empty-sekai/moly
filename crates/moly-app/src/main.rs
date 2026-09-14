@@ -1,4 +1,4 @@
-//! 入口。native 开窗；wasm 是一次 `App::run()`，业务导出面为 0。
+//! Native window entry; the browser bootstrap invokes the library start export.
 //!
 //! wasm 下本 bin 不是入口：rustc 会把 bin 的 main 放进 wasm 的 start
 //! section，wasm-bindgen 把它搬成 `__wbindgen_start` 在实例化时自动执行，
@@ -8,14 +8,18 @@
 //!
 //! 但也不能写成空 main：链接器会把「没有任何引用的」wasm-bindgen 运行时
 //! 内建导出 GC 掉，wasm-bindgen 随即报 clone_ref intrinsic 缺失。这里引用
-//! run 而不调用，整张依赖图保持可达。
+//! start 而不调用，整张依赖图保持可达。
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    let _run_referenced_not_called: fn() = moly_app::run;
+    let _start_referenced_not_called = moly_app::start;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
+    if std::env::args().skip(1).any(|arg| matches!(arg.as_str(), "--version" | "-V")) {
+        println!("moly {}", moly_game::VERSION);
+        return;
+    }
     moly_app::run();
 }

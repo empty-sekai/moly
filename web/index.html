@@ -15,7 +15,7 @@
       font: 1rem/1.5 system-ui, sans-serif;
     }
     #boot-panel[hidden] { display: none; }
-    #boot-start { padding: .65rem 2rem; font: inherit; cursor: pointer; }
+    #boot-panel button { padding: .65rem 2rem; font: inherit; cursor: pointer; }
     #boot-start:disabled { cursor: wait; }
     #boot-status { margin: 0 1.5rem; text-align: center; white-space: pre-wrap; }
   </style>
@@ -25,6 +25,8 @@
   <section id="boot-panel" aria-label="启动游戏">
     <p id="boot-status" role="status" aria-live="polite">正在加载游戏…</p>
     <button id="boot-start" type="button" aria-describedby="boot-status" disabled>开始</button>
+    <button id="boot-retry" type="button" hidden>重新加载</button>
+    <button id="boot-webgl" type="button" hidden>使用 WebGL2 重试</button>
   </section>
   <script type="module" src="./main.mjs"></script>
 </body>

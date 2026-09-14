@@ -612,8 +612,8 @@ mod tests {
             talk_wait(0.0, None),
             TalkStep::Label { name: String::new() },
             TalkStep::Voice { channel: String::new(), cue: String::new(), who: String::new() },
-            TalkStep::ChangeNpcEye { who: String::new(), pattern: String::new(), alias: String::new() },
-            TalkStep::ChangeNpcMouth { who: String::new(), pattern: String::new(), alias: String::new() },
+            TalkStep::ChangeNpcEye { who: String::new(), pattern: String::new(), alias: String::new(), delay_seconds: 0.0 },
+            TalkStep::ChangeNpcMouth { who: String::new(), pattern: String::new(), alias: String::new(), delay_seconds: 0.0 },
             TalkStep::ChangeAnimation {
                 who: String::new(),
                 motion: String::new(),
@@ -709,6 +709,7 @@ mod tests {
             who: "a".to_string(),
             pattern: "EyePresets.normal".to_string(),
             alias: "EyePresets.normal".to_string(),
+            delay_seconds: 0.0,
         };
         assert_eq!(
             eye.face_change(),
@@ -718,6 +719,7 @@ mod tests {
             who: "a".to_string(),
             pattern: "MouthPresets.smile01".to_string(),
             alias: "MouthPresets.smile01".to_string(),
+            delay_seconds: 0.0,
         };
         assert_eq!(
             mouth.face_change(),
@@ -729,6 +731,7 @@ mod tests {
             who: 1.0,
             pattern: "p".to_string(),
             alias: "p".to_string(),
+            delay_seconds: 0.0,
         };
         assert_eq!(fx_eye.face_change(), Some((FaceSlot::Eye, "p", "p")));
     }

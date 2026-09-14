@@ -17,6 +17,9 @@ mod input;
 mod presentation;
 mod validation;
 
+#[cfg(test)]
+mod tests;
+
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::fixture::{EditableFixture, FixturePlacements, OccupancyRow};
 use assets::{CANDIDATES, FixtureAreas};
@@ -71,7 +74,8 @@ pub(crate) enum EditPhase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditItemView {
     pub uid: String,
-    pub package: &'static str,
+    pub package: String,
+    pub texture_id: u32,
     pub fixture_id: i32,
     pub center: GridPosition,
     pub direction: Direction,
@@ -84,7 +88,8 @@ impl From<&EditableFixture> for EditItemView {
     fn from(item: &EditableFixture) -> Self {
         Self {
             uid: item.uid.clone(),
-            package: item.package,
+            package: item.package.clone(),
+            texture_id: item.texture_id,
             fixture_id: item.fixture_id,
             center: item.center,
             direction: item.direction,
@@ -227,13 +232,6 @@ pub(crate) enum FixtureEditSystems {
     Pointer,
     Commands,
     View,
-}
-
-pub(crate) fn canonical_package(name: &str) -> Option<&'static str> {
-    CANDIDATES
-        .iter()
-        .find(|row| row.package == name)
-        .map(|row| row.package)
 }
 
 pub(crate) fn has_unsaved_layout(session: &EditSession) -> bool {
@@ -578,9 +576,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             }
             session.next_fixture_uid = next_serial;
             session.catalog_index = index;
-            let item = EditableFixture {
+            let item = EditableFixture { texture_id: 1,
                 uid,
-                package: row.package,
+                package: row.package.to_owned(),
                 fixture_id: row.fixture_id,
                 center: GridPosition::ZERO,
                 grid_size: row.grid_size,

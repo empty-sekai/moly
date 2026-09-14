@@ -149,10 +149,36 @@ impl From<SiteRequest> for SiteSelection {
 }
 
 impl SiteSelection {
+    pub(crate) fn for_player_data(data: &moly_assets::player_data::ImportedPlayerData) -> Self {
+        Self { site: data.sites[0].site_type.clone(),
+            levels: data.sites.iter().map(|site| (site.site_type.clone(), site.level)).collect(),
+            content: OfflineSceneContent::Compact }
+    }
+
+    pub(crate) fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({ "site": self.site, "levels": self.levels,
+            "content": if self.content == OfflineSceneContent::Full { "full" } else { "compact" } })
+    }
+
+    pub(crate) fn from_snapshot(value: &serde_json::Value) -> Result<Self, String> {
+        let site = value["site"].as_str().ok_or("Backup site is missing")?.to_owned();
+        if !SUPPORTED.contains(&site.as_str()) { return Err("Backup site is unknown".into()); }
+        let levels = serde_json::from_value::<HashMap<String, u32>>(value["levels"].clone())
+            .map_err(|_| "Backup levels are invalid")?;
+        if levels.iter().any(|(site, level)| !SUPPORTED.contains(&site.as_str()) || *level == 0) {
+            return Err("Backup levels are invalid".into());
+        }
+        let content = match value["content"].as_str() {
+            Some("full") => OfflineSceneContent::Full, Some("compact") => OfflineSceneContent::Compact,
+            _ => return Err("Backup content selection is invalid".into()),
+        };
+        Ok(Self { site, levels, content })
+    }
+
     pub(crate) fn site_type(&self) -> &str { &self.site }
     pub(crate) fn content(&self) -> OfflineSceneContent { self.content }
 
-    fn resolve_level(&mut self, sites: &Sites, layouts: &crate::fixture::layouts::SiteFixtureLayouts) -> Result<u32, String> {
+    pub(crate) fn resolve_level(&mut self, sites: &Sites, layouts: &crate::fixture::layouts::SiteFixtureLayouts) -> Result<u32, String> {
         let row = sites.row(&self.site);
         let level = if let Some(level) = self.levels.get(&self.site) { *level }
         else if let Some(level) = layouts.saved_level(row.id)? { level }
@@ -927,6 +953,12 @@ pub(crate) fn read_switch(
         warn!("[site] switch refused: {error}; current map and saved data were retained");
         return;
     }
+    queue_transition(&mut commands, roots.iter().collect(), next);
+    tour.hops += 1;
+}
+
+/// Queue the shared scene teardown before publishing a new site selection.
+pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection) {
     // Release furniture ownership and detach the logical player before any
     // scene subtree disappears or the next site reseeds that same player.
     commands.queue(crate::player_fixture_action::cancel_for_site_change);
@@ -934,7 +966,7 @@ pub(crate) fn read_switch(
     commands.queue(crate::fixture_gimmick::cancel_for_site_change);
     commands.queue(crate::fixture_scene_inputs::invalidate_for_site_change);
     commands.queue(crate::fixture::clear_for_site_change);
-    for root in &roots {
+    for root in roots {
         commands.entity(root).despawn();
     }
     commands.remove_resource::<SiteAssets>();
@@ -943,19 +975,18 @@ pub(crate) fn read_switch(
     commands.remove_resource::<SiteScenesReady>();
     commands.remove_resource::<SiteSettled>();
     commands.remove_resource::<SiteScenePending>();
-    crate::walk_face::teardown(&mut commands);
-    site_material::teardown(&mut commands);
-    site_sound::teardown(&mut commands);
+    crate::walk_face::teardown(commands);
+    site_material::teardown(commands);
+    site_sound::teardown(commands);
     // 粒子链：计划与状态随站撤（绘制实体不是站点树的子节点，本站的
     // 属性池不能带进下一站）。天气粒子链同理——它的锚点一半是站。
-    crate::uber_particle::teardown(&mut commands);
-    crate::weather_fx::teardown(&mut commands);
+    crate::uber_particle::teardown(commands);
+    crate::weather_fx::teardown(commands);
     // GroundEpoch 留下：重播种面按代数变化起跳，撤了会把「新代」算回
     // 「首代」（首代在名册播种时已被记录）。
     commands.remove_resource::<SiteActive>();
-    inactive_nodes::teardown(&mut commands);
+    inactive_nodes::teardown(commands);
     commands.insert_resource(next);
-    tour.hops += 1;
 }
 
 /// 按键路：Tab 下一站（一键一义：Tab 只归换站，天气循环在 weather 的

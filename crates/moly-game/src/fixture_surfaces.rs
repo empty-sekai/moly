@@ -321,7 +321,8 @@ impl Plugin for FixtureSurfacePlugin {
             .init_resource::<FixtureSurfaceReadiness>()
             .init_resource::<TransparentBlockAppearance>()
             .add_systems(Update, (bind_surfaces, update_block_opacity).chain()
-                .after(crate::fixture::FixtureLayoutSet).before(FixtureMaterialSet));
+                .after(crate::fixture::FixtureLayoutSet).after(crate::fixture_colors::prepare)
+                .run_if(crate::fixture_colors::ready).before(FixtureMaterialSet));
         bevy::asset::embedded_asset!(app, "shaders/fixture_surface.wgsl");
     }
 }

@@ -8,6 +8,21 @@
 
 use moly_assets::AssetSource;
 
+/// Asset roots are canonical same-origin directory paths, not URL references.
+pub fn validate_asset_prefix(base: &str) -> Result<(), String> {
+    if !base.starts_with('/')
+        || base.starts_with("//")
+        || !base.ends_with('/')
+        || base
+            .bytes()
+            .any(|b| b <= b' ' || b == 0x7f || matches!(b, b'\\' | b'%' | b'?' | b'#'))
+        || base.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err("?assets= must be a canonical same-origin directory path ending in /; URL references, encoded separators, query and fragment are not allowed".into());
+    }
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve() -> Result<AssetSource, String> {
     let raw = std::env::var("MOLY_ASSET_ROOT").map_err(|_| {
@@ -23,14 +38,17 @@ pub fn resolve() -> Result<AssetSource, String> {
             path.display()
         ));
     }
-    if path.join("asset-packs.json").is_file() { Ok(AssetSource::NativePacks { path }) }
-    else { Ok(AssetSource::NativeDir { path }) }
+    if path.join("asset-packs.json").is_file() {
+        Ok(AssetSource::NativePacks { path })
+    } else {
+        Ok(AssetSource::NativeDir { path })
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn resolve() -> Result<AssetSource, String> {
-    let window = web_sys::window()
-        .ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
+    let window =
+        web_sys::window().ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
     let search = window
         .location()
         .search()
@@ -40,18 +58,19 @@ pub fn resolve() -> Result<AssetSource, String> {
     let base = params.get("assets").ok_or_else(|| {
         "missing ?assets=<url-prefix>/ — the HTTP base assets are fetched from".to_owned()
     })?;
-    if base.is_empty() {
-        return Err("?assets= is empty; it must be a same-origin path prefix ending in /".into());
-    }
-    if !base.starts_with('/') {
-        return Err(format!(
-            "?assets={base} must be a same-origin absolute path starting with /"
-        ));
-    }
-    if !base.ends_with('/') {
-        return Err(format!(
-            "?assets={base} must end in / — it is a prefix asset keys are appended to"
-        ));
+    validate_asset_prefix(&base)?;
+    let location = window.location();
+    let page = location.href().map_err(|_| "Could not read page URL")?;
+    let url = web_sys::Url::new_with_base(&base, &page).map_err(|_| "Invalid asset URL prefix")?;
+    if url.origin()
+        != location
+            .origin()
+            .map_err(|_| "Could not read page origin")?
+        || url.pathname() != base
+        || !url.search().is_empty()
+        || !url.hash().is_empty()
+    {
+        return Err("?assets= must resolve to a canonical path on the page origin".into());
     }
     match params.get("packs").as_deref() {
         Some("1") => Ok(AssetSource::HttpPacks { url: base }),

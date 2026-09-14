@@ -187,14 +187,14 @@ function gitUntrackedFiles() {
 // exactly when the check was blind. Compressed and binary fixtures (.br, .brz,
 // .bin, .gzz) stay out: they are not text, and scanning them would report
 // matches no human wrote.
-const SOURCE_EXTENSIONS = new Set(['.ts', '.rs', '.wgsl', '.mjs', '.js', '.html', '.toml', '.json']);
+const SOURCE_EXTENSIONS = new Set(['.ts', '.rs', '.wgsl', '.mjs', '.js', '.html', '.toml', '.json', '.py', '.yml', '.yaml']);
 
 // Directory prefixes (trailing slash mandatory) holding source that is part of
 // the published product. This list is hand-maintained, which is exactly why
 // checkSourceDirCoverage() below asserts it has not fallen behind the tree:
 // a stale list does not fail, it silently stops classifying a whole directory
 // of release candidates as release candidates.
-const SOURCE_DIR_PREFIXES = ['web/', 'tools/', 'src/', 'tests/', '.cargo/'];
+const SOURCE_DIR_PREFIXES = ['web/', 'tools/', 'src/', 'tests/', '.cargo/', '.github/'];
 
 // Per-crate source directories. Enumerated rather than collapsed into a single
 // `^crates/[^/]+/` catch-all on purpose: a catch-all would cover every future
@@ -215,7 +215,7 @@ const CRATE_SOURCE_DIR_PATTERNS = [
 const CRATE_ROOT_DIR = /^crates\/[^/]+\/$/;
 
 const SOURCE_DIR_DESCRIPTION =
-  'the repo root, web/, tools/, src/, tests/, .cargo/, crates/*/ and crates/*/{src,tests,examples}/';
+  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, crates/*/ and crates/*/{src,tests,examples}/';
 
 // Directories deliberately outside the coverage assertion, each with the reason
 // it is out. Stated explicitly rather than left to "no prefix happens to match

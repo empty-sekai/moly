@@ -31,7 +31,7 @@ pub fn resolve() -> Result<SiteRequest, String> {
     let site = match env("MOLY_SITE")? {
         Some(raw) if !raw.trim().is_empty() => raw.trim().to_owned(),
         Some(_) => return Err("MOLY_SITE is set but empty; it names a site type".into()),
-        None => DEFAULT_SITE.to_owned(),
+        None => moly_game::player_data::preferred_site().unwrap_or_else(|| DEFAULT_SITE.to_owned()),
     };
     let room_level = parse_level(env("MOLY_ROOM_LEVEL")?.as_deref(), "MOLY_ROOM_LEVEL")?;
     let offline_home_level = parse_level(env("MOLY_OFFLINE_HOME_LEVEL")?.as_deref(), "MOLY_OFFLINE_HOME_LEVEL")?;
@@ -48,7 +48,7 @@ pub fn resolve() -> Result<SiteRequest, String> {
     let site = match params.get("site") {
         Some(raw) if !raw.trim().is_empty() => raw.trim().to_owned(),
         Some(_) => return Err("?site= is empty; it names a site type".into()),
-        None => DEFAULT_SITE.to_owned(),
+        None => moly_game::player_data::preferred_site().unwrap_or_else(|| DEFAULT_SITE.to_owned()),
     };
     let room_level = parse_level(params.get("level").as_deref(), "level")?;
     let offline_home_level = parse_level(params.get("offline_home_level").as_deref(), "offline_home_level")?;

@@ -13,7 +13,7 @@ use crate::{settings_store, site::OfflineSceneContent};
 #[path = "fixture_layout_inventory.rs"]
 mod inventory;
 
-const SECTION: &str = "OfflineSiteLayouts";
+pub(crate) const SECTION: &str = "OfflineSiteLayouts";
 const VERSION: u64 = 1;
 
 /// Private optimistic editor baseline. Full records, including unknown fields,
@@ -95,6 +95,10 @@ impl Default for SiteFixtureLayouts {
 }
 
 impl SiteFixtureLayouts {
+    pub(crate) fn from_document(document: Value) -> Self {
+        Self { document: Ok(document), visited: HashMap::new() }
+    }
+
     pub(crate) fn saved_level(&self, site_id: u32) -> Result<Option<u32>, String> {
         if let Some(layout) = self.visited.get(&site_id) {
             return Ok(Some(layout.level));
@@ -185,7 +189,7 @@ impl SiteFixtureLayouts {
             .map(|serial| format!("offline-fixture-{site_id}-{serial}"))
             .collect();
         Ok(FixturePlacements {
-            rows, instance_uids, site_id, site_type: site_type.to_owned(), level,
+            rows: rows.into_iter().map(PlacementMock::into_owned).collect(), instance_uids, site_id, site_type: site_type.to_owned(), level,
             next_edit_uid: 1, floor: None,
         })
     }
@@ -239,11 +243,8 @@ fn decode(saved: &Value, site_id: u32, site_type: &str, level: u32) -> Result<Fi
             .ok_or("saved fixture UID is empty")?;
         if !unique.insert(uid) { return Err(format!("saved fixture UID is duplicated: {uid}")); }
         let name = record["package"].as_str().ok_or("saved fixture package is missing")?;
-        // The current offline placement producer has a finite static registry.
-        // Unknown packages remain in the source document, not leaked as &'static
-        // strings or silently dropped. Extend this resolver with new producers.
         let package = canonical_package(name)
-            .ok_or_else(|| format!("saved fixture package is not supported by the offline producer: {name}"))?;
+            .ok_or_else(|| format!("saved fixture package is invalid: {name}"))?;
         let min = grid(&record["minimum"], "saved minimum")?;
         let max = grid(&record["maximum"], "saved maximum")?;
         let center_y = byte(&record["centerY"], "saved centerY")?;
@@ -253,20 +254,66 @@ fn decode(saved: &Value, site_id: u32, site_type: &str, level: u32) -> Result<Fi
             .and_then(Direction::from_u8).ok_or("saved rotation must be 0..3")?;
         let fixture_id = record["mysekaiFixtureId"].as_i64().and_then(|v| i32::try_from(v).ok())
             .ok_or("saved mysekaiFixtureId must be i32")?;
-        moly_law::fixture::position::footprint_to_center_size(min, max)?;
-        let (placed_min, placed_max) = moly_law::fixture::position::placed_footprint(min, max, direction)?;
+        let (mut center, size) = moly_law::fixture::position::footprint_to_center_size(min, max)?;
+        center.y = center_y;
+        let (placed_min, placed_max) = moly_law::fixture::position::layout_footprint(center, size, direction, layout)?;
         moly_law::fixture::position::field_position(placed_min, placed_max, center_y, layout)?;
-        rows.push(PlacementMock { package, min, max, center_y, layout, direction, fixture_id });
+        rows.push(PlacementMock { texture_id: record.get("textureId").map(|v| positive_u32(v, "textureId")).transpose()?.unwrap_or(1), package, min, max, center_y, layout, direction, fixture_id });
         instance_uids.push(uid.to_owned());
     }
     Ok(FixturePlacements { rows, instance_uids, site_id, site_type: site_type.to_owned(), level, next_edit_uid, floor: None })
 }
 
-fn canonical_package(name: &str) -> Option<&'static str> {
-    PLACEMENTS.iter().chain(compact::PLACEMENTS.iter())
-        .find(|row| row.package == name).map(|row| row.package)
-        .or_else(|| gallery::canonical_package(name))
-        .or_else(|| crate::fixture_edit::canonical_package(name))
+fn canonical_package(name: &str) -> Option<String> {
+    let suffix = name.strip_prefix("mysekai__fixture__")?;
+    (!suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+        .then(|| name.to_owned())
+}
+
+/// Build every imported site before the caller replaces the local document.
+pub(crate) fn import_section(
+    data: &moly_assets::player_data::ImportedPlayerData, sites: &crate::site::Sites,
+) -> Result<Value, String> {
+    let mut records = Map::new();
+    for site in &data.sites {
+        if sites.site_id(&site.site_type) != Some(site.id) {
+            return Err(format!("Site {} does not match the loaded scene catalog", site.id));
+        }
+        let floor = sites.floor_grid(&site.site_type, site.level)?;
+        let fixtures: Vec<_> = site.fixtures.iter().map(|row| {
+            let (min, max) = moly_law::fixture::position::footprint_front(row.center, row.grid_size);
+            json!({ "mysekaiUniqueId": row.uid, "package": row.package,
+                "mysekaiFixtureId": row.fixture_id, "textureId": row.texture_id,
+                "minimum": grid_json(min), "maximum": grid_json(max), "centerY": row.center.y,
+                "layoutType": row.layout, "rotation": row.direction as u8,
+                "sourceArray": row.source_array, "sourceData": row.source })
+        }).collect();
+        let record = json!({ "mysekaiSiteId": site.id, "siteType": site.site_type,
+            "level": site.level, "nextEditUid": 1, "fixtures": fixtures,
+            "mysekaiFixtureSurfaceAppearances": site.source.get("mysekaiFixtureSurfaceAppearances")
+                .cloned().unwrap_or_else(|| json!([])),
+            "mysekaiPhenomenaId": site.source.get("mysekaiPhenomenaId") });
+        let layout = decode(&record, site.id, &site.site_type, site.level)?;
+        validate_floor_layout(&layout, floor)?;
+        records.insert(site.id.to_string(), record);
+    }
+    Ok(json!({ "version": VERSION, "sites": records, "returnedFixtures": [] }))
+}
+
+pub(crate) fn validate_document(document: &Value, sites: &crate::site::Sites) -> Result<(), String> {
+    let Some(section) = document.get(SECTION) else { return Ok(()); };
+    if section["version"].as_u64() != Some(VERSION) { return Err("Unsupported layout backup version".into()); }
+    for (key, record) in section["sites"].as_object().ok_or("Backup sites must be an object")? {
+        let id = key.parse::<u32>().map_err(|_| "Backup site ID is invalid")?;
+        saved_site(document, id)?;
+        let site_type = record["siteType"].as_str().ok_or("Backup site type is missing")?;
+        if sites.site_id(site_type) != Some(id) { return Err("Backup site identity does not match the catalog".into()); }
+        let level = positive_u32(&record["level"], "backup site level")?;
+        validate_floor_layout(&decode(record, id, site_type, level)?, sites.floor_grid(site_type, level)?)?;
+    }
+    inventory::read(document)?;
+    inventory::previous_records(document)?;
+    Ok(())
 }
 
 /// Existing rows are checked too: a level override may not turn a large saved
@@ -298,7 +345,7 @@ pub(crate) fn validate_floor_layout(layout: &FixturePlacements, floor: crate::si
 
 /// Layout and returned items share the existing settings write. Validate the
 /// exact Enter/last-success snapshot and build the patch on the SAME fresh
-/// document used by merge/write. This is synchronous stale-preflight, not CAS.
+/// document used by merge/write under the exclusive settings transaction.
 pub(crate) fn persist_edit(
     layout: &FixturePlacements,
     returned: &[super::EditableFixture],
@@ -326,7 +373,7 @@ pub(crate) fn persist_edit(
                 ("mysekaiFixtureId", json!(row.fixture_id)),
                 ("minimum", grid_json(row.min)), ("maximum", grid_json(row.max)),
                 ("centerY", json!(row.center_y)), ("layoutType", json!(row.layout)),
-                ("rotation", json!(row.direction as u8)),
+                ("rotation", json!(row.direction as u8)), ("textureId", json!(row.texture_id)),
             ] { object.insert(key.to_owned(), value); }
             fixtures.push(record);
         }
