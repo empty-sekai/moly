@@ -632,23 +632,22 @@ pub(crate) struct EditableFixture {
 }
 
 impl EditableFixture {
-    pub(crate) fn footprint(&self) -> (GridPosition, GridPosition) {
+    /// Editor candidates can leave the grid domain before Decide validates them.
+    pub(crate) fn footprint(&self) -> Result<(GridPosition, GridPosition), String> {
         moly_law::fixture::position::layout_footprint(self.center, self.grid_size, self.direction, self.layout)
-            .expect("validated fixture layout")
     }
 
-    pub(crate) fn occupancy(&self) -> OccupancyRow {
-        let (min, max) = self.footprint();
-        OccupancyRow {
+    pub(crate) fn occupancy(&self) -> Result<OccupancyRow, String> {
+        let (min, max) = self.footprint()?;
+        Ok(OccupancyRow {
             uid: self.uid.clone(), package: self.package.clone(), min, max,
             center_y: self.center.y, layout: self.layout, direction: self.direction,
             layout_center: self.center, layout_grid_size: self.grid_size,
-        }
+        })
     }
 
     pub(crate) fn pose(&self) -> Result<Transform, String> {
-        let (min, max) = moly_law::fixture::position::layout_footprint(
-            self.center, self.grid_size, self.direction, self.layout)?;
+        let (min, max) = self.footprint()?;
         let position = field_position(min, max, self.center.y, self.layout)?;
         Ok(Transform::from_translation(Vec3::from(position)).with_rotation(
             Quat::from_rotation_y(direction_yaw_degrees(self.direction).to_radians())))
@@ -664,6 +663,13 @@ pub(crate) struct FixtureLayoutRevision(pub u64);
 pub(crate) struct FixtureLayoutSet;
 
 impl FixturePlacements {
+    #[cfg(test)]
+    pub(crate) fn test_layout(rows: &[EditableFixture], floor: crate::site::FloorGridLayout) -> Self {
+        Self { site_id: 1, site_type: "first_floor".into(), level: floor.level,
+            floor: Some(floor), ..Default::default() }
+            .with_editor_rows(rows, 1).expect("valid synthetic layout")
+    }
+
     pub(crate) fn site_id(&self) -> u32 { self.site_id }
     pub(crate) fn site_type(&self) -> &str { &self.site_type }
     pub(crate) fn floor_grid(&self) -> Option<crate::site::FloorGridLayout> { self.floor }

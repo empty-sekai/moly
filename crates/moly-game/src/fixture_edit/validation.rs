@@ -1,13 +1,12 @@
 //! Grid-space checks. Rendering bounds are never used as layout dimensions.
 
 use super::{
-    PutStatus,
     assets::{FixtureAreas, MetaGrid},
+    PutStatus,
 };
 use crate::{fixture::EditableFixture, site::FloorGridLayout};
-use moly_law::fixture::Direction;
-use moly_law::fixture::areas::{GridAreaData, motion_area_bounds, rotated_center_grid};
-use moly_law::fixture::position::{footprint_front, footprint_to_center_size, layout_type};
+use moly_law::fixture::areas::{motion_area_bounds, rotated_center_grid, GridAreaData};
+use moly_law::fixture::position::layout_type;
 use std::collections::HashSet;
 
 /// This slice edits ground furniture and rugs. Roads, walls and nonzero-height
@@ -43,25 +42,17 @@ pub(super) fn put(
     let Some(floor) = floor else {
         return PutStatus::OutOfBounds { cells: 0 };
     };
-    let (front_min, front_max) = footprint_front(item.center, item.grid_size);
-    if footprint_to_center_size(front_min, front_max).is_err()
-        || item.grid_size.x <= 0
-        || item.grid_size.y <= 0
-        || item.grid_size.z <= 0
-    {
+    let Ok((min, max)) = item.footprint() else {
         return PutStatus::OutOfBounds { cells: 0 };
-    }
-    let (min, max) = item.footprint();
-    let (width, depth) = match item.direction {
-        Direction::Front | Direction::Back => (item.grid_size.x, item.grid_size.z),
-        Direction::Left | Direction::Right => (item.grid_size.z, item.grid_size.x),
     };
-    if max.x as i32 - min.x as i32 + 1 != width
-        || max.z as i32 - min.z as i32 + 1 != depth
-        || max.y as i32 - min.y as i32 + 1 != item.grid_size.y
-    {
+    let occupied: Result<Vec<_>, _> = rows
+        .iter()
+        .filter(|row| row.uid != item.uid && row.layout == item.layout)
+        .map(EditableFixture::footprint)
+        .collect();
+    let Ok(occupied) = occupied else {
         return PutStatus::OutOfBounds { cells: 0 };
-    }
+    };
     let mut outside = 0;
     let mut overlap = 0;
     let height = if item.layout == layout_type::FLOOR {
@@ -80,19 +71,14 @@ pub(super) fn put(
                     || y >= height
                 {
                     outside += 1;
-                } else if rows
-                    .iter()
-                    .filter(|row| row.uid != item.uid && row.layout == item.layout)
-                    .any(|other| {
-                        let (a, b) = other.footprint();
-                        x >= a.x as i32
-                            && x <= b.x as i32
-                            && y >= a.y as i32
-                            && y <= b.y as i32
-                            && z >= a.z as i32
-                            && z <= b.z as i32
-                    })
-                {
+                } else if occupied.iter().any(|(a, b)| {
+                    x >= a.x as i32
+                        && x <= b.x as i32
+                        && y >= a.y as i32
+                        && y <= b.y as i32
+                        && z >= a.z as i32
+                        && z <= b.z as i32
+                }) {
                     overlap += 1;
                 }
             }
@@ -132,6 +118,15 @@ pub(super) fn save(
     let Some(floor) = floor else {
         return Err("地图等级尺寸尚未就绪".into());
     };
+    // Reject malformed drafts before any volume-based save checks. Valid
+    // geometry still follows the source cutscene/animation/layout precedence.
+    let footprints: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.footprint()
+                .map_err(|error| format!("ErrorLayout(1)：{}：{error}", row.uid))
+        })
+        .collect::<Result<_, _>>()?;
     for owner in rows {
         if let Some(meta) = areas.cutscene.get(&owner.package) {
             let protected = cutscene_cells(meta, owner);
@@ -140,9 +135,9 @@ pub(super) fn save(
                 .any(|(x, z)| !axis_inside(*x, floor.width) || !axis_inside(*z, floor.depth))
                 || rows
                     .iter()
-                    .filter(|row| row.uid != owner.uid && row.layout == layout_type::FLOOR)
-                    .any(|row| {
-                        let (min, max) = row.footprint();
+                    .zip(&footprints)
+                    .filter(|(row, _)| row.uid != owner.uid && row.layout == layout_type::FLOOR)
+                    .any(|(_, (min, max))| {
                         (min.x..=max.x)
                             .any(|x| (min.z..=max.z).any(|z| protected.contains(&(x, z))))
                     })
@@ -172,9 +167,9 @@ pub(super) fn save(
             );
             if bounds.iter().any(|bound| {
                 rows.iter()
-                    .filter(|row| row.uid != item.uid && row.layout == layout_type::FLOOR)
-                    .any(|row| {
-                        let (a, b) = row.footprint();
+                    .zip(&footprints)
+                    .filter(|(row, _)| row.uid != item.uid && row.layout == layout_type::FLOOR)
+                    .any(|(_, (a, b))| {
                         bound.min.x <= b.x
                             && bound.max.x >= a.x
                             && bound.min.z <= b.z

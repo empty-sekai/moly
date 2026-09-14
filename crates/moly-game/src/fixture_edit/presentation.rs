@@ -283,10 +283,12 @@ fn sync_marker(
             invalid,
         });
     }
-    let Ok(pose) = selected.pose() else {
+    let (Ok(pose), Ok((min, max))) = (selected.pose(), selected.footprint()) else {
+        for entity in markers {
+            world.despawn(entity);
+        }
         return;
     };
-    let (min, max) = selected.footprint();
     let transform =
         Transform::from_translation(pose.translation + Vec3::Y * 0.01).with_scale(Vec3::new(
             (max.x as i32 - min.x as i32 + 1) as f32 * TILE_SIZE,

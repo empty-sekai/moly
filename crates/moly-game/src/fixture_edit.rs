@@ -17,6 +17,9 @@ mod input;
 mod presentation;
 mod validation;
 
+#[cfg(test)]
+mod tests;
+
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::fixture::{EditableFixture, FixturePlacements, OccupancyRow};
 use assets::{CANDIDATES, FixtureAreas};

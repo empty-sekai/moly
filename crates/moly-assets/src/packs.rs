@@ -69,6 +69,18 @@ struct Entry {
     xf: Option<String>,
 }
 
+impl Entry {
+    fn buffer_peak(&self) -> Result<usize, AssetReaderError> {
+        let transfer = self.blob_bytes.checked_add(1);
+        let peak = match self.codec.as_str() {
+            "identity" if self.blob_bytes == self.bytes => transfer,
+            "gzip" => transfer.and_then(|value| value.checked_add(self.bytes)?.checked_add(1)),
+            _ => return Err(invalid("Packed representation has incompatible codec or lengths")),
+        };
+        peak.ok_or_else(|| invalid("Asset buffer size overflow"))
+    }
+}
+
 #[derive(Hash, PartialEq, Eq)]
 struct Representation {
     path: String,
@@ -168,7 +180,7 @@ impl PackReader {
 
     async fn document_bytes(&self, path: &str) -> Result<Buffer, AssetReaderError> {
         let _slot = self.budget.slots.acquire().await;
-        let reservation = self.budget.reserve(MAX_DOCUMENT_BYTES + 1)?;
+        let reservation = self.budget.reserve(MAX_DOCUMENT_BYTES + 1).await?;
         Ok(Buffer {
             bytes: self.bytes(path, MAX_DOCUMENT_BYTES).await?,
             _reservation: reservation,
@@ -316,12 +328,7 @@ impl PackReader {
         let bytes = flight
             .get_or_try_init(|| async {
                 let _slot = self.budget.slots.acquire().await;
-                let peak = entry
-                    .blob_bytes
-                    .checked_add(entry.bytes)
-                    .and_then(|value| value.checked_add(2))
-                    .ok_or_else(|| invalid("Asset buffer size overflow"))?;
-                let mut reservation = self.budget.reserve(peak)?;
+                let mut reservation = self.budget.reserve(entry.buffer_peak()?).await?;
                 let bytes = self.bytes(path, entry.blob_bytes).await?;
                 if bytes.len() != entry.blob_bytes
                     || format!("{:x}", Sha256::digest(&bytes)) != entry.blob_sha256
@@ -420,3 +427,6 @@ impl AssetReader for PackReader {
             .any(|p| p.starts_with(&prefix)))
     }
 }
+
+#[cfg(test)]
+mod tests;

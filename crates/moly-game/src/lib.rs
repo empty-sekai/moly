@@ -54,6 +54,7 @@ pub mod option_dialog;
 pub mod pick;
 pub mod player;
 pub mod player_data;
+mod player_data_io;
 mod player_data_ui;
 pub mod player_avatar;
 mod player_fixture_action;

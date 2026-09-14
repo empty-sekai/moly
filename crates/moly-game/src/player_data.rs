@@ -6,13 +6,11 @@ use moly_assets::{
     player_data::{ImportedPlayerData, PlayerDataCatalog, MAX_IMPORT_BYTES},
 };
 use serde_json::{json, Value};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
 use crate::{
     fixture::layouts::{self, SiteFixtureLayouts},
+    player_data_io::{self, decode_bytes, ReadTask},
     settings_store,
     site::{SiteSelection, Sites},
 };
@@ -41,10 +39,21 @@ struct Payload {
     apply: bool,
 }
 enum Incoming {
-    Data(u64, Result<Option<Payload>, String>),
+    Data(Result<Option<Payload>, String>),
     Paste(Result<String, String>),
 }
-type Inbox = Arc<Mutex<Vec<Incoming>>>;
+
+#[derive(Default)]
+struct InboxState {
+    generation: u64,
+    message: Option<Incoming>,
+}
+type Inbox = Arc<Mutex<InboxState>>;
+
+fn deliver(inbox: &Inbox, ticket: u64, message: Incoming) {
+    let mut inbox = inbox.lock().unwrap();
+    if inbox.generation == ticket { inbox.message = Some(message); }
+}
 
 struct Preview {
     data: ImportedPlayerData,
@@ -62,6 +71,7 @@ pub struct PlayerDataImport {
     pub(crate) action: Option<ImportAction>,
     api: String,
     inbox: Inbox,
+    read_task: Option<ReadTask>,
     generation: u64,
     pending: Option<Payload>,
     preview: Option<Preview>,
@@ -77,7 +87,7 @@ impl Default for PlayerDataImport {
         let api = "/player-api/{region}/{target_user_id}";
         Self { uid: String::new(), region: "cn".into(),
             status: "Enter a player UID or choose a Mysekai JSON file. Import keeps a recoverable layout backup.".into(),
-            busy: false, action: None, api: api.into(), inbox: Default::default(),
+            busy: false, action: None, api: api.into(), inbox: Default::default(), read_task: None,
             generation: 0, pending: None, preview: None, requests: None, catalog: None }
     }
 }
@@ -110,6 +120,10 @@ impl PlayerDataImport {
 
     pub fn request_json(&mut self, text: String, apply: bool) {
         self.cancel();
+        if text.len() > MAX_IMPORT_BYTES {
+            self.status = "Player data exceeds the 32 MiB import limit".into();
+            return;
+        }
         self.pending = Some(Payload {
             text,
             region: self.region.clone(),
@@ -151,7 +165,13 @@ impl PlayerDataImport {
     }
 
     fn cancel(&mut self) {
+        self.read_task = None;
         self.generation = self.generation.wrapping_add(1);
+        {
+            let mut inbox = self.inbox.lock().unwrap();
+            inbox.generation = self.generation;
+            inbox.message = None;
+        }
         self.pending = None;
         self.preview = None;
         self.busy = false;
@@ -174,68 +194,60 @@ impl PlayerDataImport {
             .api
             .replace("{region}", &self.region)
             .replace("{target_user_id}", &uid);
-        let request = ehttp::Request::get(url).with_timeout(Some(Duration::from_secs(60)));
         let (inbox, ticket, region) = (self.inbox.clone(), self.generation, self.region.clone());
-        ehttp::fetch(request, move |response| {
-            let result = response.and_then(|response| {
-                match response.status {
-                    200 => {}
-                    404 => {
-                        return Err(
-                            "Player does not exist or their Mysekai home is unavailable (HTTP 404)"
-                                .into(),
-                        )
-                    }
-                    401 | 403 => {
-                        return Err(format!(
-                            "Player API denied access (HTTP {})",
-                            response.status
-                        ))
-                    }
-                    429 => {
-                        return Err("Player API is rate limited; try again later (HTTP 429)".into())
-                    }
-                    code => return Err(format!("Player API returned HTTP {code}")),
-                }
-                decode_bytes(response.bytes).map(|text| {
-                    Some(Payload {
-                        text,
-                        region,
-                        uid: Some(uid),
-                        apply: false,
-                    })
-                })
-            });
-            inbox.lock().unwrap().push(Incoming::Data(ticket, result));
-        });
+        self.read_task = Some(player_data_io::fetch(url, move |result| {
+            let result = result.map(|text| Some(Payload { text, region, uid: Some(uid), apply: false }));
+            deliver(&inbox, ticket, Incoming::Data(result));
+        })?);
         Ok(())
     }
 
-    fn choose_file(&mut self) {
+    fn choose_file(&mut self) -> Result<(), String> {
         self.cancel();
         self.busy = true;
         self.status = "Choose a player-data JSON file...".into();
-        choose_file(self.inbox.clone(), self.generation, self.region.clone());
+        let (inbox, ticket, region) = (self.inbox.clone(), self.generation, self.region.clone());
+        self.read_task = Some(player_data_io::choose_file(move |result| {
+            let result = result.map(|text| text.map(|text| Payload { text, region, uid: None, apply: false }));
+            deliver(&inbox, ticket, Incoming::Data(result));
+        })?);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_file(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        self.cancel();
+        self.busy = true;
+        self.status = "Reading player data...".into();
+        let (inbox, ticket, region) = (self.inbox.clone(), self.generation, self.region.clone());
+        self.read_task = Some(player_data_io::read_file(path, move |result| {
+            let result = result.map(|text| Some(Payload { text, region, uid: None, apply: false }));
+            deliver(&inbox, ticket, Incoming::Data(result));
+        })?);
+        Ok(())
     }
 
     fn receive(&mut self) {
-        let messages = std::mem::take(&mut *self.inbox.lock().unwrap());
-        for message in messages {
+        let message = self.inbox.lock().unwrap().message.take();
+        if let Some(message) = message {
             match message {
-                Incoming::Data(ticket, result) if ticket == self.generation => match result {
-                    Ok(Some(payload)) => {
-                        self.pending = Some(payload);
-                        self.status = "Checking player data and matching assets...".into();
+                Incoming::Data(result) => {
+                    self.read_task = None;
+                    match result {
+                        Ok(Some(payload)) => {
+                            self.pending = Some(payload);
+                            self.status = "Checking player data and matching assets...".into();
+                        }
+                        Ok(None) => {
+                            self.busy = false;
+                            self.status = "File selection cancelled.".into();
+                        }
+                        Err(error) => {
+                            self.busy = false;
+                            self.status = error;
+                        }
                     }
-                    Ok(None) => {
-                        self.busy = false;
-                        self.status = "File selection cancelled.".into();
-                    }
-                    Err(error) => {
-                        self.busy = false;
-                        self.status = error;
-                    }
-                },
+                }
                 Incoming::Paste(Ok(text)) => {
                     let text = text.trim();
                     if text.len() <= 20 && text.bytes().all(|b| b.is_ascii_digit()) {
@@ -246,7 +258,6 @@ impl PlayerDataImport {
                     }
                 }
                 Incoming::Paste(Err(error)) => self.status = error,
-                _ => {}
             }
         }
     }
@@ -403,6 +414,10 @@ impl PlayerDataImport {
     }
 }
 
+impl Drop for PlayerDataImport {
+    fn drop(&mut self) { self.cancel(); }
+}
+
 fn require_clean_editor(world: &World) -> Result<(), String> {
     if world
         .get_resource::<crate::fixture_edit::EditSession>()
@@ -495,14 +510,11 @@ pub(crate) fn update(world: &mut World) {
             }
             state.fetch()
         }
-        Some(ImportAction::File) => {
-            state.choose_file();
-            Ok(())
-        }
+        Some(ImportAction::File) => state.choose_file(),
         Some(ImportAction::Apply) => state.apply(world),
         Some(ImportAction::Restore) => state.restore(world),
         Some(ImportAction::Paste) => {
-            paste(state.inbox.clone());
+            paste(state.inbox.clone(), state.generation);
             Ok(())
         }
         Some(ImportAction::ClearUid) => {
@@ -539,25 +551,19 @@ pub(crate) fn update(world: &mut World) {
     world.insert_resource(state);
 }
 
-fn decode_bytes(bytes: Vec<u8>) -> Result<String, String> {
-    if bytes.len() > MAX_IMPORT_BYTES {
-        return Err("Player data exceeds 32 MiB".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "Player data must be a UTF-8 JSON file".into())
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_json_file(path: &std::path::Path) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("Open player data: {e}"))?;
-    if !file
-        .metadata()
-        .map_err(|e| format!("Read player data: {e}"))?
-        .is_file()
-    {
+    let metadata = file.metadata().map_err(|e| format!("Read player data: {e}"))?;
+    if !metadata.is_file() {
         return Err("Choose a player-data file".into());
+    }
+    if metadata.len() > MAX_IMPORT_BYTES as u64 {
+        return Err("Player data exceeds the 32 MiB import limit".into());
     }
     use std::io::Read;
     let mut bytes = Vec::new();
+    bytes.try_reserve_exact(MAX_IMPORT_BYTES + 1).map_err(|e| format!("Allocate player-data buffer: {e}"))?;
     file.take(MAX_IMPORT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Read player data: {e}"))?;
@@ -565,56 +571,15 @@ pub fn read_json_file(path: &std::path::Path) -> Result<String, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn choose_file(inbox: Inbox, ticket: u64, region: String) {
-    std::thread::spawn(move || {
-        let result = rfd::FileDialog::new()
-            .add_filter("Mysekai player data", &["json"])
-            .pick_file()
-            .map(|path| {
-                read_json_file(&path).map(|text| Payload {
-                    text,
-                    region,
-                    uid: None,
-                    apply: false,
-                })
-            })
-            .transpose();
-        inbox.lock().unwrap().push(Incoming::Data(ticket, result));
-    });
-}
-
-#[cfg(target_arch = "wasm32")]
-fn choose_file(inbox: Inbox, ticket: u64, region: String) {
-    wasm_bindgen_futures::spawn_local(async move {
-        let result = match rfd::AsyncFileDialog::new()
-            .add_filter("Mysekai player data", &["json"])
-            .pick_file()
-            .await
-        {
-            Some(file) => decode_bytes(file.read().await).map(|text| {
-                Some(Payload {
-                    text,
-                    region,
-                    uid: None,
-                    apply: false,
-                })
-            }),
-            None => Ok(None),
-        };
-        inbox.lock().unwrap().push(Incoming::Data(ticket, result));
-    });
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn paste(inbox: Inbox) {
+fn paste(inbox: Inbox, ticket: u64) {
     let result = arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.get_text())
         .map_err(|e| format!("Read clipboard: {e}"));
-    inbox.lock().unwrap().push(Incoming::Paste(result));
+    deliver(&inbox, ticket, Incoming::Paste(result));
 }
 
 #[cfg(target_arch = "wasm32")]
-fn paste(inbox: Inbox) {
+fn paste(inbox: Inbox, ticket: u64) {
     wasm_bindgen_futures::spawn_local(async move {
         let result = match web_sys::window() {
             Some(window) => {
@@ -629,7 +594,7 @@ fn paste(inbox: Inbox) {
             }
             None => Err("Browser window is unavailable".into()),
         };
-        inbox.lock().unwrap().push(Incoming::Paste(result));
+        deliver(&inbox, ticket, Incoming::Paste(result));
     });
 }
 
@@ -643,12 +608,9 @@ pub(crate) fn drop_files(
         if let bevy::window::FileDragAndDrop::DroppedFile { path_buf, .. } = event {
             panel.open = true;
             panel.player_data = true;
-            match read_json_file(path_buf) {
-                Ok(text) => state.request_json(text, false),
-                Err(error) => {
-                    state.cancel();
-                    state.status = error;
-                }
+            if let Err(error) = state.read_file(path_buf.clone()) {
+                state.cancel();
+                state.status = error;
             }
         }
     }
@@ -665,3 +627,6 @@ pub(crate) fn install(app: &mut App) {
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(Update, drop_files.before(update));
 }
+
+#[cfg(test)]
+mod tests;
