@@ -1,0 +1,9 @@
+[package]
+name = "moly-law"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# 本 crate 禁止依赖 bevy：判据是反编译，律必须活在引擎版本漂移之外。
+# 引擎相关的翻译（component、schedule、材质）一律归 moly-game。

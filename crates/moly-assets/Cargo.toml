@@ -1,0 +1,18 @@
+[package]
+name = "moly-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moly-law = { path = "../moly-law" }
+bevy = { workspace = true }
+gltf = { version = "1.4", default-features = false }
+# 清单类提取产物（manifest.json / characters.json）与站点 sidecar 的解析；
+# schema 归本 crate 的 character/sidecar 模块，解析只发生在装载边界这一次。
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+async-lock = "3"
+flate2 = "1"
+futures-lite = "2"
+sha2 = "0.10"

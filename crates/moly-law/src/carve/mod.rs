@@ -1,0 +1,585 @@
+//! 可行走面的烘焙与查询律：站点面三角网 → 格面 → 家具足迹挖洞 →
+//! 半径侵蚀 → 小区过滤，以及面上的可走性 / 最近点 / 折线查询。
+//!
+//! # 烘焙参数从哪来
+//!
+//! * **站点体素**：`NavMeshField.InitializeNavMesh` 按站点枚举值分派——
+//!   值 < 4（居住类四站）写体素 0.01 且瓦 100；== 4（草原）写 0.05；
+//!   > 4（其余户外站）写 0.01。见 [`voxel_size`]。
+//! * **agent 参数**：`NavMeshField` 把自己的 agent 类型设为
+//!   `MysekaiUtility.GetMysekaiAgentTypeId()` 的返回——按名字
+//!   `"MysekaiCharacter"` 在导航设置表里查到的类型。该类型的烘焙参数
+//!   （radius 0.24 · height 0.98 · slope 45 · climb 0.1 ·
+//!   minRegionArea 2.0）读自工程导航设置。摆放后重烘用的就是这套；
+//!   角色组件上 `NavMeshAgent.radius` 的 0.3 是转向半径，两回事。
+//! * **换算式**（原生烘焙构造 Recast 配置的指令级取证，四舍五入方式
+//!   逐条对应）：半径格数 = `ceil(agentRadius/cs + cs·(−0.01))`（向正
+//!   无穷取整）；可行走高度格数 = `floor(agentHeight/ch)`、`ch = cs·0.5`
+//!   （向负无穷取整）；小区面积阈 = `2.0/(cs·cs)` 的 f32 除法后向零
+//!   截断（0.01 → 20000；0.05 的 f32 平方让 2.0/0.0025000001 截成
+//!   799 而非 800——原生同形，照抄）。
+//!
+//! # 烘焙链（四步，序照原生调度）
+//!
+//! 1. **栅格化**：面三角按格中心含点判入面。
+//! 2. **足迹标 null**：格中心落在阻挡足迹矩形内即杀。
+//! 3. **侵蚀**（`rcErodeWalkableArea` 的 2D 转录）：距离场初值 null=0、
+//!    可走=255；可行走格的四邻有 null **或出界（虚空）** → 距离 0
+//!    ——外边界与障碍同为 0 距离源，外缘同样被侵蚀；两遍 chamfer
+//!    （基数向 +2、斜向 +3）；距离 < 2×半径格的可走格杀掉。
+//! 4. **小区过滤**（`rcBuildRegions` 小区规则的 2D 形）：4 连通区域格数
+//!    低于阈值的整区杀掉。
+//!
+//! 家具足迹的**参与门**是低高度过滤（`rcFilterWalkableLowHeightSpans`）
+//! 的 2D 投影：地面 span 头顶的净空 = 家具底面高（0.25 × center_y），
+//! 低于可行走高度（0.98）→ 地面 span 被杀 → 足迹挖洞；底面 ≥ 0.98
+//! （如挂在 1.5m/2.0m 墙位的家具）→ 地面照走，不挖。见
+//! [`blocking_footprint`]。
+//!
+//! # 查询链
+//!
+//! 折线查询转录 `MoveUtility.TryGetCanNavmeshTargetPosition` 的形状：
+//! 目标 5.0 内吸附 → 路径计算；任一步失败把目标按 t = 0.9…0.0 拉向
+//! 起点逐档重试（每档重新吸附）；全败返回 `None`（源的同族方法返回
+//! 起点本身——「原地」的策略留给调用方）。折线整直用「格上 A\* +
+//! 贪心视线拉直」，与原生代理「搜索 + 直线路径后处理」同形（后处理
+//! 本体在原生层，不可读）。
+//!
+//! # 具名边界（未建模的东西，与为什么）
+//!
+//! * **瓦边豁免不建模**：源按瓦分区，连瓦边的小区不杀（真实面积跨瓦
+//!   不可估）；本烘焙是单张整场格，没有瓦缝。整场格的外缘在源里恰是
+//!   瓦边 ⇒ 若整片面小于小区阈（2 m²）会被这里误杀——真实站点的主
+//!   面远大于它，测试面也保持大于它。
+//! * **多层面不建模**：家具顶面若矮于 climb（0.1）是「走上去」而不是
+//!   「绕开」，矮障碍的顶面会并进可行走面。摆放表没有网格高度列，
+//!   无法逐件判高矮——当前全部摆放都是带高的真家具，此债具名：接
+//!   高度列后，矮于 climb 的行应退出挖洞。
+//! * **RUG/ROAD 按类当平铺**：这两类布局是平铺饰面（地毯/路面），
+//!   按类别语义不挖洞——类别是「网格高度列缺失」下的代理判据。
+//! * **墙格足迹链未转录**：墙布局的足迹走另一条派生链
+//!   （`CreateWallTileData`），而当前全部墙位摆放的底面高（1.5/2.0）
+//!   都在 0.98 之上、本就不挖——不转录无损。
+//! * **渲染网格剪影 ≈ 格足迹**：源按渲染网格收集障碍；本烘焙用摆放
+//!   的格足迹矩形作其包围近似（编辑会话的增量摆放也只有格足迹可
+//!   用）。其几何差异尚未逐家具验证，不能宣称等价。
+//! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
+
+mod grid;
+mod query;
+
+use crate::fixture::position::{layout_type, TILE_SIZE};
+use crate::fixture::GridPosition;
+pub use query::SNAP_MAX_DISTANCE;
+
+/// 烘焙 agent 半径（米）：`"MysekaiCharacter"` agent 类型的表值。
+/// f32 表示即 0.23999999463…，与本常量的 f32 位形一致。
+pub const AGENT_RADIUS: f32 = 0.24;
+
+/// 烘焙 agent 高度（米）：同表值（可行走净空阈）。
+pub const AGENT_HEIGHT: f32 = 0.98;
+
+/// 小区面积阈（平方米）：同表值，换算成格数见 [`min_region_spans`]。
+pub const MIN_REGION_AREA: f32 = 2.0;
+
+/// 站点枚举名 → 值（`MysekaiSiteType` 的九值闭集）。
+pub fn site_type_value(name: &str) -> Option<u32> {
+    Some(match name {
+        "home_site" => 0,
+        "first_floor" => 1,
+        "second_floor" => 2,
+        "third_floor" => 3,
+        "grassland" => 4,
+        "shore" => 5,
+        "flower_garden" => 6,
+        "memorial_place" => 7,
+        "festival_garden" => 8,
+        _ => return None,
+    })
+}
+
+/// 站点体素（米）：`InitializeNavMesh` 的三支——< 4 → 0.01，== 4 →
+/// 0.05，> 4 → 0.01。
+pub fn voxel_size(site_type_value: u32) -> f32 {
+    if site_type_value < 4 {
+        0.01
+    } else if site_type_value == 4 {
+        0.05
+    } else {
+        0.01
+    }
+}
+
+/// 侵蚀半径格数：`ceil(agentRadius/cs + cs·(−0.01))`（0.01 → 24 格、
+/// 0.05 → 5 格；负项让恰好的整数半径不被再进一）。
+pub fn radius_cells(voxel: f32) -> u32 {
+    (AGENT_RADIUS / voxel + voxel * (-0.01)).ceil() as u32
+}
+
+/// 小区面积阈（格数）：`2.0/(cs·cs)` 的 f32 除法向零截断。
+/// 0.01 → 20000；0.05 → 799（f32 的 cs² 略大于 0.0025）。
+pub fn min_region_spans(voxel: f32) -> usize {
+    (MIN_REGION_AREA / (voxel * voxel)) as usize
+}
+
+/// 可行走净空阈（米，格量化后）：`floor(agentHeight/ch)·ch`，`ch = cs·0.5`。
+/// 0.01 → 0.98；0.05 → 0.975。
+fn walkable_height_world(voxel: f32) -> f32 {
+    let ch = voxel * 0.5;
+    (AGENT_HEIGHT / ch).floor() * ch
+}
+
+/// 一条阻挡足迹（世界系 xz 矩形，半开 [min, max)）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Obstacle {
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+}
+
+/// 摆放行是否参与挖洞，参与则给它的世界足迹矩形。
+///
+/// 参与门（低高度过滤的 2D 投影）：地板类布局（布局含地板位）且
+/// 底面高 0.25 × `center_y` 低于可行走净空阈 → 挖；墙位（1.5/2.0）、
+/// 高台位（1.0）与平铺类（RUG/ROAD）不挖。格角到世界角的换算与
+/// 落位律同式：min 角 = min × 0.25，max 角 = max × 0.25 + 0.25。
+pub fn blocking_footprint(
+    min: GridPosition,
+    max: GridPosition,
+    center_y: i8,
+    layout: u8,
+    voxel: f32,
+) -> Option<Obstacle> {
+    if layout & layout_type::FLOOR == 0 {
+        return None;
+    }
+    if TILE_SIZE * center_y as f32 >= walkable_height_world(voxel) {
+        return None;
+    }
+    Some(Obstacle {
+        min: [
+            min.x as f32 * TILE_SIZE,
+            min.z as f32 * TILE_SIZE,
+        ],
+        max: [
+            max.x as f32 * TILE_SIZE + TILE_SIZE,
+            max.z as f32 * TILE_SIZE + TILE_SIZE,
+        ],
+    })
+}
+
+/// 一次烘焙的输入：面三角网（世界 xz）、阻挡足迹、体素。
+pub struct BakeInput {
+    pub tris: Vec<[[f32; 2]; 3]>,
+    pub obstacles: Vec<Obstacle>,
+    pub voxel: f32,
+}
+
+/// 烘焙账目（每阶段的格数，重烘前后可对账）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BakeCounts {
+    /// 场格总数（cols × rows）。
+    pub cells: usize,
+    /// 栅格化入面的格数。
+    pub face: usize,
+    /// 足迹标 null 杀掉的格数。
+    pub obstacle_nulled: usize,
+    /// 侵蚀杀掉的格数（含外缘）。
+    pub erosion_nulled: usize,
+    /// 小区过滤杀掉的格数。
+    pub region_nulled: usize,
+    /// 最终可行走格数。
+    pub walkable: usize,
+}
+
+/// 烘好的可行走场：格面 + 账目。查询全部走它。
+pub struct WalkField {
+    grid: grid::Grid,
+    counts: BakeCounts,
+}
+
+impl WalkField {
+    /// 烘焙：栅格化 → 足迹标 null → 侵蚀 → 小区过滤，账目逐段记。
+    pub fn bake(input: &BakeInput) -> WalkField {
+        let mut grid = grid::rasterize(&input.tris, input.voxel);
+        let face = grid.walkable.iter().filter(|w| **w).count();
+        let obstacle_nulled = grid::mark_obstacles(&mut grid, &input.obstacles);
+        let erosion_nulled = grid::erode(&mut grid, radius_cells(input.voxel));
+        let region_nulled = grid::filter_regions(&mut grid, min_region_spans(input.voxel));
+        let walkable = grid.walkable.iter().filter(|w| **w).count();
+        WalkField {
+            counts: BakeCounts {
+                cells: grid.cols * grid.rows,
+                face,
+                obstacle_nulled,
+                erosion_nulled,
+                region_nulled,
+                walkable,
+            },
+            grid,
+        }
+    }
+
+    /// 点是否可行走（所在格为可行走格；出界按不可走）。
+    pub fn walkable_at(&self, p: [f32; 2]) -> bool {
+        query::walkable_at(&self.grid, p)
+    }
+
+    /// 最近可走点（吸附上限 `max_dist`，超限返回 `None`）。
+    pub fn nearest_walkable(&self, p: [f32; 2], max_dist: Option<f32>) -> Option<[f32; 2]> {
+        query::nearest_walkable(&self.grid, p, max_dist)
+    }
+
+    /// 沿面折线：转录 `TryGetCanNavmeshTargetPosition` 的查询链
+    /// （吸附 + 拉回梯度），见模块注释。全败返回 `None`。
+    pub fn path(&self, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
+        query::path(&self.grid, start, goal)
+    }
+
+    /// 严格完整路线：不拉回目标，起终点必须已在可走场上。
+    pub fn path_exact(&self, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
+        query::path_exact(&self.grid, start, goal)
+    }
+
+    /// 整条位移线段的超覆盖判定（同路线拉直，不只检查终点）。
+    pub fn segment_walkable(&self, start: [f32; 2], goal: [f32; 2]) -> bool {
+        query::visible(&self.grid, start, goal)
+    }
+
+    /// 沿请求位移走到第一处阻挡前；不把被挡终点吸到家具另一边。
+    pub fn constrain_move(&self, start: [f32; 2], goal: [f32; 2]) -> [f32; 2] {
+        if !start.into_iter().chain(goal).all(f32::is_finite)
+            || !self.walkable_at(start)
+        {
+            return start;
+        }
+        if self.segment_walkable(start, goal) {
+            return goal;
+        }
+        // 可达前缀是单调区间。每次候选都验整段，任意 dt 下不可跨薄障碍。
+        let mut lo = 0.0;
+        let mut hi = 1.0;
+        let mut accepted = start;
+        for _ in 0..24 {
+            let t = (lo + hi) * 0.5;
+            let candidate = [
+                start[0] + (goal[0] - start[0]) * t,
+                start[1] + (goal[1] - start[1]) * t,
+            ];
+            if self.segment_walkable(start, candidate) {
+                lo = t;
+                accepted = candidate;
+            } else {
+                hi = t;
+            }
+        }
+        accepted
+    }
+
+    /// 烘焙账目。
+    pub fn counts(&self) -> &BakeCounts {
+        &self.counts
+    }
+
+    /// 体素（米）。
+    pub fn voxel(&self) -> f32 {
+        self.grid.voxel
+    }
+
+    /// 场格的世界包围盒（min 角 / max 远角）。
+    pub fn bounds(&self) -> ([f32; 2], [f32; 2]) {
+        (
+            self.grid.origin,
+            [
+                self.grid.origin[0] + self.grid.cols as f32 * self.grid.voxel,
+                self.grid.origin[1] + self.grid.rows as f32 * self.grid.voxel,
+            ],
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 轴对齐四边形 → 两三角。
+    fn quad(min: [f32; 2], max: [f32; 2]) -> Vec<[[f32; 2]; 3]> {
+        vec![
+            [[min[0], min[1]], [max[0], min[1]], [max[0], max[1]]],
+            [[min[0], min[1]], [max[0], max[1]], [min[0], max[1]]],
+        ]
+    }
+
+    /// 线段与闭矩形是否相交（slab 法；测试侧独立几何，不复用被测的
+    /// 视线实现）。
+    fn seg_hits_rect(a: [f32; 2], b: [f32; 2], min: [f32; 2], max: [f32; 2]) -> bool {
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for axis in 0..2 {
+            let d = b[axis] - a[axis];
+            if d.abs() <= f32::EPSILON {
+                if a[axis] < min[axis] || a[axis] > max[axis] {
+                    return false;
+                }
+            } else {
+                let mut ta = (min[axis] - a[axis]) / d;
+                let mut tb = (max[axis] - a[axis]) / d;
+                if ta > tb {
+                    std::mem::swap(&mut ta, &mut tb);
+                }
+                t0 = t0.max(ta);
+                t1 = t1.min(tb);
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn bake(tris: Vec<[[f32; 2]; 3]>, obstacles: Vec<Obstacle>, voxel: f32) -> WalkField {
+        WalkField::bake(&BakeInput {
+            tris,
+            obstacles,
+            voxel,
+        })
+    }
+
+    // —— 站点与换算律 ——
+
+    #[test]
+    fn site_names_map_to_enum_values() {
+        assert_eq!(site_type_value("home_site"), Some(0));
+        assert_eq!(site_type_value("grassland"), Some(4));
+        assert_eq!(site_type_value("festival_garden"), Some(8));
+        assert_eq!(site_type_value("unknown"), None);
+    }
+
+    #[test]
+    fn voxel_branches_match_initialize_navmesh() {
+        // < 4 → 0.01；== 4（草原）→ 0.05；> 4 → 0.01。
+        for value in [0u32, 1, 2, 3, 5, 6, 7, 8] {
+            assert_eq!(voxel_size(value), 0.01, "value {value}");
+        }
+        assert_eq!(voxel_size(4), 0.05);
+    }
+
+    #[test]
+    fn radius_cells_match_native_conversion() {
+        // 0.01 → ceil(24 − 0.0001) = 24；0.05 → ceil(4.8 − 0.0005) = 5。
+        // 若半径误取角色组件的 0.3：0.05 会得 6、0.01 会得 30——红。
+        assert_eq!(radius_cells(0.01), 24);
+        assert_eq!(radius_cells(0.05), 5);
+    }
+
+    #[test]
+    fn min_region_spans_match_f32_truncation() {
+        assert_eq!(min_region_spans(0.01), 20000);
+        // f32 的 0.05² 略大 → 799 而非 800（原生同形）。
+        assert_eq!(min_region_spans(0.05), 799);
+    }
+
+    // —— 阻挡带（足迹参与门）——
+
+    #[test]
+    fn low_floor_footprints_block() {
+        let voxel = 0.05;
+        let min = GridPosition::new(0, 0, 0);
+        let max = GridPosition::new(1, 0, 1);
+        // 地板位 + 底面 0：挖。
+        let ob = blocking_footprint(min, max, 0, layout_type::FLOOR, voxel).unwrap();
+        // 格角换算：min 角 0，max 远角 1×0.25+0.25 = 0.5。
+        assert_eq!(ob.min, [0.0, 0.0]);
+        assert_eq!(ob.max, [0.5, 0.5]);
+        // 高台位 center_y=3（底 0.75 < 0.975）：仍挖。
+        assert!(blocking_footprint(min, max, 3, layout_type::FLOOR, voxel).is_some());
+        // 墙位底面（6/8 → 1.5/2.0）与高台位 4（底 1.0 ≥ 阈）：不挖。
+        assert!(blocking_footprint(min, max, 4, layout_type::FLOOR, voxel).is_none());
+        assert!(blocking_footprint(min, max, 6, layout_type::WALL_FRONT, voxel).is_none());
+        // 平铺类（RUG/ROAD）按类不挖。
+        assert!(blocking_footprint(min, max, 0, layout_type::RUG, voxel).is_none());
+        assert!(blocking_footprint(min, max, 0, layout_type::ROAD, voxel).is_none());
+        // 地板族复合位（FIELD 含地板位）：挖。
+        assert!(blocking_footprint(min, max, 0, layout_type::FIELD, voxel).is_some());
+    }
+
+    #[test]
+    fn blocking_threshold_quantizes_per_voxel() {
+        // 0.01 体素的高阈是 0.98：底 1.0 不挖；0.05 体素是 0.975：
+        // 同一座 1.0 也不挖。center_y=3 的 0.75 两个体素下都挖。
+        for voxel in [0.01, 0.05] {
+            let min = GridPosition::new(0, 0, 0);
+            let max = GridPosition::new(0, 0, 0);
+            assert!(blocking_footprint(min, max, 4, layout_type::FLOOR, voxel).is_none());
+            assert!(blocking_footprint(min, max, 3, layout_type::FLOOR, voxel).is_some());
+        }
+    }
+
+    // —— 成对判据一：足迹挖洞（内不可走 ∧ 外可走 ∧ 反向臂）——
+
+    #[test]
+    fn footprint_carves_inside_and_spare_outside() {
+        // 体素 0.01（居住类参数）让两臂的相位余量 ≫ 格尺度。
+        let face = quad([0.0, 0.0], [10.0, 10.0]);
+        let wall = Obstacle {
+            min: [4.0, 4.0],
+            max: [6.0, 6.0],
+        };
+        let carved = bake(face.clone(), vec![wall], 0.01);
+        // 臂 A：足迹内的点不可走。
+        assert!(!carved.walkable_at([5.0, 5.0]));
+        // 臂 B：足迹外（越过侵蚀带）的点可走。若把整片面挖没了，
+        // 这条臂红——只有臂 A 会让那种实现变绿。
+        assert!(carved.walkable_at([8.0, 8.0]));
+        // 反向臂：不挖时同一点可走 ⇒ 臂 A 测的是挖洞，不是别的。
+        let clean = bake(face, vec![], 0.01);
+        assert!(clean.walkable_at([5.0, 5.0]));
+        // 账目：2m×2m 的足迹矩形在 0.01 体素下按格中心入判，恰
+        // 200×200 = 40000 格被杀。
+        assert_eq!(carved.counts().obstacle_nulled, 40000);
+    }
+
+    // —— 成对判据二：半径内缩可量测 ——
+
+    #[test]
+    fn agent_radius_inflates_the_carve() {
+        let face = quad([0.0, 0.0], [10.0, 10.0]);
+        let wall = Obstacle {
+            min: [4.0, 4.0],
+            max: [6.0, 6.0],
+        };
+        let field = bake(face, vec![wall], 0.01);
+        // 紧贴障碍 0.2m（矩形边 x=6、边中点 z=5）：不可走。
+        // 半径不参与（挖原始足迹）时这一点可走——臂红。
+        assert!(!field.walkable_at([6.2, 5.0]));
+        // 0.4m：可走（工单口径的一对）。
+        assert!(field.walkable_at([6.4, 5.0]));
+        // 0.27m：可走。这一臂把内缩量钉死在 (0.2, 0.27) 内——
+        // 半径误取 0.3（角色组件值）时 0.27 会被误杀，红。
+        assert!(field.walkable_at([6.27, 5.0]));
+    }
+
+    // —— 成对判据三：外边界同样侵蚀 ——
+
+    #[test]
+    fn outer_boundary_erodes_too() {
+        // 无障碍：外缘的侵蚀只能来自虚空边界。
+        let field = bake(quad([0.0, 0.0], [10.0, 10.0]), vec![], 0.01);
+        assert!(!field.walkable_at([0.1, 5.0]));
+        assert!(field.walkable_at([0.5, 5.0]));
+    }
+
+    // —— 成对判据四：小区过滤（小岛死 ∧ 大岛活）——
+
+    #[test]
+    fn small_islands_die_large_survive() {
+        // 0.05 体素：阈 799 格（≈2 m²）。
+        // 岛 B 1×1m：20×20 格，侵蚀后剩 10×10 = 100 格 < 799 → 整区杀。
+        // 岛 C 4×4m：80×80 格，侵蚀后剩 70×70 = 4900 格 > 799 → 活。
+        // 主面 10×10m：40000 格，侵蚀后 36100 格 → 活。
+        let mut tris = quad([0.0, 0.0], [10.0, 10.0]);
+        tris.extend(quad([20.0, 20.0], [21.0, 21.0]));
+        tris.extend(quad([30.0, 30.0], [34.0, 34.0]));
+        let field = bake(tris, vec![], 0.05);
+        // 臂 A：小岛上的点不可走（小区过滤杀的——侵蚀只吃它外缘 5 格，
+        // 剩 10×10 是过滤整区杀掉的）。
+        assert!(!field.walkable_at([20.5, 20.5]));
+        // 臂 B：大岛中心可走。
+        assert!(field.walkable_at([32.0, 32.0]));
+        // 主面可走。
+        assert!(field.walkable_at([5.0, 5.0]));
+        // 账目：恰 100 格（小岛侵蚀后的全部）被小区过滤杀掉。
+        assert_eq!(field.counts().region_nulled, 100);
+    }
+
+    // —— 烘焙账目可复算 ——
+
+    #[test]
+    fn bake_counts_recompute_exactly() {
+        // 10×10m 面、0.05 体素：200×200 = 40000 格入面；侵蚀杀 5 圈
+        // （距离 < 2×5 半格单位）剩 190×190 = 36100；单区 36100 > 799
+        // → 小区过滤 0。逐格可复算。
+        let field = bake(quad([0.0, 0.0], [10.0, 10.0]), vec![], 0.05);
+        assert_eq!(field.counts().cells, 40000);
+        assert_eq!(field.counts().face, 40000);
+        assert_eq!(field.counts().erosion_nulled, 3900);
+        assert_eq!(field.counts().region_nulled, 0);
+        assert_eq!(field.counts().walkable, 36100);
+        let (min, max) = field.bounds();
+        assert_eq!(min, [0.0, 0.0]);
+        assert_eq!(max, [10.0, 10.0]);
+    }
+
+    // —— 成对判据五：折线绕洞（正向不穿 ∧ 反向臂确实穿）——
+
+    #[test]
+    fn path_detours_the_carved_hole_and_reverse_crosses() {
+        // 竖墙 x[5,7] z[2,10] 把 12×12 的面左右分开，上下各留 2m 通道
+        // （侵蚀后仍 > 1.5m）。
+        let face = quad([0.0, 0.0], [12.0, 12.0]);
+        let wall = Obstacle {
+            min: [5.0, 2.0],
+            max: [7.0, 10.0],
+        };
+        let start = [2.0, 6.0];
+        let goal = [10.0, 6.0];
+        let carved = bake(face.clone(), vec![wall], 0.05);
+        let path = carved.path(start, goal).expect("绕洞折线应存在");
+        // 正向臂：每一段都不与已挖的洞（足迹矩形）相交；路点全可走。
+        assert!(path.len() >= 2);
+        for window in path.windows(2) {
+            assert!(
+                !seg_hits_rect(window[0], window[1], wall.min, wall.max),
+                "段 {:?}→{:?} 穿过洞",
+                window[0],
+                window[1]
+            );
+        }
+        for p in &path {
+            assert!(carved.walkable_at(*p), "路点 {:?} 不可走", p);
+        }
+        // 反向臂：不挖时同一对起终点的路径确实穿过那个位置
+        // ⇒ 正向臂量的是挖洞，不是「本来就得绕」。
+        let clean = bake(face, vec![], 0.05);
+        let direct = clean.path(start, goal).expect("无洞直达应存在");
+        assert_eq!(direct.len(), 2, "无洞时应整直成直达段");
+        assert!(seg_hits_rect(direct[0], direct[1], wall.min, wall.max));
+        assert_eq!(direct[0], start);
+        assert_eq!(direct[1], goal);
+    }
+
+    // —— 查询链：吸附、拉回梯度、不可达 ——
+
+    #[test]
+    fn path_snaps_endpoints_onto_the_face() {
+        let field = bake(quad([0.0, 0.0], [10.0, 10.0]), vec![], 0.05);
+        // 起点在面外 0.05（侵蚀带内）：5.0 吸附内拉回首格。
+        let path = field.path([-0.05, 5.0], [5.0, 5.0]).expect("吸附后应可走");
+        assert!(path[0][0] >= 0.2 && path[0][0] <= 0.35, "首点 {:?}", path[0]);
+        assert!(field.walkable_at(path[0]));
+    }
+
+    #[test]
+    fn unreachable_goal_pulls_back_along_the_ladder() {
+        // 两个不连通的面：目标在大岛上。直达失败后目标按 0.9…0.0
+        // 拉向起点，落在小岛上的档位出折线——末端不是原目标。
+        let mut tris = quad([0.0, 0.0], [10.0, 10.0]);
+        tris.extend(quad([30.0, 30.0], [34.0, 34.0]));
+        let field = bake(tris, vec![], 0.05);
+        let path = field
+            .path([5.0, 5.0], [32.0, 32.0])
+            .expect("拉回梯度应找到可达档");
+        assert_ne!(*path.last().unwrap(), [32.0, 32.0]);
+        assert!(field.walkable_at(*path.last().unwrap()));
+        // 起点自身吸不上（离任何面都远超 5.0）：None——梯度的锚点
+        // 不在面上时，全梯度都失败。
+        assert!(field.path([200.0, 200.0], [5.0, 5.0]).is_none());
+    }
+
+    #[test]
+    fn same_cell_path_is_two_points() {
+        let field = bake(quad([0.0, 0.0], [10.0, 10.0]), vec![], 0.05);
+        let path = field.path([5.0, 5.0], [5.02, 5.03]).unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0], [5.0, 5.0]);
+        assert_eq!(path[1], [5.02, 5.03]);
+    }
+}

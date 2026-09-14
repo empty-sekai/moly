@@ -1,0 +1,23 @@
+[package]
+name = "moly-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy = { workspace = true }
+moly-assets = { path = "../moly-assets" }
+moly-game = { path = "../moly-game" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# 钉精确版本随本机 wasm-bindgen CLI：CLI 拒绝 schema 版本不一致的输入，
+# 而报法是一段多行 schema 文案，不直说版本不匹配。升级时 CLI 与这里的钉
+# 一起动（cargo install wasm-bindgen-cli --version X），别单改一头。
+wasm-bindgen = "=0.2.127"
+# wasm 的 panic 默认只剩一句 RuntimeError；资产源的拒绝要整句落进控制台。
+console_error_panic_hook = "0.1"
+# Navigator 供 render_backend 取 navigator 对象；gpu 属性本身用 js-sys 的
+# Reflect 读（见该模块注释——web-sys 的 Gpu 绑定还挂在 web_sys_unstable_apis
+# 门后，不为此开 rustflags）。
+web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams", "Navigator"] }
+js-sys = "0.3"

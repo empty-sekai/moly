@@ -1,0 +1,144 @@
+{
+ "effects": {
+  "fx_env_site_006_common_raindrop": {
+   "kind": "site",
+   "particles": [
+    {
+     "node": "root/raindrop_01",
+     "system": {
+      "duration": 1.0,
+      "looping": true,
+      "prewarm": true,
+      "playOnAwake": true,
+      "simulationSpeed": 1.0,
+      "simulationSpace": "World",
+      "startDelay": {
+       "mode": "constant",
+       "value": 0.0
+      },
+      "ringBufferMode": 0,
+      "ringBufferLoopRange": [
+       0.0,
+       1.0
+      ],
+      "maxParticles": 300,
+      "start": {
+       "lifetime": {
+        "mode": "constant",
+        "value": 5.0
+       },
+       "speed": {
+        "mode": "twoConstants",
+        "min": 0.0,
+        "max": 0.0
+       },
+       "size": {
+        "mode": "twoConstants",
+        "min": 0.019999999552965164,
+        "max": 0.009999999776482582
+       },
+       "rotation": {
+        "mode": "twoConstants",
+        "min": 0.0,
+        "max": 0.0
+       },
+       "color": {
+        "mode": "color",
+        "color": [
+         1.0,
+         1.0,
+         1.0,
+         1.0
+        ]
+       },
+       "gravityModifier": {
+        "mode": "constant",
+        "value": 0.5
+       },
+       "size3D": true,
+       "rotation3D": false,
+       "sizeY": {
+        "mode": "twoConstants",
+        "min": 0.800000011920929,
+        "max": 0.10000000149011612
+       },
+       "sizeZ": {
+        "mode": "twoConstants",
+        "min": 1.0,
+        "max": 1.0
+       }
+      },
+      "emission": {
+       "rateOverTime": {
+        "mode": "constant",
+        "value": 60.0
+       },
+       "rateOverDistance": {
+        "mode": "constant",
+        "value": 0.0
+       },
+       "bursts": []
+      },
+      "shape": {
+       "type": "Circle",
+       "radius": 50.0,
+       "radiusThickness": 1.0,
+       "angle": 25.0,
+       "length": 5.0,
+       "arc": 360.0,
+       "boxThickness": [
+        0.0,
+        0.0,
+        0.0
+       ],
+       "donutRadius": 0.20000000298023224,
+       "position": [
+        0.0,
+        0.0,
+        0.0
+       ],
+       "rotation": [
+        -90.0,
+        0.0,
+        0.0
+       ],
+       "scale": [
+        1.0,
+        1.0,
+        1.0
+       ],
+       "alignToDirection": false,
+       "randomDirectionAmount": 0.0,
+       "sphericalDirectionAmount": 0.0,
+       "meshPlacement": 2,
+       "meshNormalOffset": 0.0,
+       "meshMaterialIndex": null
+      },
+      "velocityOverLifetime": {
+       "x": {
+        "mode": "twoConstants",
+        "min": 0.0,
+        "max": 0.0
+       },
+       "y": {
+        "mode": "twoConstants",
+        "min": -0.5,
+        "max": -1.0
+       },
+       "z": {
+        "mode": "twoConstants",
+        "min": 0.0,
+        "max": 0.0
+       },
+       "speedModifier": {
+        "mode": "constant",
+        "value": 1.0
+       },
+       "inWorldSpace": false
+      }
+     }
+    }
+   ]
+  }
+ }
+}

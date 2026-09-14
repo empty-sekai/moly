@@ -1,0 +1,6 @@
+/target
+/shared-target
+/screenshots/*
+!/screenshots/readme.png
+/*.exe
+/build-guarded.log
