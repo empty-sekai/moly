@@ -9,6 +9,7 @@
 //! General controllers and nonzero interruption sources remain separate gaps.
 
 mod rotation;
+pub(crate) mod session;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -168,6 +169,7 @@ struct PlayerSwitch {
 pub(crate) struct Gimmicks {
     instances: HashMap<FixtureTarget, Instance>,
     player: Option<PlayerSwitch>,
+    leases: HashMap<FixtureTarget, session::Lease>,
 }
 
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
@@ -532,11 +534,17 @@ fn effect_outputs(world: &World, view: Entity) -> Vec<Entity> {
     outputs
 }
 
-pub(crate) fn start(
-    world: &mut World,
-    target: &FixtureTarget,
-    generation: u64,
-) -> Result<(), String> {
+struct Prepared {
+    definition: Arc<Definition>,
+    view: Entity,
+    rotation: Option<rotation::Binding>,
+    outputs: Vec<Entity>,
+    light: bool,
+    one_shot: bool,
+}
+
+/// Resolve one real source-backed controller without acquiring player input.
+fn prepare_binding(world: &World, target: &FixtureTarget) -> Result<Prepared, String> {
     if world.get_resource::<crate::fixture_edit::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
@@ -586,6 +594,15 @@ pub(crate) fn start(
     if needs_emission && outputs.is_empty() {
         return Err("fixture's actual emission materials are not ready".into());
     }
+    Ok(Prepared { definition, view, rotation, outputs, light, one_shot })
+}
+
+pub(crate) fn start(
+    world: &mut World,
+    target: &FixtureTarget,
+    generation: u64,
+) -> Result<(), String> {
+    let Prepared { definition, view, rotation, outputs, light, one_shot } = prepare_binding(world, target)?;
     if world.contains_resource::<PlayerFixtureControlOwner>()
         || !world.resource::<PlayerAvatarStates>().can_intercept
     {
@@ -654,6 +671,7 @@ pub(crate) fn start(
 pub(crate) fn advance(world: &mut World) {
     let delta = world.resource::<Time>().delta_secs();
     world.resource_scope(|world, mut runtime: Mut<Gimmicks>| {
+        let runtime = &mut *runtime;
         runtime.instances.retain(|target, _| world.get::<FixtureActivityIdentity>(target.entity).is_some_and(|identity| target.matches(identity)));
         for (target, instance) in &mut runtime.instances {
             // First positive contribution includes the clip's start event;
@@ -711,7 +729,7 @@ pub(crate) fn advance(world: &mut World) {
                         // bus resolves its leaf cue within that exact bank.
                         // Empty PlaySe parameters are no-ops.
                         if !bundle_or_cue.is_empty() {
-                            world.resource_mut::<SeRequests>().0.push(SeRequest {
+                            world.resource_mut::<SeRequests>().0.push(SeRequest { owner: runtime.leases.get(target).map(|lease| lease.owner),
                                 cue: bundle_or_cue.clone(),
                                 class: SeClass::Ingame,
                                 source: "fixture-animation-event",
@@ -765,12 +783,13 @@ pub(crate) fn advance(world: &mut World) {
         if !player.sound_checked && player.elapsed >= SWITCH_SOUND_TIME {
             player.sound_checked = true;
             if player.light {
-                world.resource_mut::<SeRequests>().0.push(SeRequest { cue: "se_turn_on".into(), class: SeClass::Ingame, source: "fixture-switch" });
+                world.resource_mut::<SeRequests>().0.push(SeRequest { owner: runtime.leases.get(&player.target).map(|lease| lease.owner), cue: "se_turn_on".into(), class: SeClass::Ingame, source: "fixture-switch" });
                 info!("[fixture-gimmick] source switch SE queued; positional attenuation is not yet reproduced by the shared SE bus");
             }
         }
         if player.elapsed >= SWITCH_END_TIME { finish(world, player); } else { runtime.player = Some(player); }
     });
+    session::advance(world);
 }
 
 fn collect_events(program: &Program, elapsed: f64, next: &mut usize, events: &mut Vec<ClipEvent>) {
@@ -820,6 +839,8 @@ fn finish(world: &mut World, player: PlayerSwitch) {
 /// This is lifecycle adaptation, not a claim that the source state has a
 /// dedicated target-removal callback.
 pub(crate) fn cancel_for_site_change(world: &mut World) {
+    let owners: Vec<_> = world.resource::<Gimmicks>().leases.values().map(|lease| lease.owner).collect();
+    for owner in owners { session::finish_owner(world, owner); }
     world.resource_scope(|world, mut runtime: Mut<Gimmicks>| {
         if let Some(player) = runtime.player.take() {
             finish(world, player);

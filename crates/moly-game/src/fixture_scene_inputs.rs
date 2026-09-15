@@ -590,8 +590,9 @@ pub(crate) fn validate_admission(
     Ok(())
 }
 
-/// Real geometry/agent implementation only. The supplier deliberately has no
-/// WalkField adapter, synthetic-success result, or fallback endpoint radius.
+/// A supplied geometry implementation must preserve failed samples and paths.
+/// Moly installs its real carved WalkField adapter separately; this input owner
+/// never manufactures success or changes a requested endpoint radius.
 pub(crate) trait FixtureNavigationGeometry: Send + Sync {
     fn sample_position(&self, position: Vec3, max_distance: f32) -> Option<Vec3>;
     fn path(

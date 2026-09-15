@@ -15,70 +15,73 @@ pub mod character;
 pub mod character_material;
 pub mod client_config;
 pub mod cloth_runtime;
+mod content_library;
 mod delayed_faces;
 pub mod emoticon;
 pub mod env;
 pub mod fixture;
-mod fixture_colors;
-pub mod fixture_attach;
 mod fixture_activity_data;
 mod fixture_activity_provider;
-mod fixture_gimmick;
-mod fixture_tiles;
-mod fixture_scene_inputs;
 mod fixture_activity_state;
 mod fixture_activity_timeline;
+pub mod fixture_attach;
+mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
 pub mod fixture_emission;
+mod fixture_gimmick;
 pub mod fixture_material;
+mod fixture_scene_inputs;
+mod fixture_player_navigation;
 pub mod fixture_talk;
+mod fixture_tiles;
 mod frame_capture;
+pub mod game_settings;
 pub mod gesture;
 pub mod get_resource;
-pub mod game_settings;
 pub mod harvest;
 pub mod harvest_material;
-pub mod info;
 pub mod inactive_nodes;
+pub mod info;
+mod interaction;
 pub mod joystick;
 pub mod light;
+mod material_order;
 pub mod menu_dialog;
 pub mod menu_shell;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
 pub mod npc;
-pub mod npc_objective;
 mod npc_fixture_activity;
+pub mod npc_objective;
 pub mod option_dialog;
+mod particle_runtime;
 pub mod pick;
 pub mod player;
+pub mod player_avatar;
 pub mod player_data;
 mod player_data_io;
 mod player_data_ui;
-pub mod player_avatar;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
 pub mod schedule;
+mod settings_store;
 pub mod shadowmap;
 pub mod site;
 pub mod site_material;
 pub mod site_sound;
 pub mod sitemap;
 pub mod sitemap_phenomena;
-mod source_curve;
 pub mod sky;
+mod source_curve;
 pub mod talk;
 pub mod talk_camera;
+mod talk_ingest;
 pub mod talk_window;
 pub mod uber_particle;
 pub mod ui_layers;
 pub mod ui_layout;
-mod interaction;
-mod particle_runtime;
-mod settings_store;
-mod material_order;
 mod voice_mouth;
 mod voice_pcm;
 pub mod walk_face;
@@ -104,15 +107,23 @@ pub fn app(
     // Asset sources must be registered before AssetPlugin is built.
     moly_assets::install(&mut app, source);
     let plugins = DefaultPlugins.set(bevy::window::WindowPlugin {
-        primary_window: Some(Window { title: format!("moly v{VERSION}"), ..default() }),
+        primary_window: Some(Window {
+            title: format!("moly v{VERSION}"),
+            ..default()
+        }),
         ..default()
     });
     #[cfg(target_arch = "wasm32")]
     // The browser host reports failures to its retry page. Keep that hook.
-    let plugins = plugins.disable::<bevy::app::PanicHandlerPlugin>().set(bevy::render::RenderPlugin {
-        render_creation: bevy::render::settings::RenderCreation::Automatic(web_render_settings),
-        ..default()
-    });
+    let plugins =
+        plugins
+            .disable::<bevy::app::PanicHandlerPlugin>()
+            .set(bevy::render::RenderPlugin {
+                render_creation: bevy::render::settings::RenderCreation::Automatic(
+                    web_render_settings,
+                ),
+                ..default()
+            });
     app.add_plugins(plugins);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);
@@ -137,6 +148,9 @@ pub fn app(
         fixture_emission::FixtureEmissionPlugin,
     ));
     app.add_plugins(fixture_edit::FixtureEditPlugin);
-    app.add_plugins((harvest::HarvestPlugin, harvest_material::HarvestMaterialPlugin));
+    app.add_plugins((
+        harvest::HarvestPlugin,
+        harvest_material::HarvestMaterialPlugin,
+    ));
     app
 }

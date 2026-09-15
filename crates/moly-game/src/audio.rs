@@ -272,7 +272,11 @@ pub(crate) fn apply_system_volume(bus: &mut VolumeBus, system: &VolumeSettingDat
         info!(
             "[option] 施加（{reason}）：SetupVolume(1.0, bgm={:.2}, se={:.2}, voice={:.2}) → 总线 \
              [{}]（bgm 消费侧再乘 {} 进 BGM 通道；LiveVolume 不进施加——节奏域律）",
-            system.bgm, system.se, system.voice, bus.describe(), BGM_VOLUME_FACTOR
+            system.bgm,
+            system.se,
+            system.voice,
+            bus.describe(),
+            BGM_VOLUME_FACTOR
         );
     }
 }
@@ -323,11 +327,14 @@ fn clear_pending_voice_lines(world: &mut World) {
 /// （LiveVolume/SystemVolume），字段键照真源序列化键（Bgm/Se/Voice）。
 /// native 落用户数据目录（persistentDataPath 的对应位），`MOLY_SETTINGS_FILE`
 /// 可覆写（验证用）；wasm 落 localStorage（浏览器端的「本地」）。
-pub(crate) fn settings_sections(settings: &LocalVolumeSettings) -> [(&'static str, serde_json::Value); 2] {
-    let group = |value: &VolumeSettingData| {
-        serde_json::json!({"Bgm": value.bgm, "Se": value.se, "Voice": value.voice})
-    };
-    [("LiveVolume", group(&settings.live)), ("SystemVolume", group(&settings.system))]
+pub(crate) fn settings_sections(
+    settings: &LocalVolumeSettings,
+) -> [(&'static str, serde_json::Value); 2] {
+    let group = |value: &VolumeSettingData| serde_json::json!({"Bgm": value.bgm, "Se": value.se, "Voice": value.voice});
+    [
+        ("LiveVolume", group(&settings.live)),
+        ("SystemVolume", group(&settings.system)),
+    ]
 }
 
 /// JSON 文本 → 档。整体不是 JSON 对象 ⇒ `None`（调用方响亮回默认——真源
@@ -368,13 +375,15 @@ fn parse_volume_settings(text: &str) -> Option<LocalVolumeSettings> {
 /// `SceneMysekai.Start → SetupVolume`（只应用 System 组）。
 pub(crate) fn init_settings(mut commands: Commands, mut bus: ResMut<VolumeBus>) {
     let (settings, origin) = match crate::settings_store::read_text() {
-        Ok(Some(text)) => match parse_volume_settings(&text) {
-            Some(settings) => (settings, "本地档"),
-            None => {
-                warn!("[option] 本地档文本不是 JSON 对象，整档回默认（真源档读不出走构造默认的同律）");
-                (LocalVolumeSettings::default(), "默认（档损坏）")
+        Ok(Some(text)) => {
+            match parse_volume_settings(&text) {
+                Some(settings) => (settings, "本地档"),
+                None => {
+                    warn!("[option] 本地档文本不是 JSON 对象，整档回默认（真源档读不出走构造默认的同律）");
+                    (LocalVolumeSettings::default(), "默认（档损坏）")
+                }
             }
-        },
+        }
         Ok(None) => (LocalVolumeSettings::default(), "默认（无档·首跑）"),
         Err(err) => {
             warn!("[option] 本地档读取失败：{err}——整档回默认，本次会话的改动将无法落盘（fail-closed，不静默换位落盘）");
@@ -475,7 +484,13 @@ fn stored_location() -> String {
 /// 来自游戏资产，将来某次重提取可能带入表外字符；进日志的只有这份转写。
 fn label(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii() { c.to_string() } else { format!("U+{:04X}", c as u32) })
+        .map(|c| {
+            if c.is_ascii() {
+                c.to_string()
+            } else {
+                format!("U+{:04X}", c as u32)
+            }
+        })
         .collect()
 }
 
@@ -531,7 +546,9 @@ impl Routing {
     /// The timeline names both package and cue. A same-name cue in another
     /// package or the public UI sound bank is not a substitute.
     pub(crate) fn timeline_se_asset_path(&self, package: &str, cue: &str) -> Option<&str> {
-        self.streams.0.get(&(cue.to_owned(), package.to_owned()))
+        self.streams
+            .0
+            .get(&(cue.to_owned(), package.to_owned()))
             .map(|stream| stream.ogg.as_str())
     }
     /// talk voice 包里的全部 (cue, 包) 对，按 (cue, 包) 字典序——合成对话
@@ -566,9 +583,7 @@ pub(crate) struct AudioRequests {
 /// 点表，corpus.json 是 talk voice 的语料账本（cue→包账面 + 上游无包具名
 /// 清单），partvoice.json 是说话者/家具 → 变体语音包的查表面（可缺席）。
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
-    let index = server.load::<JsonAsset>(AssetPath::from(
-        "moly://phenomena/index.json".to_owned(),
-    ));
+    let index = server.load::<JsonAsset>(AssetPath::from("moly://phenomena/index.json".to_owned()));
     let loops = server.load::<JsonAsset>(AssetPath::from(
         "moly://phenomena/audio/loop.json".to_owned(),
     ));
@@ -619,13 +634,15 @@ pub(crate) fn parse(
     // 在途（Loading）则等它一起吃：请求资源一次性撤下，不留在半途。
     let partvoice_map = match server.load_state(&requests.partvoice) {
         LoadState::Failed(_) => {
-            warn!("partvoice 路由表缺席：partvoice 步全部具名跳过（不推默认包），voice_ 族不受影响");
+            warn!(
+                "partvoice 路由表缺席：partvoice 步全部具名跳过（不推默认包），voice_ 族不受影响"
+            );
             None
         }
         LoadState::Loaded => {
-            let doc = jsons.get(&requests.partvoice).unwrap_or_else(|| {
-                panic!("partvoice.json 已装载但不在资产表里")
-            });
+            let doc = jsons
+                .get(&requests.partvoice)
+                .unwrap_or_else(|| panic!("partvoice.json 已装载但不在资产表里"));
             let doc: serde_json::Value = serde_json::from_str(&doc.0)
                 .unwrap_or_else(|err| panic!("partvoice.json 不是合法 JSON：{err}"));
             Some(parse_partvoice(&doc))
@@ -648,8 +665,9 @@ pub(crate) fn parse(
     let corpus: serde_json::Value = serde_json::from_str(&corpus.0)
         .unwrap_or_else(|err| panic!("音频 corpus.json 不是合法 JSON：{err}"));
     let mut routing = parse_routing(&index, &loops);
-    let ui: serde_json::Value = serde_json::from_str(&jsons.get(&requests.ui).expect("UI audio loaded").0)
-        .expect("UI audio catalog");
+    let ui: serde_json::Value =
+        serde_json::from_str(&jsons.get(&requests.ui).expect("UI audio loaded").0)
+            .expect("UI audio catalog");
     routing.streams.0.extend(parse_streams(&ui, "").0);
     let voice_corpus = parse_corpus(&corpus);
     info!(
@@ -696,7 +714,10 @@ fn parse_routing(index: &serde_json::Value, loops: &serde_json::Value) -> Routin
         let site = field_i64(row, "siteId");
         let brightness = field_str(row, "brightnessType").to_string();
         let route = RouteCue::from_row(row);
-        if site_bgms.insert((site, brightness.clone()), route).is_some() {
+        if site_bgms
+            .insert((site, brightness.clone()), route)
+            .is_some()
+        {
             panic!("siteBgms 里 site {site} 的 {brightness} 档重复");
         }
     }
@@ -723,14 +744,13 @@ fn parse_routing(index: &serde_json::Value, loops: &serde_json::Value) -> Routin
     for (name, entry) in phenomena {
         // master 为 null 是配送祭会场那档：BGM 走站点正常亮度档（配送判据
         // 在客户端配置里，提取侧「无 master 行」就是它的形），环境音走停。
-        let brightness = match entry["master"].as_object() {
-            None => None,
-            Some(master) => Some(
-                master["brightnessType"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("现象 {} 的 brightnessType 不是字符串", label(name))),
-            ),
-        };
+        let brightness =
+            match entry["master"].as_object() {
+                None => None,
+                Some(master) => Some(master["brightnessType"].as_str().unwrap_or_else(|| {
+                    panic!("现象 {} 的 brightnessType 不是字符串", label(name))
+                })),
+            };
         let bgm_route = match brightness {
             None => site_bgms
                 .get(&(SITE_ID, "normal".to_string()))
@@ -762,9 +782,9 @@ fn parse_routing(index: &serde_json::Value, loops: &serde_json::Value) -> Routin
             // （站点掩码对祭会场同样判停——两处独立来源，同判）。
             None => None,
             Some(_) => {
-                let specific = entry["siteSounds"].as_array().and_then(|rows| {
-                    rows.iter().find(|row| field_i64(row, "siteId") == SITE_ID)
-                });
+                let specific = entry["siteSounds"]
+                    .as_array()
+                    .and_then(|rows| rows.iter().find(|row| field_i64(row, "siteId") == SITE_ID));
                 match specific {
                     Some(row) => Some(RouteCue::from_row(row)),
                     // 本档本站没有行：走站点的「其它档」兜底行。
@@ -885,12 +905,7 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
             }
         }
     }
-    let streams = Streams(
-        streams
-            .into_iter()
-            .map(|(k, (_, v))| (k, v))
-            .collect(),
-    );
+    let streams = Streams(streams.into_iter().map(|(k, (_, v))| (k, v)).collect());
 
     streams
 }
@@ -982,9 +997,9 @@ fn parse_partvoice(doc: &serde_json::Value) -> PartVoiceMap {
                 ParticipantRoute::Gated(reason.to_owned())
             } else {
                 let package = |name: &str| {
-                    row[name].as_str().unwrap_or_else(|| {
-                        panic!("partvoice.json 的参与者 {id} 缺 {name} 包名")
-                    })
+                    row[name]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("partvoice.json 的参与者 {id} 缺 {name} 包名"))
                 };
                 ParticipantRoute::Packages {
                     scenario: package("scenarioPackage").to_owned(),
@@ -1128,8 +1143,7 @@ pub(crate) fn advance_bgm(
                 )
             })
         });
-        let handoff_due = voice.intro.is_none()
-            || intro_status.is_some_and(|(due, _)| due);
+        let handoff_due = voice.intro.is_none() || intro_status.is_some_and(|(due, _)| due);
         if handoff_due && !voice.handoff_done {
             if let Some(loop_sink) = voice.loop_sink {
                 if let Ok(sink) = sinks.get(loop_sink) {
@@ -1198,10 +1212,7 @@ pub(crate) fn advance_bgm(
     };
     let volume_now = if cold { target_volume } else { 0.0 };
     let settings_volume = Volume::Linear(volume_now);
-    let handle = server.load::<AudioSource>(AssetPath::from(format!(
-        "moly://{}",
-        stream.ogg
-    )));
+    let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
     let (intro, loop_sink, handoff_done) = if stream.loops {
         if stream.loop_start > 0.0 {
             // 两段式：intro 一次性段 + 驻停的 loop 段。
@@ -1218,9 +1229,7 @@ pub(crate) fn advance_bgm(
                     AudioPlayer::new(handle),
                     PlaybackSettings::LOOP
                         .with_start_position(Duration::from_secs_f64(stream.loop_start))
-                        .with_duration(Duration::from_secs_f64(
-                            stream.loop_end - stream.loop_start,
-                        ))
+                        .with_duration(Duration::from_secs_f64(stream.loop_end - stream.loop_start))
                         .with_volume(settings_volume)
                         .paused(),
                 ))
@@ -1333,16 +1342,12 @@ pub(crate) fn advance_ambient(
                 );
             };
             let volume = bus.se_area_ambient;
-            let handle = server.load::<AudioSource>(AssetPath::from(format!(
-                "moly://{}",
-                stream.ogg
-            )));
+            let handle =
+                server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
             let settings = if stream.loops {
                 PlaybackSettings::LOOP
                     .with_start_position(Duration::from_secs_f64(stream.loop_start))
-                    .with_duration(Duration::from_secs_f64(
-                        stream.loop_end - stream.loop_start,
-                    ))
+                    .with_duration(Duration::from_secs_f64(stream.loop_end - stream.loop_start))
             } else {
                 PlaybackSettings::ONCE
             };
@@ -1362,10 +1367,7 @@ pub(crate) fn advance_ambient(
                 volume,
                 bus.se_area_ambient,
                 if stream.loops {
-                    format!(
-                        "循环 [{:.3}, {:.3}]",
-                        stream.loop_start, stream.loop_end
-                    )
+                    format!("循环 [{:.3}, {:.3}]", stream.loop_start, stream.loop_end)
                 } else {
                     "整轨一次性".to_string()
                 },
@@ -1424,7 +1426,10 @@ pub(crate) fn advance_proximity(
     bus: Res<VolumeBus>,
     routing: Option<Res<Routing>>,
     mut state: ResMut<ProximityState>,
-    sources: Query<(&SoundObject, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    sources: Query<
+        (&SoundObject, &GlobalTransform),
+        Without<moly_assets::scene_state::SourceInactive>,
+    >,
     avatars: Query<&GlobalTransform, With<AvatarRoot>>,
     mut sinks: Query<&mut AudioSink>,
 ) {
@@ -1483,8 +1488,8 @@ pub(crate) fn advance_proximity(
         // 同声源支：epsilon 门更新音量（门宽 = max(ε×8, 大者×1e-6)，
         // 逐位对齐真源：绝对差过门才写，并按「用户音量 × 距离音量」更新
         // 播放器）。
-        let epsilon = (UNITY_MIN_FLOAT * 8.0)
-            .max(state.current_volume.abs().max(volume.abs()) * 1e-6);
+        let epsilon =
+            (UNITY_MIN_FLOAT * 8.0).max(state.current_volume.abs().max(volume.abs()) * 1e-6);
         if (volume - state.current_volume).abs() >= epsilon {
             state.current_volume = volume;
             if let Some(entity) = state.playback {
@@ -1541,16 +1546,11 @@ fn play_proximity(
         );
         return None;
     };
-    let handle = server.load::<AudioSource>(AssetPath::from(format!(
-        "moly://{}",
-        stream.ogg
-    )));
+    let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
     let settings = if stream.loops {
         PlaybackSettings::LOOP
             .with_start_position(Duration::from_secs_f64(stream.loop_start))
-            .with_duration(Duration::from_secs_f64(
-                stream.loop_end - stream.loop_start,
-            ))
+            .with_duration(Duration::from_secs_f64(stream.loop_end - stream.loop_start))
     } else {
         PlaybackSettings::ONCE
     };
@@ -1734,7 +1734,12 @@ pub(crate) fn serve_voice(
     // terminal asset failures, while retaining real in-flight asset loads.
     if let Some(entity) = channel.sink {
         if crate::voice_pcm::finished_or_failed(
-            entity, &server, &sources, &players, &metered_sources, &sinks,
+            entity,
+            &server,
+            &sources,
+            &players,
+            &metered_sources,
+            &sinks,
         ) {
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.despawn();
@@ -1763,10 +1768,8 @@ pub(crate) fn serve_voice(
                 // talk voice 的流全部非循环（整轨一次性）；音量 =
                 // 1.0（真源 PlayVoice 基量）× 面板 vox_scenario。
                 let volume = bus.vox_scenario;
-                let handle = server.load::<AudioSource>(AssetPath::from(format!(
-                    "moly://{}",
-                    stream.ogg
-                )));
+                let handle =
+                    server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
                 channel.sink = Some(
                     commands
                         .spawn((
@@ -1900,6 +1903,8 @@ impl SeClass {
 /// 一次一次性 SE 请求（事件侧入队的三元组）：cue + 音量类 + 日志标签。
 #[derive(Debug, Clone)]
 pub struct SeRequest {
+    /// A generation-safe playback scope; None is an ordinary world/UI sound.
+    pub owner: Option<Entity>,
     /// A plain cue, or an AnimationEvent's bundle path whose leaf is the cue.
     /// A supplied bundle path selects its own bank, never a same-name fallback.
     pub cue: String,
@@ -1915,9 +1920,18 @@ pub struct SeRequest {
 pub struct SeRequests(pub Vec<SeRequest>);
 
 impl SeRequests {
-    pub(crate) fn source_button(&mut self, layouts: &crate::ui_layout::UiLayouts, key: &str, path: &str) {
+    pub(crate) fn source_button(
+        &mut self,
+        layouts: &crate::ui_layout::UiLayouts,
+        key: &str,
+        path: &str,
+    ) {
         if let Some(cue) = layouts.button_sound(key, path) {
-            self.0.push(SeRequest { cue, class: SeClass::Ui, source: "source-button" });
+            self.0.push(SeRequest { owner: None,
+                cue,
+                class: SeClass::Ui,
+                source: "source-button",
+            });
         }
     }
 }
@@ -1951,6 +1965,7 @@ pub(crate) fn advance_se(
     mut channel: ResMut<SeChannel>,
     sinks: Query<&AudioSink>,
     players: Query<&AudioPlayer<AudioSource>>,
+    owners: Query<()>,
 ) {
     channel.live.retain(|entity| {
         if !one_shot_finished_or_failed(*entity, &server, &players, &sinks) {
@@ -1965,6 +1980,7 @@ pub(crate) fn advance_se(
         return; // 路由表未就绪：请求留队（就绪后排空，窗口照样去重）
     };
     for request in queue.0.drain(..) {
+        if request.owner.is_some_and(|owner| owners.get(owner).is_err()) { continue; }
         channel.requests += 1;
         let (cue, source_package) = match request.cue.rsplit_once('/') {
             Some((_, cue)) => (cue, Some(request.cue.replace('/', "__"))),
@@ -1973,12 +1989,24 @@ pub(crate) fn advance_se(
         let stream = if let Some(package) = source_package {
             routing.streams.0.get(&(cue.to_owned(), package))
         } else {
-            routing.streams.0.get(&(cue.to_owned(), SE_PACKAGE.to_string()))
-                .or_else(|| routing.streams.0.get(&(cue.to_owned(), "MenuCommon_Built_in".into())))
-                .or_else(|| routing.streams.0.get(&(cue.to_owned(), "MenuCommon".into())))
+            routing
+                .streams
+                .0
+                .get(&(cue.to_owned(), SE_PACKAGE.to_string()))
+                .or_else(|| {
+                    routing
+                        .streams
+                        .0
+                        .get(&(cue.to_owned(), "MenuCommon_Built_in".into()))
+                })
+                .or_else(|| {
+                    routing
+                        .streams
+                        .0
+                        .get(&(cue.to_owned(), "MenuCommon".into()))
+                })
         };
-        let Some(stream) = stream
-        else {
+        let Some(stream) = stream else {
             if channel.warned_missing.insert(request.cue.to_string()) {
                 warn!(
                     "SE 跳过：cue {} 不在流表（ExistsCueName fail-closed，真源同支；每 cue 只告警一次）",
@@ -1988,10 +2016,7 @@ pub(crate) fn advance_se(
             continue;
         };
         let volume = request.class.volume(&bus);
-        let handle = server.load::<AudioSource>(AssetPath::from(format!(
-            "moly://{}",
-            stream.ogg
-        )));
+        let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
         let entity = commands
             .spawn((
                 AudioPlayer::new(handle),
@@ -1999,6 +2024,7 @@ pub(crate) fn advance_se(
                 BusVolume::Se(request.class),
             ))
             .id();
+        if let Some(owner) = request.owner { commands.entity(entity).insert(ScopedSe(owner)); }
         channel.live.push(entity);
         channel.played += 1;
         info!(
@@ -2009,6 +2035,45 @@ pub(crate) fn advance_se(
             volume,
             volume,
         );
+    }
+}
+
+#[derive(Component)]
+pub(crate) struct ScopedSe(pub Entity);
+
+/// Stop only the departing controller's queued and already-playing effects.
+/// Other fixtures, UI clicks, BGM and ambient sound are intentionally untouched.
+pub(crate) fn dispose_scoped_se(world: &mut World, owner: Entity) {
+    if let Some(mut queue) = world.get_resource_mut::<SeRequests>() {
+        queue.0.retain(|request| request.owner != Some(owner));
+    }
+    let entities: Vec<_> = world.query::<(Entity, &ScopedSe)>().iter(world)
+        .filter_map(|(entity, scope)| (scope.0 == owner).then_some(entity)).collect();
+    for entity in &entities {
+        if let Some(sink) = world.get::<AudioSink>(*entity) { sink.stop(); }
+        if let Ok(entity) = world.get_entity_mut(*entity) { entity.despawn(); }
+    }
+    if let Some(mut channel) = world.get_resource_mut::<SeChannel>() {
+        channel.live.retain(|entity| !entities.contains(entity));
+    }
+}
+
+#[cfg(test)]
+mod scoped_se_tests {
+    use super::*;
+    #[test]
+    fn cancellation_retires_only_the_departing_owner() {
+        let mut world = World::new(); world.init_resource::<SeRequests>(); world.init_resource::<SeChannel>();
+        let first = world.spawn_empty().id(); let second = world.spawn_empty().id();
+        let old = world.spawn(ScopedSe(first)).id(); let newer = world.spawn(ScopedSe(second)).id();
+        world.resource_mut::<SeChannel>().live = vec![old, newer];
+        for owner in [Some(first), Some(second), None] {
+            world.resource_mut::<SeRequests>().0.push(SeRequest { owner, cue: "test".into(), class: SeClass::Ingame, source: "test" });
+        }
+        dispose_scoped_se(&mut world, first);
+        assert!(world.get_entity(old).is_err()); assert!(world.get_entity(newer).is_ok());
+        assert_eq!(world.resource::<SeRequests>().0.len(), 2);
+        assert_eq!(world.resource::<SeChannel>().live, vec![newer]);
     }
 }
 

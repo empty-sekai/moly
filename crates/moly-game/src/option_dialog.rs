@@ -525,7 +525,7 @@ fn fire_preview(
             // 型 1（PlaySEOneShot）⇒ 真 SE 请求队列。cue 未提取 ⇒ 通道侧
             // 每 cue 一次的缺流告警就是它的诚实行（ExistsCueName
             // fail-closed 同款）。
-            se_requests.0.push(SeRequest {
+            se_requests.0.push(SeRequest { owner: None,
                 cue: cue.into(),
                 class: SeClass::Ui,
                 source: "option_preview",

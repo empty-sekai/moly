@@ -60,7 +60,9 @@ impl FaceCommand {
         let cell = match self.slot {
             FaceSlot::Eye => apply_eye(materials, eye, Some(&index)),
             FaceSlot::Mouth => apply_mouth_pattern(
-                materials, mouth, tables.lip_pattern(&self.pattern).unwrap_or_default(),
+                materials,
+                mouth,
+                tables.lip_pattern(&self.pattern).unwrap_or_default(),
             ),
         };
         info!(
@@ -104,6 +106,15 @@ impl DelayedFaces {
     pub(crate) fn stop_loop(&mut self) {
         self.running = false;
         self.awaiting_first_yield = false;
+    }
+
+    /// Explicit user cancellation owns the currently playing talk and must not
+    /// leak its future callbacks into a replacement. Natural Dispose retains
+    /// the engine queue; this targeted path removes only the cancelled owner.
+    pub(crate) fn cancel_talk(&mut self, talk_id: i32) {
+        self.pending
+            .retain(|entry| entry.command.source_talk != talk_id);
+        self.stop_loop();
     }
 
     pub(crate) fn enqueue(&mut self, delay_seconds: f32, command: FaceCommand) {
@@ -187,26 +198,22 @@ fn compare_deadlines(a: f32, b: f32) -> Ordering {
 /// null is an omitted/explicit-nil Lua argument (the bridge reads nil as zero).
 /// A missing field is an old lossy export, not evidence of an authored zero.
 pub(crate) fn delay_seconds(step: &Value) -> Result<f32, String> {
-    match step.get("delaySeconds") {
+    let value: Result<f64, String> = match step.get("delaySeconds") {
         Some(Value::Null) => Ok(0.0),
-        Some(Value::String(value)) => match value.as_str() {
-            "Infinity" => Ok(f32::INFINITY),
-            "-Infinity" => Ok(f32::NEG_INFINITY),
-            "NaN" => Ok(f32::NAN),
-            _ => value
-                .trim()
-                .parse::<f64>()
-                .map(|value| value as f32)
-                .map_err(|_| {
-                    "NPC face delaySeconds remains an unresolved source expression".into()
-                }),
-        },
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "NPC face delaySeconds remains an unresolved source expression".into()),
         Some(value) => value
             .as_f64()
-            .map(|value| value as f32)
             .ok_or_else(|| "NPC face delaySeconds is not a resolved number/null".into()),
         None => Err("NPC face delaySeconds metadata is absent; re-extract the scenario".into()),
+    };
+    let value = value?;
+    if !value.is_finite() || value < 0.0 || value > f32::MAX as f64 {
+        return Err("NPC face delaySeconds is not a finite nonnegative f32".into());
     }
+    Ok(value as f32)
 }
 
 /// Start at a real conversation-construction edge, before its update systems
@@ -218,4 +225,59 @@ pub(crate) fn start_loop(commands: &mut Commands) {
 /// Stop at the owner's disposal edge without executing or discarding callbacks.
 pub(crate) fn stop_loop(commands: &mut Commands) {
     commands.queue(|world: &mut World| world.resource_mut::<DelayedFaces>().stop_loop());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(source_talk: i32, source_step: usize) -> FaceCommand {
+        FaceCommand {
+            unit: 1,
+            slot: FaceSlot::Eye,
+            pattern: "normal".into(),
+            source_talk,
+            source_step,
+        }
+    }
+
+    #[test]
+    fn cancelling_one_talk_retains_unrelated_delayed_faces() {
+        let mut delayed = DelayedFaces::default();
+        delayed.start_loop();
+        delayed.enqueue(10.0, command(10, 0));
+        delayed.enqueue(10.0, command(11, 1));
+        delayed.cancel_talk(10);
+        delayed.start_loop();
+        let remaining = delayed.wait_clicked();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].source_talk, 11);
+        assert_eq!(remaining[0].source_step, 1);
+    }
+
+    #[test]
+    fn cancelled_delayed_faces_do_not_run_in_replacement_owner() {
+        let mut delayed = DelayedFaces::default();
+        delayed.start_loop();
+        delayed.enqueue(0.25, command(10, 0));
+        delayed.cancel_talk(10);
+        delayed.start_loop();
+        delayed.enqueue(0.0, command(12, 2));
+        assert!(delayed.advance(1.0).is_empty());
+        let due = delayed.advance(0.0);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].source_talk, 12);
+    }
+
+    #[test]
+    fn delay_parser_rejects_nonfinite_negative_and_f32_overflow() {
+        for value in [
+            serde_json::json!("Infinity"),
+            serde_json::json!(-1.0),
+            serde_json::json!(1e100),
+        ] {
+            let step = serde_json::json!({"delaySeconds": value});
+            assert!(delay_seconds(&step).is_err());
+        }
+    }
 }

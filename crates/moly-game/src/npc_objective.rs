@@ -58,26 +58,24 @@
 //! 重建；构建端带格桶索引，逐格最近点查询不扫全网格。
 
 use crate::client_config::{
-    ClientConfigs, KEY_CHARACTER_FIXTURE_MOVE_OFFSET, KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
+    ClientConfigs, KEY_CHARACTER_FIXTURE_MOVE_OFFSET, KEY_CHARACTER_OVERLAP_DISTANCE,
+    KEY_CHARACTER_OVERLAP_TIME, KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
     KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
     KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT, KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE,
     KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE, KEY_NPC_RANDOM_MOVE_MAX_DISTANCE,
     KEY_NPC_RANDOM_MOVE_MIN_DISTANCE,
-    KEY_CHARACTER_OVERLAP_TIME, KEY_CHARACTER_OVERLAP_DISTANCE,
 };
 use crate::fixture::FixturePlacements;
 use crate::npc::{
-    CharacterUnitId, FitCandidate, MoveTarget, MotionPhase, PathSlot, PauseSeconds, RouteStops,
-    WalkState, depart,
+    depart, CharacterUnitId, FitCandidate, MotionPhase, MoveTarget, PathSlot, PauseSeconds,
+    RouteStops, WalkState,
 };
 use crate::site::{GroundEpoch, SiteSelection, WalkFaceMeshes};
 use bevy::prelude::*;
 use moly_law::objective::{
     self, Cell, ObjectiveType, SurfaceProbe, TalkType, APPROACH_SEARCH_RANGE, TILE_SCALE,
 };
-use moly_law::talk::select::{
-    self, LotteryPercents, PercentDraw, TalkLane, UniformDraw,
-};
+use moly_law::talk::select::{self, LotteryPercents, PercentDraw, TalkLane, UniformDraw};
 use std::collections::HashMap;
 
 /// 目标面的格桶外扩余量（米）：三角按 XZ 包围盒外扩这一段后登记进格桶，
@@ -87,7 +85,7 @@ const BUCKET_MARGIN: f32 = 0.5;
 
 /// 目标面：世界系三角网（保留高度）+ 格桶索引 + 可行走格集。站点域换装
 /// 后由 [`build_face`] 按新面重建（代数戳记在 `epoch` 上）。
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct ObjectiveFace {
     /// 世界系三角（三顶点，含高度）。
     tris: Vec<[[f32; 3]; 3]>,
@@ -112,11 +110,17 @@ impl ObjectiveFace {
         self.epoch == epoch
     }
 
-    pub(crate) fn navigation_generation(&self) -> u64 { self.generation }
+    pub(crate) fn navigation_generation(&self) -> u64 {
+        self.generation
+    }
 
     /// 格角世界位：x/z 按格距换算，y 取参考平面（采样负责落到真高度）。
     pub(crate) fn world_of(&self, cell: Cell) -> [f32; 3] {
-        [cell.0 as f32 * TILE_SCALE, self.ref_y, cell.1 as f32 * TILE_SCALE]
+        [
+            cell.0 as f32 * TILE_SCALE,
+            self.ref_y,
+            cell.1 as f32 * TILE_SCALE,
+        ]
     }
 
     /// 参考平面高度（面顶点均值）：一切「这一点在不在面上」的采样探针
@@ -130,13 +134,21 @@ impl ObjectiveFace {
     /// Show keeps a valid current point; only an invalid x/z is moved to the
     /// nearest available point. This is not Unity NavMeshAgent reattachment.
     pub(crate) fn reattach_after_layout(&self, current: [f32; 3]) -> Option<[f32; 3]> {
-        if current.iter().any(|value| !value.is_finite()) { return None; }
-        if self.field.walkable_at([current[0], current[2]]) { return Some(current); }
-        let xz = self.field.nearest_walkable([current[0], current[2]], None)?;
+        if current.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        if self.field.walkable_at([current[0], current[2]]) {
+            return Some(current);
+        }
+        let xz = self
+            .field
+            .nearest_walkable([current[0], current[2]], None)?;
         let (point, distance) = self.closest([xz[0], current[1], xz[1]]);
-        (distance.is_finite() && distance < f32::MAX
+        (distance.is_finite()
+            && distance < f32::MAX
             && point.iter().all(|value| value.is_finite())
-            && self.field.walkable_at([point[0], point[2]])).then_some(point)
+            && self.field.walkable_at([point[0], point[2]]))
+        .then_some(point)
     }
 
     /// 面上最近点与距离（含高度的三角最近点；无三角覆盖处距离无穷）。
@@ -159,10 +171,12 @@ impl ObjectiveFace {
     /// 表面采样（源 `SamplePosition` 语义）：面上最近点在容差内即命中，
     /// 返回面上点；否则未命中。
     pub(crate) fn sample(&self, target: [f32; 3], tolerance: f32) -> Option<[f32; 3]> {
-        let xz = self.field.nearest_walkable([target[0], target[2]], Some(tolerance))?;
+        let xz = self
+            .field
+            .nearest_walkable([target[0], target[2]], Some(tolerance))?;
         let (point, _) = self.closest([xz[0], target[1], xz[1]]);
-        (dist3(point, target) <= tolerance
-            && self.field.walkable_at([point[0], point[2]])).then_some(point)
+        (dist3(point, target) <= tolerance && self.field.walkable_at([point[0], point[2]]))
+            .then_some(point)
     }
 
     /// 高度几何探针；不提供导航资格，只给已经验证的路线/挂点落高度。
@@ -173,7 +187,28 @@ impl ObjectiveFace {
 
     /// 与执行器共用严格完整路径，目标不拉回到其他可达位置。
     pub(crate) fn has_path(&self, source: [f32; 3], target: [f32; 3]) -> bool {
-        self.field.path_exact([source[0], source[2]], [target[0], target[2]]).is_some()
+        self.field
+            .path_exact([source[0], source[2]], [target[0], target[2]])
+            .is_some()
+    }
+
+    /// The player furniture adapter uses this same carved geometry as normal
+    /// movement. A failed exact path remains a failed query, never a straight
+    /// line fabricated through furniture. Heights come from the real mesh.
+    pub(crate) fn fixture_path(&self, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
+        if !from.is_finite() || !to.is_finite() { return None; }
+        let corners = self.field.path_exact([from.x, from.z], [to.x, to.z])?;
+        corners.into_iter().map(|point| {
+            let (height, distance) = self.closest([point[0], self.ref_y, point[1]]);
+            (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(height))
+        }).collect()
+    }
+
+    pub(crate) fn fixture_move(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
+        if !from.is_finite() || !to.is_finite() { return None; }
+        let point = self.field.constrain_move([from.x, from.z], [to.x, to.z]);
+        let (surface, distance) = self.closest([point[0], from.y, point[1]]);
+        (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(surface))
     }
 
     /// 可行走格集。
@@ -204,7 +239,10 @@ impl SurfaceProbe for FaceProbe<'_> {
 
 /// 世界位 → 格坐标（格距换算，向下取整）。
 pub(crate) fn cell_of(x: f32, z: f32) -> Cell {
-    ((x / TILE_SCALE).floor() as i32, (z / TILE_SCALE).floor() as i32)
+    (
+        (x / TILE_SCALE).floor() as i32,
+        (z / TILE_SCALE).floor() as i32,
+    )
 }
 
 /// Update：面网格柄齐备且站点场景展开后，把目标面提为世界系三角网并算
@@ -223,7 +261,9 @@ pub(crate) fn build_face(
     parts: Query<(&Mesh3d, &GlobalTransform)>,
 ) {
     let epoch = epoch.map(|epoch| epoch.0).unwrap_or(0);
-    let Some(walk_face) = walk_face else { return; };
+    let Some(walk_face) = walk_face else {
+        return;
+    };
     if face.is_some_and(|face| face.epoch == epoch && face.generation == walk_face.generation()) {
         return;
     }
@@ -259,7 +299,9 @@ pub(crate) fn build_face(
             .map(|indices| indices.iter().collect())
             .unwrap_or_default();
         let triples: Vec<[usize; 3]> = match index.len() {
-            0 => (0..verts.len() / 3).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect(),
+            0 => (0..verts.len() / 3)
+                .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
+                .collect(),
             _ => (0..index.len() / 3)
                 .map(|i| [index[i * 3], index[i * 3 + 1], index[i * 3 + 2]])
                 .collect(),
@@ -384,8 +426,13 @@ pub(crate) struct AiTalkData {
 impl AiTalkData {
     fn pending(kind: TalkType, unit: u32, position: [f32; 3]) -> Self {
         Self {
-            kind, content: None, target_fixture: None, target_position: position,
-            main_character: unit, characters: vec![unit], pre_action: None,
+            kind,
+            content: None,
+            target_fixture: None,
+            target_position: position,
+            main_character: unit,
+            characters: vec![unit],
+            pre_action: None,
             pending_factory: Some("activity factory has not supplied its master and participants"),
         }
     }
@@ -405,7 +452,11 @@ impl TalkSlot {
     }
 
     pub(crate) fn previous_id(&self) -> Option<i32> {
-        self.previous.as_ref()?.content.as_ref().map(|content| content.master_id)
+        self.previous
+            .as_ref()?
+            .content
+            .as_ref()
+            .map(|content| content.master_id)
     }
 
     pub(crate) fn set_current(&mut self, data: AiTalkData) {
@@ -488,11 +539,22 @@ impl ObjectiveMind {
 /// RNG, clear Previous, or invoke the unrelated ResetAITalkData operation.
 pub(crate) fn cancel_ordinary_for_layout_edit(world: &mut World, actor: Entity) -> bool {
     let mut query = world.query::<(&crate::npc::NpcActions, &mut ObjectiveMind)>();
-    let Ok((actions, mut mind)) = query.get_mut(world, actor) else { return false; };
-    if actions.current == crate::npc::NpcAction::Talk { return false; }
-    let resting = !mind.executing && (mind.rest_remaining > 0.0 || actions.current == crate::npc::NpcAction::Rest);
-    let ordinary = mind.executing && matches!(mind.current, Some(ObjectiveType::RandomMove | ObjectiveType::Talk));
-    if !resting && !ordinary { return false; }
+    let Ok((actions, mut mind)) = query.get_mut(world, actor) else {
+        return false;
+    };
+    if actions.current == crate::npc::NpcAction::Talk {
+        return false;
+    }
+    let resting = !mind.executing
+        && (mind.rest_remaining > 0.0 || actions.current == crate::npc::NpcAction::Rest);
+    let ordinary = mind.executing
+        && matches!(
+            mind.current,
+            Some(ObjectiveType::RandomMove | ObjectiveType::Talk)
+        );
+    if !resting && !ordinary {
+        return false;
+    }
     mind.edit_rest_after = if ordinary { mind.current } else { None };
     mind.executing = false;
     mind.rest_remaining = 0.0;
@@ -508,7 +570,10 @@ struct PercentSource<'a> {
 
 impl<'a> PercentSource<'a> {
     fn new(rng: &'a mut MemberRng) -> Self {
-        Self { rng, draws: Vec::new() }
+        Self {
+            rng,
+            draws: Vec::new(),
+        }
     }
 
     /// 账目串：按抽签次序列出（`r0=37 r1=82`）。
@@ -538,7 +603,10 @@ struct UniformSource<'a> {
 
 impl<'a> UniformSource<'a> {
     fn new(rng: &'a mut MemberRng) -> Self {
-        Self { rng, draws: Vec::new() }
+        Self {
+            rng,
+            draws: Vec::new(),
+        }
     }
 
     fn account(&self) -> String {
@@ -574,9 +642,7 @@ impl<'a> PermuteSource<'a> {
 impl objective::Permute for PermuteSource<'_> {
     fn permutation(&mut self, len: usize) -> Vec<usize> {
         self.keys += len;
-        let mut keyed: Vec<(u64, usize)> = (0..len)
-            .map(|index| (self.rng.next(), index))
-            .collect();
+        let mut keyed: Vec<(u64, usize)> = (0..len).map(|index| (self.rng.next(), index)).collect();
         keyed.sort_by_key(|&(key, _)| key);
         keyed.into_iter().map(|(_, index)| index).collect()
     }
@@ -602,14 +668,19 @@ pub(crate) struct AnchoredFixtureCache {
 
 /// Preserve each placed instance's footprint, including repeated furniture IDs.
 fn anchored_fixtures(placements: &FixturePlacements) -> Vec<AnchoredFixture> {
-    placements.occupancy_rows().into_iter().zip(placements.fixture_ids())
+    placements
+        .occupancy_rows()
+        .into_iter()
+        .zip(placements.fixture_ids())
         .filter(|(_, id)| *id != 0)
         .map(|(row, fixture_id)| AnchoredFixture {
             uid: row.uid,
-            fixture_id, package: row.package,
+            fixture_id,
+            package: row.package,
             min: (row.min.x as i32, row.min.z as i32),
             max: (row.max.x as i32, row.max.z as i32),
-        }).collect()
+        })
+        .collect()
 }
 
 /// 道别 → 槽位类型（替身映射，见模块注释）。
@@ -629,14 +700,70 @@ fn slot_type_of(lane: TalkLane) -> TalkType {
 /// 锚定摆放表上均匀抽（见模块注释「目标家具抽签」），表按家具查即
 /// 与抽签面同形。
 const NOTALK_ASSIGNMENTS: &[(i32, i32)] = &[
-    (8, 13), (10, 13), (23, 13), (25, 13), (38, 13), (40, 13), (53, 13), (55, 13),
-    (68, 13), (70, 13), (83, 13), (85, 13), (143, 13), (147, 13), (148, 13), (150, 13),
-    (151, 13), (163, 13), (164, 13), (175, 13), (177, 13), (178, 13), (184, 13), (189, 13),
-    (202, 13), (219, 13), (227, 13), (236, 13), (243, 11), (255, 13), (259, 13), (269, 13),
-    (272, 13), (286, 13), (294, 13), (303, 13), (307, 13), (309, 13), (311, 13), (321, 13),
-    (323, 13), (327, 13), (337, 13), (339, 13), (460, 13), (462, 13), (470, 13), (524, 13),
-    (531, 13), (532, 13), (586, 13), (587, 13), (588, 13), (660, 13), (661, 13), (747, 13),
-    (749, 23), (760, 13), (805, 14), (814, 13), (984, 13), (986, 13), (988, 13), (1025, 13),
+    (8, 13),
+    (10, 13),
+    (23, 13),
+    (25, 13),
+    (38, 13),
+    (40, 13),
+    (53, 13),
+    (55, 13),
+    (68, 13),
+    (70, 13),
+    (83, 13),
+    (85, 13),
+    (143, 13),
+    (147, 13),
+    (148, 13),
+    (150, 13),
+    (151, 13),
+    (163, 13),
+    (164, 13),
+    (175, 13),
+    (177, 13),
+    (178, 13),
+    (184, 13),
+    (189, 13),
+    (202, 13),
+    (219, 13),
+    (227, 13),
+    (236, 13),
+    (243, 11),
+    (255, 13),
+    (259, 13),
+    (269, 13),
+    (272, 13),
+    (286, 13),
+    (294, 13),
+    (303, 13),
+    (307, 13),
+    (309, 13),
+    (311, 13),
+    (321, 13),
+    (323, 13),
+    (327, 13),
+    (337, 13),
+    (339, 13),
+    (460, 13),
+    (462, 13),
+    (470, 13),
+    (524, 13),
+    (531, 13),
+    (532, 13),
+    (586, 13),
+    (587, 13),
+    (588, 13),
+    (660, 13),
+    (661, 13),
+    (747, 13),
+    (749, 23),
+    (760, 13),
+    (805, 14),
+    (814, 13),
+    (984, 13),
+    (986, 13),
+    (988, 13),
+    (1025, 13),
 ];
 
 /// 无对话道的按角色覆写行（家具 227 的例外：角色 18 的座位不是该家具
@@ -651,16 +778,52 @@ const NOTALK_OVERRIDES: &[(u32, i32, i32)] = &[(18, 227, 43)];
 /// 家具) 多行取语料序首行——真源在合格动作表上随机取，随机面归
 /// 抽签域，这里按首行具名。
 const TALK_SEATS: &[(i32, u32, i32)] = &[
-    (227, 2, 13), (227, 5, 13), (227, 7, 13), (227, 9, 13), (227, 10, 13),
-    (227, 12, 13), (227, 13, 13), (227, 14, 13), (227, 16, 43), (227, 18, 23),
-    (227, 20, 13), (227, 30, 13), (227, 31, 43), (227, 39, 13), (227, 55, 13),
+    (227, 2, 13),
+    (227, 5, 13),
+    (227, 7, 13),
+    (227, 9, 13),
+    (227, 10, 13),
+    (227, 12, 13),
+    (227, 13, 13),
+    (227, 14, 13),
+    (227, 16, 43),
+    (227, 18, 23),
+    (227, 20, 13),
+    (227, 30, 13),
+    (227, 31, 43),
+    (227, 39, 13),
+    (227, 55, 13),
     (243, 12, 13),
-    (695, 1, 33), (695, 2, 43), (695, 3, 33), (695, 4, 43), (695, 5, 33),
-    (695, 6, 43), (695, 7, 33), (695, 8, 33), (695, 9, 33), (695, 10, 43),
-    (695, 11, 53), (695, 12, 53), (695, 13, 53), (695, 14, 33), (695, 15, 33),
-    (695, 16, 43), (695, 17, 33), (695, 18, 43), (695, 19, 33), (695, 20, 33),
-    (695, 27, 33), (695, 28, 43), (695, 29, 33), (695, 30, 33), (695, 31, 43),
-    (695, 33, 33), (695, 39, 53), (695, 42, 33), (695, 49, 53), (695, 55, 33),
+    (695, 1, 33),
+    (695, 2, 43),
+    (695, 3, 33),
+    (695, 4, 43),
+    (695, 5, 33),
+    (695, 6, 43),
+    (695, 7, 33),
+    (695, 8, 33),
+    (695, 9, 33),
+    (695, 10, 43),
+    (695, 11, 53),
+    (695, 12, 53),
+    (695, 13, 53),
+    (695, 14, 33),
+    (695, 15, 33),
+    (695, 16, 43),
+    (695, 17, 33),
+    (695, 18, 43),
+    (695, 19, 33),
+    (695, 20, 33),
+    (695, 27, 33),
+    (695, 28, 43),
+    (695, 29, 33),
+    (695, 30, 33),
+    (695, 31, 43),
+    (695, 33, 33),
+    (695, 39, 53),
+    (695, 42, 33),
+    (695, 49, 53),
+    (695, 55, 33),
 ];
 
 /// 无对话道座位：覆写行优先，其次家具恒常行；无行 [`None`]。
@@ -787,8 +950,7 @@ fn action_point_line(unit: u32, fixture_id: i32, seat: i32, package: &str, landi
     let tail = package.rsplit("__").next().unwrap_or(package);
     info!(
         "[npc unit={unit}] 目标动作点 = 家具 {fixture_id}（{tail}）的座 {seat} @ ({:.2},{:.2})",
-        landing[0],
-        landing[2]
+        landing[0], landing[2]
     );
 }
 
@@ -832,7 +994,10 @@ pub(crate) fn decide(
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
-    initialized: Query<(&CharacterUnitId, &InheritedVisibility), With<crate::character::MotionDriver>>,
+    initialized: Query<
+        (&CharacterUnitId, &InheritedVisibility),
+        With<crate::character::MotionDriver>,
+    >,
     catalog: crate::player_talk::TalkCatalog,
     mut fixture_activities: crate::npc_fixture_activity::Factory,
     mut npcs: Query<(
@@ -859,7 +1024,9 @@ pub(crate) fn decide(
     }
     // Keep change-tick invalidation above, but consume no ordinary AI timer
     // or RNG while Hide owns the actors or saved geometry is still reloading.
-    if editor.is_active() { return; }
+    if editor.is_active() {
+        return;
+    }
     let Some(face) = face else {
         return;
     };
@@ -881,33 +1048,44 @@ pub(crate) fn decide(
         return;
     };
     let walk_face: &crate::walk_face::WalkFace = &*walk_face;
-    if face.generation != walk_face.generation() { return; }
+    if face.generation != walk_face.generation() {
+        return;
+    }
     // 动作点世界位组合表：不在场时整帧让路（组合晚解析一帧落地）——
     // 缺表时动作点支读不出挂点，静默落环带会把「表没到」伪装成「该
     // 家具没有动作点」。
     let attach = attach_worlds.as_deref();
-    if !catalog.ready() { return; }
+    if !catalog.ready() {
+        return;
+    }
     let dt = time.delta_secs();
 
     // 成员快照：社交链的候选（位置 + 导航目的地）与游走链的占格都从
     // 同一帧的全员位置算。
     let snaps: Vec<MemberSnap> = npcs
         .iter()
-        .map(|(entity, unit, _, _, slot, mind, _, _, state, target, _, _, _, _)| MemberSnap {
-            entity,
-            target_fixture: slot.current.as_ref().and_then(|data| data.target_fixture),
-            unit: unit.0,
-            position: state.0.position,
-            destination: if mind.executing {
-                target.0
-            } else {
-                state.0.position
+        .map(
+            |(entity, unit, _, _, slot, mind, _, _, state, target, _, _, _, _)| MemberSnap {
+                entity,
+                target_fixture: slot.current.as_ref().and_then(|data| data.target_fixture),
+                unit: unit.0,
+                position: state.0.position,
+                destination: if mind.executing {
+                    target.0
+                } else {
+                    state.0.position
+                },
             },
-        })
+        )
         .collect();
-    let fixture_targets: Vec<_> = snaps.iter().map(|snap| (snap.entity, snap.target_fixture)).collect();
-    let mut occupied: std::collections::HashSet<Cell> =
-        snaps.iter().map(|snap| cell_of(snap.position[0], snap.position[2])).collect();
+    let fixture_targets: Vec<_> = snaps
+        .iter()
+        .map(|snap| (snap.entity, snap.target_fixture))
+        .collect();
+    let mut occupied: std::collections::HashSet<Cell> = snaps
+        .iter()
+        .map(|snap| cell_of(snap.position[0], snap.position[2]))
+        .collect();
     for player in &players {
         let translation = player.translation;
         occupied.insert(cell_of(translation.x, translation.z));
@@ -916,10 +1094,8 @@ pub(crate) fn decide(
     // 面板占比与游走距离档（房间类站点切室内档）。
     let percents = LotteryPercents {
         fixture_talk: config.float(KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT),
-        already_read_fixture_talk: config
-            .float(KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT),
-        none_talk_fixture_action: config
-            .float(KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT),
+        already_read_fixture_talk: config.float(KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT),
+        none_talk_fixture_action: config.float(KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT),
         already_read_when_has_not_read: config
             .float(KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ),
     };
@@ -936,10 +1112,13 @@ pub(crate) fn decide(
         )
     };
     let move_offset = config.float(KEY_CHARACTER_FIXTURE_MOVE_OFFSET);
-    let anchored = anchored_cache.rows
+    let anchored = anchored_cache
+        .rows
         .get_or_insert_with(|| anchored_fixtures(&placements))
         .as_slice();
-    if !anchored.is_empty() && attach.is_none() { return; }
+    if !anchored.is_empty() && attach.is_none() {
+        return;
+    }
     // 道可得性替身：锚定对话家具在 ⇒ 未读道可得（级联首档即中）。
     let yet_unread_available = !anchored.is_empty();
 
@@ -960,10 +1139,14 @@ pub(crate) fn decide(
         mut rest,
     ) in &mut npcs
     {
-        if !actions.ready() { continue; }
+        if !actions.ready() {
+            continue;
+        }
         // The activity owner consumes arrival and completion separately. A
         // route reaching its last corner must not skip the furniture body.
-        if fixture_activities.owns_actor(entity) { continue; }
+        if fixture_activities.owns_actor(entity) {
+            continue;
+        }
         if talk_hold.is_some() || actions.current == crate::npc::NpcAction::Talk {
             // RestObjective's delay runs before its WaitWhile(Talk). Ending
             // the Rest action disposes its script, not this independent delay.
@@ -977,21 +1160,43 @@ pub(crate) fn decide(
             // Respect a later owner that installed another objective during
             // the hidden interval. The Talk/hold guards above also still apply.
             if !mind.executing && mind.current == Some(cancelled) {
-                finish_objective(unit.0, &mut mind, &mut slot, pause_seconds.0,
-                    false, &mut actions, &mut rest);
-                if mind.rest_remaining > 0.0 { continue; }
+                finish_objective(
+                    unit.0,
+                    &mut mind,
+                    &mut slot,
+                    pause_seconds.0,
+                    false,
+                    &mut actions,
+                    &mut rest,
+                );
+                if mind.rest_remaining > 0.0 {
+                    continue;
+                }
             }
         }
-        let overlaps = snaps.iter().any(|other| other.unit != unit.0
-            && dist3(state.0.position, other.position) < config.float(KEY_CHARACTER_OVERLAP_DISTANCE));
+        let overlaps = snaps.iter().any(|other| {
+            other.unit != unit.0
+                && dist3(state.0.position, other.position)
+                    < config.float(KEY_CHARACTER_OVERLAP_DISTANCE)
+        });
         // 当前移动执行器运行于 AutoMove；转体相位在源是 Rotate。
         // 本域未承载 FixtureAction/PhotoShot/通信状态，不能把它们猜成常态。
         let state_type = actions.current as u8;
         let group_talk = objective::overlap::has_group_talk(mind.current, slot.kind());
         let cancellable = mind.executing || mind.rest_remaining > 0.0;
-        let visible = initialized.iter().any(|(id, visibility)| id.0 == unit.0 && visibility.get());
-        if visible && objective::overlap::should_cancel(&mut mind.overlap_seconds, dt,
-            config.float(KEY_CHARACTER_OVERLAP_TIME), overlaps, group_talk, state_type, cancellable)
+        let visible = initialized
+            .iter()
+            .any(|(id, visibility)| id.0 == unit.0 && visibility.get());
+        if visible
+            && objective::overlap::should_cancel(
+                &mut mind.overlap_seconds,
+                dt,
+                config.float(KEY_CHARACTER_OVERLAP_TIME),
+                overlaps,
+                group_talk,
+                state_type,
+                cancellable,
+            )
         {
             mind.executing = false;
             mind.current = None;
@@ -1003,11 +1208,18 @@ pub(crate) fn decide(
             state.0.next_corner = 0;
             *phase = MotionPhase::Dwelling { remaining: None };
             actions.change(crate::npc::NpcAction::Idle, &mut rest);
-            info!("[npc unit={}] 角色重叠超过源时限，取消目标并立即重选", unit.0);
+            info!(
+                "[npc unit={}] 角色重叠超过源时限，取消目标并立即重选",
+                unit.0
+            );
         }
         // 执行中且路线已尽（推进系统末站驻留尽的收场位）：目标收场。路点
         // 中途的驻留（Some）不收场——目标还没走完，不换乘。
-        let outcome = if mind.executing { route.outcome.take() } else { None };
+        let outcome = if mind.executing {
+            route.outcome.take()
+        } else {
+            None
+        };
         if outcome == Some(crate::npc::RouteOutcome::Stopped) {
             // The movement task ended without OnArrive. Do not invent arrival,
             // release the AI content, or resume an interrupted Rest timer.
@@ -1018,7 +1230,15 @@ pub(crate) fn decide(
         let completed_now = outcome == Some(crate::npc::RouteOutcome::Arrived);
         if completed_now {
             let grounded = false;
-            finish_objective(unit.0, &mut mind, &mut slot, pause_seconds.0, grounded, &mut actions, &mut rest);
+            finish_objective(
+                unit.0,
+                &mut mind,
+                &mut slot,
+                pause_seconds.0,
+                grounded,
+                &mut actions,
+                &mut rest,
+            );
         }
         if !mind.executing && mind.rest_remaining > 0.0 {
             if !completed_now {
@@ -1080,16 +1300,34 @@ pub(crate) fn decide(
             // LotteryGeneralTalkId. This is an AI factory edge, not window end.
             slot.reset_ai_talk_data();
             let mut uniform = UniformSource::new(&mut rng);
-            match catalog.lottery(unit.0, &actions.site_type, slot.previous_id(), |len| uniform.draw(len)) {
+            match catalog.lottery(unit.0, &actions.site_type, slot.previous_id(), |len| {
+                uniform.draw(len)
+            }) {
                 Ok(selection) => match if selection.replayed {
-                    slot.previous.as_ref().and_then(|data| data.content.as_ref()).and_then(|content| catalog.resolve_content(content))
-                } else { catalog.resolve(selection.master_id) } {
+                    slot.previous
+                        .as_ref()
+                        .and_then(|data| data.content.as_ref())
+                        .and_then(|content| catalog.resolve_content(content))
+                } else {
+                    catalog.resolve(selection.master_id)
+                } {
                     Some(content) => Some(content),
-                    None => { warn!("[npc unit={}] selected master {} is not loaded", unit.0, selection.master_id); continue; }
+                    None => {
+                        warn!(
+                            "[npc unit={}] selected master {} is not loaded",
+                            unit.0, selection.master_id
+                        );
+                        continue;
+                    }
                 },
-                Err(reason) => { warn!("[npc unit={}] ordinary factory: {reason}", unit.0); continue; }
+                Err(reason) => {
+                    warn!("[npc unit={}] ordinary factory: {reason}", unit.0);
+                    continue;
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
 
         // —— 目的地解算 ——
         let mut probe = FaceProbe { face };
@@ -1180,13 +1418,7 @@ pub(crate) fn decide(
                             package,
                             landing,
                         } => {
-                            action_point_line(
-                                unit.0,
-                                fixture_id,
-                                seat,
-                                &package,
-                                landing,
-                            );
+                            action_point_line(unit.0, fixture_id, seat, &package, landing);
                             detail = format!(
                                 "动作点 家具 {fixture_id} 座 {seat} 池抽 {}",
                                 uniform.account()
@@ -1213,11 +1445,22 @@ pub(crate) fn decide(
                 }
             }
         } else {
-            match fixture_activities.select_none_talk(entity, unit.0, &actions.site_type,
-                epoch.0, from, &placements, &fixture_targets, face, &mut rng)
-            {
+            match fixture_activities.select_none_talk(
+                entity,
+                unit.0,
+                &actions.site_type,
+                epoch.0,
+                from,
+                &placements,
+                &fixture_targets,
+                face,
+                &mut rng,
+            ) {
                 Ok(Some(selected)) => {
-                    detail = format!("source no-talk action on {:?}/{}", selected.target.entity, selected.target.uid);
+                    detail = format!(
+                        "source no-talk action on {:?}/{}",
+                        selected.target.entity, selected.target.uid
+                    );
                     let position = selected.position;
                     fixture_selection = Some(selected);
                     Some(position)
@@ -1238,12 +1481,21 @@ pub(crate) fn decide(
             slot.set_current(selected.ai_data());
         } else if let Some(ordinary) = ordinary {
             slot.set_current(AiTalkData {
-                kind: TalkType::Common, content: Some(ordinary.content()),
-                target_fixture: None, target_position, main_character: unit.0,
-                characters: vec![unit.0], pre_action: Some(ordinary.pre_action()), pending_factory: None,
+                kind: TalkType::Common,
+                content: Some(ordinary.content()),
+                target_fixture: None,
+                target_position,
+                main_character: unit.0,
+                characters: vec![unit.0],
+                pre_action: Some(ordinary.pre_action()),
+                pending_factory: None,
             });
         } else {
-            slot.set_current(AiTalkData::pending(lane.map(slot_type_of).unwrap_or(TalkType::NoneTalk), unit.0, target_position));
+            slot.set_current(AiTalkData::pending(
+                lane.map(slot_type_of).unwrap_or(TalkType::NoneTalk),
+                unit.0,
+                target_position,
+            ));
         }
         mind.current = Some(objective_type);
         let source_word = match decision {
@@ -1265,11 +1517,17 @@ pub(crate) fn decide(
                 // 从哪条链来：动作点落点按构造命中自己的挂点，环带落点
                 // 撞上挂点坐标的同样命中。
                 let fit = if let Some(selected) = &fixture_selection {
-                    Some(FitCandidate { position: selected.position, rotation: selected.rotation })
-                } else {
-                    attach.and_then(|attach| attach.matching(landing)).map(|world| FitCandidate {
-                        position: landing, rotation: world.rotation,
+                    Some(FitCandidate {
+                        position: selected.position,
+                        rotation: selected.rotation,
                     })
+                } else {
+                    attach
+                        .and_then(|attach| attach.matching(landing))
+                        .map(|world| FitCandidate {
+                            position: landing,
+                            rotation: world.rotation,
+                        })
                 };
                 match depart(
                     unit,
@@ -1288,12 +1546,25 @@ pub(crate) fn decide(
                                 route.cancel();
                                 path.0 = moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
                                 *phase = MotionPhase::Dwelling { remaining: None };
-                                finish_objective(unit.0, &mut mind, &mut slot, pause_seconds.0, true, &mut actions, &mut rest);
+                                finish_objective(
+                                    unit.0,
+                                    &mut mind,
+                                    &mut slot,
+                                    pause_seconds.0,
+                                    true,
+                                    &mut actions,
+                                    &mut rest,
+                                );
                                 continue;
                             }
                         }
                         *phase = depart_phase;
-                        crate::npc::declare_navigation_action(&mut actions, &mut rest, &phase, &route);
+                        crate::npc::declare_navigation_action(
+                            &mut actions,
+                            &mut rest,
+                            &phase,
+                            &route,
+                        );
                         info!(
                             "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2})",
                             unit.0,
@@ -1314,7 +1585,15 @@ pub(crate) fn decide(
                         // 折线全档未命中（无路可达落点）：按未命中收场（与
                         // 三条链全未命中同形——不立跳过旗，进停顿等下一轮）。
                         let grounded = true;
-                        finish_objective(unit.0, &mut mind, &mut slot, pause_seconds.0, grounded, &mut actions, &mut rest);
+                        finish_objective(
+                            unit.0,
+                            &mut mind,
+                            &mut slot,
+                            pause_seconds.0,
+                            grounded,
+                            &mut actions,
+                            &mut rest,
+                        );
                         info!(
                             "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 无路（折线全档未命中），站定",
                             unit.0,
@@ -1337,7 +1616,15 @@ pub(crate) fn decide(
                 // 三条链全未命中：站定收场（无对话目标照常补位断环，但不
                 // 立跳过旗——见模块注释），进停顿等下一轮。
                 let grounded = true;
-                finish_objective(unit.0, &mut mind, &mut slot, pause_seconds.0, grounded, &mut actions, &mut rest);
+                finish_objective(
+                    unit.0,
+                    &mut mind,
+                    &mut slot,
+                    pause_seconds.0,
+                    grounded,
+                    &mut actions,
+                    &mut rest,
+                );
                 info!(
                     "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 未命中，站定",
                     unit.0,
@@ -1370,8 +1657,16 @@ pub(crate) fn finish_objective(
     mind.executing = false;
     if mind.current == Some(ObjectiveType::NoneTalk) {
         // 断环补位：未读道可得即取未读道（与空槽补位同一条级联替身）。
-        let position = slot.current.as_ref().expect("NoneTalk goal retains its factory record").target_position;
-        slot.set_current(AiTalkData::pending(slot_type_of(TalkLane::YetUnreadFixtureTalk), unit, position));
+        let position = slot
+            .current
+            .as_ref()
+            .expect("NoneTalk goal retains its factory record")
+            .target_position;
+        slot.set_current(AiTalkData::pending(
+            slot_type_of(TalkLane::YetUnreadFixtureTalk),
+            unit,
+            position,
+        ));
         if !grounded {
             mind.skip_next_rest = true;
             info!("[npc unit={unit}] 无对话目标收场：补位 → talk:unread，跳过下一轮停顿");
@@ -1385,8 +1680,9 @@ pub(crate) fn finish_objective(
         actions.change(crate::npc::NpcAction::Idle, rest);
     } else {
         mind.skip_next_rest = false;
-        let milliseconds = objective::rest_delay_milliseconds(pause_seconds)
-            .unwrap_or_else(|| panic!("角色 {unit} 的 pauseSeconds 列产不出停顿时长：{pause_seconds}"));
+        let milliseconds = objective::rest_delay_milliseconds(pause_seconds).unwrap_or_else(|| {
+            panic!("角色 {unit} 的 pauseSeconds 列产不出停顿时长：{pause_seconds}")
+        });
         mind.rest_remaining = milliseconds as f32 / 1000.0;
         mind.rest_revision = mind.rest_revision.wrapping_add(1);
         actions.begin_objective_rest(rest, mind.rest_revision);
@@ -1404,9 +1700,10 @@ pub(crate) fn finish_objective(
 pub(crate) fn seed_position(face: &ObjectiveFace, index: usize, count: usize) -> [f32; 3] {
     let walkable = face.walkable();
     let cell = walkable[index * walkable.len() / count];
-    face.sample(face.world_of(cell), TILE_SCALE).unwrap_or_else(|| {
-        panic!("可行走格 {cell:?} 构建时在面上，此刻采样落空——面在决策窗内被换代")
-    })
+    face.sample(face.world_of(cell), TILE_SCALE)
+        .unwrap_or_else(|| {
+            panic!("可行走格 {cell:?} 构建时在面上，此刻采样落空——面在决策窗内被换代")
+        })
 }
 
 /// 三角形上最近点（Ericson《Real-Time Collision Detection》5.1.5）。

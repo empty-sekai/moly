@@ -54,7 +54,9 @@ pub(crate) fn pick(
     // 同一条次序）。
     let mut taps: Vec<Vec2> = gestures
         .read()
-        .filter(|event| event.kind == GestureKind::Tap && event.state == GestureState::End && !event.ui_owned)
+        .filter(|event| {
+            event.kind == GestureKind::Tap && event.state == GestureState::End && !event.ui_owned
+        })
         .map(|event| event.position)
         .collect();
     // 屏幕按钮先手：接近触发的动作按钮与场地屏外壳都排在本系统之前，
@@ -65,7 +67,11 @@ pub(crate) fn pick(
     // 触发沿：手势层的 TAP 收场（真源只认 TAP；双击的第二次与长按都不
     // 拾取）+ 右键收起（PC 映射，取当帧光标位）。
     if buttons.just_released(MouseButton::Right) {
-        if let Some(position) = windows.single().ok().and_then(|window| window.cursor_position()) {
+        if let Some(position) = windows
+            .single()
+            .ok()
+            .and_then(|window| window.cursor_position())
+        {
             taps.push(position);
         }
     }
@@ -127,13 +133,17 @@ pub(crate) fn pick(
                 );
             }
             Some((_, Candidate::Npc(entity, index))) => {
-                if !eligibility.allows(*entity, *index) { continue; }
+                if !eligibility.allows(*entity, *index) {
+                    continue;
+                }
                 // This host mapping shares appearance qualification with the
                 // proximity button. The dispatcher owns safe positioning and
                 // click-time state checks; no nearby fixture selects a script.
                 talk_requests.write(PlayerTalkRequest {
                     entity: *entity,
                     unit: *index,
+                    exact: None,
+                    target_fixture: None,
                 });
                 info!(
                     "[pick] 点按 ({:.0},{:.0}) → 命中 NPC {entity:?}（unit {}）→ 玩家对话请求入队",

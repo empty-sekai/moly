@@ -102,7 +102,8 @@ impl TalkSession<'_> {
 // ---------------------------------------------------------------------------
 
 /// 面板源图所在页（提取产物的 UI atlas 页 0；文件名含 atlas 与页号）。
-const PANEL_PAGE: &str = "moly://ui/atlas/textures/sactx-0-2048x2048-ASTC 4x4-CommonAtlas-d65f3824-00000202.png";
+const PANEL_PAGE: &str =
+    "moly://ui/atlas/textures/sactx-0-2048x2048-ASTC 4x4-CommonAtlas-d65f3824-00000202.png";
 
 /// 面板：中心 (0,−320)、1600×312。
 const PANEL_CENTER: Vec2 = Vec2::new(0.0, -320.0);
@@ -199,6 +200,18 @@ pub(crate) struct TalkWindowState {
     label_version: u64,
     built_text: u64,
     built_label: u64,
+}
+
+impl TalkWindowState {
+    /// Read-only visible source transcript for accessibility/acceptance tools.
+    pub(crate) fn transcript(&self) -> (&str, &str, bool, bool) {
+        // HideTalkWindow fades alpha without unmounting the session. An
+        // accessibility/QA reader must not mistake a retained window for a
+        // visible dialogue prompt and accidentally skip a silent finale.
+        let displaying = self.present && self.fade.as_ref()
+            .map_or(self.alpha > 0.01, |(_, target, _, _)| *target > 0.01);
+        (&self.label, &self.text, displaying, self.playing)
+    }
 }
 
 impl Default for TalkWindowState {
@@ -367,7 +380,11 @@ pub(crate) struct TalkEndMark;
 // ---------------------------------------------------------------------------
 
 /// Startup：请求面板页贴图、程序化烘尾标替身、初始化窗体状态（常驻）。
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>, mut images: ResMut<Assets<Image>>) {
+pub(crate) fn load(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let page = server.load::<Image>(AssetPath::from(PANEL_PAGE.to_owned()));
     let end_mark = end_mark_image(&mut images);
     commands.insert_resource(WindowArt { page, end_mark });
@@ -391,9 +408,9 @@ pub(crate) fn read_click_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut gestures: MessageReader<GestureEvent>,
 ) {
-    let tap_family_end = gestures.read().any(|event| {
-        event.kind.is_tap_family() && event.state == GestureState::End
-    });
+    let tap_family_end = gestures
+        .read()
+        .any(|event| event.kind.is_tap_family() && event.state == GestureState::End);
     if !(tap_family_end || keys.just_pressed(KeyCode::Space)) {
         return;
     }
@@ -403,17 +420,13 @@ pub(crate) fn read_click_input(
             let owner = TalkSession::Player(&mut session);
             let chain = owner.chain_word();
             state.latch(owner);
-            info!(
-                "[talkwin] 点击闩置位（{chain}；tap 族收场/Space；打字中即跳字，收尾后放行）"
-            );
+            info!("[talkwin] 点击闩置位（{chain}；tap 族收场/Space；打字中即跳字，收尾后放行）");
         }
         (None, Some(mut talk)) => {
             let owner = TalkSession::Pair(&mut talk);
             let chain = owner.chain_word();
             state.latch(owner);
-            info!(
-                "[talkwin] 点击闩置位（{chain}；tap 族收场/Space；打字中即跳字，收尾后放行）"
-            );
+            info!("[talkwin] 点击闩置位（{chain}；tap 族收场/Space；打字中即跳字，收尾后放行）");
         }
         (Some(_), Some(_)) => {
             panic!("玩家会话与配对会话同时在播：两链互斥的入口守卫失守，fail-closed");
@@ -517,21 +530,19 @@ pub(crate) fn tick_window(
         // 点跳 SE：真源对话窗 OnClick 体 0 cue（读不出），按 mysekai UI
         // 家族的 select 档具名 mock（按下沿语义，CustomSelectableDefine
         // 同表）；2.0s 抑制在 SE 通道侧。
-        se.0.push(SeRequest {
+        se.0.push(SeRequest { owner: None,
             cue: "se_mysekai_ui_select".into(),
             class: SeClass::Ui,
             source: "talk-skip",
         });
-        info!(
-            "[talkwin] 点跳：跳过打字机（{len} 字一次揭示），点击闩清零——放行须再点"
-        );
+        info!("[talkwin] 点跳：跳过打字机（{len} 字一次揭示），点击闩清零——放行须再点");
     }
 
     // --- 放行沿 SE：wait_click 放行发生在步进主循环（其系统参数已满，
     // 经状态中转，见 consume_click/take_released）——decision 档具名 mock，
     // 与点跳的 select 档同表同源。 ---
     if state.take_released() {
-        se.0.push(SeRequest {
+        se.0.push(SeRequest { owner: None,
             cue: "se_mysekai_ui_decision".into(),
             class: SeClass::Ui,
             source: "talk-advance",
@@ -586,7 +597,9 @@ pub(crate) fn tick_window(
                         panic!("对话窗面板页装载失败：{err:?}");
                     }
                     LoadState::Loaded => {
-                        let Some(placement) = placement else { return; };
+                        let Some(placement) = placement else {
+                            return;
+                        };
                         spawn_tree(&mut commands, art, window_art, &state, placement);
                         state.built_label = state.label_version;
                         state.built_text = state.text_version;
@@ -609,7 +622,9 @@ pub(crate) fn tick_window(
 
     // The source Window is bottom-anchored. Scale alone would keep its
     // reference-frame coordinates around the center of a tall viewport.
-    let Some(placement) = placement else { return; };
+    let Some(placement) = placement else {
+        return;
+    };
     *root_transform = placement;
 
     // --- 呈现：名字栏/正文字形重建（版本落后即重建） ---
@@ -858,7 +873,13 @@ fn spawn_content_glyphs(
         BAKE_PPEM,
         &|ch| art.glyph_cell(ch).map(|(_, advance)| advance),
     );
-    let (lines, missing) = walk_glyphs(text, art, CONTENT_FONT, CONTENT_CHAR_EXTRA, CONTENT_WORD_EXTRA);
+    let (lines, missing) = walk_glyphs(
+        text,
+        art,
+        CONTENT_FONT,
+        CONTENT_CHAR_EXTRA,
+        CONTENT_WORD_EXTRA,
+    );
     if lines.len() != metrics.line_widths.len() {
         warn!(
             "[talkwin] 正文摆位行数 {} 与律行数 {} 不一致：摆位实现漂移",
@@ -867,9 +888,7 @@ fn spawn_content_glyphs(
         );
     }
     if missing > 0 {
-        warn!(
-            "[talkwin] 正文缺字形 {missing} 个（候选预筛已把语料字符集并进图集——缺即数据断点）"
-        );
+        warn!("[talkwin] 正文缺字形 {missing} 个（候选预筛已把语料字符集并进图集——缺即数据断点）");
     }
     let mut widest = 0.0f32;
     for line in &lines {
@@ -930,7 +949,8 @@ fn spawn_text_glyphs(
     let (cell, pen_x, baseline_from_top) = art.cell_geometry();
     let mut count = 0usize;
     for (li, line) in lines.iter().enumerate() {
-        let baseline = baseline_0 - metrics.line_offsets.get(li).copied().unwrap_or(0.0) / TEXT_SCALE;
+        let baseline =
+            baseline_0 - metrics.line_offsets.get(li).copied().unwrap_or(0.0) / TEXT_SCALE;
         for (spot, pen, raw) in line {
             let Some((cell_rect, _)) = art.glyph_cell(spot.ch) else {
                 continue;
@@ -958,9 +978,7 @@ fn spawn_text_glyphs(
                     ..default()
                 },
                 Transform::from_xyz(x, y, 0.0),
-                TalkWindowPart {
-                    base: glyph_color,
-                },
+                TalkWindowPart { base: glyph_color },
                 Visibility::Hidden,
                 RenderLayers::layer(BALLOON_LAYER),
             ));

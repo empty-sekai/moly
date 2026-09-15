@@ -132,8 +132,18 @@ pub(crate) fn install(app: &mut App) {
         .add_message::<SettingsPanelRequest>();
 }
 
-pub(crate) fn scene_input_enabled(panel: Res<SettingsPanel>) -> bool {
-    !panel.blocks_world_input()
+pub(crate) fn scene_input_enabled(
+    panel: Res<SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
+) -> bool {
+    !panel.blocks_world_input() && !library.blocks_world_input()
+}
+
+pub(crate) fn talk_input_enabled(
+    panel: Res<SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
+) -> bool {
+    !panel.blocks_world_input() && !library.blocks_talk_input()
 }
 
 fn graphics_from_document(document: &Value) -> GraphicsSettings {
@@ -235,13 +245,41 @@ pub(crate) fn setup(
         .id();
     commands.entity(root).add_child(content);
     let heading = row(&mut commands, content);
-    add_text(&mut commands, heading, &font, &format!("moly v{}", crate::VERSION), 23., None);
-    add_button(&mut commands, heading, &font, "Audio/video", Action::SettingsPage);
-    add_button(&mut commands, heading, &font, "Player data", Action::PlayerData);
+    add_text(
+        &mut commands,
+        heading,
+        &font,
+        &format!("moly v{}", crate::VERSION),
+        23.,
+        None,
+    );
+    add_button(
+        &mut commands,
+        heading,
+        &font,
+        "Audio/video",
+        Action::SettingsPage,
+    );
+    add_button(
+        &mut commands,
+        heading,
+        &font,
+        "Player data",
+        Action::PlayerData,
+    );
     add_button(&mut commands, heading, &font, "Close", Action::Close);
     crate::player_data_ui::spawn(&mut commands, content, &font);
-    let settings_body = commands.spawn((Node { width: percent(100),
-        flex_direction: FlexDirection::Column, row_gap: px(12), ..default() }, SettingsBody)).id();
+    let settings_body = commands
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(12),
+                ..default()
+            },
+            SettingsBody,
+        ))
+        .id();
     commands.entity(content).add_child(settings_body);
     let content = settings_body;
     for (index, title) in ["Music", "Sound effects", "Voice"].into_iter().enumerate() {
@@ -329,8 +367,14 @@ pub(crate) fn setup(
         14.,
         Some(ValueLabel::Status),
     );
-    add_text(&mut commands, content, &font, "Measuring frame time...", 14.,
-        Some(ValueLabel::Performance));
+    add_text(
+        &mut commands,
+        content,
+        &font,
+        "Measuring frame time...",
+        14.,
+        Some(ValueLabel::Performance),
+    );
 }
 
 fn row(commands: &mut Commands, parent: Entity) -> Entity {
@@ -509,8 +553,10 @@ pub(crate) fn input(
                 panel.status = if store.save(&sections) {
                     "Saved.".into()
                 } else {
-                    format!("Save failed: {}. Session values are still active.",
-                        store.last_error.as_deref().unwrap_or("storage unavailable"))
+                    format!(
+                        "Save failed: {}. Session values are still active.",
+                        store.last_error.as_deref().unwrap_or("storage unavailable")
+                    )
                 };
                 if let Some(error) = &store.last_error {
                     warn!("[game-settings] {error}");
@@ -538,19 +584,34 @@ pub(crate) fn refresh_ui(
             Display::None
         };
     }
-    if !panel.open { return; }
+    if !panel.open {
+        return;
+    }
     for mut body in &mut bodies {
-        body.display = if panel.player_data { Display::None } else { Display::Flex };
+        body.display = if panel.player_data {
+            Display::None
+        } else {
+            Display::Flex
+        };
     }
     let refresh_performance = time.elapsed_secs_f64() - *last_performance >= 0.5;
-    if refresh_performance { *last_performance = time.elapsed_secs_f64(); }
+    if refresh_performance {
+        *last_performance = time.elapsed_secs_f64();
+    }
     for (label, mut text) in &mut labels {
         let next = match label {
             ValueLabel::Performance => {
-                if !refresh_performance { continue; }
+                if !refresh_performance {
+                    continue;
+                }
                 use bevy::diagnostic::FrameTimeDiagnosticsPlugin as Frames;
-                match diagnostics.get(&Frames::FRAME_TIME).and_then(|d| d.average()) {
-                    Some(ms) if ms > 0. => format!("Actual: {:.1} FPS | {:.1} ms/frame", 1000. / ms, ms),
+                match diagnostics
+                    .get(&Frames::FRAME_TIME)
+                    .and_then(|d| d.average())
+                {
+                    Some(ms) if ms > 0. => {
+                        format!("Actual: {:.1} FPS | {:.1} ms/frame", 1000. / ms, ms)
+                    }
                     _ => "Measuring frame time...".into(),
                 }
             }

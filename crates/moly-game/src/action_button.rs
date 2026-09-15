@@ -23,8 +23,8 @@ use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
 
 use moly_law::action_button::{
-    character_box, fixture_box, ButtonStack, ButtonType, CollisionBox2D,
-    FixtureType, TargetId, ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
+    character_box, fixture_box, ButtonStack, ButtonType, CollisionBox2D, FixtureType, TargetId,
+    ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
 };
 
 use crate::balloon::{canvas_scale, BALLOON_LAYER};
@@ -76,16 +76,29 @@ impl ActionButtonSkin {
         let doc = layouts.document(SKIN_LAYOUT)?;
         let background_node = &doc.nodes[doc.find(BUTTON_NODE).expect("source action button")];
         let icon_node = &doc.nodes[doc.find(ICON_NODE).expect("source action icon")];
-        let background = background_node.components.iter().find(|component| {
-            component.enabled && component.class.ends_with("Image") && component.sprite.is_some()
-        }).expect("source action button Image");
-        let icon = icon_node.components.iter().find(|component| {
-            component.enabled && component.class.ends_with("RawImage")
-        }).expect("source action icon RawImage");
-        let image = background.sprite.as_ref().and_then(|sprite| sprite["image"].as_str())
+        let background = background_node
+            .components
+            .iter()
+            .find(|component| {
+                component.enabled
+                    && component.class.ends_with("Image")
+                    && component.sprite.is_some()
+            })
+            .expect("source action button Image");
+        let icon = icon_node
+            .components
+            .iter()
+            .find(|component| component.enabled && component.class.ends_with("RawImage"))
+            .expect("source action icon RawImage");
+        let image = background
+            .sprite
+            .as_ref()
+            .and_then(|sprite| sprite["image"].as_str())
             .expect("source action button Sprite image");
         let color = |component: &moly_assets::ui_layout::UiComponent| {
-            let values = component.fields["m_Color"].as_array().expect("source UI color");
+            let values = component.fields["m_Color"]
+                .as_array()
+                .expect("source UI color");
             let channel = |i: usize| values[i].as_f64().expect("source UI color channel") as f32;
             Color::srgba(channel(0), channel(1), channel(2), channel(3))
         };
@@ -113,11 +126,20 @@ pub(crate) struct ActionButtonScreen<'w, 's> {
 }
 
 impl ActionButtonScreen<'_, '_> {
-    fn rects(&self, size: Vec2) -> Option<(moly_assets::ui_layout::UiRect, moly_assets::ui_layout::UiRect)> {
+    fn rects(
+        &self,
+        size: Vec2,
+    ) -> Option<(
+        moly_assets::ui_layout::UiRect,
+        moly_assets::ui_layout::UiRect,
+    )> {
         let skin = self.art.as_deref()?.skin.as_ref()?;
         let layouts = self.layouts.as_deref()?;
         let canvas = size / canvas_scale(size.x, size.y);
-        Some((skin.geometry.rect(layouts, BUTTON_NODE, canvas)?, skin.geometry.rect(layouts, ICON_NODE, canvas)?))
+        Some((
+            skin.geometry.rect(layouts, BUTTON_NODE, canvas)?,
+            skin.geometry.rect(layouts, ICON_NODE, canvas)?,
+        ))
     }
 
     fn button_position(&self, size: Vec2) -> Option<Vec2> {
@@ -127,7 +149,9 @@ impl ActionButtonScreen<'_, '_> {
     }
 
     fn hit(&self, position: Vec2, size: Vec2) -> bool {
-        let Some((button, _)) = self.rects(size) else { return false; };
+        let Some((button, _)) = self.rects(size) else {
+            return false;
+        };
         let canvas_point = Vec2::new(position.x - size.x * 0.5, size.y * 0.5 - position.y)
             / canvas_scale(size.x, size.y);
         button.active && button.contains(canvas_point)
@@ -225,10 +249,16 @@ impl ActionButtonState {
 
     fn fixture_key(&mut self, entity: Entity, identity: Option<&FixtureActivityIdentity>) -> i32 {
         let uid = identity.map(|identity| identity.uid.as_str());
-        if let Some((&key, candidate)) = self.fixture_candidates.iter_mut().find(|(_, candidate)| {
-            candidate.entity == entity
-                && candidate.uid.as_deref().zip(uid).map_or(true, |(previous, current)| previous == current)
-        }) {
+        if let Some((&key, candidate)) =
+            self.fixture_candidates.iter_mut().find(|(_, candidate)| {
+                candidate.entity == entity
+                    && candidate
+                        .uid
+                        .as_deref()
+                        .zip(uid)
+                        .map_or(true, |(previous, current)| previous == current)
+            })
+        {
             // Bind a late identity to this same entity. Once known, retain it
             // through temporary absence; the existing activity owner rejects
             // stale Entity/UID pairs. A different known UID gets a new handle.
@@ -238,11 +268,16 @@ impl ActionButtonState {
             return key;
         }
         let key = self.next_fixture_key;
-        self.next_fixture_key = key.checked_add(1).expect("fixture button handle space exhausted");
-        self.fixture_candidates.insert(key, FixtureButtonCandidate {
-            entity,
-            uid: uid.map(str::to_owned),
-        });
+        self.next_fixture_key = key
+            .checked_add(1)
+            .expect("fixture button handle space exhausted");
+        self.fixture_candidates.insert(
+            key,
+            FixtureButtonCandidate {
+                entity,
+                uid: uid.map(str::to_owned),
+            },
+        );
         key
     }
 
@@ -350,9 +385,7 @@ pub(crate) fn parse_tables(
         let Some(glb) = entry.get("glb").and_then(|v| v.as_str()) else {
             continue;
         };
-        facts
-            .package_by_glb
-            .insert(glb.to_owned(), name.to_owned());
+        facts.package_by_glb.insert(glb.to_owned(), name.to_owned());
     }
 
     let master: serde_json::Value = serde_json::from_str(&master_json.0)
@@ -370,12 +403,13 @@ pub(crate) fn parse_tables(
             .get("fixtureTypeValue")
             .and_then(|v| v.as_i64())
             .expect("[action_button] 主表行缺 fixtureTypeValue") as i32;
-        let action_value = row
-            .get("playerActionTypeValue")
-            .and_then(|v| v.as_i64())
-            .expect("[action_button] 主表行缺 playerActionTypeValue") as i32;
-        let fixture_type = FixtureType::from_i32(type_value)
-            .unwrap_or_else(|| panic!("[action_button] 主表行 {bundle} 的家具类别越界：{type_value}"));
+        let action_value =
+            row.get("playerActionTypeValue")
+                .and_then(|v| v.as_i64())
+                .expect("[action_button] 主表行缺 playerActionTypeValue") as i32;
+        let fixture_type = FixtureType::from_i32(type_value).unwrap_or_else(|| {
+            panic!("[action_button] 主表行 {bundle} 的家具类别越界：{type_value}")
+        });
         let grid_width = row.get("gridWidth").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
         let grid_depth = row.get("gridDepth").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
         // 摆放侧的包名是主表 assetbundleName 加一个固定前缀。
@@ -454,14 +488,20 @@ pub(crate) fn spawn_when_ready(
     if !roots.is_empty() {
         return;
     }
-    let (Some(mut art), Some(layouts)) = (art, layouts) else { return };
+    let (Some(mut art), Some(layouts)) = (art, layouts) else {
+        return;
+    };
     if art.skin.is_none() {
         art.skin = ActionButtonSkin::from_layouts(&layouts, &server);
     }
-    let Some(skin) = art.skin.as_ref() else { return; };
+    let Some(skin) = art.skin.as_ref() else {
+        return;
+    };
     match server.load_state(&skin.background) {
         LoadState::Loaded => {}
-        LoadState::Failed(err) => panic!("[action_button] source button background failed: {err:?}"),
+        LoadState::Failed(err) => {
+            panic!("[action_button] source button background failed: {err:?}")
+        }
         _ => return,
     }
     // 对话与机关两张是当前接得出的两种按钮，等它们到齐即可铺件；
@@ -476,12 +516,18 @@ pub(crate) fn spawn_when_ready(
             _ => return,
         }
     }
-    let background = commands.spawn((
-        ActionButtonBackground,
-        Sprite { image: skin.background.clone(), color: skin.background_color, ..default() },
-        Transform::default(),
-        RenderLayers::layer(BALLOON_LAYER),
-    )).id();
+    let background = commands
+        .spawn((
+            ActionButtonBackground,
+            Sprite {
+                image: skin.background.clone(),
+                color: skin.background_color,
+                ..default()
+            },
+            Transform::default(),
+            RenderLayers::layer(BALLOON_LAYER),
+        ))
+        .id();
     let icon = commands
         .spawn((
             ActionButtonIcon,
@@ -519,7 +565,14 @@ pub(crate) fn advance(
     players: Query<&Transform, With<PlayerControlled>>,
     npcs: Query<(&Transform, &CharacterUnitId, &WalkState), Without<PlayerControlled>>,
     fixtures: Query<
-        (Entity, &Transform, &FixtureSource, &FixturePlacement, &GlobalTransform, Option<&FixtureActivityIdentity>),
+        (
+            Entity,
+            &Transform,
+            &FixtureSource,
+            &FixturePlacement,
+            &GlobalTransform,
+            Option<&FixtureActivityIdentity>,
+        ),
         With<FixtureRoot>,
     >,
     server: Res<AssetServer>,
@@ -614,7 +667,9 @@ pub(crate) fn advance(
     state
         .stack
         .retain_targets(&|target| alive.contains(&target));
-    state.fixture_candidates.retain(|key, _| alive.contains(&TargetId::Fixture(*key)));
+    state
+        .fixture_candidates
+        .retain(|key, _| alive.contains(&TargetId::Fixture(*key)));
 
     let head = state.stack.first();
     if head != state.reported {
@@ -667,7 +722,10 @@ pub(crate) fn place_ui(
     state: Res<ActionButtonState>,
     screen: ActionButtonScreen,
     mut roots: Query<(&mut Visibility, &mut Transform), (With<ActionButtonRoot>, Without<Sprite>)>,
-    mut parts: Query<(&mut Transform, &mut Sprite, Option<&ActionButtonIcon>), Or<(With<ActionButtonIcon>, With<ActionButtonBackground>)>>,
+    mut parts: Query<
+        (&mut Transform, &mut Sprite, Option<&ActionButtonIcon>),
+        Or<(With<ActionButtonIcon>, With<ActionButtonBackground>)>,
+    >,
 ) {
     let Ok((_, window)) = screen.windows.single() else {
         return;
@@ -685,9 +743,15 @@ pub(crate) fn place_ui(
         transform.scale = Vec3::new(scale, scale, 1.0);
     }
     let Some((button, _)) = head else { return };
-    let (Some(art), Some((background_rect, icon_rect))) = (screen.art.as_deref(), rects) else { return; };
+    let (Some(art), Some((background_rect, icon_rect))) = (screen.art.as_deref(), rects) else {
+        return;
+    };
     for (mut transform, mut sprite, icon) in &mut parts {
-        let rect = if icon.is_some() { &icon_rect } else { &background_rect };
+        let rect = if icon.is_some() {
+            &icon_rect
+        } else {
+            &background_rect
+        };
         let (local_scale, rotation, _) = rect.world.to_scale_rotation_translation();
         *transform = Transform {
             translation: rect.center().extend(if icon.is_some() { 0.5 } else { 0.0 }),
@@ -731,8 +795,12 @@ pub(crate) fn click(
         .filter(|event| event.kind == GestureKind::Tap && event.state == GestureState::End)
         .map(|event| event.position)
         .collect();
-    if taps.is_empty() || !eligibility.available()
-        || !roots.iter().any(|visibility| *visibility != Visibility::Hidden) {
+    if taps.is_empty()
+        || !eligibility.available()
+        || !roots
+            .iter()
+            .any(|visibility| *visibility != Visibility::Hidden)
+    {
         return;
     }
     let Some((button, target)) = state.current() else {
@@ -756,10 +824,14 @@ pub(crate) fn click(
             consumed.0 = true;
             continue;
         }
-        if button != ButtonType::Talk { state.last_input = now; }
+        if button != ButtonType::Talk {
+            state.last_input = now;
+        }
         consumed.0 = true;
         if let TargetId::Character(unit) = target {
-            if !eligibility.for_unit(unit) { continue; }
+            if !eligibility.for_unit(unit) {
+                continue;
+            }
         }
         dispatch(
             button,
@@ -810,7 +882,12 @@ fn dispatch(
                 info!("[action_button] 对话按钮按下但 unit {unit} 已离场，丢弃");
                 return;
             };
-            talk_requests.write(PlayerTalkRequest { entity, unit });
+            talk_requests.write(PlayerTalkRequest {
+                entity,
+                unit,
+                exact: None,
+                target_fixture: None,
+            });
             info!("[action_button] 对话按钮按下 → unit {unit}（{entity:?}）玩家对话请求入队");
         }
         (ButtonType::GimmickFixture | ButtonType::TimelineFixture, TargetId::Fixture(key)) => {
@@ -829,15 +906,13 @@ fn dispatch(
         (ButtonType::HouseEntry, _) => {
             // 源侧进屋换层（房子家具 → 室内场地屏）。本仓室内是站点
             // （first_floor），走与小地图点站同一条站点切换请求。
-            commands.insert_resource(crate::site::SiteChangeRequest(
-                "first_floor".to_owned(),
-            ));
-            info!("[action_button] 进屋按钮按下 → 站点切换请求 first_floor（与小地图点站同一条路）");
+            commands.insert_resource(crate::site::SiteChangeRequest("first_floor".to_owned()));
+            info!(
+                "[action_button] 进屋按钮按下 → 站点切换请求 first_floor（与小地图点站同一条路）"
+            );
         }
         (ButtonType::GoHomeSite, _) => {
-            commands.insert_resource(crate::site::SiteChangeRequest(
-                "home_site".to_owned(),
-            ));
+            commands.insert_resource(crate::site::SiteChangeRequest("home_site".to_owned()));
             info!("[action_button] 回家按钮按下 → 站点切换请求 home_site");
         }
         (ButtonType::OpenChest, _) => {
@@ -877,9 +952,7 @@ fn dispatch(
             info!("[action_button] 访问按钮按下 → PushUIScreen(访客一览 658) → 层栈压层");
         }
         (ButtonType::OpenAvatarDressUp, _) => {
-            layer_commands.write(LayerCommand::Push(
-                LayerId::MysekaiAvatarCostumeSetting,
-            ));
+            layer_commands.write(LayerCommand::Push(LayerId::MysekaiAvatarCostumeSetting));
             info!("[action_button] 换装按钮按下 → PushUIScreen(换装 629) → 层栈压层");
         }
         (ButtonType::OpenSecretShop, _) => {
@@ -963,18 +1036,19 @@ pub(crate) fn smoke_autowalk(
             id: FINGER,
         });
     };
-    let write_tap =
-        |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
-            touches.write(TouchInput {
-                phase,
-                position,
-                window: window_entity,
-                force: None,
-                id: TAP_FINGER,
-            });
-        };
+    let write_tap = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
+        touches.write(TouchInput {
+            phase,
+            position,
+            window: window_entity,
+            force: None,
+            id: TAP_FINGER,
+        });
+    };
     // 按钮的屏位（顶原点）：与摆件同一式——覆盖相机世界心翻回屏坐标。
-    let Some(button_pos) = screen.button_position(Vec2::new(width, height)) else { return; };
+    let Some(button_pos) = screen.button_position(Vec2::new(width, height)) else {
+        return;
+    };
     // 收尾：armed 窗口一过两根指都松（走指若还按着，摇杆会拖着最后
     // 那个方向一直走）。
     if now >= armed {
@@ -1035,7 +1109,8 @@ pub(crate) fn smoke_autowalk(
         .iter()
         .map(|(entity, _)| WalkTarget::Npc(entity))
         .collect();
-    let mut anchors: Vec<(i32, Vec2)> = fixtures.iter()
+    let mut anchors: Vec<(i32, Vec2)> = fixtures
+        .iter()
         .filter(|(placement, _)| placement.fixture_id != 0)
         .map(|(placement, global)| (placement.fixture_id, global.translation().xz()))
         .collect();
@@ -1129,10 +1204,7 @@ pub(crate) fn smoke_autowalk(
         };
         let right = camera.right();
         let right_flat = Vec2::new(right.x, right.z);
-        let joy = Vec2::new(
-            dir_world.dot(right_flat),
-            dir_world.dot(forward_flat),
-        );
+        let joy = Vec2::new(dir_world.dot(right_flat), dir_world.dot(forward_flat));
         let radius = HANDLE_SIZE * canvas_scale(width, height);
         // 触点 = 底盘 + (joy.x, -joy.y) × 半径（屏坐标 y 向下）。
         let position = base + Vec2::new(joy.x, -joy.y) * radius;

@@ -348,10 +348,11 @@ pub(crate) fn read_input(
     edits: Res<crate::fixture_edit::EditSessionActive>,
     joystick: Res<crate::joystick::JoystickState>,
     settings_panel: Res<crate::game_settings::SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
-    if edits.is_active() || settings_panel.blocks_world_input() {
+    if edits.is_active() || settings_panel.blocks_world_input() || library.blocks_world_input() {
         for (mut input, _) in &mut players {
             input.active = false;
             input.direction = Vec3::ZERO;

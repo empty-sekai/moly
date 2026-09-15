@@ -269,7 +269,7 @@ fn receive_commands(
 
 fn play_se(world: &mut World, cue: &'static str, source: &'static str) {
     if let Some(mut se) = world.get_resource_mut::<SeRequests>() {
-        se.0.push(SeRequest {
+        se.0.push(SeRequest { owner: None,
             cue: cue.into(),
             class: SeClass::Ui,
             source,

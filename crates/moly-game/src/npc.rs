@@ -26,9 +26,9 @@ use moly_assets::json::JsonAsset;
 use moly_law::objective::rest_delay_milliseconds;
 use moly_law::path::WalkState as LawWalkState;
 use moly_law::path::{
-    NpcPathWalkSlot, TurnMotion, WalkVerdict, angle_between, facing_direction, heading_yaw,
-    rotate_time, turn_angle, turn_motion, ARRIVAL_DISTANCE, FORWARD_FALLBACK,
-    Waypoint, WaypointKind, build_waypoints, WAYPOINT_SAMPLE_DISTANCE,
+    angle_between, build_waypoints, facing_direction, heading_yaw, rotate_time, turn_angle,
+    turn_motion, NpcPathWalkSlot, TurnMotion, WalkVerdict, Waypoint, WaypointKind,
+    ARRIVAL_DISTANCE, FORWARD_FALLBACK, WAYPOINT_SAMPLE_DISTANCE,
 };
 
 /// 离线名册点名（native `MOLY_ROSTER_UNITS` / web `roster_units`）。
@@ -40,21 +40,24 @@ fn roster_units(content: crate::site::OfflineSceneContent) -> Option<Vec<u32>> {
     #[cfg(not(target_arch = "wasm32"))]
     let raw = std::env::var("MOLY_ROSTER_UNITS").ok();
     #[cfg(target_arch = "wasm32")]
-    let raw = web_sys::window().and_then(|window| window.location().search().ok())
+    let raw = web_sys::window()
+        .and_then(|window| window.location().search().ok())
         .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
         .and_then(|params| params.get("roster_units"));
     let Some(raw) = raw else {
         return (content == crate::site::OfflineSceneContent::Compact).then(|| vec![1, 5, 13]);
     };
-    if raw.trim() == "all" { return None; }
+    if raw.trim() == "all" {
+        return None;
+    }
     let ids: Vec<u32> = raw
         .split(',')
         .map(|token| token.trim())
         .filter(|token| !token.is_empty())
         .map(|token| {
-            token.parse::<u32>().unwrap_or_else(|_| {
-                panic!("MOLY_ROSTER_UNITS 的项不是 unit id：{token:?}")
-            })
+            token
+                .parse::<u32>()
+                .unwrap_or_else(|_| panic!("MOLY_ROSTER_UNITS 的项不是 unit id：{token:?}"))
         })
         .collect();
     if ids.is_empty() {
@@ -118,32 +121,47 @@ pub(crate) struct NpcActions {
 impl Default for NpcActions {
     fn default() -> Self {
         Self {
-            current: NpcAction::None, before: NpcAction::None, enable_talk: false,
-            is_tweeting: false, talk_owner: None, site_type: String::new(),
-            registered: false, scene: 0,
+            current: NpcAction::None,
+            before: NpcAction::None,
+            enable_talk: false,
+            is_tweeting: false,
+            talk_owner: None,
+            site_type: String::new(),
+            registered: false,
+            scene: 0,
         }
     }
 }
 
 impl NpcActions {
-    pub(crate) fn ready(&self) -> bool { self.registered }
+    pub(crate) fn ready(&self) -> bool {
+        self.registered
+    }
 
     pub(crate) fn change(&mut self, next: NpcAction, rest: &mut RestLifecycle) {
-        if self.current == next { return; }
-        if self.current == NpcAction::Rest { rest.leave(); }
+        if self.current == next {
+            return;
+        }
+        if self.current == NpcAction::Rest {
+            rest.leave();
+        }
         self.before = self.current;
         self.current = next;
     }
 
     pub(crate) fn begin_objective_rest(&mut self, rest: &mut RestLifecycle, revision: u64) {
         self.change(NpcAction::Rest, rest);
-        rest.enter(RestSource::Objective { scene: self.scene, revision });
+        rest.enter(RestSource::Objective {
+            scene: self.scene,
+            revision,
+        });
     }
 
     fn begin_waypoint_rest(&mut self, rest: &mut RestLifecycle, route: &RouteStops) {
         self.change(NpcAction::Rest, rest);
         rest.enter(RestSource::Waypoint {
-            scene: self.scene, index: route.next,
+            scene: self.scene,
+            index: route.next,
             goal: route.goal.map(|point| point.map(f32::to_bits)),
         });
     }
@@ -159,8 +177,15 @@ pub(crate) struct RestLifecycle {
 
 #[derive(Clone, PartialEq, Eq)]
 enum RestSource {
-    Objective { scene: u64, revision: u64 },
-    Waypoint { scene: u64, index: usize, goal: Option<[u32; 3]> },
+    Objective {
+        scene: u64,
+        revision: u64,
+    },
+    Waypoint {
+        scene: u64,
+        index: usize,
+        goal: Option<[u32; 3]>,
+    },
 }
 
 impl RestLifecycle {
@@ -169,12 +194,16 @@ impl RestLifecycle {
     }
 
     fn enter(&mut self, source: RestSource) {
-        if self.source.is_none() { self.epoch = self.epoch.wrapping_add(1); }
+        if self.source.is_none() {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
         self.source = Some(source);
     }
 
     fn leave(&mut self) {
-        if self.source.take().is_some() { self.epoch = self.epoch.wrapping_add(1); }
+        if self.source.take().is_some() {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
     }
 }
 
@@ -188,14 +217,21 @@ pub(crate) fn sync_rest_lifecycle(
         Option<&crate::character::MotionDriver>,
         Option<&crate::character_material::ToonMaterials>,
         Option<&crate::talk::TalkHold>,
-        Option<&crate::balloon::AfterEditHold>, &mut RestLifecycle,
+        Option<&crate::balloon::AfterEditHold>,
+        &mut RestLifecycle,
     )>,
 ) {
     // SiteActive removal is the current host's scene-retirement signal.
     // Visibility and navigation readiness are not Rest state transitions.
-    let scene = epoch.as_deref().filter(|_| site.is_some()).map(|epoch| epoch.0);
+    let scene = epoch
+        .as_deref()
+        .filter(|_| site.is_some())
+        .map(|epoch| epoch.0);
     for (mut actions, driver, toon, talk, reaction, mut rest) in &mut npcs {
-        let Some(scene) = scene else { rest.leave(); continue; };
+        let Some(scene) = scene else {
+            rest.leave();
+            continue;
+        };
         if !actions.registered && driver.is_some() && toon.is_some() {
             actions.registered = true;
             actions.scene = scene;
@@ -214,10 +250,16 @@ pub(crate) fn sync_rest_lifecycle(
 pub(crate) fn enter_player_talk(commands: &mut Commands, entity: Entity, player: Entity) {
     commands.queue(move |world: &mut World| {
         let mut query = world.query::<(
-            &mut NpcActions, &mut RestLifecycle, &mut RouteStops, &mut PathSlot,
-            &mut WalkState, &mut MotionPhase,
+            &mut NpcActions,
+            &mut RestLifecycle,
+            &mut RouteStops,
+            &mut PathSlot,
+            &mut WalkState,
+            &mut MotionPhase,
         )>();
-        if let Ok((mut actions, mut rest, mut route, mut path, mut walk, mut phase)) = query.get_mut(world, entity) {
+        if let Ok((mut actions, mut rest, mut route, mut path, mut walk, mut phase)) =
+            query.get_mut(world, entity)
+        {
             actions.change(NpcAction::Talk, &mut rest);
             actions.talk_owner = Some(player);
             route.stop();
@@ -234,9 +276,13 @@ pub(crate) fn leave_player_talk(commands: &mut Commands, entity: Entity) {
     commands.queue(move |world: &mut World| {
         let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
         if let Ok((mut actions, mut rest)) = query.get_mut(world, entity) {
-            if actions.current != NpcAction::Talk { return; }
+            if actions.current != NpcAction::Talk {
+                return;
+            }
             let next = match actions.before {
-                NpcAction::FixtureAction | NpcAction::FixtureActionIdle => NpcAction::FixtureActionIdle,
+                NpcAction::FixtureAction | NpcAction::FixtureActionIdle => {
+                    NpcAction::FixtureActionIdle
+                }
                 _ => NpcAction::Idle,
             };
             actions.change(next, &mut rest);
@@ -248,11 +294,26 @@ pub(crate) fn leave_player_talk(commands: &mut Commands, entity: Entity) {
 /// The ordinary objective owner has accepted cancellation. Dispose only its
 /// movement/Rest execution; Current/Previous content and MemberRng stay owned
 /// by the retained AI instance.
-pub(crate) fn stop_for_layout_edit(world: &mut World, actor: Entity) {
-    let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle,
-        &mut RouteStops, &mut PathSlot, &mut WalkState, &mut StuckBaseline, &mut MotionPhase)>();
-    let Ok((mut actions, mut rest, mut route, mut path, mut walk, mut stuck, mut phase)) = query.get_mut(world, actor) else { return; };
-    if actions.current == NpcAction::Talk { return; }
+pub(crate) use stop_for_external_activity as stop_for_layout_edit;
+
+pub(crate) fn stop_for_external_activity(world: &mut World, actor: Entity) {
+    let mut query = world.query::<(
+        &mut NpcActions,
+        &mut RestLifecycle,
+        &mut RouteStops,
+        &mut PathSlot,
+        &mut WalkState,
+        &mut StuckBaseline,
+        &mut MotionPhase,
+    )>();
+    let Ok((mut actions, mut rest, mut route, mut path, mut walk, mut stuck, mut phase)) =
+        query.get_mut(world, actor)
+    else {
+        return;
+    };
+    if actions.current == NpcAction::Talk {
+        return;
+    }
     route.cancel();
     path.0 = NpcPathWalkSlot::from_corners(Vec::new());
     walk.0.next_corner = 0;
@@ -264,14 +325,32 @@ pub(crate) fn stop_for_layout_edit(world: &mut World, actor: Entity) {
 /// Show synchronizes the retained actor with the rebuilt field. Unhandled
 /// objective branches keep their route/content and the existing generation
 /// mover replans them; it must not blindly follow a stale path after Save.
-pub(crate) fn reattach_after_layout_edit(world: &mut World, actor: Entity, point: Vec3, generation: u64) {
-    let mut query = world.query::<(&mut Transform, &mut WalkState, &mut RouteStops, &PathSlot, &mut StuckBaseline)>();
-    let Ok((mut transform, mut walk, mut route, path, mut stuck)) = query.get_mut(world, actor) else { return; };
+pub(crate) fn reattach_after_layout_edit(
+    world: &mut World,
+    actor: Entity,
+    point: Vec3,
+    generation: u64,
+) {
+    let mut query = world.query::<(
+        &mut Transform,
+        &mut WalkState,
+        &mut RouteStops,
+        &PathSlot,
+        &mut StuckBaseline,
+    )>();
+    let Ok((mut transform, mut walk, mut route, path, mut stuck)) = query.get_mut(world, actor)
+    else {
+        return;
+    };
     transform.translation = point;
     walk.0.position = point.to_array();
     walk.0.forward = (transform.rotation * Vec3::Z).to_array();
     stuck.0 = None;
-    route.generation = if route.goal.is_none() && path.0.corners().is_empty() { generation } else { 0 };
+    route.generation = if route.goal.is_none() && path.0.corners().is_empty() {
+        generation
+    } else {
+        0
+    };
 }
 
 /// 当前 waypoint 的导航拐点。与包含 Rest/CheckPoint 身份的整条路点表分开。
@@ -306,7 +385,10 @@ pub struct RouteStops {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RouteOutcome { Arrived, Stopped }
+pub(crate) enum RouteOutcome {
+    Arrived,
+    Stopped,
+}
 
 impl RouteStops {
     fn stop(&mut self) {
@@ -321,9 +403,17 @@ impl RouteStops {
         self.reentry = reentry;
     }
 
-    pub(crate) fn navigation_origin(&self, position: [f32; 3], face: &crate::walk_face::WalkFace) -> [f32; 3] {
-        if face.walkable_at([position[0], position[2]]) { return position; }
-        self.reentry.filter(|p| face.walkable_at([p[0], p[2]])).unwrap_or(position)
+    pub(crate) fn navigation_origin(
+        &self,
+        position: [f32; 3],
+        face: &crate::walk_face::WalkFace,
+    ) -> [f32; 3] {
+        if face.walkable_at([position[0], position[2]]) {
+            return position;
+        }
+        self.reentry
+            .filter(|p| face.walkable_at([p[0], p[2]]))
+            .unwrap_or(position)
     }
 
     /// Pause route bookkeeping while the activity owns local movement.
@@ -477,8 +567,8 @@ impl Catalog {
     /// 的一次性拒绝；报错只带字段名与 unitId，不带清单文本（清单含角色名）。
     /// 停顿列要能产出停顿时长（停顿律拒负值/NaN），产不出同样在这里响。
     fn parse(text: &str) -> Self {
-        let value: serde_json::Value = serde_json::from_str(text)
-            .unwrap_or_else(|err| panic!("角色清单不是合法 JSON：{err}"));
+        let value: serde_json::Value =
+            serde_json::from_str(text).unwrap_or_else(|err| panic!("角色清单不是合法 JSON：{err}"));
         let characters = value
             .get("characters")
             .and_then(|v| v.as_object())
@@ -486,10 +576,10 @@ impl Catalog {
         let mut rows: Vec<_> = characters
             .values()
             .map(|row| {
-                let unit_id = row
-                    .get("unitId")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_else(|| panic!("角色行缺 unitId")) as u32;
+                let unit_id =
+                    row.get("unitId")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or_else(|| panic!("角色行缺 unitId")) as u32;
                 let speed = row
                     .pointer("/locomotion/walkSpeedMetersPerSecond")
                     .and_then(|v| v.as_f64())
@@ -499,9 +589,8 @@ impl Catalog {
                 let pause = row
                     .pointer("/locomotion/pauseSeconds")
                     .and_then(|v| v.as_f64())
-                    .unwrap_or_else(|| {
-                        panic!("角色 {unit_id} 缺 locomotion.pauseSeconds")
-                    }) as f32;
+                    .unwrap_or_else(|| panic!("角色 {unit_id} 缺 locomotion.pauseSeconds"))
+                    as f32;
                 if !pause.is_finite() || pause < 0.0 {
                     panic!("角色 {unit_id} 的 pauseSeconds 产不出停顿时长：{pause}");
                 }
@@ -632,7 +721,11 @@ pub(crate) fn spawn_when_ready(
             Visibility::default(),
             PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
             WalkSpeed(*walk_speed),
-            (PauseSeconds(*pause_seconds), RestLifecycle::default(), NpcActions::default()),
+            (
+                PauseSeconds(*pause_seconds),
+                RestLifecycle::default(),
+                NpcActions::default(),
+            ),
             WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
             MoveTarget(seed),
             RouteStops::default(),
@@ -656,8 +749,9 @@ pub(crate) fn spawn_when_ready(
     commands.insert_resource(Spawned);
     commands.remove_resource::<Catalog>();
     use crate::client_config::{
-        KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT, KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
-        KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT, KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
+        KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
+        KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
+        KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
     };
     let pause_word = if pause_min == pause_max {
         format!("{pause_min:.1}s/员")
@@ -851,12 +945,16 @@ pub(crate) fn depart(
         // 源下次 MoveAsync 先重新开启 NavMeshAgent。这里只恢复已完成
         // 局部 Fit 的已验证接近点；禁止任意无效起点用一条直线连入场。
         let reentry = route.reentry?;
-        if !walk_face.walkable_at([reentry[0], reentry[2]]) { return None; }
+        if !walk_face.walkable_at([reentry[0], reentry[2]]) {
+            return None;
+        }
         state.position = reentry;
         start = [reentry[0], reentry[2]];
     }
     // 出生与重烘修复由各自生命周期处理；不把不可走起点插进路线制造穿洞首腿。
-    if !walk_face.walkable_at(start) { return None; }
+    if !walk_face.walkable_at(start) {
+        return None;
+    }
     let goal = [corner[0], corner[2]];
     let polyline = if fit.is_some() {
         // MoveExecutor 先 CalculatePath，再严验末拐点可达（0.01）；
@@ -868,7 +966,9 @@ pub(crate) fn depart(
     };
     let corners = lift_navigation_path(unit, objective_face, polyline);
     route.stops = build_waypoints(state.position, &corners, state.forward, rng, |candidate| {
-        objective_face.sample(candidate, WAYPOINT_SAMPLE_DISTANCE).is_some()
+        objective_face
+            .sample(candidate, WAYPOINT_SAMPLE_DISTANCE)
+            .is_some()
     });
     route.next = 0;
     route.generation = walk_face.generation();
@@ -877,7 +977,11 @@ pub(crate) fn depart(
     route.reentry = None;
     *slot = NpcPathWalkSlot::from_corners(Vec::new());
     let last = route.stops.last()?.position;
-    let rests = route.stops.iter().filter(|point| point.kind == WaypointKind::Rest).count();
+    let rests = route
+        .stops
+        .iter()
+        .filter(|point| point.kind == WaypointKind::Rest)
+        .count();
     info!(
         "[npc unit={}] 路线起步：{} CheckPoint / {rests} Rest，末站 ({:.2},{:.2},{:.2})",
         unit.0,
@@ -896,13 +1000,18 @@ fn lift_navigation_path(
     face: &crate::npc_objective::ObjectiveFace,
     points: Vec<[f32; 2]>,
 ) -> Vec<[f32; 3]> {
-    points.into_iter().map(|point| {
-        face.surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
-            .unwrap_or_else(|| panic!(
-                "[npc unit={}] 路点 ({:.2},{:.2}) 在目标面上无采样（两份面数据不一致）",
-                unit.0, point[0], point[1]
-            ))
-    }).collect()
+    points
+        .into_iter()
+        .map(|point| {
+            face.surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "[npc unit={}] 路点 ({:.2},{:.2}) 在目标面上无采样（两份面数据不一致）",
+                        unit.0, point[0], point[1]
+                    )
+                })
+        })
+        .collect()
 }
 
 /// Each ordered waypoint is a navigation destination, not a permission to
@@ -922,31 +1031,41 @@ fn start_waypoint(
         route.stops.clear();
         route.next = 0;
         route.goal = None;
-        let phase = fit.and_then(|fit| fit_depart(unit, state, slot, route, fit))
+        let phase = fit
+            .and_then(|fit| fit_depart(unit, state, slot, route, fit))
             .unwrap_or(MotionPhase::Dwelling { remaining: None });
         if matches!(phase, MotionPhase::Dwelling { remaining: None }) {
             route.outcome = Some(RouteOutcome::Arrived);
         }
         return Some(phase);
     };
-    let corners = if Vec3::from(waypoint.position).distance(Vec3::from(state.position)) < ARRIVAL_DISTANCE {
-        // Even a coincident CheckPoint is an execution leg; the next update
-        // observes arrival without inventing a Rest delay.
-        vec![state.position]
-    } else {
-        let sampled = objective_face.sample(waypoint.position, WAYPOINT_SAMPLE_DISTANCE)?;
-        let points = walk_face.path_exact(
-            [state.position[0], state.position[2]], [sampled[0], sampled[2]],
-        )?;
-        lift_navigation_path(unit, objective_face, points)
-    };
+    let corners =
+        if Vec3::from(waypoint.position).distance(Vec3::from(state.position)) < ARRIVAL_DISTANCE {
+            // Even a coincident CheckPoint is an execution leg; the next update
+            // observes arrival without inventing a Rest delay.
+            vec![state.position]
+        } else {
+            let sampled = objective_face.sample(waypoint.position, WAYPOINT_SAMPLE_DISTANCE)?;
+            let points = walk_face.path_exact(
+                [state.position[0], state.position[2]],
+                [sampled[0], sampled[2]],
+            )?;
+            lift_navigation_path(unit, objective_face, points)
+        };
     // Keep nearby corners, including the query's start. Removing every corner
     // inside the arrival radius can cut a short but necessary obstacle turn.
     *slot = NpcPathWalkSlot::from_corners(corners);
     state.next_corner = 0;
-    info!("[npc unit={}] 路点 {}/{} {:?} 出发 → ({:.2},{:.2},{:.2})",
-        unit.0, route.next + 1, route.stops.len(), waypoint.kind,
-        waypoint.position[0], waypoint.position[1], waypoint.position[2]);
+    info!(
+        "[npc unit={}] 路点 {}/{} {:?} 出发 → ({:.2},{:.2},{:.2})",
+        unit.0,
+        route.next + 1,
+        route.stops.len(),
+        waypoint.kind,
+        waypoint.position[0],
+        waypoint.position[1],
+        waypoint.position[2]
+    );
     Some(MotionPhase::Walking)
 }
 
@@ -963,7 +1082,10 @@ fn next_waypoint_or_stop(
         route.stop();
         *slot = NpcPathWalkSlot::from_corners(Vec::new());
         state.next_corner = 0;
-        warn!("[npc unit={}] waypoint has no navigation route; movement stopped", unit.0);
+        warn!(
+            "[npc unit={}] waypoint has no navigation route; movement stopped",
+            unit.0
+        );
         MotionPhase::Dwelling { remaining: None }
     })
 }
@@ -1012,12 +1134,7 @@ fn fit_depart(
     };
     info!(
         "[npc unit={}] 贴合起步：目标 ({:.2},{:.2},{:.2})，行程 {:.2}m，直线匀速 {:.1} m/s",
-        unit.0,
-        fit.position[0],
-        fit.position[1],
-        fit.position[2],
-        distance,
-        FIT_SPEED
+        unit.0, fit.position[0], fit.position[1], fit.position[2], distance, FIT_SPEED
     );
 
     let attach_forward = fit.rotation * Vec3::Z;
@@ -1032,10 +1149,7 @@ fn fit_depart(
             state.position = leg.target;
             return Some(MotionPhase::Dwelling { remaining: None });
         }
-        return Some(MotionPhase::FitWalking {
-            leg,
-            elapsed: 0.0,
-        });
+        return Some(MotionPhase::FitWalking { leg, elapsed: 0.0 });
     }
     let angle = turn_angle(
         heading_yaw(state.forward),
@@ -1093,12 +1207,18 @@ fn horizontal_direction(start: [f32; 3], target: [f32; 3]) -> Option<[f32; 3]> {
 /// Called only by the movement producer when it starts a new execution leg.
 /// Conversation-script turns never use this entry point.
 pub(crate) fn declare_navigation_action(
-    actions: &mut NpcActions, rest: &mut RestLifecycle,
-    phase: &MotionPhase, route: &RouteStops,
+    actions: &mut NpcActions,
+    rest: &mut RestLifecycle,
+    phase: &MotionPhase,
+    route: &RouteStops,
 ) {
     match phase {
-        MotionPhase::Turning { .. } | MotionPhase::FitTurning { .. } => actions.change(NpcAction::Rotate, rest),
-        MotionPhase::Walking | MotionPhase::FitWalking { .. } => actions.change(NpcAction::AutoMove, rest),
+        MotionPhase::Turning { .. } | MotionPhase::FitTurning { .. } => {
+            actions.change(NpcAction::Rotate, rest)
+        }
+        MotionPhase::Walking | MotionPhase::FitWalking { .. } => {
+            actions.change(NpcAction::AutoMove, rest)
+        }
         MotionPhase::Dwelling { remaining: Some(_) } => actions.begin_waypoint_rest(rest, route),
         MotionPhase::Dwelling { remaining: None } => actions.change(NpcAction::Idle, rest),
     }
@@ -1121,27 +1241,45 @@ pub fn advance(
     editor: Res<crate::fixture_edit::EditSessionActive>,
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
-    mut npcs: Query<(
-        &CharacterUnitId,
-        &WalkSpeed,
-        &PauseSeconds,
-        &mut crate::npc_objective::MemberRng,
-        &mut PathSlot,
-        &mut WalkState,
-        &mut RouteStops,
-        &mut StuckBaseline,
-        &mut Transform,
-        &mut MotionPhase,
-        Option<&crate::talk::TalkHold>,
-        &mut NpcActions,
-        &mut RestLifecycle,
-    ), Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>>,
+    mut npcs: Query<
+        (
+            &CharacterUnitId,
+            &WalkSpeed,
+            &PauseSeconds,
+            &mut crate::npc_objective::MemberRng,
+            &mut PathSlot,
+            &mut WalkState,
+            &mut RouteStops,
+            &mut StuckBaseline,
+            &mut Transform,
+            &mut MotionPhase,
+            Option<&crate::talk::TalkHold>,
+            &mut NpcActions,
+            &mut RestLifecycle,
+        ),
+        Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
+    >,
 ) {
-    if editor.is_active() { return; }
+    if editor.is_active() {
+        return;
+    }
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
-    for (unit, speed, pause, mut rng, mut slot, mut state, mut route, mut stuck, mut transform, mut phase, talk_hold, mut actions, mut rest) in
-        &mut npcs
+    for (
+        unit,
+        speed,
+        pause,
+        mut rng,
+        mut slot,
+        mut state,
+        mut route,
+        mut stuck,
+        mut transform,
+        mut phase,
+        talk_hold,
+        mut actions,
+        mut rest,
+    ) in &mut npcs
     {
         // 外部截断的自愈：收场位（`Dwelling::None`）与非空路点表/路径槽
         // 并存，只可能来自相位被外部改写（对话域对参演者的收场写入）。
@@ -1155,17 +1293,30 @@ pub fn advance(
             slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
             state.0.next_corner = 0;
             stuck.0 = None;
-            info!("[npc unit={}] t={now:.1} 路点表外部截断，清空（对话收场写入）", unit.0);
+            info!(
+                "[npc unit={}] t={now:.1} 路点表外部截断，清空（对话收场写入）",
+                unit.0
+            );
         }
         if talk_hold.is_some() || actions.current == NpcAction::Talk {
             continue; // 对话持留：位移推进整名让位（相位与变换都不写）
         }
-        let (Some(walk_face), Some(objective_face)) = (walk_face.as_deref(), objective_face.as_deref()) else { continue; };
-        if objective_face.navigation_generation() != walk_face.generation() { continue; }
+        let (Some(walk_face), Some(objective_face)) =
+            (walk_face.as_deref(), objective_face.as_deref())
+        else {
+            continue;
+        };
+        if objective_face.navigation_generation() != walk_face.generation() {
+            continue;
+        }
         if route.generation != walk_face.generation() {
             if !walk_face.walkable_at([state.0.position[0], state.0.position[2]]) {
                 let (x, z) = walk_face.seat(state.0.position[0], state.0.position[2]);
-                state.0.position = objective_face.surface_sample([x, objective_face.ref_y(), z], moly_law::objective::TILE_SCALE)
+                state.0.position = objective_face
+                    .surface_sample(
+                        [x, objective_face.ref_y(), z],
+                        moly_law::objective::TILE_SCALE,
+                    )
                     .unwrap_or([x, state.0.position[1], z]);
                 transform.translation = Vec3::from(state.0.position);
             }
@@ -1176,18 +1327,33 @@ pub fn advance(
             state.0.next_corner = 0;
             stuck.0 = None;
             *phase = if let Some(goal) = goal {
-                match depart(unit, &mut state.0, &mut slot.0, &mut route, walk_face, objective_face, goal, fit, &mut rng) {
+                match depart(
+                    unit,
+                    &mut state.0,
+                    &mut slot.0,
+                    &mut route,
+                    walk_face,
+                    objective_face,
+                    goal,
+                    fit,
+                    &mut rng,
+                ) {
                     Some(phase) => phase,
                     None => {
                         // A failed replacement path terminates this move, not
                         // the AI content. Its executor must receive a result
                         // instead of waiting for an arrival that cannot happen.
                         route.stop();
-                        warn!("[npc unit={}] navigation replan has no route; movement stopped", unit.0);
+                        warn!(
+                            "[npc unit={}] navigation replan has no route; movement stopped",
+                            unit.0
+                        );
                         MotionPhase::Dwelling { remaining: None }
                     }
                 }
-            } else { MotionPhase::Dwelling { remaining: None } };
+            } else {
+                MotionPhase::Dwelling { remaining: None }
+            };
             route.generation = walk_face.generation();
             declare_navigation_action(&mut actions, &mut rest, &phase, &route);
         }
@@ -1216,7 +1382,11 @@ pub fn advance(
             let end = (state.0.next_corner as usize).min(corners.len());
             let mut from = prior;
             let mut valid = true;
-            for to in corners[begin..end].iter().copied().chain(std::iter::once(state.0.position)) {
+            for to in corners[begin..end]
+                .iter()
+                .copied()
+                .chain(std::iter::once(state.0.position))
+            {
                 valid &= walk_face.segment_walkable([from[0], from[2]], [to[0], to[2]]);
                 from = to;
             }
@@ -1233,7 +1403,9 @@ pub fn advance(
                 }
             }
             if let WalkVerdict::Arrived(_) = verdict {
-                let waypoint = route.stops.get(route.next)
+                let waypoint = route
+                    .stops
+                    .get(route.next)
                     .expect("active navigation leg retains its waypoint");
                 let distance = Vec3::from(waypoint.position).distance(Vec3::from(state.0.position));
                 // A sampled endpoint is not proof that the unsnapped waypoint
@@ -1285,7 +1457,9 @@ pub fn advance(
                 match waypoint.kind {
                     WaypointKind::Rest => {
                         let dwell = dwell_seconds(pause.0);
-                        *phase = MotionPhase::Dwelling { remaining: Some(dwell) };
+                        *phase = MotionPhase::Dwelling {
+                            remaining: Some(dwell),
+                        };
                         actions.begin_waypoint_rest(&mut rest, &route);
                         info!("[npc unit={}] t={now:.1} 路点 {}/{} Rest 到站，距 {distance:.3}m，驻留 {dwell:.1}s",
                             unit.0, route.next + 1, route.stops.len());
@@ -1293,22 +1467,41 @@ pub fn advance(
                     WaypointKind::CheckPoint => {
                         info!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
                             unit.0, route.next + 1, route.stops.len());
-                        *phase = next_waypoint_or_stop(unit, &mut state.0, &mut slot.0, &mut route, walk_face, objective_face);
+                        *phase = next_waypoint_or_stop(
+                            unit,
+                            &mut state.0,
+                            &mut slot.0,
+                            &mut route,
+                            walk_face,
+                            objective_face,
+                        );
                         declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                     }
                 }
             }
             WalkVerdict::Idle => match &mut *phase {
-                MotionPhase::Turning { to, duration, elapsed, .. } => {
+                MotionPhase::Turning {
+                    to,
+                    duration,
+                    elapsed,
+                    ..
+                } => {
                     *elapsed += dt;
                     if *elapsed >= *duration {
                         let end = *to;
                         stuck.0 = None;
-                        *phase = start_waypoint(unit, &mut state.0, &mut slot.0, &mut route, walk_face, objective_face)
-                            .unwrap_or_else(|| {
-                                route.stop();
-                                MotionPhase::Dwelling { remaining: None }
-                            });
+                        *phase = start_waypoint(
+                            unit,
+                            &mut state.0,
+                            &mut slot.0,
+                            &mut route,
+                            walk_face,
+                            objective_face,
+                        )
+                        .unwrap_or_else(|| {
+                            route.stop();
+                            MotionPhase::Dwelling { remaining: None }
+                        });
                         declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                         finished_turn = Some(end);
                     }
@@ -1319,11 +1512,24 @@ pub fn advance(
                     *remaining -= dt;
                     if *remaining <= 0.0 {
                         stuck.0 = None;
-                        *phase = next_waypoint_or_stop(unit, &mut state.0, &mut slot.0, &mut route, walk_face, objective_face);
+                        *phase = next_waypoint_or_stop(
+                            unit,
+                            &mut state.0,
+                            &mut slot.0,
+                            &mut route,
+                            walk_face,
+                            objective_face,
+                        );
                         declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                     }
                 }
-                MotionPhase::FitTurning { to, duration, elapsed, leg, .. } => {
+                MotionPhase::FitTurning {
+                    to,
+                    duration,
+                    elapsed,
+                    leg,
+                    ..
+                } => {
                     *elapsed += dt;
                     if *elapsed >= *duration {
                         // 贴合转身完成：进直线插值腿（终点朝向先取出再写相位，
@@ -1344,7 +1550,10 @@ pub fn advance(
                             *phase = MotionPhase::FitWalking { leg, elapsed: 0.0 };
                             actions.change(NpcAction::AutoMove, &mut rest);
                             finished_turn = Some(end);
-                            info!("[npc unit={}] t={now:.1} 贴合转身完成，起步直线插值", unit.0);
+                            info!(
+                                "[npc unit={}] t={now:.1} 贴合转身完成，起步直线插值",
+                                unit.0
+                            );
                         }
                     }
                 }
@@ -1356,8 +1565,8 @@ pub fn advance(
                         // 末帧精确落位：位置直写目标，forward 换行进方向
                         // （下一轮决策的走前转身从行进末向起算，不回跳）。
                         state.0.position = leg.target;
-                        let move_forward = horizontal_direction(leg.start, leg.target)
-                            .unwrap_or(state.0.forward);
+                        let move_forward =
+                            horizontal_direction(leg.start, leg.target).unwrap_or(state.0.forward);
                         state.0.forward = move_forward;
                         stuck.0 = None;
                         *phase = MotionPhase::Dwelling { remaining: None };
@@ -1383,16 +1592,29 @@ pub fn advance(
                 // 律的拒绝是响的：状态字节不动，但这里要有人听见。
                 warn!(
                     "npc {} 本帧被推进律拒绝（状态保持）：速度 {:.3}，dt {:.3}",
-                    unit.0,
-                    speed.0,
-                    dt
+                    unit.0, speed.0, dt
                 );
             }
         }
         transform.translation = Vec3::from(state.0.position);
         transform.rotation = match (&*phase, finished_turn) {
-            (MotionPhase::Turning { from, to, duration, elapsed, .. }
-            | MotionPhase::FitTurning { from, to, duration, elapsed, .. }, _) => {
+            (
+                MotionPhase::Turning {
+                    from,
+                    to,
+                    duration,
+                    elapsed,
+                    ..
+                }
+                | MotionPhase::FitTurning {
+                    from,
+                    to,
+                    duration,
+                    elapsed,
+                    ..
+                },
+                _,
+            ) => {
                 let t = (elapsed / duration).clamp(0.0, 1.0);
                 // 缓动取补间库缺省（转体调用点不设 ease）：先快后慢的
                 // 二次出线。`from`/`to` 已是最短弧同叶对，普通球面插值
@@ -1448,18 +1670,33 @@ pub fn report(
         let yaw = heading_yaw([forward.x, forward.y, forward.z]);
         let phase_word = match phase {
             MotionPhase::Walking => "walk".to_owned(),
-            MotionPhase::Dwelling { remaining: Some(remaining) } => {
+            MotionPhase::Dwelling {
+                remaining: Some(remaining),
+            } => {
                 format!("dwell {:.1}s", remaining)
             }
             MotionPhase::Dwelling { remaining: None } => "dwell".to_owned(),
-            MotionPhase::Turning { duration, elapsed, .. } => {
-                format!("turn {:.0}%", (elapsed / duration * 100.0).clamp(0.0, 100.0))
+            MotionPhase::Turning {
+                duration, elapsed, ..
+            } => {
+                format!(
+                    "turn {:.0}%",
+                    (elapsed / duration * 100.0).clamp(0.0, 100.0)
+                )
             }
-            MotionPhase::FitTurning { duration, elapsed, .. } => {
-                format!("fitturn {:.0}%", (elapsed / duration * 100.0).clamp(0.0, 100.0))
+            MotionPhase::FitTurning {
+                duration, elapsed, ..
+            } => {
+                format!(
+                    "fitturn {:.0}%",
+                    (elapsed / duration * 100.0).clamp(0.0, 100.0)
+                )
             }
             MotionPhase::FitWalking { leg, elapsed } => {
-                format!("fitwalk {:.0}%", (elapsed / leg.travel * 100.0).clamp(0.0, 100.0))
+                format!(
+                    "fitwalk {:.0}%",
+                    (elapsed / leg.travel * 100.0).clamp(0.0, 100.0)
+                )
             }
         };
         let route_word = if route.stops.is_empty() {

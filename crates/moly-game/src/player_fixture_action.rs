@@ -40,6 +40,7 @@ const EXIT_SPEED: f32 = 0.4;
 pub(crate) enum PlayerFixtureRequest {
     Timeline(FixtureTarget),
     Gimmick(FixtureTarget),
+    PreviewGimmick { target: FixtureTarget, owner: Entity },
     RequestEnd,
     Cancel(PlayerFixtureCancelReason),
 }
@@ -70,13 +71,14 @@ pub(crate) enum PlayerFixtureAvailability {
         locate_index: usize,
         slot_id: i32,
     },
+    GimmickReady,
     Pending(PlayerFixturePreparationError),
     Unavailable(&'static str),
 }
 
 impl PlayerFixtureAvailability {
     pub(crate) fn is_ready(&self) -> bool {
-        matches!(self, Self::Ready { .. })
+        matches!(self, Self::Ready { .. } | Self::GimmickReady)
     }
 }
 
@@ -132,7 +134,11 @@ impl PlayerFixtureVisualProfile {
         Ok(())
     }
 
-    pub(crate) fn start_request(&self, owner: FixtureActivityOwner, target: &FixtureTarget) -> StartTimeline {
+    pub(crate) fn start_request(
+        &self,
+        owner: FixtureActivityOwner,
+        target: &FixtureTarget,
+    ) -> StartTimeline {
         StartTimeline {
             owner: TimelineOwner {
                 activity: owner,
@@ -288,7 +294,9 @@ pub(crate) enum PlayerFixtureOutcome {
         target: FixtureTarget,
         reason: String,
     },
-    GimmickStarted { target: FixtureTarget },
+    GimmickStarted {
+        target: FixtureTarget,
+    },
 }
 
 struct LinearMove {
@@ -452,6 +460,14 @@ pub(crate) fn refresh_availability(world: &mut World) {
     for target in targets {
         let state = if runtime.active() {
             PlayerFixtureAvailability::Unavailable("player furniture session owns input")
+        } else if world.get::<FixtureActivityIdentity>(target.entity)
+            .and_then(|identity| world.get_resource::<FixtureActivityTables>()?.fixture_master(identity.master_id))
+            .is_some_and(|master| matches!(master.player_action_type.as_str(), "loop" | "one_shot"))
+        {
+            match crate::fixture_gimmick::session::availability(world, &target) {
+                Ok(()) => PlayerFixtureAvailability::GimmickReady,
+                Err(reason) => PlayerFixtureAvailability::Pending(PlayerFixturePreparationError::Invalid(reason)),
+            }
         } else {
             match prepare(world, &target, runtime.generation.saturating_add(1)) {
                 Ok(prepared) => PlayerFixtureAvailability::Ready {
@@ -533,7 +549,9 @@ fn prepare(
     };
     let owner = FixtureActivityOwner { actor, generation };
     if navigation.scene_stamp.player != actor {
-        return Err(Missing("navigation parameters for the current logical player"));
+        return Err(Missing(
+            "navigation parameters for the current logical player",
+        ));
     }
     let tables = world
         .get_resource::<FixtureActivityTables>()
@@ -565,10 +583,16 @@ fn prepare(
     // Generate from the actual attachment array, with the source's first
     // matching master row. Known invalid StartLoc names generate no locator;
     // they do not turn the remaining valid seats into a missing-data error.
-    let rows: Vec<_> = points.player_action_points(&identity.model_package)
+    let rows: Vec<_> = points
+        .player_action_points(&identity.model_package)
         .ok_or(Missing("original player locator array metadata"))?
         .into_iter()
-        .filter_map(|point| source_rows.iter().find(|row| row.action_point == point).cloned())
+        .filter_map(|point| {
+            source_rows
+                .iter()
+                .find(|row| row.action_point == point)
+                .cloned()
+        })
         .collect();
 
     struct Candidate {
@@ -918,6 +942,7 @@ pub(crate) fn advance(world: &mut World) {
     for request in std::mem::take(&mut runtime.pending) {
         match request {
             PlayerFixtureRequest::Cancel(reason) => {
+                crate::fixture_gimmick::session::cancel_previews(world);
                 if let Some(session) = runtime.session.take() {
                     capture_coverage(world, &session, &mut runtime);
                     finish(
@@ -959,16 +984,37 @@ pub(crate) fn advance(world: &mut World) {
                     }
                 }
             }
-            PlayerFixtureRequest::Gimmick(target) => {
-                let next = runtime.generation.checked_add(1).expect("player activity generation exhausted");
-                match crate::fixture_gimmick::start(world, &target, next) {
+            PlayerFixtureRequest::PreviewGimmick { target, owner } => {
+                let next = runtime.generation.saturating_add(1);
+                match crate::fixture_gimmick::session::start_preview(world, &target, owner, next) {
                     Ok(()) => {
                         runtime.generation = next;
                         runtime.last_outcome = Some(PlayerFixtureOutcome::GimmickStarted { target });
                     }
                     Err(reason) => {
-                        warn!("[fixture-gimmick] {} request not prepared: {reason}", target.uid);
+                        warn!("[fixture-gimmick] {} preview rejected: {reason}", target.uid);
                         runtime.last_outcome = Some(PlayerFixtureOutcome::GimmickNotPrepared { target, reason });
+                    }
+                }
+            }
+            PlayerFixtureRequest::Gimmick(target) => {
+                let next = runtime
+                    .generation
+                    .checked_add(1)
+                    .expect("player activity generation exhausted");
+                match crate::fixture_gimmick::start(world, &target, next) {
+                    Ok(()) => {
+                        runtime.generation = next;
+                        runtime.last_outcome =
+                            Some(PlayerFixtureOutcome::GimmickStarted { target });
+                    }
+                    Err(reason) => {
+                        warn!(
+                            "[fixture-gimmick] {} request not prepared: {reason}",
+                            target.uid
+                        );
+                        runtime.last_outcome =
+                            Some(PlayerFixtureOutcome::GimmickNotPrepared { target, reason });
                     }
                 }
             }
@@ -1125,7 +1171,9 @@ fn step_session(
     navigation
         .validate(session.prepared.site_generation)
         .map_err(|_| NavigationFailed)?;
-    if navigation.scene_stamp.player != actor { return Err(OwnershipLost); }
+    if navigation.scene_stamp.player != actor {
+        return Err(OwnershipLost);
+    }
     let mut pose = world_pose(world, actor).ok_or(PlayerRemoved)?;
     match session.phase {
         PlayerFixturePhase::Approaching => {

@@ -155,6 +155,10 @@ pub(super) fn bind(world: &World, view: Entity, definition: &Definition) -> Resu
     Ok(Some(Binding { entity: *entity, target: program.target.clone(), rest }))
 }
 
+pub(super) fn snapshot(world: &World, binding: &Binding) -> Option<(Entity, Quat)> {
+    world.get::<Transform>(binding.entity).map(|transform| (binding.entity, transform.rotation))
+}
+
 pub(super) fn apply(world: &mut World, binding: &Binding, playback: &Playback) -> Result<(), String> {
     if !world.get::<SourceObjectIdentity>(binding.entity).is_some_and(|id| binding.target.matches(id)) {
         return Err("actual Euler target disappeared or changed source identity".into());

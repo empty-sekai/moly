@@ -12,14 +12,14 @@
 //! place. Talk enters through the NPC lifecycle, ends the old Rest script and
 //! stops navigation without inventing arrival or resetting the AI goal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::animation::graph::{AnimationGraph, AnimationNodeIndex};
 use bevy::animation::AnimationPlayer;
 use bevy::asset::{AssetPath, Assets, LoadState};
+use bevy::ecs::system::SystemParam;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::ecs::system::SystemParam;
 use moly_assets::json::JsonAsset;
 use moly_law::path::{angle_between, facing_direction, turn_motion, TurnMotion};
 use moly_law::talk::{
@@ -29,12 +29,16 @@ use moly_law::talk::{
     CONDITION_MYSEKAI_PHENOMENA_ID, CONDITION_READ_EVENT_STORY_EPISODE_ID,
 };
 
-use crate::alone_action_runtime::{apply_eye, apply_mouth_pattern, node_for, play_idle, FacialTables};
+use crate::alone_action_runtime::{
+    apply_eye, apply_mouth_pattern, node_for, play_idle, FacialTables,
+};
 use crate::audio::{VoiceLine, VoiceSpeaker, VoiceWho};
 use crate::character::{MotionDriver, MotionLibrary, SEGMENT_BLEND};
 use crate::character_material::{CharacterMaterial, ToonMaterials};
 use crate::delayed_faces::{DelayedFaces, FaceCommand};
 use crate::emoticon::EmoticonArchive;
+use crate::fixture::{FixturePlacement, FixtureRoot};
+use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::npc::{CharacterUnitId, MotionPhase, Registry, WalkState};
 use crate::player::PlayerControlled;
@@ -64,10 +68,31 @@ const SMOKE_TAP_INTERVAL: f32 = 0.8;
 
 /// 拾取链 NPC 沿发出的玩家对话请求（命中实体 + 角色单位 id；消费侧
 /// 按实体取位并核对 unit——同帧链内实体必在，核不上即响亮拒绝）。
-#[derive(Debug, Clone, Copy, Message)]
+#[derive(Debug, Clone, Message)]
 pub(crate) struct PlayerTalkRequest {
     pub(crate) entity: Entity,
     pub(crate) unit: u32,
+    pub(crate) exact: Option<crate::npc_objective::TalkContent>,
+    pub(crate) target_fixture: Option<Entity>,
+}
+
+#[derive(Debug, Clone, Copy, Message)]
+pub(crate) struct TalkCancelRequest;
+
+pub(crate) fn drain_talk_cancellation(reader: &mut MessageReader<TalkCancelRequest>) -> bool {
+    reader.read().next().is_some()
+}
+
+pub(crate) fn reset_cancelled_player_status(commands: &mut Commands) {
+    commands.queue(|world: &mut World| {
+        let Some(mut states) = world.get_resource_mut::<crate::player_state::PlayerAvatarStates>()
+        else {
+            return;
+        };
+        if states.current == crate::player_state::PlayerActionState::Talk {
+            states.change_status(crate::player_state::PlayerActionState::Idle);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -85,8 +110,8 @@ pub(crate) struct PlayerTalkDataHandle {
 /// 名表（名 → unit）。
 #[derive(Resource)]
 pub(crate) struct PlayerTalkStore {
-    units: Vec<(u32, Vec<TalkRow>)>,
-    names: HashMap<String, u32>,
+    pub(crate) units: Vec<(u32, Vec<TalkRow>)>,
+    pub(crate) names: HashMap<String, u32>,
 }
 
 /// A resolved row retains one of the two existing script representations.
@@ -101,19 +126,25 @@ impl ResolvedTalk {
         use crate::npc_objective::{TalkBackend, TalkContent};
         match self {
             Self::General { row, .. } => TalkContent {
-                master_id: row.talk_id, backend: TalkBackend::General,
+                master_id: row.talk_id,
+                backend: TalkBackend::General,
                 is_general: Some(is_general_row(row)),
             },
             // The fixture product retains a condition-group id, not the
             // group's predicates. Its backend name is not an IsGeneral result.
             Self::Fixture(row) => TalkContent {
-                master_id: row.talk_id, backend: TalkBackend::Fixture, is_general: None,
+                master_id: row.talk_id,
+                backend: TalkBackend::Fixture,
+                is_general: None,
             },
         }
     }
 
     pub(crate) fn pre_action(&self) -> TweetRef {
-        match self { Self::General { row, .. } => row.tweet.clone(), Self::Fixture(row) => row.tweet.clone() }
+        match self {
+            Self::General { row, .. } => row.tweet.clone(),
+            Self::Fixture(row) => row.tweet.clone(),
+        }
     }
 
     fn units(&self) -> Vec<u32> {
@@ -139,29 +170,55 @@ pub(crate) struct GeneralSelection {
     pub(crate) replayed: bool,
 }
 
-fn is_general_row(row: &TalkRow) -> bool {
-    row.conditions.iter().any(|condition| matches!(condition_type_discriminant(condition),
-        Some(CONDITION_READ_EVENT_STORY_EPISODE_ID | CONDITION_MYSEKAI_PHENOMENA_ID | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT)))
+pub(crate) fn is_general_row(row: &TalkRow) -> bool {
+    row.conditions.iter().any(|condition| {
+        matches!(
+            condition_type_discriminant(condition),
+            Some(
+                CONDITION_READ_EVENT_STORY_EPISODE_ID
+                    | CONDITION_MYSEKAI_PHENOMENA_ID
+                    | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT
+            )
+        )
+    })
 }
 
 impl TalkCatalog<'_> {
-    pub(crate) fn ready(&self) -> bool { self.store.is_some() && self.sites.is_some() }
-
-    fn site_id(&self, site_type: &str) -> Option<i32> {
-        self.sites.as_deref()?.by_type.iter().find(|(kind, _)| kind == site_type).map(|(_, id)| *id)
+    pub(crate) fn ready(&self) -> bool {
+        self.store.is_some() && self.sites.is_some()
     }
 
-    pub(crate) fn resolve_content(&self, content: &crate::npc_objective::TalkContent) -> Option<ResolvedTalk> {
+    fn site_id(&self, site_type: &str) -> Option<i32> {
+        self.sites
+            .as_deref()?
+            .by_type
+            .iter()
+            .find(|(kind, _)| kind == site_type)
+            .map(|(_, id)| *id)
+    }
+
+    pub(crate) fn resolve_content(
+        &self,
+        content: &crate::npc_objective::TalkContent,
+    ) -> Option<ResolvedTalk> {
         match content.backend {
             crate::npc_objective::TalkBackend::General => {
                 for (unit, rows) in &self.store.as_deref()?.units {
                     if let Some(row) = rows.iter().find(|row| row.talk_id == content.master_id) {
-                        return Some(ResolvedTalk::General { unit: *unit, row: row.clone() });
+                        return Some(ResolvedTalk::General {
+                            unit: *unit,
+                            row: row.clone(),
+                        });
                     }
                 }
                 None
             }
-            crate::npc_objective::TalkBackend::Fixture => self.fixtures.as_deref()?.row(content.master_id).cloned().map(ResolvedTalk::Fixture),
+            crate::npc_objective::TalkBackend::Fixture => self
+                .fixtures
+                .as_deref()?
+                .row(content.master_id)
+                .cloned()
+                .map(ResolvedTalk::Fixture),
         }
     }
 
@@ -169,60 +226,123 @@ impl TalkCatalog<'_> {
         if let Some(store) = self.store.as_deref() {
             for (unit, rows) in &store.units {
                 if let Some(row) = rows.iter().find(|row| row.talk_id == master_id) {
-                    return Some(ResolvedTalk::General { unit: *unit, row: row.clone() });
+                    return Some(ResolvedTalk::General {
+                        unit: *unit,
+                        row: row.clone(),
+                    });
                 }
             }
         }
-        self.fixtures.as_deref()?.row(master_id).cloned().map(ResolvedTalk::Fixture)
+        self.fixtures
+            .as_deref()?
+            .row(master_id)
+            .cloned()
+            .map(ResolvedTalk::Fixture)
     }
 
     fn name(&self, unit: u32) -> String {
-        self.store.as_deref().and_then(|store| store.names.iter()
-            .find(|(_, member)| **member == unit).map(|(name, _)| name.clone())).unwrap_or_default()
+        self.store
+            .as_deref()
+            .and_then(|store| {
+                store
+                    .names
+                    .iter()
+                    .find(|(_, member)| **member == unit)
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_default()
     }
 
     /// The source lottery runs even if PlayGeneralTalk subsequently overwrites
     /// the result with CurrentGeneral. Previous fallback bypasses every filter.
     pub(crate) fn lottery(
-        &self, unit: u32, site_type: &str, previous: Option<i32>,
+        &self,
+        unit: u32,
+        site_type: &str,
+        previous: Option<i32>,
         mut draw: impl FnMut(usize) -> usize,
     ) -> Result<GeneralSelection, &'static str> {
-        let store = self.store.as_deref().ok_or("ordinary talk data is not loaded")?;
+        let store = self
+            .store
+            .as_deref()
+            .ok_or("ordinary talk data is not loaded")?;
         let sites = self.sites.as_deref().ok_or("site data is not loaded")?;
-        let site_id = sites.by_type.iter().find(|(kind, _)| kind == site_type)
-            .map(|(_, id)| *id).ok_or("NPC site is absent from the loaded site table")?;
-        let rows = store.units.iter().find(|(member, _)| *member == unit)
-            .map(|(_, rows)| rows.as_slice()).unwrap_or(&[]);
+        let site_id = sites
+            .by_type
+            .iter()
+            .find(|(kind, _)| kind == site_type)
+            .map(|(_, id)| *id)
+            .ok_or("NPC site is absent from the loaded site table")?;
+        let rows = store
+            .units
+            .iter()
+            .find(|(member, _)| *member == unit)
+            .map(|(_, rows)| rows.as_slice())
+            .unwrap_or(&[]);
         let matches_site = |row: &TalkRow| {
-            SITE_GROUP_SITES.iter().find(|(group, _)| *group == row.site_group_id)
+            SITE_GROUP_SITES
+                .iter()
+                .find(|(group, _)| *group == row.site_group_id)
                 .is_some_and(|(_, sites)| sites.contains(&site_id))
         };
-        let pool: Vec<_> = rows.iter().filter(|row| {
-            if !is_general_row(row) || previous == Some(row.talk_id) { return false; }
-            // Preserve the existing ordinary product's supported condition
-            // surface. A fixture predicate needs its own actual activity data.
-            if row.conditions.iter().any(|condition| !matches!(condition_type_discriminant(condition),
-                Some(CONDITION_READ_EVENT_STORY_EPISODE_ID | CONDITION_MYSEKAI_PHENOMENA_ID |
-                    CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT | CONDITION_AFTER_SET_FIXTURE))) { return false; }
-            condition_group_matches(row.conditions.iter().zip(&row.condition_values)
-                .filter_map(|(kind, value)| value.map(|value| (kind.as_str(), value))),
-                &ConditionContext { current_phenomena_id: self.phenomena.0, ..Default::default() })
-                && matches_site(row)
-        }).collect();
+        let pool: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                if !is_general_row(row) || previous == Some(row.talk_id) {
+                    return false;
+                }
+                // Preserve the existing ordinary product's supported condition
+                // surface. A fixture predicate needs its own actual activity data.
+                if row.conditions.iter().any(|condition| {
+                    !matches!(
+                        condition_type_discriminant(condition),
+                        Some(
+                            CONDITION_READ_EVENT_STORY_EPISODE_ID
+                                | CONDITION_MYSEKAI_PHENOMENA_ID
+                                | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT
+                                | CONDITION_AFTER_SET_FIXTURE
+                        )
+                    )
+                }) {
+                    return false;
+                }
+                condition_group_matches(
+                    row.conditions
+                        .iter()
+                        .zip(&row.condition_values)
+                        .filter_map(|(kind, value)| value.map(|value| (kind.as_str(), value))),
+                    &ConditionContext {
+                        current_phenomena_id: self.phenomena.0,
+                        ..Default::default()
+                    },
+                ) && matches_site(row)
+            })
+            .collect();
         if pool.is_empty() {
             let general_rows = rows.iter().filter(|row| is_general_row(row)).count();
-            let general_site_rows = rows.iter()
-                .filter(|row| is_general_row(row) && matches_site(row)).count();
+            let general_site_rows = rows
+                .iter()
+                .filter(|row| is_general_row(row) && matches_site(row))
+                .count();
             warn!(
                 "[player-talk-pool] unit={unit} site_type={site_type} site_id={site_id} phenomena={} rows={} general_rows={general_rows} general_after_site={general_site_rows} candidates={} previous={previous:?} previous_has_master={}",
                 self.phenomena.0, rows.len(), pool.len(), previous.is_some_and(|id| id != 0),
             );
-            return previous.filter(|id| *id != 0).map(|master_id| GeneralSelection {
-                master_id, pool_len: 0, replayed: true,
-            }).ok_or("ordinary pool is empty and shared Previous has no master");
+            return previous
+                .filter(|id| *id != 0)
+                .map(|master_id| GeneralSelection {
+                    master_id,
+                    pool_len: 0,
+                    replayed: true,
+                })
+                .ok_or("ordinary pool is empty and shared Previous has no master");
         }
         let index = draw(pool.len());
-        Ok(GeneralSelection { master_id: pool[index].talk_id, pool_len: pool.len(), replayed: false })
+        Ok(GeneralSelection {
+            master_id: pool[index].talk_id,
+            pool_len: pool.len(),
+            replayed: false,
+        })
     }
 }
 
@@ -261,6 +381,26 @@ pub(crate) struct PlayerTalkLedger {
     refusals: u32,
     completed: u32,
     last_request_at: Option<f32>,
+    pub(crate) last_outcome: Option<PlayerTalkOutcome>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PlayerTalkOutcome {
+    Started(crate::npc_objective::TalkContent),
+    Rejected {
+        requested: Option<crate::npc_objective::TalkContent>,
+        reason: String,
+    },
+}
+
+impl PlayerTalkLedger {
+    fn reject(&mut self, request: &PlayerTalkRequest, reason: impl Into<String>) {
+        self.refusals += 1;
+        self.last_outcome = Some(PlayerTalkOutcome::Rejected {
+            requested: request.exact.clone(),
+            reason: reason.into(),
+        });
+    }
 }
 
 /// Startup：请求装载剧本表与站点主表，落账本资源。
@@ -285,14 +425,35 @@ pub(crate) fn parse(
     };
     for asset in [&handle.talks, &handle.sites] {
         if let LoadState::Failed(err) = server.load_state(asset) {
-            panic!("玩家对话数据装载失败：{err:?}");
+            warn!("[talk-ingest] player conversation asset unavailable: {err:?}");
+            commands.insert_resource(PlayerTalkStore {
+                units: Vec::new(),
+                names: HashMap::new(),
+            });
+            commands.insert_resource(PlayerTalkCharset { chars: Vec::new() });
+            commands.insert_resource(PlayerTalkSites {
+                by_type: Vec::new(),
+            });
+            commands.remove_resource::<PlayerTalkDataHandle>();
+            return;
         }
     }
     let (Some(talks), Some(sites)) = (jsons.get(&handle.talks), jsons.get(&handle.sites)) else {
         return;
     };
-    let (store, charset) = parse_talks(&talks.0);
-    let site_map = parse_sites(&sites.0);
+    let (store, charset, issues) = parse_talks(&talks.0);
+    for issue in &issues {
+        warn!("[talk-ingest] quarantined general row: {issue}");
+    }
+    let site_map = match parse_sites(&sites.0) {
+        Ok(sites) => sites,
+        Err(reason) => {
+            warn!("[talk-ingest] site lookup unavailable: {reason}");
+            PlayerTalkSites {
+                by_type: Vec::new(),
+            }
+        }
+    };
     // 现象门控段（条件表含现象型）与值缺位现象臂各点一次名：前者是
     // 冒烟账目的分母（档位切换下这些段的入池/出池可推导），后者当前
     // 全语料为 0——非 0 即提取侧形状变化，装载期就要看见。
@@ -350,32 +511,66 @@ pub(crate) fn parse(
 /// 响亮失败——指称解析按单名假设）与字符集（正文/名字栏/tweet 文案，
 /// 口径同配对对话侧的收集）。未知 op 响亮失败（提取词表外的新步型，
 /// 静默跳过会把整段流播残）。
-fn parse_talks(text: &str) -> (PlayerTalkStore, PlayerTalkCharset) {
-    let value: serde_json::Value =
-        serde_json::from_str(text).unwrap_or_else(|err| panic!("玩家对话剧本表不是合法 JSON：{err}"));
-    let units = value
-        .get("units")
-        .and_then(|v| v.as_object())
-        .unwrap_or_else(|| panic!("玩家对话剧本表缺 units 对象"));
+fn parse_talks(text: &str) -> (PlayerTalkStore, PlayerTalkCharset, Vec<String>) {
+    let mut issues = Vec::new();
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(error) => {
+            issues.push(format!("document is not valid JSON: {error}"));
+            return (
+                PlayerTalkStore {
+                    units: Vec::new(),
+                    names: HashMap::new(),
+                },
+                PlayerTalkCharset { chars: Vec::new() },
+                issues,
+            );
+        }
+    };
+    let Some(units) = value.get("units").and_then(|v| v.as_object()) else {
+        issues.push("document has no units object".into());
+        return (
+            PlayerTalkStore {
+                units: Vec::new(),
+                names: HashMap::new(),
+            },
+            PlayerTalkCharset { chars: Vec::new() },
+            issues,
+        );
+    };
     let mut buckets = Vec::with_capacity(units.len());
     let mut chars: Vec<char> = Vec::new();
     let mut names: HashMap<String, u32> = HashMap::new();
     for (key, entry) in units {
-        let unit: u32 = key
-            .parse()
-            .unwrap_or_else(|_| panic!("玩家对话剧本表的 unit 键不是数字：{key}"));
-        let rows = entry
-            .get("talks")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("unit {unit} 缺 talks 数组"));
-        let talks: Vec<TalkRow> = rows.iter().map(parse_row).collect();
+        let Ok(unit) = key.parse::<u32>() else {
+            issues.push(format!("unit key {key:?} is not numeric"));
+            continue;
+        };
+        let Some(rows) = entry.get("talks").and_then(|v| v.as_array()) else {
+            issues.push(format!("unit {unit} has no talks array"));
+            buckets.push((unit, Vec::new()));
+            continue;
+        };
+        let talks: Vec<TalkRow> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match crate::talk_ingest::general_row(row) {
+                Ok(()) => Some(parse_row(row)),
+                Err(reason) => {
+                    issues.push(format!("unit {unit}, source row {}: {reason}", index + 1));
+                    None
+                }
+            })
+            .collect();
         for row in &talks {
             collect_chars(&row.tweet.text, &mut chars);
             for step in &row.steps {
                 if let Some(name) = referent_name(step) {
                     match names.get(name) {
                         Some(&known) if known != unit => {
-                            panic!("指称名 {name} 同时归属 unit {known} 与 {unit}");
+                            issues.push(format!(
+                                "referent {name:?} belongs to both unit {known} and {unit}; keeping first binding"
+                            ));
                         }
                         None => {
                             names.insert(name.to_owned(), unit);
@@ -401,6 +596,7 @@ fn parse_talks(text: &str) -> (PlayerTalkStore, PlayerTalkCharset) {
             names,
         },
         PlayerTalkCharset { chars },
+        issues,
     )
 }
 
@@ -578,7 +774,10 @@ fn parse_step(step_value: &serde_json::Value) -> TalkStep {
     // 眼/口图样：剥「表名.」前缀得键（两张常量表恒等映射，见模块注释）。
     let facial_field = |name: &str| -> String {
         let raw = s_field_step(name);
-        match raw.strip_prefix("EyePresets.").or_else(|| raw.strip_prefix("LipSyncPresets.")) {
+        match raw
+            .strip_prefix("EyePresets.")
+            .or_else(|| raw.strip_prefix("LipSyncPresets."))
+        {
             Some(key) => key.to_owned(),
             None => raw,
         }
@@ -653,26 +852,27 @@ fn parse_step(step_value: &serde_json::Value) -> TalkStep {
 }
 
 /// 站点主表解析：只取 `siteType → id` 对照（站点门消费面）。
-fn parse_sites(text: &str) -> PlayerTalkSites {
-    let value: serde_json::Value =
-        serde_json::from_str(text).unwrap_or_else(|err| panic!("站点主表不是合法 JSON：{err}"));
+fn parse_sites(text: &str) -> Result<PlayerTalkSites, String> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| format!("site document is not valid JSON: {error}"))?;
     let rows = value
         .get("sites")
         .and_then(|v| v.as_array())
-        .unwrap_or_else(|| panic!("站点主表缺 sites 数组"));
+        .ok_or("site document has no sites array")?;
     let mut by_type = Vec::with_capacity(rows.len());
     for row in rows {
         let site_type = row
             .get("siteType")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| panic!("站点主表行缺 siteType 字符串"));
+            .ok_or("site row has no string siteType")?;
         let id = row
             .get("id")
             .and_then(|v| v.as_i64())
-            .unwrap_or_else(|| panic!("站点 {site_type} 的 id 不是数字")) as i32;
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or_else(|| format!("site {site_type:?} has no i32 id"))?;
         by_type.push((site_type.to_owned(), id));
     }
-    PlayerTalkSites { by_type }
+    Ok(PlayerTalkSites { by_type })
 }
 
 fn collect_chars(text: &str, chars: &mut Vec<char>) {
@@ -727,7 +927,9 @@ pub(crate) fn prepare(
         return; // 动作库未到齐（有驱动即到齐，此行只是防序）
     };
     let roster = &registry.character_unit_ids;
-    if *prepared_roster == *roster && !prepared_roster.is_empty() { return; }
+    if *prepared_roster == *roster && !prepared_roster.is_empty() {
+        return;
+    }
     let mut units = Vec::new();
     let mut census = Census::default();
     for (unit, rows) in &store.units {
@@ -954,41 +1156,119 @@ pub(crate) struct PlayerTurn {
     elapsed: f32,
 }
 
-/// The fixture-script backend uses the same player turn component and updater.
-pub(crate) fn turn_player_to_point(commands: &mut Commands, player: Entity, target: [f32; 3], duration: f64) {
+#[derive(Component)]
+pub(crate) struct PlayerTalkRotationSnapshot {
+    talk_id: i32,
+    rotation: Quat,
+}
+
+pub(crate) fn snapshot_player_rotation(
+    commands: &mut Commands,
+    player: Entity,
+    talk_id: i32,
+    rotation: Option<Quat>,
+) {
     commands.queue(move |world: &mut World| {
-        let Some(transform) = world.get::<Transform>(player) else { return; };
+        if world.get::<PlayerTalkRotationSnapshot>(player).is_some() {
+            return;
+        }
+        let Some(rotation) =
+            rotation.or_else(|| world.get::<Transform>(player).map(|t| t.rotation))
+        else {
+            return;
+        };
+        world
+            .entity_mut(player)
+            .insert(PlayerTalkRotationSnapshot { talk_id, rotation });
+    });
+}
+
+pub(crate) fn restore_cancelled_player_rotation(
+    commands: &mut Commands,
+    player: Entity,
+    talk_id: i32,
+) {
+    commands.queue(move |world: &mut World| {
+        let Some(rotation) = world
+            .get::<PlayerTalkRotationSnapshot>(player)
+            .filter(|snapshot| snapshot.talk_id == talk_id)
+            .map(|snapshot| snapshot.rotation)
+        else {
+            return;
+        };
+        if let Some(mut transform) = world.get_mut::<Transform>(player) {
+            transform.rotation = rotation;
+        }
+    });
+}
+
+/// The fixture-script backend uses the same player turn component and updater.
+pub(crate) fn turn_player_to_point(
+    commands: &mut Commands,
+    player: Entity,
+    target: [f32; 3],
+    duration: f64,
+) {
+    commands.queue(move |world: &mut World| {
+        let Some(transform) = world.get::<Transform>(player) else {
+            return;
+        };
         let from = transform.rotation;
         let forward = facing_direction(transform.translation.to_array(), target);
         let mut to = Quat::from_rotation_arc(Vec3::Z, Vec3::from(forward));
-        if from.dot(to) < 0.0 { to = Quat::from_xyzw(-to.x, -to.y, -to.z, -to.w); }
-        world.entity_mut(player).insert(PlayerTurn { from, to, duration: duration as f32, elapsed: 0.0 });
+        if from.dot(to) < 0.0 {
+            to = Quat::from_xyzw(-to.x, -to.y, -to.z, -to.w);
+        }
+        world.entity_mut(player).insert(PlayerTurn {
+            from,
+            to,
+            duration: duration as f32,
+            elapsed: 0.0,
+        });
     });
 }
 
 #[derive(Clone, Copy, Debug)]
-enum TalkRoute { General, CurrentSet }
+enum TalkRoute {
+    General,
+    CurrentSet,
+}
 
 fn route_for(
-    actions: &crate::npc::NpcActions, data: Option<&crate::npc_objective::AiTalkData>,
+    actions: &crate::npc::NpcActions,
+    data: Option<&crate::npc_objective::AiTalkData>,
 ) -> Result<TalkRoute, &'static str> {
     use crate::npc::NpcAction;
     use moly_law::objective::TalkType;
-    let Some(data) = data else { return Ok(TalkRoute::General); };
-    if matches!(data.kind, TalkType::TutorialFreeWalking | TalkType::TutorialWaiting) {
+    let Some(data) = data else {
+        return Ok(TalkRoute::General);
+    };
+    if matches!(
+        data.kind,
+        TalkType::TutorialFreeWalking | TalkType::TutorialWaiting
+    ) {
         return Err("tutorial override/default/next-state context is not supplied");
     }
-    if matches!(data.kind, TalkType::AfterEditLayout | TalkType::RandomWalk) { return Ok(TalkRoute::General); }
+    if matches!(data.kind, TalkType::AfterEditLayout | TalkType::RandomWalk) {
+        return Ok(TalkRoute::General);
+    }
     if data.kind == TalkType::CommunicationWhileDoingWait {
         return Err("while-doing participants and their arrival slots are not supplied");
     }
     // A running furniture action needs its activity's real timeline, actors
     // and loop-restoration owner. It cannot borrow the ordinary route merely
     // because its data factory is incomplete.
-    if matches!(actions.current, NpcAction::FixtureAction | NpcAction::FixtureActionIdle) {
-        return Err("playing-fixture talk needs the registered activity and its IK/loop restore owner");
+    if matches!(
+        actions.current,
+        NpcAction::FixtureAction | NpcAction::FixtureActionIdle
+    ) {
+        return Err(
+            "playing-fixture talk needs the registered activity and its IK/loop restore owner",
+        );
     }
-    if data.kind == TalkType::BirthdayParty { return Err("birthday context and authored scenario are not supplied"); }
+    if data.kind == TalkType::BirthdayParty {
+        return Err("birthday context and authored scenario are not supplied");
+    }
 
     // IsGeneralTalkState reads the *current action*: Idle, AutoMove, Walk or
     // Rest. A CommonFixture/NoneTalk objective may still be a future intent
@@ -996,12 +1276,21 @@ fn route_for(
     // playing fixture and does not gate PlayGeneralTalk's independent lottery.
     // IsPlayingSomeCharacterTalkFixture instead requires an actual timeline
     // registration with multiple action presenters, not an AITalkType label.
-    if matches!(actions.current, NpcAction::Idle | NpcAction::AutoMove | NpcAction::Walk | NpcAction::Rest) {
+    if matches!(
+        actions.current,
+        NpcAction::Idle | NpcAction::AutoMove | NpcAction::Walk | NpcAction::Rest
+    ) {
         return Ok(TalkRoute::General);
     }
-    if let Some(reason) = data.pending_factory { return Err(reason); }
-    if matches!(data.kind, TalkType::MultipleCharacterFixture | TalkType::SingleCharacterFixture | TalkType::CommonFixture)
-        || data.target_fixture.is_some()
+    if let Some(reason) = data.pending_factory {
+        return Err(reason);
+    }
+    if matches!(
+        data.kind,
+        TalkType::MultipleCharacterFixture
+            | TalkType::SingleCharacterFixture
+            | TalkType::CommonFixture
+    ) || data.target_fixture.is_some()
     {
         return Err("registered NPC fixture timeline and loop control are not supplied");
     }
@@ -1030,10 +1319,26 @@ pub(crate) fn consume_trigger(
     active_talk: Option<Res<crate::talk::ActiveTalk>>,
     catalog: TalkCatalog,
     npcs: Query<
-        (Entity, &CharacterUnitId, &WalkState, &ToonMaterials, &crate::npc::NpcActions, &crate::npc_objective::TalkSlot),
+        (
+            Entity,
+            &CharacterUnitId,
+            &WalkState,
+            &ToonMaterials,
+            &crate::npc::NpcActions,
+            &crate::npc_objective::TalkSlot,
+        ),
         Without<PlayerControlled>,
     >,
     player: Query<(Entity, &Transform), With<PlayerControlled>>,
+    fixtures: Query<
+        (
+            Entity,
+            &FixtureActivityIdentity,
+            &FixturePlacement,
+            &Transform,
+        ),
+        With<FixtureRoot>,
+    >,
     mut ledger: ResMut<PlayerTalkLedger>,
     mut window: ResMut<TalkWindowState>,
 ) {
@@ -1042,34 +1347,63 @@ pub(crate) fn consume_trigger(
     let mut session_started = session.is_some() || active_talk.is_some();
     for request in requests.read() {
         ledger.requests += 1;
-        if session_started || !catalog.ready() {
+        if session_started {
             ledger.busy_skips += 1;
+            ledger.reject(request, "another talk session is active");
             continue;
         }
-        let safe_position = match eligibility.click_position(request.entity, request.unit) {
-            Ok(position) => position,
-            Err(reason) => { ledger.refusals += 1; warn!("[player-talk] unit {} cannot talk: {reason}", request.unit); continue; }
-        };
-        let Ok((player_entity, player_transform)) = player.single() else { continue; };
-        // Source CanTalk/avoidance precedes the input throttle. Relocate only
-        // the real player, and use that same position for the session snapshot.
-        if safe_position.length_squared() >= 1e-10 {
-            commands.queue(move |world: &mut World| {
-                if let Some(mut transform) = world.get_mut::<Transform>(player_entity) {
-                    transform.translation = safe_position;
-                }
-            });
+        if !catalog.ready() {
+            ledger.reject(request, "talk catalog is not ready");
+            continue;
         }
         let now = time.elapsed_secs();
-        if ledger.last_request_at.is_some_and(|last| now - last < moly_law::action_button::ACTION_BUTTON_INPUT_INTERVAL) {
+        if ledger
+            .last_request_at
+            .is_some_and(|last| now - last < moly_law::action_button::ACTION_BUTTON_INPUT_INTERVAL)
+        {
             ledger.busy_skips += 1;
+            ledger.reject(request, "talk request was throttled");
             continue;
         }
-        ledger.last_request_at = Some(now);
-        let Ok((_, _, _, _, actions, binding)) = npcs.get(request.entity) else { continue; };
-        let route = match route_for(actions, binding.current.as_ref()) {
+        let safe_position = match if request.exact.is_some() {
+            eligibility.library_position(request.entity)
+        } else {
+            eligibility.click_position(request.entity, request.unit)
+        } {
+            Ok(position) => position,
+            Err(reason) => {
+                ledger.reject(request, reason);
+                warn!("[player-talk] unit {} cannot talk: {reason}", request.unit);
+                continue;
+            }
+        };
+        let Ok((player_entity, player_transform)) = player.single() else {
+            ledger.reject(request, "exactly one real player is required");
+            continue;
+        };
+        let Ok((_, member, _, _, actions, binding)) = npcs.get(request.entity) else {
+            ledger.reject(request, "requested NPC entity left the scene");
+            continue;
+        };
+        if member.0 != request.unit {
+            ledger.reject(request, "requested NPC entity/unit identity changed");
+            continue;
+        }
+        let route = match request
+            .exact
+            .as_ref()
+            .map(|_| Ok(TalkRoute::CurrentSet))
+            .unwrap_or_else(|| route_for(actions, binding.current.as_ref()))
+        {
             Ok(route) => route,
-            Err(reason) => { ledger.refusals += 1; warn!("[player-talk] unit {} activity is not prepared: {reason}", request.unit); continue; }
+            Err(reason) => {
+                ledger.reject(request, reason);
+                warn!(
+                    "[player-talk] unit {} activity is not prepared: {reason}",
+                    request.unit
+                );
+                continue;
+            }
         };
         info!(
             "[player-talk] unit {} route={route:?} action={:?} ai_type={:?} future_factory_pending={}",
@@ -1077,74 +1411,219 @@ pub(crate) fn consume_trigger(
             binding.current.as_ref().is_some_and(|data| data.pending_factory.is_some()),
         );
         let previous_id = binding.previous_id();
-        let selection = match route {
-            TalkRoute::General => {
-                let mut uniform = UniformSource {
-                    rng: TalkRng(selection_seed(request.unit, catalog.site_id(&actions.site_type).unwrap_or(0), previous_id, ledger.requests)),
-                    calls: 0, last_index: 0, last_len: 0,
-                };
-                let mut selected = match catalog.lottery(request.unit, &actions.site_type, previous_id, |len| uniform.draw(len)) {
-                    Ok(selected) => selected,
-                    Err(reason) => { ledger.refusals += 1; warn!("[player-talk] unit {}: {reason}", request.unit); continue; }
-                };
-                let lottery_id = selected.master_id;
-                if let Some(current) = binding.current.as_ref().and_then(|data| data.content.as_ref()) {
-                    match current.is_general {
-                        Some(true) => selected.master_id = current.master_id,
-                        Some(false) => {},
-                        None => { ledger.refusals += 1; warn!("[player-talk] Current {} lacks its general-condition predicates", current.master_id); continue; }
-                    }
-                }
-                info!("[player-talk] unit {} General lottery={} draws={} then Current overwrite={} pool={}",
-                    request.unit, lottery_id, uniform.calls, selected.master_id, selected.pool_len);
-                selected
+        let selection = if let Some(content) = request.exact.as_ref() {
+            GeneralSelection {
+                master_id: content.master_id,
+                pool_len: 1,
+                replayed: false,
             }
-            TalkRoute::CurrentSet => GeneralSelection {
-                master_id: binding.current.as_ref().and_then(|data| data.content.as_ref()).expect("route requires prepared content").master_id,
-                pool_len: 0, replayed: true,
-            },
+        } else {
+            match route {
+                TalkRoute::General => {
+                    let mut uniform = UniformSource {
+                        rng: TalkRng(selection_seed(
+                            request.unit,
+                            catalog.site_id(&actions.site_type).unwrap_or(0),
+                            previous_id,
+                            ledger.requests,
+                        )),
+                        calls: 0,
+                        last_index: 0,
+                        last_len: 0,
+                    };
+                    let mut selected = match catalog.lottery(
+                        request.unit,
+                        &actions.site_type,
+                        previous_id,
+                        |len| uniform.draw(len),
+                    ) {
+                        Ok(selected) => selected,
+                        Err(reason) => {
+                            ledger.reject(request, reason);
+                            warn!("[player-talk] unit {}: {reason}", request.unit);
+                            continue;
+                        }
+                    };
+                    let lottery_id = selected.master_id;
+                    if let Some(current) = binding
+                        .current
+                        .as_ref()
+                        .and_then(|data| data.content.as_ref())
+                    {
+                        match current.is_general {
+                            Some(true) => selected.master_id = current.master_id,
+                            Some(false) => {}
+                            None => {
+                                ledger.reject(
+                                    request,
+                                    "Current content lacks general-condition predicates",
+                                );
+                                warn!("[player-talk] Current {} lacks its general-condition predicates", current.master_id);
+                                continue;
+                            }
+                        }
+                    }
+                    info!("[player-talk] unit {} General lottery={} draws={} then Current overwrite={} pool={}",
+                    request.unit, lottery_id, uniform.calls, selected.master_id, selected.pool_len);
+                    selected
+                }
+                TalkRoute::CurrentSet => GeneralSelection {
+                    master_id: binding
+                        .current
+                        .as_ref()
+                        .and_then(|data| data.content.as_ref())
+                        .expect("route requires prepared content")
+                        .master_id,
+                    pool_len: 0,
+                    replayed: true,
+                },
+            }
         };
-        let bound_content = match route {
-            TalkRoute::CurrentSet => binding.current.as_ref().and_then(|data| data.content.as_ref()),
-            TalkRoute::General => binding.current.as_ref().and_then(|data| data.content.as_ref())
-                .filter(|content| content.is_general == Some(true) && content.master_id == selection.master_id)
-                .or_else(|| selection.replayed.then(|| binding.previous.as_ref().and_then(|data| data.content.as_ref())).flatten()),
+        let bound_content = if let Some(content) = request.exact.as_ref() {
+            Some(content)
+        } else {
+            match route {
+                TalkRoute::CurrentSet => binding
+                    .current
+                    .as_ref()
+                    .and_then(|data| data.content.as_ref()),
+                TalkRoute::General => binding
+                    .current
+                    .as_ref()
+                    .and_then(|data| data.content.as_ref())
+                    .filter(|content| {
+                        content.is_general == Some(true) && content.master_id == selection.master_id
+                    })
+                    .or_else(|| {
+                        selection
+                            .replayed
+                            .then(|| {
+                                binding
+                                    .previous
+                                    .as_ref()
+                                    .and_then(|data| data.content.as_ref())
+                            })
+                            .flatten()
+                    }),
+            }
         };
         let resolved = match bound_content {
             Some(content) => catalog.resolve_content(content),
             None => catalog.resolve(selection.master_id),
         };
         let Some(resolved) = resolved else {
-            ledger.refusals += 1;
+            ledger.reject(request, "selected backend/master is not loaded");
             warn!("[player-talk] selected master {} is outside the loaded content, not an empty candidate pool", selection.master_id);
             continue;
         };
-        let mut actors = Vec::new();
-        for unit in resolved.units() {
-            let Some((entity, _, _, toon, state, _)) = npcs.iter().find(|(_, member, _, _, _, _)| member.0 == unit) else { break; };
-            if !state.ready() { break; }
-            let (Some(eye), Some(mouth)) = (toon.slot_handle("eye"), toon.slot_handle("mouth")) else { break; };
-            actors.push(crate::talk::TalkActor { unit, entity, eye: eye.clone(), mouth: mouth.clone() });
-        }
-        if actors.len() != resolved.units().len() || actors.is_empty() {
-            ledger.refusals += 1;
-            warn!("[player-talk] master {} cannot resolve its final actor group", selection.master_id);
+        let units = resolved.units();
+        let unique_units: HashSet<_> = units.iter().copied().collect();
+        if units.is_empty() || unique_units.len() != units.len() {
+            ledger.reject(request, "selected content has an empty or duplicate cast");
             continue;
         }
-        let target_fixture = match route {
-            TalkRoute::General => None,
-            TalkRoute::CurrentSet => binding.current.as_ref().and_then(|data| data.target_fixture),
+        if request.exact.is_some() && !unique_units.contains(&request.unit) {
+            ledger.reject(request, "requested NPC is not in the selected content cast");
+            continue;
+        }
+        let mut actors = Vec::new();
+        for unit in &units {
+            let Some((entity, _, _, toon, state, _)) = npcs
+                .iter()
+                .find(|(_, member, _, _, _, _)| member.0 == *unit)
+            else {
+                break;
+            };
+            if !state.ready()
+                || !state.enable_talk
+                || state.current == crate::npc::NpcAction::Talk
+                || state.talk_owner.is_some_and(|owner| owner != player_entity)
+            {
+                break;
+            }
+            let (Some(eye), Some(mouth)) = (toon.slot_handle("eye"), toon.slot_handle("mouth"))
+            else {
+                break;
+            };
+            actors.push(crate::talk::TalkActor {
+                unit: *unit,
+                entity,
+                eye: eye.clone(),
+                mouth: mouth.clone(),
+            });
+        }
+        if actors.len() != units.len() {
+            ledger.reject(
+                request,
+                "not every selected actor is present, ready, and rendered",
+            );
+            warn!(
+                "[player-talk] master {} cannot resolve its final actor group",
+                selection.master_id
+            );
+            continue;
+        }
+        let target_fixture = if request.exact.is_some() {
+            request.target_fixture
+        } else {
+            match route {
+                TalkRoute::General => None,
+                TalkRoute::CurrentSet => binding
+                    .current
+                    .as_ref()
+                    .and_then(|data| data.target_fixture),
+            }
         };
+        let fixture_bindings = match &resolved {
+            ResolvedTalk::General { .. } => Vec::new(),
+            ResolvedTalk::Fixture(row) => {
+                match validate_fixture_context(row, target_fixture, &actors, &npcs, &fixtures) {
+                    Ok(bindings) => bindings,
+                    Err(reason) => {
+                        ledger.reject(request, reason);
+                        warn!(
+                            "[player-talk] fixture master {} cannot be admitted: {reason}",
+                            selection.master_id
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        // Admission is now complete. Throttle state and world mutations begin
+        // only after backend/master, cast, fixture instances and context passed.
+        ledger.last_request_at = Some(now);
+        ledger.last_outcome = Some(PlayerTalkOutcome::Started(resolved.content()));
+        if safe_position.length_squared() >= 1e-10 {
+            commands.queue(move |world: &mut World| {
+                if let Some(mut transform) = world.get_mut::<Transform>(player_entity) {
+                    transform.translation = safe_position;
+                }
+            });
+        }
         commands.queue(|world: &mut World| {
-            if let Some(mut player_state) = world.get_resource_mut::<crate::player_state::PlayerAvatarStates>() {
+            if let Some(mut player_state) =
+                world.get_resource_mut::<crate::player_state::PlayerAvatarStates>()
+            {
                 player_state.change_status(crate::player_state::PlayerActionState::Talk);
             }
         });
-        for actor in &actors { crate::npc::enter_player_talk(&mut commands, actor.entity, player_entity); }
+        for actor in &actors {
+            crate::npc::enter_player_talk(&mut commands, actor.entity, player_entity);
+        }
         session_started = true;
         let (final_unit, row) = match resolved {
             ResolvedTalk::Fixture(row) => {
-                crate::talk::start_selected(&mut commands, &mut window, row, &actors, player_entity, target_fixture, now);
+                crate::talk::start_selected(
+                    &mut commands,
+                    &mut window,
+                    row,
+                    &actors,
+                    player_entity,
+                    target_fixture,
+                    fixture_bindings,
+                    now,
+                );
                 continue;
             }
             ResolvedTalk::General { unit, row } => (unit, row),
@@ -1159,7 +1638,17 @@ pub(crate) fn consume_trigger(
         let player_position = safe_position.to_array();
         let player_rotation = player_transform.rotation;
         let npc_name = catalog.name(final_unit);
-        if npc_name.is_empty() {
+        let needs_named_referent = row.steps.iter().any(|step| {
+            [referent_of_general_step(step), target_of_general_step(step)]
+                .into_iter()
+                .flatten()
+                .any(|referent| {
+                    referent
+                        .strip_prefix("Characters.")
+                        .is_some_and(|name| name != "Player" && !name.is_empty())
+                })
+        });
+        if npc_name.is_empty() && needs_named_referent {
             // 剧本里没有该 unit 的指称名：全部指称步都会悬空（记日志
             // 跳过），会话照开——转身/眼口/动作不出，文本照上屏。
             warn!(
@@ -1195,6 +1684,12 @@ pub(crate) fn consume_trigger(
             .entity(player_entity)
             .insert(TalkHold)
             .insert(MotionPhase::Dwelling { remaining: None });
+        snapshot_player_rotation(
+            &mut commands,
+            player_entity,
+            row.talk_id,
+            Some(player_transform.rotation),
+        );
         let mut session = PlayerTalkSession {
             talk_id: row.talk_id,
             unit: final_unit,
@@ -1229,6 +1724,26 @@ pub(crate) fn consume_trigger(
     }
 }
 
+fn referent_of_general_step(step: &TalkStep) -> Option<&str> {
+    match step {
+        TalkStep::LookAtBody { who, .. }
+        | TalkStep::Voice { who, .. }
+        | TalkStep::ChangeNpcEye { who, .. }
+        | TalkStep::ChangeNpcMouth { who, .. }
+        | TalkStep::ChangeAnimation { who, .. }
+        | TalkStep::Emoticon { who, .. }
+        | TalkStep::HideEmoticon { who } => Some(who),
+        _ => None,
+    }
+}
+
+fn target_of_general_step(step: &TalkStep) -> Option<&str> {
+    match step {
+        TalkStep::LookAtBody { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
 /// 抽签种子：检出现场（unit、当前站点、前一段、请求序）喂进 LCG——
 /// 同现场同序列，现场变序列跟着变；请求序让连续两次点按不同掷点。
 fn selection_seed(unit: u32, site: i32, prev: Option<i32>, request_no: u32) -> u64 {
@@ -1238,6 +1753,135 @@ fn selection_seed(unit: u32, site: i32, prev: Option<i32>, request_no: u32) -> u
     seed ^= (prev.unwrap_or(0) as u64).wrapping_mul(0x0100_0019);
     seed ^= (request_no as u64).wrapping_mul(0x9E37_79B9);
     seed
+}
+
+const FIXTURE_CAST_COHERENCE_RADIUS: f32 = 4.0;
+
+#[allow(clippy::type_complexity)]
+fn validate_fixture_context(
+    row: &moly_law::talk::FixtureTalkRow,
+    requested: Option<Entity>,
+    actors: &[crate::talk::TalkActor],
+    npcs: &Query<
+        (
+            Entity,
+            &CharacterUnitId,
+            &WalkState,
+            &ToonMaterials,
+            &crate::npc::NpcActions,
+            &crate::npc_objective::TalkSlot,
+        ),
+        Without<PlayerControlled>,
+    >,
+    fixtures: &Query<
+        (
+            Entity,
+            &FixtureActivityIdentity,
+            &FixturePlacement,
+            &Transform,
+        ),
+        With<FixtureRoot>,
+    >,
+) -> Result<Vec<(i32, Entity)>, &'static str> {
+    validate_fixture_declarations(
+        row,
+        actors.iter().map(|actor| actor.unit),
+        fixtures.iter().filter_map(|(_, identity, placement, _)| {
+            (identity.master_id == placement.fixture_id).then_some(identity.master_id)
+        }),
+    )?;
+    let requested = requested.ok_or("fixture content requires a selected real fixture instance")?;
+    let (_, requested_identity, requested_placement, _) = fixtures
+        .get(requested)
+        .map_err(|_| "selected fixture instance left the scene")?;
+    if !row.fixture_ids.contains(&requested_identity.master_id)
+        || requested_placement.fixture_id != requested_identity.master_id
+    {
+        return Err("selected fixture instance no longer matches the authored master");
+    }
+
+    let mut bindings = Vec::with_capacity(row.fixture_ids.len());
+    for fixture_id in &row.fixture_ids {
+        let binding = if *fixture_id == requested_identity.master_id {
+            Some(requested)
+        } else {
+            fixtures
+                .iter()
+                .find(|(_, identity, placement, _)| {
+                    identity.master_id == *fixture_id && placement.fixture_id == *fixture_id
+                })
+                .map(|(entity, _, _, _)| entity)
+        };
+        let Some(entity) = binding else {
+            return Err("an authored fixture instance is missing from the current scene");
+        };
+        bindings.push((*fixture_id, entity));
+    }
+
+    for actor in actors {
+        let pairs: Vec<_> = row
+            .pairs
+            .iter()
+            .filter(|pair| pair.unit_id == actor.unit as i32)
+            .collect();
+        if pairs.is_empty() {
+            return Err("an actor has no authored fixture pairing");
+        }
+        let (_, _, walk, _, _, _) = npcs
+            .get(actor.entity)
+            .map_err(|_| "an admitted actor left the scene")?;
+        let coherent = pairs.iter().any(|pair| {
+            bindings
+                .iter()
+                .find(|(fixture_id, _)| *fixture_id == pair.fixture_id)
+                .and_then(|(_, entity)| fixtures.get(*entity).ok())
+                .is_some_and(|(_, _, _, transform)| {
+                    Vec3::from(walk.0.position).distance(transform.translation)
+                        <= FIXTURE_CAST_COHERENCE_RADIUS
+                })
+        });
+        if !coherent {
+            return Err("the full fixture cast is not coherently staged at its authored fixture");
+        }
+    }
+    Ok(bindings)
+}
+
+fn validate_fixture_declarations(
+    row: &moly_law::talk::FixtureTalkRow,
+    actor_units: impl IntoIterator<Item = u32>,
+    available_fixtures: impl IntoIterator<Item = i32>,
+) -> Result<(), &'static str> {
+    let actors: HashSet<_> = actor_units.into_iter().collect();
+    let fixtures: HashSet<_> = available_fixtures.into_iter().collect();
+    if actors.len() != row.unit_ids.len()
+        || !row
+            .unit_ids
+            .iter()
+            .all(|unit| actors.contains(&(*unit as u32)))
+    {
+        return Err("fixture cast does not match the selected row");
+    }
+    if !row
+        .fixture_ids
+        .iter()
+        .all(|fixture| fixtures.contains(fixture))
+    {
+        return Err("an authored fixture instance is missing from the current scene");
+    }
+    if row.pairs.iter().any(|pair| {
+        !row.fixture_ids.contains(&pair.fixture_id) || !row.unit_ids.contains(&pair.unit_id)
+    }) {
+        return Err("fixture cast pairing references an undeclared actor or fixture");
+    }
+    if row
+        .unit_ids
+        .iter()
+        .any(|unit| !row.pairs.iter().any(|pair| pair.unit_id == *unit))
+    {
+        return Err("an actor has no authored fixture pairing");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,24 +1900,72 @@ pub(crate) fn advance_session(
     store: Option<Res<PlayerTalkStore>>,
     library: Res<MotionLibrary>,
     libraries: Res<Assets<Gltf>>,
-    playback: crate::talk::TalkPlayback,
+    mut playback: crate::talk::TalkPlayback,
     mut materials: ResMut<Assets<CharacterMaterial>>,
     mut window: ResMut<TalkWindowState>,
     mut emote_reqs: ResMut<TalkEmoteReqs>,
     window_roots: Query<Entity, With<TalkWindowRoot>>,
     mut npcs: Query<
-        (&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform),
+        (
+            &mut MotionPhase,
+            &mut WalkState,
+            &mut MotionDriver,
+            &Transform,
+        ),
         Without<PlayerControlled>,
     >,
     mut runtimes: Query<&mut PlayerTalkRuntime>,
+    live_entities: Query<()>,
     mut ledger: ResMut<PlayerTalkLedger>,
 ) {
+    let explicit_cancel = drain_talk_cancellation(&mut playback.cancel);
     let Some(mut session) = session else {
         return;
     };
     // 拆成一条 &mut 再走字段：row（只读侧）与 state/账目（可写侧）是
     // 同一结构的互斥字段，经它取借用才分得开。
     let session = &mut *session;
+    let interrupted =
+        live_entities.get(session.npc).is_err() || live_entities.get(session.player).is_err();
+    if explicit_cancel || interrupted {
+        if interrupted {
+            warn!(
+                "[player-talk] talk {} interrupted because an admitted actor disappeared",
+                session.talk_id
+            );
+        }
+        let crate::talk::TalkPlayback {
+            mut players,
+            mut transitions,
+            mut delayed_faces,
+            ..
+        } = playback;
+        delayed_faces.cancel_talk(session.talk_id);
+        if let (Some(tables), Ok(runtime)) = (tables.as_deref(), runtimes.get(session.npc)) {
+            reset_default_face(
+                session.unit,
+                tables,
+                &mut materials,
+                &runtime.eye_handle,
+                &runtime.mouth_handle,
+            );
+        }
+        emote_reqs.hides.push(session.npc);
+        restore_cancelled_player_rotation(&mut commands, session.player, session.talk_id);
+        reset_cancelled_player_status(&mut commands);
+        finish_session(
+            &mut commands,
+            session,
+            &mut window,
+            &window_roots,
+            &mut npcs,
+            &mut players,
+            &mut transitions,
+            &mut ledger,
+            time.elapsed_secs(),
+        );
+        return;
+    }
     let (Some(tables), Some(store)) = (tables, store) else {
         return;
     };
@@ -1283,7 +1975,11 @@ pub(crate) fn advance_session(
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
     let crate::talk::TalkPlayback {
-        mut graphs, mut players, mut transitions, mut delayed_faces,
+        mut graphs,
+        mut players,
+        mut transitions,
+        mut delayed_faces,
+        ..
     } = playback;
 
     // This backend and the fixture-script backend are mutually exclusive
@@ -1311,12 +2007,18 @@ pub(crate) fn advance_session(
     // 回看一步判——挂起记账同一条判法）。
     let holding_click = session.state.is_holding()
         && matches!(
-            session.row.steps.get(session.state.cursor.saturating_sub(1)),
+            session
+                .row
+                .steps
+                .get(session.state.cursor.saturating_sub(1)),
             Some(TalkStep::WaitClick)
         );
     let holding_auto_wait = session.state.is_holding()
         && matches!(
-            session.row.steps.get(session.state.cursor.saturating_sub(1)),
+            session
+                .row
+                .steps
+                .get(session.state.cursor.saturating_sub(1)),
             Some(TalkStep::WaitTimeOnAutoMode { .. })
         );
 
@@ -1353,13 +2055,19 @@ pub(crate) fn advance_session(
         // Consume that click, but do not run WaitClick's engine-only face flush.
         window.consume_click(TalkSession::Player(&mut *session));
         session.hold_logged = None;
-        info!("[player-talk] 段 {} wait_time_on_auto_mode 手动跳过（点击闩耗尽）", session.talk_id);
+        info!(
+            "[player-talk] 段 {} wait_time_on_auto_mode 手动跳过（点击闩耗尽）",
+            session.talk_id
+        );
     }
 
     // 挂起侧账：游标回看一步（等待步消费后游标已过它）；步型变化才记
     // 一行（挂起期间逐帧记账是刷屏不是证据）。
     if session.state.is_holding() {
-        let parked = session.row.steps.get(session.state.cursor.saturating_sub(1));
+        let parked = session
+            .row
+            .steps
+            .get(session.state.cursor.saturating_sub(1));
         let word = parked.map(|step| step.op()).unwrap_or("<unknown>");
         if session.hold_logged != Some(word) {
             session.hold_logged = Some(word);
@@ -1427,7 +2135,13 @@ pub(crate) fn advance_session(
         }
         emote_reqs.hides.push(session.npc);
         if let Ok(runtime) = runtimes.get(session.npc) {
-            reset_default_face(session.unit, &tables, &mut materials, &runtime.eye_handle, &runtime.mouth_handle);
+            reset_default_face(
+                session.unit,
+                &tables,
+                &mut materials,
+                &runtime.eye_handle,
+                &runtime.mouth_handle,
+            );
         }
         finish_session(
             &mut commands,
@@ -1458,8 +2172,15 @@ fn apply_delayed_face(
         );
         return;
     }
-    let Ok(runtime) = runtimes.get(session.npc) else { return; };
-    command.apply(tables, materials, &runtime.eye_handle, &runtime.mouth_handle);
+    let Ok(runtime) = runtimes.get(session.npc) else {
+        return;
+    };
+    command.apply(
+        tables,
+        materials,
+        &runtime.eye_handle,
+        &runtime.mouth_handle,
+    );
 }
 
 /// Convert the authored referent to a logical id without requiring that id to
@@ -1543,7 +2264,12 @@ fn dispatch_step(
     window: &mut TalkWindowState,
     emote_reqs: &mut TalkEmoteReqs,
     npcs: &mut Query<
-        (&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform),
+        (
+            &mut MotionPhase,
+            &mut WalkState,
+            &mut MotionDriver,
+            &Transform,
+        ),
         Without<PlayerControlled>,
     >,
     runtimes: &mut Query<&mut PlayerTalkRuntime>,
@@ -1635,7 +2361,9 @@ fn dispatch_step(
             if !matches!(participant_of(session, who), Some(Participant::Npc)) {
                 warn!(
                     "[player-talk] 段 {} 步 {} voice who={}：无有效NPC说话者，不起播",
-                    talk_id, index, ascii_or(who),
+                    talk_id,
+                    index,
+                    ascii_or(who),
                 );
                 return;
             }
@@ -1655,17 +2383,37 @@ fn dispatch_step(
                 who,
             );
         }
-        TalkStep::ChangeNpcEye { who, pattern, delay_seconds, .. }
-        | TalkStep::ChangeNpcMouth { who, pattern, delay_seconds, .. } => {
+        TalkStep::ChangeNpcEye {
+            who,
+            pattern,
+            delay_seconds,
+            ..
+        }
+        | TalkStep::ChangeNpcMouth {
+            who,
+            pattern,
+            delay_seconds,
+            ..
+        } => {
             let Some(unit) = delayed_face_unit(store, who) else {
                 warn!("[player-talk] source={talk_id} step={index} {step_word} has an unresolved character id");
                 return;
             };
-            let slot = if matches!(step, TalkStep::ChangeNpcEye { .. }) { FaceSlot::Eye } else { FaceSlot::Mouth };
-            delayed_faces.enqueue(*delay_seconds, FaceCommand {
-                unit, slot, pattern: pattern.clone(),
-                source_talk: talk_id, source_step: index,
-            });
+            let slot = if matches!(step, TalkStep::ChangeNpcEye { .. }) {
+                FaceSlot::Eye
+            } else {
+                FaceSlot::Mouth
+            };
+            delayed_faces.enqueue(
+                *delay_seconds,
+                FaceCommand {
+                    unit,
+                    slot,
+                    pattern: pattern.clone(),
+                    source_talk: talk_id,
+                    source_step: index,
+                },
+            );
         }
         TalkStep::ChangeAnimation {
             who,
@@ -1687,7 +2435,10 @@ fn dispatch_step(
                 None => {
                     info!(
                         "[player-talk] 段 {} 步 {} animation who={} motion={}：悬空指称，不起播",
-                        talk_id, index, who, ascii_or(motion),
+                        talk_id,
+                        index,
+                        who,
+                        ascii_or(motion),
                     );
                     return;
                 }
@@ -1773,23 +2524,25 @@ fn dispatch_step(
             name,
             show_seconds,
             ..
-        } => match participant_of(session, who) {
-            Some(Participant::Npc) => {
-                emote_reqs
-                    .shows
-                    .push((session.npc, name.clone(), *show_seconds as f32));
-                info!(
+        } => {
+            match participant_of(session, who) {
+                Some(Participant::Npc) => {
+                    emote_reqs
+                        .shows
+                        .push((session.npc, name.clone(), *show_seconds as f32));
+                    info!(
                     "[player-talk] 段 {} 步 {} emoticon who={} name={} showSeconds={:.1}（出件走表情件通道）",
                     talk_id, index, who, ascii_or(name), show_seconds,
                 );
-            }
-            _ => {
-                info!(
+                }
+                _ => {
+                    info!(
                     "[player-talk] 段 {} 步 {} emoticon who={} name={}：玩家侧/悬空指称，不出件",
                     talk_id, index, who, ascii_or(name),
                 );
+                }
             }
-        },
+        }
         TalkStep::HideEmoticon { who } => match participant_of(session, who) {
             Some(Participant::Npc) => {
                 emote_reqs.hides.push(session.npc);
@@ -1842,7 +2595,12 @@ fn turn_npc_toward(
     target_pos: [f32; 3],
     duration: f64,
     npcs: &mut Query<
-        (&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform),
+        (
+            &mut MotionPhase,
+            &mut WalkState,
+            &mut MotionDriver,
+            &Transform,
+        ),
         Without<PlayerControlled>,
     >,
 ) -> TurnMotion {
@@ -1904,7 +2662,12 @@ fn begin_player_turn(
 fn release_finished_animations(
     session: &mut PlayerTalkSession,
     npcs: &mut Query<
-        (&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform),
+        (
+            &mut MotionPhase,
+            &mut WalkState,
+            &mut MotionDriver,
+            &Transform,
+        ),
         Without<PlayerControlled>,
     >,
     runtimes: &mut Query<&mut PlayerTalkRuntime>,
@@ -1951,7 +2714,12 @@ fn finish_session(
     window: &mut TalkWindowState,
     window_roots: &Query<Entity, With<TalkWindowRoot>>,
     npcs: &mut Query<
-        (&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform),
+        (
+            &mut MotionPhase,
+            &mut WalkState,
+            &mut MotionDriver,
+            &Transform,
+        ),
         Without<PlayerControlled>,
     >,
     players: &mut Query<&mut AnimationPlayer>,
@@ -1976,26 +2744,26 @@ fn finish_session(
             walk.0.forward = [fwd.x, fwd.y, fwd.z];
         }
     }
-    if let Ok((mut phase, _, mut driver)) = npcs
-        .get_mut(session.npc)
-        .map(|(p, w, d, _)| (p, w, d))
+    if let Ok((mut phase, _, mut driver)) = npcs.get_mut(session.npc).map(|(p, w, d, _)| (p, w, d))
     {
         *phase = MotionPhase::Dwelling { remaining: None };
         driver.alone_holds = false;
         driver.playing = None;
         play_idle(&mut driver, players, transitions, session.unit);
     }
-    commands
-        .entity(session.npc)
-        .remove::<TalkHold>()
-        .remove::<PlayerTalkRuntime>();
-    crate::npc::leave_player_talk(commands, session.npc);
+    if let Ok(mut entity) = commands.get_entity(session.npc) {
+        entity.remove::<TalkHold>().remove::<PlayerTalkRuntime>();
+        drop(entity);
+        crate::npc::leave_player_talk(commands, session.npc);
+    }
     // 玩家：撤持留与转身件（相位已是驻留；朝向保持当前值——玩家域
     // 朝向直设，下一次移动自会重设朝向，无律状态要同步）。
-    commands
-        .entity(session.player)
-        .remove::<TalkHold>()
-        .remove::<PlayerTurn>();
+    if let Ok(mut entity) = commands.get_entity(session.player) {
+        entity
+            .remove::<TalkHold>()
+            .remove::<PlayerTurn>()
+            .remove::<PlayerTalkRotationSnapshot>();
+    }
     // 窗体撤下：层弹出路径无淡出，即时收树（α 回 1 供下次开场短路）。
     for root in window_roots {
         commands.entity(root).despawn();
@@ -2022,8 +2790,11 @@ fn finish_session(
 
 /// ResetFacial reads the authored unit defaults, applying mouth before eye.
 pub(crate) fn reset_default_face(
-    unit: u32, tables: &FacialTables, materials: &mut Assets<CharacterMaterial>,
-    eye: &Handle<CharacterMaterial>, mouth: &Handle<CharacterMaterial>,
+    unit: u32,
+    tables: &FacialTables,
+    materials: &mut Assets<CharacterMaterial>,
+    eye: &Handle<CharacterMaterial>,
+    mouth: &Handle<CharacterMaterial>,
 ) {
     let Some((eye_pattern, mouth_pattern)) = tables.default_patterns(unit) else {
         warn!("[player-talk] unit {unit} has no authored default facial row");
@@ -2096,10 +2867,7 @@ pub(crate) fn progress_turns(
 
 /// Update（周期 5s，run_if 门控）：会话状态行 + 累计账——「玩家对话
 /// 真的在播」的现算证据（步进游标、文本数、点跳放行数）。
-pub(crate) fn report(
-    session: Option<Res<PlayerTalkSession>>,
-    ledger: Res<PlayerTalkLedger>,
-) {
+pub(crate) fn report(session: Option<Res<PlayerTalkSession>>, ledger: Res<PlayerTalkLedger>) {
     match session {
         Some(session) => {
             info!(
@@ -2184,10 +2952,7 @@ pub(crate) fn smoke_autotap(
         return;
     };
     *index += 1;
-    let Some(position) = camera
-        .world_to_viewport(camera_transform, *world)
-        .ok()
-    else {
+    let Some(position) = camera.world_to_viewport(camera_transform, *world).ok() else {
         info!("[player-talk-smoke] unit {unit} 的世界位投影失败（相机视口外），跳过");
         return;
     };
@@ -2202,6 +2967,112 @@ pub(crate) fn smoke_autotap(
         "[player-talk-smoke] 合成 TAP @({:.0},{:.0})（投影 unit {unit} 的世界位，事件面注入）",
         position.x, position.y
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moly_law::talk::{FixtureTalkRow, PairRow};
+
+    fn tweet() -> TweetRef {
+        TweetRef {
+            id: 1,
+            text: String::new(),
+            motion: String::new(),
+            eye: String::new(),
+            mouth: String::new(),
+        }
+    }
+
+    fn fixture_row() -> FixtureTalkRow {
+        FixtureTalkRow {
+            talk_id: 77,
+            lua: String::new(),
+            form: 0,
+            site_group_id: 1,
+            term_id: 1,
+            condition_group_id: 1,
+            fixture_ids: vec![423],
+            unit_ids: vec![13, 14],
+            pairs: vec![
+                PairRow {
+                    fixture_id: 423,
+                    unit_id: 13,
+                },
+                PairRow {
+                    fixture_id: 423,
+                    unit_id: 14,
+                },
+            ],
+            tweet: tweet(),
+            voices: Vec::new(),
+            steps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolved_content_preserves_exact_backend_and_master_id() {
+        let general = ResolvedTalk::General {
+            unit: 1,
+            row: TalkRow {
+                talk_id: 77,
+                lua: String::new(),
+                site_group_id: 1,
+                term_id: 1,
+                conditions: Vec::new(),
+                condition_values: Vec::new(),
+                tweet: tweet(),
+                voices: Vec::new(),
+                steps: Vec::new(),
+            },
+        }
+        .content();
+        let fixture = ResolvedTalk::Fixture(fixture_row()).content();
+        assert_eq!(general.master_id, 77);
+        assert_eq!(general.backend, crate::npc_objective::TalkBackend::General);
+        assert_eq!(fixture.master_id, 77);
+        assert_eq!(fixture.backend, crate::npc_objective::TalkBackend::Fixture);
+    }
+
+    #[test]
+    fn fixture_declarations_reject_missing_actor_and_fixture_references() {
+        let row = fixture_row();
+        assert!(validate_fixture_declarations(&row, [13], [423]).is_err());
+        assert!(validate_fixture_declarations(&row, [13, 14], []).is_err());
+        assert!(validate_fixture_declarations(&row, [13, 14], [423]).is_ok());
+    }
+
+    #[derive(Resource, Default)]
+    struct CancelProbe {
+        owner_active: bool,
+        cancellations: usize,
+    }
+
+    fn cancellation_probe(
+        mut requests: MessageReader<TalkCancelRequest>,
+        mut probe: ResMut<CancelProbe>,
+    ) {
+        let cancelled = drain_talk_cancellation(&mut requests);
+        if probe.owner_active && cancelled {
+            probe.cancellations += 1;
+        }
+    }
+
+    #[test]
+    fn idle_cancellation_is_drained_before_a_new_owner_is_admitted() {
+        let mut app = App::new();
+        app.add_message::<TalkCancelRequest>()
+            .init_resource::<CancelProbe>()
+            .add_systems(Update, cancellation_probe);
+        app.world_mut().write_message(TalkCancelRequest);
+        app.update();
+        app.world_mut().resource_mut::<CancelProbe>().owner_active = true;
+        app.update();
+        assert_eq!(app.world().resource::<CancelProbe>().cancellations, 0);
+        app.world_mut().write_message(TalkCancelRequest);
+        app.update();
+        assert_eq!(app.world().resource::<CancelProbe>().cancellations, 1);
+    }
 }
 
 /// 环境变量秒数（缺省 0）：与各域冒烟钩子同款读法。

@@ -1783,7 +1783,7 @@ pub(crate) fn on_damage(
             // 跳过且无声）在采集站点上恒过，形状记注释不入码。
             if object.fixture_type == 9 {
                 stats.drop_se_birthday += 1;
-                se.0.push(SeRequest {
+                se.0.push(SeRequest { owner: None,
                     cue: "se_drop_birthday_material".into(),
                     class: SeClass::Ingame,
                     source: "harvest-drop",
@@ -1793,7 +1793,7 @@ pub(crate) fn on_damage(
                 match max_rarity {
                     Some(1 | 2) => {
                         stats.drop_se_rare += 1;
-                        se.0.push(SeRequest {
+                        se.0.push(SeRequest { owner: None,
                             cue: "se_drop_rare_material".into(),
                             class: SeClass::Ingame,
                             source: "harvest-drop",
@@ -1911,7 +1911,7 @@ pub(crate) fn on_damage(
             object.se_hit
         };
         if let Some(cue) = se_cue {
-            se.0.push(SeRequest {
+            se.0.push(SeRequest { owner: None,
                 cue: cue.into(),
                 class: SeClass::Ingame,
                 source: "harvest-hit",
