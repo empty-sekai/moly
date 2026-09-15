@@ -1028,7 +1028,10 @@ pub(crate) fn refresh(
 ) {
     let window = windows.iter().next();
     let narrow = window.is_some_and(|w| w.width() < 860.);
-    let short = window.is_some_and(|w| w.height() < 560.);
+    // Windows DPI scaling commonly turns a physical 720px window into a
+    // shorter logical viewport. Compact the explanatory chrome early enough
+    // to preserve useful result rows at 1280x720 and 800x600.
+    let short = window.is_some_and(|w| w.height() < 760.);
     let selected_instances = state
         .selected
         .map(|key| context::instances_for(key, &catalog, &world))
