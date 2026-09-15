@@ -440,7 +440,7 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         .iter(world)
         .map(|(entity, pose)| (entity, *pose))
         .collect();
-    world.insert_resource(crate::site::SiteChangeRequest(destination.clone()));
+    world.insert_resource(crate::site::TemporarySiteChangeRequest(destination.clone()));
     world.insert_resource(IndependentSession {
         ticket: choice.ticket,
         phase: IndependentPhase::SwitchingSite,
@@ -775,6 +775,7 @@ fn drive_independent(world: &mut World) {
                     .get_resource::<GroundEpoch>()
                     .map(|epoch| epoch.0)
                     .unwrap_or(0);
+                world.remove_resource::<crate::site::TemporarySiteChangeRequest>();
                 world.insert_resource(crate::site::SiteChangeRequest(
                     session.original_site.clone(),
                 ));

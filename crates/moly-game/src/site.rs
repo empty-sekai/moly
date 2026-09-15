@@ -208,6 +208,33 @@ impl SiteSelection {
         self.content
     }
 
+    fn resolve_temporary_level(&mut self, sites: &Sites) -> Result<u32, String> {
+        let row = sites.row(&self.site);
+        let level = if let Some(level) = self.levels.get(&self.site) {
+            *level
+        } else if self.site == "home_site" {
+            DEFAULT_OFFLINE_HOME_LEVEL
+        } else if is_room(&self.site) {
+            DEFAULT_ROOM_LEVEL
+        } else if row.levels.len() == 1 {
+            row.levels[0]
+        } else {
+            return Err(format!(
+                "site {} requires an explicit expansion stage",
+                self.site
+            ));
+        };
+        if !row.levels.contains(&level) {
+            return Err(format!(
+                "site {} has no authored level {level} (available {:?})",
+                self.site, row.levels
+            ));
+        }
+        sites.floor_grid(&self.site, level)?;
+        self.levels.insert(self.site.clone(), level);
+        Ok(level)
+    }
+
     pub(crate) fn resolve_level(
         &mut self,
         sites: &Sites,
@@ -675,6 +702,7 @@ pub(crate) fn plan(
     selection: Option<ResMut<SiteSelection>>,
     assets: Option<Res<SiteAssets>>,
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
+    temporary: Option<Res<TemporarySiteActive>>,
     mut last_input_error: Local<Option<String>>,
 ) {
     if assets.is_some() {
@@ -683,7 +711,11 @@ pub(crate) fn plan(
     let (Some(sites), Some(mut selection)) = (sites, selection) else {
         return;
     };
-    let site_level = match selection.resolve_level(&sites, &layouts) {
+    let site_level = match if temporary.is_some() {
+        selection.resolve_temporary_level(&sites)
+    } else {
+        selection.resolve_level(&sites, &layouts)
+    } {
         Ok(level) => {
             *last_input_error = None;
             level
@@ -994,6 +1026,7 @@ pub(crate) fn read_switch(
     sites: Option<Res<Sites>>,
     epoch: Option<Res<GroundEpoch>>,
     pending: Option<Res<SiteChangeRequest>>,
+    preview: Option<Res<TemporarySiteChangeRequest>>,
     mut exit: MessageWriter<AppExit>,
     edit: Option<Res<crate::fixture_edit::EditSession>>,
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
@@ -1008,11 +1041,17 @@ pub(crate) fn read_switch(
         requested = tour_request(&mut tour, &time, active.as_deref(), &epoch, &mut exit);
     }
     // 小地图点的名与按键同级；请求无论是否抢先落地都当帧撤（不跨帧）。
+    let temporary_request = preview.as_deref().map(|request| request.0.clone());
     if let Some(pending) = pending.as_deref() {
         if requested.is_none() {
             requested = Some(pending.0.clone());
         }
         commands.remove_resource::<SiteChangeRequest>();
+        commands.remove_resource::<TemporarySiteChangeRequest>();
+        commands.remove_resource::<TemporarySiteActive>();
+    } else if let Some(site) = temporary_request.as_ref() {
+        requested = Some(site.clone());
+        commands.remove_resource::<TemporarySiteChangeRequest>();
     }
     let Some(site) = requested else {
         return;
@@ -1037,14 +1076,23 @@ pub(crate) fn read_switch(
     }
     // Admission is side-effect-free. An incompatible target, malformed save
     // or unknown package cannot tear down the map the user is currently in.
+    let temporary = temporary_request.as_deref() == Some(site.as_str());
     let mut next = (*selection).clone();
     next.site = site;
     let Some(sites) = sites.as_deref() else {
         return;
     };
-    if let Err(error) = next.resolve_level(sites, &layouts) {
+    let resolved = if temporary {
+        next.resolve_temporary_level(sites)
+    } else {
+        next.resolve_level(sites, &layouts)
+    };
+    if let Err(error) = resolved {
         warn!("[site] switch refused: {error}; current map and saved data were retained");
         return;
+    }
+    if temporary {
+        commands.insert_resource(TemporarySiteActive);
     }
     queue_transition(&mut commands, roots.iter().collect(), next);
     tour.hops += 1;
@@ -1262,6 +1310,12 @@ fn subtree_stats(
 /// 与按键/巡游汇入同一条拆站重装链。请求一进消费即撤，不跨帧存活。
 #[derive(Clone, Resource)]
 pub struct SiteChangeRequest(pub String);
+
+#[derive(Clone, Resource)]
+pub(crate) struct TemporarySiteChangeRequest(pub String);
+
+#[derive(Resource)]
+pub(crate) struct TemporarySiteActive;
 
 /// 站点域插件的挂载点：选择资源由入口参数起值。
 pub struct SitePlugin(pub SiteRequest);
