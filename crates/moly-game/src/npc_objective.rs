@@ -114,6 +114,20 @@ impl ObjectiveFace {
         self.generation
     }
 
+    /// A source-navigation-validated central staging point, not the NPC patrol
+    /// seed at the room perimeter. Ties retain the authored cell ordering.
+    pub(crate) fn preview_center(&self) -> Option<[f32; 3]> {
+        let x = (self.grid_min.0 as f32 + self.grid_max.0 as f32) * 0.5;
+        let z = (self.grid_min.1 as f32 + self.grid_max.1 as f32) * 0.5;
+        self.walkable
+            .iter()
+            .min_by(|a, b| {
+                let dist = |cell: &Cell| (cell.0 as f32 - x).powi(2) + (cell.1 as f32 - z).powi(2);
+                dist(a).total_cmp(&dist(b))
+            })
+            .and_then(|cell| self.sample(self.world_of(*cell), 0.25))
+    }
+
     /// 格角世界位：x/z 按格距换算，y 取参考平面（采样负责落到真高度）。
     pub(crate) fn world_of(&self, cell: Cell) -> [f32; 3] {
         [
@@ -196,16 +210,23 @@ impl ObjectiveFace {
     /// movement. A failed exact path remains a failed query, never a straight
     /// line fabricated through furniture. Heights come from the real mesh.
     pub(crate) fn fixture_path(&self, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
-        if !from.is_finite() || !to.is_finite() { return None; }
+        if !from.is_finite() || !to.is_finite() {
+            return None;
+        }
         let corners = self.field.path_exact([from.x, from.z], [to.x, to.z])?;
-        corners.into_iter().map(|point| {
-            let (height, distance) = self.closest([point[0], self.ref_y, point[1]]);
-            (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(height))
-        }).collect()
+        corners
+            .into_iter()
+            .map(|point| {
+                let (height, distance) = self.closest([point[0], self.ref_y, point[1]]);
+                (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(height))
+            })
+            .collect()
     }
 
     pub(crate) fn fixture_move(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
-        if !from.is_finite() || !to.is_finite() { return None; }
+        if !from.is_finite() || !to.is_finite() {
+            return None;
+        }
         let point = self.field.constrain_move([from.x, from.z], [to.x, to.z]);
         let (surface, distance) = self.closest([point[0], from.y, point[1]]);
         (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(surface))
@@ -1321,7 +1342,7 @@ pub(crate) fn decide(
                     }
                 },
                 Err(reason) => {
-                    warn!("[npc unit={}] ordinary factory: {reason}", unit.0);
+                    trace!("[npc unit={}] ordinary factory: {reason}", unit.0);
                     continue;
                 }
             }

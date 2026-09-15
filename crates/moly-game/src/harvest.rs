@@ -83,6 +83,12 @@ use crate::site::{GroundMeshes, SITE};
 /// 坐标取整数世界单位（真源式：worldPos = 站点原点 + (positionX, 0,
 /// positionZ)，无格值系数），落在相机取景的广场（世界 (0, ·, −8) 一带）
 /// 周围、家具摆放区之外。
+// The historical rocks/chests were a development fixture gallery, not a
+// player's saved world. They are no longer injected into ordinary gameplay.
+fn preview_placements_enabled() -> bool {
+    std::env::var("MOLY_HARVEST_PREVIEW").ok().as_deref() == Some("1")
+}
+
 const PLACEMENTS: [PlacementMock; 12] = [
     // 针叶树：多击族（wood，master 1002：hp 90 · 终结体力 10），树动画
     // 材质（_USE_TREE_ANIMATION）。
@@ -405,9 +411,12 @@ const RT_MYSEKAI_MUSIC_RECORD: i32 = 44;
 
 /// fixture 族掉落的常量模型（真源 GetDropItemPrefab 的 39 臂：GetMasterFixture
 /// 只做存在门，模型恒取玻璃球基形，与 id 无关）。
-const GLASSBALL_DROP_PACKAGE: &str = "mysekai__site__field__object__mdl_site_glassball_common_glassballdrop01";
-const BLUEPRINT_DROP_PACKAGE: &str = "mysekai__site__field__object__mdl_site_blueprint_common_blueprintdrop01";
-const RECORD_DROP_PACKAGE: &str = "mysekai__site__field__object__mdl_site_record_common_recorddrop01";
+const GLASSBALL_DROP_PACKAGE: &str =
+    "mysekai__site__field__object__mdl_site_glassball_common_glassballdrop01";
+const BLUEPRINT_DROP_PACKAGE: &str =
+    "mysekai__site__field__object__mdl_site_blueprint_common_blueprintdrop01";
+const RECORD_DROP_PACKAGE: &str =
+    "mysekai__site__field__object__mdl_site_record_common_recorddrop01";
 
 /// UserMysekaiSiteHarvestResourceDropStatus 的掉落前值（真源枚举；掉落
 /// 发生后转 dropped=1，本表只放掉落前行——转场是捡拾域的服务端回执）。
@@ -543,14 +552,26 @@ fn se_cues(view_class: &str, is_rare: bool) -> (Option<&'static str>, Option<&'s
     match view_class {
         "MysekaiAreaTreeView" => (
             Some("se_axe1"),
-            Some(if is_rare { "se_break_rare" } else { "se_fallen_tree" }),
+            Some(if is_rare {
+                "se_break_rare"
+            } else {
+                "se_fallen_tree"
+            }),
         ),
         "MysekaiAreaStoneView" => (
             Some("se_pickaxe1"),
-            Some(if is_rare { "se_break_rare" } else { "se_break_rock" }),
+            Some(if is_rare {
+                "se_break_rare"
+            } else {
+                "se_break_rock"
+            }),
         ),
         "MysekaiAreaPlantView" => (
-            Some(if is_rare { "se_pick_plant_rare" } else { "se_pick_plant" }),
+            Some(if is_rare {
+                "se_pick_plant_rare"
+            } else {
+                "se_pick_plant"
+            }),
             None,
         ),
         "MysekaiAreaJunkView" => (Some("se_rustle"), None),
@@ -709,7 +730,10 @@ fn drop_rarity_type(resource_type: i32, material_rarity: Option<i32>) -> i32 {
 /// else 档；mask 外的其余类型（43 等）同 else 档。
 fn drop_scatter_params(resource_type: i32, material_type: i32) -> (f32, f32, f32) {
     match resource_type {
-        RT_MATERIAL | RT_MYSEKAI_FIXTURE | RT_MYSEKAI_BLUEPRINT | RT_MYSEKAI_ITEM
+        RT_MATERIAL
+        | RT_MYSEKAI_FIXTURE
+        | RT_MYSEKAI_BLUEPRINT
+        | RT_MYSEKAI_ITEM
         | RT_MYSEKAI_MUSIC_RECORD => (0.6, 1.0, 0.0),
         RT_MYSEKAI_MATERIAL => match material_type {
             0 | 1 => (0.7, 1.2, 0.2),
@@ -823,7 +847,6 @@ fn ease_out_cubic(u: f32) -> f32 {
     1.0 - (1.0 - u).powi(3)
 }
 
-
 /// 一次击打请求（被击接口的入队形状，对齐真源 OnDamage 的形参）。
 #[derive(Debug, Clone, Copy)]
 pub struct HarvestHit {
@@ -932,8 +955,16 @@ struct HarvestScenesReadyCount(usize);
 
 /// Startup：请求装载清单，交接面就位。
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {
+    // Ordinary scenes deliberately have no injected harvest demonstration.
+    // Do not load or validate that unrelated gallery (including model-less
+    // source entries) merely to establish an empty harvest scene.
+    if !preview_placements_enabled() {
+        return;
+    }
     commands.insert_resource(HarvestIndexAsset {
-        index: server.load(bevy::asset::AssetPath::from("moly://site/harvest.json".to_owned())),
+        index: server.load(bevy::asset::AssetPath::from(
+            "moly://site/harvest.json".to_owned(),
+        )),
         fixtures: server.load(moly_assets::mysekai_fixtures()),
         blueprints: server.load(moly_assets::mysekai_blueprints()),
         items: server.load(moly_assets::mysekai_items()),
@@ -946,19 +977,37 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
 fn keyed_master_ids(asset: &moly_assets::json::JsonAsset, table: &str) -> HashSet<i64> {
     let value: serde_json::Value = serde_json::from_str(&asset.0)
         .unwrap_or_else(|error| panic!("{table} master JSON: {error}"));
-    assert_eq!(value["version"].as_u64(), Some(1), "{table}: unsupported master version");
-    assert_eq!(value["semantics"]["table"].as_str(), Some(table), "master table identity mismatch");
-    value["entries"].as_object().expect("keyed master requires entries")
-        .iter().map(|(key, row)| {
+    assert_eq!(
+        value["version"].as_u64(),
+        Some(1),
+        "{table}: unsupported master version"
+    );
+    assert_eq!(
+        value["semantics"]["table"].as_str(),
+        Some(table),
+        "master table identity mismatch"
+    );
+    value["entries"]
+        .as_object()
+        .expect("keyed master requires entries")
+        .iter()
+        .map(|(key, row)| {
             let id = row["id"].as_i64().expect("master row requires integer id");
-            assert_eq!(key.parse::<i64>().ok(), Some(id), "{table}: entry key differs from row id");
+            assert_eq!(
+                key.parse::<i64>().ok(),
+                Some(id),
+                "{table}: entry key differs from row id"
+            );
             id
-        }).collect()
+        })
+        .collect()
 }
 
 fn constant_drop_prefab(ids: &HashSet<i64>, resource_id: i64, package: &str) -> DropPrefab {
     if ids.contains(&resource_id) {
-        DropPrefab::Model { package: package.to_owned() }
+        DropPrefab::Model {
+            package: package.to_owned(),
+        }
     } else {
         DropPrefab::Unresolved("掉落资源在对应主表中不存在（GetDropItemPrefab 返回空）")
     }
@@ -980,7 +1029,13 @@ fn plan_when_ready(
     let Some(index) = index else {
         return;
     };
-    for handle in [&index.index, &index.fixtures, &index.blueprints, &index.items, &index.music_records] {
+    for handle in [
+        &index.index,
+        &index.fixtures,
+        &index.blueprints,
+        &index.items,
+        &index.music_records,
+    ] {
         match server.load_state(handle) {
             LoadState::Failed(err) => panic!("采集物清单/主表装载失败：{err:?}"),
             LoadState::Loaded => {}
@@ -988,21 +1043,32 @@ fn plan_when_ready(
         }
     }
     let (Some(asset), Some(fixtures), Some(blueprints), Some(items), Some(music_records)) = (
-        json.get(&index.index), json.get(&index.fixtures), json.get(&index.blueprints),
-        json.get(&index.items), json.get(&index.music_records),
+        json.get(&index.index),
+        json.get(&index.fixtures),
+        json.get(&index.blueprints),
+        json.get(&index.items),
+        json.get(&index.music_records),
     ) else {
         return;
     };
     let fixture_value: serde_json::Value = serde_json::from_str(&fixtures.0)
         .unwrap_or_else(|error| panic!("家具主表切片 JSON: {error}"));
-    let fixture_ids: HashSet<i64> = fixture_value["fixtures"].as_array()
-        .expect("家具主表切片缺 fixtures 数组").iter()
-        .map(|row| row["id"].as_i64().expect("家具主表行缺 id")).collect();
+    let fixture_ids: HashSet<i64> = fixture_value["fixtures"]
+        .as_array()
+        .expect("家具主表切片缺 fixtures 数组")
+        .iter()
+        .map(|row| row["id"].as_i64().expect("家具主表行缺 id"))
+        .collect();
     let blueprint_ids = keyed_master_ids(blueprints, "mysekaiBlueprints");
     let item_ids = keyed_master_ids(items, "mysekaiItems");
     let music_record_ids = keyed_master_ids(music_records, "mysekaiMusicRecords");
-    info!("掉落身份表就绪：家具 {} · 设计图 {} · 道具 {} · 唱片 {}",
-        fixture_ids.len(), blueprint_ids.len(), item_ids.len(), music_record_ids.len());
+    info!(
+        "掉落身份表就绪：家具 {} · 设计图 {} · 道具 {} · 唱片 {}",
+        fixture_ids.len(),
+        blueprint_ids.len(),
+        item_ids.len(),
+        music_record_ids.len()
+    );
     let value: serde_json::Value = serde_json::from_str(&asset.0)
         .unwrap_or_else(|err| panic!("采集物清单不是合法 JSON：{err}"));
     let packages = value
@@ -1027,11 +1093,12 @@ fn plan_when_ready(
             .get("glb")
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("采集物清单条目缺 glb 文件名：{key}"));
-        let handle = server.load::<Gltf>(bevy::asset::AssetPath::from(format!(
-            "moly://site/{glb}"
-        )));
-        by_key.insert(key.clone(), handle);
-        order.push(key.clone());
+        if preview_placements_enabled() {
+            let handle =
+                server.load::<Gltf>(bevy::asset::AssetPath::from(format!("moly://site/{glb}")));
+            by_key.insert(key.clone(), handle);
+            order.push(key.clone());
+        }
         // 视图契约：null ⇒ 伴生包；数组恰一条 ⇒ 契约。
         let view = entry
             .get("view")
@@ -1087,7 +1154,10 @@ fn plan_when_ready(
     // 摆放行合取：视图契约 + master 行（按 fixture_id join）。
     let mut plans = Vec::with_capacity(PLACEMENTS.len());
     let mut docs = HashMap::new();
-    for row in PLACEMENTS {
+    for row in PLACEMENTS
+        .into_iter()
+        .filter(|_| preview_placements_enabled())
+    {
         let entry = packages
             .get(row.package)
             .unwrap_or_else(|| panic!("摆放 mock 点名的包不在清单里：{}", row.package));
@@ -1095,17 +1165,14 @@ fn plan_when_ready(
             .get("view")
             .and_then(|v| v.as_array())
             .filter(|v| v.len() == 1)
-            .unwrap_or_else(|| {
-                panic!("摆放 mock 点名的包没有单条视图契约：{}", row.package)
-            });
+            .unwrap_or_else(|| panic!("摆放 mock 点名的包没有单条视图契约：{}", row.package));
         let contract = &view[0];
         let class = contract
             .get("class")
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("视图契约缺 class：{}", row.package));
-        let interface = interface_of(class).unwrap_or_else(|| {
-            panic!("视图类不在接口闭集里：{class}（{}）", row.package)
-        });
+        let interface = interface_of(class)
+            .unwrap_or_else(|| panic!("视图类不在接口闭集里：{class}（{}）", row.package));
         let fixture_type = contract
             .get("mysekaiSiteHarvestFixtureType")
             .and_then(|v| v.as_i64())
@@ -1156,7 +1223,10 @@ fn plan_when_ready(
             .get("lastAttackStamina")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(|| {
-                panic!("master 行缺 lastAttackStamina：{}#{}", row.package, row.fixture_id)
+                panic!(
+                    "master 行缺 lastAttackStamina：{}#{}",
+                    row.package, row.fixture_id
+                )
             }) as i32;
         let rarity = master
             .get("mysekaiSiteHarvestFixtureRarityType")
@@ -1184,9 +1254,9 @@ fn plan_when_ready(
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("清单条目缺 document 文件名：{}", row.package));
         docs.entry(row.package.to_string()).or_insert_with(|| {
-            server.load::<moly_assets::json::JsonAsset>(bevy::asset::AssetPath::from(
-                format!("moly://site/{document}"),
-            ))
+            server.load::<moly_assets::json::JsonAsset>(bevy::asset::AssetPath::from(format!(
+                "moly://site/{document}"
+            )))
         });
         if view_is_rare {
             // 视图的 isRareObject 与 master rarity 是两个来源；真源判稀有
@@ -1247,8 +1317,15 @@ fn plan_when_ready(
             }
         }
     }
-    for package in [GLASSBALL_DROP_PACKAGE, BLUEPRINT_DROP_PACKAGE, RECORD_DROP_PACKAGE] {
-        assert!(packages.contains_key(package), "掉落常量模型包不在清单里：{package}");
+    for package in [
+        GLASSBALL_DROP_PACKAGE,
+        BLUEPRINT_DROP_PACKAGE,
+        RECORD_DROP_PACKAGE,
+    ] {
+        assert!(
+            packages.contains_key(package),
+            "掉落常量模型包不在清单里：{package}"
+        );
     }
 
     // 掉落行解析：GetDropItemPrefab 的分支律逐族直迁（fixture 存在门 +
@@ -1308,10 +1385,12 @@ fn plan_when_ready(
             other => panic!("掉落行的 resourceType {other} 不在掉落族闭集里"),
         };
         let material_type = match row.resource_type {
-            RT_MYSEKAI_MATERIAL => material_join
-                .get(&row.resource_id)
-                .expect("素材 join 上面已核过")
-                .1,
+            RT_MYSEKAI_MATERIAL => {
+                material_join
+                    .get(&row.resource_id)
+                    .expect("素材 join 上面已核过")
+                    .1
+            }
             _ => -1,
         };
         drop_rows.push(PendingDrop {
@@ -1341,9 +1420,9 @@ fn plan_when_ready(
                 .and_then(|v| v.as_str())
                 .unwrap_or_else(|| panic!("清单条目缺 document 文件名：{package}"));
             docs.entry(package.clone()).or_insert_with(|| {
-                server.load::<moly_assets::json::JsonAsset>(bevy::asset::AssetPath::from(
-                    format!("moly://site/{document}"),
-                ))
+                server.load::<moly_assets::json::JsonAsset>(bevy::asset::AssetPath::from(format!(
+                    "moly://site/{document}"
+                )))
             });
         }
     }
@@ -1705,11 +1784,7 @@ fn on_scene_ready(
     };
     count.0 += 1;
     if count.0 == plans.0.len() {
-        info!(
-            "采集物 scene 全部展开：{}/{}",
-            count.0,
-            plans.0.len()
-        );
+        info!("采集物 scene 全部展开：{}/{}", count.0, plans.0.len());
         commands.insert_resource(HarvestScenesReady);
     }
 }
@@ -1783,7 +1858,8 @@ pub(crate) fn on_damage(
             // 跳过且无声）在采集站点上恒过，形状记注释不入码。
             if object.fixture_type == 9 {
                 stats.drop_se_birthday += 1;
-                se.0.push(SeRequest { owner: None,
+                se.0.push(SeRequest {
+                    owner: None,
                     cue: "se_drop_birthday_material".into(),
                     class: SeClass::Ingame,
                     source: "harvest-drop",
@@ -1793,7 +1869,8 @@ pub(crate) fn on_damage(
                 match max_rarity {
                     Some(1 | 2) => {
                         stats.drop_se_rare += 1;
-                        se.0.push(SeRequest { owner: None,
+                        se.0.push(SeRequest {
+                            owner: None,
                             cue: "se_drop_rare_material".into(),
                             class: SeClass::Ingame,
                             source: "harvest-drop",
@@ -1852,9 +1929,7 @@ pub(crate) fn on_damage(
                         tail.push_str("→ 消失 + POST 回显");
                     } else {
                         stats.idle_returns += 1;
-                        tail.push_str(&format!(
-                            "→ 复击空转（UpdateHp 返回 {returned}，状态不变）"
-                        ));
+                        tail.push_str(&format!("→ 复击空转（UpdateHp 返回 {returned}，状态不变）"));
                     }
                 }
             }
@@ -1894,9 +1969,7 @@ pub(crate) fn on_damage(
                     tail.push_str("→ 消失 + punch + POST 回显");
                 } else {
                     stats.idle_returns += 1;
-                    tail.push_str(&format!(
-                        "→ 复击空转（UpdateHp 返回 {returned}，状态不变）"
-                    ));
+                    tail.push_str(&format!("→ 复击空转（UpdateHp 返回 {returned}，状态不变）"));
                 }
             }
         }
@@ -1911,7 +1984,8 @@ pub(crate) fn on_damage(
             object.se_hit
         };
         if let Some(cue) = se_cue {
-            se.0.push(SeRequest { owner: None,
+            se.0.push(SeRequest {
+                owner: None,
                 cue: cue.into(),
                 class: SeClass::Ingame,
                 source: "harvest-hit",

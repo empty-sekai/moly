@@ -597,7 +597,7 @@ pub struct SiteAssets {
     /// 场景包站的地表网格名（逐站对账，见 `GROUND`/`GROUND_BY_SCENE`）；
     /// 房间站为空（地表来自模块）。
     grounds: Vec<String>,
-    module: Option<Handle<Gltf>>,
+    pub(crate) module: Option<Handle<Gltf>>,
     walkable: Option<Handle<Gltf>>,
     navmesh: Option<Handle<Gltf>>,
     /// Source HomeSiteObstacleController.UpdateView: rank >= site level.
@@ -1048,7 +1048,6 @@ pub(crate) fn read_switch(
         }
         commands.remove_resource::<SiteChangeRequest>();
         commands.remove_resource::<TemporarySiteChangeRequest>();
-        commands.remove_resource::<TemporarySiteActive>();
     } else if let Some(site) = temporary_request.as_ref() {
         requested = Some(site.clone());
         commands.remove_resource::<TemporarySiteChangeRequest>();
@@ -1056,7 +1055,10 @@ pub(crate) fn read_switch(
     let Some(site) = requested else {
         return;
     };
-    if site == selection.site {
+    // A preview is a fresh, unsaved scene even when its site name is the same.
+    // Returning from that preview must likewise rebuild the saved original.
+    let reload_same_site = preview.is_some() || (pending.is_some() && library.owns_scene());
+    if site == selection.site && !reload_same_site {
         return;
     }
     if sites
@@ -1076,7 +1078,7 @@ pub(crate) fn read_switch(
     }
     // Admission is side-effect-free. An incompatible target, malformed save
     // or unknown package cannot tear down the map the user is currently in.
-    let temporary = temporary_request.as_deref() == Some(site.as_str());
+    let temporary = pending.is_none() && temporary_request.as_deref() == Some(site.as_str());
     let mut next = (*selection).clone();
     next.site = site;
     let Some(sites) = sites.as_deref() else {
@@ -1093,6 +1095,9 @@ pub(crate) fn read_switch(
     }
     if temporary {
         commands.insert_resource(TemporarySiteActive);
+    } else {
+        // Do not change source identity until normal admission succeeds.
+        commands.remove_resource::<TemporarySiteActive>();
     }
     queue_transition(&mut commands, roots.iter().collect(), next);
     tour.hops += 1;

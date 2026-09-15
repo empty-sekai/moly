@@ -21,11 +21,14 @@ use std::time::Duration;
 
 pub fn install(app: &mut App) {
     content_library::install(app);
+    app.add_systems(Startup, content_library::load_capabilities);
     app.add_systems(
         Update,
         (
             content_library::parse_assets,
+            content_library::parse_capabilities,
             content_library::build_talk_catalog,
+            content_library::build_activity_catalog,
             content_library::refresh_context,
             content_library::prepare_pending,
             content_library::dispatch,
@@ -52,6 +55,7 @@ pub fn install(app: &mut App) {
     .add_systems(
         Update,
         content_library::observe_start
+            .after(crate::npc_fixture_activity::advance)
             .after(crate::fixture_gimmick::advance)
             .after(player_talk::advance_session)
             .after(talk::advance_talk)
@@ -116,6 +120,7 @@ pub fn install(app: &mut App) {
         .add_systems(
             Update,
             crate::npc_fixture_activity::advance
+                .after(content_library::dispatch)
                 .after(npc::advance)
                 .after(crate::fixture_scene_inputs::advance)
                 .after(crate::fixture_activity_provider::advance)
@@ -459,7 +464,7 @@ pub fn install(app: &mut App) {
                         // ——输入当帧生效。
                         camera::apply_input
                             .after(camera::parse)
-                            .run_if(crate::game_settings::scene_input_enabled),
+                            .run_if(crate::game_settings::camera_input_enabled),
                     ),
                     (
                         // 角色链：计划（发包装载）→ 挂载 → 装配（插播放器与驱动）→

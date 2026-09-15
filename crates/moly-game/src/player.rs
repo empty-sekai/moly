@@ -167,17 +167,24 @@ pub(crate) fn parse(
         .unwrap_or_else(|| panic!("玩家替身行缺 unitId")) as u32;
     // 速度不读清单：真源 UpdateState 逐帧调 ClientConfig getter，本仓
     // 在推进帧从面板取值（见 [`move_speed`]）。
-    let locomotion = row.get("locomotion").and_then(|v| v.as_object())
+    let locomotion = row
+        .get("locomotion")
+        .and_then(|v| v.as_object())
         .unwrap_or_else(|| panic!("玩家外观 unit {unit_id} 缺 locomotion 动作名"));
     let motion = |key: &str| {
-        locomotion.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty())
+        locomotion
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| panic!("玩家外观 unit {unit_id} 缺 {key}"))
             .to_owned()
     };
     commands.insert_resource(PlayerSpecs {
         unit_id,
         visual_clips: crate::player_avatar::PlayerVisualClips {
-            idle: motion("idleMotion"), walk: motion("walkMotion"), run: motion("runMotion"),
+            idle: motion("idleMotion"),
+            walk: motion("walkMotion"),
+            run: motion("runMotion"),
         },
     });
     commands.remove_resource::<PlayerListHandle>();
@@ -220,11 +227,7 @@ pub(crate) fn spawn_when_ready(
     if let Some(face) = face.as_deref() {
         (seed_x, seed_z) = face.seat(seed_x, seed_z);
     }
-    let seed = [
-        seed_x,
-        surface_y(&verts, seed_x, seed_z, center_y),
-        seed_z,
-    ];
+    let seed = [seed_x, surface_y(&verts, seed_x, seed_z, center_y), seed_z];
     commands.spawn((
         CharacterUnitId(specs.unit_id),
         Transform::from_translation(Vec3::from(seed)),
@@ -267,7 +270,14 @@ pub(crate) fn reseed(
     ground: Option<Res<GroundMeshes>>,
     face: Option<Res<walk_face::WalkFace>>,
     parts: Query<(&Mesh3d, &GlobalTransform)>,
-    mut players: Query<(&mut Transform, &mut MotionPhase, Option<&mut crate::player_avatar::AvatarDriver>), With<PlayerControlled>>,
+    mut players: Query<
+        (
+            &mut Transform,
+            &mut MotionPhase,
+            Option<&mut crate::player_avatar::AvatarDriver>,
+        ),
+        With<PlayerControlled>,
+    >,
     mut animators: Query<&mut AnimationPlayer>,
     mut ground_cache: Option<ResMut<PlayerGround>>,
 ) {
@@ -297,11 +307,7 @@ pub(crate) fn reseed(
     if let Some(face) = face.as_deref() {
         (seed_x, seed_z) = face.seat(seed_x, seed_z);
     }
-    let seed = [
-        seed_x,
-        surface_y(&verts, seed_x, seed_z, center_y),
-        seed_z,
-    ];
+    let seed = [seed_x, surface_y(&verts, seed_x, seed_z, center_y), seed_z];
     for (mut transform, mut phase, driver) in &mut players {
         if let Some(mut driver) = driver {
             if let Ok(mut animator) = animators.get_mut(driver.player) {
@@ -352,7 +358,10 @@ pub(crate) fn read_input(
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
-    if edits.is_active() || settings_panel.blocks_world_input() || library.blocks_world_input() {
+    if edits.is_active()
+        || settings_panel.blocks_world_input()
+        || library.blocks_exploration_input()
+    {
         for (mut input, _) in &mut players {
             input.active = false;
             input.direction = Vec3::ZERO;
@@ -430,7 +439,10 @@ pub(crate) fn read_input(
     for (mut input, mut dash) in &mut players {
         if keys.just_pressed(KeyCode::ShiftLeft) {
             dash.0 = !dash.0;
-            info!("[player] dash 模式切换：{}", if dash.0 { "开" } else { "关" });
+            info!(
+                "[player] dash 模式切换：{}",
+                if dash.0 { "开" } else { "关" }
+            );
         }
         if let Some(first_half) = smoke {
             // 冒烟输入：固定世界方向，前半 walk、后半 dash——速度差在
@@ -522,7 +534,20 @@ pub(crate) fn advance(
     face: Option<Res<walk_face::WalkFace>>,
     // 对话持留让位：玩家参演对话期间位移推进不跑（相位在开场时已钉
     // 驻留；转身由对话域插值直写）。
-    mut players: Query<(&mut Transform, &mut MotionPhase, &PlayerInput, &DashMode, Option<&crate::player_avatar::AvatarDriver>), (With<PlayerControlled>, Without<crate::talk::TalkHold>, Without<PlayerFixtureHeld>)>,
+    mut players: Query<
+        (
+            &mut Transform,
+            &mut MotionPhase,
+            &PlayerInput,
+            &DashMode,
+            Option<&crate::player_avatar::AvatarDriver>,
+        ),
+        (
+            With<PlayerControlled>,
+            Without<crate::talk::TalkHold>,
+            Without<PlayerFixtureHeld>,
+        ),
+    >,
     mut boundary: Local<Boundary>,
 ) {
     let dt = time.delta_secs();
@@ -537,7 +562,8 @@ pub(crate) fn advance(
         // 新烘焙可能在脚下挖洞；仅修复无效起点，正常位移永不跨洞吸附。
         if !face.walkable_at([transform.translation.x, transform.translation.z]) {
             let (x, z) = face.seat(transform.translation.x, transform.translation.z);
-            transform.translation = Vec3::new(x, surface_y(&ground.0, x, z, transform.translation.y), z);
+            transform.translation =
+                Vec3::new(x, surface_y(&ground.0, x, z, transform.translation.y), z);
         }
         if input.active {
             let speed = move_speed(&configs, &site, camera_state.0, dash.0);
@@ -555,8 +581,15 @@ pub(crate) fn advance(
                 Boundary::Snapped
             };
             if *boundary != next_boundary {
-                info!("[player] 导航线段裁决 {:?}：请求 ({:.2},{:.2}) → ({:.2},{:.2})，代数 {}",
-                    next_boundary, requested.x, requested.z, position.x, position.z, face.generation());
+                info!(
+                    "[player] 导航线段裁决 {:?}：请求 ({:.2},{:.2}) → ({:.2},{:.2})，代数 {}",
+                    next_boundary,
+                    requested.x,
+                    requested.z,
+                    position.x,
+                    position.z,
+                    face.generation()
+                );
                 *boundary = next_boundary;
             }
             let was_walking = matches!(*phase, MotionPhase::Walking);
@@ -598,7 +631,14 @@ pub fn tune_animation_speed(
     // The activity's approach/exit motion owns its speed even while the
     // locomotion driver still supplies the visible walk/run clip. Raw input
     // retained for end requests must not retime that movement's animation.
-    players: Query<(&MotionPhase, &PlayerInput, &crate::player_avatar::AvatarDriver), (With<PlayerControlled>, Without<PlayerFixtureHeld>)>,
+    players: Query<
+        (
+            &MotionPhase,
+            &PlayerInput,
+            &crate::player_avatar::AvatarDriver,
+        ),
+        (With<PlayerControlled>, Without<PlayerFixtureHeld>),
+    >,
     mut animators: Query<&mut AnimationPlayer>,
 ) {
     let Some(site) = site else {
@@ -611,9 +651,9 @@ pub fn tune_animation_speed(
         }
         let speed = match phase {
             MotionPhase::Walking => {
-                let magnitude =
-                    (input.direction.x * input.direction.x + input.direction.z * input.direction.z)
-                        .sqrt();
+                let magnitude = (input.direction.x * input.direction.x
+                    + input.direction.z * input.direction.z)
+                    .sqrt();
                 (magnitude * anim_mul).clamp(MIN_ANIMATION_SPEED, MAX_ANIMATION_SPEED)
             }
             _ => 1.0,
@@ -651,9 +691,7 @@ pub fn report(
         &PlayerInput,
     )>,
 ) {
-    let Some((configs, site)) = configs
-        .as_deref()
-        .zip(site.as_deref()) else {
+    let Some((configs, site)) = configs.as_deref().zip(site.as_deref()) else {
         return; // 面板或站点选择未立：速度律没有取值面，跳过本行
     };
     for (unit, transform, phase, dash, input) in &players {

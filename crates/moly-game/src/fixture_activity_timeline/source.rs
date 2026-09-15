@@ -88,6 +88,10 @@ pub(crate) enum TimelinePayload {
         cue: String,
     },
     NpcIkTalkGate,
+    Emoticon {
+        name: String,
+        use_root: bool,
+    },
     Unsupported {
         class: String,
         fields: Value,
@@ -361,36 +365,50 @@ impl TimelinePackage {
         // views and another otherwise unique director are not substitutes.
         let root = asset(&prefab["asset"])?;
         let views = match prefab.get("fixtureTimelineViews") {
-            Some(value) => value.as_array()
+            Some(value) => value
+                .as_array()
                 .ok_or_else(|| invalid("fixtureTimelineViews is not an array"))?
-                .iter().filter_map(|view| {
-                    match asset(&view["gameObject"]) {
-                        Ok(owner) if owner == root => Some(Ok(view)),
-                        Ok(_) => None,
-                        Err(error) => Some(Err(error)),
-                    }
-                }).collect::<Result<Vec<_>, _>>()?,
+                .iter()
+                .filter_map(|view| match asset(&view["gameObject"]) {
+                    Ok(owner) if owner == root => Some(Ok(view)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             None => Vec::new(), // Older documents retain the previous reader.
         };
         if views.len() > 1 {
             return Err(invalid("multiple NPC timeline views on the prefab root"));
         }
-        let view_director = views.first().map(|view| asset(&view["director"]))
+        let view_director = views
+            .first()
+            .map(|view| asset(&view["director"]))
             .transpose()?;
-        let fixture_view = views.first().map(|view| -> Result<FixtureTimelineViewBinding, TimelineFailure> {
-            Ok(FixtureTimelineViewBinding {
-                identity: asset(&view["asset"])?,
-                game_object: asset(&view["gameObject"])?,
-                effects: array(view, "effectBindings")?.iter().map(|row| {
-                    Ok(TimelineEffectBinding {
-                        playable: if row["playable"].is_null() { None }
-                            else { Some(asset(&row["playable"])?) },
-                        bind_name: string(row, "bindName")?.to_owned(),
-                        exposed_name: string(row, "exposedName")?.to_owned(),
+        let fixture_view = views
+            .first()
+            .map(
+                |view| -> Result<FixtureTimelineViewBinding, TimelineFailure> {
+                    Ok(FixtureTimelineViewBinding {
+                        identity: asset(&view["asset"])?,
+                        game_object: asset(&view["gameObject"])?,
+                        effects: array(view, "effectBindings")?
+                            .iter()
+                            .map(|row| {
+                                Ok(TimelineEffectBinding {
+                                    playable: if row["playable"].is_null() {
+                                        None
+                                    } else {
+                                        Some(asset(&row["playable"])?)
+                                    },
+                                    bind_name: string(row, "bindName")?.to_owned(),
+                                    exposed_name: string(row, "exposedName")?.to_owned(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, TimelineFailure>>()?,
                     })
-                }).collect::<Result<Vec<_>, TimelineFailure>>()?,
-            })
-        }).transpose()?;
+                },
+            )
+            .transpose()?;
         let directors: Vec<_> = array(prefab, "directors")?
             .iter()
             .filter(|d| match &view_director {
@@ -456,10 +474,16 @@ impl TimelinePackage {
                     .get(unsigned(envelope, "assetRef")? as usize)
                     .ok_or_else(|| invalid("clip assetRef is out of range"))?;
                 let body = self.payload(payload, &key)?;
-                let playable = envelope.get("playableAsset")
-                    .filter(|value| !value.is_null()).map(asset).transpose()?;
+                let playable = envelope
+                    .get("playableAsset")
+                    .filter(|value| !value.is_null())
+                    .map(asset)
+                    .transpose()?;
                 let effect_binding = playable.as_ref().and_then(|playable| {
-                    fixture_view.as_ref()?.effects.iter()
+                    fixture_view
+                        .as_ref()?
+                        .effects
+                        .iter()
                         .find(|binding| binding.playable.as_ref() == Some(playable))
                         .cloned()
                 });
@@ -614,11 +638,48 @@ impl TimelinePackage {
             "ChangeBlinkStateClip" => TimelinePayload::BlinkGate,
             "ChangeLipSyncStateClip" => TimelinePayload::LipGate,
             "EnableIKTalkClip" => TimelinePayload::NpcIkTalkGate,
+            "EmoticonClip" => emoticon_payload(f)?,
             _ => TimelinePayload::Unsupported {
                 class: class.into(),
                 fields: f.clone(),
             },
         })
+    }
+}
+
+fn emoticon_payload(fields: &Value) -> Result<TimelinePayload, TimelineFailure> {
+    let index = integer(fields, "SelectIndex")?;
+    let name = usize::try_from(index)
+        .ok()
+        .and_then(|index| {
+            fields
+                .get("EmoticonNames")
+                .and_then(Value::as_array)
+                .and_then(|names| names.get(index))
+        })
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| invalid("emoticon SelectIndex has no authored name"))?;
+    Ok(TimelinePayload::Emoticon {
+        name: name.to_owned(),
+        use_root: flag(fields, "UseRootTransform")?,
+    })
+}
+
+#[cfg(test)]
+mod emoticon_tests {
+    use super::*;
+    #[test]
+    fn authored_emoticon_selection_and_root_mode_are_exact() {
+        let fields = serde_json::json!({"EmoticonNames":["fx_emote_001","fx_emote_005_loop"],"SelectIndex":1,"UseRootTransform":0});
+        assert!(
+            matches!(emoticon_payload(&fields).unwrap(),TimelinePayload::Emoticon{name,use_root:false} if name=="fx_emote_005_loop")
+        );
+        for index in [-1, 2] {
+            let mut bad = fields.clone();
+            bad["SelectIndex"] = serde_json::json!(index);
+            assert!(emoticon_payload(&bad).is_err());
+        }
     }
 }
 
@@ -631,7 +692,10 @@ fn flatten<'a>(rows: &'a [Value], output: &mut Vec<&'a Value>) -> Result<(), Tim
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> TimelineFailure {
-    TimelineFailure(message.into())
+    TimelineFailure {
+        message: message.into(),
+        retryable: false,
+    }
 }
 pub(super) fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str, TimelineFailure> {
     v.get(key)

@@ -324,7 +324,7 @@ impl TalkCatalog<'_> {
                 .iter()
                 .filter(|row| is_general_row(row) && matches_site(row))
                 .count();
-            warn!(
+            trace!(
                 "[player-talk-pool] unit={unit} site_type={site_type} site_id={site_id} phenomena={} rows={} general_rows={general_rows} general_after_site={general_site_rows} candidates={} previous={previous:?} previous_has_master={}",
                 self.phenomena.0, rows.len(), pool.len(), previous.is_some_and(|id| id != 0),
             );

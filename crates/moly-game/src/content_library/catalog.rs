@@ -139,15 +139,69 @@ fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
             .and_then(Value::as_str)
             .unwrap_or("no_action")
             .to_owned();
+        let preview = &row["preview"];
+        let custom = (preview["kind"].as_str() == Some("custom"))
+            .then(|| preview["variants"].as_array())
+            .flatten()
+            .and_then(|variants| {
+                variants
+                    .iter()
+                    .find(|value| value["available"].as_bool() == Some(true))
+            });
+        let custom_base = custom
+            .and_then(|value| value["basePackage"].as_str())
+            .and_then(|name| name.strip_prefix("mysekai__fixture__"))
+            .and_then(source_leaf);
         let model = row
             .get("assetbundleName")
             .and_then(Value::as_str)
             .and_then(source_leaf);
+        let model = custom_base.or(model);
+        let presentation = if preview["kind"].as_str() == Some("surface") {
+            match (preview["skin"].as_str(), preview["channel"].as_str()) {
+                (Some(skin), Some(channel @ ("wall" | "floor")))
+                    if skin
+                        .bytes()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
+                        && !skin.is_empty() =>
+                {
+                    FixturePresentation::Surface {
+                        skin: skin.into(),
+                        wall: channel == "wall",
+                        available: preview["available"].as_bool() == Some(true),
+                    }
+                }
+                _ => FixturePresentation::default(),
+            }
+        } else if let Some(path) = custom
+            .and_then(|value| value["ornamentFile"].as_str())
+            .filter(|path| {
+                path.starts_with("custom-fixture-models/")
+                    && path.ends_with(".glb")
+                    && !path.contains([':', '\\'])
+                    && !path.split('/').any(|part| matches!(part, "" | ".." | "."))
+            })
+        {
+            FixturePresentation::Custom {
+                ornament: path.into(),
+            }
+        } else {
+            FixturePresentation::default()
+        };
         let dimensions = ["gridWidth", "gridHeight", "gridDepth"].map(|field| {
             row.get(field)
                 .and_then(Value::as_i64)
                 .and_then(|value| i32::try_from(value).ok())
         });
+        let dimensions = if let Some(custom) = custom {
+            ["width", "height", "depth"].map(|axis| {
+                custom["gridSize"][axis]
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+            })
+        } else {
+            dimensions
+        };
         let source = model
             .zip(dimensions.into_iter().collect::<Option<Vec<_>>>())
             .and_then(|(model, size)| {
@@ -155,8 +209,12 @@ fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
                     package: format!("mysekai__fixture__{model}"),
                     grid_size: moly_law::fixture::Vector3Int::new(size[0], size[1], size[2]),
                     exported: false,
-                    layout: match row.get("handleType").and_then(Value::as_str) {
-                        Some("windowpane" | "clock") => {
+                    layout: match row
+                        .get("layoutType")
+                        .and_then(Value::as_str)
+                        .or_else(|| row.get("handleType").and_then(Value::as_str))
+                    {
+                        Some("wall" | "windowpane" | "clock") => {
                             moly_law::fixture::position::layout_type::WALL_FRONT
                         }
                         Some("road") => moly_law::fixture::position::layout_type::ROAD,
@@ -166,8 +224,10 @@ fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
                         _ => moly_law::fixture::position::layout_type::FLOOR,
                     },
                     center_y: if matches!(
-                        row.get("handleType").and_then(Value::as_str),
-                        Some("windowpane" | "clock")
+                        row.get("layoutType")
+                            .and_then(Value::as_str)
+                            .or_else(|| row.get("handleType").and_then(Value::as_str)),
+                        Some("wall" | "windowpane" | "clock")
                     ) {
                         6
                     } else {
@@ -184,6 +244,7 @@ fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
             search,
             thumbnail: None,
             source,
+            presentation,
         });
     }
 }
@@ -491,6 +552,7 @@ pub(super) fn filtered_keys(
 ) -> Vec<EntryKey> {
     let query = state.search.to_lowercase();
     let mut keys = match state.tab {
+        LibraryTab::Activities => activities::filtered_keys(state, catalog, world),
         LibraryTab::Furniture => catalog
             .fixtures
             .iter()
@@ -545,14 +607,22 @@ pub(super) fn filtered_keys(
             .collect::<Vec<_>>(),
     };
     // Available content comes first without changing authored script order.
-    keys.sort_by_key(|key| match key {
-        EntryKey::Fixture(id) => !world
-            .instances
-            .get(id)
-            .is_some_and(|items| !items.is_empty()),
-        _ => catalog
-            .talk(*key)
-            .is_none_or(|row| !context::talk_here(row, world)),
+    keys.sort_by_key(|key| {
+        if state.mode == ExperienceMode::Independent {
+            return context::independent_reason(*key, catalog).is_some();
+        }
+        match key {
+            EntryKey::Activity(id) => catalog
+                .activity(*id)
+                .is_none_or(|row| activities::current_reason(row, catalog, world).is_some()),
+            EntryKey::Fixture(id) => !world
+                .instances
+                .get(id)
+                .is_some_and(|items| !items.is_empty()),
+            _ => catalog
+                .talk(*key)
+                .is_none_or(|row| !context::talk_here(row, world)),
+        }
     });
     keys
 }

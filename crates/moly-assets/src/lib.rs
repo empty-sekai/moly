@@ -3,17 +3,21 @@
 //! 资产根怎么来——native 的 env、web 的 URL 参数——归入口 crate（moly-app）
 //! 解析；这里只消费解析结果，拒绝全树只在那一处发生。
 
-pub mod sidecar;
-pub mod material_passes;
-pub mod material_textures;
-pub mod scene_state;
-pub mod source_navigation;
-pub mod player_data;
-pub mod ui_layout;
-mod packs;
-mod read_limits;
 #[cfg(target_arch = "wasm32")]
 mod http;
+#[cfg(target_arch = "wasm32")]
+mod http_directory;
+#[cfg(any(target_arch = "wasm32", test))]
+mod http_path;
+pub mod material_passes;
+pub mod material_textures;
+mod packs;
+pub mod player_data;
+mod read_limits;
+pub mod scene_state;
+pub mod sidecar;
+pub mod source_navigation;
+pub mod ui_layout;
 
 use bevy::app::App;
 use bevy::asset::{io::AssetSourceBuilder, AssetApp, AssetPath};
@@ -29,12 +33,20 @@ const SOURCE: &str = "moly";
 #[derive(Clone, Resource)]
 pub enum AssetSource {
     /// native：提取产物目录（入口已验存在且是目录）。
-    NativeDir { path: std::path::PathBuf },
+    NativeDir {
+        path: std::path::PathBuf,
+    },
     /// web：同源绝对路径前缀（保证以 `/` 结尾）——`platform_default`
     /// 在 wasm 上就是按页源取 HTTP 的读取器。
-    HttpBase { url: String },
-    NativePacks { path: std::path::PathBuf },
-    HttpPacks { url: String },
+    HttpBase {
+        url: String,
+    },
+    NativePacks {
+        path: std::path::PathBuf,
+    },
+    HttpPacks {
+        url: String,
+    },
 }
 
 /// 装上 `moly` 资产源并把解析结果挂成资源。
@@ -43,20 +55,42 @@ pub enum AssetSource {
 /// 之后注册只打一行 error 并被丢弃。
 pub fn install(app: &mut App, source: AssetSource) {
     #[cfg(target_arch = "wasm32")]
+    if let AssetSource::HttpBase { url } = &source {
+        let root = url.clone();
+        app.register_asset_source(
+            SOURCE,
+            AssetSourceBuilder::new(move || {
+                Box::new(http_directory::HttpDirectoryReader::new(root.clone()))
+            }),
+        );
+        app.insert_resource(source);
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
     if let AssetSource::HttpPacks { url } = &source {
         let root = url.clone();
-        app.register_asset_source(SOURCE, AssetSourceBuilder::new(move || Box::new(packs::PackReader::http(root.clone()))));
+        app.register_asset_source(
+            SOURCE,
+            AssetSourceBuilder::new(move || Box::new(packs::PackReader::http(root.clone()))),
+        );
         app.insert_resource(source);
         return;
     }
     let root = match &source {
-        AssetSource::NativeDir { path } | AssetSource::NativePacks { path } => path.to_string_lossy().to_string(),
+        AssetSource::NativeDir { path } | AssetSource::NativePacks { path } => {
+            path.to_string_lossy().to_string()
+        }
         AssetSource::HttpBase { url } | AssetSource::HttpPacks { url } => url.clone(),
     };
-    let builder = if matches!(source, AssetSource::NativePacks { .. } | AssetSource::HttpPacks { .. }) {
+    let builder = if matches!(
+        source,
+        AssetSource::NativePacks { .. } | AssetSource::HttpPacks { .. }
+    ) {
         let mut reader = bevy::asset::io::AssetSource::get_default_reader(root);
         AssetSourceBuilder::new(move || Box::new(packs::PackReader::new(reader())))
-    } else { AssetSourceBuilder::platform_default(&root, None) };
+    } else {
+        AssetSourceBuilder::platform_default(&root, None)
+    };
     app.register_asset_source(SOURCE, builder);
     app.insert_resource(source);
 }

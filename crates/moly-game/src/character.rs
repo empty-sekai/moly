@@ -29,12 +29,14 @@
 
 use crate::npc::{CharacterUnitId, MotionClips, MotionPhase};
 use bevy::animation::graph::AnimationNodeIndex;
-use bevy::animation::{AnimatedBy, AnimationTargetId, AnimationClip};
+use bevy::animation::{AnimatedBy, AnimationClip, AnimationTargetId};
 use bevy::asset::{AssetPath, Assets, LoadState, RecursiveDependencyLoadState};
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::ecs::observer::On;
 use bevy::gltf::{Gltf, GltfNode};
-use bevy::scene::{SceneInstanceReady, SceneRoot};
+use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
+use bevy::scene::{SceneInstanceReady, SceneRoot};
 use moly_assets::character as schema;
 use moly_assets::json::JsonAsset;
 use moly_law::path::TurnMotion;
@@ -136,7 +138,10 @@ impl MotionDriver {
 
     /// 该段是否循环（起始段播一遍后由衔接逻辑接管，不自身循环）。
     fn loops(kind: MotionKind) -> bool {
-        matches!(kind, MotionKind::Idle | MotionKind::Walk | MotionKind::TurnL(_))
+        matches!(
+            kind,
+            MotionKind::Idle | MotionKind::Walk | MotionKind::TurnL(_)
+        )
     }
 
     fn clip(&self, kind: MotionKind) -> String {
@@ -178,7 +183,10 @@ pub(crate) fn plan_when_ready(
     npcs: Query<
         (Entity, &CharacterUnitId),
         (
-            Or<(With<MotionClips>, With<crate::player_avatar::PlayerVisualClips>)>,
+            Or<(
+                With<MotionClips>,
+                With<crate::player_avatar::PlayerVisualClips>,
+            )>,
             Without<CharacterPack>,
         ),
     >,
@@ -212,7 +220,8 @@ pub(crate) fn plan_when_ready(
             .checked_add(100)
             .expect("成员 unitId 加 100 溢出：不是 unitId+100 形");
         let (glb, rig) = rows
-            .get(&code).copied()
+            .get(&code)
+            .copied()
             .unwrap_or_else(|| panic!("清单里没有成员 unit {} 的角色包（代号 {code}）", unit.0));
         commands.entity(entity).insert(CharacterPack {
             gltf: server.load::<Gltf>(moly_assets::character_glb(glb)),
@@ -244,7 +253,10 @@ pub fn attach_when_ready(
         if let RecursiveDependencyLoadState::Failed(err) =
             server.recursive_dependency_load_state(&pack.gltf)
         {
-            panic!("unit {} 的角色包 {} 依赖装载失败：{err:?}", unit.0, pack.file);
+            panic!(
+                "unit {} 的角色包 {} 依赖装载失败：{err:?}",
+                unit.0, pack.file
+            );
         }
         if !server.is_loaded_with_dependencies(&pack.gltf) {
             continue; // 这名等下一帧，不挡别人
@@ -293,11 +305,20 @@ pub(crate) fn wire_when_ready(
     clip_assets: Res<Assets<AnimationClip>>,
     mesh_assets: Res<Assets<Mesh>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    npcs: Query<(Entity, &CharacterUnitId, Option<&MotionClips>, Option<&crate::player_avatar::PlayerVisualClips>), With<ModelSceneReady>>,
+    npcs: Query<
+        (
+            Entity,
+            &CharacterUnitId,
+            Option<&MotionClips>,
+            Option<&crate::player_avatar::PlayerVisualClips>,
+        ),
+        With<ModelSceneReady>,
+    >,
     children: Query<&Children>,
     names: Query<&Name>,
     models: Query<&CharacterModel>,
     meshes_3d: Query<&Mesh3d>,
+    skinned_meshes: Query<(), With<SkinnedMesh>>,
     globals: Query<&GlobalTransform>,
 ) {
     if npcs.is_empty() {
@@ -379,6 +400,13 @@ pub(crate) fn wire_when_ready(
             }
             if let Ok(mesh3d) = meshes_3d.get(entity) {
                 mesh_entities += 1;
+                // glTF stores a bind-pose AABB. Skinned face/hair meshes can
+                // leave that box while an animation or fixture bridge moves
+                // their joints, so let the shader decide visibility. Static
+                // accessory meshes retain normal frustum culling.
+                if skinned_meshes.get(entity).is_ok() {
+                    commands.entity(entity).insert(NoFrustumCulling);
+                }
                 let mesh = mesh_assets
                     .get(&mesh3d.0)
                     .expect("网格实体引用的 Mesh 不在 Assets 里：装载门已过，不应发生");
@@ -423,7 +451,9 @@ pub(crate) fn wire_when_ready(
             .unwrap_or_else(|| panic!("共享动作库没有段 {walk_clip_name}"));
         if let Some(clips) = player_clips {
             let run_clip_name = format!("{}_L", clips.run);
-            let run = lib.named_animations.get(run_clip_name.as_str())
+            let run = lib
+                .named_animations
+                .get(run_clip_name.as_str())
                 .unwrap_or_else(|| panic!("SD玩家共享动作库没有冲刺段 {run_clip_name}"));
             let mut graph = AnimationGraph::new();
             let idle_node = graph.add_clip(idle.clone(), 1.0, graph.root);
@@ -431,17 +461,31 @@ pub(crate) fn wire_when_ready(
             let run_node = graph.add_clip(run.clone(), 1.0, graph.root);
             let graph_handle = graphs.add(graph);
             commands.entity(root).insert((
-                AnimationPlayer::default(), AnimationTransitions::new(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
                 AnimationGraphHandle(graph_handle.clone()),
             ));
             commands.entity(npc).insert((
                 crate::player_avatar::AvatarDriver::new_sd(
-                    root, model, graph_handle, [idle_node, walk_node, run_node],
-                    [idle_clip_name.clone(), walk_clip_name.clone(), run_clip_name.clone()],
-                    lib.named_animations.iter().map(|(name, clip)| (name.to_string(), clip.clone())).collect(),
+                    root,
+                    model,
+                    graph_handle,
+                    [idle_node, walk_node, run_node],
+                    [
+                        idle_clip_name.clone(),
+                        walk_clip_name.clone(),
+                        run_clip_name.clone(),
+                    ],
+                    lib.named_animations
+                        .iter()
+                        .map(|(name, clip)| (name.to_string(), clip.clone()))
+                        .collect(),
                     time.elapsed_secs(),
                 ),
-                CharacterShell { height, lowest: min.y },
+                CharacterShell {
+                    height,
+                    lowest: min.y,
+                },
             ));
             commands.entity(npc).remove::<ModelSceneReady>();
             info!("[player] SD unit={} wired: animator={root:?} model={model:?}, targets={targets}, meshes={mesh_entities}, idle={idle_clip_name}, walk={walk_clip_name}, run={run_clip_name}", unit.0);
@@ -531,7 +575,10 @@ pub(crate) fn wire_when_ready(
 /// 都把段重置到头，同段重复换等于永不播放——`playing` 的簿记不是装饰，
 /// 是调用的前置条件。
 pub fn drive(
-    mut npcs: Query<(&CharacterUnitId, &MotionPhase, &mut MotionDriver), Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>>,
+    mut npcs: Query<
+        (&CharacterUnitId, &MotionPhase, &mut MotionDriver),
+        Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
+    >,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,
 ) {
@@ -592,7 +639,9 @@ pub fn drive(
             MotionKind::TurnS(motion) => format!("turn_s({})", motion.label()),
             MotionKind::TurnL(motion) => format!("turn_l({})", motion.label()),
         };
-        let from = old.map(|kind| word(kind)).unwrap_or_else(|| "未起播".to_owned());
+        let from = old
+            .map(|kind| word(kind))
+            .unwrap_or_else(|| "未起播".to_owned());
         info!(
             "[npc unit={}] 动画段 {from} -> {}（{}）",
             unit.0,
@@ -627,5 +676,50 @@ pub fn probe_playback(
             );
         }
         driver.probed = true;
+    }
+}
+
+#[cfg(test)]
+mod visibility_regressions {
+    use super::*;
+
+    #[test]
+    fn animated_face_is_not_rejected_by_its_offscreen_bind_pose() {
+        use bevy::camera::{
+            primitives::{Aabb, Frustum, HalfSpace},
+            visibility::{check_visibility, VisibleEntities},
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, check_visibility);
+        // Screen edge at x=0: the bind-pose face is entirely outside, but its
+        // animated joint has moved the face across the edge into the view.
+        app.world_mut().spawn((
+            Camera::default(),
+            VisibleEntities::default(),
+            Frustum {
+                half_spaces: [HalfSpace::new(Vec4::new(1.0, 0.0, 0.0, 0.0)); 6],
+            },
+        ));
+        let mut spawn = || {
+            app.world_mut()
+                .spawn((
+                    Aabb::from_min_max(Vec3::new(-1.1, -0.1, -0.1), Vec3::new(-0.9, 0.1, 0.1)),
+                    GlobalTransform::IDENTITY,
+                    InheritedVisibility::VISIBLE,
+                    ViewVisibility::HIDDEN,
+                ))
+                .id()
+        };
+        let face = spawn();
+        let static_prop = spawn();
+        app.world_mut().entity_mut(face).insert(NoFrustumCulling);
+        app.update();
+        assert!(app.world().get::<ViewVisibility>(face).unwrap().get());
+        assert!(!app
+            .world()
+            .get::<ViewVisibility>(static_prop)
+            .unwrap()
+            .get());
     }
 }

@@ -5,6 +5,10 @@
 //! the result atomically with its reservation. Missing data and rejected source
 //! conditions are distinct outcomes, neither an implicit General-talk fallback.
 
+#[path = "fixture_activity_catalog.rs"]
+mod catalog;
+pub(crate) use catalog::{ActivityKey, ActivityOrigin, ActivitySpec};
+
 use std::collections::{HashMap, HashSet};
 
 use bevy::{asset::LoadState, prelude::*};
@@ -16,7 +20,10 @@ use moly_law::talk::{
 };
 use serde_json::Value;
 
-use crate::{fixture_attach::AttachPoints, talk::{TalkCandidates, TalkStore}};
+use crate::{
+    fixture_attach::AttachPoints,
+    talk::{TalkCandidates, TalkStore},
+};
 
 const PATHS: [&str; 11] = [
     "moly://mysekai-character-talks.json",
@@ -37,7 +44,10 @@ pub(crate) struct ActivityTableRequests(Vec<Handle<JsonAsset>>);
 
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(ActivityTableRequests(
-        PATHS.iter().map(|path| server.load::<JsonAsset>(*path)).collect(),
+        PATHS
+            .iter()
+            .map(|path| server.load::<JsonAsset>(*path))
+            .collect(),
     ));
 }
 
@@ -47,20 +57,30 @@ pub(crate) fn parse(
     jsons: Res<Assets<JsonAsset>>,
     request: Option<Res<ActivityTableRequests>>,
 ) {
-    let Some(request) = request else { return; };
+    let Some(request) = request else {
+        return;
+    };
     let mut documents = Vec::with_capacity(PATHS.len());
     for (path, handle) in PATHS.iter().zip(&request.0) {
         if let LoadState::Failed(error) = server.load_state(handle) {
             panic!("activity table {path} failed to load: {error:?}");
         }
-        let Some(asset) = jsons.get(handle) else { return; };
-        documents.push(serde_json::from_str::<Value>(&asset.0)
-            .unwrap_or_else(|error| panic!("activity table {path}: {error}")));
+        let Some(asset) = jsons.get(handle) else {
+            return;
+        };
+        documents.push(
+            serde_json::from_str::<Value>(&asset.0)
+                .unwrap_or_else(|error| panic!("activity table {path}: {error}")),
+        );
     }
     let tables = FixtureActivityTables::from_documents(&documents)
         .unwrap_or_else(|error| panic!("activity table relationships: {error}"));
-    info!("[fixture-activity] data ready: {} masters, {} timeline rows, {} pre-actions",
-        tables.talks.rows.len(), tables.timelines.rows.len(), tables.pre_actions.len());
+    info!(
+        "[fixture-activity] data ready: {} masters, {} timeline rows, {} pre-actions",
+        tables.talks.rows.len(),
+        tables.timelines.rows.len(),
+        tables.pre_actions.len()
+    );
     commands.insert_resource(tables);
     commands.remove_resource::<ActivityTableRequests>();
 }
@@ -144,7 +164,12 @@ pub(crate) struct ActivityPreAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PutType { None, Base, Target, Either }
+pub(crate) enum PutType {
+    None,
+    Base,
+    Target,
+    Either,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActivityFixtureMaster {
@@ -183,7 +208,10 @@ pub(crate) enum PrepareError {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ReadSelection { Unread, Read }
+pub(crate) enum ReadSelection {
+    Unread,
+    Read,
+}
 
 pub(crate) struct QualificationInput<'a> {
     pub actor: Entity,
@@ -281,9 +309,15 @@ pub(crate) struct SingleFixtureActivity {
 pub(crate) enum TargetRequest {
     /// Return the original position if the source .3m sample succeeds. Do not
     /// substitute hit.position into the activity's target-position binding.
-    ActionPoint { position: [f32; 3], sample_distance: f32 },
+    ActionPoint {
+        position: [f32; 3],
+        sample_distance: f32,
+    },
     /// The no-timeline single-character branch uses GetLittleFarPosition.
-    NearFixture { actor_position: [f32; 3], search_range: i32 },
+    NearFixture {
+        actor_position: [f32; 3],
+        search_range: i32,
+    },
 }
 
 impl FixtureActivityTables {
@@ -291,18 +325,36 @@ impl FixtureActivityTables {
     /// is not an eligible pool: the caller retains its existing candidate view
     /// and must call qualify_single with the live source gates for every entry.
     pub(crate) fn ordered_rows<'a>(
-        &'a self, store: &'a TalkStore, candidates: &'a TalkCandidates,
+        &'a self,
+        store: &'a TalkStore,
+        candidates: &'a TalkCandidates,
     ) -> impl Iterator<Item = &'a FixtureTalkRow> {
-        self.talks.rows.iter().filter(move |master| candidates.contains_talk(master.id))
+        self.talks
+            .rows
+            .iter()
+            .filter(move |master| candidates.contains_talk(master.id))
             .filter_map(move |master| store.row(master.id))
     }
 
-    pub(crate) fn player_timelines(&self, fixture_id: i32) -> impl Iterator<Item = &PlayerTimelineRow> {
-        self.player_timelines.rows.iter().filter(move |row| row.fixture_id == fixture_id)
+    pub(crate) fn player_timelines(
+        &self,
+        fixture_id: i32,
+    ) -> impl Iterator<Item = &PlayerTimelineRow> {
+        self.player_timelines
+            .rows
+            .iter()
+            .filter(move |row| row.fixture_id == fixture_id)
     }
 
-    pub(crate) fn sd_visual_rows(&self, unit: u32, fixture_id: i32) -> impl Iterator<Item = &NoTalkVisualRow> {
-        self.no_talk_visuals.rows.iter().filter(move |row| row.unit == unit && row.fixture_id == fixture_id)
+    pub(crate) fn sd_visual_rows(
+        &self,
+        unit: u32,
+        fixture_id: i32,
+    ) -> impl Iterator<Item = &NoTalkVisualRow> {
+        self.no_talk_visuals
+            .rows
+            .iter()
+            .filter(move |row| row.unit == unit && row.fixture_id == fixture_id)
     }
 
     /// The full source row order, before the no-talk Guid-key permutation.
@@ -313,25 +365,55 @@ impl FixtureActivityTables {
     /// CreateNoneTalkData uses the first group whose Unit1 is this actor,
     /// and the first timeline of its action group to assign locators. The
     /// later random timeline choice is independent of this assignment.
-    pub(crate) fn no_talk_point(&self, unit: u32, first_timeline: &ActivityTimeline) -> Result<i32, PrepareError> {
-        let group = self.units.rows.iter().find(|group| group.units[0] == Some(unit as i32))
-            .ok_or_else(|| PrepareError::DataMissing(format!("no source Unit1 group for NPC {unit}")))?;
-        if group.units.iter().skip(1).any(|unit| unit.is_some_and(|unit| unit != 0)) {
-            return Err(PrepareError::OtherActivity("source no-talk unit group needs multiple actor ownership"));
+    pub(crate) fn no_talk_point(
+        &self,
+        unit: u32,
+        first_timeline: &ActivityTimeline,
+    ) -> Result<i32, PrepareError> {
+        let group = self
+            .units
+            .rows
+            .iter()
+            .find(|group| group.units[0] == Some(unit as i32))
+            .ok_or_else(|| {
+                PrepareError::DataMissing(format!("no source Unit1 group for NPC {unit}"))
+            })?;
+        if group
+            .units
+            .iter()
+            .skip(1)
+            .any(|unit| unit.is_some_and(|unit| unit != 0))
+        {
+            return Err(PrepareError::OtherActivity(
+                "source no-talk unit group needs multiple actor ownership",
+            ));
         }
         self.action_point_value(first_timeline.action_point_definition, 0)?
             .filter(|point| *point != 0)
-            .ok_or(PrepareError::Rejected("source no-talk actor has no action-point assignment"))
+            .ok_or(PrepareError::Rejected(
+                "source no-talk actor has no action-point assignment",
+            ))
     }
 
     pub(crate) fn timeline_rows(&self, group_id: i32) -> impl Iterator<Item = &ActivityTimeline> {
-        self.timelines.rows.iter().filter(move |row| row.group_id == group_id)
+        self.timelines
+            .rows
+            .iter()
+            .filter(move |row| row.group_id == group_id)
     }
 
-    pub(crate) fn action_point_value(&self, definition: i32, unit_slot: usize) -> Result<Option<i32>, PrepareError> {
-        let row = self.action_points.get(definition).ok_or_else(|| missing("action point", definition))?;
-        row.points.get(unit_slot).copied()
-            .ok_or_else(|| PrepareError::InvalidData("action point unit slot exceeds source definition".into()))
+    pub(crate) fn action_point_value(
+        &self,
+        definition: i32,
+        unit_slot: usize,
+    ) -> Result<Option<i32>, PrepareError> {
+        let row = self
+            .action_points
+            .get(definition)
+            .ok_or_else(|| missing("action point", definition))?;
+        row.points.get(unit_slot).copied().ok_or_else(|| {
+            PrepareError::InvalidData("action point unit slot exceeds source definition".into())
+        })
     }
 
     pub(crate) fn fixture_master(&self, id: i32) -> Option<&ActivityFixtureMaster> {
@@ -341,7 +423,10 @@ impl FixtureActivityTables {
     /// Legacy offline layout seeds sometimes name only a model. Resolve that
     /// seed only when the source master has exactly one such row; variants
     /// sharing a model still need their explicit saved master identity.
-    pub(crate) fn unique_fixture_master_for_model(&self, model: &str) -> Option<&ActivityFixtureMaster> {
+    pub(crate) fn unique_fixture_master_for_model(
+        &self,
+        model: &str,
+    ) -> Option<&ActivityFixtureMaster> {
         let mut rows = self.fixtures.values().filter(|row| row.model_name == model);
         let row = rows.next()?;
         rows.next().is_none().then_some(row)
@@ -354,39 +439,82 @@ impl FixtureActivityTables {
         input: QualificationInput<'_>,
     ) -> Result<QualifiedSingleSelection, PrepareError> {
         if !candidates.contains_talk(row.talk_id) {
-            return Err(PrepareError::Rejected("master is not in the current fixture-talk candidate view"));
+            return Err(PrepareError::Rejected(
+                "master is not in the current fixture-talk candidate view",
+            ));
         }
-        let master = self.talks.get(row.talk_id).ok_or_else(|| missing("talk", row.talk_id))?;
-        if master.lua != row.lua || master.condition_group_id != row.condition_group_id
-            || master.site_group_id != row.site_group_id || master.term_id != row.term_id {
-            return Err(PrepareError::InvalidData(format!("script/master mismatch for talk {}", row.talk_id)));
+        let master = self
+            .talks
+            .get(row.talk_id)
+            .ok_or_else(|| missing("talk", row.talk_id))?;
+        if master.lua != row.lua
+            || master.condition_group_id != row.condition_group_id
+            || master.site_group_id != row.site_group_id
+            || master.term_id != row.term_id
+        {
+            return Err(PrepareError::InvalidData(format!(
+                "script/master mismatch for talk {}",
+                row.talk_id
+            )));
         }
-        let group = self.units.get(master.unit_group_id).ok_or_else(|| missing("unit group", master.unit_group_id))?;
-        let members: Vec<_> = group.units.iter().enumerate()
-            .filter_map(|(slot, unit)| unit.filter(|unit| *unit != 0).map(|unit| (slot, unit))).collect();
-        if members.len() != 1 { return Err(PrepareError::OtherActivity("not a single-character master")); }
+        let group = self
+            .units
+            .get(master.unit_group_id)
+            .ok_or_else(|| missing("unit group", master.unit_group_id))?;
+        let members: Vec<_> = group
+            .units
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, unit)| unit.filter(|unit| *unit != 0).map(|unit| (slot, unit)))
+            .collect();
+        if members.len() != 1 {
+            return Err(PrepareError::OtherActivity("not a single-character master"));
+        }
         let (unit_slot, unit) = members[0];
         if row.unit_ids.as_slice() != [unit].as_slice() {
-            return Err(PrepareError::InvalidData(format!("script/unit-group mismatch for talk {}", row.talk_id)));
+            return Err(PrepareError::InvalidData(format!(
+                "script/unit-group mismatch for talk {}",
+                row.talk_id
+            )));
         }
-        let is_read = input.is_read.ok_or_else(|| PrepareError::DataMissing("read-state supplier is not ready".into()))?;
+        let is_read = input
+            .is_read
+            .ok_or_else(|| PrepareError::DataMissing("read-state supplier is not ready".into()))?;
         if is_read != matches!(input.read_selection, ReadSelection::Read) {
             return Err(PrepareError::Rejected("read-state filter"));
         }
-        let sites = self.site_groups.get(&master.site_group_id).ok_or_else(|| missing("site group", master.site_group_id))?;
+        let sites = self
+            .site_groups
+            .get(&master.site_group_id)
+            .ok_or_else(|| missing("site group", master.site_group_id))?;
         if !row.fixture_ids.contains(&input.fixture_id) {
-            return Err(PrepareError::Rejected("instance is not a fixture of the selected master"));
+            return Err(PrepareError::Rejected(
+                "instance is not a fixture of the selected master",
+            ));
         }
         let mut has_fixture_condition = false;
         let mut is_general = false;
         let mut condition_matches = false;
-        let conditions: Vec<_> = self.condition_groups.rows.iter()
-            .filter(|entry| entry.group_id == master.condition_group_id).collect();
-        if conditions.is_empty() { return Err(missing("condition group", master.condition_group_id)); }
+        let conditions: Vec<_> = self
+            .condition_groups
+            .rows
+            .iter()
+            .filter(|entry| entry.group_id == master.condition_group_id)
+            .collect();
+        if conditions.is_empty() {
+            return Err(missing("condition group", master.condition_group_id));
+        }
         for entry in conditions {
-            let condition = self.conditions.get(entry.condition_id).ok_or_else(|| missing("condition", entry.condition_id))?;
-            is_general |= matches!(condition.kind.as_str(), "read_event_story_episode_id"
-                | "mysekai_character_visit_count" | "mysekai_phenomena_id");
+            let condition = self
+                .conditions
+                .get(entry.condition_id)
+                .ok_or_else(|| missing("condition", entry.condition_id))?;
+            is_general |= matches!(
+                condition.kind.as_str(),
+                "read_event_story_episode_id"
+                    | "mysekai_character_visit_count"
+                    | "mysekai_phenomena_id"
+            );
             condition_matches |= match condition.kind.as_str() {
                 // These TalkUtility predicates are unconditional in the source
                 // client. Greeting visit-count ranges belong to another path.
@@ -397,24 +525,42 @@ impl FixtureActivityTables {
                     input.placed_fixture_ids.contains(&condition.value)
                 }
                 "mysekai_fixture_tag_id" => {
-                    let tags = input.condition_fixture_tags.get(&condition.value)
+                    let tags = input
+                        .condition_fixture_tags
+                        .get(&condition.value)
                         .ok_or_else(|| missing("fixture tag-group resolution", condition.value))?;
-                    tags.iter().any(|tag| input.placed_fixture_tag_ids.contains(tag))
+                    tags.iter()
+                        .any(|tag| input.placed_fixture_tag_ids.contains(tag))
                 }
                 "after_set_fixture" => false,
-                _ => return Err(PrepareError::InvalidData(format!("unknown condition type {} on {}", condition.kind, condition.id))),
+                _ => {
+                    return Err(PrepareError::InvalidData(format!(
+                        "unknown condition type {} on {}",
+                        condition.kind, condition.id
+                    )))
+                }
             };
         }
-        if !has_fixture_condition { return Err(PrepareError::OtherActivity("not a fixture-action master")); }
+        if !has_fixture_condition {
+            return Err(PrepareError::OtherActivity("not a fixture-action master"));
+        }
         let mut gates = input.gates;
         gates.character_condition &= unit > 0 && unit as u32 == input.unit;
         gates.prev_talk &= input.previous_talk_id != Some(master.id);
         gates.condition &= condition_matches;
         gates.environment_site_condition &= sites.contains(&input.site_id);
-        if !matches_lottery_conditions(&gates) { return Err(PrepareError::Rejected("MatchesLotteryConditions")); }
+        if !matches_lottery_conditions(&gates) {
+            return Err(PrepareError::Rejected("MatchesLotteryConditions"));
+        }
         Ok(QualifiedSingleSelection {
-            master: master.clone(), is_general, actor: input.actor, unit: input.unit, unit_slot,
-            fixture: input.fixture, fixture_id: input.fixture_id, site_id: input.site_id,
+            master: master.clone(),
+            is_general,
+            actor: input.actor,
+            unit: input.unit,
+            unit_slot,
+            fixture: input.fixture,
+            fixture_id: input.fixture_id,
+            site_id: input.site_id,
         })
     }
 
@@ -428,128 +574,279 @@ impl FixtureActivityTables {
         attachments: &AttachPoints,
         mut resolve_target: impl FnMut(TargetRequest) -> Result<Option<[f32; 3]>, PrepareError>,
     ) -> Result<SingleFixtureActivity, PrepareError> {
-        if row.talk_id != selected.master.id || actor.entity != selected.actor || actor.unit != selected.unit
-            || fixture.entity != selected.fixture || fixture.fixture_id != selected.fixture_id
-            || actor.site_id != selected.site_id || fixture.site_id != selected.site_id {
-            return Err(PrepareError::Rejected("qualified actor/instance/site changed"));
+        if row.talk_id != selected.master.id
+            || actor.entity != selected.actor
+            || actor.unit != selected.unit
+            || fixture.entity != selected.fixture
+            || fixture.fixture_id != selected.fixture_id
+            || actor.site_id != selected.site_id
+            || fixture.site_id != selected.site_id
+        {
+            return Err(PrepareError::Rejected(
+                "qualified actor/instance/site changed",
+            ));
         }
-        let fixture_master = self.fixtures.get(&fixture.fixture_id).ok_or_else(|| missing("fixture", fixture.fixture_id))?;
+        let fixture_master = self
+            .fixtures
+            .get(&fixture.fixture_id)
+            .ok_or_else(|| missing("fixture", fixture.fixture_id))?;
         if fixture.model_package != format!("mysekai__fixture__{}", fixture_master.model_name) {
-            return Err(PrepareError::InvalidData("instance model/master mismatch".into()));
+            return Err(PrepareError::InvalidData(
+                "instance model/master mismatch".into(),
+            ));
         }
-        if !actor.position.into_iter().chain([actor.site_y, fixture.view_local_y]).all(f32::is_finite) {
+        if !actor
+            .position
+            .into_iter()
+            .chain([actor.site_y, fixture.view_local_y])
+            .all(f32::is_finite)
+        {
             return Err(PrepareError::InvalidData("non-finite activity pose".into()));
         }
         let (scale, rotation, position) = fixture.world.to_scale_rotation_translation();
         if !scale.is_finite() || !rotation.is_finite() || !position.is_finite() {
-            return Err(PrepareError::InvalidData("non-finite fixture instance transform".into()));
+            return Err(PrepareError::InvalidData(
+                "non-finite fixture instance transform".into(),
+            ));
         }
-        let pre_action = self.pre_action_by_talk.get(&row.talk_id).map(|index| self.pre_actions[*index].clone());
-        if pre_action.as_ref().and_then(|pre| pre.fixture_together_communication_id).is_some_and(|id| id != 0) {
-            return Err(PrepareError::OtherActivity("fixture-together waiting must be prepared by its own factory"));
+        let pre_action = self
+            .pre_action_by_talk
+            .get(&row.talk_id)
+            .map(|index| self.pre_actions[*index].clone());
+        if pre_action
+            .as_ref()
+            .and_then(|pre| pre.fixture_together_communication_id)
+            .is_some_and(|id| id != 0)
+        {
+            return Err(PrepareError::OtherActivity(
+                "fixture-together waiting must be prepared by its own factory",
+            ));
         }
         let tweet = match pre_action.as_ref().map(|pre| pre.tweet_id) {
             Some(id) if id != 0 => {
-                if row.tweet.id != id { return Err(PrepareError::InvalidData("script/pre-action tweet mismatch".into())); }
+                if row.tweet.id != id {
+                    return Err(PrepareError::InvalidData(
+                        "script/pre-action tweet mismatch".into(),
+                    ));
+                }
                 Some(row.tweet.clone())
             }
             _ => None,
         };
-        let group_id = pre_action.as_ref().and_then(|pre| pre.timeline_group_id).filter(|id| *id != 0);
+        let group_id = pre_action
+            .as_ref()
+            .and_then(|pre| pre.timeline_group_id)
+            .filter(|id| *id != 0);
         let (timeline, locate, request) = if let Some(group_id) = group_id {
-            let pool: Vec<_> = self.timelines.rows.iter().filter(|row| row.group_id == group_id).collect();
-            if pool.is_empty() { return Err(missing("timeline group", group_id)); }
+            let pool: Vec<_> = self
+                .timelines
+                .rows
+                .iter()
+                .filter(|row| row.group_id == group_id)
+                .collect();
+            if pool.is_empty() {
+                return Err(missing("timeline group", group_id));
+            }
             let index = draw.draw(pool.len());
-            let timeline = (**pool.get(index).ok_or_else(|| PrepareError::InvalidData("timeline draw outside its pool".into()))?).clone();
-            let points = self.action_points.get(timeline.action_point_definition)
-                .ok_or_else(|| missing("action-point definition", timeline.action_point_definition))?;
-            let value = points.points.get(selected.unit_slot).copied().flatten().filter(|point| *point != 0)
-                .ok_or_else(|| PrepareError::Rejected("selected actor has no action-point assignment"))?;
-            let action_point_index = attachments.instance_index(fixture.model_package, value)
+            let timeline = (**pool.get(index).ok_or_else(|| {
+                PrepareError::InvalidData("timeline draw outside its pool".into())
+            })?)
+            .clone();
+            let points = self
+                .action_points
+                .get(timeline.action_point_definition)
+                .ok_or_else(|| {
+                    missing("action-point definition", timeline.action_point_definition)
+                })?;
+            let value = points
+                .points
+                .get(selected.unit_slot)
+                .copied()
+                .flatten()
+                .filter(|point| *point != 0)
+                .ok_or_else(|| {
+                    PrepareError::Rejected("selected actor has no action-point assignment")
+                })?;
+            let action_point_index = attachments
+                .instance_index(fixture.model_package, value)
                 // This API also returns None for legacy data without a source
                 // index or ambiguous multi-view entries. Neither is a proven
                 // source rejection and neither may trigger a General fallback.
-                .ok_or_else(|| PrepareError::DataMissing(format!(
-                    "action-point identity {value} is unavailable or ambiguous for {}", fixture.model_package
-                )))?;
-            let pair = attachments.instance_poses(fixture.model_package, value, fixture.world)
-                .ok_or_else(|| PrepareError::InvalidData("resolved action-point index has no pose".into()))?;
+                .ok_or_else(|| {
+                    PrepareError::DataMissing(format!(
+                        "action-point identity {value} is unavailable or ambiguous for {}",
+                        fixture.model_package
+                    ))
+                })?;
+            let pair = attachments
+                .instance_poses(fixture.model_package, value, fixture.world)
+                .ok_or_else(|| {
+                    PrepareError::InvalidData("resolved action-point index has no pose".into())
+                })?;
             let finite_pose = |pose: crate::fixture_attach::AttachPose| {
                 pose.position.into_iter().all(f32::is_finite) && pose.rotation.is_finite()
             };
             if !finite_pose(pair.start) || pair.end.is_some_and(|pose| !finite_pose(pose)) {
-                return Err(PrepareError::InvalidData("non-finite action-point pose".into()));
+                return Err(PrepareError::InvalidData(
+                    "non-finite action-point pose".into(),
+                ));
             }
             let locate = ActivityLocate {
-                unit: actor.unit, unit_slot: selected.unit_slot, action_point_value: value, action_point_index,
-                start: ActivityPose { position: pair.start.position, rotation: pair.start.rotation },
-                end: pair.end.map(|pose| ActivityPose { position: pose.position, rotation: pose.rotation }),
+                unit: actor.unit,
+                unit_slot: selected.unit_slot,
+                action_point_value: value,
+                action_point_index,
+                start: ActivityPose {
+                    position: pair.start.position,
+                    rotation: pair.start.rotation,
+                },
+                end: pair.end.map(|pose| ActivityPose {
+                    position: pose.position,
+                    rotation: pose.rotation,
+                }),
             };
-            let (package, prefab_name) = timeline_asset(&timeline.asset_name, fixture_master.put_type, fixture.view_local_y)?;
+            let (package, prefab_name) = timeline_asset(
+                &timeline.asset_name,
+                fixture_master.put_type,
+                fixture.view_local_y,
+            )?;
             let request = TargetRequest::ActionPoint {
-                position: [locate.start.position[0], actor.site_y, locate.start.position[2]], sample_distance: 0.3,
+                position: [
+                    locate.start.position[0],
+                    actor.site_y,
+                    locate.start.position[2],
+                ],
+                sample_distance: 0.3,
             };
-            (Some(PreparedTimeline { master: timeline, package, prefab_name }), Some(locate), request)
+            (
+                Some(PreparedTimeline {
+                    master: timeline,
+                    package,
+                    prefab_name,
+                }),
+                Some(locate),
+                request,
+            )
         } else {
-            (None, None, TargetRequest::NearFixture { actor_position: actor.position, search_range: 2 })
+            (
+                None,
+                None,
+                TargetRequest::NearFixture {
+                    actor_position: actor.position,
+                    search_range: 2,
+                },
+            )
         };
         let original_action_target = match &request {
             TargetRequest::ActionPoint { position, .. } => Some(*position),
             TargetRequest::NearFixture { .. } => None,
         };
-        let resolved = resolve_target(request)?.ok_or(PrepareError::Rejected("source target-position calculation failed"))?;
-        if !resolved.into_iter().all(f32::is_finite) { return Err(PrepareError::InvalidData("non-finite target".into())); }
+        let resolved = resolve_target(request)?.ok_or(PrepareError::Rejected(
+            "source target-position calculation failed",
+        ))?;
+        if !resolved.into_iter().all(f32::is_finite) {
+            return Err(PrepareError::InvalidData("non-finite target".into()));
+        }
         let target_position = original_action_target.unwrap_or(resolved);
         Ok(SingleFixtureActivity {
-            master: selected.master.clone(), is_general: selected.is_general,
-            fixture: fixture.entity, fixture_id: fixture.fixture_id,
-            actor: actor.entity, unit: actor.unit, target_position, pre_action, tweet, timeline, locate,
+            master: selected.master.clone(),
+            is_general: selected.is_general,
+            fixture: fixture.entity,
+            fixture_id: fixture.fixture_id,
+            actor: actor.entity,
+            unit: actor.unit,
+            target_position,
+            pre_action,
+            tweet,
+            timeline,
+            locate,
         })
     }
 
     fn from_documents(d: &[Value]) -> Result<Self, String> {
-        let talks = ordered(&d[0], |row| Ok(ActivityMaster {
-            id: int(row, "id")?, unit_group_id: int(row, "mysekaiGameCharacterUnitGroupId")?,
-            condition_group_id: int(row, "mysekaiCharacterTalkConditionGroupId")?,
-            site_group_id: int(row, "mysekaiSiteGroupId")?, term_id: int(row, "mysekaiCharacterTalkTermId")?,
-            lua: string(row, "lua")?,
-        }))?;
-        let units = ordered(&d[1], |row| Ok(UnitGroup { id: int(row, "id")?, units: [
-            optional_int(row, "gameCharacterUnitId1")?, optional_int(row, "gameCharacterUnitId2")?,
-            optional_int(row, "gameCharacterUnitId3")?, optional_int(row, "gameCharacterUnitId4")?,
-            optional_int(row, "gameCharacterUnitId5")?,
-        ] }))?;
-        let conditions = ordered(&d[2], |row| Ok(Condition {
-            id: int(row, "id")?, kind: string(row, "mysekaiCharacterTalkConditionType")?,
-            value: int(row, "mysekaiCharacterTalkConditionTypeValue")?,
-        }))?;
-        let condition_groups = ordered(&d[3], |row| Ok(ConditionGroupRow {
-            group_id: int(row, "groupId")?, condition_id: int(row, "mysekaiCharacterTalkConditionId")?,
-        }))?;
-        let timelines = ordered(&d[4], |row| Ok(ActivityTimeline {
-            id: int(row, "id")?, group_id: int(row, "groupId")?, asset_name: string(row, "assetbundleName")?,
-            action_point_definition: int(row, "mysekaiCharacterTalkActionPointId")?,
-        }))?;
-        let action_points = ordered(&d[5], |row| Ok(ActionPointDefinition { points: [
-            optional_int(row, "gameCharacterUnitId1ActionPoint")?, optional_int(row, "gameCharacterUnitId2ActionPoint")?,
-            optional_int(row, "gameCharacterUnitId3ActionPoint")?, optional_int(row, "gameCharacterUnitId4ActionPoint")?,
-        ] }))?;
-        let player_timelines = ordered(&d[6], |row| Ok(PlayerTimelineRow {
-            id: int(row, "id")?, fixture_id: int(row, "mysekaiFixtureId")?,
-            asset_name: string(row, "assetbundleName")?, action_point: int(row, "actionPoint")?,
-        }))?;
+        let talks = ordered(&d[0], |row| {
+            Ok(ActivityMaster {
+                id: int(row, "id")?,
+                unit_group_id: int(row, "mysekaiGameCharacterUnitGroupId")?,
+                condition_group_id: int(row, "mysekaiCharacterTalkConditionGroupId")?,
+                site_group_id: int(row, "mysekaiSiteGroupId")?,
+                term_id: int(row, "mysekaiCharacterTalkTermId")?,
+                lua: string(row, "lua")?,
+            })
+        })?;
+        let units = ordered(&d[1], |row| {
+            Ok(UnitGroup {
+                id: int(row, "id")?,
+                units: [
+                    optional_int(row, "gameCharacterUnitId1")?,
+                    optional_int(row, "gameCharacterUnitId2")?,
+                    optional_int(row, "gameCharacterUnitId3")?,
+                    optional_int(row, "gameCharacterUnitId4")?,
+                    optional_int(row, "gameCharacterUnitId5")?,
+                ],
+            })
+        })?;
+        let conditions = ordered(&d[2], |row| {
+            Ok(Condition {
+                id: int(row, "id")?,
+                kind: string(row, "mysekaiCharacterTalkConditionType")?,
+                value: int(row, "mysekaiCharacterTalkConditionTypeValue")?,
+            })
+        })?;
+        let condition_groups = ordered(&d[3], |row| {
+            Ok(ConditionGroupRow {
+                group_id: int(row, "groupId")?,
+                condition_id: int(row, "mysekaiCharacterTalkConditionId")?,
+            })
+        })?;
+        let timelines = ordered(&d[4], |row| {
+            Ok(ActivityTimeline {
+                id: int(row, "id")?,
+                group_id: int(row, "groupId")?,
+                asset_name: string(row, "assetbundleName")?,
+                action_point_definition: int(row, "mysekaiCharacterTalkActionPointId")?,
+            })
+        })?;
+        let action_points = ordered(&d[5], |row| {
+            Ok(ActionPointDefinition {
+                points: [
+                    optional_int(row, "gameCharacterUnitId1ActionPoint")?,
+                    optional_int(row, "gameCharacterUnitId2ActionPoint")?,
+                    optional_int(row, "gameCharacterUnitId3ActionPoint")?,
+                    optional_int(row, "gameCharacterUnitId4ActionPoint")?,
+                ],
+            })
+        })?;
+        let player_timelines = ordered(&d[6], |row| {
+            Ok(PlayerTimelineRow {
+                id: int(row, "id")?,
+                fixture_id: int(row, "mysekaiFixtureId")?,
+                asset_name: string(row, "assetbundleName")?,
+                action_point: int(row, "actionPoint")?,
+            })
+        })?;
         let mut pre_actions = Vec::new();
         let mut pre_action_by_talk = HashMap::new();
         for row in array(&d[7], "talkPreActions")? {
             for field in ["timelineGroupId", "fixtureTogetherCommunicationId"] {
-                if row.get(field).is_none() { return Err(format!("pre-action export does not carry {field}")); }
+                if row.get(field).is_none() {
+                    return Err(format!("pre-action export does not carry {field}"));
+                }
             }
             let value = ActivityPreAction {
-                id: int(row, "id")?, talk_id: int(row, "talkId")?, tweet_id: int(row, "tweetId")?,
+                id: int(row, "id")?,
+                talk_id: int(row, "talkId")?,
+                tweet_id: int(row, "tweetId")?,
                 timeline_group_id: optional_int(row, "timelineGroupId")?,
-                fixture_together_communication_id: optional_int(row, "fixtureTogetherCommunicationId")?,
+                fixture_together_communication_id: optional_int(
+                    row,
+                    "fixtureTogetherCommunicationId",
+                )?,
             };
-            if pre_action_by_talk.insert(value.talk_id, pre_actions.len()).is_some() {
+            if pre_action_by_talk
+                .insert(value.talk_id, pre_actions.len())
+                .is_some()
+            {
                 return Err(format!("duplicate pre-action talk {}", value.talk_id));
             }
             pre_actions.push(value);
@@ -558,31 +855,67 @@ impl FixtureActivityTables {
         for row in array(&d[8], "fixtures")? {
             let id = int(row, "id")?;
             let put_type = match string(row, "putType")?.as_str() {
-                "none" => PutType::None, "put_base" => PutType::Base,
-                "put_target" => PutType::Target, "put_either" => PutType::Either,
+                "none" => PutType::None,
+                "put_base" => PutType::Base,
+                "put_target" => PutType::Target,
+                "put_either" => PutType::Either,
                 other => return Err(format!("unknown put type {other}")),
             };
-            if fixtures.insert(id, ActivityFixtureMaster { id, model_name: string(row, "assetbundleName")?,
-                grid_size: moly_law::fixture::Vector3Int::new(int(row, "gridWidth")?, int(row, "gridHeight")?, int(row, "gridDepth")?),
-                put_type, player_action_type: string(row, "playerActionType")?,
-                handle_type: string(row, "handleType")? }).is_some() {
+            if fixtures
+                .insert(
+                    id,
+                    ActivityFixtureMaster {
+                        id,
+                        model_name: string(row, "assetbundleName")?,
+                        grid_size: moly_law::fixture::Vector3Int::new(
+                            int(row, "gridWidth")?,
+                            int(row, "gridHeight")?,
+                            int(row, "gridDepth")?,
+                        ),
+                        put_type,
+                        player_action_type: string(row, "playerActionType")?,
+                        handle_type: string(row, "handleType")?,
+                    },
+                )
+                .is_some()
+            {
                 return Err(format!("duplicate fixture {id}"));
             }
         }
         let mut site_groups = HashMap::new();
         for row in array(&d[9], "groups")? {
             let id = int(row, "siteGroupId")?;
-            let sites = array(row, "sites")?.iter().map(value_int).collect::<Result<_, _>>()?;
-            if site_groups.insert(id, sites).is_some() { return Err(format!("duplicate site group {id}")); }
+            let sites = array(row, "sites")?
+                .iter()
+                .map(value_int)
+                .collect::<Result<_, _>>()?;
+            if site_groups.insert(id, sites).is_some() {
+                return Err(format!("duplicate site group {id}"));
+            }
         }
-        let no_talk_visuals = ordered(&d[10], |row| Ok(NoTalkVisualRow {
-            id: int(row, "id")?,
-            unit: u32::try_from(int(row, "gameCharacterUnitId")?).map_err(|_| "negative visual unit")?,
-            fixture_id: int(row, "mysekaiFixtureId")?,
-            timeline_group_id: int(row, "mysekaiCharacterTalkFixtureTimelineGroupId")?,
-        }))?;
-        Ok(Self { talks, units, conditions, condition_groups, timelines, action_points,
-            player_timelines, no_talk_visuals, pre_actions, pre_action_by_talk, fixtures, site_groups })
+        let no_talk_visuals = ordered(&d[10], |row| {
+            Ok(NoTalkVisualRow {
+                id: int(row, "id")?,
+                unit: u32::try_from(int(row, "gameCharacterUnitId")?)
+                    .map_err(|_| "negative visual unit")?,
+                fixture_id: int(row, "mysekaiFixtureId")?,
+                timeline_group_id: int(row, "mysekaiCharacterTalkFixtureTimelineGroupId")?,
+            })
+        })?;
+        Ok(Self {
+            talks,
+            units,
+            conditions,
+            condition_groups,
+            timelines,
+            action_points,
+            player_timelines,
+            no_talk_visuals,
+            pre_actions,
+            pre_action_by_talk,
+            fixtures,
+            site_groups,
+        })
     }
 }
 
@@ -590,61 +923,117 @@ fn missing(table: &str, id: i32) -> PrepareError {
     PrepareError::DataMissing(format!("missing {table} {id}"))
 }
 
-fn ordered<T>(value: &Value, mut parse: impl FnMut(&Value) -> Result<T, String>) -> Result<OrderedTable<T>, String> {
-    let entries = value.get("entries").and_then(Value::as_object).ok_or("table entries must be an object")?;
+fn ordered<T>(
+    value: &Value,
+    mut parse: impl FnMut(&Value) -> Result<T, String>,
+) -> Result<OrderedTable<T>, String> {
+    let entries = value
+        .get("entries")
+        .and_then(Value::as_object)
+        .ok_or("table entries must be an object")?;
     let order = array(value, "rowOrder")?;
     let mut rows = Vec::with_capacity(order.len());
     let mut by_id = HashMap::with_capacity(order.len());
     let mut seen = HashSet::new();
     for entry in order {
         let id = value_int(entry)?;
-        if !seen.insert(id) { return Err(format!("duplicate rowOrder id {id}")); }
-        let row = entries.get(&id.to_string()).ok_or_else(|| format!("rowOrder references absent id {id}"))?;
-        if int(row, "id")? != id { return Err(format!("entry id mismatch {id}")); }
+        if !seen.insert(id) {
+            return Err(format!("duplicate rowOrder id {id}"));
+        }
+        let row = entries
+            .get(&id.to_string())
+            .ok_or_else(|| format!("rowOrder references absent id {id}"))?;
+        if int(row, "id")? != id {
+            return Err(format!("entry id mismatch {id}"));
+        }
         by_id.insert(id, rows.len());
         rows.push(parse(row)?);
     }
-    if entries.len() != rows.len() { return Err("entries not covered by rowOrder".into()); }
+    if entries.len() != rows.len() {
+        return Err("entries not covered by rowOrder".into());
+    }
     Ok(OrderedTable { rows, by_id })
 }
 
 fn value_int(value: &Value) -> Result<i32, String> {
-    value.as_i64().and_then(|value| i32::try_from(value).ok()).ok_or_else(|| "expected i32 integer".into())
+    value
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| "expected i32 integer".into())
 }
 fn int(value: &Value, key: &str) -> Result<i32, String> {
-    value.get(key).ok_or_else(|| format!("missing integer {key}")).and_then(value_int)
+    value
+        .get(key)
+        .ok_or_else(|| format!("missing integer {key}"))
+        .and_then(value_int)
 }
 fn optional_int(value: &Value, key: &str) -> Result<Option<i32>, String> {
-    match value.get(key) { None | Some(Value::Null) => Ok(None), Some(value) => value_int(value).map(Some) }
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value_int(value).map(Some),
+    }
 }
 fn string(value: &Value, key: &str) -> Result<String, String> {
-    value.get(key).and_then(Value::as_str).map(str::to_owned).ok_or_else(|| format!("missing string {key}"))
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing string {key}"))
 }
 fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
-    value.get(key).and_then(Value::as_array).ok_or_else(|| format!("missing array {key}"))
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing array {key}"))
 }
 
 /// Extract the substring between the first and fourth underscores, exactly
 /// as the factory does; the timeline can intentionally use another model's
 /// compatible template. Model identity is not a shortcut for this parsing.
 fn timeline_template(logical: &str) -> Result<&str, PrepareError> {
-    let underscores: Vec<_> = logical.match_indices('_').take(4).map(|(index, _)| index).collect();
-    if underscores.len() != 4 { return Err(PrepareError::InvalidData(format!("invalid timeline asset name {logical}"))); }
+    let underscores: Vec<_> = logical
+        .match_indices('_')
+        .take(4)
+        .map(|(index, _)| index)
+        .collect();
+    if underscores.len() != 4 {
+        return Err(PrepareError::InvalidData(format!(
+            "invalid timeline asset name {logical}"
+        )));
+    }
     Ok(&logical[underscores[0] + 1..underscores[3]])
 }
 
 /// Source asset-name package routing, without applying any NPC placement
 /// variant rule to the player's original timeline or its sound companions.
 pub(crate) fn timeline_package(logical: &str) -> Result<String, PrepareError> {
-    Ok(format!("mysekai__fixture_timeline__mdl_{}", timeline_template(logical)?))
+    Ok(format!(
+        "mysekai__fixture_timeline__mdl_{}",
+        timeline_template(logical)?
+    ))
 }
 
-pub(crate) fn timeline_asset(logical: &str, put_type: PutType, view_y: f32) -> Result<(String, String), PrepareError> {
+pub(crate) fn timeline_asset(
+    logical: &str,
+    put_type: PutType,
+    view_y: f32,
+) -> Result<(String, String), PrepareError> {
     let fixture_name = timeline_template(logical)?;
-    let suffix = if view_y == 0.0 { "-ground" } else if view_y == 0.22_f32 { "-low" }
-        else if view_y == 0.35_f32 { "" } else { return Err(PrepareError::Rejected("unsupported source view-local placement height")); };
+    let suffix = if view_y == 0.0 {
+        "-ground"
+    } else if view_y == 0.22_f32 {
+        "-low"
+    } else if view_y == 0.35_f32 {
+        ""
+    } else {
+        return Err(PrepareError::Rejected(
+            "unsupported source view-local placement height",
+        ));
+    };
     let prefab = if put_type == PutType::Target && !suffix.is_empty() {
         logical.replace(fixture_name, &format!("{fixture_name}{suffix}"))
-    } else { logical.to_owned() };
+    } else {
+        logical.to_owned()
+    };
     Ok((timeline_package(logical)?, prefab))
 }

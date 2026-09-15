@@ -166,6 +166,10 @@ pub(super) fn instances_for<'a>(
 ) -> Vec<&'a InstanceView> {
     let ids = match key {
         EntryKey::Fixture(id) => vec![id],
+        EntryKey::Activity(id) => catalog
+            .activity(id)
+            .map(|row| vec![row.spec.fixture_id])
+            .unwrap_or_default(),
         _ => catalog
             .talk(key)
             .map(|row| row.fixture_ids.clone())
@@ -214,6 +218,17 @@ pub(super) fn selected_reason(
         return independent_reason(key, catalog);
     }
     match key {
+        EntryKey::Activity(id) => {
+            let Some(row) = catalog.activity(id) else {
+                return Some("这项角色互动的原始数据不可用".into());
+            };
+            if let Some(reason) = activities::current_reason(row, catalog, world) {
+                return Some(reason);
+            }
+            if selected_instance(state, catalog, world).is_none() {
+                return Some("所选家具实例已移除，请重新选择".into());
+            }
+        }
         EntryKey::Fixture(id) => {
             let Some(row) = catalog.fixture(id) else {
                 return Some("这件家具已不在图鉴中".into());
@@ -253,7 +268,7 @@ pub(super) fn selected_reason(
 pub(super) fn independent_reason(key: EntryKey, catalog: &LibraryCatalog) -> Option<String> {
     let fixture_reason = |id| match catalog.fixture(id) {
         None => Some(format!("家具 {id} 已不在当前来源的图鉴中")),
-        Some(row) if row.source.as_ref().is_none_or(|source| !source.exported) => Some(format!(
+        Some(row) if !row.available_for_preview() => Some(format!(
             "{} 的原始模型尚未完整导出，暂时只能查看图鉴",
             row.name
         )),
@@ -261,6 +276,13 @@ pub(super) fn independent_reason(key: EntryKey, catalog: &LibraryCatalog) -> Opt
     };
     match key {
         EntryKey::Fixture(id) => fixture_reason(id),
+        EntryKey::Activity(id) => match catalog.activity(id) {
+            Some(row) => row
+                .unavailable
+                .clone()
+                .or_else(|| fixture_reason(row.spec.fixture_id)),
+            None => Some("这项角色互动的原始数据不可用".into()),
+        },
         _ => {
             let row = catalog.talk(key)?;
             if row.units.is_empty() {
@@ -320,6 +342,7 @@ mod tests {
             action: "no_action".into(),
             search: String::new(),
             thumbnail: None,
+            presentation: FixturePresentation::Model,
             source: Some(FixtureSource {
                 package: "mysekai__fixture__static".into(),
                 grid_size: moly_law::fixture::Vector3Int::new(1, 1, 1),

@@ -6,19 +6,18 @@
 //! pipeline, and returns through the ordinary site transition. No preview data
 //! is written to the editor or settings store.
 use super::*;
+#[path = "camera_snapshot.rs"]
+mod camera_snapshot;
 use crate::{
-    npc::WalkState,
-    npc_objective::ObjectiveFace,
-    player::PlayerControlled,
-    site::{GroundEpoch, SiteReady},
-    talk::TalkHold,
+    npc::WalkState, npc_objective::ObjectiveFace, player::PlayerControlled, site::GroundEpoch,
+    site::SiteScenesReady, talk::TalkHold,
 };
 #[cfg(test)]
 use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition};
 
-const SITE_TIMEOUT: f32 = 25.;
-const ASSET_TIMEOUT: f32 = 40.;
+const SITE_TIMEOUT: f32 = 90.;
+const ASSET_TIMEOUT: f32 = 120.;
 
 #[derive(Clone)]
 struct ActorPose {
@@ -38,6 +37,7 @@ pub(crate) struct ScenePreview {
     ticket: u64,
     pub(super) epoch: u64,
     actors: Vec<ActorPose>,
+    camera: camera_snapshot::CameraSnapshot,
 }
 impl ScenePreview {
     pub(super) fn ready(
@@ -82,7 +82,8 @@ pub(crate) struct IndependentSession {
     original_player: Option<(Entity, Transform)>,
     original_actors: Vec<(Entity, Transform)>,
     original_cameras: Vec<(Entity, Transform)>,
-    navigation_generation: u64,
+    original_camera_state: camera_snapshot::CameraSnapshot,
+    original_appearance: crate::room_appearance::RoomAppearance,
     failure: Option<String>,
 }
 impl IndependentSession {
@@ -114,7 +115,8 @@ impl IndependentSession {
 }
 
 fn owners_idle(world: &World) -> bool {
-    !world.contains_resource::<crate::player_talk::PlayerTalkSession>()
+    !crate::npc_fixture_activity::preview::active(world)
+        && !world.contains_resource::<crate::player_talk::PlayerTalkSession>()
         && !world.contains_resource::<crate::talk::ActiveTalk>()
         && !world.resource::<PlayerFixtureRuntime>().active()
         && !crate::fixture_gimmick::session::blocks_replacement(
@@ -160,6 +162,17 @@ fn requirements(
     choice: &PlaybackChoice,
 ) -> Result<(Vec<u32>, Vec<i32>, Vec<(u32, i32)>), String> {
     match choice.key {
+        EntryKey::Activity(id) => {
+            let row = world
+                .resource::<LibraryCatalog>()
+                .activity(id)
+                .ok_or("所选角色互动的原始关系不可用")?;
+            Ok((
+                vec![row.spec.unit],
+                vec![row.spec.fixture_id],
+                vec![(row.spec.unit, row.spec.fixture_id)],
+            ))
+        }
         EntryKey::Talk(_, _) => {
             let row = world
                 .resource::<LibraryCatalog>()
@@ -179,7 +192,17 @@ fn requirements(
             };
             Ok((row.units.clone(), row.fixture_ids.clone(), pairs))
         }
-        EntryKey::Fixture(id) => Ok((Vec::new(), vec![id], Vec::new())),
+        EntryKey::Fixture(id) => {
+            let surface = world
+                .resource::<LibraryCatalog>()
+                .fixture(id)
+                .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. }));
+            Ok((
+                Vec::new(),
+                if surface { Vec::new() } else { vec![id] },
+                Vec::new(),
+            ))
+        }
     }
 }
 
@@ -238,6 +261,13 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
         .collect();
     let mut bindings = Vec::new();
     for id in &required {
+        if world
+            .resource::<LibraryCatalog>()
+            .fixture(*id)
+            .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. }))
+        {
+            continue;
+        }
         let mut candidates: Vec<_> = actual
             .iter()
             .filter(|(_, identity, _)| identity.master_id == *id)
@@ -311,6 +341,14 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
         face.sample(point.to_array(), 0.15).map(Vec3::from)
     };
     let mut independent_group_anchor = None;
+    let independent_center = (choice.mode == ExperienceMode::Independent)
+        .then(|| {
+            bindings
+                .first()
+                .map(|(_, _, _, pose)| pose.translation)
+                .or_else(|| face.preview_center().map(Vec3::from))
+        })
+        .flatten();
     for (index, actor) in actors.iter_mut().enumerate() {
         let unit = units[index];
         let anchor = pairs
@@ -335,6 +373,10 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
             );
             independent_group_anchor.get_or_insert(actor.after.translation);
         } else if choice.mode == ExperienceMode::Independent {
+            if index == 0 {
+                actor.after.translation = independent_center.ok_or("独立空间中央没有安全站位")?;
+                actor.after.rotation = Quat::IDENTITY;
+            }
             if let Some(group_anchor) = independent_group_anchor {
                 let nearby = actor.before.translation.distance(group_anchor) <= 1.8
                     && occupied
@@ -358,6 +400,13 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
         .first()
         .map(|actor| actor.after.translation)
         .or_else(|| bindings.first().map(|(_, _, _, pose)| pose.translation))
+        .or_else(|| {
+            if choice.mode == ExperienceMode::Independent {
+                face.preview_center().map(Vec3::from)
+            } else {
+                None
+            }
+        })
         .ok_or("没有可供体验的场景目标")?;
     let player_position = viewing_position(anchor, Quat::IDENTITY, &occupied, sample)
         .ok_or("目标附近暂时没有适合观看的位置")?;
@@ -378,6 +427,7 @@ fn apply_preview(world: &mut World, choice: &PlaybackChoice, actors: Vec<ActorPo
         ticket: choice.ticket,
         epoch: world.resource::<GroundEpoch>().0,
         actors,
+        camera: camera_snapshot::CameraSnapshot::capture(world),
     };
     for actor in &preview.actors {
         if actor.npc {
@@ -418,12 +468,13 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         .resource::<crate::site::SiteSelection>()
         .site_type()
         .to_owned();
-    let destination = if original_site == "first_floor" {
-        "home_site"
-    } else {
-        "first_floor"
-    }
-    .to_owned();
+    // Furniture and character actions belong in a clean courtyard, not an
+    // unrelated indoor room. A wallpaper/floor swatch requires an actual room
+    // surface and is the only semantic exception, never a fabricated mesh.
+    let surface = matches!(choice.key, EntryKey::Fixture(id)
+        if world.resource::<LibraryCatalog>().fixture(id)
+            .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. })));
+    let destination = if surface { "first_floor" } else { "home_site" }.to_owned();
     let original_player = world
         .query_filtered::<(Entity, &Transform), With<PlayerControlled>>()
         .iter(world)
@@ -435,12 +486,32 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         .iter(world)
         .map(|(entity, pose)| (entity, *pose))
         .collect();
+    let original_camera_state = camera_snapshot::CameraSnapshot::capture(world);
     let original_cameras = world
         .query_filtered::<(Entity, &Transform), With<Camera3d>>()
         .iter(world)
         .map(|(entity, pose)| (entity, *pose))
         .collect();
+    camera_snapshot::CameraSnapshot::prepare_temporary(world);
     world.insert_resource(crate::site::TemporarySiteChangeRequest(destination.clone()));
+    let original_appearance = world
+        .resource::<crate::room_appearance::RoomAppearance>()
+        .clone();
+    let appearance = match choice.key {
+        EntryKey::Fixture(id) => world
+            .resource::<LibraryCatalog>()
+            .fixture(id)
+            .map(|row| row.presentation.clone()),
+        _ => None,
+    };
+    if let Some(FixturePresentation::Surface { skin, wall, .. }) = appearance {
+        let mut current = world.resource_mut::<crate::room_appearance::RoomAppearance>();
+        if wall {
+            current.wall = skin;
+        } else {
+            current.floor = skin;
+        }
+    }
     world.insert_resource(IndependentSession {
         ticket: choice.ticket,
         phase: IndependentPhase::SwitchingSite,
@@ -457,10 +528,13 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         original_player,
         original_actors,
         original_cameras,
-        navigation_generation: 0,
+        original_camera_state,
+        original_appearance,
         failure: None,
     });
     let mut state = world.resource_mut::<ContentLibrary>();
+    state.scene_owned = true;
+    state.last_error = None;
     state.status = "正在前往独立空场景…".into();
     state.changed();
     Ok(())
@@ -468,7 +542,7 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
 
 fn park_background_actors(world: &mut World, required: &[u32]) -> Vec<ParkedActor> {
     let actors: Vec<_> = world
-        .query::<(Entity, &CharacterUnitId, &Visibility)>()
+        .query_filtered::<(Entity, &CharacterUnitId, &Visibility), Without<PlayerControlled>>()
         .iter(world)
         .filter(|(_, unit, _)| !required.contains(&unit.0))
         .map(|(entity, _, visibility)| (entity, *visibility))
@@ -495,9 +569,15 @@ fn restore_background_actors(world: &mut World, parked: &[ParkedActor]) {
 }
 
 fn restore_original_poses(world: &mut World, session: &IndependentSession) {
+    session.original_camera_state.restore(world);
     if let Some((entity, pose)) = session.original_player {
         if let Ok(mut player) = world.get_entity_mut(entity) {
-            player.insert(pose);
+            player.insert((
+                pose,
+                GlobalTransform::from(pose),
+                crate::player::PlayerInput::default(),
+                crate::npc::MotionPhase::Dwelling { remaining: None },
+            ));
         }
     }
     for (entity, pose) in &session.original_actors {
@@ -523,7 +603,7 @@ fn fail_independent(
     reason: impl Into<String>,
 ) {
     let reason = reason.into();
-    session.failure = Some(reason.clone());
+    session.failure = Some(playback::human_playback_failure(&reason));
     session.phase = IndependentPhase::RequestingReturn;
     session.elapsed = 0.;
     playback::fail(&mut world.resource_mut::<ContentLibrary>(), &reason);
@@ -532,6 +612,13 @@ fn fail_independent(
 fn matching_fixture_targets(world: &mut World, required: &[i32]) -> Option<Vec<FixtureTarget>> {
     let mut found = Vec::new();
     for id in required {
+        if world
+            .resource::<LibraryCatalog>()
+            .fixture(*id)
+            .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. }))
+        {
+            continue;
+        }
         let mut rows: Vec<_> = world
             .query::<(Entity, &FixtureActivityIdentity)>()
             .iter(world)
@@ -601,6 +688,9 @@ fn restore_preview(world: &mut World) {
             }
         }
     }
+    if same_site {
+        preview.camera.restore(world);
+    }
     info!(
         "[content-library] restored staged poses ticket={}",
         preview.ticket
@@ -635,13 +725,11 @@ fn drive_independent(world: &mut World) {
                 .is_some_and(|selection| selection.site_type() == session.destination);
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
             let site_ready = epoch.is_some_and(|epoch| epoch > session.departure_epoch)
-                && world.contains_resource::<SiteReady>()
+                && world.contains_resource::<SiteScenesReady>()
                 && world
-                    .get_resource::<ObjectiveFace>()
-                    .is_some_and(|face| face.is_fresh(epoch.unwrap()));
+                    .get_resource::<crate::fixture::FixturePlacements>()
+                    .is_some_and(|layout| layout.site_type() == session.destination);
             if selection_ready && site_ready {
-                session.navigation_generation =
-                    world.resource::<ObjectiveFace>().navigation_generation();
                 if let Err(reason) = crate::fixture::install_temporary_layout(world, &session.rows)
                 {
                     fail_independent(world, &mut session, reason);
@@ -661,16 +749,42 @@ fn drive_independent(world: &mut World) {
             if let Some(failure) = world.get_resource::<crate::fixture::FixtureLoadFailure>() {
                 let reason = failure.0.clone();
                 fail_independent(world, &mut session, reason);
+                world.insert_resource(session);
+                return;
             }
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-            let scene_ready = epoch.is_some_and(|epoch| {
-                world.contains_resource::<crate::fixture::FixtureScenesReady>()
-                    && world.contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>()
-                    && world.get_resource::<ObjectiveFace>().is_some_and(|face| {
-                        face.is_fresh(epoch)
-                            && face.navigation_generation() != session.navigation_generation
-                    })
-            });
+            let room_status = world.resource::<crate::room_appearance::RoomAppearanceState>();
+            if world.resource::<crate::site::SiteSelection>().is_room() {
+                if let Some(error) = &room_status.error {
+                    let reason = error.clone();
+                    fail_independent(world, &mut session, reason);
+                    world.insert_resource(session);
+                    return;
+                }
+            }
+            let room_ready = !world.resource::<crate::site::SiteSelection>().is_room()
+                || world
+                    .resource::<crate::room_appearance::RoomAppearanceState>()
+                    .ready;
+            let scene_ready = room_ready
+                && epoch.is_some_and(|epoch| {
+                    world.contains_resource::<crate::fixture::FixtureScenesReady>()
+                        && world
+                            .contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>()
+                        && world.get_resource::<ObjectiveFace>().is_some_and(|face| {
+                            face.is_fresh(epoch)
+                                && world
+                                    .get_resource::<crate::walk_face::WalkFace>()
+                                    .is_some_and(|navigation| {
+                                        navigation.layout_revision()
+                                            == world
+                                                .resource::<crate::fixture::FixtureLayoutRevision>()
+                                                .0
+                                            && face.navigation_generation()
+                                                == navigation.generation()
+                                    })
+                        })
+                });
             if scene_ready {
                 if session.temporary_actors.is_empty() {
                     match crate::npc::spawn_temporary_units(world, &session.required_units) {
@@ -715,6 +829,14 @@ fn drive_independent(world: &mut World) {
             }
         }
         IndependentPhase::Staged => {
+            if session.elapsed >= ASSET_TIMEOUT {
+                let reason = world
+                    .resource::<ContentLibrary>()
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "角色站位未能完成同步，已取消这次体验".into());
+                fail_independent(world, &mut session, reason);
+            }
             let state = world.resource::<ContentLibrary>();
             if state
                 .active
@@ -741,6 +863,9 @@ fn drive_independent(world: &mut World) {
             }
         }
         IndependentPhase::RequestingReturn => {
+            if session.failure.is_none() {
+                session.failure = world.resource::<ContentLibrary>().last_error.clone();
+            }
             if owners_idle(world) {
                 if world
                     .resource::<ContentLibrary>()
@@ -755,14 +880,23 @@ fn drive_independent(world: &mut World) {
                 session.parked_actors.clear();
                 crate::npc::remove_temporary_units(world, &session.temporary_actors);
                 session.temporary_actors.clear();
+                // Withdraw an unconsumed preview before either rollback path.
+                // Otherwise cancellation before read_switch could switch later.
+                world.remove_resource::<crate::site::TemporarySiteChangeRequest>();
+                world.insert_resource(session.original_appearance.clone());
                 let never_left = world
                     .get_resource::<crate::site::SiteSelection>()
                     .is_some_and(|selection| selection.site_type() == session.original_site)
+                    && world
+                        .get_resource::<GroundEpoch>()
+                        .is_some_and(|epoch| epoch.0 == session.departure_epoch)
+                    && !world.contains_resource::<crate::site::TemporarySiteActive>()
                     && !world.contains_resource::<crate::fixture::TemporaryFixtureLayout>();
                 if never_left {
                     restore_original_poses(world, &session);
                     let mut state = world.resource_mut::<ContentLibrary>();
                     state.stopping = false;
+                    state.scene_owned = false;
                     state.status = session
                         .failure
                         .as_ref()
@@ -792,7 +926,7 @@ fn drive_independent(world: &mut World) {
                 .get_resource::<crate::site::SiteSelection>()
                 .is_some_and(|selection| selection.site_type() == session.original_site)
                 && epoch.is_some_and(|epoch| epoch > session.return_epoch)
-                && world.contains_resource::<SiteReady>()
+                && world.contains_resource::<SiteScenesReady>()
                 && world
                     .get_resource::<ObjectiveFace>()
                     .is_some_and(|face| face.is_fresh(epoch.unwrap()));
@@ -800,6 +934,7 @@ fn drive_independent(world: &mut World) {
                 restore_original_poses(world, &session);
                 let mut state = world.resource_mut::<ContentLibrary>();
                 state.stopping = false;
+                state.scene_owned = false;
                 state.status = session
                     .failure
                     .as_ref()
@@ -904,9 +1039,11 @@ mod tests {
                 GlobalTransform::default(),
             ))
             .id();
+        let camera_snapshot = camera_snapshot::CameraSnapshot::capture(&mut world);
         world.insert_resource(ScenePreview {
             ticket: 1,
             epoch: 1,
+            camera: camera_snapshot,
             actors: vec![ActorPose {
                 entity: actor,
                 before: Transform::IDENTITY,
@@ -936,6 +1073,7 @@ mod tests {
                 action: action.into(),
                 search: String::new(),
                 thumbnail: None,
+                presentation: FixturePresentation::Model,
                 source: Some(FixtureSource {
                     package: package.into(),
                     grid_size: moly_law::fixture::Vector3Int::new(2, 2, 2),
@@ -951,5 +1089,30 @@ mod tests {
         assert_eq!(rows[0].package, "mysekai__fixture__static");
         assert_eq!(rows[1].package, "mysekai__fixture__chair");
         assert!(rows.iter().all(|row| row.texture_id == 1));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_regressions {
+    use super::*;
+    #[test]
+    fn scene_readiness_is_not_the_consumed_camera_or_scene_event_latch() {
+        let mut world = World::new();
+        world.insert_resource(SiteScenesReady);
+        world.insert_resource(GroundEpoch(2));
+        assert!(!world.contains_resource::<crate::site::SiteReady>());
+        assert!(!world.contains_resource::<crate::inactive_nodes::SiteSettled>());
+        assert!(world.contains_resource::<SiteScenesReady>());
+        assert_eq!(world.resource::<GroundEpoch>().0, 2);
+    }
+    #[test]
+    fn closing_ui_keeps_game_input_blocked_until_owned_scene_is_restored() {
+        let mut state = ContentLibrary::default();
+        state.scene_owned = true;
+        state.close();
+        state.release_guard = 0;
+        assert!(state.blocks_world_input());
+        state.scene_owned = false;
+        assert!(!state.blocks_world_input());
     }
 }

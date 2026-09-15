@@ -119,12 +119,12 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::renderer::RenderDevice;
 use moly_assets::json::JsonAsset;
 use moly_law::text::advance::{force_fallback_glyph, resolve_glyph_advance};
-use moly_law::text::tags::{parse_rich_segments, transformed_glyphs, SizeSpec, TextSegment};
 use moly_law::text::layout_metrics;
+use moly_law::text::tags::{parse_rich_segments, transformed_glyphs, SizeSpec, TextSegment};
 use moly_law::tweet::{
     condition_matches, greeting_tweet_id, pick_after_edit_tweet, pick_greeting, AfterEditRow,
     GreetingConditionRow, GreetingRow, TweetRow, UniformDraw, WithoutRelatedTalkRow,
-    CONDITION_TYPE_TIME_PERIOD, CONDITION_TYPE_VISIT_COUNT, AFTER_EDIT_REACTION_DELAY_SECONDS,
+    AFTER_EDIT_REACTION_DELAY_SECONDS, CONDITION_TYPE_TIME_PERIOD, CONDITION_TYPE_VISIT_COUNT,
     TWEET_DISPLAY_SECONDS,
 };
 use std::collections::HashMap;
@@ -368,9 +368,9 @@ impl TweetMaster {
                     .unwrap_or_else(|| panic!("after-edit 池 {unit} 不是 tweet id 数组"))
                     .iter()
                     .map(|id| {
-                        id.as_i64().map(|id| id as i32).unwrap_or_else(|| {
-                            panic!("after-edit 池 {unit} 里有非整数 tweet id")
-                        })
+                        id.as_i64()
+                            .map(|id| id as i32)
+                            .unwrap_or_else(|| panic!("after-edit 池 {unit} 里有非整数 tweet id"))
                     })
                     .collect();
                 (unit, ids)
@@ -381,7 +381,13 @@ impl TweetMaster {
 
     /// 问候链三表（WRT / 问候 / 条件）。value2 的 null 落成 0——律的
     /// 口径里访问型条件 value2==0 即无上界，现象型不读 value2。
-    fn parse_tables(text: &str) -> (Vec<WithoutRelatedTalkRow>, Vec<GreetingRow>, Vec<GreetingConditionRow>) {
+    fn parse_tables(
+        text: &str,
+    ) -> (
+        Vec<WithoutRelatedTalkRow>,
+        Vec<GreetingRow>,
+        Vec<GreetingConditionRow>,
+    ) {
         let value: serde_json::Value = serde_json::from_str(text)
             .unwrap_or_else(|err| panic!("tweet 问候链表不是合法 JSON：{err}"));
         let int_of = |row: &serde_json::Value, key: &str| -> i32 {
@@ -424,13 +430,13 @@ impl TweetMaster {
                     .to_owned();
                 // null（现象型条件的 value2）落成 0：访问型 0 = 无上界，
                 // 现象型不读它。
-                let value2 = row
-                    .get("value2")
-                    .and_then(|v| match v {
-                        serde_json::Value::Null => Some(0),
-                        v => v.as_i64(),
-                    })
-                    .unwrap_or_else(|| panic!("条件行缺 value2")) as i32;
+                let value2 =
+                    row.get("value2")
+                        .and_then(|v| match v {
+                            serde_json::Value::Null => Some(0),
+                            v => v.as_i64(),
+                        })
+                        .unwrap_or_else(|| panic!("条件行缺 value2")) as i32;
                 GreetingConditionRow {
                     id: int_of(row, "id"),
                     condition_type,
@@ -459,10 +465,7 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
         tables: server.load::<JsonAsset>(tweet_tables()),
     });
     commands.insert_resource(SkinHandle {
-        bg: server.load::<Image>(moly_assets::ui_atlas_sprite(
-            "CommonAtlas",
-            "btn_r30_wh",
-        )),
+        bg: server.load::<Image>(moly_assets::ui_atlas_sprite("CommonAtlas", "btn_r30_wh")),
         arrow: server.load::<Image>(moly_assets::ui_atlas_sprite(
             "CommonAtlas",
             "balloon_direction_triangle_wh",
@@ -511,17 +514,15 @@ pub(crate) fn parse_master(
             });
         }
     }
-    let (visit_rows, period_rows) = conditions
-        .iter()
-        .fold((0usize, 0usize), |(v, p), c| {
-            if c.condition_type == CONDITION_TYPE_VISIT_COUNT {
-                (v + 1, p)
-            } else if c.condition_type == CONDITION_TYPE_TIME_PERIOD {
-                (v, p + 1)
-            } else {
-                (v, p)
-            }
-        });
+    let (visit_rows, period_rows) = conditions.iter().fold((0usize, 0usize), |(v, p), c| {
+        if c.condition_type == CONDITION_TYPE_VISIT_COUNT {
+            (v + 1, p)
+        } else if c.condition_type == CONDITION_TYPE_TIME_PERIOD {
+            (v, p + 1)
+        } else {
+            (v, p)
+        }
+    });
     info!(
         "[tweet] 表就绪：主表 {} 条 + 问候链三表（WRT {} · 候选 {} · 条件 {}：访问型 {visit_rows} / 现象型 {period_rows}）+ after-edit 池 {} 单元 {} 行",
         tweets.len(),
@@ -587,7 +588,10 @@ impl BalloonArt {
     /// 字符所在页的纹理句柄；须与同字符的 glyph_cell 页内矩形配对。
     /// 调用者先用 glyph_cell 处理缺字，不能用首页面替代已在后页的字形。
     pub(crate) fn glyph_image_for(&self, ch: char) -> &Handle<Image> {
-        let cell = self.cells.get(&ch).expect("glyph_image_for requires a baked glyph");
+        let cell = self
+            .cells
+            .get(&ch)
+            .expect("glyph_image_for requires a baked glyph");
         &self.images[cell.page]
     }
 
@@ -727,7 +731,10 @@ pub(crate) fn bake_atlas(
             missing.push(ch);
             continue;
         };
-        let (w, h) = (glyph.placement.width as usize, glyph.placement.height as usize);
+        let (w, h) = (
+            glyph.placement.width as usize,
+            glyph.placement.height as usize,
+        );
         if w == 0 || h == 0 {
             // 有 cmap 项、无墨迹的字形（空白类）：推进入表，无墨可烘。
             rasters.push(Raster {
@@ -773,9 +780,14 @@ pub(crate) fn bake_atlas(
     // additional glyphs get another page with the same cell geometry.
     let required_cols = (rasters.len() as f64).sqrt().ceil() as usize;
     let max_edge = render_device.limits().max_texture_dimension_2d as usize;
-    let atlas_size = MIN_ATLAS_SIZE.max(required_cols * cell as usize).min(max_edge);
+    let atlas_size = MIN_ATLAS_SIZE
+        .max(required_cols * cell as usize)
+        .min(max_edge);
     let cols = atlas_size / cell as usize;
-    assert!(cols > 0, "device texture limit {max_edge}px cannot hold one {cell}px glyph cell");
+    assert!(
+        cols > 0,
+        "device texture limit {max_edge}px cannot hold one {cell}px glyph cell"
+    );
     let page_capacity = cols * cols;
     let page_count = rasters.len().div_ceil(page_capacity).max(1);
     let capacity = page_capacity * page_count;
@@ -808,7 +820,14 @@ pub(crate) fn bake_atlas(
             max: Vec2::new(x0 + cell, y0 + cell),
         };
         if r.width == 0 {
-            cells.insert(r.ch, GlyphCell { rect, advance: r.advance, page });
+            cells.insert(
+                r.ch,
+                GlyphCell {
+                    rect,
+                    advance: r.advance,
+                    page,
+                },
+            );
             continue;
         }
         // swash 的 placement：以基线笔点为原点（y 向下为正），墨迹从
@@ -838,10 +857,20 @@ pub(crate) fn bake_atlas(
                 data[at + 3] = data[at + 3].max(coverage);
             }
         }
-        cells.insert(r.ch, GlyphCell { rect, advance: r.advance, page });
+        cells.insert(
+            r.ch,
+            GlyphCell {
+                rect,
+                advance: r.advance,
+                page,
+            },
+        );
     }
 
-    let missing_hex: Vec<String> = missing.iter().map(|ch| format!("U+{:04X}", *ch as u32)).collect();
+    let missing_hex: Vec<String> = missing
+        .iter()
+        .map(|ch| format!("U+{:04X}", *ch as u32))
+        .collect();
     info!(
         "字形图集烘成：{} 格（字符集 {}，{page_count} 页 {atlas_size}x{atlas_size}，每页容量 {page_capacity}，总容量 {capacity}，设备上限 {max_edge}），缺字形 {} 个 [{}]，烘制 {:.0}px 实际墨迹上界 {:.1} 下界 {:.1} ⇒ 格 {:.0}px 笔点=({pen_x:.0},{baseline_from_top:.0})",
         cells.len(),
@@ -945,6 +974,7 @@ const VISIT_COUNT_STAND_IN: i32 = 0;
 #[allow(clippy::type_complexity)]
 pub(crate) fn trigger(
     mut commands: Commands,
+    library: Res<crate::content_library::ContentLibrary>,
     master: Option<Res<TweetMaster>>,
     art: Option<Res<BalloonArt>>,
     // 选取时读当前现象 id——真源的门在选取时求值，不监听档位变更。
@@ -969,14 +999,14 @@ pub(crate) fn trigger(
         ),
     >,
 ) {
+    if library.owns_scene() {
+        return;
+    }
     let (Some(master), Some(art)) = (master, art) else {
         return;
     };
     for (npc, unit, phase, arm) in &mut npcs {
-        let walking = matches!(
-            phase,
-            MotionPhase::Walking | MotionPhase::FitWalking { .. }
-        );
+        let walking = matches!(phase, MotionPhase::Walking | MotionPhase::FitWalking { .. });
         let Some(mut arm) = arm else {
             // 首见：默认武装，让第一次驻留就能出 tweet。
             commands.entity(npc).insert(TweetArm {
@@ -1106,9 +1136,7 @@ pub(crate) fn after_edit_reaction(
         if hold.remaining <= 0.0 {
             info!(
                 "[tweet] after-edit unit={} 保存 #{}：驻留满 {:.1}s，反应收场（objective 让位）",
-                unit.0,
-                hold.sequence,
-                AFTER_EDIT_REACTION_DELAY_SECONDS
+                unit.0, hold.sequence, AFTER_EDIT_REACTION_DELAY_SECONDS
             );
             commands.entity(npc).remove::<AfterEditHold>();
         }
@@ -1424,10 +1452,11 @@ pub(crate) fn walk_glyphs(
                     } else {
                         art.cells.get(&rendered_ch).map(|cell| cell.advance)
                     };
-                    let step = resolve_glyph_advance(glyph, rendered_ch, measure, BAKE_PPEM, FONT_FAMILY)
-                        * char_scale
-                        * seg_scale
-                        + char_extra;
+                    let step =
+                        resolve_glyph_advance(glyph, rendered_ch, measure, BAKE_PPEM, FONT_FAMILY)
+                            * char_scale
+                            * seg_scale
+                            + char_extra;
                     if let Some(_) = glyph {
                         lines[li].push((
                             GlyphSpot {
@@ -1468,7 +1497,8 @@ pub(crate) fn walk_glyphs(
             } else {
                 art.cells.get(&raw_ch).map(|cell| cell.advance)
             };
-            let step = resolve_glyph_advance(glyph, raw_ch, font_size, BAKE_PPEM, FONT_FAMILY) + char_extra;
+            let step = resolve_glyph_advance(glyph, raw_ch, font_size, BAKE_PPEM, FONT_FAMILY)
+                + char_extra;
             if glyph.is_some() {
                 lines[li].push((
                     GlyphSpot {
@@ -1503,7 +1533,7 @@ fn spawn_balloon(
     unit: u32,
     row: &TweetRow,
 ) {
-    spawn_balloon_text(commands, art, npc, unit, row.id, &row.text, None, false)
+    spawn_balloon_text(commands, art, npc, unit, row.id, &row.text, None, false);
 }
 
 /// 铺一只气泡的核（对账 id 与日志由调用侧打）。
@@ -1516,7 +1546,7 @@ fn spawn_balloon_text(
     text: &str,
     probe_root: Option<Vec3>,
     probe: bool,
-) {
+) -> Entity {
     // 对话路径没有 face 四键：tweet 对账日志读 face 的地方全部走
     // row.id/文本侧，face 缺省 None 不进对账。
     let row = TweetRow {
@@ -1561,13 +1591,16 @@ fn spawn_balloon_text(
     let size_of_line = |i: usize| -> f32 {
         lines
             .get(i)
-            .map(|line| line.iter().map(|(spot, _, _)| spot.size).fold(0.0f32, f32::max))
+            .map(|line| {
+                line.iter()
+                    .map(|(spot, _, _)| spot.size)
+                    .fold(0.0f32, f32::max)
+            })
             .filter(|size| *size > 0.0)
             .unwrap_or(FONT_SIZE)
     };
     let box_top = baseline_up(0) + size_of_line(0) * ASCENT_RATIO;
-    let box_bottom =
-        baseline_up(line_count - 1) - size_of_line(line_count - 1) * DESCENT_RATIO;
+    let box_bottom = baseline_up(line_count - 1) - size_of_line(line_count - 1) * DESCENT_RATIO;
     let text_h = (box_top - box_bottom).max(1.0);
     // 律的盒宽自带 32px 内边距常数（可见宽最大值 + 32），扣除得文本宽。
     let text_w = (metrics.box_w - 32.0).max(1.0);
@@ -1726,7 +1759,10 @@ fn spawn_balloon_text(
     if line_count > 1 {
         // 行距实际值：首两行的基线节距（律换算后的落地值）。
         let pitch = metrics.line_offsets[1] / TEXT_SCALE;
-        info!("[tweet] tweet={} 行距节距（行距 -80 换算后）：{pitch:.2}", row.id);
+        info!(
+            "[tweet] tweet={} 行距节距（行距 -80 换算后）：{pitch:.2}",
+            row.id
+        );
     }
     info!(
         "[tweet] unit={unit} tweet={} 对账：行 {}（律 {line_count}）锚基 {:.2} 缺字形 {missing_used} 锚=avatar根+1.0 面={}/{} 动作 {}",
@@ -1750,6 +1786,7 @@ fn spawn_balloon_text(
             y
         );
     }
+    root
 }
 
 /// 九宫件清单：4 角 + 4 边 + 中心（`btn_r30_wh` 的 border 38 语义——
@@ -1769,15 +1806,47 @@ fn nine_slice_pieces(bg_w: f32, bg_h: f32) -> Vec<(Rect, Vec2, Vec2)> {
     };
     vec![
         // 四角（源图坐标 y 从顶量；带上边缘的贴 bg 顶）。
-        (rect(0.0, 0.0, b, b), Vec2::splat(b), Vec2::new(x0 + b / 2.0, y0 + bg_h - b / 2.0)),
-        (rect(s - b, 0.0, s, b), Vec2::splat(b), Vec2::new(x0 + bg_w - b / 2.0, y0 + bg_h - b / 2.0)),
-        (rect(0.0, s - b, b, s), Vec2::splat(b), Vec2::new(x0 + b / 2.0, y0 + b / 2.0)),
-        (rect(s - b, s - b, s, s), Vec2::splat(b), Vec2::new(x0 + bg_w - b / 2.0, y0 + b / 2.0)),
+        (
+            rect(0.0, 0.0, b, b),
+            Vec2::splat(b),
+            Vec2::new(x0 + b / 2.0, y0 + bg_h - b / 2.0),
+        ),
+        (
+            rect(s - b, 0.0, s, b),
+            Vec2::splat(b),
+            Vec2::new(x0 + bg_w - b / 2.0, y0 + bg_h - b / 2.0),
+        ),
+        (
+            rect(0.0, s - b, b, s),
+            Vec2::splat(b),
+            Vec2::new(x0 + b / 2.0, y0 + b / 2.0),
+        ),
+        (
+            rect(s - b, s - b, s, s),
+            Vec2::splat(b),
+            Vec2::new(x0 + bg_w - b / 2.0, y0 + b / 2.0),
+        ),
         // 四边（中段）。
-        (rect(b, 0.0, s - b, b), Vec2::new(cw, b), Vec2::new(0.0, y0 + bg_h - b / 2.0)),
-        (rect(b, s - b, s - b, s), Vec2::new(cw, b), Vec2::new(0.0, y0 + b / 2.0)),
-        (rect(0.0, b, b, s - b), Vec2::new(b, ch), Vec2::new(x0 + b / 2.0, 0.0)),
-        (rect(s - b, b, s, s - b), Vec2::new(b, ch), Vec2::new(x0 + bg_w - b / 2.0, 0.0)),
+        (
+            rect(b, 0.0, s - b, b),
+            Vec2::new(cw, b),
+            Vec2::new(0.0, y0 + bg_h - b / 2.0),
+        ),
+        (
+            rect(b, s - b, s - b, s),
+            Vec2::new(cw, b),
+            Vec2::new(0.0, y0 + b / 2.0),
+        ),
+        (
+            rect(0.0, b, b, s - b),
+            Vec2::new(b, ch),
+            Vec2::new(x0 + b / 2.0, 0.0),
+        ),
+        (
+            rect(s - b, b, s, s - b),
+            Vec2::new(b, ch),
+            Vec2::new(x0 + bg_w - b / 2.0, 0.0),
+        ),
         // 中心。
         (rect(b, b, s - b, s - b), Vec2::new(cw, ch), Vec2::ZERO),
     ]
@@ -1804,12 +1873,23 @@ pub(crate) fn ascii_or(value: &str) -> &str {
 /// 节点（非根）。
 pub(crate) fn tick(
     mut commands: Commands,
+    library: Res<crate::content_library::ContentLibrary>,
     time: Res<Time>,
-    mut balloons: Query<(Entity, &BalloonAnchor, &mut Elapsed, &Children)>,
+    mut balloons: Query<(
+        Entity,
+        &BalloonAnchor,
+        &mut Elapsed,
+        &Children,
+        Option<&ActivityBalloon>,
+    )>,
     mut anims: Query<&mut Transform, With<BalloonAnim>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, anchor, mut elapsed, kids) in &mut balloons {
+    for (entity, anchor, mut elapsed, kids, activity) in &mut balloons {
+        if library.owns_scene() && activity.is_none() {
+            commands.entity(entity).despawn();
+            continue;
+        }
         elapsed.t += dt;
         let end = TWEET_DISPLAY_SECONDS + SCALE_SECONDS;
         if elapsed.t > end {
@@ -1948,7 +2028,12 @@ pub(crate) fn place(
             anchor.hidden = behind;
             // Every part starts with its base color. Only a visibility edge
             // changes alpha; avoid dirtying every glyph Sprite each frame.
-            set_alpha(&mut parts, &children_q, entity, if behind { 0.0 } else { 1.0 });
+            set_alpha(
+                &mut parts,
+                &children_q,
+                entity,
+                if behind { 0.0 } else { 1.0 },
+            );
             info!(
                 "[tweet] tweet={} {}",
                 anchor.tweet,
@@ -1966,7 +2051,10 @@ pub(crate) fn place(
             continue; // 投影退化（NaN）：沿用上一帧位置
         };
         // NDC → 视口逻辑像素：y 翻转（NDC 向上、屏幕向下），原点在左下。
-        let target = camera.logical_viewport_rect().map(|r| r.size()).unwrap_or(Vec2::new(width, height));
+        let target = camera
+            .logical_viewport_rect()
+            .map(|r| r.size())
+            .unwrap_or(Vec2::new(width, height));
         let px = Vec2::new(
             (ndc.x + 1.0) / 2.0 * target.x,
             (1.0 - ndc.y) / 2.0 * target.y,
@@ -2219,4 +2307,56 @@ pub(crate) fn overlay_camera(mut commands: Commands) {
         },
         RenderLayers::layer(BALLOON_LAYER),
     ));
+}
+
+/// A selected furniture pre-action owns its own bubble. Background greetings
+/// stay suppressed in an independent scene; this source-authored bubble does
+/// not start a second dialogue or overwrite the Timeline's pose/face channels.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct ActivityBalloon(pub(crate) crate::fixture_activity_state::FixtureActivityOwner);
+
+pub(crate) fn show_activity_balloon(
+    world: &mut World,
+    owner: crate::fixture_activity_state::FixtureActivityOwner,
+    unit: u32,
+    tweet: &moly_law::talk::TweetRef,
+) {
+    if tweet.text.trim().is_empty() || world.get_entity(owner.actor).is_err() {
+        return;
+    }
+    cancel_activity_balloon(world, owner);
+    let mut state =
+        bevy::ecs::system::SystemState::<(Commands, Option<Res<BalloonArt>>)>::new(world);
+    let (mut commands, art) = state.get_mut(world);
+    if let Some(art) = art {
+        let root = spawn_balloon_text(
+            &mut commands,
+            &art,
+            owner.actor,
+            unit,
+            tweet.id,
+            &tweet.text,
+            None,
+            false,
+        );
+        commands.entity(root).insert(ActivityBalloon(owner));
+    }
+    state.apply(world);
+}
+
+pub(crate) fn cancel_activity_balloon(
+    world: &mut World,
+    owner: crate::fixture_activity_state::FixtureActivityOwner,
+) {
+    let roots: Vec<_> = world
+        .query::<(Entity, &ActivityBalloon)>()
+        .iter(world)
+        .filter(|(_, bubble)| bubble.0 == owner)
+        .map(|(entity, _)| entity)
+        .collect();
+    for entity in roots {
+        if let Ok(root) = world.get_entity_mut(entity) {
+            root.despawn();
+        }
+    }
 }

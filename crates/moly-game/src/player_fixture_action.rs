@@ -40,7 +40,10 @@ const EXIT_SPEED: f32 = 0.4;
 pub(crate) enum PlayerFixtureRequest {
     Timeline(FixtureTarget),
     Gimmick(FixtureTarget),
-    PreviewGimmick { target: FixtureTarget, owner: Entity },
+    PreviewGimmick {
+        target: FixtureTarget,
+        owner: Entity,
+    },
     RequestEnd,
     Cancel(PlayerFixtureCancelReason),
 }
@@ -460,13 +463,20 @@ pub(crate) fn refresh_availability(world: &mut World) {
     for target in targets {
         let state = if runtime.active() {
             PlayerFixtureAvailability::Unavailable("player furniture session owns input")
-        } else if world.get::<FixtureActivityIdentity>(target.entity)
-            .and_then(|identity| world.get_resource::<FixtureActivityTables>()?.fixture_master(identity.master_id))
+        } else if world
+            .get::<FixtureActivityIdentity>(target.entity)
+            .and_then(|identity| {
+                world
+                    .get_resource::<FixtureActivityTables>()?
+                    .fixture_master(identity.master_id)
+            })
             .is_some_and(|master| matches!(master.player_action_type.as_str(), "loop" | "one_shot"))
         {
             match crate::fixture_gimmick::session::availability(world, &target) {
                 Ok(()) => PlayerFixtureAvailability::GimmickReady,
-                Err(reason) => PlayerFixtureAvailability::Pending(PlayerFixturePreparationError::Invalid(reason)),
+                Err(reason) => PlayerFixtureAvailability::Pending(
+                    PlayerFixturePreparationError::Invalid(reason),
+                ),
             }
         } else {
             match prepare(world, &target, runtime.generation.saturating_add(1)) {
@@ -794,7 +804,7 @@ fn validate_visual_relation(
     )
     .map_err(|error| Invalid(format!("visual timeline variant: {error:?}")))?;
     if profile.definition.package != expected_package
-        || profile.definition.prefab != expected_prefab
+        || prefab_leaf(&profile.definition.prefab) != prefab_leaf(&expected_prefab)
     {
         return Err(Invalid(
             "SD profile definition is not the source timeline prefab".into(),
@@ -812,6 +822,11 @@ fn validate_visual_relation(
         ));
     }
     Ok(())
+}
+
+fn prefab_leaf(path: &str) -> &str {
+    let leaf = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    leaf.strip_suffix(".prefab").unwrap_or(leaf)
 }
 
 fn path_length(path: &[Vec3]) -> Option<f32> {
@@ -989,11 +1004,16 @@ pub(crate) fn advance(world: &mut World) {
                 match crate::fixture_gimmick::session::start_preview(world, &target, owner, next) {
                     Ok(()) => {
                         runtime.generation = next;
-                        runtime.last_outcome = Some(PlayerFixtureOutcome::GimmickStarted { target });
+                        runtime.last_outcome =
+                            Some(PlayerFixtureOutcome::GimmickStarted { target });
                     }
                     Err(reason) => {
-                        warn!("[fixture-gimmick] {} preview rejected: {reason}", target.uid);
-                        runtime.last_outcome = Some(PlayerFixtureOutcome::GimmickNotPrepared { target, reason });
+                        warn!(
+                            "[fixture-gimmick] {} preview rejected: {reason}",
+                            target.uid
+                        );
+                        runtime.last_outcome =
+                            Some(PlayerFixtureOutcome::GimmickNotPrepared { target, reason });
                     }
                 }
             }

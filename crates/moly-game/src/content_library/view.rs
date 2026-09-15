@@ -6,7 +6,7 @@ const MUTED: Color = Color::srgb(0.57, 0.67, 0.76);
 const ACCENT: Color = Color::srgb(0.33, 0.84, 0.88);
 const PANEL: Color = Color::srgb(0.070, 0.095, 0.14);
 const EDGE: Color = Color::srgb(0.16, 0.23, 0.30);
-const ROW_HEIGHT: f32 = 76.;
+const ROW_HEIGHT: f32 = 64.;
 fn attach(c: &mut Commands, parent: Entity, node: Node) -> Entity {
     let id = c.spawn(node).id();
     c.entity(parent).add_child(id);
@@ -298,6 +298,7 @@ pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>) {
         LibraryTab::Conversations,
         LibraryTab::Furniture,
         LibraryTab::Performances,
+        LibraryTab::Activities,
     ] {
         button(
             &mut c,
@@ -595,7 +596,7 @@ pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>) {
         &mut c,
         shell,
         &font,
-        "Ctrl+F 搜索 · ↑↓ 选择 · Enter 体验 · Ctrl+1/2/3 切换 · 台词区可滚动",
+        "Ctrl+F 搜索 · ↑↓ 选择 · Enter 体验 · Ctrl+1/2/3/4 切换 · 台词区可滚动",
         12.,
         MUTED,
     );
@@ -756,7 +757,7 @@ fn populate_list(
                     height: px(ROW_HEIGHT - 8.),
                     min_height: px(ROW_HEIGHT - 8.),
                     flex_shrink: 0.,
-                    padding: UiRect::all(px(9)),
+                    padding: UiRect::all(px(5)),
                     column_gap: px(10),
                     align_items: AlignItems::Center,
                     border: UiRect::all(px(1)),
@@ -770,6 +771,20 @@ fn populate_list(
             .id();
         c.entity(parent).add_child(item);
         let (title, meta, image, icon, color) = match key {
+            EntryKey::Activity(id) => {
+                let Some(row) = catalog.activity(*id) else {
+                    continue;
+                };
+                (
+                    row.title.clone(),
+                    row.kind().to_owned(),
+                    catalog
+                        .fixture(row.spec.fixture_id)
+                        .and_then(|fixture| fixture.thumbnail.as_ref()),
+                    catalog.character(row.spec.unit),
+                    character_color(catalog, row.spec.unit),
+                )
+            }
             EntryKey::Fixture(id) => {
                 let Some(row) = catalog.fixture(*id) else {
                     continue;
@@ -854,6 +869,84 @@ fn populate_detail(
     catalog: &LibraryCatalog,
 ) {
     match key {
+        Some(EntryKey::Activity(id)) => {
+            let Some(activity) = catalog.activity(id) else {
+                return;
+            };
+            let spec = &activity.spec;
+            text(c, parent, font, activity.kind(), 12., ACCENT);
+            text(c, parent, font, &activity.title, 22., INK);
+            let hero = row(c, parent, 12.);
+            artwork(
+                c,
+                hero,
+                font,
+                catalog
+                    .fixture(spec.fixture_id)
+                    .and_then(|row| row.thumbnail.as_ref()),
+                "家",
+                84.,
+                ACCENT,
+            );
+            let summary = column(c, hero, 6.);
+            text(
+                c,
+                summary,
+                font,
+                catalog.character(spec.unit),
+                16.,
+                character_color(catalog, spec.unit),
+            );
+            text(
+                c,
+                summary,
+                font,
+                "走向家具 → 完整动作 → 离开家具",
+                13.,
+                MUTED,
+            );
+            if spec.variants > 1 {
+                text(
+                    c,
+                    summary,
+                    font,
+                    format!("原始动作 {} / {}", spec.variant, spec.variants),
+                    12.,
+                    ACCENT,
+                );
+            }
+            if let Some(tweet) = &spec.tweet {
+                text(c, parent, font, "动作期间的头顶气泡", 12., ACCENT);
+                text(c, parent, font, plain_text(&tweet.text), 16., INK);
+            } else {
+                text(
+                    c,
+                    parent,
+                    font,
+                    "这项互动没有对白，直接欣赏角色的动作。",
+                    14.,
+                    MUTED,
+                );
+            }
+            text(
+                c,
+                parent,
+                font,
+                "可随时停止；不会自动开启之后的家具故事。",
+                13.,
+                MUTED,
+            );
+            if let Some(talk) = spec.related_talk {
+                button(
+                    c,
+                    parent,
+                    font,
+                    "查看相关故事 →",
+                    LibraryAction::RelatedStory(talk),
+                    ButtonKind::Secondary,
+                );
+            }
+        }
         Some(EntryKey::Fixture(id)) => {
             let Some(fixture) = catalog.fixture(id) else {
                 return;
@@ -882,7 +975,7 @@ fn populate_detail(
                 parent,
                 font,
                 match fixture.action.as_str() {
-                    "timeline" => "在场景中选中一件，体验角色与家具的完整互动。",
+                    "timeline" => "自己操作家具，或在「角色互动」中挑选登场角色欣赏原始演出。",
                     "loop" => "启动这件家具的持续互动。结束体验时会恢复原来的状态。",
                     "one_shot" => "欣赏一次完整的家具互动，也可以随时停止。",
                     _ => "这是一件陈设家具。相关的角色故事也值得一看。",
@@ -890,6 +983,29 @@ fn populate_detail(
                 14.,
                 MUTED,
             );
+            let activity_count = catalog
+                .activities
+                .iter()
+                .filter(|row| row.spec.fixture_id == id)
+                .count();
+            if activity_count > 0 {
+                button(
+                    c,
+                    parent,
+                    font,
+                    &format!("角色互动 · {activity_count} 项 →"),
+                    LibraryAction::RelatedActivities(id),
+                    ButtonKind::Primary,
+                );
+                text(
+                    c,
+                    parent,
+                    font,
+                    "挑选原始登场角色，观看骑乘、坐卧等动作与气泡。",
+                    13.,
+                    MUTED,
+                );
+            }
             let count = catalog
                 .talks
                 .iter()
@@ -1055,7 +1171,9 @@ pub(crate) fn refresh(
             Region::Back => narrow,
             Region::HeaderSubtitle | Region::FooterHint | Region::ModeDescription => !short,
             Region::CharacterFilter => state.tab != LibraryTab::Furniture,
-            Region::SpecialFilter => state.tab != LibraryTab::Conversations,
+            Region::SpecialFilter => {
+                matches!(state.tab, LibraryTab::Furniture | LibraryTab::Performances)
+            }
             Region::RelatedFilter => state.related_fixture.is_some(),
             Region::ResumeControl => state.active.as_ref().is_some_and(|a| a.started),
             Region::InstanceControls => selected_instances.len() > 1,
@@ -1269,6 +1387,11 @@ pub(crate) fn refresh(
                     .is_some_and(|active| active.static_view)
                 {
                     "正在查看 · 返回即恢复".into()
+                } else if matches!(
+                    state.active.as_ref().map(|a| a.choice.key),
+                    Some(EntryKey::Activity(_))
+                ) {
+                    excerpt(&state.status, 24)
                 } else if playing {
                     "正在体验 · 可随时停止".into()
                 } else {
@@ -1300,6 +1423,9 @@ pub(crate) fn refresh(
                 format!("场景中的第 {} 件 / {} 件", i + 1, selected_instances.len())
             }
             UiLabel::Availability => available.clone().unwrap_or_else(|| {
+                if state.mode == ExperienceMode::Independent && state.selected.is_some() {
+                    return "将自动准备空场景、所需角色与家具".into();
+                }
                 if context::selected_instance(&state, &catalog, &world)
                     .is_some_and(|instance| instance.can_stage && !instance.ready)
                 {
@@ -1319,8 +1445,10 @@ pub(crate) fn refresh(
                     && catalog.fixture(id).is_some_and(|row| !row.interactive()))
                 {
                     "在独立场景中查看".into()
+                } else if matches!(state.selected, Some(EntryKey::Activity(_))) {
+                    "观看角色互动".into()
                 } else if matches!(state.selected, Some(EntryKey::Fixture(_))) {
-                    "体验这件家具".into()
+                    "自己体验这件家具".into()
                 } else if playing {
                     "切换到这段故事".into()
                 } else {

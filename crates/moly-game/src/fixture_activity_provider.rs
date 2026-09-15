@@ -44,6 +44,7 @@ pub(crate) struct ProviderKey {
 pub(crate) struct ProviderPending {
     pub stage: &'static str,
     pub reason: String,
+    pub retryable: bool,
 }
 
 impl ProviderPending {
@@ -51,7 +52,28 @@ impl ProviderPending {
         Self {
             stage,
             reason: reason.into(),
+            retryable: matches!(
+                stage,
+                "json-loading" | "fixture-clip-loading" | "fixture-instance"
+            ),
         }
+    }
+    fn timeline(stage: &'static str, error: timeline::TimelineFailure) -> Self {
+        Self {
+            stage,
+            reason: error.to_string(),
+            retryable: error.retryable,
+        }
+    }
+}
+impl From<String> for ProviderPending {
+    fn from(reason: String) -> Self {
+        Self::new("live-preflight", reason)
+    }
+}
+impl From<&str> for ProviderPending {
+    fn from(reason: &str) -> Self {
+        Self::new("live-preflight", reason)
     }
 }
 
@@ -123,15 +145,17 @@ impl FixtureActivityProvider {
         assets::require_live_fixture(&mut self.assets, world, &target, &identity.model_package)?;
         timeline::prepare_actor_animation_bindings(world, request, unit, animator, graph).map_err(
             |error| {
-                ProviderPending::new(
-                    "actor-source-library",
-                    format!("unit {unit}, prefab {}: {error}", request.definition.prefab,),
-                )
+                let mut issue = ProviderPending::timeline("actor-source-library", error);
+                issue.reason = format!(
+                    "unit {unit}, prefab {}: {}",
+                    request.definition.prefab, issue.reason
+                );
+                issue
             },
         )?;
         self.assets.prepare_fixture_bindings(world, request)?;
         timeline::prepare_source_sounds(world, request)
-            .map_err(|error| ProviderPending::new("source-sounds", error.to_string()))?;
+            .map_err(|error| ProviderPending::timeline("source-sounds", error))?;
         Ok(())
     }
 }
@@ -223,13 +247,18 @@ pub(crate) fn report(
     provider: Option<Res<FixtureActivityProvider>>,
     mut previous: Local<Vec<String>>,
 ) {
-    let Some(provider) = provider else { return; };
+    let Some(provider) = provider else {
+        return;
+    };
     let mut current = Vec::new();
     if let Some(pending) = &provider.global_pending {
         current.push(format!("global {}: {}", pending.stage, pending.reason));
     }
     for (entity, pending) in &provider.host_pending {
-        current.push(format!("fixture {entity:?} {}: {}", pending.stage, pending.reason));
+        current.push(format!(
+            "fixture {entity:?} {}: {}",
+            pending.stage, pending.reason
+        ));
     }
     for (key, status) in provider.statuses() {
         current.push(format!(
@@ -597,7 +626,7 @@ fn prepare_plan(
         .expect("stored draft")
         .start_request(owner, &plan.key.target);
     timeline::validate_start(world, &request)
-        .map_err(|error| ProviderPending::new("live-binding-preflight", error.to_string()))
+        .map_err(|error| ProviderPending::timeline("live-binding-preflight", error))
 }
 
 fn profile_key(profile: &PlayerFixtureVisualProfile) -> ProviderKey {

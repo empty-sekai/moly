@@ -128,6 +128,7 @@ pub(crate) fn advance(
     edits: Res<crate::fixture_edit::EditSessionActive>,
     player_talk: Option<Res<crate::player_talk::PlayerTalkSession>>,
     settings_panel: Res<crate::game_settings::SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
 ) {
     let Some(window) = windows.single().ok() else {
@@ -137,8 +138,10 @@ pub(crate) fn advance(
     // 让位门（GameStateType 分派）：Edit=2 / Talk=3（玩家自己的对话）
     // → 禁用。环境配对对话不改游戏态（SomeCharacterTalk=7 不在摇杆的
     // 分派表里），不算禁用源。
-    state.enabled = !edits.is_active() && player_talk.is_none()
-        && !settings_panel.blocks_world_input();
+    state.enabled = !edits.is_active()
+        && player_talk.is_none()
+        && !settings_panel.blocks_world_input()
+        && !library.blocks_exploration_input();
     if !state.enabled {
         touches.clear();
         if state.captured.take().is_some() {
@@ -332,7 +335,10 @@ pub(crate) fn place_ui(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut roots: Query<&mut Visibility, With<JoystickUiRoot>>,
     mut bases: Query<(&mut Transform, &mut Sprite), (With<JoystickBase>, Without<JoystickHandle>)>,
-    mut handles: Query<(&mut Transform, &mut Sprite), (With<JoystickHandle>, Without<JoystickBase>)>,
+    mut handles: Query<
+        (&mut Transform, &mut Sprite),
+        (With<JoystickHandle>, Without<JoystickBase>),
+    >,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -410,9 +416,7 @@ pub(crate) fn smoke_autojoystick(
     let radius = HANDLE_SIZE * canvas_scale(width, height);
     // 起手点：区内中部（15% 宽、75% 高——顶原点坐标的左下象限）。
     let start = Vec2::new(width * 0.15, height * 0.75);
-    let write = |touches: &mut MessageWriter<TouchInput>,
-                 phase: TouchPhase,
-                 position: Vec2| {
+    let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
         touches.write(TouchInput {
             phase,
             position,
@@ -444,7 +448,11 @@ pub(crate) fn smoke_autojoystick(
         }
         1 => {
             let s = progress(C1_PRESS, C1_FULL);
-            write(&mut touches, TouchPhase::Moved, start + Vec2::new(radius * s, 0.0));
+            write(
+                &mut touches,
+                TouchPhase::Moved,
+                start + Vec2::new(radius * s, 0.0),
+            );
             if now >= C1_FULL {
                 snapshot("周期一满偏（向右）", "(1,0)");
                 run.step = 2;

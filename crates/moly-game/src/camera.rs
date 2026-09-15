@@ -30,8 +30,8 @@ use crate::inactive_nodes::SiteSettled;
 use crate::site::{GroundMeshes, SiteActive, SiteSelection};
 use bevy::asset::{AssetPath, LoadState};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::ecs::system::SystemParam;
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 
@@ -54,6 +54,11 @@ const MIN_PITCH_AT_MAX_ZOOM_TO: f32 = 24.0;
 /// 滚轮一档折算的捏合像素数。源手势层是触屏、单位是像素；滚轮是 PC
 /// 独有输入，此值是手感常量，非真源量。
 const WHEEL_PINCH_PIXELS: f32 = 50.0;
+// Product extension requested for close inspection: after entering FPS the
+// wheel narrows the lens down to 20 degrees. Reverse first restores the source
+// field of view, then the next outward gesture exits to the source Normal view.
+const INSPECTION_MIN_FOV_DEGREES: f32 = 20.0;
+const INSPECTION_ZOOM_RATE: f32 = 0.0025;
 
 /// 源 FPSCameraState 构造体的字面量：FPS 态距离三界同值 0.15（私有模型
 /// Distance/MinDistance/MaxDistance 一并写 0.15），俯仰界户外 −8 / 楼层
@@ -358,23 +363,27 @@ impl FieldCameraModel {
 /// 站点的颜色是材质程序自己写好的终值：tonemapping 与去色带都关，不叠
 /// 第二层处理。
 pub fn spawn(mut commands: Commands, server: Res<AssetServer>) {
-    let camera = commands.spawn((
-        Camera3d::default(),
-        // The empty loading view uses the engine default. The actual prefab
-        // projection is installed with its bound setting before site framing.
-        Projection::Perspective(PerspectiveProjection::default()),
-        Tonemapping::None,
-        DebandDither::Disabled,
-        // 3D 音频收听者：耳朵对在听者局部 X 轴上，位置/朝向每帧随本实体的
-        // 全局变换走（引擎侧语义）。真源相机挂的是无条件常驻的 3D 监听器，
-        // 这里照挂——当前两条音频通道（BGM、区域环境音）按真源走平铺 2D，
-        // 不消费它；它是给未来的 3D 一次性 SE 那一族预留的收听面。
-        SpatialListener::new(4.0),
-    )).id();
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            // The empty loading view uses the engine default. The actual prefab
+            // projection is installed with its bound setting before site framing.
+            Projection::Perspective(PerspectiveProjection::default()),
+            Tonemapping::None,
+            DebandDither::Disabled,
+            // 3D 音频收听者：耳朵对在听者局部 X 轴上，位置/朝向每帧随本实体的
+            // 全局变换走（引擎侧语义）。真源相机挂的是无条件常驻的 3D 监听器，
+            // 这里照挂——当前两条音频通道（BGM、区域环境音）按真源走平铺 2D，
+            // 不消费它；它是给未来的 3D 一次性 SE 那一族预留的收听面。
+            SpatialListener::new(4.0),
+        ))
+        .id();
     // Native wgpu/DX12 indirect offsets fail validation; keep that workaround
     // scoped to native. Browser material reloads are handled at asset import.
     #[cfg(not(target_arch = "wasm32"))]
-    commands.entity(camera).insert(bevy::render::view::NoIndirectDrawing);
+    commands
+        .entity(camera)
+        .insert(bevy::render::view::NoIndirectDrawing);
     #[cfg(target_arch = "wasm32")]
     let _ = camera;
     let handle = server.load::<JsonAsset>(AssetPath::from(
@@ -404,19 +413,37 @@ pub(crate) fn parse(
     };
     let value: serde_json::Value = serde_json::from_str(&asset.0)
         .unwrap_or_else(|err| panic!("相机 JSON 不是合法 JSON：{err}"));
-    let field_cameras = value["fieldCameras"].as_array().expect("bound FieldCamera instances");
-    assert_eq!(field_cameras.len(), 1, "the field-camera package must identify its sole camera");
+    let field_cameras = value["fieldCameras"]
+        .as_array()
+        .expect("bound FieldCamera instances");
+    assert_eq!(
+        field_cameras.len(),
+        1,
+        "the field-camera package must identify its sole camera"
+    );
     let field = &field_cameras[0];
     assert_eq!(field["class"].as_str(), Some("FieldCamera"));
     let setting = parse_setting(linked_asset(&value, "cameraSettings", &field["setting"]));
     let params = parse_camera_params(linked_asset(&value, "cameraParams", &field["cameraParam"]));
     let view = &field["view"];
-    assert_eq!(view["orthographic"].as_bool(), Some(false), "field camera must be perspective");
-    let plane = |name: &str| view[name].as_f64().map(|n| n as f32)
-        .filter(|n| n.is_finite()).unwrap_or_else(|| panic!("FieldCamera view lacks {name}"));
+    assert_eq!(
+        view["orthographic"].as_bool(),
+        Some(false),
+        "field camera must be perspective"
+    );
+    let plane = |name: &str| {
+        view[name]
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| n.is_finite())
+            .unwrap_or_else(|| panic!("FieldCamera view lacks {name}"))
+    };
     let near = plane("nearClipPlane");
     let far = plane("farClipPlane");
-    assert!(near > 0. && far > near, "invalid field camera projection planes");
+    assert!(
+        near > 0. && far > near,
+        "invalid field camera projection planes"
+    );
     // 视角锥改写：真源 SetupModel 一族把 FOV 应用到相机。
     let fov = setting.fov.to_radians();
     for mut projection in &mut cameras {
@@ -485,13 +512,27 @@ pub(crate) fn parse(
     commands.remove_resource::<CameraJsonHandle>();
 }
 
-fn linked_asset<'a>(document: &'a serde_json::Value, table: &str, identity: &serde_json::Value) -> &'a serde_json::Value {
-    assert!(identity["file"].as_str().is_some() && identity["pathId"].as_str().is_some(),
-        "FieldCamera must supply a complete {table} identity");
-    let mut matches = document[table].as_array().expect("camera asset table")
-        .iter().filter(|row| row.get("asset") == Some(identity));
-    let row = matches.next().unwrap_or_else(|| panic!("FieldCamera {table} reference is unresolved"));
-    assert!(matches.next().is_none(), "duplicate bound camera asset identity");
+fn linked_asset<'a>(
+    document: &'a serde_json::Value,
+    table: &str,
+    identity: &serde_json::Value,
+) -> &'a serde_json::Value {
+    assert!(
+        identity["file"].as_str().is_some() && identity["pathId"].as_str().is_some(),
+        "FieldCamera must supply a complete {table} identity"
+    );
+    let mut matches = document[table]
+        .as_array()
+        .expect("camera asset table")
+        .iter()
+        .filter(|row| row.get("asset") == Some(identity));
+    let row = matches
+        .next()
+        .unwrap_or_else(|| panic!("FieldCamera {table} reference is unresolved"));
+    assert!(
+        matches.next().is_none(),
+        "duplicate bound camera asset identity"
+    );
     row
 }
 
@@ -506,9 +547,15 @@ fn parse_setting(row: &serde_json::Value) -> CameraSetting {
             .get(name)
             .unwrap_or_else(|| panic!("CameraSetting 缺 {name}"));
         Vec3::new(
-            node.get("x").and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("CameraSetting.{name} 缺 x")) as f32,
-            node.get("y").and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("CameraSetting.{name} 缺 y")) as f32,
-            node.get("z").and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("CameraSetting.{name} 缺 z")) as f32,
+            node.get("x")
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| panic!("CameraSetting.{name} 缺 x")) as f32,
+            node.get("y")
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| panic!("CameraSetting.{name} 缺 y")) as f32,
+            node.get("z")
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| panic!("CameraSetting.{name} 缺 z")) as f32,
         )
     };
     let scalar = |name: &str| {
@@ -560,7 +607,8 @@ fn parse_camera_params(value: &serde_json::Value) -> CameraParamAsset {
             let f = |field: &str| {
                 key.get(field)
                     .and_then(|v| v.as_f64())
-                    .unwrap_or_else(|| panic!("CameraParam.{name} 键缺 {field}")) as f32
+                    .unwrap_or_else(|| panic!("CameraParam.{name} 键缺 {field}"))
+                    as f32
             };
             parsed.push(CurveKey {
                 time: f("time"),
@@ -674,8 +722,7 @@ pub fn frame_site(
     // 半径 = fmax(全径 − 格值×不可见格数, 0)·0.5；全径即包围盒 x/z 跨度）。
     // 不可见格数是面板键（InvisibleGridCount，IntConfigs 键 69）。
     let mut model = FieldCameraModel::from_setting(&setting);
-    let invisible_grid_count =
-        config.int(crate::client_config::KEY_INVISIBLE_GRID_COUNT) as f32;
+    let invisible_grid_count = config.int(crate::client_config::KEY_INVISIBLE_GRID_COUNT) as f32;
     let full_extents = Vec2::new(max.x - min.x, max.z - min.z);
     let shrink = moly_law::fixture::position::TILE_SIZE * invisible_grid_count;
     let near_extents = Vec2::new(
@@ -779,7 +826,8 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// `FPSCameraState.OnDrag`）；捏合**只有退出支**（v13 > 0 = 捏合张开方向
 /// 即回 Normal，源 `FPSCameraState.OnPinch` 没有缩放支——FPS 态下的
 /// 「继续放大」就是进入转场本身：距离 1.7→0.15 的位置前移，FOV 不动）。
-/// 进出迁移逐行对源（[`enter_fps`] / [`exit_fps`]）。
+/// Moly 的近距查看扩展允许进入 FPS 后继续滚轮缩小 FOV，先还原 FOV 再退出。
+/// 进出迁移仍逐行对源（[`enter_fps`] / [`exit_fps`]）。
 ///
 /// 不迁（逐条挂账）：双拖手势源两态本身就是空方法；源 FPS OnEnter 的 `SetLock(0)` /
 /// `SetActiveUI(0)` / `SiteObjectManager.ShowAll(0)` / `ResetHouseDither(1)`
@@ -806,13 +854,8 @@ pub struct FpsTransitionCtx<'w, 's> {
     active: Option<Res<'w, SiteActive>>,
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,
-    players: Query<
-        'w,
-        's,
-        (&'static GlobalTransform, &'static mut Visibility),
-        With<AvatarRoot>,
-    >,
-    cameras: Query<'w, 's, &'static Projection, With<Camera3d>>,
+    players: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
+    cameras: Query<'w, 's, &'static mut Projection, With<Camera3d>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -836,7 +879,8 @@ pub(crate) fn apply_input(
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层归编辑面），相机
     // 拖拽/缩放整表让位——编辑模式内的输入分配收口。
-    if edits.is_active() || transition.dialogs.blocks_field_input() || !transition.layers.on_field() {
+    if edits.is_active() || transition.dialogs.blocks_field_input() || !transition.layers.on_field()
+    {
         gestures.clear();
         return;
     }
@@ -845,7 +889,8 @@ pub(crate) fn apply_input(
     // 自带的当帧增量。模型未立也把事件读掉，别攒陈账。
     let mut drag = Vec2::ZERO;
     for event in gestures.read() {
-        if event.kind == GestureKind::Drag && event.state == GestureState::Moved && !event.ui_owned {
+        if event.kind == GestureKind::Drag && event.state == GestureState::Moved && !event.ui_owned
+        {
             drag += event.delta;
         }
     }
@@ -906,7 +951,11 @@ pub(crate) fn apply_input(
             CameraStateType::Fps => fps_drag(model, &mut fps_view, source_drag.x, source_drag.y),
             // Talk deliberately has no Normal pitch/distance coupling.
             CameraStateType::Talk => {
-                if transition.talk_camera.as_deref().is_some_and(|camera| camera.accepts_input()) {
+                if transition
+                    .talk_camera
+                    .as_deref()
+                    .is_some_and(|camera| camera.accepts_input())
+                {
                     update_angle(model, source_drag.x, source_drag.y);
                 }
             }
@@ -933,8 +982,7 @@ pub(crate) fn apply_input(
     if pinch != 0.0 {
         let player = transition.players.single_mut().ok();
         // 源 Normal 态 OnPinch 开头算好的缩放增量，进入判定与缩放支共用。
-        let ratio =
-            config.float(crate::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO);
+        let ratio = config.float(crate::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO);
         let v13 = -ratio * pinch;
         match state.0 {
             CameraStateType::Normal => {
@@ -946,9 +994,8 @@ pub(crate) fn apply_input(
                         transition.site.as_deref(),
                         transition.active.as_deref(),
                         player,
-                        transition.cameras.single().ok(),
-                    )
-                    else {
+                        transition.cameras.single_mut().ok(),
+                    ) else {
                         return; // 站点/相机未立：FPS 迁移的写面不全，让位下帧
                     };
                     enter_fps(
@@ -960,22 +1007,41 @@ pub(crate) fn apply_input(
                         pg.translation(),
                         pv,
                         &mut fps_view,
-                        perspective_fov_deg(projection),
+                        perspective_fov_deg(&projection),
                     );
                 } else {
                     pinch_zoom(model, pinch, config);
                 }
             }
             CameraStateType::Fps => {
+                if let Ok(mut projection) = transition.cameras.single_mut() {
+                    let current = perspective_fov_deg(&projection);
+                    let baseline = memory
+                        .as_deref()
+                        .map(|memory| memory.fov)
+                        .unwrap_or(model.fov);
+                    if let Some(next) = inspection_fov(current, baseline, pinch) {
+                        if let Projection::Perspective(projection) = &mut *projection {
+                            projection.fov = next.to_radians();
+                        }
+                        // An unfinished entry tween must not overwrite the
+                        // user's newer lens setting on the next follow frame.
+                        commands.queue(move |world: &mut World| {
+                            if let Some(mut tween) = world.get_resource_mut::<CameraTween>() {
+                                tween.fov = (next, next);
+                            }
+                        });
+                        return;
+                    }
+                }
                 if v13 > 0.0 {
                     // 退出支（捏合张开方向）。FPS OnPinch 仅此一支。
                     let (Some(setting), Some(active), Some((pg, pv)), Some(projection)) = (
                         transition.setting.as_deref(),
                         transition.active.as_deref(),
                         player,
-                        transition.cameras.single().ok(),
-                    )
-                    else {
+                        transition.cameras.single_mut().ok(),
+                    ) else {
                         return;
                     };
                     exit_fps(
@@ -988,7 +1054,7 @@ pub(crate) fn apply_input(
                         pg.translation(),
                         pv,
                         memory.as_deref(),
-                        perspective_fov_deg(projection),
+                        perspective_fov_deg(&projection),
                     );
                 } else {
                     info!(
@@ -998,11 +1064,16 @@ pub(crate) fn apply_input(
                 }
             }
             CameraStateType::Talk => {
-                if transition.talk_camera.as_deref().is_some_and(|camera| camera.accepts_input()) {
+                if transition
+                    .talk_camera
+                    .as_deref()
+                    .is_some_and(|camera| camera.accepts_input())
+                {
                     // Talk.OnPinch calls AddDistance only. Normal's gesture
                     // memory, pitch coupling and FPS entry do not run here.
                     let before = model.distance;
-                    model.distance = (model.distance + v13).clamp(model.min_distance, model.max_distance);
+                    model.distance =
+                        (model.distance + v13).clamp(model.min_distance, model.max_distance);
                     info!(
                         "[talk-cam] 对话缩放：距离 {before:.2}→{:.2}，无 Normal 俯仰联动或 FPS 切换",
                         model.distance,
@@ -1035,6 +1106,32 @@ pub(crate) fn apply_input(
         } else {
             pinch_zoom(model, 60.0, config);
         }
+    }
+}
+
+fn inspection_fov(current: f32, baseline: f32, pinch: f32) -> Option<f32> {
+    if !current.is_finite() || !baseline.is_finite() || !pinch.is_finite() || pinch == 0. {
+        return None;
+    }
+    let minimum = INSPECTION_MIN_FOV_DEGREES.min(baseline);
+    if pinch > 0. || current < baseline - 0.01 {
+        Some((current * (-pinch * INSPECTION_ZOOM_RATE).exp()).clamp(minimum, baseline))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod inspection_zoom_tests {
+    use super::*;
+    #[test]
+    fn fps_inspection_zoom_is_bounded_and_unzooms_before_exiting() {
+        let closer = inspection_fov(50., 50., 50.).unwrap();
+        assert!(closer < 50. && closer > 20.);
+        assert_eq!(inspection_fov(20., 50., 50000.), Some(20.));
+        assert_eq!(inspection_fov(25., 50., -50000.), Some(50.));
+        assert_eq!(inspection_fov(50., 50., -50.), None);
+        assert_eq!(inspection_fov(f32::NAN, 50., 50.), None);
     }
 }
 
@@ -1080,7 +1177,11 @@ fn update_angle(model: &mut FieldCameraModel, dx: f32, dy: f32) {
 
 /// 源 Normal 态 `OnDrag` 尾段：按（刚更新的）pitch 压当帧生效距离。
 fn drag_distance_coupling(model: &mut FieldCameraModel) {
-    let t = ratio01(model.pitch, MIN_PITCH_AT_MAX_ZOOM_FROM, MIN_PITCH_AT_MAX_ZOOM_TO);
+    let t = ratio01(
+        model.pitch,
+        MIN_PITCH_AT_MAX_ZOOM_FROM,
+        MIN_PITCH_AT_MAX_ZOOM_TO,
+    );
     let cap = GESTURED_MIN_DISTANCE + t * (model.max_distance - GESTURED_MIN_DISTANCE);
     let before = model.distance;
     model.distance = cap.min(model.gestured_distance);
@@ -1119,10 +1220,7 @@ fn pinch_zoom(
         crate::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO
     );
     if distance != raw {
-        info!(
-            "[camera] 距离触界：raw {:.2} → {:.2}",
-            raw, distance
-        );
+        info!("[camera] 距离触界：raw {:.2} → {:.2}", raw, distance);
     }
     // 俯仰下限：插值端点来自构造体常量，减项是面板键（FloatConfigs 66）。
     let move_look_at_ratio =
@@ -1409,10 +1507,14 @@ fn exit_fps(
         // initPitch，偏航/FOV/距离保持当前——不猜值）。取景点目标 = 当前
         // 值（源取 OnEnter 时刻的模型值，恒等）。
         let (pitch, yaw, fov, distance, hit) = match memory {
-            Some(m) if m.site == active.site_type => {
-                (m.pitch, m.yaw, m.fov, m.distance, true)
-            }
-            _ => (setting.init_pitch, model.yaw, model.fov, model.distance, false),
+            Some(m) if m.site == active.site_type => (m.pitch, m.yaw, m.fov, m.distance, true),
+            _ => (
+                setting.init_pitch,
+                model.yaw,
+                model.fov,
+                model.distance,
+                false,
+            ),
         };
         commands.insert_resource(CameraTween {
             look_at: (model.look_at, model.look_at),
@@ -1503,7 +1605,10 @@ pub fn track_prev_site(
     if seen != active.site_type {
         prev.0 = seen;
         *cache = Some(active.site_type.clone());
-        info!("[camera-fps] 站点搬迁：{} → {}（前站类型记账）", prev.0, active.site_type);
+        info!(
+            "[camera-fps] 站点搬迁：{} → {}（前站类型记账）",
+            prev.0, active.site_type
+        );
     }
 }
 
@@ -1577,14 +1682,8 @@ pub(crate) fn follow_avatar(
     mut tween: Option<ResMut<CameraTween>>,
     // 两查询都持 &mut Transform：互加 Without 声明不相交（相机不是
     // avatar、avatar 不是相机），否则 Bevy 借用检查按「可能同实体」拒绝。
-    mut avatars: Query<
-        (&GlobalTransform, &mut Transform),
-        (With<AvatarRoot>, Without<Camera3d>),
-    >,
-    mut cameras: Query<
-        (&mut Transform, &mut Projection),
-        (With<Camera3d>, Without<AvatarRoot>),
-    >,
+    mut avatars: Query<(&GlobalTransform, &mut Transform), (With<AvatarRoot>, Without<Camera3d>)>,
+    mut cameras: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<AvatarRoot>)>,
     mut announced: Local<bool>,
     mut fps_announced: Local<bool>,
     talk: Option<Res<crate::talk::ActiveTalk>>,
@@ -1599,7 +1698,9 @@ pub(crate) fn follow_avatar(
     // A player conversation owns the camera, including its entry tween.
     // Normal following resumes on the actual session's completion frame;
     // it must not tug at a conversation target before the Talk writer runs.
-    if talk.as_deref().is_some_and(crate::talk::ActiveTalk::includes_player)
+    if talk
+        .as_deref()
+        .is_some_and(crate::talk::ActiveTalk::includes_player)
         || player_talk.is_some()
     {
         return;
@@ -1696,11 +1797,8 @@ pub(crate) fn follow_avatar(
             };
             let t = (raw * FOLLOW_RATE).clamp(0.0, 1.0);
             // 先取插值界与缩放参数（避免与 LookAt 的可变借用交叉）。
-            let (min_distance, max_distance, distance) = (
-                models.min_distance,
-                models.max_distance,
-                models.distance,
-            );
+            let (min_distance, max_distance, distance) =
+                (models.min_distance, models.max_distance, models.distance);
             let near_min = models.look_at_bounds.min();
             let near_max = models.look_at_bounds.max();
             let far_min = models.max_look_at_bounds.min();

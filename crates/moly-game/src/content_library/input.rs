@@ -136,6 +136,7 @@ pub(crate) fn input(
                     KeyCode::Digit1 => actions.push(LibraryAction::Tab(LibraryTab::Conversations)),
                     KeyCode::Digit2 => actions.push(LibraryAction::Tab(LibraryTab::Furniture)),
                     KeyCode::Digit3 => actions.push(LibraryAction::Tab(LibraryTab::Performances)),
+                    KeyCode::Digit4 => actions.push(LibraryAction::Tab(LibraryTab::Activities)),
                     KeyCode::Enter => actions.push(LibraryAction::Play),
                     KeyCode::Backspace if state.search_focus => {
                         state.search.clear();
@@ -253,195 +254,7 @@ pub(crate) fn input(
     }
     state.rebuild_results(&catalog, &world);
     for action in actions {
-        match action {
-            LibraryAction::Toggle => {
-                if state.watching {
-                    state.open = true;
-                    state.watching = false;
-                    state.search_focus = false;
-                    state.changed();
-                } else if state.open {
-                    close(&mut state, &mut io);
-                } else {
-                    state.open = true;
-                    state.search_focus = false;
-                    state.release_guard = 2;
-                    state.changed();
-                }
-            }
-            LibraryAction::Return => {
-                state.open = true;
-                state.watching = false;
-                state.search_focus = false;
-                state.changed();
-            }
-            LibraryAction::Continue => {
-                state.open = false;
-                state.watching = true;
-                state.search_focus = false;
-                state.release_guard = 2;
-                state.changed();
-            }
-            LibraryAction::Close => close(&mut state, &mut io),
-            LibraryAction::Stop | LibraryAction::RestoreScene => {
-                cancel(&mut io);
-                state.pending = None;
-                state.stopping = true;
-                state.cleanup_frames = 2;
-                state.watching = false;
-                state.open = true;
-                state.release_guard = 2;
-                state.status = "正在结束播放并恢复场景…".into();
-                state.changed();
-            }
-            LibraryAction::Play if state.open || state.watching => {
-                if let Some(reason) = context::selected_reason(&state, &catalog, &world) {
-                    state.status = reason;
-                    state.changed();
-                    continue;
-                }
-                let Some(key) = state.selected else {
-                    continue;
-                };
-                let target = if state.mode == ExperienceMode::CurrentScene {
-                    context::selected_instance(&state, &catalog, &world)
-                        .map(|instance| instance.target.clone())
-                } else {
-                    None
-                };
-                cancel(&mut io);
-                state.next_ticket = state.next_ticket.wrapping_add(1);
-                state.pending = Some(PlaybackChoice {
-                    key,
-                    target,
-                    ticket: state.next_ticket,
-                    mode: state.mode,
-                });
-                state.cleanup_frames = 2;
-                state.stopping = false;
-                state.search_focus = false;
-                state.status = "正在准备所选内容…".into();
-                state.changed();
-            }
-            _ if !state.open => {}
-            LibraryAction::Back => {
-                state.narrow_detail = false;
-                state.changed();
-            }
-            LibraryAction::Tab(tab) => {
-                state.tab = tab;
-                state.special_only = false;
-                state.related_fixture = None;
-                state.picker_open = false;
-                state.search_focus = false;
-                state.status.clear();
-                state.reset_browse();
-            }
-            LibraryAction::SetScope(scope) => {
-                if scope == Scope::Here && state.mode == ExperienceMode::Independent {
-                    state.mode = ExperienceMode::CurrentScene;
-                }
-                state.scope = scope;
-                state.reset_browse();
-            }
-            LibraryAction::SetMode(mode) => {
-                state.mode = mode;
-                state.scope = if mode == ExperienceMode::Independent {
-                    Scope::All
-                } else {
-                    Scope::Here
-                };
-                state.status.clear();
-                state.reset_browse();
-            }
-            LibraryAction::SpecialFilter => {
-                state.special_only = !state.special_only;
-                state.reset_browse();
-            }
-            LibraryAction::CharacterPicker => {
-                state.picker_open = !state.picker_open;
-                state.search_focus = false;
-                state.changed();
-            }
-            LibraryAction::SetCharacter(unit) => {
-                state.character = unit;
-                state.picker_open = false;
-                state.reset_browse();
-            }
-            LibraryAction::DismissPicker => {
-                state.picker_open = false;
-                state.changed();
-            }
-            LibraryAction::ClearRelated => {
-                state.related_fixture = None;
-                state.reset_browse();
-            }
-            LibraryAction::Related(id) => {
-                state.tab = LibraryTab::Performances;
-                state.related_fixture = Some(id);
-                state.scope = Scope::All;
-                state.special_only = false;
-                state.character = None;
-                state.search.clear();
-                state.search_cursor = 0;
-                state.reset_browse();
-            }
-            LibraryAction::FocusSearch => {
-                state.search_focus = true;
-                state.search_cursor = state.search.chars().count();
-                state.select_all = false;
-                state.changed();
-            }
-            LibraryAction::ClearSearch => {
-                state.search.clear();
-                state.search_cursor = 0;
-                state.ime_preedit.clear();
-                state.search_focus = true;
-                state.reset_browse();
-            }
-            LibraryAction::Select(key) => {
-                if state.filtered.contains(&key) {
-                    if state.selected != Some(key) {
-                        state.selected_uid = None;
-                    }
-                    state.selected = Some(key);
-                    state.narrow_detail = true;
-                    state.search_focus = false;
-                    state.status.clear();
-                    state.changed();
-                }
-            }
-            LibraryAction::PreviousPage => {
-                let next = state.offset.saturating_sub(state.page_size);
-                state.select_index(next);
-            }
-            LibraryAction::NextPage => {
-                let next =
-                    (state.offset + state.page_size).min(state.filtered.len().saturating_sub(1));
-                state.select_index(next);
-            }
-            LibraryAction::PreviousInstance | LibraryAction::NextInstance => {
-                if let Some(key) = state.selected {
-                    let targets = context::instances_for(key, &catalog, &world);
-                    if !targets.is_empty() {
-                        let index = targets
-                            .iter()
-                            .position(|row| {
-                                Some(row.target.uid.as_str()) == state.selected_uid.as_deref()
-                            })
-                            .unwrap_or(0);
-                        let next = if action == LibraryAction::PreviousInstance {
-                            (index + targets.len() - 1) % targets.len()
-                        } else {
-                            (index + 1) % targets.len()
-                        };
-                        state.selected_uid = Some(targets[next].target.uid.clone());
-                        state.changed();
-                    }
-                }
-            }
-            _ => {}
-        }
+        apply_action(action, &mut state, &catalog, &world, &mut io);
     }
     state.rebuild_results(&catalog, &world);
     if let Ok(mut window) = io.windows.single_mut() {
@@ -449,6 +262,222 @@ pub(crate) fn input(
         if window.ime_enabled {
             window.ime_position = Vec2::new(72., if window.width() < 860. { 166. } else { 152. });
         }
+    }
+}
+pub(super) fn apply_action(
+    action: LibraryAction,
+    state: &mut ContentLibrary,
+    catalog: &LibraryCatalog,
+    world: &LibraryContext,
+    io: &mut LibraryInput,
+) {
+    match action {
+        LibraryAction::Toggle => {
+            if state.watching {
+                state.open = true;
+                state.watching = false;
+                state.search_focus = false;
+                state.changed();
+            } else if state.open {
+                close(state, io);
+            } else {
+                state.open = true;
+                state.search_focus = false;
+                state.release_guard = 2;
+                state.changed();
+            }
+        }
+        LibraryAction::Return => {
+            state.open = true;
+            state.watching = false;
+            state.search_focus = false;
+            state.changed();
+        }
+        LibraryAction::Continue => {
+            state.open = false;
+            state.watching = true;
+            state.search_focus = false;
+            state.release_guard = 2;
+            state.changed();
+        }
+        LibraryAction::Close => close(state, io),
+        LibraryAction::Stop | LibraryAction::RestoreScene => {
+            cancel(io);
+            state.pending = None;
+            state.stopping = true;
+            state.cleanup_frames = 2;
+            state.watching = false;
+            state.open = true;
+            state.release_guard = 2;
+            state.status = "正在结束播放并恢复场景…".into();
+            state.changed();
+        }
+        LibraryAction::Play if state.open || state.watching => {
+            if let Some(reason) = context::selected_reason(state, catalog, world) {
+                state.status = reason;
+                state.changed();
+                return;
+            }
+            let Some(key) = state.selected else {
+                return;
+            };
+            let target = if state.mode == ExperienceMode::CurrentScene {
+                context::selected_instance(state, catalog, world)
+                    .map(|instance| instance.target.clone())
+            } else {
+                None
+            };
+            cancel(io);
+            state.next_ticket = state.next_ticket.wrapping_add(1);
+            state.pending = Some(PlaybackChoice {
+                key,
+                target,
+                ticket: state.next_ticket,
+                mode: state.mode,
+            });
+            state.cleanup_frames = 2;
+            state.stopping = false;
+            state.search_focus = false;
+            state.status = "正在准备所选内容…".into();
+            state.changed();
+        }
+        _ if !state.open => {}
+        LibraryAction::Back => {
+            state.narrow_detail = false;
+            state.changed();
+        }
+        LibraryAction::Tab(tab) => {
+            state.tab = tab;
+            state.special_only = false;
+            state.related_fixture = None;
+            state.picker_open = false;
+            state.search_focus = false;
+            state.status.clear();
+            state.reset_browse();
+        }
+        LibraryAction::SetScope(scope) => {
+            if scope == Scope::Here && state.mode == ExperienceMode::Independent {
+                state.mode = ExperienceMode::CurrentScene;
+            }
+            state.scope = scope;
+            state.reset_browse();
+        }
+        LibraryAction::SetMode(mode) => {
+            state.mode = mode;
+            state.scope = if mode == ExperienceMode::Independent {
+                Scope::All
+            } else {
+                Scope::Here
+            };
+            state.status.clear();
+            state.reset_browse();
+        }
+        LibraryAction::SpecialFilter => {
+            state.special_only = !state.special_only;
+            state.reset_browse();
+        }
+        LibraryAction::CharacterPicker => {
+            state.picker_open = !state.picker_open;
+            state.search_focus = false;
+            state.changed();
+        }
+        LibraryAction::SetCharacter(unit) => {
+            state.character = unit;
+            state.picker_open = false;
+            state.reset_browse();
+        }
+        LibraryAction::DismissPicker => {
+            state.picker_open = false;
+            state.changed();
+        }
+        LibraryAction::ClearRelated => {
+            state.related_fixture = None;
+            state.reset_browse();
+        }
+        LibraryAction::RelatedActivities(id) => {
+            state.tab = LibraryTab::Activities;
+            state.related_fixture = Some(id);
+            state.scope = Scope::All;
+            state.special_only = false;
+            state.character = None;
+            state.search.clear();
+            state.search_cursor = 0;
+            state.reset_browse();
+        }
+        LibraryAction::RelatedStory(id) => {
+            state.tab = LibraryTab::Performances;
+            state.related_fixture = None;
+            state.scope = Scope::All;
+            state.special_only = false;
+            state.character = None;
+            state.search = format!("#{id}");
+            state.search_cursor = state.search.chars().count();
+            state.reset_browse();
+        }
+        LibraryAction::Related(id) => {
+            state.tab = LibraryTab::Performances;
+            state.related_fixture = Some(id);
+            state.scope = Scope::All;
+            state.special_only = false;
+            state.character = None;
+            state.search.clear();
+            state.search_cursor = 0;
+            state.reset_browse();
+        }
+        LibraryAction::FocusSearch => {
+            state.search_focus = true;
+            state.search_cursor = state.search.chars().count();
+            state.select_all = false;
+            state.changed();
+        }
+        LibraryAction::ClearSearch => {
+            state.search.clear();
+            state.search_cursor = 0;
+            state.ime_preedit.clear();
+            state.search_focus = true;
+            state.reset_browse();
+        }
+        LibraryAction::Select(key) => {
+            if state.filtered.contains(&key) {
+                if state.selected != Some(key) {
+                    state.selected_uid = None;
+                }
+                state.selected = Some(key);
+                state.narrow_detail = true;
+                state.search_focus = false;
+                state.status.clear();
+                state.changed();
+            }
+        }
+        LibraryAction::PreviousPage => {
+            let next = state.offset.saturating_sub(state.page_size);
+            state.select_index(next);
+        }
+        LibraryAction::NextPage => {
+            let next = (state.offset + state.page_size).min(state.filtered.len().saturating_sub(1));
+            state.select_index(next);
+        }
+        LibraryAction::PreviousInstance | LibraryAction::NextInstance => {
+            if let Some(key) = state.selected {
+                let targets = context::instances_for(key, catalog, world);
+                if !targets.is_empty() {
+                    let index = targets
+                        .iter()
+                        .position(|row| {
+                            Some(row.target.uid.as_str()) == state.selected_uid.as_deref()
+                        })
+                        .unwrap_or(0);
+                    let next = if action == LibraryAction::PreviousInstance {
+                        (index + targets.len() - 1) % targets.len()
+                    } else {
+                        (index + 1) % targets.len()
+                    };
+                    state.selected_uid = Some(targets[next].target.uid.clone());
+                    state.changed();
+                }
+            }
+        }
+        _ => {}
     }
 }
 fn cancel(io: &mut LibraryInput) {

@@ -38,7 +38,9 @@ impl WalkFace {
 
     /// 种子落座：无条件吸到最近面点（出生点与换站落位必须站在面内）。
     pub(crate) fn seat(&self, x: f32, z: f32) -> (f32, f32) {
-        let q = self.field.nearest_walkable([x, z], None)
+        let q = self
+            .field
+            .nearest_walkable([x, z], None)
             .expect("可行走场没有出生点");
         (q[0], q[1])
     }
@@ -58,7 +60,9 @@ impl WalkFace {
         self.generation
     }
 
-    pub(crate) fn layout_revision(&self) -> u64 { self.layout_revision }
+    pub(crate) fn layout_revision(&self) -> u64 {
+        self.layout_revision
+    }
 
     pub fn sample(&self, p: [f32; 2], tolerance: f32) -> Option<[f32; 2]> {
         self.field.nearest_walkable(p, Some(tolerance))
@@ -110,7 +114,9 @@ pub(crate) fn build(
     let Some(placements) = placements else {
         return;
     };
-    if placements.site_id() == 0 { return; }
+    if placements.site_id() == 0 {
+        return;
+    }
     let Some(tris) = collect_tris(&meshes, &handles, &parts) else {
         return; // 场景未展开完，下一帧再试
     };
@@ -126,16 +132,16 @@ pub(crate) fn build(
         obstacles,
         voxel,
     });
-    let (min, max) = tris
-        .iter()
-        .flatten()
-        .fold(([f32::MAX; 2], [-f32::MAX; 2]), |(mut min, mut max), p| {
-            min[0] = min[0].min(p[0]);
-            min[1] = min[1].min(p[1]);
-            max[0] = max[0].max(p[0]);
-            max[1] = max[1].max(p[1]);
-            (min, max)
-        });
+    let (min, max) =
+        tris.iter()
+            .flatten()
+            .fold(([f32::MAX; 2], [-f32::MAX; 2]), |(mut min, mut max), p| {
+                min[0] = min[0].min(p[0]);
+                min[1] = min[1].min(p[1]);
+                max[0] = max[0].max(p[0]);
+                max[1] = max[1].max(p[1]);
+                (min, max)
+            });
     info!(
         "[walk-face] 约束面就绪：三角 {}，x [{:.1},{:.1}] z [{:.1},{:.1}]",
         tris.len(),
@@ -145,8 +151,11 @@ pub(crate) fn build(
         max[1]
     );
     log_bake("烘好", &field, n_obstacles);
-    commands.insert_resource(WalkFace { field: Arc::new(field), generation: 1,
-        layout_revision: revision.0 });
+    commands.insert_resource(WalkFace {
+        field: Arc::new(field),
+        generation: 1,
+        layout_revision: revision.0,
+    });
 }
 
 /// 放稳行变化即重烘；会话撤销时同时撤销增量洞，保存事件仍驱动同一入口。
@@ -172,7 +181,11 @@ pub(crate) fn rebake_on_save(
     // Keep the same request alive when meshes/site/face are not ready. The
     // old code consumed LayoutSaved and updated CarvedRows before returning,
     // making the next frame look unchanged and dropping the needed bake.
-    *pending |= saved_now || !(unchanged || (carved.is_none() && current.is_empty()));
+    *pending |= saved_now
+        || !(unchanged || (carved.is_none() && current.is_empty()))
+        || face
+            .as_deref()
+            .is_some_and(|face| face.layout_revision != revision.0);
     if !*pending {
         return;
     }
@@ -264,8 +277,12 @@ fn collect_tris(
             .indices()
             .map(|indices| indices.iter().collect::<Vec<_>>());
         let triples = match &index {
-            Some(list) => (0..list.len() / 3).map(|i| [list[i * 3], list[i * 3 + 1], list[i * 3 + 2]]).collect::<Vec<_>>(),
-            None => (0..count / 3).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect::<Vec<_>>(),
+            Some(list) => (0..list.len() / 3)
+                .map(|i| [list[i * 3], list[i * 3 + 1], list[i * 3 + 2]])
+                .collect::<Vec<_>>(),
+            None => (0..count / 3)
+                .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
+                .collect::<Vec<_>>(),
         };
         for [a, b, c] in triples {
             let (va, vb, vc) = (world(a), world(b), world(c));
@@ -292,11 +309,7 @@ fn site_voxel(site: &SiteActive) -> f32 {
 
 /// 阻挡足迹全集：摆放底数行 + 台账行，一律过参与门（低高度过滤的 2D
 /// 投影——墙位/高台位/平铺类出局）。
-fn obstacle_set(
-    placements: &FixturePlacements,
-    ledger: &[CarvedRow],
-    voxel: f32,
-) -> Vec<Obstacle> {
+fn obstacle_set(placements: &FixturePlacements, ledger: &[CarvedRow], voxel: f32) -> Vec<Obstacle> {
     placements
         .occupancy_rows()
         .iter()

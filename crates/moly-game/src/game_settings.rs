@@ -139,6 +139,13 @@ pub(crate) fn scene_input_enabled(
     !panel.blocks_world_input() && !library.blocks_world_input()
 }
 
+pub(crate) fn camera_input_enabled(
+    panel: Res<SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
+) -> bool {
+    !panel.blocks_world_input() && !library.blocks_camera_input()
+}
+
 pub(crate) fn talk_input_enabled(
     panel: Res<SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,

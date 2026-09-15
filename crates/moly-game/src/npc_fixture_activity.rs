@@ -8,6 +8,7 @@
 //! post-sample geometry test. A real shared NavMesh producer remains separate.
 
 mod areas;
+pub(crate) mod preview;
 pub(crate) use areas::NpcFixtureAreas;
 
 use std::collections::HashMap;
@@ -18,15 +19,17 @@ use moly_law::{
     fixture::position::layout_type,
     objective::TalkType,
     path::{
-        NpcPathWalkSlot, WaypointDraw, angle_between, heading_yaw, make_positive_yaw, rotate_time,
-        turn_angle, turn_motion,
+        angle_between, heading_yaw, make_positive_yaw, rotate_time, turn_angle, turn_motion,
+        NpcPathWalkSlot, WaypointDraw,
     },
 };
 
 use crate::{
     character::MotionDriver,
     fixture::{FixturePlacements, FixtureRoot},
-    fixture_activity_data::{ActivityTimeline, FixtureActivityTables, NoTalkVisualRow, PutType},
+    fixture_activity_data::{
+        ActivityKey, ActivityOrigin, ActivitySpec, ActivityTimeline, FixtureActivityTables, PutType,
+    },
     fixture_activity_provider::{FixtureActivityProvider, SourceFixtureViewLocalY},
     fixture_activity_state::{
         FixtureActivityIdentity, FixtureActivityOwner, FixtureActivityReservations, FixtureTarget,
@@ -64,7 +67,8 @@ pub(crate) struct Selection {
     pub target: FixtureTarget,
     identity: FixtureActivityIdentity,
     site_epoch: u64,
-    action: NoTalkVisualRow,
+    source: ActivityKey,
+    tweet: Option<moly_law::talk::TweetRef>,
     timeline: ActivityTimeline,
     point: i32,
     locate_index: usize,
@@ -105,6 +109,9 @@ struct Session {
     animator: Option<Entity>,
     previous_enable_talk: bool,
     last_pending: Option<String>,
+    preview_ticket: Option<u64>,
+    waiting_seconds: f32,
+    tweet_issued: bool,
 }
 
 #[derive(Resource, Default)]
@@ -118,6 +125,7 @@ pub(crate) struct NpcFixtureActivities {
 pub(crate) struct Factory<'w, 's> {
     editor: Res<'w, crate::fixture_edit::EditSessionActive>,
     tables: Option<Res<'w, FixtureActivityTables>>,
+    scripts: Option<Res<'w, crate::talk::TalkStore>>,
     points: Option<Res<'w, AttachPoints>>,
     inputs: Option<Res<'w, FixtureSceneSupply>>,
     areas: Res<'w, NpcFixtureAreas>,
@@ -163,8 +171,73 @@ impl Factory<'_, '_> {
         face: &ObjectiveFace,
         rng: &mut MemberRng,
     ) -> Result<Option<Selection>, String> {
+        self.select_internal(
+            actor,
+            unit,
+            site_type,
+            epoch,
+            from,
+            placements,
+            other_targets,
+            face,
+            rng,
+            None,
+        )
+    }
+
+    pub(crate) fn select_exact(
+        &self,
+        key: ActivityKey,
+        target: &FixtureTarget,
+        actor: Entity,
+        unit: u32,
+        site_type: &str,
+        epoch: u64,
+        from: [f32; 3],
+        placements: &FixturePlacements,
+        other_targets: &[(Entity, Option<Entity>)],
+        face: &ObjectiveFace,
+        rng: &mut MemberRng,
+    ) -> Result<Option<Selection>, String> {
+        let tables = self.tables.as_deref().ok_or("角色互动主表尚未载入")?;
+        let scripts = self.scripts.as_deref().ok_or("家具前置演出主表尚未载入")?;
+        let spec = tables
+            .resolve_activity(key, scripts)
+            .ok_or("所选互动的原始演员、家具或动作关系不可用")?;
+        if spec.unit != unit {
+            return Err("所选互动的演员身份已经变化".into());
+        }
+        self.select_internal(
+            actor,
+            unit,
+            site_type,
+            epoch,
+            from,
+            placements,
+            other_targets,
+            face,
+            rng,
+            Some((&spec, target)),
+        )
+    }
+
+    fn select_internal(
+        &self,
+        actor: Entity,
+        unit: u32,
+        site_type: &str,
+        epoch: u64,
+        from: [f32; 3],
+        placements: &FixturePlacements,
+        other_targets: &[(Entity, Option<Entity>)],
+        face: &ObjectiveFace,
+        rng: &mut MemberRng,
+        exact: Option<(&ActivitySpec, &FixtureTarget)>,
+    ) -> Result<Option<Selection>, String> {
         if self.editor.is_active() {
-            return Err("the layout editor owns fixture mutation; no new activity is admitted".into());
+            return Err(
+                "the layout editor owns fixture mutation; no new activity is admitted".into(),
+            );
         }
         let tables = self
             .tables
@@ -212,16 +285,53 @@ impl Factory<'_, '_> {
             }
             instances.push((*entity, *identity, *world, row));
         }
-        let source_rows = tables.no_talk_rows();
-        // Same host RNG adaptation already used for OrderBy(Guid.NewGuid()).
-        // One key per source row BEFORE unit filtering; do not retry/re-draw
-        // the chosen row every frame while its resources load.
-        let mut order: Vec<_> = (0..source_rows.len())
-            .map(|index| (rng.next(), index))
-            .collect();
-        order.sort_by_key(|&(key, _)| key);
-        for (_, index) in order {
-            let action = &source_rows[index];
+        // A projection, not a fabricated row in the NoTalk source table.
+        // Exact pre-actions retain their own origin and authored tweet.
+        struct Candidate {
+            origin: ActivityOrigin,
+            unit: u32,
+            fixture_id: i32,
+            group_id: i32,
+            point: Option<i32>,
+            timeline_id: Option<i32>,
+            tweet: Option<moly_law::talk::TweetRef>,
+        }
+        let mut order: Vec<(u64, Candidate)> = if let Some((spec, _)) = exact {
+            vec![(
+                0,
+                Candidate {
+                    origin: spec.key.origin,
+                    unit: spec.unit,
+                    fixture_id: spec.fixture_id,
+                    group_id: spec.timeline.group_id,
+                    point: Some(spec.point),
+                    timeline_id: Some(spec.timeline.id),
+                    tweet: spec.tweet.clone(),
+                },
+            )]
+        } else {
+            // Preserve the natural source permutation and draw count.
+            tables
+                .no_talk_rows()
+                .iter()
+                .map(|row| {
+                    (
+                        rng.next(),
+                        Candidate {
+                            origin: ActivityOrigin::NoTalk(row.id),
+                            unit: row.unit,
+                            fixture_id: row.fixture_id,
+                            group_id: row.timeline_group_id,
+                            point: None,
+                            timeline_id: None,
+                            tweet: None,
+                        },
+                    )
+                })
+                .collect()
+        };
+        order.sort_by_key(|(key, _)| *key);
+        for (_, action) in order {
             if action.unit != unit {
                 continue;
             }
@@ -233,18 +343,24 @@ impl Factory<'_, '_> {
             {
                 continue;
             }
-            let group: Vec<_> = tables.timeline_rows(action.timeline_group_id).collect();
+            let group: Vec<_> = tables.timeline_rows(action.group_id).collect();
             let Some(first) = group.first() else {
                 return Err(format!(
                     "source action {} has no timeline group {}",
-                    action.id, action.timeline_group_id
+                    match action.origin {
+                        ActivityOrigin::NoTalk(id) | ActivityOrigin::PreAction(id) => id,
+                    },
+                    action.group_id
                 ));
             };
             // Source factory computes locators from FirstOrDefault(group),
             // then independently RandomPick(group) for the actual director.
-            let point = tables
-                .no_talk_point(unit, first)
-                .map_err(|error| format!("action {} locator: {error:?}", action.id))?;
+            let point = match action.point {
+                Some(point) => point,
+                None => tables
+                    .no_talk_point(unit, first)
+                    .map_err(|error| format!("action {:?} locator: {error:?}", action.origin))?,
+            };
             for (entity, identity, fixture_world, row) in &instances {
                 if identity.master_id != action.fixture_id {
                     continue;
@@ -253,6 +369,9 @@ impl Factory<'_, '_> {
                     entity: *entity,
                     uid: identity.uid.clone(),
                 };
+                if exact.is_some_and(|(_, selected)| selected != &target) {
+                    continue;
+                }
                 if self.reservations.npc_target_in_use(&target)
                     || other_targets
                         .iter()
@@ -338,14 +457,26 @@ impl Factory<'_, '_> {
                 {
                     continue;
                 }
-                let timeline = (*group[rng.index(group.len())]).clone();
+                let timeline = if let Some(id) = action.timeline_id {
+                    (**group
+                        .iter()
+                        .find(|timeline| timeline.id == id)
+                        .ok_or("所选动作已不在原始 Timeline 组中")?)
+                    .clone()
+                } else {
+                    (*group[rng.index(group.len())]).clone()
+                };
                 return Ok(Some(Selection {
                     actor,
                     unit,
                     target,
                     identity: (*identity).clone(),
                     site_epoch: epoch,
-                    action: action.clone(),
+                    source: ActivityKey {
+                        origin: action.origin,
+                        timeline_id: timeline.id,
+                    },
+                    tweet: action.tweet.clone(),
                     timeline,
                     point,
                     locate_index,
@@ -382,7 +513,7 @@ impl Factory<'_, '_> {
         info!(
             "[npc-fixture] unit={} selected action={} fixture={:?}/{} locator={}/slot={} timeline={} (WalkField approach remains approximate)",
             selection.unit,
-            selection.action.id,
+            selection.source.source_id(),
             selection.target.entity,
             selection.target.uid,
             selection.locate_index,
@@ -400,6 +531,9 @@ impl Factory<'_, '_> {
                 animator: None,
                 previous_enable_talk: enable_talk,
                 last_pending: None,
+                preview_ticket: None,
+                waiting_seconds: 0.,
+                tweet_issued: false,
             },
         );
         true
@@ -409,8 +543,12 @@ impl Factory<'_, '_> {
 /// Runs after the ordinary movement system and before the shared timeline.
 /// An Arrived result transfers ownership; it is not objective completion.
 pub(crate) fn advance(world: &mut World) {
-    if world.get_resource::<crate::fixture_edit::EditSessionActive>()
-        .is_some_and(|editor| editor.is_active()) { return; }
+    if world
+        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .is_some_and(|editor| editor.is_active())
+    {
+        return;
+    }
     let Some(mut runtime) = world.remove_resource::<NpcFixtureActivities>() else {
         return;
     };
@@ -432,13 +570,16 @@ pub(crate) fn advance(world: &mut World) {
         match result {
             Ok(true) => dispose(world, session, false, true),
             Ok(false) => {
+                preview::record_progress(world, &mut session);
                 runtime.sessions.insert(actor, session);
             }
             Err(reason) => {
                 warn!(
                     "[npc-fixture] unit={} action={} cancelled: {reason}",
-                    session.selection.unit, session.selection.action.id
+                    session.selection.unit,
+                    session.selection.source.source_id()
                 );
+                preview::record_failure(world, &session, reason);
                 dispose(world, session, false, false);
             }
         }
@@ -455,6 +596,18 @@ fn tick(
     session: &mut Session,
 ) -> Result<bool, String> {
     let actor = session.owner.actor;
+    if matches!(session.phase, Phase::Approaching | Phase::Preparing) {
+        session.waiting_seconds += world.resource::<Time>().delta_secs();
+        if session.waiting_seconds > 120. {
+            return Err(format!(
+                "角色互动准备未完成：{}",
+                session
+                    .last_pending
+                    .as_deref()
+                    .unwrap_or("角色未能走到家具动作点")
+            ));
+        }
+    }
     let selection = &session.selection;
     if world
         .get_resource::<GroundEpoch>()
@@ -527,7 +680,7 @@ fn tick(
                 session.phase = Phase::Preparing;
                 info!(
                     "[npc-fixture] unit={} arrived at action {}; preparing its exact source timeline",
-                    selection.unit, selection.action.id
+                    selection.unit, selection.source.source_id()
                 );
             }
         }
@@ -542,8 +695,12 @@ fn tick(
         let Some(provider) = provider else {
             return pending(session, "shared activity provider is not initialized");
         };
-        if let Err(reason) = prepare(world, provider, session) {
-            return pending(session, &reason);
+        if let Err(issue) = prepare(world, provider, session) {
+            let reason = format!("{}: {}", issue.stage, issue.reason);
+            if issue.retryable {
+                return pending(session, &reason);
+            }
+            return Err(reason);
         }
         let request = session
             .request
@@ -574,7 +731,7 @@ fn tick(
         info!(
             "[npc-fixture] unit={} start action={} timeline={} target={:?}/{}",
             session.selection.unit,
-            session.selection.action.id,
+            session.selection.source.source_id(),
             session.selection.timeline.id,
             target.entity,
             target.uid
@@ -672,7 +829,8 @@ fn pending(session: &mut Session, reason: &str) -> Result<bool, String> {
     if session.last_pending.as_deref() != Some(reason) {
         info!(
             "[npc-fixture] unit={} action={} preparation pending: {reason}",
-            session.selection.unit, session.selection.action.id
+            session.selection.unit,
+            session.selection.source.source_id()
         );
         session.last_pending = Some(reason.into());
     }
@@ -683,7 +841,7 @@ fn prepare(
     world: &mut World,
     provider: &mut FixtureActivityProvider,
     session: &mut Session,
-) -> Result<(), String> {
+) -> Result<(), crate::fixture_activity_provider::ProviderPending> {
     let selection = &session.selection;
     let view_y = world
         .get::<SourceFixtureViewLocalY>(selection.target.entity)
@@ -703,9 +861,7 @@ fn prepare(
         return Err("selected NPC body generation changed".into());
     }
     if session.request.is_none() {
-        let definition = provider
-            .definition(world, &package, &prefab)
-            .map_err(|error| format!("{}: {}", error.stage, error.reason))?;
+        let definition = provider.definition(world, &package, &prefab)?;
         session.request = Some(StartTimeline {
             owner: TimelineOwner {
                 activity: session.owner,
@@ -722,9 +878,7 @@ fn prepare(
         });
     }
     let request = session.request.as_mut().expect("installed request");
-    provider
-        .prepare_bindings(world, request, selection.unit, animator, graph)
-        .map_err(|error| format!("{}: {}", error.stage, error.reason))?;
+    provider.prepare_bindings(world, request, selection.unit, animator, graph)?;
     if !request
         .bindings
         .animations
@@ -733,7 +887,13 @@ fn prepare(
     {
         return Err("source-selected NPC timeline has no actual body binding".into());
     }
-    fixture_activity_timeline::validate_start(world, request).map_err(|error| error.to_string())?;
+    fixture_activity_timeline::validate_start(world, request).map_err(|error| {
+        crate::fixture_activity_provider::ProviderPending {
+            stage: "live-binding-preflight",
+            reason: error.to_string(),
+            retryable: error.retryable,
+        }
+    })?;
     session.animator = Some(animator);
     Ok(())
 }
@@ -818,6 +978,8 @@ fn release_animation_lease(world: &mut World, session: &Session) {
 }
 
 fn dispose(world: &mut World, session: Session, site_changed: bool, completed: bool) {
+    preview::record_disposed(world, &session, completed);
+    crate::balloon::cancel_activity_balloon(world, session.owner);
     let actor = session.owner.actor;
     if let Some(token) = session.token {
         if let Some(mut timelines) = world.get_resource_mut::<FixtureActivityTimelines>() {
@@ -893,7 +1055,7 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
         );
         info!(
             "[npc-fixture] unit={} action={} disposed completed={completed}; instance/slot leases released",
-            unit.0, session.selection.action.id
+            unit.0, session.selection.source.source_id()
         );
     }
 }
@@ -914,8 +1076,11 @@ fn cancel_runtime(world: &mut World, site_changed: bool) {
         return;
     };
     for (actor, session) in std::mem::take(&mut runtime.sessions) {
-        if !site_changed && world.get::<NpcActions>(actor)
-            .is_some_and(|actions| actions.current == NpcAction::Talk) {
+        if !site_changed
+            && world
+                .get::<NpcActions>(actor)
+                .is_some_and(|actions| actions.current == NpcAction::Talk)
+        {
             // Presenter.IsEnabledCancelCondition refuses Talk(4). Hiding the
             // actor does not authorize releasing another talk owner's leases.
             runtime.sessions.insert(actor, session);

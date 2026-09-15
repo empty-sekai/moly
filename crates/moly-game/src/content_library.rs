@@ -34,7 +34,11 @@ use moly_law::talk::{
 };
 use std::collections::{HashMap, HashSet};
 
+mod capabilities;
+pub(crate) use capabilities::{load as load_capabilities, parse as parse_capabilities};
+mod activities;
 mod catalog;
+pub(crate) use activities::build_activity_catalog;
 mod context;
 mod input;
 mod playback;
@@ -62,6 +66,7 @@ pub(crate) enum LibraryTab {
     Conversations,
     Furniture,
     Performances,
+    Activities,
 }
 impl LibraryTab {
     fn title(self) -> &'static str {
@@ -69,6 +74,7 @@ impl LibraryTab {
             Self::Conversations => "对话",
             Self::Furniture => "家具",
             Self::Performances => "家具故事",
+            Self::Activities => "角色互动",
         }
     }
 }
@@ -89,6 +95,7 @@ pub(crate) enum ExperienceMode {
 pub(crate) enum EntryKey {
     Talk(TalkBackend, i32),
     Fixture(i32),
+    Activity(crate::fixture_activity_data::ActivityKey),
 }
 #[derive(Clone, Debug)]
 struct DialogueLine {
@@ -129,6 +136,19 @@ struct FixtureSource {
     layout: u8,
     center_y: i8,
 }
+#[derive(Clone, Debug, Default)]
+enum FixturePresentation {
+    #[default]
+    Model,
+    Surface {
+        skin: String,
+        wall: bool,
+        available: bool,
+    },
+    Custom {
+        ornament: String,
+    },
+}
 #[derive(Clone)]
 struct LibraryFixture {
     id: i32,
@@ -138,9 +158,22 @@ struct LibraryFixture {
     search: String,
     thumbnail: Option<Handle<Image>>,
     source: Option<FixtureSource>,
+    presentation: FixturePresentation,
 }
 impl LibraryFixture {
+    fn available_for_preview(&self) -> bool {
+        match &self.presentation {
+            FixturePresentation::Surface { available, .. } => *available,
+            _ => self.source.as_ref().is_some_and(|source| source.exported),
+        }
+    }
     fn action_label(&self) -> &'static str {
+        if let FixturePresentation::Surface { wall, .. } = self.presentation {
+            return if wall { "墙面外观" } else { "地板外观" };
+        }
+        if matches!(self.presentation, FixturePresentation::Custom { .. }) {
+            return "自定义展示家具";
+        }
         match self.action.as_str() {
             "timeline" => "角色互动",
             "loop" => "持续互动",
@@ -165,6 +198,8 @@ pub(crate) struct LibraryFont(Handle<Font>);
 #[derive(Resource, Default)]
 pub(crate) struct LibraryCatalog {
     talks: Vec<LibraryTalk>,
+    activities: Vec<activities::LibraryActivity>,
+    activities_ready: bool,
     fixtures: Vec<LibraryFixture>,
     character_names: HashMap<u32, String>,
     character_colors: HashMap<u32, String>,
@@ -197,6 +232,10 @@ impl LibraryCatalog {
     fn title(&self, key: EntryKey) -> String {
         match key {
             EntryKey::Fixture(id) => self.fixture_name(id),
+            EntryKey::Activity(key) => self
+                .activity(key)
+                .map(|row| row.title.clone())
+                .unwrap_or_else(|| "角色互动".into()),
             _ => self
                 .talk(key)
                 .map(|row| row.title.clone())
@@ -240,6 +279,9 @@ struct ActiveChoice {
 pub(crate) struct ContentLibrary {
     pub(crate) open: bool,
     watching: bool,
+    // Scene ownership outlives closing the catalogue until rollback completes.
+    scene_owned: bool,
+    last_error: Option<String>,
     tab: LibraryTab,
     scope: Scope,
     mode: ExperienceMode,
@@ -273,6 +315,8 @@ impl Default for ContentLibrary {
         Self {
             open: false,
             watching: false,
+            scene_owned: false,
+            last_error: None,
             tab: LibraryTab::default(),
             scope: Scope::All,
             mode: ExperienceMode::default(),
@@ -305,11 +349,43 @@ impl Default for ContentLibrary {
 }
 impl ContentLibrary {
     pub(crate) fn blocks_world_input(&self) -> bool {
-        self.open || self.watching || self.release_guard != 0
+        self.open
+            || self.watching
+            || self.active.is_some()
+            || self.pending.is_some()
+            || self.scene_owned
+            || self.release_guard != 0
+    }
+    /// Viewing an NPC performance owns only its actors and furniture. The
+    /// spectator remains a normal player; admission/rollback and every other
+    /// interaction remain protected by the original world-input gate.
+    pub(crate) fn blocks_exploration_input(&self) -> bool {
+        if self.open || self.release_guard != 0 || self.stopping || self.pending.is_some() {
+            return true;
+        }
+        if self.active.as_ref().is_some_and(|active| {
+            active.started
+                && (matches!(active.choice.key, EntryKey::Activity(_)) || active.static_view)
+        }) {
+            return false;
+        }
+        self.blocks_world_input()
+    }
+    pub(crate) fn blocks_camera_input(&self) -> bool {
+        if self.active.as_ref().is_some_and(|active| {
+            active.started && matches!(active.choice.key, EntryKey::Talk(_, _))
+        }) {
+            return self.open || self.release_guard != 0 || self.stopping || self.pending.is_some();
+        }
+        self.blocks_exploration_input()
     }
     pub(crate) fn blocks_talk_input(&self) -> bool {
         self.open || self.release_guard != 0
     }
+    pub(crate) fn owns_scene(&self) -> bool {
+        self.scene_owned
+    }
+
     fn changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -378,6 +454,8 @@ pub(crate) enum LibraryAction {
     SetCharacter(Option<u32>),
     ClearRelated,
     Related(i32),
+    RelatedActivities(i32),
+    RelatedStory(i32),
     FocusSearch,
     ClearSearch,
     Select(EntryKey),
@@ -454,6 +532,7 @@ struct DetailArtwork;
 
 pub(crate) fn install(app: &mut App) {
     input::install(app);
+    capabilities::install(app);
     app.init_resource::<ContentLibrary>()
         .init_resource::<LibraryCatalog>()
         .init_resource::<LibraryContext>()

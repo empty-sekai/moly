@@ -1,5 +1,6 @@
 //! Admission and transport state. Script execution remains in its original owner.
 use super::*;
+use crate::npc_fixture_activity::preview::{PreviewPhase, PreviewRecord};
 use crate::player_talk::{PlayerTalkLedger, PlayerTalkOutcome};
 
 #[allow(clippy::too_many_arguments)]
@@ -40,6 +41,9 @@ pub(crate) fn dispatch(
             identity.uid == target.uid
                 && match choice.key {
                     EntryKey::Fixture(id) => identity.master_id == id,
+                    EntryKey::Activity(id) => catalog
+                        .activity(id)
+                        .is_some_and(|row| row.spec.fixture_id == identity.master_id),
                     _ => catalog
                         .talk(choice.key)
                         .is_some_and(|row| row.fixture_ids.contains(&identity.master_id)),
@@ -73,6 +77,16 @@ pub(crate) fn dispatch(
         return;
     }
     match choice.key {
+        EntryKey::Activity(key) => {
+            let Some(target) = choice.target.clone() else {
+                fail(&mut state, "所选角色互动需要一个真实家具实例");
+                return;
+            };
+            let ticket = choice.ticket;
+            commands.queue(move |world: &mut World| {
+                crate::npc_fixture_activity::preview::start(world, key, target, ticket);
+            });
+        }
         EntryKey::Talk(_, _) => {
             let Some(row) = catalog.talk(choice.key) else {
                 fail(&mut state, "所选对话已不在图鉴中");
@@ -141,6 +155,12 @@ pub(crate) fn dispatch(
                     fixtures.write(request);
                 }
                 Some(PlayerFixtureAvailability::Pending(error)) => {
+                    if choice.mode == ExperienceMode::Independent {
+                        state.status =
+                            format!("正在准备家具互动：{}", human_preparation_error(error));
+                        state.last_error = Some(human_preparation_error(error));
+                        return;
+                    }
                     fail(&mut state, &human_preparation_error(error));
                     return;
                 }
@@ -149,6 +169,10 @@ pub(crate) fn dispatch(
                     return;
                 }
                 None => {
+                    if choice.mode == ExperienceMode::Independent {
+                        state.status = "正在等待家具互动资源就绪…".into();
+                        return;
+                    }
                     fail(&mut state, "家具互动资源正在准备，请稍候");
                     return;
                 }
@@ -161,6 +185,7 @@ pub(crate) fn dispatch(
         choice.key,
         choice.target.as_ref().map(|target| &target.uid)
     );
+    state.last_error = None;
     state.active = Some(ActiveChoice {
         choice,
         title,
@@ -185,14 +210,18 @@ pub(crate) fn observe_start(
     mut cancel: MessageWriter<TalkCancelRequest>,
     mut fixtures: MessageWriter<PlayerFixtureRequest>,
     gimmicks: Res<crate::fixture_gimmick::Gimmicks>,
+    activity: Option<Res<PreviewRecord>>,
 ) {
     let effect_running = state
         .active
         .as_ref()
         .and_then(|active| active.effect_owner)
         .is_some_and(|owner| crate::fixture_gimmick::session::active(&gimmicks, owner));
-    let busy =
-        player_session.is_some() || pair_session.is_some() || runtime.active() || effect_running;
+    let busy = player_session.is_some()
+        || pair_session.is_some()
+        || runtime.active()
+        || effect_running
+        || activity.as_ref().is_some_and(|record| record.active());
     if state.stopping {
         if !busy && state.cleanup_frames == 0 {
             state.active = None;
@@ -211,7 +240,25 @@ pub(crate) fn observe_start(
         state.active = Some(active);
         return;
     }
+    if let EntryKey::Activity(key) = active.choice.key {
+        if let Some(record) = activity
+            .as_ref()
+            .filter(|record| record.ticket == active.choice.ticket && record.key == key)
+        {
+            if record.phase == PreviewPhase::Failed {
+                let reason = record.error.as_deref().unwrap_or("原始角色互动资源不可用");
+                fail(&mut state, &format!("角色互动无法完成：{reason}"));
+                return;
+            }
+            if record.active() {
+                state.status = record.label().into();
+            }
+        }
+    }
     let running = match active.choice.key {
+        EntryKey::Activity(key) => activity.as_ref().is_some_and(|record| {
+            record.ticket == active.choice.ticket && record.key == key && record.active()
+        }),
         EntryKey::Talk(TalkBackend::General, id) => player_session
             .as_ref()
             .is_some_and(|session| session.talk_id() == id),
@@ -276,7 +323,7 @@ pub(crate) fn observe_start(
             state.status = "播放中".into();
             state.changed();
             info!("[content-library] started {:?}", active.choice.key);
-        } else if active.elapsed >= 8. {
+        } else if active.elapsed >= 20. {
             cancel.write(TalkCancelRequest);
             fixtures.write(PlayerFixtureRequest::Cancel(
                 PlayerFixtureCancelReason::User,
@@ -297,14 +344,76 @@ pub(crate) fn observe_start(
     state.active = Some(active);
 }
 pub(super) fn fail(state: &mut ContentLibrary, reason: &str) {
+    warn!("[content-library] preparation failed: {reason}");
+    let message = human_playback_failure(reason);
+    state.last_error = Some(message.clone());
     state.pending = None;
     state.active = None;
     state.stopping = false;
     state.open = true;
     state.watching = false;
     state.release_guard = 2;
-    state.status = reason.to_owned();
+    state.status = message;
     state.changed();
+}
+/// Runtime diagnostics stay in logs; both native and browser chrome present
+/// an actionable sentence instead of package paths, source keys or ECS types.
+pub(super) fn human_playback_failure(reason: &str) -> String {
+    let lower = reason.to_ascii_lowercase();
+    let contains = |tokens: &[&str]| tokens.iter().any(|token| lower.contains(token));
+    if contains(&["failed to fetch", "http", "network", "timed out", "timeout"])
+        || reason.contains("限定时间")
+        || reason.contains("准备未完成")
+    {
+        "所需资源暂时未能载入，请稍候重试。场景会自动恢复。".into()
+    } else if contains(&[
+        "actor-source-library",
+        "actor source clip",
+        "source-routed animation",
+        "actor animation",
+        "source animation",
+        "sourceclip",
+    ]) {
+        "这段互动所需的角色动作尚不可用，可以先欣赏其他内容。".into()
+    } else if contains(&["source se", "source-sounds", "audio", "sound"]) {
+        "这段演出的声音资源暂时不可用，请稍候重试。".into()
+    } else if contains(&["occupied", "reservation", "another", "replaced", "lease"])
+        || reason.contains("占用")
+    {
+        "角色或家具正在进行其他互动，请停止当前体验后重试。".into()
+    } else if contains(&[
+        "locator",
+        "endloc",
+        "approach",
+        "navigation",
+        "path slot",
+        "route owner",
+    ]) {
+        "角色暂时无法到达家具的互动位置，请重新选择家具后重试。".into()
+    } else if contains(&[
+        "timeline",
+        "prefab",
+        "json-",
+        "gltf",
+        "glb",
+        "source-",
+        "binding",
+        "animator",
+        "entity/uid",
+        "mat_wall_",
+        "mat_floor_",
+    ]) || reason.contains("assets/")
+        || reason.contains("moly://")
+    {
+        "这项内容的演出资源尚不完整，暂时无法播放。".into()
+    } else if reason
+        .chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+    {
+        reason.to_owned()
+    } else {
+        "这项内容暂时无法播放，请重新选择后再试。".into()
+    }
 }
 fn rejection_message(reason: &str) -> &str {
     if reason.contains("throttl") {
@@ -363,6 +472,19 @@ mod tests {
 #[derive(Component)]
 struct LibraryPreviewOwner;
 pub(crate) fn reap_preview_owners(world: &mut World) {
+    let retained = {
+        let state = world.resource::<ContentLibrary>();
+        if state.stopping || state.pending.is_some() {
+            None
+        } else {
+            state
+                .active
+                .as_ref()
+                .filter(|active| matches!(active.choice.key, EntryKey::Activity(_)))
+                .map(|active| active.choice.ticket)
+        }
+    };
+    crate::npc_fixture_activity::preview::reap(world, retained);
     let current = world
         .resource::<ContentLibrary>()
         .active
@@ -378,5 +500,32 @@ pub(crate) fn reap_preview_owners(world: &mut World) {
         if let Ok(entity) = world.get_entity_mut(owner) {
             entity.despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod user_failure_tests {
+    use super::*;
+    #[test]
+    fn technical_actor_failure_never_enters_product_status() {
+        let raw = "actor-source-library: unit 29, prefab assets/sekai/surprisebox.prefab: actor source clip is missing or ambiguous";
+        let mut state = ContentLibrary::default();
+        fail(&mut state, raw);
+        assert!(state.status.contains("角色动作"));
+        assert!(!state.status.contains("prefab"));
+        assert!(!state.last_error.as_ref().unwrap().contains("unit 29"));
+        assert!(state.active.is_none() && state.pending.is_none());
+    }
+    #[test]
+    fn user_context_errors_are_preserved_but_unknown_internal_errors_are_not() {
+        assert_eq!(
+            human_playback_failure("请先退出家具布局编辑，再开始独立体验"),
+            "请先退出家具布局编辑，再开始独立体验"
+        );
+        assert!(!human_playback_failure("fixture model matrix invariant X99").contains("X99"));
+        assert!(
+            human_playback_failure("Asset HTTP request failed for effects.json: TypeError")
+                .contains("载入")
+        );
     }
 }

@@ -143,6 +143,7 @@ impl ActivityAssets {
         world: &World,
         package: &str,
         clip_name: &str,
+        expected: &SourceAnimationEvidence,
     ) -> Result<Handle<AnimationClip>, ProviderPending> {
         let index = self.document(world, "fixture-models/index.json")?;
         let row = index
@@ -155,6 +156,9 @@ impl ActivityAssets {
                     format!("source package {package} is absent"),
                 )
             })?;
+        if package != expected.package {
+            validate_relocated_fixture_clip(row, clip_name, expected)?;
+        }
         let file = row.get("glb").and_then(Value::as_str).ok_or_else(|| {
             ProviderPending::new(
                 "fixture-source-catalog",
@@ -220,8 +224,21 @@ impl ActivityAssets {
                     SourceAnimationEvidence::from_clip_target(target).map_err(|error| {
                         ProviderPending::new("fixture-source-metadata", error.to_string())
                     })?;
+                // JP stores some fixture Transform clips in a Timeline
+                // AssetBundle. They are exported into the bound fixture's GLB;
+                // source package identity is evidence, never a guessed model path.
+                let model_package = world
+                    .get::<FixtureActivityIdentity>(request.fixture)
+                    .ok_or_else(|| {
+                        ProviderPending::new(
+                            "fixture-instance",
+                            "placed fixture identity is unavailable",
+                        )
+                    })?
+                    .model_package
+                    .clone();
                 let animation =
-                    self.source_fixture_clip(world, &target.target_package, &target.clip_name)?;
+                    self.source_fixture_clip(world, &model_package, &target.clip_name, &evidence)?;
                 let ids = {
                     let assets =
                         world
@@ -302,6 +319,72 @@ impl ActivityAssets {
         }
         request.bindings.animations.extend(bindings);
         Ok(())
+    }
+}
+
+fn validate_relocated_fixture_clip(
+    row: &Value,
+    clip_name: &str,
+    expected: &SourceAnimationEvidence,
+) -> Result<(), ProviderPending> {
+    let clips = row
+        .pointer("/animations/clips")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProviderPending::new(
+                "fixture-source-evidence",
+                "relocated clip has no exported identity ledger",
+            )
+        })?;
+    let matches: Vec<_> = clips
+        .iter()
+        .filter(|clip| {
+            clip["name"].as_str() == Some(clip_name)
+                && clip.pointer("/sourceClip/file").and_then(Value::as_str)
+                    == Some(expected.asset.file.as_str())
+                && clip.pointer("/sourceClip/pathId").and_then(Value::as_str)
+                    == Some(expected.asset.path_id.as_str())
+        })
+        .collect();
+    let [clip] = matches.as_slice() else {
+        return Err(ProviderPending::new(
+            "fixture-source-evidence",
+            "relocated clip does not uniquely match the authored source identity",
+        ));
+    };
+    if clip["sourceStartTime"].as_f64() != Some(expected.start_time)
+        || clip["sourceStopTime"].as_f64() != Some(expected.stop_time)
+        || clip["sourceLoopTime"].as_bool() != Some(expected.looping)
+    {
+        return Err(ProviderPending::new(
+            "fixture-source-evidence",
+            "relocated clip changed authored time bounds or loop state",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod relocated_clip_tests {
+    use super::*;
+    #[test]
+    fn external_fixture_clip_requires_exact_source_identity_and_time_domain() {
+        let expected = SourceAnimationEvidence {
+            package: "mysekai__fixture_timeline__bike".into(),
+            clip_name: "bike_L".into(),
+            asset: crate::fixture_activity_timeline::SourceAssetId {
+                file: "CAB-source".into(),
+                path_id: "7".into(),
+            },
+            start_time: 0.,
+            stop_time: 2.,
+            looping: true,
+        };
+        let mut row = serde_json::json!({"animations":{"clips":[{"name":"bike_L","sourceClip":{"file":"CAB-source","pathId":"7"},
+            "sourceStartTime":0.,"sourceStopTime":2.,"sourceLoopTime":true}]}});
+        assert!(validate_relocated_fixture_clip(&row, "bike_L", &expected).is_ok());
+        row["animations"]["clips"][0]["sourceClip"]["file"] = serde_json::json!("CAB-other");
+        assert!(validate_relocated_fixture_clip(&row, "bike_L", &expected).is_err());
     }
 }
 

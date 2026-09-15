@@ -6,6 +6,13 @@ pub(crate) struct QaDiagnostics<'w, 's> {
     window: Res<'w, crate::talk_window::TalkWindowState>,
     gimmicks: Res<'w, crate::fixture_gimmick::Gimmicks>,
     stage: Option<Res<'w, staging::ScenePreview>>,
+    site_scenes: Option<Res<'w, crate::site::SiteScenesReady>>,
+    appearance: Res<'w, crate::room_appearance::RoomAppearanceState>,
+    navigation: Option<Res<'w, crate::walk_face::WalkFace>>,
+    objective: Option<Res<'w, crate::npc_objective::ObjectiveFace>>,
+    layout_revision: Res<'w, crate::fixture::FixtureLayoutRevision>,
+    fixture_scenes: Option<Res<'w, crate::fixture::FixtureScenesReady>>,
+    fixture_materials: Option<Res<'w, crate::fixture_material::FixtureMaterialsSwapped>>,
     independent: Option<Res<'w, staging::IndependentSession>>,
     temporary_layout: Option<Res<'w, crate::fixture::TemporaryFixtureLayout>>,
     player: Query<
@@ -17,6 +24,9 @@ pub(crate) struct QaDiagnostics<'w, 's> {
     voices: Query<'w, 's, Entity, With<crate::audio::VoicePlaybackIdentity>>,
     sounds: Query<'w, 's, Entity, With<crate::audio::ScopedSe>>,
     control: Option<Res<'w, crate::player_fixture_action::PlayerFixtureControlOwner>>,
+    activity: Option<Res<'w, crate::npc_fixture_activity::preview::PreviewRecord>>,
+    activity_bubbles: Query<'w, 's, Entity, With<crate::balloon::ActivityBalloon>>,
+    harvests: Query<'w, 's, Entity, With<crate::harvest::HarvestObject>>,
 }
 #[derive(Default)]
 pub(crate) struct QaState {
@@ -93,10 +103,19 @@ pub(crate) fn qa_open(
                 "position":i.position.to_array()})).collect::<Vec<_>>();
             serde_json::json!({"id":id,"instances":rows})
         }).collect::<Vec<_>>();
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "open": state.open, "watching": state.watching, "search": state.search,
             "mode":format!("{:?}",state.mode), "site":selection.site_type(), "ground_epoch":epoch.map(|epoch|epoch.0),
             "independent":independent,
+            "scene_input_owned":state.scene_owned,
+            "last_error":state.last_error,
+            "room_appearance":{"ready":extra.appearance.ready,"phase":extra.appearance.phase,"error":extra.appearance.error},
+            "readiness": {"site_scenes":extra.site_scenes.is_some(),
+                "fixture_scenes":extra.fixture_scenes.is_some(), "fixture_materials":extra.fixture_materials.is_some(),
+                "layout_revision":extra.layout_revision.0,
+                "navigation_revision":extra.navigation.as_ref().map(|nav|nav.layout_revision()),
+                "navigation_generation":extra.navigation.as_ref().map(|nav|nav.generation()),
+                "objective_generation":extra.objective.as_ref().map(|face|face.navigation_generation())},
             "transcript":transcript,
             "gimmick_owners": crate::fixture_gimmick::session::lease_count(&extra.gimmicks),
             "scene_preview": extra.stage.is_some(), "player_control_owned":extra.control.is_some(),
@@ -115,6 +134,15 @@ pub(crate) fn qa_open(
             "player_fixture_active": runtime.active(), "held_actors": holds.iter().count(), "entities": all.iter().count(),
             "actors":actor_rows, "fixtures":fixture_rows
         });
+        value.as_object_mut().expect("QA object").extend(serde_json::json!({
+            "activities":catalog.activities.len(),
+            "activity":extra.activity.as_ref().map(|record|serde_json::json!({
+                "ticket":record.ticket,"key":format!("{:?}",record.key),
+                "actor":record.actor.map(|entity|format!("{entity:?}")),
+                "phase":format!("{:?}",record.phase),"active":record.active(),"error":record.error})),
+            "activity_bubbles":extra.activity_bubbles.iter().count(),
+            "harvest_nodes":extra.harvests.iter().count()
+        }).as_object().expect("activity QA object").clone());
         // Replace via a sibling to keep readers from observing partial JSON.
         let temp = format!("{path}.tmp");
         if let Ok(bytes) = serde_json::to_vec_pretty(&value) {

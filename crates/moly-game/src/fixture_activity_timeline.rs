@@ -6,6 +6,7 @@
 //! Foot IK, start offsets, track matching and mixer differences remain
 //! readable through `coverage`; they are never inferred from clip names.
 
+mod actor_space;
 mod clock;
 mod source;
 
@@ -40,10 +41,23 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct TimelineFailure(pub String);
+pub(crate) struct TimelineFailure {
+    pub message: String,
+    /// True only for a requested asset that is still in flight. Structural,
+    /// source-identity and failed-load errors must not consume a timeout budget.
+    pub retryable: bool,
+}
+impl TimelineFailure {
+    fn loading(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+}
 impl std::fmt::Display for TimelineFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for TimelineFailure {}
@@ -86,7 +100,11 @@ impl SourceAnimationEvidence {
         }
         Ok(Self {
             package: package.into(),
-            clip_name: string(entry, "name")?.into(),
+            clip_name: entry
+                .get("sourceClipName")
+                .and_then(Value::as_str)
+                .unwrap_or(string(entry, "name")?)
+                .into(),
             asset: asset(&entry["sourceClip"])?,
             start_time: finite(entry, "sourceStartTime")?,
             stop_time: finite(entry, "sourceStopTime")?,
@@ -140,7 +158,6 @@ pub(crate) fn prepare_actor_animation_bindings(
                 .iter()
                 .filter(|row| {
                     row["unitId"].as_u64() == Some(unit_id as u64)
-                        && row["clipName"].as_str() == Some(target.clip_name.as_str())
                         && asset(&row["sourceClip"]).ok().as_ref() == Some(source_clip)
                 })
                 .collect();
@@ -151,6 +168,7 @@ pub(crate) fn prepare_actor_animation_bindings(
             }
             let route = routes[0];
             let route_identity = asset(&route["sourceClip"])?;
+            let exported_name = string(route, "clipName")?;
             let library = array(&catalog, "libraries")?
                 .get(source::unsigned(route, "library")? as usize)
                 .ok_or_else(|| invalid("actor library route out of range"))?;
@@ -174,7 +192,7 @@ pub(crate) fn prepare_actor_animation_bindings(
                 .filter_map(|group| group["segments"].as_object())
                 .flat_map(|segments| segments.values())
                 .filter(|entry| {
-                    entry["name"].as_str() == Some(target.clip_name.as_str())
+                    entry["name"].as_str() == Some(exported_name)
                         && asset(&entry["sourceClip"]).ok().as_ref() == Some(&route_identity)
                 })
                 .collect();
@@ -185,6 +203,7 @@ pub(crate) fn prepare_actor_animation_bindings(
                 SourceAnimationEvidence::from_index_entry(segments[0], &target.target_package)?;
             let expected = SourceAnimationEvidence::from_clip_target(target)?;
             if source.asset != expected.asset
+                || source.clip_name != expected.clip_name
                 || source.start_time != expected.start_time
                 || source.stop_time != expected.stop_time
                 || source.looping != expected.looping
@@ -203,13 +222,18 @@ pub(crate) fn prepare_actor_animation_bindings(
                     .or_insert_with(|| server.load(format!("moly://{path}")))
                     .clone()
             };
+            if let bevy::asset::LoadState::Failed(error) = server.load_state(&handle) {
+                return Err(invalid(format!(
+                    "actor animation library failed to load: {path}: {error}"
+                )));
+            }
             let gltfs = world.resource::<Assets<Gltf>>();
             let gltf = gltfs
                 .get(&handle)
-                .ok_or_else(|| invalid("actor animation library still loading"))?;
+                .ok_or_else(|| TimelineFailure::loading("actor animation library still loading"))?;
             let animation = gltf
                 .named_animations
-                .get(target.clip_name.as_str())
+                .get(exported_name)
                 .ok_or_else(|| invalid("source-routed animation is absent from library"))?
                 .clone();
             prepared.push((
@@ -236,6 +260,7 @@ pub(crate) fn prepare_actor_animation_bindings(
                     | TimelinePayload::BlinkGate
                     | TimelinePayload::LipGate
                     | TimelinePayload::NpcIkTalkGate
+                    | TimelinePayload::Emoticon { .. }
             )
         }) {
             request
@@ -272,18 +297,19 @@ fn load_json(
             .or_insert_with(|| server.load(format!("moly://{path}")))
             .clone()
     };
+    if let bevy::asset::LoadState::Failed(error) = server.load_state(&handle) {
+        return Err(invalid(format!(
+            "actor metadata failed to load: {path}: {error}"
+        )));
+    }
     let (text, parsed) = {
         let assets = world.resource::<Assets<JsonAsset>>();
         // Consult the live asset before the cache. Removal/loading must not
         // make a previous successful document usable in its absence.
-        let json = assets
-            .get(&handle)
-            .ok_or_else(|| invalid(format!("actor metadata still loading: {path}")))?;
-        if let Some((text, parsed)) = world
-            .resource::<TimelineAssetLoads>()
-            .parsed_json
-            .get(path)
-        {
+        let json = assets.get(&handle).ok_or_else(|| {
+            TimelineFailure::loading(format!("actor metadata still loading: {path}"))
+        })?;
+        if let Some((text, parsed)) = world.resource::<TimelineAssetLoads>().parsed_json.get(path) {
             if text == &json.0 {
                 return Ok(parsed.clone());
             }
@@ -291,8 +317,10 @@ fn load_json(
         // A changed malformed document keeps the original parse error; an
         // older cached success is not a fallback. Do not clone the source
         // string or Value on an unchanged-document hit.
-        let parsed: Arc<Value> = Arc::new(serde_json::from_str(&json.0)
-            .map_err(|error| invalid(format!("actor metadata JSON: {error}")))?);
+        let parsed: Arc<Value> = Arc::new(
+            serde_json::from_str(&json.0)
+                .map_err(|error| invalid(format!("actor metadata JSON: {error}")))?,
+        );
         (json.0.clone(), parsed)
     };
     world
@@ -445,6 +473,8 @@ struct Session {
     prior_face: HashMap<Handle<CharacterMaterial>, PriorFace>,
     prior_gates: HashMap<Entity, Option<TimelineFacialState>>,
     sound_entities: Vec<Entity>,
+    emoticons: HashMap<TimelineClipKey, crate::emoticon::timeline::EmoteLease>,
+    actor_space: Option<actor_space::ActorSpaceLease>,
     coverage: Vec<TimelineCoverageGap>,
     cancel: bool,
     release: bool,
@@ -490,6 +520,8 @@ impl FixtureActivityTimelines {
                 prior_face: HashMap::new(),
                 prior_gates: HashMap::new(),
                 sound_entities: Vec::new(),
+                emoticons: HashMap::new(),
+                actor_space: None,
                 coverage: Vec::new(),
                 cancel: false,
                 release: false,
@@ -609,7 +641,7 @@ pub(crate) fn prepare_source_sounds(
 ) -> Result<(), TimelineFailure> {
     let routing = world
         .get_resource::<Routing>()
-        .ok_or_else(|| invalid("audio routing not ready"))?;
+        .ok_or_else(|| TimelineFailure::loading("audio routing not ready"))?;
     let server = world
         .get_resource::<AssetServer>()
         .ok_or_else(|| invalid("asset server missing"))?;
@@ -747,7 +779,7 @@ fn validate(
                     }
                     let animation = clips
                         .get(&binding.clip)
-                        .ok_or_else(|| invalid("animation clip still loading"))?;
+                        .ok_or_else(|| TimelineFailure::loading("animation clip still loading"))?;
                     if animation.curves().is_empty()
                         || animation.curves().values().all(Vec::is_empty)
                         || !animation.duration().is_finite()
@@ -772,7 +804,7 @@ fn validate(
                     required_sounds.insert(clip.key.clone());
                     let routing = world
                         .get_resource::<Routing>()
-                        .ok_or_else(|| invalid("audio routing not ready"))?;
+                        .ok_or_else(|| TimelineFailure::loading("audio routing not ready"))?;
                     let path = routing
                         .timeline_se_asset_path(package, cue)
                         .ok_or_else(|| invalid("source SE route unavailable"))?;
@@ -787,12 +819,19 @@ fn validate(
                     {
                         return Err(invalid("SE handle does not match the exact source route"));
                     }
+                    if let Some(server) = world.get_resource::<AssetServer>() {
+                        if let bevy::asset::LoadState::Failed(error) = server.load_state(handle) {
+                            return Err(invalid(format!(
+                                "source SE audio failed to load: {path}: {error}"
+                            )));
+                        }
+                    }
                     if world
                         .get_resource::<Assets<AudioSource>>()
                         .and_then(|a| a.get(handle))
                         .is_none()
                     {
-                        return Err(invalid("source SE audio still loading"));
+                        return Err(TimelineFailure::loading("source SE audio still loading"));
                     }
                     if world.get_resource::<VolumeBus>().is_none() {
                         return Err(invalid("source audio volume bus missing"));
@@ -814,6 +853,27 @@ fn validate(
                         .ok_or_else(|| invalid("facial/IK track actor missing"))?;
                     if *actor != request.owner.activity.actor {
                         return Err(invalid("facial/IK track is not bound to activity actor"));
+                    }
+                }
+                TimelinePayload::Emoticon { name, .. } => {
+                    let actor = request
+                        .bindings
+                        .actors
+                        .get(&track.identity)
+                        .ok_or_else(|| invalid("emoticon track actor missing"))?;
+                    if *actor != request.owner.activity.actor {
+                        return Err(invalid("emoticon track is bound to another actor"));
+                    }
+                    let archive = world
+                        .get_resource::<crate::emoticon::EmoticonArchive>()
+                        .ok_or_else(|| {
+                            TimelineFailure::loading("emoticon archive still loading")
+                        })?;
+                    if !world.contains_resource::<crate::emoticon::Emotes>() {
+                        return Err(TimelineFailure::loading("emoticon renderer still loading"));
+                    }
+                    if !archive.has(name) {
+                        return Err(invalid(format!("source emoticon {name} is unavailable")));
                     }
                 }
                 TimelinePayload::LoopFlag { .. } => loop_count += 1,
@@ -965,6 +1025,19 @@ fn initialize(
         let graphs = world.resource::<Assets<AnimationGraph>>();
         cache.retain(|(graph, _, _), _| graphs.get(*graph).is_some());
     }
+    if session.request.definition.tracks.iter().any(|track| {
+        track.name == "CharacterAnimator"
+            && track
+                .clips
+                .iter()
+                .any(|clip| matches!(clip.payload, TimelinePayload::Animation { .. }))
+    }) {
+        session.actor_space = Some(actor_space::acquire(
+            world,
+            session.request.owner.activity.actor,
+            token,
+        )?);
+    }
     let request = &session.request;
     let mut claimed = HashSet::new();
     for track in &request.definition.tracks {
@@ -1018,6 +1091,7 @@ fn initialize(
                 TimelinePayload::LipGate if world.get::<crate::player::PlayerControlled>(request.owner.activity.actor).is_some() => Some(("SourceLipSyncOscillator","player avatar timeline lip enable/analyzer adapter is not implemented")),
                 TimelinePayload::LipGate => Some(("SourceLipSyncArbitration","NPC mixer enable/null-analyzer reaches the existing oscillator; cross-owner voice setter ordering and final visual playback remain unverified")),
                 TimelinePayload::NpcIkTalkGate if request.owner.kind == TimelineOwnerKind::Npc => Some(("SourceTalkIK","NPC talk IK gate is exposed but its native solver is not implemented")),
+                TimelinePayload::Emoticon { .. } => Some(("SourceEmoticonSound","source Timeline emote visuals and root mode use the shared renderer; its legacy soundInput audio adapter is not implemented")),
                 _ => None,
             };
             if let Some((feature, detail)) = feature {
@@ -1231,6 +1305,7 @@ fn apply_events(
                 TimelinePayload::Eye { .. }
                     | TimelinePayload::Lip { .. }
                     | TimelinePayload::Se { .. }
+                    | TimelinePayload::Emoticon { .. }
             )
         })
         .map(|clip| {
@@ -1249,6 +1324,11 @@ fn apply_events(
         })
         .map(|(key, _, _, _)| key.clone())
         .collect();
+    for key in session.active_events.difference(&active) {
+        if let Some(lease) = session.emoticons.get(key).copied() {
+            crate::emoticon::timeline::hide(world, lease, false);
+        }
+    }
     // The source evaluates the current point's active interval set. A short
     // clip entirely skipped by a large delta never receives OnBehaviourPlay.
     let entered: Vec<_> = events
@@ -1269,18 +1349,39 @@ fn apply_events(
                 let previous = materials
                     .get(&handle)
                     .ok_or_else(|| invalid("face material disappeared"))?;
-                session.prior_face.entry(handle.clone()).or_insert(PriorFace {
-                    st: previous.params.main_tex_st,
-                    lip_pattern: previous.lip_pattern,
-                });
+                session
+                    .prior_face
+                    .entry(handle.clone())
+                    .or_insert(PriorFace {
+                        st: previous.params.main_tex_st,
+                        lip_pattern: previous.lip_pattern,
+                    });
                 match payload {
-                    TimelinePayload::Eye { open, .. } => apply_eye(&mut materials, &handle, Some(open)),
-                    TimelinePayload::Lip { open, middle, close, .. } => apply_mouth_pattern(
-                        &mut materials, &handle,
-                        LipPattern { open: *open, middle: *middle, close: *close },
+                    TimelinePayload::Eye { open, .. } => {
+                        apply_eye(&mut materials, &handle, Some(open))
+                    }
+                    TimelinePayload::Lip {
+                        open,
+                        middle,
+                        close,
+                        ..
+                    } => apply_mouth_pattern(
+                        &mut materials,
+                        &handle,
+                        LipPattern {
+                            open: *open,
+                            middle: *middle,
+                            close: *close,
+                        },
                     ),
                     _ => unreachable!(),
                 };
+            }
+            TimelinePayload::Emoticon { name, use_root } => {
+                let actor = session.request.bindings.actors[&key.track];
+                let lease = crate::emoticon::timeline::show(world, actor, name, *use_root)
+                    .map_err(invalid)?;
+                session.emoticons.insert(key.clone(), lease);
             }
             TimelinePayload::Se { .. } => {
                 let handle = session
@@ -1310,15 +1411,20 @@ fn apply_events(
 fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Session, time: f64) {
     let mut gates: HashMap<Entity, (bool, Option<bool>, bool)> = HashMap::new();
     for track in &session.request.definition.tracks {
-        if track.clips.iter().any(|clip| matches!(clip.payload, TimelinePayload::LipGate)) {
+        if track
+            .clips
+            .iter()
+            .any(|clip| matches!(clip.payload, TimelinePayload::LipGate))
+        {
             let actor = session.request.bindings.actors[&track.identity];
             // Each source mixer calls its setter on every ProcessFrame. OR
             // active clips within this track, but let a later track assignment
             // replace an earlier one rather than merging distinct setters.
             // An empty clip/curve track has no compiled mixer; its mere
             // presence in exported metadata must not disable an actor.
-            gates.entry(actor).or_default().1 = Some(track.clips.iter().any(|clip|
-                matches!(clip.payload, TimelinePayload::LipGate) && clip.contains(time)));
+            gates.entry(actor).or_default().1 = Some(track.clips.iter().any(|clip| {
+                matches!(clip.payload, TimelinePayload::LipGate) && clip.contains(time)
+            }));
         }
         for clip in &track.clips {
             if matches!(
@@ -1331,7 +1437,7 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
                 let state = gates.entry(actor).or_default();
                 match clip.payload {
                     TimelinePayload::BlinkGate => state.0 |= clip.contains(time),
-                    TimelinePayload::LipGate => {},
+                    TimelinePayload::LipGate => {}
                     TimelinePayload::NpcIkTalkGate => {
                         state.2 |= session.request.owner.kind == TimelineOwnerKind::Npc
                             && clip.contains(time)
@@ -1358,6 +1464,12 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
 }
 
 fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
+    if let Some(lease) = session.actor_space.take() {
+        actor_space::restore(world, token, lease);
+    }
+    for (_, lease) in session.emoticons.drain() {
+        crate::emoticon::timeline::hide(world, lease, true);
+    }
     let mut animators = HashSet::new();
     for node in &session.nodes {
         if world

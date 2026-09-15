@@ -39,14 +39,17 @@
 //! 「自身→诸子」的方向和（动画向 → 布料向），叶子取自身父边；旋转 =
 //! 对齐四元数 × 动画世界旋转，方向退化时保持动画旋转；fixed 粒子
 //! 位置钉在动画位、旋转仍随子线；局部化在拓扑序里做（父先于子），
-//! 链内父用其**新**世界（位置与旋转），链外父用其**动画**世界，尺度
-//! 一律不动。
+//! 链内父用其**新**世界矩阵，链外父用其**动画**世界矩阵，局部尺度
+//! 一律不动。世界链保留完整仿射矩阵：家具演出可能在模型外层反射 X，
+//! 反射与后续骨旋转不可拆成逐项相乘的 quaternion/scale。坐标系手性
+//! 切换时重新播种粒子，避免把坐标桥接当成物理位移。
 //!
 //! 风：律已具名「无风」——rig 的风参数在、风源不在，本层不造风。
 
 use crate::character::{CharacterModel, CharacterPack, MotionDriver};
 use crate::npc::CharacterUnitId;
 use bevy::asset::{Assets, LoadState};
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use moly_law::cloth::math;
@@ -120,6 +123,8 @@ struct ChainRuntime {
     colliders: Vec<ColliderBinding>,
     /// 链根的链外父路径（成员不含 → 父含尾）：链根局部化的基准。
     root_parent_path: Vec<Entity>,
+    /// A handedness change is a coordinate-frame switch, not physical motion.
+    reflected: Option<bool>,
 }
 
 /// Capacity is owned by this chain and released with its runtime. All active
@@ -129,8 +134,8 @@ struct ChainScratch {
     anim: Vec<[f32; 3]>,
     anim_q: Vec<Quat>,
     colliders: Vec<WorldCollider>,
-    new_p: Vec<Vec3>,
-    new_q: Vec<Quat>,
+    anim_world: Vec<Affine3A>,
+    new_world: Vec<Affine3A>,
     solver: SolverScratch,
 }
 
@@ -305,7 +310,10 @@ pub fn plan_when_wired(
     jsons: Res<Assets<JsonAsset>>,
     npcs: Query<
         (Entity, &CharacterUnitId, &CharacterPack),
-        (Or<(With<MotionDriver>, With<crate::player_avatar::AvatarDriver>)>, Without<ClothRuntime>),
+        (
+            Or<(With<MotionDriver>, With<crate::player_avatar::AvatarDriver>)>,
+            Without<ClothRuntime>,
+        ),
     >,
     children: Query<&Children>,
     child_of: Query<&ChildOf>,
@@ -316,7 +324,10 @@ pub fn plan_when_wired(
     for (npc, unit, pack) in &npcs {
         match server.load_state(&pack.rig) {
             LoadState::Failed(err) => {
-                panic!("unit {} 的骨架档案 {} 装载失败：{err:?}", unit.0, pack.rig_file)
+                panic!(
+                    "unit {} 的骨架档案 {} 装载失败：{err:?}",
+                    unit.0, pack.rig_file
+                )
             }
             LoadState::Loaded => {}
             _ => continue, // 这名等下一帧，不挡别人
@@ -369,7 +380,9 @@ pub fn plan_when_wired(
                 }
                 let parent = child_of
                     .get(cursor)
-                    .unwrap_or_else(|e| panic!("unit {} 的场景实体 {cursor:?} 没有父：{e:?}", unit.0))
+                    .unwrap_or_else(|e| {
+                        panic!("unit {} 的场景实体 {cursor:?} 没有父：{e:?}", unit.0)
+                    })
                     .0;
                 reversed.push(cursor);
                 cursor = parent;
@@ -384,7 +397,10 @@ pub fn plan_when_wired(
         let world_resolved = Cell::new(0usize);
         let bind = |chain: &str, kind: &str, name: &str, expected: [f32; 3]| -> Entity {
             let candidates = by_name.get(name).unwrap_or_else(|| {
-                panic!("unit {} 链 {chain} 的{kind}骨名 {name}：角色包里没有", unit.0)
+                panic!(
+                    "unit {} 链 {chain} 的{kind}骨名 {name}：角色包里没有",
+                    unit.0
+                )
             });
             if candidates.len() == 1 {
                 return candidates[0];
@@ -395,7 +411,10 @@ pub fn plan_when_wired(
                 let mut world = Transform::IDENTITY;
                 for entity in path_to(candidate) {
                     let local = *transforms.get(entity).unwrap_or_else(|_| {
-                        panic!("unit {} 链 {chain} 的{kind}骨 {name} 候选缺 Transform", unit.0)
+                        panic!(
+                            "unit {} 链 {chain} 的{kind}骨 {name} 候选缺 Transform",
+                            unit.0
+                        )
                     });
                     world = world.mul_transform(local);
                 }
@@ -445,17 +464,17 @@ pub fn plan_when_wired(
             let ev = EvaluatedParams::evaluate(&pchain.params, &def.depth);
             let topo = match build_chain(def, &ev, &pchain.rest) {
                 Ok(topo) => topo,
-                Err(reason) => panic!(
-                    "unit {} 链 {} 建链被拒：{reason}",
-                    unit.0, def.name
-                ),
+                Err(reason) => panic!("unit {} 链 {} 建链被拒：{reason}", unit.0, def.name),
             };
             let n = def.bones.len();
             let mut bones = Vec::with_capacity(n);
             for (vi, bone_name) in def.bones.iter().enumerate() {
                 let entity = bind(&def.name, "链", bone_name, pchain.rest[vi]);
                 let local = *transforms.get(entity).unwrap_or_else(|_| {
-                    panic!("unit {} 链 {} 骨 {bone_name} 缺 Transform", unit.0, def.name)
+                    panic!(
+                        "unit {} 链 {} 骨 {bone_name} 缺 Transform",
+                        unit.0, def.name
+                    )
                 });
                 bones.push(BoneBinding {
                     entity,
@@ -469,16 +488,11 @@ pub fn plan_when_wired(
             // 不一致时位置直写会错位——装配期必须响。
             for (vi, &p) in def.parent.iter().enumerate() {
                 if p >= 0 {
-                    let actual = child_of
-                        .get(bones[vi].entity)
-                        .expect("链骨必有父")
-                        .0;
+                    let actual = child_of.get(bones[vi].entity).expect("链骨必有父").0;
                     if actual != bones[p as usize].entity {
                         panic!(
                             "unit {} 链 {} 骨 {} 的场景父不是链内父顶点：写回局部化会错位",
-                            unit.0,
-                            def.name,
-                            def.bones[vi]
+                            unit.0, def.name, def.bones[vi]
                         );
                     }
                 }
@@ -497,12 +511,7 @@ pub fn plan_when_wired(
                 .find(|(vi, _)| def.parent[*vi] < 0)
                 .map(|(_, b)| b.entity)
                 .unwrap_or_else(|| panic!("unit {} 链 {} 无链根", unit.0, def.name));
-            let root_parent_path = path_to(
-                child_of
-                    .get(root_entity)
-                    .expect("链根必有场景父")
-                    .0,
-            );
+            let root_parent_path = path_to(child_of.get(root_entity).expect("链根必有场景父").0);
             particles += n;
             built.push(Built {
                 chain_index: i,
@@ -574,6 +583,7 @@ pub fn plan_when_wired(
                 bones: b.bones,
                 colliders,
                 root_parent_path: b.root_parent_path,
+                reflected: None,
             });
         }
         if disabled_chains > 0 || disabled_colliders > 0 {
@@ -620,19 +630,17 @@ fn world_transform(
     chain_bones: &HashSet<Entity>,
     rest: &HashMap<Entity, Transform>,
     live: &Query<&Transform, Without<ClothBone>>,
-) -> Transform {
-    let mut world = *base;
+) -> Affine3A {
+    let mut world = base.compute_affine();
     for entity in path {
         let local = if chain_bones.contains(entity) {
-            *rest
-                .get(entity)
-                .expect("链骨必有绑定姿态快照")
+            *rest.get(entity).expect("链骨必有绑定姿态快照")
         } else {
             *live
                 .get(*entity)
                 .expect("路径实体缺 Transform：场景结构在装配后被改动")
         };
-        world = world.mul_transform(local);
+        world *= local.compute_affine();
     }
     world
 }
@@ -652,8 +660,8 @@ fn collider_world_transform(
     path: &[Entity],
     live: &Query<&Transform, Without<ClothBone>>,
     cloth_bones: &Query<&mut Transform, With<ClothBone>>,
-) -> Transform {
-    let mut world = *base;
+) -> Affine3A {
+    let mut world = base.compute_affine();
     for entity in path {
         let local = match cloth_bones.get(*entity) {
             Ok(current) => *current,
@@ -661,9 +669,69 @@ fn collider_world_transform(
                 .get(*entity)
                 .expect("路径实体缺 Transform：场景结构在装配后被改动"),
         };
-        world = world.mul_transform(local);
+        world *= local.compute_affine();
     }
     world
+}
+
+/// Keep the full inherited basis until after world-to-local conversion. A
+/// quaternion plus componentwise scale cannot compose Sx * R correctly, and a
+/// chain child's local scale does not include its parent's reflection.
+fn localized_bone(
+    parent: Affine3A,
+    animated: Affine3A,
+    alignment: Quat,
+    position: Vec3,
+    local_scale: Vec3,
+) -> Transform {
+    let mut desired = Affine3A::from_rotation_translation(alignment, Vec3::ZERO) * animated;
+    desired.translation = position.into();
+    let local = parent.inverse() * desired;
+    let (_, rotation, translation) = local.to_scale_rotation_translation();
+    Transform {
+        translation,
+        rotation,
+        scale: local_scale,
+    }
+}
+
+/// Collider offsets and axes share the skin's full affine frame, including
+/// handedness. Normals use the inverse transpose, not quaternion-only rotation.
+fn world_collider(def: &ColliderDef, world: Affine3A) -> WorldCollider {
+    let scale = (world.matrix3.x_axis.length()
+        + world.matrix3.y_axis.length()
+        + world.matrix3.z_axis.length())
+        / 3.0;
+    match def {
+        ColliderDef::Sphere { center, radius } => WorldCollider::Sphere {
+            center: world.transform_point3(Vec3::from(*center)).to_array(),
+            radius: radius * scale,
+        },
+        ColliderDef::Capsule {
+            center,
+            axis,
+            length,
+            start_radius,
+            end_radius,
+        } => {
+            let center = world.transform_point3(Vec3::from(*center));
+            let mut direction = Vec3::ZERO;
+            direction[*axis as usize] = *length;
+            let extent = world.transform_vector3(direction);
+            WorldCollider::Capsule {
+                p0: (center - extent).to_array(),
+                p1: (center + extent).to_array(),
+                r0: start_radius * scale,
+                r1: end_radius * scale,
+            }
+        }
+        ColliderDef::Plane { center, normal } => WorldCollider::Plane {
+            origin: world.transform_point3(Vec3::from(*center)).to_array(),
+            normal: (world.matrix3.inverse().transpose() * Vec3::from(*normal))
+                .normalize_or_zero()
+                .to_array(),
+        },
+    }
 }
 
 /// PostUpdate（动画之后、变换传播之前）：逐链读当帧动画位与世界碰撞
@@ -677,9 +745,7 @@ pub fn advance(
 ) {
     let dt = time.delta_secs();
     for (npc, unit, mut runtime) in &mut npcs {
-        let base = *live
-            .get(npc)
-            .expect("成员实体必有 Transform");
+        let base = *live.get(npc).expect("成员实体必有 Transform");
         // 统计先攒在本地，链循环结束后一次落账（链引用与账本字段
         // 分开借，见下面的分字段借用）。
         let mut substeps = 0u64;
@@ -696,30 +762,37 @@ pub fn advance(
             // 当帧动画位（世界）与动画世界旋转。
             let anim = &mut scratch.anim;
             let anim_q = &mut scratch.anim_q;
+            let anim_world = &mut scratch.anim_world;
             anim.clear();
             anim_q.clear();
+            anim_world.clear();
             for bone in &chain.bones {
                 let world = world_transform(&base, &bone.path, chain_bones, rest, &live);
                 anim.push(world.translation.to_array());
-                anim_q.push(world.rotation);
+                anim_q.push(world.to_scale_rotation_translation().1);
+                anim_world.push(world);
             }
+            let reflected = anim_world[chain.topo.anchor as usize].matrix3.determinant() < 0.0;
+            if chain
+                .reflected
+                .is_some_and(|previous| previous != reflected)
+            {
+                chain.state.inited = false;
+                chain.state.accumulator = 0.0;
+                for bone in &chain.bones {
+                    *cloth_bones
+                        .get_mut(bone.entity)
+                        .expect("链骨实体必有 Transform") = rest[&bone.entity];
+                }
+            }
+            chain.reflected = Some(reflected);
             // 世界碰撞基元：碰撞骨当帧世界矩阵搬入律（链骨碰撞体读现行
             // 姿势，见 collider_world_transform）。
             let colliders = &mut scratch.colliders;
             colliders.clear();
             for c in &chain.colliders {
                 let world = collider_world_transform(&base, &c.path, &live, &cloth_bones);
-                colliders.push(WorldCollider::from_def(
-                    &c.def,
-                    world.translation.to_array(),
-                    [
-                        world.rotation.x,
-                        world.rotation.y,
-                        world.rotation.z,
-                        world.rotation.w,
-                    ],
-                    world.scale.to_array(),
-                ));
+                colliders.push(world_collider(&c.def, world));
             }
             // 推进（律内部处理首帧播种、累加器、teleport 与 NaN 复位）。
             let anchor_q = anim_q[chain.topo.anchor as usize];
@@ -729,7 +802,12 @@ pub fn advance(
                 colliders: colliders.as_slice(),
             };
             let stats = match solve(
-                &mut chain.state, &chain.topo, &chain.params, &input, dt, &mut scratch.solver,
+                &mut chain.state,
+                &chain.topo,
+                &chain.params,
+                &input,
+                dt,
+                &mut scratch.solver,
             ) {
                 Ok(stats) => stats,
                 Err(reason) => panic!("unit {} 链 {} 推进被拒：{reason}", unit.0, chain.name),
@@ -737,12 +815,8 @@ pub fn advance(
             // 写回：位置直写 + 父→子方向反解旋转。拓扑序父先于子，
             // 链内父的新世界边算边用。
             let pos = &chain.state.pos;
-            let new_p = &mut scratch.new_p;
-            let new_q = &mut scratch.new_q;
-            new_p.resize(n, Vec3::ZERO);
-            new_q.resize(n, Quat::IDENTITY);
-            new_p.fill(Vec3::ZERO);
-            new_q.fill(Quat::IDENTITY);
+            let new_world = &mut scratch.new_world;
+            new_world.resize(n, Affine3A::IDENTITY);
             for &v in &chain.topo.order {
                 let vi = v as usize;
                 let p = chain.parent[vi];
@@ -765,7 +839,7 @@ pub fn advance(
                 }
                 // 旋转 = 对齐四元数（动画向 → 布料向）× 动画世界旋转；
                 // 方向退化时保持动画旋转。
-                let wq = if dir_ok
+                let alignment = if dir_ok
                     && dir_anim.length_squared() > 1e-18
                     && dir_pos.length_squared() > 1e-18
                 {
@@ -773,9 +847,9 @@ pub fn advance(
                         dir_anim.normalize().to_array(),
                         dir_pos.normalize().to_array(),
                     ));
-                    Quat::from_xyzw(q[0], q[1], q[2], q[3]) * anim_q[vi]
+                    Quat::from_xyzw(q[0], q[1], q[2], q[3])
                 } else {
-                    anim_q[vi]
+                    Quat::IDENTITY
                 };
                 // 位置：fixed 钉在动画位（旋转仍随子线），move 直写布料位。
                 let wp = if chain.bones[vi].fixed {
@@ -784,32 +858,17 @@ pub fn advance(
                     Vec3::from(pos[vi])
                 };
                 // 局部化基准：链内父用新世界；链外父用动画世界。
-                let (pp, pq, ps) = if p >= 0 {
+                let parent_world = if p >= 0 {
                     let pi = p as usize;
-                    let scale = rest
-                        .get(&chain.bones[pi].entity)
-                        .expect("链骨必有绑定姿态快照")
-                        .scale;
-                    (new_p[pi], new_q[pi], scale)
+                    new_world[pi]
                 } else {
-                    let world = world_transform(
-                        &base,
-                        &chain.root_parent_path,
-                        chain_bones,
-                        rest,
-                        &live,
-                    );
-                    (world.translation, world.rotation, world.scale)
+                    world_transform(&base, &chain.root_parent_path, chain_bones, rest, &live)
                 };
-                let inv = pq.inverse();
                 let mut bone = cloth_bones
                     .get_mut(chain.bones[vi].entity)
                     .expect("链骨实体必有 Transform");
-                bone.translation = (inv * (wp - pp)) / ps;
-                bone.rotation = inv * wq;
-                // 尺度不动（绑定姿态的尺度保持）。
-                new_p[vi] = wp;
-                new_q[vi] = wq;
+                *bone = localized_bone(parent_world, anim_world[vi], alignment, wp, bone.scale);
+                new_world[vi] = parent_world * bone.compute_affine();
             }
             substeps += stats.substeps as u64;
             writes += n as u64;
@@ -831,7 +890,11 @@ pub fn report(npcs: Query<(&CharacterUnitId, &ClothRuntime)>) {
         return;
     }
     for (unit, runtime) in &npcs {
-        let nan = runtime.chains.iter().map(|c| c.state.nan_resets).sum::<u32>();
+        let nan = runtime
+            .chains
+            .iter()
+            .map(|c| c.state.nan_resets)
+            .sum::<u32>();
         let teleport = runtime
             .chains
             .iter()
@@ -850,5 +913,236 @@ pub fn report(npcs: Query<(&CharacterUnitId, &ClothRuntime)>) {
             nan,
             teleport
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(actual: Affine3A, expected: Affine3A) {
+        for point in [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z] {
+            assert!(
+                actual
+                    .transform_point3(point)
+                    .distance(expected.transform_point3(point))
+                    < 1e-5,
+                "basis differs at {point:?}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reflected_rotated_hair_chain_retains_rest_pose() {
+        for sign in [1.0, -1.0] {
+            let actor =
+                Transform::from_xyz(3.0, 0.4, -2.0).with_rotation(Quat::from_rotation_y(0.8));
+            let model = Transform::from_scale(Vec3::new(sign, 1.0, 1.0));
+            let head = Transform::from_xyz(0.03, 1.2, -0.04).with_rotation(Quat::from_euler(
+                EulerRot::XYZ,
+                0.3,
+                -0.6,
+                0.2,
+            ));
+            let root =
+                Transform::from_xyz(0.12, 0.04, 0.08).with_rotation(Quat::from_rotation_z(0.5));
+            let tip =
+                Transform::from_xyz(0.04, -0.15, 0.03).with_rotation(Quat::from_rotation_x(-0.25));
+            let head_world =
+                actor.compute_affine() * model.compute_affine() * head.compute_affine();
+            let root_world = head_world * root.compute_affine();
+            let tip_world = root_world * tip.compute_affine();
+            let local_root = localized_bone(
+                head_world,
+                root_world,
+                Quat::IDENTITY,
+                root_world.translation.into(),
+                root.scale,
+            );
+            close(local_root.compute_affine(), root.compute_affine());
+            let updated_root = head_world * local_root.compute_affine();
+            let local_tip = localized_bone(
+                updated_root,
+                tip_world,
+                Quat::IDENTITY,
+                tip_world.translation.into(),
+                tip.scale,
+            );
+            close(local_tip.compute_affine(), tip.compute_affine());
+            close(updated_root * local_tip.compute_affine(), tip_world);
+        }
+    }
+
+    #[test]
+    fn hair_direction_alignment_survives_reflected_parent_localization() {
+        let parent = Transform::from_xyz(0.5, 1.3, -0.1)
+            .with_rotation(Quat::from_rotation_y(1.1))
+            .with_scale(Vec3::new(-1.0, 1.0, 1.0))
+            .compute_affine();
+        let rest = Transform::from_xyz(0.08, 0.02, 0.1).with_rotation(Quat::from_rotation_z(-0.3));
+        let animated = parent * rest.compute_affine();
+        let alignment = Quat::from_rotation_x(0.2);
+        let position = Vec3::from(animated.translation) + Vec3::new(0.01, 0.03, -0.02);
+        let local = localized_bone(parent, animated, alignment, position, rest.scale);
+        let mut expected = Affine3A::from_rotation_translation(alignment, Vec3::ZERO) * animated;
+        expected.translation = position.into();
+        close(parent * local.compute_affine(), expected);
+        assert_eq!(local.scale, rest.scale);
+    }
+
+    #[test]
+    fn reflected_colliders_preserve_endpoint_identity_and_normal() {
+        let matrix = Transform::from_xyz(0.4, 1.1, -0.2)
+            .with_rotation(Quat::from_rotation_y(0.7))
+            .with_scale(Vec3::new(-1.0, 1.0, 1.0))
+            .compute_affine();
+        let center = Vec3::new(0.1, 0.2, -0.1);
+        let capsule = world_collider(
+            &ColliderDef::Capsule {
+                center: center.to_array(),
+                axis: 0,
+                length: 0.3,
+                start_radius: 0.04,
+                end_radius: 0.08,
+            },
+            matrix,
+        );
+        let WorldCollider::Capsule { p0, p1, r0, r1 } = capsule else {
+            panic!()
+        };
+        assert!(Vec3::from(p0).distance(matrix.transform_point3(center - 0.3 * Vec3::X)) < 1e-6);
+        assert!(Vec3::from(p1).distance(matrix.transform_point3(center + 0.3 * Vec3::X)) < 1e-6);
+        assert!((r0 - 0.04).abs() < 1e-6 && (r1 - 0.08).abs() < 1e-6);
+        let WorldCollider::Plane { normal, .. } = world_collider(
+            &ColliderDef::Plane {
+                center: center.to_array(),
+                normal: Vec3::X.to_array(),
+            },
+            matrix,
+        ) else {
+            panic!()
+        };
+        assert!(Vec3::from(normal).distance(matrix.transform_vector3(Vec3::X)) < 1e-6);
+    }
+
+    #[test]
+    fn live_cloth_survives_repeated_fixture_frame_switches() {
+        use moly_law::cloth::schema::ChainDef;
+        let mut app = App::new();
+        app.init_resource::<Time>().add_systems(Update, advance);
+        let actor_pose =
+            Transform::from_xyz(0.7, 0.1, -0.2).with_rotation(Quat::from_rotation_y(0.8));
+        let actor = app.world_mut().spawn((actor_pose, CharacterUnitId(1))).id();
+        let model = app.world_mut().spawn(Transform::IDENTITY).id();
+        let head_pose = Transform::from_xyz(0.0, 1.0, 0.05).with_rotation(Quat::from_euler(
+            EulerRot::XYZ,
+            0.3,
+            -0.2,
+            0.1,
+        ));
+        let head = app.world_mut().spawn(head_pose).id();
+        let root_pose = Transform::from_xyz(0.1, 0.1, 0.05);
+        let tip_pose = Transform::from_xyz(0.03, -0.15, 0.0);
+        let root = app.world_mut().spawn((root_pose, ClothBone)).id();
+        let tip = app.world_mut().spawn((tip_pose, ClothBone)).id();
+        let definition = ChainDef {
+            name: "hair".into(),
+            class: "hair".into(),
+            bones: vec!["root".into(), "tip".into()],
+            parent: vec![-1, 0],
+            root: vec![-1, 0],
+            selection: vec![Selection::Fixed, Selection::Move],
+            depth: vec![0.0, 1.0],
+            struct_distance: vec![],
+            root_distance: vec![],
+        };
+        let params = EvaluatedParams {
+            radius: vec![0.01; 2],
+            drag: vec![0.1; 2],
+            max_velocity: vec![2.0; 2],
+            clamp_angle: vec![std::f32::consts::PI; 2],
+            restore_power: vec![0.0; 2],
+            struct_stiffness: vec![1.0; 2],
+            gravity: vec![[0.0; 3]; 2],
+            move_influence: vec![1.0; 2],
+            rotation_influence: vec![1.0; 2],
+            mass: vec![1.0; 2],
+            mass_influence: 0.0,
+            use_collision: false,
+            use_clamp_distance: false,
+            clamp_min_ratio: 0.7,
+            clamp_max_ratio: 1.1,
+            clamp_vel_influence: 0.2,
+            max_move_speed: 2.0,
+            max_rotation_speed: 12.0,
+            use_reset_teleport: false,
+            teleport_distance: 0.2,
+            teleport_rotation: 0.7,
+            external_force: [0.0; 3],
+            scale_ratio: 1.0,
+        };
+        let root_rest =
+            actor_pose.compute_affine() * head_pose.compute_affine() * root_pose.compute_affine();
+        let tip_rest = root_rest * tip_pose.compute_affine();
+        let rest_positions = [
+            root_rest.translation.to_array(),
+            tip_rest.translation.to_array(),
+        ];
+        let topo = build_chain(&definition, &params, &rest_positions).unwrap();
+        let chain = ChainRuntime {
+            name: "hair".into(),
+            topo,
+            parent: vec![-1, 0],
+            params,
+            state: ClothState::new(2),
+            scratch: ChainScratch::default(),
+            bones: vec![
+                BoneBinding {
+                    entity: root,
+                    path: vec![model, head, root],
+                    fixed: true,
+                },
+                BoneBinding {
+                    entity: tip,
+                    path: vec![model, head, root, tip],
+                    fixed: false,
+                },
+            ],
+            colliders: vec![],
+            root_parent_path: vec![model, head],
+            reflected: None,
+        };
+        app.world_mut().entity_mut(actor).insert(ClothRuntime {
+            chains: vec![chain],
+            chain_bones: HashSet::from([root, tip]),
+            rest: HashMap::from([(root, root_pose), (tip, tip_pose)]),
+            particles: 2,
+            collider_bindings: 0,
+            frames: 0,
+            substeps: 0,
+            writes: 0,
+            max_disp: 0.0,
+        });
+        for sign in [1.0, -1.0, 1.0, -1.0, 1.0] {
+            app.world_mut().get_mut::<Transform>(model).unwrap().scale.x = sign;
+            for _ in 0..60 {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(Duration::from_secs_f32(1.0 / 60.0));
+                app.update();
+                close(
+                    app.world().get::<Transform>(root).unwrap().compute_affine(),
+                    root_pose.compute_affine(),
+                );
+                close(
+                    app.world().get::<Transform>(tip).unwrap().compute_affine(),
+                    tip_pose.compute_affine(),
+                );
+            }
+            let state = &app.world().get::<ClothRuntime>(actor).unwrap().chains[0].state;
+            assert!(state.inited);
+            assert_eq!(state.nan_resets, 0);
+            assert_eq!(state.teleport_resets, 0);
+        }
     }
 }

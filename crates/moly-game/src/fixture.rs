@@ -1225,6 +1225,7 @@ fn restore_selected_layout(
     mut placements: ResMut<FixturePlacements>,
     mut revision: ResMut<FixtureLayoutRevision>,
     mut last_error: Local<Option<String>>,
+    temporary: Option<Res<crate::site::TemporarySiteActive>>,
 ) {
     let Some(sites) = sites else {
         return;
@@ -1238,17 +1239,29 @@ fn restore_selected_layout(
     if placements.site_id == site_id && placements.site_type == selection.site_type() {
         return;
     }
-    match saved
-        .restore(
+    let restored = if temporary.is_some() {
+        // The temporary site is empty from its first frame. Never materialize
+        // a saved layout only to delete it, or let it block preview admission.
+        commands.insert_resource(TemporaryFixtureLayout);
+        Ok(FixturePlacements {
+            site_id,
+            site_type: selection.site_type().to_owned(),
+            level: floor.level,
+            floor: Some(floor),
+            ..Default::default()
+        })
+    } else {
+        saved.restore(
             site_id,
             selection.site_type(),
             floor.level,
             selection.content(),
         )
-        .and_then(|layout| {
-            layouts::validate_floor_layout(&layout, floor)?;
-            Ok(layout)
-        }) {
+    };
+    match restored.and_then(|layout| {
+        layouts::validate_floor_layout(&layout, floor)?;
+        Ok(layout)
+    }) {
         Ok(mut layout) => {
             info!("[offline-layout] site {} ({}) level {}: restored {} fixtures; layouts are per-site",
                 site_id, selection.site_type(), floor.level, layout.total());
