@@ -82,12 +82,18 @@ class Acceptance:
 
     def play(self, expected: str) -> dict[str, Any]:
         self.drive('key', 'ENTER')
-        return self.wait(lambda s: s['active'] == expected and s['started'] and s['watching'], f'{expected} did not start')
+        state = self.wait(lambda s: s['active'] == expected and s['started'] and s['watching'], f'{expected} did not start', 70.)
+        session = state.get('independent')
+        if state.get('mode') == 'Independent':
+            assert session and session['phase'] in ('Staged', 'Experiencing'), 'Independent session did not reach a staged phase'
+            assert session['ticket'] > 0 and session['destination'] == state['site'], 'Independent site/ticket mismatch'
+        return state
 
     @staticmethod
     def idle(s: dict[str, Any]) -> bool:
         return (s['active'] is None and s['pending'] is None and not s['player_fixture_active']
                 and not s['player_control_owned'] and not s['scene_preview']
+                and s.get('independent') is None
                 and s['gimmick_owners'] == 0 and s['held_actors'] == 0
                 and s['voice_players'] == 0 and s['scoped_sounds'] == 0)
 

@@ -58,7 +58,16 @@ pub fn install(app: &mut App) {
             .after(crate::player_fixture_action::advance)
             .before(content_library::refresh),
     );
-    app.add_systems(Update, (content_library::reap_preview_owners, content_library::retire_scene).chain().after(content_library::observe_start).before(content_library::refresh));
+    app.add_systems(
+        Update,
+        (
+            content_library::reap_preview_owners,
+            content_library::retire_scene,
+        )
+            .chain()
+            .after(content_library::observe_start)
+            .before(content_library::refresh),
+    );
     // UI consumes a pointer before the editor/world rays. Commands finish
     // before gameplay input; the early fixture loader intentionally depends
     // only on keyboard Input and observes committed reloads next frame.
@@ -122,13 +131,16 @@ pub fn install(app: &mut App) {
                 .after(crate::fixture_edit::FixtureEditSystems::Commands)
                 .before(crate::player_fixture_action::refresh_availability),
         );
-    app.add_systems(Update, crate::fixture_player_navigation::publish
-        .after(crate::fixture_scene_inputs::advance)
-        .after(npc_objective::build_face)
-        .after(walk_face::rebake_on_save)
-        .before(content_library::refresh_context)
-        .before(crate::player_fixture_action::refresh_availability)
-        .before(crate::player_fixture_action::receive_requests));
+    app.add_systems(
+        Update,
+        crate::fixture_player_navigation::publish
+            .after(crate::fixture_scene_inputs::advance)
+            .after(npc_objective::build_face)
+            .after(walk_face::rebake_on_save)
+            .before(content_library::refresh_context)
+            .before(crate::player_fixture_action::refresh_availability)
+            .before(crate::player_fixture_action::receive_requests),
+    );
     app.init_resource::<crate::fixture_activity_state::FixtureActivityReservations>()
         .init_resource::<crate::fixture_activity_timeline::FixtureActivityTimelines>()
         .init_resource::<crate::player_fixture_action::PlayerFixtureRuntime>()
@@ -353,9 +365,7 @@ pub fn install(app: &mut App) {
                     // 约束面构建收尾站点域：玩家铺位与推进读它（面与地表
                     // 同批网格，地表顶点可查的当帧它也齐）。
                     site::parse_masters,
-                    site::read_switch
-                        .after(site::parse_masters)
-                        .run_if(crate::game_settings::scene_input_enabled),
+                    site::read_switch.after(site::parse_masters),
                     site::plan.after(site::read_switch),
                     site::spawn_when_ready.after(site::plan),
                     inactive_nodes::parse,

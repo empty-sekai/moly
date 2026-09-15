@@ -554,7 +554,7 @@ pub struct Registry {
 pub(crate) struct CharacterListHandle(Handle<JsonAsset>);
 
 /// 解析完成的角色清单，每行 `(unitId, 运行时步行速, 步间停顿秒数, 待机
-/// 段族名, 走姿段族名)`；spawn 消费后即撤。
+/// 段族名, 走姿段族名)`；常驻作为独立体验临时名册的真实角色蓝图。
 #[derive(Resource)]
 pub(crate) struct Catalog(Vec<(u32, f32, f32, String, String)>);
 
@@ -747,7 +747,6 @@ pub(crate) fn spawn_when_ready(
         character_unit_ids: ids.clone(),
     });
     commands.insert_resource(Spawned);
-    commands.remove_resource::<Catalog>();
     use crate::client_config::{
         KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
         KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
@@ -771,6 +770,105 @@ pub(crate) fn spawn_when_ready(
         placements.anchored().len(),
         face.walkable().len(),
     );
+}
+
+/// Add exact cast members for a scoped independent experience. These are
+/// ordinary NPC entities, so character assembly, animation, facial, talk and
+/// cleanup remain owned by their existing systems.
+pub(crate) fn spawn_temporary_units(
+    world: &mut World,
+    requested: &[u32],
+) -> Result<Vec<Entity>, String> {
+    let existing: std::collections::HashSet<u32> = world
+        .query::<&CharacterUnitId>()
+        .iter(world)
+        .map(|unit| unit.0)
+        .collect();
+    let epoch = world
+        .get_resource::<crate::site::GroundEpoch>()
+        .ok_or_else(|| "独立场景还没有定案".to_owned())?
+        .0;
+    let face = world
+        .get_resource::<crate::npc_objective::ObjectiveFace>()
+        .filter(|face| face.is_fresh(epoch) && !face.walkable().is_empty())
+        .ok_or_else(|| "独立场景的行走区域还在准备".to_owned())?;
+    let rows = world
+        .get_resource::<Catalog>()
+        .ok_or_else(|| "角色蓝图尚未载入".to_owned())?;
+    let missing: Vec<u32> = requested
+        .iter()
+        .copied()
+        .filter(|unit| !existing.contains(unit))
+        .collect();
+    let blueprints: Vec<_> = missing
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let (_, speed, pause, idle, walk) = rows
+                .0
+                .iter()
+                .find(|(id, ..)| id == unit)
+                .ok_or_else(|| format!("角色 {unit} 不在当前来源的角色清单中"))?;
+            Ok((
+                *unit,
+                *speed,
+                *pause,
+                idle.clone(),
+                walk.clone(),
+                crate::npc_objective::seed_position(face, index, missing.len().max(1)),
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    let mut spawned = Vec::with_capacity(blueprints.len());
+    for (unit_id, speed, pause, idle, walk, seed) in blueprints {
+        let entity = world
+            .spawn((
+                CharacterUnitId(unit_id),
+                Transform::from_translation(Vec3::from(seed)),
+                Visibility::default(),
+                PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
+                WalkSpeed(speed),
+                (
+                    PauseSeconds(pause),
+                    RestLifecycle::default(),
+                    NpcActions::default(),
+                ),
+                WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
+                MoveTarget(seed),
+                RouteStops::default(),
+                StuckBaseline::default(),
+                MotionClips { idle, walk },
+                crate::npc_objective::TalkSlot::default(),
+                crate::npc_objective::ObjectiveMind::at_spawn(),
+                crate::npc_objective::MemberRng::seeded(unit_id),
+                MotionPhase::Dwelling { remaining: None },
+            ))
+            .id();
+        spawned.push(entity);
+    }
+    if let Some(mut registry) = world.get_resource_mut::<Registry>() {
+        registry.character_unit_ids.extend(missing.iter().copied());
+        registry.character_unit_ids.sort_unstable();
+        registry.character_unit_ids.dedup();
+    }
+    Ok(spawned)
+}
+
+pub(crate) fn remove_temporary_units(world: &mut World, entities: &[Entity]) {
+    let units: std::collections::HashSet<u32> = entities
+        .iter()
+        .filter_map(|entity| world.get::<CharacterUnitId>(*entity).map(|unit| unit.0))
+        .collect();
+    for entity in entities {
+        if let Ok(entity) = world.get_entity_mut(*entity) {
+            entity.despawn();
+        }
+    }
+    if let Some(mut registry) = world.get_resource_mut::<Registry>() {
+        registry
+            .character_unit_ids
+            .retain(|unit| !units.contains(unit));
+    }
 }
 
 /// Update：换站后的名册重播种。吃站点定案代数（见 `site::GroundEpoch`）：

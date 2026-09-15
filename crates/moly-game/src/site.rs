@@ -118,7 +118,10 @@ pub struct SiteRequest {
 
 /// Product-owned offline population, never an NPC simulation or quality rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OfflineSceneContent { Compact, Full }
+pub enum OfflineSceneContent {
+    Compact,
+    Full,
+}
 
 /// 当前请求的站点：换站入口改写它，装载计划读它。
 #[derive(Clone, Resource)]
@@ -137,7 +140,11 @@ impl From<SiteRequest> for SiteSelection {
             levels.insert("home_site".to_owned(), level);
         }
         if let Some(level) = request.room_level {
-            let target = if is_room(&request.site) { request.site.as_str() } else { "first_floor" };
+            let target = if is_room(&request.site) {
+                request.site.as_str()
+            } else {
+                "first_floor"
+            };
             levels.insert(target.to_owned(), level);
         }
         Self {
@@ -150,9 +157,15 @@ impl From<SiteRequest> for SiteSelection {
 
 impl SiteSelection {
     pub(crate) fn for_player_data(data: &moly_assets::player_data::ImportedPlayerData) -> Self {
-        Self { site: data.sites[0].site_type.clone(),
-            levels: data.sites.iter().map(|site| (site.site_type.clone(), site.level)).collect(),
-            content: OfflineSceneContent::Compact }
+        Self {
+            site: data.sites[0].site_type.clone(),
+            levels: data
+                .sites
+                .iter()
+                .map(|site| (site.site_type.clone(), site.level))
+                .collect(),
+            content: OfflineSceneContent::Compact,
+        }
     }
 
     pub(crate) fn snapshot(&self) -> serde_json::Value {
@@ -161,41 +174,82 @@ impl SiteSelection {
     }
 
     pub(crate) fn from_snapshot(value: &serde_json::Value) -> Result<Self, String> {
-        let site = value["site"].as_str().ok_or("Backup site is missing")?.to_owned();
-        if !SUPPORTED.contains(&site.as_str()) { return Err("Backup site is unknown".into()); }
+        let site = value["site"]
+            .as_str()
+            .ok_or("Backup site is missing")?
+            .to_owned();
+        if !SUPPORTED.contains(&site.as_str()) {
+            return Err("Backup site is unknown".into());
+        }
         let levels = serde_json::from_value::<HashMap<String, u32>>(value["levels"].clone())
             .map_err(|_| "Backup levels are invalid")?;
-        if levels.iter().any(|(site, level)| !SUPPORTED.contains(&site.as_str()) || *level == 0) {
+        if levels
+            .iter()
+            .any(|(site, level)| !SUPPORTED.contains(&site.as_str()) || *level == 0)
+        {
             return Err("Backup levels are invalid".into());
         }
         let content = match value["content"].as_str() {
-            Some("full") => OfflineSceneContent::Full, Some("compact") => OfflineSceneContent::Compact,
+            Some("full") => OfflineSceneContent::Full,
+            Some("compact") => OfflineSceneContent::Compact,
             _ => return Err("Backup content selection is invalid".into()),
         };
-        Ok(Self { site, levels, content })
+        Ok(Self {
+            site,
+            levels,
+            content,
+        })
     }
 
-    pub(crate) fn site_type(&self) -> &str { &self.site }
-    pub(crate) fn content(&self) -> OfflineSceneContent { self.content }
+    pub(crate) fn site_type(&self) -> &str {
+        &self.site
+    }
+    pub(crate) fn content(&self) -> OfflineSceneContent {
+        self.content
+    }
 
-    pub(crate) fn resolve_level(&mut self, sites: &Sites, layouts: &crate::fixture::layouts::SiteFixtureLayouts) -> Result<u32, String> {
+    pub(crate) fn resolve_level(
+        &mut self,
+        sites: &Sites,
+        layouts: &crate::fixture::layouts::SiteFixtureLayouts,
+    ) -> Result<u32, String> {
         let row = sites.row(&self.site);
-        let level = if let Some(level) = self.levels.get(&self.site) { *level }
-        else if let Some(level) = layouts.saved_level(row.id)? { level }
-        else if self.site == "home_site" { DEFAULT_OFFLINE_HOME_LEVEL }
-        else if self.site == "first_floor" { DEFAULT_ROOM_LEVEL }
-        else if row.levels.len() == 1 { row.levels[0] }
-        else { return Err(format!("site {} requires an explicit expansion stage", self.site)); };
+        let level = if let Some(level) = self.levels.get(&self.site) {
+            *level
+        } else if let Some(level) = layouts.saved_level(row.id)? {
+            level
+        } else if self.site == "home_site" {
+            DEFAULT_OFFLINE_HOME_LEVEL
+        } else if self.site == "first_floor" {
+            DEFAULT_ROOM_LEVEL
+        } else if row.levels.len() == 1 {
+            row.levels[0]
+        } else {
+            return Err(format!(
+                "site {} requires an explicit expansion stage",
+                self.site
+            ));
+        };
         if !row.levels.contains(&level) {
-            return Err(format!("site {} has no authored level {level} (available {:?})", self.site, row.levels));
+            return Err(format!(
+                "site {} has no authored level {level} (available {:?})",
+                self.site, row.levels
+            ));
         }
-        layouts.validate_target(row.id, &self.site, sites.floor_grid(&self.site, level)?, self.content)?;
+        layouts.validate_target(
+            row.id,
+            &self.site,
+            sites.floor_grid(&self.site, level)?,
+            self.content,
+        )?;
         self.levels.insert(self.site.clone(), level);
         Ok(level)
     }
 
     pub(crate) fn fixture_floor_grid(&self, sites: &Sites) -> Result<FloorGridLayout, String> {
-        let level = self.levels.get(&self.site)
+        let level = self
+            .levels
+            .get(&self.site)
             .ok_or_else(|| format!("site {} expansion stage is not resolved yet", self.site))?;
         sites.floor_grid(&self.site, *level)
     }
@@ -405,14 +459,20 @@ impl Sites {
             let ground = entry
                 .get("collision")
                 .and_then(|v| v.as_array())
-                .and_then(|rows| rows.iter().find(|row| {
-                    row.get("role").and_then(|r| r.as_str()) == Some(WALKABLE_GROUND_ROLE)
-                }));
+                .and_then(|rows| {
+                    rows.iter().find(|row| {
+                        row.get("role").and_then(|r| r.as_str()) == Some(WALKABLE_GROUND_ROLE)
+                    })
+                });
             let face = if baked && HEIGHTMESH_SCENES.contains(&scene.as_str()) {
                 NavFace::Heightmesh
             } else if let Some(ground) = ground {
-                let file = ground.get("file").and_then(|f| f.as_str())
-                    .unwrap_or_else(|| panic!("站点包清单：场景 {scene} 的 role={WALKABLE_GROUND_ROLE} 缺几何文件"));
+                let file = ground
+                    .get("file")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("站点包清单：场景 {scene} 的 role={WALKABLE_GROUND_ROLE} 缺几何文件")
+                    });
                 NavFace::BakeInput(file.to_owned())
             } else if baked {
                 panic!("站点包清单：场景 {scene} 的烘档在场但没有 role={WALKABLE_GROUND_ROLE} 的碰撞面行")
@@ -459,12 +519,16 @@ impl Sites {
         requested_level: u32,
     ) -> Result<FloorGridLayout, String> {
         if self.row_opt(site_type).is_none() {
-            return Err(format!("site type {site_type} is not in the loaded site table"));
+            return Err(format!(
+                "site type {site_type} is not in the loaded site table"
+            ));
         }
         self.floor_layouts
             .get(&(site_type.to_owned(), requested_level))
             .copied()
-            .ok_or_else(|| format!("site {site_type} has no authored floor layout for level {requested_level}"))
+            .ok_or_else(|| {
+                format!("site {site_type} has no authored floor layout for level {requested_level}")
+            })
     }
 }
 
@@ -620,9 +684,14 @@ pub(crate) fn plan(
         return;
     };
     let site_level = match selection.resolve_level(&sites, &layouts) {
-        Ok(level) => { *last_input_error = None; level }
+        Ok(level) => {
+            *last_input_error = None;
+            level
+        }
         Err(error) => {
-            if last_input_error.as_ref() != Some(&error) { error!("[site] {error}"); }
+            if last_input_error.as_ref() != Some(&error) {
+                error!("[site] {error}");
+            }
             *last_input_error = Some(error);
             return;
         }
@@ -630,11 +699,7 @@ pub(crate) fn plan(
     let row = sites.row(&selection.site);
     let room = is_room(&row.site_type).then(|| RoomInfo {
         level: site_level,
-        walkable_file: sites
-            .walkable
-            .get(&site_level)
-            .cloned()
-            .flatten(),
+        walkable_file: sites.walkable.get(&site_level).cloned().flatten(),
     });
     let module = room.as_ref().map(|_| {
         server.load::<Gltf>(AssetPath::from(format!(
@@ -653,12 +718,10 @@ pub(crate) fn plan(
     // 玩家可行走面来自清单中的显式导航输入（草原另用烘档高度网格）。
     // 有无离线瓦片不影响独立导航输入的装载；无独立面时才沿用地表。
     let navmesh = sites.nav_face(&row.scene).map(|face| match face {
-        NavFace::Heightmesh => {
-            server.load::<Gltf>(AssetPath::from(format!(
-                "moly://site/scenes/{}/navmesh/heightmesh-0.glb",
-                row.scene
-            )))
-        }
+        NavFace::Heightmesh => server.load::<Gltf>(AssetPath::from(format!(
+            "moly://site/scenes/{}/navmesh/heightmesh-0.glb",
+            row.scene
+        ))),
         NavFace::BakeInput(file) => {
             server.load::<Gltf>(AssetPath::from(format!("moly://site/{file}")))
         }
@@ -670,7 +733,10 @@ pub(crate) fn plan(
     let grounds = if is_room(&row.site_type) {
         Vec::new()
     } else {
-        ground_names(&row.scene).iter().map(|s| (*s).to_owned()).collect()
+        ground_names(&row.scene)
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
     };
     commands.insert_resource(SiteActive {
         site_id: row.id,
@@ -690,8 +756,14 @@ pub(crate) fn plan(
         walkable,
         navmesh,
         home_obstacle_levels: if row.site_type == "home_site" {
-            row.levels.iter().copied().filter(|rank| *rank >= site_level).collect()
-        } else { Vec::new() },
+            row.levels
+                .iter()
+                .copied()
+                .filter(|rank| *rank >= site_level)
+                .collect()
+        } else {
+            Vec::new()
+        },
     });
     // 侧车（inactiveNodes 名单、材质表与 A 套声源表）跟着站点走：换站后
     // 重新起请求。
@@ -741,7 +813,9 @@ pub fn spawn_when_ready(
     // generated fences. Default home L5 adds only the authored-empty rank5 root.
     for rank in &assets.home_obstacle_levels {
         let name = format!("rank{rank}");
-        let obstacle = gltf.named_scenes.get(name.as_str())
+        let obstacle = gltf
+            .named_scenes
+            .get(name.as_str())
             .unwrap_or_else(|| panic!("home glTF lacks authored obstacle scene {name}"));
         scenes.push((obstacle.clone(), false));
     }
@@ -837,7 +911,9 @@ pub fn spawn_when_ready(
     let pending = scenes.len();
     for (scene_index, (scene, hidden)) in scenes.into_iter().enumerate() {
         let mut root = commands.spawn((SceneRoot(scene), SiteRoot));
-        if scene_index == 0 { root.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin); }
+        if scene_index == 0 {
+            root.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin);
+        }
         if hidden {
             root.insert(Visibility::Hidden);
         }
@@ -873,7 +949,8 @@ fn ready(server: &Res<AssetServer>, handle: &Handle<Gltf>, label: &str) -> bool 
     if let LoadState::Failed(err) = server.load_state(handle) {
         panic!("{label}装载失败：{err:?}");
     }
-    if let RecursiveDependencyLoadState::Failed(err) = server.recursive_dependency_load_state(handle)
+    if let RecursiveDependencyLoadState::Failed(err) =
+        server.recursive_dependency_load_state(handle)
     {
         panic!("{label}的依赖装载失败：{err:?}");
     }
@@ -920,9 +997,14 @@ pub(crate) fn read_switch(
     mut exit: MessageWriter<AppExit>,
     edit: Option<Res<crate::fixture_edit::EditSession>>,
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
+    panel: Res<crate::game_settings::SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
 ) {
-    let mut requested = key_request(&keys, active.as_deref());
-    if requested.is_none() {
+    let manual_input = !panel.blocks_world_input() && !library.blocks_world_input();
+    let mut requested = manual_input
+        .then(|| key_request(&keys, active.as_deref()))
+        .flatten();
+    if requested.is_none() && manual_input {
         requested = tour_request(&mut tour, &time, active.as_deref(), &epoch, &mut exit);
     }
     // 小地图点的名与按键同级；请求无论是否抢先落地都当帧撤（不跨帧）。
@@ -935,12 +1017,21 @@ pub(crate) fn read_switch(
     let Some(site) = requested else {
         return;
     };
-    if site == selection.site { return; }
-    if sites.as_deref().and_then(|sites| sites.row_opt(&site)).is_none() {
+    if site == selection.site {
+        return;
+    }
+    if sites
+        .as_deref()
+        .and_then(|sites| sites.row_opt(&site))
+        .is_none()
+    {
         warn!("[site] cannot switch to unknown/not-yet-loaded site {site}");
         return;
     }
-    if edit.as_deref().is_some_and(crate::fixture_edit::has_unsaved_layout) {
+    if edit
+        .as_deref()
+        .is_some_and(crate::fixture_edit::has_unsaved_layout)
+    {
         warn!("[site] layout has unsaved changes; save this map before switching");
         return;
     }
@@ -948,7 +1039,9 @@ pub(crate) fn read_switch(
     // or unknown package cannot tear down the map the user is currently in.
     let mut next = (*selection).clone();
     next.site = site;
-    let Some(sites) = sites.as_deref() else { return; };
+    let Some(sites) = sites.as_deref() else {
+        return;
+    };
     if let Err(error) = next.resolve_level(sites, &layouts) {
         warn!("[site] switch refused: {error}; current map and saved data were retained");
         return;
@@ -978,12 +1071,9 @@ pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next
     crate::walk_face::teardown(commands);
     site_material::teardown(commands);
     site_sound::teardown(commands);
-    // 粒子链：计划与状态随站撤（绘制实体不是站点树的子节点，本站的
-    // 属性池不能带进下一站）。天气粒子链同理——它的锚点一半是站。
     crate::uber_particle::teardown(commands);
     crate::weather_fx::teardown(commands);
-    // GroundEpoch 留下：重播种面按代数变化起跳，撤了会把「新代」算回
-    // 「首代」（首代在名册播种时已被记录）。
+    // GroundEpoch stays monotonic across the transition.
     commands.remove_resource::<SiteActive>();
     inactive_nodes::teardown(commands);
     commands.insert_resource(next);
