@@ -310,6 +310,7 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
         point.y = face.ref_y();
         face.sample(point.to_array(), 0.15).map(Vec3::from)
     };
+    let mut independent_group_anchor = None;
     for (index, actor) in actors.iter_mut().enumerate() {
         let unit = units[index];
         let anchor = pairs
@@ -332,6 +333,24 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
                 fixture.translation,
                 actor.before.rotation,
             );
+            independent_group_anchor.get_or_insert(actor.after.translation);
+        } else if choice.mode == ExperienceMode::Independent {
+            if let Some(group_anchor) = independent_group_anchor {
+                let nearby = actor.before.translation.distance(group_anchor) <= 1.8
+                    && occupied
+                        .iter()
+                        .all(|other| actor.before.translation.distance(*other) >= 0.62)
+                    && sample(actor.before.translation).is_some();
+                if !nearby {
+                    actor.after.translation =
+                        viewing_position(group_anchor, Quat::IDENTITY, &occupied, sample)
+                            .ok_or("登场角色附近暂时没有足够的安全站位")?;
+                }
+                actor.after.rotation =
+                    facing(actor.after.translation, group_anchor, actor.before.rotation);
+            } else {
+                independent_group_anchor = Some(actor.after.translation);
+            }
         }
         occupied.push(actor.after.translation);
     }
