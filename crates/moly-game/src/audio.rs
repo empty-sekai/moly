@@ -860,6 +860,18 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
             .unwrap_or_else(|| panic!("loop.json 的 streams 不是数组"))
         {
             let cue = field_str(stream, "cue");
+            // The extractor explicitly emits {cue, error} for a requested cue
+            // with no source waveform (phenomena/audio.py, NO_CUE). It is a
+            // diagnostic variant, not a playable stream with missing fields.
+            // Do not invent loop=false, a path, or another cue as a substitute.
+            if let Some(diagnostic) = stream.get("error") {
+                let reason = diagnostic.as_str().filter(|value| !value.is_empty())
+                    .expect("audio diagnostic error must be a nonempty string");
+                assert_eq!(stream.as_object().map(|row| row.len()), Some(2),
+                    "audio diagnostic cannot also contain partial playable fields");
+                warn!("[audio-source] unavailable cue={cue} package={package_name}: {reason}");
+                continue;
+            }
             let cue_label = label(cue);
             // 单流键 subsong 是空值（自成一包的下载件一族）；多流键里全是
             // 编号——空值折算为最大，必输给任何编号。
@@ -2202,4 +2214,44 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<VoiceChannel>()
         .init_resource::<SeRequests>()
         .init_resource::<SeChannel>();
+}
+
+#[cfg(test)]
+mod stream_manifest_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn manifest(rows: serde_json::Value) -> serde_json::Value {
+        json!({"packages":[{"package":"source-bank","streams":rows}]})
+    }
+    fn valid() -> serde_json::Value {
+        json!({"cue":"available","subsong":1,"loop":false,
+            "ogg":"audio/source.ogg","durationSeconds":1.25})
+    }
+    #[test]
+    fn source_diagnostic_does_not_poison_unrelated_audio_or_fabricate_a_stream() {
+        let streams=parse_streams(&manifest(json!([valid(), {
+            "cue":"missing","error":"no waveform in this archive carries this cue name"
+        }])), "phenomena/");
+        assert_eq!(streams.0.len(),1);
+        assert!(streams.0.get(&("missing".into(),"source-bank".into())).is_none());
+        assert_eq!(streams.0[&("available".into(),"source-bank".into())].ogg,"phenomena/audio/source.ogg");
+    }
+    #[test]
+    #[should_panic(expected="loop")]
+    fn malformed_playable_row_still_fails_closed() {
+        let mut row=valid();row["loop"]=json!(null);
+        parse_streams(&manifest(json!([row])), "");
+    }
+    #[test]
+    #[should_panic(expected="partial playable")]
+    fn diagnostic_cannot_hide_corrupt_playable_data() {
+        let mut row=valid();row["error"]=json!("failed");
+        parse_streams(&manifest(json!([row])), "");
+    }
+    #[test]
+    #[should_panic(expected="nonempty string")]
+    fn malformed_diagnostic_is_not_silently_ignored() {
+        parse_streams(&manifest(json!([{"cue":"bad","error":false}])), "");
+    }
 }
