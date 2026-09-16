@@ -161,3 +161,14 @@ pub fn library_catalog() -> String { moly_game::library_catalog() }
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn library_diagnostics() -> String { moly_game::library_diagnostics() }
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn player_data_command(operation: &str, region: &str, json: &str) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::player_data::browser_command(operation, region, json)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn player_data_snapshot() -> String { moly_game::player_data::browser_snapshot() }

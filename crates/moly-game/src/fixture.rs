@@ -1227,6 +1227,7 @@ fn restore_selected_layout(
     mut last_error: Local<Option<String>>,
     temporary: Option<Res<crate::site::TemporarySiteActive>>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    exploration: Option<Res<crate::player_data::TransientExploration>>,
 ) {
     let Some(sites) = sites else {
         return;
@@ -1243,7 +1244,7 @@ fn restore_selected_layout(
     // An embedded stage starts with no preset or persisted layout. The same
     // layout owner later installs/restores exact content-scoped fixtures.
     // In particular, never instantiate a CN offline preset in a JP snapshot.
-    let restored = if temporary.is_some() || stage.is_some() {
+    let restored = if crate::player_data::use_empty_stage_layout(temporary.is_some(), stage.is_some(), exploration.is_some()) {
         // The temporary site is empty from its first frame. Never materialize
         // a saved layout only to delete it, or let it block preview admission.
         commands.insert_resource(TemporaryFixtureLayout);

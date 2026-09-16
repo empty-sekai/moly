@@ -80,7 +80,7 @@ impl LayoutSaveReceipt {
     pub(crate) fn snapshot(&self) -> EditStorageSnapshot { self.snapshot.clone() }
 }
 
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub(crate) struct SiteFixtureLayouts {
     document: Result<Value, String>,
     /// Switching away keeps the current map's rows/UIDs even before the user

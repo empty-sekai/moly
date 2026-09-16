@@ -28,6 +28,8 @@ pub(crate) enum ImportAction {
     ClearUid,
     Region,
     Apply,
+    Explore,
+    LeaveExploration,
     Restore,
     Cancel,
 }
@@ -77,6 +79,8 @@ pub struct PlayerDataImport {
     preview: Option<Preview>,
     requests: Option<(Handle<JsonAsset>, Handle<JsonAsset>)>,
     catalog: Option<PlayerDataCatalog>,
+    exploration: Option<(SiteFixtureLayouts, SiteSelection)>,
+    last_error: bool,
 }
 
 impl Default for PlayerDataImport {
@@ -88,7 +92,7 @@ impl Default for PlayerDataImport {
         Self { uid: String::new(), region: "cn".into(),
             status: "Enter a player UID or choose a Mysekai JSON file. Import keeps a recoverable layout backup.".into(),
             busy: false, action: None, api: api.into(), inbox: Default::default(), read_task: None,
-            generation: 0, pending: None, preview: None, requests: None, catalog: None }
+            generation: 0, pending: None, preview: None, requests: None, catalog: None, exploration: None, last_error: false }
     }
 }
 
@@ -373,6 +377,40 @@ impl PlayerDataImport {
         Ok(())
     }
 
+    fn explore(&mut self, world: &mut World) -> Result<(), String> {
+        require_clean_editor(world)?;
+        let preview = self.preview.as_ref().ok_or("Validate player data before exploring")?;
+        if self.exploration.is_none() {
+            self.exploration = Some((world.resource::<SiteFixtureLayouts>().clone(), world.resource::<SiteSelection>().clone()));
+        }
+        // No settings write, localStorage mutation or source account upload.
+        let mut document = json!({});
+        document[layouts::SECTION] = preview.section.clone();
+        document[PROFILE] = json!({"version":1,"region":preview.data.region,"rank":preview.data.rank});
+        let selection = SiteSelection::for_player_data(&preview.data);
+        world.insert_resource(TransientExploration);
+        replace_live(world, document, selection);
+        self.status = "Exploring player data in this session only.".into();
+        self.preview = None;
+        Ok(())
+    }
+
+    fn leave_exploration(&mut self, world: &mut World) -> Result<(), String> {
+        require_clean_editor(world)?;
+        let Some((layouts, selection)) = self.exploration.take() else { return Ok(()); };
+        world.remove_resource::<TransientExploration>();
+        let rank = saved_rank();
+        if let Some(mut menu) = world.get_resource_mut::<crate::menu_dialog::MenuMock>() { menu.set_player_rank(rank); }
+        if let Some(mut info) = world.get_resource_mut::<crate::info::InfoMock>() { info.set_player_rank(rank); }
+        let roots = world.query_filtered::<Entity, With<crate::site::SiteRoot>>().iter(world).collect();
+        let mut commands = world.commands();
+        crate::site::queue_transition(&mut commands, roots, selection);
+        commands.insert_resource(layouts);
+        self.cancel();
+        self.status = "The original scene has been restored. No player data was saved.".into();
+        Ok(())
+    }
+
     fn restore(&mut self, world: &mut World) -> Result<(), String> {
         require_clean_editor(world)?;
         let sites = world
@@ -500,6 +538,28 @@ pub(crate) fn update(world: &mut World) {
     let Some(mut state) = world.remove_resource::<PlayerDataImport>() else {
         return;
     };
+    if let Some(request) = browser_requests().lock().unwrap().take() {
+        state.last_error = false;
+        let busy = world.get_resource::<crate::content_library::ContentLibrary>()
+            .is_some_and(|library| library.browser_busy());
+        let checked = if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
+            Err("Player-data browser commands require an isolated stage".to_owned())
+        } else if busy {
+            Err("Stop the current interaction before importing player data".to_owned())
+        } else { Ok(()) };
+        match checked {
+            Err(error) => { state.last_error = true; state.status = error; }
+            Ok(()) => match request {
+                BrowserRequest::Preview { region, json } => {
+                    state.region = region;
+                    state.request_json(json, false);
+                }
+                BrowserRequest::Explore => state.action = Some(ImportAction::Explore),
+                BrowserRequest::Restore => state.action = Some(ImportAction::LeaveExploration),
+                BrowserRequest::Cancel => state.action = Some(ImportAction::Cancel),
+            }
+        }
+    }
     state.receive();
     let result = match state.action.take() {
         Some(ImportAction::Fetch) => {
@@ -512,6 +572,8 @@ pub(crate) fn update(world: &mut World) {
         }
         Some(ImportAction::File) => state.choose_file(),
         Some(ImportAction::Apply) => state.apply(world),
+        Some(ImportAction::Explore) => state.explore(world),
+        Some(ImportAction::LeaveExploration) => state.leave_exploration(world),
         Some(ImportAction::Restore) => state.restore(world),
         Some(ImportAction::Paste) => {
             paste(state.inbox.clone(), state.generation);
@@ -543,11 +605,20 @@ pub(crate) fn update(world: &mut World) {
         state.busy = false;
         state.pending = None;
         state.status = error;
+        state.last_error = true;
+        if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
         if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>() {
             panel.open = true;
             panel.player_data = true;
         }
+        }
     }
+    let summary = state.preview_summary();
+    *browser_snapshot_cell().lock().unwrap() = json!({
+        "schemaVersion":1,"region":state.region,"busy":state.busy,"error":state.last_error,
+        "status":state.status,"canExplore":summary.is_some(),"exploring":state.exploration.is_some(),
+        "summary":summary.map(|(rank,sites,fixtures)|json!({"rank":rank,"sites":sites,"fixtures":fixtures})),
+    }).to_string();
     world.insert_resource(state);
 }
 
@@ -630,3 +701,51 @@ pub(crate) fn install(app: &mut App) {
 
 #[cfg(test)]
 mod tests;
+
+// One bounded, latest-wins browser request. Never store imported JSON in the
+// public catalogue, log, URL or a durable command replay queue.
+enum BrowserRequest { Preview { region: String, json: String }, Explore, Restore, Cancel }
+fn browser_requests() -> &'static Mutex<Option<BrowserRequest>> {
+    static CELL: std::sync::OnceLock<Mutex<Option<BrowserRequest>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+fn browser_snapshot_cell() -> &'static Mutex<String> {
+    static CELL: std::sync::OnceLock<Mutex<String>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new("{}".into()))
+}
+pub fn browser_snapshot() -> String { browser_snapshot_cell().lock().unwrap().clone() }
+pub fn browser_command(operation: &str, region: &str, json: &str) -> Result<(), String> {
+    if !matches!(region, "cn" | "jp") { return Err("Unsupported player data region".into()); }
+    if json.len() > MAX_IMPORT_BYTES { return Err("Player data exceeds the 32 MiB import limit".into()); }
+    let request = match operation {
+        "preview" => BrowserRequest::Preview { region: region.into(), json: json.into() },
+        "explore" if json.is_empty() => BrowserRequest::Explore,
+        "restore" if json.is_empty() => BrowserRequest::Restore,
+        "cancel" if json.is_empty() => BrowserRequest::Cancel,
+        _ => return Err("Invalid player-data operation".into()),
+    };
+    *browser_requests().lock().unwrap() = Some(request);
+    Ok(())
+}
+
+/// Only a successfully validated, explicitly entered transient import lets an
+/// embedded stage restore player layouts. Its absence keeps the safe empty
+/// stage and prevents accidental reads of a different region's saved preset.
+#[derive(Resource)]
+pub(crate) struct TransientExploration;
+
+pub(crate) fn use_empty_stage_layout(temporary: bool, stage: bool, exploring: bool) -> bool {
+    temporary || (stage && !exploring)
+}
+
+#[cfg(test)]
+mod transient_tests {
+    #[test]
+    fn validated_exploration_overrides_only_the_empty_browser_preset() {
+        use super::use_empty_stage_layout as empty;
+        assert!(empty(false, true, false));
+        assert!(!empty(false, true, true));
+        assert!(empty(true, true, true));
+        assert!(!empty(false, false, false));
+    }
+}
