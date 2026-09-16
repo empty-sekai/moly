@@ -15,7 +15,23 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 # The application adds WebGPU for its default build. The WebGL2 build omits
 # that feature so the engine uses its required uniform padding and limits.
-bevy = { version = "0.18.1", features = ["3d", "debug", "webgl2"] }
+# Explicit expansion of Bevy 0.18's default 2d/3d/ui feature groups. Keep the
+# existing renderer, audio, animation, UI, codecs and native platform support;
+# omit only engine gizmos and picking. Moly owns its gesture/raycast UI routes.
+bevy = { version = "0.18.1", default-features = false, features = [
+    "async_executor", "bevy_asset", "bevy_input_focus", "bevy_log",
+    "bevy_state", "bevy_window", "custom_cursor", "reflect_auto_register",
+    "std", "android-game-activity", "android_shared_stdcxx", "bevy_gilrs",
+    "bevy_winit", "default_font", "multi_threaded", "webgl2", "x11",
+    "wayland", "sysinfo_plugin",
+    "bevy_animation", "bevy_camera", "bevy_color", "bevy_image", "bevy_mesh",
+    "bevy_shader", "bevy_text", "hdr", "png", "bevy_sprite",
+    "bevy_render", "bevy_core_pipeline", "bevy_sprite_render",
+    "bevy_light", "bevy_mikktspace", "ktx2", "morph_animation", "morph",
+    "smaa_luts", "tonemapping_luts", "zstd_rust", "bevy_anti_alias",
+    "bevy_gltf", "bevy_pbr", "bevy_post_process", "gltf_animation",
+    "bevy_ui", "bevy_ui_render", "bevy_scene", "bevy_audio", "vorbis", "debug",
+] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.dev]
@@ -23,3 +39,12 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Browser size profile, measured and browser-validated. Native release is unchanged.
+[profile.wasm-size]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
