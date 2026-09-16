@@ -143,13 +143,16 @@ pub(crate) struct UiLayoutRequests {
     textures: Handle<JsonAsset>,
     text_settings: Handle<JsonAsset>,
     host_canvas: Handle<JsonAsset>,
+    stage_only: bool,
 }
 
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
+pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>, stage: Option<Res<crate::browser_stage::BrowserStage>>) {
     commands.init_resource::<UiLayouts>();
     commands.insert_resource(UiLayoutRequests {
+        stage_only: stage.is_some(),
         docs: DOCUMENTS
             .iter()
+            .filter(|(name, _)| stage.is_none() || *name == "Talk")
             .map(|(name, path)| (*name, server.load(format!("{ROOT}{path}"))))
             .collect(),
         wordings: server.load("moly://wordings.json"),
@@ -230,7 +233,10 @@ pub(crate) fn parse(
             .collect();
         layouts.runtime_textures = serde_json::from_str(&json.get(&request.textures).unwrap().0)
             .expect("UI runtime texture inventory");
-        let paths: Vec<_> = layouts.runtime_textures.values().cloned().collect();
+        // The stage has no editor/menu: do not fetch thousands of unrelated
+        // thumbnails and chrome textures. Talk document images are requested
+        // by install_document, using the original source geometry.
+        let paths: Vec<_> = if request.stage_only { Vec::new() } else { layouts.runtime_textures.values().cloned().collect() };
         for path in paths {
             layouts
                 .images

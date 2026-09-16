@@ -148,6 +148,14 @@ fn viewing_position(
     }
     None
 }
+fn observer_viewing_yaw(mode: ExperienceMode) -> Quat {
+    if mode == ExperienceMode::Independent {
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_3)
+    } else {
+        Quat::IDENTITY
+    }
+}
+
 fn facing(point: Vec3, target: Vec3, fallback: Quat) -> Quat {
     let direction = target - point;
     if direction.x * direction.x + direction.z * direction.z < 1e-6 {
@@ -408,7 +416,13 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
             }
         })
         .ok_or("没有可供体验的场景目标")?;
-    let player_position = viewing_position(anchor, Quat::IDENTITY, &occupied, sample)
+    // The independent observer must not stand directly between the normal
+    // follow camera and a small table/lamp. Preserve the real safe-radius and
+    // navigation sampler, but prefer an oblique side of the content. This is
+    // staging composition only; the original scene and authored actor paths
+    // retain their owners and are restored from the same snapshot.
+    let observer_yaw = observer_viewing_yaw(choice.mode);
+    let player_position = viewing_position(anchor, observer_yaw, &occupied, sample)
         .ok_or("目标附近暂时没有适合观看的位置")?;
     let mut after = *player_pose;
     after.translation = player_position;
@@ -441,6 +455,9 @@ fn apply_preview(world: &mut World, choice: &PlaybackChoice, actors: Vec<ActorPo
         if actor.npc {
             world.entity_mut(actor.entity).insert(TalkHold);
         }
+    }
+    if let Some(player) = preview.actors.iter().find(|actor| !actor.npc) {
+        super::stage_framing::prepare(world, choice, player.after);
     }
     info!(
         "[content-library] staged ticket={} actors={} epoch={}",
@@ -801,6 +818,17 @@ fn drive_independent(world: &mut World) {
                 world.insert_resource(session);
                 return;
             }
+            let controller_ready = match crate::fixture_gimmick::catalog_stream::ready_for(
+                world,
+                &session.required_fixtures,
+            ) {
+                Ok(ready) => ready,
+                Err(reason) => {
+                    fail_independent(world, &mut session, reason);
+                    world.insert_resource(session);
+                    return;
+                }
+            };
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
             let room_status = world.resource::<crate::room_appearance::RoomAppearanceState>();
             if world.resource::<crate::site::SiteSelection>().is_room() {
@@ -844,6 +872,7 @@ fn drive_independent(world: &mut World) {
                 reserve_required_actors(world, &session.required_units);
                 if session.phase == IndependentPhase::LoadingContent
                     && actors_ready(world, &session.required_units)
+                    && controller_ready
                 {
                     if let Some(targets) =
                         matching_fixture_targets(world, &session.required_fixtures)
@@ -878,6 +907,25 @@ fn drive_independent(world: &mut World) {
             }
         }
         IndependentPhase::Staged => {
+            let state = world.resource::<ContentLibrary>();
+            if state
+                .pending
+                .as_ref()
+                .is_none_or(|choice| choice.ticket != session.ticket)
+                && state
+                    .active
+                    .as_ref()
+                    .is_none_or(|active| active.choice.ticket != session.ticket)
+            {
+                if let Some(reason) = state.last_error.clone() {
+                    fail_independent(world, &mut session, reason);
+                } else {
+                    session.phase = IndependentPhase::RequestingReturn;
+                    session.elapsed = 0.;
+                }
+                world.insert_resource(session);
+                return;
+            }
             if session.elapsed >= ASSET_TIMEOUT {
                 let reason = world
                     .resource::<ContentLibrary>()
@@ -1064,6 +1112,22 @@ pub(crate) fn retire_scene(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_observer_is_not_collinear_with_the_normal_camera_and_content() {
+        let yaw = observer_viewing_yaw(ExperienceMode::Independent);
+        let point = viewing_position(Vec3::ZERO, yaw, &[], Some).unwrap();
+        assert!(point.x.abs() > 0.7);
+        assert!((point.length() - 0.95).abs() < 1e-5);
+        let current = viewing_position(
+            Vec3::ZERO,
+            observer_viewing_yaw(ExperienceMode::CurrentScene),
+            &[],
+            Some,
+        )
+        .unwrap();
+        assert!(current.x.abs() < 1e-5);
+        assert!(viewing_position(Vec3::ZERO, yaw, &[], |_| None).is_none());
+    }
     #[test]
     fn independent_origin_allows_pre_settle_switch_without_snapshotting_partial_state() {
         let mut world = World::new();

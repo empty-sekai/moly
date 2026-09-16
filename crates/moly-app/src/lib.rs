@@ -18,6 +18,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// 与 `site_request` 两处入口）。
 fn run_app(
     #[cfg(target_arch = "wasm32")] web_render_settings: bevy::render::settings::WgpuSettings,
+    #[cfg(target_arch = "wasm32")] stage: bool,
 ) {
     let source = match asset_source::resolve() {
         Ok(source) => source,
@@ -39,6 +40,7 @@ fn run_app(
     #[cfg(target_arch = "wasm32")]
     {
         moly_game::configure_browser_library(&mut app);
+        if stage { moly_game::configure_browser_stage(&mut app); }
         attach_canvas(&mut app);
         app.add_systems(Startup, || {
             if let Some(window) = web_sys::window() {
@@ -92,6 +94,18 @@ fn attach_canvas(app: &mut App) {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue> {
+    start_browser(backend, writable, false)
+}
+
+/// Read-only stage entry; no second player/runtime is installed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn start_stage(backend: &str) -> Result<(), wasm_bindgen::JsValue> {
+    start_browser(backend, false, true)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_browser(backend: &str, writable: bool, stage: bool) -> Result<(), wasm_bindgen::JsValue> {
     std::panic::set_hook(Box::new(|info| {
         // Disable writes before notifying JavaScript; the host may release its lease.
         moly_game::set_browser_storage_writable(false);
@@ -113,7 +127,7 @@ pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue>
     let settings = render_backend::settings(backend)
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
     set_storage_writable(writable);
-    run_app(settings);
+    run_app(settings, stage);
     Ok(())
 }
 
@@ -136,3 +150,14 @@ pub fn library_command(command: &str) -> Result<(), wasm_bindgen::JsValue> {
 pub fn library_snapshot() -> String {
     moly_game::library_snapshot()
 }
+
+/// Deployment tooling requests a source-scoped catalogue, never a live entity.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn library_catalog() -> String { moly_game::library_catalog() }
+
+/// Read-only native/browser QA projection. Deliberately absent from the host
+/// postMessage intention protocol; it cannot mutate a world or inject scripts.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn library_diagnostics() -> String { moly_game::library_diagnostics() }

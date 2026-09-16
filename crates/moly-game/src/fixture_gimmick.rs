@@ -9,6 +9,7 @@
 //! General controllers and nonzero interruption sources remain separate gaps.
 
 mod rotation;
+pub(crate) mod catalog_stream;
 pub(crate) mod session;
 
 use std::{collections::HashMap, sync::Arc};
@@ -105,7 +106,7 @@ struct Definition {
 }
 
 #[derive(Resource, Default)]
-struct Catalog(HashMap<String, Result<Arc<Definition>, String>>);
+pub(crate) struct Catalog(HashMap<String, Result<Arc<Definition>, String>>);
 
 struct Playback {
     program: Arc<Program>,
@@ -172,7 +173,14 @@ pub(crate) struct Gimmicks {
     leases: HashMap<FixtureTarget, session::Lease>,
 }
 
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
+pub(crate) fn load(
+    mut commands: Commands, server: Res<AssetServer>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
+) {
+    if stage.is_some() {
+        catalog_stream::load(&mut commands, &server);
+        return;
+    }
     commands.insert_resource(CatalogLoad(
         server.load("moly://fixture-gimmick/gimmicks.json"),
     ));

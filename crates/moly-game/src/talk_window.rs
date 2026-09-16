@@ -72,6 +72,9 @@ use crate::balloon::{
 use crate::gesture::{GestureEvent, GestureState};
 use crate::ui_layout::UiLayouts;
 
+mod stage_layout;
+pub(crate) use stage_layout::ResponsiveDialogueMetrics;
+
 // ---------------------------------------------------------------------------
 // 会话归属
 // ---------------------------------------------------------------------------
@@ -517,6 +520,8 @@ pub(crate) fn tick_window(
     label_glyphs: Query<(Entity, &TalkLabelGlyph)>,
     mut end_marks: Query<&mut Visibility, (With<TalkEndMark>, Without<TalkGlyph>)>,
     mut parts: Query<(&TalkWindowPart, &mut Sprite)>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    mut responsive: Local<stage_layout::Cache>,
 ) {
     let dt = time.delta_secs();
 
@@ -583,10 +588,23 @@ pub(crate) fn tick_window(
         }
     }
 
+    // Small embedded stages use readable physical-pixel typography while
+    // consuming this same source state, typewriter cursor and owner lifecycle.
+    // Native and wide stage source geometry remains unchanged.
+    if let Ok(window) = windows.single() {
+        if stage_layout::render(
+            &mut commands, stage.is_some(), Vec2::new(window.width(), window.height()),
+            &mut responsive, &state, &server, art.as_deref(), window_art.as_deref(), &mut roots,
+        ) {
+            update_visibility(&state, &mut glyphs, &mut end_marks, &mut parts);
+            return;
+        }
+    }
+
     // --- 呈现：树生死（根至多一棵——只有本系统铺） ---
     let placement = layouts.as_deref().and_then(|layouts| {
         let window = windows.single().ok()?;
-        window_root_transform(layouts, Vec2::new(window.width(), window.height()))
+        window_root_transform(layouts, Vec2::new(window.width(), window.height()), stage.is_some())
     });
     if roots.is_empty() {
         // 无树：该在场且纹源齐了才铺；铺完把两栏版本记到当版（同帧已铺）。
@@ -664,15 +682,29 @@ pub(crate) fn tick_window(
         );
     }
 
+    update_visibility(&state, &mut glyphs, &mut end_marks, &mut parts);
+}
+
+// ---------------------------------------------------------------------------
+// 树与字形
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::type_complexity)]
+fn update_visibility(
+    state: &TalkWindowState,
+    glyphs: &mut Query<(Entity, &TalkGlyph, &mut Visibility)>,
+    end_marks: &mut Query<&mut Visibility, (With<TalkEndMark>, Without<TalkGlyph>)>,
+    parts: &mut Query<(&TalkWindowPart, &mut Sprite)>,
+) {
     // --- 呈现：揭示与尾标 ---
-    for (_, glyph, mut visible) in &mut glyphs {
+    for (_, glyph, mut visible) in glyphs.iter_mut() {
         *visible = if glyph.order < state.shown {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
     }
-    for mut visible in &mut end_marks {
+    for mut visible in end_marks.iter_mut() {
         *visible = if state.end_icon {
             Visibility::Visible
         } else {
@@ -682,21 +714,22 @@ pub(crate) fn tick_window(
 
     // --- 呈现：α 写回（淡变值乘进每个部件的基础色） ---
     let alpha = state.alpha;
-    for (part, mut sprite) in &mut parts {
+    for (part, mut sprite) in parts.iter_mut() {
         sprite.color = part.base.with_alpha(part.base.alpha() * alpha);
     }
 }
 
-// ---------------------------------------------------------------------------
-// 树与字形
-// ---------------------------------------------------------------------------
-
-fn window_root_transform(layouts: &UiLayouts, size: Vec2) -> Option<Transform> {
+fn window_root_transform(layouts: &UiLayouts, size: Vec2, stage: bool) -> Option<Transform> {
     let scale = canvas_scale(size.x, size.y);
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
-    let panel = layouts.rect(PANEL_LAYOUT, PANEL_NODE, size / scale)?;
+    let panel = if stage {
+        crate::browser_stage::dialogue_panel(layouts.document(PANEL_LAYOUT)?, PANEL_NODE, size / scale)
+            .unwrap_or_else(|error| panic!("{error}"))
+    } else {
+        layouts.rect(PANEL_LAYOUT, PANEL_NODE, size / scale)?
+    };
     // Every currently rendered part belongs to this fixed-size panel subtree.
     // Keep the existing font/glyph geometry; move their common root by the
     // panel's authored anchor displacement in the current canvas.

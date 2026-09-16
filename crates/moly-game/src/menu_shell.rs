@@ -300,8 +300,18 @@ pub(crate) fn parse(
     jsons: Res<Assets<JsonAsset>>,
     handle: Option<Res<ShellNamesHandle>>,
     layouts: Res<UiLayouts>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     let Some(handle) = handle else { return; };
+    // A stage does not render prefab-based menus or their fixed button labels.
+    // Its visible text comes from TalkCharset and TweetMaster, which still feed
+    // the one shared atlas. Do not demand unused localized menu wordings here.
+    if stage.is_some() {
+        if layouts.document("Talk").is_none() { return; }
+        commands.insert_resource(ShellTextCharset { chars: Vec::new() });
+        commands.remove_resource::<ShellNamesHandle>();
+        return;
+    }
     if let LoadState::Failed(error) = server.load_state(&handle.0) {
         panic!("field menu site names failed: {error:?}");
     }

@@ -5,6 +5,11 @@
 //! dispatcher. Neither the transport nor the DOM has a second playback owner.
 use super::input::apply_action;
 use super::*;
+#[path = "bridge_presentation.rs"]
+mod presentation;
+#[path = "bridge_export.rs"]
+mod export;
+pub use export::library_catalog;
 use crate::fixture_activity_data::{ActivityKey, ActivityOrigin};
 use serde_json::{json, Value};
 use std::sync::{
@@ -34,6 +39,7 @@ pub(super) enum BrowserCommand {
     Page(usize),
     PageSize(usize),
     Related(i32, LibraryTab),
+    Fixture(Option<i32>),
     Focus(bool),
     Settings,
 }
@@ -159,6 +165,11 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
                 None => return Err("操作缺少角色字段".into()),
             }))
         }
+        "fixture" => BrowserCommand::Fixture(match value.get("value") {
+            Some(Value::Null) => None,
+            Some(id) => Some(id.as_u64().and_then(|id| i32::try_from(id).ok()).filter(|id| *id > 0).ok_or("家具编号不正确")?),
+            None => return Err("操作缺少家具字段".into()),
+        }),
         "availability" => BrowserCommand::Scope(match string(&value, "value")? {
             "all" => Scope::All,
             "here" => Scope::Here,
@@ -354,6 +365,10 @@ pub(super) fn apply_command(
             state.page_size = size;
             state.offset = first / size * size;
             state.changed();
+        }
+        BrowserCommand::Fixture(id) => {
+            state.related_fixture = id;
+            state.reset_browse();
         }
         BrowserCommand::Related(id, tab) => {
             if catalog.fixture(id).is_none() {
@@ -565,6 +580,7 @@ fn project_row(
             .collect::<Vec<_>>());
         row["related"] = json!(related);
     }
+    presentation::enrich(key_value, state, catalog, &mut row);
     row
 }
 fn tab_name(tab: LibraryTab) -> &'static str {
@@ -632,14 +648,24 @@ pub(crate) fn publish(
     catalog: Res<LibraryCatalog>,
     world: Res<LibraryContext>,
     mut previous: Local<String>,
+    site_ready: Option<Res<crate::site::SiteScenesReady>>,
+    player_visual: Query<(), (With<crate::player::PlayerControlled>, With<crate::player_avatar::AvatarDriver>)>,
+    text_art: Option<Res<crate::balloon::BalloonArt>>,
+    layouts: Option<Res<crate::ui_layout::UiLayouts>>,
+    server: Res<AssetServer>,
 ) {
     if !state.external_ui {
         return;
     }
+    export::publish_if_requested(&catalog);
     // No per-frame elapsed counter is exposed. Serialize a page only when a
     // catalogue, context, owner, or visible status actually changes.
+    let text_ready = text_art.is_some()
+        && layouts.as_deref().is_some_and(|layouts| layouts.ready("Talk", &server));
+    let scene_ready = site_ready.is_some() && !player_visual.is_empty()
+        && world.actors.values().all(|ready| *ready) && text_ready;
     let stamp = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
         state.revision,
         catalog.revision,
         world.revision,
@@ -647,14 +673,21 @@ pub(crate) fn publish(
         state.stopping,
         state.scene_owned,
         state.active.is_some(),
-        state.pending.is_some()
+        state.pending.is_some(),
+        scene_ready
     );
     if *previous == stamp {
         return;
     }
     *previous = stamp;
     if let Ok(mut slot) = snapshot_cell().lock() {
-        *slot = project(&state, &catalog, &world).to_string();
+        let mut snapshot = project(&state, &catalog, &world);
+        let mut actors: Vec<_> = world.actors.keys().copied().collect();
+        actors.sort_unstable();
+        let mut fixture_ids: Vec<_> = world.instances.keys().copied().collect();
+        fixture_ids.sort_unstable();
+        snapshot["scene"] = json!({"ready":scene_ready,"actorUnits":actors,"fixtureIds":fixture_ids});
+        *slot = snapshot.to_string();
     }
 }
 pub(crate) fn gate_input(

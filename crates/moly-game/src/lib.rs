@@ -10,6 +10,8 @@ pub mod avatar_wear;
 pub mod balloon;
 pub mod billboard;
 pub mod birthday;
+mod browser_stage;
+pub use browser_stage::configure_browser_stage;
 pub mod camera;
 pub mod character;
 pub mod character_material;
@@ -91,7 +93,8 @@ pub mod weather_fx;
 
 use bevy::prelude::*;
 
-pub use content_library::bridge::{configure_browser_library, library_command, library_snapshot};
+pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
+pub use content_library::library_diagnostics;
 
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

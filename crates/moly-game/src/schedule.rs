@@ -172,6 +172,13 @@ pub fn install(app: &mut App) {
         .add_systems(Update, crate::fixture_activity_data::parse)
         .add_systems(
             Update,
+            crate::fixture_gimmick::catalog_stream::advance
+                .after(crate::fixture_activity_data::parse)
+                .after(crate::fixture::refresh_activity_view)
+                .before(crate::player_fixture_action::refresh_availability),
+        )
+        .add_systems(
+            Update,
             crate::fixture_activity_provider::advance
                 .after(crate::fixture_activity_data::parse)
                 .after(crate::fixture::refresh_activity_view)
@@ -199,7 +206,7 @@ pub fn install(app: &mut App) {
     .add_systems(Startup, content_library::setup.after(camera::spawn))
     .add_systems(
         PreUpdate,
-        crate::game_settings::input.after(bevy::ui::UiSystems::Focus),
+        crate::game_settings::input.after(bevy::ui::UiSystems::Focus).run_if(crate::browser_stage::standalone),
     )
     .add_systems(
         PreUpdate,
@@ -354,8 +361,8 @@ pub fn install(app: &mut App) {
                     audio::load,
                     balloon::overlay_camera,
                     // 小地图链的装载请求与覆盖相机（order 2 层，与气泡层平行）。
-                    sitemap::load,
-                    sitemap::overlay_camera,
+                    sitemap::load.run_if(crate::browser_stage::standalone),
+                    sitemap::overlay_camera.run_if(crate::browser_stage::standalone),
                 )
                     .chain(),
             )

@@ -178,6 +178,7 @@ pub(crate) fn setup(
     mut store: ResMut<SettingsStore>,
     mut settings: ResMut<GameSettings>,
     mut panel: ResMut<SettingsPanel>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if let Some(document) = store.load() {
         settings.graphics = graphics_from_document(&document);
@@ -185,6 +186,7 @@ pub(crate) fn setup(
     } else {
         panel.status = "Storage unavailable. Changes will apply to this session.".into();
     }
+    if stage.is_some() { return; }
     let font = fonts.add(Font::try_from_bytes(FONT.to_vec()).expect("bundled open font is valid"));
     let camera = commands
         .spawn((

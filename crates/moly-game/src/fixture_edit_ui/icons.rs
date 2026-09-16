@@ -21,9 +21,14 @@ pub(crate) struct EditorAssetRequests {
     sprites: Handle<JsonAsset>,
 }
 
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
+pub(crate) fn load(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
+) {
     commands.init_resource::<EditorIcons>();
     commands.init_resource::<super::EditorUiState>();
+    if stage.is_some() { return; }
     commands.insert_resource(EditorAssetRequests {
         thumbnails: server.load("moly://fixture-thumbnails/fixture-thumbnails.json"),
         sprites: server.load("moly://ui-layout-v2/runtime-sprites.json"),

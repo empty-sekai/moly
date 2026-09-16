@@ -1226,6 +1226,7 @@ fn restore_selected_layout(
     mut revision: ResMut<FixtureLayoutRevision>,
     mut last_error: Local<Option<String>>,
     temporary: Option<Res<crate::site::TemporarySiteActive>>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     let Some(sites) = sites else {
         return;
@@ -1239,7 +1240,10 @@ fn restore_selected_layout(
     if placements.site_id == site_id && placements.site_type == selection.site_type() {
         return;
     }
-    let restored = if temporary.is_some() {
+    // An embedded stage starts with no preset or persisted layout. The same
+    // layout owner later installs/restores exact content-scoped fixtures.
+    // In particular, never instantiate a CN offline preset in a JP snapshot.
+    let restored = if temporary.is_some() || stage.is_some() {
         // The temporary site is empty from its first frame. Never materialize
         // a saved layout only to delete it, or let it block preview admission.
         commands.insert_resource(TemporaryFixtureLayout);

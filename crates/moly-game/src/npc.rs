@@ -660,6 +660,7 @@ pub(crate) fn spawn_when_ready(
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     spawned: Option<Res<Spawned>>,
     selection: Res<crate::site::SiteSelection>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if spawned.is_some() {
         return;
@@ -686,7 +687,11 @@ pub(crate) fn spawn_when_ready(
     // 名册行：按离线预设或显式点名集过滤（保持清单序，落位
     // 随人数摊）。点名不在清单里即响亮失败——静默丢一名会让冒烟覆盖
     // 悄悄变短。
-    let roster: Vec<&(u32, f32, f32, String, String)> = match roster_units(selection.content()) {
+    // No demonstration cast in the embedded stage: independent playback must
+    // obtain every required member through spawn_temporary_units. Standalone
+    // continues to use its explicit offline roster unchanged.
+    let requested = if stage.is_some() { Some(Vec::new()) } else { roster_units(selection.content()) };
+    let roster: Vec<&(u32, f32, f32, String, String)> = match requested {
         Some(ids) => {
             let set: std::collections::HashSet<u32> = ids.iter().copied().collect();
             if set.len() != ids.len() {
@@ -752,7 +757,9 @@ pub(crate) fn spawn_when_ready(
         KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
         KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
     };
-    let pause_word = if pause_min == pause_max {
+    let pause_word = if count == 0 {
+        "none".to_owned()
+    } else if pause_min == pause_max {
         format!("{pause_min:.1}s/员")
     } else {
         format!("{pause_min:.1}-{pause_max:.1}s/员")

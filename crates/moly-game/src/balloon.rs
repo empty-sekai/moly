@@ -1958,6 +1958,7 @@ pub(crate) fn place(
     windows: Query<&Window>,
     children_q: Query<&Children>,
     mut parts: Query<(&BalloonPart, &mut Sprite)>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if balloons.is_empty() {
         return;
@@ -2075,7 +2076,19 @@ pub(crate) fn place(
         // UpdateScale、后者是根 canvas 的 ScaleWithScreenSize，两层相乘；
         // 锚点屏幕位不参与——真源的 localPosition 已除过 canvas 缩放，
         // 乘回去净值为屏幕像素）。
-        transform.scale = Vec3::splat(top_scale * canvas);
+        let visual_scale = if stage.is_some() {
+            stage_bubble_scale(width, anchor.box_size.x, top_scale * canvas)
+        } else {
+            top_scale * canvas
+        };
+        transform.scale = Vec3::splat(visual_scale);
+        if stage.is_some() {
+            // Only the host-sized presentation changes: the original source
+            // text, glyphs, anchor target, animation and lifetime remain intact.
+            let half = anchor.box_size.x * visual_scale * 0.5;
+            let limit = (width * 0.5 - half - 8.).max(0.);
+            transform.translation.x = transform.translation.x.clamp(-limit, limit);
+        }
         if placed.is_none() {
             commands.entity(entity).insert(Placed);
             // 矩阵 near：clip_from_view[3][2]。与组件 near 并排打——两者会
@@ -2358,5 +2371,39 @@ pub(crate) fn cancel_activity_balloon(
         if let Ok(root) = world.get_entity_mut(entity) {
             root.despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod embedded_font_coverage_tests {
+    use super::FONT_BYTES;
+    #[test]
+    fn embedded_subset_contains_japanese_voicing_and_common_kanji() {
+        let font=swash::FontRef::from_index(FONT_BYTES,0).expect("valid embedded OFL font");
+        // Previously absent from the CN-only subset, creating silent holes in
+        // Japanese dialogue despite Playing/scene-ready being true.
+        for codepoint in [0x304C_u32,0x3054,0x3069,0x3060,0x3053,0x9055,0x6575] {
+            assert_ne!(font.charmap().map(codepoint),0,"missing U+{codepoint:04X}");
+        }
+    }
+}
+
+/// Embedded stages may be only a few hundred pixels wide. Keep short authored
+/// bubbles readable without changing their source geometry or native behavior.
+fn stage_bubble_scale(width: f32, source_width: f32, authored_scale: f32) -> f32 {
+    let readable = authored_scale.max(13. / FONT_SIZE);
+    readable.min((width - 16.).max(1.) / source_width.max(1.))
+}
+
+#[cfg(test)]
+mod stage_bubble_view_tests {
+    use super::*;
+    #[test]
+    fn short_phone_bubbles_are_legible_and_long_ones_stay_in_the_canvas() {
+        let scale=stage_bubble_scale(390.,330.,canvas_scale(390.,700.));
+        assert!((FONT_SIZE*scale-13.).abs()<1e-5);
+        assert!(330.*scale<=374.);
+        assert!(1200.*stage_bubble_scale(390.,1200.,0.2)<=374.01);
+        assert_eq!(stage_bubble_scale(1920.,330.,1.),1.);
     }
 }

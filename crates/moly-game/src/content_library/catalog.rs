@@ -588,6 +588,7 @@ pub(super) fn filtered_keys(
             .iter()
             .filter(|row| {
                 query_matches(&row.search, &query, row.id)
+                    && state.related_fixture.is_none_or(|id| id == row.id)
                     && (!state.special_only || row.interactive())
                     && match state.scope {
                         Scope::All => true,
@@ -597,7 +598,7 @@ pub(super) fn filtered_keys(
                             .is_some_and(|items| !items.is_empty()),
                         Scope::Ready => {
                             if state.mode == ExperienceMode::Independent {
-                                row.source.as_ref().is_some_and(|source| source.exported)
+                                context::independent_reason(EntryKey::Fixture(row.id), catalog).is_none()
                             } else {
                                 row.interactive()
                                     && world
