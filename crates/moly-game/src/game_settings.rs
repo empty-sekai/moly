@@ -34,7 +34,7 @@ pub(crate) struct GraphicsSettings {
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
-            frame_rate: 60,
+            frame_rate: if cfg!(target_arch = "wasm32") { 30 } else { 60 },
             render_scale: 1.0,
             fxaa: true,
         }
@@ -198,25 +198,28 @@ pub(crate) fn setup(
             SettingsUiCamera,
         ))
         .id();
-    let trigger = commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(14),
-                bottom: px(14),
-                ..default()
-            },
-            UiTargetCamera(camera),
-            GlobalZIndex(1000),
-        ))
-        .id();
-    add_button(
-        &mut commands,
-        trigger,
-        &font,
-        "Settings  F10",
-        Action::Toggle,
-    );
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let trigger = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(14),
+                    bottom: px(14),
+                    ..default()
+                },
+                UiTargetCamera(camera),
+                GlobalZIndex(1000),
+            ))
+            .id();
+        add_button(
+            &mut commands,
+            trigger,
+            &font,
+            "Settings  F10",
+            Action::Toggle,
+        );
+    }
 
     let root = commands
         .spawn((

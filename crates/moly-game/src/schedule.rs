@@ -23,6 +23,17 @@ pub fn install(app: &mut App) {
     content_library::install(app);
     app.add_systems(Startup, content_library::load_capabilities);
     app.add_systems(
+        PreUpdate,
+        content_library::bridge::gate_input
+            .after(bevy::input::InputSystems)
+            .before(crate::game_settings::input)
+            .before(content_library::input),
+    );
+    app.add_systems(
+        Update,
+        content_library::bridge::publish.after(content_library::refresh),
+    );
+    app.add_systems(
         Update,
         (
             content_library::parse_assets,
@@ -267,7 +278,8 @@ pub fn install(app: &mut App) {
         // 摇杆层状态（手势层与玩家输入都读它；缺资源会在系统参数校验
         // 处 panic，与手势层同款兜底）。
         .init_resource::<joystick::JoystickState>()
-        .add_observer(site::on_scene_ready)
+        // SitePlugin owns the site SceneInstanceReady observer. Registering it
+        // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
         // 气泡链的选取门要读当前现象 id；wasm 分支不装天气插件，资源在
         // 这里兜底建（默认值 = 真源默认现象 1，与档名资源在音频侧兜底建

@@ -5,6 +5,17 @@
 use moly_game::site::{OfflineSceneContent, SiteRequest};
 
 const DEFAULT_SITE: &str = "grassland";
+#[cfg(any(target_arch = "wasm32", test))]
+const INDEPENDENT_BROWSER_SITE: &str = "home_site";
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn browser_default_site(experience: Option<&str>, preferred: Option<&str>) -> String {
+    if experience.map(str::trim) == Some("current") {
+        preferred.unwrap_or(DEFAULT_SITE).to_owned()
+    } else {
+        INDEPENDENT_BROWSER_SITE.to_owned()
+    }
+}
 
 fn parse_content(raw: Option<&str>) -> Result<OfflineSceneContent, String> {
     match raw.map(str::trim) {
@@ -15,8 +26,14 @@ fn parse_content(raw: Option<&str>) -> Result<OfflineSceneContent, String> {
 }
 
 fn parse_level(raw: Option<&str>, name: &str) -> Result<Option<u32>, String> {
-    raw.map(|raw| raw.trim().parse::<u32>().ok().filter(|v| *v != 0)
-        .ok_or_else(|| format!("{name} must be a positive level number"))).transpose()
+    raw.map(|raw| {
+        raw.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|v| *v != 0)
+            .ok_or_else(|| format!("{name} must be a positive level number"))
+    })
+    .transpose()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -34,24 +51,70 @@ pub fn resolve() -> Result<SiteRequest, String> {
         None => moly_game::player_data::preferred_site().unwrap_or_else(|| DEFAULT_SITE.to_owned()),
     };
     let room_level = parse_level(env("MOLY_ROOM_LEVEL")?.as_deref(), "MOLY_ROOM_LEVEL")?;
-    let offline_home_level = parse_level(env("MOLY_OFFLINE_HOME_LEVEL")?.as_deref(), "MOLY_OFFLINE_HOME_LEVEL")?;
+    let offline_home_level = parse_level(
+        env("MOLY_OFFLINE_HOME_LEVEL")?.as_deref(),
+        "MOLY_OFFLINE_HOME_LEVEL",
+    )?;
     let content = parse_content(env("MOLY_SCENE_CONTENT")?.as_deref())?;
-    Ok(SiteRequest { site, room_level, offline_home_level, content })
+    Ok(SiteRequest {
+        site,
+        room_level,
+        offline_home_level,
+        content,
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn resolve() -> Result<SiteRequest, String> {
-    let window = web_sys::window().ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
-    let search = window.location().search().map_err(|e| format!("could not read query string: {e:?}"))?;
+    let window =
+        web_sys::window().ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
+    let search = window
+        .location()
+        .search()
+        .map_err(|e| format!("could not read query string: {e:?}"))?;
     let params = web_sys::UrlSearchParams::new_with_str(&search)
         .map_err(|e| format!("could not parse query string: {e:?}"))?;
     let site = match params.get("site") {
         Some(raw) if !raw.trim().is_empty() => raw.trim().to_owned(),
         Some(_) => return Err("?site= is empty; it names a site type".into()),
-        None => moly_game::player_data::preferred_site().unwrap_or_else(|| DEFAULT_SITE.to_owned()),
+        None => {
+            let preferred = moly_game::player_data::preferred_site();
+            browser_default_site(params.get("experience").as_deref(), preferred.as_deref())
+        }
     };
     let room_level = parse_level(params.get("level").as_deref(), "level")?;
-    let offline_home_level = parse_level(params.get("offline_home_level").as_deref(), "offline_home_level")?;
+    let offline_home_level = parse_level(
+        params.get("offline_home_level").as_deref(),
+        "offline_home_level",
+    )?;
     let content = parse_content(params.get("scene_content").as_deref())?;
-    Ok(SiteRequest { site, room_level, offline_home_level, content })
+    Ok(SiteRequest {
+        site,
+        room_level,
+        offline_home_level,
+        content,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_independent_mode_starts_on_clean_home_site() {
+        assert_eq!(browser_default_site(None, Some("grassland")), "home_site");
+        assert_eq!(
+            browser_default_site(Some("independent"), Some("flower_garden")),
+            "home_site"
+        );
+    }
+
+    #[test]
+    fn browser_current_mode_preserves_the_normal_site_default() {
+        assert_eq!(
+            browser_default_site(Some("current"), Some("flower_garden")),
+            "flower_garden"
+        );
+        assert_eq!(browser_default_site(Some("current"), None), DEFAULT_SITE);
+    }
 }

@@ -82,7 +82,7 @@ pub(crate) struct IndependentSession {
     original_player: Option<(Entity, Transform)>,
     original_actors: Vec<(Entity, Transform)>,
     original_cameras: Vec<(Entity, Transform)>,
-    original_camera_state: camera_snapshot::CameraSnapshot,
+    original_camera_state: Option<camera_snapshot::CameraSnapshot>,
     original_appearance: crate::room_appearance::RoomAppearance,
     failure: Option<String>,
 }
@@ -451,6 +451,27 @@ fn apply_preview(world: &mut World, choice: &PlaybackChoice, actors: Vec<ActorPo
     world.insert_resource(preview);
 }
 
+fn independent_origin(world: &World) -> (u64, bool) {
+    let current_epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
+    let settled = current_epoch.is_some() && world.contains_resource::<SiteScenesReady>();
+    (current_epoch.unwrap_or(0), settled)
+}
+
+fn independent_generation_ready(
+    original_site: &str,
+    destination: &str,
+    departure_epoch: u64,
+    current_epoch: Option<u64>,
+) -> bool {
+    current_epoch.is_some_and(|current| {
+        if original_site == destination {
+            current >= departure_epoch.max(1)
+        } else {
+            current > departure_epoch
+        }
+    })
+}
+
 fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), String> {
     if world
         .get_resource::<crate::fixture_edit::EditSessionActive>()
@@ -460,10 +481,11 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
     }
     let (units, fixtures, _) = requirements(world, choice)?;
     let rows = preview_rows(world.resource::<LibraryCatalog>(), &fixtures, choice.ticket)?;
-    let epoch = world
-        .get_resource::<GroundEpoch>()
-        .ok_or("当前场景尚未定案")?
-        .0;
+    // Independent mode may be requested while the initial site is still
+    // streaming. Do not spend a minute finishing a scene that will immediately
+    // be discarded: epoch 0 means "no settled origin yet" and the destination's
+    // first settled generation will advance to 1.
+    let (epoch, origin_settled) = independent_origin(world);
     let original_site = world
         .resource::<crate::site::SiteSelection>()
         .site_type()
@@ -475,25 +497,46 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         if world.resource::<LibraryCatalog>().fixture(id)
             .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. })));
     let destination = if surface { "first_floor" } else { "home_site" }.to_owned();
-    let original_player = world
-        .query_filtered::<(Entity, &Transform), With<PlayerControlled>>()
-        .iter(world)
-        .next()
-        .map(|(entity, pose)| (entity, *pose));
-    let original_actors = world
-        .query_filtered::<(Entity, &Transform), (With<CharacterUnitId>, Without<PlayerControlled>)>(
-        )
-        .iter(world)
-        .map(|(entity, pose)| (entity, *pose))
-        .collect();
-    let original_camera_state = camera_snapshot::CameraSnapshot::capture(world);
-    let original_cameras = world
-        .query_filtered::<(Entity, &Transform), With<Camera3d>>()
-        .iter(world)
-        .map(|(entity, pose)| (entity, *pose))
-        .collect();
+    // A half-loaded origin has no authoritative poses yet. In that case the
+    // normal site pipeline must reseed the player, actors and camera on return.
+    let original_player = origin_settled
+        .then(|| {
+            world
+                .query_filtered::<(Entity, &Transform), With<PlayerControlled>>()
+                .iter(world)
+                .next()
+                .map(|(entity, pose)| (entity, *pose))
+        })
+        .flatten();
+    let original_actors = if origin_settled {
+        world
+            .query_filtered::<(Entity, &Transform), (With<CharacterUnitId>, Without<PlayerControlled>)>()
+            .iter(world)
+            .map(|(entity, pose)| (entity, *pose))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let original_camera_state =
+        origin_settled.then(|| camera_snapshot::CameraSnapshot::capture(world));
+    let original_cameras = if origin_settled {
+        world
+            .query_filtered::<(Entity, &Transform), With<Camera3d>>()
+            .iter(world)
+            .map(|(entity, pose)| (entity, *pose))
+            .collect()
+    } else {
+        Vec::new()
+    };
     camera_snapshot::CameraSnapshot::prepare_temporary(world);
-    world.insert_resource(crate::site::TemporarySiteChangeRequest(destination.clone()));
+    if original_site != destination {
+        world.insert_resource(crate::site::TemporarySiteChangeRequest(destination.clone()));
+    } else {
+        info!(
+            "[content-library] independent ticket={} reuses current site {} while it settles",
+            choice.ticket, destination
+        );
+    }
     let original_appearance = world
         .resource::<crate::room_appearance::RoomAppearance>()
         .clone();
@@ -569,7 +612,9 @@ fn restore_background_actors(world: &mut World, parked: &[ParkedActor]) {
 }
 
 fn restore_original_poses(world: &mut World, session: &IndependentSession) {
-    session.original_camera_state.restore(world);
+    if let Some(camera) = &session.original_camera_state {
+        camera.restore(world);
+    }
     if let Some((entity, pose)) = session.original_player {
         if let Ok(mut player) = world.get_entity_mut(entity) {
             player.insert((
@@ -724,8 +769,12 @@ fn drive_independent(world: &mut World) {
                 .get_resource::<crate::site::SiteSelection>()
                 .is_some_and(|selection| selection.site_type() == session.destination);
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-            let site_ready = epoch.is_some_and(|epoch| epoch > session.departure_epoch)
-                && world.contains_resource::<SiteScenesReady>()
+            let site_ready = independent_generation_ready(
+                &session.original_site,
+                &session.destination,
+                session.departure_epoch,
+                epoch,
+            ) && world.contains_resource::<SiteScenesReady>()
                 && world
                     .get_resource::<crate::fixture::FixturePlacements>()
                     .is_some_and(|layout| layout.site_type() == session.destination);
@@ -1015,6 +1064,59 @@ pub(crate) fn retire_scene(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_origin_allows_pre_settle_switch_without_snapshotting_partial_state() {
+        let mut world = World::new();
+        assert_eq!(independent_origin(&world), (0, false));
+
+        world.insert_resource(SiteScenesReady);
+        assert_eq!(independent_origin(&world), (0, false));
+
+        world.insert_resource(GroundEpoch(4));
+        assert_eq!(independent_origin(&world), (4, true));
+
+        world.remove_resource::<SiteScenesReady>();
+        assert_eq!(independent_origin(&world), (4, false));
+    }
+
+    #[test]
+    fn same_site_independent_preview_reuses_the_current_generation() {
+        assert!(independent_generation_ready(
+            "home_site",
+            "home_site",
+            4,
+            Some(4)
+        ));
+        assert!(independent_generation_ready(
+            "home_site",
+            "home_site",
+            0,
+            Some(1)
+        ));
+        assert!(!independent_generation_ready(
+            "home_site",
+            "home_site",
+            0,
+            None
+        ));
+    }
+
+    #[test]
+    fn cross_site_independent_preview_requires_a_new_generation() {
+        assert!(!independent_generation_ready(
+            "grassland",
+            "home_site",
+            4,
+            Some(4)
+        ));
+        assert!(independent_generation_ready(
+            "grassland",
+            "home_site",
+            4,
+            Some(5)
+        ));
+    }
+
     #[test]
     fn blocked_navigation_never_fabricates_a_position() {
         assert!(viewing_position(Vec3::ZERO, Quat::IDENTITY, &[], |_| None).is_none());

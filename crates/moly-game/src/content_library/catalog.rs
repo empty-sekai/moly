@@ -8,6 +8,7 @@ pub(crate) fn parse_assets(
     jsons: Res<Assets<JsonAsset>>,
     handles: Option<ResMut<LibraryAssets>>,
     mut catalog: ResMut<LibraryCatalog>,
+    state: Res<ContentLibrary>,
 ) {
     let Some(mut handles) = handles else {
         return;
@@ -59,16 +60,29 @@ pub(crate) fn parse_assets(
         handles.processed[slot] = true;
     }
     if handles.processed.iter().all(|done| *done) {
-        let paths = catalog.thumbnail_paths.clone();
-        for row in &mut catalog.fixtures {
-            row.thumbnail = paths.get(&row.id).map(|path| {
-                server.load::<Image>(AssetPath::from(format!("moly://fixture-thumbnails/{path}")))
-            });
-        }
+        load_thumbnail_handles(&mut catalog, state.external_ui, |path| {
+            server.load::<Image>(AssetPath::from(format!("moly://fixture-thumbnails/{path}")))
+        });
         catalog.fixtures.sort_by_key(|row| row.id);
         catalog.source_ready = true;
         catalog.revision = catalog.revision.wrapping_add(1);
         commands.remove_resource::<LibraryAssets>();
+    }
+}
+
+/// The DOM loads only visible artwork. Importing the entire catalogue into
+/// Bevy as well duplicates thousands of requests and GPU textures in a web tab.
+fn load_thumbnail_handles(
+    catalog: &mut LibraryCatalog,
+    external_ui: bool,
+    mut load: impl FnMut(&str) -> Handle<Image>,
+) {
+    for row in &mut catalog.fixtures {
+        row.thumbnail = if external_ui {
+            None
+        } else {
+            catalog.thumbnail_paths.get(&row.id).map(|path| load(path))
+        };
     }
 }
 
@@ -94,10 +108,26 @@ fn parse_characters(value: &Value, catalog: &mut LibraryCatalog) {
         {
             catalog.character_names.insert(unit, plain_text(name));
         }
+        if let Some(group) = row.pointer("/identity/unit").and_then(Value::as_str) {
+            if let Some(label) = character_group_label(group) {
+                catalog.character_groups.insert(unit, label.to_owned());
+            }
+        }
         if let Some(color) = row.pointer("/identity/colorCode").and_then(Value::as_str) {
             catalog.character_colors.insert(unit, color.to_owned());
         }
     }
+}
+fn character_group_label(group: &str) -> Option<&'static str> {
+    Some(match group {
+        "light_sound" => "Leo/need",
+        "idol" => "MORE MORE JUMP!",
+        "street" => "Vivid BAD SQUAD",
+        "theme_park" => "Wonderlands×Showtime",
+        "school_refusal" => "25时，在Nightcord。",
+        "piapro" => "VIRTUAL SINGER",
+        _ => return None,
+    })
 }
 fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
     catalog.source_region = value
@@ -630,6 +660,33 @@ pub(super) fn filtered_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dom_artwork_preserves_manifest_without_loading_gpu_thumbnails() {
+        let mut catalog = LibraryCatalog::default();
+        catalog.fixtures.push(LibraryFixture {
+            id: 7,
+            name: "椅子".into(),
+            description: String::new(),
+            action: String::new(),
+            search: String::new(),
+            thumbnail: Some(Handle::default()),
+            source: None,
+            presentation: FixturePresentation::Model,
+        });
+        catalog.thumbnail_paths.insert(7, "images/chair.png".into());
+        load_thumbnail_handles(&mut catalog, true, |_| {
+            panic!("DOM artwork must not request GPU images")
+        });
+        assert!(catalog.fixtures[0].thumbnail.is_none());
+        assert_eq!(catalog.thumbnail_paths[&7], "images/chair.png");
+        let mut requests = Vec::new();
+        load_thumbnail_handles(&mut catalog, false, |path| {
+            requests.push(path.to_owned());
+            Handle::default()
+        });
+        assert_eq!(requests, ["images/chair.png"]);
+        assert!(catalog.fixtures[0].thumbnail.is_some());
+    }
     #[test]
     fn transcript_keeps_all_lines_and_speakers() {
         let lines = general_lines(

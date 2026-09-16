@@ -90,6 +90,10 @@ pub(crate) fn parse(
             })
             .collect(),
     };
+    info!(
+        "[site-ready] parsed inactive sidecar for {site}: {} rows",
+        list.len()
+    );
     commands.insert_resource(InactiveList(list));
     commands.remove_resource::<SiteSceneJsonHandle>();
 }

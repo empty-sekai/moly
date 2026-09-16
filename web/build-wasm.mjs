@@ -11,6 +11,12 @@ const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
 const workspaceRoot = path.resolve(here, "..");
 const outDir = path.join(here, "pkg");
 const lockPath = path.join(workspaceRoot, "Cargo.lock");
+const requestedBackend = process.argv.find(arg => arg.startsWith("--renderer="))?.split("=")[1];
+if (requestedBackend && !["webgpu", "webgl2"].includes(requestedBackend)) {
+  throw new Error("--renderer must be webgpu or webgl2");
+}
+// Keep local builds responsive; callers can explicitly raise this limit.
+process.env.CARGO_BUILD_JOBS ??= "2";
 
 function findOnPath(command) {
   const entries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
@@ -105,6 +111,7 @@ console.log(`wasm-bindgen version check: Cargo.lock and CLI both ${cliMatch[1]}`
 // Engine buffer layouts depend on these features at compile time. Each module
 // has the layout for its backend; the bootstrap downloads only the chosen one.
 for (const [backend, features] of [["webgpu", ["--features", "webgpu"]], ["webgl2", ["--no-default-features"]]]) {
+  if (requestedBackend && requestedBackend !== backend) continue;
   run(CARGO, ["build", "--release", "--target", "wasm32-unknown-unknown", "-p", "moly-app",
     ...features, "--manifest-path", path.join(workspaceRoot, "Cargo.toml")]);
   if (!existsSync(cargoWasmPath)) throw new Error(`cargo build did not produce ${cargoWasmPath}`);

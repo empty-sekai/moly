@@ -34,6 +34,7 @@ use moly_law::talk::{
 };
 use std::collections::{HashMap, HashSet};
 
+pub(crate) mod bridge;
 mod capabilities;
 pub(crate) use capabilities::{load as load_capabilities, parse as parse_capabilities};
 mod activities;
@@ -203,6 +204,7 @@ pub(crate) struct LibraryCatalog {
     fixtures: Vec<LibraryFixture>,
     character_names: HashMap<u32, String>,
     character_colors: HashMap<u32, String>,
+    character_groups: HashMap<u32, String>,
     thumbnail_paths: HashMap<i32, String>,
     data_issues: Vec<String>,
     source_region: String,
@@ -278,8 +280,12 @@ struct ActiveChoice {
 #[derive(Resource)]
 pub(crate) struct ContentLibrary {
     pub(crate) open: bool,
+    // The web shell owns chrome while the same playback owner owns the scene.
+    external_ui: bool,
+    external_open: bool,
+    external_input_capture: bool,
     watching: bool,
-    // Scene ownership outlives closing the catalogue until rollback completes.
+    // Scene ownership outlives closing the browser until rollback completes.
     scene_owned: bool,
     last_error: Option<String>,
     tab: LibraryTab,
@@ -314,6 +320,9 @@ impl Default for ContentLibrary {
     fn default() -> Self {
         Self {
             open: false,
+            external_ui: false,
+            external_open: false,
+            external_input_capture: false,
             watching: false,
             scene_owned: false,
             last_error: None,
@@ -349,18 +358,23 @@ impl Default for ContentLibrary {
 }
 impl ContentLibrary {
     pub(crate) fn blocks_world_input(&self) -> bool {
-        self.open
-            || self.watching
+        ((self.open || self.watching) && !self.external_ui)
             || self.active.is_some()
             || self.pending.is_some()
             || self.scene_owned
+            || self.external_input_capture
             || self.release_guard != 0
     }
     /// Viewing an NPC performance owns only its actors and furniture. The
     /// spectator remains a normal player; admission/rollback and every other
     /// interaction remain protected by the original world-input gate.
     pub(crate) fn blocks_exploration_input(&self) -> bool {
-        if self.open || self.release_guard != 0 || self.stopping || self.pending.is_some() {
+        if (self.open && !self.external_ui)
+            || self.external_input_capture
+            || self.release_guard != 0
+            || self.stopping
+            || self.pending.is_some()
+        {
             return true;
         }
         if self.active.as_ref().is_some_and(|active| {
@@ -375,12 +389,16 @@ impl ContentLibrary {
         if self.active.as_ref().is_some_and(|active| {
             active.started && matches!(active.choice.key, EntryKey::Talk(_, _))
         }) {
-            return self.open || self.release_guard != 0 || self.stopping || self.pending.is_some();
+            return (self.open && !self.external_ui)
+                || self.external_input_capture
+                || self.release_guard != 0
+                || self.stopping
+                || self.pending.is_some();
         }
         self.blocks_exploration_input()
     }
     pub(crate) fn blocks_talk_input(&self) -> bool {
-        self.open || self.release_guard != 0
+        (self.open && !self.external_ui) || self.external_input_capture || self.release_guard != 0
     }
     pub(crate) fn owns_scene(&self) -> bool {
         self.scene_owned

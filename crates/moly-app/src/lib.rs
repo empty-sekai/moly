@@ -38,6 +38,7 @@ fn run_app(
     }
     #[cfg(target_arch = "wasm32")]
     {
+        moly_game::configure_browser_library(&mut app);
         attach_canvas(&mut app);
         app.add_systems(Startup, || {
             if let Some(window) = web_sys::window() {
@@ -95,7 +96,10 @@ pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue>
         // Disable writes before notifying JavaScript; the host may release its lease.
         moly_game::set_browser_storage_writable(false);
         if let Some(window) = web_sys::window() {
-            let message = info.payload().downcast_ref::<String>().map(String::as_str)
+            let message = info
+                .payload()
+                .downcast_ref::<String>()
+                .map(String::as_str)
                 .or_else(|| info.payload().downcast_ref::<&str>().copied())
                 .unwrap_or("Unexpected game error");
             let init = web_sys::CustomEventInit::new();
@@ -117,4 +121,18 @@ pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue>
 #[wasm_bindgen]
 pub fn set_storage_writable(writable: bool) {
     moly_game::set_browser_storage_writable(writable);
+}
+
+/// Enqueue one validated browser intent; the normal Bevy input phase owns it.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn library_command(command: &str) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::library_command(command).map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+/// Read the last published, versioned projection without borrowing the world.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn library_snapshot() -> String {
+    moly_game::library_snapshot()
 }

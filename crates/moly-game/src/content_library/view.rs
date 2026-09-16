@@ -130,7 +130,13 @@ fn surface(c: &mut Commands, parent: Entity, node: Node, region: Region) -> Enti
         .insert((region, BackgroundColor(PANEL), BorderColor::all(EDGE)));
     id
 }
-pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>) {
+pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<ContentLibrary>) {
+    if state.external_ui {
+        // refresh retains the same SystemParam contract, but the web shell
+        // needs neither a second UI camera nor the native catalogue tree.
+        c.insert_resource(LibraryFont(Handle::default()));
+        return;
+    }
     let font = fonts.add(Font::try_from_bytes(FONT.to_vec()).expect("bundled library font"));
     c.insert_resource(LibraryFont(font.clone()));
     let camera = c
@@ -1142,6 +1148,17 @@ pub(crate) fn refresh(
     )>,
     mut cache: Local<ViewCache>,
 ) {
+    if state.external_ui {
+        for (_, region, mut node, _, _, _) in &mut regions {
+            if matches!(
+                region,
+                Region::Overlay | Region::Transport | Region::Launcher
+            ) {
+                node.display = Display::None;
+            }
+        }
+        return;
+    }
     let window = windows.iter().next();
     let narrow = window.is_some_and(|w| w.width() < 860.);
     // Windows DPI scaling commonly turns a physical 720px window into a

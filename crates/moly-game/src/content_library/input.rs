@@ -27,6 +27,7 @@ pub(crate) struct LibraryInput<'w, 's> {
     windows: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
     cancel_talk: MessageWriter<'w, TalkCancelRequest>,
     fixtures: MessageWriter<'w, PlayerFixtureRequest>,
+    pub(super) settings: MessageWriter<'w, crate::game_settings::SettingsPanelRequest>,
     paste: Res<'w, PasteInbox>,
 }
 
@@ -50,7 +51,7 @@ pub(crate) fn input(
     // A press and release may be delivered in the same frame. ButtonInput's
     // final snapshot loses the Ctrl modifier in that case. Preserve the order
     // of the actual OS keyboard events, including while the library is closed.
-    let keyboard: Vec<_> = io
+    let mut keyboard: Vec<_> = io
         .keyboard
         .read()
         .cloned()
@@ -78,6 +79,12 @@ pub(crate) fn input(
         if state.watching && event.key_code == KeyCode::Escape {
             actions.push(LibraryAction::Stop);
         }
+    }
+    // Browser text entry and shortcuts are handled by real DOM controls.
+    // Drain Bevy events without interpreting them as catalogue navigation.
+    if state.external_ui {
+        keyboard.clear();
+        actions.clear();
     }
     let was_composing = !state.ime_preedit.is_empty();
     let mut committed = false;
@@ -256,6 +263,10 @@ pub(crate) fn input(
     for action in actions {
         apply_action(action, &mut state, &catalog, &world, &mut io);
     }
+    for command in bridge::drain_commands() {
+        bridge::apply_command(command, &mut state, &catalog, &world, &mut io);
+        state.rebuild_results(&catalog, &world);
+    }
     state.rebuild_results(&catalog, &world);
     if let Ok(mut window) = io.windows.single_mut() {
         window.ime_enabled = state.open && state.search_focus;
@@ -312,7 +323,7 @@ pub(super) fn apply_action(
             state.status = "正在结束播放并恢复场景…".into();
             state.changed();
         }
-        LibraryAction::Play if state.open || state.watching => {
+        LibraryAction::Play if state.open || state.watching || state.external_ui => {
             if let Some(reason) = context::selected_reason(state, catalog, world) {
                 state.status = reason;
                 state.changed();
@@ -341,7 +352,7 @@ pub(super) fn apply_action(
             state.status = "正在准备所选内容…".into();
             state.changed();
         }
-        _ if !state.open => {}
+        _ if !state.open && !state.external_ui => {}
         LibraryAction::Back => {
             state.narrow_detail = false;
             state.changed();

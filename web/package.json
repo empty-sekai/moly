@@ -1,0 +1,17 @@
+{
+  "name": "moly-browser-shell-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 *.test.mjs",
+    "format": "prettier --write index.html shell.css main.mjs shell.mjs presentation.mjs embed.mjs snapshots.mjs presentation.test.mjs shell.test.mjs serve.test.mjs EMBEDDING.md TESTING.md package.json",
+    "format:check": "prettier --check index.html shell.css main.mjs shell.mjs presentation.mjs embed.mjs snapshots.mjs presentation.test.mjs shell.test.mjs serve.test.mjs EMBEDDING.md TESTING.md package.json"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "prettier": "3.9.6"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  }
+}

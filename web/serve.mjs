@@ -5,7 +5,8 @@
 // 用法：node web/serve.mjs [port]   （默认 8000，只绑 127.0.0.1）
 
 import { createServer } from "node:http";
-import { closeSync, constants, fstatSync, openSync, realpathSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, createReadStream, fstatSync, openSync, realpathSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { playerDataResponse, DEFAULT_PLAYER_API } from "./player-api.mjs";
@@ -24,6 +25,17 @@ if (!statSync(assetRoot, { throwIfNoEntry: false })?.isDirectory()) {
 }
 
 const port = Number(process.argv[2] ?? 8000);
+const jpRoot = (process.env.MOLY_JP_ASSET_ROOT ?? "").trim();
+if (jpRoot && !statSync(jpRoot, { throwIfNoEntry: false })?.isDirectory()) {
+  throw new Error("MOLY_JP_ASSET_ROOT must name an existing resource snapshot");
+}
+function snapshotInfo(root, assetBase) {
+  try {
+    const data = JSON.parse(readFileSync(path.join(root, "mysekai-fixtures.json"), "utf8"));
+    return { region: data.region, version: data.gameVersion, assetBase };
+  } catch { return { region: "unknown", version: "", assetBase }; }
+}
+const snapshots = [snapshotInfo(assetRoot, "/assets/"), ...(jpRoot ? [snapshotInfo(jpRoot, "/assets-jp/")] : [])];
 const packRoot = (process.env.MOLY_ASSET_PACK_ROOT ?? "").trim();
 if (packRoot && !statSync(packRoot, { throwIfNoEntry: false })?.isDirectory()) {
   throw new Error("MOLY_ASSET_PACK_ROOT must name an existing package directory");
@@ -34,6 +46,7 @@ if (packRoot && !statSync(packRoot, { throwIfNoEntry: false })?.isDirectory()) {
 // （Windows 上「盘符:/…」形的 MOLY_ASSET_ROOT），startsWith 对每个
 // 文件都对不上，全部 404。
 const mounts = [
+  ...(jpRoot ? [["/assets-jp/", realpathSync(jpRoot)]] : []),
   ...(packRoot ? [["/packs/", realpathSync(packRoot)]] : []),
   ["/assets/", realpathSync(assetRoot)],
   ["/", realpathSync(here)],
@@ -41,6 +54,9 @@ const mounts = [
 
 const contentTypes = new Map([
   [".html", "text/html; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".svg", "image/svg+xml"],
+  [".woff2", "font/woff2"],
   [".js", "text/javascript"],
   [".mjs", "text/javascript"],
   [".json", "application/json"],
@@ -99,6 +115,10 @@ const server = createServer(async (request, response) => {
       throw httpError(400, "Invalid URL encoding");
     }
     if (/[\\\\\u0000-\u001f\u007f]/.test(urlPath)) throw httpError(400, "Invalid request path");
+    if (urlPath === "/snapshots.json" && (request.method === "GET" || request.method === "HEAD")) {
+      send(200, { "Content-Type": "application/json" }, JSON.stringify({ version: 1, snapshots }));
+      return;
+    }
     if (urlPath.startsWith("/player-api/")) {
       if (request.method !== "GET") {
         send(405, { "Content-Type": "application/json", Allow: "GET" }, '{"error":"GET only"}');
@@ -117,20 +137,26 @@ const server = createServer(async (request, response) => {
     }
     const file = resolveFile(urlPath);
     const descriptor = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let streamOwnsDescriptor = false;
     try {
       const stat = fstatSync(descriptor);
       if (!stat.isFile()) throw httpError(404, "Not a file");
       const type = contentTypes.get(path.extname(file).toLowerCase()) ?? "application/octet-stream";
-      const body = request.method === "HEAD" ? undefined : readFileSync(descriptor);
       const immutable = urlPath.startsWith("/packs/blobs/") && /\/[a-f0-9]{64}\.(?:bin|gzz)$/.test(urlPath);
-      send(200, { "Content-Type": type, "Content-Length": body?.length ?? stat.size,
-        "Cache-Control": immutable ? "public, max-age=31536000, immutable" : "no-store" }, body);
+      response.writeHead(200, { "Content-Type": type, "Content-Length": stat.size,
+        "Cache-Control": immutable ? "public, max-age=31536000, immutable" : "no-store" });
+      if (request.method === "HEAD") response.end();
+      else {
+        const stream = createReadStream(file, { fd: descriptor, autoClose: true });
+        streamOwnsDescriptor = true;
+        await pipeline(stream, response);
+      }
     } finally {
-      closeSync(descriptor);
+      if (!streamOwnsDescriptor) closeSync(descriptor);
     }
   } catch (error) {
     const status = error.status ?? ({ ENOENT: 404, ENOTDIR: 404, EACCES: 403, EPERM: 403, ELOOP: 403 }[error.code] ?? 500);
-    if (status === 500) console.error("Request failed:", error);
+    if (status === 500 && !["ERR_STREAM_PREMATURE_CLOSE", "ECONNRESET"].includes(error.code)) console.error("Request failed:", error);
     if (!response.headersSent) {
       send(status, { "Content-Type": "text/plain; charset=utf-8" }, `${status === 500 ? "Request failed" : error.message}\n`);
     } else {

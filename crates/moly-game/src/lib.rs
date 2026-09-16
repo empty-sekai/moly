@@ -91,6 +91,8 @@ pub mod weather_fx;
 
 use bevy::prelude::*;
 
+pub use content_library::bridge::{configure_browser_library, library_command, library_snapshot};
+
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
