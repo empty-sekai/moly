@@ -298,6 +298,7 @@ mod tests {
     use super::*;
     fn row() -> LibraryTalk {
         LibraryTalk {
+            preview_tweet: None,
             content: TalkContent {
                 master_id: 6998,
                 backend: TalkBackend::Fixture,

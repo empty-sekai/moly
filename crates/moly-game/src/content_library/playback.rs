@@ -19,6 +19,7 @@ pub(crate) fn dispatch(
     preview: Option<Res<staging::ScenePreview>>,
     staged: Query<(&Transform, &GlobalTransform)>,
     epoch: Option<Res<crate::site::GroundEpoch>>,
+    balloon_art: Option<Res<crate::balloon::BalloonArt>>,
 ) {
     if state.cleanup_frames != 0
         || player_session.is_some()
@@ -112,6 +113,26 @@ pub(crate) fn dispatch(
             };
             if !row.fixture_ids.is_empty() && choice.target.is_none() {
                 fail(&mut state, "这段故事需要场景中真实摆放的家具");
+                return;
+            }
+            if choice.preview {
+                let Some(tweet) = row.preview_tweet.clone() else {
+                    fail(&mut state, "这段对话没有原始前置气泡数据");
+                    return;
+                };
+                if balloon_art.is_none() { return; }
+                let ticket = choice.ticket;
+                commands.queue(move |world: &mut World| {
+                    crate::balloon::show_talk_preview(world, entity, unit, &tweet, ticket);
+                });
+                state.active = Some(ActiveChoice { title: catalog.title(choice.key), choice,
+                    started: true, elapsed: 0., effect_owner: None, static_view: false });
+                state.pending = None;
+                state.open = false;
+                state.watching = true;
+                state.release_guard = 2;
+                state.status = "前置气泡预览；进入对话后播放完整内容".into();
+                state.changed();
                 return;
             }
             // A prior rejection of the same ID must not become this request's
@@ -236,7 +257,7 @@ pub(crate) fn observe_start(
         return;
     };
     active.elapsed += time.delta_secs();
-    if active.static_view {
+    if active.static_view || active.choice.preview {
         state.active = Some(active);
         return;
     }
@@ -447,6 +468,7 @@ mod tests {
         let mut state = ContentLibrary::default();
         state.watching = true;
         state.pending = Some(PlaybackChoice {
+            preview: false,
             key: EntryKey::Fixture(157),
             target: None,
             ticket: 1,

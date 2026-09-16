@@ -108,6 +108,7 @@ struct DialogueLine {
 #[derive(Clone)]
 struct LibraryTalk {
     content: TalkContent,
+    preview_tweet: Option<moly_law::talk::TweetRef>,
     units: Vec<u32>,
     fixture_ids: Vec<i32>,
     title: String,
@@ -264,6 +265,7 @@ pub(crate) struct LibraryContext {
 }
 #[derive(Clone)]
 struct PlaybackChoice {
+    preview: bool,
     key: EntryKey,
     target: Option<FixtureTarget>,
     ticket: u64,
@@ -359,6 +361,12 @@ impl Default for ContentLibrary {
     }
 }
 impl ContentLibrary {
+    pub(crate) fn browser_busy(&self) -> bool { self.active.is_some() || self.pending.is_some() || self.stopping || self.scene_owned }
+
+    pub(crate) fn owns_talk_preview(&self, ticket: u64) -> bool {
+        !self.stopping && self.active.as_ref().is_some_and(|active|
+            active.choice.preview && active.choice.ticket == ticket)
+    }
     pub(crate) fn blocks_world_input(&self) -> bool {
         ((self.open || self.watching) && !self.external_ui)
             || self.active.is_some()
@@ -484,6 +492,7 @@ pub(crate) enum LibraryAction {
     PreviousInstance,
     NextInstance,
     Play,
+    Preview,
     Stop,
     RestoreScene,
     Continue,

@@ -34,6 +34,7 @@ pub(super) enum BrowserCommand {
     Query(String),
     Select(EntryKey),
     Play(Option<EntryKey>),
+    Preview(Option<EntryKey>),
     Mode(ExperienceMode),
     Scope(Scope),
     Page(usize),
@@ -147,6 +148,9 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
                 .collect(),
         ),
         "select" => BrowserCommand::Select(parse_key(string(&value, "key")?)?),
+        "preview" => BrowserCommand::Preview(
+            value.get("key").map(|_| string(&value, "key").and_then(parse_key)).transpose()?,
+        ),
         "play" => BrowserCommand::Play(
             value
                 .get("key")
@@ -272,6 +276,7 @@ pub(super) fn apply_command(
     world: &LibraryContext,
     io: &mut input::LibraryInput,
 ) {
+    let preview_intent = matches!(&command, BrowserCommand::Preview(_));
     match command {
         BrowserCommand::Open => {
             if !state.external_ui {
@@ -319,7 +324,7 @@ pub(super) fn apply_command(
                     .unwrap(),
             );
         }
-        BrowserCommand::Play(selected) => {
+        BrowserCommand::Play(selected) | BrowserCommand::Preview(selected) => {
             // A stale/missing key must never silently play a different row.
             if let Some(key) = selected {
                 if !state.filtered.contains(&key) {
@@ -332,7 +337,7 @@ pub(super) fn apply_command(
                 reject(state, "正在恢复场景，请稍候再播放");
                 return;
             }
-            apply_action(LibraryAction::Play, state, catalog, world, io);
+            apply_action(if preview_intent { LibraryAction::Preview } else { LibraryAction::Play }, state, catalog, world, io);
         }
         BrowserCommand::Mode(mode) => {
             if state.mode == mode {
@@ -638,6 +643,7 @@ fn project(state: &ContentLibrary, catalog: &LibraryCatalog, world: &LibraryCont
         "characters":characters.into_iter().map(|id|character(catalog,id)).collect::<Vec<_>>(),
         "rows":rows,"selected":selected,"relatedFixture":state.related_fixture,
         "status":{"phase":phase,"label":state.status,"error":state.last_error,
+            "preview":state.active.as_ref().is_some_and(|active|active.choice.preview),
             "activeKey":state.active.as_ref().map(|a|key(a.choice.key)).or_else(||state.pending.as_ref().map(|p|key(p.key))),
             "activeTitle":state.active.as_ref().map(|a|a.title.clone()).or_else(||state.pending.as_ref().map(|p|catalog.title(p.key))),
             "canStop":busy(state)},"issues":catalog.data_issues})
@@ -753,6 +759,7 @@ mod tests {
     }
     fn talk(id: i32, backend: TalkBackend) -> LibraryTalk {
         LibraryTalk {
+            preview_tweet: None,
             content: TalkContent {
                 master_id: id,
                 backend,
@@ -847,6 +854,7 @@ mod tests {
     }
     fn playing() -> ContentLibrary {
         let choice = PlaybackChoice {
+            preview: false,
             key: EntryKey::Talk(TalkBackend::General, 1),
             target: None,
             ticket: 77,

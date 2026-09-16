@@ -1881,11 +1881,28 @@ pub(crate) fn tick(
         &mut Elapsed,
         &Children,
         Option<&ActivityBalloon>,
+        Option<&TalkPreviewBalloon>,
     )>,
     mut anims: Query<&mut Transform, With<BalloonAnim>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, anchor, mut elapsed, kids, activity) in &mut balloons {
+    for (entity, anchor, mut elapsed, kids, activity, preview) in &mut balloons {
+        if let Some(preview) = preview {
+            if !library.owns_talk_preview(preview.ticket) {
+                commands.entity(entity).despawn();
+                continue;
+            }
+            // The source HUD does not truncate text or own a duration timer.
+            // A callable preview is held by its admitted interaction, until
+            // engagement/cancel releases it; only the source enter tween runs.
+            elapsed.t = (elapsed.t + dt).min(SCALE_SECONDS);
+            for kid in kids.iter() {
+                if let Ok(mut transform) = anims.get_mut(kid) {
+                    transform.scale = Vec3::splat((elapsed.t / SCALE_SECONDS).clamp(0.,1.));
+                }
+            }
+            continue;
+        }
         if library.owns_scene() && activity.is_none() {
             commands.entity(entity).despawn();
             continue;
@@ -1958,7 +1975,6 @@ pub(crate) fn place(
     windows: Query<&Window>,
     children_q: Query<&Children>,
     mut parts: Query<(&BalloonPart, &mut Sprite)>,
-    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if balloons.is_empty() {
         return;
@@ -2076,19 +2092,8 @@ pub(crate) fn place(
         // UpdateScale、后者是根 canvas 的 ScaleWithScreenSize，两层相乘；
         // 锚点屏幕位不参与——真源的 localPosition 已除过 canvas 缩放，
         // 乘回去净值为屏幕像素）。
-        let visual_scale = if stage.is_some() {
-            stage_bubble_scale(width, anchor.box_size.x, top_scale * canvas)
-        } else {
-            top_scale * canvas
-        };
-        transform.scale = Vec3::splat(visual_scale);
-        if stage.is_some() {
-            // Only the host-sized presentation changes: the original source
-            // text, glyphs, anchor target, animation and lifetime remain intact.
-            let half = anchor.box_size.x * visual_scale * 0.5;
-            let limit = (width * 0.5 - half - 8.).max(0.);
-            transform.translation.x = transform.translation.x.clamp(-limit, limit);
-        }
+        // Same authored canvas/HUD scale in browser and native rendering.
+        transform.scale = Vec3::splat(top_scale * canvas);
         if placed.is_none() {
             commands.entity(entity).insert(Placed);
             // 矩阵 near：clip_from_view[3][2]。与组件 near 并排打——两者会
@@ -2388,22 +2393,18 @@ mod embedded_font_coverage_tests {
     }
 }
 
-/// Embedded stages may be only a few hundred pixels wide. Keep short authored
-/// bubbles readable without changing their source geometry or native behavior.
-fn stage_bubble_scale(width: f32, source_width: f32, authored_scale: f32) -> f32 {
-    let readable = authored_scale.max(13. / FONT_SIZE);
-    readable.min((width - 16.).max(1.) / source_width.max(1.))
-}
+/// Explicit source first-line preview, separate from a full dialogue session.
+#[derive(Component)]
+pub(crate) struct TalkPreviewBalloon { ticket: u64 }
 
-#[cfg(test)]
-mod stage_bubble_view_tests {
-    use super::*;
-    #[test]
-    fn short_phone_bubbles_are_legible_and_long_ones_stay_in_the_canvas() {
-        let scale=stage_bubble_scale(390.,330.,canvas_scale(390.,700.));
-        assert!((FONT_SIZE*scale-13.).abs()<1e-5);
-        assert!(330.*scale<=374.);
-        assert!(1200.*stage_bubble_scale(390.,1200.,0.2)<=374.01);
-        assert_eq!(stage_bubble_scale(1920.,330.,1.),1.);
+pub(crate) fn show_talk_preview(world: &mut World, actor: Entity, unit: u32,
+    tweet: &moly_law::talk::TweetRef, ticket: u64) {
+    if tweet.id <= 0 || tweet.text.trim().is_empty() || world.get_entity(actor).is_err() { return; }
+    let mut params = bevy::ecs::system::SystemState::<(Commands, Option<Res<BalloonArt>>)>::new(world);
+    let (mut commands, art) = params.get_mut(world);
+    if let Some(art) = art {
+        let root = spawn_balloon_text(&mut commands, &art, actor, unit, tweet.id, &tweet.text, None, false);
+        commands.entity(root).insert(TalkPreviewBalloon { ticket });
     }
+    params.apply(world);
 }

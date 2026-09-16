@@ -9,6 +9,12 @@ pub(super) fn enrich(
     catalog: &LibraryCatalog,
     row: &mut Value,
 ) {
+    if let Some(source) = catalog.talk(key) {
+        row["preview"] = match &source.preview_tweet {
+            Some(tweet) => json!({"available":true,"tweetId":tweet.id,"text":tweet.text,"unit":source.units.first()}),
+            None => json!({"available":false,"reason":"missing_source_tweet"}),
+        };
+    }
     let (category, behavior, action, text_mode, fixtures, units) = match key {
         EntryKey::Fixture(id) => {
             let source = catalog.fixture(id);

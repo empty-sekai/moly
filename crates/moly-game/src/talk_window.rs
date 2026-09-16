@@ -33,8 +33,7 @@
 //!   两栏水平居左、垂直居顶、行距 −80、margin 0——行量法与摆位全按
 //!   排版律（`moly_law::text`），字距增量在摆位侧逐字加。
 //! * **尾标**（EndSign）：中心 (718,−434) 100×100 组，可见标记是
-//!   50×44 的 `icon_pageForward_gn`（ScenarioAtlas 未解码——程序化白色
-//!   下指三角替身，换图即真）；同组 12×12 星标与缩放/位移动效是装饰
+//!   50×44 的 `icon_pageForward_gn`（直接消费 ScenarioAtlas 真源裁件）；同组 12×12 星标与缩放/位移动效是装饰
 //!   （替身缺动效，具名）。打字机收尾拍才激活。
 //!
 //! **时序**：
@@ -61,7 +60,6 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::image::Image;
 use bevy::math::Rect;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use moly_law::text::{layout_metrics, LayoutMetrics};
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
@@ -164,7 +162,7 @@ const TYPE_INTERVAL: f32 = 0.05;
 // 资源与组件
 // ---------------------------------------------------------------------------
 
-/// 窗体纹源：面板页（atlas 提取产物）+ 尾标替身三角（程序化）。
+/// 窗体纹源：面板页与 ScenarioAtlas 原始 icon_pageForward_gn 裁件。
 #[derive(Resource)]
 pub(crate) struct WindowArt {
     page: Handle<Image>,
@@ -386,10 +384,9 @@ pub(crate) struct TalkEndMark;
 pub(crate) fn load(
     mut commands: Commands,
     server: Res<AssetServer>,
-    mut images: ResMut<Assets<Image>>,
 ) {
     let page = server.load::<Image>(AssetPath::from(PANEL_PAGE.to_owned()));
-    let end_mark = end_mark_image(&mut images);
+    let end_mark = server.load("moly://ui/atlas/sprites/ScenarioAtlas/icon_pageForward_gn.png");
     commands.insert_resource(WindowArt { page, end_mark });
     commands.init_resource::<TalkWindowState>();
 }
@@ -521,7 +518,6 @@ pub(crate) fn tick_window(
     mut end_marks: Query<&mut Visibility, (With<TalkEndMark>, Without<TalkGlyph>)>,
     mut parts: Query<(&TalkWindowPart, &mut Sprite)>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
-    mut responsive: Local<stage_layout::Cache>,
 ) {
     let dt = time.delta_secs();
 
@@ -588,18 +584,8 @@ pub(crate) fn tick_window(
         }
     }
 
-    // Small embedded stages use readable physical-pixel typography while
-    // consuming this same source state, typewriter cursor and owner lifecycle.
-    // Native and wide stage source geometry remains unchanged.
-    if let Ok(window) = windows.single() {
-        if stage_layout::render(
-            &mut commands, stage.is_some(), Vec2::new(window.width(), window.height()),
-            &mut responsive, &state, &server, art.as_deref(), window_art.as_deref(), &mut roots,
-        ) {
-            update_visibility(&state, &mut glyphs, &mut end_marks, &mut parts);
-            return;
-        }
-    }
+    // Browser and native views consume the same authored panel tree.
+    // Viewport size changes the source canvas transform, not corner geometry.
 
     // --- 呈现：树生死（根至多一棵——只有本系统铺） ---
     let placement = layouts.as_deref().and_then(|layouts| {
@@ -643,6 +629,9 @@ pub(crate) fn tick_window(
     let Some(placement) = placement else {
         return;
     };
+    if *root_transform != placement || state.built_text != state.text_version {
+        commands.entity(root).insert(stage_layout::source_metrics(placement, &state.text));
+    }
     *root_transform = placement;
 
     // --- 呈现：名字栏/正文字形重建（版本落后即重建） ---
@@ -749,6 +738,7 @@ fn spawn_tree(
     let root = commands
         .spawn((
             TalkWindowRoot,
+            stage_layout::source_metrics(placement, &state.text),
             placement,
             Visibility::default(),
             RenderLayers::layer(BALLOON_LAYER),
@@ -1037,40 +1027,3 @@ fn spawn_text_glyphs(
 // ---------------------------------------------------------------------------
 // 程序化替身
 // ---------------------------------------------------------------------------
-
-/// 尾标替身：50×44 白色下指三角（顶边 y=8 起全宽，收到底心尖）。真件
-/// `icon_pageForward_gn`（ScenarioAtlas，提取缺口）——换图即真。
-fn end_mark_image(images: &mut Assets<Image>) -> Handle<Image> {
-    let (w, h) = (END_ICON_W as usize, END_ICON_H as usize);
-    let mut data = vec![0u8; w * h * 4];
-    // 三顶点 A(0,8) B(50,8) C(25,44)；三条边的内侧重距取最小 ⇒ SDF。
-    let norm = (36.0f32 * 36.0 + 25.0 * 25.0).sqrt();
-    for py in 0..h {
-        for px in 0..w {
-            let x = px as f32 + 0.5;
-            let y = py as f32 + 0.5;
-            let d_top = y - 8.0;
-            let d_left = (36.0 * x - 25.0 * (y - 8.0)) / norm;
-            let d_right = (36.0 * (END_ICON_W - x) - 25.0 * (y - 8.0)) / norm;
-            let inside = d_top.min(d_left).min(d_right);
-            let sdf = -inside; // 负在内侧
-            let alpha = (0.5 - sdf).clamp(0.0, 1.0);
-            let at = (py * w + px) * 4;
-            data[at] = 255;
-            data[at + 1] = 255;
-            data[at + 2] = 255;
-            data[at + 3] = (alpha * 255.0).round() as u8;
-        }
-    }
-    images.add(Image::new(
-        Extent3d {
-            width: w as u32,
-            height: h as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD,
-    ))
-}

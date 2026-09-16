@@ -395,6 +395,7 @@ pub(crate) fn build_talk_catalog(
                 related,
                 false,
                 &catalog,
+                &row.tweet,
             ));
         }
     }
@@ -437,6 +438,7 @@ pub(crate) fn build_talk_catalog(
             related,
             drives,
             &catalog,
+            &row.tweet,
         ));
     }
     catalog.talks = talks;
@@ -456,6 +458,7 @@ fn make_talk(
     furniture_related: bool,
     drives_fixture: bool,
     catalog: &LibraryCatalog,
+    tweet: &moly_law::talk::TweetRef,
 ) -> LibraryTalk {
     let preview = lines
         .iter()
@@ -489,6 +492,7 @@ fn make_talk(
     )
     .to_lowercase();
     LibraryTalk {
+        preview_tweet: (tweet.id > 0 && !tweet.text.trim().is_empty()).then(|| tweet.clone()),
         content,
         units,
         fixture_ids,
@@ -733,6 +737,7 @@ mod tests {
             false,
             false,
             &LibraryCatalog::default(),
+            &moly_law::talk::TweetRef { id: 0, text: String::new(), motion: String::new(), eye: String::new(), mouth: String::new() },
         );
         assert!(query_matches(&row.search, "独特的关键词", 12));
         assert!(!query_matches(&row.search, "123", 12));
@@ -805,4 +810,18 @@ mod tests {
         );
         assert!(!catalog.fixtures[0].source.as_ref().unwrap().exported);
     }
+    #[test]
+    fn opening_tweet_preserves_source_break_and_missing_stays_missing() {
+        let original = "……对了，冰箱里好像还\n剩了一些望月同学……";
+        let tweet = moly_law::talk::TweetRef { id: 11374, text: original.into(),
+            motion: "mov_cw_silent_tilthead003".into(), eye: "normal_l".into(), mouth: "normal01".into() };
+        let build = |tweet: &moly_law::talk::TweetRef| make_talk(
+            TalkContent {master_id:1374,backend:TalkBackend::Fixture,is_general:None}, vec![17], vec![157],
+            vec![DialogueLine{speaker:"奏".into(),text:"这里是完整正式对白，不得截取替代气泡".into()}],
+            true, true, &LibraryCatalog::default(), tweet);
+        assert_eq!(build(&tweet).preview_tweet.unwrap().text, original);
+        let missing = moly_law::talk::TweetRef {id:0,text:String::new(),motion:String::new(),eye:String::new(),mouth:String::new()};
+        assert!(build(&missing).preview_tweet.is_none());
+    }
+
 }

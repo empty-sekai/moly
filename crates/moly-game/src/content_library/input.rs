@@ -76,7 +76,7 @@ pub(crate) fn input(
         if event.key_code == KeyCode::F9 {
             actions.push(LibraryAction::Toggle);
         }
-        if state.watching && event.key_code == KeyCode::Escape {
+        if !state.external_ui && state.watching && event.key_code == KeyCode::Escape {
             actions.push(LibraryAction::Stop);
         }
     }
@@ -323,7 +323,30 @@ pub(super) fn apply_action(
             state.status = "正在结束播放并恢复场景…".into();
             state.changed();
         }
-        LibraryAction::Play if state.open || state.watching || state.external_ui => {
+        LibraryAction::Play | LibraryAction::Preview if state.open || state.watching || state.external_ui => {
+            let preview = action == LibraryAction::Preview;
+            if preview && state.selected.and_then(|key| catalog.talk(key))
+                .and_then(|row| row.preview_tweet.as_ref()).is_none() {
+                state.status = "这项内容没有可用的原始前置气泡".into();
+                state.changed();
+                return;
+            }
+            // Engage the same admitted actor/fixture/ticket. Do not cancel the
+            // staged world, navigate sites or reconstruct the character first.
+            if !preview {
+                if let Some(active) = state.active.clone().filter(|active|
+                    active.choice.preview && Some(active.choice.key) == state.selected) {
+                    let mut choice = active.choice;
+                    choice.preview = false;
+                    state.pending = Some(choice);
+                    state.active = None;
+                    state.cleanup_frames = 0;
+                    state.stopping = false;
+                    state.status = "正在进入这段对话…".into();
+                    state.changed();
+                    return;
+                }
+            }
             if let Some(reason) = context::selected_reason(state, catalog, world) {
                 state.status = reason;
                 state.changed();
@@ -341,6 +364,7 @@ pub(super) fn apply_action(
             cancel(io);
             state.next_ticket = state.next_ticket.wrapping_add(1);
             state.pending = Some(PlaybackChoice {
+                preview,
                 key,
                 target,
                 ticket: state.next_ticket,
