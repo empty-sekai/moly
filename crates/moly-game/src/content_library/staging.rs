@@ -764,6 +764,50 @@ fn drive_independent(world: &mut World) {
         return;
     };
     session.elapsed += world.resource::<Time>().delta_secs();
+    // Consecutive entries using the same fixture set need no site switch,
+    // layout rebuild or character reload. Wait for the old native owners to
+    // release, then transfer admission to the new generation in place.
+    let replacement = world.resource::<ContentLibrary>().pending.clone()
+        .filter(|choice| choice.mode == ExperienceMode::Independent && choice.ticket != session.ticket);
+    if let Some(mut choice) = replacement.filter(|_| matches!(session.phase,
+        IndependentPhase::Staged | IndependentPhase::Experiencing | IndependentPhase::LoadingContent)) {
+        if let Ok((units, fixtures, _)) = requirements(world, &choice) {
+            let compatible = fixtures.len() == session.required_fixtures.len()
+                && fixtures.iter().all(|id|session.required_fixtures.contains(id))
+                && !matches!(choice.key, EntryKey::Fixture(id) if world.resource::<LibraryCatalog>().fixture(id)
+                    .is_some_and(|row|matches!(row.presentation, FixturePresentation::Surface { .. })));
+            if compatible {
+                if !owners_idle(world) {
+                    world.insert_resource(session);
+                    return;
+                }
+                restore_preview(world);
+                restore_background_actors(world, &session.parked_actors);
+                session.parked_actors = park_background_actors(world, &units);
+                match crate::npc::spawn_temporary_units(world, &units) {
+                    Ok(actors) => session.temporary_actors.extend(actors),
+                    Err(reason) => {
+                        fail_independent(world, &mut session, reason);
+                        world.insert_resource(session);
+                        return;
+                    }
+                }
+                choice.target = matching_fixture_targets(world, &fixtures).and_then(|targets|targets.first().cloned());
+                session.ticket = choice.ticket;
+                session.required_units = units;
+                session.phase = IndependentPhase::LoadingContent;
+                session.elapsed = 0.;
+                session.failure = None;
+                let mut state = world.resource_mut::<ContentLibrary>();
+                state.active = None;
+                state.pending = Some(choice);
+                state.stopping = false;
+                state.status = "已复用独立场景，正在切换内容…".into();
+                state.changed();
+                info!("[content-library] reused independent world ticket={} fixtures={:?}", session.ticket, fixtures);
+            }
+        }
+    }
     let state_ticket = {
         let state = world.resource::<ContentLibrary>();
         state
