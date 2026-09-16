@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="light dark" />
+    <title>MYSEKAI</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./stage.css" />
+    <script type="module" src="./stage.mjs"></script>
+  </head>
+  <body>
+    <main id="stage" aria-label="MYSEKAI">
+      <canvas id="app-canvas" tabindex="0"></canvas>
+      <section id="stage-boot" class="boot" aria-labelledby="boot-title">
+        <div class="boot-inner">
+          <span class="stage-mark" aria-hidden="true">✦</span>
+          <p class="eyebrow">MYSEKAI · MOLY</p>
+          <h1 id="boot-title"></h1>
+          <p id="boot-message" role="status" aria-live="polite"></p>
+          <p id="boot-progress" class="progress" aria-live="off"></p>
+          <button id="stage-start" class="primary" type="button"></button>
+          <div id="boot-recovery" hidden>
+            <button id="stage-retry" class="secondary" type="button"></button>
+            <button id="stage-webgl" class="secondary" type="button"></button>
+          </div>
+          <p id="boot-note" class="note"></p>
+        </div>
+      </section>
+      <p id="stage-hint" class="hint" hidden></p>
+    </main>
+  </body>
+</html>
