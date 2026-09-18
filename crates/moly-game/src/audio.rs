@@ -57,7 +57,7 @@ use bevy::audio::{
 };
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 /// 站点的音频档 id：`siteBgms`/`siteSounds` 表里的 siteId。草地站是 5
@@ -146,6 +146,20 @@ pub(crate) struct VolumeBus {
     pub bgm: f32,
 }
 
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioGate {
+    pub enabled: bool,
+}
+
+impl Default for AudioGate {
+    fn default() -> Self { Self { enabled: true } }
+}
+
+impl AudioGate {
+    #[inline]
+    fn factor(&self) -> f32 { if self.enabled { 1.0 } else { 0.0 } }
+}
+
 #[derive(Component)]
 pub(crate) enum BusVolume {
     Ambient,
@@ -155,6 +169,7 @@ pub(crate) enum BusVolume {
 
 pub(crate) fn apply_sink_volumes(
     bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     mut sinks: Query<(&BusVolume, &mut AudioSink)>,
 ) {
     for (source, mut sink) in &mut sinks {
@@ -162,7 +177,7 @@ pub(crate) fn apply_sink_volumes(
             BusVolume::Ambient => bus.se_area_ambient,
             BusVolume::Voice => bus.vox_scenario,
             BusVolume::Se(class) => class.volume(&bus),
-        };
+        } * gate.factor();
         if sink.volume().to_linear() != volume {
             sink.set_volume(Volume::Linear(volume));
         }
@@ -865,10 +880,15 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
             // diagnostic variant, not a playable stream with missing fields.
             // Do not invent loop=false, a path, or another cue as a substitute.
             if let Some(diagnostic) = stream.get("error") {
-                let reason = diagnostic.as_str().filter(|value| !value.is_empty())
+                let reason = diagnostic
+                    .as_str()
+                    .filter(|value| !value.is_empty())
                     .expect("audio diagnostic error must be a nonempty string");
-                assert_eq!(stream.as_object().map(|row| row.len()), Some(2),
-                    "audio diagnostic cannot also contain partial playable fields");
+                assert_eq!(
+                    stream.as_object().map(|row| row.len()),
+                    Some(2),
+                    "audio diagnostic cannot also contain partial playable fields"
+                );
                 warn!("[audio-source] unavailable cue={cue} package={package_name}: {reason}");
                 continue;
             }
@@ -1090,6 +1110,7 @@ pub(crate) fn advance_bgm(
     server: Res<AssetServer>,
     time: Res<Time>,
     bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     phenomenon: Res<CurrentPhenomenon>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<BgmChannel>,
@@ -1103,7 +1124,7 @@ pub(crate) fn advance_bgm(
     // 淡出推进：线性归零，到点拆除。
     channel.fading.retain_mut(|fading| {
         fading.elapsed += dt;
-        let level = fading.from_volume * (1.0 - (fading.elapsed / CROSS_FADE_SECONDS).min(1.0));
+        let level = fading.from_volume * (1.0 - (fading.elapsed / CROSS_FADE_SECONDS).min(1.0)) * gate.factor();
         for entity in &fading.entities {
             if let Ok(mut sink) = sinks.get_mut(*entity) {
                 sink.set_volume(Volume::Linear(level));
@@ -1122,7 +1143,7 @@ pub(crate) fn advance_bgm(
     });
 
     // 当前声的音量与交接。
-    let target_volume = BGM_VOLUME_FACTOR * bus.bgm;
+    let target_volume = BGM_VOLUME_FACTOR * bus.bgm * gate.factor();
     if let Some(voice) = channel.voice.as_mut() {
         let envelope = match &mut voice.fade_in {
             Some(elapsed) => {
@@ -1313,6 +1334,7 @@ pub(crate) fn advance_ambient(
     mut commands: Commands,
     server: Res<AssetServer>,
     bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     phenomenon: Res<CurrentPhenomenon>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<AmbientChannel>,
@@ -1353,7 +1375,7 @@ pub(crate) fn advance_ambient(
                     label(&route.package)
                 );
             };
-            let volume = bus.se_area_ambient;
+            let volume = bus.se_area_ambient * gate.factor();
             let handle =
                 server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
             let settings = if stream.loops {
@@ -1436,6 +1458,7 @@ pub(crate) fn advance_proximity(
     mut commands: Commands,
     server: Res<AssetServer>,
     bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     routing: Option<Res<Routing>>,
     mut state: ResMut<ProximityState>,
     sources: Query<
@@ -1478,6 +1501,7 @@ pub(crate) fn advance_proximity(
     let Some((nearest, volume)) = best else {
         return;
     };
+    let audible_volume = volume * gate.factor();
 
     if state.pre.is_empty() || state.current.is_empty() {
         // 起播支：起播音量 0（真源把 0 传给播放器，音量参数被丢弃），
@@ -1501,12 +1525,12 @@ pub(crate) fn advance_proximity(
         // 逐位对齐真源：绝对差过门才写，并按「用户音量 × 距离音量」更新
         // 播放器）。
         let epsilon =
-            (UNITY_MIN_FLOAT * 8.0).max(state.current_volume.abs().max(volume.abs()) * 1e-6);
-        if (volume - state.current_volume).abs() >= epsilon {
-            state.current_volume = volume;
+            (UNITY_MIN_FLOAT * 8.0).max(state.current_volume.abs().max(audible_volume.abs()) * 1e-6);
+        if (audible_volume - state.current_volume).abs() >= epsilon {
+            state.current_volume = audible_volume;
             if let Some(entity) = state.playback {
                 if let Ok(mut sink) = sinks.get_mut(entity) {
-                    sink.set_volume(Volume::Linear(bus.se_area_ambient * volume));
+                    sink.set_volume(Volume::Linear(bus.se_area_ambient * audible_volume));
                 }
             }
         }
@@ -1607,6 +1631,57 @@ pub(crate) struct VoiceLine {
     pub who: Option<VoiceWho>,
     /// Current-cast instance; unresolved identity does not change audio routing.
     pub speaker: Option<VoiceSpeaker>,
+}
+
+/// A future authored voice command. Preparing one only requests the exact raw
+/// audio asset; it never creates an AudioPlayer, changes the single voice bus,
+/// or advances dialogue timing.
+#[derive(Clone, Debug)]
+pub(crate) struct VoicePrefetch {
+    pub cue: String,
+    pub who: Option<VoiceWho>,
+}
+
+impl VoicePrefetch {
+    pub(crate) fn new(cue: String, who: Option<VoiceWho>) -> Self {
+        Self { cue, who }
+    }
+}
+
+const VOICE_PREFETCH_CACHE_LIMIT: usize = 24;
+
+/// Small bounded strong-handle cache. Keeping the handle alive is what makes an
+/// AssetServer request a real preload rather than a dropped speculative load.
+#[derive(Resource, Default)]
+pub(crate) struct VoicePrefetchCache {
+    handles: HashMap<String, Handle<AudioSource>>,
+    order: VecDeque<String>,
+}
+
+impl VoicePrefetchCache {
+    fn get(&mut self, path: &str) -> Option<Handle<AudioSource>> {
+        let handle = self.handles.get(path)?.clone();
+        if let Some(index) = self.order.iter().position(|key| key == path) {
+            self.order.remove(index);
+        }
+        self.order.push_back(path.to_owned());
+        Some(handle)
+    }
+
+    fn insert(&mut self, path: String, handle: Handle<AudioSource>) {
+        if self.handles.contains_key(&path) {
+            let _ = self.get(&path);
+            return;
+        }
+        while self.handles.len() >= VOICE_PREFETCH_CACHE_LIMIT {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.handles.remove(&oldest);
+        }
+        self.order.push_back(path.clone());
+        self.handles.insert(path, handle);
+    }
 }
 
 /// Attached to the actual player, not to a parallel clock or a cue lookup.
@@ -1724,17 +1799,70 @@ fn route_voice(
     VoiceRoute::Miss { who, packages }
 }
 
+/// Request exact future authored voice assets while a conversation is already
+/// known. This deliberately performs no playback and never touches VoiceChannel:
+/// the source StopVoiceAll/ExistsCueName/PlayVoice ordering remains owned by
+/// serve_voice when the actual command reaches the script cursor.
+pub(crate) fn prefetch_voice(
+    server: Res<AssetServer>,
+    routing: Option<Res<Routing>>,
+    partvoice: Option<Res<PartVoiceMap>>,
+    active: Option<Res<crate::talk::ActiveTalk>>,
+    player: Option<Res<crate::player_talk::PlayerTalkSession>>,
+    mut cache: ResMut<VoicePrefetchCache>,
+) {
+    let Some(routing) = routing else {
+        return;
+    };
+    let mut requests = Vec::new();
+    if let Some(active) = active {
+        requests.extend(active.voice_prefetches());
+    }
+    if let Some(player) = player {
+        requests.extend(player.voice_prefetches());
+    }
+    requests.truncate(VOICE_PREFETCH_CACHE_LIMIT);
+
+    for request in requests {
+        let line = VoiceLine {
+            talk_id: 0,
+            step: 0,
+            cue: request.cue,
+            who: request.who,
+            speaker: None,
+        };
+        let VoiceRoute::Play { package, .. } =
+            route_voice(&line, partvoice.as_deref(), &routing.streams)
+        else {
+            continue;
+        };
+        let Some(stream) = routing.streams.0.get(&(line.cue.clone(), package)) else {
+            continue;
+        };
+        let path = format!("moly://{}", stream.ogg);
+        if cache.get(&path).is_some() {
+            continue;
+        }
+        let handle = server.load::<AudioSource>(AssetPath::from(path.clone()));
+        debug!("[voice-prefetch] requested {}", label(&line.cue));
+        cache.insert(path, handle);
+    }
+}
+
 /// Update（对话链内、步进之后）：吃掉行请求——停旧声、查流表、起播或
 /// 具名跳过。缺 cue 真源同款是跳过且对话照走（ExistsCueName 无 else 无
 /// 日志），这里照做并按本仓纪律把跳过记响：上游无包的走语料账本具名，
 /// 其余不在表里的点名为未提取消费面，不静默不 panic。
 pub(crate) fn serve_voice(
     mut commands: Commands,
+    time: Res<Time>,
     server: Res<AssetServer>,
     bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     corpus: Option<Res<VoiceCorpus>>,
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
+    mut prefetch: ResMut<VoicePrefetchCache>,
     mut channel: ResMut<VoiceChannel>,
     lines: Query<(Entity, &VoiceLine)>,
     sinks: Query<&AudioSink>,
@@ -1779,13 +1907,29 @@ pub(crate) fn serve_voice(
                 };
                 // talk voice 的流全部非循环（整轨一次性）；音量 =
                 // 1.0（真源 PlayVoice 基量）× 面板 vox_scenario。
-                let volume = bus.vox_scenario;
-                let handle =
-                    server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
+                let volume = bus.vox_scenario * gate.factor();
+                let path = format!("moly://{}", stream.ogg);
+                let cached = prefetch.get(&path);
+                let was_prefetched = cached.is_some();
+                let handle = match cached {
+                    Some(handle) => handle,
+                    None => {
+                        let handle = server.load::<AudioSource>(AssetPath::from(path.clone()));
+                        prefetch.insert(path, handle.clone());
+                        handle
+                    }
+                };
+                let raw_ready_at_command =
+                    matches!(server.get_load_state(handle.id()), Some(LoadState::Loaded));
                 channel.sink = Some(
                     commands
                         .spawn((
-                            VoiceSource::new(handle),
+                            VoiceSource::new(
+                                handle,
+                                time.elapsed_secs_f64(),
+                                was_prefetched,
+                                raw_ready_at_command,
+                            ),
                             PlaybackSettings::ONCE.with_volume(Volume::Linear(volume)),
                             BusVolume::Voice,
                             VoicePlaybackIdentity {
@@ -1939,7 +2083,8 @@ impl SeRequests {
         path: &str,
     ) {
         if let Some(cue) = layouts.button_sound(key, path) {
-            self.0.push(SeRequest { owner: None,
+            self.0.push(SeRequest {
+                owner: None,
                 cue,
                 class: SeClass::Ui,
                 source: "source-button",
@@ -1972,6 +2117,7 @@ pub(crate) fn advance_se(
     mut commands: Commands,
     server: Res<AssetServer>,
     bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     routing: Option<Res<Routing>>,
     mut queue: ResMut<SeRequests>,
     mut channel: ResMut<SeChannel>,
@@ -1992,7 +2138,12 @@ pub(crate) fn advance_se(
         return; // 路由表未就绪：请求留队（就绪后排空，窗口照样去重）
     };
     for request in queue.0.drain(..) {
-        if request.owner.is_some_and(|owner| owners.get(owner).is_err()) { continue; }
+        if request
+            .owner
+            .is_some_and(|owner| owners.get(owner).is_err())
+        {
+            continue;
+        }
         channel.requests += 1;
         let (cue, source_package) = match request.cue.rsplit_once('/') {
             Some((_, cue)) => (cue, Some(request.cue.replace('/', "__"))),
@@ -2027,7 +2178,7 @@ pub(crate) fn advance_se(
             }
             continue;
         };
-        let volume = request.class.volume(&bus);
+        let volume = request.class.volume(&bus) * gate.factor();
         let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
         let entity = commands
             .spawn((
@@ -2036,7 +2187,9 @@ pub(crate) fn advance_se(
                 BusVolume::Se(request.class),
             ))
             .id();
-        if let Some(owner) = request.owner { commands.entity(entity).insert(ScopedSe(owner)); }
+        if let Some(owner) = request.owner {
+            commands.entity(entity).insert(ScopedSe(owner));
+        }
         channel.live.push(entity);
         channel.played += 1;
         info!(
@@ -2059,11 +2212,18 @@ pub(crate) fn dispose_scoped_se(world: &mut World, owner: Entity) {
     if let Some(mut queue) = world.get_resource_mut::<SeRequests>() {
         queue.0.retain(|request| request.owner != Some(owner));
     }
-    let entities: Vec<_> = world.query::<(Entity, &ScopedSe)>().iter(world)
-        .filter_map(|(entity, scope)| (scope.0 == owner).then_some(entity)).collect();
+    let entities: Vec<_> = world
+        .query::<(Entity, &ScopedSe)>()
+        .iter(world)
+        .filter_map(|(entity, scope)| (scope.0 == owner).then_some(entity))
+        .collect();
     for entity in &entities {
-        if let Some(sink) = world.get::<AudioSink>(*entity) { sink.stop(); }
-        if let Ok(entity) = world.get_entity_mut(*entity) { entity.despawn(); }
+        if let Some(sink) = world.get::<AudioSink>(*entity) {
+            sink.stop();
+        }
+        if let Ok(entity) = world.get_entity_mut(*entity) {
+            entity.despawn();
+        }
     }
     if let Some(mut channel) = world.get_resource_mut::<SeChannel>() {
         channel.live.retain(|entity| !entities.contains(entity));
@@ -2075,15 +2235,25 @@ mod scoped_se_tests {
     use super::*;
     #[test]
     fn cancellation_retires_only_the_departing_owner() {
-        let mut world = World::new(); world.init_resource::<SeRequests>(); world.init_resource::<SeChannel>();
-        let first = world.spawn_empty().id(); let second = world.spawn_empty().id();
-        let old = world.spawn(ScopedSe(first)).id(); let newer = world.spawn(ScopedSe(second)).id();
+        let mut world = World::new();
+        world.init_resource::<SeRequests>();
+        world.init_resource::<SeChannel>();
+        let first = world.spawn_empty().id();
+        let second = world.spawn_empty().id();
+        let old = world.spawn(ScopedSe(first)).id();
+        let newer = world.spawn(ScopedSe(second)).id();
         world.resource_mut::<SeChannel>().live = vec![old, newer];
         for owner in [Some(first), Some(second), None] {
-            world.resource_mut::<SeRequests>().0.push(SeRequest { owner, cue: "test".into(), class: SeClass::Ingame, source: "test" });
+            world.resource_mut::<SeRequests>().0.push(SeRequest {
+                owner,
+                cue: "test".into(),
+                class: SeClass::Ingame,
+                source: "test",
+            });
         }
         dispose_scoped_se(&mut world, first);
-        assert!(world.get_entity(old).is_err()); assert!(world.get_entity(newer).is_ok());
+        assert!(world.get_entity(old).is_err());
+        assert!(world.get_entity(newer).is_ok());
         assert_eq!(world.resource::<SeRequests>().0.len(), 2);
         assert_eq!(world.resource::<SeChannel>().live, vec![newer]);
     }
@@ -2206,11 +2376,13 @@ pub(crate) fn report(
 /// 此落位。
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<VolumeBus>()
+        .init_resource::<AudioGate>()
         .init_resource::<LocalVolumeSettings>()
         .init_resource::<CurrentPhenomenon>()
         .init_resource::<BgmChannel>()
         .init_resource::<AmbientChannel>()
         .init_resource::<ProximityState>()
+        .init_resource::<VoicePrefetchCache>()
         .init_resource::<VoiceChannel>()
         .init_resource::<SeRequests>()
         .init_resource::<SeChannel>();
@@ -2230,27 +2402,38 @@ mod stream_manifest_tests {
     }
     #[test]
     fn source_diagnostic_does_not_poison_unrelated_audio_or_fabricate_a_stream() {
-        let streams=parse_streams(&manifest(json!([valid(), {
-            "cue":"missing","error":"no waveform in this archive carries this cue name"
-        }])), "phenomena/");
-        assert_eq!(streams.0.len(),1);
-        assert!(streams.0.get(&("missing".into(),"source-bank".into())).is_none());
-        assert_eq!(streams.0[&("available".into(),"source-bank".into())].ogg,"phenomena/audio/source.ogg");
+        let streams = parse_streams(
+            &manifest(json!([valid(), {
+                "cue":"missing","error":"no waveform in this archive carries this cue name"
+            }])),
+            "phenomena/",
+        );
+        assert_eq!(streams.0.len(), 1);
+        assert!(streams
+            .0
+            .get(&("missing".into(), "source-bank".into()))
+            .is_none());
+        assert_eq!(
+            streams.0[&("available".into(), "source-bank".into())].ogg,
+            "phenomena/audio/source.ogg"
+        );
     }
     #[test]
-    #[should_panic(expected="loop")]
+    #[should_panic(expected = "loop")]
     fn malformed_playable_row_still_fails_closed() {
-        let mut row=valid();row["loop"]=json!(null);
+        let mut row = valid();
+        row["loop"] = json!(null);
         parse_streams(&manifest(json!([row])), "");
     }
     #[test]
-    #[should_panic(expected="partial playable")]
+    #[should_panic(expected = "partial playable")]
     fn diagnostic_cannot_hide_corrupt_playable_data() {
-        let mut row=valid();row["error"]=json!("failed");
+        let mut row = valid();
+        row["error"] = json!("failed");
         parse_streams(&manifest(json!([row])), "");
     }
     #[test]
-    #[should_panic(expected="nonempty string")]
+    #[should_panic(expected = "nonempty string")]
     fn malformed_diagnostic_is_not_silently_ignored() {
         parse_streams(&manifest(json!([{"cue":"bad","error":false}])), "");
     }

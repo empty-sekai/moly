@@ -294,6 +294,7 @@ pub(crate) fn click(
     mut ui: ResMut<EditorUiState>,
     mut consumed: ResMut<ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
+    mut library: ResMut<crate::content_library::ContentLibrary>,
     mut sounds: ResMut<SeRequests>,
     roots: Query<(&EditorRoot, &UiPrefabView)>,
     auxiliaries: Query<(&EditorAuxiliary, &UiPrefabView)>,
@@ -455,6 +456,13 @@ pub(crate) fn click(
             };
             ui.motion.target(target);
             continue;
+        }
+        if let Some(selected) = edit.selected.as_ref() {
+            if hit(view, &layouts, &bindings.info, point, canvas)
+                && library.inspect_fixture(selected.item.fixture_id) {
+                sounds.source_button(&layouts, view.key, &bindings.info);
+                break;
+            }
         }
         let choice = if edit.can_save && hit(view, &layouts, &bindings.save, point, canvas) {
             // CN 6.0.0: OnReceiveSaveLayout -> SaveLayoutWithValidation ->
@@ -674,6 +682,7 @@ pub(crate) fn refresh(
         view.set_visible(&bindings.show_ui, ui.hidden);
         let document = layouts.document(compose::RUNTIME).unwrap();
         compose::enabled(&mut view, document, &bindings.save, edit.can_save);
+        compose::enabled(&mut view, document, &bindings.info, edit.selected.is_some());
         view.set_visible(
             &bindings.hud,
             edit.selected.is_some() && !ui.hidden && !edit.exit_dialog,

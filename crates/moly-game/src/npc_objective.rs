@@ -493,7 +493,7 @@ impl TalkSlot {
 /// 成员抽签引擎：跨帧线性同余（与配对域同款——律只约束分布与求值次数，
 /// 引擎序列不在律内）。种子按 unit id 定推，逐成员可复算、不受查询序
 /// 影响。
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct MemberRng(u64);
 
 impl MemberRng {

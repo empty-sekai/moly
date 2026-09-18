@@ -95,7 +95,7 @@ use moly_law::shading::fieldobject;
 
 use crate::env::SiteEnvGpuBuffer;
 use crate::shadowmap::ShadowMapGpu;
-use crate::site::{SiteAssets, SiteScenesReady};
+use crate::site::{SiteAssets, SiteScenesReady, SiteVisualPending};
 
 /// Ground-Birthday 族名（真源 shader 名）。law 侧只收了四个老族；
 /// 这四个新族的族名在本层声明。
@@ -1758,7 +1758,7 @@ fn switch_materials(
     mut materials: ResMut<Assets<SiteMaterial>>,
     site: Option<Res<SiteAssets>>,
     parts: Query<(Entity, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
-    mut plan: Local<Option<SwapPlan>>,
+    mut plan: Local<Option<(bevy::asset::AssetId<Gltf>, String, SwapPlan)>>,
 ) {
     if swapped.is_some() {
         return;
@@ -1778,8 +1778,12 @@ fn switch_materials(
     let MolyJson::SiteSidecar(sidecar) = asset else {
         panic!("站点 sidecar 路径装载到了别的资产类型（{scene}）");
     };
-    let Some(mut state) = plan
-        .take()
+    // Local state outlives teardown. Never apply a half-loaded plan from a
+    // retired site to the next generation's entities (including rapid A/B/A).
+    let cached = plan.take().filter(|(gltf, name, _)| {
+        *gltf == site.gltf.id() && name == scene
+    }).map(|(_, _, plan)| plan);
+    let Some(mut state) = cached
         .or_else(|| build_swap_plan(&gltfs, &site, sidecar, scene, &server))
     else {
         return;
@@ -1803,7 +1807,7 @@ fn switch_materials(
         }
     }
     if !all_loaded {
-        *plan = Some(state);
+        *plan = Some((site.gltf.id(), scene.to_owned(), state));
         return;
     }
 
@@ -1905,6 +1909,21 @@ fn switch_materials(
         state.tally.sidecar_only, state.tally.unmatched_texture_slots,
     );
     commands.insert_resource(SiteMaterialsSwapped);
+}
+
+/// Only presentation is delayed. The deferred material replacements must be
+/// applied before this system can reveal the roots; `.chain()` supplies that
+/// barrier. Source-inactive descendants and navigation roots remain hidden.
+fn reveal_material_ready_roots(
+    mut commands: Commands,
+    ready: Option<Res<SiteMaterialsSwapped>>,
+    mut roots: Query<(Entity, &mut Visibility), With<SiteVisualPending>>,
+) {
+    if ready.is_none() { return; }
+    for (entity, mut visibility) in &mut roots {
+        *visibility = Visibility::Inherited;
+        commands.entity(entity).remove::<SiteVisualPending>();
+    }
 }
 
 /// 建 plan：按 glb 材质下标 join sidecar（glb `materials[i]` 与 sidecar
@@ -2029,7 +2048,31 @@ impl Plugin for SiteMaterialPlugin {
         ))
         .init_asset::<MolyJson>()
         .init_asset_loader::<MolyJsonLoader>()
-        .add_systems(Update, switch_materials);
+        .add_systems(Update, (switch_materials, reveal_material_ready_roots).chain());
         bevy::asset::embedded_asset!(app, "shaders/site_material.wgsl");
+    }
+}
+
+#[cfg(test)]
+mod visual_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn source_material_barrier_does_not_reveal_navigation_or_inactive_nodes() {
+        let mut app = App::new();
+        app.add_systems(Update, reveal_material_ready_roots);
+        let root = app.world_mut().spawn((SiteVisualPending, Visibility::Hidden)).id();
+        let nav = app.world_mut().spawn(Visibility::Hidden).id();
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(root).unwrap(), Visibility::Hidden);
+        app.world_mut().insert_resource(SiteMaterialsSwapped);
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(root).unwrap(), Visibility::Inherited);
+        assert!(app.world().get::<SiteVisualPending>(root).is_none());
+        assert_eq!(*app.world().get::<Visibility>(nav).unwrap(), Visibility::Hidden);
+        // A later ready signal must not overwrite an intentional hiding.
+        *app.world_mut().get_mut::<Visibility>(root).unwrap() = Visibility::Hidden;
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(root).unwrap(), Visibility::Hidden);
     }
 }

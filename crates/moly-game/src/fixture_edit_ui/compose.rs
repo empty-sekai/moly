@@ -46,6 +46,7 @@ pub(super) struct Bindings {
     pub tabs: Vec<Tab>,
     pub hidden: Vec<String>,
     pub save: String,
+    pub info: String,
     pub hide_ui: String,
     pub show_ui: String,
     pub hud: String,
@@ -319,7 +320,6 @@ pub(super) fn compose(
     let mut unsupported_buttons = [
         "_removeAllButton",
         "_presetSaveButton",
-        "_infoButton",
         "_changeLookButton",
         "_rotateButton",
         "_reportTipButton",
@@ -374,6 +374,7 @@ pub(super) fn compose(
         tabs,
         hidden,
         save: field(&action, "_saveButton")?,
+        info: field(&action, "_infoButton")?,
         hide_ui: field(&action, "_uiDisableButton")?,
         show_ui: field(&action, "_uiEnableButton")?,
         hud: field(&screen, "_fixtureEditHeadUpDisplay")?,

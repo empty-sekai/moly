@@ -30,6 +30,8 @@ pub(crate) mod layouts;
 #[path = "road.rs"]
 pub(crate) mod road;
 
+use std::collections::HashMap;
+
 use bevy::asset::{LoadState, RecursiveDependencyLoadState};
 use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
@@ -1174,6 +1176,18 @@ pub(crate) struct FixtureVisualReady;
 #[derive(Component)]
 struct FixtureIdentityResolved;
 
+/// One attempt at source-view binding has been made for this root. The search
+/// only succeeds on an unambiguous match, so without this marker a root that
+/// matches zero nodes — or several — stays in the binding query forever and
+/// repeats a full subtree walk, with a JSON parse per node, every frame for the
+/// life of the layout. The search runs behind `FixtureScenesReady`, i.e. after
+/// every fixture scene has finished expanding, so a root that cannot be
+/// resolved once will not become resolvable later. It is removed together with
+/// `FixtureViewInstance` when a view disappears, so a replacement scene is
+/// still allowed to bind.
+#[derive(Component)]
+pub(crate) struct FixtureViewResolved;
+
 /// The actual source FixtureView root inside this scene instance. Its local
 /// transform, not the logical placement's world position, selects variants.
 #[derive(Component)]
@@ -1198,9 +1212,21 @@ struct FixtureScenesReadyCount(usize);
 #[derive(Resource)]
 struct FixtureIndexAsset(Handle<moly_assets::json::JsonAsset>);
 
-/// 已请求装载的逐包 glb 句柄。
+/// Validated per-row GLB paths plus the bounded set of handles requested so far.
+/// Paths stay aligned with placement row indices; handles are shared by path so
+/// repeated furniture does not create duplicate load requests.
 #[derive(Resource, Default)]
-struct FixtureGltfAssets(Vec<Handle<Gltf>>);
+struct FixtureGltfAssets {
+    paths: Vec<String>,
+    handles: HashMap<String, Handle<Gltf>>,
+}
+
+/// Keep browser asset decoding and scene expansion under explicit backpressure.
+/// A real Home site currently contains hundreds of instances; unbounded loading
+/// makes wasm spend multi-second stretches on one update.
+const FIXTURE_UNIQUE_LOADS_IN_FLIGHT: usize = 12;
+const FIXTURE_SCENE_SPAWN_BUDGET: usize = 3;
+const FIXTURE_SCENES_IN_FLIGHT: usize = 6;
 
 /// 已展开的摆放数（spawn 闩的计数）。
 #[derive(Resource, Default)]
@@ -1244,7 +1270,11 @@ fn restore_selected_layout(
     // An embedded stage starts with no preset or persisted layout. The same
     // layout owner later installs/restores exact content-scoped fixtures.
     // In particular, never instantiate a CN offline preset in a JP snapshot.
-    let restored = if crate::player_data::use_empty_stage_layout(temporary.is_some(), stage.is_some(), exploration.is_some()) {
+    let restored = if crate::player_data::use_empty_stage_layout(
+        temporary.is_some(),
+        stage.is_some(),
+        exploration.is_some(),
+    ) {
         // The temporary site is empty from its first frame. Never materialize
         // a saved layout only to delete it, or let it block preview admission.
         commands.insert_resource(TemporaryFixtureLayout);
@@ -1392,7 +1422,7 @@ fn plan_when_ready(
         .get("packages")
         .and_then(|packages| packages.as_object())
         .unwrap_or_else(|| panic!("家具包清单缺 packages 对象"));
-    let mut handles = Vec::with_capacity(placements.total());
+    let mut paths = Vec::with_capacity(placements.total());
     for row in &placements.rows {
         let entry = packages
             .get(&row.package)
@@ -1416,16 +1446,20 @@ fn plan_when_ready(
             .get("glb")
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("清单条目缺 glb 文件名：{}", row.package));
-        handles.push(server.load::<Gltf>(bevy::asset::AssetPath::from(format!(
-            "moly://fixture-models/{glb}"
-        ))));
+        paths.push(format!("moly://fixture-models/{glb}"));
     }
+    let unique = paths.iter().collect::<std::collections::HashSet<_>>().len();
     info!(
-        "家具装载计划：摆放 mock {} 条，逐包装载 {} 个 glb",
+        "家具装载计划：{} 个实例 / {} 个唯一 glb；浏览器加载窗口 {}，scene 展开窗口 {}",
         placements.total(),
-        handles.len()
+        unique,
+        FIXTURE_UNIQUE_LOADS_IN_FLIGHT,
+        FIXTURE_SCENES_IN_FLIGHT,
     );
-    commands.insert_resource(FixtureGltfAssets(handles));
+    commands.insert_resource(FixtureGltfAssets {
+        paths,
+        handles: HashMap::new(),
+    });
 }
 
 /// Update：逐包等到齐（glb 与全部依赖）后展开默认 scene 并按律落位。
@@ -1435,24 +1469,65 @@ fn spawn_when_ready(
     mut commands: Commands,
     server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
-    assets: Option<Res<FixtureGltfAssets>>,
+    assets: Option<ResMut<FixtureGltfAssets>>,
     placements: Res<FixturePlacements>,
     mut spawned: ResMut<FixtureSpawnedCount>,
+    scenes_ready_count: Res<FixtureScenesReadyCount>,
     scenes_ready: Option<Res<FixtureScenesReady>>,
     temporary: Option<Res<TemporaryFixtureLayout>>,
 ) {
-    let Some(assets) = assets else {
+    let Some(mut assets) = assets else {
         return;
     };
-    if assets.0.is_empty() && scenes_ready.is_none() {
+    if assets.paths.is_empty() && scenes_ready.is_none() {
         commands.insert_resource(FixtureScenesReady);
+        return;
     }
-    let occupancy = placements.occupancy_rows();
-    for (index, handle) in assets.0.iter().enumerate() {
-        if index < spawned.0 {
-            continue;
+
+    // Count only unresolved unique GLBs against the loading window. Loaded
+    // handles stay cached because live FixtureSource components share them.
+    let pending = assets
+        .handles
+        .values()
+        .filter(|handle| {
+            !server.is_loaded_with_dependencies(*handle)
+                && !matches!(server.load_state(*handle), LoadState::Failed(_))
+                && !matches!(
+                    server.recursive_dependency_load_state(*handle),
+                    RecursiveDependencyLoadState::Failed(_)
+                )
+        })
+        .count();
+    let mut slots = FIXTURE_UNIQUE_LOADS_IN_FLIGHT.saturating_sub(pending);
+    if slots > 0 {
+        for index in spawned.0..assets.paths.len() {
+            if slots == 0 {
+                break;
+            }
+            let path = assets.paths[index].clone();
+            if assets.handles.contains_key(&path) {
+                continue;
+            }
+            let handle = server.load::<Gltf>(bevy::asset::AssetPath::from(path.clone()));
+            assets.handles.insert(path, handle);
+            slots -= 1;
         }
-        if let LoadState::Failed(err) = server.load_state(handle) {
+    }
+
+    let occupancy = placements.occupancy_rows();
+    let mut spawned_this_frame = 0usize;
+    while spawned.0 < assets.paths.len()
+        && spawned_this_frame < FIXTURE_SCENE_SPAWN_BUDGET
+        && spawned.0.saturating_sub(scenes_ready_count.0) < FIXTURE_SCENES_IN_FLIGHT
+    {
+        let index = spawned.0;
+        let path = assets.paths[index].clone();
+        let Some(handle) = assets.handles.get(&path).cloned() else {
+            // The current row is always the first candidate for a free load
+            // slot. No slot means existing requests must settle first.
+            return;
+        };
+        if let LoadState::Failed(err) = server.load_state(&handle) {
             let reason = format!(
                 "家具模型装载失败（{}）：{err:?}",
                 placements.rows[index].package
@@ -1464,7 +1539,7 @@ fn spawn_when_ready(
             panic!("{reason}");
         }
         if let RecursiveDependencyLoadState::Failed(err) =
-            server.recursive_dependency_load_state(handle)
+            server.recursive_dependency_load_state(&handle)
         {
             let reason = format!(
                 "家具模型依赖装载失败（{}）：{err:?}",
@@ -1476,14 +1551,13 @@ fn spawn_when_ready(
             }
             panic!("{reason}");
         }
-        if !server.is_loaded_with_dependencies(handle) {
+        if !server.is_loaded_with_dependencies(&handle) {
             return;
         }
-        let Some(gltf) = gltfs.get(handle) else {
+        let Some(gltf) = gltfs.get(&handle) else {
             return;
         };
         let row = &placements.rows[index];
-        // 默认 scene = fixture 视图变体（提取侧约定，实测 999 包全对上）。
         let Some(scene) = gltf.default_scene.clone() else {
             panic!("家具 glb 没有默认 scene：{}", row.package);
         };
@@ -1510,35 +1584,29 @@ fn spawn_when_ready(
             crate::fixture_scene_inputs::FixtureScenePlacement(occupancy[index].clone()),
             Transform::from_translation(Vec3::from(placed.position))
                 .with_rotation(Quat::from_rotation_y(placed.yaw)),
-            // Imported vertex colors encode shader masks, not albedo. Reveal
-            // the scene only after its source materials have been installed.
             Visibility::Hidden,
         ));
-        info!(
-            "家具摆放（{}）：存档格 min {:?} max {:?} center_y {} layout {:#04x} fixture_id {} \
-             朝向 {:?} yaw {:.1}° → 足迹 min {:?} max {:?}（{}x{} 格）→ 世界 \
-             ({:.3}, {:.3}, {:.3})",
-            row.package,
-            (row.min.x, row.min.y, row.min.z),
-            (row.max.x, row.max.y, row.max.z),
-            row.center_y,
-            row.layout,
-            row.fixture_id,
-            row.direction,
-            placed.yaw.to_degrees(),
-            (placed.min.x, placed.min.y, placed.min.z),
-            (placed.max.x, placed.max.y, placed.max.z),
-            placed.max.x as i32 - placed.min.x as i32 + 1,
-            placed.max.z as i32 - placed.min.z as i32 + 1,
-            placed.position[0],
-            placed.position[1],
-            placed.position[2],
-        );
+        // Per-instance browser logging is surprisingly expensive for real Home
+        // layouts. Keep detailed evidence for small fixtures, otherwise sample
+        // progress without serializing hundreds of near-identical messages.
+        if placements.total() <= 64 || index % 100 == 0 || index + 1 == placements.total() {
+            info!(
+                "家具摆放 {}/{}（{}）：方向 {:?} yaw {:.1}°，世界 ({:.3}, {:.3}, {:.3})",
+                index + 1,
+                placements.total(),
+                row.package,
+                row.direction,
+                placed.yaw.to_degrees(),
+                placed.position[0],
+                placed.position[1],
+                placed.position[2],
+            );
+        }
         spawned.0 += 1;
+        spawned_this_frame += 1;
     }
 }
 
-/// 全局观察者：scene 实例展开完毕时计数；全部摆放展开后立换装的闩
 /// （`FixtureScenesReady`，换装系统只看它）。
 fn on_scene_ready(
     trigger: On<SceneInstanceReady>,
@@ -1681,20 +1749,26 @@ fn bind_source_views(
     mut commands: Commands,
     ready: Option<Res<FixtureScenesReady>>,
     points: Option<Res<crate::fixture_attach::AttachPoints>>,
-    roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureViewInstance>>,
+    roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureViewResolved>>,
     children: Query<&Children>,
     extras: Query<&bevy::gltf::GltfExtras>,
 ) {
     let (Some(_), Some(points)) = (ready, points) else {
         return;
     };
+    let (mut bound, mut absent, mut unmatched, mut ambiguous) = (0usize, 0usize, 0usize, 0usize);
+    let mut deferred = 0usize;
     for (root, seed) in &roots {
         let Some(source) = points.instance_view(&seed.package) else {
+            absent += 1;
+            commands.entity(root).insert(FixtureViewResolved);
             continue;
         };
         let mut stack = vec![root];
         let mut matches = Vec::new();
+        let mut visited = 0usize;
         while let Some(entity) = stack.pop() {
+            visited += 1;
             if let Ok(kids) = children.get(entity) {
                 stack.extend(kids.iter());
             }
@@ -1710,9 +1784,31 @@ fn bind_source_views(
                 matches.push(entity);
             }
         }
-        if let [view] = matches.as_slice() {
-            commands.entity(root).insert(FixtureViewInstance(*view));
+        if visited <= 1 {
+            deferred += 1;
+            // 只看到根自己：这棵场景树还没展开，这一次搜索什么也没搜过。
+            // 退役它会把一个本来会在后一帧成功的绑定永久判死。闩已经保证
+            // 展开完毕，这里是第二道保险；真有长不出子节点的根，它的重扫
+            // 成本也只有一个实体。
+            continue;
         }
+        match matches.as_slice() {
+            [view] => {
+                bound += 1;
+                commands.entity(root).insert(FixtureViewInstance(*view));
+            }
+            [] => unmatched += 1,
+            _ => ambiguous += 1,
+        }
+        // Every outcome retires the root from the query, exactly as the sibling
+        // identity binding does. A root left in it would be re-walked forever.
+        commands.entity(root).insert(FixtureViewResolved);
+    }
+    if bound + absent + unmatched + ambiguous + deferred > 0 {
+        info!(
+            "[fixture-view] 源视图绑定：成功 {bound} · 该包无 instance_view {absent} · \
+             零匹配 {unmatched} · 多匹配 {ambiguous} · 场景未展开改日再试 {deferred}",
+        );
     }
 }
 
@@ -1731,9 +1827,11 @@ pub(crate) fn refresh_activity_view(
     use crate::fixture_activity_provider::SourceFixtureViewLocalY;
     for (root, view, current) in &roots {
         let Ok(transform) = transforms.get(view.0) else {
+            // Clearing the resolved marker as well is what lets a replacement
+            // scene bind again; leaving it would retire this root permanently.
             commands
                 .entity(root)
-                .remove::<(FixtureViewInstance, SourceFixtureViewLocalY)>();
+                .remove::<(FixtureViewInstance, FixtureViewResolved, SourceFixtureViewLocalY)>();
             continue;
         };
         let y = transform.translation.y;

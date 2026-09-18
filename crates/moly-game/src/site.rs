@@ -620,6 +620,12 @@ pub struct WalkFaceMeshes(pub Vec<Handle<Mesh>>);
 #[derive(Component)]
 pub struct SiteRoot;
 
+/// A renderable scene root is withheld until its source materials are installed.
+/// Navigation-only roots never carry this marker and stay hidden permanently.
+/// Scene instantiation and navigation do not depend on presentation visibility.
+#[derive(Component)]
+pub(crate) struct SiteVisualPending;
+
 /// scene 实例已展开完毕（全部站点 scene 就绪）；由 `on_scene_ready` 计数
 /// 置位。
 #[derive(Resource)]
@@ -942,12 +948,12 @@ pub fn spawn_when_ready(
     let face = face.unwrap_or_else(|| ground.clone());
     let pending = scenes.len();
     for (scene_index, (scene, hidden)) in scenes.into_iter().enumerate() {
-        let mut root = commands.spawn((SceneRoot(scene), SiteRoot));
+        let mut root = commands.spawn((SceneRoot(scene), SiteRoot, Visibility::Hidden));
         if scene_index == 0 {
             root.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin);
         }
-        if hidden {
-            root.insert(Visibility::Hidden);
+        if !hidden {
+            root.insert(SiteVisualPending);
         }
     }
     commands.insert_resource(GroundMeshes(ground));
@@ -1005,6 +1011,11 @@ pub(crate) fn on_scene_ready(
         return;
     };
     pending.0 = pending.0.saturating_sub(1);
+    info!(
+        "[site-ready] scene root {:?} ready; {} roots remaining",
+        trigger.event().entity,
+        pending.0
+    );
     if pending.0 == 0 {
         commands.insert_resource(SiteReady);
         commands.insert_resource(SiteScenesReady);

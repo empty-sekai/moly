@@ -3,7 +3,7 @@
 use bevy::{asset::LoadState, prelude::*};
 use moly_assets::{
     json::JsonAsset,
-    player_data::{ImportedPlayerData, PlayerDataCatalog, MAX_IMPORT_BYTES},
+    player_data::{ImportNotice, ImportedPlayerData, PlayerDataCatalog, MAX_IMPORT_BYTES},
 };
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -310,6 +310,9 @@ impl PlayerDataImport {
         let section = layouts::import_section(&data, sites)?;
         let document = settings_store::read_document()?;
         layouts::validate_document(&document, sites)?;
+        // Catalog gaps no longer fail the import; the native status line spells
+        // them out here, and the browser host localizes the same records.
+        let notices: Vec<ImportNotice> = data.notices.clone();
         self.status = format!(
             "Ready for {} {}: {} sites, {} furniture instances, Mysekai rank {}.{}",
             data.region.to_uppercase(),
@@ -320,10 +323,17 @@ impl PlayerDataImport {
             data.sites.len(),
             data.fixture_count(),
             data.rank,
-            if data.notices.is_empty() {
+            if notices.is_empty() {
                 String::new()
             } else {
-                format!("\n{}", data.notices.join("\n"))
+                format!(
+                    "\n{}",
+                    notices
+                        .iter()
+                        .map(ImportNotice::describe)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
             }
         );
         self.preview = Some(Preview {
@@ -614,10 +624,16 @@ pub(crate) fn update(world: &mut World) {
         }
     }
     let summary = state.preview_summary();
+    let notices = state
+        .preview
+        .as_ref()
+        .map(|preview| preview.data.notices.clone())
+        .unwrap_or_default();
     *browser_snapshot_cell().lock().unwrap() = json!({
         "schemaVersion":1,"region":state.region,"busy":state.busy,"error":state.last_error,
         "status":state.status,"canExplore":summary.is_some(),"exploring":state.exploration.is_some(),
         "summary":summary.map(|(rank,sites,fixtures)|json!({"rank":rank,"sites":sites,"fixtures":fixtures})),
+        "notices":notices,
     }).to_string();
     world.insert_resource(state);
 }

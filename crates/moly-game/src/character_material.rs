@@ -706,6 +706,8 @@ pub struct ToonMaterials {
 impl ToonMaterials {
     /// The resolved skeleton already owns this reference; interaction queries
     /// read its current world transform instead of searching the hierarchy again.
+    pub(crate) fn head_entity(&self) -> Entity { self.head }
+
     pub(crate) fn hips_entity(&self) -> Entity {
         self.hips
     }
