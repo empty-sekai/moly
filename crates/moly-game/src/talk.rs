@@ -574,6 +574,8 @@ pub(crate) struct TalkLedger {
 /// 与等待点击状态。
 #[derive(Resource)]
 pub(crate) struct ActiveTalk {
+    /// Selected source pre-action gate; prevents body/voice racing source clips.
+    preparing: bool,
     effect_owner: Entity,
     talk_id: i32,
     form: i32,
@@ -594,6 +596,9 @@ pub(crate) struct ActiveTalk {
 }
 
 impl ActiveTalk {
+    pub(crate) fn body_ready(&self) -> bool {
+        !self.preparing
+    }
     pub(crate) fn includes_player(&self) -> bool {
         self.player.is_some()
     }
@@ -622,10 +627,40 @@ impl ActiveTalk {
     }
 
     /// 会话的段 id（窗体日志的链名读取点用）。
-    pub(crate) fn fixture_instances(&self) -> &[(i32, Entity)] { &self.fixtures }
+    pub(crate) fn fixture_instances(&self) -> &[(i32, Entity)] {
+        &self.fixtures
+    }
 
     pub(crate) fn talk_id(&self) -> i32 {
         self.talk_id
+    }
+
+    /// Exact future voice commands from the authored cursor onward. This is a
+    /// load hint only: command dispatch, StopVoiceAll and playback stay on the
+    /// normal line-order path.
+    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio::VoicePrefetch> {
+        self.row
+            .steps
+            .iter()
+            .skip(self.state.cursor)
+            .filter_map(|step| match step {
+                FixtureStep::Voice { cue, who, .. } => Some(crate::audio::VoicePrefetch::new(
+                    cue.clone(),
+                    partvoice_who(*who),
+                )),
+                FixtureStep::FixtureVoice { cue, fixture }
+                    if fixture.is_finite()
+                        && fixture.fract() == 0.0
+                        && *fixture as i32 == self.fixture_id =>
+                {
+                    Some(crate::audio::VoicePrefetch::new(
+                        cue.clone(),
+                        Some(VoiceWho::Fixture(*fixture as i32)),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -654,6 +689,9 @@ pub(crate) struct TalkActor {
     pub(crate) mouth: Handle<CharacterMaterial>,
 }
 
+#[path = "fixture_talk_action.rs"]
+pub(crate) mod fixture_action;
+
 /// Start the existing fixture-script backend from the dispatcher's final row.
 #[allow(clippy::type_complexity)]
 pub(crate) fn start_selected(
@@ -665,6 +703,7 @@ pub(crate) fn start_selected(
     target_fixture: Option<Entity>,
     fixture_bindings: Vec<(i32, Entity)>,
     now: f32,
+    prepare_source_action: bool,
 ) {
     crate::delayed_faces::start_loop(commands);
     commands.queue(|world: &mut World| {
@@ -704,6 +743,7 @@ pub(crate) fn start_selected(
         );
     }
     let mut talk = ActiveTalk {
+        preparing: prepare_source_action && target_fixture.is_some(),
         effect_owner: commands.spawn_empty().id(),
         talk_id,
         form: row.form,
@@ -725,7 +765,11 @@ pub(crate) fn start_selected(
         .insert(TalkHold)
         .insert(MotionPhase::Dwelling { remaining: None });
     crate::player_talk::snapshot_player_rotation(commands, player, talk_id, None);
-    window.open(TalkSession::Pair(&mut talk));
+    if talk.preparing {
+        window.prepare(TalkSession::Pair(&mut talk));
+    } else {
+        window.open(TalkSession::Pair(&mut talk));
+    }
     info!(
         "[talk] prepared master {} starts with actors {:?}",
         talk_id,
@@ -836,6 +880,7 @@ pub(crate) fn voice_probe(
     );
     commands.entity(gate).despawn();
     let mut talk = ActiveTalk {
+        preparing: false,
         effect_owner: commands.spawn_empty().id(),
         talk_id: 0,
         form: 0,
@@ -1009,6 +1054,7 @@ pub(crate) fn partvoice_probe(
     );
     commands.entity(gate).despawn();
     let mut talk = ActiveTalk {
+        preparing: false,
         effect_owner: commands.spawn_empty().id(),
         talk_id: 0,
         form: 0,
@@ -1192,6 +1238,9 @@ pub(crate) fn advance_talk(
             &mut prev,
             time.elapsed_secs(),
         );
+        return;
+    }
+    if active.preparing {
         return;
     }
     let Some(tables) = tables else {
@@ -2152,7 +2201,9 @@ fn dispatch_step(
             if let Some(entity) = active.fixture_entity(active.fixture_id) {
                 let source = fixture.clone();
                 commands.queue(move |world: &mut World| {
-                    if let Err(reason) = crate::fixture_gimmick::session::talk_trigger(world, entity, owner, true, 0.) {
+                    if let Err(reason) = crate::fixture_gimmick::session::talk_trigger(
+                        world, entity, owner, true, 0.,
+                    ) {
                         warn!("[talk] gimmick {source} could not start: {reason}");
                         world.write_message(crate::player_talk::TalkCancelRequest);
                     }
@@ -2165,7 +2216,9 @@ fn dispatch_step(
             let delay = *name as f32;
             if let Some(entity) = active.fixture_entity(active.fixture_id) {
                 commands.queue(move |world: &mut World| {
-                    if let Err(reason) = crate::fixture_gimmick::session::talk_trigger(world, entity, owner, false, delay) {
+                    if let Err(reason) = crate::fixture_gimmick::session::talk_trigger(
+                        world, entity, owner, false, delay,
+                    ) {
                         warn!("[talk] gimmick stop could not be applied: {reason}");
                         world.write_message(crate::player_talk::TalkCancelRequest);
                     }
@@ -2383,8 +2436,11 @@ fn finish_talk(
     crate::audio::dispose_talk_voice(commands);
     let owner = active.effect_owner;
     commands.queue(move |world: &mut World| {
+        fixture_action::cancel_owner(world, Some(owner));
         crate::fixture_gimmick::session::finish_owner(world, owner);
-        if let Ok(entity) = world.get_entity_mut(owner) { entity.despawn(); }
+        if let Ok(entity) = world.get_entity_mut(owner) {
+            entity.despawn();
+        }
     });
     for (_, fixture) in &active.fixtures {
         crate::fixture_talk::finish_talk_effects(commands, *fixture, active.talk_id);

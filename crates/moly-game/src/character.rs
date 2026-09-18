@@ -577,7 +577,7 @@ pub(crate) fn wire_when_ready(
 pub fn drive(
     mut npcs: Query<
         (&CharacterUnitId, &MotionPhase, &mut MotionDriver),
-        Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
+        (Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>, Without<crate::talk::fixture_action::TalkFixtureActorLease>),
     >,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,

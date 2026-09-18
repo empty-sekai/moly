@@ -247,7 +247,18 @@ impl TalkWindowState {
     /// 清两栏。首个 show 步因此被 Approximately 短路。要一条会话作保
     /// （归属构造，见模块注释——两条链的 [`TalkSession`] 任一）。
     pub(crate) fn open(&mut self, _owner: TalkSession<'_>) {
-        self.present = true;
+        self.reset_for_admission(true);
+    }
+
+    /// A fixture pre-action has acquired its cast but has not entered the
+    /// source talk body yet. Clear the previous prompt without exposing an
+    /// empty dialogue panel or admitting clicks during source asset loading.
+    pub(crate) fn prepare(&mut self, _owner: TalkSession<'_>) {
+        self.reset_for_admission(false);
+    }
+
+    fn reset_for_admission(&mut self, present: bool) {
+        self.present = present;
         self.alpha = 1.0;
         self.fade = None;
         self.label.clear();
@@ -256,6 +267,7 @@ impl TalkWindowState {
         self.typing_clock = 0.0;
         self.playing = false;
         self.clicked = false;
+        self.released = false;
         self.end_icon = false;
         self.text_version += 1;
         self.label_version += 1;
@@ -273,6 +285,7 @@ impl TalkWindowState {
         self.typing_clock = 0.0;
         self.playing = false;
         self.clicked = false;
+        self.released = false;
         self.end_icon = false;
         self.text_version += 1;
         self.label_version += 1;

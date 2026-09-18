@@ -121,6 +121,47 @@ impl FixtureActivityProvider {
 
     /// Common resource preparation, with no player/NPC activity admission.
     /// Caller retains the prepared request and supplies its own timeout budget.
+    pub(crate) fn prepare_talk_cast_bindings(
+        &mut self,
+        world: &mut World,
+        request: &mut StartTimeline,
+        cast: &[(u32, Entity, Entity, Handle<AnimationGraph>)],
+    ) -> Result<(), ProviderPending> {
+        let identity = world.get::<FixtureActivityIdentity>(request.fixture)
+            .ok_or_else(|| ProviderPending::new("fixture-identity", "cast fixture has no typed identity"))?.clone();
+        let target = FixtureTarget { entity: request.fixture, uid: identity.uid.clone() };
+        assets::require_live_fixture(&mut self.assets, world, &target, &identity.model_package)?;
+        let common = request.definition.tracks.iter().any(|track| track.name == "CharacterAnimator");
+        if common && cast.len() != 1 {
+            return Err(ProviderPending::new("actor-cast", "common actor timeline requires exactly one admitted actor"));
+        }
+        let mut pending = None;
+        // Start independent actor loads in the same frame, not serially. The
+        // retained request owns every completed binding while siblings load.
+        for (unit, actor, animator, graph) in cast {
+            let result = if common {
+                timeline::prepare_actor_animation_bindings(world, request, *unit, *animator, graph.clone())
+            } else {
+                timeline::prepare_cast_actor_bindings(world, request, *unit, *actor, *animator, graph.clone())
+            };
+            if let Err(error) = result {
+                if !error.retryable { return Err(ProviderPending::timeline("actor-clips", error)); }
+                pending = Some(ProviderPending::timeline("actor-clips", error));
+            }
+        }
+        // Actor name ownership must already be visible when joining the
+        // fixture tracks, even while an actor's own GLTF is still arriving.
+        if pending.is_none() {
+            self.assets.prepare_fixture_bindings(world, request)?;
+        }
+        if let Err(error) = timeline::prepare_source_sounds(world, request) {
+            if !error.retryable { return Err(ProviderPending::timeline("audio", error)); }
+            pending = Some(ProviderPending::timeline("audio", error));
+        }
+        if let Some(pending) = pending { return Err(pending); }
+        Ok(())
+    }
+
     pub(crate) fn prepare_bindings(
         &mut self,
         world: &mut World,

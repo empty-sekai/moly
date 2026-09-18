@@ -1134,6 +1134,27 @@ impl PlayerTalkSession {
     pub(crate) fn npc_entity(&self) -> Entity {
         self.npc
     }
+
+    /// Exact future NPC voice commands from the authored cursor onward. The
+    /// returned rows are load hints only and never advance the script or play.
+    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio::VoicePrefetch> {
+        self.row
+            .steps
+            .iter()
+            .skip(self.state.cursor)
+            .filter_map(|step| match step {
+                TalkStep::Voice { cue, who, .. }
+                    if matches!(participant_of(self, who), Some(Participant::Npc)) =>
+                {
+                    Some(crate::audio::VoicePrefetch::new(
+                        cue.clone(),
+                        Some(VoiceWho::Participant(self.unit as i32)),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// NPC 参演者身上的运行时（同配对对话侧的形状）：眼/口材质句柄、动作
@@ -1623,6 +1644,9 @@ pub(crate) fn consume_trigger(
                     target_fixture,
                     fixture_bindings,
                     now,
+                    // Ordinary CurrentSet entry keeps its existing source owner.
+                    // Explicit library selection prepares the authored cast anew.
+                    request.exact.is_some(),
                 );
                 continue;
             }

@@ -9,6 +9,10 @@
 mod catalog;
 pub(crate) use catalog::{ActivityKey, ActivityOrigin, ActivitySpec};
 
+#[path = "fixture_talk_action_data.rs"]
+mod talk_action;
+pub(crate) use talk_action::{FixtureTalkActionInput, FixtureTalkActionPlan};
+
 use std::collections::{HashMap, HashSet};
 
 use bevy::{asset::LoadState, prelude::*};

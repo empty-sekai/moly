@@ -29,6 +29,7 @@ use bevy::{
     },
     asset::{AssetId, AssetPath},
     audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, PlaybackSettings, Volume},
+    ecs::change_detection::Tick,
     prelude::*,
 };
 use moly_assets::json::JsonAsset;
@@ -119,7 +120,11 @@ struct TimelineAssetLoads {
     // One successful parse per currently observed source text. This caches
     // metadata syntax only, never a prepared actor/fixture binding or its
     // liveness verdict. The original text makes invalidation collision-free.
-    parsed_json: HashMap<String, (String, Arc<Value>)>,
+    //
+    // 第一格是「校验这条缓存时 `Assets<JsonAsset>` 的 last_changed」。代没变
+    // 就说明期间没有任何 json 资产被动过，这条缓存必然仍成立——省掉一次
+    // 对整份文档的逐字节比对。代不同时走原来的比对，判定结果不变。
+    parsed_json: HashMap<String, (Option<Tick>, String, Arc<Value>)>,
     gltf: HashMap<String, Handle<Gltf>>,
 }
 
@@ -134,6 +139,36 @@ pub(crate) fn prepare_actor_animation_bindings(
     animator: Entity,
     graph: Handle<AnimationGraph>,
 ) -> Result<(), TimelineFailure> {
+    let actor = request.owner.activity.actor;
+    prepare_actor_tracks(world, request, unit_id, actor, animator, graph, false)
+}
+
+/// The authored multi-character directors bind their actor tracks by exact
+/// unit-id names (e.g. "14", "15"), not by one shared CharacterAnimator slot.
+/// The owner resolves that source name to an admitted actor exactly once.
+pub(crate) fn prepare_cast_actor_bindings(
+    world: &mut World,
+    request: &mut StartTimeline,
+    unit_id: u32,
+    actor: Entity,
+    animator: Entity,
+    graph: Handle<AnimationGraph>,
+) -> Result<(), TimelineFailure> {
+    if world.get::<crate::npc::CharacterUnitId>(actor).map(|id| id.0) != Some(unit_id) {
+        return Err(invalid("source actor track unit differs from admitted actor"));
+    }
+    prepare_actor_tracks(world, request, unit_id, actor, animator, graph, true)
+}
+
+fn prepare_actor_tracks(
+    world: &mut World,
+    request: &mut StartTimeline,
+    unit_id: u32,
+    actor: Entity,
+    animator: Entity,
+    graph: Handle<AnimationGraph>,
+    explicit_cast: bool,
+) -> Result<(), TimelineFailure> {
     world.init_resource::<TimelineAssetLoads>();
     let server = world.resource::<AssetServer>().clone();
     let catalog = load_json(world, &server, "actor-animations/index.json")?;
@@ -142,7 +177,11 @@ pub(crate) fn prepare_actor_animation_bindings(
     }
     let mut prepared = Vec::new();
     for track in &request.definition.tracks {
-        if track.class != "AnimationTrack" || track.name != "CharacterAnimator" {
+        if track.class != "AnimationTrack" || if explicit_cast {
+            track.name.parse::<u32>().ok() != Some(unit_id)
+        } else {
+            track.name != "CharacterAnimator"
+        } {
             continue;
         }
         for clip in &track.clips {
@@ -252,21 +291,14 @@ pub(crate) fn prepare_actor_animation_bindings(
         request.bindings.animations.insert(key, binding);
     }
     for track in &request.definition.tracks {
-        if track.clips.iter().any(|clip| {
-            matches!(
-                clip.payload,
-                TimelinePayload::Eye { .. }
-                    | TimelinePayload::Lip { .. }
-                    | TimelinePayload::BlinkGate
-                    | TimelinePayload::LipGate
-                    | TimelinePayload::NpcIkTalkGate
-                    | TimelinePayload::Emoticon { .. }
-            )
-        }) {
-            request
-                .bindings
-                .actors
-                .insert(track.identity.clone(), request.owner.activity.actor);
+        let named_cast = explicit_cast && track.name.parse::<u32>().ok() == Some(unit_id);
+        let single_body = !explicit_cast && track.name == "CharacterAnimator";
+        let single_face = !explicit_cast && track.clips.iter().any(|clip| matches!(clip.payload,
+            TimelinePayload::Eye { .. } | TimelinePayload::Lip { .. } |
+            TimelinePayload::BlinkGate | TimelinePayload::LipGate |
+            TimelinePayload::NpcIkTalkGate | TimelinePayload::Emoticon { .. }));
+        if named_cast || single_body || single_face {
+            request.bindings.actors.insert(track.identity.clone(), actor);
         }
     }
     Ok(())
@@ -302,6 +334,18 @@ fn load_json(
             "actor metadata failed to load: {path}: {error}"
         )));
     }
+    let generation = world
+        .get_resource_ref::<Assets<JsonAsset>>()
+        .map(|assets| assets.last_changed());
+    if let Some((validated_at, _, parsed)) = world
+        .resource::<TimelineAssetLoads>()
+        .parsed_json
+        .get(path)
+    {
+        if matches!((*validated_at, generation), (Some(a), Some(b)) if a == b) {
+            return Ok(parsed.clone());
+        }
+    }
     let (text, parsed) = {
         let assets = world.resource::<Assets<JsonAsset>>();
         // Consult the live asset before the cache. Removal/loading must not
@@ -309,9 +353,18 @@ fn load_json(
         let json = assets.get(&handle).ok_or_else(|| {
             TimelineFailure::loading(format!("actor metadata still loading: {path}"))
         })?;
-        if let Some((text, parsed)) = world.resource::<TimelineAssetLoads>().parsed_json.get(path) {
+        if let Some((_, text, parsed)) = world.resource::<TimelineAssetLoads>().parsed_json.get(path)
+        {
             if text == &json.0 {
-                return Ok(parsed.clone());
+                let parsed = parsed.clone();
+                if let Some(entry) = world
+                    .resource_mut::<TimelineAssetLoads>()
+                    .parsed_json
+                    .get_mut(path)
+                {
+                    entry.0 = generation;
+                }
+                return Ok(parsed);
             }
         }
         // A changed malformed document keeps the original parse error; an
@@ -326,7 +379,7 @@ fn load_json(
     world
         .resource_mut::<TimelineAssetLoads>()
         .parsed_json
-        .insert(path.into(), (text, parsed.clone()));
+        .insert(path.into(), (generation, text, parsed.clone()));
     Ok(parsed)
 }
 
@@ -388,6 +441,8 @@ pub(crate) struct TimelineCompanionTrack {
 pub(crate) enum TimelineOwnerKind {
     Npc,
     Player,
+    /// The selected fixture-talk cast owns one shared source Director clock.
+    Talk,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TimelineTimeoutBudget {
@@ -474,7 +529,7 @@ struct Session {
     prior_gates: HashMap<Entity, Option<TimelineFacialState>>,
     sound_entities: Vec<Entity>,
     emoticons: HashMap<TimelineClipKey, crate::emoticon::timeline::EmoteLease>,
-    actor_space: Option<actor_space::ActorSpaceLease>,
+    actor_space: Vec<actor_space::ActorSpaceLease>,
     coverage: Vec<TimelineCoverageGap>,
     cancel: bool,
     release: bool,
@@ -501,6 +556,11 @@ pub(crate) struct FixtureActivityTimelines {
 }
 
 impl FixtureActivityTimelines {
+    pub(crate) fn has_no_loop(&self, token: TimelineToken) -> bool {
+        self.sessions.get(&token).is_some_and(|session| !session.request.definition.tracks.iter()
+            .flat_map(|track| &track.clips).any(|clip| matches!(clip.payload, TimelinePayload::LoopFlag { .. })))
+    }
+
     pub(crate) fn request_start(&mut self, request: StartTimeline) -> TimelineToken {
         self.next_serial = self
             .next_serial
@@ -521,7 +581,7 @@ impl FixtureActivityTimelines {
                 prior_gates: HashMap::new(),
                 sound_entities: Vec::new(),
                 emoticons: HashMap::new(),
-                actor_space: None,
+                actor_space: Vec::new(),
                 coverage: Vec::new(),
                 cancel: false,
                 release: false,
@@ -605,6 +665,16 @@ impl FixtureActivityTimelines {
     }
 }
 
+/// Release this exact generation synchronously. Replacing a conversation must
+/// not leave the previous token owning an animator until an unrelated next tick.
+pub(crate) fn cancel_and_release(world: &mut World, token: TimelineToken) {
+    let Some(mut timelines) = world.remove_resource::<FixtureActivityTimelines>() else { return; };
+    if let Some(mut session) = timelines.sessions.remove(&token) {
+        cleanup(world, token, &mut session);
+    }
+    world.insert_resource(timelines);
+}
+
 fn all_tracks(request: &StartTimeline) -> Result<Vec<&TimelineTrack>, TimelineFailure> {
     let mut result: Vec<_> = request.definition.tracks.iter().collect();
     let mut identities: HashSet<_> = result.iter().map(|t| t.identity.clone()).collect();
@@ -685,7 +755,7 @@ fn validate(
     }
     match (request.owner.kind, request.timeout_budget) {
         (TimelineOwnerKind::Player, TimelineTimeoutBudget::PlayerWall)
-        | (TimelineOwnerKind::Npc, TimelineTimeoutBudget::OwnerGated { advance: Some(_) }) => {}
+        | (TimelineOwnerKind::Npc | TimelineOwnerKind::Talk, TimelineTimeoutBudget::OwnerGated { advance: Some(_) }) => {}
         _ => {
             return Err(invalid(
                 "source activity timeout budget/gate is not prepared",
@@ -731,7 +801,10 @@ fn validate(
                     {
                         return Err(invalid("animator already belongs to another timeline"));
                     }
-                    let expected_root = if track.name == "CharacterAnimator" {
+                    let expected_root = if let Some(actor) = request.bindings.actors.get(&track.identity) {
+                        validate_track_actor(world, request, &track.identity, *actor)?;
+                        *actor
+                    } else if track.name == "CharacterAnimator" {
                         request.owner.activity.actor
                     } else {
                         request.fixture
@@ -851,9 +924,7 @@ fn validate(
                         .actors
                         .get(&track.identity)
                         .ok_or_else(|| invalid("facial/IK track actor missing"))?;
-                    if *actor != request.owner.activity.actor {
-                        return Err(invalid("facial/IK track is not bound to activity actor"));
-                    }
+                    validate_track_actor(world, request, &track.identity, *actor)?;
                 }
                 TimelinePayload::Emoticon { name, .. } => {
                     let actor = request
@@ -861,9 +932,7 @@ fn validate(
                         .actors
                         .get(&track.identity)
                         .ok_or_else(|| invalid("emoticon track actor missing"))?;
-                    if *actor != request.owner.activity.actor {
-                        return Err(invalid("emoticon track is bound to another actor"));
-                    }
+                    validate_track_actor(world, request, &track.identity, *actor)?;
                     let archive = world
                         .get_resource::<crate::emoticon::EmoticonArchive>()
                         .ok_or_else(|| {
@@ -918,6 +987,31 @@ fn baked(state: &CoverageState) -> bool {
     matches!(state, CoverageState::BakedIntoClip { evidence } if !evidence.is_empty())
 }
 
+/// Explicit cast bindings are accepted only when the source track identifies
+/// that exact unit and the actual entity belongs to the current admitted talk.
+/// The single-player/NPC owner contract is otherwise unchanged.
+fn validate_track_actor(
+    world: &World, request: &StartTimeline, identity: &SourceAssetId, actor: Entity,
+) -> Result<(), TimelineFailure> {
+    if request.owner.kind != TimelineOwnerKind::Talk {
+        return if actor == request.owner.activity.actor { Ok(()) }
+            else { Err(invalid("track actor differs from the activity owner")) };
+    }
+    let track = request.definition.tracks.iter().find(|track| &track.identity == identity)
+        .ok_or_else(|| invalid("actor track is outside the selected source director"))?;
+    let common_single = request.definition.tracks.iter().any(|track| track.name == "CharacterAnimator")
+        && world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| talk.participants().len() == 1);
+    if common_single && actor == request.owner.activity.actor { return Ok(()); }
+    let unit = track.name.parse::<u32>().map_err(|_| invalid("cast track has no exact source unit name"))?;
+    if world.get::<crate::npc::CharacterUnitId>(actor).map(|id| id.0) != Some(unit) {
+        return Err(invalid("cast track is bound to a different source unit"));
+    }
+    let admitted = world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk|
+        talk.participants().iter().any(|(candidate, entity)| *candidate == unit && *entity == actor));
+    if !admitted { return Err(invalid("cast track actor is outside the admitted talk")); }
+    Ok(())
+}
+
 fn face_handle(
     world: &World,
     request: &StartTimeline,
@@ -929,9 +1023,7 @@ fn face_handle(
         .actors
         .get(track)
         .ok_or_else(|| invalid("facial track actor missing"))?;
-    if *actor != request.owner.activity.actor {
-        return Err(invalid("facial track bound to another actor"));
-    }
+    validate_track_actor(world, request, track, *actor)?;
     let handle = world
         .get::<ToonMaterials>(*actor)
         .and_then(|m| m.slot_handle(slot))
@@ -1025,18 +1117,22 @@ fn initialize(
         let graphs = world.resource::<Assets<AnimationGraph>>();
         cache.retain(|(graph, _, _), _| graphs.get(*graph).is_some());
     }
-    if session.request.definition.tracks.iter().any(|track| {
-        track.name == "CharacterAnimator"
-            && track
-                .clips
-                .iter()
-                .any(|clip| matches!(clip.payload, TimelinePayload::Animation { .. }))
-    }) {
-        session.actor_space = Some(actor_space::acquire(
-            world,
-            session.request.owner.activity.actor,
-            token,
-        )?);
+    // Every admitted body needs its own coordinate-space lease, while all
+    // tracks still sample ONE Director clock. Never clone/retime the timeline.
+    let mut actors = HashSet::new();
+    for track in &session.request.definition.tracks {
+        if track.clips.iter().any(|clip| matches!(clip.payload, TimelinePayload::Animation { .. })) {
+            if let Some(actor) = session.request.bindings.actors.get(&track.identity) {
+                actors.insert(*actor);
+            } else if track.name == "CharacterAnimator" {
+                actors.insert(session.request.owner.activity.actor);
+            }
+        }
+    }
+    let mut actors: Vec<_> = actors.into_iter().collect();
+    actors.sort();
+    for actor in actors {
+        session.actor_space.push(actor_space::acquire(world, actor, token)?);
     }
     let request = &session.request;
     let mut claimed = HashSet::new();
@@ -1182,7 +1278,7 @@ fn tick(
         session.timeout_elapsed += delta;
     }
     let budget_expired = session.timeout_elapsed > session.request.timeout_secs;
-    if budget_expired && session.request.owner.kind == TimelineOwnerKind::Npc {
+    if budget_expired && matches!(session.request.owner.kind, TimelineOwnerKind::Npc | TimelineOwnerKind::Talk) {
         // NPC PlayAsyncForNPC first waits for its gated budget, then switches
         // LoopFlag off and waits for Director.time >= duration. Timeout is a
         // request to play the source E, not an error/cancellation shortcut.
@@ -1228,7 +1324,7 @@ fn tick(
             time,
             loop_started: session.clock.loop_started,
             loop_active: session.clock.loop_active,
-            enable_talk: session.request.owner.kind == TimelineOwnerKind::Npc
+            enable_talk: matches!(session.request.owner.kind, TimelineOwnerKind::Npc | TimelineOwnerKind::Talk)
                 && session.clock.enable_talk,
         }
     };
@@ -1439,7 +1535,7 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
                     TimelinePayload::BlinkGate => state.0 |= clip.contains(time),
                     TimelinePayload::LipGate => {}
                     TimelinePayload::NpcIkTalkGate => {
-                        state.2 |= session.request.owner.kind == TimelineOwnerKind::Npc
+                        state.2 |= matches!(session.request.owner.kind, TimelineOwnerKind::Npc | TimelineOwnerKind::Talk)
                             && clip.contains(time)
                     }
                     _ => {}
@@ -1464,7 +1560,7 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
 }
 
 fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
-    if let Some(lease) = session.actor_space.take() {
+    for lease in session.actor_space.drain(..) {
         actor_space::restore(world, token, lease);
     }
     for (_, lease) in session.emoticons.drain() {

@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use bevy::asset::{AssetId, LoadState};
 use bevy::audio::{
-    AddAudioSource, AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, CpalSample,
-    Decodable, SeekError, Source,
+    AddAudioSource, AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, CpalSample, Decodable,
+    SeekError, Source,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -40,7 +40,10 @@ pub(crate) struct VoiceRmsMeter {
 
 impl VoiceRmsMeter {
     fn new(request: Entity) -> Self {
-        Self { request, published: Arc::new(PublishedRms::default()) }
+        Self {
+            request,
+            published: Arc::new(PublishedRms::default()),
+        }
     }
 
     pub(crate) fn latest(&self) -> f32 {
@@ -98,28 +101,40 @@ impl Iterator for MeteredVoiceDecoder {
             // The pinned Vorbis decoder exposes current_data.len(), not the
             // remaining sample count. Its first next() after exhaustion fills
             // the next buffer, so read the length AFTER obtaining that sample.
-            let count = self.inner.current_frame_len()
+            let count = self
+                .inner
+                .current_frame_len()
                 .expect("the voice Vorbis decoder must expose its buffer length");
             self.channels = usize::from(self.inner.channels());
-            assert!(count != 0 && self.channels != 0 && count % self.channels == 0,
-                "the voice Vorbis buffer must contain complete interleaved frames");
+            assert!(
+                count != 0 && self.channels != 0 && count % self.channels == 0,
+                "the voice Vorbis buffer must contain complete interleaved frames"
+            );
             self.packet_remaining = count;
             self.channel = 0;
         }
         if self.channel == 0 {
-            self.channel_zero.push(<f32 as CpalSample>::from_sample(sample));
+            self.channel_zero
+                .push(<f32 as CpalSample>::from_sample(sample));
         }
         self.channel = (self.channel + 1) % self.channels;
         self.packet_remaining -= 1;
         if self.packet_remaining == 0 {
             // Submit this complete actual buffer, including any quota overshoot.
             // No fixed-sized slicing, padding, EOF flush or video-clock samples.
-            if let Some(value) = self.accumulator.submit_channel_zero(&self.channel_zero)
+            if let Some(value) = self
+                .accumulator
+                .submit_channel_zero(&self.channel_zero)
                 .expect("a decoded voice buffer must fit the analyzer counter")
             {
-                self.meter.published.value_bits.store(value.to_bits(), Ordering::Release);
+                self.meter
+                    .published
+                    .value_bits
+                    .store(value.to_bits(), Ordering::Release);
             }
-            self.meter.published.observed_frames
+            self.meter
+                .published
+                .observed_frames
                 .fetch_add(self.channel_zero.len(), Ordering::Relaxed);
             self.channel_zero.clear();
         }
@@ -162,11 +177,27 @@ impl Source for MeteredVoiceDecoder {
 pub(crate) struct VoiceSource {
     raw: Handle<AudioSource>,
     prepared: Option<AssetId<MeteredVoiceSource>>,
+    command_at: f64,
+    prefetched: bool,
+    raw_ready_at_command: bool,
+    sink_ready_logged: bool,
 }
 
 impl VoiceSource {
-    pub(crate) fn new(raw: Handle<AudioSource>) -> Self {
-        Self { raw, prepared: None }
+    pub(crate) fn new(
+        raw: Handle<AudioSource>,
+        command_at: f64,
+        prefetched: bool,
+        raw_ready_at_command: bool,
+    ) -> Self {
+        Self {
+            raw,
+            prepared: None,
+            command_at,
+            prefetched,
+            raw_ready_at_command,
+            sink_ready_logged: false,
+        }
     }
 
     /// Before prepare has installed the typed player, absence of its meter is
@@ -180,15 +211,29 @@ impl VoiceSource {
 /// can prepare; intermediate requests stopped in the same frame never decode.
 pub(crate) fn prepare(
     mut commands: Commands,
+    time: Res<Time>,
     channel: Res<VoiceChannel>,
     raw_sources: Res<Assets<AudioSource>>,
     mut metered_sources: ResMut<Assets<MeteredVoiceSource>>,
     mut sources: Query<(&mut VoiceSource, &VoicePlaybackIdentity)>,
 ) {
-    let Some(entity) = channel.active_sink() else { return; };
-    let Ok((mut source, identity)) = sources.get_mut(entity) else { return; };
-    if source.prepared.is_some() { return; }
-    let Some(raw) = raw_sources.get(&source.raw) else { return; };
+    let Some(entity) = channel.active_sink() else {
+        return;
+    };
+    let Ok((mut source, identity)) = sources.get_mut(entity) else {
+        return;
+    };
+    if source.prepared.is_some() {
+        return;
+    }
+    let Some(raw) = raw_sources.get(&source.raw) else {
+        return;
+    };
+    let raw_ready_ms = ((time.elapsed_secs_f64() - source.command_at).max(0.0)) * 1000.0;
+    info!(
+        "[voice-timing] request={:?} raw-ready={:.1}ms prefetched={} ready-at-command={}",
+        identity.request, raw_ready_ms, source.prefetched, source.raw_ready_at_command,
+    );
     let meter = VoiceRmsMeter::new(identity.request);
     let handle = metered_sources.add(MeteredVoiceSource {
         source: raw.clone(),
@@ -196,6 +241,34 @@ pub(crate) fn prepare(
     });
     source.prepared = Some(handle.id());
     commands.entity(entity).insert((AudioPlayer(handle), meter));
+}
+
+/// Report the point where Bevy has accepted the prepared voice into its real
+/// AudioSink. This is observable transport latency, not a synthetic playback
+/// clock; the audio backend still owns the actual sample pull.
+pub(crate) fn report_start(
+    time: Res<Time>,
+    mut sources: Query<(
+        Entity,
+        &mut VoiceSource,
+        Option<&AudioSink>,
+        &VoicePlaybackIdentity,
+    )>,
+) {
+    for (entity, mut source, sink, identity) in &mut sources {
+        if source.sink_ready_logged || sink.is_none() {
+            continue;
+        }
+        source.sink_ready_logged = true;
+        let sink_ready_ms = ((time.elapsed_secs_f64() - source.command_at).max(0.0)) * 1000.0;
+        info!(
+            "[voice-timing] request={:?} player={entity:?} sink-ready={:.1}ms prefetched={} ready-at-command={}",
+            identity.request,
+            sink_ready_ms,
+            source.prefetched,
+            source.raw_ready_at_command,
+        );
+    }
 }
 
 /// Read-only lifetime classification for the existing channel owner. It alone
@@ -208,9 +281,13 @@ pub(crate) fn finished_or_failed(
     assets: &Assets<MeteredVoiceSource>,
     sinks: &Query<&AudioSink>,
 ) -> bool {
-    let Ok(source) = sources.get(entity) else { return true; };
+    let Ok(source) = sources.get(entity) else {
+        return true;
+    };
     if let Some(expected) = source.prepared {
-        let Ok(player) = players.get(entity) else { return true; };
+        let Ok(player) = players.get(entity) else {
+            return true;
+        };
         if player.0.id() != expected {
             warn!("voice player {entity:?} no longer owns its prepared source; releasing player");
             return true;
@@ -228,8 +305,10 @@ pub(crate) fn finished_or_failed(
         return false;
     }
     if let Some(LoadState::Failed(error)) = server.get_load_state(source.raw.id()) {
-        warn!("voice player {entity:?} failed loading {:?}: {error}; releasing player",
-            source.raw.path());
+        warn!(
+            "voice player {entity:?} failed loading {:?}: {error}; releasing player",
+            source.raw.path()
+        );
         return true;
     }
     // A pending raw load intentionally has no typed AudioPlayer yet.
