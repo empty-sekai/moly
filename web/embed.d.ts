@@ -1,4 +1,4 @@
-export type MolyRegion = "cn" | "jp";
+export type MolyRegion = "cn" | "jp" | "tw" | "en" | "kr";
 export type MolyLocale = "zh-CN" | "zh-TW" | "en-US" | "ja-JP" | "ko-KR";
 export type MolyTab =
   "conversations" | "furniture" | "performances" | "activities";
@@ -107,6 +107,19 @@ export interface MolySnapshot {
   status: MolyStatus;
   issues: string[];
   scene?: { ready: boolean; actorUnits: number[]; fixtureIds: number[] };
+  /**
+   * The weather dial, in the runtime's own numbered order. `options` is the
+   * complete catalogue the runtime published — never a partial guess — and
+   * `setWeather` accepts only IDs from it. `label` is localized by the stage in
+   * the locale the host asked for, so the host renders it verbatim.
+   */
+  weather?: MolyWeather;
+}
+export interface MolyWeather {
+  id: number;
+  name: string;
+  label?: string;
+  options: { id: number; name: string; label?: string }[];
 }
 export interface MolyBoot {
   phase: string;
@@ -133,6 +146,7 @@ export interface MountOptions {
   theme?: MolyTheme;
   renderer?: "auto" | "webgpu" | "webgl2";
   preload?: boolean;
+  sound?: boolean;
   fixture?: number;
   tab?: MolyTab;
   content?: MolyKey;
@@ -156,6 +170,9 @@ export interface MolyMount {
   setTheme(theme: MolyTheme): void;
   setLocale(locale: MolyLocale): void;
   browse(filters: MolyFilters): void;
+  /** Switch the phenomenon of the live scene. Unknown IDs are rejected by the runtime. */
+  setWeather(phenomenon: number): void;
+  setSoundEnabled(enabled: boolean): void;
   select(key: MolyKey): void;
   play(key: MolyKey): void;
   preview(key: MolyKey): void;
@@ -170,6 +187,10 @@ export function mountMoly(
   options: MountOptions & {
     view: "stage";
     assets: string;
+    /** Pin a release under a shared content-addressed assets store. */
+    assetCatalog?: string;
+    /** Legacy packs may omit assetCatalog; new publications should always pin it. */
+    packs?: boolean;
     region: MolyRegion;
     version: string;
   },
@@ -193,4 +214,18 @@ export interface MolyPlayerDataState {
   canExplore: boolean;
   exploring: boolean;
   summary: { rank: number; sites: number; fixtures: number } | null;
+  /**
+   * Every record of what a successful import left out, in the runtime's own
+   * words (`ImportNotice` in `moly-assets`). Catalog gaps — furniture whose
+   * exported model, texture or color texture is absent — drop only that
+   * instance and land here; they never fail the import. Consumers localize
+   * `code` themselves instead of parsing `status`.
+   */
+  notices: (
+    | { code: "specialFurnitureRetained"; count: number }
+    | { code: "surfaceAppearanceRetained"; count: number }
+    | { code: "fixtureModelMissing"; count: number; fixtures: number[] }
+    | { code: "fixtureTextureMissing"; count: number; fixtures: number[] }
+    | { code: "fixtureColorMissing"; count: number; fixtures: number[] }
+  )[];
 }

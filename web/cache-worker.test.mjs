@@ -4,7 +4,9 @@ import {
   resourceIdentity,
   isCacheMessage,
   RESOURCE_PREFIX,
+  verifiedSharedBody,
 } from "./cache-worker.mjs";
+import { createHash } from "node:crypto";
 const origin = "https://moesekai.test";
 
 test("resource retention keys preserve both release and snapshot identities", () => {
@@ -54,4 +56,46 @@ test("cache protocol exposes bounded intentions, never arbitrary purge/fetch com
     null,
   ])
     assert.ok(!isCacheMessage(payload));
+});
+
+test("shared cache stream validation enforces size while reading and verifies SHA-256", async () => {
+  const hash = createHash("sha256").update("resource").digest("hex");
+  assert.equal(
+    new TextDecoder().decode(
+      await verifiedSharedBody(new Response("resource"), 8, hash),
+    ),
+    "resource",
+  );
+  await assert.rejects(
+    verifiedSharedBody(new Response("resource"), 9, hash),
+    /length mismatch/,
+  );
+  await assert.rejects(
+    verifiedSharedBody(new Response("resource"), 8, "ab".repeat(32)),
+    /checksum/,
+  );
+  let pulls = 0,
+    cancelled = false;
+  const endless = new ReadableStream(
+    {
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new Uint8Array(8));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  await assert.rejects(
+    verifiedSharedBody(new Response(endless), 8, hash),
+    /exceeded/,
+  );
+  assert.equal(pulls, 2);
+  assert.equal(cancelled, true);
+  assert.equal(
+    resourceIdentity(`/moly/asset-store/packages/${hash}.json`, origin).maximum,
+    16 * 1048576,
+  );
 });

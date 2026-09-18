@@ -124,6 +124,14 @@ export function intent(type, value) {
     case "restore":
     case "close":
       return { type };
+    // The weather dial carries one phenomenon ID. Names stay on the Rust
+    // side: the host never learns the master-table topology, only the ordered
+    // catalogue the runtime publishes.
+    case "weather":
+      return { type, value: integer(value, 1, 2147483647, "weather") };
+    case "sound":
+      if (typeof value !== "boolean") throw new TypeError("Invalid sound preference");
+      return { type, value };
     default:
       throw new TypeError("Unsupported catalogue intent");
   }
@@ -149,7 +157,30 @@ export function isSnapshot(value) {
     value.characters.length <= 1000 &&
     value.status &&
     typeof value.status.canStop === "boolean" &&
-    TABS.includes(value.tab)
+    TABS.includes(value.tab) &&
+    (value.weather === undefined || isWeather(value.weather))
+  );
+}
+// The weather block is optional so a runtime without it keeps working; when it
+// is present it must be the whole ordered catalogue, not a partial guess.
+export function isWeather(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      Number.isSafeInteger(value.id) &&
+      value.id > 0 &&
+      typeof value.name === "string" &&
+      Array.isArray(value.options) &&
+      value.options.length > 0 &&
+      value.options.length <= 64 &&
+      value.options.every(
+        (option) =>
+          option &&
+          typeof option === "object" &&
+          Number.isSafeInteger(option.id) &&
+          option.id > 0 &&
+          typeof option.name === "string",
+      ),
   );
 }
 export function sameOriginDirectory(value, base) {

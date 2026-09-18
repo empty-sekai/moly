@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+  readFile,
+  mkdir,
+} from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -113,6 +120,19 @@ test(
     const payload = Buffer.alloc(10 * 1024 * 1024);
     for (let i = 0; i < payload.length; i++) payload[i] = i % 251;
     const expectedHash = createHash("sha256").update(payload).digest("hex");
+    const golden = JSON.parse(
+      await readFile(
+        new URL("./fixtures/asset-pack-v2.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    const packRoot = path.join(assetRoot, "pack-store");
+    for (const [relative, value] of Object.entries(golden.files)) {
+      if (!relative.startsWith("store/")) continue;
+      const filename = path.join(packRoot, relative.slice("store/".length));
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, Buffer.from(value, "base64"));
+    }
     await writeFile(path.join(assetRoot, "sample.bin"), payload);
     await writeFile(
       path.join(assetRoot, "sample.css"),
@@ -132,7 +152,7 @@ test(
       env: {
         ...process.env,
         MOLY_ASSET_ROOT: assetRoot,
-        MOLY_ASSET_PACK_ROOT: "",
+        MOLY_ASSET_PACK_ROOT: packRoot,
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -163,6 +183,63 @@ test(
       });
     });
     assert.notEqual(new URL(base).port, "8017");
+
+    await t.test(
+      "shared store serves exact immutable bytes and keeps selectors mutable",
+      async () => {
+        const catalogPath = `catalogs/${golden.index.catalogs.cn.id}.json`;
+        const catalog = JSON.parse(
+          Buffer.from(golden.files[`store/${catalogPath}`], "base64"),
+        );
+        const manifestPath = catalog.packages[0].manifest;
+        const manifest = JSON.parse(
+          Buffer.from(golden.files[`store/${manifestPath}`], "base64"),
+        );
+        for (const logical of [
+          catalogPath,
+          manifestPath,
+          "blobs/" + manifest.entries[0].blob,
+        ]) {
+          const result = await readResponse(
+            `${base}moly/asset-store/${logical}`,
+          );
+          assert.equal(result.status, 200);
+          assert.equal(
+            result.hash,
+            createHash("sha256")
+              .update(Buffer.from(golden.files[`store/${logical}`], "base64"))
+              .digest("hex"),
+          );
+          assert.match(
+            result.headers["cache-control"],
+            /immutable, no-transform/,
+          );
+          assert.equal(
+            Number(result.headers["x-moly-decoded-bytes"]),
+            result.bytes,
+          );
+        }
+        for (const logical of [
+          "asset-packs.json",
+          "channels/cn/stable.json",
+          "channels/jp/stable.json",
+        ]) {
+          const result = await readResponse(
+            `${base}moly/asset-store/${logical}`,
+          );
+          assert.equal(result.status, 200);
+          assert.equal(result.headers["cache-control"], "no-store");
+        }
+        const discovery = await (await fetch(`${base}snapshots.json`)).json();
+        for (const region of ["cn", "jp", "tw"])
+          assert.equal(
+            discovery.snapshots.find(
+              (row) => row.region === region && row.packs,
+            )?.assetCatalog,
+            golden.index.catalogs[region].id,
+          );
+      },
+    );
 
     await t.test(
       "HEAD advertises the exact length without streaming a response body",

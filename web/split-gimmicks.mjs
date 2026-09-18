@@ -116,7 +116,10 @@ export function splitGimmicks(assets) {
     fs.readFileSync(path.join(assets, "mysekai-fixtures.json"), "utf8"),
   );
   const { region, gameVersion } = master;
-  if (!["cn", "jp"].includes(region) || !/^\d+\.\d+\.\d+$/.test(gameVersion))
+  if (
+    !["cn", "jp", "tw", "en", "kr"].includes(region) ||
+    !/^\d+\.\d+\.\d+$/.test(gameVersion)
+  )
     throw new Error("Explicit snapshot identity required");
   const source = fs.readFileSync(
     path.join(assets, "fixture-gimmick/gimmicks.json"),

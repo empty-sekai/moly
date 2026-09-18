@@ -1,6 +1,7 @@
 // Framework-independent mount for a same-origin Moly feature page.
 // The iframe owns one complete Bevy app: removing it also releases audio,
 // rendering, input listeners and the browser's document storage lease.
+import { applyPackSelection } from "./asset-pack-client.mjs";
 import { mountStage, ACTIVE_MOUNT } from "./embed-stage.mjs";
 
 export function mountMoly(container, options = {}) {
@@ -30,6 +31,7 @@ export function mountMoly(container, options = {}) {
     throw new Error("Moly must be served from the host origin");
   url.searchParams.set("embed", "1");
   if (assets) url.searchParams.set("assets", assets);
+  applyPackSelection(url, options);
   if (content) url.searchParams.set("content", content);
   if (tab) url.searchParams.set("tab", tab);
   if (Number.isSafeInteger(fixture) && fixture > 0)

@@ -1,3 +1,4 @@
+import { verifyPublishedStore } from "./asset-pack-store.mjs";
 import { resolveResourceSource } from "./resource-sources.mjs";
 import {
   existsSync,
@@ -27,6 +28,7 @@ export const STAGE_FILES = [
   "stage.html",
   "stage.mjs",
   "base-resources.mjs",
+  "asset-pack-client.mjs",
   "stage.css",
   "stage-controller.mjs",
   "stage-activation.mjs",
@@ -86,7 +88,7 @@ export function splitCatalog(raw, snapshotId) {
     raw.schemaVersion !== 1 ||
     raw.ready !== true ||
     raw.mode !== "independent" ||
-    !["cn", "jp"].includes(raw.region) ||
+    !["cn", "jp", "tw", "en", "kr"].includes(raw.region) ||
     !/^\d+\.\d+\.\d+$/.test(raw.version) ||
     !Array.isArray(raw.entries) ||
     !Array.isArray(raw.characters) ||
@@ -182,8 +184,8 @@ export async function publish({
   output = path.resolve(output);
   if (inside(workspace, output) || path.basename(output) === "moly-deploy")
     throw new Error("Publish outside source repositories");
-  if (!Array.isArray(sources) || sources.length < 1 || sources.length > 2)
-    throw new Error("Publish one or two explicit CN/JP snapshots");
+  if (!Array.isArray(sources) || sources.length < 1 || sources.length > 5)
+    throw new Error("Publish one to five explicit region snapshots");
   const manifestPath = path.join(output, "manifest.json");
   if (
     existsSync(manifestPath) &&
@@ -276,7 +278,10 @@ export async function publish({
     const source = await resolveResourceSource(specification, {
       cacheRoot: path.join(output, ".source-cache"),
     });
-    if (!["cn", "jp"].includes(source.region) || regions.has(source.region))
+    if (
+      !["cn", "jp", "tw", "en", "kr"].includes(source.region) ||
+      regions.has(source.region)
+    )
       throw new Error("Unsupported or duplicated source region");
     regions.add(source.region);
     const assets = realpathSync(source.assets),
@@ -426,6 +431,31 @@ export async function publish({
       if (entities.size)
         throw new Error("Source SD entities are missing portraits");
     }
+    const packed =
+      source.assetCatalog !== undefined
+        ? await verifyPublishedStore(
+            path.join(output, "asset-store"),
+            source.assetCatalog,
+            { region: source.region, assets },
+          )
+        : null;
+    if (packed)
+      for (const required of [
+        "browser-base.json",
+        "mysekai-fixtures.json",
+        "manifest.json",
+        "fixture-gimmick/browser-index.json",
+      ])
+        if (!packed.entries.has(required))
+          throw new Error(
+            `Pinned pack omits required stage asset: ${required}`,
+          );
+    if (packed && base)
+      for (const resource of base.files)
+        if (!packed.entries.has(resource.path))
+          throw new Error(
+            `Pinned pack omits required base asset: ${resource.path}`,
+          );
     const portraitDigest = portraitBytes.length
       ? sha256(
           Buffer.concat([
@@ -436,7 +466,7 @@ export async function publish({
           ]),
         )
       : "";
-    const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest }))])).slice(0, 20)}`;
+    const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
     const directory = path.join(output, "snapshots", id);
     const { files: catalogFiles } = splitCatalog(catalog, id);
     for (const [name, bytes] of catalogFiles)
@@ -450,7 +480,9 @@ export async function publish({
         put(path.join(directory, "catalog/portraits", name), bytes);
     }
     const mount = path.join(directory, "assets");
-    if (developmentLinks) {
+    if (packed) {
+      // The store was verified, not copied. No per-snapshot binary mount exists.
+    } else if (developmentLinks) {
       // The Go server contains all path resolution within its configured root.
       if (!inside(realpathSync(output), assets))
         throw new Error(
@@ -474,7 +506,14 @@ export async function publish({
       id,
       region: source.region,
       version: catalog.version,
-      assets: `${root}assets/`,
+      assets: packed ? "/moly/asset-store/" : `${root}assets/`,
+      ...(packed
+        ? {
+            packs: true,
+            assetCatalog: packed.catalogId,
+            assetReleaseVersion: packed.catalog.version,
+          }
+        : {}),
       catalog: `${root}catalog/index.json`,
       provenance: {
         resourceProvider: source.provider,
@@ -489,9 +528,17 @@ export async function publish({
         fixtureMasterSha256: sha256(fixtureBytes),
         controllerIndexSha256: sha256(controllerIndexBytes),
         ...(base ? { baseDescriptorSha256: sha256(baseBytes) } : {}),
-        assetPolicy: developmentLinks
-          ? "development-mount"
-          : "immutable-readonly-mount",
+        assetPolicy: packed
+          ? "content-addressed-store"
+          : developmentLinks
+            ? "development-mount"
+            : "immutable-readonly-mount",
+        ...(packed
+          ? {
+              assetCatalogSha256: packed.catalogId,
+              verifiedLogicalFiles: packed.logicalFiles,
+            }
+          : {}),
         ...(provenance.source?.assetVersion
           ? { assetVersion: provenance.source.assetVersion }
           : {}),
@@ -500,10 +547,26 @@ export async function publish({
           : {}),
       },
       base: {
-        downloadBytes: base?.downloadBytes ?? 0,
+        downloadBytes:
+          packed && base
+            ? [
+                ...new Map(
+                  base.files.map((row) => {
+                    const entry = packed.entries.get(row.path);
+                    return [entry.blob, entry.blob_bytes];
+                  }),
+                ).values(),
+              ].reduce((a, b) => a + b, 0)
+            : (base?.downloadBytes ?? 0),
         decodedBytes: base?.decodedBytes ?? 0,
       },
     });
+    // Keep the exact source-qualified descriptor independently addressable
+    // after discovery moves on to a newer region release. Never rewrite it.
+    put(
+      path.join(directory, "snapshot.json"),
+      Buffer.from(JSON.stringify(snapshots.at(-1), null, 2) + "\n"),
+    );
     put(
       path.join(directory, "provenance.json"),
       Buffer.from(
@@ -512,8 +575,9 @@ export async function publish({
             schemaVersion: 1,
             snapshotId: id,
             source: provenance,
-            policy:
-              "This identity hashes the Rust catalogue, fixture master and provenance descriptor, not every binary. Production asset mounts MUST be immutable; replace the snapshot instead of editing the mount.",
+            policy: packed
+              ? "Every runtime artifact is verified against the pinned package catalog; all binary objects live in the shared immutable asset store. Channels/default selection are mutable and never cached as content."
+              : "This identity hashes the Rust catalogue, fixture master and provenance descriptor, not every binary. Production asset mounts MUST be immutable; replace the snapshot instead of editing the mount.",
           },
           null,
           2,

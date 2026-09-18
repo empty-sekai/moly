@@ -74,6 +74,10 @@ export function createStageController({
     } else if (item.type === "select") command("select", undefined, item.value);
     else if (item.type === "play" || item.type === "preview")
       command(item.type, undefined, item.value);
+    // Weather owns no playback state: it is one deterministic dial value the
+    // Rust weather chain either admits (a real档位) or rejects.
+    else if (item.type === "weather") command("weather", item.value);
+    else if (item.type === "sound") command("sound", item.value);
     else if (item.type === "close") {
       closing = true;
       pending.length = 0;
@@ -91,6 +95,7 @@ export function createStageController({
         if (!value.initial?.tab) desired.tab = tabForKey(pendingSelection);
       }
       configured = true;
+      if (typeof value.sound === "boolean") command("sound", value.sound);
       command("open");
       command("focus", false);
     },

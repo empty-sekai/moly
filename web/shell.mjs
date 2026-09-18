@@ -1,3 +1,5 @@
+import { PackClient } from "./asset-pack-client.mjs";
+import { PackedImages } from "./asset-pack-images.mjs";
 import {
   assetUrl,
   safeColor,
@@ -22,8 +24,19 @@ function action(text, className, click) {
 }
 
 export class ExperienceShell {
-  constructor(assetBase) {
+  constructor(assetBase, options = {}) {
     this.assetBase = assetBase;
+    this.packClient =
+      options.packs || options.assetCatalog
+        ? new PackClient(assetBase, options.assetCatalog ?? null)
+        : null;
+    this.packedImages = this.packClient
+      ? new PackedImages(this.packClient)
+      : null;
+    if (this.packedImages)
+      window.addEventListener("pagehide", () => this.packedImages.dispose(), {
+        once: true,
+      });
     this.wasm = null;
     this.snapshot = null;
     this.lastJson = "";
@@ -47,14 +60,21 @@ export class ExperienceShell {
   }
   async loadPortraits() {
     try {
-      const response = await fetch(
-        `${this.assetBase}ui/character-portraits/character-portraits.json`,
-      );
-      if (!response.ok) return;
-      const data = await response.json();
+      const path = "ui/character-portraits/character-portraits.json";
+      let data;
+      if (this.packClient) data = await this.packClient.json(path);
+      else {
+        const response = await fetch(`${this.assetBase}${path}`);
+        if (!response.ok) return;
+        data = await response.json();
+      }
       for (const row of data.characters ?? []) {
         const image = assetUrl(this.assetBase, row.image);
-        if (image) this.portraits.set(Number(row.unitId ?? row.id), image);
+        if (image)
+          this.portraits.set(
+            Number(row.unitId ?? row.id),
+            this.packClient ? row.image : image,
+          );
       }
       this.lastList = "";
       this.lastDetail = "";
@@ -120,6 +140,15 @@ export class ExperienceShell {
       if (snapshot.schemaVersion !== 1)
         throw new Error("Unsupported library snapshot");
       this.snapshot = snapshot;
+      if (snapshot.inspection?.id && this.lastInspection !== snapshot.inspection.id) {
+        this.lastInspection = snapshot.inspection.id;
+        this.awaitingInitialSelection = false;
+        this.setFocus(false);
+        this.setCollapsed(false);
+        this.send("focus", { value: true });
+        $("catalog-search").value = "";
+        $("detail-panel").scrollIntoView({ block: "nearest", behavior: "instant" });
+      }
       if (
         this.awaitingInitialSelection &&
         snapshot.selected?.key === this.initial.key
@@ -176,7 +205,7 @@ export class ExperienceShell {
     const url = assetUrl(this.assetBase, relative);
     if (url) {
       const img = element("img");
-      img.src = url;
+      if (!this.packedImages) img.src = url;
       img.alt = "";
       img.loading = "lazy";
       img.decoding = "async";
@@ -189,6 +218,7 @@ export class ExperienceShell {
         { once: true },
       );
       wrap.append(img);
+      if (this.packedImages) this.packedImages.bind(img, relative);
     } else wrap.textContent = fallback;
     return wrap;
   }
@@ -202,7 +232,7 @@ export class ExperienceShell {
     const url = this.portraits.get(character.id);
     if (url) {
       const image = element("img");
-      image.src = url;
+      if (!this.packedImages) image.src = url;
       image.alt = "";
       image.loading = "lazy";
       image.addEventListener(
@@ -214,6 +244,7 @@ export class ExperienceShell {
         { once: true },
       );
       wrap.append(image);
+      if (this.packedImages) this.packedImages.bind(image, url);
     } else wrap.textContent = name.slice(-2) || "♪";
     return wrap;
   }

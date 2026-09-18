@@ -538,6 +538,77 @@ test("a region picker keeps valid snapshots when an optional manifest row is mal
   );
 });
 
+test("shared-store picker matches the pinned release, not just its shared directory", async (t) => {
+  const cn = "a".repeat(64),
+    jp = "b".repeat(64),
+    base = "/moly/asset-store/";
+  const f = fixture(
+    t,
+    state(null, { region: "jp" }),
+    `?assets=${base}&packs=1&asset_catalog=${jp}`,
+  );
+  globalThis.fetch = async (url, options) => {
+    assert.equal(options.cache, "no-store");
+    return {
+      ok: true,
+      json: async () => ({
+        snapshots: [
+          {
+            region: "cn",
+            version: "1",
+            assetBase: base,
+            assetCatalog: cn,
+            packs: true,
+          },
+          {
+            region: "jp",
+            version: "2",
+            assetBase: base,
+            assetCatalog: jp,
+            packs: true,
+          },
+        ],
+      }),
+    };
+  };
+  await installSnapshotPicker(base);
+  assert.equal(f.get("snapshot-picker").value, `${base}#${jp}`);
+});
+
+test("a historical pinned release absent from discovery is never mislabeled as the first region", async (t) => {
+  const base = "/moly/asset-store/";
+  const f = fixture(
+    t,
+    state(null, { region: "jp" }),
+    `?assets=${base}&packs=1&asset_catalog=${"c".repeat(64)}`,
+  );
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      snapshots: [
+        {
+          region: "cn",
+          version: "1",
+          assetBase: base,
+          assetCatalog: "a".repeat(64),
+          packs: true,
+        },
+        {
+          region: "jp",
+          version: "2",
+          assetBase: base,
+          assetCatalog: "b".repeat(64),
+          packs: true,
+        },
+      ],
+    }),
+  });
+  const originalLabel = f.get("source-label").textContent;
+  await installSnapshotPicker(base);
+  assert.equal(f.get("snapshot-picker"), null);
+  assert.equal(f.get("source-label").textContent, originalLabel);
+});
+
 test("embed messages require their exact frame and disposal releases listeners", (t) => {
   const f = fixture(t);
   const container = f.dom.window.document.createElement("div");

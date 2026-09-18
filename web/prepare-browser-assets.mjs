@@ -11,7 +11,7 @@ export function evidencePaths(evidence) {
   if (
     evidence.schemaVersion !== 1 ||
     evidence.failed !== false ||
-    !["cn", "jp"].includes(evidence.options?.region)
+    !["cn", "jp", "tw", "en", "kr"].includes(evidence.options?.region)
   )
     throw new Error(
       "A successful source-qualified acceptance trace is required",

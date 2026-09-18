@@ -1,3 +1,4 @@
+import { applyPackSelection } from "./asset-pack-client.mjs";
 import { activatePreparedStage } from "./stage-activation.mjs";
 import {
   EMBED_VERSION,
@@ -52,6 +53,7 @@ export function mountStage(container, options = {}) {
   const ui = {
     theme: checkedTheme(options.theme ?? "light"),
     locale: checkedLocale(options.locale),
+    sound: options.sound !== false,
   };
   const initial = filters({
     ...(options.tab ? { tab: options.tab } : {}),
@@ -67,8 +69,9 @@ export function mountStage(container, options = {}) {
       "assets",
       sameOriginDirectory(options.assets, location.href).pathname,
     );
+  applyPackSelection(url, options);
   if (options.snapshot) url.searchParams.set("snapshot", options.snapshot);
-  if (!["cn", "jp"].includes(options.region))
+  if (!["cn", "jp", "tw", "en", "kr"].includes(options.region))
     throw new TypeError("An explicit supported resource region is required");
   if (
     typeof options.version !== "string" ||
@@ -96,7 +99,8 @@ export function mountStage(container, options = {}) {
     closePromise = null;
   let pending = [];
   let documentInstance = null,
-    requestedPlay = null;
+    requestedPlay = null,
+    requestedWeather = null;
   let currentFilters = { ...initial },
     currentSelection = selected;
   const owner = {};
@@ -116,6 +120,8 @@ export function mountStage(container, options = {}) {
       currentSelection = command.value;
     if (type === "play" || type === "preview") requestedPlay = command;
     if (["stop", "restore", "close"].includes(type)) requestedPlay = null;
+    if (type === "weather") requestedWeather = command.value;
+    if (type === "sound") ui.sound = command.value;
     if (connected) post("intent", command);
     else {
       if (pending.length >= MAX_PENDING_INTENTS)
@@ -157,6 +163,15 @@ export function mountStage(container, options = {}) {
       // silently resumed after a crash, and current browsing is never rewound.
       if (reloaded && requestedPlay && !queuedPlay)
         post("intent", requestedPlay);
+      // The weather dial is a scene setting, not a playback intention: an
+      // engine reload must come back on the档 the user last chose instead of
+      // silently rewinding to the default phenomenon.
+      if (
+        reloaded &&
+        requestedWeather !== null &&
+        !pending.some((command) => command.type === "weather")
+      )
+        post("intent", { type: "weather", value: requestedWeather });
     } else if (
       type === "player-data" &&
       value?.schemaVersion === 1 &&
@@ -242,6 +257,12 @@ export function mountStage(container, options = {}) {
     },
     select(value) {
       dispatch("select", value);
+    },
+    setWeather(value) {
+      dispatch("weather", value);
+    },
+    setSoundEnabled(value) {
+      dispatch("sound", !!value);
     },
     play(value) {
       dispatch("play", value);

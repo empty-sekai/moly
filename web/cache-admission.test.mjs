@@ -50,6 +50,15 @@ test("only the matching measured source can mark required cache entries", () => 
     files: [{ path: "motion-library.glb" }],
   };
   assert.equal(requiredResourceURLs(pack, url, origin).length, 2);
+  for (const region of ["tw", "en", "kr"])
+    assert.equal(
+      requiredResourceURLs(
+        { ...pack, region },
+        url.replace("cn-", region + "-"),
+        origin,
+      ).length,
+      2,
+    );
   assert.deepEqual(
     requiredResourceURLs({ ...pack, region: "jp" }, url, origin),
     [],

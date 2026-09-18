@@ -19,7 +19,6 @@
       <section id="stage-boot" class="boot" aria-labelledby="boot-title">
         <div class="boot-inner">
           <span class="stage-mark" aria-hidden="true">✦</span>
-          <p class="eyebrow">MYSEKAI · MOLY</p>
           <h1 id="boot-title"></h1>
           <p id="boot-message" role="status" aria-live="polite"></p>
           <p id="boot-progress" class="progress" aria-live="off"></p>
@@ -31,6 +30,16 @@
           <p id="boot-note" class="note"></p>
         </div>
       </section>
+      <button
+        id="stage-weather"
+        class="weather"
+        type="button"
+        aria-live="polite"
+        hidden
+      >
+        <span class="weather-glyph" aria-hidden="true">☁</span>
+        <span id="weather-label"></span>
+      </button>
       <p id="stage-hint" class="hint" hidden></p>
     </main>
   </body>

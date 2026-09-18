@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { createHash, webcrypto } from "node:crypto";
 
 // Unit tests execute the shipped worker body with a controllable storage API.
 // Actual browser cache/online behavior is additionally exercised by QA scripts.
@@ -78,6 +79,7 @@ function worker() {
     source,
     {
       self,
+      crypto: webcrypto,
       ServiceWorkerGlobalScope,
       caches,
       URL,
@@ -142,12 +144,15 @@ function worker() {
       await waiting;
       return result;
     },
-    async request(name = "data.json") {
+    async request(name = "data.json", options = {}) {
       let response;
       const waiting = [];
       handlers.get("fetch")({
         request: new Request(
-          "https://qa.test/moly/releases/stage-test/" + name,
+          name.startsWith("/")
+            ? "https://qa.test" + name
+            : "https://qa.test/moly/releases/stage-test/" + name,
+          options,
         ),
         respondWith: (value) => {
           response = value;
@@ -261,4 +266,48 @@ test("a response requested before clear cannot silently refill the resource stor
   await response.settle();
   assert.equal(await response.response.text(), "resource");
   assert.equal((await w.message("query")).bytes, 0);
+});
+
+test("shared CAS responses are hash-checked, pinned, and retained once across releases", async () => {
+  const w = worker();
+  await w.message("retain", true);
+  const hash = createHash("sha256").update("resource").digest("hex");
+  const name = `/moly/asset-store/blobs/${hash.slice(0, 2)}/${hash}.bin`;
+  const first = await w.request(name, { headers: { "X-Moly-Required": "1" } });
+  assert.equal(await first.response.text(), "resource");
+  await first.settle();
+  assert.equal((await w.message("query")).entries, 1);
+  const second = await w.request(name);
+  await second.settle();
+  assert.equal(second.response.headers.get("X-Moly-Cache"), "retained");
+  assert.equal(w.network(), 1);
+  const controls = await Promise.all(
+    [...w.stores.get("moly-control-v1").values()].map((value) =>
+      value.clone().text(),
+    ),
+  );
+  assert.ok(controls.some((value) => value.includes(name)));
+  await w.message("clear");
+  assert.equal((await w.message("query")).entries, 0);
+});
+
+test("bad shared immutable checksums are never retained, mutable selectors are never intercepted", async () => {
+  const w = worker();
+  await w.message("retain", true);
+  const invalid = await w.request(
+    `/moly/asset-store/packages/${"ab".repeat(32)}.json`,
+  );
+  assert.equal(invalid.response.status, 200);
+  await invalid.settle();
+  assert.equal((await w.message("query")).entries, 0);
+  for (const name of [
+    "asset-packs.json",
+    "channels/cn/stable.json",
+    "channels/jp/stable.json",
+  ])
+    assert.equal(
+      (await w.request("/moly/asset-store/" + name)).response,
+      undefined,
+    );
+  assert.equal(w.network(), 1);
 });

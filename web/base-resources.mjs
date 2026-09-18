@@ -1,3 +1,5 @@
+import { PackClient, packDigest } from "./asset-pack-client.mjs";
+
 // The first entry downloads the measured necessary pack without waiting for
 // audio permission. Playback still begins from the trusted in-frame gesture.
 export function validateBasePack(pack, { region, version, assets }) {
@@ -89,7 +91,17 @@ export async function warmBaseResources(
   { fetchImpl = fetch, signal, onProgress = () => {} } = {},
 ) {
   const descriptor = new URL("browser-base.json", options.assets);
-  const bytes = await consume(descriptor, 1048576, signal, fetchImpl, true);
+  const client =
+    options.packs || options.assetCatalog
+      ? new PackClient(options.assets, options.assetCatalog ?? null, {
+          fetchImpl,
+          signal,
+          required: true,
+        })
+      : null;
+  const bytes = client
+    ? await client.read("browser-base.json")
+    : await consume(descriptor, 1048576, signal, fetchImpl, true);
   const pack = JSON.parse(
     new TextDecoder("utf-8", { fatal: true }).decode(bytes),
   );
@@ -100,17 +112,30 @@ export async function warmBaseResources(
   const worker = async () => {
     while (next < rows.length) {
       const row = rows[next++];
-      decodedBytes += await consume(
-        row.url,
-        row.decodedBytes,
-        signal,
-        fetchImpl,
-      );
+      if (client) {
+        const bytes = await client.read(row.path);
+        if (
+          bytes.byteLength !== row.decodedBytes ||
+          (await packDigest(bytes)) !== row.sha256
+        )
+          throw new Error(
+            "Packed base resource differs from its measured descriptor",
+          );
+        decodedBytes += bytes.byteLength;
+      } else
+        decodedBytes += await consume(
+          row.url,
+          row.decodedBytes,
+          signal,
+          fetchImpl,
+        );
       completed++;
       onProgress({ completed, total: rows.length, decodedBytes });
     }
   };
-  await Promise.all(Array.from({ length: Math.min(3, rows.length) }, worker));
+  await Promise.all(
+    Array.from({ length: Math.min(client ? 2 : 3, rows.length) }, worker),
+  );
   // Cache writes are serialized and may complete just after their response.
   // Flush their queue, without making storage denial a playback blocker.
   const serviceWorker = globalThis.navigator?.serviceWorker?.controller;

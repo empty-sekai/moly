@@ -82,7 +82,7 @@ test("catalogue transport preserves exact owner facts and splits only detail pay
 });
 test("source identity and duplicate keys fail closed", () => {
   for (const change of [
-    { region: "en" },
+    { region: "invalid-region" },
     { ready: false },
     { mode: "current" },
     { version: "../cn" },
@@ -91,4 +91,12 @@ test("source identity and duplicate keys fail closed", () => {
   ]) {
     assert.throws(() => splitCatalog({ ...raw, ...change }, "jp-6.8.1-test"));
   }
+});
+
+test("all supported game regions preserve their release selection identity", () => {
+  for (const region of ["cn", "jp", "tw", "en", "kr"])
+    assert.equal(
+      splitCatalog({ ...raw, region }, `${region}-6.8.1-test`).index.region,
+      region,
+    );
 });

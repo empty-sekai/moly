@@ -12,6 +12,10 @@ if (!url.searchParams.has("assets")) {
 const assetBase = url.searchParams.get("assets");
 const shell = new ExperienceShell(
   validAssetBase(assetBase) ? assetBase : "/assets/",
+  {
+    packs: url.searchParams.get("packs") === "1",
+    assetCatalog: url.searchParams.get("asset_catalog") ?? undefined,
+  },
 );
 installSnapshotPicker(assetBase);
 

@@ -57,8 +57,30 @@ export class CacheAdmission {
 
 export function resourceIdentity(value, origin) {
   const url = new URL(value, origin);
-  if (url.origin !== origin || url.search || /%2f|%5c|%00/i.test(url.pathname))
+  if (
+    url.origin !== origin ||
+    url.search ||
+    url.hash ||
+    url.username ||
+    url.password ||
+    !["http:", "https:"].includes(url.protocol) ||
+    /%2f|%5c|%00/i.test(url.pathname)
+  )
     return null;
+  const shared = url.pathname.match(
+    /^\/moly\/asset-store\/(?:(blobs)\/([a-f0-9]{2})\/([a-f0-9]{64})\.(bin|gzz|brz|br)|(packages|catalogs)\/([a-f0-9]{64})\.json)$/,
+  );
+  if (shared) {
+    const sha256 = shared[3] || shared[6];
+    if (shared[2] && shared[2] !== sha256.slice(0, 2)) return null;
+    return {
+      cache: RESOURCE_PREFIX + "shared-pack-store",
+      url: url.href,
+      sha256,
+      shared: true,
+      maximum: shared[1] ? MAX_ENTRY : 16 * 1024 * 1024,
+    };
+  }
   const match =
     /^\/moly\/(releases|snapshots)\/([a-z0-9][a-z0-9._-]{0,95})\/(.+)$/.exec(
       url.pathname,
@@ -82,7 +104,7 @@ export function requiredResourceURLs(pack, descriptor, origin) {
     !identity ||
     pack?.schemaVersion !== 1 ||
     pack.generator !== "moly-browser-base-v1" ||
-    !["cn", "jp"].includes(pack.region) ||
+    !["cn", "jp", "tw", "en", "kr"].includes(pack.region) ||
     !/^\d+\.\d+\.\d+$/.test(pack.gameVersion) ||
     !Array.isArray(pack.files) ||
     pack.files.length > 5000
@@ -125,6 +147,44 @@ export function isCacheMessage(value) {
     ["query", "retain", "clear"].includes(value.type) &&
     (value.type !== "retain" || typeof value.enabled === "boolean")
   );
+}
+
+/** A size header is only an admission hint. Bound the stream before hashing so
+ * a malformed immutable response cannot allocate an unbounded arrayBuffer. */
+export async function verifiedSharedBody(response, bytes, sha256) {
+  if (
+    !response.body ||
+    !Number.isSafeInteger(bytes) ||
+    bytes < 0 ||
+    bytes > MAX_ENTRY
+  )
+    throw new Error("Invalid shared response size");
+  const body = new Uint8Array(bytes),
+    reader = response.body.getReader();
+  let used = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (used + value.byteLength > bytes)
+        throw new Error("Shared response exceeded its declared size");
+      body.set(value, used);
+      used += value.byteLength;
+    }
+    if (used !== bytes) throw new Error("Shared response length mismatch");
+    const actual = [
+      ...new Uint8Array(await crypto.subtle.digest("SHA-256", body)),
+    ]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    if (actual !== sha256) throw new Error("Shared response checksum mismatch");
+    return body;
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 if (
@@ -268,6 +328,25 @@ if (
             .match(identity.url, { cacheName: identity.cache })
             .catch(() => null);
           if (retained) {
+            if (
+              identity.shared &&
+              request.headers.get("X-Moly-Required") === "1"
+            ) {
+              event.waitUntil(
+                serial(async () => {
+                  if (!enabled || required.size >= 20000) return;
+                  required.add(identity.url);
+                  await (
+                    await caches.open(CONTROL_CACHE)
+                  ).put(
+                    pinsUrl,
+                    new Response(JSON.stringify([...required]), {
+                      headers: { "Content-Type": "application/json" },
+                    }),
+                  );
+                }).catch(() => {}),
+              );
+            }
             const headers = new Headers(retained.headers);
             headers.set("X-Moly-Cache", "retained");
             return new Response(retained.body, {
@@ -319,7 +398,7 @@ if (
           response.headers.get("Cache-Control")?.includes("immutable") &&
           Number.isSafeInteger(bytes) &&
           bytes > 0 &&
-          bytes <= MAX_ENTRY
+          bytes <= (identity.maximum ?? MAX_ENTRY)
         ) {
           const generation = epoch;
           const release = await admission.acquire(
@@ -327,12 +406,32 @@ if (
             () => enabled && generation === epoch && !request.signal?.aborted,
           );
           if (!release) return response;
-          const copy = response.clone();
+          let copy = response.clone();
           event.waitUntil(
             serial(async () => {
               if (!enabled || generation !== epoch) {
                 await copy.body?.cancel();
                 return;
+              }
+              if (identity.sha256) {
+                const data = await verifiedSharedBody(
+                  copy,
+                  bytes,
+                  identity.sha256,
+                );
+                copy = new Response(data, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers,
+                });
+              }
+              if (
+                identity.shared &&
+                request.headers.get("X-Moly-Required") === "1" &&
+                required.size < 20000
+              ) {
+                required.add(identity.url);
+                pinsChanged = true;
               }
               if (pinsChanged)
                 await (

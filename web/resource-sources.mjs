@@ -33,7 +33,10 @@ export function safeResourcePath(value) {
   );
 }
 function sourceIdentity(region, version) {
-  if (!["cn", "jp"].includes(region) || !/^\d+\.\d+\.\d+$/.test(version))
+  if (
+    !["cn", "jp", "tw", "en", "kr"].includes(region) ||
+    !/^\d+\.\d+\.\d+$/.test(version)
+  )
     throw new Error("Invalid source region/version");
 }
 export function validateResourceIndex(index, region, version) {

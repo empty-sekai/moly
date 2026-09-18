@@ -205,7 +205,7 @@ test("stage validates mount inputs before creating a renderer", () => {
       { src: "https://user:pw@host.test/stage.html" },
       { src: "https://host.test/stage.html#other" },
       { assets: undefined },
-      { region: "en" },
+      { region: "invalid-region" },
       { version: "current" },
       { renderer: "invented" },
       { snapshot: "../jp" },
@@ -217,6 +217,24 @@ test("stage validates mount inputs before creating a renderer", () => {
     env.cleanup();
   }
 });
+test("sound preference is carried by configure and live changes use a sound intent", () => {
+  const env = dom();
+  let handle;
+  try {
+    handle = mountStage(env.target, { ...options, sound: false });
+    const sent = [];
+    handle.frame.contentWindow.postMessage = (message) => sent.push(message);
+    emit(env.window, handle.frame, "hello", { contract: 2, instance: "sound-test" });
+    assert.equal(sent[0].type, "configure");
+    assert.equal(sent[0].value.sound, false);
+    handle.setSoundEnabled(true);
+    assert.deepEqual(sent.at(-1).value, { type: "sound", value: true });
+  } finally {
+    handle?.dispose();
+    env.cleanup();
+  }
+});
+
 test("stage callback boundary requires both exact iframe window and same origin/version", () => {
   const env = dom();
   let handle;

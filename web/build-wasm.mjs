@@ -19,7 +19,7 @@ const workspaceRoot = path.resolve(here, "..");
 const profileName =
   process.argv.find((arg) => arg.startsWith("--profile="))?.split("=")[1] ??
   "wasm-size";
-if (!["release", "wasm-size"].includes(profileName))
+if (!["release", "wasm-size", "wasm-names"].includes(profileName))
   throw new Error("Unsupported WASM profile");
 const outputArg = process.argv
   .find((arg) => arg.startsWith("--out-dir="))

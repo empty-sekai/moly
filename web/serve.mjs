@@ -19,6 +19,7 @@ import {
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { storeChannels } from "./asset-pack-store.mjs";
 import { playerDataResponse, DEFAULT_PLAYER_API } from "./player-api.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
@@ -66,9 +67,21 @@ if (packRoot && !statSync(packRoot, { throwIfNoEntry: false })?.isDirectory()) {
 // resolve：越界检查比对的是 resolve 后的绝对路径，根若保留正斜杠
 // （Windows 上「盘符:/…」形的 MOLY_ASSET_ROOT），startsWith 对每个
 // 文件都对不上，全部 404。
+if (packRoot)
+  snapshots.push(
+    ...storeChannels(packRoot).map((row) => ({
+      ...row,
+      assetBase: "/moly/asset-store/",
+    })),
+  );
 const mounts = [
   ...(jpRoot ? [["/assets-jp/", realpathSync(jpRoot)]] : []),
-  ...(packRoot ? [["/packs/", realpathSync(packRoot)]] : []),
+  ...(packRoot
+    ? [
+        ["/packs/", realpathSync(packRoot)],
+        ["/moly/asset-store/", realpathSync(packRoot)],
+      ]
+    : []),
   ["/assets/", realpathSync(assetRoot)],
   ["/", realpathSync(here)],
 ];
@@ -204,13 +217,15 @@ const server = createServer(async (request, response) => {
         contentTypes.get(path.extname(file).toLowerCase()) ??
         "application/octet-stream";
       const immutable =
-        urlPath.startsWith("/packs/blobs/") &&
-        /\/[a-f0-9]{64}\.(?:bin|gzz)$/.test(urlPath);
+        /^\/(?:packs|moly\/asset-store)\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(
+          urlPath,
+        );
       response.writeHead(200, {
         "Content-Type": type,
         "Content-Length": stat.size,
+        "X-Moly-Decoded-Bytes": String(stat.size),
         "Cache-Control": immutable
-          ? "public, max-age=31536000, immutable"
+          ? "public, max-age=31536000, immutable, no-transform"
           : "no-store",
       });
       if (request.method === "HEAD") response.end();

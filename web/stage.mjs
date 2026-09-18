@@ -10,7 +10,7 @@ import {
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
 import { createStageController } from "./stage-controller.mjs";
-import { stageMessages } from "./stage-locale.mjs";
+import { stageMessages, weatherLabel } from "./stage-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
@@ -23,6 +23,10 @@ let configuration = null,
   controller = null,
   backend = null;
 let lastPlayerData = "";
+// The last weather block the runtime published. The dial is drawn from it and
+// a click advances to the next檔 the runtime itself listed, so the stage never
+// invents an ID the catalogue does not contain.
+let weather = null;
 let phase = "idle",
   loading = false,
   started = false,
@@ -110,7 +114,47 @@ function render() {
       ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
       : "";
   $("stage-hint").textContent = t.controls;
+  renderWeather();
 }
+function renderWeather() {
+  const button = $("stage-weather");
+  if (!weather) {
+    button.hidden = true;
+    return;
+  }
+  const current = weather.options.find((option) => option.id === weather.id);
+  $("weather-label").textContent = weatherLabel(
+    ui.locale,
+    current?.name ?? weather.name,
+  );
+  button.hidden = false;
+  button.dataset.weatherId = String(weather.id);
+}
+// The runtime publishes the档位 in game terms (id + name). Names are localized
+// here, once, so the host can render the catalogue verbatim in the reader's
+// language instead of carrying its own copy of the weather table.
+function decorateWeather(state) {
+  if (!state?.weather) return state;
+  const options = state.weather.options.map((option) => ({
+    ...option,
+    label: weatherLabel(ui.locale, option.name),
+  }));
+  const current = options.find((option) => option.id === state.weather.id);
+  state.weather = {
+    ...state.weather,
+    options,
+    label: current?.label ?? weatherLabel(ui.locale, state.weather.name),
+  };
+  return state;
+}
+$("stage-weather").addEventListener("click", () => {
+  if (!weather || !controller) return;
+  const index = weather.options.findIndex(
+    (option) => option.id === weather.id,
+  );
+  const next = weather.options[(index + 1) % weather.options.length];
+  if (next) controller.dispatch("weather", next.id);
+});
 function fail(code, error) {
   if (failed) return;
   failed = true;
@@ -155,7 +199,7 @@ async function loadEngine() {
       abort.abort(new Error("Engine download made no progress for 30 seconds"));
   }, 2000);
   try {
-    if (!["cn", "jp"].includes(region))
+    if (!["cn", "jp", "tw", "en", "kr"].includes(region))
       throw new Error("An explicit supported resource region is required");
     sameOriginDirectory(params.get("assets") || "", location.href);
     const basePreparation = warmBaseResources(
@@ -163,6 +207,8 @@ async function loadEngine() {
         region,
         version,
         assets: new URL(params.get("assets"), location.href).href,
+        packs: params.get("packs") === "1",
+        assetCatalog: params.get("asset_catalog") ?? undefined,
       },
       {
         signal: abort.signal,
@@ -253,6 +299,7 @@ function enter() {
       post(type, value) {
         if (type === "error" && value.code === "source_mismatch")
           fail("source_mismatch", value);
+        if (type === "snapshot") decorateWeather(value);
         send(type, value);
       },
     });
@@ -291,9 +338,14 @@ window.addEventListener("message", (event) => {
         configuration = {
           initial: filters(value.initial || {}),
           content: value.content || null,
+          sound: value.sound !== false,
         };
       controller?.configure(configuration);
       render();
+      // A locale change relabels the weather dial; the host keeps reading the
+      // same projection instead of caching a stale translation.
+      const snapshot = controller?.getSnapshot();
+      if (snapshot) send("snapshot", decorateWeather(snapshot));
     } else if (type === "player-data") {
       if (
         !wasm ||
@@ -341,6 +393,10 @@ window.addEventListener("moly-ready", () => {
       }
       const state = controller?.poll();
       if (!state) return;
+      if (state.weather) {
+        weather = state.weather;
+        renderWeather();
+      }
       if (state.ready) mark("catalogReady");
       if (state.scene?.ready) {
         mark("sceneReady");
