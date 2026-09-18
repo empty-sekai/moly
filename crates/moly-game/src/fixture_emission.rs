@@ -58,7 +58,7 @@ use bevy::render::sync_world::MainEntity;
 use bevy::render::view::{Msaa, ViewDepthTexture, ViewUniform, ViewUniformOffset, ViewUniforms};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
-use crate::env::SiteEnvGpuBuffer;
+use crate::env::{SiteEnv, SiteEnvGpuBuffer};
 use crate::uber_particle::{ParticleEmission, UberParticleMaterial, CullArm, BlendArm, UBER_SHADER};
 use crate::fixture_material::{FixtureMaterialKey, FixtureParams};
 
@@ -151,6 +151,10 @@ struct EmissionDraw {
     vertex_transform: Mat4,
     params: Option<FixtureParams>,
     particle: Option<ParticleEmission>,
+    /// 粒子链的 `_GlobalPhenomenaDirectionalLightColor`。前向那条路读共享的
+    /// 全局量 buffer；效果 pass 只有对象块这一个 uniform，所以逐帧在这里取
+    /// 一次同样的值塞进去，两条路读到的是同一帧的同一个量。
+    phenomena_light: [f32; 4],
     /// (bright, dark)。
     emission: [f32; 4],
     key: FixtureMaterialKey,
@@ -176,7 +180,7 @@ struct EmissionPipelineKey {
     key: FixtureMaterialKey,
     blend: bool,
     sample_count: u32,
-    particle: Option<(bool, bool, CullArm, BlendArm)>,
+    particle: Option<(bool, bool, CullArm, BlendArm, bool)>,
     skinned: bool,
 }
 
@@ -214,7 +218,12 @@ fn emission_vertex_layout(
     skinned: bool,
 ) -> Result<bevy::mesh::VertexBufferLayout, ()> {
     let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0), Mesh::ATTRIBUTE_UV_0.at_shader_location(1)];
-    if particle { attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(2)); }
+    if particle {
+        attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(2));
+        // 逐粒子自定义流：源程序按 `coord` 从这两条里取分量。
+        attributes.push(crate::billboard::ATTRIBUTE_CUSTOM1.at_shader_location(3));
+        attributes.push(crate::billboard::ATTRIBUTE_CUSTOM2.at_shader_location(4));
+    }
     if skinned {
         attributes.push(Mesh::ATTRIBUTE_JOINT_INDEX.at_shader_location(2));
         attributes.push(Mesh::ATTRIBUTE_JOINT_WEIGHT.at_shader_location(3));
@@ -232,10 +241,12 @@ fn extract_emission_draws(
     draws: Extract<Query<(Entity, &Mesh3d, &GlobalTransform, &ViewVisibility, &FixtureEmission, Option<&FixtureEmissionOverride>, Option<&SkinnedMesh>)>>,
     particles: Extract<Query<(&Mesh3d, &GlobalTransform, &ViewVisibility, &ParticleEmission, &MeshMaterial3d<UberParticleMaterial>)>>,
     particle_materials: Extract<Res<Assets<UberParticleMaterial>>>,
+    site_env: Extract<Res<SiteEnv>>,
     cameras: Extract<Query<(&GlobalTransform, &Camera), With<Camera3d>>>,
     mut overflow_warned: Local<bool>,
 ) {
     let mut list = EmissionDrawList::default();
+    let phenomena_light = site_env.globals.phenomena_directional_light_color;
     if let Ok((cam_global, camera)) = cameras.single() {
         let view_from_world = cam_global.to_matrix().inverse();
         let view_proj = camera.clip_from_view() * view_from_world;
@@ -254,6 +265,9 @@ fn extract_emission_draws(
                 vertex_transform: world_from_local,
                 params: Some(emission.params),
                 particle: None,
+                // 家具链的现象光在它自己的 `SiteEnv` 绑定里读，对象块这一槽
+                // 是粒子专用的，家具这条路不写也不读。
+                phenomena_light: [0.0; 4],
                 emission: [emission.bright, emission.dark, f32::from(emission.force_emission), mode.copied().unwrap_or_default().uniform()],
                 key: emission.key,
                 blend: emission.blend,
@@ -270,6 +284,7 @@ fn extract_emission_draws(
                 mesh: mesh.0.id(), vertex_transform: view_proj * transform.to_matrix(),
                 skin: None, skin_byte_offset: None,
                 params: None, particle: Some(*effect), emission: [0.0; 4],
+                phenomena_light,
                 key: FixtureMaterialKey { fence: false, rug: None, render_queue: 0, alpha_clip: false, dither: false, window_clip: false, fresnel: false, reflection: false },
                 blend: true, view_z: view_from_world.transform_point3(transform.translation()).z,
                 pipeline: CachedRenderPipelineId::INVALID,
@@ -304,7 +319,7 @@ fn emission_object_bytes(draw: &EmissionDraw) -> Vec<u8> {
         bytes.extend_from_slice(&component.to_le_bytes());
     }
     if let Some(effect) = draw.particle {
-        for slot in [effect.params.base_st, effect.params.tint_colour, effect.params.scalars, effect.colour, Vec4::new(effect.intensity, effect.colour_type, 0.0, 0.0)] {
+        for slot in [effect.params.base_st, effect.params.tint_colour, effect.params.scalars, effect.params.luminance, effect.params.coords, effect.colour, Vec4::new(effect.intensity, effect.colour_type, 0.0, 0.0), Vec4::from_array(draw.phenomena_light)] {
             for value in slot.to_array() { bytes.extend_from_slice(&value.to_le_bytes()); }
         }
         bytes.resize(64 + 192, 0);
@@ -455,7 +470,7 @@ fn prepare_emission(
         let topology = render_mesh.primitive_topology();
         let mat_key = item.key;
         let blend = item.blend;
-        let particle = item.particle.map(|p| (p.tint_area, p.area, p.cull, p.blend));
+        let particle = item.particle.map(|p| (p.tint_area, p.area, p.cull, p.blend, p.plain_colour));
         item.pipeline = *pipelines
             .queued
             .entry(EmissionPipelineKey {
@@ -474,10 +489,11 @@ fn prepare_emission(
                     if gpu.skin_uniforms { defs.push("SKINS_USE_UNIFORM_BUFFERS"); }
                 }
                 if mat_key.rug.is_some() { defs.push("FIXTURE_RUG"); }
-                if let Some((tint, area, _, _)) = particle {
+                if let Some((tint, area, _, _, plain)) = particle {
                     defs.push("UBER_EFFECT_PASS");
                     if tint { defs.push("UBER_TINT_AREA_ALL"); }
                     if area { defs.push("UBER_EMISSION_AREA_ALL"); }
+                    if plain { defs.push("UBER_PLAIN_COLOUR"); }
                 }
                 let shader = if particle.is_some() { UBER_SHADER.clone() } else { FIXTURE_EMISSION_SHADER.clone() };
                 if mat_key.alpha_clip {

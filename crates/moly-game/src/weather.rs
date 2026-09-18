@@ -8,12 +8,17 @@
 //! 档案驱动的四条轴里能上屏的两条（天空扩散、屏幕耀斑）走本模块的 render
 //! graph 自定义节点。
 //!
-//! # 切换入口为什么是按键而不是 URL 参数
+//! # 切换入口
 //!
-//! URL 参数要在浏览器入口读一次再传进 App，入口组装在 `moly-app`——那是
-//! 本模块的可写范围之外；而本 crate 的 native 入口没有「打开时读一次」的
-//! 挂钩。按键在 App 内部闭环，不越界。切换 = C 键循环推进 15 档，
-//! 顺序按现象清单里的 id 排。
+//! 两条入口，同一段核对与同一条淡化链：
+//!
+//! - **C 键**：场景输入可用时循环推进 15 档，顺序按现象清单里的 id 排。
+//!   这是 native 的调试/演示路径，仍由 `scene_input_enabled` 挡门。
+//! - **[`WeatherRequest`]**：浏览器桥与宿主 UI 送来的**目标档位**（按 id
+//!   指定，不是「下一档」）。宿主的天气钮是用户界面上的显式操作，因此不受
+//!   场景输入门限制——否则正在播对话时那颗钮会变成死键。清单由
+//!   [`PhenomenonCatalogue`] 对外给出，界面点不到不存在的档；真送错了只
+//!   打一行拒绝行，请求面绝不 panic、也绝不把淡化砍在半途。
 //!
 //! # 键位归置（分配表的一键一义）
 //!
@@ -264,6 +269,25 @@ impl Default for CurrentPhenomenonId {
         Self(DEFAULT_PHENOMENON_ID)
     }
 }
+
+/// 一次性的切档请求：浏览器桥与宿主天气钮写它，天气链在下一帧核对档位
+/// 是否真实存在，再走与 C 键**同一条**核对与淡化。未知 id 只打一行拒绝行
+/// ——请求面绝不 panic、也绝不把淡化砍在半途。
+#[derive(Message, Debug, Clone, Copy)]
+pub struct WeatherRequest(pub i32);
+
+/// 现象档清单里的一项：对外只暴露 id 与档名这一对，宿主不必认识主表。
+#[derive(Clone, Debug)]
+pub struct PhenomenonOption {
+    pub id: i32,
+    pub name: String,
+}
+
+/// 现象档清单（id 升序，与现象运行态同序），由 `resolve_all` 在同一次落定
+/// 里写满。浏览器与宿主 UI 只读它来画天气钮——档位表由运行时给出，界面因此
+/// 点不到不存在的档；真送错了也只是被拒绝一次。
+#[derive(Resource, Default)]
+pub struct PhenomenonCatalogue(pub Vec<PhenomenonOption>);
 
 /// 一帧解出的后处理轴值（淡化权重已折进强度），主世界每帧写、抽取到渲染
 /// 世界。两条轴全关时节点整段旁路。
@@ -612,6 +636,7 @@ fn resolve_all(
     mut run: ResMut<WeatherRun>,
     mut phenomenon: ResMut<CurrentPhenomenon>,
     mut phenomenon_id: ResMut<CurrentPhenomenonId>,
+    mut catalogue: ResMut<PhenomenonCatalogue>,
 ) {
     if run.pending.is_empty() || !run.phenomena.is_empty() {
         return;
@@ -721,6 +746,18 @@ fn resolve_all(
     // 问候链的门按 id 比较，档名对不上门。
     phenomenon.0 = resolved[run.current].name.clone();
     phenomenon_id.0 = resolved[run.current].id;
+    // 对外档位表与当前档同点落定：浏览器与宿主 UI 读到的清单从这一刻起就
+    // 是完整的，不存在「先看到空表、再看到档位」的中间态。顺序按 id 排，
+    // 与真源现象主表一致。
+    *catalogue = PhenomenonCatalogue(
+        resolved
+            .iter()
+            .map(|entry| PhenomenonOption {
+                id: entry.id,
+                name: entry.name.clone(),
+            })
+            .collect(),
+    );
     let sun_on = resolved.iter().filter(|r| r.sun_on).count();
     let bloom_on = resolved.iter().filter(|r| r.bloom_on).count();
     let grade_on = resolved.iter().filter(|r| r.grade_on).count();
@@ -1004,26 +1041,35 @@ fn advance(
     }
 }
 
-/// Update：C 键循环推进到下一档，开一段交叉淡化（淡化在下一帧起推进）。
+/// Update：两个入口共用这一条切换链——场景输入可用时 C 键循环推进到下一
+/// 档，以及浏览器桥/宿主 UI 请求的**确定性档位**。两者都在这里核对档位、
+/// 开一段交叉淡化（淡化在下一帧起推进）。
 ///
 /// 另有**验证用**的自动切换：环境变量 `MOLY_WEATHER_AUTOSWITCH_SECS` 给了
 /// 秒数就按该周期自动切——验收要在无人按键的跑法里从日志推导「轴 resource
 /// 值随切换变」，真人按键路径（C 键）不受影响；变量不给时这条路径完全不
 /// 生效。淡化进行中不叠新切换（0.25s 的窗口，叠了会砍在半途）。
-fn switch_on_key(
+///
+/// 按键仍按场景输入门（设置面板/内容库挡世界输入时不该被键盘改天气），而
+/// 请求来自宿主界面上的显式操作，不受那条门限制——否则正在播一段对话时
+/// 天气钮会变成死键。未知档位只打一行拒绝行：请求面不能 panic。
+fn switch_phenomenon(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut run: ResMut<WeatherRun>,
     site: Option<Res<SiteActive>>,
     mut phenomenon: ResMut<CurrentPhenomenon>,
     mut phenomenon_id: ResMut<CurrentPhenomenonId>,
+    mut requests: MessageReader<WeatherRequest>,
+    panel: Res<crate::game_settings::SettingsPanel>,
+    library: Res<crate::content_library::ContentLibrary>,
     // 自发光账目（换装完成的收账件；Option——换装未完成时缺件，此切换
     // 无行可打）。
     emission: Option<Res<EmissionAccount>>,
     // (周期, 已计秒数)，首次调用时按环境变量定型。
     mut auto: Local<Option<(f32, f32)>>,
 ) {
-    if run.phenomena.len() < 2 || run.fade.is_some() {
+    if run.phenomena.is_empty() || run.fade.is_some() {
         return;
     }
     if auto.is_none() {
@@ -1033,8 +1079,7 @@ fn switch_on_key(
             .filter(|period| *period > 0.0)
             .map(|period| (period, 0.0));
     }
-    let pressed = keys.just_pressed(KeyCode::KeyC)
-        || match auto.as_mut() {
+    let autoswitch = match auto.as_mut() {
             Some((period, elapsed)) => {
                 *elapsed += time.delta_secs();
                 if *elapsed >= *period {
@@ -1046,11 +1091,28 @@ fn switch_on_key(
             }
             None => false,
         };
-    if !pressed {
+    // 显式请求比同帧的按键更具体：请求给出的是**目标档**，按键只是「下一
+    // 档」。两者都过同一段核对，因此两条入口的淡化与记账逐式同形。
+    let requested = requests.read().last().map(|request| request.0);
+    let pressed = crate::game_settings::scene_input_enabled(panel, library)
+        && (keys.just_pressed(KeyCode::KeyC) || autoswitch);
+    let to = match requested {
+        Some(id) => match run.phenomena.iter().position(|entry| entry.id == id) {
+            Some(index) => index,
+            None => {
+                warn!("天气请求：清单里没有 id {id} 的档位，忽略这一次请求");
+                return;
+            }
+        },
+        None if pressed && run.phenomena.len() > 1 => {
+            (run.current + 1) % run.phenomena.len()
+        }
+        None => return,
+    };
+    if to == run.current {
         return;
     }
     let from = run.current;
-    let to = (from + 1) % run.phenomena.len();
     // 切换行的两侧取当前站点的生效变体：覆写站上切换的数值面就是覆写档
     // 的（淡化混合与收口读同一对变体，见 `advance`）。
     let environment_site = site
@@ -1742,15 +1804,17 @@ impl ViewNode for WeatherPostNode {
         &'static ViewTarget,
         &'static WeatherPyramid,
         Option<&'static ViewEmissionTarget>,
+        Option<&'static TransparentCapture>,
     );
 
     fn run(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, pyramid, emission_target): QueryItem<Self::ViewQuery>,
+        (view_target, pyramid, emission_target, transparent_capture): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        if transparent_capture.is_some() { return Ok(()); }
         let params = world.resource::<WeatherPostParams>();
         if !params.diff_on && !params.flare_on && !params.bloom_on && !params.grade_on && params.split_highlights[3] == 0.0 {
             return Ok(());
@@ -2045,16 +2109,22 @@ fn fullscreen_pass(
 
 /// 天气系统插件：主世界装载/切换/逐帧写出，渲染世界 uniform + 金字塔 +
 /// render graph 节点（挂在色调映射之后、主后处理收尾之前）。
+#[derive(Component, Clone, bevy::render::extract_component::ExtractComponent)]
+pub(crate) struct TransparentCapture;
+
 pub struct WeatherPlugin;
 
 impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<TransparentCapture>::default());
         app.add_plugins(ExtractResourcePlugin::<WeatherPostParams>::default())
             .init_resource::<CurrentPhenomenon>()
             .init_resource::<CurrentPhenomenonId>()
+            .init_resource::<PhenomenonCatalogue>()
+            .add_message::<WeatherRequest>()
             .add_systems(Startup, load)
             .add_systems(Update, (parse_index, resolve_all).chain())
-            .add_systems(Update, (advance, switch_on_key.run_if(crate::game_settings::scene_input_enabled)).chain());
+            .add_systems(Update, (advance, switch_phenomenon).chain());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

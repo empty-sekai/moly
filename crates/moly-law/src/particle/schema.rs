@@ -9,14 +9,14 @@
 //! 「接没接线分不清」。
 //!
 //! 识别但**未映射**的键不丢弃也不报错——收进 `unmapped` 具名清单
-//! （customData、subEmitters、collision、forceOverLifetime、scalingMode、
+//! （subEmitters、collision、forceOverLifetime、scalingMode、
 //! emitterVelocityMode、randomSeed、autoRandomSeed、renderer、以及 shape
 //! 的非圆参数族），消费侧可见「这条数据在，但律没管它」。
 
 use std::fmt;
 
 use crate::particle::buffer::RingBufferMode;
-use crate::particle::emit::Burst;
+use crate::particle::emit::{Burst, BurstCycles};
 use crate::particle::json::{self, Value};
 use crate::particle::value::{
     Curve, CurveKey, Gradient, GradientAlphaKey, GradientColorKey, MinMaxCurve, MinMaxGradient,
@@ -142,6 +142,30 @@ pub struct VelocityOverLifetimeParams {
     pub in_world_space: bool,
 }
 
+/// customData 模块的一个槽（`custom1` / `custom2`）。
+///
+/// 逐粒子自定义流：每个分量是一条独立的 MinMax 曲线，按归一化寿命逐粒子
+/// 求值，结果进顶点属性的对应分量。着色器侧的选择器按
+/// `coord = 分量号 × 10 + 来源号` 取值，来源 1 = `custom1`、2 = `custom2`、
+/// 0 = 常量零向量。
+///
+/// `componentCount` 之外的分量不写，留零——源程序的选择器可以指到那里，
+/// 取到的就是零。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomDataSlot {
+    /// 实际产出的分量数（1..=4）。
+    pub component_count: usize,
+    /// 逐分量曲线，长度等于 `component_count`。
+    pub components: Vec<MinMaxCurve>,
+}
+
+/// customData 模块：两个槽，缺席或 `disabled` 为 None。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CustomDataParams {
+    pub custom1: Option<CustomDataSlot>,
+    pub custom2: Option<CustomDataSlot>,
+}
+
 /// sizeOverLifetime 模块（分轴时 `curve` 是 X 轴）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SizeOverLifetimeParams {
@@ -202,20 +226,22 @@ pub struct EmitterParams {
     pub size_over_lifetime: Option<SizeOverLifetimeParams>,
     pub rotation_over_lifetime: Option<RotationOverLifetimeParams>,
     pub limit_velocity: Option<LimitVelocityParams>,
+    /// 逐粒子自定义流。两个槽都缺席或 `disabled` 时为 None。
+    pub custom_data: Option<CustomDataParams>,
     /// system 层 + particle 层识别到但未映射的键（去重、按序）。
     pub unmapped: Vec<String>,
 }
 
 /// system 层已映射进参数的键——之外的键全部进 `unmapped`。
-/// 「识别但具名不迁」的那五个（scalingMode、emitterVelocityMode、
-/// randomSeed、autoRandomSeed、customData）**不在**此列：它们同样落
+/// 「识别但具名不迁」的那四个（scalingMode、emitterVelocityMode、
+/// randomSeed、autoRandomSeed）**不在**此列：它们同样落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 18] = [
+const MAPPED_SYSTEM_KEYS: [&str; 19] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed",
     "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
     "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
-    "limitVelocity",
+    "limitVelocity", "customData",
 ];
 
 /// start 层已映射键。
@@ -293,6 +319,12 @@ impl EmitterParams {
             }
             _ => None,
         };
+        let custom_data = match system_get(system, "customData") {
+            Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
+                CustomDataParams::from_value(v, &ctx)?
+            }
+            _ => None,
+        };
         let rotation_over_lifetime = match system_get(system, "rotationOverLifetime") {
             Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
                 Some(RotationOverLifetimeParams::from_value(v, &ctx)?)
@@ -340,6 +372,7 @@ impl EmitterParams {
             velocity_over_lifetime,
             color_over_lifetime,
             size_over_lifetime,
+            custom_data,
             rotation_over_lifetime,
             limit_velocity,
             unmapped,
@@ -393,12 +426,14 @@ impl EmissionParams {
                 .map(|(i, b)| {
                     let bctx = format!("{ctx}.emission.bursts[{i}]");
                     let count = min_max_curve(b.get("count"), &format!("{bctx}.count"))?;
-                    let cycles = u32_of(b.get("cycleCount"), &format!("{bctx}.cycleCount"))?;
-                    if cycles == 0 {
-                        return Err(EffectsError(format!(
-                            "{bctx}.cycleCount: 0 (user-facing counts are >= 1)"
-                        )));
-                    }
+                    // 序列化的 `cycleCount == 0` 是「无限重复」，不是非法值：
+                    // 引擎 Editor 的轮数下拉第 0 项写的就是字面量 0，托管
+                    // setter 也只拒 `< 0`。此处此前把 0 当非法整条拒掉，
+                    // 常驻发射器（喷泉水柱一族）因此一条都进不来。
+                    let cycles = BurstCycles::from_serialized(u32_of(
+                        b.get("cycleCount"),
+                        &format!("{bctx}.cycleCount"),
+                    )?);
                     Ok(Burst {
                         time: f32_of(b.get("time"), &format!("{bctx}.time"))?,
                         count,
@@ -478,6 +513,70 @@ impl VelocityOverLifetimeParams {
                 &format!("{ctx}.velocityOverLifetime.inWorldSpace"),
             )?,
         })
+    }
+}
+
+impl CustomDataParams {
+    /// 两个槽都缺席或 `disabled` 时返回 None——没有流要产出。
+    fn from_value(v: &Value, ctx: &str) -> Result<Option<Self>, EffectsError> {
+        let obj = v.as_object().unwrap_or(&[]);
+        let custom1 = CustomDataSlot::from_value(
+            obj_get(obj, "custom1"),
+            &format!("{ctx}.customData.custom1"),
+        )?;
+        let custom2 = CustomDataSlot::from_value(
+            obj_get(obj, "custom2"),
+            &format!("{ctx}.customData.custom2"),
+        )?;
+        if custom1.is_none() && custom2.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self { custom1, custom2 }))
+    }
+}
+
+impl CustomDataSlot {
+    fn from_value(v: Option<&Value>, ctx: &str) -> Result<Option<Self>, EffectsError> {
+        let Some(obj) = v.and_then(Value::as_object) else {
+            return Ok(None);
+        };
+        let mode = str_of(obj_get(obj, "mode"), &format!("{ctx}.mode"))?;
+        match mode.as_str() {
+            "disabled" => Ok(None),
+            // `color` 档存的是 MinMaxGradient 不是逐分量曲线，是另一种形状；
+            // 本站语料里 0 条，落这里要响亮拒，不要静默当 vector 读。
+            "vector" => {
+                let count = f32_of(
+                    obj_get(obj, "componentCount"),
+                    &format!("{ctx}.componentCount"),
+                )? as usize;
+                if count == 0 || count > 4 {
+                    return Err(EffectsError(format!(
+                        "{ctx}.componentCount: {count} 不在 1..=4"
+                    )));
+                }
+                let components = obj_get(obj, "components")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| EffectsError(format!("{ctx}.components: array missing")))?;
+                if components.len() < count {
+                    return Err(EffectsError(format!(
+                        "{ctx}.components: {} 条曲线不足 componentCount {count}",
+                        components.len()
+                    )));
+                }
+                let components = components
+                    .iter()
+                    .take(count)
+                    .enumerate()
+                    .map(|(i, c)| min_max_curve(Some(c), &format!("{ctx}.components[{i}]")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Some(Self {
+                    component_count: count,
+                    components,
+                }))
+            }
+            other => Err(EffectsError(format!("{ctx}.mode: 未实现的档 {other}"))),
+        }
     }
 }
 
@@ -928,7 +1027,7 @@ mod tests {
         }
         // burst 用户面口径直接落。
         let b = &e.emission.as_ref().unwrap().bursts[1];
-        assert_eq!(b.cycles, 3);
+        assert_eq!(b.cycles, BurstCycles::from_serialized(3));
         assert_eq!(b.repeat_interval, 2.0);
         assert_eq!(b.probability, 0.25);
         // shape 只映射圆参数。

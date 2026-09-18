@@ -120,6 +120,7 @@ pub(crate) fn compose_to_world(system: &Runtime, ctx: &Context) -> GlobalTransfo
 pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Quad> {
     let size_over_lifetime = system.emitter.size_over_lifetime.as_ref();
     let colour_over_lifetime = system.emitter.color_over_lifetime.as_ref();
+    let custom_data = system.emitter.custom_data.as_ref();
     let mut quads = Vec::with_capacity(system.pool.len());
     for (index, particle) in system.pool.iter().enumerate() {
         let side = system.side[index];
@@ -142,12 +143,27 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
                 colour[channel] *= over[channel];
             }
         }
+        // 逐粒子自定义流：两个槽各按归一化年龄求值，与 size/colour 同口径
+        // （`evaluate(age, side.rand)`）。componentCount 之外的分量留零。
+        let mut custom1 = [0.0f32; 4];
+        let mut custom2 = [0.0f32; 4];
+        if let Some(cd) = custom_data {
+            for (slot, out) in [(cd.custom1.as_ref(), &mut custom1), (cd.custom2.as_ref(), &mut custom2)] {
+                if let Some(slot) = slot {
+                    for (channel, curve) in slot.components.iter().enumerate() {
+                        out[channel] = curve.evaluate(age, side.rand);
+                    }
+                }
+            }
+        }
         quads.push(Quad {
             centre: to_world.transform_point(Vec3::from_array(particle.position)),
             size: Vec2::from_array(size),
             // 自旋状态（弧度）：出生角 + rotationOverLifetime 的积分。
             rotation: side.rot[2],
             colour,
+            custom1,
+            custom2,
         });
     }
     quads

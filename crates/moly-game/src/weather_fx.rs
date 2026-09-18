@@ -85,6 +85,23 @@ use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_worl
 /// 源族的 shader 名（与站点链同一族、同一份材质实现）。
 const SHADER_NAME: &str = "Mysekai/Effect/UberUnlit";
 
+/// 原版粒子族的 shader 名。天气档案里两族并存——现算全 15 份现象档案：
+/// 该族 144 条、UberUnlit 380 条、无材质/无 shader 名 36 条。
+const PLAIN_SHADER_NAME: &str = "Particles/Standard Unlit";
+
+/// 粒子材质族。两族的属性名与特性面**不相交**，但化简后的片元链同形：
+/// 原版族的程序体（该族全部变体逐份读过）恰三步——
+///   `c = texture(_MainTex, uv)` → `c *= _Color` → `c *= 顶点色`
+/// 即本链所有特性臂关闭、材质色改为平乘。所以两族共用一条绘制路径，
+/// 由这个枚举决定按哪套属性名取值、以及着色器走哪条臂。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Family {
+    /// 染色 / 亮度键控透明 / 现象光 / 逐粒子流都在这一族。
+    Uber,
+    /// 原版族：特性面由它自己的一组开关表达，全 0 才等于那条三步链。
+    Plain,
+}
+
 /// 零缩放的四边形没有面积，画不出来；尺寸下限。
 const MIN_PARTICLE_SIZE: f32 = 0.0001;
 
@@ -146,6 +163,8 @@ struct Planned {
     node_affine: GlobalTransform,
     params: UberT1Params,
     tint_area: bool,
+    /// 原版粒子族 ⇒ 材质色平乘（见 wgsl 的 `UBER_PLAIN_COLOUR`）。
+    plain_colour: bool,
     cull: CullArm,
     blend: BlendArm,
     clamp: SizeClamp,
@@ -497,12 +516,16 @@ fn judge(
         }
     };
     let shader = material.get("shader").and_then(Value::as_str);
-    if shader != Some(SHADER_NAME) {
-        tally
-            .other_shader
-            .push(shader.unwrap_or("(缺 shader 名)").to_owned());
-        return None;
-    }
+    let family = match shader {
+        Some(SHADER_NAME) => Family::Uber,
+        Some(PLAIN_SHADER_NAME) => Family::Plain,
+        other => {
+            tally
+                .other_shader
+                .push(other.unwrap_or("(缺 shader 名)").to_owned());
+            return None;
+        }
+    };
     tally.records += 1;
     if renderer.get("enabled").and_then(Value::as_bool) != Some(true) {
         tally.renderer_disabled += 1;
@@ -590,18 +613,28 @@ fn judge(
     // ---- 状态档（材质 uniform 的分支全关才走 T1 片元链） ----
     let floats = material.get("floats").and_then(Value::as_object);
     let get = |key: &str| floats.and_then(|f| f.get(key)).and_then(Value::as_f64);
-    if get("_BlendSrc") != Some(5.0) {
-        tally.state_arm.push(format!("_BlendSrc={:?}", get("_BlendSrc")));
+    // 混合因子：两族的属性名不同——染色族 `_BlendSrc`/`_BlendDst`，原版族
+    // `_SrcBlend`/`_DstBlend`（后者由该 shader 的 pass 状态 `rtBlend0` 具名
+    // 引用，读自真源而非推断）。取值口径同为 Unity `BlendMode`：5 = SrcAlpha。
+    let (src_key, dst_key) = match family {
+        Family::Uber => ("_BlendSrc", "_BlendDst"),
+        Family::Plain => ("_SrcBlend", "_DstBlend"),
+    };
+    if get(src_key) != Some(5.0) {
+        tally
+            .state_arm
+            .push(format!("{src_key}={:?}", get(src_key)));
         return None;
     }
-    let blend = match get("_BlendDst") {
+    let blend = match get(dst_key) {
         Some(v) if v == 10.0 => BlendArm::AlphaBlend,
         Some(v) if v == 1.0 => BlendArm::Additive,
         other => {
-            tally.state_arm.push(format!("_BlendDst={other:?}"));
+            tally.state_arm.push(format!("{dst_key}={other:?}"));
             return None;
         }
     };
+    // `_Cull` 两族同名同口径（原版族的 pass 状态把 culling 具名引到它）。
     let cull = match get("_Cull") {
         Some(v) if v == 0.0 => CullArm::Off,
         Some(v) if v == 1.0 => CullArm::Front,
@@ -611,33 +644,104 @@ fn judge(
             return None;
         }
     };
-    if get("_ZTest") != Some(4.0) {
-        tally.state_arm.push(format!("_ZTest={:?}", get("_ZTest")));
+    // 深度比较：染色族由材质属性给；原版族的 pass 状态把 zTest 写成常量
+    // 4（LEqual）且**不开放为属性**，所以该族按 4 读——这是从 pass 状态读出
+    // 来的值，不是「属性缺失就当默认」的倒推。
+    let z_test = match family {
+        Family::Uber => get("_ZTest"),
+        Family::Plain => Some(4.0),
+    };
+    if z_test != Some(4.0) {
+        tally.state_arm.push(format!("_ZTest={z_test:?}"));
         return None;
     }
-    for name in [
-        "_FakeLightEnabled",
-        "_TranceparencyByLuminanceEnabled",
-        "_PhenomenaLightEnabled",
-        "_BaseMapRotationEnabled",
-    ] {
-        if get(name) != Some(0.0) {
-            tally.state_arm.push(format!("{name}={:?}", get(name)));
-            return None;
+
+    // 特性开关：两族各有自己的一组，含义相同——「全关」才等于本链实现的
+    // 那条片元链。任何一个非 0 都说明源程序里编进了本链没有的步，具名挡下。
+    let mut luminance_enabled = 0.0f32;
+    let mut phenomena_enabled = 0.0f32;
+    let mut tint_blend_rate_coord = 0.0f32;
+    match family {
+        Family::Uber => {
+            for name in ["_FakeLightEnabled", "_BaseMapRotationEnabled"] {
+                if get(name) != Some(0.0) {
+                    tally.state_arm.push(format!("{name}={:?}", get(name)));
+                    return None;
+                }
+            }
+            // 亮度键控透明与现象光这两条分支本链已实现（片元链尾段，与站点粒子
+            // 共用同一条）。开关只认 0/1，别的取值说明这份材质不是我们读过的那一档。
+            luminance_enabled = match get("_TranceparencyByLuminanceEnabled") {
+                Some(v) if v == 0.0 || v == 1.0 => v as f32,
+                other => {
+                    tally
+                        .state_arm
+                        .push(format!("_TranceparencyByLuminanceEnabled={other:?}"));
+                    return None;
+                }
+            };
+            phenomena_enabled = match get("_PhenomenaLightEnabled") {
+                Some(v) if v == 0.0 || v == 1.0 => v as f32,
+                other => {
+                    tally
+                        .state_arm
+                        .push(format!("_PhenomenaLightEnabled={other:?}"));
+                    return None;
+                }
+            };
+            if luminance_enabled == 1.0 {
+                for name in [
+                    "_LuminanceTransparencyProgressCoord",
+                    "_LuminanceTransparencySharpnessCoord",
+                ] {
+                    if get(name) != Some(0.0) {
+                        tally.state_arm.push(format!("{name}={:?}", get(name)));
+                        return None;
+                    }
+                }
+            }
+            // `_TintBlendRateCoord` 已接逐粒子流（顶点属性 custom1/custom2 + 着色器
+            // 选择器），不再要求为 0；其余 coord 的选择器接口相同但消费面未接，
+            // 仍旧拒——放行了却不喂就是静默的错误值。
+            tint_blend_rate_coord = get("_TintBlendRateCoord").unwrap_or(0.0) as f32;
+            for name in [
+                "_EmissionIntensityCoord",
+                "_BaseMapOffsetXCoord",
+                "_BaseMapOffsetYCoord",
+                "_BaseMapRotationCoord",
+            ] {
+                if get(name) != Some(0.0) {
+                    tally.state_arm.push(format!("{name}={:?}", get(name)));
+                    return None;
+                }
+            }
+        }
+        Family::Plain => {
+            // 原版族的特性面。`_ColorMode` 非 0 会把「平乘」换成加/减/叠加/
+            // 取色/差值里的另一支；其余六个各自把一整段接进片元链。这一族
+            // 没有亮度键控与现象光那两条分支（属性面不含它们）⇒ 两臂恒关。
+            for name in [
+                "_ColorMode",
+                "_LightingEnabled",
+                "_EmissionEnabled",
+                "_DistortionEnabled",
+                "_FlipbookMode",
+                "_SoftParticlesEnabled",
+                "_CameraFadingEnabled",
+            ] {
+                if get(name) != Some(0.0) {
+                    tally.state_arm.push(format!("{name}={:?}", get(name)));
+                    return None;
+                }
+            }
         }
     }
-    for name in [
-        "_TintBlendRateCoord",
-        "_EmissionIntensityCoord",
-        "_BaseMapOffsetXCoord",
-        "_BaseMapOffsetYCoord",
-        "_BaseMapRotationCoord",
-    ] {
-        if get(name) != Some(0.0) {
-            tally.state_arm.push(format!("{name}={:?}", get(name)));
-            return None;
-        }
-    }
+    let luminance = Vec4::new(
+        get("_LuminanceTransparencyProgress").unwrap_or(0.0) as f32,
+        get("_LuminanceTransparencySharpness").unwrap_or(0.0) as f32,
+        get("_InverseLuminanceTransparency").unwrap_or(0.0) as f32,
+        0.0,
+    );
     // 关键字：T1 全集之外的关键字意味着源程序里编进了本链没有的步。
     // 软粒子是「放行但未实现」（alpha 乘法链末段，要读场景深度）。
     let keywords = material
@@ -653,6 +757,11 @@ fn judge(
         match *keyword {
             "_BASE_MAP_MODE_2D" | "_EMISSION_MAP_MODE_2D" | "_TINT_COLOR_ENABLED"
             | "_EMISSION_AREA_ALL" | "_TINT_AREA_ALL" => {}
+            // 原版族的混合变体关键字。它与 `_SrcBlend=5`/`_DstBlend=10` 表达
+            // 同一件事（该族语料 144/144 两者同时在场），混合因子已由上面的
+            // 状态档接走，这里不额外改片元链。只对该族放行：出现在染色族上
+            // 说明读到的不是我们读过的那一档。
+            "_ALPHABLEND_ON" if family == Family::Plain => {}
             SOFT_PARTICLES => {
                 tally
                     .shading_shortfall
@@ -672,8 +781,13 @@ fn judge(
             .push(format!("深度偏置 _ZOffset={:?}", get("_ZOffset")));
     }
     // 基础贴图：现象根相对 URI（字符串直存，不是站点侧车的槽下标）。
+    // 两族的贴图槽名不同：染色族 `_BaseMap`，原版族 `_MainTex`。
+    let base_map_key = match family {
+        Family::Uber => "_BaseMap",
+        Family::Plain => "_MainTex",
+    };
     let uri = material
-        .pointer("/textures/_BaseMap")
+        .pointer(&format!("/textures/{base_map_key}"))
         .and_then(Value::as_str)
         .filter(|uri| !uri.is_empty());
     let Some(uri) = uri else {
@@ -802,7 +916,7 @@ fn judge(
         .iter()
         .any(|k| *k == "_TINT_AREA_ALL" || *k == "_TINT_AREA_RIM");
     let base_st = material
-        .pointer("/textureScaleOffset/_BaseMap")
+        .pointer(&format!("/textureScaleOffset/{base_map_key}"))
         .and_then(Value::as_array)
         .filter(|list| list.len() == 4)
         .map(|list| {
@@ -815,8 +929,18 @@ fn judge(
             out
         })
         .unwrap_or([1.0, 1.0, 0.0, 0.0]);
+    // 材质色。染色族读 `_TintColor` 并按混合率朝它插值；原版族读 `_Color`
+    // 并**无条件平乘**。两者共用这一槽，由 `plain_colour` 决定着色器按哪
+    // 种语义读它（见 wgsl 的 `UBER_PLAIN_COLOUR`）。
+    // ⚠ 该族语料里 `_Color` 与 `_MainTex_ST` 恰好都是单位元（144/144 分别
+    // 为 (1,1,1,1) 与 (1,1,0,0)）⇒ **这份语料区分不出这两项有没有真的接上**。
+    // 照真源接线，但不能拿它当已验证。
+    let colour_key = match family {
+        Family::Uber => "/colors/_TintColor",
+        Family::Plain => "/colors/_Color",
+    };
     let tint_colour = material
-        .pointer("/colors/_TintColor")
+        .pointer(colour_key)
         .and_then(Value::as_array)
         .filter(|list| list.len() == 4)
         .map(|list| {
@@ -843,9 +967,12 @@ fn judge(
         params: UberT1Params {
             base_st: Vec4::from_array(base_st),
             tint_colour: Vec4::from_array(tint_colour),
-            scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, 0.0, 0.0),
+            scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled),
+            luminance,
+            coords: Vec4::new(tint_blend_rate_coord, 0.0, 0.0, 0.0),
         },
         tint_area,
+        plain_colour: family == Family::Plain,
         cull,
         blend,
         clamp: SizeClamp {
@@ -856,12 +983,12 @@ fn judge(
         alignment,
         texture,
         effect_pass: crate::uber_particle::ParticleEmission {
-            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, 0.0, 0.0) },
+            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled), luminance, coords: Vec4::new(tint_blend_rate_coord, 0.0, 0.0, 0.0) },
             colour: Vec4::from_array(std::array::from_fn(|i| material.pointer("/colors/_EmissionColor").and_then(Value::as_array).and_then(|a| a.get(i)).and_then(Value::as_f64).unwrap_or(1.0) as f32)),
             intensity: get("_EmissionIntensity").unwrap_or(1.0) as f32,
             colour_type: material.pointer("/ints/_EmissionColorType").and_then(Value::as_f64).or_else(|| get("_EmissionColorType")).unwrap_or(0.0) as f32,
             area: keywords.iter().any(|k| *k == "_EMISSION_AREA_ALL"),
-            tint_area, cull, blend,
+            tint_area, plain_colour: family == Family::Plain, cull, blend,
         },
         cone_angle,
         rol,
@@ -1007,6 +1134,7 @@ pub(crate) fn spawn_when_ready(
             planned.params,
             planned.texture.clone(),
             planned.tint_area,
+            planned.plain_colour,
             planned.cull,
             planned.blend,
         ));

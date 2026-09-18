@@ -34,7 +34,8 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::{Mat3, Vec2, Vec3};
-use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
+use bevy::mesh::{Indices, Mesh, MeshVertexAttribute, PrimitiveTopology};
+use bevy::render::render_resource::VertexFormat;
 
 /// 一颗要画的粒子。
 ///
@@ -49,7 +50,23 @@ pub struct Quad {
     pub rotation: f32,
     /// 逐粒子颜色（线性域，直接进 `COLOR` 槽）。
     pub colour: [f32; 4],
+    /// 逐粒子自定义流 1 / 2：`customData` 的两个槽按归一化寿命求值。
+    ///
+    /// 槽缺席、`disabled`、或分量数不足 4 时，未写到的分量留零——源程序的
+    /// 选择器可以指到那里，指到就取零，这与「来源 0 = 常量零向量」同形。
+    pub custom1: [f32; 4],
+    pub custom2: [f32; 4],
 }
+
+/// 自定义流的两条顶点属性。
+///
+/// 引擎那边这两条是活动顶点流里的 `Custom1XYZW` / `Custom2XYZW`，按顺序
+/// 打包后各占满一个 TEXCOORD 槽（同版本 Editor 三后端实测）。本链不复刻
+/// 那套打包，直接各给一条 `Float32x4`：着色器读到的分量语义相同。
+pub const ATTRIBUTE_CUSTOM1: MeshVertexAttribute =
+    MeshVertexAttribute::new("Custom1", 0x4d_4f_4c_59_01, VertexFormat::Float32x4);
+pub const ATTRIBUTE_CUSTOM2: MeshVertexAttribute =
+    MeshVertexAttribute::new("Custom2", 0x4d_4f_4c_59_02, VertexFormat::Float32x4);
 
 /// `ParticleSystemRenderSpace` 的档位。
 ///
@@ -148,6 +165,8 @@ pub fn empty_mesh() -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new())
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new())
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new())
+        .with_inserted_attribute(ATTRIBUTE_CUSTOM1, Vec::<[f32; 4]>::new())
+        .with_inserted_attribute(ATTRIBUTE_CUSTOM2, Vec::<[f32; 4]>::new())
         .with_inserted_indices(Indices::U32(Vec::new()))
 }
 
@@ -168,6 +187,8 @@ pub fn write_quads(
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n * 4);
     let mut colours: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
+    let mut custom1: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
+    let mut custom2: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
 
     for quad in quads {
@@ -220,6 +241,8 @@ pub fn write_quads(
             positions.push(world.to_array());
             uvs.push(corner);
             colours.push(quad.colour);
+            custom1.push(quad.custom1);
+            custom2.push(quad.custom2);
         }
         // One surface; render-state culling determines which side is visible.
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -230,6 +253,8 @@ pub fn write_quads(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
+    mesh.insert_attribute(ATTRIBUTE_CUSTOM1, custom1);
+    mesh.insert_attribute(ATTRIBUTE_CUSTOM2, custom2);
     mesh.insert_indices(Indices::U32(indices));
     tally
 }
