@@ -62,6 +62,8 @@ pub mod pick;
 pub mod player;
 pub mod player_avatar;
 pub mod player_data;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod portraits;
 mod player_data_io;
 mod player_data_ui;
 mod player_fixture_action;

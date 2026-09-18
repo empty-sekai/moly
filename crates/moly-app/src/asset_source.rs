@@ -8,6 +8,18 @@
 
 use moly_assets::AssetSource;
 
+fn validate_catalog_id(catalog: &Option<String>) -> Result<(), String> {
+    if catalog.as_deref().is_some_and(|id| {
+        id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err("asset catalog must be a full lowercase SHA-256".into());
+    }
+    Ok(())
+}
+
 /// Asset roots are canonical same-origin directory paths, not URL references.
 pub fn validate_asset_prefix(base: &str) -> Result<(), String> {
     if !base.starts_with('/')
@@ -38,8 +50,10 @@ pub fn resolve() -> Result<AssetSource, String> {
             path.display()
         ));
     }
-    if path.join("asset-packs.json").is_file() {
-        Ok(AssetSource::NativePacks { path })
+    let catalog = std::env::var("MOLY_ASSET_CATALOG").ok();
+    validate_catalog_id(&catalog)?;
+    if catalog.is_some() || path.join("asset-packs.json").is_file() {
+        Ok(AssetSource::NativePacks { path, catalog })
     } else {
         Ok(AssetSource::NativeDir { path })
     }
@@ -72,9 +86,12 @@ pub fn resolve() -> Result<AssetSource, String> {
     {
         return Err("?assets= must resolve to a canonical path on the page origin".into());
     }
+    let catalog = params.get("asset_catalog");
+    validate_catalog_id(&catalog)?;
     match params.get("packs").as_deref() {
-        Some("1") => Ok(AssetSource::HttpPacks { url: base }),
-        None | Some("0") => Ok(AssetSource::HttpBase { url: base }),
+        Some("1") => Ok(AssetSource::HttpPacks { url: base, catalog }),
+        None | Some("0") if catalog.is_none() => Ok(AssetSource::HttpBase { url: base }),
+        None | Some("0") => Err("asset_catalog requires packs=1".into()),
         _ => Err("?packs= must be 0 or 1".into()),
     }
 }

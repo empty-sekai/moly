@@ -34,6 +34,18 @@ fn run_app(
     let mut app = moly_game::app(source, site, web_render_settings);
     #[cfg(not(target_arch = "wasm32"))]
     let mut app = moly_game::app(source, site);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(directory) = std::env::var_os("MOLY_PORTRAITS_OUT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create portrait output directory");
+        // This opt-in export process never writes the user's normal settings.
+        std::env::set_var("MOLY_SETTINGS_FILE", directory.join("capture-settings.json"));
+        let only = std::env::var("MOLY_PORTRAIT_UNIT").ok()
+            .map(|value| value.parse::<u32>().expect("MOLY_PORTRAIT_UNIT must be a source unit ID"));
+        moly_game::configure_browser_stage(&mut app);
+        moly_game::configure_browser_library(&mut app);
+        moly_game::portraits::configure(&mut app, directory, only);
+    }
     if let Err(message) = player_data_input::configure(&mut app) {
         fail_loud(&message);
     }

@@ -114,6 +114,7 @@ pub fn install(app: &mut App) {
                 ApplyDeferred,
                 crate::voice_pcm::prepare,
                 ApplyDeferred,
+                crate::voice_pcm::report_start,
                 crate::voice_mouth::attach,
                 ApplyDeferred,
                 crate::voice_mouth::advance,
@@ -206,7 +207,9 @@ pub fn install(app: &mut App) {
     .add_systems(Startup, content_library::setup.after(camera::spawn))
     .add_systems(
         PreUpdate,
-        crate::game_settings::input.after(bevy::ui::UiSystems::Focus).run_if(crate::browser_stage::standalone),
+        crate::game_settings::input
+            .after(bevy::ui::UiSystems::Focus)
+            .run_if(crate::browser_stage::standalone),
     )
     .add_systems(
         PreUpdate,
@@ -612,12 +615,20 @@ pub fn install(app: &mut App) {
                             // Dispose a departing Rest before a new conversation writes animation.
                             npc::sync_rest_lifecycle.after(npc::advance),
                             alone_action_runtime::advance,
-                            character::drive,
+                            (talk::fixture_action::drive, character::drive).chain(),
                             emoticon::serve_rest,
                             // 合成对话注入口（冒烟；无环境变量自关）——与配对同链
                             // 在步进前：注入的会话当帧即可步进。
-                            talk::voice_probe,
-                            talk::partvoice_probe,
+                            // Keep the outer dialogue tuple below Bevy's tuple-system
+                            // arity while preserving the probe -> prefetch order.
+                            (
+                                talk::voice_probe,
+                                talk::partvoice_probe,
+                                // Warm exact future authored voice assets without
+                                // creating a player or advancing the script cursor.
+                                audio::prefetch_voice,
+                            )
+                                .chain(),
                             talk_window::read_click_input
                                 .run_if(crate::game_settings::talk_input_enabled),
                             fixture_talk::discover_faces,

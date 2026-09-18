@@ -41,10 +41,23 @@ opt-level = 1
 opt-level = 3
 
 # Browser size profile, measured and browser-validated. Native release is unchanged.
+# Thin LTO keeps the release build reproducible on the 32 GiB review host: the
+# current fat-LTO link exceeds LLVM's practical peak-memory budget, while the
+# measured Brotli transfer remains no larger with thin LTO.
 [profile.wasm-size]
 inherits = "release"
 opt-level = "s"
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "debuginfo"
+
+# Diagnostic-only sibling of `wasm-size`: identical code generation, but the
+# WebAssembly name section is kept so a sampling profile reports real function
+# names instead of bare indices. `strip = "debuginfo"` above removes that
+# section, which leaves 7,281 names for 149,011 functions — enough to make a
+# profile unreadable. Never published; it exists so a hot function can be named.
+[profile.wasm-names]
+inherits = "wasm-size"
+strip = "none"
+debug = 1
