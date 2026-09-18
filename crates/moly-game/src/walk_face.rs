@@ -325,7 +325,7 @@ fn obstacle_set(placements: &FixturePlacements, ledger: &[CarvedRow], voxel: f32
 fn log_bake(tag: &str, field: &WalkField, obstacles: usize) {
     let counts = field.counts();
     info!(
-        "[walk-face] 可行走场{tag}：voxel {:.2} · 格 {} · 入面 {} · 阻挡足迹 {obstacles} 行（杀 {} 格）· 侵蚀杀 {} · 小区杀 {} · 可走 {} 格",
+        "[walk-face] 可行走场{tag}：voxel {:.2} · 格 {} · 入面 {} · 阻挡足迹 {obstacles} 行（杀 {} 格）· 侵蚀杀 {} · 小区杀 {} · 可走 {} 格 · 单调分区 {} 区 · 轮廓 {} 条/{} 顶点 · 导航多边形 {} 个",
         field.voxel(),
         counts.cells,
         counts.face,
@@ -333,5 +333,9 @@ fn log_bake(tag: &str, field: &WalkField, obstacles: usize) {
         counts.erosion_nulled,
         counts.region_nulled,
         counts.walkable,
+        counts.regions,
+        counts.contours,
+        counts.contour_verts,
+        counts.polygons,
     );
 }

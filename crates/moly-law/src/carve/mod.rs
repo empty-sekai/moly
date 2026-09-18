@@ -65,8 +65,12 @@
 //!   用）。其几何差异尚未逐家具验证，不能宣称等价。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
 
+mod contour;
+mod funnel;
 mod grid;
+mod polymesh;
 mod query;
+mod region;
 
 use crate::fixture::position::{layout_type, TILE_SIZE};
 use crate::fixture::GridPosition;
@@ -81,6 +85,10 @@ pub const AGENT_HEIGHT: f32 = 0.98;
 
 /// 小区面积阈（平方米）：同表值，换算成格数见 [`min_region_spans`]。
 pub const MIN_REGION_AREA: f32 = 2.0;
+
+/// 轮廓简化的最大偏差（格）：原生构造 Recast 配置时写入的常量，
+/// f32 位形 1.2999999523162842。它不随站点变化。
+pub const MAX_SIMPLIFICATION_ERROR: f32 = 1.3;
 
 /// 站点枚举名 → 值（`MysekaiSiteType` 的九值闭集）。
 pub fn site_type_value(name: &str) -> Option<u32> {
@@ -189,16 +197,29 @@ pub struct BakeCounts {
     pub region_nulled: usize,
     /// 最终可行走格数。
     pub walkable: usize,
+    /// 单调分区产出的区数（有效区号是 `1..=regions`）。
+    pub regions: u32,
+    /// 简化后的轮廓条数。
+    pub contours: usize,
+    /// 全部轮廓的顶点总数（简化后）。
+    pub contour_verts: usize,
+    /// 导航多边形网的单元数（三角形；凸合并未实现，见 polymesh 模块注释）。
+    pub polygons: usize,
 }
 
-/// 烘好的可行走场：格面 + 账目。查询全部走它。
+/// 烘好的可行走场：格面 + 分区 + 轮廓 + 账目。查询全部走它。
 pub struct WalkField {
     grid: grid::Grid,
+    regions: region::Regions,
+    #[allow(dead_code)] // 轮廓建完多边形网后只出账目；分瓦时它还要被读。
+    contours: Vec<contour::Contour>,
+    polys: polymesh::PolyMesh,
     counts: BakeCounts,
 }
 
 impl WalkField {
-    /// 烘焙：栅格化 → 足迹标 null → 侵蚀 → 小区过滤，账目逐段记。
+    /// 烘焙：栅格化 → 足迹标 null → 侵蚀 → 小区过滤 → 单调分区 → 轮廓，
+    /// 账目逐段记。
     pub fn bake(input: &BakeInput) -> WalkField {
         let mut grid = grid::rasterize(&input.tris, input.voxel);
         let face = grid.walkable.iter().filter(|w| **w).count();
@@ -206,6 +227,9 @@ impl WalkField {
         let erosion_nulled = grid::erode(&mut grid, radius_cells(input.voxel));
         let region_nulled = grid::filter_regions(&mut grid, min_region_spans(input.voxel));
         let walkable = grid.walkable.iter().filter(|w| **w).count();
+        let regions = region::build_monotone(&grid);
+        let contours = contour::build_contours(&grid, &regions, MAX_SIMPLIFICATION_ERROR);
+        let polys = polymesh::build(&contours);
         WalkField {
             counts: BakeCounts {
                 cells: grid.cols * grid.rows,
@@ -214,7 +238,14 @@ impl WalkField {
                 erosion_nulled,
                 region_nulled,
                 walkable,
+                regions: regions.max.saturating_sub(1),
+                contours: contours.len(),
+                contour_verts: contours.iter().map(|c| c.verts.len()).sum(),
+                polygons: polys.polygon_count(),
             },
+            regions,
+            contours,
+            polys,
             grid,
         }
     }
@@ -232,12 +263,12 @@ impl WalkField {
     /// 沿面折线：转录 `TryGetCanNavmeshTargetPosition` 的查询链
     /// （吸附 + 拉回梯度），见模块注释。全败返回 `None`。
     pub fn path(&self, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
-        query::path(&self.grid, start, goal)
+        query::path(&self.grid, &self.polys, &self.regions, start, goal)
     }
 
     /// 严格完整路线：不拉回目标，起终点必须已在可走场上。
     pub fn path_exact(&self, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
-        query::path_exact(&self.grid, start, goal)
+        query::path_exact(&self.grid, &self.polys, &self.regions, start, goal)
     }
 
     /// 整条位移线段的超覆盖判定（同路线拉直，不只检查终点）。
@@ -503,6 +534,16 @@ mod tests {
         assert_eq!(field.counts().erosion_nulled, 3900);
         assert_eq!(field.counts().region_nulled, 0);
         assert_eq!(field.counts().walkable, 36100);
+        // 单调分区：侵蚀后是一整块实心矩形，每行恰一个跨段，北邻唯一且
+        // 「本行并进该区的格数」与「该区被并的格数」相等 ⇒ 每行都并进上
+        // 一行那个区，全场恰 1 区。跨段没并上会得到 190。
+        assert_eq!(field.counts().regions, 1);
+        // 轮廓：那一块实心矩形只有一条外边界，简化后恰 4 个角。
+        // 全环邻区号都是 0（外墙）⇒ 走路径 B，先取字典序最小/最大的两个
+        // 对角点；另两个角离那条对角线约 95 格，远超 1.3 格的偏差阈 ⇒ 各被
+        // 插入一次；之后每条边都精确落在直线上 ⇒ 收在 4 个顶点。
+        assert_eq!(field.counts().contours, 1);
+        assert_eq!(field.counts().contour_verts, 4);
         let (min, max) = field.bounds();
         assert_eq!(min, [0.0, 0.0]);
         assert_eq!(max, [10.0, 10.0]);
@@ -533,8 +574,22 @@ mod tests {
                 window[1]
             );
         }
+        // 路点落在可走集的**闭包**上。
+        //
+        // ⚠ 这里不能用 `walkable_at`：搜索从格面搬到多边形网之后，拐点是
+        // 轮廓顶点，而轮廓顶点是**格角**，恰好落在最后一个可走格与第一个
+        // 死格的公共边上——按 `cell_of` 的半开约定归进死格，`walkable_at`
+        // 因此对一个完全正确的拐点报假。
+        //
+        // 而这正是侵蚀的用意：面已经按 agent 半径内缩过，agent 的中心本来
+        // 就可以走到这条边界上。所以判据问的应是「偏离可走集不超过一格」，
+        // 不是「格心可走」。真正的安全性质由上面那条「每段都不穿洞」承担。
         for p in &path {
-            assert!(carved.walkable_at(*p), "路点 {:?} 不可走", p);
+            assert!(
+                carved.nearest_walkable(*p, Some(0.05)).is_some(),
+                "路点 {:?} 离可走集超过一格",
+                p
+            );
         }
         // 反向臂：不挖时同一对起终点的路径确实穿过那个位置
         // ⇒ 正向臂量的是挖洞，不是「本来就得绕」。
