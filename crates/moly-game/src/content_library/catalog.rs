@@ -18,6 +18,8 @@ pub(crate) fn parse_assets(
         (1, handles.fixtures.clone()),
         (2, handles.thumbnails.clone()),
         (3, handles.models.clone()),
+        (4, handles.reactions.clone()),
+        (5, handles.portraits.clone()),
     ];
     for (slot, handle) in sources {
         if handles.processed[slot] {
@@ -33,7 +35,9 @@ pub(crate) fn parse_assets(
                     0 => "角色名称暂时无法载入，部分条目使用备用名称",
                     1 => "家具图鉴暂时无法载入，对话仍可浏览",
                     2 => "部分家具图片暂时无法载入",
-                    _ => "家具模型清单暂时无法载入，仍可浏览图鉴",
+                    3 => "家具模型清单暂时无法载入，仍可浏览图鉴",
+                    4 => "家具的原生角色互动组合暂时无法载入",
+                    _ => "角色 SD 图标暂时无法载入，组合列表仍可按名称显示",
                 }
                 .into(),
             );
@@ -48,7 +52,9 @@ pub(crate) fn parse_assets(
                 0 => parse_characters(&value, &mut catalog),
                 1 => parse_fixtures(&value, &mut catalog),
                 2 => parse_thumbnails(&value, &mut catalog),
-                _ => parse_model_index(&value, &mut catalog),
+                3 => parse_model_index(&value, &mut catalog),
+                4 => parse_fixture_reactions(&value, &mut catalog),
+                _ => parse_character_portraits(&value, &mut catalog),
             },
             Err(error) => {
                 warn!("[content-library] invalid document slot {slot}: {error}");
@@ -62,6 +68,9 @@ pub(crate) fn parse_assets(
     if handles.processed.iter().all(|done| *done) {
         load_thumbnail_handles(&mut catalog, state.external_ui, |path| {
             server.load::<Image>(AssetPath::from(format!("moly://fixture-thumbnails/{path}")))
+        });
+        load_character_portrait_handles(&mut catalog, state.external_ui, |path| {
+            server.load::<Image>(AssetPath::from(format!("moly://{path}")))
         });
         catalog.fixtures.sort_by_key(|row| row.id);
         catalog.source_ready = true;
@@ -83,6 +92,25 @@ fn load_thumbnail_handles(
         } else {
             catalog.thumbnail_paths.get(&row.id).map(|path| load(path))
         };
+    }
+}
+
+fn load_character_portrait_handles(
+    catalog: &mut LibraryCatalog,
+    external_ui: bool,
+    mut load: impl FnMut(&str) -> Handle<Image>,
+) {
+    catalog.character_portraits.clear();
+    if external_ui {
+        return;
+    }
+    let paths: Vec<_> = catalog
+        .character_portrait_paths
+        .iter()
+        .map(|(unit, path)| (*unit, path.clone()))
+        .collect();
+    for (unit, path) in paths {
+        catalog.character_portraits.insert(unit, load(&path));
     }
 }
 
@@ -109,6 +137,7 @@ fn parse_characters(value: &Value, catalog: &mut LibraryCatalog) {
             catalog.character_names.insert(unit, plain_text(name));
         }
         if let Some(group) = row.pointer("/identity/unit").and_then(Value::as_str) {
+            catalog.character_unit_types.insert(unit, group.to_owned());
             if let Some(label) = character_group_label(group) {
                 catalog.character_groups.insert(unit, label.to_owned());
             }
@@ -129,6 +158,131 @@ fn character_group_label(group: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+fn parse_fixture_reactions(value: &Value, catalog: &mut LibraryCatalog) {
+    if value.get("schema").and_then(Value::as_str) != Some("moly-fixture-reactions/1") {
+        catalog
+            .data_issues
+            .push("家具角色组合数据的版本无法识别".into());
+        return;
+    }
+    let Some(rows) = value.get("fixtures").and_then(Value::as_array) else {
+        catalog
+            .data_issues
+            .push("家具角色组合数据缺少家具列表".into());
+        return;
+    };
+    let mut seen_fixtures = HashSet::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let Some(id) = positive_id(row.get("fixtureId")).filter(|id| seen_fixtures.insert(*id))
+        else {
+            catalog.data_issues.push(format!(
+                "第 {} 条家具角色组合缺少有效编号或重复",
+                row_index + 1
+            ));
+            continue;
+        };
+        let Some(raw_groups) = row.get("groups").and_then(Value::as_array) else {
+            catalog
+                .data_issues
+                .push(format!("家具 {id} 的角色组合不是数组"));
+            continue;
+        };
+        let mut groups = Vec::with_capacity(raw_groups.len());
+        let mut row_valid = true;
+        let mut seen_groups = HashSet::<Vec<u32>>::new();
+        for (group_index, raw_group) in raw_groups.iter().enumerate() {
+            let Some(raw_units) = raw_group.as_array().filter(|units| !units.is_empty()) else {
+                catalog.data_issues.push(format!(
+                    "家具 {id} 的第 {} 个角色组合为空或格式错误",
+                    group_index + 1
+                ));
+                row_valid = false;
+                break;
+            };
+            let mut group = Vec::with_capacity(raw_units.len());
+            let mut seen_units = HashSet::new();
+            for value in raw_units {
+                let Some(unit) = value
+                    .as_u64()
+                    .and_then(|unit| u32::try_from(unit).ok())
+                    .filter(|unit| *unit > 0 && seen_units.insert(*unit))
+                else {
+                    catalog.data_issues.push(format!(
+                        "家具 {id} 的第 {} 个角色组合包含无效或重复角色",
+                        group_index + 1
+                    ));
+                    row_valid = false;
+                    break;
+                };
+                group.push(unit);
+            }
+            if !row_valid {
+                break;
+            }
+            if !seen_groups.insert(group.clone()) {
+                catalog
+                    .data_issues
+                    .push(format!("家具 {id} 存在重复的角色组合"));
+                row_valid = false;
+                break;
+            }
+            groups.push(group);
+        }
+        if row_valid {
+            catalog.fixture_reactions.insert(id, groups);
+        }
+    }
+}
+
+fn safe_character_portrait_path(path: &str) -> bool {
+    path.starts_with("ui/character-portraits/")
+        && path.to_ascii_lowercase().ends_with(".png")
+        && !path.contains([':', '\\'])
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+fn parse_character_portraits(value: &Value, catalog: &mut LibraryCatalog) {
+    if value.get("version").and_then(Value::as_u64) != Some(1) {
+        catalog
+            .data_issues
+            .push("角色 SD 图标清单的版本无法识别".into());
+        return;
+    }
+    let Some(rows) = value.get("characters").and_then(Value::as_array) else {
+        catalog
+            .data_issues
+            .push("角色 SD 图标清单缺少角色列表".into());
+        return;
+    };
+    let mut seen = HashSet::new();
+    for row in rows {
+        let Some(unit) = row
+            .get("unitId")
+            .and_then(Value::as_u64)
+            .and_then(|unit| u32::try_from(unit).ok())
+            .filter(|unit| *unit > 0 && seen.insert(*unit))
+        else {
+            catalog
+                .data_issues
+                .push("角色 SD 图标清单含无效或重复 unit".into());
+            continue;
+        };
+        let Some(path) = row
+            .get("image")
+            .and_then(Value::as_str)
+            .filter(|path| safe_character_portrait_path(path))
+        else {
+            catalog
+                .data_issues
+                .push(format!("角色 {unit} 的 SD 图标路径无效"));
+            continue;
+        };
+        catalog
+            .character_portrait_paths
+            .insert(unit, path.to_owned());
+    }
+}
+
 fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
     catalog.source_region = value
         .get("region")
@@ -602,7 +756,8 @@ pub(super) fn filtered_keys(
                             .is_some_and(|items| !items.is_empty()),
                         Scope::Ready => {
                             if state.mode == ExperienceMode::Independent {
-                                context::independent_reason(EntryKey::Fixture(row.id), catalog).is_none()
+                                context::independent_reason(EntryKey::Fixture(row.id), catalog)
+                                    .is_none()
                             } else {
                                 row.interactive()
                                     && world
@@ -737,7 +892,13 @@ mod tests {
             false,
             false,
             &LibraryCatalog::default(),
-            &moly_law::talk::TweetRef { id: 0, text: String::new(), motion: String::new(), eye: String::new(), mouth: String::new() },
+            &moly_law::talk::TweetRef {
+                id: 0,
+                text: String::new(),
+                motion: String::new(),
+                eye: String::new(),
+                mouth: String::new(),
+            },
         );
         assert!(query_matches(&row.search, "独特的关键词", 12));
         assert!(!query_matches(&row.search, "123", 12));
@@ -811,17 +972,110 @@ mod tests {
         assert!(!catalog.fixtures[0].source.as_ref().unwrap().exported);
     }
     #[test]
-    fn opening_tweet_preserves_source_break_and_missing_stays_missing() {
-        let original = "……对了，冰箱里好像还\n剩了一些望月同学……";
-        let tweet = moly_law::talk::TweetRef { id: 11374, text: original.into(),
-            motion: "mov_cw_silent_tilthead003".into(), eye: "normal_l".into(), mouth: "normal01".into() };
-        let build = |tweet: &moly_law::talk::TweetRef| make_talk(
-            TalkContent {master_id:1374,backend:TalkBackend::Fixture,is_general:None}, vec![17], vec![157],
-            vec![DialogueLine{speaker:"奏".into(),text:"这里是完整正式对白，不得截取替代气泡".into()}],
-            true, true, &LibraryCatalog::default(), tweet);
-        assert_eq!(build(&tweet).preview_tweet.unwrap().text, original);
-        let missing = moly_law::talk::TweetRef {id:0,text:String::new(),motion:String::new(),eye:String::new(),mouth:String::new()};
-        assert!(build(&missing).preview_tweet.is_none());
+    fn native_fixture_reactions_preserve_source_group_order() {
+        let mut catalog = LibraryCatalog::default();
+        parse_fixture_reactions(
+            &serde_json::json!({
+                "schema":"moly-fixture-reactions/1",
+                "fixtures":[{"fixtureId":534,"groups":[
+                    [1,4],[27,42],[7,8],[28,33],[11,12],
+                    [29,49],[13,55],[14,15],[18,20]
+                ]}]
+            }),
+            &mut catalog,
+        );
+        assert_eq!(
+            catalog.fixture_reactions(534),
+            &[
+                vec![1, 4],
+                vec![27, 42],
+                vec![7, 8],
+                vec![28, 33],
+                vec![11, 12],
+                vec![29, 49],
+                vec![13, 55],
+                vec![14, 15],
+                vec![18, 20]
+            ]
+        );
+        assert!(catalog.data_issues.is_empty());
     }
 
+    #[test]
+    fn malformed_fixture_reaction_row_fails_closed() {
+        let mut catalog = LibraryCatalog::default();
+        parse_fixture_reactions(
+            &serde_json::json!({
+                "schema":"moly-fixture-reactions/1",
+                "fixtures":[{"fixtureId":534,"groups":[[14,14]]}]
+            }),
+            &mut catalog,
+        );
+        assert!(catalog.fixture_reactions(534).is_empty());
+        assert!(!catalog.data_issues.is_empty());
+    }
+
+    #[test]
+    fn source_character_portrait_paths_are_confined_and_dom_does_not_load_them() {
+        let mut catalog = LibraryCatalog::default();
+        parse_character_portraits(
+            &serde_json::json!({"version":1,"characters":[
+                {"unitId":14,"image":"ui/character-portraits/chr_sp_14-demo.png"},
+                {"unitId":15,"image":"../escape.png"}
+            ]}),
+            &mut catalog,
+        );
+        assert_eq!(
+            catalog
+                .character_portrait_paths
+                .get(&14)
+                .map(String::as_str),
+            Some("ui/character-portraits/chr_sp_14-demo.png")
+        );
+        assert!(!catalog.character_portrait_paths.contains_key(&15));
+        load_character_portrait_handles(&mut catalog, true, |_| {
+            panic!("external DOM mode must not request native portrait textures")
+        });
+        assert!(catalog.character_portraits.is_empty());
+    }
+
+    #[test]
+    fn opening_tweet_preserves_source_break_and_missing_stays_missing() {
+        let original = "……对了，冰箱里好像还\n剩了一些望月同学……";
+        let tweet = moly_law::talk::TweetRef {
+            id: 11374,
+            text: original.into(),
+            motion: "mov_cw_silent_tilthead003".into(),
+            eye: "normal_l".into(),
+            mouth: "normal01".into(),
+        };
+        let build = |tweet: &moly_law::talk::TweetRef| {
+            make_talk(
+                TalkContent {
+                    master_id: 1374,
+                    backend: TalkBackend::Fixture,
+                    is_general: None,
+                },
+                vec![17],
+                vec![157],
+                vec![DialogueLine {
+                    speaker: "奏".into(),
+                    text: "这里是完整正式对白，不得截取替代气泡".into(),
+                }],
+                true,
+                true,
+                &LibraryCatalog::default(),
+                tweet,
+            )
+        };
+        assert_eq!(build(&tweet).preview_tweet.unwrap().text, original);
+        let missing = moly_law::talk::TweetRef {
+            id: 0,
+            text: String::new(),
+            motion: String::new(),
+            eye: String::new(),
+            mouth: String::new(),
+        };
+        assert!(build(&missing).preview_tweet.is_none());
+    }
 }

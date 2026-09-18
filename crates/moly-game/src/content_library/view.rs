@@ -661,6 +661,123 @@ pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>, state: Res
         RelativeCursorPosition::default(),
         ScrollPosition::default(),
     ));
+
+    // Source-shaped FixtureDescriptionDialog.  The source is a Common1ButtonDialog
+    // with two pages (FixtureDescription / FixtureReactionDescription), not
+    // ScreenLayerMysekaiInfo.  Geometry here is responsive Bevy chrome; page
+    // ownership, data and CharacterBand structure follow the decompiled source.
+    let fixture_dialog = c
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                display: Display::None,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                padding: UiRect::all(px(14)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.015, 0.026, 0.045, 0.82)),
+            FocusPolicy::Block,
+            Region::FixtureDialog,
+            UiTargetCamera(camera),
+            GlobalZIndex(1240),
+        ))
+        .id();
+    let dialog = attach(
+        &mut c,
+        fixture_dialog,
+        Node {
+            width: percent(92),
+            max_width: px(780),
+            height: percent(82),
+            max_height: px(760),
+            min_height: px(320),
+            min_width: px(0),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(12),
+            padding: UiRect::all(px(18)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(18)),
+            ..default()
+        },
+    );
+    c.entity(dialog).insert((
+        BackgroundColor(Color::srgb(0.035, 0.052, 0.087)),
+        BorderColor::all(EDGE),
+    ));
+    let tabs = row(&mut c, dialog, 8.);
+    let details = button(
+        &mut c,
+        tabs,
+        &font,
+        "家具信息",
+        LibraryAction::FixtureDialogTab(FixtureDialogTab::Details),
+        ButtonKind::Chip,
+    );
+    c.entity(details).insert(Node {
+        flex_grow: 1.,
+        min_height: px(40),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        padding: UiRect::axes(px(12), px(7)),
+        border: UiRect::all(px(1)),
+        border_radius: BorderRadius::all(px(9)),
+        ..default()
+    });
+    let reactions = button(
+        &mut c,
+        tabs,
+        &font,
+        "角色互动",
+        LibraryAction::FixtureDialogTab(FixtureDialogTab::Reactions),
+        ButtonKind::Chip,
+    );
+    c.entity(reactions).insert(Node {
+        flex_grow: 1.,
+        min_height: px(40),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        padding: UiRect::axes(px(12), px(7)),
+        border: UiRect::all(px(1)),
+        border_radius: BorderRadius::all(px(9)),
+        ..default()
+    });
+    let body = attach(
+        &mut c,
+        dialog,
+        Node {
+            width: percent(100),
+            flex_grow: 1.,
+            min_height: px(0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+    );
+    c.entity(body).insert((
+        Region::FixtureDialogBody,
+        RelativeCursorPosition::default(),
+        ScrollPosition::default(),
+    ));
+    let close = button(
+        &mut c,
+        dialog,
+        &font,
+        "关闭",
+        LibraryAction::CloseFixtureDialog,
+        ButtonKind::Primary,
+    );
+    c.entity(close).insert(Node {
+        width: percent(100),
+        min_height: px(42),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        padding: UiRect::axes(px(12), px(7)),
+        border: UiRect::all(px(1)),
+        border_radius: BorderRadius::all(px(9)),
+        ..default()
+    });
 }
 fn character_color(catalog: &LibraryCatalog, unit: u32) -> Color {
     catalog
@@ -708,6 +825,177 @@ fn artwork(
         );
     }
 }
+
+fn fixture_grid_text(fixture: &LibraryFixture) -> Option<String> {
+    let source = fixture.source.as_ref()?;
+    let size = source.grid_size;
+    let second = if source.layout == moly_law::fixture::position::layout_type::WALL_FRONT {
+        size.y
+    } else {
+        size.z
+    };
+    (size.x > 0 && second > 0).then(|| format!("{} × {}", size.x, second))
+}
+
+fn character_band(
+    c: &mut Commands,
+    parent: Entity,
+    font: &Handle<Font>,
+    units: &[u32],
+    catalog: &LibraryCatalog,
+) {
+    let band = attach(
+        c,
+        parent,
+        Node {
+            width: percent(100),
+            min_height: px(88),
+            flex_shrink: 0.,
+            align_items: AlignItems::Center,
+            column_gap: px(4),
+            padding: UiRect::all(px(4)),
+            border_radius: BorderRadius::all(px(10)),
+            ..default()
+        },
+    );
+    if units.len() > 1 {
+        // Source CharacterBand enables its background for multi-person rows.
+        c.entity(band)
+            .insert(BackgroundColor(Color::srgb(0.075, 0.12, 0.17)));
+    }
+    for unit in units {
+        let icon = attach(
+            c,
+            band,
+            Node {
+                width: px(80),
+                height: px(80),
+                flex_shrink: 0.,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                overflow: Overflow::clip(),
+                border_radius: BorderRadius::all(px(9)),
+                ..default()
+            },
+        );
+        if let Some(image) = catalog.portrait(*unit) {
+            c.entity(icon).insert(ImageNode::new(image.clone()));
+        } else {
+            c.entity(icon)
+                .insert(BackgroundColor(Color::srgb(0.10, 0.17, 0.22)));
+            text(
+                c,
+                icon,
+                font,
+                catalog.character(*unit).chars().take(1).collect::<String>(),
+                26.,
+                character_color(catalog, *unit),
+            );
+        }
+    }
+}
+
+fn populate_fixture_dialog(
+    c: &mut Commands,
+    parent: Entity,
+    font: &Handle<Font>,
+    fixture_id: i32,
+    tab: FixtureDialogTab,
+    catalog: &LibraryCatalog,
+) {
+    let body = column(c, parent, 13.);
+    c.entity(body).insert(Node {
+        width: percent(100),
+        min_width: px(0),
+        flex_direction: FlexDirection::Column,
+        row_gap: px(13),
+        padding: UiRect::axes(px(4), px(4)),
+        ..default()
+    });
+    let Some(fixture) = catalog.fixture(fixture_id) else {
+        text(c, body, font, "家具数据尚未就绪", 18., INK);
+        return;
+    };
+
+    match tab {
+        FixtureDialogTab::Details => {
+            let hero = row(c, body, 18.);
+            artwork(
+                c,
+                hero,
+                font,
+                fixture.thumbnail.as_ref(),
+                "家",
+                128.,
+                ACCENT,
+            );
+            let copy = column(c, hero, 8.);
+            text(c, copy, font, &fixture.name, 24., INK);
+            text(c, copy, font, format!("#{fixture_id}"), 12., MUTED);
+            if let Some(grid) = fixture_grid_text(fixture) {
+                let metric = row(c, copy, 10.);
+                text(c, metric, font, "尺寸", 12., MUTED);
+                text(c, metric, font, grid, 15., INK);
+            }
+            if !fixture.description.is_empty() && fixture.description != fixture.name {
+                text(c, body, font, &fixture.description, 15., INK);
+            }
+            // The source page also has hashtags, recycle state, layout cost and
+            // bonus panes. The current runtime master slice does not contain all
+            // of those source fields, so they stay absent rather than fabricated.
+        }
+        FixtureDialogTab::Reactions => {
+            let groups = catalog.fixture_reactions(fixture_id);
+            if groups.is_empty() {
+                text(c, body, font, "没有角色互动信息", 18., INK);
+                text(
+                    c,
+                    body,
+                    font,
+                    "原作在没有 FixtureReactionData 时显示空状态。",
+                    12.,
+                    MUTED,
+                );
+                return;
+            }
+
+            let mut participant_count = None;
+            let mut unit_type: Option<&str> = None;
+            let mut section = body;
+            let mut unit_list = body;
+            for group in groups {
+                let count = group.len();
+                if participant_count != Some(count) {
+                    participant_count = Some(count);
+                    unit_type = None;
+                    section = column(c, body, 8.);
+                    text(c, section, font, format!("{count} 人"), 14., ACCENT);
+                    unit_list = section;
+                }
+                let next_type = group
+                    .first()
+                    .and_then(|unit| catalog.character_unit_types.get(unit))
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                if unit_type != Some(next_type) {
+                    unit_type = Some(next_type);
+                    unit_list = column(c, section, 6.);
+                    if let Some(label) = group
+                        .first()
+                        .and_then(|unit| catalog.character_groups.get(unit))
+                    {
+                        // Source UnitCharacterList renders the unit identity as
+                        // its own header/icon. Text is the truthful fallback for
+                        // that identity until the exact unit prefab is exported.
+                        text(c, unit_list, font, label, 11., MUTED);
+                    }
+                }
+                character_band(c, unit_list, font, group, catalog);
+            }
+        }
+    }
+}
+
 fn populate_list(
     c: &mut Commands,
     parent: Entity,
@@ -970,6 +1258,14 @@ fn populate_detail(
             let copy = column(c, hero, 7.);
             text(c, copy, font, &fixture.name, 23., INK);
             text(c, copy, font, fixture.action_label(), 13., ACCENT);
+            button(
+                c,
+                parent,
+                font,
+                "家具信息",
+                LibraryAction::OpenFixtureDialog(id),
+                ButtonKind::Secondary,
+            );
             if fixture.thumbnail.is_none() {
                 text(c, parent, font, "这件家具暂时没有展示图片", 12., MUTED);
             }
@@ -1120,6 +1416,7 @@ fn populate_detail(
 pub(crate) struct ViewCache {
     list: Option<(u64, u64, u64, usize, usize)>,
     detail: Option<(Option<EntryKey>, u64)>,
+    fixture_dialog: Option<(i32, FixtureDialogTab, u64)>,
     characters: u64,
 }
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1152,7 +1449,7 @@ pub(crate) fn refresh(
         for (_, region, mut node, _, _, _) in &mut regions {
             if matches!(
                 region,
-                Region::Overlay | Region::Transport | Region::Launcher
+                Region::Overlay | Region::Transport | Region::Launcher | Region::FixtureDialog
             ) {
                 node.display = Display::None;
             }
@@ -1174,12 +1471,16 @@ pub(crate) fn refresh(
     let mut list_root = None;
     let mut detail_root = None;
     let mut character_root = None;
+    let mut fixture_dialog_root = None;
     for (entity, region, mut node, computed, scroll, text_font) in &mut regions {
         let visible = match region {
             Region::Overlay => state.open,
             Region::Transport => state.watching,
-            Region::Launcher => !state.open && !state.watching,
-            Region::CharacterPicker => state.open && state.picker_open,
+            Region::FixtureDialog => state.fixture_dialog.is_some(),
+            Region::Launcher => !state.open && !state.watching && state.fixture_dialog.is_none(),
+            Region::CharacterPicker => {
+                state.open && state.picker_open && state.fixture_dialog.is_none()
+            }
             Region::Browser => !narrow || !state.narrow_detail,
             Region::Navigation | Region::SearchBox | Region::Filters => {
                 !narrow || !state.narrow_detail
@@ -1243,6 +1544,17 @@ pub(crate) fn refresh(
             Region::ListItems => list_root = Some(entity),
             Region::DetailBody => detail_root = Some(entity),
             Region::CharacterChoices => character_root = Some(entity),
+            Region::FixtureDialogBody => {
+                fixture_dialog_root = Some(entity);
+                let stamp = state
+                    .fixture_dialog
+                    .map(|id| (id, state.fixture_dialog_tab, catalog.revision));
+                if cache.fixture_dialog != stamp {
+                    if let Some(mut scroll) = scroll {
+                        scroll.y = 0.;
+                    }
+                }
+            }
             Region::DetailScroll => {
                 if cache.detail != Some((state.selected, catalog.revision)) {
                     if let Some(mut scroll) = scroll {
@@ -1277,6 +1589,18 @@ pub(crate) fn refresh(
             populate_detail(&mut c, parent, &font.0, state.selected, &catalog);
         }
         cache.detail = Some(detail_stamp);
+    }
+    let fixture_dialog_stamp = state
+        .fixture_dialog
+        .map(|id| (id, state.fixture_dialog_tab, catalog.revision));
+    if cache.fixture_dialog != fixture_dialog_stamp {
+        if let Some(parent) = fixture_dialog_root {
+            c.entity(parent).despawn_children();
+            if let Some((id, tab, _)) = fixture_dialog_stamp {
+                populate_fixture_dialog(&mut c, parent, &font.0, id, tab, &catalog);
+            }
+        }
+        cache.fixture_dialog = fixture_dialog_stamp;
     }
     if cache.characters != catalog.revision {
         if let Some(parent) = character_root {
@@ -1485,6 +1809,9 @@ pub(crate) fn refresh(
             LibraryAction::Select(key) => Some(*key) == state.selected,
             LibraryAction::SpecialFilter => state.special_only,
             LibraryAction::SetCharacter(unit) => *unit == state.character,
+            LibraryAction::FixtureDialogTab(tab) => {
+                state.fixture_dialog.is_some() && *tab == state.fixture_dialog_tab
+            }
             LibraryAction::FocusSearch => state.search_focus,
             _ => false,
         };

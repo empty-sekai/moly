@@ -2,8 +2,8 @@
 //! requests or synthetic assets. Ordinary runs do not touch the filesystem.
 use super::*;
 use std::sync::{
-    Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
 };
 
 static BROWSER_DIAGNOSTICS: AtomicBool = AtomicBool::new(false);
@@ -51,6 +51,8 @@ pub(crate) struct QaDiagnostics<'w, 's> {
     activity: Option<Res<'w, crate::npc_fixture_activity::preview::PreviewRecord>>,
     activity_bubbles: Query<'w, 's, Entity, With<crate::balloon::ActivityBalloon>>,
     harvests: Query<'w, 's, Entity, With<crate::harvest::HarvestObject>>,
+    fixture_talk_action: Option<Res<'w, crate::talk::fixture_action::FixtureTalkAction>>,
+    cast_timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
 }
 #[derive(Default)]
 pub(crate) struct QaState {
@@ -157,6 +159,7 @@ pub(crate) fn qa_open(
                 "navigation_generation":extra.navigation.as_ref().map(|nav|nav.generation()),
                 "objective_generation":extra.objective.as_ref().map(|face|face.navigation_generation())},
             "transcript":transcript,
+
             "gimmick_owners": crate::fixture_gimmick::session::lease_count(&extra.gimmicks),
             "scene_preview": extra.stage.is_some(), "player_control_owned":extra.control.is_some(),
             "voice_players":extra.voices.iter().count(), "scoped_sounds":extra.sounds.iter().count(),
@@ -174,6 +177,12 @@ pub(crate) fn qa_open(
             "player_fixture_active": runtime.active(), "held_actors": holds.iter().count(), "entities": all.iter().count(),
             "actors":actor_rows, "fixtures":fixture_rows
         });
+        value["fixture_talk_action"] = extra
+            .fixture_talk_action
+            .as_ref()
+            .map_or(serde_json::Value::Null, |action| {
+                action.diagnostics(extra.cast_timelines.as_deref())
+            });
         value.as_object_mut().expect("QA object").extend(serde_json::json!({
             "dialogue_layout":extra.dialogue_layout.iter().next().map(|layout|serde_json::json!({
                 "font_px":layout.font_px,"lines":layout.line_count,

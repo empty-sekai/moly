@@ -767,13 +767,26 @@ fn drive_independent(world: &mut World) {
     // Consecutive entries using the same fixture set need no site switch,
     // layout rebuild or character reload. Wait for the old native owners to
     // release, then transfer admission to the new generation in place.
-    let replacement = world.resource::<ContentLibrary>().pending.clone()
-        .filter(|choice| choice.mode == ExperienceMode::Independent && choice.ticket != session.ticket);
-    if let Some(mut choice) = replacement.filter(|_| matches!(session.phase,
-        IndependentPhase::Staged | IndependentPhase::Experiencing | IndependentPhase::LoadingContent)) {
+    let replacement = world
+        .resource::<ContentLibrary>()
+        .pending
+        .clone()
+        .filter(|choice| {
+            choice.mode == ExperienceMode::Independent && choice.ticket != session.ticket
+        });
+    if let Some(mut choice) = replacement.filter(|_| {
+        matches!(
+            session.phase,
+            IndependentPhase::Staged
+                | IndependentPhase::Experiencing
+                | IndependentPhase::LoadingContent
+        )
+    }) {
         if let Ok((units, fixtures, _)) = requirements(world, &choice) {
             let compatible = fixtures.len() == session.required_fixtures.len()
-                && fixtures.iter().all(|id|session.required_fixtures.contains(id))
+                && fixtures
+                    .iter()
+                    .all(|id| session.required_fixtures.contains(id))
                 && !matches!(choice.key, EntryKey::Fixture(id) if world.resource::<LibraryCatalog>().fixture(id)
                     .is_some_and(|row|matches!(row.presentation, FixturePresentation::Surface { .. })));
             if compatible {
@@ -792,7 +805,8 @@ fn drive_independent(world: &mut World) {
                         return;
                     }
                 }
-                choice.target = matching_fixture_targets(world, &fixtures).and_then(|targets|targets.first().cloned());
+                choice.target = matching_fixture_targets(world, &fixtures)
+                    .and_then(|targets| targets.first().cloned());
                 session.ticket = choice.ticket;
                 session.required_units = units;
                 session.phase = IndependentPhase::LoadingContent;
@@ -804,7 +818,10 @@ fn drive_independent(world: &mut World) {
                 state.stopping = false;
                 state.status = "已复用独立场景，正在切换内容…".into();
                 state.changed();
-                info!("[content-library] reused independent world ticket={} fixtures={:?}", session.ticket, fixtures);
+                info!(
+                    "[content-library] reused independent world ticket={} fixtures={:?}",
+                    session.ticket, fixtures
+                );
             }
         }
     }
@@ -836,6 +853,7 @@ fn drive_independent(world: &mut World) {
                 session.departure_epoch,
                 epoch,
             ) && world.contains_resource::<SiteScenesReady>()
+                && world.contains_resource::<crate::site_material::SiteMaterialsSwapped>()
                 && world
                     .get_resource::<crate::fixture::FixturePlacements>()
                     .is_some_and(|layout| layout.site_type() == session.destination);
@@ -888,6 +906,7 @@ fn drive_independent(world: &mut World) {
                     .resource::<crate::room_appearance::RoomAppearanceState>()
                     .ready;
             let scene_ready = room_ready
+                && world.contains_resource::<crate::site_material::SiteMaterialsSwapped>()
                 && epoch.is_some_and(|epoch| {
                     world.contains_resource::<crate::fixture::FixtureScenesReady>()
                         && world

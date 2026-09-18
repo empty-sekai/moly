@@ -5,12 +5,12 @@
 //! dispatcher. Neither the transport nor the DOM has a second playback owner.
 use super::input::apply_action;
 use super::*;
-#[path = "bridge_presentation.rs"]
-mod presentation;
 #[path = "bridge_export.rs"]
 mod export;
-pub use export::library_catalog;
+#[path = "bridge_presentation.rs"]
+mod presentation;
 use crate::fixture_activity_data::{ActivityKey, ActivityOrigin};
+pub use export::library_catalog;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -43,6 +43,8 @@ pub(super) enum BrowserCommand {
     Fixture(Option<i32>),
     Focus(bool),
     Settings,
+    Sound(bool),
+    Weather(i32),
 }
 fn commands() -> &'static Mutex<Vec<BrowserCommand>> {
     COMMANDS.get_or_init(|| Mutex::new(Vec::new()))
@@ -136,6 +138,9 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
             }
             BrowserCommand::Settings
         }
+        "sound" => BrowserCommand::Sound(
+            value.get("value").and_then(Value::as_bool).ok_or("声音开关不正确")?,
+        ),
         "stop" => BrowserCommand::Action(LibraryAction::Stop),
         "restore" => BrowserCommand::Action(LibraryAction::RestoreScene),
         "tab" => BrowserCommand::Action(LibraryAction::Tab(parse_tab(string(&value, "value")?)?)),
@@ -149,7 +154,10 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
         ),
         "select" => BrowserCommand::Select(parse_key(string(&value, "key")?)?),
         "preview" => BrowserCommand::Preview(
-            value.get("key").map(|_| string(&value, "key").and_then(parse_key)).transpose()?,
+            value
+                .get("key")
+                .map(|_| string(&value, "key").and_then(parse_key))
+                .transpose()?,
         ),
         "play" => BrowserCommand::Play(
             value
@@ -171,7 +179,12 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
         }
         "fixture" => BrowserCommand::Fixture(match value.get("value") {
             Some(Value::Null) => None,
-            Some(id) => Some(id.as_u64().and_then(|id| i32::try_from(id).ok()).filter(|id| *id > 0).ok_or("家具编号不正确")?),
+            Some(id) => Some(
+                id.as_u64()
+                    .and_then(|id| i32::try_from(id).ok())
+                    .filter(|id| *id > 0)
+                    .ok_or("家具编号不正确")?,
+            ),
             None => return Err("操作缺少家具字段".into()),
         }),
         "availability" => BrowserCommand::Scope(match string(&value, "value")? {
@@ -218,6 +231,16 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
                 .get("value")
                 .and_then(Value::as_bool)
                 .ok_or("输入焦点值不正确")?,
+        ),
+        // The target档位, never an index: the host picks from the catalogue the
+        // runtime published, so a wrong ID can only come from a stale page.
+        "weather" => BrowserCommand::Weather(
+            value
+                .get("value")
+                .and_then(Value::as_i64)
+                .and_then(|id| i32::try_from(id).ok())
+                .filter(|id| *id > 0)
+                .ok_or("天气档位不正确")?,
         ),
         _ => return Err("未知的内容操作".into()),
     })
@@ -302,6 +325,15 @@ pub(super) fn apply_command(
             io.settings
                 .write(crate::game_settings::SettingsPanelRequest::Toggle);
         }
+        BrowserCommand::Sound(enabled) => {
+            io.audio_gate.enabled = enabled;
+        }
+        // Weather owns no catalogue state: the dial is queued for the weather
+        // chain, which validates the档 and starts the same cross-fade as the
+        // native key. A stale ID is refused there with a log line.
+        BrowserCommand::Weather(id) => {
+            io.weather.write(crate::weather::WeatherRequest(id));
+        }
         BrowserCommand::Focus(value) => {
             state.external_input_capture = value;
         }
@@ -337,7 +369,17 @@ pub(super) fn apply_command(
                 reject(state, "正在恢复场景，请稍候再播放");
                 return;
             }
-            apply_action(if preview_intent { LibraryAction::Preview } else { LibraryAction::Play }, state, catalog, world, io);
+            apply_action(
+                if preview_intent {
+                    LibraryAction::Preview
+                } else {
+                    LibraryAction::Play
+                },
+                state,
+                catalog,
+                world,
+                io,
+            );
         }
         BrowserCommand::Mode(mode) => {
             if state.mode == mode {
@@ -642,6 +684,7 @@ fn project(state: &ContentLibrary, catalog: &LibraryCatalog, world: &LibraryCont
         "page":state.offset/state.page_size.max(1),"pageSize":state.page_size,"tabs":tabs,
         "characters":characters.into_iter().map(|id|character(catalog,id)).collect::<Vec<_>>(),
         "rows":rows,"selected":selected,"relatedFixture":state.related_fixture,
+        "inspection":state.inspection.map(|(id,fixture_id)|json!({"id":id,"fixtureId":fixture_id})),
         "status":{"phase":phase,"label":state.status,"error":state.last_error,
             "preview":state.active.as_ref().is_some_and(|active|active.choice.preview),
             "activeKey":state.active.as_ref().map(|a|key(a.choice.key)).or_else(||state.pending.as_ref().map(|p|key(p.key))),
@@ -655,9 +698,18 @@ pub(crate) fn publish(
     world: Res<LibraryContext>,
     mut previous: Local<String>,
     site_ready: Option<Res<crate::site::SiteScenesReady>>,
-    player_visual: Query<(), (With<crate::player::PlayerControlled>, With<crate::player_avatar::AvatarDriver>)>,
+    site_materials: Option<Res<crate::site_material::SiteMaterialsSwapped>>,
+    player_visual: Query<
+        (),
+        (
+            With<crate::player::PlayerControlled>,
+            With<crate::player_avatar::AvatarDriver>,
+        ),
+    >,
     text_art: Option<Res<crate::balloon::BalloonArt>>,
     layouts: Option<Res<crate::ui_layout::UiLayouts>>,
+    phenomenon: Option<Res<crate::weather::CurrentPhenomenonId>>,
+    catalogue: Option<Res<crate::weather::PhenomenonCatalogue>>,
     server: Res<AssetServer>,
 ) {
     if !state.external_ui {
@@ -667,11 +719,22 @@ pub(crate) fn publish(
     // No per-frame elapsed counter is exposed. Serialize a page only when a
     // catalogue, context, owner, or visible status actually changes.
     let text_ready = text_art.is_some()
-        && layouts.as_deref().is_some_and(|layouts| layouts.ready("Talk", &server));
-    let scene_ready = site_ready.is_some() && !player_visual.is_empty()
-        && world.actors.values().all(|ready| *ready) && text_ready;
+        && layouts
+            .as_deref()
+            .is_some_and(|layouts| layouts.ready("Talk", &server));
+    let scene_ready = site_ready.is_some()
+        && site_materials.is_some()
+        && !player_visual.is_empty()
+        && world.actors.values().all(|ready| *ready)
+        && text_ready;
+    // 天气档位进戳：宿主画的那颗钮读同一份投影，切档必须重发一页，否则
+    // 「档位变了但页面没变」会一直停在旧值上。
+    let weather_id = phenomenon
+        .as_deref()
+        .map(|phenomenon| phenomenon.0)
+        .unwrap_or_default();
     let stamp = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         state.revision,
         catalog.revision,
         world.revision,
@@ -680,7 +743,8 @@ pub(crate) fn publish(
         state.scene_owned,
         state.active.is_some(),
         state.pending.is_some(),
-        scene_ready
+        scene_ready,
+        weather_id
     );
     if *previous == stamp {
         return;
@@ -692,7 +756,28 @@ pub(crate) fn publish(
         actors.sort_unstable();
         let mut fixture_ids: Vec<_> = world.instances.keys().copied().collect();
         fixture_ids.sort_unstable();
-        snapshot["scene"] = json!({"ready":scene_ready,"actorUnits":actors,"fixtureIds":fixture_ids});
+        snapshot["scene"] =
+            json!({"ready":scene_ready,"actorUnits":actors,"fixtureIds":fixture_ids});
+        // The weather dial rides the same projection as the catalogue: current
+        // 档 plus the ordered list the runtime actually resolved. An unresolved
+        // catalogue omits the block instead of publishing an empty dial, so the
+        // host never renders a control with nothing to choose.
+        if let Some(catalogue) = catalogue.as_deref().filter(|c| !c.0.is_empty()) {
+            let current = catalogue
+                .0
+                .iter()
+                .find(|option| option.id == weather_id)
+                .or_else(|| catalogue.0.first());
+            snapshot["weather"] = json!({
+                "id": current.map(|option| option.id).unwrap_or_default(),
+                "name": current.map(|option| option.name.clone()).unwrap_or_default(),
+                "options": catalogue
+                    .0
+                    .iter()
+                    .map(|option| json!({"id": option.id, "name": option.name}))
+                    .collect::<Vec<_>>(),
+            });
+        }
         *slot = snapshot.to_string();
     }
 }
@@ -840,7 +925,13 @@ mod tests {
         world.init_resource::<Messages<TalkCancelRequest>>();
         world.init_resource::<Messages<PlayerFixtureRequest>>();
         world.init_resource::<Messages<crate::game_settings::SettingsPanelRequest>>();
+        world.init_resource::<Messages<crate::weather::WeatherRequest>>();
         world.init_resource::<input::PasteInbox>();
+        // 声音闸是 `LibraryInput` 的一个 `ResMut`，缺席时取参会 panic。
+        // 它随声音开关那条改动进入 `LibraryInput`，而这个最小 World 没跟着
+        // 补——四条 bridge 判据因此红，且红的话说的是「资源不存在」，
+        // 与被测的命令语义无关。
+        world.init_resource::<crate::audio::AudioGate>();
         let mut system = SystemState::<input::LibraryInput>::new(&mut world);
         {
             let mut io = system.get_mut(&mut world);

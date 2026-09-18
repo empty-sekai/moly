@@ -28,6 +28,9 @@ pub(crate) struct LibraryInput<'w, 's> {
     cancel_talk: MessageWriter<'w, TalkCancelRequest>,
     fixtures: MessageWriter<'w, PlayerFixtureRequest>,
     pub(super) settings: MessageWriter<'w, crate::game_settings::SettingsPanelRequest>,
+    pub(super) audio_gate: ResMut<'w, crate::audio::AudioGate>,
+    /// 宿主天气钮的写入端：请求一次目标档位，天气链在下一帧起淡化。
+    pub(super) weather: MessageWriter<'w, crate::weather::WeatherRequest>,
     paste: Res<'w, PasteInbox>,
 }
 
@@ -73,10 +76,13 @@ pub(crate) fn input(
         if event.state != ButtonState::Pressed || event.repeat {
             continue;
         }
-        if event.key_code == KeyCode::F9 {
+        if event.key_code == KeyCode::F9 && state.fixture_dialog.is_none() {
             actions.push(LibraryAction::Toggle);
         }
-        if !state.external_ui && state.watching && event.key_code == KeyCode::Escape {
+        if !state.external_ui && state.fixture_dialog.is_some() && event.key_code == KeyCode::Escape
+        {
+            actions.push(LibraryAction::CloseFixtureDialog);
+        } else if !state.external_ui && state.watching && event.key_code == KeyCode::Escape {
             actions.push(LibraryAction::Stop);
         }
     }
@@ -85,6 +91,10 @@ pub(crate) fn input(
     if state.external_ui {
         keyboard.clear();
         actions.clear();
+    } else if state.fixture_dialog.is_some() {
+        // The source furniture dialog is modal. Its buttons stay in `actions`,
+        // while catalogue shortcuts and text entry behind it are suppressed.
+        keyboard.clear();
     }
     let was_composing = !state.ime_preedit.is_empty();
     let mut committed = false;
@@ -227,7 +237,10 @@ pub(crate) fn input(
         for event in wheels {
             for (region, cursor, computed, mut position) in &mut io.scroll {
                 if !cursor.cursor_over()
-                    || (state.picker_open && *region != Region::CharacterChoices)
+                    || (state.fixture_dialog.is_some() && *region != Region::FixtureDialogBody)
+                    || (state.fixture_dialog.is_none()
+                        && state.picker_open
+                        && *region != Region::CharacterChoices)
                 {
                     continue;
                 }
@@ -244,7 +257,10 @@ pub(crate) fn input(
                         .saturating_add_signed(amount)
                         .min(state.filtered.len().saturating_sub(state.page_size));
                     state.changed();
-                } else if matches!(region, Region::DetailScroll | Region::CharacterChoices) {
+                } else if matches!(
+                    region,
+                    Region::DetailScroll | Region::CharacterChoices | Region::FixtureDialogBody
+                ) {
                     let delta = -event.y
                         * if event.unit == MouseScrollUnit::Line {
                             36.
@@ -312,6 +328,26 @@ pub(super) fn apply_action(
             state.changed();
         }
         LibraryAction::Close => close(state, io),
+        LibraryAction::OpenFixtureDialog(id) => {
+            if catalog.fixture(id).is_some() && !state.browser_busy() {
+                state.fixture_dialog = Some(id);
+                state.fixture_dialog_tab = FixtureDialogTab::Details;
+                state.search_focus = false;
+                state.picker_open = false;
+                state.release_guard = 2;
+                state.changed();
+            }
+        }
+        LibraryAction::FixtureDialogTab(tab) if state.fixture_dialog.is_some() => {
+            state.fixture_dialog_tab = tab;
+            state.changed();
+        }
+        LibraryAction::CloseFixtureDialog => {
+            if state.fixture_dialog.take().is_some() {
+                state.release_guard = 2;
+                state.changed();
+            }
+        }
         LibraryAction::Stop | LibraryAction::RestoreScene => {
             cancel(io);
             state.pending = None;
@@ -323,10 +359,17 @@ pub(super) fn apply_action(
             state.status = "正在结束播放并恢复场景…".into();
             state.changed();
         }
-        LibraryAction::Play | LibraryAction::Preview if state.open || state.watching || state.external_ui => {
+        LibraryAction::Play | LibraryAction::Preview
+            if state.open || state.watching || state.external_ui =>
+        {
             let preview = action == LibraryAction::Preview;
-            if preview && state.selected.and_then(|key| catalog.talk(key))
-                .and_then(|row| row.preview_tweet.as_ref()).is_none() {
+            if preview
+                && state
+                    .selected
+                    .and_then(|key| catalog.talk(key))
+                    .and_then(|row| row.preview_tweet.as_ref())
+                    .is_none()
+            {
                 state.status = "这项内容没有可用的原始前置气泡".into();
                 state.changed();
                 return;
@@ -334,8 +377,9 @@ pub(super) fn apply_action(
             // Engage the same admitted actor/fixture/ticket. Do not cancel the
             // staged world, navigate sites or reconstruct the character first.
             if !preview {
-                if let Some(active) = state.active.clone().filter(|active|
-                    active.choice.preview && Some(active.choice.key) == state.selected) {
+                if let Some(active) = state.active.clone().filter(|active| {
+                    active.choice.preview && Some(active.choice.key) == state.selected
+                }) {
                     let mut choice = active.choice;
                     choice.preview = false;
                     state.pending = Some(choice);

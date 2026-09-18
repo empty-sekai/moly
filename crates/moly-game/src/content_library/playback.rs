@@ -120,13 +120,21 @@ pub(crate) fn dispatch(
                     fail(&mut state, "这段对话没有原始前置气泡数据");
                     return;
                 };
-                if balloon_art.is_none() { return; }
+                if balloon_art.is_none() {
+                    return;
+                }
                 let ticket = choice.ticket;
                 commands.queue(move |world: &mut World| {
                     crate::balloon::show_talk_preview(world, entity, unit, &tweet, ticket);
                 });
-                state.active = Some(ActiveChoice { title: catalog.title(choice.key), choice,
-                    started: true, elapsed: 0., effect_owner: None, static_view: false });
+                state.active = Some(ActiveChoice {
+                    title: catalog.title(choice.key),
+                    choice,
+                    started: true,
+                    elapsed: 0.,
+                    effect_owner: None,
+                    static_view: false,
+                });
                 state.pending = None;
                 state.open = false;
                 state.watching = true;
@@ -285,7 +293,7 @@ pub(crate) fn observe_start(
             .is_some_and(|session| session.talk_id() == id),
         EntryKey::Talk(TalkBackend::Fixture, id) => pair_session
             .as_ref()
-            .is_some_and(|session| session.talk_id() == id),
+            .is_some_and(|session| session.talk_id() == id && session.body_ready()),
         EntryKey::Fixture(_) => {
             effect_running
                 || active.choice.target.as_ref().is_some_and(|chosen| {

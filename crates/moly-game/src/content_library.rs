@@ -45,8 +45,8 @@ mod input;
 mod playback;
 mod qa;
 pub use qa::library_diagnostics;
-mod staging;
 mod stage_framing;
+mod staging;
 mod view;
 pub(crate) use catalog::{build_talk_catalog, parse_assets};
 pub(crate) use context::refresh_context;
@@ -195,7 +195,9 @@ pub(crate) struct LibraryAssets {
     fixtures: Handle<JsonAsset>,
     thumbnails: Handle<JsonAsset>,
     models: Handle<JsonAsset>,
-    processed: [bool; 4],
+    reactions: Handle<JsonAsset>,
+    portraits: Handle<JsonAsset>,
+    processed: [bool; 6],
 }
 #[derive(Resource)]
 pub(crate) struct LibraryFont(Handle<Font>);
@@ -208,6 +210,10 @@ pub(crate) struct LibraryCatalog {
     character_names: HashMap<u32, String>,
     character_colors: HashMap<u32, String>,
     character_groups: HashMap<u32, String>,
+    character_unit_types: HashMap<u32, String>,
+    character_portrait_paths: HashMap<u32, String>,
+    character_portraits: HashMap<u32, Handle<Image>>,
+    fixture_reactions: HashMap<i32, Vec<Vec<u32>>>,
     thumbnail_paths: HashMap<i32, String>,
     data_issues: Vec<String>,
     source_region: String,
@@ -230,6 +236,15 @@ impl LibraryCatalog {
         self.fixture(id)
             .map(|row| row.name.clone())
             .unwrap_or_else(|| format!("家具 {id}"))
+    }
+    fn fixture_reactions(&self, id: i32) -> &[Vec<u32>] {
+        self.fixture_reactions
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+    fn portrait(&self, unit: u32) -> Option<&Handle<Image>> {
+        self.character_portraits.get(&unit)
     }
     fn talk(&self, key: EntryKey) -> Option<&LibraryTalk> {
         self.talks.iter().find(|row| row.key() == key)
@@ -281,6 +296,13 @@ struct ActiveChoice {
     static_view: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FixtureDialogTab {
+    #[default]
+    Details,
+    Reactions,
+}
+
 #[derive(Resource)]
 pub(crate) struct ContentLibrary {
     pub(crate) open: bool,
@@ -298,6 +320,7 @@ pub(crate) struct ContentLibrary {
     character: Option<u32>,
     special_only: bool,
     related_fixture: Option<i32>,
+    inspection: Option<(u64, i32)>,
     search: String,
     search_cursor: usize,
     search_focus: bool,
@@ -305,6 +328,8 @@ pub(crate) struct ContentLibrary {
     ime_preedit: String,
     picker_open: bool,
     narrow_detail: bool,
+    fixture_dialog: Option<i32>,
+    fixture_dialog_tab: FixtureDialogTab,
     page_size: usize,
     offset: usize,
     selected: Option<EntryKey>,
@@ -336,6 +361,7 @@ impl Default for ContentLibrary {
             character: None,
             special_only: false,
             related_fixture: None,
+            inspection: None,
             search: String::new(),
             search_cursor: 0,
             search_focus: false,
@@ -343,6 +369,8 @@ impl Default for ContentLibrary {
             ime_preedit: String::new(),
             picker_open: false,
             narrow_detail: false,
+            fixture_dialog: None,
+            fixture_dialog_tab: FixtureDialogTab::Details,
             page_size: 5,
             offset: 0,
             selected: None,
@@ -361,14 +389,19 @@ impl Default for ContentLibrary {
     }
 }
 impl ContentLibrary {
-    pub(crate) fn browser_busy(&self) -> bool { self.active.is_some() || self.pending.is_some() || self.stopping || self.scene_owned }
+    pub(crate) fn browser_busy(&self) -> bool {
+        self.active.is_some() || self.pending.is_some() || self.stopping || self.scene_owned
+    }
 
     pub(crate) fn owns_talk_preview(&self, ticket: u64) -> bool {
-        !self.stopping && self.active.as_ref().is_some_and(|active|
-            active.choice.preview && active.choice.ticket == ticket)
+        !self.stopping
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.choice.preview && active.choice.ticket == ticket)
     }
     pub(crate) fn blocks_world_input(&self) -> bool {
-        ((self.open || self.watching) && !self.external_ui)
+        ((self.open || self.watching || self.fixture_dialog.is_some()) && !self.external_ui)
             || self.active.is_some()
             || self.pending.is_some()
             || self.scene_owned
@@ -379,7 +412,7 @@ impl ContentLibrary {
     /// spectator remains a normal player; admission/rollback and every other
     /// interaction remain protected by the original world-input gate.
     pub(crate) fn blocks_exploration_input(&self) -> bool {
-        if (self.open && !self.external_ui)
+        if ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
             || self.external_input_capture
             || self.release_guard != 0
             || self.stopping
@@ -399,7 +432,7 @@ impl ContentLibrary {
         if self.active.as_ref().is_some_and(|active| {
             active.started && matches!(active.choice.key, EntryKey::Talk(_, _))
         }) {
-            return (self.open && !self.external_ui)
+            return ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
                 || self.external_input_capture
                 || self.release_guard != 0
                 || self.stopping
@@ -408,10 +441,53 @@ impl ContentLibrary {
         self.blocks_exploration_input()
     }
     pub(crate) fn blocks_talk_input(&self) -> bool {
-        (self.open && !self.external_ui) || self.external_input_capture || self.release_guard != 0
+        ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
+            || self.external_input_capture
+            || self.release_guard != 0
     }
     pub(crate) fn owns_scene(&self) -> bool {
         self.scene_owned
+    }
+
+    /// The original editor info button is a reading entry, not permission to
+    /// discard a placement draft, start playback or move the player. Reuse the
+    /// same catalogue and portrait links in native and browser presentation.
+    pub(crate) fn inspect_fixture(&mut self, fixture_id: i32) -> bool {
+        if fixture_id <= 0 || self.browser_busy() {
+            return false;
+        }
+        self.inspection = Some((
+            self.inspection.map_or(1, |(id, _)| id.wrapping_add(1)),
+            fixture_id,
+        ));
+        if self.external_ui {
+            // The web product owns its furniture drawer. Preserve the shared
+            // selection/deep-link contract instead of creating native chrome.
+            self.tab = LibraryTab::Furniture;
+            self.scope = Scope::All;
+            self.related_fixture = Some(fixture_id);
+            self.character = None;
+            self.special_only = false;
+            self.search.clear();
+            self.search_cursor = 0;
+            self.ime_preedit.clear();
+            self.search_focus = false;
+            self.picker_open = false;
+            self.reset_browse();
+            self.selected = Some(EntryKey::Fixture(fixture_id));
+            self.narrow_detail = true;
+            self.external_open = true;
+        } else {
+            // The source editor's info button opens FixtureDescriptionDialog,
+            // not the full content browser and not ScreenLayerMysekaiInfo.
+            self.fixture_dialog = Some(fixture_id);
+            self.fixture_dialog_tab = FixtureDialogTab::Details;
+            self.search_focus = false;
+            self.picker_open = false;
+            self.release_guard = 2;
+            self.changed();
+        }
+        true
     }
 
     fn changed(&mut self) {
@@ -428,6 +504,7 @@ impl ContentLibrary {
         self.open = false;
         self.watching = false;
         self.picker_open = false;
+        self.fixture_dialog = None;
         self.search_focus = false;
         self.ime_preedit.clear();
         self.pending = None;
@@ -484,6 +561,9 @@ pub(crate) enum LibraryAction {
     Related(i32),
     RelatedActivities(i32),
     RelatedStory(i32),
+    OpenFixtureDialog(i32),
+    FixtureDialogTab(FixtureDialogTab),
+    CloseFixtureDialog,
     FocusSearch,
     ClearSearch,
     Select(EntryKey),
@@ -517,6 +597,8 @@ pub(crate) enum Region {
     DetailBody,
     CharacterPicker,
     CharacterChoices,
+    FixtureDialog,
+    FixtureDialogBody,
     Transport,
     Launcher,
     Back,
@@ -573,7 +655,9 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
         fixtures: server.load::<JsonAsset>(AssetPath::from(FIXTURES.to_owned())),
         thumbnails: server.load::<JsonAsset>(AssetPath::from(THUMBNAILS.to_owned())),
         models: server.load::<JsonAsset>(AssetPath::from(FIXTURE_MODELS.to_owned())),
-        processed: [false; 4],
+        reactions: server.load::<JsonAsset>(moly_assets::fixture_reactions()),
+        portraits: server.load::<JsonAsset>(moly_assets::character_portraits()),
+        processed: [false; 6],
     });
 }
 fn excerpt(value: &str, limit: usize) -> String {
@@ -668,5 +752,23 @@ mod tests {
         let state = ContentLibrary::default();
         assert_eq!(state.mode, ExperienceMode::Independent);
         assert_eq!(state.scope, Scope::All);
+    }
+    #[test]
+    fn native_editor_info_opens_source_fixture_dialog_without_opening_browser() {
+        let mut state = ContentLibrary::default();
+        assert!(state.inspect_fixture(534));
+        assert_eq!(state.fixture_dialog, Some(534));
+        assert_eq!(state.fixture_dialog_tab, FixtureDialogTab::Details);
+        assert!(!state.open);
+        assert!(state.blocks_world_input());
+    }
+    #[test]
+    fn external_editor_info_keeps_browser_owned_detail_contract() {
+        let mut state = ContentLibrary::default();
+        state.external_ui = true;
+        assert!(state.inspect_fixture(534));
+        assert!(state.fixture_dialog.is_none());
+        assert!(state.external_open);
+        assert_eq!(state.selected, Some(EntryKey::Fixture(534)));
     }
 }
