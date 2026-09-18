@@ -17,7 +17,6 @@ pub(crate) const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_BLOB_BYTES: usize = 128 * 1024 * 1024;
 pub(crate) const MAX_ASSET_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_IN_FLIGHT_BYTES: usize = 512 * 1024 * 1024;
-pub(crate) const MAX_EXPANSION_RATIO: usize = 256;
 
 pub(crate) struct Budget {
     bytes: Arc<ByteSemaphore>,
@@ -176,6 +175,7 @@ impl Reader for SharedReader {
 }
 
 #[cfg(test)]
+#[path = "read_limits/tests.rs"]
 mod tests;
 
 pub(crate) fn buffer(capacity: usize) -> io::Result<Vec<u8>> {

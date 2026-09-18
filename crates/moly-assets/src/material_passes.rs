@@ -37,8 +37,12 @@ impl SourceRenderState {
             let number = if name.is_empty() || name == "<noninit>" {
                 value.get("val")
             } else {
-                extras.get("floats").and_then(|v| v.get(name)).or_else(|| value.get("default"))
-            }?.as_f64()?;
+                extras
+                    .get("floats")
+                    .and_then(|v| v.get(name))
+                    .or_else(|| value.get("default"))
+            }?
+            .as_f64()?;
             (number.is_finite() && number >= 0.0 && number <= 255.0 && number.fract() == 0.0)
                 .then_some(number as u8)
         };
@@ -47,7 +51,9 @@ impl SourceRenderState {
         let depth_test = scalar(value.get("zTest")?)?;
         let depth_write = scalar(value.get("zWrite")?)?;
         let state = Self {
-            cull, depth_test, depth_write: depth_write == 1,
+            cull,
+            depth_test,
+            depth_write: depth_write == 1,
             color_mask: scalar(blend.get("colMask")?)?,
             src_color: scalar(blend.get("srcBlend")?)?,
             dst_color: scalar(blend.get("destBlend")?)?,
@@ -56,9 +62,21 @@ impl SourceRenderState {
             color_op: scalar(blend.get("blendOp")?)?,
             alpha_op: scalar(blend.get("blendOpAlpha")?)?,
         };
-        (cull <= 2 && depth_test <= 8 && depth_write <= 1 && state.color_mask <= 15
-            && [state.src_color, state.dst_color, state.src_alpha, state.dst_alpha].iter().all(|v| *v <= 10)
-            && state.color_op <= 4 && state.alpha_op <= 4).then_some(state)
+        (cull <= 2
+            && depth_test <= 8
+            && depth_write <= 1
+            && state.color_mask <= 15
+            && [
+                state.src_color,
+                state.dst_color,
+                state.src_alpha,
+                state.dst_alpha,
+            ]
+            .iter()
+            .all(|v| *v <= 10)
+            && state.color_op <= 4
+            && state.alpha_op <= 4)
+            .then_some(state)
     }
 }
 
@@ -68,13 +86,19 @@ impl SourceMaterialPasses {
     pub fn from_extras(extras: &serde_json::Value) -> Option<Self> {
         // glTF fixture extras store this directly; site sidecars retain it
         // inside the resolved shader reference. Both originate from pass tags.
-        let passes = extras.get("shaderPasses")
-            .or_else(|| extras.get("shader")?.get("shaderPasses"))?.as_array()?;
+        let passes = extras
+            .get("shaderPasses")
+            .or_else(|| extras.get("shader")?.get("shaderPasses"))?
+            .as_array()?;
         let mut light_modes = Vec::new();
         let mut color_state = None;
         for pass in passes {
             let pass = pass.as_object()?;
-            if pass.get("name").and_then(|v| v.as_str()).is_some_and(|name| name.eq_ignore_ascii_case("Base")) {
+            if pass
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("Base"))
+            {
                 if let Some(state) = pass.get("renderState") {
                     color_state = SourceRenderState::parse(state, extras);
                 }
@@ -85,12 +109,19 @@ impl SourceMaterialPasses {
                 _ => return None,
             }
         }
-        Some(Self { light_modes, color_state })
+        Some(Self {
+            light_modes,
+            color_state,
+        })
     }
 
     pub fn has_shadow_caster(&self) -> bool {
-        self.light_modes.iter().any(|mode| mode.eq_ignore_ascii_case("ShadowCaster"))
+        self.light_modes
+            .iter()
+            .any(|mode| mode.eq_ignore_ascii_case("ShadowCaster"))
     }
 
-    pub fn color_state(&self) -> Option<SourceRenderState> { self.color_state }
+    pub fn color_state(&self) -> Option<SourceRenderState> {
+        self.color_state
+    }
 }

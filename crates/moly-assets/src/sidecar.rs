@@ -6,13 +6,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::material_passes::SourceMaterialPasses;
 use bevy::asset::io::Reader;
 use bevy::asset::{Asset, AssetLoader, LoadContext};
 use bevy::reflect::TypePath;
 use moly_law::material::MaterialSlot;
 use moly_law::weather::{FogGlobals, PostProcessProfile};
 use serde_json::Value;
-use crate::material_passes::SourceMaterialPasses;
 
 /// 一个粒子系统记录：发射节点 + 律侧参数块 + 渲染器侧记录。
 ///
@@ -55,6 +55,21 @@ pub struct ParticleRenderer {
     pub vertex_stream_names: Vec<String>,
     /// 内联材质记录；`material` 为 null 时为 None。
     pub material: Option<MaterialSlot>,
+    /// Mesh 绘制模式要实例化的网格。
+    ///
+    /// **只有 `renderMode == "Mesh"` 的记录带这个键**，Billboard 记录没有
+    /// ——所以缺席按空表，不是错。现象语料现算：90 条 Mesh 模式渲染器里
+    /// 82 条恰一个网格、8 条为空表。
+    pub meshes: Vec<ParticleMesh>,
+}
+
+/// 一个网格引用：包内文件 + 包内节点名。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParticleMesh {
+    /// 相对该现象目录的 glb 路径，例如 `models/mysekai_sekai_pt-b79d7ecb.glb`。
+    pub file: String,
+    /// glb 里承载这份网格的节点名。
+    pub node: String,
 }
 
 /// One source material row: shading properties and pass availability share
@@ -67,7 +82,9 @@ pub struct SiteMaterialSource {
 
 impl std::ops::Deref for SiteMaterialSource {
     type Target = MaterialSlot;
-    fn deref(&self) -> &Self::Target { &self.slot }
+    fn deref(&self) -> &Self::Target {
+        &self.slot
+    }
 }
 
 /// 一个站点场景包的 sidecar 材质表。
@@ -94,25 +111,43 @@ pub struct SiteSidecar {
 /// 另一份 sidecar：`emitters[]` 里每条带 `renderer/material`）。
 pub fn parse_fixture_particles(bytes: &[u8]) -> Result<SiteSidecar, MolyJsonError> {
     let mut root: Value = serde_json::from_slice(bytes)?;
-    let mut particles = root.get_mut("emitters").and_then(Value::as_array_mut)
-        .ok_or_else(|| shape_err("fixture particle archive: emitters missing"))?.clone();
+    let mut particles = root
+        .get_mut("emitters")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| shape_err("fixture particle archive: emitters missing"))?
+        .clone();
     let mut textures = Vec::<String>::new();
     for particle in &mut particles {
-        let Some(material) = particle.pointer_mut("/renderer/material").and_then(Value::as_object_mut) else { continue; };
+        let Some(material) = particle
+            .pointer_mut("/renderer/material")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
         if !material.contains_key("keywords") {
-            return Err(shape_err("fixture particle material keywords absent from archive"));
+            return Err(shape_err(
+                "fixture particle material keywords absent from archive",
+            ));
         }
         if let Some(slots) = material.get_mut("textures").and_then(Value::as_object_mut) {
             for slot in slots.values_mut() {
-                if slot.is_null() { continue; }
-                let uri = slot.get("file").and_then(Value::as_str)
-                    .ok_or_else(|| shape_err("fixture particle texture unresolved"))?.to_owned();
-                if !textures.contains(&uri) { textures.push(uri.clone()); }
+                if slot.is_null() {
+                    continue;
+                }
+                let uri = slot
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| shape_err("fixture particle texture unresolved"))?
+                    .to_owned();
+                if !textures.contains(&uri) {
+                    textures.push(uri.clone());
+                }
                 *slot = Value::String(uri);
             }
         }
     }
-    let sidecar = serde_json::json!({"materials": [], "textures": textures, "particles": particles});
+    let sidecar =
+        serde_json::json!({"materials": [], "textures": textures, "particles": particles});
     parse_site_sidecar(sidecar.to_string().as_bytes())
 }
 
@@ -188,8 +223,7 @@ impl AssetLoader for MolyJsonLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         if load_context.path().path().ends_with("postprocess.json") {
-            let profile =
-                PostProcessProfile::from_bytes(&bytes).map_err(MolyJsonError::Law)?;
+            let profile = PostProcessProfile::from_bytes(&bytes).map_err(MolyJsonError::Law)?;
             let post = profile.resolve().map_err(MolyJsonError::Law)?;
             // 站点渲染侧没有关雾开关：档案自己的 enabled 门已进采纳结果，
             // 关着时 alpha 为 0、高度雾项精确化简为无贡献。
@@ -230,9 +264,7 @@ pub fn parse_site_sidecar(bytes: &[u8]) -> Result<SiteSidecar, MolyJsonError> {
         .map(|entries| {
             entries
                 .iter()
-                .filter_map(|(uri, flag)| {
-                    flag.as_bool().map(|flag| (uri.clone(), flag))
-                })
+                .filter_map(|(uri, flag)| flag.as_bool().map(|flag| (uri.clone(), flag)))
                 .collect::<std::collections::HashMap<_, _>>()
         })
         .unwrap_or_default();
@@ -395,6 +427,37 @@ fn parse_particle_renderer(
             0,
         )?),
     };
+    // Mesh 绘制模式的网格引用。缺席按空表（Billboard 记录本来就没有这个
+    // 键）；在场就必须是对象数组、每项两个字符串，否则整包拒绝。
+    let meshes = match object.get("meshes") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                let entry = item
+                    .as_object()
+                    .ok_or_else(|| shape_err(format!("{ctx}.renderer.meshes entry is not an object")))?;
+                let field = |key: &str| -> Result<String, MolyJsonError> {
+                    entry
+                        .get(key)
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            shape_err(format!("{ctx}.renderer.meshes entry {key} is not a string"))
+                        })
+                };
+                Ok(ParticleMesh {
+                    file: field("file")?,
+                    node: field("node")?,
+                })
+            })
+            .collect::<Result<Vec<_>, MolyJsonError>>()?,
+        Some(_) => {
+            return Err(shape_err(format!(
+                "{ctx}.renderer.meshes is not an array"
+            )))
+        }
+    };
     Ok(ParticleRenderer {
         enabled,
         render_mode,
@@ -405,6 +468,7 @@ fn parse_particle_renderer(
         use_custom_vertex_streams,
         vertex_stream_names,
         material,
+        meshes,
     })
 }
 
@@ -453,17 +517,11 @@ fn parse_material_slot(
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err(shape_err(format!("{ctx}.keywords is not an array"))),
     };
-    let textures = parse_texture_slots(
-        object.get("textures"),
-        &name,
-        texture_uris,
-        unmatched,
-        &ctx,
-    )?;
+    let textures =
+        parse_texture_slots(object.get("textures"), &name, texture_uris, unmatched, &ctx)?;
     let floats = parse_float_map(object.get("floats"), &ctx)?;
     let colors = parse_color_map(object.get("colors"), &ctx)?;
-    let texture_scale_offsets =
-        parse_st_map(object.get("textureScaleOffset"), &ctx)?;
+    let texture_scale_offsets = parse_st_map(object.get("textureScaleOffset"), &ctx)?;
     Ok(MaterialSlot {
         name,
         shader,
@@ -479,18 +537,30 @@ fn parse_material_slot(
 /// sidecar URIs. Normalize that representation once at the asset boundary.
 pub fn parse_fixture_material(name: &str, extras: &Value) -> Result<MaterialSlot, MolyJsonError> {
     let mut value = extras.clone();
-    let object = value.as_object_mut().ok_or_else(|| shape_err("fixture material extras must be an object"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| shape_err("fixture material extras must be an object"))?;
     object.insert("name".into(), Value::String(name.into()));
-    let keywords = object.get("validKeywords").cloned()
+    let keywords = object
+        .get("validKeywords")
+        .cloned()
         .ok_or_else(|| shape_err(format!("fixture material {name}: validKeywords missing")))?;
     object.insert("keywords".into(), keywords);
     // The table carries identities only; no URI is invented or fetched here.
     let mut indices = Vec::new();
     if let Some(textures) = object.get_mut("textures").and_then(Value::as_object_mut) {
         for (property, value) in textures {
-            if value.is_null() { continue; }
-            let index = value.as_u64().and_then(|v| usize::try_from(v).ok())
-                .ok_or_else(|| shape_err(format!("fixture material {name}: invalid {property} texture index")))?;
+            if value.is_null() {
+                continue;
+            }
+            let index = value
+                .as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .ok_or_else(|| {
+                    shape_err(format!(
+                        "fixture material {name}: invalid {property} texture index"
+                    ))
+                })?;
             indices.push((property.clone(), index));
             *value = Value::Null;
         }

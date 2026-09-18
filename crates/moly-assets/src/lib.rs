@@ -33,19 +33,19 @@ const SOURCE: &str = "moly";
 #[derive(Clone, Resource)]
 pub enum AssetSource {
     /// native：提取产物目录（入口已验存在且是目录）。
-    NativeDir {
-        path: std::path::PathBuf,
-    },
+    NativeDir { path: std::path::PathBuf },
     /// web：同源绝对路径前缀（保证以 `/` 结尾）——`platform_default`
     /// 在 wasm 上就是按页源取 HTTP 的读取器。
-    HttpBase {
-        url: String,
-    },
+    HttpBase { url: String },
     NativePacks {
         path: std::path::PathBuf,
+        /// Immutable release catalog SHA-256; None selects the default release.
+        catalog: Option<String>,
     },
     HttpPacks {
         url: String,
+        /// Same store URL across regions, independently pinned release selection.
+        catalog: Option<String>,
     },
 }
 
@@ -67,27 +67,38 @@ pub fn install(app: &mut App, source: AssetSource) {
         return;
     }
     #[cfg(target_arch = "wasm32")]
-    if let AssetSource::HttpPacks { url } = &source {
+    if let AssetSource::HttpPacks { url, catalog } = &source {
         let root = url.clone();
+        let catalog = catalog.clone();
         app.register_asset_source(
             SOURCE,
-            AssetSourceBuilder::new(move || Box::new(packs::PackReader::http(root.clone()))),
+            AssetSourceBuilder::new(move || {
+                Box::new(packs::PackReader::http(root.clone()).with_catalog(catalog.clone()))
+            }),
         );
         app.insert_resource(source);
         return;
     }
     let root = match &source {
-        AssetSource::NativeDir { path } | AssetSource::NativePacks { path } => {
+        AssetSource::NativeDir { path } | AssetSource::NativePacks { path, .. } => {
             path.to_string_lossy().to_string()
         }
-        AssetSource::HttpBase { url } | AssetSource::HttpPacks { url } => url.clone(),
+        AssetSource::HttpBase { url } | AssetSource::HttpPacks { url, .. } => url.clone(),
     };
     let builder = if matches!(
         source,
         AssetSource::NativePacks { .. } | AssetSource::HttpPacks { .. }
     ) {
         let mut reader = bevy::asset::io::AssetSource::get_default_reader(root);
-        AssetSourceBuilder::new(move || Box::new(packs::PackReader::new(reader())))
+        let catalog = match &source {
+            AssetSource::NativePacks { catalog, .. } | AssetSource::HttpPacks { catalog, .. } => {
+                catalog.clone()
+            }
+            _ => None,
+        };
+        AssetSourceBuilder::new(move || {
+            Box::new(packs::PackReader::new(reader()).with_catalog(catalog.clone()))
+        })
     } else {
         AssetSourceBuilder::platform_default(&root, None)
     };
@@ -124,6 +135,12 @@ pub fn character_manifest() -> AssetPath<'static> {
 /// 角色名册的资产路径；位移段名（待机/走姿）从这里取。
 pub fn character_registry() -> AssetPath<'static> {
     AssetPath::from("moly://characters.json".to_owned())
+}
+
+/// 原生家具详情 `CharacterBandIcon` 使用的 SD icon 图鉴。每个 unit 行
+/// 保留从 CharacterSDIconAtlas 导出的真实 sprite 路径，不使用产品头像替代。
+pub fn character_portraits() -> AssetPath<'static> {
+    AssetPath::from("moly://ui/character-portraits/character-portraits.json".to_owned())
 }
 
 /// 单个角色包的资产路径；文件名来自清单行。
@@ -197,6 +214,13 @@ pub fn ui_action_icon(name: &str) -> AssetPath<'static> {
 /// 「这件家具有没有交互按钮」只有这一份数据答得出。
 pub fn mysekai_fixtures() -> AssetPath<'static> {
     AssetPath::from("moly://mysekai-fixtures.json".to_owned())
+}
+
+/// 家具详情原生「角色互动」页的数据面：源
+/// `FixtureReactionDataSet.FixturerRactions` 的严格导出，按家具 id 保存
+/// CharacterBand 的角色 unit 组合与源顺序。它不是从对话语料反推的索引。
+pub fn fixture_reactions() -> AssetPath<'static> {
+    AssetPath::from("moly://fixture-reactions.json".to_owned())
 }
 
 /// 已提取的完整设计图、道具与唱片主表；行按各自 id 寻址。

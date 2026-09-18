@@ -362,9 +362,14 @@ impl<'a> Work<'a> {
             let mut min = Winner::empty();
             let mut preferred = Winner::empty();
             let mut flexible = Winner::empty();
-            let group_total = self.plans[i].group.map(|group| self.group_sizes(i, axis, group))
-                .or_else(|| self.plans[i].grid.map(|grid|
-                    grid.metrics(axis, self.layout_children(i).len(), self.sizes[i])));
+            let group_total = self.plans[i]
+                .group
+                .map(|group| self.group_sizes(i, axis, group))
+                .or_else(|| {
+                    self.plans[i].grid.map(|grid| {
+                        grid.metrics(axis, self.layout_children(i).len(), self.sizes[i])
+                    })
+                });
             if let Some(total) = group_total {
                 if !total.is_finite() {
                     return Err(format!(

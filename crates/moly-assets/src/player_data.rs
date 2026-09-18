@@ -2,6 +2,7 @@
 //! Coordinates remain in the game's grid frame. Player IDs are opaque strings.
 
 use moly_law::fixture::{position::layout_type, Direction, GridPosition, Vector3Int};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -50,12 +51,105 @@ pub struct ImportedPlayerData {
     pub player_id: Option<String>,
     pub sites: Vec<ImportedSite>,
     pub source: Value,
-    pub notices: Vec<String>,
+    pub notices: Vec<ImportNotice>,
 }
 
 impl ImportedPlayerData {
     pub fn fixture_count(&self) -> usize {
         self.sites.iter().map(|site| site.fixtures.len()).sum()
+    }
+}
+
+/// Machine-readable record of something an otherwise successful import left
+/// out. The wording belongs to the consumer: the native status line renders
+/// [`ImportNotice::describe`], and the browser host localizes `code` with the
+/// carried counts so one import reads correctly in every language.
+///
+/// A player whose saved layout holds furniture the exported catalog never
+/// produced is normal, not corruption. Those instances are dropped from the
+/// scene and reported here; structural problems still fail the whole import.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "camelCase")]
+pub enum ImportNotice {
+    /// Custom/special furniture arrays kept as records but not rendered.
+    SpecialFurnitureRetained { count: usize },
+    /// Floor/wall skin records kept while the scene keeps its own textures.
+    SurfaceAppearanceRetained { count: usize },
+    /// No exported model package for the master fixture ID.
+    FixtureModelMissing { count: usize, fixtures: Vec<u32> },
+    /// The saved texture ID has no entry in this master version.
+    FixtureTextureMissing { count: usize, fixtures: Vec<u32> },
+    /// The texture exists but no exported color texture came with the catalog.
+    FixtureColorMissing { count: usize, fixtures: Vec<u32> },
+}
+
+/// How many distinct fixture IDs a notice spells out. The count stays exact;
+/// the list only needs to be long enough to point at the catalog gap.
+const NOTICE_FIXTURE_LIMIT: usize = 32;
+
+impl ImportNotice {
+    /// English one-line text for the native status line and logs. Browser
+    /// consumers read the structured fields instead of parsing this string.
+    pub fn describe(&self) -> String {
+        fn listed(fixtures: &[u32]) -> String {
+            fixtures
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        match self {
+            Self::SpecialFurnitureRetained { count } => format!("{count} custom furniture records retained. Custom images and ornaments are not rendered by this importer yet."),
+            Self::SurfaceAppearanceRetained { count } => format!("{count} floor/wall skin records retained. The scene still uses its supplied floor/wall textures."),
+            Self::FixtureModelMissing { count, fixtures } => format!("{count} furniture instances skipped: no exported model for fixture IDs {}.", listed(fixtures)),
+            Self::FixtureTextureMissing { count, fixtures } => format!("{count} furniture instances skipped: texture not present in this master version for fixture IDs {}.", listed(fixtures)),
+            Self::FixtureColorMissing { count, fixtures } => format!("{count} furniture instances skipped: no exported color texture for fixture IDs {}.", listed(fixtures)),
+        }
+    }
+}
+
+/// Catalog gaps collected while reading one player document.
+#[derive(Default)]
+struct SkippedFixtures {
+    model_missing: MissingFixtures,
+    texture_missing: MissingFixtures,
+    color_missing: MissingFixtures,
+}
+
+impl SkippedFixtures {
+    fn notices(&self) -> Vec<ImportNotice> {
+        [
+            self.model_missing
+                .notice(|count, fixtures| ImportNotice::FixtureModelMissing { count, fixtures }),
+            self.texture_missing
+                .notice(|count, fixtures| ImportNotice::FixtureTextureMissing { count, fixtures }),
+            self.color_missing
+                .notice(|count, fixtures| ImportNotice::FixtureColorMissing { count, fixtures }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+#[derive(Default)]
+struct MissingFixtures {
+    /// Instances skipped, counting repeats of the same master fixture ID.
+    count: usize,
+    /// Distinct master fixture IDs, first-seen order, capped for the payload.
+    fixtures: Vec<u32>,
+}
+
+impl MissingFixtures {
+    fn record(&mut self, fixture_id: u32) {
+        self.count += 1;
+        if self.fixtures.len() < NOTICE_FIXTURE_LIMIT && !self.fixtures.contains(&fixture_id) {
+            self.fixtures.push(fixture_id);
+        }
+    }
+
+    fn notice(&self, build: impl FnOnce(usize, Vec<u32>) -> ImportNotice) -> Option<ImportNotice> {
+        (self.count > 0).then(|| build(self.count, self.fixtures.clone()))
     }
 }
 
@@ -188,6 +282,7 @@ impl PlayerDataCatalog {
         let mut uids = HashSet::new();
         let mut special_count = 0;
         let mut appearance_count = 0;
+        let mut skipped = SkippedFixtures::default();
         for site in rows {
             let id = positive(&site["mysekaiSiteId"], "mysekaiSiteId")?;
             if !site_ids.insert(id) {
@@ -258,7 +353,8 @@ impl PlayerDataCatalog {
                         }
                         let package = format!("mysekai__fixture__{asset}");
                         if !self.packages.contains(&package) {
-                            return Err(format!("Furniture {fixture_id} has no exported model; update the asset catalog"));
+                            skipped.model_missing.record(fixture_id);
+                            continue;
                         }
                         let grid = custom.unwrap_or(&master["gridSize"]);
                         let size = Vector3Int {
@@ -272,25 +368,24 @@ impl PlayerDataCatalog {
                             grid_byte(&position["y"], "position.y")?,
                             grid_byte(&position["z"], "position.z")?,
                         );
-                        let center = wall_to_site(center, layer, width, depth)?;
-                        let direction = if let Some(direction) =
+                        // Resolve the authored layout first, then reflect its
+                        // occupied cells into the runtime/glTF frame. `position`
+                        // is a layout anchor, not a Euclidean point: even spans
+                        // and quarter turns need a pivot correction.
+                        let source_center = wall_to_site(center, layer, width, depth)?;
+                        let source_direction = if let Some(direction) =
                             moly_law::fixture::position::wall_direction(layer)
                         {
                             direction
                         } else {
-                            let rotation = fixture["rotation"]
-                                .as_i64()
-                                .ok_or("rotation must be an integer number of degrees")?;
-                            if !(-360..=360).contains(&rotation) || rotation % 90 != 0 {
-                                return Err(
-                                    "Furniture rotation must be a cardinal angle in degrees".into(),
-                                );
-                            }
-                            Direction::from_u8((rotation.rem_euclid(360) / 90) as u8).unwrap()
+                            wire_rotation_direction(
+                                fixture["rotation"]
+                                    .as_i64()
+                                    .ok_or("rotation must be an integer number of degrees")?,
+                            )?
                         };
-                        moly_law::fixture::position::layout_footprint(
-                            center, size, direction, layer,
-                        )?;
+                        let (center, direction, layer) =
+                            mirror_fixture_layout(source_center, size, source_direction, layer)?;
                         let texture_id = fixture
                             .get("textureId")
                             .filter(|v| !v.is_null())
@@ -302,7 +397,8 @@ impl PlayerDataCatalog {
                                 .iter()
                                 .any(|v| v["textureId"].as_u64() == Some(texture_id as u64))
                         {
-                            return Err(format!("Furniture {fixture_id} has no texture {texture_id} in this master version"));
+                            skipped.texture_missing.record(fixture_id);
+                            continue;
                         }
                         if texture_id != 1
                             && self
@@ -311,7 +407,8 @@ impl PlayerDataCatalog {
                                 .and_then(|colors| colors.get(texture_id.to_string()))
                                 .is_none()
                         {
-                            return Err(format!("Furniture {fixture_id} needs color {texture_id}; export the player catalog with its source color textures"));
+                            skipped.color_missing.record(fixture_id);
+                            continue;
                         }
                         if array_name != "mysekaiFixtures" {
                             special_count += 1;
@@ -344,11 +441,16 @@ impl PlayerDataCatalog {
         sites.sort_by_key(|site| site.id);
         let mut notices = Vec::new();
         if special_count > 0 {
-            notices.push(format!("{special_count} custom furniture records retained. Custom images and ornaments are not rendered by this importer yet."));
+            notices.push(ImportNotice::SpecialFurnitureRetained {
+                count: special_count,
+            });
         }
         if appearance_count > 0 {
-            notices.push(format!("{appearance_count} floor/wall skin records retained. The scene still uses its supplied floor/wall textures."));
+            notices.push(ImportNotice::SurfaceAppearanceRetained {
+                count: appearance_count,
+            });
         }
+        notices.extend(skipped.notices());
         let game_data = updated
             .get("userGamedata")
             .or_else(|| root.get("userGamedata"));
@@ -424,6 +526,76 @@ fn grid_byte(value: &Value, label: &str) -> Result<i8, String> {
         .ok_or_else(|| format!("{label} must be an integer in -128..127"))
 }
 
+/// Reflect one authored layout through the Unity -> runtime/glTF Z boundary.
+///
+/// The wire `position` expands through the native direction-dependent placement
+/// law before it becomes a world pose. Reflect the closed occupied-cell footprint
+/// (`z_cell -> -z_cell - 1`), then solve the mirrored anchor under the target
+/// direction/layout. This preserves exact world-space X/Y and negates world Z,
+/// including even footprints and rotations at the edge of an even-sized site.
+fn mirror_fixture_layout(
+    source_center: GridPosition,
+    size: Vector3Int,
+    source_direction: Direction,
+    source_layout: u8,
+) -> Result<(GridPosition, Direction, u8), String> {
+    use moly_law::fixture::position::layout_footprint;
+
+    let (source_min, source_max) =
+        layout_footprint(source_center, size, source_direction, source_layout)?;
+    let target_layout = mirror_layout(source_layout);
+    let target_direction = mirror_direction(source_direction);
+    let mirror_cell = |value: i8| -> Result<i8, String> {
+        i8::try_from(-(value as i16) - 1)
+            .map_err(|_| "Mirrored fixture footprint exceeds signed grid domain".to_owned())
+    };
+    let expected_min = GridPosition::new(source_min.x, source_min.y, mirror_cell(source_max.z)?);
+    let expected_max = GridPosition::new(source_max.x, source_max.y, mirror_cell(source_min.z)?);
+
+    // Placement is translation-equivariant inside the signed-grid domain. A
+    // zero-anchor footprint exposes the layout/direction-specific offset, so the
+    // target anchor can be solved without guessing a model pivot.
+    let zero = GridPosition::new(0, source_center.y, 0);
+    let (base_min, _) = layout_footprint(zero, size, target_direction, target_layout)?;
+    let x = i16::from(expected_min.x) - i16::from(base_min.x);
+    let z = i16::from(expected_min.z) - i16::from(base_min.z);
+    let target_center = GridPosition::new(
+        i8::try_from(x).map_err(|_| "Mirrored fixture center.x exceeds signed grid domain")?,
+        source_center.y,
+        i8::try_from(z).map_err(|_| "Mirrored fixture center.z exceeds signed grid domain")?,
+    );
+    let actual = layout_footprint(target_center, size, target_direction, target_layout)?;
+    if actual != (expected_min, expected_max) {
+        return Err("Mirrored fixture footprint does not round-trip through placement law".into());
+    }
+    Ok((target_center, target_direction, target_layout))
+}
+
+fn mirror_layout(layout: u8) -> u8 {
+    match layout {
+        layout_type::WALL_FRONT => layout_type::WALL_BACK,
+        layout_type::WALL_BACK => layout_type::WALL_FRONT,
+        _ => layout,
+    }
+}
+
+fn wire_rotation_direction(rotation: i64) -> Result<Direction, String> {
+    if !(-360..=360).contains(&rotation) || rotation % 90 != 0 {
+        return Err("Furniture rotation must be a cardinal angle in degrees".into());
+    }
+    Ok(Direction::from_u8((rotation.rem_euclid(360) / 90) as u8).unwrap())
+}
+
+/// Reflection across Z preserves Front/Back and swaps the two quarter turns.
+fn mirror_direction(direction: Direction) -> Direction {
+    match direction {
+        Direction::Front => Direction::Front,
+        Direction::Left => Direction::Right,
+        Direction::Back => Direction::Back,
+        Direction::Right => Direction::Left,
+    }
+}
+
 fn text<'a>(value: &'a Value, label: &str) -> Result<&'a str, String> {
     value
         .as_str()
@@ -486,4 +658,93 @@ fn wall_to_site(
         position.y,
         i8::try_from(z).map_err(|_| "Wall Z exceeds signed grid domain")?,
     ))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moly_law::fixture::position::{field_position, layout_footprint};
+
+    fn assert_reflection(
+        center: GridPosition,
+        size: Vector3Int,
+        direction: Direction,
+        layout: u8,
+    ) -> (GridPosition, Direction, u8) {
+        let source_fp = layout_footprint(center, size, direction, layout).unwrap();
+        let source_world = field_position(source_fp.0, source_fp.1, center.y, layout).unwrap();
+        let target = mirror_fixture_layout(center, size, direction, layout).unwrap();
+        let target_fp = layout_footprint(target.0, size, target.1, target.2).unwrap();
+        let target_world = field_position(target_fp.0, target_fp.1, target.0.y, target.2).unwrap();
+
+        assert_eq!(
+            (target_fp.0.x, target_fp.1.x),
+            (source_fp.0.x, source_fp.1.x)
+        );
+        assert_eq!(target_fp.0.z as i16, -(source_fp.1.z as i16) - 1);
+        assert_eq!(target_fp.1.z as i16, -(source_fp.0.z as i16) - 1);
+        assert!((target_world[0] - source_world[0]).abs() < 1.0e-6);
+        assert!((target_world[1] - source_world[1]).abs() < 1.0e-6);
+        assert!((target_world[2] + source_world[2]).abs() < 1.0e-6);
+        target
+    }
+
+    #[test]
+    fn real_home_boundary_fixture_reflects_inside_same_even_floor() {
+        // real-home-outside fixture-0425: crane game, wire center (41,0,-45),
+        // master 7x5x4, yaw 180. Raw z-negation produces 44..47 and rejects a
+        // valid 90-cell layout; footprint reflection produces 41..44.
+        let target = assert_reflection(
+            GridPosition::new(41, 0, -45),
+            Vector3Int::new(7, 5, 4),
+            Direction::Back,
+            layout_type::FLOOR,
+        );
+        let fp = layout_footprint(target.0, Vector3Int::new(7, 5, 4), target.1, target.2).unwrap();
+        assert_eq!((fp.0.z, fp.1.z), (41, 44));
+        assert_eq!(target.1, Direction::Back);
+    }
+
+    #[test]
+    fn housing_wire_quarter_turn_reflects_pose_and_yaw() {
+        let target = assert_reflection(
+            GridPosition::new(34, 0, -42),
+            Vector3Int::new(4, 3, 2),
+            Direction::Left,
+            layout_type::FLOOR,
+        );
+        assert_eq!(target.1, Direction::Right);
+        assert_eq!(
+            mirror_direction(wire_rotation_direction(90).unwrap()),
+            Direction::Right
+        );
+        assert_eq!(
+            mirror_direction(wire_rotation_direction(270).unwrap()),
+            Direction::Left
+        );
+        assert!(wire_rotation_direction(45).is_err());
+    }
+
+    #[test]
+    fn wall_reflection_swaps_front_back_layer_and_mirrors_side_yaw() {
+        let front_source =
+            wall_to_site(GridPosition::new(3, 4, 0), layout_type::WALL_FRONT, 10, 10).unwrap();
+        let front = assert_reflection(
+            front_source,
+            Vector3Int::new(3, 2, 1),
+            moly_law::fixture::position::wall_direction(layout_type::WALL_FRONT).unwrap(),
+            layout_type::WALL_FRONT,
+        );
+        assert_eq!(front.2, layout_type::WALL_BACK);
+
+        let side_source =
+            wall_to_site(GridPosition::new(2, 3, 0), layout_type::WALL_LEFT, 10, 10).unwrap();
+        let side = assert_reflection(
+            side_source,
+            Vector3Int::new(2, 2, 1),
+            moly_law::fixture::position::wall_direction(layout_type::WALL_LEFT).unwrap(),
+            layout_type::WALL_LEFT,
+        );
+        assert_eq!(side.2, layout_type::WALL_LEFT);
+        assert_eq!(side.1, Direction::Left);
+    }
 }
