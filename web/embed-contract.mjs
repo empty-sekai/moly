@@ -130,7 +130,8 @@ export function intent(type, value) {
     case "weather":
       return { type, value: integer(value, 1, 2147483647, "weather") };
     case "sound":
-      if (typeof value !== "boolean") throw new TypeError("Invalid sound preference");
+      if (typeof value !== "boolean")
+        throw new TypeError("Invalid sound preference");
       return { type, value };
     default:
       throw new TypeError("Unsupported catalogue intent");
@@ -166,21 +167,21 @@ export function isSnapshot(value) {
 export function isWeather(value) {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      Number.isSafeInteger(value.id) &&
-      value.id > 0 &&
-      typeof value.name === "string" &&
-      Array.isArray(value.options) &&
-      value.options.length > 0 &&
-      value.options.length <= 64 &&
-      value.options.every(
-        (option) =>
-          option &&
-          typeof option === "object" &&
-          Number.isSafeInteger(option.id) &&
-          option.id > 0 &&
-          typeof option.name === "string",
-      ),
+    typeof value === "object" &&
+    Number.isSafeInteger(value.id) &&
+    value.id > 0 &&
+    typeof value.name === "string" &&
+    Array.isArray(value.options) &&
+    value.options.length > 0 &&
+    value.options.length <= 64 &&
+    value.options.every(
+      (option) =>
+        option &&
+        typeof option === "object" &&
+        Number.isSafeInteger(option.id) &&
+        option.id > 0 &&
+        typeof option.name === "string",
+    ),
   );
 }
 export function sameOriginDirectory(value, base) {

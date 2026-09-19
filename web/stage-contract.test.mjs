@@ -224,7 +224,10 @@ test("sound preference is carried by configure and live changes use a sound inte
     handle = mountStage(env.target, { ...options, sound: false });
     const sent = [];
     handle.frame.contentWindow.postMessage = (message) => sent.push(message);
-    emit(env.window, handle.frame, "hello", { contract: 2, instance: "sound-test" });
+    emit(env.window, handle.frame, "hello", {
+      contract: 2,
+      instance: "sound-test",
+    });
     assert.equal(sent[0].type, "configure");
     assert.equal(sent[0].value.sound, false);
     handle.setSoundEnabled(true);

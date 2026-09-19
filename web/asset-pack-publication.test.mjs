@@ -173,7 +173,11 @@ test("stage publisher pins three regions into one existing store and preserves t
       );
       assert.equal(snapshot.packs, true);
       assert.deepEqual(
-        JSON.parse(fs.readFileSync(path.join(output, "snapshots", snapshot.id, "snapshot.json"))),
+        JSON.parse(
+          fs.readFileSync(
+            path.join(output, "snapshots", snapshot.id, "snapshot.json"),
+          ),
+        ),
         snapshot,
         "historical descriptor preserves the exact pinned snapshot",
       );
@@ -187,8 +191,15 @@ test("stage publisher pins three regions into one existing store and preserves t
       fs.readFileSync(path.join(output, "manifest.json")),
       first,
     );
-    const historical = manifest.snapshots.find(snapshot => snapshot.region === "jp");
-    const historicalPath = path.join(output, "snapshots", historical.id, "snapshot.json");
+    const historical = manifest.snapshots.find(
+      (snapshot) => snapshot.region === "jp",
+    );
+    const historicalPath = path.join(
+      output,
+      "snapshots",
+      historical.id,
+      "snapshot.json",
+    );
     const historicalBytes = fs.readFileSync(historicalPath);
     await publish({ workspace: work, output, sources: [sources[0]] });
     assert.deepEqual(fs.readFileSync(historicalPath), historicalBytes);
