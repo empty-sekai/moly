@@ -250,6 +250,8 @@ pub struct EmitterParams {
     pub start: StartParams,
     pub emission: Option<EmissionParams>,
     pub shape: Option<ShapeParams>,
+    /// None means legacy/unknown module state, not an implicitly disabled shape.
+    pub shape_enabled: Option<bool>,
     pub velocity_over_lifetime: Option<VelocityOverLifetimeParams>,
     pub color_over_lifetime: Option<MinMaxGradient>,
     pub size_over_lifetime: Option<SizeOverLifetimeParams>,
@@ -265,12 +267,12 @@ pub struct EmitterParams {
 /// 「识别但具名不迁」的那四个（scalingMode、emitterVelocityMode、
 /// randomSeed、autoRandomSeed）**不在**此列：它们同样落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 19] = [
+const MAPPED_SYSTEM_KEYS: [&str; 20] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed",
     "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
     "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
-    "limitVelocity", "customData",
+    "limitVelocity", "customData", "shapeEnabled",
 ];
 
 /// start 层已映射键。
@@ -398,6 +400,10 @@ impl EmitterParams {
             )?,
             emission,
             shape,
+            shape_enabled: match system_get(system, "shapeEnabled") {
+                None | Some(Value::Null) => None,
+                value => Some(bool_of(value, &format!("{ctx}.shapeEnabled"))?),
+            },
             velocity_over_lifetime,
             color_over_lifetime,
             size_over_lifetime,
@@ -772,9 +778,8 @@ fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsErr
     }
 }
 
-/// 键数组 → 曲线。null 斜率拒（阶跃键在语料模拟键里不存在，仅
-/// customData 出过 4 个 null 斜率键，而 customData 本就不迁移），出现
-/// 即是数据损伤。加权键按位解析：激活位（入权 bit0/出权 bit1）的权重
+/// 键数组 → 曲线。阶跃切线保留有符号 Infinity；旧 null 编码丢失了符号，
+/// 必须从源重新提取，不能推断为任意一端。加权键按位解析：激活位的权重
 /// 必读，缺失即拒；未激活位的权重惰性（求值时代 1/3），缺失容。
 fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
     let arr = v
@@ -797,9 +802,13 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
         };
         let slope = |name: &str| -> Result<f32, EffectsError> {
             let s = k.get(name).ok_or_else(|| {
-                EffectsError(format!("{kctx}.{name}: missing (null slope = step key)"))
+                EffectsError(format!("{kctx}.{name}: missing tangent"))
             })?;
-            f32_of(Some(s), &format!("{kctx}.{name}"))
+            match s.as_str() {
+                Some("Infinity") => Ok(f32::INFINITY),
+                Some("-Infinity") => Ok(f32::NEG_INFINITY),
+                _ => f32_of(Some(s), &format!("{kctx}.{name}")),
+            }
         };
         keys.push(CurveKey {
             time: f32_of(k.get("time"), &format!("{kctx}.time"))?,
@@ -1157,6 +1166,29 @@ mod tests {
         let bad = r#"{"effects":{"e":{"particles":[{"node":"n","system":{"duration":1.0,"looping":true,"prewarm":false,"playOnAwake":true,"simulationSpeed":1.0,"simulationSpace":"Local","startDelay":{"mode":"constant","value":0.0},"ringBufferMode":0,"ringBufferLoopRange":[0.0,1.0],"maxParticles":10,"start":{"lifetime":{"mode":"constant","value":1.0},"speed":{"mode":"constant","value":1.0},"size":{"mode":"constant","value":1.0},"rotation":{"mode":"constant","value":0.0},"color":{"mode":"color","color":[1.0,1.0,1.0,1.0]},"gravityModifier":{"mode":"constant","value":0.0},"size3D":false,"rotation3D":false},"sizeOverLifetime":{"separateAxes":false,"curve":{"mode":"curve","multiplier":1.0,"keys":[{"time":0.0,"value":0.0,"inSlope":0.0,"outSlope":null,"weightedMode":0,"inWeight":0.0,"outWeight":0.0}]}}}}]}}}"#;
         let err = Effects::from_json_str(bad.as_bytes()).unwrap_err();
         assert!(err.0.contains("outSlope"), "{}", err.0);
+    }
+
+    #[test]
+    fn signed_step_tangents_survive_particle_schema() {
+        let keys = json::parse(br#"[
+            {"time":0.0,"value":2.0,"inSlope":0.0,"outSlope":"Infinity","weightedMode":0},
+            {"time":1.0,"value":7.0,"inSlope":"Infinity","outSlope":0.0,"weightedMode":0}
+        ]"#).unwrap();
+        let curve = curve_of(Some(&keys), "step").unwrap();
+        assert_eq!(curve.evaluate(0.5), 2.0);
+        assert_eq!(curve.evaluate(1.0), 7.0);
+        let keys = json::parse(br#"[
+            {"time":0.0,"value":2.0,"inSlope":0.0,"outSlope":"-Infinity","weightedMode":0},
+            {"time":1.0,"value":7.0,"inSlope":"-Infinity","outSlope":0.0,"weightedMode":0}
+        ]"#).unwrap();
+        assert_eq!(curve_of(Some(&keys), "step").unwrap().evaluate(0.5), 7.0);
+        // Native positive-infinity return precedes the negative check, even
+        // when an authored segment supplies opposite signs at its two ends.
+        let keys = json::parse(br#"[
+            {"time":0.0,"value":2.0,"inSlope":0.0,"outSlope":"Infinity","weightedMode":2,"outWeight":0.25},
+            {"time":1.0,"value":7.0,"inSlope":"-Infinity","outSlope":0.0,"weightedMode":1,"inWeight":0.4}
+        ]"#).unwrap();
+        assert_eq!(curve_of(Some(&keys), "step").unwrap().evaluate(0.5), 2.0);
     }
 
     #[test]

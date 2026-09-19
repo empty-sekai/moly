@@ -26,6 +26,8 @@ fn current_corpus_admission() {
         path: root.parent().expect("phenomena directory has a parent").to_path_buf(),
     });
     app.add_plugins((MinimalPlugins, AssetPlugin::default(), ImagePlugin::default()));
+    moly_assets::source_shader::loader::register(&mut app);
+    app.init_asset::<Gltf>();
     app.finish();
     app.cleanup();
     let server = app.world().resource::<AssetServer>();
@@ -36,7 +38,6 @@ fn current_corpus_admission() {
         let doc = read(&path);
         let start = rows.len();
         let mut admitted = 0;
-        let mut wrong_route = 0;
         let mut renderer_enabled = 0;
         for (effect_name, effect) in doc["effects"].as_object().expect("effects map") {
             let kind = match effect["kind"].as_str() {
@@ -58,30 +59,45 @@ fn current_corpus_admission() {
                 let material = &particle["renderer"]["material"];
                 let source_member = material["lightModes"].as_array()
                     .map(|tags| tags.iter().any(|tag| tag.as_str() == Some("MysekaiEffect")));
-                // Read the actual plan's explicit pass decision, not the shader family.
-                let effect_attached = planned.as_ref().is_some_and(|p| p.effect_pass.is_some());
-                let route_wrong = effect_attached && source_member == Some(false);
+                // Admission only requests assets. GPU pass resolution happens later
+                // in the renderer, so this diagnostic must not claim a tested route.
+                let node = particle["node"].as_str().expect("particle node");
+                let active = active_in_hierarchy(&by_path, node);
+                let classification = if particle["renderer"]["enabled"] == false {
+                    "source_renderer_disabled"
+                } else if !active {
+                    "source_hierarchy_inactive"
+                } else if kind.is_none() {
+                    "runtime_anchor_unresolved"
+                } else if planned.is_some() {
+                    "admitted_pending_gpu_and_behavior_verification"
+                } else {
+                    // Zero autonomous emission is not proof of invisibility:
+                    // subemitters, animation and timeline can trigger emission.
+                    "runtime_admission_rejected"
+                };
                 admitted += usize::from(planned.is_some());
-                wrong_route += usize::from(route_wrong);
                 renderer_enabled += usize::from(particle["renderer"]["enabled"].as_bool() == Some(true));
                 rows.push(json!({
                     "phenomenon": name, "effect": effect_name, "node": particle["node"],
                     "kind": effect["kind"], "variant": effect["variant"],
+                    "site": effect["site"], "classification": classification,
+                    "activeInHierarchy": active,
                     "rendererEnabled": particle["renderer"]["enabled"],
                     "renderMode": particle["renderer"]["renderMode"],
                     "shader": material["shader"], "lightModes": material["lightModes"],
-                    "admitted": planned.is_some(), "effectAttached": effect_attached,
-                    "knownWrongRoute": route_wrong, "gates": format!("{tally:?}"),
+                    "admitted": planned.is_some(), "sourceEffectPassDeclared": source_member,
+                    "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
                         v.iter().any(|k| k.as_str() == Some("_SOFT_PARTICLES_ENABLED"))),
                 }));
             }
         }
         let total = rows.len() - start;
-        println!("{name}: records={total}, renderer_enabled={renderer_enabled}, admitted={admitted}, wrong_route={wrong_route}");
+        println!("{name}: records={total}, renderer_enabled={renderer_enabled}, admitted={admitted}");
         per_phenomenon.insert(name.clone(), json!({
             "records": total, "rendererEnabled": renderer_enabled,
-            "admitted": admitted, "knownWrongRoute": wrong_route,
+            "admitted": admitted,
         }));
     }
     let report = json!({
@@ -89,7 +105,7 @@ fn current_corpus_admission() {
         "perPhenomenon": per_phenomenon,
         "records": rows.len(),
         "admitted": rows.iter().filter(|r| r["admitted"] == true).count(),
-        "knownWrongRoute": rows.iter().filter(|r| r["knownWrongRoute"] == true).count(),
+        "gpuVerification": "not_run",
         "rows": rows,
     });
     std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).expect("write audit report");

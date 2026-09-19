@@ -1,69 +1,8 @@
-//! 天气粒子链：现象档案的 `fx/effects.json` → 天空/相机/站点三锚 →
-//! UberUnlit 粒子绘制路径（与站点链共用同一份材质与管线特化）→ 粒子律
-//! 仿真。**几何半在 `billboard`、着色半在 `uber_particle`，本模块只做
-//! 装载、判读、锚定与推进。**
-//!
-//! # 装载形
-//!
-//! 现象切换（天气链写 `CurrentPhenomenon`）与换站（站点链换
-//! `SiteActive`）共同决定一个锚点 `(档位, 站点)`：锚点变了就拆链重装。
-//! 档位清单按 `phenomena/<档位>/fx/file` 取该档的 effects.json，然后按
-//! 三类锚挑选 effect：
-//!
-//! - **sky / camera**：先取 `unique__<站点>` 变体，没有再回退 `global`
-//!   （语料里每个 (档, 类) 至多一个匹配，挑选与对象序无关）。
-//! - **site**：`unique__<站点>` 变体**全部**装上（站点专属效果没有
-//!   全局回退）。
-//!
-//! 站点名是主表行的 `assetbundleName`（`SiteActive::env_site`）。
-//!
-//! # 锚定语义
-//!
-//! - **sky**：随玩家平移（穹顶跟人走），不随任何旋转。
-//! - **camera**：随相机平移；旋转仅当 `effectiveRotation == "normal"`
-//!   继承（`"fix"` 档源里每帧用父级旋转的逆抵消自己 ⇒ 世界恒等）。
-//! - **site**：恒等——本仓站点系是站点局部系（`SiteRoot` 恒等生成、
-//!   主表位点无人消费），effect 的节点链在语料里也全为恒等。
-//!
-//! 节点链 TRS（根记录 → 发射节点）在判读时合成一次；局部空间仿真逐帧
-//! `锚 ∘ 链` 换算，世界空间仿真在**出生时**过一次全变换（位置过全变换、
-//! 方向过旋转后归一、尺寸吃链缩放）。
-//!
-//! # 判读门与盘点
-//!
-//! 逐条具名拒绝（分母是选中 effect 的全部 `particles[]` 条目）：材质族、
-//! 绘制模式、对齐档、发射率形状、发射形状、仿真空间、起始三轴旋转、
-//! 状态档、关键字、律解析、渲染器字段。语料里整类够不着的（Mesh 绘制、
-//! 非 View 对齐、Donut/ConeVolume 形状、带权曲线）按档计数，不静默。
-//! 律对单条条目解析（单条档案包裹，一条坏不拖垮整包——`Effects` 的
-//! 入口对档案级失败成立，包裹后失败按条计）。
-//!
-//! 语料事实（放行 78 条上现算）：`limitVelocity` 29 条（system 块的键名
-//! 就是 `limitVelocity`，不是引擎的 `LimitVelocityOverLifetime`——律的
-//! 映射表与之一致），全部能过律构造；`subEmitters` 56 条声明但 `emitter`
-//! 全为 null（源数据里就没接线，没有可发射的子体，不构成缺口）；
-//! `sortMode` 全 0、`renderQueue` 全 3000（系统间无序差）；`randomSeed`
-//! 全 0 且 `autoRandomSeed` 全 true（引擎运行时自造种子，不可复算——
-//! 固定种子流是本仓的表示选择）。
-//!
-//! # 抽签纪律
-//!
-//! 出生抽签次数是式的组成部分（固定种子下可复算）：形状抽样按律表
-//! （圆 1 抽、锥 2 抽、球/半球 2 抽、单边棱 1 抽），随后出生取值表逐项
-//! 各抽一次（速度与重力共用稳定因子不抽），种子 u32 最后一抽。**取值
-//! 顺序是本仓的表示选择**（源引擎的流分配不可见），仓内各链顺序不一，
-//! 次数与条件规则按引擎侧转录（表情链的出生取值表）。
-//!
-//! # 仓内已记录的分歧
-//!
-//! - **圆盘 1 抽 vs 2 抽**：律表（`StartCircle<Random>` 反汇编）是 1 抽
-//!   （径向由 `radiusThickness` 单参数决定）；雨/站点/表情三条链都抽 2。
-//!   本链按**律表**。
-//! - **重力次序**：本链按表情链的引擎次序（模块批 → 推进 → **重力**）；
-//!   雨/站点链是重力在积分前（各自注释具名「未核」）。
-//! - **环形模式 2 回卷**：本链调律的 `set_remaining` 落回卷值（语料里
-//!   14 条模式 2 发射器，回卷区间全为 [0,1] 即整段循环）；站点链对
-//!   `Looped` 裁决不落值（站点语料无模式 2）。
+//! Weather effect lifecycle and particle simulation, with source-addressed
+//! material programs submitted through the scene renderer. Forward/effect GPU
+//! readiness precedes environment preparation; superseded preflight entities
+//! are discarded without interrupting the currently committed effects.
+//! Geometry and simulation gaps remain explicit admission failures.
 
 use bevy::asset::{AssetPath, LoadState, RecursiveDependencyLoadState};
 use bevy::gltf::{Gltf, GltfMesh, GltfNode};
@@ -82,29 +21,10 @@ use moly_assets::weather_effect::WeatherEffectLifecycle;
 use crate::billboard::{self, Alignment, SizeClamp};
 use crate::character::AvatarRoot;
 use crate::site::SiteActive;
-use crate::uber_particle::{BlendArm, CullArm, UberParticleMaterial, UberT1Params};
+use crate::source_particle::{SourceParticle, ParticleReadiness};
+use moly_assets::source_shader::SourceShaderCatalogue;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared};
 use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world, simulate};
-
-/// 源族的 shader 名（与站点链同一族、同一份材质实现）。
-const SHADER_NAME: &str = "Mysekai/Effect/UberUnlit";
-
-/// 原版粒子族的 shader 名。天气档案里两族并存——现算全 15 份现象档案：
-/// 该族 144 条、UberUnlit 380 条、无材质/无 shader 名 36 条。
-const PLAIN_SHADER_NAME: &str = "Particles/Standard Unlit";
-
-/// 粒子材质族。两族的属性名与特性面**不相交**，但化简后的片元链同形：
-/// 原版族的程序体（该族全部变体逐份读过）恰三步——
-///   `c = texture(_MainTex, uv)` → `c *= _Color` → `c *= 顶点色`
-/// 即本链所有特性臂关闭、材质色改为平乘。所以两族共用一条绘制路径，
-/// 由这个枚举决定按哪套属性名取值、以及着色器走哪条臂。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Family {
-    /// 染色 / 亮度键控透明 / 现象光 / 逐粒子流都在这一族。
-    Uber,
-    /// 原版族：特性面由它自己的一组开关表达，全 0 才等于那条三步链。
-    Plain,
-}
 
 /// 零缩放的四边形没有面积，画不出来；尺寸下限。
 const MIN_PARTICLE_SIZE: f32 = 0.0001;
@@ -113,15 +33,9 @@ const MIN_PARTICLE_SIZE: f32 = 0.0001;
 /// 同流会在两族上画出同一图形的错觉（逐系统再乘质数散列）。
 const RNG_SEED: u64 = 0x7765_6174_0001_0125;
 
-/// 全局 mip 偏置：与站点链同口径（无动态分辨率 ⇒ 0）。
-const GLOBAL_MIP_BIAS: f32 = 0.0;
-
 /// prewarm 快进步长：与运行帧率同一量级（雨链同值）。prewarm 的档位
 /// 语义是「开播前把一个周期快进完」，不是精确复算。
 const PREWARM_STEP: f32 = 1.0 / 60.0;
-
-/// T1 关键字全集之外的「放行但未实现」项。
-const SOFT_PARTICLES: &str = "_SOFT_PARTICLES_ENABLED";
 
 // ---- 资源 ----
 
@@ -155,6 +69,13 @@ pub(crate) struct WeatherFxDoc {
 /// 绘制实体标记：换档/换站时按它撤（这些实体不挂在任何场景树下）。
 #[derive(Component)]
 pub struct WeatherFxDraw;
+#[derive(Component)]
+pub(crate) struct WeatherFxPreflight(u64);
+pub(crate) fn cleanup_preflight(mut commands: Commands, phase: Res<WeatherTransition>, draws: Query<(Entity, &WeatherFxPreflight)>) {
+    for (entity, preflight) in &draws {
+        if preflight.0 != phase.request_serial { commands.entity(entity).try_despawn(); }
+    }
+}
 
 enum PlannedGeometry {
     Billboard { alignment: Alignment, clamp: SizeClamp, pivot: [f32; 3] },
@@ -190,15 +111,9 @@ struct Planned {
     /// 根记录 → 发射节点链的 TRS 合成（语料根记录全档恒等，仍参与合成）。
     /// 链缩放由出生步从它折算（X 分量；语料全部均匀）。
     node_affine: GlobalTransform,
-    params: UberT1Params,
-    tint_area: bool,
-    /// 原版粒子族 ⇒ 材质色平乘（见 wgsl 的 `UBER_PLAIN_COLOUR`）。
-    plain_colour: bool,
-    cull: CullArm,
-    blend: BlendArm,
+    source: SourceParticle,
+    draw: Option<(Entity, Handle<Mesh>)>,
     geometry: PlannedGeometry,
-    texture: Handle<Image>,
-    effect_pass: Option<crate::uber_particle::ParticleEmission>,
     lifecycle: WeatherEffectLifecycle,
     /// Cone 的半顶角（shape 块的 `angle` 键；律的 `ShapeParams` 不带它）。
     cone_angle: Option<f32>,
@@ -273,6 +188,29 @@ pub(crate) struct WeatherFxState {
     env_site: String,
     admitted: usize,
     records: usize,
+}
+
+impl WeatherFxState {
+    /// Read-only simulation and generated geometry evidence. Admission alone
+    /// does not establish particle birth, visibility or source equivalence.
+    pub(crate) fn diagnostics(&self, meshes: &Assets<Mesh>) -> Value {
+        serde_json::json!({
+            "phenomenon": self.tier, "site": self.env_site,
+            "records": self.records, "admitted": self.admitted,
+            "emitters": self.live.iter().map(|s| {
+                let mesh = meshes.get(&s.mesh);
+                serde_json::json!({
+                    "effect": s.effect, "node": s.node,
+                    "alive": s.pool.len(), "born": s.born_total, "died": s.died_total,
+                    "poolFull": s.full_total, "integrationRefused": s.refused_total,
+                    "playbackTime": s.playback_head,
+                    "meshVertices": mesh.map(Mesh::count_vertices),
+                    "meshIndices": mesh.and_then(Mesh::indices).map(|indices| indices.len()),
+                    "unmappedSimulationFields": s.emitter.unmapped,
+                })
+            }).collect::<Vec<_>>()
+        })
+    }
 }
 
 struct LiveWeatherEmitter {
@@ -631,6 +569,7 @@ fn judge(
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
+    tally.records += 1;
     let renderer = match particle.get("renderer").filter(|v| v.is_object()) {
         Some(renderer) => renderer,
         None => {
@@ -639,25 +578,13 @@ fn judge(
         }
     };
     let material = renderer.get("material").filter(|v| v.is_object());
-    let material = match material {
+    let _material = match material {
         Some(material) => material,
         None => {
             tally.no_material += 1;
             return None;
         }
     };
-    let shader = material.get("shader").and_then(Value::as_str);
-    let family = match shader {
-        Some(SHADER_NAME) => Family::Uber,
-        Some(PLAIN_SHADER_NAME) => Family::Plain,
-        other => {
-            tally
-                .other_shader
-                .push(other.unwrap_or("(缺 shader 名)").to_owned());
-            return None;
-        }
-    };
-    tally.records += 1;
     if renderer.get("enabled").and_then(Value::as_bool) != Some(true) {
         tally.renderer_disabled += 1;
         return None;
@@ -723,25 +650,26 @@ fn judge(
         tally.dead_emission += 1;
         return None;
     }
-    let shape = match system.get("shape").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
-        Some(shape) => shape,
-        None => {
-            tally.no_shape += 1;
+    let shape = system.get("shape").filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
+    let shape_type = if let Some(shape) = shape {
+        if system.get("shapeEnabled").and_then(Value::as_bool) == Some(false) {
+            tally.shape.push("disabled Shape module unexpectedly carries active parameters".into());
             return None;
         }
+        let shape_type = shape.get("type").and_then(Value::as_str).unwrap_or("");
+        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut") {
+            tally.shape.push(shape_type.to_owned()); return None;
+        }
+        if let Some(reason) = source_shape_admission(shape) {
+            tally.shape.push(format!("{shape_type}: {reason}")); return None;
+        }
+        shape_type
+    } else if system.get("shapeEnabled").and_then(Value::as_bool) == Some(false) {
+        ""
+    } else {
+        tally.no_shape += 1;
+        return None;
     };
-    let shape_type = shape.get("type").and_then(Value::as_str).unwrap_or("");
-    if !matches!(
-        shape_type,
-        "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut"
-    ) {
-        tally.shape.push(shape_type.to_owned());
-        return None;
-    }
-    if let Some(reason) = source_shape_admission(shape) {
-        tally.shape.push(format!("{shape_type}: {reason}"));
-        return None;
-    }
     if !matches!(
         system.get("simulationSpace").and_then(Value::as_str),
         Some("Local") | Some("World")
@@ -766,189 +694,9 @@ fn judge(
         return None;
     }
 
-    // ---- 状态档（材质 uniform 的分支全关才走 T1 片元链） ----
-    let floats = material.get("floats").and_then(Value::as_object);
-    let get = |key: &str| floats.and_then(|f| f.get(key)).and_then(Value::as_f64);
-    // 混合因子：两族的属性名不同——染色族 `_BlendSrc`/`_BlendDst`，原版族
-    // `_SrcBlend`/`_DstBlend`（后者由该 shader 的 pass 状态 `rtBlend0` 具名
-    // 引用，读自真源而非推断）。取值口径同为 Unity `BlendMode`：5 = SrcAlpha。
-    let (src_key, dst_key) = match family {
-        Family::Uber => ("_BlendSrc", "_BlendDst"),
-        Family::Plain => ("_SrcBlend", "_DstBlend"),
-    };
-    if get(src_key) != Some(5.0) {
-        tally
-            .state_arm
-            .push(format!("{src_key}={:?}", get(src_key)));
-        return None;
-    }
-    let blend = match get(dst_key) {
-        Some(v) if v == 10.0 => BlendArm::AlphaBlend,
-        Some(v) if v == 1.0 => BlendArm::Additive,
-        other => {
-            tally.state_arm.push(format!("{dst_key}={other:?}"));
-            return None;
-        }
-    };
-    // `_Cull` 两族同名同口径（原版族的 pass 状态把 culling 具名引到它）。
-    let cull = match get("_Cull") {
-        Some(v) if v == 0.0 => CullArm::Off,
-        Some(v) if v == 1.0 => CullArm::Front,
-        Some(v) if v == 2.0 => CullArm::Back,
-        other => {
-            tally.state_arm.push(format!("_Cull={other:?}"));
-            return None;
-        }
-    };
-    // 深度比较：染色族由材质属性给；原版族的 pass 状态把 zTest 写成常量
-    // 4（LEqual）且**不开放为属性**，所以该族按 4 读——这是从 pass 状态读出
-    // 来的值，不是「属性缺失就当默认」的倒推。
-    let z_test = match family {
-        Family::Uber => get("_ZTest"),
-        Family::Plain => Some(4.0),
-    };
-    if z_test != Some(4.0) {
-        tally.state_arm.push(format!("_ZTest={z_test:?}"));
-        return None;
-    }
-
-    // 特性开关：两族各有自己的一组，含义相同——「全关」才等于本链实现的
-    // 那条片元链。任何一个非 0 都说明源程序里编进了本链没有的步，具名挡下。
-    let mut luminance_enabled = 0.0f32;
-    let mut phenomena_enabled = 0.0f32;
-    let mut tint_blend_rate_coord = 0.0f32;
-    match family {
-        Family::Uber => {
-            for name in ["_FakeLightEnabled", "_BaseMapRotationEnabled"] {
-                if get(name) != Some(0.0) {
-                    tally.state_arm.push(format!("{name}={:?}", get(name)));
-                    return None;
-                }
-            }
-            // 亮度键控透明与现象光这两条分支本链已实现（片元链尾段，与站点粒子
-            // 共用同一条）。开关只认 0/1，别的取值说明这份材质不是我们读过的那一档。
-            luminance_enabled = match get("_TranceparencyByLuminanceEnabled") {
-                Some(v) if v == 0.0 || v == 1.0 => v as f32,
-                other => {
-                    tally
-                        .state_arm
-                        .push(format!("_TranceparencyByLuminanceEnabled={other:?}"));
-                    return None;
-                }
-            };
-            phenomena_enabled = match get("_PhenomenaLightEnabled") {
-                Some(v) if v == 0.0 || v == 1.0 => v as f32,
-                other => {
-                    tally
-                        .state_arm
-                        .push(format!("_PhenomenaLightEnabled={other:?}"));
-                    return None;
-                }
-            };
-            if luminance_enabled == 1.0 {
-                for name in [
-                    "_LuminanceTransparencyProgressCoord",
-                    "_LuminanceTransparencySharpnessCoord",
-                ] {
-                    if get(name) != Some(0.0) {
-                        tally.state_arm.push(format!("{name}={:?}", get(name)));
-                        return None;
-                    }
-                }
-            }
-            // `_TintBlendRateCoord` 已接逐粒子流（顶点属性 custom1/custom2 + 着色器
-            // 选择器），不再要求为 0；其余 coord 的选择器接口相同但消费面未接，
-            // 仍旧拒——放行了却不喂就是静默的错误值。
-            tint_blend_rate_coord = get("_TintBlendRateCoord").unwrap_or(0.0) as f32;
-            for name in [
-                "_EmissionIntensityCoord",
-                "_BaseMapOffsetXCoord",
-                "_BaseMapOffsetYCoord",
-                "_BaseMapRotationCoord",
-            ] {
-                if get(name) != Some(0.0) {
-                    tally.state_arm.push(format!("{name}={:?}", get(name)));
-                    return None;
-                }
-            }
-        }
-        Family::Plain => {
-            // 原版族的特性面。`_ColorMode` 非 0 会把「平乘」换成加/减/叠加/
-            // 取色/差值里的另一支；其余六个各自把一整段接进片元链。这一族
-            // 没有亮度键控与现象光那两条分支（属性面不含它们）⇒ 两臂恒关。
-            for name in [
-                "_ColorMode",
-                "_LightingEnabled",
-                "_EmissionEnabled",
-                "_DistortionEnabled",
-                "_FlipbookMode",
-                "_SoftParticlesEnabled",
-                "_CameraFadingEnabled",
-            ] {
-                if get(name) != Some(0.0) {
-                    tally.state_arm.push(format!("{name}={:?}", get(name)));
-                    return None;
-                }
-            }
-        }
-    }
-    let luminance = Vec4::new(
-        get("_LuminanceTransparencyProgress").unwrap_or(0.0) as f32,
-        get("_LuminanceTransparencySharpness").unwrap_or(0.0) as f32,
-        get("_InverseLuminanceTransparency").unwrap_or(0.0) as f32,
-        0.0,
-    );
-    // 关键字：T1 全集之外的关键字意味着源程序里编进了本链没有的步。
-    // 软粒子是「放行但未实现」（alpha 乘法链末段，要读场景深度）。
-    let keywords = material
-        .get("keywords")
-        .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<&str>>()
-        })
-        .unwrap_or_default();
-    for keyword in &keywords {
-        match *keyword {
-            "_BASE_MAP_MODE_2D" | "_EMISSION_MAP_MODE_2D" | "_TINT_COLOR_ENABLED"
-            | "_EMISSION_AREA_ALL" | "_TINT_AREA_ALL" => {}
-            // 原版族的混合变体关键字。它与 `_SrcBlend=5`/`_DstBlend=10` 表达
-            // 同一件事（该族语料 144/144 两者同时在场），混合因子已由上面的
-            // 状态档接走，这里不额外改片元链。只对该族放行：出现在染色族上
-            // 说明读到的不是我们读过的那一档。
-            "_ALPHABLEND_ON" if family == Family::Plain => {}
-            SOFT_PARTICLES => {
-                tally
-                    .shading_shortfall
-                    .push("软粒子（关键字在场）".to_owned());
-            }
-            other => {
-                tally.keyword.push(other.to_owned());
-                return None;
-            }
-        }
-    }
-    // 深度偏置：源程序的顶点段在 |_ZOffset| > 0.004 时把裁剪空间 z 重映射
-    // 一次，本链没有这一步——放行并具名计数。
-    if get("_ZOffset").map(|v| v.abs() > 0.004).unwrap_or(false) {
-        tally
-            .shading_shortfall
-            .push(format!("深度偏置 _ZOffset={:?}", get("_ZOffset")));
-    }
-    // 基础贴图：现象根相对 URI（字符串直存，不是站点侧车的槽下标）。
-    // 两族的贴图槽名不同：染色族 `_BaseMap`，原版族 `_MainTex`。
-    let base_map_key = match family {
-        Family::Uber => "_BaseMap",
-        Family::Plain => "_MainTex",
-    };
-    let uri = material
-        .pointer(&format!("/textures/{base_map_key}"))
-        .and_then(Value::as_str)
-        .filter(|uri| !uri.is_empty());
-    let Some(uri) = uri else {
-        tally.no_base_map += 1;
-        return None;
+    let source = match SourceParticle::load(renderer, server) {
+        Ok(source) => source,
+        Err(error) => { tally.law_reject.push(format!("source material: {error}")); return None; }
     };
 
     // ---- 律解析（单条档案包裹：一条坏只拒这一条，不拖垮整档） ----
@@ -982,44 +730,19 @@ fn judge(
         tally.start_delay += 1;
         return None;
     }
-    // ---- 模块律构造（表情链的条目级拒绝形：构造拒绝就摘模块，发射器照跑） ----
-    let rol = emitter.rotation_over_lifetime.as_ref().and_then(|params| {
-        match RotationOverLifetime::from_parts(
-            params.separate_axes,
-            params.x.as_ref(),
-            params.y.as_ref(),
-            &params.curve,
-        ) {
-            Ok(law) => Some(law),
-            Err(reason) => {
-                tally
-                    .rol_refused
-                    .push(format!("{node}: {reason}（自旋冻结）"));
-                None
-            }
-        }
-    });
-    // 限速：语料里 29 条放行条目带 limitVelocity（全部 separateAxis=false、
-    // 幅值恒定、drag=0、dampen∈{0.02, 0.1}、无乘法标志键），律构造全部
-    // 接受——这一支是活的，不是占位。
-    let limit = emitter.limit_velocity.as_ref().and_then(|params| {
-        match LimitVelocity::from_parts(
-            params.separate_axis,
-            &params.magnitude,
-            params.dampen,
-            params.drag.as_ref(),
-            params.multiply_drag_by_size,
-            params.multiply_drag_by_velocity,
-        ) {
-            Ok(law) => Some(law),
-            Err(reason) => {
-                tally
-                    .limit_refused
-                    .push(format!("{node}: {reason}（不钳速）"));
-                None
-            }
-        }
-    });
+    // An invalid module invalidates this emitter; it never becomes a different
+    // simulation with rotation or velocity limiting silently removed.
+    let rol = match emitter.rotation_over_lifetime.as_ref().map(|p|
+        RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve)).transpose() {
+        Ok(value) => value,
+        Err(error) => { tally.rol_refused.push(format!("{node}: {error}")); return None; }
+    };
+    let limit = match emitter.limit_velocity.as_ref().map(|p|
+        LimitVelocity::from_parts(p.separate_axis, &p.magnitude, p.dampen, p.drag.as_ref(),
+            p.multiply_drag_by_size, p.multiply_drag_by_velocity)).transpose() {
+        Ok(value) => value,
+        Err(error) => { tally.limit_refused.push(format!("{node}: {error}")); return None; }
+    };
 
     // ---- 渲染器字段：钳制上限与轴心是本链消费的两个，缺了没有可用的
     // 呈现输入（语料 78/78 都带；`minParticleSize` 全 0 且律侧下限用
@@ -1067,67 +790,6 @@ fn judge(
         return None;
     };
 
-    // ---- uniform 组装（与站点链同一份 T1 片元链） ----
-    let tint_area = keywords
-        .iter()
-        .any(|k| *k == "_TINT_AREA_ALL" || *k == "_TINT_AREA_RIM");
-    let base_st = material
-        .pointer(&format!("/textureScaleOffset/{base_map_key}"))
-        .and_then(Value::as_array)
-        .filter(|list| list.len() == 4)
-        .map(|list| {
-            let mut out = [1.0f32; 4];
-            for (slot, value) in out.iter_mut().zip(list) {
-                if let Some(v) = value.as_f64() {
-                    *slot = v as f32;
-                }
-            }
-            out
-        })
-        .unwrap_or([1.0, 1.0, 0.0, 0.0]);
-    // 材质色。染色族读 `_TintColor` 并按混合率朝它插值；原版族读 `_Color`
-    // 并**无条件平乘**。两者共用这一槽，由 `plain_colour` 决定着色器按哪
-    // 种语义读它（见 wgsl 的 `UBER_PLAIN_COLOUR`）。
-    // ⚠ 该族语料里 `_Color` 与 `_MainTex_ST` 恰好都是单位元（144/144 分别
-    // 为 (1,1,1,1) 与 (1,1,0,0)）⇒ **这份语料区分不出这两项有没有真的接上**。
-    // 照真源接线，但不能拿它当已验证。
-    let colour_key = match family {
-        Family::Uber => "/colors/_TintColor",
-        Family::Plain => "/colors/_Color",
-    };
-    let tint_colour = material
-        .pointer(colour_key)
-        .and_then(Value::as_array)
-        .filter(|list| list.len() == 4)
-        .map(|list| {
-            let mut out = [1.0f32; 4];
-            for (slot, value) in out.iter_mut().zip(list) {
-                if let Some(v) = value.as_f64() {
-                    *slot = v as f32;
-                }
-            }
-            out
-        })
-        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
-    let tint_blend_rate = get("_TintBlendRate").unwrap_or(0.0) as f32;
-    let texture =
-        server.load::<Image>(AssetPath::from(format!("moly://phenomena/{uri}")));
-
-    use moly_assets::material_passes::EffectPassEligibility;
-    let effect_eligibility = EffectPassEligibility::from_material(material);
-    match effect_eligibility {
-        EffectPassEligibility::Unresolved => { tally.effect_pass_unresolved += 1; }
-        EffectPassEligibility::NotDeclared => { tally.effect_pass_not_declared += 1; }
-        EffectPassEligibility::QueueExcluded => { tally.effect_pass_queue_excluded += 1; }
-        EffectPassEligibility::Eligible => {}
-    }
-    let soft_enabled = keywords.contains(&"_SOFT_PARTICLES_ENABLED");
-    let soft_intensity = if soft_enabled {
-        get("_SoftParticlesIntensity").filter(|v| v.is_finite())
-            .expect("active source soft particles require exported intensity") as f32
-    } else { 0.0 };
-    let shader_coords = Vec4::new(tint_blend_rate_coord, soft_intensity,
-        f32::from(soft_enabled), get("_EmissionIntensityCoord").unwrap_or(0.0) as f32);
     Some(Planned {
         ordinal: 0,
         node: node.to_owned(),
@@ -1137,17 +799,8 @@ fn judge(
         kind,
         camera_rotation,
         node_affine,
-        params: UberT1Params {
-            base_st: Vec4::from_array(base_st),
-            tint_colour: Vec4::from_array(tint_colour),
-            scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled),
-            luminance,
-            coords: shader_coords,
-        },
-        tint_area,
-        plain_colour: family == Family::Plain,
-        cull,
-        blend,
+        source,
+        draw: None,
         geometry: if let Some(reference) = mesh_reference {
             let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("phenomena/{}", reference.file))).with_source("moly"));
             PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, pivot: Vec3::from_array(pivot) }
@@ -1155,17 +808,6 @@ fn judge(
             PlannedGeometry::Billboard { alignment: alignment.expect("validated Billboard alignment"),
                 clamp: SizeClamp { max_screen_fraction: max_particle_size as f32, min_size: MIN_PARTICLE_SIZE }, pivot }
         },
-        texture,
-        effect_pass: (effect_eligibility == EffectPassEligibility::Eligible).then(|| crate::uber_particle::ParticleEmission {
-            source_state: moly_assets::material_passes::SourceMaterialPasses::from_extras(material).and_then(|p| p.effect_state()),
-            render_queue: material.get("renderQueue").and_then(Value::as_i64).expect("eligible effect has a queue") as i32,
-            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled), luminance, coords: shader_coords },
-            colour: Vec4::from_array(std::array::from_fn(|i| material.pointer("/colors/_EmissionColor").and_then(Value::as_array).and_then(|a| a.get(i)).and_then(Value::as_f64).unwrap_or(1.0) as f32)),
-            intensity: get("_EmissionIntensity").unwrap_or(1.0) as f32,
-            colour_type: material.pointer("/ints/_EmissionColorType").and_then(Value::as_f64).or_else(|| get("_EmissionColorType")).unwrap_or(0.0) as f32,
-            area: keywords.iter().any(|k| *k == "_EMISSION_AREA_ALL"),
-            tint_area, plain_colour: family == Family::Plain, cull, blend,
-        }),
         cone_angle,
         rol,
         limit,
@@ -1276,7 +918,7 @@ pub(crate) fn spawn_when_ready(
     mut commands: Commands,
     server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<UberParticleMaterial>>,
+    catalogues: Res<Assets<SourceShaderCatalogue>>,
     plan: Option<ResMut<WeatherFxPlan>>,
     mut active: Option<ResMut<WeatherFxState>>,
     mut retiring: ResMut<WeatherFxRetirements>,
@@ -1296,6 +938,7 @@ pub(crate) fn spawn_when_ready(
         commands.remove_resource::<WeatherFxPrepared>();
         return;
     }
+    let request_serial = plan.request_serial;
     for planned in &mut plan.planned {
         if let PlannedGeometry::Mesh { reference, glb, source, .. } = &mut planned.geometry {
             match (server.load_state(&*glb), server.recursive_dependency_load_state(&*glb)) {
@@ -1316,12 +959,27 @@ pub(crate) fn spawn_when_ready(
                     .unwrap_or_else(|error| panic!("invalid source particle mesh {}: {error}", reference.file))));
             }
         }
-        match server.load_state(&planned.texture) {
-            LoadState::Failed(err) => panic!("weather particle texture {} failed: {err:?}", planned.node),
-            state if state.is_loaded() => {},
-            _ => return,
+        if let Err(error) = planned.source.resolve(&server, &catalogues) {
+            if planned.source.error.as_deref() != Some(&error.0) { error!(%error, "weather source material unresolved"); }
+            planned.source.error = Some(error.0);
+            return;
+        }
+        if planned.source.passes.is_empty() { return; }
+        if planned.draw.is_none() {
+            let mesh = meshes.add(billboard::empty_mesh());
+            let draw = commands.spawn((Mesh3d(mesh.clone()), planned.source.clone(), Transform::IDENTITY,
+                NoFrustumCulling, WeatherFxPreflight(request_serial), crate::shadowmap::NoShadowCast)).id();
+            planned.draw = Some((draw, mesh));
         }
     }
+    for planned in &mut plan.planned {
+        if let ParticleReadiness::Failed(error) = &*planned.source.readiness.lock().unwrap() {
+            if planned.source.error.as_ref() != Some(error) { error!(%error, node=%planned.node, "weather GPU preparation failed"); }
+            planned.source.error = Some(error.clone());
+            return;
+        }
+    }
+    if !plan.planned.iter().all(|p| matches!(*p.source.readiness.lock().unwrap(), ParticleReadiness::Ready)) { return; }
     commands.insert_resource(WeatherFxPrepared {selection:plan.selection.clone(),request_serial:plan.request_serial});
     if !phase.can_start_site_fx(&plan.selection) { return; }
 
@@ -1365,31 +1023,18 @@ pub(crate) fn spawn_when_ready(
     let mut waiting = Vec::new();
     for planned in std::mem::take(&mut plan.planned) {
         let is_global = planned.kind != EffectKind::Site;
-        if (is_global && preserve_global) || (!is_global && site_timed_out) { continue; }
+        if (is_global && preserve_global) || (!is_global && site_timed_out) {
+            if let Some((draw, _)) = planned.draw { commands.entity(draw).try_despawn(); }
+            continue;
+        }
         if (is_global && !install_global) || (!is_global && !install_site) {
             waiting.push(planned); continue;
         }
-        let mesh = meshes.add(billboard::empty_mesh());
-        let material = materials.add(UberParticleMaterial::new(
-            planned.params,
-            planned.texture.clone(),
-            planned.tint_area,
-            planned.plain_colour,
-            planned.cull,
-            planned.blend,
-        ));
-        // 实体变换恒等：四角已在 CPU 展开成世界坐标，属性即世界坐标。
-        // 逐帧重建的属性池没有稳定包围盒，剔除交给 NoFrustumCulling 直通。
-        let mut draw = commands.spawn((
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(material),
-            Transform::IDENTITY,
-            NoFrustumCulling,
-            WeatherFxDraw,
-            crate::shadowmap::NoShadowCast,
-        ));
-        if let Some(effect_pass) = planned.effect_pass { draw.insert(effect_pass); }
-        state.live.push(LiveWeatherEmitter { draw: draw.id(), lifecycle: planned.lifecycle, runtime: Runtime {
+        let (draw, mesh) = planned.draw.expect("GPU preflight must precede installation");
+        let mut source = planned.source;
+        source.enabled = true;
+        commands.entity(draw).remove::<WeatherFxPreflight>().insert((source, WeatherFxDraw));
+        state.live.push(LiveWeatherEmitter { draw, lifecycle: planned.lifecycle, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
             emitter: planned.emitter.clone(),
@@ -1405,6 +1050,7 @@ pub(crate) fn spawn_when_ready(
             emission: EmissionState::default(),
             playback_head: 0.0,
             previous_head: 0.0,
+            emission_started: false,
             // 逐系统换一条流：同一个种子在所有系统上会画出同一个图形。
             rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             prewarmed: false,

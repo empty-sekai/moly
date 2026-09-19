@@ -27,6 +27,9 @@ pub(crate) struct PreparedDepthSnapshot {
     texture: CachedTexture,
     source: BindGroup,
 }
+impl PreparedDepthSnapshot {
+    pub(crate) fn view(&self) -> &TextureView { &self.texture.default_view }
+}
 
 #[derive(Default)]
 pub(crate) struct WeatherOpaqueDepthNode;
@@ -113,7 +116,7 @@ pub(crate) fn raw_depth_layout() -> BindGroupLayoutDescriptor {
 pub(crate) struct RawDepthBinding { pub group: BindGroup }
 
 #[derive(Resource)]
-struct RawDepthGpu {
+pub(crate) struct RawDepthGpu {
     invalid_view: TextureView,
     valid: Buffer,
     invalid: Buffer,
@@ -173,7 +176,7 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
     commands.insert_resource(RawDepthGpu {invalid_view,valid,invalid,copy_pipeline});
 }
 
-fn prepare_raw_depth(
+pub(crate) fn prepare_raw_depth(
     mut commands: Commands,
     device: Res<bevy::render::renderer::RenderDevice>,
     cache: Res<PipelineCache>,

@@ -23,6 +23,8 @@ pub fn library_diagnostics() -> String {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct QaDiagnostics<'w, 's> {
     weather_transition: Option<Res<'w, crate::weather_transition::WeatherTransition>>,
+    weather_particles: Option<Res<'w, crate::weather_fx::WeatherFxState>>,
+    particle_meshes: Res<'w, Assets<Mesh>>,
     weather_timeline: Option<Res<'w, crate::weather::WeatherTimelineState>>,
     weather_environment: Option<Res<'w, crate::env::SiteEnv>>,
     character_environment: Option<Res<'w, crate::character_material::CharacterEnv>>,
@@ -190,6 +192,7 @@ pub(crate) fn qa_open(
             });
         value.as_object_mut().expect("QA object").extend(serde_json::json!({
             "weather_transition":extra.weather_transition.as_deref(),
+            "weather_particles":extra.weather_particles.as_ref().map(|state|state.diagnostics(&extra.particle_meshes)),
             "weather_timeline":extra.weather_timeline.as_ref().map(|state|serde_json::json!({
                 "elapsed":state.elapsed,"localTime":state.local_time,"duration":state.duration,
                 "skyColor":state.values.sky_color,"lightColor":state.values.light_color,

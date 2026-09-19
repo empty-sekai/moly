@@ -20,7 +20,7 @@ fn runtime() -> Runtime {
                 color:MinMaxGradient::Color([1.0;4]),gravity_modifier:zero.clone() },
             emission:Some(EmissionParams { rate_over_time:MinMaxCurve::Constant(100.0),
                 rate_over_distance:zero,bursts:Vec::new() }),
-            shape:None,velocity_over_lifetime:None,color_over_lifetime:None,
+            shape:None,shape_enabled:Some(false),velocity_over_lifetime:None,color_over_lifetime:None,
             size_over_lifetime:None,rotation_over_lifetime:None,limit_velocity:None,
             custom_data:None,unmapped:Vec::new(),
         },
@@ -30,7 +30,7 @@ fn runtime() -> Runtime {
             clamp:SizeClamp { min_size:0.0,max_screen_fraction:1.0 },pivot:[0.0;3]},
         pool:vec![Particle::born([0.0;3],[2.0,0.0,0.0],10.0)],
         side:vec![Side {rand:0.5,seed:123,rot:[0.0;3],size:[1.0;3],gravity:0.0,colour:[1.0;4]}],
-        emission:EmissionState::default(),playback_head:0.0,previous_head:0.0,rng:Rng(123),
+        emission:EmissionState::default(),playback_head:0.0,previous_head:0.0,emission_started:false,rng:Rng(123),
         prewarmed:false,cone_angle:None,rol:None,limit:None,
         born_total:1,died_total:0,full_total:0,refused_total:0,
     }
@@ -40,6 +40,56 @@ fn lifecycle(delay: f64) -> WeatherEffectLifecycle {
     WeatherEffectLifecycle::from_effect(&serde_json::json!({"lifecycle":{
         "stopBehavior":"stopEmitting","timeUntilDestroy":delay,"delaySource":"serializedRoot"
     }})).unwrap()
+}
+
+#[test]
+fn disabled_shape_matches_engine_origin_and_forward_motion() {
+    // Unity 2022.3.62f2 ParticleSystem.Simulate: disabled Shape, speed 2,
+    // owner (2,3,4), Euler (0,90,0). Runtime world coordinates reflect X.
+    for space in [SimulationSpace::Local, SimulationSpace::World] {
+        let mut system = runtime();
+        system.pool.clear();
+        system.side.clear();
+        system.born_total = 0;
+        system.emitter.simulation_space = space;
+        system.emitter.start.speed = MinMaxCurve::Constant(2.0);
+        // Use the same single time-zero burst as the engine probe. A rate
+        // surrogate would conceal a broken initial emission boundary.
+        system.emitter.emission = Some(EmissionParams {
+            rate_over_time: MinMaxCurve::Constant(0.0),
+            rate_over_distance: MinMaxCurve::Constant(0.0),
+            bursts: vec![moly_law::particle::Burst {
+                time: 0.0, count: MinMaxCurve::Constant(1.0),
+                cycles: moly_law::particle::emit::BurstCycles::from_serialized(1),
+                repeat_interval: 0.01, probability: 1.0,
+            }],
+        });
+        system.node_affine = GlobalTransform::from(
+            Transform::from_xyz(-2.0, 3.0, 4.0)
+                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+        );
+        let ctx = Context { sky: GlobalTransform::IDENTITY,
+            camera: GlobalTransform::IDENTITY, site: GlobalTransform::IDENTITY };
+        crate::particle_runtime::simulate(&mut system, 0.01, &ctx);
+        assert_eq!(system.pool.len(), 1);
+        let expected_velocity = if space == SimulationSpace::Local {
+            [0.0, 0.0, 2.0]
+        } else { [-2.0, 0.0, 0.0] };
+        for (elapsed, dt) in [(0.01, 0.0), (0.25, 0.24)] {
+            if dt > 0.0 {
+                crate::particle_runtime::simulate(&mut system, dt, &ctx);
+            }
+            assert_eq!(system.born_total, 1, "initial burst must fire exactly once");
+            assert_eq!(system.pool.len(), 1);
+            let expected_position = if space == SimulationSpace::Local {
+                [0.0, 0.0, elapsed * 2.0]
+            } else { [-2.0 - elapsed * 2.0, 3.0, 4.0] };
+            for axis in 0..3 {
+                assert!((system.pool[0].position[axis] - expected_position[axis]).abs() < 1e-5);
+                assert!((system.pool[0].velocity[axis] - expected_velocity[axis]).abs() < 1e-5);
+            }
+        }
+    }
 }
 
 fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {

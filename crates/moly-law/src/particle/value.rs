@@ -57,8 +57,7 @@ pub struct Curve {
 /// B2 = (1−u)·((u·u)·3)；B3 = u·(u·u)；
 /// 值 = v1·B3 + (P2y·B2 + (P1y·B1 + v0·B0))。
 ///
-/// 原式在 Bezier 路之后还有一步 ±inf 切线检查（任一 +inf 取 v0、
-/// 任一 −inf 取 v1），装载处已拒 ±inf 斜率，不在此重复。
+/// 原式在 Bezier 路之后还有一步 ±inf 切线覆写，见 step_value。
 /// d == 0 由各档调用处的退化分支先行接管（引擎原式给 v0）。
 pub fn bezier_interpolate(t: f32, k0: CurveKey, k1: CurveKey) -> f32 {
     let third = f32::from_bits(0x3eaa_aaab);
@@ -87,7 +86,18 @@ pub fn bezier_interpolate(t: f32, k0: CurveKey, k1: CurveKey) -> f32 {
     let b3v1 = k1.value * u3;
     let t0 = (k0.value * b0) + (p1y * b1);
     let t1 = (p2y * b2) + t0;
-    b3v1 + t1
+    step_value(k0, k1).unwrap_or(b3v1 + t1)
+}
+
+fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
+    // The positive-infinity branch returns before the negative check.
+    if k0.out_slope == f32::INFINITY || k1.in_slope == f32::INFINITY {
+        Some(k0.value)
+    } else if k0.out_slope == f32::NEG_INFINITY || k1.in_slope == f32::NEG_INFINITY {
+        Some(k1.value)
+    } else {
+        None
+    }
 }
 
 /// x-Bezier 求逆：解 `c·u³ + b·u² + a·u − x = 0` 取 [0,1] 内的根，
@@ -264,7 +274,7 @@ impl Curve {
                 let b = t3 - 2.0 * t2 + t;
                 let c = -2.0 * t3 + 3.0 * t2;
                 let d = t3 - t2;
-                a * k0.value + b * m0 + c * k1.value + d * m1
+                step_value(k0, k1).unwrap_or(a * k0.value + b * m0 + c * k1.value + d * m1)
             }
         }
     }

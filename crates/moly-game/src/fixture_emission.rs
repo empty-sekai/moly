@@ -772,7 +772,7 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct EmissionPassLabel;
+pub(crate) struct EmissionPassLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct TransparentFixtureEmissionLabel;

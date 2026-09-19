@@ -1104,6 +1104,7 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             emission: EmissionState::default(),
             playback_head: 0.0,
             previous_head: 0.0,
+            emission_started: false,
             // 逐系统换一条流：同一个种子在所有系统上会画出同一个图形。
             rng: Rng(RNG_SEED ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             born_total: 0,

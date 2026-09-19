@@ -44,6 +44,8 @@ pub(crate) struct Runtime {
     pub(crate) playback_head: f32,
     /// 上一帧的播头（burst 裁决要一个左端点）。
     pub(crate) previous_head: f32,
+    /// The initial zero-time burst belongs to the first positive simulation step.
+    pub(crate) emission_started: bool,
     pub(crate) rng: Rng,
     /// 惰性 prewarm 的闸：首个推进帧快进一个周期。
     pub(crate) prewarmed: bool,
@@ -188,14 +190,21 @@ pub(crate) fn simulate_stopped(system: &mut Runtime, dt: f32, ctx: &Context) {
 }
 
 fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting: bool) {
-    if emitting {
+    if emitting && dt > 0.0 {
         let emission = system
             .emitter
             .emission
             .as_ref()
             .expect("判读已门 emission 在场")
             .clone();
-        system.previous_head = system.playback_head;
+        system.previous_head = if system.emission_started {
+            system.playback_head
+        } else {
+            // burst_check uses (previous, now]. Include exactly zero on first
+            // playback without shifting the source clock or repeating it later.
+            system.emission_started = true;
+            -f32::from_bits(1)
+        };
         let rate = emission
             .rate_over_time
             .evaluate(system.playback_head, 0.5);
@@ -335,11 +344,7 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
 
 /// 出生一颗：形状抽样 → 出生取值 → 律的入池裁决。
 fn spawn_one(system: &mut Runtime, ctx: &Context) {
-    let shape = system
-        .emitter
-        .shape
-        .as_ref()
-        .expect("判读已门形状在场");    // Current native RNG consumption: Circle/Cone 2, Sphere/Hemisphere 3,
+    let (position, direction) = if let Some(shape) = system.emitter.shape.as_ref() {    // Current native RNG consumption: Circle/Cone 2, Sphere/Hemisphere 3,
     // SingleSidedEdge 1. A billboard's facing direction is not its birth velocity.
     let (local, raw_dir) = match shape.shape_type.as_str() {
         "Circle" => {
@@ -419,6 +424,12 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     } else {
         direction = [0.0; 3];
     }
+
+    (position, direction)
+    } else {
+        assert_eq!(system.emitter.shape_enabled, Some(false), "missing shape requires explicit disabled-module evidence");
+        ([0.0; 3], [0.0, 0.0, 1.0])
+    };
 
     // ---- 出生取值表（表情链转录：逐项各抽一次，速度与重力共用稳定
     // 因子，种子 u32 最后一抽）----

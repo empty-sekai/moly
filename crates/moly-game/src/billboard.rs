@@ -163,6 +163,7 @@ pub fn empty_mesh() -> Mesh {
     // dormant emitters would compile an invalid shader before their first quad.
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new())
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new())
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new())
         .with_inserted_attribute(ATTRIBUTE_CUSTOM1, Vec::<[f32; 4]>::new())
@@ -185,6 +186,7 @@ pub fn write_quads(
     let mut tally = BatchTally::default();
     let n = quads.len();
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n * 4);
     let mut colours: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
     let mut custom1: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
@@ -239,6 +241,7 @@ pub fn write_quads(
             );
             let world = centre + basis_x * spun.x + basis_y * spun.y;
             positions.push(world.to_array());
+            normals.push(basis_x.cross(basis_y).normalize_or_zero().to_array());
             uvs.push(corner);
             colours.push(quad.colour);
             custom1.push(quad.custom1);
@@ -251,6 +254,7 @@ pub fn write_quads(
     }
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
     mesh.insert_attribute(ATTRIBUTE_CUSTOM1, custom1);

@@ -96,6 +96,10 @@ pub mod weather_fx;
 mod weather_depth;
 mod weather_transition;
 mod source_render_state;
+mod source_shader;
+mod source_particle;
+mod source_particle_streams;
+mod source_particle_render;
 
 use bevy::prelude::*;
 
@@ -141,6 +145,8 @@ pub fn app(
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);
 
     moly_assets::json::register(&mut app);
+    moly_assets::source_shader::register(&mut app);
+    app.add_plugins(source_shader::SourceShaderPlugin);
     moly_assets::material_textures::register(&mut app);
     sky::install(&mut app);
     emoticon::install(&mut app);
@@ -161,6 +167,7 @@ pub fn app(
         fixture_emission::FixtureEmissionPlugin,
     ));
     app.add_plugins(fixture_edit::FixtureEditPlugin);
+    app.add_plugins(source_particle_render::SourceParticlePlugin);
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
