@@ -55,6 +55,10 @@ pub struct ParticleRenderer {
     pub vertex_stream_names: Vec<String>,
     /// 内联材质记录；`material` 为 null 时为 None。
     pub material: Option<MaterialSlot>,
+    /// Source tag + transparent-queue decision, independent of shader family.
+    pub effect_pass: crate::material_passes::EffectPassEligibility,
+    pub effect_render_state: Option<crate::material_passes::SourceRenderState>,
+    pub render_queue: Option<i32>,
     /// Mesh 绘制模式要实例化的网格。
     ///
     /// **只有 `renderMode == "Mesh"` 的记录带这个键**，Billboard 记录没有
@@ -467,6 +471,10 @@ fn parse_particle_renderer(
         pivot: pivot_out,
         use_custom_vertex_streams,
         vertex_stream_names,
+        effect_render_state: object.get("material").and_then(SourceMaterialPasses::from_extras).and_then(|p| p.effect_state()),
+        render_queue: object.get("material").and_then(|m| m.get("renderQueue")).and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()),
+        effect_pass: crate::material_passes::EffectPassEligibility::from_material(
+            object.get("material").unwrap_or(&Value::Null)),
         material,
         meshes,
     })

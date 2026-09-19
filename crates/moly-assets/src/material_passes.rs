@@ -10,6 +10,7 @@ use bevy::prelude::*;
 pub struct SourceMaterialPasses {
     light_modes: Vec<String>,
     color_state: Option<SourceRenderState>,
+    effect_state: Option<SourceRenderState>,
 }
 
 /// Resolved source pass state. Unity numeric enums are preserved at the asset
@@ -86,12 +87,16 @@ impl SourceMaterialPasses {
     pub fn from_extras(extras: &serde_json::Value) -> Option<Self> {
         // glTF fixture extras store this directly; site sidecars retain it
         // inside the resolved shader reference. Both originate from pass tags.
-        let passes = extras
-            .get("shaderPasses")
-            .or_else(|| extras.get("shader")?.get("shaderPasses"))?
-            .as_array()?;
+        let detailed = extras.get("shaderPasses")
+            .or_else(|| extras.get("shader").and_then(|s| s.get("shaderPasses")));
+        let Some(detailed) = detailed else {
+            return Self::from_light_modes(extras.get("lightModes")?);
+        };
+        let passes = detailed.as_array()?;
         let mut light_modes = Vec::new();
         let mut color_state = None;
+        let mut effect_state = None;
+        let mut effect_unresolved = false;
         for pass in passes {
             let pass = pass.as_object()?;
             if pass
@@ -103,6 +108,13 @@ impl SourceMaterialPasses {
                     color_state = SourceRenderState::parse(state, extras);
                 }
             }
+            if pass.get("lightMode").and_then(|v| v.as_str()) == Some("MysekaiEffect") {
+                let state = pass.get("renderState").and_then(|s| SourceRenderState::parse(s, extras));
+                match state {
+                    Some(state) if effect_state.is_none_or(|previous| previous == state) => effect_state = Some(state),
+                    _ => effect_unresolved = true,
+                }
+            }
             match pass.get("lightMode") {
                 Some(serde_json::Value::String(mode)) => light_modes.push(mode.clone()),
                 None | Some(serde_json::Value::Null) => {}
@@ -112,7 +124,27 @@ impl SourceMaterialPasses {
         Some(Self {
             light_modes,
             color_state,
+            effect_state: if effect_unresolved { None } else { effect_state },
         })
+    }
+
+    /// Compact particle exports retain each declared LightMode, including
+    /// null for an untagged pass. Missing/malformed metadata is NOT an empty list.
+    pub fn from_light_modes(value: &serde_json::Value) -> Option<Self> {
+        let mut light_modes = Vec::new();
+        for tag in value.as_array()? {
+            match tag {
+                serde_json::Value::String(tag) => light_modes.push(tag.clone()),
+                serde_json::Value::Null => {},
+                _ => return None,
+            }
+        }
+        Some(Self { light_modes, color_state: None, effect_state: None })
+    }
+
+    /// Pass tags are identities. Shader-family names are never a substitute.
+    pub fn has_light_mode(&self, mode: &str) -> bool {
+        self.light_modes.iter().any(|tag| tag == mode)
     }
 
     pub fn has_shadow_caster(&self) -> bool {
@@ -121,7 +153,76 @@ impl SourceMaterialPasses {
             .any(|mode| mode.eq_ignore_ascii_case("ShadowCaster"))
     }
 
+    /// Only a source-resolved effect state is usable. Differing SubShader
+    /// states require actual SubShader selection; do not choose one arbitrarily.
+    pub fn effect_state(&self) -> Option<SourceRenderState> {
+        self.effect_state
+    }
+
     pub fn color_state(&self) -> Option<SourceRenderState> {
         self.color_state
+    }
+}
+
+
+/// Material-level eligibility for the source transparent MysekaiEffect draw.
+/// Renderer visibility and camera gates remain separate render-extraction checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectPassEligibility {
+    Eligible,
+    NotDeclared,
+    QueueExcluded,
+    Unresolved,
+}
+
+impl EffectPassEligibility {
+    pub fn from_material(value: &serde_json::Value) -> Self {
+        let Some(passes) = SourceMaterialPasses::from_extras(value) else {
+            return Self::Unresolved;
+        };
+        if !passes.has_light_mode("MysekaiEffect") {
+            return Self::NotDeclared;
+        }
+        let Some(queue) = value.get("renderQueue").and_then(|v| v.as_i64()) else {
+            return Self::Unresolved;
+        };
+        if (2501..=5000).contains(&queue) { Self::Eligible } else { Self::QueueExcluded }
+    }
+}
+
+#[cfg(test)]
+mod weather_pass_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn family_name_does_not_authorize_an_effect_draw() {
+        let plain = json!({"shader":"Particles/Standard Unlit", "lightModes":[null,null], "renderQueue":3000});
+        let misleading = json!({"shader":"Mysekai/Effect/UberUnlit", "lightModes":["UniversalForward"], "renderQueue":3000});
+        assert_eq!(EffectPassEligibility::from_material(&plain), EffectPassEligibility::NotDeclared);
+        assert_eq!(EffectPassEligibility::from_material(&misleading), EffectPassEligibility::NotDeclared);
+    }
+
+    #[test]
+    fn explicit_tag_and_transparent_queue_are_both_required() {
+        for (queue, expected) in [(2500, EffectPassEligibility::QueueExcluded), (2501, EffectPassEligibility::Eligible), (5000, EffectPassEligibility::Eligible), (5001, EffectPassEligibility::QueueExcluded)] {
+            let value = json!({"lightModes":["UniversalForward","MysekaiEffect"], "renderQueue":queue});
+            assert_eq!(EffectPassEligibility::from_material(&value), expected);
+        }
+        assert_eq!(EffectPassEligibility::from_material(&json!({"lightModes":["MysekaiEffect"]})), EffectPassEligibility::Unresolved);
+    }
+
+    #[test]
+    fn unknown_is_not_known_absence_and_does_not_fall_back_to_a_family() {
+        for value in [json!({"shader":"Mysekai/Effect/UberUnlit"}), json!({"lightModes":null}), json!({"lightModes":[7]}), json!({"shaderPasses":null,"lightModes":["MysekaiEffect"],"renderQueue":3000})] {
+            assert_eq!(EffectPassEligibility::from_material(&value), EffectPassEligibility::Unresolved);
+        }
+        assert_eq!(EffectPassEligibility::from_material(&json!({"lightModes":[]})), EffectPassEligibility::NotDeclared);
+    }
+
+    #[test]
+    fn detailed_and_compact_exports_authorize_the_same_pass() {
+        let value = json!({"shaderPasses":[{"lightMode":"UniversalForward"},{"lightMode":"MysekaiEffect"}],"renderQueue":3000});
+        assert_eq!(EffectPassEligibility::from_material(&value), EffectPassEligibility::Eligible);
     }
 }

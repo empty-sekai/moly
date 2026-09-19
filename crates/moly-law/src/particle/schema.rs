@@ -105,6 +105,8 @@ pub struct StartParams {
     pub size_z: Option<MinMaxCurve>,
     pub size3d: bool,
     pub rotation: MinMaxCurve,
+    pub rotation_x: Option<MinMaxCurve>,
+    pub rotation_y: Option<MinMaxCurve>,
     pub rotation3d: bool,
     pub color: MinMaxGradient,
     pub gravity_modifier: MinMaxCurve,
@@ -130,7 +132,34 @@ pub struct ShapeParams {
     /// 欧拉旋转（度）。施加口径见 `shape::euler_rotate_deg`。
     pub rotation: [f32; 3],
     pub position: [f32; 3],
+    /// Authored controls are preserved even when a renderer cannot consume
+    /// them yet. Missing legacy metadata is distinguishable from authored zero.
+    pub controls: ShapeControls,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeMode { Random, Loop, PingPong, BurstSpread }
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShapeControls {
+    pub source_version: Option<u32>,
+    pub angle: Option<f32>,
+    pub length: Option<f32>,
+    pub donut_radius: Option<f32>,
+    pub scale: Option<[f32; 3]>,
+    pub box_thickness: Option<[f32; 3]>,
+    pub arc_mode: Option<ShapeMode>,
+    pub arc_spread: Option<f32>,
+    pub arc_speed: Option<MinMaxCurve>,
+    pub radius_mode: Option<ShapeMode>,
+    pub radius_spread: Option<f32>,
+    pub radius_speed: Option<MinMaxCurve>,
+    pub align_to_direction: Option<bool>,
+    pub random_direction: Option<f32>,
+    pub spherical_direction: Option<f32>,
+    pub random_position: Option<f32>,
+}
+
 
 /// velocityOverLifetime 模块。
 #[derive(Debug, Clone, PartialEq)]
@@ -245,9 +274,9 @@ const MAPPED_SYSTEM_KEYS: [&str; 19] = [
 ];
 
 /// start 层已映射键。
-const MAPPED_START_KEYS: [&str; 10] = [
+const MAPPED_START_KEYS: [&str; 12] = [
     "lifetime", "speed", "size", "sizeY", "sizeZ", "size3D", "rotation",
-    "rotation3D", "color", "gravityModifier",
+    "rotationX", "rotationY", "rotation3D", "color", "gravityModifier",
 ];
 
 impl EmitterParams {
@@ -406,6 +435,10 @@ impl StartParams {
                 .transpose()?,
             size3d: bool_of(obj_get(obj, "size3D"), &format!("{ctx}.start.size3D"))?,
             rotation: min_max_curve(obj_get(obj, "rotation"), &format!("{ctx}.start.rotation"))?,
+            rotation_x: obj_get(obj, "rotationX")
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationX"))).transpose()?,
+            rotation_y: obj_get(obj, "rotationY")
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationY"))).transpose()?,
             rotation3d: bool_of(obj_get(obj, "rotation3D"), &format!("{ctx}.start.rotation3D"))?,
             color: min_max_gradient(obj_get(obj, "color"), &format!("{ctx}.start.color"))?,
             gravity_modifier: min_max_curve(
@@ -468,8 +501,47 @@ impl EmissionParams {
 /// shape 层映射的闭集；其余（angle/length/boxThickness/donutRadius/
 /// mesh*/alignToDirection/randomDirectionAmount/sphericalDirectionAmount/
 /// scale）收 unmapped。
-const MAPPED_SHAPE_KEYS: [&str; 6] =
-    ["type", "radius", "radiusThickness", "arc", "rotation", "position"];
+const MAPPED_SHAPE_KEYS: &[&str] = &[
+    "type", "radius", "radiusThickness", "arc", "rotation", "position", "sourceVersion",
+    "angle", "length", "donutRadius", "scale", "boxThickness", "arcMode", "arcSpread", "arcSpeed",
+    "radiusMode", "radiusSpread", "radiusSpeed", "alignToDirection", "randomDirectionAmount",
+    "sphericalDirectionAmount", "randomPositionAmount",
+];
+
+impl ShapeMode {
+    fn from_value(value: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        match value.as_str() {
+            Some("Random") => Ok(Self::Random), Some("Loop") => Ok(Self::Loop),
+            Some("PingPong") => Ok(Self::PingPong), Some("BurstSpread") => Ok(Self::BurstSpread),
+            _ => Err(EffectsError(format!("{ctx}: unknown source shape mode"))),
+        }
+    }
+}
+
+impl ShapeControls {
+    fn from_value(value: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        let number = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| f32_of(Some(v), &format!("{ctx}.{key}"))).transpose();
+        let vector = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| vec3_of(Some(v), &format!("{ctx}.{key}"))).transpose();
+        let curve = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| min_max_curve(Some(v), &format!("{ctx}.{key}"))).transpose();
+        let mode = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| ShapeMode::from_value(v, &format!("{ctx}.{key}"))).transpose();
+        Ok(Self {
+            source_version:value.get("sourceVersion").map(|v|u32_of(Some(v),ctx)).transpose()?,
+            angle:number("angle")?,length:number("length")?,donut_radius:number("donutRadius")?,
+            scale:vector("scale")?,box_thickness:vector("boxThickness")?,
+            arc_mode:mode("arcMode")?,arc_spread:number("arcSpread")?,arc_speed:curve("arcSpeed")?,
+            radius_mode:mode("radiusMode")?,radius_spread:number("radiusSpread")?,radius_speed:curve("radiusSpeed")?,
+            align_to_direction:value.get("alignToDirection").filter(|v|!matches!(v,Value::Null))
+                .map(|v|bool_of(Some(v),ctx)).transpose()?,
+            random_direction:number("randomDirectionAmount")?,spherical_direction:number("sphericalDirectionAmount")?,
+            random_position:number("randomPositionAmount")?,
+        })
+    }
+}
+
 
 impl ShapeParams {
     fn from_value(
@@ -493,6 +565,7 @@ impl ShapeParams {
             arc: f32_of(obj_get(obj, "arc"), &format!("{ctx}.shape.arc"))?,
             rotation: vec3_of(obj_get(obj, "rotation"), &format!("{ctx}.shape.rotation"))?,
             position: vec3_of(obj_get(obj, "position"), &format!("{ctx}.shape.position"))?,
+            controls: ShapeControls::from_value(v, &format!("{ctx}.shape"))?,
         })
     }
 }
@@ -1045,7 +1118,8 @@ mod tests {
         assert!(e.unmapped.contains(&"emitterVelocityMode".to_string()));
         assert!(e.unmapped.contains(&"randomSeed".to_string()));
         assert!(e.unmapped.contains(&"autoRandomSeed".to_string()));
-        assert!(e.unmapped.contains(&"shape.angle".to_string()));
+        assert_eq!(e.shape.as_ref().unwrap().controls.angle, Some(25.0));
+        assert!(!e.unmapped.contains(&"shape.angle".to_string()));
         assert!(e.unmapped.contains(&"renderer".to_string()));
         // effect 层键（kind 等）收在 Effects 清单。
         assert!(fx.unmapped_effect_keys.contains(&"kind".to_string()));
@@ -1116,4 +1190,34 @@ mod tests {
         let err = Effects::from_json_str(bad.as_bytes()).unwrap_err();
         assert!(err.0.contains("e/n.duration"), "{}", err.0);
     }
+    #[test]
+    fn source_shape_modes_and_curves_are_not_flattened() {
+        let value = super::super::json::parse(br#"{
+          "sourceVersion":1,"angle":25,"length":5,"donutRadius":2,
+          "scale":[2,0.25,-3],"boxThickness":[0.1,0.2,0.3],
+          "arcMode":"Loop","arcSpread":0.25,
+          "arcSpeed":{"mode":"constant","value":0.7},
+          "radiusMode":"BurstSpread","radiusSpread":0.5,
+          "radiusSpeed":{"mode":"constant","value":2},
+          "alignToDirection":false,"randomDirectionAmount":0,
+          "sphericalDirectionAmount":0,"randomPositionAmount":0.15
+        }"#).unwrap();
+        let controls = ShapeControls::from_value(&value, "shape").unwrap();
+        assert_eq!(controls.source_version,Some(1));
+        assert_eq!(controls.arc_mode,Some(ShapeMode::Loop));
+        assert_eq!(controls.radius_mode,Some(ShapeMode::BurstSpread));
+        assert_eq!(controls.scale,Some([2.0,0.25,-3.0]));
+        assert_eq!(controls.donut_radius,Some(2.0));
+        assert_eq!(controls.random_position,Some(0.15));
+        assert!(controls.arc_speed.is_some());
+        let missing = super::super::json::parse(b"{}").unwrap();
+        assert_eq!(ShapeControls::from_value(&missing,"shape").unwrap(),ShapeControls::default());
+    }
+
+    #[test]
+    fn unknown_source_shape_modes_are_rejected_not_randomised() {
+        let value = super::super::json::parse(br#"{"arcMode":"FutureMode"}"#).unwrap();
+        assert!(ShapeControls::from_value(&value,"shape").unwrap_err().0.contains("shape.arcMode"));
+    }
+
 }
