@@ -64,6 +64,7 @@ pub(crate) fn dispatch(
             choice,
             title,
             started: true,
+            completed: false,
             elapsed: 0.,
             effect_owner: None,
             static_view: true,
@@ -131,6 +132,7 @@ pub(crate) fn dispatch(
                     title: catalog.title(choice.key),
                     choice,
                     started: true,
+                    completed: false,
                     elapsed: 0.,
                     effect_owner: None,
                     static_view: false,
@@ -219,6 +221,7 @@ pub(crate) fn dispatch(
         choice,
         title,
         started: false,
+        completed: false,
         elapsed: 0.,
         effect_owner,
         static_view: false,
@@ -264,6 +267,9 @@ pub(crate) fn observe_start(
     let Some(mut active) = state.active.clone() else {
         return;
     };
+    if active.completed {
+        return;
+    }
     active.elapsed += time.delta_secs();
     if active.static_view || active.choice.preview {
         state.active = Some(active);
@@ -364,8 +370,12 @@ pub(crate) fn observe_start(
             return;
         }
     } else if !running && state.pending.is_none() {
-        state.active = None;
-        state.status = "播放结束，可以再看一遍或返回对话与互动".into();
+        // The action owners have completed their normal cleanup. Keep the
+        // preview ticket alive so staging retains its actors, furniture and
+        // return snapshot until an explicit stop/close or replacement intent.
+        active.completed = true;
+        state.active = Some(active.clone());
+        state.status = "播放完毕，场景已保留；可重新播放、选择下一项或返回原场景".into();
         state.changed();
         info!("[content-library] finished {:?}", active.choice.key);
         return;

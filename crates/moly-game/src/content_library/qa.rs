@@ -22,6 +22,10 @@ pub fn library_diagnostics() -> String {
 }
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct QaDiagnostics<'w, 's> {
+    weather_transition: Option<Res<'w, crate::weather_transition::WeatherTransition>>,
+    weather_timeline: Option<Res<'w, crate::weather::WeatherTimelineState>>,
+    weather_environment: Option<Res<'w, crate::env::SiteEnv>>,
+    character_environment: Option<Res<'w, crate::character_material::CharacterEnv>>,
     window: Res<'w, crate::talk_window::TalkWindowState>,
     dialogue_layout: Query<'w, 's, &'static crate::talk_window::ResponsiveDialogueMetrics>,
     camera_model: Option<Res<'w, crate::camera::FieldCameraModel>>,
@@ -177,6 +181,7 @@ pub(crate) fn qa_open(
             "player_fixture_active": runtime.active(), "held_actors": holds.iter().count(), "entities": all.iter().count(),
             "actors":actor_rows, "fixtures":fixture_rows
         });
+        value["completed"] = serde_json::json!(state.active.as_ref().is_some_and(|active| active.completed));
         value["fixture_talk_action"] = extra
             .fixture_talk_action
             .as_ref()
@@ -184,6 +189,14 @@ pub(crate) fn qa_open(
                 action.diagnostics(extra.cast_timelines.as_deref())
             });
         value.as_object_mut().expect("QA object").extend(serde_json::json!({
+            "weather_transition":extra.weather_transition.as_deref(),
+            "weather_timeline":extra.weather_timeline.as_ref().map(|state|serde_json::json!({
+                "elapsed":state.elapsed,"localTime":state.local_time,"duration":state.duration,
+                "skyColor":state.values.sky_color,"lightColor":state.values.light_color,
+                "skyIntensity":state.values.sky_intensity,"lightIntensity":state.values.light_intensity,
+            })),
+            "weather_light":extra.weather_environment.as_ref().map(|environment|environment.globals.phenomena_directional_light_color),
+            "character_light":extra.character_environment.as_ref().map(|environment|environment.globals.light_color),
             "dialogue_layout":extra.dialogue_layout.iter().next().map(|layout|serde_json::json!({
                 "font_px":layout.font_px,"lines":layout.line_count,
                 "min":layout.bounds.min.to_array(),"max":layout.bounds.max.to_array()

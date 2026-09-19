@@ -291,6 +291,8 @@ struct ActiveChoice {
     choice: PlaybackChoice,
     title: String,
     started: bool,
+    // Finishing the authored action does not release the user's preview scene.
+    completed: bool,
     elapsed: f32,
     effect_owner: Option<Entity>,
     static_view: bool,
@@ -422,7 +424,9 @@ impl ContentLibrary {
         }
         if self.active.as_ref().is_some_and(|active| {
             active.started
-                && (matches!(active.choice.key, EntryKey::Activity(_)) || active.static_view)
+                && (active.completed
+                    || matches!(active.choice.key, EntryKey::Activity(_))
+                    || active.static_view)
         }) {
             return false;
         }

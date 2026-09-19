@@ -142,6 +142,7 @@ pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>, state: Res
     let camera = c
         .spawn((
             Camera2d,
+            crate::camera::MYSEKAI_CAMERA_MSAA,
             Camera {
                 order: 104,
                 clear_color: ClearColorConfig::None,
@@ -1722,7 +1723,9 @@ pub(crate) fn refresh(
                 .map(|a| excerpt(&a.title, 14))
                 .unwrap_or_else(|| "这段故事，随时再看".into()),
             UiLabel::TransportState => {
-                if state
+                if state.active.as_ref().is_some_and(|active| active.completed) {
+                    "播放完毕 · 场景保留中".into()
+                } else if state
                     .active
                     .as_ref()
                     .is_some_and(|active| active.static_view)

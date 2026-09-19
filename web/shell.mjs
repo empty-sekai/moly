@@ -140,14 +140,20 @@ export class ExperienceShell {
       if (snapshot.schemaVersion !== 1)
         throw new Error("Unsupported library snapshot");
       this.snapshot = snapshot;
-      if (snapshot.inspection?.id && this.lastInspection !== snapshot.inspection.id) {
+      if (
+        snapshot.inspection?.id &&
+        this.lastInspection !== snapshot.inspection.id
+      ) {
         this.lastInspection = snapshot.inspection.id;
         this.awaitingInitialSelection = false;
         this.setFocus(false);
         this.setCollapsed(false);
         this.send("focus", { value: true });
         $("catalog-search").value = "";
-        $("detail-panel").scrollIntoView({ block: "nearest", behavior: "instant" });
+        $("detail-panel").scrollIntoView({
+          block: "nearest",
+          behavior: "instant",
+        });
       }
       if (
         this.awaitingInitialSelection &&
@@ -478,6 +484,7 @@ export class ExperienceShell {
         idle: "待播放",
         preparing: "准备中",
         playing: "演出中",
+        completed: "播放完毕 · 场景保留中",
         restoring: "恢复中",
         error: "暂不可用",
       }[phase] ?? "待播放";
@@ -487,8 +494,7 @@ export class ExperienceShell {
     $("stop-button").disabled = !status.canStop;
     $("restore-button").hidden = !status.canStop;
     $("live-dot").classList.toggle("running", phase === "playing");
-    $("stage-label").textContent =
-      phase === "playing" ? status.activeTitle || "演出进行中" : "你的 MYSEKAI";
+    $("stage-label").textContent = status.activeTitle || "你的 MYSEKAI";
     $("stage-loading").hidden = !["preparing", "restoring"].includes(phase);
     $("stage-loading-label").textContent = status.label || "正在准备场景…";
     const playButton = document.querySelector("[data-play]");
@@ -496,14 +502,15 @@ export class ExperienceShell {
       playButton.disabled =
         this.failed || !s.selected?.available || phase === "restoring";
       playButton.textContent =
-        phase === "playing" && status.activeKey === s.selected?.key
+        ["playing", "completed"].includes(phase) &&
+        status.activeKey === s.selected?.key
           ? "↻ 重新播放"
           : s.selected?.kind === "陈设家具"
             ? "▷ 查看家具"
             : "▷ 开始体验";
     }
     for (const button of document.querySelectorAll("[data-mode]"))
-      button.disabled = ["preparing", "playing", "restoring"].includes(phase);
+      button.disabled = status.canStop;
     if (status.error && status.error !== this.lastError)
       this.notify(status.error);
     this.lastError = status.error;

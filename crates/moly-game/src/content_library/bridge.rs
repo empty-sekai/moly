@@ -655,6 +655,8 @@ fn project(state: &ContentLibrary, catalog: &LibraryCatalog, world: &LibraryCont
         "restoring"
     } else if state.pending.is_some() || state.active.as_ref().is_some_and(|a| !a.started) {
         "preparing"
+    } else if state.active.as_ref().is_some_and(|active| active.completed) {
+        "completed"
     } else if state.active.is_some() {
         "playing"
     } else if state.last_error.is_some() {
@@ -710,6 +712,7 @@ pub(crate) fn publish(
     layouts: Option<Res<crate::ui_layout::UiLayouts>>,
     phenomenon: Option<Res<crate::weather::CurrentPhenomenonId>>,
     catalogue: Option<Res<crate::weather::PhenomenonCatalogue>>,
+    weather_transition: Option<Res<crate::weather_transition::WeatherTransition>>,
     server: Res<AssetServer>,
 ) {
     if !state.external_ui {
@@ -733,8 +736,9 @@ pub(crate) fn publish(
         .as_deref()
         .map(|phenomenon| phenomenon.0)
         .unwrap_or_default();
+    let weather_view = weather_transition.as_deref().map(|phase| phase.presentation());
     let stamp = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}",
         state.revision,
         catalog.revision,
         world.revision,
@@ -744,7 +748,7 @@ pub(crate) fn publish(
         state.active.is_some(),
         state.pending.is_some(),
         scene_ready,
-        weather_id
+        weather_id, weather_view
     );
     if *previous == stamp {
         return;
@@ -771,10 +775,15 @@ pub(crate) fn publish(
             snapshot["weather"] = json!({
                 "id": current.map(|option| option.id).unwrap_or_default(),
                 "name": current.map(|option| option.name.clone()).unwrap_or_default(),
+                "transition": weather_view,
                 "options": catalogue
                     .0
                     .iter()
-                    .map(|option| json!({"id": option.id, "name": option.name}))
+                    .map(|option| json!({
+                        "id": option.id, "name": option.name,
+                        "icon": option.icon, "metadata": option.metadata,
+                        "iconSource": option.icon_source,
+                    }))
                     .collect::<Vec<_>>(),
             });
         }
@@ -962,6 +971,7 @@ mod tests {
                 choice,
                 title: "正在播放".into(),
                 started: true,
+                completed: false,
                 elapsed: 3.,
                 effect_owner: None,
                 static_view: false,
