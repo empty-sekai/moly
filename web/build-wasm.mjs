@@ -11,27 +11,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { workspaceFingerprint, sha256 } from "./build-source.mjs";
+import { parseWasmBuildArguments } from "./build-wasm-arguments.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
 const workspaceRoot = path.resolve(here, "..");
-const profileName =
-  process.argv.find((arg) => arg.startsWith("--profile="))?.split("=")[1] ??
-  "wasm-size";
-if (!["release", "wasm-size", "wasm-names"].includes(profileName))
-  throw new Error("Unsupported WASM profile");
-const outputArg = process.argv
-  .find((arg) => arg.startsWith("--out-dir="))
-  ?.slice("--out-dir=".length);
-const outDir = outputArg ? path.resolve(outputArg) : path.join(here, "pkg");
+const buildArguments = parseWasmBuildArguments(process.argv.slice(2));
+const profileName = buildArguments.profile;
+const outDir = buildArguments.outDir
+  ? path.resolve(buildArguments.outDir)
+  : path.join(here, "pkg");
 const lockPath = path.join(workspaceRoot, "Cargo.lock");
-const requestedBackend = process.argv
-  .find((arg) => arg.startsWith("--renderer="))
-  ?.split("=")[1];
-if (requestedBackend && !["webgpu", "webgl2"].includes(requestedBackend)) {
-  throw new Error("--renderer must be webgpu or webgl2");
-}
+const requestedBackend = buildArguments.renderer;
 // Keep local builds responsive; callers can explicitly raise this limit.
 process.env.CARGO_BUILD_JOBS ??= "2";
 
@@ -142,7 +134,7 @@ console.log(
 // has the layout for its backend; the bootstrap downloads only the chosen one.
 for (const [backend, features] of [
   ["webgpu", ["--features", "webgpu"]],
-  ["webgl2", ["--no-default-features"]],
+  ["webgl2", ["--no-default-features", "--features", "webgl2"]],
 ]) {
   if (requestedBackend && requestedBackend !== backend) continue;
   const sourceFingerprint = workspaceFingerprint(workspaceRoot);

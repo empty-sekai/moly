@@ -83,8 +83,61 @@ export function prepareBrowserAssets(assetRoot, evidence) {
   )?.data;
   if (source?.region !== master.region || source.version !== master.gameVersion)
     throw new Error("Evidence and asset version disagree");
+  return writeDescriptor(
+    assets,
+    master,
+    evidencePaths(evidence),
+    "empty-stage observed resource set, not an offline-completeness guarantee",
+  );
+}
+
+// Re-hash an already measured source-qualified file set after an extractor
+// contract upgrade. This does not invent a successful browser trace or claim
+// that newly required files were observed. Full acceptance must still be rerun.
+export function refreshBrowserAssets(assetRoot) {
+  const assets = fs.realpathSync(assetRoot);
+  const previous = JSON.parse(
+    fs.readFileSync(path.join(assets, "browser-base.json"), "utf8"),
+  );
+  const master = JSON.parse(
+    fs.readFileSync(path.join(assets, "mysekai-fixtures.json"), "utf8"),
+  );
+  if (
+    previous.schemaVersion !== 1 ||
+    previous.generator !== "moly-browser-base-v1" ||
+    previous.region !== master.region ||
+    previous.gameVersion !== master.gameVersion ||
+    !Array.isArray(previous.files) ||
+    !previous.files.length
+  ) {
+    throw new Error(
+      "A same-source previously measured base descriptor is required",
+    );
+  }
+  const paths = previous.files.map((file) => file.path);
+  if (
+    new Set(paths).size !== paths.length ||
+    paths.some(
+      (relative) =>
+        typeof relative !== "string" ||
+        relative.includes("\\") ||
+        relative.includes(":") ||
+        relative.split("/").some((part) => !part || part.startsWith(".")),
+    )
+  ) {
+    throw new Error("Invalid previously measured resource paths");
+  }
+  return writeDescriptor(
+    assets,
+    master,
+    paths,
+    "previously observed empty-stage file set, rehashed after asset changes; browser acceptance pending",
+  );
+}
+
+function writeDescriptor(assets, master, paths, measurement) {
   const files = [];
-  for (const relative of evidencePaths(evidence)) {
+  for (const relative of paths) {
     const filename = path.join(assets, relative),
       resolved = fs.realpathSync(filename);
     const within = path.relative(assets, resolved);
@@ -137,8 +190,7 @@ export function prepareBrowserAssets(assetRoot, evidence) {
     generator: "moly-browser-base-v1",
     region: master.region,
     gameVersion: master.gameVersion,
-    measurement:
-      "empty-stage observed resource set, not an offline-completeness guarantee",
+    measurement,
     files,
     decodedBytes: files.reduce((sum, file) => sum + file.decodedBytes, 0),
     downloadBytes: files.reduce((sum, file) => sum + file.downloadBytes, 0),
@@ -164,16 +216,25 @@ if (
 ) {
   try {
     const { values } = parseArgs({
-      options: { assets: { type: "string" }, evidence: { type: "string" } },
+      options: {
+        assets: { type: "string" },
+        evidence: { type: "string" },
+        refresh: { type: "boolean", default: false },
+      },
     });
-    if (!values.assets || !values.evidence)
+    if (
+      !values.assets ||
+      (values.refresh ? Boolean(values.evidence) : !values.evidence)
+    )
       throw new Error(
-        "Usage: --assets /private/runtime --evidence /private/acceptance.json",
+        "Usage: --assets /private/runtime (--evidence /private/acceptance.json | --refresh)",
       );
-    const result = prepareBrowserAssets(
-      values.assets,
-      JSON.parse(fs.readFileSync(values.evidence, "utf8")),
-    );
+    const result = values.refresh
+      ? refreshBrowserAssets(values.assets)
+      : prepareBrowserAssets(
+          values.assets,
+          JSON.parse(fs.readFileSync(values.evidence, "utf8")),
+        );
     console.log(
       JSON.stringify({
         region: result.region,

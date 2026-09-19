@@ -18,8 +18,7 @@
       <canvas id="app-canvas" tabindex="0"></canvas>
       <section id="stage-boot" class="boot" aria-labelledby="boot-title">
         <div class="boot-inner">
-          <span class="stage-mark" aria-hidden="true">✦</span>
-          <h1 id="boot-title"></h1>
+          <h1 id="boot-title" class="sr-only"></h1>
           <p id="boot-message" role="status" aria-live="polite"></p>
           <p id="boot-progress" class="progress" aria-live="off"></p>
           <button id="stage-start" class="primary" type="button"></button>
@@ -37,9 +36,17 @@
         aria-live="polite"
         hidden
       >
-        <span class="weather-glyph" aria-hidden="true">☁</span>
+        <img
+          id="weather-icon"
+          class="weather-source-icon"
+          width="28"
+          height="28"
+          alt=""
+          hidden
+        />
         <span id="weather-label"></span>
       </button>
+      <dialog id="weather-dialog" class="weather-dialog"></dialog>
       <p id="stage-hint" class="hint" hidden></p>
     </main>
   </body>

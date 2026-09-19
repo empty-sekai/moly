@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = ["webgpu"]
 webgpu = ["bevy/webgpu"]
+webgl2 = ["bevy/webgl2"]
 
 [dependencies]
 bevy = { workspace = true }

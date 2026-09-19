@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { stageMessages } from "../stage-locale.mjs";
+import { isRenderFailure, inspectScreenshot } from "./render-validation.mjs";
 const { values: options } = parseArgs({
   options: {
     origin: { type: "string", default: "http://127.0.0.1:8017" },
@@ -20,6 +21,7 @@ const { values: options } = parseArgs({
     content: { type: "string", multiple: true },
     video: { type: "boolean", default: false },
     orbit: { type: "boolean", default: false },
+    diagnostics: { type: "boolean", default: false },
   },
 });
 assert.ok(["cn", "jp"].includes(options.region));
@@ -95,6 +97,12 @@ page.on("pageerror", (error) => {
 });
 page.on("console", (message) => {
   const text = message.text();
+  if (options.diagnostics)
+    record("raw-console", { level: message.type(), text });
+  if (isRenderFailure(text) && message.type() !== "error") {
+    if (!errors.includes(text)) errors.push(text);
+    record("gpu-validation-error", text);
+  }
   if (message.type() === "error") {
     if (isExpected(text, message.location().url))
       record("expected-resource-error", text);
@@ -121,6 +129,10 @@ page.on("response", (response) => {
     }
   }
 });
+if (options.diagnostics && backend === "webgl2") {
+  const { installGlDiagnostics } = await import("./gl-diagnostics.mjs");
+  await page.addInitScript(installGlDiagnostics);
+}
 await page.addInitScript(() => {
   window.__molyQA = {
     fatal: null,
@@ -296,10 +308,13 @@ function assertRestored(d) {
   );
 }
 async function saveFrame(name) {
-  await page.screenshot({
+  const png = await page.screenshot({
     path: path.join(output, `${prefix}-${name}.png`),
     timeout: 15000,
   });
+  if (name !== "failure") {
+    record("render-pixels", { name, ...(await inspectScreenshot(page, png)) });
+  }
 }
 try {
   const locale = options.region === "jp" ? "ja-JP" : "en-US";
@@ -506,8 +521,15 @@ try {
         lastFrame = frameAt;
         await saveFrame(`${key.replaceAll(":", "-")}-${frameAt}s`);
       }
-      if (s.status.phase === "idle" && !s.status.canStop) {
+      if (s.status.phase === "completed" && s.status.activeKey === key) {
         ended = true;
+        one.retained = d;
+        assert.ok(s.status.canStop, "completed content still offers return");
+        assert.ok(d.independent, "natural completion retains its scene");
+        await page.waitForTimeout(900);
+        assert.equal((await snapshot()).status.phase, "completed");
+        await saveFrame(`${key.replaceAll(":", "-")}-completed`);
+        await command("stop");
         break;
       }
       if (
@@ -632,7 +654,33 @@ try {
   record("failure", String(error));
   record("last-audit", await audit().catch(() => null));
   await saveFrame("failure").catch(() => {});
+  if (options.diagnostics) {
+    await page
+      .evaluate(() => {
+        if (window.__molyGL) window.__molyGL.armed = true;
+      })
+      .catch(() => {});
+    // Failure-only evidence. A later visible frame never changes failed=true.
+    let elapsed = 0;
+    for (const delay of [2000, 8000]) {
+      await page.waitForTimeout(delay).catch(() => {});
+      elapsed += delay;
+      await saveFrame(`failure-after-${elapsed}ms`).catch((error) =>
+        record("diagnostic-frame-rejected", String(error)),
+      );
+      record("diagnostic-audit", await audit().catch(() => null));
+    }
+  }
 } finally {
+  if (options.diagnostics && backend === "webgl2") {
+    const trace = await page
+      .evaluate(() => window.__molyGL ?? null)
+      .catch(() => null);
+    await fs.writeFile(
+      path.join(output, `${prefix}-webgl.json`),
+      JSON.stringify(trace, null, 2),
+    );
+  }
   const video = page.video();
   await context.close();
   if (video) {

@@ -66,7 +66,7 @@ export interface MolyEntry {
 }
 export interface MolyStatus {
   preview?: boolean;
-  phase: "idle" | "preparing" | "playing" | "restoring" | "error";
+  phase: "idle" | "preparing" | "playing" | "completed" | "restoring" | "error";
   label: string;
   error: string | null;
   activeKey: MolyKey | null;
@@ -115,12 +115,33 @@ export interface MolySnapshot {
    */
   weather?: MolyWeather;
 }
+export interface MolyWeatherOption {
+  id: number;
+  name: string;
+  label?: string;
+  /** Relative source artifact path; never interpreted as a weather kind. */
+  icon?: string | null;
+  /** Stage-resolved same-origin URL. Missing art stays absent. */
+  iconUrl?: string | null;
+  metadata?: {
+    id: number;
+    name: string;
+    englishName?: string | null;
+    description?: string | null;
+    timePeriodType?: string | null;
+    brightnessType?: string | null;
+    backgroundColorId?: number | null;
+    iconAssetbundleName?: string | null;
+  } | null;
+}
 export interface MolyWeather {
   id: number;
   name: string;
   label?: string;
-  options: { id: number; name: string; label?: string }[];
+  iconUrl?: string | null;
+  options: MolyWeatherOption[];
 }
+
 export interface MolyBoot {
   phase: string;
   backend: "webgpu" | "webgl2" | null;

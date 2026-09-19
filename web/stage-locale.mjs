@@ -225,9 +225,9 @@ export function stageMessages(locale) {
 }
 // 现象档名 → 本地化短名：档名形如 001_sunny，去掉数字前缀后查表。表里没有
 // 的档（未来新增）回退到档名本身，界面永远不空着。
-export function weatherLabel(locale, name) {
+export function weatherLabel(locale, name, sourceName) {
   const suffix = String(name ?? "").replace(/^\d+_/, "");
   const table = stageMessages(locale).weather ?? {};
-  return table[suffix] ?? suffix;
+  return table[suffix] ?? sourceName ?? suffix;
 }
 export const STAGE_LOCALES = Object.keys(messages);

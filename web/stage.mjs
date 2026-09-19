@@ -10,7 +10,11 @@ import {
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
 import { createStageController } from "./stage-controller.mjs";
-import { stageMessages, weatherLabel } from "./stage-locale.mjs";
+import { stageMessages } from "./stage-locale.mjs";
+import { presentWeather } from "./weather-presentation.mjs";
+import { createWeatherArtwork } from "./weather-artwork.mjs";
+import { createWeatherPicker } from "./weather-picker.mjs";
+import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
@@ -24,9 +28,51 @@ let configuration = null,
   backend = null;
 let lastPlayerData = "";
 // The last weather block the runtime published. The dial is drawn from it and
-// a click advances to the next檔 the runtime itself listed, so the stage never
+// the selector admits only IDs the runtime itself listed, so the stage never
 // invents an ID the catalogue does not contain.
 let weather = null;
+let weatherArtwork = null;
+const weatherPicker = createWeatherPicker({
+  dialog: $("weather-dialog"),
+  trigger: $("stage-weather"),
+  onSelect: (id) => {
+    if (weather?.options.some((option) => option.id === id))
+      controller?.dispatch("weather", id);
+  },
+  onFocus: (captured) => controller?.focus(captured),
+});
+const weatherIconUrls = new Map();
+const weatherIconRequests = new Set();
+function weatherPresentationOptions() {
+  return {
+    locale: ui.locale,
+    region,
+    assets: params.get("assets"),
+    baseUrl: location.href,
+    packed: params.get("packs") === "1" || Boolean(params.get("asset_catalog")),
+    iconUrls: weatherIconUrls,
+  };
+}
+function loadWeatherIcons(value) {
+  if (!weatherArtwork) return;
+  for (const option of value.options) {
+    if (!option.icon || weatherIconRequests.has(option.icon)) continue;
+    weatherIconRequests.add(option.icon);
+    weatherArtwork
+      .resolve(option.icon, option.iconSource)
+      .catch((error) => {
+        console.warn("[moly-weather:thumbnail-unavailable]", option.id, error);
+        return null;
+      })
+      .then((url) => {
+        weatherIconUrls.set(option.icon, url);
+        renderWeather();
+        const snapshot = controller?.getSnapshot();
+        if (snapshot) send("snapshot", decorateWeather(snapshot));
+      });
+  }
+}
+window.addEventListener("pagehide", () => weatherArtwork?.dispose());
 let phase = "idle",
   loading = false,
   started = false,
@@ -122,39 +168,44 @@ function renderWeather() {
     button.hidden = true;
     return;
   }
-  const current = weather.options.find((option) => option.id === weather.id);
-  $("weather-label").textContent = weatherLabel(
-    ui.locale,
-    current?.name ?? weather.name,
-  );
+  const shown = presentWeather(weather, weatherPresentationOptions());
+  $("weather-label").textContent = shown.label;
+  const icon = $("weather-icon");
+  const source = shown.iconUrl;
+  if (source && icon.dataset.source !== source) {
+    icon.dataset.source = source;
+    icon.hidden = false;
+    icon.src = source;
+  } else if (!source) {
+    delete icon.dataset.source;
+    icon.removeAttribute("src");
+    icon.hidden = true;
+  }
   button.hidden = false;
-  button.dataset.weatherId = String(weather.id);
+  button.dataset.weatherId = String(shown.committedId ?? "");
+  button.dataset.requestedId = String(shown.transition?.requestedId ?? "");
+  button.dataset.phase = shown.transition?.phase ?? "ready";
+  button.title = weatherPhaseLabel(shown, ui.locale);
+  weatherPicker.update(shown, ui.locale);
 }
 // The runtime publishes the档位 in game terms (id + name). Names are localized
 // here, once, so the host can render the catalogue verbatim in the reader's
 // language instead of carrying its own copy of the weather table.
 function decorateWeather(state) {
   if (!state?.weather) return state;
-  const options = state.weather.options.map((option) => ({
-    ...option,
-    label: weatherLabel(ui.locale, option.name),
-  }));
-  const current = options.find((option) => option.id === state.weather.id);
-  state.weather = {
-    ...state.weather,
-    options,
-    label: current?.label ?? weatherLabel(ui.locale, state.weather.name),
-  };
+  loadWeatherIcons(state.weather);
+  state.weather = presentWeather(state.weather, weatherPresentationOptions());
   return state;
 }
-$("stage-weather").addEventListener("click", () => {
-  if (!weather || !controller) return;
-  const index = weather.options.findIndex(
-    (option) => option.id === weather.id,
-  );
-  const next = weather.options[(index + 1) % weather.options.length];
-  if (next) controller.dispatch("weather", next.id);
+$("weather-icon").addEventListener("error", () => {
+  $("weather-icon").hidden = true;
+  $("stage-weather").dataset.iconState = "unavailable";
 });
+$("weather-icon").addEventListener("load", () => {
+  $("stage-weather").dataset.iconState = "ready";
+});
+$("stage-weather").addEventListener("click", () => weatherPicker.open());
+
 function fail(code, error) {
   if (failed) return;
   failed = true;
@@ -202,6 +253,12 @@ async function loadEngine() {
     if (!["cn", "jp", "tw", "en", "kr"].includes(region))
       throw new Error("An explicit supported resource region is required");
     sameOriginDirectory(params.get("assets") || "", location.href);
+    weatherArtwork = createWeatherArtwork({
+      assets: params.get("assets"),
+      baseUrl: location.href,
+      packs: params.get("packs") === "1",
+      assetCatalog: params.get("asset_catalog"),
+    });
     const basePreparation = warmBaseResources(
       {
         region,
