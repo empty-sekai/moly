@@ -4,7 +4,7 @@
 //! 各只有一族）：曲线 `constant{value}` / `twoConstants{min,max}` /
 //! `curve{multiplier,keys}` / `twoCurves{multiplier,minKeys,maxKeys}`；
 //! 梯度 `color{color}` / `gradient{gradient}` / `twoColors{min,max}` /
-//! `twoGradients{minGradient,maxGradient}` / `randomColor{color}`。
+//! `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
 //! 解析**失败响亮**：键在而形状不对是数据损伤，静默兜底会重建
 //! 「接没接线分不清」。
 //!
@@ -169,6 +169,10 @@ pub struct VelocityOverLifetimeParams {
     pub z: MinMaxCurve,
     pub speed_modifier: MinMaxCurve,
     pub in_world_space: bool,
+    /// Orbital motion is emitter-local even when linear motion is world-space.
+    pub orbital: [MinMaxCurve; 3],
+    pub orbital_offset: [MinMaxCurve; 3],
+    pub radial: MinMaxCurve,
 }
 
 /// customData 模块的一个槽（`custom1` / `custom2`）。
@@ -579,7 +583,11 @@ impl ShapeParams {
 impl VelocityOverLifetimeParams {
     fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
         let obj = v.as_object().unwrap_or(&[]);
+        let curve = |key: &str| min_max_curve(obj_get(obj, key), &format!("{ctx}.velocityOverLifetime.{key}"));
         Ok(Self {
+            orbital: [curve("orbitalX")?, curve("orbitalY")?, curve("orbitalZ")?],
+            orbital_offset: [curve("orbitalOffsetX")?, curve("orbitalOffsetY")?, curve("orbitalOffsetZ")?],
+            radial: curve("radial")?,
             x: min_max_curve(obj_get(obj, "x"), &format!("{ctx}.velocityOverLifetime.x"))?,
             y: min_max_curve(obj_get(obj, "y"), &format!("{ctx}.velocityOverLifetime.y"))?,
             z: min_max_curve(obj_get(obj, "z"), &format!("{ctx}.velocityOverLifetime.z"))?,
@@ -662,7 +670,7 @@ impl CustomDataSlot {
 impl SizeOverLifetimeParams {
     fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
         let obj = v.as_object().unwrap_or(&[]);
-        Ok(Self {
+        let params = Self {
             separate_axes: bool_of(
                 obj_get(obj, "separateAxes"),
                 &format!("{ctx}.sizeOverLifetime.separateAxes"),
@@ -677,7 +685,11 @@ impl SizeOverLifetimeParams {
             z: obj_get(obj, "z")
                 .map(|v| min_max_curve(Some(v), &format!("{ctx}.sizeOverLifetime.z")))
                 .transpose()?,
-        })
+        };
+        if params.separate_axes && (params.y.is_none() || params.z.is_none()) {
+            return Err(EffectsError(format!("{ctx}.sizeOverLifetime: separate axes require Y and Z curves")));
+        }
+        Ok(params)
     }
 }
 
@@ -830,11 +842,9 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
 }
 
 /// `color{color:[r,g,b,a]}` / `gradient{gradient}` / `twoColors{min,max}` /
-/// `twoGradients{minGradient,maxGradient}` / `randomColor{color}`。
+/// `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
 ///
-/// `randomColor` 在引擎里读 `gradientMax`，但提取侧把它写成了平色
-/// [r,g,b,a]——按数据实际携带的翻成**单键常梯度**（任意时刻求值恒该
-/// 色），不做发明。若上游将来给出 `gradient` 键，同样接住。
+/// Random colour requires its authored gradient; a flat colour is lost source data.
 fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
@@ -857,29 +867,10 @@ fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, Effe
             min: gradient_of(obj_get(obj, "minGradient"), &format!("{ctx}.minGradient"))?,
             max: gradient_of(obj_get(obj, "maxGradient"), &format!("{ctx}.maxGradient"))?,
         }),
-        "randomColor" => {
-            if let Some(g) = obj_get(obj, "gradient") {
-                Ok(MinMaxGradient::RandomColor(gradient_of(
-                    Some(g),
-                    &format!("{ctx}.gradient"),
-                )?))
-            } else {
-                let color = vec4_of(obj_get(obj, "color"), &format!("{ctx}.color"))?;
-                Ok(MinMaxGradient::RandomColor(constant_gradient(color)))
-            }
-        }
+        "randomColor" => Ok(MinMaxGradient::RandomColor(gradient_of(
+            obj_get(obj, "gradient"), &format!("{ctx}.gradient"),
+        )?)),
         _ => Err(EffectsError(format!("{ctx}.mode: unknown {mode:?}"))),
-    }
-}
-
-/// 平色 → 单键常梯度（randomColor 的提取侧形状）。
-fn constant_gradient(color: [f32; 4]) -> Gradient {
-    Gradient {
-        color_keys: vec![GradientColorKey {
-            time: 0.0,
-            color: [color[0], color[1], color[2]],
-        }],
-        alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: color[3] }],
     }
 }
 
@@ -887,6 +878,18 @@ fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: gradient object missing")))?;
+    use super::gradient::{GradientColorSpace, GradientMode};
+    let mode = match str_of(obj_get(obj, "interpolation"), &format!("{ctx}.interpolation"))?.as_str() {
+        "blend" => GradientMode::Blend,
+        "fixed" => GradientMode::Fixed,
+        other => return Err(EffectsError(format!("{ctx}.interpolation: unsupported {other:?}"))),
+    };
+    let color_space = match obj_get(obj, "colorSpace").and_then(Value::as_f64) {
+        Some(-1.0) => GradientColorSpace::Unspecified,
+        Some(0.0) => GradientColorSpace::Gamma,
+        Some(1.0) => GradientColorSpace::Linear,
+        other => return Err(EffectsError(format!("{ctx}.colorSpace: invalid or missing {other:?}"))),
+    };
     let color_keys = obj_get(obj, "colorKeys")
         .and_then(Value::as_array)
         .ok_or_else(|| EffectsError(format!("{ctx}.colorKeys: array missing")))?
@@ -914,7 +917,17 @@ fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
             })
         })
         .collect::<Result<Vec<_>, EffectsError>>()?;
-    Ok(Gradient { color_keys, alpha_keys })
+    let validate_times = |times: Vec<f32>, field: &str| -> Result<(), EffectsError> {
+        if !(2..=8).contains(&times.len()) || times.iter().any(|time| !(0.0..=1.0).contains(time))
+            || times.windows(2).any(|pair| pair[0] > pair[1])
+        {
+            return Err(EffectsError(format!("{ctx}.{field}: expected 2..8 ordered keys in [0,1]")));
+        }
+        Ok(())
+    };
+    validate_times(color_keys.iter().map(|key| key.time).collect(), "colorKeys")?;
+    validate_times(alpha_keys.iter().map(|key| key.time).collect(), "alphaKeys")?;
+    Ok(Gradient { color_keys, alpha_keys, mode, color_space })
 }
 
 // —— 基元读取 ————————————————————————————————————
@@ -1064,12 +1077,21 @@ mod tests {
                   "y": {"mode": "twoConstants", "min": -0.5, "max": -1.0},
                   "z": {"mode": "twoConstants", "min": 0.0, "max": 0.0},
                   "speedModifier": {"mode": "constant", "value": 1.0},
+                  "orbitalX": {"mode": "constant", "value": 0.0},
+                  "orbitalY": {"mode": "constant", "value": 0.0},
+                  "orbitalZ": {"mode": "constant", "value": 0.0},
+                  "orbitalOffsetX": {"mode": "constant", "value": 0.0},
+                  "orbitalOffsetY": {"mode": "constant", "value": 0.0},
+                  "orbitalOffsetZ": {"mode": "constant", "value": 0.0},
+                  "radial": {"mode": "constant", "value": 0.0},
                   "inWorldSpace": false
                 },
                 "colorOverLifetime": {
                   "mode": "gradient",
                   "gradient": {
-                    "colorKeys": [{"time": 0.0, "color": [1.0, 1.0, 1.0]}],
+                    "interpolation": "blend", "colorSpace": -1,
+                    "colorKeys": [{"time": 0.0, "color": [1.0, 1.0, 1.0]},
+                                  {"time": 1.0, "color": [1.0, 1.0, 1.0]}],
                     "alphaKeys": [{"time": 0.0, "alpha": 0.0},
                                   {"time": 1.0, "alpha": 1.0}]
                   }
@@ -1081,6 +1103,13 @@ mod tests {
         }
       }
     }"#;
+
+    #[test]
+    fn missing_orbital_curve_is_not_implicitly_neutral() {
+        let missing = SYNTHETIC.replace("\"orbitalX\": {\"mode\": \"constant\", \"value\": 0.0},", "");
+        let error = Effects::from_json_str(missing.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("orbitalX"));
+    }
 
     #[test]
     fn parses_full_synthetic_entry() {
@@ -1203,17 +1232,10 @@ mod tests {
     }
 
     #[test]
-    fn random_color_flat_form_becomes_constant_gradient() {
+    fn random_color_rejects_flattened_source_gradient() {
         let bad = r#"{"effects":{"e":{"particles":[{"node":"n","system":{"duration":1.0,"looping":true,"prewarm":false,"playOnAwake":true,"simulationSpeed":1.0,"simulationSpace":"Local","startDelay":{"mode":"constant","value":0.0},"ringBufferMode":0,"ringBufferLoopRange":[0.0,1.0],"maxParticles":10,"start":{"lifetime":{"mode":"constant","value":1.0},"speed":{"mode":"constant","value":1.0},"size":{"mode":"constant","value":1.0},"rotation":{"mode":"constant","value":0.0},"color":{"mode":"randomColor","color":[0.25,0.5,0.75,1.0]},"gravityModifier":{"mode":"constant","value":0.0},"size3D":false,"rotation3D":false}}}]}}}"#;
-        let fx = Effects::from_json_str(bad.as_bytes()).unwrap();
-        let color = fx.emitters[0].start.color.clone();
-        // randomColor 的求值把 lerp 当时间用；常梯度在任何入参下恒该色。
-        for t in [0.0, 0.3, 1.0] {
-            for lerp in [0.0, 0.7] {
-                let c = color.evaluate(t, lerp);
-                assert_eq!(c, [0.25, 0.5, 0.75, 1.0]);
-            }
-        }
+        let error = Effects::from_json_str(bad.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("gradient"));
     }
 
     #[test]

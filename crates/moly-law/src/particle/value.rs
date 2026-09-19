@@ -89,7 +89,7 @@ pub fn bezier_interpolate(t: f32, k0: CurveKey, k1: CurveKey) -> f32 {
     step_value(k0, k1).unwrap_or(b3v1 + t1)
 }
 
-fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
+pub(crate) fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
     // The positive-infinity branch returns before the negative check.
     if k0.out_slope == f32::INFINITY || k1.in_slope == f32::INFINITY {
         Some(k0.value)
@@ -341,93 +341,8 @@ fn color_lerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     ]
 }
 
-/// 颜色键：RGB 分段插值（alpha 由 alpha 键独立给，C# 的
-/// `GradientColorKey` 本就不含 alpha）。时刻归一化到 [0,1]。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GradientColorKey {
-    pub time: f32,
-    /// RGB。alpha 位恒 1.0，不参与求值。
-    pub color: [f32; 3],
-}
+pub use super::gradient::{Gradient, GradientAlphaKey, GradientColorKey};
 
-/// alpha 键：分段插值，与颜色键的时刻轴独立。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GradientAlphaKey {
-    pub time: f32,
-    pub alpha: f32,
-}
-
-/// 一根梯度：RGB 沿颜色键、A 沿 alpha 键各自分段线性，两端钳位。
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Gradient {
-    pub color_keys: Vec<GradientColorKey>,
-    pub alpha_keys: Vec<GradientAlphaKey>,
-}
-
-impl Gradient {
-    /// `Gradient.Evaluate(time)`，档位：**行为口径**（extern 原生）。
-    ///
-    /// 按文档语义实现：在颜色键表上定位区间，RGB 按局部 t 线性插值；
-    /// alpha 键表同法独立求；任一表为空则该分量取 1（白/不透明——
-    /// 引擎序列化保证两表非空，空表走不到）。首键前、末键后取端点。
-    ///
-    /// Editor 测量方案：两键 (0,黑)→(1,白) 于 t=0.5 采样应为 0.5 灰；
-    /// 单 alpha 键表加多颜色键表，核对 RGB 与 A 的时刻轴互不串扰
-    /// （如 colorKeys=[(0.5,红)]、alphaKeys=[(0.25,0),(0.75,1)]，
-    /// t=0.3 处 RGB 应已是红、A 应是 0.1）。
-    pub fn evaluate(&self, time: f32) -> [f32; 4] {
-        let mut out = [1.0, 1.0, 1.0, 1.0];
-        let colors: Vec<(f32, [f32; 3])> = self
-            .color_keys
-            .iter()
-            .map(|k| (k.time, k.color))
-            .collect();
-        out[..3].copy_from_slice(&sample_components(time, &colors));
-        let alphas: Vec<(f32, [f32; 1])> = self
-            .alpha_keys
-            .iter()
-            .map(|k| (k.time, [k.alpha]))
-            .collect();
-        out[3] = sample_components(time, &alphas)[0];
-        out
-    }
-}
-
-/// 分段线性采样：端点钳位、区间内局部 t 线性插值、键时刻重合取右键。
-fn sample_components<const N: usize>(time: f32, keys: &[(f32, [f32; N])]) -> [f32; N] {
-    if time <= keys[0].0 {
-        return keys[0].1;
-    }
-    let last = keys[keys.len() - 1];
-    if time >= last.0 {
-        return last.1;
-    }
-    for w in keys.windows(2) {
-        let (t0, t1) = (w[0].0, w[1].0);
-        if t0 <= time && time < t1 {
-            let span = t1 - t0;
-            if !(span > 0.0) {
-                return w[1].1;
-            }
-            let t = (time - t0) / span;
-            return lerp_components(w[0].1, w[1].1, t);
-        }
-    }
-    [0.0; N]
-}
-
-/// `lerp` 的分量版：`[f32; N]` 逐分量 `a + (b-a)t`，t 已由调用方算好。
-fn lerp_components<const N: usize>(a: [f32; N], b: [f32; N], t: f32) -> [f32; N] {
-    let mut out = [0.0; N];
-    for i in 0..N {
-        out[i] = a[i] + (b[i] - a[i]) * t;
-    }
-    out
-}
-
-/// 粒子颜色参数的五值模式。`C# 可读`：`ParticleSystemGradientMode`
-/// { Color=0, Gradient=1, TwoColors=2, TwoGradients=3, RandomColor=4 }，
-/// `Evaluate` 逐式转写自 `MinMaxGradient.Evaluate`。
 #[derive(Debug, Clone, PartialEq)]
 pub enum MinMaxGradient {
     /// 序列化名 `color`（引擎内部存 `colorMax`）。
@@ -564,29 +479,34 @@ mod tests {
 
     #[test]
     fn gradient_mixes_color_and_alpha_independently() {
-        // 颜色键时刻轴与 alpha 键时刻轴独立：t=0.3 处 RGB 已越过唯一
-        // 颜色键（红），A 在 alpha 键 (0.25,0)→(0.75,1) 的局部 t=0.1
-        // 处 = 0.1。
+        // RGB stays red while the independent alpha table crosses its midpoint.
+        // Source time codes around 0.25 and 0.75 are symmetric around t=0.5.
         let g = Gradient {
-            color_keys: vec![GradientColorKey { time: 0.5, color: [1.0, 0.0, 0.0] }],
+            mode: super::super::gradient::GradientMode::Blend,
+            color_space: super::super::gradient::GradientColorSpace::Unspecified,
+            color_keys: vec![GradientColorKey { time: 0.0, color: [1.0, 0.0, 0.0] },
+                GradientColorKey { time: 1.0, color: [1.0, 0.0, 0.0] }],
             alpha_keys: vec![
                 GradientAlphaKey { time: 0.25, alpha: 0.0 },
                 GradientAlphaKey { time: 0.75, alpha: 1.0 },
             ],
         };
-        let c = g.evaluate(0.3);
+        let c = g.evaluate(0.5);
         assert!((c[0] - 1.0).abs() < 1e-6 && c[1] == 0.0 && c[2] == 0.0);
-        assert!((c[3] - 0.1).abs() < 1e-6);
+        assert!((c[3] - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn gradient_clamps_outside_keys() {
         let g = Gradient {
+            mode: super::super::gradient::GradientMode::Blend,
+            color_space: super::super::gradient::GradientColorSpace::Unspecified,
             color_keys: vec![
                 GradientColorKey { time: 0.0, color: [0.0, 0.0, 0.0] },
                 GradientColorKey { time: 1.0, color: [1.0, 1.0, 1.0] },
             ],
-            alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: 0.5 }],
+            alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: 0.5 },
+                GradientAlphaKey { time: 1.0, alpha: 0.5 }],
         };
         assert_eq!(g.evaluate(-1.0), [0.0, 0.0, 0.0, 0.5]);
         assert_eq!(g.evaluate(2.0), [1.0, 1.0, 1.0, 0.5]);
@@ -599,11 +519,14 @@ mod tests {
         // 键 (0,黑)→(1,白)，lerp=0.25 -> 0.25 灰；若误当 Gradient 模式
         // （time 当 time）则 t=0 处恒黑——此锚钉住差异。
         let g = MinMaxGradient::RandomColor(Gradient {
+            mode: super::super::gradient::GradientMode::Blend,
+            color_space: super::super::gradient::GradientColorSpace::Unspecified,
             color_keys: vec![
                 GradientColorKey { time: 0.0, color: [0.0, 0.0, 0.0] },
                 GradientColorKey { time: 1.0, color: [1.0, 1.0, 1.0] },
             ],
-            alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: 1.0 }],
+            alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: 1.0 },
+                GradientAlphaKey { time: 1.0, alpha: 1.0 }],
         });
         let c = g.evaluate(0.0, 0.25);
         assert!((c[0] - 0.25).abs() < 1e-6);
@@ -623,11 +546,14 @@ mod tests {
     #[test]
     fn two_gradients_lerps_each_evaluation() {
         let mk = |v: f32| Gradient {
+            mode: super::super::gradient::GradientMode::Blend,
+            color_space: super::super::gradient::GradientColorSpace::Unspecified,
             color_keys: vec![
                 GradientColorKey { time: 0.0, color: [v, v, v] },
                 GradientColorKey { time: 1.0, color: [v, v, v] },
             ],
-            alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: v }],
+            alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: v },
+                GradientAlphaKey { time: 1.0, alpha: v }],
         };
         let g = MinMaxGradient::TwoGradients { min: mk(0.0), max: mk(1.0) };
         // time=任意：两梯度各自恒值，Lerp(0,1,0.5) = 0.5。

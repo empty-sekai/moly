@@ -1,6 +1,11 @@
 //! Shared particle simulation, module evaluation and world-space presentation.
 //! Domain adapters own selection, asset loading, instance anchors and teardown.
 use bevy::prelude::*;
+mod motion;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod motion_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::step::set_remaining;
@@ -52,6 +57,9 @@ pub(crate) struct Runtime {
     pub(crate) cone_angle: Option<f32>,
     pub(crate) rol: Option<RotationOverLifetime>,
     pub(crate) limit: Option<LimitVelocity>,
+    pub(crate) velocity_law: Option<moly_law::particle::velocity::VelocityOverLifetime>,
+    pub(crate) size_law: Option<moly_law::particle::size::SizeOverLifetime>,
+    pub(crate) color_law: Option<moly_law::particle::color::ColorOverLifetime>,
     pub(crate) born_total: u64,
     pub(crate) died_total: u64,
     pub(crate) full_total: u64,
@@ -72,6 +80,8 @@ pub(crate) struct Side {
     pub(crate) size: [f32; 3],
     pub(crate) gravity: f32,
     pub(crate) colour: [f32; 4],
+    /// Persistent plus animated velocity, before the integration speed modifier.
+    pub(crate) total_velocity: [f32; 3],
 }
 
 /// 出生抽签的确定性随机：splitmix64（站点链同款流算法、不同种子）。
@@ -125,8 +135,6 @@ pub(crate) fn compose_to_world(system: &Runtime, ctx: &Context) -> GlobalTransfo
 
 /// 把律状态换算成公告板批次。
 pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Quad> {
-    let size_over_lifetime = system.emitter.size_over_lifetime.as_ref();
-    let colour_over_lifetime = system.emitter.color_over_lifetime.as_ref();
     let custom_data = system.emitter.custom_data.as_ref();
     let mut quads = Vec::with_capacity(system.pool.len());
     for (index, particle) in system.pool.iter().enumerate() {
@@ -134,23 +142,15 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
         // 归一化年龄：律的倒计时折算。
         let age = particle.normalized_age();
         let scale = system.node_affine.to_scale_rotation_translation().0.x;
-        let mut size = [side.size[0] * scale, side.size[1] * scale];
-        if let Some(sol) = size_over_lifetime {
-            let x = sol.curve.evaluate(age, side.rand);
-            let y = match (sol.separate_axes, sol.y.as_ref()) {
-                (true, Some(curve)) => curve.evaluate(age, side.rand),
-                _ => x,
-            };
-            size = [size[0] * x, size[1] * y];
-        }
-        // 引擎口径：最终颜色 = 出生色 × colorOverLifetime(年龄)。
-        let mut colour = side.colour;
-        if let Some(col) = colour_over_lifetime {
-            let over = col.evaluate(age, side.rand);
-            for channel in 0..4 {
-                colour[channel] *= over[channel];
-            }
-        }
+        let evaluated_size = motion::size_at_age(system, &side, age);
+        let size = [evaluated_size[0] * scale, evaluated_size[1] * scale];
+        // The source render path multiplies byte colour into immutable birth
+        // colour. Keep that operation separate from raw gradient evaluation.
+        let colour = system.color_law.as_ref().map_or(side.colour, |law| {
+            let birth = moly_law::particle::gradient::quantize_rgba8(side.colour);
+            moly_law::particle::gradient::rgba8_to_float(
+                law.apply(birth, side.seed, age * 100.0))
+        });
         // 逐粒子自定义流：两个槽各按归一化年龄求值，与 size/colour 同口径
         // （`evaluate(age, side.rand)`）。componentCount 之外的分量留零。
         let mut custom1 = [0.0f32; 4];
@@ -241,7 +241,8 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
 
     }
 
-    let velocity_over_lifetime = system.emitter.velocity_over_lifetime.clone();
+    let owner = compose_to_world(system, ctx);
+    let velocity_over_lifetime = system.velocity_law.as_ref();
     let mut dead: Vec<usize> = Vec::new();
     for index in 0..system.pool.len() {
         let side = system.side[index];
@@ -285,13 +286,11 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
             );
             system.side[index].rot = rot;
         }
-        let anim = match &velocity_over_lifetime {
-            Some(v) => [
-                v.x.evaluate(age_pre, side.rand),
-                v.y.evaluate(age_pre, side.rand),
-                v.z.evaluate(age_pre, side.rand),
-            ],
-            None => [0.0; 3],
+        let batch_seed = system.side[index & !3].seed;
+        let (anim, modifier) = match velocity_over_lifetime {
+            Some(value) => motion::velocity_at_age(value, &system.pool[index], &side, batch_seed,
+                system.emitter.simulation_space, &owner, age_pre, dt),
+            None => ([0.0; 3], 1.0),
         };
         if let Some(law) = &system.limit {
             let mut velocity = system.pool[index].velocity;
@@ -302,27 +301,20 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
                 age_pre * 100.0,
                 dt,
                 DragSize {
-                    components: [side.size[0], side.size[1], 0.0],
-                    size3d: false,
+                    components: motion::size_at_age(system, &side, age_pre),
+                    size3d: system.emitter.start.size3d || system.emitter.size_over_lifetime
+                        .as_ref().is_some_and(|size| size.separate_axes),
                 },
             );
             system.pool[index].velocity = velocity;
         }
-        // ---- 推进（引擎的 Simulate 段）----
-        // 有效速度 = 状态速度 + 叠加速度，再整体乘 speedModifier（叠加
-        // 值不入状态）。年寿进程量用推进后的值。
-        let u = system.pool[index].normalized_age();
-        let mut eff = [
-            system.pool[index].velocity[0] + anim[0],
-            system.pool[index].velocity[1] + anim[1],
-            system.pool[index].velocity[2] + anim[2],
-        ];
-        if let Some(v) = &velocity_over_lifetime {
-            let modifier = v.speed_modifier.evaluate(u, side.rand);
-            if modifier != 0.0 {
-                eff = [eff[0] * modifier, eff[1] * modifier, eff[2] * modifier];
-            }
-        }
+        // The same pre-simulation speed modifier owns both orbital displacement
+        // and integration. Animated velocity remains transient, including when
+        // a zero speed modifier stops movement without clearing base velocity.
+        let total = std::array::from_fn(|axis|
+            system.pool[index].velocity[axis] + anim[axis]);
+        let eff = total.map(|value| value * modifier);
+        system.side[index].total_velocity = total;
         // 积分：律的 `integrate` 会用帧速度覆写状态速度——先存后还原。
         let state_velocity = system.pool[index].velocity;
         if let StepVerdict::Refused = integrate(&mut system.pool[index], dt, eff) {
@@ -453,11 +445,9 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         Some(curve) => curve.evaluate(0.0, system.rng.next_f32()),
         None => size_x,
     };
-    let colour = system
-        .emitter
-        .start
-        .color
-        .evaluate(0.0, system.rng.next_f32());
+    let colour = moly_law::particle::gradient::rgba8_to_float(
+        moly_law::particle::color::initial_rgba8(
+            &system.emitter.start.color, 0.0, system.rng.next_f32()));
     let spin0 = system
         .emitter
         .start
@@ -524,6 +514,7 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         size: [size_x, size_y, size_z],
         gravity,
         colour,
+        total_velocity: velocity,
     };
     let particle = Particle::born(position, velocity, lifetime);
     match ring_push(
@@ -563,17 +554,11 @@ pub(crate) fn write_geometry(
             let instances: Vec<_> = system.pool.iter().enumerate().map(|(index, particle)| {
                 let side = system.side[index];
                 let age = particle.normalized_age();
-                let mut size = Vec3::from_array(side.size);
-                if let Some(curves) = &system.emitter.size_over_lifetime {
-                    let x = curves.curve.evaluate(age, side.rand);
-                    let y = if curves.separate_axes { curves.y.as_ref().map_or(x, |c| c.evaluate(age, side.rand)) } else { x };
-                    let z = if curves.separate_axes { curves.z.as_ref().map_or(x, |c| c.evaluate(age, side.rand)) } else { x };
-                    size *= Vec3::new(x,y,z);
-                }
+                let size = Vec3::from_array(motion::size_at_age(system, &side, age));
                 let view = &appearance[index];
                 crate::particle_geometry::Instance {
                     position: crate::particle_geometry::reflect(view.centre),
-                    velocity: crate::particle_geometry::reflect(to_world.affine().transform_vector3(Vec3::from_array(particle.velocity))),
+                    velocity: crate::particle_geometry::reflect(to_world.affine().transform_vector3(Vec3::from_array(side.total_velocity))),
                     rotation: Vec3::from_array(side.rot), size,
                     colour: Vec4::from_array(view.colour),
                     custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),

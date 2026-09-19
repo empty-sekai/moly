@@ -36,6 +36,12 @@ pub mod buffer;
 pub mod schema;
 pub mod rotation;
 pub mod limit_velocity;
+pub mod velocity;
+pub mod random;
+pub mod curve;
+pub mod size;
+pub mod gradient;
+pub mod color;
 
 #[cfg(test)]
 mod corpus;

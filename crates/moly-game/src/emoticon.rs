@@ -655,6 +655,7 @@ fn parse_gradient(obj: &Value) -> Gradient {
                     .collect()
             })
             .unwrap_or_default(),
+        ..Default::default()
     }
 }
 

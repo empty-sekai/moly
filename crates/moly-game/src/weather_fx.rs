@@ -1057,6 +1057,12 @@ pub(crate) fn spawn_when_ready(
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),
+            velocity_law: planned.emitter.velocity_over_lifetime.as_ref()
+                .map(moly_law::particle::velocity::VelocityOverLifetime::from_params),
+            size_law: planned.emitter.size_over_lifetime.as_ref()
+                .map(moly_law::particle::size::SizeOverLifetime::from_params),
+            color_law: planned.emitter.color_over_lifetime.as_ref()
+                .map(moly_law::particle::color::ColorOverLifetime::from_params),
             born_total: 0,
             died_total: 0,
             full_total: 0,

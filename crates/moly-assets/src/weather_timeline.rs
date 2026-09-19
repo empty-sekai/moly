@@ -242,6 +242,8 @@ impl WeatherTimeline {
                     "SiteEnvironmentColorClip" => {
                         let gradient = asset.gradient.as_ref().unwrap();
                         ClipValue::Color(Gradient {
+                            mode: moly_law::particle::gradient::GradientMode::Blend,
+                            color_space: moly_law::particle::gradient::GradientColorSpace::Gamma,
                             color_keys: gradient
                                 .color_keys
                                 .iter()
