@@ -3,29 +3,29 @@
 use crate::source_particle::SourceParticle;
 use crate::source_shader::*;
 use bevy::core_pipeline::core_3d::{
-    Transparent3d,
     graph::{Core3d, Node3d},
+    Transparent3d,
 };
 use bevy::ecs::{
     query::{QueryItem, ROQueryItem},
-    system::{SystemParamItem, lifetimeless::SRes},
+    system::{lifetimeless::SRes, SystemParamItem},
 };
 use bevy::mesh::VertexBufferLayout;
 use bevy::prelude::*;
 use bevy::render::{
-    Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
     render_asset::RenderAssets,
     render_graph::{
         NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
     },
     render_phase::{
-        AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
-        RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
-        sort_phase_system,
+        sort_phase_system, AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex,
+        RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
+        ViewSortedRenderPhases,
     },
     renderer::RenderContext,
     sync_world::{MainEntity, RenderEntity},
     view::{ExtractedView, ViewDepthTexture, ViewTarget},
+    Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
 };
 use bevy::render::{
     render_resource::*,
@@ -34,7 +34,7 @@ use bevy::render::{
 use moly_assets::source_shader::Result;
 use moly_assets::source_shader::SourceShaderCatalogue;
 use moly_assets::source_shader::{
-    SourceShaderError, UniformValue, loader::SourceProgramAsset, state::SourcePassState,
+    loader::SourceProgramAsset, state::SourcePassState, SourceShaderError, UniformValue,
 };
 use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap};
@@ -197,12 +197,18 @@ fn queue(
                     color: if pass.effect {
                         crate::fixture_emission::EMISSION_FORMAT
                     } else {
-                        target.main_texture_format()
+                        crate::source_color::ENCODED_FORMAT
                     },
                     depth: depth.texture.format(),
                     samples: depth.texture.sample_count(),
                     layout,
                 };
+                if !crate::source_color::compatible(target, depth) {
+                    fail_particle(&mut gpu, &item.source, SourceShaderError(
+                        "source Gamma draws require matching single-sample sRGB scene/depth targets".into(),
+                    ));
+                    continue;
+                }
                 if pass.effect && key.samples != 1 {
                     fail_particle(
                         &mut gpu,
@@ -291,6 +297,29 @@ fn sort_source_particles(
     }
 }
 
+// Run before the render view uniforms are built, so every opaque/transparent
+// writer and the sampled depth agree on the source camera's finite far plane.
+fn prepare_source_cameras(
+    frame: Res<ParticleFrame>,
+    mut views: Query<(Entity, &mut ExtractedView), With<crate::weather_depth::WeatherCameraRole>>,
+) {
+    for (entity, mut view) in &mut views {
+        let Some(camera) = frame.cameras.get(&entity) else {
+            continue;
+        };
+        match crate::source_camera::render_projection(view.clip_from_view, camera) {
+            Ok(projection) => {
+                if let Some(clip) = view.clip_from_world {
+                    let view_from_world = view.clip_from_view.inverse() * clip;
+                    view.clip_from_world = Some(projection * view_from_world);
+                }
+                view.clip_from_view = projection;
+            }
+            Err(error) => error!(%error, "source camera projection unresolved"),
+        }
+    }
+}
+
 fn globals(
     name: &str,
     view: &ExtractedView,
@@ -302,13 +331,9 @@ fn globals(
     let view_from_world = world_from_view.inverse() * source_to_render;
     // Invert only the qualified output adapter: source GLES [-w,+w] forward Z
     // becomes renderer [w,0] reversed Z. Matrix arithmetic remains in source VS.
-    let to_source = Mat4::from_cols(
-        Vec4::X,
-        Vec4::Y,
-        Vec4::new(0.0, 0.0, -2.0, 0.0),
-        Vec4::new(0.0, 0.0, 1.0, 1.0),
-    );
-    let projection = to_source * view.clip_from_view;
+    let projection = crate::source_camera::gles_projection(view.clip_from_view);
+    // Validate the authored planes even when this particular shader only uses VP.
+    let source_z = crate::source_camera::gles_z_buffer_params(camera)?;
     let (near, far, ortho) = match camera {
         Projection::Perspective(p) => (p.near, p.far, false),
         Projection::Orthographic(p) => (p.near, p.far, true),
@@ -327,16 +352,12 @@ fn globals(
         "hlslcc_mtx4x4unity_MatrixV" => view_from_world.to_cols_array().to_vec(),
         "_GlobalMipBias" => vec![0.0, 0.0],
         "_GlobalPhenomenaDirectionalLightColor" => light.to_vec(),
-        "_WorldSpaceCameraPos" => source_to_render.transform_point3(world_from_view.w_axis.truncate()).to_array().to_vec(),
+        "_WorldSpaceCameraPos" => source_to_render
+            .transform_point3(world_from_view.w_axis.truncate())
+            .to_array()
+            .to_vec(),
         "_ProjectionParams" => vec![1.0, near, far, far.recip()],
-        // For perspective raw depth d = -P22 + P32/eyeDepth. This formula
-        // follows the actual attachment projection, including infinite far Z.
-        "_ZBufferParams" if !ortho => vec![
-            far / raw.w_axis.z,
-            far * raw.z_axis.z / raw.w_axis.z,
-            raw.w_axis.z.recip(),
-            raw.z_axis.z / raw.w_axis.z,
-        ],
+        "_ZBufferParams" => source_z.to_vec(),
         "unity_OrthoParams" => vec![
             2.0 / raw.x_axis.x,
             2.0 / raw.y_axis.y,
@@ -364,6 +385,7 @@ fn prepare(
         Entity,
         &ExtractedView,
         Option<&crate::weather_depth::PreparedDepthSnapshot>,
+        Option<&crate::source_color::SourceColorView>,
     )>,
 ) {
     if gpu.depth_sampler.is_none() {
@@ -379,7 +401,7 @@ fn prepare(
     }
     let depth_sampler = gpu.depth_sampler.as_ref().unwrap().clone();
     let mut live = std::collections::HashSet::new();
-    for (view_entity, view, depth) in &views {
+    for (view_entity, view, depth, _) in &views {
         let Some(camera) = frame.cameras.get(&view_entity) else {
             continue;
         };
@@ -424,11 +446,11 @@ fn prepare(
                             let Some(depth) = depth else {
                                 return Ok(None);
                             };
-                            resources.push(format!("{:?}", depth.view().id()));
+                            resources.push(format!("{:?}", depth.source_view().id()));
                             bindings.insert(
                                 declaration.name.clone(),
                                 SourceSampledResource::View {
-                                    view: depth.view(),
+                                    view: depth.source_view(),
                                     sampler: &depth_sampler,
                                     dimension: TextureViewDimension::D2,
                                     filterable: false,
@@ -538,7 +560,7 @@ fn prepare(
         }
     }
     gpu.packets.retain(|key, _| live.contains(key));
-    for (view_entity, _, _) in &views {
+    for (view_entity, _, _, color) in &views {
         for item in &frame.particles {
             let mut readiness = item.source.readiness.lock().unwrap();
             if matches!(
@@ -561,6 +583,14 @@ fn prepare(
             }) {
                 *readiness = crate::source_particle::ParticleReadiness::Failed(error);
                 continue;
+            }
+            match color.map(|color| color.ready(&cache)) {
+                Some(Ok(true)) => {}
+                Some(Err(error)) => {
+                    *readiness = crate::source_particle::ParticleReadiness::Failed(error);
+                    continue;
+                }
+                _ => continue,
             }
             if item.source.passes.iter().all(|p| {
                 gpu.packets
@@ -590,7 +620,7 @@ impl RenderCommand<Transparent3d> for DrawPacket {
             .into_inner()
             .packets
             .get(&(view, item.entity(), false))
-            .filter(|p| p.pipeline == item.pipeline)
+            .filter(|p| p.pipeline == item.pipeline && p.count > 0)
         else {
             return RenderCommandResult::Skip;
         };
@@ -683,6 +713,9 @@ impl ViewNode for EffectNode {
             1.0,
         );
         for packet in packets {
+            if packet.count == 0 {
+                continue;
+            }
             let Some(pipeline) = cache.get_render_pipeline(packet.pipeline) else {
                 continue;
             };
@@ -717,6 +750,10 @@ impl Plugin for SourceParticlePlugin {
             .init_resource::<ParticleGpu>()
             .add_render_command::<Transparent3d, DrawSourceParticle>()
             .add_systems(ExtractSchedule, extract)
+            .add_systems(
+                Render,
+                prepare_source_cameras.in_set(RenderSystems::ManageViews),
+            )
             .add_systems(Render, queue.in_set(RenderSystems::QueueMeshes))
             .add_systems(
                 Render,

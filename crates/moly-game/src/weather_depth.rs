@@ -25,10 +25,13 @@ pub(crate) struct WeatherDepthSnapshot;
 #[derive(Component)]
 pub(crate) struct PreparedDepthSnapshot {
     texture: CachedTexture,
+    // Original GLES programs sample forward depth with a bottom-left origin.
+    // Legacy renderer-native consumers keep the unchanged reversed snapshot.
+    source_texture: CachedTexture,
     source: BindGroup,
 }
 impl PreparedDepthSnapshot {
-    pub(crate) fn view(&self) -> &TextureView { &self.texture.default_view }
+    pub(crate) fn source_view(&self) -> &TextureView { &self.source_texture.default_view }
 }
 
 #[derive(Default)]
@@ -46,6 +49,7 @@ impl ViewNode for WeatherOpaqueDepthNode {
         let gpu = world.resource::<RawDepthGpu>();
         let cache = world.resource::<PipelineCache>();
         let Some(pipeline) = cache.get_render_pipeline(gpu.copy_pipeline) else { return Ok(()); };
+        let Some(source_pipeline) = cache.get_render_pipeline(gpu.source_copy_pipeline) else { return Ok(()); };
         let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
             label: Some("weather_copy_actual_opaque_depth"),
             color_attachments: &[],
@@ -61,6 +65,21 @@ impl ViewNode for WeatherOpaqueDepthNode {
         pass.set_bind_group(0, &snapshot.source, &[]);
         // No viewport/scissor subset: every texel, including the camera clear
         // outside a viewport, must be copied before the valid binding is read.
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
+            label: Some("source_GLES_opaque_depth_coordinates"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &snapshot.source_texture.default_view,
+                depth_ops: Some(Operations { load: LoadOp::Clear(1.0), store: StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(source_pipeline);
+        pass.set_bind_group(0, &snapshot.source, &[]);
         pass.draw(0..3, 0..1);
         Ok(())
     }
@@ -121,6 +140,7 @@ pub(crate) struct RawDepthGpu {
     valid: Buffer,
     invalid: Buffer,
     copy_pipeline: CachedRenderPipelineId,
+    source_copy_pipeline: CachedRenderPipelineId,
 }
 
 const DEPTH_COPY_SHADER: Handle<Shader> = Handle::Uuid(
@@ -152,7 +172,7 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
     let invalid=device.create_buffer_with_data(&BufferInitDescriptor {
         label:Some("weather_depth_unavailable"),contents:&[0;16],usage:BufferUsages::UNIFORM,
     });
-    let copy_pipeline = cache.queue_render_pipeline(RenderPipelineDescriptor {
+    let copy_descriptor = |entry: &'static str| RenderPipelineDescriptor {
         label: Some("weather_raw_depth_copy_pipeline".into()),
         layout: vec![depth_copy_layout()],
         vertex: VertexState {
@@ -160,7 +180,7 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
             ..Default::default()
         },
         fragment: Some(FragmentState {
-            shader: DEPTH_COPY_SHADER.clone(), entry_point: Some("fragment".into()),
+            shader: DEPTH_COPY_SHADER.clone(), entry_point: Some(entry.into()),
             targets: vec![], ..Default::default()
         }),
         primitive: PrimitiveState { cull_mode: None, ..Default::default() },
@@ -172,8 +192,10 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
         }),
         multisample: MultisampleState::default(),
         ..Default::default()
-    });
-    commands.insert_resource(RawDepthGpu {invalid_view,valid,invalid,copy_pipeline});
+    };
+    let copy_pipeline = cache.queue_render_pipeline(copy_descriptor("fragment"));
+    let source_copy_pipeline = cache.queue_render_pipeline(copy_descriptor("source_fragment"));
+    commands.insert_resource(RawDepthGpu {invalid_view,valid,invalid,copy_pipeline,source_copy_pipeline});
 }
 
 pub(crate) fn prepare_raw_depth(
@@ -189,7 +211,8 @@ pub(crate) fn prepare_raw_depth(
             && effect_attachment_compatible(role.copied(), main.texture.sample_count())
             && main.texture.format() == TextureFormat::Depth32Float
             && main.texture.usage().contains(TextureUsages::TEXTURE_BINDING)
-            && cache.get_render_pipeline(gpu.copy_pipeline).is_some();
+            && cache.get_render_pipeline(gpu.copy_pipeline).is_some()
+            && cache.get_render_pipeline(gpu.source_copy_pipeline).is_some();
         let snapshot = compatible.then(|| {
             let texture = textures.get(&device, TextureDescriptor {
                 label: Some("weather_actual_opaque_depth_snapshot"),
@@ -203,7 +226,15 @@ pub(crate) fn prepare_raw_depth(
             let source = device.create_bind_group("weather_actual_depth_source",
                 &cache.get_bind_group_layout(&depth_copy_layout()),
                 &BindGroupEntries::single(&source_view));
-            PreparedDepthSnapshot { texture, source }
+            let source_texture = textures.get(&device, TextureDescriptor {
+                label: Some("source_GLES_actual_opaque_depth"),
+                size: main.texture.size(), mip_level_count: 1, sample_count: 1,
+                dimension: TextureDimension::D2, format: main.texture.format(),
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            PreparedDepthSnapshot { texture, source_texture, source }
         });
         let (view, valid) = match &snapshot {
             Some(snapshot) => (&snapshot.texture.default_view, &gpu.valid),

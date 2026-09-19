@@ -97,6 +97,8 @@ mod weather_depth;
 mod weather_transition;
 mod source_render_state;
 mod source_shader;
+mod source_color;
+mod source_camera;
 mod source_particle;
 mod source_particle_streams;
 mod source_particle_render;
@@ -167,7 +169,7 @@ pub fn app(
         fixture_emission::FixtureEmissionPlugin,
     ));
     app.add_plugins(fixture_edit::FixtureEditPlugin);
-    app.add_plugins(source_particle_render::SourceParticlePlugin);
+    app.add_plugins((source_color::SourceColorPlugin, source_particle_render::SourceParticlePlugin));
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,

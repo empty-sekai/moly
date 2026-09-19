@@ -45,3 +45,30 @@ fn actual_snapshot_shader_writes_raw_depth_without_colour_or_comparison() {
     assert!(!glsl.contains("Shadow"), "Snapshot must not compare: {glsl}");
     assert!(!glsl.contains("textureLod("), "Snapshot must not filter: {glsl}");
 }
+
+#[test]
+fn source_depth_and_colour_adapters_compile_for_webgl2() {
+    for (source, entries) in [
+        (include_str!("shaders/weather_depth_copy.wgsl"), &["source_fragment"][..]),
+        (include_str!("shaders/source_color.wgsl"), &["to_encoded", "to_linear"][..]),
+    ] {
+        let module = naga::front::wgsl::parse_str(source).unwrap();
+        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all()).validate(&module).unwrap();
+        for entry in entries {
+            let options = glsl::Options {
+                version: glsl::Version::Embedded { version: 300, is_webgl: true },
+                ..Default::default()
+            };
+            let pipeline = glsl::PipelineOptions {
+                shader_stage: naga::ShaderStage::Fragment,
+                entry_point: (*entry).into(), multiview: None,
+            };
+            let mut output = String::new();
+            glsl::Writer::new(&mut output, &module, &info, &options, &pipeline,
+                naga::proc::BoundsCheckPolicies::default()).unwrap().write().unwrap();
+            assert!(output.contains("texelFetch"), "{entry}: {output}");
+            assert!(!output.contains("Shadow"), "{entry}: {output}");
+        }
+    }
+}

@@ -26,6 +26,7 @@ pub struct ParticlePass {
 }
 
 #[derive(Component, Clone, ExtractComponent)]
+#[require(crate::source_color::EncodedColorOutput)]
 pub struct SourceParticle {
     pub material: Arc<MaterialSnapshot>,
     pub catalogue: Handle<SourceShaderCatalogue>,
