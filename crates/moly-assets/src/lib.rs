@@ -10,6 +10,7 @@ mod http_directory;
 #[cfg(any(target_arch = "wasm32", test))]
 mod http_path;
 pub mod material_passes;
+pub mod source_shader;
 pub mod weather_effect;
 pub mod weather_index;
 pub mod weather_icons;
