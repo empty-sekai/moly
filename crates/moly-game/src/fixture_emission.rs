@@ -4,7 +4,7 @@
 //! Target1 = 自发射遮罩 × 现象自发光门），并把第二目标喂给粒子泛光链的
 //! 输入缓冲。本管线的主 pass 只有一个颜色目标（与站点族同一裁决），这条
 //! 第二目标由本模块自建 render graph 节点直画：深度测试复用主 pass 的
-//! 深度图（只读不写），颜色写进一张半浮点缓冲，天气链的泛光金字塔以它
+//! 深度图（只读不写），颜色写进一张单采样 ARGB32 缓冲，天气链的泛光金字塔以它
 //! 为预滤波源。着色程序在 `shaders/fixture_emission.wgsl`（片元式与绑定
 //! 契约的注释在那里）。
 //!
@@ -69,9 +69,11 @@ const FIXTURE_EMISSION_SHADER: Handle<Shader> = Handle::Uuid(
     PhantomData,
 );
 
-/// 自发光缓冲的格式：半浮点，与天气链的泛光金字塔同一档——第二目标存
-/// 线性域的遮罩值，泛光全链按线性消费。
-const EMISSION_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// MysekaiBuffer.ReAllocateTextureIfNeeded sets RenderTextureFormat.ARGB32.
+/// The source effect fragment writes gamma-domain values. Unlike the separate
+/// bloom pyramid this target clamps and quantizes each fixed-function blend.
+/// Source sample-count / main-depth compatibility is accounted separately.
+pub(crate) const EMISSION_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 /// 逐对象 uniform（着色程序里的 `EmissionObject`）的字节数：对象矩阵
 /// 64 + 材质参数 12 槽 192 + 自发光 vec4 16 + skin address uvec4 16。槽序契约见
@@ -130,13 +132,20 @@ impl FixtureEmissionOverride {
 }
 
 /// 一个视图的自发光缓冲：节点写它，天气链的泛光预滤波读 `resolved`。
-/// msaa > 1 时本 pass 与主 pass 同采样数（深度图是多采样的，pass 采样数
-/// 必须一致），msaa 视图只作 attachment，store 时 resolve 进 resolved。
+/// 固定单采样；共享相机深度不兼容时只清缓冲、不画，不创建隐式 resolve。
 #[derive(Component)]
 pub struct ViewEmissionTarget {
-    msaa: Option<TextureView>,
-    /// 已 resolve 的单采样视图：泛光预滤波的采样源。
+    /// 单采样视图：泛光预滤波的采样源（没有额外 resolve）。
     pub resolved: TextureView,
+    resolved_texture: Texture,
+}
+
+/// Optional raw-target copies for diagnostic readback. These never feed back
+/// into rendering and therefore cannot change the pixel oracle being observed.
+#[derive(Resource, Clone, Default, bevy::render::extract_resource::ExtractResource)]
+pub(crate) struct WeatherEffectProbes {
+    pub after_opaques: Option<Handle<Image>>,
+    pub after_transparents: Option<Handle<Image>>,
 }
 
 /// 一条自发光 draw：extract 时算好的逐对象数据 + 特化管线。
@@ -181,6 +190,7 @@ struct EmissionPipelineKey {
     blend: bool,
     sample_count: u32,
     particle: Option<(bool, bool, CullArm, BlendArm, bool)>,
+    source_state: Option<moly_assets::material_passes::SourceRenderState>,
     skinned: bool,
 }
 
@@ -205,6 +215,7 @@ struct EmissionGpu {
     skin_uniforms: bool,
     /// group 1 布局（全局量表 + 遮罩 + 主贴图 + 采样器，全 FRAGMENT）。
     texture_layout: BindGroupLayoutDescriptor,
+    depth_layout: BindGroupLayoutDescriptor,
     /// 钳边三线性采样器：与家具主材质同一组参数（同一 glb 里两张纹理
     /// 共用同一条采样器条目）。
     sampler: Sampler,
@@ -278,7 +289,7 @@ fn extract_emission_draws(
             });
         }
         for (mesh, transform, visibility, effect, material) in &particles {
-            if !visibility.get() { continue; }
+            if !visibility.get() || effect.source_state.is_none() { continue; }
             let Some(material) = particle_materials.get(&material.0) else { continue; };
             list.draws.push(EmissionDraw {
                 mesh: mesh.0.id(), vertex_transform: view_proj * transform.to_matrix(),
@@ -305,7 +316,10 @@ fn extract_emission_draws(
             (false, false) => std::cmp::Ordering::Equal,
             (false, true) => std::cmp::Ordering::Less,
             (true, false) => std::cmp::Ordering::Greater,
-            (true, true) => a.view_z.total_cmp(&b.view_z),
+            (true, true) => {
+                let queue = |draw: &EmissionDraw| draw.particle.map(|p| i64::from(p.render_queue)).unwrap_or(i64::from(draw.key.render_queue));
+                queue(a).cmp(&queue(b)).then_with(|| a.view_z.total_cmp(&b.view_z))
+            },
         });
     }
     commands.insert_resource(list);
@@ -359,7 +373,7 @@ fn emission_texture_descriptor(
         usage: if attachment_only {
             TextureUsages::RENDER_ATTACHMENT
         } else {
-            TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC
         },
         view_formats: &[],
     }
@@ -383,57 +397,18 @@ fn prepare_emission(
     mut texture_cache: ResMut<TextureCache>,
     mut missing_uv_warned: Local<bool>,
 ) {
-    // 3D 视图的自发光缓冲与采样数（pass 与主 pass 共用同一张多采样深度
-    // 图，采样数必须一致）。站点场景单 3D 相机；出现多台时每个视图各得
-    // 一份缓冲，draw 名单共享（抽取侧只认单相机，多了整帧不画）。
-    let mut sample_count = 1u32;
-    for (entity, camera, msaa) in &views {
-        if camera.render_graph != Core3d.intern() {
-            continue;
-        }
-        let samples = msaa.map(|m| m.samples()).unwrap_or(1);
-        sample_count = samples;
-        let Some(viewport) = camera.physical_target_size else {
-            continue;
-        };
-        let (msaa_view, resolved) = if samples > 1 {
-            let msaa_texture = texture_cache.get(
-                &render_device,
-                emission_texture_descriptor(
-                    viewport.x,
-                    viewport.y,
-                    samples,
-                    true,
-                    "fixture_emission_msaa",
-                ),
-            );
-            let resolved = texture_cache.get(
-                &render_device,
-                emission_texture_descriptor(
-                    viewport.x,
-                    viewport.y,
-                    1,
-                    false,
-                    "fixture_emission_resolved",
-                ),
-            );
-            (Some(msaa_texture.default_view), resolved.default_view)
-        } else {
-            let resolved = texture_cache.get(
-                &render_device,
-                emission_texture_descriptor(
-                    viewport.x,
-                    viewport.y,
-                    1,
-                    false,
-                    "fixture_emission_resolved",
-                ),
-            );
-            (None, resolved.default_view)
-        };
-        commands
-            .entity(entity)
-            .insert(ViewEmissionTarget { msaa: msaa_view, resolved });
+    // The source color attachment is always sample=1, with no resolve target.
+    // An incompatible main depth is rejected at draw time, not used to rewrite
+    // this contract. Every allocated target is still cleared for that camera.
+    let sample_count = 1u32;
+    for (entity, camera, _) in &views {
+        if camera.render_graph != Core3d.intern() { continue; }
+        let Some(viewport) = camera.physical_target_size else { continue; };
+        let texture = texture_cache.get(&render_device,
+            emission_texture_descriptor(viewport.x, viewport.y, 1, false, "mysekai_effect_argb32_single_sample"));
+        commands.entity(entity).insert(ViewEmissionTarget {
+            resolved: texture.default_view, resolved_texture: texture.texture,
+        });
     }
 
     // 对象池按 draw 序全量写（缺管线的 draw 也占位，动态 offset 才对得上；
@@ -480,6 +455,7 @@ fn prepare_emission(
                 blend,
                 sample_count,
                 particle,
+                source_state: item.particle.and_then(|p| p.source_state),
                 skinned,
             })
             .or_insert_with(|| {
@@ -491,6 +467,7 @@ fn prepare_emission(
                 if mat_key.rug.is_some() { defs.push("FIXTURE_RUG"); }
                 if let Some((tint, area, _, _, plain)) = particle {
                     defs.push("UBER_EFFECT_PASS");
+                    if sample_count > 1 { defs.push("UBER_DEPTH_MSAA"); }
                     if tint { defs.push("UBER_TINT_AREA_ALL"); }
                     if area { defs.push("UBER_EMISSION_AREA_ALL"); }
                     if plain { defs.push("UBER_PLAIN_COLOUR"); }
@@ -529,7 +506,9 @@ fn prepare_emission(
                             } else {
                                 None
                             },
-                            write_mask: ColorWrites::ALL,
+                            write_mask: if particle.is_some() {
+                                ColorWrites::RED | ColorWrites::GREEN | ColorWrites::BLUE
+                            } else { ColorWrites::ALL },
                         })],
                     }),
                     primitive: PrimitiveState {
@@ -554,6 +533,12 @@ fn prepare_emission(
                     },
                     ..Default::default()
                 };
+                if particle.is_some() {
+                    descriptor.layout.push(gpu.depth_layout.clone());
+                }
+                if let Some(state) = item.particle.and_then(|p| p.source_state) {
+                    crate::source_render_state::apply(&mut descriptor, state);
+                }
                 for def in defs {
                     descriptor.vertex.shader_defs.push(def.into());
                     if let Some(ref mut fragment) = descriptor.fragment {
@@ -571,13 +556,15 @@ fn prepare_emission(
 /// 自发光节点：主 pass 之后跑。每个 3D 视图一份；ViewQuery 缺件
 /// （无深度图或无本 pass 组件）的视图直接不匹配，节点不跑。
 #[derive(Default)]
-struct EmissionPassNode;
+struct EmissionPassNode<const EARLY: bool>;
 
-impl ViewNode for EmissionPassNode {
+impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
     type ViewQuery = (
         &'static ViewEmissionTarget,
         &'static ViewDepthTexture,
         &'static ViewUniformOffset,
+        Option<&'static crate::weather_depth::RawDepthBinding>,
+        Option<&'static crate::weather_depth::WeatherCameraRole>,
     );
 
     #[allow(clippy::type_complexity)]
@@ -585,9 +572,11 @@ impl ViewNode for EmissionPassNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (target, depth, view_offset): QueryItem<Self::ViewQuery>,
+        (target, depth, view_offset, depth_binding, role): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let attachment_compatible = crate::weather_depth::effect_attachment_compatible(
+            role.copied(), depth.texture.sample_count());
         let draws = world.resource::<EmissionDrawList>();
         let gpu = world.resource::<EmissionGpu>();
         let pipeline_cache = world.resource::<PipelineCache>();
@@ -689,35 +678,34 @@ impl ViewNode for EmissionPassNode {
             );
         }
 
-        // 颜色 attachment：msaa 时画进多采样视图、store 时 resolve；单采样
-        // 直写 resolved。无论有没有 draw 都清缓冲——不清会把上一帧的余像
-        // 喂进泛光。
-        let (color_view, resolve_target): (&TextureView, Option<&TextureView>) =
-            match &target.msaa {
-                Some(msaa_view) => (msaa_view, Some(&target.resolved)),
-                None => (&target.resolved, None),
-            };
+        // The forward and Effect paths use the same per-view alias of the
+        // copied camera depth. The alias changes binding type, not its bytes.
+        // Even a refused camera clears its target: no stale contribution reaches
+        // post-processing. Such a clear has no mismatched depth attachment.
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
-                label: Some("fixture_emission_pass"),
+                label: Some(if EARLY { "mysekai_effect_after_opaques" } else { "transparent_fixture_emission" }),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: color_view,
+                    view: &target.resolved,
                     depth_slice: None,
-                    resolve_target: resolve_target.map(|view| &**view),
+                    resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(LinearRgba::BLACK.into()),
+                        load: if EARLY { LoadOp::Clear(LinearRgba::NONE.into()) } else { LoadOp::Load },
                         store: StoreOp::Store,
                     },
                 })],
-                // 深度：主 pass 写完之后的只读口——第一次 get_attachment
-                // 已被主 pass 用掉（清 + 写），这里得 Load；不写所以 Discard。
-                depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Discard)),
+                // The camera depth is still required by forward transparents and
+                // later consumers. A read-only draw does NOT authorize Discard.
+                depth_stencil_attachment: attachment_compatible.then(|| depth.get_attachment(StoreOp::Store)),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
 
-        for (index, item) in draws.draws.iter().enumerate() {
+        for (index, item) in draws.draws.iter().enumerate().filter(|_| attachment_compatible) {
+            let belongs_early = item.particle.is_some() || !item.blend;
+            if EARLY != belongs_early { continue; }
+            if item.particle.is_some() && depth_binding.is_none() { continue; }
             let (Some(pipeline), Some(render_mesh)) =
                 (resolve(item.pipeline), meshes.get(item.mesh))
             else {
@@ -743,6 +731,9 @@ impl ViewNode for EmissionPassNode {
                 &object_offsets[..2]
             });
             pass.set_bind_group(1, texture_bind_group, &[]);
+            if item.particle.is_some() {
+                pass.set_bind_group(2, &depth_binding.unwrap().group, &[]);
+            }
             pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
             match &render_mesh.buffer_info {
                 RenderMeshBufferInfo::Indexed {
@@ -764,12 +755,27 @@ impl ViewNode for EmissionPassNode {
                 }
             }
         }
+        drop(pass);
+        let probe = world.get_resource::<WeatherEffectProbes>().and_then(|probes| {
+            if EARLY { probes.after_opaques.as_ref() } else { probes.after_transparents.as_ref() }
+        }).and_then(|handle| images.get(handle));
+        if let Some(probe) = probe {
+            // A probe must use the native target's exact representation. Do not
+            // hide HDR clipping or domain errors behind a display conversion.
+            if probe.texture_format == EMISSION_FORMAT && probe.size == target.resolved_texture.size() {
+                render_context.command_encoder().copy_texture_to_texture(
+                    target.resolved_texture.as_image_copy(), probe.texture.as_image_copy(), probe.size);
+            }
+        }
         Ok(())
     }
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct EmissionPassLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct TransparentFixtureEmissionLabel;
 
 /// RenderStartup：对象池 buffer、两个 bind group 布局、采样器。
 fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevice>) {
@@ -867,6 +873,7 @@ fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevi
         object_layout,
         skin_uniforms,
         texture_layout,
+        depth_layout: crate::weather_depth::raw_depth_layout(),
         sampler,
     });
 }
@@ -888,7 +895,9 @@ pub struct FixtureEmissionPlugin;
 
 impl Plugin for FixtureEmissionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load);
+        app.add_systems(Startup, load)
+            .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<WeatherEffectProbes>::default())
+            .add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<crate::weather_depth::WeatherCameraRole>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -901,16 +910,23 @@ impl Plugin for FixtureEmissionPlugin {
                 Render,
                 prepare_emission.in_set(RenderSystems::PrepareResources),
             )
-            .add_render_graph_node::<ViewNodeRunner<EmissionPassNode>>(Core3d, EmissionPassLabel)
-            // 主 pass 之后（读它的深度图）、色调映射之前——天气链的合成
-            // 节点在色调映射之后，传递序保证本 pass 先于泛光预滤波。
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::EndMainPass,
-                    EmissionPassLabel,
-                    Node3d::Tonemapping,
-                ),
-            );
+            .add_render_graph_node::<ViewNodeRunner<crate::weather_depth::WeatherOpaqueDepthNode>>(Core3d, crate::weather_depth::WeatherOpaqueDepth)
+            .add_render_graph_node::<ViewNodeRunner<EmissionPassNode<true>>>(Core3d, EmissionPassLabel)
+            .add_render_graph_node::<ViewNodeRunner<EmissionPassNode<false>>>(Core3d, TransparentFixtureEmissionLabel)
+            // Source event 300: effect participants are drawn before transparents.
+            // Opaque fixture MRT replay shares this earlier point; transparent
+            // fixture replay must stay after its main transparent source stage.
+            // Replay vs true MRT equivalence remains a separate proof obligation.
+            .add_render_graph_edges(Core3d, (
+                Node3d::MainOpaquePass,
+                crate::weather_depth::WeatherOpaqueDepth,
+                EmissionPassLabel,
+                Node3d::MainTransmissivePass,
+            ))
+            .add_render_graph_edges(Core3d, (
+                Node3d::MainTransparentPass,
+                TransparentFixtureEmissionLabel,
+                Node3d::EndMainPass,
+            ));
     }
 }

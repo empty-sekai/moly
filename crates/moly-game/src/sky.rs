@@ -79,6 +79,11 @@ impl Material for SkyGradient {
 }
 
 impl SkyGradient {
+    pub(crate) fn set_timeline_additive(&mut self, color: [f32; 4], intensity: f32) {
+        self.additive_color = Vec4::from_array(color);
+        self.params.x = intensity;
+    }
+
     /// 天气系统切换现象时翻渐变条与淡化进度（L25 双 ramp mix 的喂入点）：
     /// 淡化期两槽各持一侧、进度 0→1；稳态两槽同持当前档、进度 0（mix 退化
     /// 为直通）。附加强度（params.x）不在这里动——它是时间轴域的量，底值

@@ -1,7 +1,8 @@
 // Both passes evaluate in the source storage colour space. The forward target
-// needs format decoding; the floating-point effect target stores that value directly.
+// needs format decoding; the ARGB32 effect target clamps/quantizes that value.
 #ifndef UBER_EFFECT_PASS
 #import bevy_pbr::view_transformations::{position_world_to_view, position_view_to_clip}
+#import bevy_pbr::mesh_view_bindings::view
 // 顶点槽位由 `UberParticleMaterial::specialize` 显式装配；两处同改。
 struct UberVertex {
     @location(0) position: vec3<f32>,
@@ -16,10 +17,14 @@ struct UberT1Params {
     tint_colour: vec4<f32>,
     scalars: vec4<f32>,
     luminance: vec4<f32>,
-    /// 逐粒子流选择器。x = `_TintBlendRateCoord`，其余留给同族的其它 coord。
+    // x=tint selector; y=soft intensity; z=soft keyword; w=emission selector.
     coords: vec4<f32>,
 }
 #ifdef UBER_EFFECT_PASS
+#import bevy_render::view::View
+@group(0) @binding(1) var<uniform> view: View;
+@group(2) @binding(0) var opaque_depth: texture_2d<f32>;
+@group(2) @binding(1) var<uniform> depth_available: vec4<u32>;
 struct EmissionObject {
     clip_from_local: mat4x4<f32>,
     params: UberT1Params,
@@ -49,6 +54,8 @@ struct ParticleEnv {
 @group(3) @binding(1) var base_map: texture_2d<f32>;
 @group(3) @binding(2) var base_sampler: sampler;
 @group(3) @binding(3) var<uniform> env: ParticleEnv;
+@group(1) @binding(0) var opaque_depth: texture_2d<f32>;
+@group(1) @binding(1) var<uniform> depth_available: vec4<u32>;
 #endif
 struct UberVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -129,9 +136,12 @@ fn source_colour(in: UberVertexOutput, p: UberT1Params) -> vec4<f32> {
     var emission_colour = vec3<f32>(0.0);
     if object.emission.y == 0.0 { emission_colour = object.emission_colour.rgb; }
     if object.emission.y == 1.0 { emission_colour = tinted.rgb; }
-    return vec4<f32>(tinted.rgb * emission_colour * object.emission.x, tinted.a) * in.colour;
+    let intensity = object.emission.x + stream_value(p.coords.w, in.custom1, in.custom2);
+    return vec4<f32>(tinted.rgb * emission_colour * intensity, tinted.a) * in.colour;
 #else
-    return tinted * in.colour;
+    // Actual JP MysekaiEffect with no emission-area keyword writes zero RGB.
+    // Alpha still participates in blend factors and the subsequent alpha chain.
+    return vec4<f32>(vec3<f32>(0.0), tinted.a * in.colour.a);
 #endif
 #else
     return tinted * in.colour;
@@ -187,15 +197,52 @@ fn shade_tail(colour: vec4<f32>, p: UberT1Params, light: vec4<f32>) -> vec4<f32>
     return out;
 }
 
+// Source tail: saturate((sceneEyeZ - particleEyeZ) * (1 / intensity)).
+// No epsilon is added to the authored intensity. The eye-depth transform below
+// uses the actual projection, so finite-far and infinite reverse-Z do not share
+// guessed near/far constants. Current Moly weather cameras are perspective.
+// BEGIN RAW DEPTH LOAD CONTRACT
+// The host aliases the existing depth-format view as unfilterable float. This
+// is not a colour conversion or a second depth render: raw texels are unchanged.
+// GLSL ES can texelFetch this sampler2D without shadow-comparison semantics.
+fn load_depth_at_pixel(depth: texture_2d<f32>, pixel: vec2<f32>) -> f32 {
+    return textureLoad(depth, vec2<i32>(pixel), 0).x;
+}
+// END RAW DEPTH LOAD CONTRACT
+
+fn positive_eye_depth(device_z: f32) -> f32 {
+    return view.clip_from_view[3][2] / (device_z + view.clip_from_view[2][2]);
+}
+fn soften_alpha(colour: vec4<f32>, scene_z: f32, particle_z: f32, intensity: f32) -> vec4<f32> {
+    let distance = positive_eye_depth(scene_z) - positive_eye_depth(particle_z);
+    let fade = clamp((1.0 / intensity) * distance, 0.0, 1.0);
+    return vec4<f32>(colour.rgb, colour.a * fade);
+}
+
 #ifdef UBER_EFFECT_PASS
 @fragment
 fn emission_fragment(in: UberVertexOutput) -> @location(0) vec4<f32> {
-    return shade_tail(source_colour(in, object.params), object.params, object.phenomena_light);
+    var colour = shade_tail(source_colour(in, object.params), object.params, object.phenomena_light);
+    if object.params.coords.z > 0.5 {
+        if depth_available.x == 0u { discard; }
+        // Same single-sample snapshot as the forward path. Incompatible MSAA
+        // attachments are rejected by the host; no sample-zero resolve is used.
+        let scene_z = load_depth_at_pixel(opaque_depth, in.position.xy);
+        colour = soften_alpha(colour, scene_z, in.position.z, object.params.coords.y);
+    }
+    return colour;
 }
 #else
 @fragment
 fn fragment(in: UberVertexOutput) -> @location(0) vec4<f32> {
-    let colour = shade_tail(source_colour(in, params), params, env.phenomena_light_color);
+    var colour = shade_tail(source_colour(in, params), params, env.phenomena_light_color);
+    if params.coords.z > 0.5 {
+        // Discard, rather than merely setting alpha=0: authored blend factors
+        // may be One/One, so alpha alone does not guarantee zero contribution.
+        if depth_available.x == 0u { discard; }
+        let scene_z = load_depth_at_pixel(opaque_depth, in.position.xy);
+        colour = soften_alpha(colour, scene_z, in.position.z, params.coords.y);
+    }
     return vec4<f32>(srgb_format_decode(colour.rgb), colour.a);
 }
 #endif

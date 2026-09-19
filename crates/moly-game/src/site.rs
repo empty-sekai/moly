@@ -1136,7 +1136,7 @@ pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next
     site_material::teardown(commands);
     site_sound::teardown(commands);
     crate::uber_particle::teardown(commands);
-    crate::weather_fx::teardown(commands);
+    crate::weather_fx::invalidate_site(commands);
     // GroundEpoch stays monotonic across the transition.
     commands.remove_resource::<SiteActive>();
     inactive_nodes::teardown(commands);

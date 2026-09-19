@@ -35,9 +35,8 @@ const SHADOW_MASK_EDGES: [f32; 4] = [0.0, 0.8, 0.0, 0.0];
 const DROPITEM_GLOBALS: [f32; 4] = [0.4, 0.04, 0.65, 1.0];
 
 /// 高度淡出的天空底色（源全局量 `_MysekaiSkyBottomColor`，按天气由环境
-/// 资产下发）。**提取缺口**：环境资产侧尚未导出该值，这里落中性灰——
-/// 消费它的唯一站点材质是高度淡出权重恒 1 的远景悬崖，整片颜色就是这
-/// 个槽；值补进环境提取后由天气系统覆写。
+/// 资产下发）。这里只是环境加载前的占位；天气解析后每帧由
+/// ramp.skyBottomColor 覆写，并与 SetEnvironmentData 一同提交。
 const SKY_BOTTOM_COLOR_NEUTRAL: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 
 /// 表的 GPU 布局：26 个 vec4 槽、416 字节。槽序是本文件与
@@ -59,7 +58,7 @@ pub struct SiteEnv {
     pub shadow_mask_edges: [f32; 4],
     /// DropItem 族四个全局标量（见 [`DROPITEM_GLOBALS`]）。
     pub dropitem_globals: [f32; 4],
-    /// 高度淡出混合目标（提取缺口，中性灰起步，见 [`SKY_BOTTOM_COLOR_NEUTRAL`]）。
+    /// 高度淡出混合目标，由当前已提交的现象 ramp 元数据驱动。
     pub sky_bottom_color: [f32; 4],
 }
 

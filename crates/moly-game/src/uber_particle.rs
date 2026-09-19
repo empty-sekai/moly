@@ -20,7 +20,7 @@ use std::marker::PhantomData;
 
 use crate::billboard::{self, Alignment, SizeClamp};
 use crate::env::SiteEnvGpuBuffer;
-use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, build_quads, simulate, PREWARM_STEP};
+use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, simulate, PREWARM_STEP};
 use crate::site::{SiteActive, SiteRoot, SiteScenesReady};
 use crate::site_material::SiteSidecarAsset;
 
@@ -88,6 +88,8 @@ impl UberT1Params {
 
 #[derive(Component, Clone, Copy)]
 pub(crate) struct ParticleEmission {
+    pub source_state: Option<moly_assets::material_passes::SourceRenderState>,
+    pub render_queue: i32,
     pub params: UberT1Params,
     pub colour: Vec4,
     pub intensity: f32,
@@ -295,6 +297,10 @@ impl Material for UberParticleMaterial {
         layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        // This shader does not use Bevy's bindless light-probe array. Reuse that
+        // group slot for a PER-VIEW raw-depth alias; material instances remain
+        // view-independent. The matching draw command installs the same layout.
+        descriptor.layout[1] = crate::weather_depth::raw_depth_layout();
         // 顶点布局显式装配：默认的网格布局不含自定义流那两条，而源程序的
         // 逐粒子选择器要从它们取分量。槽位与 `shaders/uber_particle.wgsl`
         // 的 `UberVertex` 是契约。
@@ -351,6 +357,7 @@ impl Material for UberParticleMaterial {
 /// Material 管线注册：在 `app()` 里 DefaultPlugins 之后调用一次。
 pub(crate) fn install(app: &mut App) {
     app.add_plugins(MaterialPlugin::<UberParticleMaterial>::default());
+    crate::weather_depth::install_raw_depth(app);
 }
 
 /// Startup：内嵌着色程序。
@@ -383,7 +390,7 @@ struct Planned {
     clamp: SizeClamp,
     pivot: [f32; 3],
     texture: Handle<Image>,
-    effect: ParticleEmission,
+    effect: Option<ParticleEmission>,
 }
 
 /// 判读结果：放行的计划 + 逐档拒绝盘点。
@@ -830,6 +837,13 @@ fn judge(
         .unwrap_or([1.0, 1.0, 1.0, 1.0]);
     let tint_blend_rate = get("_TintBlendRate").unwrap_or(0.0);
 
+    let soft_enabled = material.keywords.iter().any(|k| k == "_SOFT_PARTICLES_ENABLED");
+    let soft_intensity = if soft_enabled {
+        get("_SoftParticlesIntensity").filter(|v| v.is_finite())
+            .expect("active source soft particles require exported intensity")
+    } else { 0.0 };
+    let shader_coords = Vec4::new(tint_blend_rate_coord, soft_intensity,
+        f32::from(soft_enabled), get("_EmissionIntensityCoord").unwrap_or(0.0));
     Some(Planned {
         node: system.node.clone(),
         emitter,
@@ -843,7 +857,7 @@ fn judge(
             tint_colour: Vec4::from_array(tint_colour),
             scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled),
             luminance,
-            coords: Vec4::new(tint_blend_rate_coord, 0.0, 0.0, 0.0),
+            coords: shader_coords,
         },
         tint_area,
         cull,
@@ -854,8 +868,10 @@ fn judge(
         },
         pivot: renderer.pivot,
         texture,
-        effect: ParticleEmission {
-            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled), luminance, coords: Vec4::new(tint_blend_rate_coord, 0.0, 0.0, 0.0) },
+        effect: (renderer.effect_pass == moly_assets::material_passes::EffectPassEligibility::Eligible).then(|| ParticleEmission {
+            source_state: renderer.effect_render_state,
+            render_queue: renderer.render_queue.expect("eligible effect has a queue"),
+            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled), luminance, coords: shader_coords },
             colour: Vec4::from_array(material.colors.get("_EmissionColor").copied().unwrap_or([1.0; 4])),
             intensity: get("_EmissionIntensity").unwrap_or(1.0),
             colour_type: get("_EmissionColorType").unwrap_or(0.0),
@@ -863,7 +879,7 @@ fn judge(
             // 站点链的材质门只认 UberUnlit（见本文件 `SHADER_NAME`），
             // 原版粒子族不会走到这里 ⇒ 平乘臂恒关。
             tint_area, plain_colour: false, cull, blend,
-        },
+        }),
     })
 }
 
@@ -935,15 +951,15 @@ pub(crate) fn spawn_when_ready(
         });
         // 实体变换恒等：四角已在 CPU 展开成世界坐标，属性即世界坐标。
         // 逐帧重建的属性池没有稳定包围盒，剔除交给 NoFrustumCulling 直通。
-        commands.spawn((
+        let mut draw = commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material),
             Transform::IDENTITY,
             NoFrustumCulling,
             UberParticleDraw,
-            planned.effect,
             crate::shadowmap::NoShadowCast,
         ));
+        if let Some(effect) = planned.effect { draw.insert(effect); }
         live.push(runtime_from_plan(planned, mesh, index));
     }
     info!(
@@ -1026,15 +1042,7 @@ pub(crate) fn advance(
         let Some(mesh) = meshes.get_mut(&system.mesh) else {
             continue;
         };
-        let quads = build_quads(system, &to_world);
-        billboard::write_quads(
-            mesh,
-            &quads,
-            system.alignment,
-            basis,
-            system.clamp,
-            system.pivot,
-        );
+        crate::particle_runtime::write_geometry(mesh, system, &to_world, &ctx.site, camera_transform, basis);
     }
 }
 
@@ -1082,15 +1090,15 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             kind: EffectKind::Site,
             camera_rotation: false,
             node_affine: GlobalTransform::IDENTITY,
-            alignment: planned.alignment,
+            geometry: crate::particle_runtime::Geometry::Billboard {
+                alignment: planned.alignment, clamp: planned.clamp, pivot: planned.pivot,
+            },
             ring_cursor: 0,
             prewarmed: false,
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),
             mesh,
-            clamp: planned.clamp,
-            pivot: planned.pivot,
             pool: Vec::new(),
             side: Vec::new(),
             emission: EmissionState::default(),
@@ -1226,9 +1234,10 @@ pub(crate) fn spawn_fixture_particles(
         for (index, planned) in request.planned.take().unwrap().iter().enumerate() {
             let mesh = meshes.add(billboard::empty_mesh());
             let material = materials.add(UberParticleMaterial::new(planned.params, planned.texture.clone(), planned.tint_area, false, planned.cull, planned.blend));
-            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material), Transform::IDENTITY,
-                NoFrustumCulling, planned.effect, crate::shadowmap::NoShadowCast,
+            let mut draw = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material), Transform::IDENTITY,
+                NoFrustumCulling, crate::shadowmap::NoShadowCast,
                 FixtureParticleLive(runtime_from_plan(planned, mesh, index))));
+            if let Some(effect) = planned.effect { draw.insert(effect); }
         }
         commands.entity(root).remove::<FixtureParticleRequest>().insert(FixtureParticlesResolved);
     }
@@ -1262,7 +1271,9 @@ pub(crate) fn advance_fixture_particles(
         let dt = time.delta_secs() * system.emitter.simulation_speed;
         if dt > 0.0 { simulate(system, dt, &ctx); }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
-        if let Some(mesh) = meshes.get_mut(&system.mesh) { billboard::write_quads(mesh, &build_quads(system, &transform), system.alignment, basis, system.clamp, system.pivot); }
+        if let Some(mesh) = meshes.get_mut(&system.mesh) {
+            crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+        }
     }
 }
 

@@ -9,6 +9,7 @@ moly-law = { path = "../moly-law" }
 moly-assets = { path = "../moly-assets" }
 bevy = { workspace = true }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 # 字形光栅化与度量：bevy_text 的同源光栅器，锁内已有 0.2.10，不新增下载。
 swash = "0.2.10"
 async-lock = "3"
@@ -32,3 +33,7 @@ wasm-bindgen-futures = "0.4"
 # 本地档（音量设置持久化）在浏览器侧落 localStorage：Window + Storage
 # 绑定。与 moly-app 同一版本源（锁内已有，不新增下载）。
 web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers"] }
+
+[dev-dependencies]
+# Compile the actual depth-sampling helper to GLSL ES before a WASM rebuild.
+naga = { version = "27", features = ["wgsl-in", "glsl-out"] }

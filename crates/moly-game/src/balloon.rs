@@ -2318,6 +2318,7 @@ pub(crate) fn order_smoke(
 pub(crate) fn overlay_camera(mut commands: Commands) {
     commands.spawn((
         Camera2d,
+        crate::camera::MYSEKAI_CAMERA_MSAA,
         Camera {
             order: 1,
             clear_color: ClearColorConfig::None,

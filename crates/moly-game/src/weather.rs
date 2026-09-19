@@ -1,65 +1,21 @@
-//! 天气系统：现象切换 + 后处理轴上屏。
+//! Source-authored phenomenon selection, environment transition and post stack.
+//! All entries are loaded from the current index, ordered by their source IDs.
+//! Native C-key and WeatherRequest share one transition owner.
 //!
-//! 一份现象档 = 三路产物（`config.json` 的光照块、`postprocess.json` 的后处理
-//! 档案、一张 32×1 渐变条）。本模块把 15 档全部装载、解出，每帧把**当前现象
-//! （或交叉淡化中的两现象混合）**的全局量写进 [`crate::env::SiteEnv`] 桥——
-//! 光向、光色、阴面色、落影色、雾三件；站点材质读的就是这张表，切换即作用于
-//! 全部站点材质。后处理档案按现象律（`moly_law::weather`）解出六个轴，
-//! 档案驱动的四条轴里能上屏的两条（天空扩散、屏幕耀斑）走本模块的 render
-//! graph 自定义节点。
+//! EnvironmentShaderView blends light/config over the source transition. At its
+//! completion SetEnvironmentData commits sky-bottom color and emission type;
+//! RefreshPostProcess replaces the VolumeProfile. Fog/post parameters do not
+//! interpolate independently. Sky uses its separate two-ramp crossfade.
 //!
-//! # 切换入口
-//!
-//! 两条入口，同一段核对与同一条淡化链：
-//!
-//! - **C 键**：场景输入可用时循环推进 15 档，顺序按现象清单里的 id 排。
-//!   这是 native 的调试/演示路径，仍由 `scene_input_enabled` 挡门。
-//! - **[`WeatherRequest`]**：浏览器桥与宿主 UI 送来的**目标档位**（按 id
-//!   指定，不是「下一档」）。宿主的天气钮是用户界面上的显式操作，因此不受
-//!   场景输入门限制——否则正在播对话时那颗钮会变成死键。清单由
-//!   [`PhenomenonCatalogue`] 对外给出，界面点不到不存在的档；真送错了只
-//!   打一行拒绝行，请求面绝不 panic、也绝不把淡化砍在半途。
-//!
-//! # 键位归置（分配表的一键一义）
-//!
-//! 游戏的输入面是触屏手势（gesture 表），键盘是宿主侧的演示范畴——键位
-//! 在分配表里具名管理，一键一义：Tab 归换站（`crate::site`），天气循环
-//! 落在空键 C。此前 Tab 同时喂换站与天气切换、一击两义（同帧两动作），
-//! 收编时天气让位到 C。
-//!
-//! # 交叉淡化
-//!
-//! 换现象 0.25s：光照与雾九参逐分量线性，光向按球面插值（构造 (0,1,0)→dir
-//! 四元数 slerp 再回向量）；单帧淡化增量上限 0.05s（后台标签页恢复的大 dt
-//! 会在一帧里吞掉整段淡化）。混合模式这类枚举档**不插值**——6 与 18 之间
-//! 没有「12」这个模式，插出来的中间值落进未识别分支，按目标档取值。
-//! 天空渐变走 [`crate::sky`] 已备好的双 ramp 槽 + 淡化进度。
-//!
-//! # 引擎件与自建节点的取舍（每条一句理由）
-//!
-//! * 雾：走已有的全局量桥，不自建——雾本来就是站点材质的逐像素式，不是
-//!   屏后处理。
-//! * 天空扩散 / 屏幕耀斑：自建 render graph 节点——引擎的现成后处理组件
-//!   （泛光、色调映射、调色）没有这两条 pass 的形状，参数喂不进去；它们是
-//!   现象链自己的式子（金字塔模糊 + 混合模式 / 轴向渐变 hard light）。
-//! * 粒子泛光（`_BLOOM_LQ`）：**不**接引擎泛光——那条轴的输入是「只有
-//!   特效粒子与第二颜色目标」的缓冲，不是整幅画面。自发光半边（家具第二
-//!   颜色目标，`fixture_emission` pass）已接进本模块的泛光金字塔；粒子
-//!   特效半边等粒子域落地（其前恒空，零贡献）。
-//! * 太阳光晕：停用并记账——它的方向向量是平行光方向经相机逆变换后的 xy，
-//!   z 的符号约定在真源里读不出来（符号反了会让光晕在太阳背对镜头时出现）。
-//! * 灰度 / 畸变：律里类型化恒关（拍照滤镜与镜头畸变不走天气档案），不接。
-//!
-//! # 渲染侧形状
-//!
-//! 官方自定义后处理示例形：节点挂在 Tonemapping 与 EndMainPassPostProcessing
-//! 之间；隐式阶段与相机一致（`camera.rs` 无色调映射无抖动，本链也一个不挂）。
-//! 纹理金字塔在 Prepare 侧按当帧视口与轴值现算（用引擎的纹理缓存）；uniform
-//! 在 Prepare 侧写入；节点的 bind group 每帧建（post_process_write 的源/目的
-//! 每帧轮换，帧外建必错）。两条轴全关的帧节点整段跳过——与不挂这条链
-//! 逐位一致。
+//! ParticleBloom reads the MysekaiEffect/fixture-MRT target, not scene color.
+//! Source pass state, scene-depth sharing and soft particles are handled by
+//! fixture_emission/weather_depth. Fog remains a per-material global consumer.
+//! Stock Bloom, SunFlare, runtime LUT grading, cloud/wind consumers and thunder
+//! timeline remain explicit implementation work until their source paths close.
+//! A render node or a nonempty target alone is not a pixel-equivalence claim.
 
 use bevy::asset::uuid::Uuid;
+use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared, WeatherEnvironmentUpdate};
 use bevy::asset::{AssetPath, LoadState};
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
@@ -110,16 +66,7 @@ const WEATHER_SHADER: Handle<Shader> = Handle::Uuid(
 const DEFAULT_PHENOMENON: &str = "001_sunny";
 
 /// 交叉淡化时长（秒）。
-const CROSS_FADE_SECONDS: f32 = 0.25;
-
-/// 单帧淡化增量上限（秒）：恢复标签页的大 dt 不许一口气吞掉整段淡化。
-const MAX_FADE_STEP_SECONDS: f32 = 0.05;
-
-/// 交叉淡化里轴的门权重阈值（之下视为全关，链整段旁路）。
-const WEIGHT_EPSILON: f32 = 1e-4;
-
-/// 耀斑强度的启用阈（与真源链同值）。
-const FLARE_INTENSITY_EPSILON: f32 = 0.001;
+const CROSS_FADE_SECONDS: f32 = crate::weather_transition::HOME_ENVIRONMENT_FADE_SECONDS;
 
 /// 耀斑衰减指数的下限（与真源链同值；0 会让 powSafe 分支整支为 0）。
 const FLARE_EXPONENT_FLOOR: f32 = 1e-3;
@@ -134,6 +81,13 @@ const WEATHER_UNIFORM_BYTES: usize = 192;
 
 /// 一个现象档解出的全局量：交叉淡化在两份之间逐项混合。
 struct ResolvedPhenomenon {
+    timeline: Option<moly_law::weather::timeline::Timeline>,
+    character_light_color: [f32; 4],
+    character_skin_shade: [f32; 4],
+    character_body_shade: [f32; 4],
+    renderer_type: i32,
+    home_light_dir: Vec3,
+    sky_bottom_color: [f32; 4],
     /// 档位的清单 id（现象主表的 id 列）。真源问候链的 tweet 门按它相等
     /// 比较，不是按名字——名字只是资产目录名。
     id: i32,
@@ -199,6 +153,14 @@ struct ResolvedPhenomenon {
     sites: Vec<(String, Box<ResolvedPhenomenon>)>,
 }
 
+impl ResolvedPhenomenon {
+    fn selection(&self, site: &SiteActive, site_generation: u64) -> EnvironmentSelection {
+        EnvironmentSelection { name:self.name.clone(), site_id:site.site_id, environment_site:site.env_site.clone(), site_generation, global_effect:GlobalEffectIdentity {
+            phenomenon_id:self.id, renderer_type:self.renderer_type,
+        }}
+    }
+}
+
 /// 现象清单装载请求；解析成功后即撤。
 #[derive(Resource)]
 struct IndexRequest(Handle<JsonAsset>);
@@ -206,6 +168,10 @@ struct IndexRequest(Handle<JsonAsset>);
 /// 装载中的现象档：三路句柄都在手，等全部到达。id 用来在 `parse_index`
 /// 排序，随后随档解出结果一起携带（问候链的门要读它）。
 struct PendingPhenomenon {
+    timeline: Option<Handle<JsonAsset>>,
+    timeline_summary: Option<moly_assets::weather_index::TimelineDocument>,
+    display: PhenomenonOption,
+    sky_bottom_color: [f32; 4],
     id: i32,
     name: String,
     config: Handle<JsonAsset>,
@@ -223,21 +189,14 @@ struct OverridePair {
     postprocess: Option<Handle<JsonAsset>>,
 }
 
-/// 交叉淡化状态：from/to 是 [`WeatherRun::phenomena`] 的下标。
-struct FadeState {
-    from: usize,
-    to: usize,
-    elapsed: f32,
-}
-
-/// 天气运行态：15 档解出结果、当前档、进行中的淡化。Startup 落空表，档案
+/// 天气运行态：动态清单、当前档、等待资源的目的档与进行中的淡化。档案
 /// 到达后由 `resolve_all` 填充；此前的帧全部早退。
 #[derive(Resource, Default)]
 struct WeatherRun {
+    queued: Option<usize>,
     pending: Vec<PendingPhenomenon>,
     phenomena: Vec<ResolvedPhenomenon>,
     current: usize,
-    fade: Option<FadeState>,
 }
 
 /// 当前现象档名——天气域对外的一面：音频（BGM/环境音按档换曲）与小地图
@@ -276,11 +235,14 @@ impl Default for CurrentPhenomenonId {
 #[derive(Message, Debug, Clone, Copy)]
 pub struct WeatherRequest(pub i32);
 
-/// 现象档清单里的一项：对外只暴露 id 与档名这一对，宿主不必认识主表。
+/// Source identity, display metadata and resolved icon path for product UI.
 #[derive(Clone, Debug)]
 pub struct PhenomenonOption {
     pub id: i32,
     pub name: String,
+    pub icon: Option<String>,
+    pub icon_source: Option<moly_assets::weather_icons::WeatherIconArtifact>,
+    pub metadata: Option<moly_assets::weather_index::PhenomenonMetadata>,
 }
 
 /// 现象档清单（id 升序，与现象运行态同序），由 `resolve_all` 在同一次落定
@@ -368,6 +330,7 @@ impl WeatherPostParams {
 
 /// 交叉淡化（或稳态）解出的一帧输出：写全局量桥 + 轴值 + 天空槽。
 struct Blended {
+    sky_bottom_color: [f32; 4],
     light_dir: Vec3,
     light_color: [f32; 4],
     shade_color: [f32; 4],
@@ -397,115 +360,54 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 /// 两档按进度混合：光九项线性（光向球面插值）、雾九参线性后折叠（门折成
 /// 权重缩总密度）、扩散/耀斑数值线性（枚举档按目标取值，门折成权重缩强度）。
 /// t=1 时精确等于 b 档单独生效。
-fn blend(a: &ResolvedPhenomenon, b: &ResolvedPhenomenon, t: f32) -> Blended {
-    // 光向：构造 (0,1,0)→dir 的最短旋转四元数，slerp 后回向量。
-    let qa = Quat::from_rotation_arc(Vec3::Y, a.light_dir);
-    let qb = Quat::from_rotation_arc(Vec3::Y, b.light_dir);
-    let light_dir = qa.slerp(qb, t) * Vec3::Y;
-
-    // 雾：两侧的开关折成权重 w，w 缩总密度（淡入一个有雾的现象 = 雾从无到有，
-    // 不是硬切）；enabled 恒开让 alpha 完全由密度×权重决定。
-    let w = lerpf(gate(a.fog_on), gate(b.fog_on), t);
-    let fog = FogVolumeState {
-        enabled: true,
-        density: lerpf(a.fog.density, b.fog.density, t) * w,
-        near_color: lerp4(a.fog.near_color, b.fog.near_color, t),
-        near_density: lerpf(a.fog.near_density, b.fog.near_density, t),
-        far_color: lerp4(a.fog.far_color, b.fog.far_color, t),
-        far_density: lerpf(a.fog.far_density, b.fog.far_density, t),
-        start: lerpf(a.fog.start, b.fog.start, t),
-        end: lerpf(a.fog.end, b.fog.end, t),
-        height: lerpf(a.fog.height, b.fog.height, t),
-    }
-    .globals(false);
-
-    // 天空扩散：数值逐项线性；混合模式是枚举档，按目标档取值。
-    let wd = lerpf(gate(a.diff_on), gate(b.diff_on), t);
-    let diff_intensity = lerpf(a.diff.intensity, b.diff.intensity, t) * wd;
-    let diff_scatter = lerpf(a.diff.scatter, b.diff.scatter, t);
-    let diff_on = wd > WEIGHT_EPSILON && diff_intensity > 0.0 && diff_scatter > 0.0;
-
-    // 屏幕耀斑：同形；方向角线性插值后折投影轴，指数下限在混合之后取。
-    let wf = lerpf(gate(a.flare_on), gate(b.flare_on), t);
-    let flare_intensity = lerpf(a.flare.intensity, b.flare.intensity, t) * wf;
-    let direction = lerpf(a.flare.direction, b.flare.direction, t);
-    let (sin_d, cos_d) = direction.to_radians().sin_cos();
-    let flare_on = wf > WEIGHT_EPSILON
-        && lerpf(a.flare.intensity, b.flare.intensity, t) > FLARE_INTENSITY_EPSILON;
-
-    // 泛光：轴门与 bright 门各折成权重，乘进强度——真源里
-    // `w = _Bloom_Enable_States.x · _Bloom_Params.x` 本就是一次乘法，稳态
-    // （t=0 或 1）取值两边精确一致；淡入一条泛光档 = 强度从无到有。tint 与
-    // 预滤波参数对已打包值线性插（非线性打包的插值是近似；语料 15 档泛光
-    // 全同，插值恒等——两档不同时的形态见 ResolvedPhenomenon 的字段注）。
-    let wb = lerpf(gate(a.bloom_on), gate(b.bloom_on), t);
-    let bloom_bright = lerpf(a.bloom_bright_gate, b.bloom_bright_gate, t);
-    let bloom_intensity = lerpf(a.bloom_uber[0], b.bloom_uber[0], t) * wb * bloom_bright;
-    let bloom_on = wb > WEIGHT_EPSILON && bloom_intensity > 0.0;
-
-    // 调色：在**原始单位**上逐项线性插（EV 与两个百分数各自的恒等点都是
-    // 0、滤色的恒等点是白），门折成权重乘在「偏离恒等的量」上——所以淡入
-    // 一档带调色的现象 = 调色从恒等长到满值，不是硬切。装箱在写 uniform
-    // 时做（`2^EV` 与百分数是非线性打包，先打包再插会插出档间不存在的值）。
-    let wg = lerpf(gate(a.grade_on), gate(b.grade_on), t);
-    let grade = ColorAdjustmentsParams {
-        post_exposure: lerpf(a.grade.post_exposure, b.grade.post_exposure, t) * wg,
-        contrast: lerpf(a.grade.contrast, b.grade.contrast, t) * wg,
-        color_filter: {
-            let f = lerp4(a.grade.color_filter, b.grade.color_filter, t);
-            [
-                lerpf(1.0, f[0], wg),
-                lerpf(1.0, f[1], wg),
-                lerpf(1.0, f[2], wg),
-                f[3],
-            ]
-        },
-        hue_shift: lerpf(a.grade.hue_shift, b.grade.hue_shift, t) * wg,
-        saturation: lerpf(a.grade.saturation, b.grade.saturation, t) * wg,
-    };
-    let grade_on = wg > WEIGHT_EPSILON;
-
+/// EnvironmentShaderView blends the light/config. Volume.sharedProfile,
+/// sky-bottom color and emission type are committed only after that transition.
+/// They are not interpolated, even when their stored values are numeric.
+fn committed<'a, T>(previous: &'a T, next: &'a T, progress: f32) -> &'a T {
+    if progress < 1.0 { previous } else { next }
+}
+fn blend_at_site(a: &ResolvedPhenomenon, b: &ResolvedPhenomenon, p: &ResolvedPhenomenon, t: f32, source_home: bool, destination_home: bool) -> Blended {
+    let direction_a = if source_home { a.home_light_dir } else { a.light_dir };
+    let direction_b = if destination_home { b.home_light_dir } else { b.light_dir };
+    let mut fog = p.fog;
+    fog.enabled = p.fog_on;
+    let (sin_d, cos_d) = p.flare.direction.to_radians().sin_cos();
     Blended {
-        light_dir,
+        sky_bottom_color: p.sky_bottom_color,
+        light_dir: light::slerp_direction(direction_a, direction_b, t),
         light_color: lerp4(a.light_color, b.light_color, t),
         shade_color: lerp4(a.shade_color, b.shade_color, t),
         drop_shadow: lerp4(a.drop_shadow, b.drop_shadow, t),
-        fog,
+        fog: fog.globals(false),
         post: WeatherPostParams {
-            diff_on,
-            diff_intensity,
-            diff_contrast: lerpf(a.diff.contrast, b.diff.contrast, t),
-            diff_blend_mode: b.diff.blend_mode,
-            diff_scatter,
-            diff_max_iterations: lerpf(a.diff.max_iterations, b.diff.max_iterations, t),
-            diff_buffer_height: lerpf(a.diff.buffer_height, b.diff.buffer_height, t),
-            flare_on,
-            flare_intensity,
+            diff_on: p.diff_on,
+            diff_intensity: p.diff.intensity,
+            diff_contrast: p.diff.contrast,
+            diff_blend_mode: p.diff.blend_mode,
+            diff_scatter: p.diff.scatter,
+            diff_max_iterations: p.diff.max_iterations,
+            diff_buffer_height: p.diff.buffer_height,
+            flare_on: p.flare_on,
+            flare_intensity: p.flare.intensity,
             flare_axis: [cos_d, sin_d],
-            flare_color1: lerp4(a.flare.color1, b.flare.color1, t),
-            flare_color2: lerp4(a.flare.color2, b.flare.color2, t),
-            flare_offset1: lerpf(a.flare.offset1, b.flare.offset1, t),
-            flare_offset2: lerpf(a.flare.offset2, b.flare.offset2, t),
-            flare_exponent: lerpf(a.flare.exponent, b.flare.exponent, t).max(FLARE_EXPONENT_FLOOR),
-            // 枚举档：按目标档取值（与混合模式同一条裁决）。
-            emission_type: b.emission_type,
-            bloom_on,
-            bloom_prefilter: lerp4(a.bloom_prefilter, b.bloom_prefilter, t),
-            bloom_uber: [
-                bloom_intensity,
-                lerpf(a.bloom_uber[1], b.bloom_uber[1], t),
-                lerpf(a.bloom_uber[2], b.bloom_uber[2], t),
-                lerpf(a.bloom_uber[3], b.bloom_uber[3], t),
-            ],
-            bloom_overlay: lerpf(a.bloom_overlay, b.bloom_overlay, t),
-            bloom_buffer_height: lerpf(a.bloom_buffer_height, b.bloom_buffer_height, t),
-            grade_on,
-            grade,
-            split_shadows: lerp4(a.split_shadows, b.split_shadows, t),
-            split_highlights: lerp4(a.split_highlights, b.split_highlights, t),
+            flare_color1: p.flare.color1, flare_color2: p.flare.color2,
+            flare_offset1: p.flare.offset1, flare_offset2: p.flare.offset2,
+            flare_exponent: p.flare.exponent.max(FLARE_EXPONENT_FLOOR),
+            emission_type: p.emission_type,
+            bloom_on: p.bloom_on,
+            bloom_prefilter: p.bloom_prefilter,
+            bloom_uber: [p.bloom_uber[0] * gate(p.bloom_on) * p.bloom_bright_gate,
+                p.bloom_uber[1], p.bloom_uber[2], p.bloom_uber[3]],
+            bloom_overlay: p.bloom_overlay,
+            bloom_buffer_height: p.bloom_buffer_height,
+            grade_on: p.grade_on,
+            grade: p.grade,
+            split_shadows: p.split_shadows,
+            split_highlights: p.split_highlights,
         },
     }
 }
+
 
 /// Startup：着色程序入表、空运行态落位、请求现象清单。
 fn load(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, server: Res<AssetServer>) {
@@ -532,99 +434,49 @@ fn parse_index(
     request: Option<Res<IndexRequest>>,
     mut run: ResMut<WeatherRun>,
 ) {
-    let Some(request) = request else {
-        return;
-    };
+    let Some(request) = request else { return; };
     if let LoadState::Failed(err) = server.load_state(&request.0) {
-        panic!("现象清单装载失败：{err:?}");
+        panic!("phenomenon index load failed: {err:?}");
     }
-    let Some(doc) = index.get(&request.0) else {
-        return;
-    };
-    let value: serde_json::Value =
-        serde_json::from_str(&doc.0).unwrap_or_else(|err| panic!("现象清单不是合法 JSON：{err}"));
-    let phenomena = value
-        .get("phenomena")
-        .and_then(|v| v.as_object())
-        .unwrap_or_else(|| panic!("现象清单缺 phenomena 对象"));
-    // 排序按档位自己的 id（清单对象的键序不是契约，id 才是）。
-    let mut entries: Vec<(i64, String, &serde_json::Value)> = phenomena
-        .iter()
-        .map(|(name, entry)| {
-            let id = entry
-                .get("id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or_else(|| panic!("现象 {name} 缺 id"));
-            (id, name.clone(), entry)
-        })
-        .collect();
-    entries.sort_by_key(|(id, _, _)| *id);
-    if entries.is_empty() {
-        panic!("现象清单是空的：没有可装载的天气档");
+    let Some(doc) = index.get(&request.0) else { return; };
+    let source = moly_assets::weather_index::PhenomenonIndex::from_bytes(doc.0.as_bytes())
+        .unwrap_or_else(|err| panic!("invalid phenomenon index: {err}"));
+    if source.phenomena.values().any(|entry| entry.timeline.is_some()) {
+        source.environment_controller.as_ref()
+            .expect("source timeline requires the controller-owned director descriptor")
+            .validate().unwrap_or_else(|e| panic!("source environment director: {e}"));
     }
+    let mut entries: Vec<_> = source.phenomena.into_iter().collect();
+    entries.sort_by_key(|(_, entry)| entry.id);
+    let load = |file: &str| server.load::<JsonAsset>(
+        AssetPath::from(format!("moly://phenomena/{file}")));
     let mut pending = Vec::with_capacity(entries.len());
-    for (id, name, entry) in entries {
-        let file_of = |key: &str| {
-            entry
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_else(|| panic!("现象 {name} 缺 {key}"))
-                .to_owned()
-        };
-        let config_file = file_of("config");
-        let postprocess_file = file_of("postprocess");
-        let ramp_file = value
-            .pointer(&format!("/phenomena/{name}/ramp/file"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| panic!("现象 {name} 缺 ramp.file"))
-            .to_owned();
-        let config = server.load::<JsonAsset>(AssetPath::from(format!(
-            "moly://phenomena/{config_file}"
-        )));
-        let postprocess = server.load::<JsonAsset>(AssetPath::from(format!(
-            "moly://phenomena/{postprocess_file}"
-        )));
-        // 站点覆写：清单 `overrides` 对象逐站点列出成对的相对路径。装载
-        // 请求在这里发，解析在 `resolve_all`（与全局档案同一处 fail-closed
-        // 策略）。某站只列了一件不是损伤——真源的查找本就逐资产回退。
-        let mut overrides = Vec::new();
-        if let Some(sites) = entry.get("overrides").and_then(|v| v.as_object()) {
-            for (site, files) in sites {
-                let file = |key: &str| {
-                    files
-                        .get(key)
-                        .and_then(|v| v.as_str())
-                        .map(|path| {
-                            server.load::<JsonAsset>(AssetPath::from(format!(
-                                "moly://phenomena/{path}"
-                            )))
-                        })
-                };
-                overrides.push((
-                    site.clone(),
-                    OverridePair {
-                        config: file("config"),
-                        postprocess: file("postprocess"),
-                    },
-                ));
-            }
-        }
-        // 渐变条按非 sRGB 读（与天空壳同一设置）：采样值与存储域同值，着色器
-        // 里的 gamma 往返才逐式同形。
+    for (name, entry) in entries {
         let ramp = server.load_with_settings::<Image, _>(
-            AssetPath::from(format!("moly://phenomena/{ramp_file}")),
+            AssetPath::from(format!("moly://phenomena/{}", entry.ramp.file)),
             |settings: &mut ImageLoaderSettings| settings.is_srgb = false,
         );
+        let overrides = entry.overrides.into_iter().map(|(site, files)| {
+            (site, OverridePair {
+                config: files.config.as_deref().map(&load),
+                postprocess: files.postprocess.as_deref().map(&load),
+            })
+        }).collect();
         pending.push(PendingPhenomenon {
-            id: id as i32,
-            name,
-            config,
-            postprocess,
-            ramp,
-            overrides,
+            timeline: entry.timeline.as_ref().map(|timeline| load(&timeline.file)),
+            timeline_summary: entry.timeline,
+            display: PhenomenonOption {
+                id: entry.id, name: name.clone(), icon: entry.icon,
+                icon_source: entry.master.as_ref().and_then(|master| master.icon_assetbundle_name.as_ref())
+                    .and_then(|key| source.icon_sources.get(key)).map(|receipt| receipt.artifact.clone()),
+                metadata: entry.master,
+            },
+            id: entry.id, name, config: load(&entry.config),
+            postprocess: load(&entry.postprocess), ramp,
+            sky_bottom_color: entry.ramp.sky_bottom_color, overrides,
         });
     }
-    info!("现象清单解析：{} 档（按 id 排序）", pending.len());
+    info!("phenomenon index: {} source entries, sorted by id", pending.len());
     run.pending = pending;
     commands.remove_resource::<IndexRequest>();
 }
@@ -642,6 +494,11 @@ fn resolve_all(
         return;
     }
     for p in &run.pending {
+        if let Some(handle) = &p.timeline {
+            if let LoadState::Failed(err) = server.load_state(handle) {
+                panic!("source weather timeline {} failed to load: {err:?}", p.name);
+            }
+        }
         for handle in [&p.config, &p.postprocess] {
             if let LoadState::Failed(err) = server.load_state(handle) {
                 panic!("现象 {} 的档案装载失败：{err:?}", p.name);
@@ -665,6 +522,7 @@ fn resolve_all(
     }
     let all_loaded = run.pending.iter().all(|p| {
         server.load_state(&p.config).is_loaded()
+            && p.timeline.as_ref().is_none_or(|h| server.load_state(h).is_loaded())
             && server.load_state(&p.postprocess).is_loaded()
             && server.load_state(&p.ramp).is_loaded()
             && p.overrides.iter().all(|(_, pair)| {
@@ -683,6 +541,7 @@ fn resolve_all(
         return;
     }
     let mut resolved: Vec<ResolvedPhenomenon> = Vec::with_capacity(run.pending.len());
+    let mut display_options = Vec::with_capacity(run.pending.len());
     for p in run.pending.drain(..) {
         let Some(config_doc) = json.get(&p.config) else {
             panic!("现象 {} 的 config.json 不在资产表里", p.name);
@@ -715,6 +574,7 @@ fn resolve_all(
                 config_override_doc.unwrap_or(config_doc.0.as_str()),
                 post_override_doc.unwrap_or(post_doc.0.as_str()),
                 p.ramp.clone(),
+                p.sky_bottom_color,
             );
             // 覆写档的逐轴门逐站报账：全局态与站点态的差异（扩散/雾这类
             // 在室内整族关掉的轴）不落一行日志就看不见。
@@ -734,9 +594,20 @@ fn resolve_all(
             sites.push((site.clone(), Box::new(variant)));
         }
         let mut phenomenon =
-            resolve_phenomenon(p.id, &p.name, &config_doc.0, &post_doc.0, p.ramp);
+            resolve_phenomenon(p.id, &p.name, &config_doc.0, &post_doc.0, p.ramp, p.sky_bottom_color);
         phenomenon.sites = sites;
+        phenomenon.timeline = p.timeline.as_ref().map(|handle| {
+            let document = json.get(handle).expect("loaded source timeline missing from asset table");
+            let parsed = moly_assets::weather_timeline::WeatherTimeline::from_bytes(document.0.as_bytes())
+                .unwrap_or_else(|e| panic!("weather {} timeline: {e}", p.name));
+            let summary = p.timeline_summary.as_ref().expect("timeline summary disappeared");
+            assert_eq!(parsed.tracks.len(), summary.tracks as usize, "source timeline track summary drift");
+            assert_eq!(parsed.tracks.iter().map(|t|t.clips.len()).sum::<usize>(), summary.clips as usize, "source timeline clip summary drift");
+            assert_eq!(parsed.duration, summary.duration, "source timeline duration summary drift");
+            parsed.compile().unwrap_or_else(|e| panic!("weather {} timeline compile: {e}", p.name))
+        });
         resolved.push(phenomenon);
+        display_options.push(p.display);
     }
     run.current = resolved
         .iter()
@@ -749,15 +620,7 @@ fn resolve_all(
     // 对外档位表与当前档同点落定：浏览器与宿主 UI 读到的清单从这一刻起就
     // 是完整的，不存在「先看到空表、再看到档位」的中间态。顺序按 id 排，
     // 与真源现象主表一致。
-    *catalogue = PhenomenonCatalogue(
-        resolved
-            .iter()
-            .map(|entry| PhenomenonOption {
-                id: entry.id,
-                name: entry.name.clone(),
-            })
-            .collect(),
-    );
+    *catalogue = PhenomenonCatalogue(display_options);
     let sun_on = resolved.iter().filter(|r| r.sun_on).count();
     let bloom_on = resolved.iter().filter(|r| r.bloom_on).count();
     let grade_on = resolved.iter().filter(|r| r.grade_on).count();
@@ -843,39 +706,16 @@ fn resolve_phenomenon(
     config_doc: &str,
     post_doc: &str,
     ramp: Handle<Image>,
+    sky_bottom_color: [f32; 4],
 ) -> ResolvedPhenomenon {
-    let config: serde_json::Value =
-        serde_json::from_str(config_doc).unwrap_or_else(|err| panic!("现象 {name} 的 config.json 不是合法 JSON：{err}"));
-    let light = config
-        .pointer("/light")
-        .unwrap_or_else(|| panic!("现象 {name} 的 config.json 缺 light 块"));
-    let angle = |key: &str| {
-        light
-            .pointer(&format!("/{key}"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or_else(|| panic!("现象 {name} 的 light 缺 {key}")) as f32
-    };
-    let color = |key: &str| {
-        light
-            .pointer(&format!("/{key}"))
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                let channel = |i: usize| {
-                    items.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32
-                };
-                [channel(0), channel(1), channel(2), channel(3)]
-            })
-            .unwrap_or_else(|| panic!("现象 {name} 的 light 缺 {key}"))
-    };
-    // 家园站的替换太阳角只在家园站生效（active 时换全局角）；当前站点不是
-    // 家园站，取全局角度。
-    let light_dir = light::dir_toward_light(angle("angleXZ"), angle("angleY"));
-    // 现象自发光类型：config 顶层 `emissionType`（1 = 日系、2 = 夜系）。
-    // 家具第二颜色目标的门链读它；15 档全带这一键，缺失即数据损伤。
-    let emission_type = config
-        .get("emissionType")
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| panic!("现象 {name} 的 config.json 缺顶层 emissionType")) as i32;
+    let config: moly_assets::weather_index::EnvironmentSelection =
+        serde_json::from_str(config_doc)
+            .unwrap_or_else(|err| panic!("phenomenon {name}: invalid environment selection: {err}"));
+    let [xz, y] = config.light.angles(false);
+    let light_dir = light::dir_toward_light(xz, y);
+    let [xz, y] = config.light.angles(true);
+    let home_light_dir = light::dir_toward_light(xz, y);
+    let emission_type = config.emission_type;
     let profile = PostProcessProfile::from_bytes(post_doc.as_bytes())
         .unwrap_or_else(|err| panic!("现象 {name} 的 postprocess.json 解析失败：{err}"));
     let (split_shadows, split_highlights) = profile.resolve_split_toning().unwrap_or_else(|err| panic!("SplitToning: {err}"));
@@ -891,12 +731,18 @@ fn resolve_phenomenon(
     let bloom_overlay = uber.scalars[3];
     let bloom_buffer_height = post.bloom_lq.params.fixed_buffer_height;
     ResolvedPhenomenon {
+        timeline: None,
+        character_light_color: config.light.character_directional_light_color,
+        character_skin_shade: config.light.character_shade_skin_color,
+        character_body_shade: config.light.character_body_shade_color,
         id,
         name: name.to_owned(),
         light_dir,
-        light_color: color("phenomenaDirectionalLightColor"),
-        shade_color: color("phenomenaShadeColor"),
-        drop_shadow: color("dropShadowColor1"),
+        home_light_dir, sky_bottom_color,
+        renderer_type: config.renderer_type,
+        light_color: config.light.phenomena_directional_light_color,
+        shade_color: config.light.phenomena_shade_color,
+        drop_shadow: config.light.drop_shadow_color1,
         fog: post.fog.params,
         fog_on: post.fog.enabled,
         diff: post.sky_diffusion.params,
@@ -936,107 +782,140 @@ fn effective<'a>(r: &'a ResolvedPhenomenon, site: &str) -> &'a ResolvedPhenomeno
 /// 解析状态重取」同节奏。
 fn advance(
     time: Res<Time>,
+    server: Res<AssetServer>,
     mut run: ResMut<WeatherRun>,
     site: Option<Res<SiteActive>>,
+    prepared: Option<Res<WeatherFxPrepared>>,
+    mut phase: ResMut<WeatherTransition>,
+    mut current: ResMut<CurrentPhenomenon>,
+    mut current_id: ResMut<CurrentPhenomenonId>,
+) {
+    if run.phenomena.is_empty() { return; }
+    let Some(site) = site.as_deref() else { return; };
+    let to = run.queued.unwrap_or(run.current);
+    let destination = effective(&run.phenomena[to], &site.env_site).selection(site, phase.site_generation);
+    phase.request(destination.clone());
+    // SiteEnvironmentManager writes its public ID before awaiting the view loader.
+    // Audio and post-profile consumers use the separate completed selection.
+    if current.0 != destination.name { current.0 = destination.name.clone(); }
+    current_id.0 = destination.global_effect.phenomenon_id;
+    let ramp_ready = server.load_state(&run.phenomena[to].ramp).is_loaded();
+    let started = ramp_ready && prepared.as_deref().is_some_and(|ready| phase.start_prepared(ready));
+    if started { run.current = to; run.queued = None; }
+    if !started { phase.advance(time.delta_secs()); }
+}
+
+/// Environment audio changes only after the real global FX commit, not at request.
+#[derive(Resource)]
+pub(crate) struct CommittedPhenomenon(pub String);
+impl Default for CommittedPhenomenon {
+    fn default() -> Self { Self(DEFAULT_PHENOMENON.to_string()) }
+}
+
+pub(crate) fn commit_environment(
+    mut phase: ResMut<WeatherTransition>,
+    effects: Option<Res<crate::weather_transition::WeatherGlobalFxCommitted>>,
+    mut committed_name: ResMut<CommittedPhenomenon>,
+) {
+    if let Some(effects) = effects.as_deref() {
+        if phase.commit(effects) {
+            committed_name.0 = phase.committed.as_ref().unwrap().name.clone();
+        }
+    }
+}
+
+/// The source controller's GameTime/Loop director is validated at load time.
+/// Cancellation leaves the last committed playable running; a detached site
+/// clears it, and only a completed environment commit starts a fresh clock.
+#[derive(Resource, Default)]
+pub(crate) struct WeatherTimelineState {
+    serial: Option<u64>,
+    generation: u64,
+    pub elapsed: f64,
+    pub local_time: f64,
+    pub duration: Option<f64>,
+    pub values: moly_law::weather::timeline::Values,
+}
+
+fn evaluate_timeline(
+    time: Res<Time>, run: Res<WeatherRun>, phase: Res<WeatherTransition>,
+    mut state: ResMut<WeatherTimelineState>,
+) {
+    if state.generation != phase.site_generation {
+        *state = WeatherTimelineState { generation: phase.site_generation, ..default() };
+    }
+    let Some(selection) = phase.committed.as_ref()
+        .filter(|selection| selection.site_generation == phase.site_generation) else {
+        state.values = default(); state.duration = None; return;
+    };
+    let Some(row) = run.phenomena.iter().find(|p|p.id==selection.global_effect.phenomenon_id) else { return; };
+    if state.serial != phase.committed_serial() {
+        state.elapsed = 0.0;
+        state.serial = phase.committed_serial();
+    } else {
+        state.elapsed += time.delta_secs_f64();
+    }
+    if let Some(timeline) = &row.timeline {
+        state.duration = Some(timeline.duration);
+        state.local_time = state.elapsed.rem_euclid(timeline.duration);
+        state.values = timeline.evaluate(state.local_time).expect("validated source environment timeline failed");
+    } else {
+        state.duration = None; state.local_time = 0.0; state.values = default();
+    }
+}
+
+/// Consume the frozen source and destination site variants. A new SiteActive must
+/// never rewrite both halves of an in-flight crossfade or a pending destination.
+fn write_environment(
+    run: Res<WeatherRun>,
+    phase: Res<WeatherTransition>,
     mut env: ResMut<SiteEnv>,
-    mut params: ResMut<WeatherPostParams>,
+    mut post: ResMut<WeatherPostParams>,
+    timeline: Res<WeatherTimelineState>,
+    mut character: Option<ResMut<crate::character_material::CharacterEnv>>,
+    mut avatar: Option<ResMut<crate::avatar_material::AvatarEnv>>,
     sky_materials: Query<&MeshMaterial3d<SkyGradient>, With<SkyDome>>,
     mut materials: ResMut<Assets<SkyGradient>>,
 ) {
-    if run.phenomena.is_empty() {
-        return;
-    }
-    // 环境资源按站点的资产身份取覆盖；不同楼层可共用同一室内环境。
-    // 站点未装载时用空串，保留全局解。
-    let environment_site = site
-        .as_deref()
-        .map(|s| s.env_site.as_str())
-        .unwrap_or("");
-    let (from, to, t) = match &run.fade {
-        Some(fade) => {
-            // 单帧增量上限：恢复标签页的大 dt 不许一口气吞掉整段淡化。
-            let step = time.delta_secs().min(MAX_FADE_STEP_SECONDS);
-            (fade.from, fade.to, 1.0f32.min((fade.elapsed + step) / CROSS_FADE_SECONDS))
-        }
-        None => (run.current, run.current, 1.0),
+    let Some(next) = phase.loaded.as_ref() else { return; };
+    let previous = phase.source.as_ref().unwrap_or(next);
+    let profile = phase.committed.as_ref().unwrap_or(previous);
+    let resolve = |selection: &EnvironmentSelection| {
+        let row = run.phenomena.iter().find(|row| row.id == selection.global_effect.phenomenon_id)
+            .expect("loaded weather selection missing from its source catalogue");
+        effective(row, &selection.environment_site)
     };
-    // 两侧都取当前站点的生效变体：在覆写站上换现象 = 两个覆写档之间淡化；
-    // 切站本身不设淡化（即时换，与真源同形）。
-    let blended = blend(
-        effective(&run.phenomena[from], environment_site),
-        effective(&run.phenomena[to], environment_site),
-        t,
-    );
-    // 全局量桥：现象驱动的字段全在这写，相机态仍由 env 侧每帧刷新。
-    env.globals.light_vector = [blended.light_dir.x, blended.light_dir.y, blended.light_dir.z];
-    env.globals.phenomena_directional_light_color = blended.light_color;
+    let (a,b,p) = (resolve(previous),resolve(next),resolve(profile));
+    let blended = blend_at_site(a,b,p,phase.progress,previous.environment_site=="home",next.environment_site=="home");
+    env.globals.light_vector = blended.light_dir.to_array();
+    let values = timeline.values;
+    let add = moly_law::weather::timeline::additive_light;
+    env.globals.phenomena_directional_light_color = add(blended.light_color, values.light_color, values.light_intensity);
+    let character_light = add(lerp4(a.character_light_color, b.character_light_color, phase.progress),
+        values.light_color, values.light_intensity);
+    if let Some(character) = character.as_deref_mut() {
+        character.globals.light_vector = blended.light_dir.to_array();
+        character.globals.light_color = character_light;
+        character.globals.skin_shade_color = lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress);
+        character.globals.body_shade_color = lerp4(a.character_body_shade, b.character_body_shade, phase.progress);
+        character.globals.fog_params = blended.fog.fog_params;
+        character.globals.fog_near_color = blended.fog.fog_near_color;
+        character.globals.fog_far_color = blended.fog.fog_far_color;
+        character.fog_ready = true;
+    }
+    if let Some(avatar) = avatar.as_deref_mut() { avatar.light_color = character_light; }
     env.globals.phenomena_shade_color = blended.shade_color;
     env.drop_shadow_color = blended.drop_shadow;
+    env.sky_bottom_color = blended.sky_bottom_color;
     env.globals.fog_params = blended.fog.fog_params;
     env.globals.fog_near_color = blended.fog.fog_near_color;
     env.globals.fog_far_color = blended.fog.fog_far_color;
-    // 现象自发光类型进全局槽（f32 存整数值，shader 侧取整消费）。淡化期
-    // 枚举档按目标档取值——类型不是可插值的量，1 和 2 之间没有「1.5 个
-    // 现象类型」。
     env.emission_type = blended.post.emission_type as f32;
-    *params = blended.post;
-    // 天空槽：淡化期两槽各持一侧 + 进度；稳态两槽同持当前档、进度 0（mix
-    // 退化为直通）。附加强度底值 0：时间轴域未接，附加项整项不出力。
+    *post = blended.post;
     if let Ok(handle) = sky_materials.single() {
         if let Some(material) = materials.get_mut(&handle.0) {
-            let (ramp1, ramp2, progress) = match &run.fade {
-                Some(_) => (
-                    run.phenomena[from].ramp.clone(),
-                    run.phenomena[to].ramp.clone(),
-                    t,
-                ),
-                None => (
-                    run.phenomena[to].ramp.clone(),
-                    run.phenomena[to].ramp.clone(),
-                    0.0,
-                ),
-            };
-            material.set_ramps(ramp1, ramp2, progress);
-        }
-    }
-    // 淡化收口：换当前档、丢淡出侧、记一次实测时长（判据读模拟时长——它与
-    // 刷新率无关）。推进与收口分开写：收口要整份拿走 fade（borrow 冲突）。
-    if let Some(fade) = run.fade.as_mut() {
-        fade.elapsed += time.delta_secs().min(MAX_FADE_STEP_SECONDS);
-    }
-    if t >= 1.0 {
-        if let Some(fade) = run.fade.take() {
-            // 收口时的轴值 = 目标档的解出值（t=1 的混合精确等于 b 档），
-            // 与切换行里的「→」侧逐值对得上，切换前后可从日志直接复算。
-            let post = &blended.post;
-            info!(
-                "淡化收口：{} → {}，模拟时长 {:.3}s（声明 {}s，单帧增量上限 {}s）；轴值落定：扩散门{} 强度 {:.3} 对比 {:.3} 模式 {} 散射 {:.3}（权重 {:.3}），屏幕耀斑门{} 强度 {:.3}，泛光门{} 强度 {:.3} 预滤波 {:?}，自发光类型 {}",
-                run.phenomena[fade.from].name,
-                run.phenomena[fade.to].name,
-                fade.elapsed,
-                CROSS_FADE_SECONDS,
-                MAX_FADE_STEP_SECONDS,
-                post.diff_on,
-                post.diff_intensity,
-                post.diff_contrast,
-                post.diff_blend_mode,
-                post.diff_scatter,
-                {
-                    let s = if post.diff_scatter < 0.0 {
-                        0.05
-                    } else {
-                        post.diff_scatter.min(1.0) * 0.9 + 0.05
-                    };
-                    s
-                },
-                post.flare_on,
-                post.flare_intensity,
-                post.bloom_on,
-                post.bloom_uber[0],
-                post.bloom_prefilter,
-                post.emission_type,
-            );
-            run.current = fade.to;
+            material.set_ramps(a.ramp.clone(),b.ramp.clone(),phase.progress);
+            material.set_timeline_additive(values.sky_color, values.sky_intensity);
         }
     }
 }
@@ -1058,8 +937,6 @@ fn switch_phenomenon(
     time: Res<Time>,
     mut run: ResMut<WeatherRun>,
     site: Option<Res<SiteActive>>,
-    mut phenomenon: ResMut<CurrentPhenomenon>,
-    mut phenomenon_id: ResMut<CurrentPhenomenonId>,
     mut requests: MessageReader<WeatherRequest>,
     panel: Res<crate::game_settings::SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
@@ -1069,7 +946,7 @@ fn switch_phenomenon(
     // (周期, 已计秒数)，首次调用时按环境变量定型。
     mut auto: Local<Option<(f32, f32)>>,
 ) {
-    if run.phenomena.is_empty() || run.fade.is_some() {
+    if run.phenomena.is_empty() {
         return;
     }
     if auto.is_none() {
@@ -1109,9 +986,7 @@ fn switch_phenomenon(
         }
         None => return,
     };
-    if to == run.current {
-        return;
-    }
+    if run.queued == Some(to) { return; }
     let from = run.current;
     // 切换行的两侧取当前站点的生效变体：覆写站上切换的数值面就是覆写档
     // 的（淡化混合与收口读同一对变体，见 `advance`）。
@@ -1153,17 +1028,8 @@ fn switch_phenomenon(
             info!("自发光账目（目标 {}）{line}", b.name);
         }
     }
-    // 对外面在淡化起点就落目标档名：音频的换曲交叉淡化与画面的交叉淡化
-    // 同为 0.25s，并行推进（等画面淡完才换曲，两条轴会错开半拍）。id 与
-    // 名同点写——真源在交叉淡化的视觉等待之前就写当前现象 id，问候链的
-    // tweet 门从切换的这一刻起就按目标档比。
-    phenomenon.0 = b.name.clone();
-    phenomenon_id.0 = b.id;
-    run.fade = Some(FadeState {
-        from,
-        to,
-        elapsed: 0.0,
-    });
+    // The request may supersede an in-flight source task; the new load has its own identity.
+    run.queued = Some(to);
 }
 
 // ---- 渲染侧 ---------------------------------------------------------------
@@ -2118,13 +1984,17 @@ impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<TransparentCapture>::default());
         app.add_plugins(ExtractResourcePlugin::<WeatherPostParams>::default())
+            .init_resource::<WeatherTransition>()
+            .init_resource::<WeatherTimelineState>()
+            .init_resource::<CommittedPhenomenon>()
             .init_resource::<CurrentPhenomenon>()
             .init_resource::<CurrentPhenomenonId>()
             .init_resource::<PhenomenonCatalogue>()
             .add_message::<WeatherRequest>()
             .add_systems(Startup, load)
-            .add_systems(Update, (parse_index, resolve_all).chain())
-            .add_systems(Update, (advance, switch_phenomenon).chain());
+            .add_systems(Update, (parse_index, resolve_all).chain().before(WeatherEnvironmentUpdate))
+            .add_systems(Update, (switch_phenomenon, advance).chain().in_set(WeatherEnvironmentUpdate))
+            .add_systems(Update, (commit_environment, evaluate_timeline, write_environment).chain().after(crate::weather_fx::spawn_when_ready).after(crate::character_material::apply_fog));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -2149,5 +2019,21 @@ impl Plugin for WeatherPlugin {
                     Node3d::EndMainPassPostProcessing,
                 ),
             );
+    }
+}
+
+#[cfg(test)]
+mod transition_commit_tests {
+    use super::committed;
+    #[test]
+    fn profile_and_globals_hold_until_crossfade_completion() {
+        // CrossFadeCore awaits DoCrossFadeAsync before RefreshShaderView and
+        // RefreshPostProcess. The previous profile remains authoritative before then.
+        let previous = (1, [0.5518868, 0.8096058, 1.0, 1.0]);
+        let next = (2, [0.12, 0.16, 0.3, 1.0]);
+        for progress in [0.0, 0.01, 0.5, 0.999999] {
+            assert_eq!(committed(&previous, &next, progress), &previous);
+        }
+        assert_eq!(committed(&previous, &next, 1.0), &next);
     }
 }

@@ -35,6 +35,14 @@ use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 
+/// Every compositing helper must match the current single-sample field target.
+/// Bevy keys per-view colour allocations by MSAA as well as output/format; a
+/// default 4x no-clear overlay is therefore NOT the same target as the 1x scene.
+/// Actual GLES readbacks observed valid scene/post pixels replaced at that
+/// overlay boundary. This is a renderer-stack compatibility invariant, not a
+/// claim that current source runtime quality writes have all been excluded.
+pub(crate) const MYSEKAI_CAMERA_MSAA: Msaa = Msaa::Off;
+
 /// 取景中心附近的地表高度采样半径：取「脚下的地面」。
 const SURFACE_RADIUS: f32 = 2.0;
 
@@ -365,7 +373,19 @@ impl FieldCameraModel {
 pub fn spawn(mut commands: Commands, server: Res<AssetServer>) {
     let camera = commands
         .spawn((
-            Camera3d::default(),
+            Camera3d {
+                depth_texture_usages: (bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT
+                    | bevy::render::render_resource::TextureUsages::TEXTURE_BINDING).into(),
+                ..Default::default()
+            },
+            crate::weather_depth::WeatherCameraRole::Base,
+            // Supported shared-depth path: source Effect color is single-sample.
+            // This is a runtime compatibility constraint, NOT evidence of the
+            // current game's URP MSAA setting. Do not silently synthesize a resolve.
+            MYSEKAI_CAMERA_MSAA,
+            // Copy the actual opaque attachment; an engine geometry prepass
+            // is neither the source producer nor a portable depth-copy carrier.
+            crate::weather_depth::WeatherDepthSnapshot,
             // The empty loading view uses the engine default. The actual prefab
             // projection is installed with its bound setting before site framing.
             Projection::Perspective(PerspectiveProjection::default()),
@@ -1868,4 +1888,23 @@ pub fn report_follow(
         models.look_at_bounds.extents,
         shell.height
     );
+}
+
+#[cfg(test)]
+mod overlay_sample_tests {
+    use super::*;
+    #[test]
+    fn source_sprite_overlay_cameras_share_the_field_sample_count() {
+        let mut app = App::new();
+        app.add_systems(Startup, (crate::balloon::overlay_camera, crate::sitemap::overlay_camera));
+        app.update();
+        let mut cameras = app.world_mut().query_filtered::<(&Camera, &Msaa), With<Camera2d>>();
+        let cameras = cameras.iter(app.world()).collect::<Vec<_>>();
+        assert_eq!(cameras.len(), 2);
+        for (camera, msaa) in cameras {
+            assert!(matches!(camera.clear_color, ClearColorConfig::None));
+            assert_eq!(*msaa, MYSEKAI_CAMERA_MSAA);
+            assert_eq!(msaa.samples(), 1);
+        }
+    }
 }

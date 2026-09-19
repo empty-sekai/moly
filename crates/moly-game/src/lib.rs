@@ -58,6 +58,7 @@ mod npc_fixture_activity;
 pub mod npc_objective;
 pub mod option_dialog;
 mod particle_runtime;
+mod particle_geometry;
 pub mod pick;
 pub mod player;
 pub mod player_avatar;
@@ -92,6 +93,9 @@ mod voice_pcm;
 pub mod walk_face;
 pub mod weather;
 pub mod weather_fx;
+mod weather_depth;
+mod weather_transition;
+mod source_render_state;
 
 use bevy::prelude::*;
 
@@ -163,3 +167,6 @@ pub fn app(
     ));
     app
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod weather_gpu_tests;

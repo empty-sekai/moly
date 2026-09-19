@@ -1236,6 +1236,7 @@ pub(crate) fn overlay_camera(mut commands: Commands) {
     commands.spawn((
         SitemapCamera,
         Camera2d,
+        crate::camera::MYSEKAI_CAMERA_MSAA,
         Camera {
             order: 2,
             clear_color: ClearColorConfig::None,

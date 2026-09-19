@@ -191,6 +191,7 @@ pub(crate) fn setup(
     let camera = commands
         .spawn((
             Camera2d,
+            crate::camera::MYSEKAI_CAMERA_MSAA,
             Camera {
                 order: UI_ORDER,
                 clear_color: ClearColorConfig::None,
@@ -757,6 +758,7 @@ pub(crate) fn apply_graphics(
         if composites.is_empty() {
             commands.spawn((
                 Camera2d,
+                crate::camera::MYSEKAI_CAMERA_MSAA,
                 Camera {
                     order: 0,
                     clear_color: ClearColorConfig::Custom(Color::BLACK),

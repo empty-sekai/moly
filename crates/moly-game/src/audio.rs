@@ -1335,7 +1335,7 @@ pub(crate) fn advance_ambient(
     server: Res<AssetServer>,
     bus: Res<VolumeBus>,
     gate: Res<AudioGate>,
-    phenomenon: Res<CurrentPhenomenon>,
+    phenomenon: Res<crate::weather::CommittedPhenomenon>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<AmbientChannel>,
 ) {
@@ -2379,6 +2379,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<AudioGate>()
         .init_resource::<LocalVolumeSettings>()
         .init_resource::<CurrentPhenomenon>()
+        .init_resource::<crate::weather::CommittedPhenomenon>()
         .init_resource::<BgmChannel>()
         .init_resource::<AmbientChannel>()
         .init_resource::<ProximityState>()

@@ -1,0 +1,131 @@
+//! Lifecycle regression fixtures; not original-client visual goldens.
+use super::*;
+use moly_law::particle::schema::{StartParams, EmissionParams};
+use moly_law::particle::{MinMaxCurve, MinMaxGradient, RingBufferMode, Particle};
+use crate::particle_runtime::Side;
+use std::time::Duration;
+
+fn runtime() -> Runtime {
+    let zero = MinMaxCurve::Constant(0.0);
+    let one = MinMaxCurve::Constant(1.0);
+    Runtime {
+        node: "test".into(), effect: "test".into(),
+        emitter: EmitterParams {
+            effect:"test".into(),node:"test".into(), duration:5.0, looping:true, prewarm:true,
+            play_on_awake:true, simulation_speed:1.0, simulation_space:SimulationSpace::Local,
+            start_delay:zero.clone(),ring_buffer_mode:RingBufferMode::Disabled,
+            ring_buffer_loop_range:[0.0,1.0], max_particles:100,
+            start:StartParams { lifetime:MinMaxCurve::Constant(10.0),speed:zero.clone(),size:one,
+                size_y:None,size_z:None,size3d:false,rotation:zero.clone(),rotation_x:None,rotation_y:None,rotation3d:false,
+                color:MinMaxGradient::Color([1.0;4]),gravity_modifier:zero.clone() },
+            emission:Some(EmissionParams { rate_over_time:MinMaxCurve::Constant(100.0),
+                rate_over_distance:zero,bursts:Vec::new() }),
+            shape:None,velocity_over_lifetime:None,color_over_lifetime:None,
+            size_over_lifetime:None,rotation_over_lifetime:None,limit_velocity:None,
+            custom_data:None,unmapped:Vec::new(),
+        },
+        kind:EffectKind::Camera,camera_rotation:false,node_affine:GlobalTransform::IDENTITY,
+        mesh:Handle::default(),anchor:None,ring_cursor:0,
+        geometry:crate::particle_runtime::Geometry::Billboard {alignment:Alignment::View,
+            clamp:SizeClamp { min_size:0.0,max_screen_fraction:1.0 },pivot:[0.0;3]},
+        pool:vec![Particle::born([0.0;3],[2.0,0.0,0.0],10.0)],
+        side:vec![Side {rand:0.5,seed:123,rot:[0.0;3],size:[1.0;3],gravity:0.0,colour:[1.0;4]}],
+        emission:EmissionState::default(),playback_head:0.0,previous_head:0.0,rng:Rng(123),
+        prewarmed:false,cone_angle:None,rol:None,limit:None,
+        born_total:1,died_total:0,full_total:0,refused_total:0,
+    }
+}
+
+fn lifecycle(delay: f64) -> WeatherEffectLifecycle {
+    WeatherEffectLifecycle::from_effect(&serde_json::json!({"lifecycle":{
+        "stopBehavior":"stopEmitting","timeUntilDestroy":delay,"delaySource":"serializedRoot"
+    }})).unwrap()
+}
+
+fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {
+    let draw=world.spawn(WeatherFxDraw).id();
+    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),draw,lifecycle:lifecycle(delay)}],
+        tier:"old".into(),env_site:"home".into(),admitted:1,records:1 }, draw)
+}
+
+#[test]
+fn stop_emitting_preserves_and_advances_existing_particles_without_rng_or_births() {
+    let mut system=runtime();
+    let before=system.pool[0].remaining_lifetime;
+    let ctx=Context {sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
+    crate::particle_runtime::simulate_stopped(&mut system,0.25,&ctx);
+    assert_eq!(system.pool.len(),1);
+    assert_eq!(system.born_total,1);
+    assert_eq!(system.rng.0,123);
+    assert!(system.pool[0].remaining_lifetime<before);
+    assert!((system.pool[0].position[0]-0.5).abs()<1e-6);
+    assert!(!system.prewarmed,"Stop must not implicitly prewarm");
+}
+
+#[test]
+fn retirement_keeps_particles_past_the_sky_fade_but_destroys_on_the_authored_deadline() {
+    let mut app=App::new();
+    app.init_resource::<Time>().init_resource::<WeatherFxRetirements>()
+        .add_systems(Update,expire_retirements);
+    let (mut old,draw)=active(app.world_mut(),2.0);
+    // The source deadline is not scaled by this emitter's simulation speed.
+    old.live[0].emitter.simulation_speed=0.1;
+    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0);
+    assert!(old.live.is_empty());
+    for delta in [0.25,1.749] {
+        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_secs_f64(delta));
+        app.update();
+        assert!(app.world().get_entity(draw).is_ok());
+        assert_eq!(app.world().resource::<WeatherFxRetirements>().live.len(),1);
+    }
+    app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(1));
+    app.update();
+    assert!(app.world().get_entity(draw).is_err());
+    assert!(app.world().resource::<WeatherFxRetirements>().live.is_empty());
+    // There was no camera at any point, and the particle had a 10s lifetime.
+}
+
+#[test]
+fn overlapping_retirements_keep_their_own_stop_instants() {
+    let mut world=World::new();
+    let (mut first,_)=active(&mut world,2.0);
+    let (mut second,_)=active(&mut world,3.75);
+    let mut retiring=WeatherFxRetirements::default();
+    retiring.stop(&mut first,10.0);
+    retiring.stop(&mut second,10.5);
+    assert_eq!(retiring.live.iter().map(|r|r.destroy_at).collect::<Vec<_>>(),vec![12.0,14.25]);
+    assert_eq!(retiring.live.iter().map(|r|r.emitter.pool.len()).sum::<usize>(),2);
+}
+
+#[test]
+fn session_disposal_clears_active_and_retired_draws() {
+    let mut app=App::new();
+    app.init_resource::<WeatherFxRetirements>();
+    let (mut old,old_draw)=active(app.world_mut(),2.0);
+    let (new,new_draw)=active(app.world_mut(),2.0);
+    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0);
+    app.insert_resource(new);
+    app.add_systems(Update,|mut commands:Commands| teardown(&mut commands));
+    app.update();
+    assert!(app.world().get_entity(old_draw).is_err());
+    assert!(app.world().get_entity(new_draw).is_err());
+    assert!(!app.world().contains_resource::<WeatherFxState>());
+    assert!(app.world().resource::<WeatherFxRetirements>().live.is_empty());
+}
+
+#[test]
+fn site_replacement_preserves_global_and_retiring_effects() {
+    let mut app=App::new();
+    app.init_resource::<WeatherFxRetirements>().init_resource::<WeatherTransition>();
+    let (mut old,old_draw)=active(app.world_mut(),2.0);
+    let (new,new_draw)=active(app.world_mut(),2.0);
+    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0);
+    app.insert_resource(new);
+    app.add_systems(Update,|mut commands:Commands| invalidate_site(&mut commands));
+    app.update();
+    assert!(app.world().get_entity(old_draw).is_ok());
+    assert!(app.world().get_entity(new_draw).is_ok());
+    assert!(app.world().contains_resource::<WeatherFxState>());
+    assert_eq!(app.world().resource::<WeatherFxRetirements>().live.len(),1);
+    assert_eq!(app.world().resource::<WeatherTransition>().site_generation,1);
+}

@@ -295,6 +295,7 @@ pub fn install(app: &mut App) {
         // 这里兜底建（默认值 = 真源默认现象 1，与档名资源在音频侧兜底建
         // 同款故事；native 上与天气插件的 init 幂等重合）。
         .init_resource::<weather::CurrentPhenomenonId>()
+        .init_resource::<weather_fx::WeatherFxRetirements>()
         .init_resource::<alone_action_runtime::AloneExecutionGate>()
         // 家具时间轴可播集（常驻空表起步，装载期填充——步进系统按 Res
         // 读它，缺资源会在系统参数校验处 panic）。
@@ -756,13 +757,14 @@ pub fn install(app: &mut App) {
         .add_systems(
             Update,
             (
+                weather_fx::expire_retirements,
                 weather_fx::watch,
                 weather_fx::parse,
                 weather_fx::plan,
                 weather_fx::spawn_when_ready,
                 weather_fx::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
             )
-                .chain(),
+                .chain().after(crate::weather_transition::WeatherEnvironmentUpdate),
         )
         // 音频链：路由表解析（两份档案到齐一次性吃掉）→ BGM（淡出/淡入/
         // intro→loop 交接/换曲）→ 环境音（切档停放）→ A 套就近管理（站点
@@ -776,7 +778,7 @@ pub fn install(app: &mut App) {
             (
                 audio::parse,
                 audio::advance_bgm,
-                audio::advance_ambient,
+                audio::advance_ambient.after(weather::commit_environment),
                 audio::advance_proximity,
                 audio::advance_se
                     .in_set(audio::SeDrainSet::Drain)

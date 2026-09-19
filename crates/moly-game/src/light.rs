@@ -52,3 +52,49 @@ pub fn spawn(mut commands: Commands, mut ambient: ResMut<GlobalAmbientLight>) {
     ambient.color = Color::srgb(SHADE_COLOR[0], SHADE_COLOR[1], SHADE_COLOR[2]);
     ambient.brightness = AMBIENT_BRIGHTNESS;
 }
+
+/// Spherical interpolation of the two direction vectors, not of independently
+/// constructed look rotations. For non-antipodal unit inputs this is the unique
+/// shortest great-circle path used by EnvironmentShaderView's Vector3.Slerp.
+/// The source angle producer returns unit vectors; no light magnitude is blended.
+pub(crate) fn slerp_direction(from: Vec3, to: Vec3, progress: f32) -> Vec3 {
+    let t = progress.clamp(0.0, 1.0);
+    if t == 0.0 || from == to { return from; }
+    if t == 1.0 { return to; }
+    let a = from.normalize();
+    let b = to.normalize();
+    let cross = a.cross(b);
+    let sine = cross.length();
+    let cosine = a.dot(b).clamp(-1.0, 1.0);
+    if sine == 0.0 {
+        // Antipodal unit vectors have no unique geodesic. No current source
+        // pair reaches this branch; do not invent Unity's native fallback axis.
+        assert!(cosine >= 0.0, "antipodal source light directions require native axis evidence");
+        return a;
+    }
+    let axis = cross / sine;
+    let angle = sine.atan2(cosine) * t;
+    let (s,c) = angle.sin_cos();
+    a*c + axis.cross(a)*s
+}
+
+#[cfg(test)]
+mod direction_transition_tests {
+    use super::*;
+    #[test]
+    fn direction_slerp_stays_on_the_source_great_circle() {
+        let midpoint = slerp_direction(Vec3::X,Vec3::Z,0.5);
+        let expected=Vec3::new(std::f32::consts::FRAC_1_SQRT_2,0.0,std::f32::consts::FRAC_1_SQRT_2);
+        assert!(midpoint.distance(expected)<1e-6);
+        assert_eq!(slerp_direction(Vec3::Y,Vec3::Y,0.5),Vec3::Y);
+    }
+    #[test]
+    fn oblique_light_vectors_do_not_blend_independent_look_rotations() {
+        let a=dir_toward_light(80.0,57.9);
+        let b=dir_toward_light(240.0,70.0);
+        let midpoint=slerp_direction(a,b,0.5);
+        // For unit endpoints the midpoint lies along their normalized sum.
+        assert!(midpoint.distance((a+b).normalize())<1e-6);
+        assert!(midpoint.dot(a.cross(b)).abs()<1e-6);
+    }
+}

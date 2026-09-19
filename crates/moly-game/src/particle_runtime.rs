@@ -2,10 +2,10 @@
 //! Domain adapters own selection, asset loading, instance anchors and teardown.
 use bevy::prelude::*;
 use moly_law::particle::schema::SimulationSpace;
-use moly_law::particle::shape::{cone_base, hemisphere_position, single_sided_edge, sphere_position};
+use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::step::set_remaining;
 use moly_law::particle::{accumulate_rate, advance_lifetime, apply_gravity, burst_check,
-    circle_position, euler_rotate_deg, integrate, ring_push, BurstOutcome, DragSize,
+    euler_rotate_deg, integrate, ring_push, BurstOutcome, DragSize,
     EmissionState, EmitterParams, LifetimeVerdict, LimitVelocity, Particle,
     RingPushVerdict, RotationOverLifetime, StepVerdict};
 use crate::billboard::{Alignment, Quad, SizeClamp};
@@ -19,6 +19,12 @@ pub(crate) enum EffectKind {
     Site,
 }
 
+#[derive(Clone)]
+pub(crate) enum Geometry {
+    Billboard { alignment: Alignment, clamp: SizeClamp, pivot: [f32; 3] },
+    Mesh(crate::particle_geometry::MeshDraw),
+}
+
 /// 一条在跑的粒子系统。
 pub(crate) struct Runtime {
     pub(crate) node: String,
@@ -29,10 +35,8 @@ pub(crate) struct Runtime {
     pub(crate) node_affine: GlobalTransform,
     pub(crate) mesh: Handle<Mesh>,
     pub(crate) anchor: Option<Entity>,
-    pub(crate) alignment: Alignment,
+    pub(crate) geometry: Geometry,
     pub(crate) ring_cursor: usize,
-    pub(crate) clamp: SizeClamp,
-    pub(crate) pivot: [f32; 3],
     pub(crate) pool: Vec<Particle>,
     pub(crate) side: Vec<Side>,
     pub(crate) emission: EmissionState,
@@ -61,8 +65,9 @@ pub(crate) struct Side {
     pub(crate) seed: u32,
     /// 自旋状态（弧度；公告板只画 Z 分量）。
     pub(crate) rot: [f32; 3],
-    /// 出生尺寸（米，已吃链缩放）。
-    pub(crate) size: [f32; 2],
+    /// Authored birth size on all three axes. Renderer scale is applied in
+    /// the geometry transform, not prematurely collapsed into one X factor.
+    pub(crate) size: [f32; 3],
     pub(crate) gravity: f32,
     pub(crate) colour: [f32; 4],
 }
@@ -126,7 +131,8 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
         let side = system.side[index];
         // 归一化年龄：律的倒计时折算。
         let age = particle.normalized_age();
-        let mut size = side.size;
+        let scale = system.node_affine.to_scale_rotation_translation().0.x;
+        let mut size = [side.size[0] * scale, side.size[1] * scale];
         if let Some(sol) = size_over_lifetime {
             let x = sol.curve.evaluate(age, side.rand);
             let y = match (sol.separate_axes, sol.y.as_ref()) {
@@ -171,45 +177,59 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
 
 /// 一个仿真步：发射（率 + burst）→ 模块批 → 推进 → 死亡移除。
 pub(crate) fn simulate(system: &mut Runtime, dt: f32, ctx: &Context) {
-    let emission = system
-        .emitter
-        .emission
-        .as_ref()
-        .expect("判读已门 emission 在场")
-        .clone();
-    system.previous_head = system.playback_head;
-    let rate = emission
-        .rate_over_time
-        .evaluate(system.playback_head, 0.5);
-    let mut emitted = accumulate_rate(&mut system.emission, rate, dt);
-    system.playback_head += dt;
-    // 非循环系统播到头就停发（现存粒子活完寿命）。循环系统的播头按
-    // duration 回卷——burst 的时间轴与率曲线共用它。
-    if system.emitter.looping && system.emitter.duration > 0.0 {
-        while system.playback_head >= system.emitter.duration {
-            system.playback_head -= system.emitter.duration;
-            system.previous_head -= system.emitter.duration;
+    simulate_with_emission(system, dt, ctx, true);
+}
+
+/// Source ParticleSystem.Stop() uses StopEmitting, not StopEmittingAndClear.
+/// Existing particles still execute their module/lifetime batch. The host owns
+/// the independent destruction deadline; no prewarm or burst runs after Stop.
+pub(crate) fn simulate_stopped(system: &mut Runtime, dt: f32, ctx: &Context) {
+    simulate_with_emission(system, dt, ctx, false);
+}
+
+fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting: bool) {
+    if emitting {
+        let emission = system
+            .emitter
+            .emission
+            .as_ref()
+            .expect("判读已门 emission 在场")
+            .clone();
+        system.previous_head = system.playback_head;
+        let rate = emission
+            .rate_over_time
+            .evaluate(system.playback_head, 0.5);
+        let mut emitted = accumulate_rate(&mut system.emission, rate, dt);
+        system.playback_head += dt;
+        // 非循环系统播到头就停发（现存粒子活完寿命）。循环系统的播头按
+        // duration 回卷——burst 的时间轴与率曲线共用它。
+        if system.emitter.looping && system.emitter.duration > 0.0 {
+            while system.playback_head >= system.emitter.duration {
+                system.playback_head -= system.emitter.duration;
+                system.previous_head -= system.emitter.duration;
+            }
         }
-    }
-    for burst in &emission.bursts {
-        let rand_fire = system.rng.next_f32();
-        let rand_count = system.rng.next_f32();
-        match burst_check(
-            burst,
-            system.previous_head,
-            system.playback_head,
-            rand_fire,
-            rand_count,
-        ) {
-            BurstOutcome::Fired(count) => emitted += count,
-            BurstOutcome::NotDue | BurstOutcome::MissedByProbability => {}
+        for burst in &emission.bursts {
+            let rand_fire = system.rng.next_f32();
+            let rand_count = system.rng.next_f32();
+            match burst_check(
+                burst,
+                system.previous_head,
+                system.playback_head,
+                rand_fire,
+                rand_count,
+            ) {
+                BurstOutcome::Fired(count) => emitted += count,
+                BurstOutcome::NotDue | BurstOutcome::MissedByProbability => {}
+            }
         }
-    }
-    if !system.emitter.looping && system.previous_head > system.emitter.duration {
-        emitted = 0;
-    }
-    for _ in 0..emitted {
-        spawn_one(system, ctx);
+        if !system.emitter.looping && system.previous_head > system.emitter.duration {
+            emitted = 0;
+        }
+        for _ in 0..emitted {
+            spawn_one(system, ctx);
+        }
+
     }
 
     let velocity_over_lifetime = system.emitter.velocity_over_lifetime.clone();
@@ -319,24 +339,13 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         .emitter
         .shape
         .as_ref()
-        .expect("判读已门形状在场");
-    // ---- 形状抽样（律表：每形状的抽签次数是式的组成部分）----
-    // Circle 律表 1 抽（径向由 radiusThickness 单参数决定，无第二次抽签；
-    // rand_r 槽不参与式子，喂 0.5 占位）。仓内雨/站点/表情三条链都抽
-    // 2——有记录的分歧，本链按律表。
+        .expect("判读已门形状在场");    // Current native RNG consumption: Circle/Cone 2, Sphere/Hemisphere 3,
+    // SingleSidedEdge 1. A billboard's facing direction is not its birth velocity.
     let (local, raw_dir) = match shape.shape_type.as_str() {
         "Circle" => {
-            let t_theta = system.rng.next_f32();
-            (
-                circle_position(
-                    shape.radius,
-                    shape.radius_thickness,
-                    shape.arc,
-                    0.5,
-                    t_theta,
-                ),
-                [0.0, 0.0, 1.0],
-            )
+            let arc = system.rng.next_f32();
+            let radial = system.rng.next_f32();
+            circle_base(shape.radius, shape.radius_thickness, shape.arc, arc, radial)
         }
         "Cone" => {
             let angle = system
@@ -353,15 +362,30 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
                 t_radial,
             )
         }
+        "ConeVolume" => {
+            let arc = system.rng.next_f32();
+            let radial = system.rng.next_f32();
+            let distance = system.rng.next_f32();
+            cone_volume(shape.radius, shape.radius_thickness,
+                shape.controls.angle.expect("validated source cone angle"), shape.arc,
+                shape.controls.length.expect("validated source cone length"), arc, radial, distance)
+        }
         "Sphere" => {
             let t_theta = system.rng.next_f32();
             let t_cos = system.rng.next_f32();
-            sphere_position(shape.radius, shape.radius_thickness, t_theta, t_cos)
+            sphere_position(shape.radius, shape.radius_thickness, shape.arc, t_theta, t_cos, system.rng.next_f32())
         }
         "Hemisphere" => {
             let t_theta = system.rng.next_f32();
             let t_cos = system.rng.next_f32();
-            hemisphere_position(shape.radius, shape.radius_thickness, t_theta, t_cos)
+            hemisphere_position(shape.radius, shape.radius_thickness, shape.arc, t_theta, t_cos, system.rng.next_f32())
+        }
+        "Donut" => {
+            let major_arc = system.rng.next_f32();
+            let tube_angle = system.rng.next_f32();
+            let radial = system.rng.next_f32();
+            donut_position(shape.radius, shape.controls.donut_radius.expect("validated source donut radius"),
+                shape.radius_thickness, shape.arc, major_arc, tube_angle, radial)
         }
         "SingleSidedEdge" => {
             let t_theta = system.rng.next_f32();
@@ -369,7 +393,11 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         }
         other => panic!("判读已门形状族，运行时遇到 {other}——判读与推进的门不一致"),
     };
-    let local = euler_rotate_deg(shape.rotation, local);
+    // Shape-module TRS scales both position and velocity before rotation.
+    // Independent engine measurements and current EmitterStoreData agree;
+    // treating the scale as a billboard-size control would flatten the wrong data.
+    let shape_scale = shape.controls.scale.unwrap_or([1.0; 3]);
+    let local = euler_rotate_deg(shape.rotation, std::array::from_fn(|i| local[i] * shape_scale[i]));
     let position = [
         local[0] + shape.position[0],
         local[1] + shape.position[1],
@@ -377,7 +405,7 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     ];
     // 出发方向：形状函数的方向经形状旋转后归一（锥形函数按引擎分工返回
     // 未归一向量，归一在调用方）。
-    let mut direction = euler_rotate_deg(shape.rotation, raw_dir);
+    let mut direction = euler_rotate_deg(shape.rotation, std::array::from_fn(|i| raw_dir[i] * shape_scale[i]));
     let length = (direction[0] * direction[0]
         + direction[1] * direction[1]
         + direction[2] * direction[2])
@@ -389,7 +417,7 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
             direction[2] / length,
         ];
     } else {
-        direction = [0.0, 0.0, 1.0];
+        direction = [0.0; 3];
     }
 
     // ---- 出生取值表（表情链转录：逐项各抽一次，速度与重力共用稳定
@@ -410,11 +438,10 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         Some(curve) => curve.evaluate(0.0, system.rng.next_f32()),
         None => size_x,
     };
-    // 第三轴只有网格绘制件用得上（billboard 是二维片），取值照抽——
-    // 抽签次数是式的组成部分，值弃掉。
-    if let Some(curve) = &system.emitter.start.size_z {
-        let _ = curve.evaluate(0.0, system.rng.next_f32());
-    }
+    let size_z = match &system.emitter.start.size_z {
+        Some(curve) => curve.evaluate(0.0, system.rng.next_f32()),
+        None => size_x,
+    };
     let colour = system
         .emitter
         .start
@@ -425,11 +452,12 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         .start
         .rotation
         .evaluate(0.0, system.rng.next_f32());
-    // 三轴旋转声明：X/Y 两轴 billboard 不画，取值照抽两次。
-    if system.emitter.start.rotation3d {
-        let _ = system.rng.next_f32();
-        let _ = system.rng.next_f32();
-    }
+    let (spin_x, spin_y) = if system.emitter.start.rotation3d {
+        (system.emitter.start.rotation_x.as_ref().expect("validated source X rotation")
+            .evaluate(0.0, system.rng.next_f32()),
+         system.emitter.start.rotation_y.as_ref().expect("validated source Y rotation")
+            .evaluate(0.0, system.rng.next_f32()))
+    } else { (0.0, 0.0) };
     let speed = system.emitter.start.speed.evaluate(0.0, r);
     let gravity = system.emitter.start.gravity_modifier.evaluate(0.0, r);
     let seed = system.rng.next_u32();
@@ -443,7 +471,10 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     // 0.9994 ×7，全部均匀；世界空间条目的链全恒等），折进出生尺寸与
     // 「渲染时折算」给出同一结果。非均匀链缩放语料里不存在，按 X 分量
     // 处理（具名记为未实现）。
-    let size_scale = node_affine.to_scale_rotation_translation().0.x;
+    // Particle module coordinates are raw Unity coordinates; GLB and game
+    // anchors use the producer's reflected-X basis. Convert once at this boundary.
+    let position = crate::particle_geometry::reflect(Vec3::from_array(position)).to_array();
+    let direction = crate::particle_geometry::reflect(Vec3::from_array(direction)).to_array();
     let (position, direction) = if system.emitter.simulation_space == SimulationSpace::World {
         let anchor = match kind {
             EffectKind::Sky => ctx.sky,
@@ -478,8 +509,8 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     let side = Side {
         rand: r,
         seed,
-        rot: [0.0, 0.0, spin0],
-        size: [size_x * size_scale, size_y * size_scale],
+        rot: [spin_x, spin_y, spin0],
+        size: [size_x, size_y, size_z],
         gravity,
         colour,
     };
@@ -505,3 +536,39 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     }
 }
 
+
+
+pub(crate) fn write_geometry(
+    mesh: &mut Mesh, system: &Runtime, to_world: &GlobalTransform,
+    owner: &GlobalTransform, camera: &GlobalTransform, basis: crate::billboard::CameraBasis,
+) {
+    match &system.geometry {
+        Geometry::Billboard { alignment, clamp, pivot } => {
+            crate::billboard::write_quads(mesh, &build_quads(system, to_world), *alignment, basis, *clamp, *pivot);
+        }
+        Geometry::Mesh(draw) => {
+            let frame = crate::particle_geometry::source_frame(owner, camera);
+            let appearance = build_quads(system, to_world);
+            let instances: Vec<_> = system.pool.iter().enumerate().map(|(index, particle)| {
+                let side = system.side[index];
+                let age = particle.normalized_age();
+                let mut size = Vec3::from_array(side.size);
+                if let Some(curves) = &system.emitter.size_over_lifetime {
+                    let x = curves.curve.evaluate(age, side.rand);
+                    let y = if curves.separate_axes { curves.y.as_ref().map_or(x, |c| c.evaluate(age, side.rand)) } else { x };
+                    let z = if curves.separate_axes { curves.z.as_ref().map_or(x, |c| c.evaluate(age, side.rand)) } else { x };
+                    size *= Vec3::new(x,y,z);
+                }
+                let view = &appearance[index];
+                crate::particle_geometry::Instance {
+                    position: crate::particle_geometry::reflect(view.centre),
+                    velocity: crate::particle_geometry::reflect(to_world.affine().transform_vector3(Vec3::from_array(particle.velocity))),
+                    rotation: Vec3::from_array(side.rot), size,
+                    colour: Vec4::from_array(view.colour),
+                    custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),
+                }
+            }).collect();
+            crate::particle_geometry::write_mesh(mesh, draw, &instances, &frame);
+        }
+    }
+}
