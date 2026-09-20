@@ -15,6 +15,10 @@
 
 use std::fmt;
 
+mod events;
+pub use events::{CollisionMode, CollisionParams, CollisionQuality, CollisionType,
+    ForceParams, SubEmitterParams, SubEmitterTrigger, TrailMode, TrailParams, TrailTextureMode};
+
 use crate::particle::buffer::RingBufferMode;
 use crate::particle::emit::{Burst, BurstCycles};
 use crate::particle::json::{self, Value};
@@ -263,6 +267,10 @@ pub struct EmitterParams {
     pub limit_velocity: Option<LimitVelocityParams>,
     /// 逐粒子自定义流。两个槽都缺席或 `disabled` 时为 None。
     pub custom_data: Option<CustomDataParams>,
+    pub sub_emitters: Vec<SubEmitterParams>,
+    pub collision: Option<CollisionParams>,
+    pub trails: Option<TrailParams>,
+    pub force: Option<ForceParams>,
     /// system 层 + particle 层识别到但未映射的键（去重、按序）。
     pub unmapped: Vec<String>,
 }
@@ -271,12 +279,13 @@ pub struct EmitterParams {
 /// 「识别但具名不迁」的那四个（scalingMode、emitterVelocityMode、
 /// randomSeed、autoRandomSeed）**不在**此列：它们同样落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 20] = [
+const MAPPED_SYSTEM_KEYS: [&str; 24] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed",
     "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
     "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
-    "limitVelocity", "customData", "shapeEnabled",
+    "limitVelocity", "customData", "shapeEnabled", "subEmitters", "collision",
+    "trails", "forceOverLifetime",
 ];
 
 /// start 层已映射键。
@@ -414,6 +423,14 @@ impl EmitterParams {
             custom_data,
             rotation_over_lifetime,
             limit_velocity,
+            sub_emitters: system_get(system, "subEmitters")
+                .map(|v| events::sub_emitters(v, &ctx)).transpose()?.unwrap_or_default(),
+            collision: system_get(system, "collision")
+                .map(|v| CollisionParams::from_value(v, &ctx)).transpose()?,
+            trails: system_get(system, "trails")
+                .map(|v| TrailParams::from_value(v, &ctx)).transpose()?,
+            force: system_get(system, "forceOverLifetime")
+                .map(|v| ForceParams::from_value(v, &ctx)).transpose()?,
             unmapped,
         })
     }

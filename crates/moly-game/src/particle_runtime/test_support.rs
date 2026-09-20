@@ -21,7 +21,7 @@ pub(crate) fn runtime() -> Runtime {
                 rate_over_distance:zero,bursts:Vec::new() }),
             shape:None,shape_enabled:Some(false),velocity_over_lifetime:None,color_over_lifetime:None,
             size_over_lifetime:None,rotation_over_lifetime:None,limit_velocity:None,
-            custom_data:None,unmapped:Vec::new(),
+            custom_data:None,sub_emitters:Vec::new(),collision:None,trails:None,force:None,unmapped:Vec::new(),
         },
         kind:EffectKind::Camera,camera_rotation:false,node_affine:GlobalTransform::IDENTITY,
         mesh:Handle::default(),anchor:None,ring_cursor:0,emission_surface:None,
