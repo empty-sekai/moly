@@ -5,6 +5,7 @@
 pub mod action_button;
 pub mod alone_action_runtime;
 pub mod audio;
+mod audio_startup;
 pub mod avatar_material;
 pub mod avatar_wear;
 pub mod balloon;

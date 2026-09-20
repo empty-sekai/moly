@@ -154,8 +154,14 @@ pub(crate) fn prepare_cast_actor_bindings(
     animator: Entity,
     graph: Handle<AnimationGraph>,
 ) -> Result<(), TimelineFailure> {
-    if world.get::<crate::npc::CharacterUnitId>(actor).map(|id| id.0) != Some(unit_id) {
-        return Err(invalid("source actor track unit differs from admitted actor"));
+    if world
+        .get::<crate::npc::CharacterUnitId>(actor)
+        .map(|id| id.0)
+        != Some(unit_id)
+    {
+        return Err(invalid(
+            "source actor track unit differs from admitted actor",
+        ));
     }
     prepare_actor_tracks(world, request, unit_id, actor, animator, graph, true)
 }
@@ -177,11 +183,13 @@ fn prepare_actor_tracks(
     }
     let mut prepared = Vec::new();
     for track in &request.definition.tracks {
-        if track.class != "AnimationTrack" || if explicit_cast {
-            track.name.parse::<u32>().ok() != Some(unit_id)
-        } else {
-            track.name != "CharacterAnimator"
-        } {
+        if track.class != "AnimationTrack"
+            || if explicit_cast {
+                track.name.parse::<u32>().ok() != Some(unit_id)
+            } else {
+                track.name != "CharacterAnimator"
+            }
+        {
             continue;
         }
         for clip in &track.clips {
@@ -293,12 +301,23 @@ fn prepare_actor_tracks(
     for track in &request.definition.tracks {
         let named_cast = explicit_cast && track.name.parse::<u32>().ok() == Some(unit_id);
         let single_body = !explicit_cast && track.name == "CharacterAnimator";
-        let single_face = !explicit_cast && track.clips.iter().any(|clip| matches!(clip.payload,
-            TimelinePayload::Eye { .. } | TimelinePayload::Lip { .. } |
-            TimelinePayload::BlinkGate | TimelinePayload::LipGate |
-            TimelinePayload::NpcIkTalkGate | TimelinePayload::Emoticon { .. }));
+        let single_face = !explicit_cast
+            && track.clips.iter().any(|clip| {
+                matches!(
+                    clip.payload,
+                    TimelinePayload::Eye { .. }
+                        | TimelinePayload::Lip { .. }
+                        | TimelinePayload::BlinkGate
+                        | TimelinePayload::LipGate
+                        | TimelinePayload::NpcIkTalkGate
+                        | TimelinePayload::Emoticon { .. }
+                )
+            });
         if named_cast || single_body || single_face {
-            request.bindings.actors.insert(track.identity.clone(), actor);
+            request
+                .bindings
+                .actors
+                .insert(track.identity.clone(), actor);
         }
     }
     Ok(())
@@ -337,10 +356,8 @@ fn load_json(
     let generation = world
         .get_resource_ref::<Assets<JsonAsset>>()
         .map(|assets| assets.last_changed());
-    if let Some((validated_at, _, parsed)) = world
-        .resource::<TimelineAssetLoads>()
-        .parsed_json
-        .get(path)
+    if let Some((validated_at, _, parsed)) =
+        world.resource::<TimelineAssetLoads>().parsed_json.get(path)
     {
         if matches!((*validated_at, generation), (Some(a), Some(b)) if a == b) {
             return Ok(parsed.clone());
@@ -353,7 +370,8 @@ fn load_json(
         let json = assets.get(&handle).ok_or_else(|| {
             TimelineFailure::loading(format!("actor metadata still loading: {path}"))
         })?;
-        if let Some((_, text, parsed)) = world.resource::<TimelineAssetLoads>().parsed_json.get(path)
+        if let Some((_, text, parsed)) =
+            world.resource::<TimelineAssetLoads>().parsed_json.get(path)
         {
             if text == &json.0 {
                 let parsed = parsed.clone();
@@ -557,8 +575,15 @@ pub(crate) struct FixtureActivityTimelines {
 
 impl FixtureActivityTimelines {
     pub(crate) fn has_no_loop(&self, token: TimelineToken) -> bool {
-        self.sessions.get(&token).is_some_and(|session| !session.request.definition.tracks.iter()
-            .flat_map(|track| &track.clips).any(|clip| matches!(clip.payload, TimelinePayload::LoopFlag { .. })))
+        self.sessions.get(&token).is_some_and(|session| {
+            !session
+                .request
+                .definition
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .any(|clip| matches!(clip.payload, TimelinePayload::LoopFlag { .. }))
+        })
     }
 
     pub(crate) fn request_start(&mut self, request: StartTimeline) -> TimelineToken {
@@ -647,6 +672,36 @@ impl FixtureActivityTimelines {
         s.clock.request_end();
         true
     }
+    /// A conversation can own a new Director or join an existing NPC activity.
+    /// Release the loop of each admitted cast/fixture owner and retain the exact
+    /// generations until their authored tails finish. No replacement is drawn.
+    pub(crate) fn request_talk_end(
+        &mut self,
+        actors: &[Entity],
+        fixtures: &[Entity],
+    ) -> Vec<TimelineToken> {
+        let tokens: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                actors.contains(&session.request.owner.activity.actor)
+                    && fixtures.contains(&session.request.fixture)
+                    && matches!(
+                        session.request.owner.kind,
+                        TimelineOwnerKind::Npc | TimelineOwnerKind::Talk
+                    )
+                    && matches!(
+                        session.status,
+                        TimelineStatus::Preparing | TimelineStatus::Playing { .. }
+                    )
+            })
+            .map(|(token, _)| *token)
+            .collect();
+        for token in &tokens {
+            self.request_end(*token);
+        }
+        tokens
+    }
     pub(crate) fn cancel(&mut self, token: TimelineToken) -> bool {
         let Some(s) = self.sessions.get_mut(&token) else {
             return false;
@@ -668,7 +723,9 @@ impl FixtureActivityTimelines {
 /// Release this exact generation synchronously. Replacing a conversation must
 /// not leave the previous token owning an animator until an unrelated next tick.
 pub(crate) fn cancel_and_release(world: &mut World, token: TimelineToken) {
-    let Some(mut timelines) = world.remove_resource::<FixtureActivityTimelines>() else { return; };
+    let Some(mut timelines) = world.remove_resource::<FixtureActivityTimelines>() else {
+        return;
+    };
     if let Some(mut session) = timelines.sessions.remove(&token) {
         cleanup(world, token, &mut session);
     }
@@ -755,7 +812,10 @@ fn validate(
     }
     match (request.owner.kind, request.timeout_budget) {
         (TimelineOwnerKind::Player, TimelineTimeoutBudget::PlayerWall)
-        | (TimelineOwnerKind::Npc | TimelineOwnerKind::Talk, TimelineTimeoutBudget::OwnerGated { advance: Some(_) }) => {}
+        | (
+            TimelineOwnerKind::Npc | TimelineOwnerKind::Talk,
+            TimelineTimeoutBudget::OwnerGated { advance: Some(_) },
+        ) => {}
         _ => {
             return Err(invalid(
                 "source activity timeout budget/gate is not prepared",
@@ -801,14 +861,15 @@ fn validate(
                     {
                         return Err(invalid("animator already belongs to another timeline"));
                     }
-                    let expected_root = if let Some(actor) = request.bindings.actors.get(&track.identity) {
-                        validate_track_actor(world, request, &track.identity, *actor)?;
-                        *actor
-                    } else if track.name == "CharacterAnimator" {
-                        request.owner.activity.actor
-                    } else {
-                        request.fixture
-                    };
+                    let expected_root =
+                        if let Some(actor) = request.bindings.actors.get(&track.identity) {
+                            validate_track_actor(world, request, &track.identity, *actor)?;
+                            *actor
+                        } else if track.name == "CharacterAnimator" {
+                            request.owner.activity.actor
+                        } else {
+                            request.fixture
+                        };
                     if !descendant_of(world, binding.animator, expected_root) {
                         return Err(invalid(
                             "track is not bound to its actual actor/fixture instance",
@@ -991,24 +1052,56 @@ fn baked(state: &CoverageState) -> bool {
 /// that exact unit and the actual entity belongs to the current admitted talk.
 /// The single-player/NPC owner contract is otherwise unchanged.
 fn validate_track_actor(
-    world: &World, request: &StartTimeline, identity: &SourceAssetId, actor: Entity,
+    world: &World,
+    request: &StartTimeline,
+    identity: &SourceAssetId,
+    actor: Entity,
 ) -> Result<(), TimelineFailure> {
     if request.owner.kind != TimelineOwnerKind::Talk {
-        return if actor == request.owner.activity.actor { Ok(()) }
-            else { Err(invalid("track actor differs from the activity owner")) };
+        return if actor == request.owner.activity.actor {
+            Ok(())
+        } else {
+            Err(invalid("track actor differs from the activity owner"))
+        };
     }
-    let track = request.definition.tracks.iter().find(|track| &track.identity == identity)
+    let track = request
+        .definition
+        .tracks
+        .iter()
+        .find(|track| &track.identity == identity)
         .ok_or_else(|| invalid("actor track is outside the selected source director"))?;
-    let common_single = request.definition.tracks.iter().any(|track| track.name == "CharacterAnimator")
-        && world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| talk.participants().len() == 1);
-    if common_single && actor == request.owner.activity.actor { return Ok(()); }
-    let unit = track.name.parse::<u32>().map_err(|_| invalid("cast track has no exact source unit name"))?;
-    if world.get::<crate::npc::CharacterUnitId>(actor).map(|id| id.0) != Some(unit) {
+    let common_single = request
+        .definition
+        .tracks
+        .iter()
+        .any(|track| track.name == "CharacterAnimator")
+        && world
+            .get_resource::<crate::talk::ActiveTalk>()
+            .is_some_and(|talk| talk.participants().len() == 1);
+    if common_single && actor == request.owner.activity.actor {
+        return Ok(());
+    }
+    let unit = track
+        .name
+        .parse::<u32>()
+        .map_err(|_| invalid("cast track has no exact source unit name"))?;
+    if world
+        .get::<crate::npc::CharacterUnitId>(actor)
+        .map(|id| id.0)
+        != Some(unit)
+    {
         return Err(invalid("cast track is bound to a different source unit"));
     }
-    let admitted = world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk|
-        talk.participants().iter().any(|(candidate, entity)| *candidate == unit && *entity == actor));
-    if !admitted { return Err(invalid("cast track actor is outside the admitted talk")); }
+    let admitted = world
+        .get_resource::<crate::talk::ActiveTalk>()
+        .is_some_and(|talk| {
+            talk.participants()
+                .iter()
+                .any(|(candidate, entity)| *candidate == unit && *entity == actor)
+        });
+    if !admitted {
+        return Err(invalid("cast track actor is outside the admitted talk"));
+    }
     Ok(())
 }
 
@@ -1121,7 +1214,11 @@ fn initialize(
     // tracks still sample ONE Director clock. Never clone/retime the timeline.
     let mut actors = HashSet::new();
     for track in &session.request.definition.tracks {
-        if track.clips.iter().any(|clip| matches!(clip.payload, TimelinePayload::Animation { .. })) {
+        if track
+            .clips
+            .iter()
+            .any(|clip| matches!(clip.payload, TimelinePayload::Animation { .. }))
+        {
             if let Some(actor) = session.request.bindings.actors.get(&track.identity) {
                 actors.insert(*actor);
             } else if track.name == "CharacterAnimator" {
@@ -1131,8 +1228,17 @@ fn initialize(
     }
     let mut actors: Vec<_> = actors.into_iter().collect();
     actors.sort();
+    let source_frame_reflected = world
+        .get::<GlobalTransform>(session.request.fixture)
+        .is_some_and(|pose| pose.affine().matrix3.determinant() < 0.);
     for actor in actors {
-        session.actor_space.push(actor_space::acquire(world, actor, token)?);
+        // A reflected fixture locator already gives the actor's imported GLB
+        // frame. Only native-frame owners need the temporary inverse bridge.
+        if !source_frame_reflected {
+            session
+                .actor_space
+                .push(actor_space::acquire(world, actor, token)?);
+        }
     }
     let request = &session.request;
     let mut claimed = HashSet::new();
@@ -1278,7 +1384,12 @@ fn tick(
         session.timeout_elapsed += delta;
     }
     let budget_expired = session.timeout_elapsed > session.request.timeout_secs;
-    if budget_expired && matches!(session.request.owner.kind, TimelineOwnerKind::Npc | TimelineOwnerKind::Talk) {
+    if budget_expired
+        && matches!(
+            session.request.owner.kind,
+            TimelineOwnerKind::Npc | TimelineOwnerKind::Talk
+        )
+    {
         // NPC PlayAsyncForNPC first waits for its gated budget, then switches
         // LoopFlag off and waits for Director.time >= duration. Timeout is a
         // request to play the source E, not an error/cancellation shortcut.
@@ -1324,8 +1435,10 @@ fn tick(
             time,
             loop_started: session.clock.loop_started,
             loop_active: session.clock.loop_active,
-            enable_talk: matches!(session.request.owner.kind, TimelineOwnerKind::Npc | TimelineOwnerKind::Talk)
-                && session.clock.enable_talk,
+            enable_talk: matches!(
+                session.request.owner.kind,
+                TimelineOwnerKind::Npc | TimelineOwnerKind::Talk
+            ) && session.clock.enable_talk,
         }
     };
     Ok(())
@@ -1535,8 +1648,10 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
                     TimelinePayload::BlinkGate => state.0 |= clip.contains(time),
                     TimelinePayload::LipGate => {}
                     TimelinePayload::NpcIkTalkGate => {
-                        state.2 |= matches!(session.request.owner.kind, TimelineOwnerKind::Npc | TimelineOwnerKind::Talk)
-                            && clip.contains(time)
+                        state.2 |= matches!(
+                            session.request.owner.kind,
+                            TimelineOwnerKind::Npc | TimelineOwnerKind::Talk
+                        ) && clip.contains(time)
                     }
                     _ => {}
                 }

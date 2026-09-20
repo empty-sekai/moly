@@ -160,6 +160,16 @@ fn fail(world: &mut World, session: &mut Session, reason: String) {
         "[fixture-talk-action] talk={} failed: {}",
         session.talk, reason
     );
+    if let Some(mut ledger) = world.get_resource_mut::<crate::player_talk::PlayerTalkLedger>() {
+        ledger.last_outcome = Some(crate::player_talk::PlayerTalkOutcome::Rejected {
+            requested: Some(crate::npc_objective::TalkContent {
+                master_id: session.talk,
+                backend: crate::npc_objective::TalkBackend::Fixture,
+                is_general: None,
+            }),
+            reason: reason.clone(),
+        });
+    }
     session.failed = Some(reason);
     teardown(world, session);
     world.write_message(TalkCancelRequest);

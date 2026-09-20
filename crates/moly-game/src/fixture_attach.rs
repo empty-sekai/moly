@@ -92,16 +92,31 @@ impl AttachPoints {
             if let Some(source_views) = cell.get("views").and_then(serde_json::Value::as_array) {
                 let mut parsed = Vec::new();
                 for view in source_views {
-                    let game_object = view.get("gameObject").expect("source FixtureView GameObject");
+                    let game_object = view
+                        .get("gameObject")
+                        .expect("source FixtureView GameObject");
                     let transform = view.get("transform").expect("source FixtureView Transform");
-                    let file = game_object.get("file").and_then(serde_json::Value::as_str)
+                    let file = game_object
+                        .get("file")
+                        .and_then(serde_json::Value::as_str)
                         .expect("source FixtureView file");
-                    assert_eq!(transform.get("file").and_then(serde_json::Value::as_str), Some(file),
-                        "source FixtureView object/transform files differ");
-                    let id = |value: &serde_json::Value| value.get("pathId")
-                        .and_then(serde_json::Value::as_str).and_then(|id| id.parse::<i64>().ok())
-                        .expect("source FixtureView id");
-                    parsed.push(AttachViewIdentity { file: file.into(), game_object: id(game_object), transform: id(transform) });
+                    assert_eq!(
+                        transform.get("file").and_then(serde_json::Value::as_str),
+                        Some(file),
+                        "source FixtureView object/transform files differ"
+                    );
+                    let id = |value: &serde_json::Value| {
+                        value
+                            .get("pathId")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|id| id.parse::<i64>().ok())
+                            .expect("source FixtureView id")
+                    };
+                    parsed.push(AttachViewIdentity {
+                        file: file.into(),
+                        game_object: id(game_object),
+                        transform: id(transform),
+                    });
                 }
                 views.insert(name.clone(), parsed);
             }
@@ -131,38 +146,67 @@ impl AttachPoints {
                     end: entry.get("end").filter(|end| !end.is_null()).map(|end| {
                         let transform = end.get("transform").expect("EndLoc transform");
                         AttachPose {
-                            position: read_vec3(transform.get("position")).expect("EndLoc position"),
-                            rotation: read_quat(transform.get("rotation")).expect("EndLoc rotation"),
+                            position: read_vec3(transform.get("position"))
+                                .expect("EndLoc position"),
+                            rotation: read_quat(transform.get("rotation"))
+                                .expect("EndLoc rotation"),
                         }
                     }),
-                    source_index: entry.pointer("/source/entryIndex")
-                        .and_then(serde_json::Value::as_u64).map(|index| index as usize),
-                    source_action_point: entry.pointer("/start/name")
-                        .and_then(serde_json::Value::as_str).and_then(parse_action_point),
-                    source_name_known: entry.pointer("/start/name")
-                        .and_then(serde_json::Value::as_str).is_some(),
+                    source_index: entry
+                        .pointer("/source/entryIndex")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|index| index as usize),
+                    source_action_point: entry
+                        .pointer("/start/name")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(parse_action_point),
+                    source_name_known: entry
+                        .pointer("/start/name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some(),
                 });
             }
             map.insert(name.clone(), locals);
         }
-        AttachPoints { packages: map, views }
+        AttachPoints {
+            packages: map,
+            views,
+        }
     }
 
     pub(crate) fn instance_view(&self, package: &str) -> Option<&AttachViewIdentity> {
-        match self.views.get(package)?.as_slice() { [view] => Some(view), _ => None }
+        match self.views.get(package)?.as_slice() {
+            [view] => Some(view),
+            _ => None,
+        }
     }
 
     /// Resolve both ends against the actual placed instance. Two instances of
     /// one model do not share a world-space anchor or an activity reservation.
-    pub(crate) fn instance_poses(&self, package: &str, id: i32, world: &GlobalTransform) -> Option<AttachPair> {
+    pub(crate) fn instance_poses(
+        &self,
+        package: &str,
+        id: i32,
+        world: &GlobalTransform,
+    ) -> Option<AttachPair> {
         let entry = self.instance_entry(package, id)?;
-        let rotation = world.to_scale_rotation_translation().1;
-        let project = |pose: AttachPose| AttachPose {
-            position: world.transform_point(Vec3::from(pose.position)).to_array(),
-            rotation: rotation * pose.rotation,
+        let project = |pose: AttachPose| {
+            // Compose before decomposing: reflection and local rotation do
+            // not commute. The resulting actor uses an X-reflected GLB.
+            let composed = world.mul_transform(
+                Transform::from_translation(Vec3::from(pose.position)).with_rotation(pose.rotation),
+            );
+            let (_, rotation, translation) = composed.to_scale_rotation_translation();
+            AttachPose {
+                position: translation.to_array(),
+                rotation,
+            }
         };
         Some(AttachPair {
-            start: project(AttachPose { position: entry.position, rotation: entry.rotation }),
+            start: project(AttachPose {
+                position: entry.position,
+                rotation: entry.rotation,
+            }),
             end: entry.end.map(project),
         })
     }
@@ -178,12 +222,20 @@ impl AttachPoints {
     /// missing metadata and must not disable another valid seat in that array.
     pub(crate) fn player_action_points(&self, package: &str) -> Option<Vec<i32>> {
         let entries = self.packages.get(package)?;
-        if entries.iter().any(|entry| entry.source_index.is_none() || !entry.source_name_known) {
+        if entries
+            .iter()
+            .any(|entry| entry.source_index.is_none() || !entry.source_name_known)
+        {
             return None;
         }
         let mut ordered: Vec<_> = entries.iter().collect();
         ordered.sort_by_key(|entry| entry.source_index);
-        Some(ordered.into_iter().filter_map(|entry| entry.source_action_point.map(|(point, _)| point)).collect())
+        Some(
+            ordered
+                .into_iter()
+                .filter_map(|entry| entry.source_action_point.map(|(point, _)| point))
+                .collect(),
+        )
     }
 
     /// The parsed source suffix slot, not the point code or the array index.
@@ -196,10 +248,15 @@ impl AttachPoints {
     }
 
     fn instance_entry(&self, package: &str, id: i32) -> Option<&AttachLocal> {
-        let mut matches = self.packages.get(package)?.iter()
-            .filter(|entry| entry.source_action_point.is_some_and(|(point, _)| point == id));
+        let mut matches = self.packages.get(package)?.iter().filter(|entry| {
+            entry
+                .source_action_point
+                .is_some_and(|(point, _)| point == id)
+        });
         let first = matches.next()?;
-        if matches.next().is_some() { return None; }
+        if matches.next().is_some() {
+            return None;
+        }
         Some(first)
     }
 }
@@ -211,8 +268,13 @@ fn parse_action_point(name: &str) -> Option<(i32, i32)> {
     let stripped = name.replace("loc_start", "");
     let mut parts = stripped.split('_');
     let point = parts.next()?.trim().parse::<i32>().ok()?;
-    if point == -1 { return None; }
-    let slot = parts.next().map(|part| part.trim().parse::<i32>().unwrap_or(0)).unwrap_or(0);
+    if point == -1 {
+        return None;
+    }
+    let slot = parts
+        .next()
+        .map(|part| part.trim().parse::<i32>().unwrap_or(0))
+        .unwrap_or(0);
     Some((point, slot))
 }
 
@@ -294,18 +356,21 @@ fn compose(placements: &FixturePlacements, points: &AttachPoints) -> AttachWorld
     let mut worlds = Vec::new();
     for placed in placements.placed_instances() {
         let (package, position, yaw) = (placed.package, placed.position, placed.yaw);
-        let entries = points.packages.get(package).unwrap_or_else(|| {
-            panic!("摆放包 {package} 不在挂点档案的键上（两份清单不一致）")
-        });
-        let instance = Quat::from_rotation_y(yaw);
+        let entries = points
+            .packages
+            .get(package)
+            .unwrap_or_else(|| panic!("摆放包 {package} 不在挂点档案的键上（两份清单不一致）"));
+        let instance = GlobalTransform::from(crate::fixture::source_transform(position, yaw));
         for entry in entries {
-            let world_position = Vec3::from(position) + instance * Vec3::from(entry.position);
+            let pair = points
+                .instance_poses(package, entry.id_value, &instance)
+                .expect("entry from this source package");
             worlds.push(AttachWorld {
                 uid: placed.uid.to_owned(),
                 package: package.to_owned(),
                 id_value: entry.id_value,
-                position: [world_position.x, world_position.y, world_position.z],
-                rotation: instance * entry.rotation,
+                position: pair.start.position,
+                rotation: pair.start.rotation,
             });
         }
     }

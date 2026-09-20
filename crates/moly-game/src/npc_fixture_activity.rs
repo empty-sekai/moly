@@ -642,9 +642,14 @@ fn tick(
     {
         return Err("future fixture reservation was replaced".into());
     }
-    if world.get::<TalkHold>(actor).is_some() {
-        // The present talk dispatcher has no registered-playing-fixture join.
-        // An independently admitted conversation must not have its body stolen.
+    let joined_talk = matches!(session.phase, Phase::Playing)
+        && world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| {
+            talk.participants().iter().any(|(_, entity)| *entity == actor)
+                && talk.fixture_instances().iter().any(|(_, entity)| *entity == selection.target.entity)
+        });
+    if world.get::<TalkHold>(actor).is_some() && !joined_talk {
+        // Only the admitted cast on this same placed fixture may retain the
+        // existing Director. An unrelated conversation still cancels ownership.
         return Err("another conversation owns the actor".into());
     }
     let dt = world.get_resource::<Time>().map_or(0.0, Time::delta_secs);
@@ -776,6 +781,11 @@ fn tick(
                 return Ok(false);
             }
             TimelineStatus::Completed => {
+                // The talk owner observes the completed generation before
+                // releasing its cast. Do not start locomotion under TalkHold.
+                if joined_talk {
+                    return Ok(false);
+                }
                 world
                     .resource_mut::<FixtureActivityTimelines>()
                     .release(token);

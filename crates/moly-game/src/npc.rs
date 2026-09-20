@@ -787,7 +787,10 @@ pub(crate) fn spawn_temporary_units(
     requested: &[u32],
 ) -> Result<Vec<Entity>, String> {
     let existing: std::collections::HashSet<u32> = world
-        .query::<&CharacterUnitId>()
+        // The player avatar may share a unit id with a requested independent
+        // cast member. It is not an NPC and has no NpcActions readiness state;
+        // counting it here makes the staging gate wait forever for that actor.
+        .query_filtered::<&CharacterUnitId, Without<crate::player::PlayerControlled>>()
         .iter(world)
         .map(|unit| unit.0)
         .collect();

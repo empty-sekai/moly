@@ -603,10 +603,19 @@ impl TimelinePackage {
             }
             "ChangeEyePresetClip" | "ChangeLipSyncPresetClip" => {
                 let index = integer(f, "SelectIndex")?;
-                if index < 0 {
+                let list_key = if class == "ChangeEyePresetClip" { "EyeDataList" } else { "LipSyncDataList" };
+                let rows = match f.get(list_key) {
+                    Some(Value::Null) => None,
+                    Some(Value::Array(rows)) => Some(rows),
+                    _ => return Err(invalid(format!("missing array {list_key}"))),
+                };
+                // IsChangeEye/LipSyncPreset first gates on a non-empty list.
+                // Empty authored clips are no-ops even with SelectIndex == 0.
+                // Only a populated list reaches the source indexed getter.
+                if index < 0 || rows.is_none_or(|rows| rows.is_empty()) {
                     TimelinePayload::NoPresetChange
                 } else if class == "ChangeEyePresetClip" {
-                    let row = array(f, "EyeDataList")?
+                    let row = rows.unwrap()
                         .get(index as usize)
                         .ok_or_else(|| invalid("eye SelectIndex out of range"))?;
                     TimelinePayload::Eye {
@@ -616,7 +625,7 @@ impl TimelinePackage {
                         blink: flag(row, "BlinkEnabled")?,
                     }
                 } else {
-                    let row = array(f, "LipSyncDataList")?
+                    let row = rows.unwrap()
                         .get(index as usize)
                         .ok_or_else(|| invalid("lip SelectIndex out of range"))?;
                     TimelinePayload::Lip {

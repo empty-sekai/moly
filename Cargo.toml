@@ -6,6 +6,12 @@ members = [
     "crates/moly-game",
     "crates/moly-app",
 ]
+exclude = ["crates/vendor-cpal"]
+
+# CPAL 0.15.3's WebAudio backend retains expired buffer deadlines after a
+# main-thread stall. Keep the small transport fix in the fingerprinted sources.
+[patch.crates-io]
+cpal = { path = "crates/vendor-cpal" }
 
 [workspace.package]
 edition = "2021"

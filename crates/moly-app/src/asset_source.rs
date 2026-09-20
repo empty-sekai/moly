@@ -3,8 +3,8 @@
 //!
 //! web 选「URL 参数」不选「同目录约定」：约定无法同步判「缺」——要探测就得
 //! 发请求，失败会散成逐资产 404，唯一拒绝点就没了；参数缺了当场拒绝。
-//! 前缀是同源绝对路径且以 `/` 结尾：消费侧在 wasm 上按页源取 HTTP，
-//! 丢斜杠或写整段外源 URL 会让一整族资产同时 404，在这里一次抓住。
+//! 前缀是同源绝对路径或明确许可的公共资源 HTTPS 根，且以 `/` 结尾。
+//! 玩家数据与页面通信仍在同源 iframe 内，只有公开资源走 CDN。
 
 use moly_assets::AssetSource;
 
@@ -20,19 +20,118 @@ fn validate_catalog_id(catalog: &Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Asset roots are canonical same-origin directory paths, not URL references.
+/// Only immutable public snapshots and the content-addressed store may use CDN.
+fn is_public_asset_path(path: &str) -> bool {
+    if path == "/moly/asset-store/" {
+        return true;
+    }
+    let Some(id) = path
+        .strip_prefix("/moly/snapshots/")
+        .and_then(|rest| rest.strip_suffix("/assets/"))
+    else {
+        return false;
+    };
+    id.len() <= 96
+        && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && id.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// Split the strict HTTPS representation supplied by the host. Browser Url
+/// parsing below is authoritative for host/port/IP canonicalization; this
+/// shared admission rejects ambiguous separators and credentials beforehand.
+fn public_asset_parts(base: &str) -> Option<(&str, &str)> {
+    let authority_and_path = base.strip_prefix("https://")?;
+    let slash = authority_and_path.find('/')?;
+    let authority = &authority_and_path[..slash];
+    if authority.is_empty()
+        || authority.bytes().any(|b| {
+            !b.is_ascii_lowercase()
+                && !b.is_ascii_digit()
+                && !matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+        })
+    {
+        return None;
+    }
+    let offset = "https://".len() + slash;
+    Some((&base[..offset], &base[offset..]))
+}
+
+/// Asset roots are canonical paths, optionally on a configured HTTPS CDN.
 pub fn validate_asset_prefix(base: &str) -> Result<(), String> {
-    if !base.starts_with('/')
-        || base.starts_with("//")
-        || !base.ends_with('/')
-        || base
+    let path = if base.starts_with("https://") {
+        let (_, path) = public_asset_parts(base).ok_or("Invalid public Moly resource directory")?;
+        if !is_public_asset_path(path) {
+            return Err("Invalid public Moly resource directory".into());
+        }
+        path
+    } else {
+        base
+    };
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || !path.ends_with('/')
+        || path
             .bytes()
             .any(|b| b <= b' ' || b == 0x7f || matches!(b, b'\\' | b'%' | b'?' | b'#'))
-        || base.split('/').any(|part| matches!(part, "." | ".."))
+        || path.split('/').any(|part| matches!(part, "." | ".."))
     {
-        return Err("?assets= must be a canonical same-origin directory path ending in /; URL references, encoded separators, query and fragment are not allowed".into());
+        return Err("?assets= must be a canonical same-origin directory or trusted public resource root ending in /".into());
     }
     Ok(())
+}
+
+/// The selected remote assets must use the origin explicitly passed by the
+/// same-origin host. A second remote origin cannot arrive through assets alone.
+pub fn validate_asset_selection(base: &str, configured_origin: Option<&str>) -> Result<(), String> {
+    validate_asset_prefix(base)?;
+    if let Some((origin, _)) = public_asset_parts(base) {
+        if configured_origin != Some(origin) {
+            return Err("Remote assets must match the configured resource_origin".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod public_resource_tests {
+    use super::{validate_asset_prefix, validate_asset_selection};
+
+    #[test]
+    fn public_immutable_roots_accept_different_configured_https_origins() {
+        for value in [
+            "/moly/sources/local/",
+            "https://assets-one.example/moly/snapshots/cn-6.0.0-a/assets/",
+            "https://cdn-two.example:8443/moly/asset-store/",
+        ] {
+            assert!(validate_asset_prefix(value).is_ok(), "{value}");
+        }
+        for value in [
+            "http://cdn.example/moly/asset-store/",
+            "https://user@cdn.example/moly/asset-store/",
+            "https://cdn.example/api/player/",
+            "https://cdn.example/moly/sources/private/",
+            "https://cdn.example/moly/snapshots/../cn-a/assets/",
+            "https://cdn.example/moly/snapshots/cn-a/assets/?token=private",
+            "https://cdn.example/moly/snapshots/cn-a/assets/%2f",
+            "https://cdn.example/moly/snapshots/cn-a/assets/#fragment",
+            "//cdn.example/moly/asset-store/",
+        ] {
+            assert!(validate_asset_prefix(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn remote_assets_require_the_selected_origin_without_a_baked_domain() {
+        for origin in ["https://assets-one.example", "https://cdn-two.example:8443"] {
+            let root = format!("{origin}/moly/asset-store/");
+            assert!(validate_asset_selection(&root, Some(origin)).is_ok());
+            assert!(validate_asset_selection(&root, None).is_err());
+            assert!(validate_asset_selection(&root, Some("https://unselected.example")).is_err());
+        }
+        assert!(validate_asset_selection("/moly/sources/local/", None).is_ok());
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -72,19 +171,24 @@ pub fn resolve() -> Result<AssetSource, String> {
     let base = params.get("assets").ok_or_else(|| {
         "missing ?assets=<url-prefix>/ — the HTTP base assets are fetched from".to_owned()
     })?;
-    validate_asset_prefix(&base)?;
+    let configured_origin = params.get("resource_origin");
+    validate_asset_selection(&base, configured_origin.as_deref())?;
     let location = window.location();
     let page = location.href().map_err(|_| "Could not read page URL")?;
     let url = web_sys::Url::new_with_base(&base, &page).map_err(|_| "Invalid asset URL prefix")?;
-    if url.origin()
-        != location
+    let public_parts = public_asset_parts(&base);
+    let allowed_origin = public_parts.map(|(origin, _)| origin.to_owned()).unwrap_or(
+        location
             .origin()
-            .map_err(|_| "Could not read page origin")?
-        || url.pathname() != base
+            .map_err(|_| "Could not read page origin")?,
+    );
+    if url.origin() != allowed_origin
+        || url.pathname() != public_parts.map(|(_, path)| path).unwrap_or(&base)
+        || (public_parts.is_some() && url.href() != base)
         || !url.search().is_empty()
         || !url.hash().is_empty()
     {
-        return Err("?assets= must resolve to a canonical path on the page origin".into());
+        return Err("?assets= must resolve to its canonical trusted resource path".into());
     }
     let catalog = params.get("asset_catalog");
     validate_catalog_id(&catalog)?;

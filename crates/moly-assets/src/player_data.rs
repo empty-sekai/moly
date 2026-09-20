@@ -1,7 +1,7 @@
 //! Original Mysekai housing responses joined to caller-supplied master data.
-//! Coordinates remain in the game's grid frame. Player IDs are opaque strings.
+//! Source grid layouts are reflected into the renderer frame. Player IDs stay opaque.
 
-use moly_law::fixture::{position::layout_type, Direction, GridPosition, Vector3Int};
+use moly_law::fixture::{Direction, GridPosition, Vector3Int, position::layout_type};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -99,11 +99,24 @@ impl ImportNotice {
                 .join(", ")
         }
         match self {
-            Self::SpecialFurnitureRetained { count } => format!("{count} custom furniture records retained. Custom images and ornaments are not rendered by this importer yet."),
-            Self::SurfaceAppearanceRetained { count } => format!("{count} floor/wall skin records retained. The scene still uses its supplied floor/wall textures."),
-            Self::FixtureModelMissing { count, fixtures } => format!("{count} furniture instances skipped: no exported model for fixture IDs {}.", listed(fixtures)),
-            Self::FixtureTextureMissing { count, fixtures } => format!("{count} furniture instances skipped: texture not present in this master version for fixture IDs {}.", listed(fixtures)),
-            Self::FixtureColorMissing { count, fixtures } => format!("{count} furniture instances skipped: no exported color texture for fixture IDs {}.", listed(fixtures)),
+            Self::SpecialFurnitureRetained { count } => format!(
+                "{count} custom furniture records retained. Custom images and ornaments are not rendered by this importer yet."
+            ),
+            Self::SurfaceAppearanceRetained { count } => format!(
+                "{count} floor/wall skin records retained. The scene still uses its supplied floor/wall textures."
+            ),
+            Self::FixtureModelMissing { count, fixtures } => format!(
+                "{count} furniture instances skipped: no exported model for fixture IDs {}.",
+                listed(fixtures)
+            ),
+            Self::FixtureTextureMissing { count, fixtures } => format!(
+                "{count} furniture instances skipped: texture not present in this master version for fixture IDs {}.",
+                listed(fixtures)
+            ),
+            Self::FixtureColorMissing { count, fixtures } => format!(
+                "{count} furniture instances skipped: no exported color texture for fixture IDs {}.",
+                listed(fixtures)
+            ),
         }
     }
 }
@@ -526,14 +539,14 @@ fn grid_byte(value: &Value, label: &str) -> Result<i8, String> {
         .ok_or_else(|| format!("{label} must be an integer in -128..127"))
 }
 
-/// Reflect one authored layout through the Unity -> runtime/glTF Z boundary.
+/// Reflect one authored layout through the shared Unity -> glTF X boundary.
 ///
 /// The wire `position` expands through the native direction-dependent placement
 /// law before it becomes a world pose. Reflect the closed occupied-cell footprint
-/// (`z_cell -> -z_cell - 1`), then solve the mirrored anchor under the target
-/// direction/layout. This preserves exact world-space X/Y and negates world Z,
+/// (`x_cell -> -x_cell - 1`), then solve the mirrored anchor under the target
+/// direction/layout. This preserves exact world-space Y/Z and negates world X,
 /// including even footprints and rotations at the edge of an even-sized site.
-fn mirror_fixture_layout(
+pub fn mirror_fixture_layout(
     source_center: GridPosition,
     size: Vector3Int,
     source_direction: Direction,
@@ -549,8 +562,8 @@ fn mirror_fixture_layout(
         i8::try_from(-(value as i16) - 1)
             .map_err(|_| "Mirrored fixture footprint exceeds signed grid domain".to_owned())
     };
-    let expected_min = GridPosition::new(source_min.x, source_min.y, mirror_cell(source_max.z)?);
-    let expected_max = GridPosition::new(source_max.x, source_max.y, mirror_cell(source_min.z)?);
+    let expected_min = GridPosition::new(mirror_cell(source_max.x)?, source_min.y, source_min.z);
+    let expected_max = GridPosition::new(mirror_cell(source_min.x)?, source_max.y, source_max.z);
 
     // Placement is translation-equivariant inside the signed-grid domain. A
     // zero-anchor footprint exposes the layout/direction-specific offset, so the
@@ -573,8 +586,8 @@ fn mirror_fixture_layout(
 
 fn mirror_layout(layout: u8) -> u8 {
     match layout {
-        layout_type::WALL_FRONT => layout_type::WALL_BACK,
-        layout_type::WALL_BACK => layout_type::WALL_FRONT,
+        layout_type::WALL_LEFT => layout_type::WALL_RIGHT,
+        layout_type::WALL_RIGHT => layout_type::WALL_LEFT,
         _ => layout,
     }
 }
@@ -586,7 +599,7 @@ fn wire_rotation_direction(rotation: i64) -> Result<Direction, String> {
     Ok(Direction::from_u8((rotation.rem_euclid(360) / 90) as u8).unwrap())
 }
 
-/// Reflection across Z preserves Front/Back and swaps the two quarter turns.
+/// Conjugating a yaw by the X reflection reverses its sign.
 fn mirror_direction(direction: Direction) -> Direction {
     match direction {
         Direction::Front => Direction::Front,
@@ -677,22 +690,22 @@ mod tests {
         let target_world = field_position(target_fp.0, target_fp.1, target.0.y, target.2).unwrap();
 
         assert_eq!(
-            (target_fp.0.x, target_fp.1.x),
-            (source_fp.0.x, source_fp.1.x)
+            (target_fp.0.z, target_fp.1.z),
+            (source_fp.0.z, source_fp.1.z)
         );
-        assert_eq!(target_fp.0.z as i16, -(source_fp.1.z as i16) - 1);
-        assert_eq!(target_fp.1.z as i16, -(source_fp.0.z as i16) - 1);
-        assert!((target_world[0] - source_world[0]).abs() < 1.0e-6);
+        assert_eq!(target_fp.0.x as i16, -(source_fp.1.x as i16) - 1);
+        assert_eq!(target_fp.1.x as i16, -(source_fp.0.x as i16) - 1);
+        assert!((target_world[0] + source_world[0]).abs() < 1.0e-6);
         assert!((target_world[1] - source_world[1]).abs() < 1.0e-6);
-        assert!((target_world[2] + source_world[2]).abs() < 1.0e-6);
+        assert!((target_world[2] - source_world[2]).abs() < 1.0e-6);
         target
     }
 
     #[test]
     fn real_home_boundary_fixture_reflects_inside_same_even_floor() {
         // real-home-outside fixture-0425: crane game, wire center (41,0,-45),
-        // master 7x5x4, yaw 180. Raw z-negation produces 44..47 and rejects a
-        // valid 90-cell layout; footprint reflection produces 41..44.
+        // master 7x5x4, yaw 180. Reflect occupied cells into the scene frame;
+        // the Z boundary remains unchanged and the X cells stay in the floor.
         let target = assert_reflection(
             GridPosition::new(41, 0, -45),
             Vector3Int::new(7, 5, 4),
@@ -700,7 +713,7 @@ mod tests {
             layout_type::FLOOR,
         );
         let fp = layout_footprint(target.0, Vector3Int::new(7, 5, 4), target.1, target.2).unwrap();
-        assert_eq!((fp.0.z, fp.1.z), (41, 44));
+        assert_eq!((fp.0.z, fp.1.z), (-45, -42));
         assert_eq!(target.1, Direction::Back);
     }
 
@@ -725,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn wall_reflection_swaps_front_back_layer_and_mirrors_side_yaw() {
+    fn wall_reflection_preserves_front_back_and_swaps_sides() {
         let front_source =
             wall_to_site(GridPosition::new(3, 4, 0), layout_type::WALL_FRONT, 10, 10).unwrap();
         let front = assert_reflection(
@@ -734,7 +747,7 @@ mod tests {
             moly_law::fixture::position::wall_direction(layout_type::WALL_FRONT).unwrap(),
             layout_type::WALL_FRONT,
         );
-        assert_eq!(front.2, layout_type::WALL_BACK);
+        assert_eq!(front.2, layout_type::WALL_FRONT);
 
         let side_source =
             wall_to_site(GridPosition::new(2, 3, 0), layout_type::WALL_LEFT, 10, 10).unwrap();
@@ -744,7 +757,7 @@ mod tests {
             moly_law::fixture::position::wall_direction(layout_type::WALL_LEFT).unwrap(),
             layout_type::WALL_LEFT,
         );
-        assert_eq!(side.2, layout_type::WALL_LEFT);
+        assert_eq!(side.2, layout_type::WALL_RIGHT);
         assert_eq!(side.1, Direction::Left);
     }
 }

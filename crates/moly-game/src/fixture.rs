@@ -863,12 +863,17 @@ impl EditableFixture {
     pub(crate) fn pose(&self) -> Result<Transform, String> {
         let (min, max) = self.footprint()?;
         let position = field_position(min, max, self.center.y, self.layout)?;
-        Ok(
-            Transform::from_translation(Vec3::from(position)).with_rotation(Quat::from_rotation_y(
-                direction_yaw_degrees(self.direction).to_radians(),
-            )),
-        )
+        Ok(source_transform(position, direction_yaw_degrees(self.direction).to_radians()))
     }
+}
+
+/// Furniture geometry and its locators retain authored coordinates. Reflect
+/// their shared root into the same X-reflected frame as sites and characters;
+/// placing only the pivot in that frame leaves asymmetric models facing wrong.
+pub(crate) fn source_transform(position: [f32; 3], yaw: f32) -> Transform {
+    Transform::from_translation(Vec3::from(position))
+        .with_rotation(Quat::from_rotation_y(yaw))
+        .with_scale(Vec3::new(-1., 1., 1.))
 }
 
 /// All local one-shot binders reset against this generation when a map's
@@ -1582,8 +1587,7 @@ fn spawn_when_ready(
                 master: row.fixture_id,
             },
             crate::fixture_scene_inputs::FixtureScenePlacement(occupancy[index].clone()),
-            Transform::from_translation(Vec3::from(placed.position))
-                .with_rotation(Quat::from_rotation_y(placed.yaw)),
+            source_transform(placed.position, placed.yaw),
             Visibility::Hidden,
         ));
         // Per-instance browser logging is surprisingly expensive for real Home
@@ -1614,6 +1618,9 @@ fn on_scene_ready(
     visuals: Query<(), With<FixtureVisualRoot>>,
     children: Query<&Children>,
     extras: Query<&bevy::gltf::GltfExtras>,
+    mesh_parts: Query<&Mesh3d>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut reflected_meshes: Local<HashMap<AssetId<Mesh>, Handle<Mesh>>>,
     placements: Res<FixturePlacements>,
     mut count: ResMut<FixtureScenesReadyCount>,
     mut commands: Commands,
@@ -1625,6 +1632,23 @@ fn on_scene_ready(
     }
     if roots.get(trigger.event().entity).is_err() {
         return;
+    }
+    // The source GLB keeps native positions, normals and triangle indices.
+    // Our X-reflected placement reverses orientation: reverse the index order
+    // too, so every material/shadow pass still sees the authored front faces.
+    // Clone once per source mesh; non-placed uses of the same GLB stay native.
+    let mut pending = vec![trigger.event().entity];
+    while let Some(entity) = pending.pop() {
+        if let Ok(children) = children.get(entity) {
+            pending.extend(children.iter());
+        }
+        let Ok(part) = mesh_parts.get(entity) else { continue; };
+        let reflected = reflected_meshes.entry(part.0.id()).or_insert_with(|| {
+            let mut mesh = meshes.get(&part.0).expect("ready fixture mesh").clone();
+            mesh.invert_winding().expect("native fixture triangle winding");
+            meshes.add(mesh)
+        }).clone();
+        commands.entity(entity).insert(Mesh3d(reflected));
     }
     fence::bind_scene(trigger.event().entity, &children, &extras, &mut commands);
     count.0 += 1;
