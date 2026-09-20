@@ -457,10 +457,22 @@ fn add_button(
     add_text(commands, entity, font, text, 16., None);
 }
 
-pub(crate) fn input(
-    keys: Res<ButtonInput<KeyCode>>,
+/// Input ownership must expire even when the embedded host owns the settings UI.
+pub(crate) fn release_input_guard(
     buttons: Res<ButtonInput<MouseButton>>,
     touches: Res<Touches>,
+    mut panel: ResMut<SettingsPanel>,
+) {
+    if panel.release_guard > 0
+        && !buttons.any_pressed([MouseButton::Left, MouseButton::Right])
+        && touches.iter().next().is_none()
+    {
+        panel.release_guard -= 1;
+    }
+}
+
+pub(crate) fn input(
+    keys: Res<ButtonInput<KeyCode>>,
     mut requests: MessageReader<SettingsPanelRequest>,
     actions: Query<(&Interaction, &Action), Changed<Interaction>>,
     mut panel: ResMut<SettingsPanel>,
@@ -471,12 +483,6 @@ pub(crate) fn input(
     mut captures: MessageWriter<crate::frame_capture::CaptureFrame>,
     mut dialogs: ResMut<crate::menu_shell::ShellDialogState>,
 ) {
-    if panel.release_guard > 0
-        && !buttons.any_pressed([MouseButton::Left, MouseButton::Right])
-        && touches.iter().next().is_none()
-    {
-        panel.release_guard -= 1;
-    }
     let mut queued = Vec::new();
     if keys.just_pressed(KeyCode::F12) {
         queued.push(Action::Capture);

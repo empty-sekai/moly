@@ -207,6 +207,13 @@ pub fn install(app: &mut App) {
     .add_systems(Startup, content_library::setup.after(camera::spawn))
     .add_systems(
         PreUpdate,
+        crate::game_settings::release_input_guard
+            .after(bevy::input::InputSystems)
+            .before(crate::game_settings::input)
+            .before(content_library::input),
+    )
+    .add_systems(
+        PreUpdate,
         crate::game_settings::input
             .after(bevy::ui::UiSystems::Focus)
             .run_if(crate::browser_stage::standalone),

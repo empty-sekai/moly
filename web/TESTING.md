@@ -51,6 +51,10 @@ app with real data:
   change together. Numeric content IDs and searches must not cross snapshots.
 - Open game settings from the stage toolbar in standalone and embedded modes.
   Check that closing settings returns control to the scene.
+- Import a player layout in the embedded stage, enter exploration and wait for
+  its furniture to load. Verify player movement and camera drag/zoom, then restore
+  the original scene and repeat. Exercise both WebGPU and WebGL2: a ready scene
+  and animated render alone do not establish that input ownership was released.
 - Compose Chinese text, use keyboard navigation, open help, and enter/exit
   focus and fullscreen modes. Verify scrolling and controls remain accessible.
 - Try a missing asset snapshot and an unavailable renderer. Recovery actions
