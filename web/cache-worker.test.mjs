@@ -5,9 +5,75 @@ import {
   isCacheMessage,
   RESOURCE_PREFIX,
   verifiedSharedBody,
+  requiredResourceURLs,
+  clientResourceOrigin,
+  activeResourceRoots,
+  isActiveRequiredResource,
+  VisitResourceCache,
 } from "./cache-worker.mjs";
 import { createHash } from "node:crypto";
 const origin = "https://moesekai.test";
+
+test("visit memory has a bounded LRU lifetime and never uses CacheStorage", async () => {
+  const visit = new VisitResourceCache(8);
+  visit.put("a", new Uint8Array([1, 2, 3, 4]), { "Content-Type": "audio/ogg" });
+  visit.put("b", new Uint8Array([5, 6, 7, 8]), {});
+  assert.equal((await visit.get("a").arrayBuffer()).byteLength, 4);
+  visit.put("c", new Uint8Array([9, 10, 11, 12]), {});
+  assert.equal(visit.get("b"), null);
+  assert.equal(visit.get("a").headers.get("X-Moly-Cache"), "visit");
+  visit.clear();
+  assert.equal(visit.bytes, 0);
+  assert.equal(visit.get("a"), null);
+});
+
+test("only open stage versions protect engines and the selected base resources", () => {
+  const cdn = "https://cdn.example";
+  const base = cdn + "/moly/snapshots/cn-6.0.0-current/assets/";
+  const oldBase = cdn + "/moly/snapshots/cn-6.0.0-old/assets/";
+  const clients = [{ url: origin + "/moly/releases/current/stage.html?resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(base) }];
+  const required = new Set([base + "base.json", oldBase + "base.json"]);
+  const active = activeResourceRoots(clients, origin);
+  assert.ok(isActiveRequiredResource(cdn + "/moly/releases/current/pkg/webgpu/moly-app_bg.wasm", required, active));
+  assert.ok(isActiveRequiredResource(base + "base.json", required, active));
+  assert.equal(isActiveRequiredResource(base + "optional.ogg", required, active), false);
+  assert.equal(isActiveRequiredResource(cdn + "/moly/releases/old/pkg/webgpu/moly-app_bg.wasm", required, active), false);
+  assert.equal(isActiveRequiredResource(oldBase + "base.json", required, active), false);
+  assert.equal(isActiveRequiredResource(base + "base.json", required, activeResourceRoots([], origin)), false);
+  const sharedRoot = cdn + "/moly/asset-store/";
+  const blob = sharedRoot + "blobs/aa/" + "a".repeat(64) + ".bin";
+  const packed = activeResourceRoots([{ url: origin + "/moly/releases/current/stage.html?packs=1&resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(sharedRoot) }], origin);
+  assert.ok(isActiveRequiredResource(blob, new Set([blob]), packed));
+  assert.equal(isActiveRequiredResource(blob, new Set([blob]), active), false);
+});
+
+test("CDN retention preserves immutable identities and excludes private routes", () => {
+  for (const cdn of ["https://assets-one.example", "https://cdn-two.example:8443"]) {
+  const descriptor = cdn + "/moly/snapshots/cn-6.0.0-test/assets/browser-base.json";
+  const client = origin + "/moly/releases/stage-a/stage.html?resource_origin=" + encodeURIComponent(cdn);
+  assert.equal(clientResourceOrigin(client, origin), cdn);
+  assert.ok(resourceIdentity(descriptor, origin, clientResourceOrigin(client, origin)));
+  assert.equal(resourceIdentity(descriptor, origin), null);
+  assert.equal(resourceIdentity(descriptor, origin, "https://unselected.example"), null);
+  assert.deepEqual(requiredResourceURLs({
+    schemaVersion: 1, generator: "moly-browser-base-v1", region: "cn", gameVersion: "6.0.0",
+    files: [{ path: "audio/loop.json" }],
+  }, descriptor, origin, cdn), [descriptor, cdn + "/moly/snapshots/cn-6.0.0-test/assets/audio/loop.json"]);
+  for (const url of [cdn + "/api/player", cdn + "/moly/manifest.json", cdn + ".evil.test/moly/asset-store/"])
+    assert.equal(resourceIdentity(url, origin, cdn), null);
+  }
+});
+
+test("only a same-origin stage can select a cache resource origin", () => {
+  for (const client of [
+    "https://other.test/moly/releases/a/stage.html?resource_origin=https://cdn.example",
+    origin + "/api/player?resource_origin=https://cdn.example",
+    origin + "/moly/releases/a/stage.html?resource_origin=http://cdn.example",
+    origin + "/moly/releases/a/stage.html?resource_origin=https://user@cdn.example",
+    origin + "/moly/releases/a/stage.html?resource_origin=https://cdn.example/private/",
+    origin + "/moly/releases/a/stage.html",
+  ]) assert.equal(clientResourceOrigin(client, origin), null);
+});
 
 test("resource retention keys preserve both release and snapshot identities", () => {
   const cn = resourceIdentity(

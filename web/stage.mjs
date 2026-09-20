@@ -6,7 +6,8 @@ import {
   theme as validateTheme,
   filters,
   intent,
-  sameOriginDirectory,
+  resourceDirectory,
+  resourceOrigin,
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
 import { createStageController } from "./stage-controller.mjs";
@@ -257,7 +258,8 @@ async function loadEngine() {
   try {
     if (!["cn", "jp", "tw", "en", "kr"].includes(region))
       throw new Error("An explicit supported resource region is required");
-    sameOriginDirectory(params.get("assets") || "", location.href);
+    const publicOrigin = resourceOrigin(params.get("resource_origin"));
+    resourceDirectory(params.get("assets") || "", location.href, publicOrigin);
     weatherArtwork = createWeatherArtwork({
       assets: params.get("assets"),
       baseUrl: location.href,
@@ -287,13 +289,17 @@ async function loadEngine() {
     const renderer = await selectRenderer(requested, { navigator, document });
     backend = renderer.backend;
     mark("backendSelected");
-    const path = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
+    const localPath = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
+    if (publicOrigin && !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/pkg\/(?:webgpu|webgl2)\/moly-app\.js$/.test(localPath.pathname))
+      throw new Error("Invalid immutable engine path");
+    const path = publicOrigin ? new URL(localPath.pathname, publicOrigin) : localPath;
     const module = await import(path.href);
     if (typeof module.start_stage !== "function")
       throw new Error("Runtime does not implement the stage contract");
     const response = await fetch(new URL("./moly-app_bg.wasm", path), {
       signal: abort.signal,
-      credentials: "same-origin",
+      credentials: "omit",
+      redirect: "error",
     });
     if (
       !response.ok ||

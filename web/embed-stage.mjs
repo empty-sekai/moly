@@ -8,7 +8,8 @@ import {
   isSnapshot,
   locale as checkedLocale,
   theme as checkedTheme,
-  sameOriginDirectory,
+  resourceDirectory,
+  resourceOrigin,
   contentKey,
   MAX_PENDING_INTENTS,
 } from "./embed-contract.mjs";
@@ -64,11 +65,10 @@ export function mountStage(container, options = {}) {
   url.searchParams.set("embed", "1");
   url.searchParams.set("theme", ui.theme.mode);
   url.searchParams.set("locale", ui.locale);
-  if (options.assets)
-    url.searchParams.set(
-      "assets",
-      sameOriginDirectory(options.assets, location.href).pathname,
-    );
+  const publicOrigin = resourceOrigin(options.resourceOrigin);
+  const assetRoot = resourceDirectory(options.assets, location.href, publicOrigin);
+  url.searchParams.set("assets", assetRoot.origin === location.origin ? assetRoot.pathname : assetRoot.href);
+  if (publicOrigin) url.searchParams.set("resource_origin", publicOrigin);
   applyPackSelection(url, options);
   if (options.snapshot) url.searchParams.set("snapshot", options.snapshot);
   if (!["cn", "jp", "tw", "en", "kr"].includes(options.region))

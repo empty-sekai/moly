@@ -51,7 +51,8 @@ async function consume(url, maximum, signal, fetchImpl, keep = false) {
   try {
     const response = await fetchImpl(url, {
       signal: signal ? AbortSignal.any([signal, abort.signal]) : abort.signal,
-      credentials: "same-origin",
+      credentials: "omit",
+      redirect: "error",
       cache: "no-store",
     });
     if (!response.ok || !response.body)

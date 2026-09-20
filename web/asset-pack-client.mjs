@@ -1,5 +1,6 @@
 // Infrastructure-only logical asset resolver. This is not a second CAS.
 // Both native/WASM PackReader and this prewarmer use the same published store.
+import { resourceDirectory } from "./embed-contract.mjs";
 const SHA = /^[a-f0-9]{64}$/;
 const DOCUMENT = 16 * 1048576,
   BLOB = 128 * 1048576,
@@ -152,7 +153,7 @@ export class PackClient {
       this.root.username ||
       this.root.password ||
       !["http:", "https:"].includes(this.root.protocol) ||
-      (globalThis.location && this.root.origin !== location.origin)
+      (globalThis.location && !resourceDirectory(this.root.href, location.href))
     )
       throw new Error("Pack store must be a same-origin directory");
     if (catalogId !== null && !validCatalogId(catalogId))
@@ -174,7 +175,7 @@ export class PackClient {
   async request(path) {
     const timeout = AbortSignal.timeout(60000);
     return this.fetchImpl(this.url(path), {
-      credentials: "same-origin",
+      credentials: "omit",
       redirect: "error",
       cache: "no-store",
       signal: this.signal ? AbortSignal.any([this.signal, timeout]) : timeout,

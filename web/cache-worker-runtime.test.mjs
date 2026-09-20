@@ -68,7 +68,7 @@ function worker() {
   const self = new ServiceWorkerGlobalScope();
   Object.assign(self, {
     location: new URL("https://qa.test/moly/cache-worker.mjs"),
-    clients: { claim: async () => {} },
+    clients: { claim: async () => {}, matchAll: async () => [] },
     skipWaiting: async () => {},
     addEventListener: (name, callback) => handlers.set(name, callback),
   });

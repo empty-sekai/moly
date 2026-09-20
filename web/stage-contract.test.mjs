@@ -6,6 +6,8 @@ import {
   filters,
   intent,
   sameOriginDirectory,
+  resourceDirectory,
+  resourceOrigin,
   EMBED_VERSION,
 } from "./embed-contract.mjs";
 import { createStageController } from "./stage-controller.mjs";
@@ -90,6 +92,30 @@ test("one-time initial configuration cannot be rewound by theme/locale updates",
   assert.equal(d.commands.length, before);
   assert.ok(d.commands.some((c) => c.type === "fixture" && c.value === 157));
   assert.ok(d.commands.every((c) => c.schemaVersion === 1));
+});
+
+test("public resources support changing the configured HTTPS origin without rebuilding", () => {
+  const cdn = "https://assets-one.example";
+  const base = "https://host.test/moly/releases/stage-test/stage.html";
+  assert.equal(resourceOrigin(cdn), cdn);
+  assert.equal(resourceOrigin(undefined), null);
+  for (const origin of [cdn, "https://cdn-two.example:8443"]) {
+    assert.equal(resourceOrigin(origin), origin);
+    assert.equal(resourceDirectory(origin + "/moly/snapshots/cn-test/assets/", base, origin).origin, origin);
+    assert.equal(resourceDirectory(origin + "/moly/asset-store/", base, origin).origin, origin);
+    assert.throws(() => resourceDirectory(origin + "/moly/asset-store/", base, null));
+    assert.throws(() => resourceDirectory(origin + "/moly/asset-store/", base, "https://unselected.example"));
+  }
+  for (const value of [
+    "http://assets-one.example/moly/asset-store/",
+    cdn + ".evil.test/moly/asset-store/",
+    "https://user@" + cdn.slice(8) + "/moly/asset-store/",
+    cdn + "/api/player/", cdn + "/moly/sources/cn/assets/",
+    cdn + "/moly/snapshots/cn-test/assets/?token=private",
+    cdn + "/moly/snapshots/old/../cn-test/assets/",
+  ]) assert.throws(() => resourceDirectory(value, base, cdn), value);
+  for (const value of ["http://other.test", "https://other.test/api/", "https://user@other.test", "https://other.test?key=private", "https://other.test/#fragment"])
+    assert.throws(() => resourceOrigin(value));
 });
 test("wrong source snapshot rejects pending Play without admitting any action", () => {
   const d = driver({ region: "jp", version: "6.8.1" });
@@ -232,6 +258,30 @@ test("sound preference is carried by configure and live changes use a sound inte
     assert.equal(sent[0].value.sound, false);
     handle.setSoundEnabled(true);
     assert.deepEqual(sent.at(-1).value, { type: "sound", value: true });
+  } finally {
+    handle?.dispose();
+    env.cleanup();
+  }
+});
+
+test("CDN resources preserve same-origin iframe and the synchronous activation gate", () => {
+  const env = dom();
+  let handle;
+  try {
+    const cdn = "https://cdn-two.example:8443";
+    handle = mountStage(env.target, { ...options, assets: cdn + options.assets, resourceOrigin: cdn });
+    const source = new URL(handle.frame.src);
+    assert.equal(source.origin, env.window.location.origin);
+    assert.equal(source.searchParams.get("assets"), cdn + options.assets);
+    assert.equal(source.searchParams.get("resource_origin"), cdn);
+    const gate = handle.frame.contentDocument.createElement("button");
+    gate.id = "stage-start";
+    gate.dataset.molyReady = "true";
+    handle.frame.contentDocument.append(gate);
+    let activated = false;
+    gate.addEventListener("click", () => { activated = true; });
+    handle.play("talk:fixture:6177");
+    assert.equal(activated, true);
   } finally {
     handle?.dispose();
     env.cleanup();

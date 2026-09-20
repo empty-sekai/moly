@@ -78,7 +78,7 @@ test("flat resources are fetched and hashed before publication", async () => {
     { ...options, packs: false, assetCatalog: null },
     {
       fetchImpl: async (url, settings) => {
-        assert.equal(settings.credentials, "same-origin");
+        assert.equal(settings.credentials, "omit");
         fetched.push(url);
         return new Response(png);
       },

@@ -122,7 +122,8 @@ export function createWeatherArtwork(
               : await readPng(
                   await fetchImpl(direct, {
                     signal: abort.signal,
-                    credentials: "same-origin",
+                    credentials: "omit",
+                    redirect: "error",
                   }),
                   receipt.bytes,
                 );

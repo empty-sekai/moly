@@ -121,7 +121,7 @@ export interface MolyWeatherOption {
   label?: string;
   /** Relative source artifact path; never interpreted as a weather kind. */
   icon?: string | null;
-  /** Stage-resolved same-origin URL. Missing art stays absent. */
+  /** Stage-verified artwork URL. Missing art stays absent. */
   iconUrl?: string | null;
   metadata?: {
     id: number;
@@ -160,6 +160,7 @@ export interface MountOptions {
   view?: "shell" | "stage";
   src: string;
   assets?: string;
+  resourceOrigin?: string;
   region?: MolyRegion;
   version?: string;
   snapshot?: string;
