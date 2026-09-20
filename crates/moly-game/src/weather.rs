@@ -436,11 +436,23 @@ fn parse_index(
 ) {
     let Some(request) = request else { return; };
     if let LoadState::Failed(err) = server.load_state(&request.0) {
-        panic!("phenomenon index load failed: {err:?}");
+        bevy::log::error!("weather unavailable: phenomenon index load failed: {err:?}");
+        commands.remove_resource::<IndexRequest>();
+        return;
     }
     let Some(doc) = index.get(&request.0) else { return; };
-    let source = moly_assets::weather_index::PhenomenonIndex::from_bytes(doc.0.as_bytes())
-        .unwrap_or_else(|err| panic!("invalid phenomenon index: {err}"));
+    let source = match moly_assets::weather_index::PhenomenonIndex::from_bytes(doc.0.as_bytes()) {
+        Ok(source) => source,
+        Err(err) => {
+            // A separately versioned snapshot can predate this runtime's
+            // source receipts. Keep the scene usable, but publish no weather
+            // catalogue: the host labels the control unavailable rather than
+            // pretending the older weather contract was consumed.
+            bevy::log::error!("weather unavailable: invalid phenomenon index: {err}");
+            commands.remove_resource::<IndexRequest>();
+            return;
+        }
+    };
     if source.phenomena.values().any(|entry| entry.timeline.is_some()) {
         source.environment_controller.as_ref()
             .expect("source timeline requires the controller-owned director descriptor")

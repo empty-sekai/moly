@@ -5,6 +5,7 @@ const messages = {
     enter: "进入场景",
     waiting: "播放器按需加载，尚未下载游戏资源。",
     loading: "正在加载引擎…",
+    base: "正在准备场景基础资源…",
     initializing: "正在初始化引擎…",
     renderer: "正在启动渲染器…",
     scene: "正在准备场景与公共动作…",
@@ -16,6 +17,7 @@ const messages = {
       "此浏览器无法启动 3D 渲染。请使用支持 WebGPU 或 WebGL2 的浏览器。",
     mismatch: "资源快照与当前区服不匹配，已阻止播放。",
     progress: "已接收",
+    baseProgress: "基础资源",
     controls: "拖动调整镜头 · 滚轮缩放 · 点击对话继续 · Esc 停止",
     stalled: "准备耗时较长，可继续等待或重新加载。",
     cached: "已保留的资源会在下次进入时复用。",
@@ -48,6 +50,7 @@ const messages = {
     waiting:
       "The player loads on demand. No game resources have been downloaded yet.",
     loading: "Downloading engine…",
+    base: "Preparing core scene resources…",
     initializing: "Initializing engine…",
     renderer: "Starting renderer…",
     scene: "Preparing the scene and shared animations…",
@@ -61,6 +64,7 @@ const messages = {
     mismatch:
       "The resource snapshot does not match this region. Playback was blocked.",
     progress: "Received",
+    baseProgress: "Core resources",
     controls:
       "Drag to orbit · Scroll to zoom · Click dialogue to continue · Esc to stop",
     stalled:
@@ -95,6 +99,7 @@ const messages = {
     waiting:
       "プレイヤーは必要なときだけ読み込みます。ゲームリソースはまだダウンロードされていません。",
     loading: "エンジンを読み込み中…",
+    base: "シーンの基本リソースを準備中…",
     initializing: "エンジンを初期化中…",
     renderer: "描画を開始中…",
     scene: "シーンと共通モーションを準備中…",
@@ -107,6 +112,7 @@ const messages = {
       "3D 描画を開始できません。WebGPU または WebGL2 対応のブラウザーをご利用ください。",
     mismatch: "リソースの地域が一致しないため、再生を停止しました。",
     progress: "受信済み",
+    baseProgress: "基本リソース",
     controls:
       "ドラッグで視点移動 · スクロールでズーム · 会話をクリックして進む · Esc で停止",
     stalled: "準備に時間がかかっています。待機するか、再読み込みしてください。",
@@ -139,6 +145,7 @@ const messages = {
     enter: "進入場景",
     waiting: "播放器按需載入，尚未下載遊戲資源。",
     loading: "正在載入引擎…",
+    base: "正在準備場景基礎資源…",
     initializing: "正在初始化引擎…",
     renderer: "正在啟動繪圖引擎…",
     scene: "正在準備場景與共用動作…",
@@ -150,6 +157,7 @@ const messages = {
       "此瀏覽器無法啟動 3D 繪圖，請使用支援 WebGPU 或 WebGL2 的瀏覽器。",
     mismatch: "資源快照與目前地區不符，已阻止播放。",
     progress: "已接收",
+    baseProgress: "基礎資源",
     controls: "拖曳調整鏡頭 · 滾輪縮放 · 點擊對話繼續 · Esc 停止",
     stalled: "準備時間較長，可繼續等待或重新載入。",
     cached: "保留的資源會在下次進入時重複使用。",
@@ -182,6 +190,7 @@ const messages = {
     waiting:
       "플레이어는 필요할 때만 불러옵니다. 게임 리소스는 아직 다운로드되지 않았습니다.",
     loading: "엔진 다운로드 중…",
+    base: "장면 기본 리소스 준비 중…",
     initializing: "엔진 초기화 중…",
     renderer: "렌더러 시작 중…",
     scene: "장면과 공통 모션 준비 중…",
@@ -193,6 +202,7 @@ const messages = {
       "3D 렌더링을 시작할 수 없습니다. WebGPU 또는 WebGL2를 지원하는 브라우저를 사용하세요.",
     mismatch: "리소스 지역이 일치하지 않아 재생을 차단했습니다.",
     progress: "수신됨",
+    baseProgress: "기본 리소스",
     controls:
       "드래그로 시점 이동 · 스크롤로 확대 · 대화 클릭으로 진행 · Esc로 중지",
     stalled: "준비가 지연되고 있습니다. 기다리거나 다시 불러오세요.",

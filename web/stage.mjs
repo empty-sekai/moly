@@ -81,6 +81,8 @@ let phase = "idle",
 let engineBytes = 0,
   transferredBytes = 0,
   decodedBytes = 0,
+  baseCompleted = 0,
+  baseTotal = 0,
   lastProgress = performance.now();
 const timings = {},
   pending = [];
@@ -105,6 +107,8 @@ function mark(name) {
   }
 }
 function report(next = phase) {
+  if (next !== phase && (next === "base" || next === "resources"))
+    lastProgress = performance.now();
   phase = next;
   send("boot", {
     phase,
@@ -119,6 +123,8 @@ function report(next = phase) {
 }
 function render() {
   const t = stageMessages(ui.locale);
+  const stalled = (phase === "base" || phase === "resources")
+    && performance.now() - lastProgress > 30000;
   document.documentElement.lang = ui.locale;
   document.documentElement.dataset.theme = ui.theme.mode;
   if (ui.theme.accent)
@@ -134,6 +140,7 @@ function render() {
         idle: t.waiting,
         downloading: t.loading,
         initializing: t.initializing,
+        base: t.base,
         "awaiting-gesture": t.ready,
         renderer: t.renderer,
         resources: t.scene,
@@ -149,14 +156,12 @@ function render() {
   $("stage-retry").textContent = t.retry;
   $("stage-webgl").textContent = t.fallback;
   $("stage-webgl").hidden = backend === "webgl2" || requested === "webgl2";
-  $("boot-recovery").hidden = !failed;
-  $("boot-note").textContent =
-    phase === "resources" && performance.now() - lastProgress > 30000
-      ? t.stalled
-      : "";
+  $("boot-recovery").hidden = !failed && !stalled;
+  $("boot-note").textContent = stalled ? t.stalled : "";
   const amount = engineBytes || decodedBytes;
-  $("boot-progress").textContent =
-    amount && !failed
+  $("boot-progress").textContent = failed ? "" : phase === "base" && baseTotal
+    ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
+    : amount
       ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
       : "";
   $("stage-hint").textContent = t.controls;
@@ -269,8 +274,11 @@ async function loadEngine() {
       },
       {
         signal: abort.signal,
-        onProgress() {
+        onProgress({ completed, total }) {
+          baseCompleted = completed;
+          baseTotal = total;
           lastProgress = performance.now();
+          if (phase === "base") render();
         },
       },
     );
@@ -328,7 +336,15 @@ async function loadEngine() {
       }),
     });
     mark("wasmReady");
-    await basePreparation;
+    report("base");
+    const progressTimer = setInterval(() => {
+      if (phase === "base") render();
+    }, 2000);
+    try {
+      await basePreparation;
+    } finally {
+      clearInterval(progressTimer);
+    }
     mark("baseResourcesReady");
     wasm = module;
     loading = false;

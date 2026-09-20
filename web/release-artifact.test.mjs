@@ -1,6 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stripDebugNames, splitCatalog } from "./release-artifact.mjs";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { stripDebugNames, splitCatalog, STAGE_FILES } from "./release-artifact.mjs";
+
+test("published stage includes every statically imported local module", () => {
+  const shipped = new Set(STAGE_FILES);
+  const root = path.dirname(fileURLToPath(import.meta.url));
+  for (const name of STAGE_FILES.filter((file) => file.endsWith(".mjs"))) {
+    const source = readFileSync(path.join(root, name), "utf8");
+    for (const match of source.matchAll(/\bfrom\s+["']\.\/([^"']+\.mjs)["']/g))
+      assert.ok(shipped.has(match[1]), `${name} imports unpublished ${match[1]}`);
+  }
+});
 
 const header = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
 const custom = (name, value = []) =>
