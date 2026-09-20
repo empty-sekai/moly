@@ -59,6 +59,8 @@ pub mod npc_objective;
 pub mod option_dialog;
 mod particle_runtime;
 mod particle_geometry;
+mod source_billboard;
+mod particle_mesh_emission;
 pub mod pick;
 pub mod player;
 pub mod player_avatar;

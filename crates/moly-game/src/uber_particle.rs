@@ -1083,6 +1083,7 @@ pub(crate) fn report(state: Option<Res<UberParticleState>>) {
 
 fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Runtime {
     Runtime {
+        emission_surface: None,
             node: planned.node.clone(),
             emitter: planned.emitter.clone(),
             anchor: Some(planned.anchor),

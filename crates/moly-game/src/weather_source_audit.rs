@@ -51,9 +51,11 @@ fn current_corpus_admission() {
             };
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
-            for particle in effect["particles"].as_array().expect("particles") {
+            let particles = effect["particles"].as_array().expect("particles");
+            let sub_emitter_owners = source_sub_emitter_owners(particles);
+            for particle in particles {
                 let mut tally = Tally::default();
-                let planned = kind.and_then(|kind| judge(effect_name, particle, &by_path, kind,
+                let planned = kind.and_then(|kind| judge(effect_name, particle, &by_path, &sub_emitter_owners, kind,
                     effect["effectiveRotation"].as_str() == Some("normal"),
                     WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), server, &mut tally));
                 let material = &particle["renderer"]["material"];
@@ -109,4 +111,38 @@ fn current_corpus_admission() {
         "rows": rows,
     });
     std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).expect("write audit report");
+}
+
+#[test]
+fn enabled_unimplemented_module_is_never_a_partially_simulated_emitter() {
+    let clean = json!({"sourceModules":{"version":1,"enabled":["InitialModule"],"unsupported":[]},
+        "ringBufferMode":0,"start":{"randomizeRotationDirection":0}});
+    assert!(source_simulation_admission(&clean).is_ok());
+    for module in ["ForceModule", "NoiseModule", "CollisionModule", "TrailModule", "SubModule", "UVModule", "InheritVelocityModule"] {
+        let mut system = clean.clone();
+        let mut enabled = vec!["InitialModule", module]; enabled.sort();
+        system["sourceModules"]["enabled"] = json!(enabled);
+        let error = source_simulation_admission(&system).unwrap_err();
+        assert!(error.contains(module), "{error}");
+    }
+    let mut system = clean.clone();
+    system["sourceModules"]["enabled"] = json!(["ColorModule", "InitialModule"]);
+    assert!(source_simulation_admission(&system).unwrap_err().contains("colorOverLifetime"));
+    for mode in [1, 2] {
+        let mut system = clean.clone(); system["ringBufferMode"] = json!(mode);
+        assert!(source_simulation_admission(&system).is_err());
+    }
+    let mut system = clean;
+    system["start"]["randomizeRotationDirection"] = json!(1.0);
+    assert!(source_simulation_admission(&system).is_err());
+}
+
+#[test]
+fn source_sub_emitter_targets_keep_their_event_owners() {
+    let particles = vec![json!({"node":"root/a","system":{"subEmitters":[{"emitter":"root/b"},{"emitter":"root/c"}]}}),
+        json!({"node":"root/b","system":{}}), json!({"node":"root/c","system":{"subEmitters":[{"emitter":"root/b"}]}})];
+    let owners = source_sub_emitter_owners(&particles);
+    assert_eq!(owners["root/b"], vec!["root/a", "root/c"]);
+    assert_eq!(owners["root/c"], vec!["root/a"]);
+    assert!(!owners.contains_key("root/a"));
 }

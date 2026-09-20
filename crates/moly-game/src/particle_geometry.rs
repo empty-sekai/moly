@@ -18,6 +18,17 @@ impl Alignment {
     }
 }
 
+/// Authored MainModule scaling affects particle geometry, independently of
+/// simulation-space ownership. Local uses this emitter node, not its ancestors.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scaling { Hierarchy, Local(Vec3) }
+impl Scaling {
+    pub(crate) fn apply(self, mut frame: Frame) -> Frame {
+        if let Self::Local(scale) = self { frame.scale = scale; }
+        frame
+    }
+}
+
 /// All vectors/matrices below are in the source (Unity) world coordinate basis.
 /// The owner's translation is already included in Instance::position.
 #[derive(Clone, Copy)]
@@ -154,6 +165,7 @@ impl SourceMesh {
 #[derive(Clone, Debug)]
 pub(crate) struct MeshDraw {
     pub source: Arc<SourceMesh>,
+    pub scaling: Scaling,
     pub alignment: Alignment,
     pub pivot: Vec3,
 }

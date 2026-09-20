@@ -693,7 +693,7 @@ fn resolve_all(
         info!("{line}");
     }
     warn!(
-        "天气系统如实记账（不接的支路与原因）：① 太阳光晕——方向向量是平行光方向经相机逆变换后的 xy，z 的符号约定在真源读不出来，停用不近似（{sun_on}/{total} 档开这一支，参数照读不参与像素）；② 粒子泛光的粒子特效半边——那条输入缓冲在源侧是 `_EffectSourceTex`（只装特效与第二颜色目标，不是整幅画面），粒子域落地前该半边恒空、贡献恒零；自发光半边（家具第二颜色目标）已接进泛光金字塔（{bloom_on}/{total} 档开这一支）；③ 引擎原生 SplitToning——只有一档带且组件级 active 为真，那一档的调色比本模块多两次 gamma 域 soft light，未接；同族的 WhiteBalance 与原生 Bloom 各只有一档带且 active 为假 ⇒ 落构造默认 ⇒ 恒等，不是缺口；④ 打雷档的时间轴（天空附加色闪光）——独立时间轴域，本模块不驱动，附加强度底值恒 0；⑤ 调色走的是引擎「烘 LUT + 查表」两段链，本模块按同一串式子逐像素直算（不烘 32³ 表），少了表的三线性插值误差；LDR 档还是 HDR 档由渲染管线资产的序列化字段决定，反编译里读不到，这里按 LDR 实现（本链帧缓冲是 8bit，输入已在 [0,1]）。"
+        "Weather renderer gaps: sun-flare projection is not implemented ({sun_on}/{total} enabled profiles); colour grading still evaluates directly rather than using the source LUT pass. Particle/effect-target and timeline diagnostics are reported separately ({bloom_on}/{total} bloom profiles)."
     );
     run.phenomena = resolved;
 }

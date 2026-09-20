@@ -15,6 +15,7 @@ pub mod weather_effect;
 pub mod weather_index;
 pub mod weather_icons;
 pub mod particle_geometry;
+pub mod particle_source;
 pub mod weather_timeline;
 pub mod material_textures;
 mod packs;

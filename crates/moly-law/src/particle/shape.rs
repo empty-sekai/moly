@@ -11,6 +11,20 @@ const INV_TAU: f32 = f32::from_bits(0x3e22_f983);
 const NATIVE_TAU: f32 = f32::from_bits(0x40c9_0fdb);
 const MIN_INNER: f32 = f32::from_bits(0x3a83_126f);
 
+/// Source EmitterStoreData offsets position on a sphere of the authored
+/// radius, not inside a cube/ball. This consumes two additional source draws
+/// only when amount is positive, before shape scaling/rotation/translation.
+/// Direction is unchanged by position jitter.
+pub fn randomize_position(position: [f32; 3], amount: f32, arc: f32, polar: f32) -> [f32; 3] {
+    if amount <= 0.0 { return position; }
+    let (sin, cos) = engine_sincos(arc * NATIVE_TAU);
+    let z = (polar + polar) - 1.0;
+    let xy = (1.0 - z * z).sqrt();
+    [position[0] + (cos * xy) * amount,
+     position[1] + (sin * xy) * amount,
+     position[2] + z * amount]
+}
+
 /// Circle's annulus is uniform in area. A zero thickness is the outer ring;
 /// full thickness is the entire disk, not a fixed-radius circle.
 pub fn circle_position(
@@ -290,6 +304,24 @@ mod tests {
         let v = euler_rotate_deg([0.0, 90.0, 0.0], [0.0, 0.0, 1.0]);
         assert!((v[0] - 1.0).abs() < 1e-6);
     }
+    #[test]
+    fn position_jitter_matches_independently_executed_native_instructions() {
+        let mut count = 0;
+        for row in include_str!("../../tests/data/particle-position-jitter.tsv").lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#')) {
+            let v: Vec<f32> = row.split('\t').map(|x| x.parse().unwrap()).collect();
+            assert_eq!(v.len(), 9);
+            let actual = randomize_position([v[0], v[1], v[2]], v[3], v[4], v[5]);
+            for (axis, (actual, expected)) in actual.into_iter().zip(v[6..].iter().copied()).enumerate() {
+                assert!(actual == expected || actual.to_bits().abs_diff(expected.to_bits()) <= 4,
+                    "case={count} axis={axis} actual={actual:?} native={expected:?}");
+            }
+            count += 1;
+        }
+        assert_eq!(count, 256);
+        assert_eq!(randomize_position([1.0, 2.0, 3.0], 0.0, f32::NAN, f32::NAN), [1.0, 2.0, 3.0]);
+    }
+
     struct Vector {
         shape: String,
         radius: f32,

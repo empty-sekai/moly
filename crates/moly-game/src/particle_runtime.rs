@@ -28,6 +28,7 @@ pub(crate) enum EffectKind {
 pub(crate) enum Geometry {
     Billboard { alignment: Alignment, clamp: SizeClamp, pivot: [f32; 3] },
     Mesh(crate::particle_geometry::MeshDraw),
+    SourceBillboard(crate::source_billboard::Draw),
 }
 
 /// 一条在跑的粒子系统。
@@ -41,6 +42,7 @@ pub(crate) struct Runtime {
     pub(crate) mesh: Handle<Mesh>,
     pub(crate) anchor: Option<Entity>,
     pub(crate) geometry: Geometry,
+    pub(crate) emission_surface: Option<std::sync::Arc<crate::particle_mesh_emission::EmissionSurface>>,
     pub(crate) ring_cursor: usize,
     pub(crate) pool: Vec<Particle>,
     pub(crate) side: Vec<Side>,
@@ -384,12 +386,28 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
             donut_position(shape.radius, shape.controls.donut_radius.expect("validated source donut radius"),
                 shape.radius_thickness, shape.arc, major_arc, tube_angle, radial)
         }
+        "Mesh" => {
+            let source = system.emission_surface.as_ref().expect("source surface must be ready before emitter installation");
+            let selector = moly_law::particle::shape::u01_from_bits(system.rng.next_u32());
+            let u = moly_law::particle::shape::u01_from_bits(system.rng.next_u32());
+            let v = moly_law::particle::shape::u01_from_bits(system.rng.next_u32());
+            source.sample(selector, u, v)
+        }
         "SingleSidedEdge" => {
             let t_theta = system.rng.next_f32();
             single_sided_edge(shape.radius, t_theta)
         }
         other => panic!("判读已门形状族，运行时遇到 {other}——判读与推进的门不一致"),
     };
+    // EmitterStoreData owns two additional draws for a positive authored
+    // position jitter. Do not consume them for zero; later birth streams must
+    // retain their original sequence. Apply this BEFORE the shape transform.
+    let amount = shape.controls.random_position.unwrap_or(0.0);
+    let local = if amount > 0.0 {
+        let arc = moly_law::particle::shape::u01_from_bits(system.rng.next_u32());
+        let polar = moly_law::particle::shape::u01_from_bits(system.rng.next_u32());
+        moly_law::particle::shape::randomize_position(local, amount, arc, polar)
+    } else { local };
     // Shape-module TRS scales both position and velocity before rotation.
     // Independent engine measurements and current EmitterStoreData agree;
     // treating the scale as a billboard-size control would flatten the wrong data.
@@ -548,8 +566,13 @@ pub(crate) fn write_geometry(
         Geometry::Billboard { alignment, clamp, pivot } => {
             crate::billboard::write_quads(mesh, &build_quads(system, to_world), *alignment, basis, *clamp, *pivot);
         }
-        Geometry::Mesh(draw) => {
-            let frame = crate::particle_geometry::source_frame(owner, camera);
+        Geometry::Mesh(_) | Geometry::SourceBillboard(_) => {
+            let base_frame = crate::particle_geometry::source_frame(owner, camera);
+            let frame = match &system.geometry {
+                Geometry::Mesh(draw) => draw.scaling.apply(base_frame),
+                Geometry::SourceBillboard(draw) => draw.scaling.apply(base_frame),
+                _ => unreachable!(),
+            };
             let appearance = build_quads(system, to_world);
             let instances: Vec<_> = system.pool.iter().enumerate().map(|(index, particle)| {
                 let side = system.side[index];
@@ -564,7 +587,12 @@ pub(crate) fn write_geometry(
                     custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),
                 }
             }).collect();
-            crate::particle_geometry::write_mesh(mesh, draw, &instances, &frame);
+            match &system.geometry {
+                Geometry::Mesh(draw) => crate::particle_geometry::write_mesh(mesh, draw, &instances, &frame),
+                Geometry::SourceBillboard(draw) => crate::source_billboard::write(mesh, draw, &instances, &frame,
+                    system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect),
+                _ => unreachable!(),
+            }
         }
     }
 }

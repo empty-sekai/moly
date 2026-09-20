@@ -18,16 +18,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use moly_assets::weather_effect::WeatherEffectLifecycle;
 
-use crate::billboard::{self, Alignment, SizeClamp};
+use crate::billboard::{self, Alignment};
 use crate::character::AvatarRoot;
 use crate::site::SiteActive;
 use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared};
 use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world, simulate};
-
-/// 零缩放的四边形没有面积，画不出来；尺寸下限。
-const MIN_PARTICLE_SIZE: f32 = 0.0001;
 
 /// 出生抽签的确定性随机种子。与站点链**不同流**：两条链同时在跑，
 /// 同流会在两族上画出同一图形的错觉（逐系统再乘质数散列）。
@@ -78,24 +75,31 @@ pub(crate) fn cleanup_preflight(mut commands: Commands, phase: Res<WeatherTransi
 }
 
 enum PlannedGeometry {
-    Billboard { alignment: Alignment, clamp: SizeClamp, pivot: [f32; 3] },
+    Billboard(crate::source_billboard::Draw),
     Mesh {
         reference: ParticleMeshReference,
         glb: Handle<Gltf>,
         alignment: crate::particle_geometry::Alignment,
         source: Option<Arc<crate::particle_geometry::SourceMesh>>,
+        scaling: crate::particle_geometry::Scaling,
         pivot: Vec3,
     },
 }
 impl PlannedGeometry {
     fn into_runtime(self) -> crate::particle_runtime::Geometry {
         match self {
-            Self::Billboard { alignment, clamp, pivot } => crate::particle_runtime::Geometry::Billboard { alignment, clamp, pivot },
-            Self::Mesh { alignment, source, pivot, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
-                source: source.expect("source mesh readiness must precede weather commit"), alignment, pivot,
+            Self::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw),
+            Self::Mesh { alignment, source, scaling, pivot, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
+                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot,
             }),
         }
     }
+}
+
+struct PlannedSurface {
+    reference: ParticleMeshReference,
+    glb: Handle<Gltf>,
+    source: Option<Arc<crate::particle_mesh_emission::EmissionSurface>>,
 }
 
 /// 一条放行的粒子系统：律侧参数 + 锚定账目 + 呈现侧输入 + 待装载贴图。
@@ -114,6 +118,7 @@ struct Planned {
     source: SourceParticle,
     draw: Option<(Entity, Handle<Mesh>)>,
     geometry: PlannedGeometry,
+    emission_surface: Option<PlannedSurface>,
     lifecycle: WeatherEffectLifecycle,
     /// Cone 的半顶角（shape 块的 `angle` 键；律的 `ShapeParams` 不带它）。
     cone_angle: Option<f32>,
@@ -149,14 +154,14 @@ struct Tally {
     alignment: Vec<String>,
     no_system_block: usize,
     no_emission: usize,
-    /// 只按距离发射（本链不跟发射器位移）。
+    /// Any authored distance emission requires an emitter-travel consumer.
     rate_distance_only: usize,
     /// 率恒 0 且无 burst：永不发射。
     dead_emission: usize,
     no_shape: usize,
     shape: Vec<String>,
     sim_space: usize,
-    /// 起始三轴旋转的非零 X/Y 常量（公告板只画 Z 自旋）。
+    /// Historical admission counter, retained for diagnostic compatibility.
     start_rotation_3d: usize,
     state_arm: Vec<String>,
     keyword: Vec<String>,
@@ -199,11 +204,32 @@ impl WeatherFxState {
             "records": self.records, "admitted": self.admitted,
             "emitters": self.live.iter().map(|s| {
                 let mesh = meshes.get(&s.mesh);
+                let bounds = (!s.pool.is_empty()).then(|| {
+                    let mut min = Vec3::splat(f32::INFINITY);
+                    let mut max = Vec3::splat(f32::NEG_INFINITY);
+                    for particle in &s.pool {
+                        let position = Vec3::from_array(particle.position);
+                        min = min.min(position); max = max.max(position);
+                    }
+                    serde_json::json!({"min":min.to_array(),"max":max.to_array()})
+                });
+                let geometry = match &s.geometry {
+                    crate::particle_runtime::Geometry::SourceBillboard(draw) => match draw.mode {
+                        crate::source_billboard::Mode::Billboard => "source_billboard",
+                        crate::source_billboard::Mode::Horizontal => "source_horizontal_billboard",
+                    },
+                    crate::particle_runtime::Geometry::Mesh(_) => "source_mesh",
+                    crate::particle_runtime::Geometry::Billboard { .. } => "legacy_billboard",
+                };
                 serde_json::json!({
                     "effect": s.effect, "node": s.node,
                     "alive": s.pool.len(), "born": s.born_total, "died": s.died_total,
                     "poolFull": s.full_total, "integrationRefused": s.refused_total,
                     "playbackTime": s.playback_head,
+                    "geometry": geometry,
+                    "emissionSurfaceTriangles": s.emission_surface.as_ref().map(|surface| surface.triangles()),
+                    "particleBounds": bounds,
+                    "nonFiniteParticles": s.pool.iter().filter(|p| p.position.iter().chain(p.velocity.iter()).any(|v| !v.is_finite())).count(),
                     "meshVertices": mesh.map(Mesh::count_vertices),
                     "meshIndices": mesh.and_then(Mesh::indices).map(|indices| indices.len()),
                     "unmappedSimulationFields": s.emitter.unmapped,
@@ -424,11 +450,13 @@ pub(crate) fn plan(
         let Some(particles) = effect.get("particles").and_then(Value::as_array) else {
             continue;
         };
+        let sub_emitter_owners = source_sub_emitter_owners(particles);
         for particle in particles {
             match judge(
                 effect_name,
                 particle,
                 &by_path,
+                &sub_emitter_owners,
                 kind,
                 camera_rotation,
                 lifecycle,
@@ -497,6 +525,32 @@ pub(crate) fn plan(
     commands.remove_resource::<WeatherFxDoc>();
 }
 
+/// Module capability is checked from the complete serialized inventory, not
+/// just whichever parameters an older producer happened to emit.
+fn source_simulation_admission(system: &Value) -> Result<(), String> {
+    let source = moly_assets::particle_source::ParticleSourceModules::from_system(system)?;
+    for module in &source.enabled {
+        let field = match module.as_str() {
+            "InitialModule" => "start", "EmissionModule" => "emission",
+            "ShapeModule" => "shape", "ColorModule" => "colorOverLifetime",
+            "SizeModule" => "sizeOverLifetime", "RotationModule" => "rotationOverLifetime",
+            "VelocityModule" => "velocityOverLifetime", "ClampVelocityModule" => "limitVelocity",
+            "CustomDataModule" => "customData",
+            _ => return Err(format!("enabled source module {module} has no runtime consumer")),
+        };
+        if !system.get(field).is_some_and(Value::is_object) {
+            return Err(format!("enabled source module {module} lacks its authored {field} parameters"));
+        }
+    }
+    if system.get("ringBufferMode").and_then(Value::as_u64) != Some(0) {
+        return Err("source RingPause/RingLoop lifecycle is not yet verified".into());
+    }
+    if system.get("start").and_then(|s| s.get("randomizeRotationDirection")).and_then(Value::as_f64) != Some(0.0) {
+        return Err("source birth rotation direction randomization is not consumed".into());
+    }
+    Ok(())
+}
+
 /// effect 档案的 `kind`（字符串原样）。
 /// Admission is based on authored controls, not an effect/phenomenon name.
 /// The source keeps irrelevant sampling channels (e.g. donut radius mode) in
@@ -511,16 +565,20 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
         return Some("missing/invalid authored shape scale".into());
     }
     let mode = if kind == "SingleSidedEdge" { "radiusMode" } else { "arcMode" };
-    if shape.get(mode).and_then(Value::as_str) != Some("Random") {
+    if kind != "Mesh" && shape.get(mode).and_then(Value::as_str) != Some("Random") {
         return Some(format!("{mode} {:?} consumer pending", shape.get(mode)));
     }
     if shape.get("alignToDirection").and_then(Value::as_bool) != Some(false) {
         return Some("source aligned start rotation consumer pending".into());
     }
-    for key in ["randomDirectionAmount", "sphericalDirectionAmount", "randomPositionAmount"] {
+    for key in ["randomDirectionAmount", "sphericalDirectionAmount"] {
         if shape.get(key).and_then(Value::as_f64) != Some(0.0) {
             return Some(format!("source {key} consumer pending"));
         }
+    }
+    if !shape.get("randomPositionAmount").and_then(Value::as_f64)
+        .is_some_and(|value| value.is_finite() && value >= 0.0 && value <= f32::MAX as f64) {
+        return Some("missing/invalid authored position randomization".into());
     }
     if matches!(kind, "Cone" | "ConeVolume") {
         for key in if kind == "ConeVolume" { &["angle", "length"][..] } else { &["angle"][..] } {
@@ -558,11 +616,29 @@ fn count_names(items: &[String]) -> Vec<(String, usize)> {
     out
 }
 
+/// A target of an unimplemented sub-emitter graph must not become an
+/// autonomous emitter just because its own local modules happen to parse.
+fn source_sub_emitter_owners(particles: &[Value]) -> HashMap<String, Vec<String>> {
+    let mut owners = HashMap::<String, Vec<String>>::new();
+    for particle in particles {
+        let Some(owner) = particle.get("node").and_then(Value::as_str) else { continue; };
+        let Some(entries) = particle.get("system").and_then(|s| s.get("subEmitters")).and_then(Value::as_array) else { continue; };
+        for entry in entries {
+            if let Some(target) = entry.get("emitter").and_then(Value::as_str) {
+                owners.entry(target.to_owned()).or_default().push(owner.to_owned());
+            }
+        }
+    }
+    for value in owners.values_mut() { value.sort(); value.dedup(); }
+    owners
+}
+
 /// 逐条判读。放行回 Some，挡下回 None 并在盘点里具名。
 fn judge(
     effect_name: &str,
     particle: &Value,
     by_path: &HashMap<String, &Value>,
+    sub_emitter_owners: &HashMap<String, Vec<String>>,
     kind: EffectKind,
     camera_rotation: bool,
     lifecycle: WeatherEffectLifecycle,
@@ -589,15 +665,18 @@ fn judge(
         tally.renderer_disabled += 1;
         return None;
     }
+    if let Some(owners) = particle.get("node").and_then(Value::as_str).and_then(|node| sub_emitter_owners.get(node)) {
+        tally.law_reject.push(format!("source sub-emitter event ownership is not installed: {}", owners.join(", ")));
+        return None;
+    }
     let render_mode = renderer.get("renderMode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(render_mode, "Billboard" | "Mesh") {
+    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "Mesh") {
         tally.render_mode.push(format!("unsupported source render mode {render_mode}"));
         return None;
     }
     let alignment_id = renderer.get("alignment").and_then(Value::as_i64).unwrap_or(-1);
     let mesh_alignment = crate::particle_geometry::Alignment::from_source(alignment_id);
-    let alignment = Alignment::from_render_space(alignment_id);
-    if mesh_alignment.is_none() || (render_mode == "Billboard" && alignment.is_none()) {
+    if mesh_alignment.is_none() || (render_mode == "Billboard" && alignment_id == 4) {
         tally.alignment.push(Alignment::render_space_name(alignment_id).to_owned());
         return None;
     }
@@ -625,6 +704,9 @@ fn judge(
             return None;
         }
     };
+    if let Err(error) = source_simulation_admission(system) {
+        tally.law_reject.push(error); return None;
+    }
     // 发射率形状：只按距离发射（本链不跟发射器位移）与死发射（率恒 0 且
     // 无 burst）都挡。
     let emission = match system.get("emission").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
@@ -637,8 +719,8 @@ fn judge(
     let rate_time = raw_const(emission.get("rateOverTime"));
     let rate_distance = raw_const(emission.get("rateOverDistance"));
     let time_zero = rate_time.map_or(true, |v| v == 0.0);
-    let distance_zero = rate_distance.map_or(true, |v| v == 0.0);
-    if time_zero && !distance_zero {
+    let distance_zero = rate_distance == Some(0.0);
+    if !distance_zero {
         tally.rate_distance_only += 1;
         return None;
     }
@@ -657,7 +739,7 @@ fn judge(
             return None;
         }
         let shape_type = shape.get("type").and_then(Value::as_str).unwrap_or("");
-        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut") {
+        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut" | "Mesh") {
             tally.shape.push(shape_type.to_owned()); return None;
         }
         if let Some(reason) = source_shape_admission(shape) {
@@ -677,16 +759,8 @@ fn judge(
         tally.sim_space += 1;
         return None;
     }
-    // 起始三轴旋转：X/Y 常量非零的挡（公告板只画 Z 自旋）。
+    // The source vertex writer consumes all three authored rotation axes.
     let start = system.get("start").cloned().unwrap_or(Value::Null);
-    if render_mode == "Billboard" && start.get("rotation3D").and_then(Value::as_bool) == Some(true) {
-        let x = raw_const(start.get("rotationX"));
-        let y = raw_const(start.get("rotationY"));
-        if !x.map_or(true, |v| v == 0.0) || !y.map_or(true, |v| v == 0.0) {
-            tally.start_rotation_3d += 1;
-            return None;
-        }
-    }
 
     if start.get("rotation3D").and_then(Value::as_bool) == Some(true)
         && ["rotationX", "rotationY"].iter().any(|key| !start.get(*key).is_some_and(Value::is_object)) {
@@ -726,7 +800,7 @@ fn judge(
         }
     };
     // 起始延迟：语料全 0；非 0 的发射次序未实现，具名挡下。
-    if const_of(&emitter.start_delay).map_or(false, |v| v != 0.0) {
+    if const_of(&emitter.start_delay) != Some(0.0) {
         tally.start_delay += 1;
         return None;
     }
@@ -744,10 +818,18 @@ fn judge(
         Err(error) => { tally.limit_refused.push(format!("{node}: {error}")); return None; }
     };
 
-    // ---- 渲染器字段：钳制上限与轴心是本链消费的两个，缺了没有可用的
-    // 呈现输入（语料 78/78 都带；`minParticleSize` 全 0 且律侧下限用
-    // 常量，不消费）。----
+    // Renderer-owned size limits, pivot, camera roll and vertex attributes are
+    // mandatory source inputs. No visual minimum is substituted for zero size.
     let max_particle_size = renderer.get("maxParticleSize").and_then(Value::as_f64);
+    let min_particle_size = renderer.get("minParticleSize").and_then(Value::as_f64);
+    let allow_roll = renderer.get("allowRoll").and_then(Value::as_bool);
+    if renderer.get("normalDirection").and_then(Value::as_f64) != Some(1.0) {
+        tally.render_mode.push("source billboard normalDirection other than one is not yet verified".into()); return None;
+    }
+    if renderer.get("flip").and_then(Value::as_array)
+        .is_none_or(|v| v.len()!=3 || v.iter().any(|x| x.as_f64()!=Some(0.0))) {
+        tally.render_mode.push("source particle flip stream permutation is not yet consumed".into()); return None;
+    }
     let pivot = renderer
         .get("pivot")
         .and_then(Value::as_array)
@@ -759,10 +841,15 @@ fn judge(
             }
             Some(out)
         });
-    let (Some(max_particle_size), Some(pivot)) = (max_particle_size, pivot) else {
+    let (Some(max_particle_size), Some(min_particle_size), Some(allow_roll), Some(pivot)) = (max_particle_size, min_particle_size, allow_roll, pivot) else {
         tally.clamp_missing += 1;
         return None;
     };
+    if !max_particle_size.is_finite() || !min_particle_size.is_finite()
+        || min_particle_size < 0.0 || max_particle_size < min_particle_size
+        || max_particle_size > f32::MAX as f64 || pivot.iter().any(|v| !v.is_finite()) {
+        tally.clamp_missing += 1; return None;
+    }
     // The typed contract owns authored cone parameters for both cone modes.
     let cone_angle = if matches!(shape_type, "Cone" | "ConeVolume") {
         match emitter.shape.as_ref().and_then(|s| s.controls.angle) {
@@ -790,8 +877,35 @@ fn judge(
         return None;
     };
 
+    let emission_surface = if shape_type == "Mesh" {
+        let contract = match moly_assets::particle_source::ParticleMeshEmission::from_shape(shape.expect("Mesh shape present")) {
+            Ok(contract) => contract,
+            Err(error) => { tally.shape.push(error); return None; }
+        };
+        // Native mesh normals are barycentrically interpolated. Until the
+        // velocity normalization branch is independently observed, admit only
+        // stationary births (the surface is still sampled, never the origin).
+        if const_of(&emitter.start.speed) != Some(0.0) {
+            tally.shape.push("source mesh start-velocity normalization needs independent verification".into()); return None;
+        }
+        let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("phenomena/{}", contract.mesh.file))).with_source("moly"));
+        Some(PlannedSurface { reference: contract.mesh, glb, source: None })
+    } else { None };
+    let scaling = match system.get("scalingMode").and_then(Value::as_u64) {
+        Some(0) => crate::particle_geometry::Scaling::Hierarchy,
+        Some(1) => {
+            let values = by_path[node].get("scale").and_then(Value::as_array);
+            let Some(values) = values.filter(|v| v.len() == 3 && v.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs() <= f32::MAX as f64))) else {
+                tally.render_mode.push("Local particle scale lacks its authored emitter transform".into()); return None;
+            };
+            crate::particle_geometry::Scaling::Local(Vec3::new(values[0].as_f64().unwrap() as f32,
+                values[1].as_f64().unwrap() as f32, values[2].as_f64().unwrap() as f32))
+        }
+        value => { tally.render_mode.push(format!("unconsumed source particle scalingMode {value:?}")); return None; }
+    };
     Some(Planned {
         ordinal: 0,
+        emission_surface,
         node: node.to_owned(),
         effect: effect_name.to_owned(),
         lifecycle,
@@ -803,10 +917,14 @@ fn judge(
         draw: None,
         geometry: if let Some(reference) = mesh_reference {
             let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("phenomena/{}", reference.file))).with_source("moly"));
-            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, pivot: Vec3::from_array(pivot) }
+            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot) }
         } else {
-            PlannedGeometry::Billboard { alignment: alignment.expect("validated Billboard alignment"),
-                clamp: SizeClamp { max_screen_fraction: max_particle_size as f32, min_size: MIN_PARTICLE_SIZE }, pivot }
+            PlannedGeometry::Billboard(crate::source_billboard::Draw {
+                mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },
+                alignment: mesh_alignment.expect("validated source Billboard alignment"),
+                screen_size: Vec2::new(min_particle_size as f32, max_particle_size as f32),
+                allow_roll, scaling, pivot: Vec3::from_array(pivot),
+            })
         },
         cone_angle,
         rol,
@@ -940,6 +1058,27 @@ pub(crate) fn spawn_when_ready(
     }
     let request_serial = plan.request_serial;
     for planned in &mut plan.planned {
+        if let Some(surface) = &mut planned.emission_surface {
+            match (server.load_state(&surface.glb), server.recursive_dependency_load_state(&surface.glb)) {
+                (LoadState::Failed(error), _) => panic!("source emission surface {} failed: {error:?}", surface.reference.file),
+                (_, RecursiveDependencyLoadState::Failed(error)) => panic!("source emission surface dependency {} failed: {error:?}", surface.reference.file),
+                _ => {},
+            }
+            if !server.is_loaded_with_dependencies(&surface.glb) { return; }
+            if surface.source.is_none() {
+                let Some(asset) = gltfs.get(&surface.glb) else { return; };
+                let node_handle = asset.named_nodes.get(surface.reference.node.as_str())
+                    .unwrap_or_else(|| panic!("source emission node {} missing", surface.reference.node));
+                let Some(node) = gltf_nodes.get(node_handle) else { return; };
+                let mesh_handle = node.mesh.as_ref().expect("source emission node must own geometry");
+                let Some(asset_mesh) = gltf_meshes.get(mesh_handle) else { return; };
+                let Some(primitives) = asset_mesh.primitives.iter().map(|p| meshes.get(&p.mesh)).collect::<Option<Vec<_>>>() else { return; };
+                let source_mesh = crate::particle_geometry::SourceMesh::from_primitives(&primitives, Vec3::from_array(surface.reference.size()))
+                    .unwrap_or_else(|error| panic!("source emission mesh {} invalid: {error}", surface.reference.file));
+                surface.source = Some(Arc::new(crate::particle_mesh_emission::EmissionSurface::from_source(&source_mesh)
+                    .unwrap_or_else(|error| panic!("source emission surface {} invalid: {error}", surface.reference.file))));
+            }
+        }
         if let PlannedGeometry::Mesh { reference, glb, source, .. } = &mut planned.geometry {
             match (server.load_state(&*glb), server.recursive_dependency_load_state(&*glb)) {
                 (LoadState::Failed(error), _) => panic!("source particle mesh {} failed: {error:?}", reference.file),
@@ -1044,6 +1183,7 @@ pub(crate) fn spawn_when_ready(
             mesh,
             anchor: None,
             geometry: planned.geometry.into_runtime(),
+            emission_surface: planned.emission_surface.map(|surface| surface.source.expect("source surface verified before installation")),
             ring_cursor: 0,
             pool: Vec::new(),
             side: Vec::new(),

@@ -24,7 +24,7 @@ pub(crate) fn runtime() -> Runtime {
             custom_data:None,unmapped:Vec::new(),
         },
         kind:EffectKind::Camera,camera_rotation:false,node_affine:GlobalTransform::IDENTITY,
-        mesh:Handle::default(),anchor:None,ring_cursor:0,
+        mesh:Handle::default(),anchor:None,ring_cursor:0,emission_surface:None,
         geometry:crate::particle_runtime::Geometry::Billboard {alignment:Alignment::View,
             clamp:SizeClamp { min_size:0.0,max_screen_fraction:1.0 },pivot:[0.0;3]},
         pool:vec![Particle::born([0.0;3],[2.0,0.0,0.0],10.0)],
