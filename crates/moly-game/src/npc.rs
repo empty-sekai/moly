@@ -1154,10 +1154,32 @@ fn start_waypoint(
             vec![state.position]
         } else {
             let sampled = objective_face.sample(waypoint.position, WAYPOINT_SAMPLE_DISTANCE)?;
-            let points = walk_face.path_exact(
-                [state.position[0], state.position[2]],
-                [sampled[0], sampled[2]],
-            )?;
+            let points = walk_face
+                .path_exact(
+                    [state.position[0], state.position[2]],
+                    [sampled[0], sampled[2]],
+                )
+                .or_else(|| {
+                    // The previous polygon checkpoint was accepted within
+                    // ARRIVAL_DISTANCE, so the integrated position can still
+                    // be a few centimetres from the corridor portal. Retry
+                    // only a furniture approach from that authored checkpoint,
+                    // and only if the exact polygon path accepts the next leg.
+                    let previous = route.stops.get(route.next.checked_sub(1)?)?;
+                    if route.fit.is_none()
+                        || previous.kind != WaypointKind::CheckPoint
+                        || Vec3::from(previous.position).distance(Vec3::from(state.position))
+                            >= ARRIVAL_DISTANCE
+                    {
+                        return None;
+                    }
+                    let path = walk_face.path_exact(
+                        [previous.position[0], previous.position[2]],
+                        [sampled[0], sampled[2]],
+                    )?;
+                    state.position = previous.position;
+                    Some(path)
+                })?;
             lift_navigation_path(unit, objective_face, points)
         };
     // Keep nearby corners, including the query's start. Removing every corner
@@ -1498,7 +1520,14 @@ pub fn advance(
                 valid &= walk_face.segment_walkable([from[0], from[2]], [to[0], to[2]]);
                 from = to;
             }
-            if !valid {
+            // Furniture approaches are issued by path_exact on the polygon
+            // navigation mesh. Its portal path can graze a 1 cm bake cell that
+            // the voxel supercover rejects even though the polygon corridor
+            // admits it. Replanning that same corridor every frame leaves the
+            // actor at the first such corner indefinitely. Ordinary movement
+            // keeps the stricter voxel guard; a changed field generation still
+            // replans furniture movement before this step.
+            if !valid && route.fit.is_none() {
                 state.0.position = prior;
                 state.0.forward = prior_forward;
                 state.0.next_corner = prior_corner;
