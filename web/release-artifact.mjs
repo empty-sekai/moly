@@ -196,31 +196,57 @@ export async function publish({
   if (retained && retained.publisher !== "moly-release-artifact-v1")
     throw new Error("Output contains an unrelated manifest");
   if (reuseSnapshots) {
-    if (sources !== undefined || !retained || retained.schemaVersion !== EMBED_VERSION ||
-        !Array.isArray(retained.snapshots) || retained.snapshots.length < 1 || retained.snapshots.length > 2 ||
-        retained.snapshots.some((snapshot) =>
+    if (
+      sources !== undefined ||
+      !retained ||
+      retained.schemaVersion !== EMBED_VERSION ||
+      !Array.isArray(retained.snapshots) ||
+      retained.snapshots.length < 1 ||
+      retained.snapshots.length > 2 ||
+      retained.snapshots.some(
+        (snapshot) =>
           !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshot.id) ||
           !["cn", "jp"].includes(snapshot.region) ||
           !/^\d+\.\d+\.\d+$/.test(snapshot.version) ||
-          snapshot.catalog !== `/moly/snapshots/${snapshot.id}/catalog/index.json` ||
-          snapshot.assets !== (snapshot.packs ? "/moly/asset-store/" : `/moly/snapshots/${snapshot.id}/assets/`)))
-      throw new Error("Cannot reuse an unverified source-qualified publication");
+          snapshot.catalog !==
+            `/moly/snapshots/${snapshot.id}/catalog/index.json` ||
+          snapshot.assets !==
+            (snapshot.packs
+              ? "/moly/asset-store/"
+              : `/moly/snapshots/${snapshot.id}/assets/`),
+      )
+    )
+      throw new Error(
+        "Cannot reuse an unverified source-qualified publication",
+      );
     const regions = new Set();
     for (const snapshot of retained.snapshots) {
-      if (regions.has(snapshot.region)) throw new Error("Duplicate retained source region");
+      if (regions.has(snapshot.region))
+        throw new Error("Duplicate retained source region");
       regions.add(snapshot.region);
       const root = path.join(output, "snapshots", snapshot.id);
       const catalog = json(path.join(root, "catalog/index.json"));
-      if (catalog.schemaVersion !== 1 || catalog.snapshotId !== snapshot.id ||
-          catalog.region !== snapshot.region || catalog.version !== snapshot.version)
+      if (
+        catalog.schemaVersion !== 1 ||
+        catalog.snapshotId !== snapshot.id ||
+        catalog.region !== snapshot.region ||
+        catalog.version !== snapshot.version
+      )
         throw new Error("Retained catalog source mismatch");
       if (!snapshot.packs) {
         const fixture = json(path.join(root, "assets/mysekai-fixtures.json"));
-        if (fixture.region !== snapshot.region || fixture.gameVersion !== snapshot.version)
+        if (
+          fixture.region !== snapshot.region ||
+          fixture.gameVersion !== snapshot.version
+        )
           throw new Error("Retained asset source mismatch");
       }
     }
-  } else if (!Array.isArray(sources) || sources.length < 1 || sources.length > 5)
+  } else if (
+    !Array.isArray(sources) ||
+    sources.length < 1 ||
+    sources.length > 5
+  )
     throw new Error("Publish one to five explicit region snapshots");
   const sourceFingerprint = workspaceFingerprint(workspace);
   const files = new Map(),
@@ -302,7 +328,9 @@ export async function publish({
       ),
     ),
   );
-  const snapshots = reuseSnapshots ? retained.snapshots.map((snapshot) => ({ ...snapshot })) : [],
+  const snapshots = reuseSnapshots
+      ? retained.snapshots.map((snapshot) => ({ ...snapshot }))
+      : [],
     regions = new Set();
   for (const specification of sources ?? []) {
     const source = await resolveResourceSource(specification, {
@@ -536,6 +564,11 @@ export async function publish({
       id,
       region: source.region,
       version: catalog.version,
+      // Usability is decided here, where the catalogue, the fixture master and
+      // the assets were just read and checked against this snapshot identity.
+      // A server that only hands the manifest out cannot re-derive it without
+      // keeping its own copy of everything the browser fetches elsewhere.
+      available: true,
       assets: packed ? "/moly/asset-store/" : `${root}assets/`,
       ...(packed
         ? {

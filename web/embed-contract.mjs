@@ -184,10 +184,39 @@ export function isWeather(value) {
     ),
   );
 }
-export function sameOriginDirectory(value, base) {
-  const url = new URL(value, base);
+// An embedder may publish the immutable resource tree on one extra origin, a
+// public CDN. That value is a bare https authority and nothing else: resource
+// paths are appended to it verbatim, so a credential, path, query or fragment
+// here would make the appended address ambiguous. Such a value is refused, not
+// normalized.
+export function resourceOrigin(value) {
+  if (typeof value !== "string" || !/^https:\/\/[^/?#\\\s]+\/?$/i.test(value))
+    throw new TypeError("Expected a bare https resource origin");
+  const url = new URL(value);
   if (
-    url.origin !== new URL(base).origin ||
+    url.protocol !== "https:" ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  )
+    throw new TypeError("Expected a bare https resource origin");
+  return url.origin;
+}
+// The origins a resource directory may live on are a closed set, fixed before
+// the first request: the base's own origin, plus at most one explicitly
+// configured resource origin. Passing no origin keeps the single-origin rule
+// this contract has always had, which is why an embed that configures nothing
+// behaves exactly as before.
+export function resourceDirectory(value, base, origin = null) {
+  const url = new URL(value, base);
+  const admitted = new Set([new URL(base).origin]);
+  if (origin !== null && origin !== undefined && origin !== "")
+    admitted.add(resourceOrigin(origin));
+  if (
+    !admitted.has(url.origin) ||
     !["http:", "https:"].includes(url.protocol) ||
     url.username ||
     url.password ||
@@ -196,6 +225,13 @@ export function sameOriginDirectory(value, base) {
     !url.pathname.endsWith("/") ||
     /%2f|%5c|%00/i.test(url.pathname)
   )
-    throw new TypeError("Expected a same-origin directory");
+    throw new TypeError(
+      admitted.size > 1
+        ? "Expected a directory on the host or the configured resource origin"
+        : "Expected a same-origin directory",
+    );
   return url;
+}
+export function sameOriginDirectory(value, base) {
+  return resourceDirectory(value, base, null);
 }

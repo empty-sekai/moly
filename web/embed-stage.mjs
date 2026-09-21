@@ -8,7 +8,8 @@ import {
   isSnapshot,
   locale as checkedLocale,
   theme as checkedTheme,
-  sameOriginDirectory,
+  resourceDirectory,
+  resourceOrigin as checkedResourceOrigin,
   contentKey,
   MAX_PENDING_INTENTS,
 } from "./embed-contract.mjs";
@@ -40,6 +41,23 @@ export function mountStage(container, options = {}) {
     throw new Error("Moly must be served from the host origin");
   if (typeof options.assets !== "string" || !options.assets)
     throw new TypeError("An explicit source asset directory is required");
+  // The stage document itself must remain on the host origin: the trusted
+  // click is handed straight to it and the resource service worker only has
+  // scope over this origin. Only the immutable resources it downloads may live
+  // somewhere else, and only on the single origin the embedder names here.
+  // Everything else is refused rather than resolved against a default.
+  const configuredOrigin =
+    options.resourceOrigin === undefined ||
+    options.resourceOrigin === null ||
+    options.resourceOrigin === ""
+      ? null
+      : checkedResourceOrigin(options.resourceOrigin);
+  const assets = resourceDirectory(
+    options.assets,
+    location.href,
+    configuredOrigin,
+  );
+  const remoteAssets = assets.origin !== location.origin;
   if (
     options.snapshot !== undefined &&
     !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(options.snapshot)
@@ -64,12 +82,24 @@ export function mountStage(container, options = {}) {
   url.searchParams.set("embed", "1");
   url.searchParams.set("theme", ui.theme.mode);
   url.searchParams.set("locale", ui.locale);
-  if (options.assets)
-    url.searchParams.set(
-      "assets",
-      sameOriginDirectory(options.assets, location.href).pathname,
-    );
+  url.searchParams.set("assets", assets.pathname);
+  // Resources that are not same-origin travel as origin + path, never as one
+  // opaque URL, so the frame re-derives the same closed set instead of
+  // trusting a string. An embed that configures no resource origin sets no
+  // parameter at all and produces exactly the frame URL it always did, which
+  // is why this is not a protocol break: EMBED_VERSION stays 2. The frame is
+  // still version-locked to this module, since a release publishes embed.mjs
+  // and stage.html together under one release id.
+  if (remoteAssets) url.searchParams.set("resource_origin", assets.origin);
   applyPackSelection(url, options);
+  // A packed store is read through PackClient, whose root is pinned to the
+  // document origin, and the resource service worker admits only same-origin
+  // URLs. Refuse the combination at the boundary instead of letting it fail
+  // deep inside the prewarm with an unrelated message.
+  if (remoteAssets && url.searchParams.has("packs"))
+    throw new TypeError(
+      "A packed asset store cannot be served from a separate resource origin",
+    );
   if (options.snapshot) url.searchParams.set("snapshot", options.snapshot);
   if (!["cn", "jp", "tw", "en", "kr"].includes(options.region))
     throw new TypeError("An explicit supported resource region is required");

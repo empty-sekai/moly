@@ -197,6 +197,29 @@ if (
   const admission = new CacheAdmission(MAX_PENDING, MAX_ENTRY);
   const controlUrl = new URL("/moly/__retention", self.location.origin).href;
   const pinsUrl = new URL("/moly/__required", self.location.origin).href;
+  // Immutable resources may be published on one separately configured origin.
+  // The embedder seals it into this worker's script URL, so the fetch handler
+  // can admit it synchronously and a different origin simply registers a
+  // different worker. The control keys above stay on this origin.
+  const resourceBase = (() => {
+    const raw = new URL(self.location.href).searchParams.get("resource_origin");
+    if (!raw) return self.location.origin;
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      return self.location.origin;
+    }
+    return url.protocol === "https:" &&
+      url.hostname &&
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash
+      ? url.origin
+      : self.location.origin;
+  })();
   const required = new Set();
   const isRequired = (url) =>
     new URL(url).pathname.startsWith("/moly/releases/") || required.has(url);
@@ -209,7 +232,7 @@ if (
       const values = await pins.json();
       if (Array.isArray(values) && values.length <= 20000)
         for (const url of values)
-          if (resourceIdentity(url, self.location.origin)) required.add(url);
+          if (resourceIdentity(url, resourceBase)) required.add(url);
     }
   })().catch(() => {
     enabled = false;
@@ -315,7 +338,7 @@ if (
     const request = event.request;
     const identity =
       request.method === "GET" && !request.headers.has("Range")
-        ? resourceIdentity(request.url, self.location.origin)
+        ? resourceIdentity(request.url, resourceBase)
         : null;
     if (!identity) return;
     event.respondWith(
@@ -374,11 +397,7 @@ if (
         ) {
           try {
             const pack = await response.clone().json();
-            const urls = requiredResourceURLs(
-              pack,
-              identity.url,
-              self.location.origin,
-            );
+            const urls = requiredResourceURLs(pack, identity.url, resourceBase);
             if (required.size + urls.length <= 20000)
               for (const url of urls) {
                 if (!required.has(url)) {
