@@ -183,12 +183,14 @@ export async function publish({
   output,
   sources,
   reuseSnapshots = false,
+  reuseEngine = false,
   developmentLinks = false,
   packageRoot,
 }) {
   workspace = realpathSync(workspace);
   output = path.resolve(output);
-  packageRoot = realpathSync(packageRoot ?? path.join(workspace, "web/pkg"));
+  if (!reuseEngine)
+    packageRoot = realpathSync(packageRoot ?? path.join(workspace, "web/pkg"));
   if (inside(workspace, output) || path.basename(output) === "moly-deploy")
     throw new Error("Publish outside source repositories");
   const manifestPath = path.join(output, "manifest.json");
@@ -248,13 +250,36 @@ export async function publish({
     sources.length > 5
   )
     throw new Error("Publish one to five explicit region snapshots");
-  const sourceFingerprint = workspaceFingerprint(workspace);
+  // A shell-only release reuses an engine that was already published and
+  // verified, rather than rebuilding one: the reused bytes are checked against
+  // the integrity record of the release they come from, and the fingerprint
+  // recorded here stays the one that actually produced that engine.
+  const reusedId =
+    reuseEngine === true
+      ? (retained?.release?.id ?? null)
+      : reuseEngine || null;
+  if (reuseEngine && !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(reusedId ?? ""))
+    throw new Error("Cannot reuse an engine from an unnamed release");
+  const reusedRoot = reusedId ? path.join(output, "releases", reusedId) : null;
+  const reused = reusedRoot
+    ? json(path.join(reusedRoot, "integrity.json"))
+    : null;
+  if (
+    reused &&
+    (reused.schemaVersion !== 1 || reused.contractVersion !== EMBED_VERSION)
+  )
+    throw new Error("Cannot reuse an engine from an unreadable release");
+  const sourceFingerprint = reused
+    ? reused.sourceFingerprint
+    : workspaceFingerprint(workspace);
   const files = new Map(),
     engines = {};
   for (const relative of STAGE_FILES)
     files.set(relative, readFileSync(path.join(workspace, "web", relative)));
   for (const backend of ["webgpu", "webgl2"]) {
-    const directory = path.join(packageRoot, backend);
+    const directory = reused
+      ? path.join(reusedRoot, "pkg", backend)
+      : path.join(packageRoot, backend);
     const build = json(path.join(directory, "build.json"));
     if (
       build.schemaVersion !== 1 ||
@@ -262,13 +287,24 @@ export async function publish({
       build.sourceFingerprint !== sourceFingerprint
     )
       throw new Error(`Stale ${backend} build; run web/build-wasm.mjs`);
+    if (reused)
+      files.set(
+        `pkg/${backend}/build.json`,
+        readFileSync(path.join(directory, "build.json")),
+      );
     for (const name of ["moly-app.js", "moly-app_bg.wasm"]) {
       const original = readFileSync(path.join(directory, name));
-      if (sha256(original) !== build.files[name])
+      if (
+        reused
+          ? sha256(original) !== reused.hashes[`pkg/${backend}/${name}`]
+          : sha256(original) !== build.files[name]
+      )
         throw new Error(`Changed ${backend} output: ${name}`);
-      const bytes = name.endsWith(".wasm")
-        ? stripDebugNames(original)
-        : original;
+      // Published engine bytes already had their debug names stripped.
+      const bytes =
+        name.endsWith(".wasm") && !reused
+          ? stripDebugNames(original)
+          : original;
       if (name.endsWith(".wasm")) {
         const before = await WebAssembly.compile(original),
           after = await WebAssembly.compile(bytes);
@@ -304,7 +340,11 @@ export async function publish({
       }
       files.set(`pkg/${backend}/${name}`, bytes);
     }
-    files.set(`pkg/${backend}/build.json`, Buffer.from(JSON.stringify(build)));
+    if (!reused)
+      files.set(
+        `pkg/${backend}/build.json`,
+        Buffer.from(JSON.stringify(build)),
+      );
   }
   const hashes = Object.fromEntries(
     [...files].map(([name, bytes]) => [name, sha256(bytes)]),
