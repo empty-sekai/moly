@@ -3,7 +3,8 @@
 //! ComputePrewarmStartParameters 0xd8316c, GetTimeStep 0xd80a9c,
 //! Update1b 0xd7e108, Update1Incremental 0xd8aa00.
 //! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
-//! positive finite constant/two-constant lifetime, source flags=8 is qualified.
+//! positive finite constant/two-constant lifetime, source flags=8 and
+//! simulation speed 1 or 0.5 are qualified.
 
 #[derive(Clone, Copy, Debug)]
 pub enum Lifetime {
@@ -68,7 +69,7 @@ impl PrewarmPlan {
         }
         if !(play.duration.is_finite()
             && play.duration > 0.0
-            && play.simulation_speed.to_bits() == 1.0f32.to_bits())
+            && matches!(play.simulation_speed.to_bits(), 0x3f80_0000 | 0x3f00_0000))
         {
             return Err("unqualified duration or simulation speed");
         }
@@ -308,6 +309,41 @@ mod tests {
                 case.get("remaining").unwrap(),
                 true,
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "MOLY_CURRENT_PREWARM_LONG must identify current JP long-lifetime native receipt"]
+    fn current_native_half_speed_long_prewarm_matches_bits() {
+        let receipt = read("MOLY_CURRENT_PREWARM_LONG");
+        assert_eq!(
+            receipt.get("sourceSha256").unwrap().as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        let compute = receipt.get("computeHalfSpeed").unwrap();
+        assert_eq!(compute.get("valid").unwrap().as_bool(), Some(true));
+        assert_eq!(number(compute.get("warmupSeconds").unwrap()).to_bits(), 130.0f32.to_bits());
+        let timestep = receipt.get("timeStepHalfSpeed").unwrap();
+        let observed = number(timestep.get("result").unwrap());
+        let source = receipt.get("sourceDerived130").unwrap();
+        assert_eq!(observed.to_bits(), number(source.get("stepArgument").unwrap()).to_bits());
+        let plan = PrewarmPlan::from_source(
+            Lifetime::TwoConstants { min: 65.0, max: 35.0 },
+            time(),
+            PlayState { simulation_speed: 0.5, ..initial_play() },
+        ).unwrap();
+        assert_eq!(plan.base_step().to_bits(), observed.to_bits());
+        compare(plan, source.get("slices").unwrap().as_array().unwrap(),
+            source.get("remaining").unwrap(), true);
+        for case in receipt.get("cases").unwrap().as_array().unwrap() {
+            let plan = PrewarmPlan::from_incremental_input(
+                number(case.get("total").unwrap()),
+                number(case.get("stepArgument").unwrap()),
+                8,
+                1.0,
+            ).unwrap();
+            compare(plan, case.get("slices").unwrap().as_array().unwrap(),
+                case.get("remaining").unwrap(), true);
         }
     }
 
