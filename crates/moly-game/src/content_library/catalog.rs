@@ -495,12 +495,13 @@ fn parse_thumbnails(value: &Value, catalog: &mut LibraryCatalog) {
 pub(crate) fn build_talk_catalog(
     store: Option<Res<PlayerTalkStore>>,
     fixtures: Option<Res<TalkStore>>,
+    activities: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
     mut catalog: ResMut<LibraryCatalog>,
 ) {
     if catalog.talks_ready || !catalog.source_ready {
         return;
     }
-    let (Some(store), Some(fixtures)) = (store, fixtures) else {
+    let (Some(store), Some(fixtures), Some(activities)) = (store, fixtures, activities) else {
         return;
     };
     let mut talks = Vec::new();
@@ -547,7 +548,7 @@ pub(crate) fn build_talk_catalog(
                 fixture_ids,
                 lines,
                 related,
-                false,
+                activities.has_talk_timeline(row.talk_id),
                 &catalog,
                 &row.tweet,
             ));
@@ -576,7 +577,8 @@ pub(crate) fn build_talk_catalog(
             .map(|unit| catalog.character(*unit))
             .unwrap_or_else(|| "旁白".into());
         let lines = fixture_lines(&row.steps, &fallback, &row.tweet.text);
-        let drives = row.steps.iter().any(is_fixture_operation);
+        let drives = activities.has_talk_timeline(row.talk_id)
+            || row.steps.iter().any(is_fixture_operation);
         // A backend filename is not a semantic category. Actual bindings and
         // operations, not the fixture-script representation alone, imply it.
         let related = !fixture_ids.is_empty() || drives;
@@ -717,11 +719,7 @@ fn fixture_step_id(step: &FixtureStep) -> Option<i32> {
 fn is_fixture_operation(step: &FixtureStep) -> bool {
     matches!(
         step,
-        FixtureStep::FixtureVoice { .. }
-            | FixtureStep::ChangeFixtureCharacterEye { .. }
-            | FixtureStep::ChangeFixtureCharacterMouth { .. }
-            | FixtureStep::ChangeFixtureTimeline { .. }
-            | FixtureStep::ShowFixtureEmoticon { .. }
+        FixtureStep::ChangeFixtureTimeline { .. }
             | FixtureStep::PlayFixtureGimmick { .. }
             | FixtureStep::StopFixtureGimmick { .. }
     )

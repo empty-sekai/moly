@@ -714,6 +714,9 @@ pub(crate) fn publish(
     catalogue: Option<Res<crate::weather::PhenomenonCatalogue>>,
     weather_transition: Option<Res<crate::weather_transition::WeatherTransition>>,
     server: Res<AssetServer>,
+    mut audio_startup: Option<ResMut<crate::audio_startup::BrowserAudioStartup>>,
+    preview: Option<Res<staging::ScenePreview>>,
+    staged: Query<(&Transform, &GlobalTransform)>,
 ) {
     if !state.external_ui {
         return;
@@ -725,11 +728,19 @@ pub(crate) fn publish(
         && layouts
             .as_deref()
             .is_some_and(|layouts| layouts.ready("Talk", &server));
-    let scene_ready = site_ready.is_some()
+    let mut scene_ready = site_ready.is_some()
         && site_materials.is_some()
         && !player_visual.is_empty()
         && world.actors.values().all(|ready| *ready)
         && text_ready;
+    if let Some(startup) = audio_startup.as_mut() {
+        // A requested independent scene must finish its own real staging before
+        // its audio or script starts; readiness of the empty base is not enough.
+        startup.prepared = scene_ready && state.pending.as_ref().is_none_or(|choice| {
+            preview.as_ref().is_some_and(|preview| preview.ready(choice, &staged))
+        });
+        scene_ready &= startup.released();
+    }
     // 天气档位进戳：宿主画的那颗钮读同一份投影，切档必须重发一页，否则
     // 「档位变了但页面没变」会一直停在旧值上。
     let weather_id = phenomenon

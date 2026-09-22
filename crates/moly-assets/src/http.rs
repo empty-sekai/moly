@@ -6,8 +6,8 @@ use std::sync::Arc;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    AbortController, ReadableStreamDefaultReader, Request, RequestInit, RequestMode,
-    RequestRedirect, Response,
+    AbortController, ReadableStreamDefaultReader, Request, RequestCredentials, RequestInit,
+    RequestMode, RequestRedirect, Response,
 };
 
 fn error(message: impl Into<String>) -> AssetReaderError {
@@ -82,7 +82,10 @@ async fn response(root: &str, path: &str) -> Result<(RequestGuard, Response), As
     let guard = RequestGuard::new()?;
     let url = format!("{root}{}", crate::http_path::encode_path(path));
     let init = RequestInit::new();
-    init.set_mode(RequestMode::SameOrigin);
+    // Root admission is owned by moly-app. Public assets may use the exact
+    // configured CDN; cookies and authorization never accompany asset reads.
+    init.set_mode(RequestMode::Cors);
+    init.set_credentials(RequestCredentials::Omit);
     init.set_redirect(RequestRedirect::Error);
     init.set_signal(Some(&guard.controller.signal()));
     let request = Request::new_with_str_and_init(&url, &init)

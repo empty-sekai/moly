@@ -2,7 +2,9 @@
 //! The existing areas loader supplies the document once; no second IO path.
 
 use bevy::prelude::*;
-use moly_law::fixture::areas::{GridAreaData, rotated_center_grid};
+use moly_assets::player_data::mirror_fixture_layout;
+use moly_law::fixture::areas::{rotated_center_grid, GridAreaData};
+use moly_law::fixture::GridPosition;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -53,15 +55,21 @@ impl NpcFixtureAreas {
         floor: &FixtureFloorTiles,
     ) -> Result<bool, String> {
         let mut motion = self.row(&row.package)?.0.clone();
-        motion.rotate(row.direction, true);
+        let (source_center, source_direction, _) = mirror_fixture_layout(
+            row.layout_center,
+            row.layout_grid_size,
+            row.direction,
+            row.layout,
+        )?;
+        motion.rotate(source_direction, true);
         // FixtureManager first collects the other fixtures through the floor
         // grid cells of UpdateMotionAreaBoundList. Rugs do not become floor
         // obstacles merely because their renderer covers the same XZ.
         let bound_center =
-            rotated_center_grid(row.layout_center, row.layout_grid_size, row.direction);
+            rotated_center_grid(source_center, row.layout_grid_size, source_direction);
         let mut candidates = HashSet::new();
         for cell in &motion.enable_tiles {
-            match floor.tile_at_grid(bound_center + *cell) {
+            match floor.tile_at_grid(reflect_cell(bound_center + *cell)) {
                 FixtureTileKnowledge::Occupied(uid) if uid != row.uid => {
                     candidates.insert(uid);
                 }
@@ -82,17 +90,23 @@ impl NpcFixtureAreas {
                 return Err(format!("motion-area occupant {uid} is ambiguous"));
             }
             let mut add = self.row(&other.package)?.1.clone();
-            add.rotate(other.direction, true);
+            let (other_center, other_direction, _) = mirror_fixture_layout(
+                other.layout_center,
+                other.layout_grid_size,
+                other.direction,
+                other.layout,
+            )?;
+            add.rotate(other_direction, true);
             let add_center =
-                rotated_center_grid(other.layout_center, other.layout_grid_size, other.direction);
+                rotated_center_grid(other_center, other.layout_grid_size, other_direction);
             for cell in &motion.enable_tiles {
-                let position = row.layout_center + *cell;
+                let position = reflect_cell(source_center + *cell);
                 let in_box = other.min.x <= position.x
                     && position.x <= other.max.x
                     && other.min.z <= position.z
                     && position.z <= other.max.z;
                 let in_add = add.enable_tiles.iter().any(|cell| {
-                    let point = add_center + *cell;
+                    let point = reflect_cell(add_center + *cell);
                     point.x == position.x && point.z == position.z
                 });
                 if in_box || in_add {
@@ -102,6 +116,12 @@ impl NpcFixtureAreas {
         }
         Ok(false)
     }
+}
+
+// Native area laws use the source layout anchor, then occupied cells cross the
+// same X boundary as the imported footprint. This maps the entire i8 domain.
+fn reflect_cell(cell: GridPosition) -> GridPosition {
+    GridPosition::new((-i16::from(cell.x) - 1) as i8, cell.y, cell.z)
 }
 
 fn parse_grid(row: &Value, key: &str) -> Result<GridAreaData, String> {
@@ -143,4 +163,3 @@ fn parse_grid(row: &Value, key: &str) -> Result<GridAreaData, String> {
         parsed[r * cols + c]
     }))
 }
-

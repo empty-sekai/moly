@@ -19,6 +19,9 @@ import {
 } from "node:zlib";
 import { contentKey, EMBED_VERSION } from "./embed-contract.mjs";
 import { workspaceFingerprint, sha256 } from "./build-source.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { COORDINATE_CONTRACT, requireCoordinateContract, validateCoordinatePair } from "./coordinate-contract.mjs";
+import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
 
 export const STAGE_FILES = [
   "embed.mjs",
@@ -28,6 +31,7 @@ export const STAGE_FILES = [
   "stage.html",
   "stage.mjs",
   "base-resources.mjs",
+  "coordinate-contract.mjs",
   "asset-pack-client.mjs",
   "stage.css",
   "stage-controller.mjs",
@@ -40,6 +44,95 @@ export const STAGE_FILES = [
   "boot.mjs",
 ];
 const MAGIC = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+const PORTRAIT_MIGRATION_BASELINE = "f79162417628b26ec54155f698a4f197d27c6fcb";
+const COORDINATE_METADATA_ADDITIONS = [
+  "asset.extras.coordinateContract", "asset.extras.coordinateUnits",
+  "sceneRoots[].extras.coordinateContract", "sceneRoots[].extras.coordinateUnits",
+];
+
+function portraitGlb(bytes) {
+  if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF" ||
+      bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length ||
+      bytes.toString("ascii", 16, 20) !== "JSON")
+    throw new Error("Invalid portrait migration GLB");
+  const end = 20 + bytes.readUInt32LE(12);
+  if (end > bytes.length || end % 4) throw new Error("Truncated portrait migration GLB");
+  let offset = end;
+  while (offset < bytes.length) {
+    if (offset + 8 > bytes.length) throw new Error("Truncated portrait GLB chunk");
+    const length = bytes.readUInt32LE(offset);
+    if (length % 4 || offset + 8 + length > bytes.length ||
+        bytes.toString("ascii", offset + 4, offset + 8) === "JSON")
+      throw new Error("Invalid portrait GLB binary chunk");
+    offset += 8 + length;
+  }
+  return { document: JSON.parse(bytes.subarray(20, end)), tail: bytes.subarray(end) };
+}
+
+/** Only metadata-only migration of the exact captured character may reuse a portrait.
+ * The original bytes are required; receipt declarations alone are not evidence.
+ * No capture facts or image bytes are rewritten, and the original model hash stays.
+ */
+export function verifyPortraitCoordinateMigration({ photo, currentBytes, originalBytes, receiptBytes }) {
+  const fail = () => { throw new Error(`Unverified portrait coordinate migration: ${photo.model}`); };
+  if (!/^sd_\d+\.glb$/.test(photo.model)) fail();
+  const receipt = JSON.parse(receiptBytes);
+  const rows = receipt.files?.filter(row => row.path === photo.model);
+  const row = rows?.length === 1 ? rows[0] : null;
+  const originalHash = sha256(originalBytes), currentHash = sha256(currentBytes);
+  const captureHash = photo.originalModelSha256 ?? photo.modelSha256;
+  const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (receipt.coordinateContract !== COORDINATE_CONTRACT ||
+      receipt.baselineCommit !== PORTRAIT_MIGRATION_BASELINE ||
+      receipt.status !== "complete" || receipt.verifiedMetadataOnly !== true ||
+      !row || row.family !== "character" || row.generator !== "moly-root character extractor" ||
+      row.sourceSha256 !== originalHash || row.outputSha256 !== currentHash ||
+      captureHash !== originalHash ||
+      row.machineCheck?.originalJsonPreserved !== true ||
+      row.machineCheck?.binaryChunksPreserved !== true ||
+      !isDeepStrictEqual(row.machineCheck?.addedMetadata, COORDINATE_METADATA_ADDITIONS) ||
+      !digest(row.originalJsonSha256) ||
+      row.originalJsonSha256 !== row.outputJsonWithoutAddedMetadataSha256) fail();
+
+  const original = portraitGlb(originalBytes), current = portraitGlb(currentBytes);
+  if (original.document.asset?.generator !== row.generator ||
+      original.document.asset?.extras?.coordinates !== "unity x-axis reflected" ||
+      !original.tail.equals(current.tail) ||
+      row.binaryChunksSha256 !== sha256(original.tail) ||
+      row.outputBinaryChunksSha256 !== sha256(current.tail)) fail();
+  const restored = structuredClone(current.document);
+  const indices = new Set(original.document.scenes?.flatMap(scene => scene.nodes ?? []) ?? []);
+  const pairs = [[original.document.asset, restored.asset],
+    ...Array.from(indices, index => [original.document.nodes?.[index], restored.nodes?.[index]])];
+  for (const [before, after] of pairs) {
+    if (!before || !after || !after.extras ||
+        after.extras.coordinateContract !== COORDINATE_CONTRACT ||
+        after.extras.coordinateUnits !== "source-unity-unit") fail();
+    for (const key of ["coordinateContract", "coordinateUnits"])
+      if (!Object.hasOwn(before.extras ?? {}, key)) delete after.extras[key];
+    if (!Object.hasOwn(before, "extras") && Object.keys(after.extras).length === 0) delete after.extras;
+  }
+  // Exact original JSON (including arbitrary extras, animations and materials)
+  // and every non-JSON chunk must be preserved. Only the four named additions
+  // above are removed for comparison; no recursive metadata stripping occurs.
+  if (!isDeepStrictEqual(original.document, restored)) fail();
+  const proof = {
+    kind: "verified-coordinate-metadata-only-v1",
+    coordinateContract: COORDINATE_CONTRACT,
+    receiptSha256: sha256(receiptBytes),
+    baselineCommit: receipt.baselineCommit,
+    sourceSha256: originalHash,
+    outputSha256: currentHash,
+    binaryChunksSha256: sha256(current.tail),
+    originalJsonPreserved: true,
+    binaryChunksPreserved: true,
+    addedMetadata: COORDINATE_METADATA_ADDITIONS,
+  };
+  if (photo.originalModelSha256 !== undefined &&
+      (photo.modelSha256 !== currentHash || !isDeepStrictEqual(photo.modelMigration, proof))) fail();
+  if (photo.modelMigration !== undefined && photo.originalModelSha256 === undefined) fail();
+  return { ...photo, originalModelSha256: originalHash, modelSha256: currentHash, modelMigration: proof };
+}
 
 function leb(bytes, offset) {
   let value = 0,
@@ -198,72 +291,53 @@ export async function publish({
   if (retained && retained.publisher !== "moly-release-artifact-v1")
     throw new Error("Output contains an unrelated manifest");
   if (reuseSnapshots) {
-    if (
-      sources !== undefined ||
-      !retained ||
-      retained.schemaVersion !== EMBED_VERSION ||
-      !Array.isArray(retained.snapshots) ||
-      retained.snapshots.length < 1 ||
-      retained.snapshots.length > 2 ||
-      retained.snapshots.some(
-        (snapshot) =>
+    if (sources !== undefined || !retained || retained.schemaVersion !== EMBED_VERSION ||
+        !Array.isArray(retained.snapshots) || retained.snapshots.length < 1 || retained.snapshots.length > 2 ||
+        retained.snapshots.some((snapshot) =>
           !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshot.id) ||
           !["cn", "jp"].includes(snapshot.region) ||
           !/^\d+\.\d+\.\d+$/.test(snapshot.version) ||
-          snapshot.catalog !==
-            `/moly/snapshots/${snapshot.id}/catalog/index.json` ||
-          snapshot.assets !==
-            (snapshot.packs
-              ? "/moly/asset-store/"
-              : `/moly/snapshots/${snapshot.id}/assets/`),
-      )
-    )
-      throw new Error(
-        "Cannot reuse an unverified source-qualified publication",
-      );
+          snapshot.catalog !== `/moly/snapshots/${snapshot.id}/catalog/index.json` ||
+          snapshot.assets !== (snapshot.packs ? "/moly/asset-store/" : `/moly/snapshots/${snapshot.id}/assets/`)))
+      throw new Error("Cannot reuse an unverified source-qualified publication");
     const regions = new Set();
     for (const snapshot of retained.snapshots) {
-      if (regions.has(snapshot.region))
-        throw new Error("Duplicate retained source region");
+      validateCoordinatePair(retained.release, snapshot);
+      if (regions.has(snapshot.region)) throw new Error("Duplicate retained source region");
       regions.add(snapshot.region);
       const root = path.join(output, "snapshots", snapshot.id);
+      const descriptor = json(path.join(root, "snapshot.json"));
+      validateCoordinatePair(retained.release, descriptor);
+      if (!isDeepStrictEqual(descriptor, snapshot)) throw new Error("Retained coordinate descriptor differs from manifest");
       const catalog = json(path.join(root, "catalog/index.json"));
-      if (
-        catalog.schemaVersion !== 1 ||
-        catalog.snapshotId !== snapshot.id ||
-        catalog.region !== snapshot.region ||
-        catalog.version !== snapshot.version
-      )
+      if (catalog.schemaVersion !== 1 || catalog.snapshotId !== snapshot.id ||
+          catalog.region !== snapshot.region || catalog.version !== snapshot.version)
         throw new Error("Retained catalog source mismatch");
       if (!snapshot.packs) {
         const fixture = json(path.join(root, "assets/mysekai-fixtures.json"));
-        if (
-          fixture.region !== snapshot.region ||
-          fixture.gameVersion !== snapshot.version
-        )
+        if (fixture.region !== snapshot.region || fixture.gameVersion !== snapshot.version)
           throw new Error("Retained asset source mismatch");
+        const checked = validatePublicationCoordinates(path.join(root, "assets"), { region: snapshot.region, version: snapshot.version });
+        if (!isDeepStrictEqual(checked.coordinateDocuments, snapshot.provenance.coordinateDocuments) || !isDeepStrictEqual(checked.coordinateModels, snapshot.provenance.coordinateModels))
+          throw new Error("Retained coordinate evidence changed");
       }
     }
-  } else if (
-    !Array.isArray(sources) ||
-    sources.length < 1 ||
-    sources.length > 5
-  )
+  } else if (!Array.isArray(sources) || sources.length < 1 || sources.length > 5)
     throw new Error("Publish one to five explicit region snapshots");
   // A shell-only release reuses an engine that was already published and
   // verified, rather than rebuilding one: the reused bytes are checked against
   // the integrity record of the release they come from, and the fingerprint
   // recorded here stays the one that actually produced that engine.
   const reusedId =
-    reuseEngine === true
-      ? (retained?.release?.id ?? null)
-      : reuseEngine || null;
+    reuseEngine === true ? (retained?.release?.id ?? null) : reuseEngine || null;
   if (reuseEngine && !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(reusedId ?? ""))
     throw new Error("Cannot reuse an engine from an unnamed release");
   const reusedRoot = reusedId ? path.join(output, "releases", reusedId) : null;
   const reused = reusedRoot
     ? json(path.join(reusedRoot, "integrity.json"))
     : null;
+  if (reused) requireCoordinateContract(reused, "reused engine");
+  if (reused && reused.releaseId !== reusedId) throw new Error("Reused coordinate engine identity mismatch");
   if (
     reused &&
     (reused.schemaVersion !== 1 || reused.contractVersion !== EMBED_VERSION)
@@ -287,11 +361,6 @@ export async function publish({
       build.sourceFingerprint !== sourceFingerprint
     )
       throw new Error(`Stale ${backend} build; run web/build-wasm.mjs`);
-    if (reused)
-      files.set(
-        `pkg/${backend}/build.json`,
-        readFileSync(path.join(directory, "build.json")),
-      );
     for (const name of ["moly-app.js", "moly-app_bg.wasm"]) {
       const original = readFileSync(path.join(directory, name));
       if (
@@ -340,11 +409,12 @@ export async function publish({
       }
       files.set(`pkg/${backend}/${name}`, bytes);
     }
-    if (!reused)
-      files.set(
-        `pkg/${backend}/build.json`,
-        Buffer.from(JSON.stringify(build)),
-      );
+    files.set(
+      `pkg/${backend}/build.json`,
+      reused
+        ? readFileSync(path.join(directory, "build.json"))
+        : Buffer.from(JSON.stringify(build)),
+    );
   }
   const hashes = Object.fromEntries(
     [...files].map(([name, bytes]) => [name, sha256(bytes)]),
@@ -359,7 +429,9 @@ export async function publish({
       JSON.stringify(
         {
           schemaVersion: 1,
+          releaseId,
           contractVersion: EMBED_VERSION,
+          coordinateContract: COORDINATE_CONTRACT,
           sourceFingerprint,
           hashes,
         },
@@ -368,9 +440,7 @@ export async function publish({
       ),
     ),
   );
-  const snapshots = reuseSnapshots
-      ? retained.snapshots.map((snapshot) => ({ ...snapshot }))
-      : [],
+  const snapshots = reuseSnapshots ? retained.snapshots.map((snapshot) => ({ ...snapshot })) : [],
     regions = new Set();
   for (const specification of sources ?? []) {
     const source = await resolveResourceSource(specification, {
@@ -400,6 +470,7 @@ export async function publish({
       : {};
     if (provenance.source?.region && provenance.source.region !== source.region)
       throw new Error("Source manifest region mismatch");
+    const coordinateEvidence = validatePublicationCoordinates(assets, { region: source.region, version: catalog.version });
     const controllerIndexBytes = readFileSync(
       path.join(assets, "fixture-gimmick/browser-index.json"),
     );
@@ -469,6 +540,9 @@ export async function publish({
       if (portraitBytes.length > 262144)
         throw new Error("Portrait index is too large");
       const photos = JSON.parse(portraitBytes);
+      let migratedPortraits = false;
+      let migrationReceipt;
+      let originalModels;
       const entities = new Set(
         json(path.join(assets, "manifest.json")).units.map(
           (row) => Number(row.unit) - 100,
@@ -484,7 +558,8 @@ export async function publish({
         photos.portraits.length !== entities.size
       )
         throw new Error("Incomplete source-rendered portrait set");
-      for (const photo of photos.portraits) {
+      for (let photoIndex = 0; photoIndex < photos.portraits.length; photoIndex++) {
+        let photo = photos.portraits[photoIndex];
         if (
           !entities.delete(photo.unit) ||
           photo.file !== `unit-${photo.unit}.png` ||
@@ -510,13 +585,26 @@ export async function publish({
         )
           throw new Error("Portrait must be a real 512 x 512 RGBA PNG");
         if (photos.generator === "moly-root-chara-head-v1") {
+          const currentModel = readFileSync(path.join(assets, photo.model));
+          if (photo.modelSha256 !== sha256(currentModel) ||
+              photo.originalModelSha256 !== undefined || photo.modelMigration !== undefined) {
+            if (!source.portraitModelOriginals)
+              throw new Error("Portrait model changed; explicit portraitModelOriginals required for metadata-only proof");
+            originalModels ??= realpathSync(source.portraitModelOriginals);
+            const originalPath = realpathSync(path.join(originalModels, photo.model));
+            if (!inside(originalModels, originalPath)) throw new Error("Original portrait model escaped its source folder");
+            migrationReceipt ??= readFileSync(path.join(assets, "coordinate-migration-receipt.json"));
+            photo = verifyPortraitCoordinateMigration({ photo, currentBytes: currentModel,
+              originalBytes: readFileSync(originalPath), receiptBytes: migrationReceipt });
+            photos.portraits[photoIndex] = photo;
+            migratedPortraits = true;
+          }
           if (
             photos.preset?.bodyGeometry !== false ||
             photo.capture?.mode !== "head-only" ||
             photo.headBoundaryPixels !== 0 ||
             photo.sha256 !== sha256(bytes) ||
-            photo.modelSha256 !==
-              sha256(readFileSync(path.join(assets, photo.model))) ||
+            photo.modelSha256 !== sha256(currentModel) ||
             photo.rigSha256 !==
               sha256(readFileSync(path.join(assets, photo.rig)))
           )
@@ -528,6 +616,10 @@ export async function publish({
       }
       if (entities.size)
         throw new Error("Source SD entities are missing portraits");
+      if (migratedPortraits) {
+        portraitBytes = Buffer.from(JSON.stringify(photos, null, 2) + "\n");
+        if (portraitBytes.length > 262144) throw new Error("Migrated portrait index is too large");
+      }
     }
     const packed =
       source.assetCatalog !== undefined
@@ -543,6 +635,7 @@ export async function publish({
         "mysekai-fixtures.json",
         "manifest.json",
         "fixture-gimmick/browser-index.json",
+        "source.json", "fixture-models/index.json", "fixture-attach/attach-points.json",
       ])
         if (!packed.entries.has(required))
           throw new Error(
@@ -564,7 +657,7 @@ export async function publish({
           ]),
         )
       : "";
-    const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
+    const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
     const directory = path.join(output, "snapshots", id);
     const { files: catalogFiles } = splitCatalog(catalog, id);
     for (const [name, bytes] of catalogFiles)
@@ -602,13 +695,12 @@ export async function publish({
     const root = `/moly/snapshots/${id}/`;
     snapshots.push({
       id,
+      coordinateContract: COORDINATE_CONTRACT,
+      // This publisher has verified source identity and closure. The CDN
+      // manifest is consumed directly by the host, without a Go annotation.
+      available: true,
       region: source.region,
       version: catalog.version,
-      // Usability is decided here, where the catalogue, the fixture master and
-      // the assets were just read and checked against this snapshot identity.
-      // A server that only hands the manifest out cannot re-derive it without
-      // keeping its own copy of everything the browser fetches elsewhere.
-      available: true,
       assets: packed ? "/moly/asset-store/" : `${root}assets/`,
       ...(packed
         ? {
@@ -619,6 +711,7 @@ export async function publish({
         : {}),
       catalog: `${root}catalog/index.json`,
       provenance: {
+        ...coordinateEvidence,
         resourceProvider: source.provider,
         ...(portraitDigest ? { portraitsSha256: portraitDigest } : {}),
         ...(source.resourceIndexSha256
@@ -696,6 +789,7 @@ export async function publish({
       module: `/moly/releases/${releaseId}/embed.mjs`,
       stage: `/moly/releases/${releaseId}/stage.html`,
       contractVersion: EMBED_VERSION,
+      coordinateContract: COORDINATE_CONTRACT,
       engines,
     },
     snapshots,

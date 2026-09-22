@@ -299,7 +299,11 @@ pub(crate) fn observe_start(
             .is_some_and(|session| session.talk_id() == id),
         EntryKey::Talk(TalkBackend::Fixture, id) => pair_session
             .as_ref()
-            .is_some_and(|session| session.talk_id() == id && session.body_ready()),
+            // Body admission starts playback; the same owner stays active
+            // while its window is closed and the authored ending still runs.
+            .is_some_and(|session| {
+                session.talk_id() == id && (active.started || session.body_ready())
+            }),
         EntryKey::Fixture(_) => {
             effect_running
                 || active.choice.target.as_ref().is_some_and(|chosen| {
@@ -358,7 +362,13 @@ pub(crate) fn observe_start(
             state.status = "播放中".into();
             state.changed();
             info!("[content-library] started {:?}", active.choice.key);
-        } else if active.elapsed >= 20. {
+        } else if active.elapsed >= 20.
+            && !matches!(active.choice.key, EntryKey::Talk(TalkBackend::Fixture, id)
+                if pair_session.as_ref().is_some_and(|session| session.talk_id() == id))
+        {
+            // Once the exact fixture talk owns its preparation, that owner
+            // times loading, navigation and the authored pre-action. A second
+            // 20-second admission clock must not cancel a healthy long start.
             cancel.write(TalkCancelRequest);
             fixtures.write(PlayerFixtureRequest::Cancel(
                 PlayerFixtureCancelReason::User,

@@ -53,7 +53,7 @@ pub(crate) use context::refresh_context;
 pub(crate) use input::input;
 pub(crate) use playback::{dispatch, observe_start, reap_preview_owners};
 pub(crate) use qa::qa_open;
-pub(crate) use staging::{prepare_pending, retire_scene};
+pub(crate) use staging::{stage_fixture_talk_observer, prepare_pending, retire_scene};
 pub(crate) use view::{refresh, setup};
 
 const FONT: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
@@ -433,9 +433,7 @@ impl ContentLibrary {
         self.blocks_world_input()
     }
     pub(crate) fn blocks_camera_input(&self) -> bool {
-        if self.active.as_ref().is_some_and(|active| {
-            active.started && matches!(active.choice.key, EntryKey::Talk(_, _))
-        }) {
+        if self.active.is_some() {
             return ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
                 || self.external_input_capture
                 || self.release_guard != 0
@@ -443,6 +441,11 @@ impl ContentLibrary {
                 || self.pending.is_some();
         }
         self.blocks_exploration_input()
+    }
+    /// Camera-only inspection is available during loading/pre-actions too;
+    /// it never grants movement, picking, layout edits or conversation clicks.
+    pub(crate) fn playback_camera_active(&self) -> bool {
+        self.active.is_some() && !self.blocks_camera_input()
     }
     pub(crate) fn blocks_talk_input(&self) -> bool {
         ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
@@ -733,6 +736,58 @@ fn human_reason(reason: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn camera_playback(key: EntryKey, started: bool) -> ContentLibrary {
+        let mut state = ContentLibrary::default();
+        state.scene_owned = true;
+        state.active = Some(ActiveChoice {
+            choice: PlaybackChoice {
+                preview: false, key, target: None, ticket: 1,
+                mode: ExperienceMode::Independent,
+            },
+            title: String::new(), started, completed: false, elapsed: 0.,
+            effect_owner: None, static_view: false,
+        });
+        state
+    }
+    #[test]
+    fn every_playback_phase_allows_only_camera_inspection() {
+        use crate::fixture_activity_data::{ActivityKey, ActivityOrigin};
+        for key in [
+            EntryKey::Fixture(1),
+            EntryKey::Talk(TalkBackend::Fixture, 1),
+            EntryKey::Talk(TalkBackend::General, 1),
+            EntryKey::Activity(ActivityKey { origin: ActivityOrigin::NoTalk(1), timeline_id: 1 }),
+        ] {
+            for started in [false, true] {
+                let state = camera_playback(key, started);
+                assert!(!state.blocks_camera_input());
+                assert!(state.playback_camera_active());
+                assert!(state.blocks_world_input());
+            }
+        }
+    }
+    #[test]
+    fn camera_inspection_respects_ui_and_replacement_guards() {
+        for gate in 0..6 {
+            let mut state = camera_playback(EntryKey::Fixture(1), false);
+            match gate {
+                0 => state.open = true,
+                1 => state.fixture_dialog = Some(1),
+                2 => state.external_input_capture = true,
+                3 => state.release_guard = 1,
+                4 => state.stopping = true,
+                _ => state.pending = Some(state.active.as_ref().unwrap().choice.clone()),
+            }
+            assert!(state.blocks_camera_input());
+            assert!(!state.playback_camera_active());
+        }
+        let mut state = camera_playback(EntryKey::Fixture(1), false);
+        state.external_ui = true;
+        state.open = true;
+        assert!(state.playback_camera_active());
+        state.external_input_capture = true;
+        assert!(!state.playback_camera_active());
+    }
     #[test]
     fn unicode_excerpt_is_safe() {
         assert_eq!(excerpt("你好，Moly 世界", 6), "你好，Mo…");

@@ -24,6 +24,7 @@ mod read_limits;
 pub mod scene_state;
 pub mod sidecar;
 pub mod source_navigation;
+pub mod coordinates;
 pub mod ui_layout;
 
 use bevy::app::App;

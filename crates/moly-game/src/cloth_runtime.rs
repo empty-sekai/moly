@@ -46,7 +46,7 @@
 //!
 //! 风：律已具名「无风」——rig 的风参数在、风源不在，本层不造风。
 
-use crate::character::{CharacterModel, CharacterPack, MotionDriver};
+use crate::character::{CharacterModel, CharacterPack, CharacterRestTransform, MotionDriver};
 use crate::npc::CharacterUnitId;
 use bevy::asset::{Assets, LoadState};
 use bevy::math::Affine3A;
@@ -70,8 +70,9 @@ pub const REPORT_PERIOD: Duration = Duration::from_secs(2);
 
 /// 同名消歧的世界位容差（米）。档案为每个绑定点存了提取器绑定的那个
 /// 实例的绑定姿态世界位（链骨 `vertices.worldPosition`、碰撞体
-/// `boneWorld.position`），装配帧场景停在绑定姿态（链骨未被写过、
-/// 动画未起帧），候选实体的合成世界位与档案值逐值比：差只许是浮点
+/// `boneWorld.position`）。rig 可晚于模型到达，装配时动画可能已经起播；
+/// 必须合成 CharacterRestTransform 中保存的导入姿态，不能读当前动画姿态。
+/// 候选实体的合成绑定世界位与档案值逐值比：差只许是浮点
 /// 圆整（全批档案实测最大 1.76e-7），容差放在圆整噪声之上四个数量级、
 /// 在相邻骨间距（厘米级）之下两个数量级。恰一命中才收，零命中或多命中
 /// 都响亮失败——不猜。
@@ -320,6 +321,7 @@ pub fn plan_when_wired(
     models: Query<&CharacterModel>,
     names: Query<&Name>,
     transforms: Query<&Transform>,
+    imported: Query<&CharacterRestTransform>,
 ) {
     for (npc, unit, pack) in &npcs {
         match server.load_state(&pack.rig) {
@@ -389,11 +391,21 @@ pub fn plan_when_wired(
             }
             panic!("unit {} 的场景树过深：路径上溯没有回到成员实体", unit.0);
         };
-        // 按名绑骨：名字唯一即收；同名多实体时逐一合成候选的世界位
-        // （装配帧即绑定姿态），与档案为这个绑定点存的世界位比，恰一
+        // 按名绑骨：名字唯一即收；同名多实体时逐一合成候选的绑定世界位，
+        // 不使用可能已经播放待机动作的当前姿态。与档案的世界位比，恰一
         // 命中才收。源资产允许骨名重名（本批 31 份档案里 3 份有：链骨
         // 的环尾骨与链根同名、同名定位碰撞体挂在身体不同部位），档案
         // 记的绑定姿态世界位是提取器绑定的那个实例的直接痕迹。
+        let rest_local = |entity: Entity| -> Transform {
+            if let Ok(pose) = imported.get(entity) {
+                pose.0
+            } else {
+                // SceneRoot wrappers have no animation targets or imported
+                // node pose; their local transform is the stable identity.
+                assert!(names.get(entity).is_err(), "named character node lacks imported rest pose");
+                *transforms.get(entity).expect("character wrapper lacks Transform")
+            }
+        };
         let world_resolved = Cell::new(0usize);
         let bind = |chain: &str, kind: &str, name: &str, expected: [f32; 3]| -> Entity {
             let candidates = by_name.get(name).unwrap_or_else(|| {
@@ -408,17 +420,11 @@ pub fn plan_when_wired(
             let tol2 = WORLD_MATCH_TOL * WORLD_MATCH_TOL;
             let mut hits = Vec::with_capacity(candidates.len());
             for &candidate in candidates {
-                let mut world = Transform::IDENTITY;
+                let mut world = Affine3A::IDENTITY;
                 for entity in path_to(candidate) {
-                    let local = *transforms.get(entity).unwrap_or_else(|_| {
-                        panic!(
-                            "unit {} 链 {chain} 的{kind}骨 {name} 候选缺 Transform",
-                            unit.0
-                        )
-                    });
-                    world = world.mul_transform(local);
+                    world *= rest_local(entity).compute_affine();
                 }
-                if world.translation.distance_squared(Vec3::from(expected)) <= tol2 {
+                if Vec3::from(world.translation).distance_squared(Vec3::from(expected)) <= tol2 {
                     hits.push(candidate);
                 }
             }
@@ -470,12 +476,7 @@ pub fn plan_when_wired(
             let mut bones = Vec::with_capacity(n);
             for (vi, bone_name) in def.bones.iter().enumerate() {
                 let entity = bind(&def.name, "链", bone_name, pchain.rest[vi]);
-                let local = *transforms.get(entity).unwrap_or_else(|_| {
-                    panic!(
-                        "unit {} 链 {} 骨 {bone_name} 缺 Transform",
-                        unit.0, def.name
-                    )
-                });
+                let local = rest_local(entity);
                 bones.push(BoneBinding {
                     entity,
                     path: path_to(entity),

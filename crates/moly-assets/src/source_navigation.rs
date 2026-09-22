@@ -18,7 +18,7 @@ pub struct SourceNavMeshObstacle {
     pub component_id: i64,
     pub enabled: bool,
     pub shape: u8,
-    /// Authored Unity-local values; conversion happens at the world boundary.
+    /// Canonical node-local values, already converted by the exporter.
     pub center: Vec3,
     pub extents: Vec3,
     pub carve: bool,
@@ -70,6 +70,8 @@ pub(crate) fn import(extras: &Value, entity: &mut EntityWorldMut) {
             .expect("source navigation obstacles")
             .iter()
             .map(|row| {
+                crate::coordinates::validate_document(row)
+                    .expect("navigation obstacle coordinate contract");
                 let shape = row["shape"]
                     .as_u64()
                     .filter(|shape| *shape <= 1)
@@ -136,4 +138,39 @@ pub(crate) fn register(app: &mut App) {
         .register_type::<SourceNavMeshObstacle>()
         .register_type::<SourceNavMeshObstacles>()
         .register_type::<SourceHarvestView>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obstacle() -> Value {
+        serde_json::json!({"navMeshObstacles": [{
+            "coordinateContract": crate::coordinates::CONTRACT,
+            "componentId": "123", "enabled": true, "shape": 1,
+            "center": {"x": -1.25, "y": 0.75, "z": 2.5},
+            "extents": {"x": 0.5, "y": 0.75, "z": 1.0},
+            "carve": true, "onlyStationary": true,
+            "moveThreshold": 0.1, "stationaryTime": 0.5
+        }]})
+    }
+
+    #[test]
+    fn canonical_obstacle_is_not_reflected_a_second_time() {
+        let mut world = World::new();
+        let mut entity = world.spawn_empty();
+        import(&obstacle(), &mut entity);
+        let row = &entity.get::<SourceNavMeshObstacles>().unwrap().0[0];
+        assert_eq!(row.center, Vec3::new(-1.25, 0.75, 2.5));
+        assert_eq!(row.extents, Vec3::new(0.5, 0.75, 1.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "navigation obstacle coordinate contract")]
+    fn untagged_obstacles_cannot_mix_with_canonical_nodes() {
+        let mut document = obstacle();
+        document["navMeshObstacles"][0].as_object_mut().unwrap()
+            .remove("coordinateContract");
+        import(&document, &mut World::new().spawn_empty());
+    }
 }

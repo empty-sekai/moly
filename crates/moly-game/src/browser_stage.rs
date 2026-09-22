@@ -9,6 +9,8 @@ pub(crate) struct BrowserStage;
 /// Called before Startup; this never changes an already-running world.
 pub fn configure_browser_stage(app: &mut App) {
     app.insert_resource(BrowserStage);
+    #[cfg(target_arch = "wasm32")]
+    crate::audio_startup::configure(app);
 }
 
 pub(crate) fn standalone(stage: Option<Res<BrowserStage>>) -> bool {

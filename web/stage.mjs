@@ -1,4 +1,5 @@
 import { warmBaseResources } from "./base-resources.mjs";
+import { preflightCoordinates } from "./coordinate-contract.mjs";
 import {
   EMBED_VERSION,
   isEnvelope,
@@ -19,40 +20,6 @@ import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
-const packed =
-  params.get("packs") === "1" || Boolean(params.get("asset_catalog"));
-// Immutable resources may be published on one separately configured origin.
-// This document always stays same-origin with its embedder; only the bytes it
-// downloads move. The admissible set therefore has exactly one element: the
-// origin the embedder sealed into this URL when it configured one, otherwise
-// this document's own origin. There is no fallback between the two, and a
-// malformed parameter fails the boot instead of silently reverting.
-// The engine glue and WASM belong to the immutable release, so they are read
-// from the same configured origin as every other published byte. Only the
-// origin moves: the path stays this document's own release directory, so a
-// release is never assembled from two different publications.
-function engineBase() {
-  const here = new URL("./", import.meta.url);
-  const configured = params.get("resource_origin");
-  return configured
-    ? new URL(here.pathname, `${resourceOrigin(configured)}/`)
-    : here;
-}
-let assetsBase = null;
-function resolveAssets() {
-  if (assetsBase) return assetsBase;
-  const configured = params.get("resource_origin");
-  const directory = resourceDirectory(
-    params.get("assets") || "",
-    configured ? `${resourceOrigin(configured)}/` : location.href,
-  );
-  if (directory.origin !== location.origin && packed)
-    throw new Error(
-      "A packed asset store cannot be served from a separate resource origin",
-    );
-  assetsBase = directory;
-  return directory;
-}
 let ui = {
   locale: validateLocale(params.get("locale") || "zh-CN"),
   theme: validateTheme(params.get("theme") || "light"),
@@ -82,9 +49,9 @@ function weatherPresentationOptions() {
   return {
     locale: ui.locale,
     region,
-    assets: assetsBase?.href ?? params.get("assets"),
-    baseUrl: assetsBase?.href ?? location.href,
-    packed,
+    assets: params.get("assets"),
+    baseUrl: location.href,
+    packed: params.get("packs") === "1" || Boolean(params.get("asset_catalog")),
     iconUrls: weatherIconUrls,
   };
 }
@@ -158,9 +125,8 @@ function report(next = phase) {
 }
 function render() {
   const t = stageMessages(ui.locale);
-  const stalled =
-    (phase === "base" || phase === "resources") &&
-    performance.now() - lastProgress > 30000;
+  const stalled = (phase === "base" || phase === "resources")
+    && performance.now() - lastProgress > 30000;
   document.documentElement.lang = ui.locale;
   document.documentElement.dataset.theme = ui.theme.mode;
   if (ui.theme.accent)
@@ -195,13 +161,11 @@ function render() {
   $("boot-recovery").hidden = !failed && !stalled;
   $("boot-note").textContent = stalled ? t.stalled : "";
   const amount = engineBytes || decodedBytes;
-  $("boot-progress").textContent = failed
-    ? ""
-    : phase === "base" && baseTotal
-      ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
-      : amount
-        ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
-        : "";
+  $("boot-progress").textContent = failed ? "" : phase === "base" && baseTotal
+    ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
+    : amount
+      ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
+      : "";
   $("stage-hint").textContent = t.controls;
   renderWeather();
 }
@@ -295,10 +259,19 @@ async function loadEngine() {
   try {
     if (!["cn", "jp", "tw", "en", "kr"].includes(region))
       throw new Error("An explicit supported resource region is required");
-    const assets = resolveAssets();
+    const publicOrigin = resourceOrigin(params.get("resource_origin"));
+    resourceDirectory(params.get("assets") || "", location.href, publicOrigin);
+    try {
+      await preflightCoordinates({
+        assets: new URL(params.get("assets"), location.href).href, region, version,
+        packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
+        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href, resourceOrigin: publicOrigin,
+      }, { signal: abort.signal });
+      lastChunk = performance.now();
+    } catch (error) { fail("source_mismatch", error); throw error; }
     weatherArtwork = createWeatherArtwork({
-      assets: assets.href,
-      baseUrl: assets.href,
+      assets: params.get("assets"),
+      baseUrl: location.href,
       packs: params.get("packs") === "1",
       assetCatalog: params.get("asset_catalog"),
     });
@@ -306,7 +279,7 @@ async function loadEngine() {
       {
         region,
         version,
-        assets: assets.href,
+        assets: new URL(params.get("assets"), location.href).href,
         packs: params.get("packs") === "1",
         assetCatalog: params.get("asset_catalog") ?? undefined,
       },
@@ -325,13 +298,17 @@ async function loadEngine() {
     const renderer = await selectRenderer(requested, { navigator, document });
     backend = renderer.backend;
     mark("backendSelected");
-    const path = new URL(`pkg/${backend}/moly-app.js`, engineBase());
+    const localPath = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
+    if (publicOrigin && !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/pkg\/(?:webgpu|webgl2)\/moly-app\.js$/.test(localPath.pathname))
+      throw new Error("Invalid immutable engine path");
+    const path = publicOrigin ? new URL(localPath.pathname, publicOrigin) : localPath;
     const module = await import(path.href);
     if (typeof module.start_stage !== "function")
       throw new Error("Runtime does not implement the stage contract");
     const response = await fetch(new URL("./moly-app_bg.wasm", path), {
       signal: abort.signal,
       credentials: "omit",
+      redirect: "error",
     });
     if (
       !response.ok ||

@@ -223,9 +223,13 @@ fn live_matrix(world: &World, entity: Entity) -> Option<Mat4> {
 }
 
 fn discover(world: &mut World) -> Result<Signature, String> {
-    if world.get_resource::<crate::fixture_edit::EditSessionActive>()
-        .is_some_and(|editor| editor.is_active()) {
-        return Err("layout editing owns scene poses; draft geometry is not a playable snapshot".into());
+    if world
+        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .is_some_and(|editor| editor.is_active())
+    {
+        return Err(
+            "layout editing owns scene poses; draft geometry is not a playable snapshot".into(),
+        );
     }
     if !world.contains_resource::<FixtureScenesReady>() {
         return Err("placed fixture scenes are still loading".into());
@@ -403,11 +407,11 @@ fn build_floor(
                 ));
             }
             let position = field_position(row.min, row.max, row.center_y, row.layout)?;
-            let expected = Transform::from_translation(signature.origin + Vec3::from(position))
-                .with_rotation(Quat::from_rotation_y(
-                    direction_yaw_degrees(row.direction).to_radians(),
-                ))
-                .to_matrix();
+            let expected = crate::fixture::source_transform(
+                (signature.origin + Vec3::from(position)).to_array(),
+                direction_yaw_degrees(row.direction).to_radians(),
+            )
+            .to_matrix();
             let actual = observed
                 .world_matrix
                 .ok_or("layout row has no live fixture pose")?;
@@ -442,10 +446,23 @@ fn build_floor(
                 .get(&row.package)
                 .ok_or("AddUsingGrid package record is missing")?
                 .clone()?;
-            add_using.rotate(row.direction, true);
-            let center = rotated_center_grid(row.layout_center, master.grid_size, row.direction);
+            let (source_center, source_direction, _) =
+                moly_assets::player_data::mirror_fixture_layout(
+                    row.layout_center,
+                    master.grid_size,
+                    row.direction,
+                    row.layout,
+                )?;
+            add_using.rotate(source_direction, true);
+            let center = rotated_center_grid(source_center, master.grid_size, source_direction);
             for cell in add_using.enable_tiles {
-                let position = center + cell;
+                let source = center + cell;
+                let position = GridPosition::new(
+                    i8::try_from(-i16::from(source.x) - 1)
+                        .map_err(|_| "AddUsing X exceeds grid domain")?,
+                    source.y,
+                    source.z,
+                );
                 result.push(TileOccupancyEntry {
                     position,
                     identity: TileOccupancyIdentity::Uid(row.uid.clone()),

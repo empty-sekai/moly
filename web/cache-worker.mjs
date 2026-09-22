@@ -1,11 +1,65 @@
-// Optional, bounded resource retention. This worker only controls /moly/.
+// Durable base/runtime retention and bounded persistent on-demand reuse.
 // It never handles site HTML, accounts, saved layouts, or API traffic.
 export const CACHE_PROTOCOL = 1;
 export const RESOURCE_PREFIX = "moly-resource-v1-";
+const RESOURCE_FAMILY_PREFIX = "moly-resource-";
 const CONTROL_CACHE = "moly-control-v1";
 const LIMIT = 512 * 1024 * 1024;
 const MAX_ENTRY = 128 * 1024 * 1024;
 const MAX_PENDING = 8;
+function publicOrigin(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password &&
+      !url.search && !url.hash && url.pathname === "/" && value === url.origin
+      ? url.origin : null;
+  } catch { return null; }
+}
+
+/** Trust the configured origin of the requesting same-origin stage client,
+ * never a global mutable allowlist shared by unrelated pages or tabs. */
+export function clientResourceOrigin(clientUrl, origin) {
+  try {
+    const client = new URL(clientUrl);
+    if (client.origin !== origin || client.username || client.password ||
+        !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/stage\.html$/.test(client.pathname)) return null;
+    return publicOrigin(client.searchParams.get("resource_origin"));
+  } catch { return null; }
+}
+
+/** Only currently open stages protect an engine or a source's base resources.
+ * The persisted required list describes base membership, not a permanent pin. */
+export function activeResourceRoots(clients, origin) {
+  const releases = new Set(), snapshots = new Set(), shared = new Set();
+  for (const client of clients) {
+    try {
+      const url = new URL(client.url);
+      const release = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(url.pathname);
+      if (url.origin !== origin || !release || url.username || url.password) continue;
+      const remote = clientResourceOrigin(client.url, origin);
+      const releasePath = `/moly/releases/${release[1]}/`;
+      releases.add(origin + releasePath);
+      if (remote) releases.add(remote + releasePath);
+      const value = url.searchParams.get("assets");
+      if (!value) continue;
+      const assets = new URL(value, url);
+      if ((assets.origin !== origin && assets.origin !== remote) || assets.username || assets.password ||
+          assets.search || assets.hash || /[%\\]/.test(assets.pathname)) continue;
+      if (/^\/moly\/snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/$/.test(assets.pathname)) snapshots.add(assets.href);
+      else if (url.searchParams.get("packs") === "1" && assets.pathname === "/moly/asset-store/") shared.add(assets.href);
+    } catch { /* An unrelated or invalid client cannot pin resources. */ }
+  }
+  return { releases, snapshots, shared };
+}
+
+export function isActiveRequiredResource(url, required, active) {
+  if ([...active.releases].some(root => url.startsWith(root))) return true;
+  if (!required.has(url)) return false;
+  // Shared objects do not carry a snapshot in their URL. Conservatively keep
+  // required objects of a store only while a packed stage uses that store.
+  return [...active.snapshots, ...active.shared].some(root => url.startsWith(root));
+}
 
 /** A bounded admission queue, never a reason to silently skip retention.
  * Waiting responses have not been cloned or consumed, so stream backpressure
@@ -55,10 +109,11 @@ export class CacheAdmission {
   }
 }
 
-export function resourceIdentity(value, origin) {
-  const url = new URL(value, origin);
+export function resourceIdentity(value, origin, configuredOrigin = null) {
+  let url;
+  try { url = new URL(value, origin); } catch { return null; }
   if (
-    url.origin !== origin ||
+    (url.origin !== origin && url.origin !== publicOrigin(configuredOrigin)) ||
     url.search ||
     url.hash ||
     url.username ||
@@ -97,9 +152,9 @@ export function resourceIdentity(value, origin) {
     url: url.href,
   };
 }
-/** Only a same-origin, source-qualified measured pack can protect assets. */
-export function requiredResourceURLs(pack, descriptor, origin) {
-  const identity = resourceIdentity(descriptor, origin);
+/** Only a trusted, source-qualified measured pack can protect assets. */
+export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin = null) {
+  const identity = resourceIdentity(descriptor, origin, configuredOrigin);
   if (
     !identity ||
     pack?.schemaVersion !== 1 ||
@@ -129,7 +184,7 @@ export function requiredResourceURLs(pack, descriptor, origin) {
       return [];
     const child = new URL(file.path, base);
     if (
-      !resourceIdentity(child.href, origin) ||
+      !resourceIdentity(child.href, origin, configuredOrigin) ||
       !child.pathname.startsWith(base.pathname)
     )
       return [];
@@ -197,32 +252,8 @@ if (
   const admission = new CacheAdmission(MAX_PENDING, MAX_ENTRY);
   const controlUrl = new URL("/moly/__retention", self.location.origin).href;
   const pinsUrl = new URL("/moly/__required", self.location.origin).href;
-  // Immutable resources may be published on one separately configured origin.
-  // The embedder seals it into this worker's script URL, so the fetch handler
-  // can admit it synchronously and a different origin simply registers a
-  // different worker. The control keys above stay on this origin.
-  const resourceBase = (() => {
-    const raw = new URL(self.location.href).searchParams.get("resource_origin");
-    if (!raw) return self.location.origin;
-    let url;
-    try {
-      url = new URL(raw);
-    } catch {
-      return self.location.origin;
-    }
-    return url.protocol === "https:" &&
-      url.hostname &&
-      !url.username &&
-      !url.password &&
-      url.pathname === "/" &&
-      !url.search &&
-      !url.hash
-      ? url.origin
-      : self.location.origin;
-  })();
   const required = new Set();
-  const isRequired = (url) =>
-    new URL(url).pathname.startsWith("/moly/releases/") || required.has(url);
+  const lastUsed = new Map();
   const initialized = (async () => {
     const cache = await caches.open(CONTROL_CACHE),
       response = await cache.match(controlUrl);
@@ -232,7 +263,9 @@ if (
       const values = await pins.json();
       if (Array.isArray(values) && values.length <= 20000)
         for (const url of values)
-          if (resourceIdentity(url, resourceBase)) required.add(url);
+          // Restoring cache bookkeeping does not authorize any network reads.
+          // Each future request must match its own stage client's origin below.
+          if (typeof url === "string" && resourceIdentity(url, self.location.origin, new URL(url).origin)) required.add(url);
     }
   })().catch(() => {
     enabled = false;
@@ -245,7 +278,7 @@ if (
   async function inventory() {
     const entries = [];
     for (const name of (await caches.keys()).filter((name) =>
-      name.startsWith(RESOURCE_PREFIX),
+      name.startsWith(RESOURCE_FAMILY_PREFIX),
     )) {
       const cache = await caches.open(name);
       for (const request of await cache.keys()) {
@@ -254,21 +287,23 @@ if (
           name,
           request,
           bytes: Number(response?.headers.get("X-Moly-Stored-Bytes") || 0),
-          time: Number(response?.headers.get("X-Moly-Stored-At") || 0),
+          time: lastUsed.get(request.url) ?? Number(response?.headers.get("X-Moly-Stored-At") || 0),
         });
       }
     }
     return entries;
   }
   async function makeSpace(extra, incoming) {
+    const active = activeResourceRoots(await self.clients.matchAll({ type: "window" }), self.location.origin);
     const entries = (await inventory()).filter(
       (entry) => entry.request.url !== incoming,
     );
     let bytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
     for (const entry of entries.sort((a, b) => a.time - b.time)) {
       if (bytes + extra <= LIMIT) break;
-      if (isRequired(entry.request.url)) continue;
+      if (isActiveRequiredResource(entry.request.url, required, active)) continue;
       await (await caches.open(entry.name)).delete(entry.request);
+      lastUsed.delete(entry.request.url);
       bytes -= entry.bytes;
     }
     // Never evict necessary base resources or engines for optional content.
@@ -279,9 +314,13 @@ if (
   self.addEventListener("install", (event) =>
     event.waitUntil(self.skipWaiting()),
   );
-  self.addEventListener("activate", (event) =>
-    event.waitUntil(self.clients.claim()),
-  );
+  self.addEventListener("activate", (event) => event.waitUntil((async () => {
+    await self.clients.claim();
+    await initialized;
+    // Keep previously downloaded optional resources across worker restarts.
+    // Activation only enforces the same total disk budget as new writes.
+    await serial(() => makeSpace(0, null)).catch(() => {});
+  })()));
   self.addEventListener("message", (event) => {
     const port = event.ports?.[0],
       message = event.data;
@@ -309,10 +348,11 @@ if (
         } else if (message.type === "clear") {
           epoch++;
           required.clear();
+          lastUsed.clear();
           await (await caches.open(CONTROL_CACHE)).delete(pinsUrl);
           await Promise.all(
             (await caches.keys())
-              .filter((name) => name.startsWith(RESOURCE_PREFIX))
+              .filter((name) => name.startsWith(RESOURCE_FAMILY_PREFIX))
               .map((name) => caches.delete(name)),
           );
         }
@@ -324,6 +364,7 @@ if (
           enabled,
           bytes: entries.reduce((sum, item) => sum + item.bytes, 0),
           entries: entries.length,
+          limitBytes: LIMIT,
         });
       }).catch(() =>
         port.postMessage({
@@ -336,14 +377,23 @@ if (
   });
   self.addEventListener("fetch", (event) => {
     const request = event.request;
-    const identity =
+    // Catalogue entry JSON belongs to the reading page, never to the resource store.
+    if (/^\/moly\/snapshots\/[^/]+\/catalog\/entries\/[^/]+\.json$/.test(new URL(request.url).pathname)) return;
+    // Prefilter immutable paths synchronously; cross-origin admission also
+    // requires the requesting stage client's current configuration.
+    const candidate =
       request.method === "GET" && !request.headers.has("Range")
-        ? resourceIdentity(request.url, resourceBase)
+        ? resourceIdentity(request.url, self.location.origin, new URL(request.url).origin)
         : null;
-    if (!identity) return;
+    if (!candidate) return;
     event.respondWith(
       (async () => {
+        const client = event.clientId ? await self.clients.get(event.clientId).catch(() => null) : null;
+        const configuredOrigin = clientResourceOrigin(client?.url, self.location.origin);
+        const identity = resourceIdentity(request.url, self.location.origin, configuredOrigin);
+        if (!identity) return fetch(request);
         await initialized;
+        const requestEpoch = epoch;
         if (enabled) {
           // Private browsing, eviction and device quota failures must never
           // turn successful online playback into an unavailable response.
@@ -351,13 +401,14 @@ if (
             .match(identity.url, { cacheName: identity.cache })
             .catch(() => null);
           if (retained) {
+            lastUsed.set(identity.url, Date.now());
             if (
               identity.shared &&
               request.headers.get("X-Moly-Required") === "1"
             ) {
               event.waitUntil(
                 serial(async () => {
-                  if (!enabled || required.size >= 20000) return;
+                  if (!enabled || requestEpoch !== epoch || required.size >= 20000) return;
                   required.add(identity.url);
                   await (
                     await caches.open(CONTROL_CACHE)
@@ -381,9 +432,9 @@ if (
         }
         // Controlled large runtime requests bypass the browser's opaque HTTP
         // cache. Optional retained copies are therefore measurable and removable.
-        const requestEpoch = epoch;
-        const response = await fetch(request, { cache: "no-store" });
-        const bytes = Number(response.headers.get("X-Moly-Decoded-Bytes") || 0);
+        const response = await fetch(request, { cache: "no-store", credentials: "omit", redirect: "error" });
+        const bytes = Number(response.headers.get("X-Moly-Decoded-Bytes") ||
+          response.headers.get("x-oss-meta-moly-decoded-bytes") || 0);
         let pinsChanged = false;
         if (
           enabled &&
@@ -397,7 +448,12 @@ if (
         ) {
           try {
             const pack = await response.clone().json();
-            const urls = requiredResourceURLs(pack, identity.url, resourceBase);
+            const urls = requiredResourceURLs(
+              pack,
+              identity.url,
+              self.location.origin,
+              configuredOrigin,
+            );
             if (required.size + urls.length <= 20000)
               for (const url of urls) {
                 if (!required.has(url)) {
@@ -409,7 +465,9 @@ if (
             /* An invalid descriptor is rejected by the stage loader. */
           }
         }
-        // Development asset mounts are no-cache and deliberately never retained.
+        // All immutable public resources use the bounded disk store. There is
+        // no completed response-body memory cache. Development no-cache mounts
+        // remain network-only, and failures never prevent online playback.
         if (
           enabled &&
           requestEpoch === epoch &&
@@ -472,6 +530,7 @@ if (
                 identity.url,
                 new Response(copy.body, { status: 200, headers }),
               );
+              lastUsed.set(identity.url, Date.now());
             })
               .catch(() => {
                 /* Retention is best-effort; never fail successful online playback. */
