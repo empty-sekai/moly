@@ -5,6 +5,7 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        build-essential clang lld cmake ninja-build pkg-config libasound2-dev \
+       libudev-dev libx11-dev libxkbcommon-dev libwayland-dev \
        ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
