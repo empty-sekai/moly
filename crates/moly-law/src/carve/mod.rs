@@ -52,18 +52,17 @@
 //!   瓦边 ⇒ 若整片面小于小区阈（2 m²）会被这里误杀——真实站点的主
 //!   面远大于它，测试面也保持大于它。
 //! * **多层面不建模**：家具顶面若矮于 climb（0.1）是「走上去」而不是
-//!   「绕开」，矮障碍的顶面会并进可行走面。摆放表没有网格高度列，
-//!   无法逐件判高矮——当前全部摆放都是带高的真家具，此债具名：接
-//!   高度列后，矮于 climb 的行应退出挖洞。
-//! * **RUG/ROAD 按类当平铺**：这两类布局是平铺饰面（地毯/路面），
-//!   按类别语义不挖洞——类别是「网格高度列缺失」下的代理判据。
+//!   「绕开」，矮障碍的顶面会并进可行走面。当前碰撞栅格对每个源三角
+//!   使用局部 min/max 高度；高度在 climb 内的贴地三角退出挖洞，避免
+//!   把 rug/mat 等低表面误杀。仍未完全等价 Unity 的多层 span 合并。
 //! * **墙格足迹链未转录**：墙布局的足迹走另一条派生链
 //!   （`CreateWallTileData`），而当前全部墙位摆放的底面高（1.5/2.0）
 //!   都在 0.98 之上、本就不挖——不转录无损。
 //! * **源物理几何的单层投影**：原版收集 PhysicsColliders。宿主走
-//!   `bake_colliders`，保留真实节点变换、几何轮廓和高度范围；旧的
-//!   `BakeInput` 矩形接口仅供独立律的兼容测试。本地投影不处理台阶顶面
-//!   或多层连通，不等价于 Unity 的三维烘焙与 convex cooking。
+//!   `bake_colliders`，保留真实节点变换、源三角轮廓和每三角高度范围；
+//!   旧的 `BakeInput` 矩形接口仅供独立律的兼容测试。本地投影不处理
+//!   台阶顶面或多层连通，凸 MeshCollider 仍是源三角 raster 近似，不等价
+//!   于 Unity 的三维烘焙与 convex cooking。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
 
 mod contour;
@@ -83,6 +82,12 @@ pub const AGENT_RADIUS: f32 = 0.24;
 
 /// 烘焙 agent 高度（米）：同表值（可行走净空阈）。
 pub const AGENT_HEIGHT: f32 = 0.98;
+
+/// 烘焙 agent 可攀越高度（米）：低于此高度的贴地碰撞面会作为新的
+/// walkable span，而不是把原地面挖掉。Unity 的 Recast 构造使用同一
+/// MysekaiCharacter agent 的 climb 值；这里不能把所有 PhysicsCollider
+/// 都当作垂直障碍。
+pub const AGENT_CLIMB: f32 = 0.1;
 
 /// 小区面积阈（平方米）：同表值，换算成格数见 [`min_region_spans`]。
 pub const MIN_REGION_AREA: f32 = 2.0;
@@ -161,16 +166,23 @@ pub struct Obstacle {
 /// This is a conservative projection, not Unity's three-dimensional bake.
 #[derive(Debug, Clone)]
 pub struct ColliderPolygon {
+    /// One source triangle (or primitive perimeter) projected to XZ.  The
+    /// runtime intentionally receives triangles for convex meshes too: this
+    /// preserves local vertical spans and avoids a polygon-wide min/max-Y
+    /// false obstacle. It is still a 2D approximation of Unity cooked hulls.
     pub vertices: Vec<[f32; 2]>,
+    /// Vertical bounds of this projected source primitive in world Y.
     pub min_y: f32,
     pub max_y: f32,
 }
 
 /// 摆放行是否参与挖洞，参与则给它的世界足迹矩形。
 ///
-/// 参与门（低高度过滤的 2D 投影）：地板类布局（布局含地板位）且
+/// 参与门（旧布局足迹兼容接口）：地板类布局（布局含地板位）且
 /// 底面高 0.25 × `center_y` 低于可行走净空阈 → 挖；墙位（1.5/2.0）、
-/// 高台位（1.0）与平铺类（RUG/ROAD）不挖。格角到世界角的换算与
+/// 高台位（1.0）不挖。源 PhysicsCollider 的实际烘焙走
+/// [`WalkField::bake_colliders`]，低于 [`AGENT_CLIMB`] 的贴地三角由
+/// span 规则保留。格角到世界角的换算与
 /// 落位律同式：min 角 = min × 0.25，max 角 = max × 0.25 + 0.25。
 pub fn blocking_footprint(
     min: GridPosition,
@@ -323,6 +335,11 @@ impl WalkField {
     }
 
     /// 沿请求位移走到第一处阻挡前；不把被挡终点吸到家具另一边。
+    ///
+    /// 到达障碍边缘后，尝试把剩余位移投影到两个轴向切向分量。Unity
+    /// 的 `NavMeshAgent.Move` 会沿 navmesh 边界继续走；只做前缀二分会把
+    /// 任何斜向擦边都错误地停死。每一步仍经过同一整段可走性裁决，
+    /// 因而不会跨越薄障碍或穿过洞。
     pub fn constrain_move(&self, start: [f32; 2], goal: [f32; 2]) -> [f32; 2] {
         if !start.into_iter().chain(goal).all(f32::is_finite) || !self.walkable_at(start) {
             return start;
@@ -347,7 +364,35 @@ impl WalkField {
                 hi = t;
             }
         }
-        accepted
+        // Resolve the remaining displacement against the two coordinate
+        // tangents.  The order is distance based so a diagonal input follows
+        // the side that makes the most progress toward its actual target.
+        let mut current = accepted;
+        for _ in 0..4 {
+            let dx = goal[0] - current[0];
+            let dz = goal[1] - current[1];
+            if dx.abs() <= self.grid.voxel * 0.25 && dz.abs() <= self.grid.voxel * 0.25 {
+                break;
+            }
+            let candidates = [[goal[0], current[1]], [current[0], goal[1]]];
+            let mut best = current;
+            let mut best_d = (goal[0] - current[0]).powi(2) + (goal[1] - current[1]).powi(2);
+            for candidate in candidates {
+                if !self.segment_walkable(current, candidate) {
+                    continue;
+                }
+                let d = (goal[0] - candidate[0]).powi(2) + (goal[1] - candidate[1]).powi(2);
+                if d < best_d {
+                    best = candidate;
+                    best_d = d;
+                }
+            }
+            if best == current {
+                break;
+            }
+            current = best;
+        }
+        current
     }
 
     /// 烘焙账目。
@@ -425,6 +470,45 @@ mod tests {
         );
         collider.min_y = 2.5;
         assert!(!WalkField::bake_colliders(&surface, &[collider], 0.05).walkable_at([0.0, 0.0]));
+    }
+
+    #[test]
+    fn thin_ground_collider_is_a_walkable_span_not_a_hole() {
+        let surface = vec![
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, -4.0], [4.0, 0.0, 4.0]],
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, 4.0], [-4.0, 0.0, 4.0]],
+        ];
+        let rug = ColliderPolygon {
+            vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
+            min_y: 0.0,
+            max_y: 0.05,
+        };
+        let field = WalkField::bake_colliders(&surface, &[rug], 0.05);
+        assert!(field.walkable_at([0.5, 0.5]));
+        let step = ColliderPolygon {
+            vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
+            min_y: 0.0,
+            max_y: 0.2,
+        };
+        let field = WalkField::bake_colliders(&surface, &[step], 0.05);
+        assert!(!field.walkable_at([0.5, 0.5]));
+    }
+
+    #[test]
+    fn blocked_diagonal_can_slide_along_a_clear_axis() {
+        let face = quad([-4.0, -4.0], [4.0, 4.0]);
+        let obstacle = Obstacle {
+            min: [0.0, -1.0],
+            max: [1.0, 1.0],
+        };
+        let field = bake(face, vec![obstacle], 0.05);
+        let start = [-1.0, -1.0];
+        let goal = [2.0, 2.0];
+        let accepted = field.constrain_move(start, goal);
+        // The two-axis projection follows the lower/side tangent and can
+        // complete the move around the rectangle in this single frame.
+        assert!((accepted[0] - goal[0]).abs() < 0.1);
+        assert!((accepted[1] - goal[1]).abs() < 0.1);
     }
 
     /// 轴对齐四边形 → 两三角。
@@ -529,7 +613,8 @@ mod tests {
         // 墙位底面（6/8 → 1.5/2.0）与高台位 4（底 1.0 ≥ 阈）：不挖。
         assert!(blocking_footprint(min, max, 4, layout_type::FLOOR, voxel).is_none());
         assert!(blocking_footprint(min, max, 6, layout_type::WALL_FRONT, voxel).is_none());
-        // 平铺类（RUG/ROAD）按类不挖。
+        // 平铺类（RUG/ROAD）没有布局足迹；源碰撞烘焙的低表面规则在
+        // `mark_collider_polygons` 中按实际几何高度处理。
         assert!(blocking_footprint(min, max, 0, layout_type::RUG, voxel).is_none());
         assert!(blocking_footprint(min, max, 0, layout_type::ROAD, voxel).is_none());
         // 地板族复合位（FIELD 含地板位）：挖。

@@ -3,7 +3,7 @@
 //! 每一步都是引擎原生烘焙链在 2D（单高度面）上的转录，锚点在
 //! [`super`] 的模块注释里。本文件只有形状与常数，不出现任何 bevy。
 
-use super::{ColliderPolygon, Obstacle, AGENT_HEIGHT};
+use super::{ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT};
 
 /// 烘焙格面：世界 xz 平面上的等距格，`walkable` 是侵蚀与小区过滤都
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
@@ -196,6 +196,15 @@ pub(crate) fn mark_collider_polygons(
                     || polygon.max_y <= heights[index] + 1e-4
                     || polygon.min_y >= heights[index] + AGENT_HEIGHT
                 {
+                    continue;
+                }
+                // PhysicsColliders are also used for thin floor/rug/mat
+                // surfaces.  Recast folds a contact whose top is within the
+                // agent climb height into the walkable span; it does not carve
+                // the original floor beneath it.  The previous projection
+                // treated every overlapping polygon as an obstacle and made
+                // these areas impossible to traverse.
+                if polygon.max_y - heights[index] <= AGENT_CLIMB {
                     continue;
                 }
                 let p = grid.cell_center(x as usize, z as usize);

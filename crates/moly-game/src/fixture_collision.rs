@@ -1,9 +1,10 @@
 //! PhysicsCollider inputs for the single-surface navigation host.
 //!
 //! This consumes canonical source geometry, never logical occupancy boxes.
-//! Convex colliders use the XZ projection of their input hull; nonconvex meshes
-//! retain individual projected triangles. Curved primitives use circumscribed
-//! polygons. These are explicit conservative 2D operations, not Unity cooking.
+//! Mesh colliders are retained as individual projected triangles so vertical
+//! clearance is decided from local geometry instead of one polygon-wide Y
+//! interval. Curved primitives use circumscribed polygons. These are explicit
+//! 2D operations, not Unity cooking.
 
 use bevy::{ecs::system::SystemParam, gltf::GltfExtras, prelude::*};
 use moly_law::carve::ColliderPolygon;
@@ -351,7 +352,7 @@ fn collider_polygons(
     geometry: &[Geometry],
     transform: &GlobalTransform,
 ) -> Result<Vec<ColliderPolygon>, String> {
-    let points = match collider.kind.as_str() {
+    let polygons = match collider.kind.as_str() {
         "MeshCollider" => {
             let id = collider
                 .geometry_id
@@ -364,49 +365,60 @@ fn collider_polygons(
             if mesh.positions.is_empty() || mesh.triangles.is_empty() {
                 return Err("empty collider geometry".into());
             }
-            if collider.convex == Some(false) {
-                return mesh
-                    .triangles
-                    .iter()
-                    .map(|tri| {
-                        let points: Result<Vec<_>, _> = tri
-                            .iter()
-                            .map(|i| {
-                                mesh.positions
-                                    .get(*i)
-                                    .copied()
-                                    .map(Vec3::from)
-                                    .ok_or("collider index out of range".to_owned())
-                            })
-                            .collect();
-                        project(points?, transform)
-                    })
-                    .collect();
-            }
-            if collider.convex != Some(true) {
+            if !matches!(collider.convex, Some(false) | Some(true)) {
                 return Err("MeshCollider convex state missing".into());
             }
-            mesh.positions.iter().copied().map(Vec3::from).collect()
+            // A convex MeshCollider is cooked by Unity as a hull, but using a
+            // single XZ hull plus global min/max Y here over-blocks open or
+            // stepped furniture.  Keep source triangles and let the bake
+            // classify each local span.  The source triangles are already the
+            // authoritative mesh input; non-convex meshes follow the same
+            // path and convexity remains recorded in the source contract.
+            mesh.triangles
+                .iter()
+                .map(|tri| {
+                    let points: Result<Vec<_>, _> = tri
+                        .iter()
+                        .map(|i| {
+                            mesh.positions
+                                .get(*i)
+                                .copied()
+                                .map(Vec3::from)
+                                .ok_or("collider index out of range".to_owned())
+                        })
+                        .collect();
+                    project(points?, transform)
+                })
+                .collect::<Result<Vec<_>, _>>()?
         }
-        "BoxCollider" => box_points(
-            Vec3::from(collider.center.ok_or("box center missing")?),
-            Vec3::from(collider.size.ok_or("box size missing")?),
-        )?,
-        "SphereCollider" => curved_points(
-            Vec3::from(collider.center.ok_or("sphere center missing")?),
-            collider.radius.ok_or("sphere radius missing")?,
-            0.0,
-            1,
-        )?,
-        "CapsuleCollider" => curved_points(
-            Vec3::from(collider.center.ok_or("capsule center missing")?),
-            collider.radius.ok_or("capsule radius missing")?,
-            collider.height.ok_or("capsule height missing")?,
-            collider.direction.ok_or("capsule direction missing")?,
-        )?,
+        "BoxCollider" => vec![project(
+            box_points(
+                Vec3::from(collider.center.ok_or("box center missing")?),
+                Vec3::from(collider.size.ok_or("box size missing")?),
+            )?,
+            transform,
+        )?],
+        "SphereCollider" => vec![project(
+            curved_points(
+                Vec3::from(collider.center.ok_or("sphere center missing")?),
+                collider.radius.ok_or("sphere radius missing")?,
+                0.0,
+                1,
+            )?,
+            transform,
+        )?],
+        "CapsuleCollider" => vec![project(
+            curved_points(
+                Vec3::from(collider.center.ok_or("capsule center missing")?),
+                collider.radius.ok_or("capsule radius missing")?,
+                collider.height.ok_or("capsule height missing")?,
+                collider.direction.ok_or("capsule direction missing")?,
+            )?,
+            transform,
+        )?],
         other => return Err(format!("unsupported collider shape {other}")),
     };
-    Ok(vec![project(points, transform)?])
+    Ok(polygons)
 }
 
 fn box_points(center: Vec3, size: Vec3) -> Result<Vec<Vec3>, String> {
@@ -570,6 +582,36 @@ mod tests {
             .vertices
             .iter()
             .any(|p| (p[0] - 6.0).abs() < 1e-5 && (p[1] - 3.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn convex_mesh_keeps_source_triangles_for_local_height_rasterization() {
+        let mesh = Geometry {
+            geometry_id: "mesh".into(),
+            positions: vec![
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, -1.0],
+                [1.0, 0.2, 1.0],
+                [-1.0, 0.2, 1.0],
+            ],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+        };
+        let collider = Collider {
+            kind: "MeshCollider".into(),
+            enabled: Some(true),
+            is_trigger: Some(false),
+            convex: Some(true),
+            geometry_id: Some("mesh".into()),
+            gap: None,
+            center: None,
+            size: None,
+            radius: None,
+            height: None,
+            direction: None,
+        };
+        let polygons = collider_polygons(&collider, &[mesh], &GlobalTransform::IDENTITY).unwrap();
+        assert_eq!(polygons.len(), 2);
+        assert!(polygons.iter().all(|polygon| polygon.vertices.len() == 3));
     }
 
     #[test]
