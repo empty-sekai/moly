@@ -35,7 +35,15 @@ to get past a mismatch.
 Run repository commands through the alias, for example:
 
 ```sh
-ssh cnb-current-project 'cd /workspace && rustc -Vv && cargo -V && cargo check -p moly-game --target wasm32-unknown-unknown'
+ssh cnb-current-project 'cd /workspace && export CARGO_BUILD_JOBS=16 && rustc -Vv && cargo -V && cargo check -p moly-game --target wasm32-unknown-unknown'
+```
+
+For the browser package, keep the same explicit cloud-side parallelism. The
+repository build script intentionally keeps a conservative local default, so
+the CNB command must opt into the Workspace's available cores:
+
+```sh
+ssh cnb-current-project 'cd /workspace && export CARGO_BUILD_JOBS=16 && node web/build-wasm.mjs --profile wasm-size --renderer webgpu'
 ```
 
 Keep the development server bound to `127.0.0.1` in CNB and forward its port
