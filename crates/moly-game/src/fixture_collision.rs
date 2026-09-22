@@ -12,6 +12,8 @@ use moly_law::carve::ColliderPolygon;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+mod primitives;
+
 const AGENT: i32 = -1372625422;
 
 #[derive(Resource, Clone, Debug, Default)]
@@ -249,7 +251,9 @@ impl CollisionInputs<'_, '_> {
                 current = *parent;
             }
             let mut composed = GlobalTransform::IDENTITY;
+            let mut world_rotation = Quat::IDENTITY;
             for local in chain.into_iter().rev() {
+                world_rotation *= local.rotation;
                 composed = composed.mul_transform(local);
             }
             let transform = &composed;
@@ -312,6 +316,7 @@ impl CollisionInputs<'_, '_> {
                         collider,
                         &document.geometry,
                         transform,
+                        world_rotation,
                     )?);
                     result.colliders += 1;
                 }
@@ -326,14 +331,9 @@ impl CollisionInputs<'_, '_> {
                 if obstacle.only_stationary != Some(true) {
                     return Err("moving NavMeshObstacle needs dynamic carving support".into());
                 }
-                let center = Vec3::from(obstacle.center.ok_or("obstacle center missing")?);
-                let extents = Vec3::from(obstacle.extents.ok_or("obstacle extents missing")?);
-                let points = match obstacle.shape {
-                    Some(1) => box_points(center, extents * 2.0)?,
-                    Some(0) => curved_points(center, extents.x.max(extents.z), extents.y * 2.0, 1)?,
-                    _ => return Err("unknown NavMeshObstacle shape".into()),
-                };
-                result.polygons.push(project(points, transform)?);
+                result
+                    .polygons
+                    .push(obstacle_polygon(obstacle, transform, world_rotation)?);
                 result.colliders += 1;
             }
         }
@@ -348,10 +348,56 @@ fn validate_contract(version: u32, contract: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn obstacle_polygon(
+    obstacle: &NavObstacle,
+    transform: &GlobalTransform,
+    world_rotation: Quat,
+) -> Result<ColliderPolygon, String> {
+    // Unity 2022.3.62f2 x86_64 NavMeshObstacle::GetWorldExtents (0xbacede)
+    // uses absolute lossy scale, sharing max(X,Z) between capsule radii.
+    // GetWorldCenterAndAxes (0xbacfa4) transforms the center and separately
+    // converts Transform::GetRotation to orthonormal axes (not affine skew).
+    let center = transform.transform_point(Vec3::from(
+        obstacle.center.ok_or("obstacle center missing")?,
+    ));
+    let extents = Vec3::from(obstacle.extents.ok_or("obstacle extents missing")?);
+    if !extents.is_finite() || extents.min_element() < 0.0 {
+        return Err("invalid obstacle extents".into());
+    }
+    let scale = primitives::scale_magnitudes(transform);
+    let mut polygon = match obstacle.shape {
+        Some(1) => {
+            let (points, triangles) = primitives::box_mesh(Vec3::ZERO, extents * scale * 2.0)?;
+            let pose = GlobalTransform::from(
+                Transform::from_translation(center).with_rotation(world_rotation),
+            );
+            project_mesh(&points, &triangles, &pose, true)?
+        }
+        Some(0) => {
+            let radius = extents.x * scale.x.max(scale.z);
+            // Both CalcCapsuleWorldExtents (0xbcc43a) and the capsule branch
+            // of CarveNavMeshTile (0xbcdeb4..0xbcded3) use max(halfHeight-r,0).
+            // A serialized "thin capsule" is therefore a sphere, NOT a disk.
+            let points = primitives::nav_capsule_points(
+                center,
+                world_rotation,
+                radius,
+                extents.y * scale.y,
+            )?;
+            let (points, triangles) = convex_mesh(&points)?;
+            project_mesh(&points, &triangles, &GlobalTransform::IDENTITY, true)?
+        }
+        _ => return Err("unknown NavMeshObstacle shape".into()),
+    };
+    polygon.carve = true;
+    Ok(polygon)
+}
+
 fn collider_polygons(
     collider: &Collider,
     geometry: &[Geometry],
     transform: &GlobalTransform,
+    world_rotation: Quat,
 ) -> Result<Vec<ColliderPolygon>, String> {
     let polygons = match collider.kind.as_str() {
         "MeshCollider" => {
@@ -380,31 +426,57 @@ fn collider_polygons(
             };
             vec![project_mesh(&positions, &triangles, transform, solid)?]
         }
-        "BoxCollider" => vec![project(
-            box_points(
-                Vec3::from(collider.center.ok_or("box center missing")?),
-                Vec3::from(collider.size.ok_or("box size missing")?),
-            )?,
-            transform,
-        )?],
-        "SphereCollider" => vec![project(
-            curved_points(
-                Vec3::from(collider.center.ok_or("sphere center missing")?),
-                collider.radius.ok_or("sphere radius missing")?,
-                0.0,
-                1,
-            )?,
-            transform,
-        )?],
-        "CapsuleCollider" => vec![project(
-            curved_points(
-                Vec3::from(collider.center.ok_or("capsule center missing")?),
-                collider.radius.ok_or("capsule radius missing")?,
-                collider.height.ok_or("capsule height missing")?,
-                collider.direction.ok_or("capsule direction missing")?,
-            )?,
-            transform,
-        )?],
+        "BoxCollider" => {
+            let center =
+                transform.transform_point(Vec3::from(collider.center.ok_or("box center missing")?));
+            let size = Vec3::from(collider.size.ok_or("box size missing")?)
+                * primitives::physics_scale(transform)?;
+            let (points, triangles) = primitives::box_mesh(Vec3::ZERO, size)?;
+            let pose = GlobalTransform::from(
+                Transform::from_translation(center).with_rotation(world_rotation),
+            );
+            vec![project_mesh(&points, &triangles, &pose, true)?]
+        }
+        "SphereCollider" => {
+            let center = transform
+                .transform_point(Vec3::from(collider.center.ok_or("sphere center missing")?));
+            let radius = collider.radius.ok_or("sphere radius missing")?
+                * primitives::physics_scale(transform)?.max_element();
+            let (points, triangles) = primitives::rounded_solid(center, Vec3::Y, radius, 0.0)?;
+            vec![project_mesh(
+                &points,
+                &triangles,
+                &GlobalTransform::IDENTITY,
+                true,
+            )?]
+        }
+        "CapsuleCollider" => {
+            let direction = collider.direction.ok_or("capsule direction missing")?;
+            if direction > 2 {
+                return Err("invalid capsule direction".into());
+            }
+            let height = collider.height.ok_or("capsule height missing")?;
+            if !height.is_finite() || height < 0.0 {
+                return Err("invalid capsule height".into());
+            }
+            let scale = primitives::physics_scale(transform)?;
+            let radius = collider.radius.ok_or("capsule radius missing")?
+                * scale[(direction + 1) % 3].max(scale[(direction + 2) % 3]);
+            let center = transform
+                .transform_point(Vec3::from(collider.center.ok_or("capsule center missing")?));
+            let mut axis = Vec3::ZERO;
+            axis[direction] = 1.0;
+            let axis = (world_rotation * axis).normalize();
+            let segment_half = (height * scale[direction] * 0.5 - radius).max(0.0);
+            let (points, triangles) =
+                primitives::rounded_solid(center, axis, radius, segment_half)?;
+            vec![project_mesh(
+                &points,
+                &triangles,
+                &GlobalTransform::IDENTITY,
+                true,
+            )?]
+        }
         other => return Err(format!("unsupported collider shape {other}")),
     };
     Ok(polygons)
@@ -483,34 +555,6 @@ fn box_points(center: Vec3, size: Vec3) -> Result<Vec<Vec3>, String> {
     Ok(points)
 }
 
-fn curved_points(center: Vec3, radius: f32, height: f32, axis: usize) -> Result<Vec<Vec3>, String> {
-    if !center.is_finite()
-        || !radius.is_finite()
-        || radius <= 0.0
-        || !height.is_finite()
-        || height < 0.0
-        || axis > 2
-    {
-        return Err("invalid curved collider geometry".into());
-    }
-    // A circumscribed 32-sided cylinder contains the capsule. This is labelled
-    // conservative projection rather than native capsule tessellation.
-    let radial = radius / (std::f32::consts::PI / 32.0).cos();
-    let half = (height * 0.5).max(radius);
-    let mut points = Vec::with_capacity(64);
-    for end in [-half, half] {
-        for step in 0..32 {
-            let angle = step as f32 * std::f32::consts::TAU / 32.0;
-            let mut p = Vec3::ZERO;
-            p[axis] = end;
-            p[(axis + 1) % 3] = radial * angle.cos();
-            p[(axis + 2) % 3] = radial * angle.sin();
-            points.push(center + p);
-        }
-    }
-    Ok(points)
-}
-
 fn project(points: Vec<Vec3>, transform: &GlobalTransform) -> Result<ColliderPolygon, String> {
     let points: Vec<_> = points
         .into_iter()
@@ -528,6 +572,7 @@ fn project(points: Vec<Vec3>, transform: &GlobalTransform) -> Result<ColliderPol
         max_y,
         triangles: Vec::new(),
         solid: true,
+        carve: false,
     })
 }
 
@@ -663,8 +708,13 @@ mod tests {
             height: None,
             direction: None,
         };
-        let polygons =
-            collider_polygons(&collider, &[mesh.clone()], &GlobalTransform::IDENTITY).unwrap();
+        let polygons = collider_polygons(
+            &collider,
+            &[mesh.clone()],
+            &GlobalTransform::IDENTITY,
+            Quat::IDENTITY,
+        )
+        .unwrap();
         assert_eq!(polygons.len(), 1);
         assert!(polygons[0].solid);
         assert_eq!(
@@ -673,7 +723,13 @@ mod tests {
             "convex=true closes the box"
         );
         collider.convex = Some(false);
-        let polygons = collider_polygons(&collider, &[mesh], &GlobalTransform::IDENTITY).unwrap();
+        let polygons = collider_polygons(
+            &collider,
+            &[mesh],
+            &GlobalTransform::IDENTITY,
+            Quat::IDENTITY,
+        )
+        .unwrap();
         assert!(!polygons[0].solid);
         assert_eq!(
             polygons[0].triangles.len(),
@@ -728,9 +784,13 @@ mod tests {
                     collider.kind == "MeshCollider" && collider.convex == Some(true)
                 }) {
                     let start = std::time::Instant::now();
-                    let polygons =
-                        collider_polygons(collider, &document.geometry, &GlobalTransform::IDENTITY)
-                            .unwrap();
+                    let polygons = collider_polygons(
+                        collider,
+                        &document.geometry,
+                        &GlobalTransform::IDENTITY,
+                        Quat::IDENTITY,
+                    )
+                    .unwrap();
                     assert_eq!(polygons.len(), 1);
                     assert!(polygons[0].solid);
                     assert!(!polygons[0].triangles.is_empty());
@@ -745,9 +805,15 @@ mod tests {
                     ];
                     for voxel in [0.01, 0.05] {
                         let start = std::time::Instant::now();
-                        let field = moly_law::carve::WalkField::bake_colliders(&surface, &polygons, voxel);
-                        eprintln!("{name}: {}m raster {} cells / {} obstacle cells in {:?}", voxel,
-                            field.counts().cells, field.counts().obstacle_nulled, start.elapsed());
+                        let field =
+                            moly_law::carve::WalkField::bake_colliders(&surface, &polygons, voxel);
+                        eprintln!(
+                            "{name}: {}m raster {} cells / {} obstacle cells in {:?}",
+                            voxel,
+                            field.counts().cells,
+                            field.counts().obstacle_nulled,
+                            start.elapsed()
+                        );
                     }
                     count += 1;
                 }
@@ -757,11 +823,236 @@ mod tests {
     }
 
     #[test]
-    fn curved_projection_is_conservative_and_invalid_inputs_fail() {
-        let points = curved_points(Vec3::ZERO, 0.5, 2.0, 1).unwrap();
-        assert_eq!(points.len(), 64);
-        assert!(points.iter().all(|p| Vec2::new(p.x, p.z).length() >= 0.5));
+    fn invalid_primitive_inputs_fail() {
+        assert!(primitives::nav_capsule_points(Vec3::ZERO, Quat::IDENTITY, 0.5, -1.0).is_err());
         assert!(box_points(Vec3::ZERO, Vec3::new(-1.0, 1.0, 1.0)).is_err());
         assert!(validate_contract(1, "legacy-unity").is_err());
+    }
+
+    #[test]
+    fn physics_round_primitives_use_unity_scale_and_capsule_height_rules() {
+        let mut collider: Collider = serde_json::from_value(serde_json::json!({
+            "kind":"SphereCollider", "center":[0.1,0.2,0.3], "radius":0.2
+        }))
+        .unwrap();
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let transform = GlobalTransform::from(
+            Transform::from_xyz(1.0, 2.0, 3.0)
+                .with_rotation(rotation)
+                .with_scale(Vec3::new(-2.0, 0.5, 3.0)),
+        );
+        let center = transform.transform_point(Vec3::new(0.1, 0.2, 0.3));
+        let sphere = collider_polygons(&collider, &[], &transform, rotation)
+            .unwrap()
+            .remove(0);
+        let radius = 0.6;
+        assert!(!sphere.carve && sphere.solid);
+        assert!(
+            sphere.triangles.iter().flatten().all(|point| {
+                (Vec3::from(*point).distance(center) - radius * primitives::rounded_inflation())
+                    .abs()
+                    < 2e-5
+            }),
+            "sphere uses maximum absolute scale, not an ellipsoid"
+        );
+        collider.kind = "CapsuleCollider".into();
+        collider.direction = Some(1);
+        collider.height = Some(1.0);
+        let capsule = collider_polygons(&collider, &[], &transform, rotation)
+            .unwrap()
+            .remove(0);
+        assert!(
+            capsule.triangles.iter().flatten().all(|point| {
+                (Vec3::from(*point).distance(center) - radius * primitives::rounded_inflation())
+                    .abs()
+                    < 2e-5
+            }),
+            "height smaller than scaled diameter becomes a sphere"
+        );
+        collider.height = Some(4.0);
+        let capsule = collider_polygons(&collider, &[], &transform, rotation)
+            .unwrap()
+            .remove(0);
+        let axis = rotation * Vec3::Y;
+        assert!(capsule.triangles.iter().flatten().all(|point| {
+            let delta = Vec3::from(*point) - center;
+            let closest = axis * delta.dot(axis).clamp(-0.4, 0.4);
+            delta.distance(closest) <= radius * primitives::rounded_inflation() + 2e-5
+        }));
+    }
+
+    #[test]
+    fn explicit_short_carve_uses_native_sphere_minimum_height() {
+        let obstacle = NavObstacle {
+            enabled: Some(true),
+            shape: Some(0),
+            center: Some([0.0, 0.07, 0.0]),
+            extents: Some([0.08, 0.00001, 0.08]),
+            carve: Some(true),
+            only_stationary: Some(true),
+        };
+        let polygon =
+            obstacle_polygon(&obstacle, &GlobalTransform::IDENTITY, Quat::IDENTITY).unwrap();
+        assert!(polygon.carve && polygon.solid && !polygon.triangles.is_empty());
+        let carved_radius = 0.08 * 1.082_392_2_f32;
+        assert!((polygon.min_y - (0.07 - carved_radius)).abs() < 1e-6);
+        assert!((polygon.max_y - (0.07 + carved_radius)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sideways_native_capsule_keeps_center_blocked_but_releases_cylinder_corner() {
+        // JP con0005 pond authors this radius/height and X=90deg obstacle.
+        let obstacle = NavObstacle {
+            enabled: Some(true),
+            shape: Some(0),
+            center: Some([0.0; 3]),
+            extents: Some([0.37, 0.625, 0.37]),
+            carve: Some(true),
+            only_stationary: Some(true),
+        };
+        let rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let transform = GlobalTransform::from(Transform::from_rotation(rotation));
+        let polygon = obstacle_polygon(&obstacle, &transform, rotation).unwrap();
+        let surface = [
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, -4.0], [4.0, 0.0, 4.0]],
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, 4.0], [-4.0, 0.0, 4.0]],
+        ];
+        let field = moly_law::carve::WalkField::bake_colliders(&surface, &[polygon], 0.01);
+        assert!(!field.walkable_at([0.0, 0.0]));
+        assert!(
+            field.walkable_at([0.50, 0.775]),
+            "source rounded end is not the old cylinder corner"
+        );
+        let radial = 0.37 / (std::f32::consts::PI / 32.0).cos();
+        let mut old = project(
+            vec![
+                Vec3::new(-radial, -radial, -0.625),
+                Vec3::new(radial, radial, -0.625),
+                Vec3::new(radial, radial, 0.625),
+                Vec3::new(-radial, -radial, 0.625),
+            ],
+            &GlobalTransform::IDENTITY,
+        )
+        .unwrap();
+        old.carve = true;
+        let field = moly_law::carve::WalkField::bake_colliders(&surface, &[old], 0.01);
+        assert!(
+            !field.walkable_at([0.50, 0.775]),
+            "regression point distinguishes the old cylinder"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires source GLBs via MOLY_COLLISION_SOURCE_ROOT"]
+    fn canonical_cn_short_and_jp_sideways_obstacles_use_native_envelopes() {
+        let directory = std::path::PathBuf::from(
+            std::env::var("MOLY_COLLISION_SOURCE_ROOT")
+                .expect("source root with cn/jp directories"),
+        );
+        for (region, name) in [
+            ("cn", "mysekai__fixture__mdl_env0003_fixture_pond1.glb"),
+            ("cn", "mysekai__fixture__mdl_con0003_fixture_taiyaki1.glb"),
+            ("jp", "mysekai__fixture__mdl_con0005_fixture_pond1.glb"),
+        ] {
+            let bytes =
+                std::fs::read(directory.join(region).join("fixture-models").join(name)).unwrap();
+            let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+            let gltf: serde_json::Value =
+                serde_json::from_slice(&bytes[20..20 + json_length]).unwrap();
+            let nodes = gltf["nodes"].as_array().unwrap();
+            let mut tested = 0;
+            for (node_index, node) in nodes.iter().enumerate() {
+                let Some(source) = node
+                    .get("extras")
+                    .and_then(|extras| extras.get("sourceCollision"))
+                else {
+                    continue;
+                };
+                let source: Node = serde_json::from_value(source.clone()).unwrap();
+                for obstacle in source.nav_mesh_obstacles.iter().filter(|o| {
+                    o.enabled == Some(true) && o.carve == Some(true) && o.shape == Some(0)
+                }) {
+                    let center = obstacle.center.unwrap();
+                    let extents = obstacle.extents.unwrap();
+                    let (transform, rotation) = test_node_world_transform(nodes, node_index);
+                    let polygon = obstacle_polygon(obstacle, &transform, rotation).unwrap();
+                    assert!(polygon.carve);
+                    assert!(!polygon.triangles.is_empty());
+                    let scale = primitives::scale_magnitudes(&transform);
+                    let radius = extents[0] * scale.x.max(scale.z);
+                    let half_height = extents[1] * scale.y;
+                    if half_height < radius {
+                        let native_radius = radius * 1.082_392_2_f32;
+                        let world_center = transform.transform_point(Vec3::from(center));
+                        assert!(
+                            polygon
+                                .triangles
+                                .iter()
+                                .flatten()
+                                .all(|p| Vec3::from(*p).distance(world_center)
+                                    <= native_radius + 1e-5)
+                        );
+                    }
+                    eprintln!(
+                        "{region}/{name}: serialized radius {} height {}, native envelope {} triangles",
+                        extents[0],
+                        extents[1] * 2.0,
+                        polygon.triangles.len(),
+                    );
+                    tested += 1;
+                }
+            }
+            assert!(tested > 0, "real source includes capsule-shaped obstacles");
+        }
+    }
+
+    fn test_node_world_transform(
+        nodes: &[serde_json::Value],
+        node_index: usize,
+    ) -> (GlobalTransform, Quat) {
+        let mut chain = Vec::new();
+        let mut current = node_index;
+        loop {
+            let node = &nodes[current];
+            assert!(
+                node.get("matrix").is_none(),
+                "fixture source uses explicit TRS"
+            );
+            let translation = node
+                .get("translation")
+                .map(|v| serde_json::from_value::<[f32; 3]>(v.clone()).unwrap())
+                .unwrap_or([0.0; 3]);
+            let rotation = node
+                .get("rotation")
+                .map(|v| serde_json::from_value::<[f32; 4]>(v.clone()).unwrap())
+                .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let scale = node
+                .get("scale")
+                .map(|v| serde_json::from_value::<[f32; 3]>(v.clone()).unwrap())
+                .unwrap_or([1.0; 3]);
+            chain.push(Transform {
+                translation: Vec3::from(translation),
+                rotation: Quat::from_array(rotation),
+                scale: Vec3::from(scale),
+            });
+            let Some(parent) = nodes.iter().position(|node| {
+                node["children"].as_array().is_some_and(|children| {
+                    children
+                        .iter()
+                        .any(|child| child.as_u64() == Some(current as u64))
+                })
+            }) else {
+                break;
+            };
+            current = parent;
+            assert!(chain.len() <= nodes.len());
+        }
+        let mut world = GlobalTransform::IDENTITY;
+        let mut rotation = Quat::IDENTITY;
+        for local in chain.into_iter().rev() {
+            world = world.mul_transform(local);
+            rotation *= local.rotation;
+        }
+        (world, rotation)
     }
 }

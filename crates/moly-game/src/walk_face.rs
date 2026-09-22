@@ -71,6 +71,12 @@ impl WalkFace {
         self.field.constrain_move(start, goal)
     }
 
+    /// Local low-step elevation above the original site surface. The raw
+    /// surface remains responsible for continuous terrain height.
+    pub(crate) fn height_offset(&self, point: [f32; 2]) -> f32 {
+        self.field.height_offset(point)
+    }
+
     /// 烘焙账目（重烘对账行的读面）。
     pub fn carve_counts(&self) -> &BakeCounts {
         self.field.counts()

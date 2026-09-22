@@ -152,17 +152,12 @@ impl ObjectiveFace {
             return None;
         }
         if self.field.walkable_at([current[0], current[2]]) {
-            return Some(current);
+            return self.navigation_point_at([current[0], current[2]]);
         }
         let xz = self
             .field
             .nearest_walkable([current[0], current[2]], None)?;
-        let (point, distance) = self.closest([xz[0], current[1], xz[1]]);
-        (distance.is_finite()
-            && distance < f32::MAX
-            && point.iter().all(|value| value.is_finite())
-            && self.field.walkable_at([point[0], point[2]]))
-        .then_some(point)
+        self.navigation_point_at(xz)
     }
 
     /// 面上最近点与距离（含高度的三角最近点；无三角覆盖处距离无穷）。
@@ -188,7 +183,9 @@ impl ObjectiveFace {
         let xz = self
             .field
             .nearest_walkable([target[0], target[2]], Some(tolerance))?;
-        let (point, _) = self.closest([xz[0], target[1], xz[1]]);
+        let (point, _) = self.closest([xz[0],
+            target[1] - self.field.height_offset(xz), xz[1]]);
+        let point = self.navigation_point(point);
         (dist3(point, target) <= tolerance && self.field.walkable_at([point[0], point[2]]))
             .then_some(point)
     }
@@ -197,6 +194,46 @@ impl ObjectiveFace {
     pub(crate) fn surface_sample(&self, target: [f32; 3], tolerance: f32) -> Option<[f32; 3]> {
         let (point, distance) = self.closest(target);
         (distance <= tolerance).then_some(point)
+    }
+
+    /// Height for an already navigation-qualified point. Explicit animation
+    /// locators retain `surface_sample`, which probes the raw site geometry.
+    pub(crate) fn navigation_surface_sample(&self, target: [f32; 3], tolerance: f32) -> Option<[f32; 3]> {
+        let point = self.navigation_point_at([target[0], target[2]])?;
+        (dist3(point, target) <= tolerance).then_some(point)
+    }
+
+    fn navigation_point(&self, mut point: [f32; 3]) -> [f32; 3] {
+        point[1] += self.field.height_offset([point[0], point[2]]);
+        point
+    }
+
+    /// Navigation already owns x/z. A 3-D nearest-point projection would move
+    /// them on slopes, then repeatedly convert a step's height into terrain.
+    /// Use the same highest covering site surface as the single-layer bake.
+    pub(crate) fn navigation_point_at(&self, xz: [f32; 2]) -> Option<[f32; 3]> {
+        if !xz.into_iter().all(f32::is_finite) {
+            return None;
+        }
+        let bucket = self.buckets.get(&cell_of(xz[0], xz[1]))?;
+        let mut height: Option<f32> = None;
+        for &index in bucket {
+            let [a, b, c] = self.tris[index as usize];
+            let determinant = (b[2] - c[2]) * (a[0] - c[0])
+                + (c[0] - b[0]) * (a[2] - c[2]);
+            if determinant.abs() < 1e-12 {
+                continue;
+            }
+            let u = ((b[2] - c[2]) * (xz[0] - c[0])
+                + (c[0] - b[0]) * (xz[1] - c[2])) / determinant;
+            let v = ((c[2] - a[2]) * (xz[0] - c[0])
+                + (a[0] - c[0]) * (xz[1] - c[2])) / determinant;
+            if u >= -1e-5 && v >= -1e-5 && u + v <= 1.00001 {
+                let y = u * a[1] + v * b[1] + (1.0 - u - v) * c[1];
+                height = Some(height.map_or(y, |prior| prior.max(y)));
+            }
+        }
+        height.map(|y| [xz[0], y + self.field.height_offset(xz), xz[1]])
     }
 
     /// 与执行器共用严格完整路径，目标不拉回到其他可达位置。
@@ -216,10 +253,7 @@ impl ObjectiveFace {
         let corners = self.field.path_exact([from.x, from.z], [to.x, to.z])?;
         corners
             .into_iter()
-            .map(|point| {
-                let (height, distance) = self.closest([point[0], self.ref_y, point[1]]);
-                (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(height))
-            })
+            .map(|point| self.navigation_point_at(point).map(Vec3::from))
             .collect()
     }
 
@@ -228,8 +262,7 @@ impl ObjectiveFace {
             return None;
         }
         let point = self.field.constrain_move([from.x, from.z], [to.x, to.z]);
-        let (surface, distance) = self.closest([point[0], from.y, point[1]]);
-        (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(surface))
+        self.navigation_point_at(point).map(Vec3::from)
     }
 
     /// 可行走格集。
@@ -1789,4 +1822,86 @@ fn scale(a: [f32; 3], t: f32) -> [f32; 3] {
 fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
     let d = sub(a, b);
     dot(d, d).sqrt()
+}
+
+#[cfg(test)]
+mod navigation_height_tests {
+    use super::*;
+    use moly_law::carve::{ColliderPolygon, WalkField};
+
+    fn low_step_face() -> ObjectiveFace {
+        let tris = vec![
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, -4.0], [4.0, 0.0, 4.0]],
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, 4.0], [-4.0, 0.0, 4.0]],
+        ];
+        let step = ColliderPolygon {
+            vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            min_y: 0.0, max_y: 0.05, triangles: Vec::new(), solid: true, carve: false,
+        };
+        let field = std::sync::Arc::new(WalkField::bake_colliders(&tris, &[step], 0.05));
+        let mut buckets = HashMap::new();
+        for x in -16..=16 {
+            for z in -16..=16 {
+                buckets.insert((x, z), vec![0, 1]);
+            }
+        }
+        ObjectiveFace { tris, buckets, grid_min: (-16, -16), grid_max: (16, 16),
+            ref_y: 0.0, walkable: Vec::new(), epoch: 1, field, generation: 1 }
+    }
+
+    #[test]
+    fn navigation_uses_step_height_but_animation_surface_probe_stays_raw() {
+        let face = low_step_face();
+        assert_eq!(face.surface_sample([0.0, 0.0, 0.0], 0.25).unwrap()[1], 0.0);
+        for point in [face.sample([0.0, 0.0, 0.0], 0.25).unwrap(),
+            face.navigation_surface_sample([0.0, 0.0, 0.0], 0.25).unwrap(),
+            face.reattach_after_layout([0.0, 0.0, 0.0]).unwrap()] {
+            assert!((point[1] - 0.05).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn fixture_navigation_move_does_not_accumulate_step_height() {
+        let face = low_step_face();
+        let start = Vec3::new(0.0, 0.05, 0.0);
+        let next = face.fixture_move(start, Vec3::new(0.1, 0.05, 0.0)).unwrap();
+        assert!((next.y - 0.05).abs() < 1e-5);
+        let outside = face.fixture_move(next, Vec3::new(2.0, 0.05, 0.0)).unwrap();
+        assert!(outside.y.abs() < 1e-5);
+        let path = face.fixture_path(Vec3::new(-2.0, 0.0, 0.0), start).unwrap();
+        assert!((path.last().unwrap().y - 0.05).abs() < 1e-5);
+    }
+
+    #[test]
+    fn navigation_height_on_a_sloped_rug_never_moves_valid_xz() {
+        let mut face = low_step_face();
+        for triangle in &mut face.tris {
+            for point in triangle {
+                point[1] = point[0] * 0.25;
+            }
+        }
+        let top = |x: f32, z: f32| [x, x * 0.25 + 0.05, z];
+        let rug = ColliderPolygon {
+            vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            min_y: -0.2, max_y: 0.3,
+            triangles: vec![[top(-1.0, -1.0), top(-1.0, 1.0), top(1.0, 1.0)],
+                [top(-1.0, -1.0), top(1.0, 1.0), top(1.0, -1.0)]],
+            solid: false, carve: false,
+        };
+        face.field = std::sync::Arc::new(WalkField::bake_colliders(&face.tris, &[rug], 0.05));
+        let xz = [0.025, 0.025];
+        assert!(face.field.walkable_at(xz));
+        let y = xz[0] * 0.25 + face.field.height_offset(xz);
+        assert!(face.field.height_offset(xz) > 0.0);
+        let original = [xz[0], y, xz[1]];
+        for result in [face.navigation_surface_sample(original, 0.25).unwrap(),
+            face.reattach_after_layout(original).unwrap(),
+            face.fixture_move(Vec3::from(original), Vec3::from(original)).unwrap().to_array()] {
+            assert_eq!([result[0], result[2]], xz);
+            assert!((result[1] - y).abs() < 1e-5);
+        }
+        let raw = face.surface_sample(original, 0.25).unwrap();
+        assert!((raw[1] - raw[0] * 0.25).abs() < 1e-5,
+            "the raw animation probe still samples the site slope");
+    }
 }
