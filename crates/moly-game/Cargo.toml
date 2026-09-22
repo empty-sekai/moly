@@ -15,6 +15,9 @@ swash = "0.2.10"
 async-lock = "3"
 futures-util = "0.3"
 futures-channel = "0.3"
+# Source MeshCollider.convex is a solid 3-D hull, not its concave render mesh.
+# Use the geometry implementation without physics dynamics or triangulation extras.
+parry3d = { version = "0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = { version = "3", default-features = false }

@@ -124,7 +124,7 @@ pub(crate) fn build(
     failure.clear();
     commands.insert_resource(CollisionBakeStatus {
         ready: true,
-        reason: "conservative single-surface collider projection; not native Unity bake".into(),
+        reason: "cell-clipped source collider spans; not native Unity bake".into(),
         colliders: sources.colliders,
         polygons: sources.polygons.len(),
     });
@@ -202,7 +202,7 @@ pub(crate) fn rebake_on_save(
     failure.clear();
     commands.insert_resource(CollisionBakeStatus {
         ready: true,
-        reason: "conservative single-surface collider projection; not native Unity bake".into(),
+        reason: "cell-clipped source collider spans; not native Unity bake".into(),
         colliders: sources.colliders,
         polygons: sources.polygons.len(),
     });

@@ -215,7 +215,8 @@ pub(crate) fn qa_open(
             |status| serde_json::json!({
                 "ready": status.ready, "reason": status.reason,
                 "colliders": status.colliders, "polygons": status.polygons,
-                "mode": "canonical-collider-xz-projection"
+                "mode": "canonical-collider-cell-spans",
+                "nativeParity": false
             }));
         value["resource_counts"] = serde_json::json!({
             "gltf":extra.gltfs.len(),"meshes":extra.particle_meshes.len(),"images":extra.images.len(),
