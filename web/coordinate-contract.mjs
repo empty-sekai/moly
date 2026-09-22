@@ -78,7 +78,10 @@ export async function preflightCoordinates(options, { fetchImpl = fetch, signal 
     const origin = options.resourceOrigin || stage.origin;
     const remoteBase = resourceBase ? new URL(resourceBase) : null;
     const [releaseBytes, snapshotBytes] = await Promise.all([
-      bytesFrom(new URL("./integrity.json", stage), 1048576, fetchImpl, signal),
+      bytesFrom(remoteBase
+        ? new URL(`releases/${releaseId}/integrity.json`, remoteBase)
+        : new URL("./integrity.json", stage),
+        1048576, fetchImpl, signal),
       bytesFrom(remoteBase
         ? new URL(`snapshots/${snapshotId}/snapshot.json`, remoteBase)
         : new URL(`/moly/snapshots/${snapshotId}/snapshot.json`, origin),
