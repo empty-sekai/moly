@@ -11,6 +11,97 @@ struct Candidate {
 #[derive(Component)]
 pub(crate) struct Request(Vec<Candidate>);
 
+/// A private, dormant GPU preparation owned by one source Control root.
+#[derive(Component)]
+pub(crate) struct ControlPreparation(Vec<Candidate>, f64);
+
+pub(crate) fn discard_abandoned_controls(world: &mut World, now: f64) {
+    let expired: Vec<_> = world.query::<(Entity, &ControlPreparation)>().iter(world)
+        .filter_map(|(root, request)| (now - request.1 > 2.0).then_some(root)).collect();
+    for root in expired {
+        if let Some(request) = world.entity_mut(root).take::<ControlPreparation>() {
+            for candidate in request.0 {
+                if let Some((draw, _)) = candidate.plan.draw { world.despawn(draw); }
+            }
+        }
+    }
+}
+
+pub(crate) fn prepare_control(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    let server = world.resource::<AssetServer>().clone();
+    let mut preparation = match world.entity_mut(root).take::<ControlPreparation>() {
+        Some(preparation) => preparation,
+        None => {
+            let particles = doc["emitters"].as_array().ok_or("missing source emitter list")?;
+            let nodes = doc["nodes"].as_array().ok_or("missing source node list")?;
+            let by_path = nodes.iter().filter_map(|node|
+                Some((node["node"].as_str()?.to_owned(), node))).collect();
+            let owners = source_sub_emitter_owners(particles);
+            let mut candidates = Vec::new();
+            for &(anchor, ordinal) in selected {
+                let particle = &particles[ordinal];
+                if !is_source_particle(particle) {
+                    return Err(format!("{}: source-owned shader/material export required", particle["node"]));
+                }
+                let mut tally = Tally::default();
+                let mut plan = judge_in_archive(doc["name"].as_str().unwrap_or("fixture"), particle,
+                    &by_path, &owners, EffectKind::Site, false, None, "fixture-particles-v2",
+                    Some(GlobalTransform::IDENTITY), &server, &mut tally)
+                    .ok_or_else(|| format!("{}: source particle control rejected {tally:?}", particle["node"]))?;
+                plan.ordinal = ordinal;
+                candidates.push(Candidate { anchor, plan });
+            }
+            ControlPreparation(candidates, 0.0)
+        }
+    };
+    preparation.1 = crate::fixture_timeline_particles::realtime(world);
+    let result = (|| {
+        for candidate in &mut preparation.0 {
+            let plan = &mut candidate.plan;
+            let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
+                world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
+                world.resource::<Assets<Mesh>>())?;
+            if !ready { return Ok(None); }
+            if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
+                return Ok(None);
+            }
+            if plan.draw.is_none() {
+                let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
+                    NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
+                plan.draw = Some((draw, mesh));
+            }
+            match plan.source.readiness.lock().unwrap().clone() {
+                ParticleReadiness::Pending => return Ok(None),
+                ParticleReadiness::Failed(error) => return Err(error),
+                ParticleReadiness::Ready => {}
+            }
+        }
+        let mut draws = Vec::new();
+        for candidate in &preparation.0 {
+            let (draw, mesh) = candidate.plan.draw.clone().expect("prepared control draw");
+            // No playOnAwake here. The owning Director installs a paused clock.
+            world.entity_mut(draw).insert(crate::uber_particle::FixtureParticleLive(
+                runtime(&candidate.plan, candidate.anchor, mesh)));
+            draws.push(draw);
+        }
+        Ok(Some(draws))
+    })();
+    match &result {
+        Ok(None) => { world.entity_mut(root).insert(preparation); }
+        Err(_) => for candidate in preparation.0 {
+            if let Some((draw, _)) = candidate.plan.draw { world.despawn(draw); }
+        },
+        Ok(Some(_)) => {}
+    }
+    result
+}
+
 pub(crate) fn is_source_particle(particle: &Value) -> bool {
     particle.pointer("/renderer/material").is_some_and(|material|
         material.get("sourceMaterial").is_some() || material.get("shaderProgram").is_some()
@@ -64,6 +155,17 @@ pub(crate) fn plan(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn abandoned_control_gpu_preparation_does_not_become_a_fixture_cache() {
+        let mut world = World::new();
+        let root = world.spawn(ControlPreparation(Vec::new(), 0.0)).id();
+        discard_abandoned_controls(&mut world, 1.0);
+        assert!(world.get::<ControlPreparation>(root).is_some());
+        discard_abandoned_controls(&mut world, 3.0);
+        assert!(world.get::<ControlPreparation>(root).is_none());
+        assert!(world.get_entity(root).is_ok());
+    }
 
     #[test]
     fn incomplete_source_contract_never_becomes_a_legacy_material() {

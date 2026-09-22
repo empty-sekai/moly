@@ -1259,17 +1259,41 @@ pub(crate) fn spawn_fixture_particles(
 }
 
 pub(crate) fn advance_fixture_particles(
-    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive)>,
+    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
+        Option<&mut crate::fixture_timeline_particles::DirectorClock>,
+        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>)>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
     time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else { return; };
-    let Some(viewport) = camera.physical_viewport_size() else { return; };
+    let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
+        commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
+    };
+    let Some(viewport) = camera.physical_viewport_size() else {
+        commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
+    };
     let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32);
-    for (entity, mut particle) in &mut live {
+    for (entity, mut particle, mut clock, stopped) in &mut live {
         let system = &mut particle.0;
-        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
+        let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
+        if let Some(mut stopped) = stopped {
+            if stopped.reactivated(dormant, system.emitter.play_on_awake) {
+                // The source GameObject has genuinely reactivated; removing a
+                // Director clock alone must never manufacture this Play edge.
+                commands.entity(entity).remove::<(
+                    crate::fixture_timeline_particles::StoppedByDirector,
+                    crate::fixture_timeline_particles::DirectorClock,
+                )>().insert(crate::fixture_timeline_particles::RestoredAutonomous);
+                clock = None;
+                system.prewarmed = false;
+            } else {
+                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                }
+                continue;
+            }
+        }
+        if dormant && clock.is_none() {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
@@ -1277,19 +1301,24 @@ pub(crate) fn advance_fixture_particles(
         }
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
         let ctx = Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera_transform };
-        if !system.prewarmed {
-            system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping {
-                for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
+        if let Some(mut clock) = clock {
+            crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant);
+        } else {
+            if !system.prewarmed {
+                system.prewarmed = true;
+                if system.emitter.prewarm && system.emitter.looping {
+                    for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
+                }
             }
+            let dt = time.delta_secs() * system.emitter.simulation_speed;
+            if dt > 0.0 { simulate(system, dt, &ctx); }
         }
-        let dt = time.delta_secs() * system.emitter.simulation_speed;
-        if dt > 0.0 { simulate(system, dt, &ctx); }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if let Some(mesh) = meshes.get_mut(&system.mesh) {
             crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
         }
     }
+    commands.queue(crate::fixture_timeline_particles::collect_garbage);
 }
 
 /// 拆站面：撤下计划与状态，让新站的判读重新起跳。实体随场景树一起撤。

@@ -113,6 +113,7 @@ fn supported(class: &str) -> bool {
     matches!(
         class,
         "AnimationPlayableAsset"
+            | "ControlPlayableAsset"
             | "ChangeEyePresetClip"
             | "ChangeLipSyncPresetClip"
             | "LoopFlagClip"
@@ -134,7 +135,7 @@ mod tests {
         };
         inventory.prefabs.insert(
             "tl_chair-ground_w".into(),
-            vec!["ControlPlayableAsset".into()],
+            vec!["UnresolvedSourcePayload".into()],
         );
         assert!(inventory.reason("tl_chair_w").is_some());
         inventory.prefabs.insert(
@@ -143,5 +144,18 @@ mod tests {
         );
         assert!(inventory.reason("tl_chair_w").is_none());
         assert!(inventory.reason("tl_unknown_w").is_none());
+    }
+
+    #[test]
+    fn source_control_particles_reach_dynamic_binding_validation() {
+        let inventory = ActivityCapabilities {
+            ready: true,
+            prefabs: HashMap::from([
+                ("tl_effect-ground_m".into(), vec!["AnimationPlayableAsset".into(), "ControlPlayableAsset".into()]),
+                ("tl_other-ground_m".into(), vec!["ControlPlayableAsset".into(), "FadeCharacterClip".into()]),
+            ]),
+        };
+        assert!(inventory.reason("tl_effect_m").is_none());
+        assert!(inventory.reason("tl_other_m").is_some());
     }
 }
