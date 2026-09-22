@@ -24,6 +24,10 @@ function descriptors(documents) {
 }
 test("source declarations reject missing/mixed contracts and wrong provenance", () => {
   assert.doesNotThrow(() => validateCoordinateSources(sourceDocuments(), identity));
+  const sharedCollision = sourceDocuments(); sharedCollision["fixture-models/index.json"].version = 4;
+  assert.doesNotThrow(() => validateCoordinateSources(sharedCollision, identity));
+  sharedCollision["fixture-models/index.json"].version = 5;
+  assert.throws(() => validateCoordinateSources(sharedCollision, identity), /schema mismatch/);
   for (const name of COORDINATE_DOCUMENTS) {
     const documents = sourceDocuments(); delete documents[name].coordinateContract;
     assert.throws(() => validateCoordinateSources(documents, identity), /coordinate contract/);
@@ -78,6 +82,21 @@ test("publication verifies every GLB/root/collision metadata, not only index lab
     fs.writeFileSync(extra,bad);assert.throws(()=>validatePublicationCoordinates(root,identity));fs.unlinkSync(extra);
     gltf.nodes[0].extras.fixtureCollision.coordinateContract="old";write();
     assert.throws(()=>validatePublicationCoordinates(root,identity),/collision/);
+    delete gltf.nodes[0].extras.fixtureCollision;
+    const reference = {schemaVersion:1,node:1};
+    gltf.extras = {fixtureCollisionRef:reference};
+    gltf.nodes[0].extras.fixtureCollisionRef = reference;
+    gltf.nodes.push({name:"__moly_fixture_collision",extras:{fixtureCollision:{
+      schemaVersion:1,coordinateContract:contract,units:"source-unity-unit",geometry:[],gaps:[]}}});
+    documents["fixture-models/index.json"].version=4;
+    fs.writeFileSync(path.join(root,"fixture-models/index.json"),JSON.stringify(documents["fixture-models/index.json"]));
+    write(); assert.equal(validatePublicationCoordinates(root,identity).coordinateModels.files,1);
+    gltf.nodes[0].children=[1];write();
+    assert.throws(()=>validatePublicationCoordinates(root,identity),/outside rendered scenes/);
+    delete gltf.nodes[0].children;
+    gltf.nodes[0].extras.fixtureCollisionRef={schemaVersion:1,node:0};write();
+    assert.throws(()=>validatePublicationCoordinates(root,identity),/collision reference/);
+    gltf.nodes[0].extras.fixtureCollisionRef=reference;
     delete gltf.asset.extras.coordinateContract;write();
     assert.throws(()=>validatePublicationCoordinates(root,identity),/GLB asset/);
   } finally { fs.rmSync(root,{recursive:true,force:true}); }

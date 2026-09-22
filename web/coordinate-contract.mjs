@@ -15,7 +15,7 @@ export function validateCoordinateSources(documents, { region, version }) {
   if (source?.region !== region || source.appVersion !== version)
     throw new Error("Coordinate source manifest region/version mismatch");
   const packages = documents["fixture-models/index.json"].packages;
-  if (documents["fixture-models/index.json"].version !== 3 || documents["fixture-attach/attach-points.json"].version !== 2)
+  if (![3, 4].includes(documents["fixture-models/index.json"].version) || documents["fixture-attach/attach-points.json"].version !== 2)
     throw new Error("Coordinate source document schema mismatch; re-export this snapshot");
   if (!packages || typeof packages !== "object" || Array.isArray(packages))
     throw new Error("Coordinate fixture index has no package identities");

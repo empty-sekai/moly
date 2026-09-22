@@ -1009,11 +1009,26 @@ pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
         _ => return Err(MipSkip::BadFormat),
     };
     let data = image.data.as_ref().ok_or(MipSkip::NoData)?;
-    if data.len() != (width * height * 4) as usize {
+    let base_len = (width as usize).checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4)).ok_or(MipSkip::BadLength)?;
+    if data.len() != base_len {
         return Err(MipSkip::BadLength);
     }
-    let mut chain = data.clone();
-    let mut src = data.clone();
+    // Reuse the decoded base-level buffer. Reserve the complete
+    // chain once, then read the previous level and write its disjoint tail.
+    // No full-resolution clone or per-level scratch buffer is needed; the CPU
+    // image remains available to every existing caller after generation.
+    let mut chain_len = base_len;
+    let (mut w, mut h) = (width as usize, height as usize);
+    for _ in 1..levels {
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+        chain_len = chain_len.checked_add(w * h * 4).ok_or(MipSkip::BadLength)?;
+    }
+    let chain = image.data.as_mut().expect("base data validated above");
+    chain.reserve_exact(chain_len - base_len);
+    chain.resize(chain_len, 0);
+    let (mut src_offset, mut dst_offset) = (0, base_len);
     let (mut w, mut h) = (width as usize, height as usize);
     while w > 1 || h > 1 {
         let cw = (w / 2).max(1);
@@ -1023,7 +1038,10 @@ pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
         let taps_x = w / cw;
         let taps_y = h / ch;
         let mean_scale = 1.0 / (taps_x * taps_y) as f32;
-        let mut dst = vec![0u8; cw * ch * 4];
+        let dst_len = cw * ch * 4;
+        let (previous, tail) = chain.split_at_mut(dst_offset);
+        let src = &previous[src_offset..];
+        let dst = &mut tail[..dst_len];
         for y in 0..ch {
             for x in 0..cw {
                 let mut acc = [0f32; 4];
@@ -1053,14 +1071,104 @@ pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
                 }
             }
         }
-        chain.extend_from_slice(&dst);
-        src = dst;
+        src_offset = dst_offset;
+        dst_offset += dst_len;
         w = cw;
         h = ch;
     }
-    image.data = Some(chain);
     image.texture_descriptor.mip_level_count = levels;
     Ok(levels)
+}
+
+#[cfg(test)]
+mod mip_tests {
+    use super::*;
+    use bevy::asset::RenderAssetUsages;
+
+    fn image(width: u32, height: u32, srgb: bool, data: Vec<u8>) -> Image {
+        Image::new(Extent3d { width, height, depth_or_array_layers: 1 }, TextureDimension::D2,
+            data, if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm },
+            RenderAssetUsages::all())
+    }
+
+    // Frozen pre-optimization buffer algorithm: a byte-equivalence oracle, not
+    // an independent claim about the original client's filtering behavior.
+    fn copied_chain(data: &[u8], mut w: usize, mut h: usize, srgb: bool) -> Vec<u8> {
+        let mut chain = data.to_vec();
+        let mut src = data.to_vec();
+        while w > 1 || h > 1 {
+            let (cw, ch) = ((w / 2).max(1), (h / 2).max(1));
+            let (taps_x, taps_y) = (w / cw, h / ch);
+            let mean_scale = 1.0 / (taps_x * taps_y) as f32;
+            let mut dst = vec![0u8; cw * ch * 4];
+            for y in 0..ch {
+                for x in 0..cw {
+                    let mut acc = [0f32; 4];
+                    for dy in 0..taps_y {
+                        for dx in 0..taps_x {
+                            let i = ((y * taps_y + dy) * w + (x * taps_x + dx)) * 4;
+                            for c in 0..4 {
+                                let channel = src[i + c] as f32 / 255.0;
+                                acc[c] += if srgb && c < 3 { srgb_decode(channel) } else { channel };
+                            }
+                        }
+                    }
+                    let o = (y * cw + x) * 4;
+                    for c in 0..4 {
+                        let mean = acc[c] * mean_scale;
+                        let channel = if srgb && c < 3 { srgb_encode(mean) } else { mean };
+                        dst[o + c] = (channel * 255.0 + 0.5).min(255.0) as u8;
+                    }
+                }
+            }
+            chain.extend_from_slice(&dst);
+            src = dst;
+            w = cw; h = ch;
+        }
+        chain
+    }
+
+    #[test]
+    fn in_place_chain_is_byte_identical_for_both_color_spaces_and_short_edges() {
+        for (w, h) in [(1, 1), (1, 16), (16, 1), (2, 8), (8, 2), (8, 8), (16, 8)] {
+            for srgb in [false, true] {
+                let data: Vec<u8> = (0..w * h * 4).map(|i| ((i * 73 + i / 7 * 19) % 256) as u8).collect();
+                let expected = copied_chain(&data, w as usize, h as usize, srgb);
+                let mut image = image(w, h, srgb, data);
+                assert_eq!(generate_mip_chain(&mut image), mip_levels(w, h).ok_or(MipSkip::BadShape));
+                assert_eq!(image.data.as_ref().unwrap(), &expected, "{w}x{h}, srgb={srgb}");
+                assert_eq!(image.asset_usage, RenderAssetUsages::all());
+            }
+        }
+    }
+
+    #[test]
+    fn reserved_image_storage_is_reused_without_changing_alpha_or_the_base_level() {
+        for (srgb, rgb) in [(false, 128), (true, 188)] {
+            let data = [0, 0, 0, 0, 255, 255, 255, 255].repeat(2);
+            let mut image = image(2, 2, srgb, data.clone());
+            image.data.as_mut().unwrap().reserve_exact(4);
+            let base_pointer = image.data.as_ref().unwrap().as_ptr();
+            assert_eq!(generate_mip_chain(&mut image), Ok(2));
+            let chain = image.data.as_ref().unwrap();
+            assert_eq!(chain.as_ptr(), base_pointer);
+            assert_eq!(&chain[..16], data.as_slice());
+            assert_eq!(&chain[16..], &[rgb, rgb, rgb, 128]);
+            let expected = chain.clone();
+            assert_eq!(generate_mip_chain(&mut image), Err(MipSkip::AlreadyChained));
+            assert_eq!(image.data.as_ref().unwrap(), &expected);
+        }
+    }
+
+    #[test]
+    fn rejected_mip_input_keeps_its_original_data_and_descriptor() {
+        let mut image = image(2, 2, false, vec![37; 16]);
+        image.data.as_mut().unwrap().pop();
+        let expected = image.data.clone();
+        assert_eq!(generate_mip_chain(&mut image), Err(MipSkip::BadLength));
+        assert_eq!(image.data, expected);
+        assert_eq!(image.texture_descriptor.mip_level_count, 1);
+    }
 }
 
 /// 遮罩贴图第 0 级的逐通道均值，**在存储（gamma）域**上取——自发光缓冲

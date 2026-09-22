@@ -12,6 +12,27 @@ function read(root, name) {
   if (fs.statSync(file).size > 128 * 1048576) throw new Error("Coordinate evidence too large");
   return fs.readFileSync(file);
 }
+
+function collisionReference(gltf, reference, label) {
+  if (!reference || typeof reference !== "object" || Array.isArray(reference) ||
+      Object.keys(reference).sort().join(",") !== "node,schemaVersion" ||
+      reference.schemaVersion !== 1 || !Number.isSafeInteger(reference.node) || reference.node < 0)
+    throw new Error(`${label}: invalid collision document reference`);
+  const index = reference.node, node = gltf.nodes?.[index];
+  if (!node || node.name !== "__moly_fixture_collision" ||
+      Object.keys(node).some(key => !["name", "extras"].includes(key)) ||
+      node.extras?.fixtureCollisionRef || node.extras?.sourceCollision ||
+      gltf.scenes?.some(scene => scene.nodes?.includes(index)) ||
+      gltf.nodes?.some(parent => parent.children?.includes(index)) ||
+      gltf.skins?.some(skin => skin.skeleton === index || skin.joints?.includes(index)) ||
+      gltf.animations?.some(animation => animation.channels?.some(channel => channel.target?.node === index)))
+    throw new Error(`${label}: collision metadata node must stay outside rendered scenes`);
+  const document = node.extras?.fixtureCollision;
+  requireCoordinateContract(document, `${label} collision`);
+  if (document.schemaVersion !== 1 || document.units !== "source-unity-unit" || !Array.isArray(document.geometry))
+    throw new Error(`${label}: unsupported collision document schema`);
+  return document;
+}
 export function validatePublicationCoordinates(assets, identity) {
   const root = fs.realpathSync(assets), documents = {}, hashes = {};
   for (const name of COORDINATE_DOCUMENTS) {
@@ -48,15 +69,29 @@ export function validatePublicationCoordinates(assets, identity) {
       const gltf = JSON.parse(bytes.subarray(20, 20 + length));
       requireCoordinateContract(gltf.asset?.extras, `${name} GLB asset`);
       const roots = gltf.scenes?.flatMap(scene => scene.nodes ?? []) ?? [];
+      const reference = gltf.extras?.fixtureCollisionRef;
+      if (reference) {
+        if (gltf.extras.fixtureCollision) throw new Error(`${name}: ambiguous collision storage`);
+        collisionReference(gltf, reference, name);
+      }
+      if (documents["fixture-models/index.json"].version === 4 && name.startsWith("fixture-models/") && !reference)
+        throw new Error(`${name}: v4 fixture collision reference missing`);
       for (const index of roots) {
         const extras = gltf.nodes?.[index]?.extras;
         requireCoordinateContract(extras, `${name} GLB root`);
         if (extras.fixtureCollision) requireCoordinateContract(extras.fixtureCollision, `${name} collision`);
+        if (reference && (extras.fixtureCollision || extras.fixtureCollisionRef?.node !== reference.node ||
+            extras.fixtureCollisionRef?.schemaVersion !== 1))
+          throw new Error(`${name}: scene collision reference differs from its asset`);
       }
       for (const node of gltf.nodes ?? []) {
         const extras = node.extras;
         if (extras?.coordinateContract !== undefined) requireCoordinateContract(extras, `${name} node`);
         if (extras?.fixtureCollision) requireCoordinateContract(extras.fixtureCollision, `${name} collision`);
+        if (extras?.fixtureCollisionRef) {
+          if (!reference || extras.fixtureCollision) throw new Error(`${name}: ambiguous collision reference`);
+          collisionReference(gltf, extras.fixtureCollisionRef, name);
+        }
         for (const obstacle of extras?.navMeshObstacles ?? []) requireCoordinateContract(obstacle, `${name} obstacle`);
       }
       modelHashes.push([relative, sha256(bytes)]);
