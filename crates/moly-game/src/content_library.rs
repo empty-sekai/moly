@@ -45,6 +45,7 @@ mod input;
 mod playback;
 mod qa;
 pub use qa::library_diagnostics;
+pub(crate) use qa::resource_residency_summary;
 mod stage_framing;
 mod staging;
 mod view;

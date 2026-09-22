@@ -22,6 +22,17 @@ pub fn library_diagnostics() -> String {
         .map(|value| value.clone())
         .unwrap_or_else(|_| r#"{"schemaVersion":1,"ready":false}"#.into())
 }
+
+/// Compact read-only projection used by the browser settings panel.  It is
+/// intentionally the same accounting as `library_diagnostics` and explicitly
+/// excludes allocator/RSS claims, render targets, ECS overhead and drivers.
+pub(crate) fn resource_residency_summary(
+    images: &Assets<Image>,
+    meshes: &Assets<Mesh>,
+    server: &AssetServer,
+) -> serde_json::Value {
+    memory::diagnostics(images, meshes, server)
+}
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct QaDiagnostics<'w, 's> {
     weather_transition: Option<Res<'w, crate::weather_transition::WeatherTransition>>,
@@ -261,7 +272,7 @@ pub(crate) fn qa_open(
             "activity_bubbles":extra.activity_bubbles.iter().count(),
             "harvest_nodes":extra.harvests.iter().count()
         }).as_object().expect("activity QA object").clone());
-        if BROWSER_DIAGNOSTICS.load(Ordering::Relaxed) {
+        if BROWSER_DIAGNOSTICS.swap(false, Ordering::Relaxed) {
             if let Ok(mut slot) = DIAGNOSTICS.get_or_init(|| Mutex::new(String::new())).lock() {
                 *slot = value.to_string();
             }

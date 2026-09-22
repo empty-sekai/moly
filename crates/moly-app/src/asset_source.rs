@@ -25,7 +25,7 @@ fn is_public_asset_path(path: &str) -> bool {
     if path == "/moly/asset-store/" || path == "/sekai-extra-assets/asset-store/" {
         return true;
     }
-    let id = path
+    let Some(id) = path
         .strip_prefix("/moly/snapshots/")
         .or_else(|| path.strip_prefix("/sekai-extra-assets/snapshots/"))
         .and_then(|rest| rest.strip_suffix("/assets/"))
