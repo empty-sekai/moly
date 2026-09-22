@@ -21,6 +21,9 @@
 //!   落空回落环带（GetLittleFarPosition 同形）；落点交给执行层前过一遍
 //!   身份判定（落点与挂点比 x/z），命中先导航到接近点，再执行局部
 //!   FitTurning/FitWalking。
+//! - 普通对话社交池只含同站、不同角色且有真实 Current TalkData 的成员。
+//!   导航 destination 与 Current.TargetPosition 是独立输入；后者用于
+//!   最终 0.7m 排斥，不能拿前者代替。未完成工厂的占位不算真实 Current。
 //!
 //! 替身，具名：
 //! * **内容绑定**：普通工厂保存所选master、既有preAction投影、目标位
@@ -29,15 +32,12 @@
 //! * **道可得性**：补位级联（未读 → 已读 → 通用，上游有货才落下一级）
 //!   的「有货」替身 = 站点有锚定对话家具（配对语料锚在摆放表非 0 的
 //!   fixtureId 上）。锚定表非空 ⇒ 未读道恒可得，级联首档即中。
-//! * **目标家具抽签**：源在合格动作表上随机取（RandomPick）；产品在
-//!   锚定摆放表上均匀抽——合格集的替身。
-//! * **动作点座位表**：无对话道的 (家具, 座位) 行为表与对话道的先行动作
-//!   入座行（经 talkId 居中联结 timeline 组）都烘成常量表（`NOTALK_*`
-//!   / `TALK_SEATS`）——座位本该从 master 镜像族提取产物读，本单先烘入；
-//!   提取侧落表后换装载是后续单的活。
-//! * **无对话道座位查表**：行为表按 (角色, 家具) 行，恒常行占绝大多数；
-//!   产品按家具查（角色覆写行保留）——角色维的行筛选是抽签域的近似，
-//!   具名。
+//! * **目标家具抽签**：三个家具 Talk 道仍在锚定摆放表上均匀抽，是真源
+//!   合格对话集的替身；NoTalk 已通过独立工厂消费角色/家具/站点源行。
+//! * **对话道动作点座位表**：三个家具 Talk 道仍消费 `TALK_SEATS` 常量；
+//!   已有真实 master 镜像与 qualify_single/prepare_single，尚未接入这些道。
+//! * **无对话道座位查表**：当前 NoTalk 工厂从真实角色行为行及 timeline
+//!   组读取动作点；下方 NOTALK 常量是遗留路径，不代表当前工厂的筛选。
 //! * **对话道先行入座选行**：同一 (角色, 家具) 的多行入座，产品取语料
 //!   序首行（选行归抽签域，首行是具名替身）。
 //! * **贴合身份判定（b__1）**：源比 AITalkData.TargetPosition 与挂点
@@ -1023,9 +1023,32 @@ struct MemberSnap {
     entity: Entity,
     target_fixture: Option<Entity>,
     unit: u32,
+    site_type: String,
     position: [f32; 3],
     /// 当前导航目的地：执行中 = 目标目的地，停顿中 = 原地（无路径）。
     destination: [f32; 3],
+    /// A source Current may be a valid NoTalk record without a master story.
+    /// Only a missing Current or our explicit unfinished factory is excluded.
+    talk_target: Option<[f32; 3]>,
+}
+
+fn prepared_social_target(slot: &TalkSlot) -> Option<[f32; 3]> {
+    slot.current.as_ref()
+        .filter(|data| data.pending_factory.is_none())
+        .map(|data| data.target_position)
+}
+
+impl MemberSnap {
+    fn social_candidate(&self, unit: u32, site_type: &str) -> Option<objective::SocialCandidate> {
+        if self.unit == unit || self.site_type != site_type {
+            return None;
+        }
+        Some(objective::SocialCandidate {
+            position: self.position,
+            destination: self.destination,
+            talk_target: self.talk_target?,
+        })
+    }
 }
 
 /// Update：目标机推进——停顿计时（对话态冻结）、路线尽收场（无对话目标
@@ -1119,10 +1142,12 @@ pub(crate) fn decide(
     let snaps: Vec<MemberSnap> = npcs
         .iter()
         .map(
-            |(entity, unit, _, _, slot, mind, _, _, state, target, _, _, _, _)| MemberSnap {
+            |(entity, unit, _, _, slot, mind, _, _, state, target, _, _, actions, _)| MemberSnap {
                 entity,
                 target_fixture: slot.current.as_ref().and_then(|data| data.target_fixture),
                 unit: unit.0,
+                site_type: actions.site_type.clone(),
+                talk_target: prepared_social_target(slot),
                 position: state.0.position,
                 destination: if mind.executing {
                     target.0
@@ -1392,17 +1417,13 @@ pub(crate) fn decide(
         let destination = if let Some(lane) = lane {
             match lane {
                 TalkLane::GeneralTalk => {
-                    // 社交链：候选 = 同站其余成员（全员同站；对话能力是
-                    // 名册的输入合同）。未命中回退游走链（源补位级联里
+                    // CN Factory.GetNearOtherCharacterPosition filters other
+                    // unit + non-null TalkData + same site before sampling.
+                    // 未命中回退游走链（源补位级联里
                     // 「就近他人未命中 → 随机位」的同形级联）。
                     let candidates: Vec<objective::SocialCandidate> = snaps
                         .iter()
-                        .filter(|snap| snap.unit != unit.0)
-                        .map(|snap| objective::SocialCandidate {
-                            position: snap.position,
-                            destination: snap.destination,
-                            talk_target: snap.destination,
-                        })
+                        .filter_map(|snap| snap.social_candidate(unit.0, &actions.site_type))
                         .collect();
                     let npc_positions: Vec<[f32; 3]> =
                         snaps.iter().map(|snap| snap.position).collect();
@@ -1822,6 +1843,40 @@ fn scale(a: [f32; 3], t: f32) -> [f32; 3] {
 fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
     let d = sub(a, b);
     dot(d, d).sqrt()
+}
+
+#[cfg(test)]
+mod social_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn current_is_required_but_a_prepared_no_talk_needs_no_master() {
+        let mut slot = TalkSlot::default();
+        assert_eq!(prepared_social_target(&slot), None);
+        slot.current = Some(AiTalkData::pending(TalkType::NoneTalk, 11, [3., 0., 4.]));
+        assert_eq!(prepared_social_target(&slot), None);
+        let current = slot.current.as_mut().unwrap();
+        current.pending_factory = None;
+        assert!(current.content.is_none());
+        assert_eq!(prepared_social_target(&slot), Some([3., 0., 4.]));
+    }
+
+    #[test]
+    fn social_pool_filters_identity_site_and_current_and_keeps_two_targets() {
+        let mut snap = MemberSnap {
+            entity: Entity::PLACEHOLDER, target_fixture: None, unit: 11,
+            site_type: "garden".into(), position: [1., 0., 2.],
+            destination: [9., 0., 8.], talk_target: Some([3., 0., 4.]),
+        };
+        assert!(snap.social_candidate(11, "garden").is_none());
+        assert!(snap.social_candidate(12, "myroom").is_none());
+        let candidate = snap.social_candidate(12, "garden").unwrap();
+        assert_eq!(candidate.position, snap.position);
+        assert_eq!(candidate.destination, [9., 0., 8.]);
+        assert_eq!(candidate.talk_target, [3., 0., 4.]);
+        snap.talk_target = None;
+        assert!(snap.social_candidate(12, "garden").is_none());
+    }
 }
 
 #[cfg(test)]

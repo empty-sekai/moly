@@ -90,7 +90,7 @@ pub(crate) fn qa_open(
     pair_session: Option<Res<crate::talk::ActiveTalk>>,
     runtime: Res<PlayerFixtureRuntime>,
     holds: Query<Entity, With<crate::talk::TalkHold>>,
-    actors: Query<(&CharacterUnitId, &Transform, Option<&crate::character::MotionDriver>, Option<&crate::npc::MotionPhase>)>,
+    actors: Query<(&CharacterUnitId, &Transform, Option<&crate::character::MotionDriver>, Option<&crate::npc::MotionPhase>, Option<&crate::npc::RouteStops>, Option<&crate::npc::WalkState>)>,
     all: Query<Entity>,
     extra: QaDiagnostics,
     mut qa: Local<QaState>,
@@ -137,7 +137,7 @@ pub(crate) fn qa_open(
             "scale":pose.scale.to_array(),"moving":input.active,"direction":input.direction.to_array()}));
         let actor_rows = actors
             .iter()
-            .map(|(unit, transform, driver, phase)| {
+            .map(|(unit, transform, driver, phase, route, walk)| {
                 let basis = driver.map(|driver| extra.bones.iter()
                     .filter(|(name, by, _)| by.0 == driver.player && matches!(name.as_str(), "Root" | "Hips"))
                     .map(|(name, _, pose)| serde_json::json!({
@@ -152,7 +152,11 @@ pub(crate) fn qa_open(
                 crate::npc::MotionPhase::FitWalking { .. } => "fit-walking",
                 crate::npc::MotionPhase::FitTurning { .. } => "fit-turning",
                 crate::npc::MotionPhase::Dwelling { .. } => "idle",
-            }),"boneBasis":basis})
+            }),"boneBasis":basis,
+            "navigation":route.map(crate::npc::RouteStops::diagnostics),
+            "walk":walk.map(|walk|serde_json::json!({
+                "position":walk.0.position,"forward":walk.0.forward,"nextCorner":walk.0.next_corner
+            }))})
             })
             .collect::<Vec<_>>();
         let fixture_rows = context.instances.iter().map(|(id, instances)| {
