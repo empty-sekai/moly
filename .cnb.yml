@@ -7,18 +7,3 @@ $:
         image: cnbcool/default-dev-env:latest
       services:
         - vscode
-
-# Ephemeral CLI/SSH workspaces are reclaimed after inactivity. Keep routine
-# source-law validation on a branch-specific build without opening an IDE.
-"codex/weather-complete-20260921":
-  api_trigger_weather_law:
-    - runner:
-        cpus: 16
-      docker:
-        build: .ide/Dockerfile
-        volumes:
-          - weather-jp681:/root/.cargo/registry:copy-on-write
-          - weather-jp681:/weather-target:copy-on-write
-      stages:
-        - name: current JP weather law tests
-          script: CARGO_TARGET_DIR=/weather-target CARGO_BUILD_JOBS=16 cargo test -p moly-law --release --lib --locked
