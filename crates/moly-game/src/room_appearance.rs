@@ -9,10 +9,71 @@ use bevy::{
     asset::{AssetId, LoadState},
     gltf::Gltf,
     math::Affine2,
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     prelude::*,
+    render::render_resource::{
+        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    },
 };
 use moly_assets::json::JsonAsset;
 use std::collections::HashMap;
+
+// Keep StandardMaterial's surface shader, but retain the authored render queue.
+// In particular Room/Floor (2005) must draw before Rug (2007/2008), whose source
+// pass deliberately uses Always depth comparison without depth writes.
+type RoomMaterial = ExtendedMaterial<StandardMaterial, RoomSurfaceOrder>;
+
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+#[bind_group_data(RoomSurfaceOrderKey)]
+struct RoomSurfaceOrder {
+    queue: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct RoomSurfaceOrderKey(u32);
+
+impl From<&RoomSurfaceOrder> for RoomSurfaceOrderKey {
+    fn from(value: &RoomSurfaceOrder) -> Self {
+        Self(value.queue)
+    }
+}
+
+impl MaterialExtension for RoomSurfaceOrder {
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        crate::material_order::set_queue(descriptor, key.bind_group_data.0);
+        Ok(())
+    }
+}
+
+fn surface_queue(document: &serde_json::Value, wall: bool) -> u32 {
+    let token = if wall { "_wall_" } else { "_floor_" };
+    let mut queues = document["materials"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row["name"]
+                .as_str()
+                .is_some_and(|name| name.contains(token))
+        })
+        .filter_map(|row| {
+            row["renderQueue"]
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+        });
+    let first = queues.next();
+    // Some generated room skins provide only surfaceBindings, not a separate
+    // material row. These are the source room wall/floor shader default queues.
+    first
+        .filter(|first| queues.all(|queue| queue == *first))
+        .unwrap_or(if wall { 2060 } else { 2005 })
+}
 
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RoomAppearance {
@@ -35,7 +96,7 @@ pub(crate) struct RoomAppearanceState {
     key: Option<(u64, String, String)>,
     sources: Vec<Handle<JsonAsset>>,
     images: Vec<Handle<Image>>,
-    replacements: HashMap<AssetId<StandardMaterial>, Handle<StandardMaterial>>,
+    replacements: HashMap<AssetId<StandardMaterial>, Handle<RoomMaterial>>,
     render_meshes: HashMap<AssetId<Mesh>, Handle<Mesh>>,
 }
 #[derive(Component)]
@@ -153,17 +214,24 @@ fn apply(
     server: Res<AssetServer>,
     json: Res<Assets<JsonAsset>>,
     gltfs: Res<Assets<Gltf>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<RoomMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
     mut walk_sources: Option<ResMut<crate::site::WalkFaceMeshes>>,
     mut ground_sources: Option<ResMut<crate::site::GroundMeshes>>,
-    mut drawn: Query<(
-        Entity,
-        &mut MeshMaterial3d<StandardMaterial>,
-        &mut Mesh3d,
-        Option<&AppliedAppearance>,
-    )>,
+    mut drawn: Query<
+        (
+            Entity,
+            Option<&MeshMaterial3d<StandardMaterial>>,
+            Option<&MeshMaterial3d<RoomMaterial>>,
+            &mut Mesh3d,
+            Option<&AppliedAppearance>,
+        ),
+        Or<(
+            With<MeshMaterial3d<StandardMaterial>>,
+            With<MeshMaterial3d<RoomMaterial>>,
+        )>,
+    >,
 ) {
     if !selection.is_room() {
         *state = RoomAppearanceState::default();
@@ -252,37 +320,45 @@ fn apply(
                 }
             };
             let image = server.load::<Image>(format!("moly://site/skins/{skin}/{path}"));
-            let handle = materials.add(StandardMaterial {
-                base_color: Color::linear_rgba(color[0], color[1], color[2], color[3]),
-                base_color_texture: Some(image.clone()),
-                base_color_channel: uv,
-                perceptual_roughness: 1.,
-                metallic: 0.,
-                reflectance: 0.,
-                uv_transform: Affine2::from_scale_angle_translation(
-                    Vec2::new(st[0], st[1]),
-                    0.,
-                    Vec2::new(st[2], st[3]),
-                ),
-                ..default()
+            let handle = materials.add(RoomMaterial {
+                base: StandardMaterial {
+                    base_color: Color::linear_rgba(color[0], color[1], color[2], color[3]),
+                    base_color_texture: Some(image.clone()),
+                    base_color_channel: uv,
+                    perceptual_roughness: 1.,
+                    metallic: 0.,
+                    reflectance: 0.,
+                    uv_transform: Affine2::from_scale_angle_translation(
+                        Vec2::new(st[0], st[1]),
+                        0.,
+                        Vec2::new(st[2], st[3]),
+                    ),
+                    ..default()
+                },
+                extension: RoomSurfaceOrder {
+                    queue: surface_queue(&documents[index], index == 0),
+                },
             });
             state.images.push(image);
             state.replacements.insert(original.id(), handle);
         }
     }
-    for (entity, mut material, mut mesh, applied) in &mut drawn {
-        let source = applied
+    for (entity, standard, room, mut mesh, applied) in &mut drawn {
+        let Some(source) = applied
             .map(|value| value.original)
-            .unwrap_or(material.0.id());
+            .or_else(|| standard.map(|material| material.0.id()))
+        else {
+            continue;
+        };
         let Some(replacement) = state.replacements.get(&source).cloned() else {
             continue;
         };
-        if material.0 == replacement {
+        if room.is_some_and(|material| material.0 == replacement) {
             continue;
         }
         if materials
             .get(&replacement)
-            .is_some_and(|material| material.base_color_channel == bevy::pbr::UvChannel::Uv1)
+            .is_some_and(|material| material.base.base_color_channel == bevy::pbr::UvChannel::Uv1)
             && meshes
                 .get(&mesh.0)
                 .is_some_and(|mesh| mesh.attribute(Mesh::ATTRIBUTE_UV_1).is_none())
@@ -324,9 +400,10 @@ fn apply(
                 mesh.0 = rendered;
             }
         }
-        material.0 = replacement.clone();
         commands
             .entity(entity)
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .insert(MeshMaterial3d(replacement))
             .insert(AppliedAppearance { original: source });
     }
     if state
@@ -353,7 +430,8 @@ fn apply(
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<RoomAppearance>()
+    app.add_plugins(MaterialPlugin::<RoomMaterial>::default())
+        .init_resource::<RoomAppearance>()
         .init_resource::<RoomAppearanceState>()
         .add_systems(Update, apply.after(crate::site::spawn_when_ready));
 }
@@ -361,6 +439,23 @@ pub(crate) fn install(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn room_surfaces_preserve_source_queue_before_rugs_and_furniture() {
+        let value = serde_json::json!({"materials":[
+            {"name":"mat_mis0001_floor_floor1","renderQueue":2005},
+            {"name":"mat_mis0001_wall_wall1","renderQueue":2060},
+            {"name":"mat_mis0001_door_door1_base","renderQueue":2065}
+        ]});
+        assert_eq!(surface_queue(&value, false), 2005);
+        assert_eq!(surface_queue(&value, true), 2060);
+        assert!(surface_queue(&value, false) < 2007);
+        let bindings_only = serde_json::json!({"surfaceBindings":{"floor":[]}});
+        assert_eq!(surface_queue(&bindings_only, false), 2005);
+        assert_eq!(
+            RoomSurfaceOrderKey::from(&RoomSurfaceOrder { queue: 2005 }).0,
+            2005
+        );
+    }
     #[test]
     fn skin_names_are_source_keys_not_paths() {
         assert!(safe_skin("mis0001"));
