@@ -5,5 +5,8 @@ $:
       docker:
         build: .ide/Dockerfile
         image: cnbcool/default-dev-env:latest
+        volumes:
+          - weather-jp681:/root/.cargo/registry:copy-on-write
+          - weather-jp681:/workspace/target:copy-on-write
       services:
         - vscode
