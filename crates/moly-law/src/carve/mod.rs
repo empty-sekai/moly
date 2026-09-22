@@ -52,17 +52,17 @@
 //!   瓦边 ⇒ 若整片面小于小区阈（2 m²）会被这里误杀——真实站点的主
 //!   面远大于它，测试面也保持大于它。
 //! * **多层面不建模**：家具顶面若矮于 climb（0.1）是「走上去」而不是
-//!   「绕开」，矮障碍的顶面会并进可行走面。当前碰撞栅格对每个源三角
-//!   使用局部 min/max 高度；高度在 climb 内的贴地三角退出挖洞，避免
+//!   「绕开」，矮障碍的顶面会并进可行走面。当前碰撞栅格将源面裁到每格
+//!   后量取局部 min/max 高度；高度在 climb 内的贴地几何退出挖洞，避免
 //!   把 rug/mat 等低表面误杀。仍未完全等价 Unity 的多层 span 合并。
 //! * **墙格足迹链未转录**：墙布局的足迹走另一条派生链
 //!   （`CreateWallTileData`），而当前全部墙位摆放的底面高（1.5/2.0）
 //!   都在 0.98 之上、本就不挖——不转录无损。
 //! * **源物理几何的单层投影**：原版收集 PhysicsColliders。宿主走
-//!   `bake_colliders`，保留真实节点变换、源三角轮廓和每三角高度范围；
+//!   `bake_colliders`，保留真实节点变换、源几何和每格高度范围；
 //!   旧的 `BakeInput` 矩形接口仅供独立律的兼容测试。本地投影不处理
-//!   台阶顶面或多层连通，凸 MeshCollider 仍是源三角 raster 近似，不等价
-//!   于 Unity 的三维烘焙与 convex cooking。
+//!   多层连通；凸 MeshCollider 保留三维凸体而不是当作凹三角网，但
+//!   通用凸包不是 PhysX 的精确 cooking/简化结果，仍不声称原生等价。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
 
 mod contour;
@@ -166,14 +166,18 @@ pub struct Obstacle {
 /// This is a conservative projection, not Unity's three-dimensional bake.
 #[derive(Debug, Clone)]
 pub struct ColliderPolygon {
-    /// One source triangle (or primitive perimeter) projected to XZ.  The
-    /// runtime intentionally receives triangles for convex meshes too: this
-    /// preserves local vertical spans and avoids a polygon-wide min/max-Y
-    /// false obstacle. It is still a 2D approximation of Unity cooked hulls.
+    /// Projected bounds for the legacy prism representation. Runtime geometry
+    /// uses `triangles` so an elevated part does not inherit a lower part's Y.
     pub vertices: Vec<[f32; 2]>,
     /// Vertical bounds of this projected source primitive in world Y.
     pub min_y: f32,
     pub max_y: f32,
+    /// World triangles retain local height coverage. Empty keeps the legacy
+    /// projected-prism input used by the standalone law tests.
+    pub triangles: Vec<[[f32; 3]; 3]>,
+    /// A closed convex source contributes the full interval between its lower
+    /// and upper faces. Triangle meshes instead contribute separate surfaces.
+    pub solid: bool,
 }
 
 /// 摆放行是否参与挖洞，参与则给它的世界足迹矩形。
@@ -364,35 +368,40 @@ impl WalkField {
                 hi = t;
             }
         }
-        // Resolve the remaining displacement against the two coordinate
-        // tangents.  The order is distance based so a diagonal input follows
-        // the side that makes the most progress toward its actual target.
-        let mut current = accepted;
-        for _ in 0..4 {
-            let dx = goal[0] - current[0];
-            let dz = goal[1] - current[1];
-            if dx.abs() <= self.grid.voxel * 0.25 && dz.abs() <= self.grid.voxel * 0.25 {
-                break;
-            }
-            let candidates = [[goal[0], current[1]], [current[0], goal[1]]];
-            let mut best = current;
-            let mut best_d = (goal[0] - current[0]).powi(2) + (goal[1] - current[1]).powi(2);
-            for candidate in candidates {
-                if !self.segment_walkable(current, candidate) {
-                    continue;
+        // Only retain a tangent of the unconsumed displacement. Do not
+        // reintroduce the rejected normal after reaching a corner: doing that
+        // would walk around furniture in one frame and exceed the move budget.
+        // Sweep each tangent too, so a second wall clips it instead of making
+        // an otherwise valid partial slide stop at its starting point.
+        let mut best = accepted;
+        let mut progress = 0.0;
+        for axis in 0..2 {
+            let delta = goal[axis] - accepted[axis];
+            let mut lo = 0.0;
+            let mut hi = 1.0;
+            let mut candidate = accepted;
+            candidate[axis] = goal[axis];
+            if self.segment_walkable(accepted, candidate) {
+                lo = 1.0;
+            } else {
+                for _ in 0..24 {
+                    let t = (lo + hi) * 0.5;
+                    candidate[axis] = accepted[axis] + delta * t;
+                    if self.segment_walkable(accepted, candidate) {
+                        lo = t;
+                    } else {
+                        hi = t;
+                    }
                 }
-                let d = (goal[0] - candidate[0]).powi(2) + (goal[1] - candidate[1]).powi(2);
-                if d < best_d {
-                    best = candidate;
-                    best_d = d;
-                }
             }
-            if best == current {
-                break;
+            let distance = (delta * lo).abs();
+            if distance > progress {
+                progress = distance;
+                best = accepted;
+                best[axis] += delta * lo;
             }
-            current = best;
         }
-        current
+        best
     }
 
     /// 烘焙账目。
@@ -431,6 +440,8 @@ mod tests {
             vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
             min_y: 0.0,
             max_y: 1.0,
+            triangles: Vec::new(),
+            solid: true,
         };
         let field = WalkField::bake_colliders(&surface, &[collider], 0.05);
         assert!(!field.walkable_at([0.5, 0.5]));
@@ -448,6 +459,8 @@ mod tests {
             vertices: vec![[0.0, -2.0], [0.0, 2.0]],
             min_y: 0.0,
             max_y: 1.5,
+            triangles: Vec::new(),
+            solid: true,
         };
         let field = WalkField::bake_colliders(&surface, &[wall], 0.05);
         assert!(!field.segment_walkable([-1.0, 0.0], [1.0, 0.0]));
@@ -464,6 +477,8 @@ mod tests {
             vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
             min_y: 3.0,
             max_y: 4.0,
+            triangles: Vec::new(),
+            solid: true,
         };
         assert!(
             WalkField::bake_colliders(&surface, &[collider.clone()], 0.05).walkable_at([0.0, 0.0])
@@ -482,6 +497,8 @@ mod tests {
             vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
             min_y: 0.0,
             max_y: 0.05,
+            triangles: Vec::new(),
+            solid: true,
         };
         let field = WalkField::bake_colliders(&surface, &[rug], 0.05);
         assert!(field.walkable_at([0.5, 0.5]));
@@ -489,6 +506,8 @@ mod tests {
             vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
             min_y: 0.0,
             max_y: 0.2,
+            triangles: Vec::new(),
+            solid: true,
         };
         let field = WalkField::bake_colliders(&surface, &[step], 0.05);
         assert!(!field.walkable_at([0.5, 0.5]));
@@ -505,10 +524,107 @@ mod tests {
         let start = [-1.0, -1.0];
         let goal = [2.0, 2.0];
         let accepted = field.constrain_move(start, goal);
-        // The two-axis projection follows the lower/side tangent and can
-        // complete the move around the rectangle in this single frame.
-        assert!((accepted[0] - goal[0]).abs() < 0.1);
+        // Slide on the first wall, without reintroducing the rejected normal
+        // and turning around the furniture in this single movement update.
+        assert!(accepted[0] < 0.0);
         assert!((accepted[1] - goal[1]).abs() < 0.1);
+        assert!(field.walkable_at(accepted));
+    }
+
+    fn collider_mesh(triangles: Vec<[[f32; 3]; 3]>, solid: bool) -> ColliderPolygon {
+        ColliderPolygon {
+            vertices: vec![],
+            min_y: 0.0,
+            max_y: 0.0,
+            triangles,
+            solid,
+        }
+    }
+
+    fn floor_at(y: f32) -> Vec<[[f32; 3]; 3]> {
+        quad([-4.0, -4.0], [4.0, 4.0])
+            .into_iter()
+            .map(|t| t.map(|p| [p[0], y, p[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn local_triangle_clearance_does_not_inherit_low_vertex() {
+        // A rising roof: its left edge is low, but the right-hand cells have
+        // sufficient headroom. A polygon-wide Y interval blocked both ends.
+        let roof = collider_mesh(
+            vec![
+                [[-2.0, 0.4, -2.0], [2.0, 2.4, -2.0], [2.0, 2.4, 2.0]],
+                [[-2.0, 0.4, -2.0], [2.0, 2.4, 2.0], [-2.0, 0.4, 2.0]],
+            ],
+            false,
+        );
+        let field = WalkField::bake_colliders(&floor_at(0.0), &[roof], 0.05);
+        assert!(!field.walkable_at([-1.5, 0.0]));
+        assert!(field.walkable_at([1.0, 0.0]));
+    }
+
+    #[test]
+    fn solid_geometry_fills_interior_but_separate_surfaces_do_not() {
+        // The bottom/top alone suffice in an interior cell. A solid spans the
+        // full volume, whereas distinct nonconvex surfaces leave headroom.
+        let faces: Vec<_> = [0.0, 2.0]
+            .into_iter()
+            .flat_map(|y| {
+                quad([-1.5, -1.5], [1.5, 1.5])
+                    .into_iter()
+                    .map(move |t| t.map(|p| [p[0], y, p[1]]))
+            })
+            .collect();
+        let solid = collider_mesh(faces.clone(), true);
+        let shell = collider_mesh(faces, false);
+        assert!(!WalkField::bake_colliders(&floor_at(0.0), &[solid], 0.05).walkable_at([0.0, 0.0]));
+        assert!(WalkField::bake_colliders(&floor_at(0.0), &[shell], 0.05).walkable_at([0.0, 0.0]));
+    }
+
+    #[test]
+    fn triangle_rug_and_wall_work_at_both_source_voxel_sizes() {
+        for voxel in [0.01, 0.05] {
+            let rug = collider_mesh(
+                quad([-1.0, -1.0], [1.0, 1.0])
+                    .into_iter()
+                    .map(|t| t.map(|p| [p[0], 2.01, p[1]]))
+                    .collect(),
+                true,
+            );
+            let field = WalkField::bake_colliders(&floor_at(2.0), &[rug], voxel);
+            assert!(field.segment_walkable([-2.0, 0.0], [2.0, 0.0]));
+            let wall = collider_mesh(
+                vec![
+                    [[0.0, 2.0, -2.0], [0.0, 3.5, -2.0], [0.0, 3.5, 2.0]],
+                    [[0.0, 2.0, -2.0], [0.0, 3.5, 2.0], [0.0, 2.0, 2.0]],
+                ],
+                false,
+            );
+            let field = WalkField::bake_colliders(&floor_at(2.0), &[wall], voxel);
+            assert!(!field.segment_walkable([-1.0, 0.0], [1.0, 0.0]));
+        }
+    }
+
+    #[test]
+    fn slide_clips_at_second_wall_instead_of_stopping_or_turning() {
+        let field = bake(
+            quad([-4.0, -4.0], [4.0, 4.0]),
+            vec![
+                Obstacle {
+                    min: [0.0, -3.0],
+                    max: [0.1, 3.0],
+                },
+                Obstacle {
+                    min: [-3.0, 1.0],
+                    max: [0.0, 1.1],
+                },
+            ],
+            0.05,
+        );
+        let point = field.constrain_move([-1.0, -1.0], [2.0, 2.0]);
+        assert!(point[0] < 0.0 && point[1] > 0.0 && point[1] < 1.0);
+        assert!(field.walkable_at(point));
     }
 
     /// 轴对齐四边形 → 两三角。

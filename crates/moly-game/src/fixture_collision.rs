@@ -1,10 +1,11 @@
 //! PhysicsCollider inputs for the single-surface navigation host.
 //!
 //! This consumes canonical source geometry, never logical occupancy boxes.
-//! Mesh colliders are retained as individual projected triangles so vertical
-//! clearance is decided from local geometry instead of one polygon-wide Y
-//! interval. Curved primitives use circumscribed polygons. These are explicit
-//! 2D operations, not Unity cooking.
+//! Convex MeshColliders retain their source solid-hull semantics: their point
+//! clouds are convex-hulled in 3-D, then the world-space boundary triangles are
+//! supplied to the rasterizer as one filled solid. Non-convex meshes retain
+//! their authored triangles without filling between separate surfaces.
+//! This models mathematical convexity, not PhysX's exact cooking/simplification.
 
 use bevy::{ecs::system::SystemParam, gltf::GltfExtras, prelude::*};
 use moly_law::carve::ColliderPolygon;
@@ -368,28 +369,16 @@ fn collider_polygons(
             if !matches!(collider.convex, Some(false) | Some(true)) {
                 return Err("MeshCollider convex state missing".into());
             }
-            // A convex MeshCollider is cooked by Unity as a hull, but using a
-            // single XZ hull plus global min/max Y here over-blocks open or
-            // stepped furniture.  Keep source triangles and let the bake
-            // classify each local span.  The source triangles are already the
-            // authoritative mesh input; non-convex meshes follow the same
-            // path and convexity remains recorded in the source contract.
-            mesh.triangles
-                .iter()
-                .map(|tri| {
-                    let points: Result<Vec<_>, _> = tri
-                        .iter()
-                        .map(|i| {
-                            mesh.positions
-                                .get(*i)
-                                .copied()
-                                .map(Vec3::from)
-                                .ok_or("collider index out of range".to_owned())
-                        })
-                        .collect();
-                    project(points?, transform)
-                })
-                .collect::<Result<Vec<_>, _>>()?
+            // Unity cooks convex=true from the whole point cloud. Source
+            // triangles can be concave or disconnected; passing them through
+            // as a non-convex surface would invent openings in a solid hull.
+            let solid = collider.convex == Some(true);
+            let (positions, triangles) = if solid {
+                convex_mesh(&mesh.positions)?
+            } else {
+                (mesh.positions.clone(), mesh.triangles.clone())
+            };
+            vec![project_mesh(&positions, &triangles, transform, solid)?]
         }
         "BoxCollider" => vec![project(
             box_points(
@@ -419,6 +408,64 @@ fn collider_polygons(
         other => return Err(format!("unsupported collider shape {other}")),
     };
     Ok(polygons)
+}
+
+fn convex_mesh(positions: &[[f32; 3]]) -> Result<(Vec<[f32; 3]>, Vec<[usize; 3]>), String> {
+    let mut points: Vec<_> = positions
+        .iter()
+        .copied()
+        .map(parry3d::math::Vector::from_array)
+        .collect();
+    if points.iter().any(|point| !point.is_finite()) {
+        return Err("nonfinite convex collision geometry".into());
+    }
+    points.sort_by(|a, b| {
+        a.x.total_cmp(&b.x)
+            .then(a.y.total_cmp(&b.y))
+            .then(a.z.total_cmp(&b.z))
+    });
+    points.dedup();
+    let (points, triangles) = parry3d::transformation::try_convex_hull(&points)
+        .map_err(|error| format!("convex collision hull failed: {error:?}"))?;
+    if points.is_empty() || triangles.is_empty() {
+        return Err("empty convex collision hull".into());
+    }
+    Ok((
+        points.into_iter().map(|point| point.to_array()).collect(),
+        triangles
+            .into_iter()
+            .map(|tri| tri.map(|i| i as usize))
+            .collect(),
+    ))
+}
+
+fn project_mesh(
+    positions: &[[f32; 3]],
+    indices: &[[usize; 3]],
+    transform: &GlobalTransform,
+    solid: bool,
+) -> Result<ColliderPolygon, String> {
+    let points: Vec<_> = positions
+        .iter()
+        .copied()
+        .map(|p| transform.transform_point(Vec3::from(p)))
+        .collect();
+    let mut projected = project(points.clone(), &GlobalTransform::IDENTITY)?;
+    projected.triangles = indices
+        .iter()
+        .map(|tri| {
+            let point = |i: usize| {
+                points
+                    .get(i)
+                    .copied()
+                    .map(|point| point.to_array())
+                    .ok_or_else(|| "collider index out of range".to_owned())
+            };
+            Ok([point(tri[0])?, point(tri[1])?, point(tri[2])?])
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    projected.solid = solid;
+    Ok(projected)
 }
 
 fn box_points(center: Vec3, size: Vec3) -> Result<Vec<Vec3>, String> {
@@ -479,6 +526,8 @@ fn project(points: Vec<Vec3>, transform: &GlobalTransform) -> Result<ColliderPol
         vertices,
         min_y,
         max_y,
+        triangles: Vec::new(),
+        solid: true,
     })
 }
 
@@ -585,18 +634,23 @@ mod tests {
     }
 
     #[test]
-    fn convex_mesh_keeps_source_triangles_for_local_height_rasterization() {
+    fn convex_mesh_fills_disconnected_source_surfaces_as_one_solid() {
         let mesh = Geometry {
             geometry_id: "mesh".into(),
             positions: vec![
                 [-1.0, 0.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, 1.0, 1.0],
+                [-1.0, 0.0, 1.0],
                 [1.0, 0.0, -1.0],
-                [1.0, 0.2, 1.0],
-                [-1.0, 0.2, 1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+                [1.0, 0.0, 1.0],
             ],
-            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            // Two separate vertical walls: the source mesh itself is open.
+            triangles: vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
         };
-        let collider = Collider {
+        let mut collider = Collider {
             kind: "MeshCollider".into(),
             enabled: Some(true),
             is_trigger: Some(false),
@@ -609,9 +663,97 @@ mod tests {
             height: None,
             direction: None,
         };
+        let polygons =
+            collider_polygons(&collider, &[mesh.clone()], &GlobalTransform::IDENTITY).unwrap();
+        assert_eq!(polygons.len(), 1);
+        assert!(polygons[0].solid);
+        assert_eq!(
+            polygons[0].triangles.len(),
+            12,
+            "convex=true closes the box"
+        );
+        collider.convex = Some(false);
         let polygons = collider_polygons(&collider, &[mesh], &GlobalTransform::IDENTITY).unwrap();
-        assert_eq!(polygons.len(), 2);
-        assert!(polygons.iter().all(|polygon| polygon.vertices.len() == 3));
+        assert!(!polygons[0].solid);
+        assert_eq!(
+            polygons[0].triangles.len(),
+            4,
+            "non-convex retains open surfaces"
+        );
+    }
+
+    #[test]
+    fn convex_hull_supports_planar_rugs_and_rejects_nonfinite_geometry() {
+        let points = [
+            [-1.0, 0.01, -1.0],
+            [1.0, 0.01, -1.0],
+            [1.0, 0.01, 1.0],
+            [-1.0, 0.01, 1.0],
+        ];
+        let (points, triangles) = convex_mesh(&points).unwrap();
+        assert_eq!(points.len(), 4);
+        assert_eq!(triangles.len(), 4, "planar hull retains both faces");
+        assert!(points.iter().all(|point| point[1] == 0.01));
+        assert!(convex_mesh(&[[f32::NAN, 0.0, 0.0], [0.0; 3], [1.0; 3]]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires source GLBs via MOLY_COLLISION_GLB_DIR"]
+    fn canonical_rug_tree_gazebo_convex_hulls() {
+        let directory = std::path::PathBuf::from(
+            std::env::var("MOLY_COLLISION_GLB_DIR").expect("source fixture-models directory"),
+        );
+        for name in [
+            "mysekai__fixture__mdl_env0001_rug_picnicsheet1.glb",
+            "mysekai__fixture__mdl_env0001_fixture_tree1.glb",
+            "mysekai__fixture__mdl_ext0020_fixture_gazebo1.glb",
+        ] {
+            let bytes = std::fs::read(directory.join(name)).unwrap();
+            assert_eq!(&bytes[..4], b"glTF");
+            let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+            let gltf: serde_json::Value =
+                serde_json::from_slice(&bytes[20..20 + json_length]).unwrap();
+            let document: Document =
+                serde_json::from_value(gltf["extras"]["fixtureCollision"].clone()).unwrap();
+            let mut count = 0;
+            for node in gltf["nodes"].as_array().unwrap() {
+                let Some(source) = node
+                    .get("extras")
+                    .and_then(|extras| extras.get("sourceCollision"))
+                else {
+                    continue;
+                };
+                let node: Node = serde_json::from_value(source.clone()).unwrap();
+                for collider in node.colliders.iter().filter(|collider| {
+                    collider.kind == "MeshCollider" && collider.convex == Some(true)
+                }) {
+                    let start = std::time::Instant::now();
+                    let polygons =
+                        collider_polygons(collider, &document.geometry, &GlobalTransform::IDENTITY)
+                            .unwrap();
+                    assert_eq!(polygons.len(), 1);
+                    assert!(polygons[0].solid);
+                    assert!(!polygons[0].triangles.is_empty());
+                    eprintln!(
+                        "{name}: hull {} triangles in {:?}",
+                        polygons[0].triangles.len(),
+                        start.elapsed()
+                    );
+                    let surface = [
+                        [[-4.0, 0.0, -4.0], [4.0, 0.0, -4.0], [4.0, 0.0, 4.0]],
+                        [[-4.0, 0.0, -4.0], [4.0, 0.0, 4.0], [-4.0, 0.0, 4.0]],
+                    ];
+                    for voxel in [0.01, 0.05] {
+                        let start = std::time::Instant::now();
+                        let field = moly_law::carve::WalkField::bake_colliders(&surface, &polygons, voxel);
+                        eprintln!("{name}: {}m raster {} cells / {} obstacle cells in {:?}", voxel,
+                            field.counts().cells, field.counts().obstacle_nulled, start.elapsed());
+                    }
+                    count += 1;
+                }
+            }
+            assert!(count > 0, "{name} has a source convex collider");
+        }
     }
 
     #[test]
