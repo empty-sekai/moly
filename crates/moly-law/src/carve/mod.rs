@@ -53,8 +53,10 @@
 //!   面远大于它，测试面也保持大于它。
 //! * **多层面不建模**：家具顶面若矮于 climb（0.1）是「走上去」而不是
 //!   「绕开」，矮障碍的顶面会并进可行走面。当前碰撞栅格将源面裁到每格
-//!   后量取局部 min/max 高度；高度在 climb 内的贴地几何退出挖洞，避免
-//!   把 rug/mat 等低表面误杀。仍未完全等价 Unity 的多层 span 合并。
+//!   后量取局部 min/max 高度；高度在原地面 climb 内的物理几何提供脚面
+//!   抬升，净空从抬升后的脚面起算。显式 NavMeshObstacle 不提供脚面，
+//!   不享受低台阶豁免；重叠小件也不无限链式爬升。仍未完全等价 Unity
+//!   的多层 span 合并、台阶连通与高度体素量化。
 //! * **墙格足迹链未转录**：墙布局的足迹走另一条派生链
 //!   （`CreateWallTileData`），而当前全部墙位摆放的底面高（1.5/2.0）
 //!   都在 0.98 之上、本就不挖——不转录无损。
@@ -178,6 +180,9 @@ pub struct ColliderPolygon {
     /// A closed convex source contributes the full interval between its lower
     /// and upper faces. Triangle meshes instead contribute separate surfaces.
     pub solid: bool,
+    /// Explicit NavMeshObstacle carving never supplies a walkable low top.
+    /// Physics geometry may supply a support surface within the climb limit.
+    pub carve: bool,
 }
 
 /// 摆放行是否参与挖洞，参与则给它的世界足迹矩形。
@@ -250,6 +255,9 @@ pub struct WalkField {
     contours: Vec<contour::Contour>,
     polys: polymesh::PolyMesh,
     counts: BakeCounts,
+    /// Relative to the source ground, not an absolute replacement for sloped
+    /// terrain sampling. Empty when no low physical support was encountered.
+    height_offsets: Vec<f32>,
 }
 
 impl WalkField {
@@ -259,7 +267,7 @@ impl WalkField {
         let mut grid = grid::rasterize(&input.tris, input.voxel);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let obstacle_nulled = grid::mark_obstacles(&mut grid, &input.obstacles);
-        Self::finish_bake(grid, face, obstacle_nulled, input.voxel)
+        Self::finish_bake(grid, face, obstacle_nulled, input.voxel, Vec::new())
     }
 
     /// Bake actual collider footprints using the existing 2D host. Geometry
@@ -276,8 +284,9 @@ impl WalkField {
         let mut grid = grid::rasterize(&tris, voxel);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let heights = grid::surface_heights(&grid, surface);
-        let obstacle_nulled = grid::mark_collider_polygons(&mut grid, colliders, &heights);
-        Self::finish_bake(grid, face, obstacle_nulled, voxel)
+        let (obstacle_nulled, height_offsets) =
+            grid::mark_collider_polygons(&mut grid, colliders, &heights);
+        Self::finish_bake(grid, face, obstacle_nulled, voxel, height_offsets)
     }
 
     fn finish_bake(
@@ -285,6 +294,7 @@ impl WalkField {
         face: usize,
         obstacle_nulled: usize,
         voxel: f32,
+        height_offsets: Vec<f32>,
     ) -> WalkField {
         let erosion_nulled = grid::erode(&mut grid, radius_cells(voxel));
         let region_nulled = grid::filter_regions(&mut grid, min_region_spans(voxel));
@@ -309,12 +319,23 @@ impl WalkField {
             contours,
             polys,
             grid,
+            height_offsets,
         }
     }
 
     /// 点是否可行走（所在格为可行走格；出界按不可走）。
     pub fn walkable_at(&self, p: [f32; 2]) -> bool {
         query::walkable_at(&self.grid, p)
+    }
+
+    /// Extra foot height above the source site's sampled terrain. Only baked
+    /// walkable cells contribute; explicit carve holes cannot become steps.
+    pub fn height_offset(&self, p: [f32; 2]) -> f32 {
+        if self.height_offsets.is_empty() || !self.walkable_at(p) {
+            return 0.0;
+        }
+        let (x, z) = self.grid.cell_of(p[0], p[1]);
+        self.height_offsets[z as usize * self.grid.cols + x as usize]
     }
 
     /// 最近可走点（吸附上限 `max_dist`，超限返回 `None`）。
@@ -442,6 +463,7 @@ mod tests {
             max_y: 1.0,
             triangles: Vec::new(),
             solid: true,
+            carve: false,
         };
         let field = WalkField::bake_colliders(&surface, &[collider], 0.05);
         assert!(!field.walkable_at([0.5, 0.5]));
@@ -461,6 +483,7 @@ mod tests {
             max_y: 1.5,
             triangles: Vec::new(),
             solid: true,
+            carve: false,
         };
         let field = WalkField::bake_colliders(&surface, &[wall], 0.05);
         assert!(!field.segment_walkable([-1.0, 0.0], [1.0, 0.0]));
@@ -479,6 +502,7 @@ mod tests {
             max_y: 4.0,
             triangles: Vec::new(),
             solid: true,
+            carve: false,
         };
         assert!(
             WalkField::bake_colliders(&surface, &[collider.clone()], 0.05).walkable_at([0.0, 0.0])
@@ -499,15 +523,19 @@ mod tests {
             max_y: 0.05,
             triangles: Vec::new(),
             solid: true,
+            carve: false,
         };
         let field = WalkField::bake_colliders(&surface, &[rug], 0.05);
         assert!(field.walkable_at([0.5, 0.5]));
+        assert!((field.height_offset([0.5, 0.5]) - 0.05).abs() < 1e-5);
+        assert_eq!(field.height_offset([-2.0, -2.0]), 0.0);
         let step = ColliderPolygon {
             vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
             min_y: 0.0,
             max_y: 0.2,
             triangles: Vec::new(),
             solid: true,
+            carve: false,
         };
         let field = WalkField::bake_colliders(&surface, &[step], 0.05);
         assert!(!field.walkable_at([0.5, 0.5]));
@@ -538,6 +566,7 @@ mod tests {
             max_y: 0.0,
             triangles,
             solid,
+            carve: false,
         }
     }
 
@@ -546,6 +575,91 @@ mod tests {
             .into_iter()
             .map(|t| t.map(|p| [p[0], y, p[1]]))
             .collect()
+    }
+
+    #[test]
+    fn low_physics_support_and_explicit_carving_have_different_roles() {
+        for voxel in [0.01, 0.05] {
+            let low = ColliderPolygon {
+                vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+                min_y: 3.0,
+                max_y: 3.05,
+                triangles: Vec::new(),
+                solid: true,
+                carve: false,
+            };
+            let field = WalkField::bake_colliders(&floor_at(3.0), &[low.clone()], voxel);
+            assert!(field.walkable_at([0.0, 0.0]));
+            assert!((field.height_offset([0.0, 0.0]) - 0.05).abs() < 1e-5);
+            let mut explicit = low;
+            explicit.carve = true;
+            let field = WalkField::bake_colliders(&floor_at(3.0), &[explicit.clone()], voxel);
+            let duplicated =
+                WalkField::bake_colliders(&floor_at(3.0), &[explicit.clone(), explicit], voxel);
+            assert!(!field.walkable_at([0.0, 0.0]));
+            assert_eq!(field.height_offset([0.0, 0.0]), 0.0);
+            assert_eq!(field.counts(), duplicated.counts());
+        }
+    }
+
+    #[test]
+    fn clearance_is_measured_from_low_top_and_is_order_independent() {
+        let top = |height| {
+            collider_mesh(
+                quad([-1.0, -1.0], [1.0, 1.0])
+                    .into_iter()
+                    .map(|t| t.map(|p| [p[0], height, p[1]]))
+                    .collect(),
+                false,
+            )
+        };
+        let rug = top(0.05);
+        let ceiling = top(1.0);
+        let floor = floor_at(0.0);
+        assert!(WalkField::bake_colliders(&floor, &[ceiling.clone()], 0.05).walkable_at([0.0, 0.0]));
+        let first = WalkField::bake_colliders(&floor, &[rug.clone(), ceiling.clone()], 0.05);
+        let reversed = WalkField::bake_colliders(&floor, &[ceiling, rug], 0.05);
+        assert!(!first.walkable_at([0.0, 0.0])); // 1.0 - .05 < .98
+        assert_eq!(first.counts(), reversed.counts());
+    }
+
+    #[test]
+    fn explicit_carve_caps_are_not_the_local_physics_surface() {
+        let mut roof = collider_mesh(
+            vec![
+                [[-2.0, 0.4, -2.0], [2.0, 2.4, -2.0], [2.0, 2.4, 2.0]],
+                [[-2.0, 0.4, -2.0], [2.0, 2.4, 2.0], [-2.0, 0.4, 2.0]],
+            ],
+            false,
+        );
+        roof.vertices = vec![[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]];
+        roof.min_y = 0.4;
+        roof.max_y = 2.4;
+        let floor = floor_at(0.0);
+        assert!(WalkField::bake_colliders(&floor, &[roof.clone()], 0.05).walkable_at([1.0, 0.0]));
+        roof.carve = true;
+        assert!(!WalkField::bake_colliders(&floor, &[roof], 0.05).walkable_at([1.0, 0.0]));
+    }
+
+    #[test]
+    fn stacked_low_objects_do_not_create_an_unproven_stairway() {
+        let mut lower = ColliderPolygon {
+            vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            min_y: 0.0,
+            max_y: 0.08,
+            triangles: Vec::new(),
+            solid: true,
+            carve: false,
+        };
+        let mut upper = lower.clone();
+        upper.min_y = 0.08;
+        upper.max_y = 0.16;
+        let field = WalkField::bake_colliders(&floor_at(0.0), &[lower.clone(), upper], 0.05);
+        assert!(!field.walkable_at([0.0, 0.0]));
+        lower.max_y = AGENT_CLIMB;
+        let field = WalkField::bake_colliders(&floor_at(0.0), &[lower], 0.05);
+        assert!((field.height_offset([0.0, 0.0]) - AGENT_CLIMB).abs() < 1e-5);
+        assert_eq!(field.height_offset([f32::NAN, 0.0]), 0.0);
     }
 
     #[test]

@@ -171,68 +171,89 @@ pub(crate) fn mark_collider_polygons(
     grid: &mut Grid,
     polygons: &[ColliderPolygon],
     heights: &[f32],
-) -> usize {
+) -> (usize, Vec<f32>) {
+    // Resolve the low physical support surfaces before testing ANY headroom.
+    // Otherwise a rug below a canopy is order-dependent and measures clearance
+    // from the original floor, even though the feet stand on the rug's top.
+    // This host only admits tops within one climb of the original site surface;
+    // it does not invent connectivity up a stack of overlapping low objects.
+    let mut support = heights.to_vec();
+    for polygon in polygons.iter().filter(|polygon| !polygon.carve) {
+        for (index, span) in collider_spans(grid, polygon) {
+            if span[1] > heights[index] && span[1] <= heights[index] + AGENT_CLIMB + 1e-5 {
+                support[index] = support[index].max(span[1]);
+            }
+        }
+    }
     let mut nulled = 0;
     for polygon in polygons {
-        if !polygon.triangles.is_empty() {
-            nulled += mark_triangle_geometry(grid, polygon, heights);
-            continue;
+        for (index, span) in collider_spans(grid, polygon) {
+            if grid.walkable[index] && blocks_ground(span, support[index]) {
+                grid.walkable[index] = false;
+                nulled += 1;
+            }
         }
-        if polygon.vertices.is_empty() {
-            continue;
-        }
-        let min = polygon
-            .vertices
-            .iter()
-            .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
-        let max = polygon
-            .vertices
-            .iter()
-            .fold([f32::NEG_INFINITY; 2], |a, p| {
-                [a[0].max(p[0]), a[1].max(p[1])]
-            });
-        let (x0, z0) = grid.cell_of(min[0] - grid.voxel, min[1] - grid.voxel);
-        let (x1, z1) = grid.cell_of(max[0] + grid.voxel, max[1] + grid.voxel);
-        for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
-            for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
-                let index = z as usize * grid.cols + x as usize;
-                if !grid.walkable[index]
-                    || polygon.max_y <= heights[index] + 1e-4
-                    || polygon.min_y >= heights[index] + AGENT_HEIGHT
-                {
-                    continue;
-                }
-                // PhysicsColliders are also used for thin floor/rug/mat
-                // surfaces.  Recast folds a contact whose top is within the
-                // agent climb height into the walkable span; it does not carve
-                // the original floor beneath it.  The previous projection
-                // treated every overlapping polygon as an obstacle and made
-                // these areas impossible to traverse.
-                if polygon.max_y - heights[index] <= AGENT_CLIMB {
-                    continue;
-                }
-                let p = grid.cell_center(x as usize, z as usize);
-                // Vertical triangles project to line segments. Retain every
-                // touched raster cell instead of silently dropping the wall.
-                if polygon.vertices.len() < 3 {
-                    let a = polygon.vertices[0];
-                    let b = *polygon.vertices.last().unwrap();
-                    let dx = b[0] - a[0];
-                    let dz = b[1] - a[1];
-                    let length = dx * dx + dz * dz;
-                    let t = if length > 0.0 {
-                        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / length).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let distance2 = (p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dz).powi(2);
-                    if distance2 <= grid.voxel * grid.voxel * 0.5 {
-                        grid.walkable[index] = false;
-                        nulled += 1;
-                    }
-                    continue;
-                }
-                // Input is convex (mesh hull or one triangle), in either winding.
+    }
+    for (index, height) in support.iter_mut().enumerate() {
+        *height = if grid.walkable[index] {
+            (*height - heights[index]).max(0.0)
+        } else {
+            0.0
+        };
+    }
+    // Do not keep another full-size height array for scenes without low steps.
+    if support.iter().all(|height| *height == 0.0) {
+        support = Vec::new();
+    }
+    (nulled, support)
+}
+
+fn collider_spans(grid: &Grid, polygon: &ColliderPolygon) -> Vec<(usize, [f32; 2])> {
+    // Explicit navigation carving is not physics-surface rasterization. The
+    // source builds an XZ hull with cap planes; for upright/axis-aligned shapes
+    // its foot range is [global_min_y - agentHeight, global_max_y]. Clipping a
+    // rounded solid to each cell would invent clearance beneath its edge.
+    // Arbitrarily tilted cap planes remain an explicit host approximation.
+    if !polygon.carve && !polygon.triangles.is_empty() {
+        return triangle_spans(grid, polygon);
+    }
+    let mut spans = Vec::new();
+    if polygon.vertices.is_empty() {
+        return spans;
+    }
+    let min = polygon
+        .vertices
+        .iter()
+        .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+    let max = polygon
+        .vertices
+        .iter()
+        .fold([f32::NEG_INFINITY; 2], |a, p| {
+            [a[0].max(p[0]), a[1].max(p[1])]
+        });
+    let (x0, z0) = grid.cell_of(min[0] - grid.voxel, min[1] - grid.voxel);
+    let (x1, z1) = grid.cell_of(max[0] + grid.voxel, max[1] + grid.voxel);
+    for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+        for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
+            let index = z as usize * grid.cols + x as usize;
+            if !grid.walkable[index] {
+                continue;
+            }
+            let p = grid.cell_center(x as usize, z as usize);
+            let inside = if polygon.vertices.len() < 3 {
+                let a = polygon.vertices[0];
+                let b = *polygon.vertices.last().unwrap();
+                let dx = b[0] - a[0];
+                let dz = b[1] - a[1];
+                let length = dx * dx + dz * dz;
+                let t = if length > 0.0 {
+                    (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / length).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let distance2 = (p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dz).powi(2);
+                distance2 <= grid.voxel * grid.voxel * 0.5
+            } else {
                 let mut positive = false;
                 let mut negative = false;
                 for i in 0..polygon.vertices.len() {
@@ -242,23 +263,23 @@ pub(crate) fn mark_collider_polygons(
                     positive |= cross > 1e-6;
                     negative |= cross < -1e-6;
                 }
-                if !(positive && negative) {
-                    grid.walkable[index] = false;
-                    nulled += 1;
-                }
+                !(positive && negative)
+            };
+            if inside {
+                spans.push((index, [polygon.min_y, polygon.max_y]));
             }
         }
     }
-    nulled
+    spans
 }
 
 /// Rasterize each face only over its own cells, clipping its geometry to each
 /// cell before measuring height. A global triangle Y range would still block
 /// the clear end of a slope/raised canopy. Convex shapes merge these intervals
 /// before carving, so a tall closed box never becomes an empty walkable room.
-fn mark_triangle_geometry(grid: &mut Grid, polygon: &ColliderPolygon, heights: &[f32]) -> usize {
+fn triangle_spans(grid: &Grid, polygon: &ColliderPolygon) -> Vec<(usize, [f32; 2])> {
     let mut spans = std::collections::HashMap::<usize, [f32; 2]>::new();
-    let mut nulled = 0;
+    let mut surfaces = Vec::new();
     for tri in &polygon.triangles {
         let mut min = [f32::INFINITY; 2];
         let mut max = [f32::NEG_INFINITY; 2];
@@ -294,26 +315,20 @@ fn mark_triangle_geometry(grid: &mut Grid, polygon: &ColliderPolygon, heights: &
                             range[1] = range[1].max(span[1]);
                         })
                         .or_insert(span);
-                } else if blocks_ground(span, heights[index]) {
-                    grid.walkable[index] = false;
-                    nulled += 1;
+                } else {
+                    surfaces.push((index, span));
                 }
             }
         }
     }
-    for (index, span) in spans {
-        if blocks_ground(span, heights[index]) {
-            grid.walkable[index] = false;
-            nulled += 1;
-        }
-    }
-    nulled
+    surfaces.extend(spans);
+    surfaces
 }
 
 fn blocks_ground(span: [f32; 2], ground: f32) -> bool {
-    // Low tops are traversable; raised sources with enough clearance are not
-    // walls. Heights remain relative to the sampled surface, not world zero.
-    span[1] > ground + AGENT_CLIMB + 1e-5 && span[0] < ground + AGENT_HEIGHT
+    // The low physical top has already become the supporting surface. Carving
+    // sources never raise that surface and therefore receive no climb exemption.
+    span[1] > ground + 1e-5 && span[0] < ground + AGENT_HEIGHT
 }
 
 /// Sutherland-Hodgman against the four vertical cell planes, retaining the Y

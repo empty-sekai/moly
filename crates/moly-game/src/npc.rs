@@ -1164,7 +1164,7 @@ fn lift_navigation_path(
         .into_iter()
         .map(|point| {
             let surface = face
-                .surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
+                .navigation_surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
                 .unwrap_or_else(|| {
                     panic!(
                         "[npc unit={}] 路点 ({:.2},{:.2}) 在目标面上无采样（两份面数据不一致）",
@@ -1217,7 +1217,7 @@ fn start_waypoint(
             [waypoint.position[0], waypoint.position[2]],
             WAYPOINT_SAMPLE_DISTANCE,
         )?;
-        let surface = objective_face.surface_sample(
+        let surface = objective_face.navigation_surface_sample(
             [xz[0], objective_face.ref_y(), xz[1]],
             WAYPOINT_SAMPLE_DISTANCE,
         )?;
@@ -1528,7 +1528,7 @@ pub fn advance(
             if !walk_face.walkable_at([state.0.position[0], state.0.position[2]]) {
                 let (x, z) = walk_face.seat(state.0.position[0], state.0.position[2]);
                 state.0.position = objective_face
-                    .surface_sample(
+                    .navigation_surface_sample(
                         [x, objective_face.ref_y(), z],
                         moly_law::objective::TILE_SCALE,
                     )
@@ -1618,6 +1618,14 @@ pub fn advance(
                 state.0.next_corner = prior_corner;
                 route.generation = 0;
                 continue;
+            }
+            // A low step may lie between two flat route corners. Re-evaluate
+            // navigation height at the travelled x/z, not only at endpoints.
+            // Local furniture fitting is a different phase and bypasses this.
+            if let Some(surface) = objective_face.navigation_surface_sample(
+                state.0.position, WAYPOINT_SAMPLE_DISTANCE,
+            ) {
+                state.0.position[1] = surface[1];
             }
             if let WalkVerdict::Walking(_) = verdict {
                 if let Some(corner) = corners.get(end).or_else(|| corners.last()) {
