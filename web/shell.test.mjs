@@ -347,6 +347,44 @@ test("canvas and DOM focus issue explicit input ownership commands", (t) => {
   assert.equal(escaped, 1, "ordinary canvas controls remain available");
 });
 
+test("canvas pointer capture keeps an orbit alive until pointerup or cancel", (t) => {
+  const f = fixture(t);
+  f.connect();
+  const canvas = f.get("app-canvas");
+  const calls = [],
+    active = new Set();
+  canvas.setPointerCapture = (id) => {
+    calls.push(["capture", id]);
+    active.add(id);
+  };
+  canvas.hasPointerCapture = (id) => active.has(id);
+  canvas.releasePointerCapture = (id) => {
+    calls.push(["release", id]);
+    active.delete(id);
+  };
+  const pointer = (type, id) => {
+    const event = new f.dom.window.Event(type, { bubbles: true });
+    Object.defineProperty(event, "pointerId", { value: id });
+    return event;
+  };
+  canvas.dispatchEvent(pointer("pointerdown", 7));
+  canvas.dispatchEvent(pointer("pointermove", 7));
+  assert.deepEqual(calls, [["capture", 7]]);
+  canvas.dispatchEvent(pointer("pointerup", 7));
+  assert.deepEqual(calls, [
+    ["capture", 7],
+    ["release", 7],
+  ]);
+  canvas.dispatchEvent(pointer("pointerdown", 8));
+  canvas.dispatchEvent(pointer("pointercancel", 8));
+  assert.deepEqual(calls, [
+    ["capture", 7],
+    ["release", 7],
+    ["capture", 8],
+    ["release", 8],
+  ]);
+});
+
 test("Chinese IME composition does not dispatch a partial query or playback shortcut", async (t) => {
   const f = fixture(t);
   f.connect();

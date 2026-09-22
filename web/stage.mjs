@@ -515,10 +515,57 @@ window.addEventListener("keydown", (event) => {
 });
 window.addEventListener("blur", () => controller?.focus(true));
 window.addEventListener("focus", () => controller?.focus(false));
-$("app-canvas").addEventListener("pointerdown", () => {
+// Keep the source gesture alive after the cursor leaves the canvas. Winit
+// cancels its gesture layer on CursorLeft, so relying on browser hit testing
+// makes a camera drag stop at the canvas edge (especially in a small iframe).
+const stageCanvas = $("app-canvas");
+const capturedPointers = new Set();
+function captureStagePointer(event) {
+  const id = event.pointerId;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (
+    !Number.isFinite(id) ||
+    typeof stageCanvas.setPointerCapture !== "function"
+  )
+    return;
+  try {
+    stageCanvas.setPointerCapture(id);
+    capturedPointers.add(id);
+  } catch {
+    // Pointer capture is optional; ordinary in-canvas input still works.
+  }
+}
+function recaptureStagePointer(event) {
+  const id = event.pointerId;
+  if (
+    !capturedPointers.has(id) ||
+    typeof stageCanvas.hasPointerCapture !== "function" ||
+    stageCanvas.hasPointerCapture(id)
+  )
+    return;
+  captureStagePointer(event);
+}
+function releaseStagePointer(event) {
+  const id = event.pointerId;
+  if (
+    !capturedPointers.delete(id) ||
+    typeof stageCanvas.releasePointerCapture !== "function"
+  )
+    return;
+  try {
+    stageCanvas.releasePointerCapture(id);
+  } catch {
+    /* browser released it */
+  }
+}
+stageCanvas.addEventListener("pointerdown", (event) => {
+  captureStagePointer(event);
   controller?.focus(false);
-  $("app-canvas").focus({ preventScroll: true });
+  stageCanvas.focus({ preventScroll: true });
 });
+stageCanvas.addEventListener("pointermove", recaptureStagePointer);
+stageCanvas.addEventListener("pointerup", releaseStagePointer);
+stageCanvas.addEventListener("pointercancel", releaseStagePointer);
 window.addEventListener("pagehide", () => {
   clearInterval(timer);
   observer.disconnect();

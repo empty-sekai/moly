@@ -628,6 +628,8 @@ kbd {
   outline: none;
   position: absolute;
   inset: 0;
+  /* Let the shared gesture layer own touch drags instead of browser panning. */
+  touch-action: none;
 }
 .boot-panel {
   position: absolute;
