@@ -5,6 +5,7 @@
 pub mod action_button;
 pub mod alone_action_runtime;
 pub mod audio;
+mod asset_cache;
 mod audio_startup;
 pub mod avatar_material;
 pub mod avatar_wear;
@@ -12,6 +13,8 @@ pub mod balloon;
 pub mod billboard;
 pub mod birthday;
 mod browser_stage;
+#[cfg(target_arch = "wasm32")]
+mod browser_log;
 pub use browser_stage::configure_browser_stage;
 pub mod camera;
 pub mod character;
@@ -23,6 +26,7 @@ mod delayed_faces;
 pub mod emoticon;
 pub mod env;
 pub mod fixture;
+mod fixture_collision;
 mod fixture_activity_data;
 mod fixture_activity_provider;
 mod fixture_activity_state;
@@ -125,6 +129,8 @@ pub fn app(
     #[cfg(target_arch = "wasm32")] web_render_settings: bevy::render::settings::WgpuSettings,
 ) -> App {
     let mut app = App::new();
+    #[cfg(target_arch = "wasm32")]
+    browser_log::install();
     // Asset sources must be registered before AssetPlugin is built.
     moly_assets::install(&mut app, source);
     let plugins = DefaultPlugins.set(bevy::window::WindowPlugin {
@@ -139,6 +145,7 @@ pub fn app(
     let plugins =
         plugins
             .disable::<bevy::app::PanicHandlerPlugin>()
+            .disable::<bevy::log::LogPlugin>()
             .set(bevy::render::RenderPlugin {
                 render_creation: bevy::render::settings::RenderCreation::Automatic(
                     web_render_settings,

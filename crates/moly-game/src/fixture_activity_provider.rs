@@ -104,6 +104,9 @@ pub(crate) struct FixtureActivityProvider {
 }
 
 impl FixtureActivityProvider {
+    pub(crate) fn cache_counts(&self) -> serde_json::Value {
+        self.assets.cache_counts()
+    }
     pub(crate) fn statuses(&self) -> impl Iterator<Item = (&ProviderKey, &ProviderStatus)> {
         self.entries.iter().map(|(key, entry)| (key, &entry.status))
     }
@@ -127,25 +130,54 @@ impl FixtureActivityProvider {
         request: &mut StartTimeline,
         cast: &[(u32, Entity, Entity, Handle<AnimationGraph>)],
     ) -> Result<(), ProviderPending> {
-        let identity = world.get::<FixtureActivityIdentity>(request.fixture)
-            .ok_or_else(|| ProviderPending::new("fixture-identity", "cast fixture has no typed identity"))?.clone();
-        let target = FixtureTarget { entity: request.fixture, uid: identity.uid.clone() };
+        let identity = world
+            .get::<FixtureActivityIdentity>(request.fixture)
+            .ok_or_else(|| {
+                ProviderPending::new("fixture-identity", "cast fixture has no typed identity")
+            })?
+            .clone();
+        let target = FixtureTarget {
+            entity: request.fixture,
+            uid: identity.uid.clone(),
+        };
         assets::require_live_fixture(&mut self.assets, world, &target, &identity.model_package)?;
-        let common = request.definition.tracks.iter().any(|track| track.name == "CharacterAnimator");
+        let common = request
+            .definition
+            .tracks
+            .iter()
+            .any(|track| track.name == "CharacterAnimator");
         if common && cast.len() != 1 {
-            return Err(ProviderPending::new("actor-cast", "common actor timeline requires exactly one admitted actor"));
+            return Err(ProviderPending::new(
+                "actor-cast",
+                "common actor timeline requires exactly one admitted actor",
+            ));
         }
         let mut pending = None;
         // Start independent actor loads in the same frame, not serially. The
         // retained request owns every completed binding while siblings load.
         for (unit, actor, animator, graph) in cast {
             let result = if common {
-                timeline::prepare_actor_animation_bindings(world, request, *unit, *animator, graph.clone())
+                timeline::prepare_actor_animation_bindings(
+                    world,
+                    request,
+                    *unit,
+                    *animator,
+                    graph.clone(),
+                )
             } else {
-                timeline::prepare_cast_actor_bindings(world, request, *unit, *actor, *animator, graph.clone())
+                timeline::prepare_cast_actor_bindings(
+                    world,
+                    request,
+                    *unit,
+                    *actor,
+                    *animator,
+                    graph.clone(),
+                )
             };
             if let Err(error) = result {
-                if !error.retryable { return Err(ProviderPending::timeline("actor-clips", error)); }
+                if !error.retryable {
+                    return Err(ProviderPending::timeline("actor-clips", error));
+                }
                 pending = Some(ProviderPending::timeline("actor-clips", error));
             }
         }
@@ -155,10 +187,14 @@ impl FixtureActivityProvider {
             self.assets.prepare_fixture_bindings(world, request)?;
         }
         if let Err(error) = timeline::prepare_source_sounds(world, request) {
-            if !error.retryable { return Err(ProviderPending::timeline("audio", error)); }
+            if !error.retryable {
+                return Err(ProviderPending::timeline("audio", error));
+            }
             pending = Some(ProviderPending::timeline("audio", error));
         }
-        if let Some(pending) = pending { return Err(pending); }
+        if let Some(pending) = pending {
+            return Err(pending);
+        }
         Ok(())
     }
 
@@ -242,6 +278,9 @@ pub(crate) fn advance(world: &mut World) {
     let mut provider = world
         .remove_resource::<FixtureActivityProvider>()
         .expect("initialized provider");
+    // Discovery may fail during a scene/appearance handoff. That must not keep
+    // the previous scene's drafts (and their strong asset handles) resident.
+    provider.entries.retain(|key, _| provider_key_is_live(world, key));
     let discovered = discover(world);
     match discovered {
         Err(reason) => {
@@ -279,6 +318,25 @@ pub(crate) fn advance(world: &mut World) {
     }
     publish(world, &mut provider);
     world.insert_resource(provider);
+}
+
+fn provider_key_is_live(world: &World, key: &ProviderKey) -> bool {
+    world.get::<PlayerControlled>(key.actor).is_some()
+        && world.get::<FixtureRoot>(key.target.entity).is_some()
+        && world.get::<FixtureActivityIdentity>(key.target.entity)
+            .is_some_and(|identity| key.target.matches(identity))
+}
+
+/// PostUpdate: all provider/NPC/talk preparation has finished for this frame.
+/// Only redundant lookup references are dropped. Prepared profiles and active
+/// timeline requests own their exact definition/clip/audio handles themselves.
+pub(crate) fn retire_lookup_caches(world: &mut World) {
+    if let Some(mut provider) = world.get_resource_mut::<FixtureActivityProvider>() {
+        provider.assets.sweep_lookup_caches();
+    }
+    if let Some(mut loads) = world.get_resource_mut::<timeline::TimelineAssetLoads>() {
+        loads.sweep_lookup_caches();
+    }
 }
 
 /// Report preparation changes without confusing a ready visual with a running
@@ -614,6 +672,15 @@ fn prepare_plan(
         &plan.key.target,
         &plan.model_package,
     )?;
+    let owner = FixtureActivityOwner { actor: plan.actor.entity, generation: 0 };
+    if let Some(profile) = draft.as_ref().filter(|profile| profile_matches_plan(profile, plan)) {
+        let request = profile.start_request(owner, &plan.key.target);
+        if timeline::validate_prepared(world, &request).is_ok() {
+            // A successful profile owns the exact required clips. Do not touch
+            // its whole GLTF lookup again; unrelated animations can retire.
+            return Ok(());
+        }
+    }
     let player_definition =
         provider.definition(world, &plan.player_package, &plan.player_row.asset_name)?;
     let definition = provider.definition(world, &plan.visual_package, &plan.visual_prefab)?;
@@ -632,10 +699,6 @@ fn prepare_plan(
             "Sampled bone curves do not implement native FootIK, start offset, track matching or all mixer behavior".into(),
             format!("Source player row {}, locator array index {}, slot {}", plan.player_row.id, plan.locate_index, plan.slot_id),
         ],
-    };
-    let owner = FixtureActivityOwner {
-        actor: plan.actor.entity,
-        generation: 0,
     };
     let mut request = profile.start_request(owner, &plan.key.target);
     let prepared = provider.prepare_bindings(
@@ -666,8 +729,29 @@ fn prepare_plan(
         .as_ref()
         .expect("stored draft")
         .start_request(owner, &plan.key.target);
-    timeline::validate_start(world, &request)
+    timeline::validate_prepared(world, &request)
         .map_err(|error| ProviderPending::timeline("live-binding-preflight", error))
+}
+
+fn profile_matches_plan(profile: &PlayerFixtureVisualProfile, plan: &Plan) -> bool {
+    profile.target == plan.key.target
+        && profile.actor == plan.actor.entity
+        && profile.unit_id == plan.actor.unit
+        && profile.fixture_id == plan.fixture_id
+        && profile.player_timeline_row_id == plan.player_row.id
+        && profile.action_point == plan.player_row.action_point
+        && profile.visual_action_point == plan.visual_point
+        && profile.slot_id == plan.slot_id
+        && profile.no_talk_row_id == plan.no_talk_row_id
+        && profile.timeline_group_id == plan.visual_row.group_id
+        && profile.timeline_row_id == plan.visual_row.id
+        && profile.source_view_local_y.to_bits() == plan.source_view_local_y.to_bits()
+        && profile.definition.package == plan.visual_package
+        && profile.definition.prefab == plan.visual_prefab
+        && profile.player_definition.package == plan.player_package
+        && profile.player_definition.prefab == plan.player_row.asset_name
+        && profile.bindings.animations.values().any(|binding|
+            binding.animator == plan.actor.animator && binding.graph == plan.actor.graph)
 }
 
 fn profile_key(profile: &PlayerFixtureVisualProfile) -> ProviderKey {
@@ -707,4 +791,30 @@ fn publish(world: &mut World, provider: &mut FixtureActivityProvider) {
         }
     }
     world.insert_resource(profiles);
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::*;
+
+    #[test]
+    fn failed_discovery_does_not_keep_a_removed_fixtures_profile() {
+        let mut world = World::new();
+        let actor = world.spawn(PlayerControlled).id();
+        let fixture = world.spawn((FixtureRoot, FixtureActivityIdentity {
+            uid: "old".into(), master_id: 1, model_package: "old-model".into(),
+        })).id();
+        let key = ProviderKey { actor, target: FixtureTarget { entity: fixture, uid: "old".into() }, player_timeline_row_id: 1 };
+        let mut provider = FixtureActivityProvider::default();
+        provider.entries.insert(key.clone(), Entry {
+            status: ProviderStatus::VisualReady { sd_timeline_row_id: 1 }, profile: None,
+        });
+        world.insert_resource(provider);
+        // Same entity, replacement UID: entity existence alone must not pin
+        // the previous player's furniture. Discovery also lacks AvatarDriver.
+        world.get_mut::<FixtureActivityIdentity>(fixture).unwrap().uid = "replacement".into();
+        advance(&mut world);
+        assert!(world.resource::<FixtureActivityProvider>().entries.is_empty());
+        assert!(world.resource::<FixtureActivityProvider>().global_pending.is_some());
+    }
 }

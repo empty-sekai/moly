@@ -68,3 +68,15 @@ test("transport sidecars preserve sources, verify repeats and reject wrong prove
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("observed decoded shader pixels remain in the browser resource boundary", () => {
+  const evidence = trace();
+  const texture = "phenomena/shader-textures/" + "a".repeat(64) + ".rgba8";
+  evidence.events[1].data.push({ name: `https://site.test/game/${texture}` });
+  assert.ok(evidencePaths(evidence).includes(texture));
+  for (const extension of ["glsl", "wgsl", "spv"]) {
+    const shader = "phenomena/shaders/compiled/" + "b".repeat(64) + "." + extension;
+    evidence.events[1].data.push({ name: `https://site.test/game/${shader}` });
+    assert.ok(evidencePaths(evidence).includes(shader));
+  }
+});

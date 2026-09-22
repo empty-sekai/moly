@@ -3766,6 +3766,7 @@ dependencies = [
  "swash",
  "tempfile",
  "tokio",
+ "tracing-wasm",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

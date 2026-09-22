@@ -105,24 +105,39 @@ test("recent reads change eviction order, and an inactive snapshot's base is evi
   });
 });
 
-test("on-demand dialogue assets are reused during this worker visit without durable storage", async () => {
-  await withWorker([], [], async ({ dispatch, has, networkReads }) => {
+test("on-demand dialogue assets persist on disk and survive worker activation", async () => {
+  await withWorker([], [], async ({ dispatch, has, networkReads, activate }) => {
     const voice = current + "voice/conversation.ogg";
     assert.equal(await (await dispatch(voice)).text(), "abc");
-    assert.equal(has(voice), false);
+    assert.equal(has(voice), true);
+    await activate();
     const repeated = await dispatch(voice);
     assert.equal(await repeated.text(), "abc");
-    assert.equal(repeated.headers.get("X-Moly-Cache"), "visit");
+    assert.equal(repeated.headers.get("X-Moly-Cache"), "retained");
     assert.equal(networkReads(), 1);
   });
 });
 
-test("upgrading the worker removes old optional disk entries but keeps declared base files", async () => {
+test("upgrading the worker preserves optional disk entries within the shared budget", async () => {
   const base = current + "base.json", voice = current + "voice/old.ogg";
   await withWorker([[base, 4, 1], [voice, 4, 1]], [base], async ({ activate, has }) => {
     await activate();
     assert.equal(has(base), true);
-    assert.equal(has(voice), false);
+    assert.equal(has(voice), true);
+  });
+});
+
+test("optional resources share the disk budget and evict the least recently read optional entry", async () => {
+  const voices = ["a.ogg", "b.ogg", "c.ogg", "d.ogg"].map(name => current + "voice/" + name);
+  await withWorker(voices.map((url, index) => [url, 128 * MiB, index + 1]), [], async ({ dispatch, has }) => {
+    await dispatch(voices[0]);
+    const incoming = current + "fixture-models/new.glb";
+    assert.equal(await (await dispatch(incoming)).text(), "abc");
+    assert.ok(has(incoming));
+    assert.ok(has(voices[0]), "a recent optional read updates eviction order");
+    assert.equal(has(voices[1]), false, "old optional bytes are evictable even for an active snapshot");
+    assert.ok(has(voices[2]));
+    assert.ok(has(voices[3]));
   });
 });
 

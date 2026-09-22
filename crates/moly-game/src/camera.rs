@@ -869,6 +869,7 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 pub struct FpsTransitionCtx<'w, 's> {
     dialogs: Res<'w, crate::menu_shell::ShellDialogState>,
     layers: Res<'w, crate::ui_layers::UiLayerStack>,
+    library: Res<'w, crate::content_library::ContentLibrary>,
     setting: Option<Res<'w, CameraSetting>>,
     site: Option<Res<'w, SiteSelection>>,
     active: Option<Res<'w, SiteActive>>,
@@ -917,6 +918,7 @@ pub(crate) fn apply_input(
     let Some(model) = models.as_deref_mut() else {
         return; // 站点未取景：模型未立，输入无处落
     };
+    let playback_inspection = transition.library.playback_camera_active();
     // FPS 冒烟钩子（无头验收用，玩家域 MOLY_PLAYER_AUTOWALK_SECS 同款）：
     // 窗口期内按当前态喂合成输入，走与真实输入同一条分派——Normal 持续
     // 捏合拉近（到底后继续捏 → 进入 FPS）、FPS 内拖拽、窗口后段反向捏合
@@ -980,8 +982,7 @@ pub(crate) fn apply_input(
                 }
             }
             CameraStateType::Normal => {
-                update_angle(model, source_drag.x, source_drag.y);
-                drag_distance_coupling(model);
+                normal_drag(model, source_drag, playback_inspection);
             }
             _ => {}
         }
@@ -1005,6 +1006,11 @@ pub(crate) fn apply_input(
         let ratio = config.float(crate::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO);
         let v13 = -ratio * pinch;
         match state.0 {
+            CameraStateType::Normal if playback_inspection => {
+                // Playback inspection must not replace the authored shot with
+                // an FPS transition or Normal's pitch/distance coupling.
+                playback_zoom(model, v13);
+            }
             CameraStateType::Normal => {
                 if can_switch_to_fps(model, player.is_some(), v13, &transition.avatar) {
                     // 进入支：当帧不再缩放（源 ChangeState 后直接 return）。
@@ -1112,6 +1118,7 @@ pub(crate) fn apply_input(
     if autogesture > 0.0
         && autofps <= 0.0
         && state.0 == CameraStateType::Normal
+        && !playback_inspection
         && time.elapsed_secs() < autogesture
     {
         let phase = time.elapsed_secs() / autogesture;
@@ -1144,6 +1151,42 @@ fn inspection_fov(current: f32, baseline: f32, pinch: f32) -> Option<f32> {
 #[cfg(test)]
 mod inspection_zoom_tests {
     use super::*;
+    fn playback_model() -> FieldCameraModel {
+        FieldCameraModel {
+            look_at: Vec3::new(1., 2., 3.), offset: Vec3::new(0., 0.5, 0.),
+            fov: 35., distance: 6., min_distance: 1.7, max_distance: 8.,
+            yaw: 0., pitch: 30., rot_sensitivity: 1., min_pitch: 8., max_pitch: 80.,
+            gestured_distance: 7.,
+            look_at_bounds: BoundsXz { center: Vec2::ZERO, extents: Vec2::ONE },
+            max_look_at_bounds: BoundsXz { center: Vec2::ZERO, extents: Vec2::ONE },
+        }
+    }
+    #[test]
+    fn playback_orbit_preserves_distance_and_authored_camera_target() {
+        let mut model = playback_model();
+        normal_drag(&mut model, Vec2::new(20., 200.), true);
+        assert_eq!(model.yaw, 20.);
+        assert_eq!(model.pitch, model.min_pitch);
+        assert_eq!(model.distance, 6.);
+        assert_eq!(model.gestured_distance, 7.);
+        assert_eq!(model.look_at, Vec3::new(1., 2., 3.));
+        assert_eq!(model.fov, 35.);
+        normal_drag(&mut model, Vec2::ZERO, false);
+        assert_ne!(model.distance, 6.); // Normal exploration keeps its source coupling.
+    }
+    #[test]
+    fn playback_zoom_stays_bounded_without_touching_pitch_or_lens() {
+        let mut model = playback_model();
+        for _ in 0..3 { playback_zoom(&mut model, -100.); }
+        assert_eq!(model.distance, 1.7);
+        assert_eq!(model.gestured_distance, 1.7);
+        playback_zoom(&mut model, 100.);
+        assert_eq!(model.distance, 8.);
+        assert_eq!(model.pitch, 30.);
+        assert_eq!(model.min_pitch, 8.);
+        assert_eq!(model.fov, 35.);
+        assert_eq!(model.look_at, Vec3::new(1., 2., 3.));
+    }
     #[test]
     fn fps_inspection_zoom_is_bounded_and_unzooms_before_exiting() {
         let closer = inspection_fov(50., 50., 50.).unwrap();
@@ -1193,6 +1236,18 @@ fn update_angle(model: &mut FieldCameraModel, dx: f32, dy: f32) {
             raw_pitch, pitch, model.min_pitch, model.max_pitch
         );
     }
+}
+
+fn normal_drag(model: &mut FieldCameraModel, delta: Vec2, playback_inspection: bool) {
+    update_angle(model, delta.x, delta.y);
+    if !playback_inspection {
+        drag_distance_coupling(model);
+    }
+}
+
+fn playback_zoom(model: &mut FieldCameraModel, delta: f32) {
+    model.distance = (model.distance + delta).clamp(model.min_distance, model.max_distance);
+    model.gestured_distance = model.distance;
 }
 
 /// 源 Normal 态 `OnDrag` 尾段：按（刚更新的）pitch 压当帧生效距离。

@@ -1,46 +1,12 @@
-// Durable base/runtime retention and bounded in-memory on-demand reuse.
+// Durable base/runtime retention and bounded persistent on-demand reuse.
 // It never handles site HTML, accounts, saved layouts, or API traffic.
 export const CACHE_PROTOCOL = 1;
 export const RESOURCE_PREFIX = "moly-resource-v1-";
+const RESOURCE_FAMILY_PREFIX = "moly-resource-";
 const CONTROL_CACHE = "moly-control-v1";
 const LIMIT = 512 * 1024 * 1024;
 const MAX_ENTRY = 128 * 1024 * 1024;
 const MAX_PENDING = 8;
-const VISIT_LIMIT = 64 * 1024 * 1024;
-const VISIT_MAX_ENTRY = 32 * 1024 * 1024;
-
-/** Best-effort playback reuse without writing optional dialogue assets to disk. */
-export class VisitResourceCache {
-  constructor(limit = VISIT_LIMIT) {
-    this.limit = limit;
-    this.bytes = 0;
-    this.entries = new Map();
-  }
-  get(url) {
-    const entry = this.entries.get(url);
-    if (!entry) return null;
-    this.entries.delete(url);
-    this.entries.set(url, entry);
-    const headers = new Headers(entry.headers);
-    headers.set("X-Moly-Cache", "visit");
-    return new Response(entry.body.slice(), { status: 200, headers });
-  }
-  put(url, body, headers) {
-    if (!body.byteLength || body.byteLength > this.limit) return;
-    const previous = this.entries.get(url);
-    if (previous) this.bytes -= previous.body.byteLength;
-    this.entries.delete(url);
-    while (this.bytes + body.byteLength > this.limit) {
-      const oldest = this.entries.keys().next().value;
-      this.bytes -= this.entries.get(oldest).body.byteLength;
-      this.entries.delete(oldest);
-    }
-    this.entries.set(url, { body, headers: new Headers(headers) });
-    this.bytes += body.byteLength;
-  }
-  clear() { this.entries.clear(); this.bytes = 0; }
-}
-
 function publicOrigin(value) {
   if (typeof value !== "string") return null;
   try {
@@ -276,27 +242,6 @@ export async function verifiedSharedBody(response, bytes, sha256) {
   }
 }
 
-async function visitBody(response, bytes) {
-  if (!response.body || !Number.isSafeInteger(bytes) || bytes <= 0 || bytes > VISIT_MAX_ENTRY)
-    throw new Error("Invalid visit response size");
-  const body = new Uint8Array(bytes), reader = response.body.getReader();
-  let used = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (used + value.byteLength > bytes) throw new Error("Visit response exceeded its declared size");
-      body.set(value, used);
-      used += value.byteLength;
-    }
-    if (used !== bytes) throw new Error("Visit response length mismatch");
-    return body;
-  } catch (error) {
-    await reader.cancel().catch(() => {});
-    throw error;
-  } finally { reader.releaseLock(); }
-}
-
 if (
   typeof ServiceWorkerGlobalScope !== "undefined" &&
   self instanceof ServiceWorkerGlobalScope
@@ -309,7 +254,6 @@ if (
   const pinsUrl = new URL("/moly/__required", self.location.origin).href;
   const required = new Set();
   const lastUsed = new Map();
-  const visit = new VisitResourceCache();
   const initialized = (async () => {
     const cache = await caches.open(CONTROL_CACHE),
       response = await cache.match(controlUrl);
@@ -334,7 +278,7 @@ if (
   async function inventory() {
     const entries = [];
     for (const name of (await caches.keys()).filter((name) =>
-      name.startsWith(RESOURCE_PREFIX),
+      name.startsWith(RESOURCE_FAMILY_PREFIX),
     )) {
       const cache = await caches.open(name);
       for (const request of await cache.keys()) {
@@ -373,16 +317,9 @@ if (
   self.addEventListener("activate", (event) => event.waitUntil((async () => {
     await self.clients.claim();
     await initialized;
-    // Upgrade older caches that retained every on-demand voice/model file.
-    // Keep only declared base resources and versioned runtime files on disk.
-    for (const name of await caches.keys()) {
-      if (!name.startsWith(RESOURCE_PREFIX) || name.startsWith(RESOURCE_PREFIX + "r-")) continue;
-      const cache = await caches.open(name);
-      for (const request of await cache.keys()) {
-        if (required.has(request.url) || new URL(request.url).pathname.endsWith("/assets/browser-base.json")) continue;
-        await cache.delete(request);
-      }
-    }
+    // Keep previously downloaded optional resources across worker restarts.
+    // Activation only enforces the same total disk budget as new writes.
+    await serial(() => makeSpace(0, null)).catch(() => {});
   })()));
   self.addEventListener("message", (event) => {
     const port = event.ports?.[0],
@@ -412,11 +349,10 @@ if (
           epoch++;
           required.clear();
           lastUsed.clear();
-          visit.clear();
           await (await caches.open(CONTROL_CACHE)).delete(pinsUrl);
           await Promise.all(
             (await caches.keys())
-              .filter((name) => name.startsWith(RESOURCE_PREFIX))
+              .filter((name) => name.startsWith(RESOURCE_FAMILY_PREFIX))
               .map((name) => caches.delete(name)),
           );
         }
@@ -428,6 +364,7 @@ if (
           enabled,
           bytes: entries.reduce((sum, item) => sum + item.bytes, 0),
           entries: entries.length,
+          limitBytes: LIMIT,
         });
       }).catch(() =>
         port.postMessage({
@@ -440,8 +377,7 @@ if (
   });
   self.addEventListener("fetch", (event) => {
     const request = event.request;
-    // Catalogue entry JSON belongs to the reading page's visit-scoped memory
-    // cache, never to this worker's durable base/runtime resource store.
+    // Catalogue entry JSON belongs to the reading page, never to the resource store.
     if (/^\/moly\/snapshots\/[^/]+\/catalog\/entries\/[^/]+\.json$/.test(new URL(request.url).pathname)) return;
     // Prefilter immutable paths synchronously; cross-origin admission also
     // requires the requesting stage client's current configuration.
@@ -457,19 +393,13 @@ if (
         const identity = resourceIdentity(request.url, self.location.origin, configuredOrigin);
         if (!identity) return fetch(request);
         await initialized;
-        const durable = identity.cache.includes("-r-") || required.has(identity.url) ||
-          (identity.shared && request.headers.get("X-Moly-Required") === "1") ||
-          new URL(identity.url).pathname.endsWith("/assets/browser-base.json");
+        const requestEpoch = epoch;
         if (enabled) {
-          if (!durable) {
-            const remembered = visit.get(identity.url);
-            if (remembered) return remembered;
-          }
           // Private browsing, eviction and device quota failures must never
           // turn successful online playback into an unavailable response.
-          const retained = durable ? await caches
+          const retained = await caches
             .match(identity.url, { cacheName: identity.cache })
-            .catch(() => null) : null;
+            .catch(() => null);
           if (retained) {
             lastUsed.set(identity.url, Date.now());
             if (
@@ -478,7 +408,7 @@ if (
             ) {
               event.waitUntil(
                 serial(async () => {
-                  if (!enabled || required.size >= 20000) return;
+                  if (!enabled || requestEpoch !== epoch || required.size >= 20000) return;
                   required.add(identity.url);
                   await (
                     await caches.open(CONTROL_CACHE)
@@ -502,7 +432,6 @@ if (
         }
         // Controlled large runtime requests bypass the browser's opaque HTTP
         // cache. Optional retained copies are therefore measurable and removable.
-        const requestEpoch = epoch;
         const response = await fetch(request, { cache: "no-store", credentials: "omit", redirect: "error" });
         const bytes = Number(response.headers.get("X-Moly-Decoded-Bytes") ||
           response.headers.get("x-oss-meta-moly-decoded-bytes") || 0);
@@ -536,23 +465,11 @@ if (
             /* An invalid descriptor is rejected by the stage loader. */
           }
         }
-        const nowDurable = durable || required.has(identity.url);
-        if (enabled && !nowDurable && requestEpoch === epoch && response.status === 200 &&
-            Number.isSafeInteger(bytes) && bytes > 0 && bytes <= VISIT_MAX_ENTRY) {
-          const generation = epoch;
-          event.waitUntil((async () => {
-            const body = await visitBody(response.clone(), bytes);
-            if (!enabled || generation !== epoch) return;
-            const headers = new Headers(response.headers);
-            headers.delete("Content-Encoding");
-            headers.delete("Content-Length");
-            visit.put(identity.url, body, headers);
-          })().catch(() => { /* Memory reuse is best-effort. */ }));
-        }
-        // Development asset mounts are no-cache and deliberately never retained.
+        // All immutable public resources use the bounded disk store. There is
+        // no completed response-body memory cache. Development no-cache mounts
+        // remain network-only, and failures never prevent online playback.
         if (
           enabled &&
-          nowDurable &&
           requestEpoch === epoch &&
           response.status === 200 &&
           response.headers.get("Cache-Control")?.includes("immutable") &&

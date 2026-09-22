@@ -1,4 +1,5 @@
 import { warmBaseResources } from "./base-resources.mjs";
+import { preflightCoordinates } from "./coordinate-contract.mjs";
 import {
   EMBED_VERSION,
   isEnvelope,
@@ -260,6 +261,14 @@ async function loadEngine() {
       throw new Error("An explicit supported resource region is required");
     const publicOrigin = resourceOrigin(params.get("resource_origin"));
     resourceDirectory(params.get("assets") || "", location.href, publicOrigin);
+    try {
+      await preflightCoordinates({
+        assets: new URL(params.get("assets"), location.href).href, region, version,
+        packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
+        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href, resourceOrigin: publicOrigin,
+      }, { signal: abort.signal });
+      lastChunk = performance.now();
+    } catch (error) { fail("source_mismatch", error); throw error; }
     weatherArtwork = createWeatherArtwork({
       assets: params.get("assets"),
       baseUrl: location.href,

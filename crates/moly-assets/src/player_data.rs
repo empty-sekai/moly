@@ -760,4 +760,27 @@ mod tests {
         assert_eq!(side.2, layout_type::WALL_RIGHT);
         assert_eq!(side.1, Direction::Left);
     }
+
+    #[test]
+    fn all_cardinal_grid_layouts_round_trip_without_half_cell_drift() {
+        for x in [-12, -1, 0, 9] {
+            for width in 1..=6 {
+                for depth in 1..=5 {
+                    let size = Vector3Int::new(width, 3, depth);
+                    for value in 0..4 {
+                        let direction = Direction::from_u8(value).unwrap();
+                        for layout in [layout_type::FLOOR, layout_type::RUG, layout_type::ROAD,
+                            layout_type::WALL_FRONT, layout_type::WALL_BACK,
+                            layout_type::WALL_LEFT, layout_type::WALL_RIGHT]
+                        {
+                            let center = GridPosition::new(x, 2, -4);
+                            let target = assert_reflection(center, size, direction, layout);
+                            assert_eq!(mirror_fixture_layout(target.0, size, target.1, target.2).unwrap(),
+                                (center, direction, layout));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -325,6 +325,54 @@ pub(crate) fn stop_for_external_activity(world: &mut World, actor: Entity) {
 /// Show synchronizes the retained actor with the rebuilt field. Unhandled
 /// objective branches keep their route/content and the existing generation
 /// mover replans them; it must not blindly follow a stale path after Save.
+pub(crate) fn begin_external_approach(
+    world: &mut World,
+    actor: Entity,
+    fit: FitCandidate,
+) -> Result<(), String> {
+    use bevy::ecs::system::SystemState;
+    let mut params = SystemState::<(
+        Res<crate::walk_face::WalkFace>,
+        Res<crate::npc_objective::ObjectiveFace>,
+        Query<(
+            &CharacterUnitId,
+            &mut WalkState,
+            &mut PathSlot,
+            &mut RouteStops,
+            &mut MotionPhase,
+            &mut NpcActions,
+            &mut RestLifecycle,
+            &mut crate::npc_objective::MemberRng,
+        )>,
+    )>::new(world);
+    let (face, objective, mut actors) = params.get_mut(world);
+    let (unit, mut walk, mut path, mut route, mut phase, mut actions, mut rest, mut rng) = actors
+        .get_mut(actor)
+        .map_err(|_| "actor navigation unavailable")?;
+    *phase = depart(
+        unit,
+        &mut walk.0,
+        &mut path.0,
+        &mut route,
+        &face,
+        &objective,
+        fit.position,
+        Some(fit),
+        &mut rng,
+    )
+    .ok_or_else(|| format!("unit {} cannot reach its source action point", unit.0))?;
+    declare_navigation_action(&mut actions, &mut rest, &phase, &route);
+    Ok(())
+}
+
+pub(crate) fn cancel_external_approach(world: &mut World, actor: Entity) {
+    let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
+    if let Ok((mut actions, mut rest)) = query.get_mut(world, actor) {
+        actions.change(NpcAction::Idle, &mut rest);
+    }
+    stop_for_external_activity(world, actor);
+}
+
 pub(crate) fn reattach_after_layout_edit(
     world: &mut World,
     actor: Entity,
@@ -690,7 +738,11 @@ pub(crate) fn spawn_when_ready(
     // No demonstration cast in the embedded stage: independent playback must
     // obtain every required member through spawn_temporary_units. Standalone
     // continues to use its explicit offline roster unchanged.
-    let requested = if stage.is_some() { Some(Vec::new()) } else { roster_units(selection.content()) };
+    let requested = if stage.is_some() {
+        Some(Vec::new())
+    } else {
+        roster_units(selection.content())
+    };
     let roster: Vec<&(u32, f32, f32, String, String)> = match requested {
         Some(ids) => {
             let set: std::collections::HashSet<u32> = ids.iter().copied().collect();
@@ -1111,13 +1163,21 @@ fn lift_navigation_path(
     points
         .into_iter()
         .map(|point| {
-            face.surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
+            let surface = face
+                .surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
                 .unwrap_or_else(|| {
                     panic!(
                         "[npc unit={}] 路点 ({:.2},{:.2}) 在目标面上无采样（两份面数据不一致）",
                         unit.0, point[0], point[1]
                     )
-                })
+                });
+            // The polygon navigation query owns x/z. A 3D closest-point
+            // projection from the reference plane can slide horizontally on
+            // sloped geometry; feeding that shifted point back into the route
+            // leaves the executor at a different endpoint while arrival still
+            // compares against the original checkpoint. Surface geometry only
+            // supplies the height for this already-validated navigation point.
+            [point[0], surface[1], point[1]]
         })
         .collect()
 }
@@ -1125,7 +1185,8 @@ fn lift_navigation_path(
 /// Each ordered waypoint is a navigation destination, not a permission to
 /// traverse the straight chord. Side candidates and radial sorting can place
 /// an obstacle between adjacent waypoints, so the same navigation field supplies
-/// each leg. The unsnapped waypoint remains the actual arrival predicate.
+/// each leg. Rest keeps its authored, unsnapped arrival predicate; generated
+/// CheckPoints commit their sampled navigation endpoint to the route.
 fn start_waypoint(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1134,7 +1195,7 @@ fn start_waypoint(
     walk_face: &crate::walk_face::WalkFace,
     objective_face: &crate::npc_objective::ObjectiveFace,
 ) -> Option<MotionPhase> {
-    let Some(waypoint) = route.stops.get(route.next).copied() else {
+    let Some(mut waypoint) = route.stops.get(route.next).copied() else {
         let fit = route.fit.take();
         route.stops.clear();
         route.next = 0;
@@ -1147,17 +1208,37 @@ fn start_waypoint(
         }
         return Some(phase);
     };
+    let target = if waypoint.kind == WaypointKind::CheckPoint {
+        // Funnel corners can lie exactly on a polygon/voxel boundary. Snap the
+        // execution checkpoint with the navigation field, then commit that
+        // same point back to the route so movement and arrival compare one
+        // coordinate. The surface mesh contributes height only.
+        let xz = walk_face.sample(
+            [waypoint.position[0], waypoint.position[2]],
+            WAYPOINT_SAMPLE_DISTANCE,
+        )?;
+        let surface = objective_face.surface_sample(
+            [xz[0], objective_face.ref_y(), xz[1]],
+            WAYPOINT_SAMPLE_DISTANCE,
+        )?;
+        [xz[0], surface[1], xz[1]]
+    } else {
+        objective_face.sample(waypoint.position, WAYPOINT_SAMPLE_DISTANCE)?
+    };
+    if waypoint.kind == WaypointKind::CheckPoint {
+        waypoint.position = target;
+        route.stops[route.next] = waypoint;
+    }
     let corners =
         if Vec3::from(waypoint.position).distance(Vec3::from(state.position)) < ARRIVAL_DISTANCE {
             // Even a coincident CheckPoint is an execution leg; the next update
             // observes arrival without inventing a Rest delay.
             vec![state.position]
         } else {
-            let sampled = objective_face.sample(waypoint.position, WAYPOINT_SAMPLE_DISTANCE)?;
             let points = walk_face
                 .path_exact(
                     [state.position[0], state.position[2]],
-                    [sampled[0], sampled[2]],
+                    [target[0], target[2]],
                 )
                 .or_else(|| {
                     // The previous polygon checkpoint was accepted within
@@ -1175,7 +1256,7 @@ fn start_waypoint(
                     }
                     let path = walk_face.path_exact(
                         [previous.position[0], previous.position[2]],
-                        [sampled[0], sampled[2]],
+                        [target[0], target[2]],
                     )?;
                     state.position = previous.position;
                     Some(path)
@@ -1386,6 +1467,7 @@ pub fn advance(
             Option<&crate::talk::TalkHold>,
             &mut NpcActions,
             &mut RestLifecycle,
+            Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
         ),
         Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
     >,
@@ -1409,6 +1491,7 @@ pub fn advance(
         talk_hold,
         mut actions,
         mut rest,
+        talk_lease,
     ) in &mut npcs
     {
         // 外部截断的自愈：收场位（`Dwelling::None`）与非空路点表/路径槽
@@ -1428,7 +1511,9 @@ pub fn advance(
                 unit.0
             );
         }
-        if talk_hold.is_some() || actions.current == NpcAction::Talk {
+        if (talk_hold.is_some() || actions.current == NpcAction::Talk)
+            && !talk_lease.is_some_and(|lease| lease.approaching)
+        {
             continue; // 对话持留：位移推进整名让位（相位与变换都不写）
         }
         let (Some(walk_face), Some(objective_face)) =

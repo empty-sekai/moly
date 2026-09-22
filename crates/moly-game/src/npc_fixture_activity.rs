@@ -97,6 +97,11 @@ enum Phase {
     Approaching,
     Preparing,
     Playing,
+    /// The source Director has completed, but the admitted talk still owns
+    /// this actor/fixture. Native `PlayAsyncForNPC` stops its Director before
+    /// the talk handoff; keep the activity reservation without re-running the
+    /// sparse end pose on every frame.
+    TalkHeld,
     Exiting(LocalMove),
 }
 
@@ -642,11 +647,12 @@ fn tick(
     {
         return Err("future fixture reservation was replaced".into());
     }
-    let joined_talk = matches!(session.phase, Phase::Playing)
+    let joined_talk = matches!(session.phase, Phase::Playing | Phase::TalkHeld)
         && world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| {
             talk.participants().iter().any(|(_, entity)| *entity == actor)
                 && talk.fixture_instances().iter().any(|(_, entity)| *entity == selection.target.entity)
         });
+
     if world.get::<TalkHold>(actor).is_some() && !joined_talk {
         // Only the admitted cast on this same placed fixture may retain the
         // existing Director. An unrelated conversation still cancels ownership.
@@ -695,6 +701,18 @@ fn tick(
         .is_none_or(|held| held.0 != session.owner)
     {
         return Err("fixture movement lease was replaced".into());
+    }
+    if matches!(session.phase, Phase::TalkHeld) {
+        // The completed Director was already stopped. Never replay idle while
+        // this admitted dialogue drives its own clips.
+        if joined_talk { return Ok(false); }
+        change_action(world, actor, NpcAction::FixtureActionIdle, false)?;
+        let (_, end) = live_poses(world, &session.selection)?;
+        // LookAt or dialogue motion may have changed the logical root after
+        // handoff. Start reattachment from that live pose, never teleport it
+        // back to EndLoc a second time.
+        let start = *world.get::<Transform>(actor).ok_or("NPC pose disappeared")?;
+        session.phase = Phase::Exiting(prepare_exit(world, actor, start, end)?);
     }
     if matches!(session.phase, Phase::Preparing) {
         let Some(provider) = provider else {
@@ -784,6 +802,23 @@ fn tick(
                 // The talk owner observes the completed generation before
                 // releasing its cast. Do not start locomotion under TalkHold.
                 if joined_talk {
+                    // CN NPCFixtureTimelineView.PlayAsyncForNPC MoveNext
+                    // (RVA 0x5DB6720) stops its Director after the terminal
+                    // wait; the controller then applies EndLoc. A completed
+                    // sparse Root track must not remain below Hips-only talk.
+                    let (_, end) = live_poses(world, &session.selection)?;
+                    fixture_activity_timeline::cancel_and_release(world, token);
+                    session.token = None;
+                    release_animation_lease(world, session);
+                    set_pose(world, actor, end)?;
+                    if !world.get::<MotionDriver>(actor).is_some_and(|driver| driver.alone_holds) {
+                        crate::character::resume_idle_after_fixture(world, actor)?;
+                    }
+                    session.phase = Phase::TalkHeld;
+                    info!(
+                        "[npc-fixture] unit={} source timeline completed; talk handoff holds EndLoc/idle",
+                        session.selection.unit
+                    );
                     return Ok(false);
                 }
                 world
@@ -794,27 +829,7 @@ fn tick(
                 change_action(world, actor, NpcAction::FixtureActionIdle, false)?;
                 let (_, end) = live_poses(world, &session.selection)?;
                 set_pose(world, actor, end)?;
-                let speed = world
-                    .get::<WalkSpeed>(actor)
-                    .ok_or("source NPC walk speed is missing")?
-                    .0;
-                let sample = world
-                    .get_resource::<ObjectiveFace>()
-                    .and_then(|face| face.sample(end.translation.to_array(), 2.0));
-                // Source fallback uses EndLoc itself, not a previous approach
-                // checkpoint. The eventual real agent handles reattachment.
-                let target = sample.map(Vec3::from).unwrap_or(end.translation);
-                let distance = end.translation.distance(target);
-                let speed = if distance >= 0.1 { speed } else { speed / 5.0 };
-                let direction = (target - end.translation).normalize_or_zero();
-                let rotation = if sample.is_none() || direction.dot(end.rotation * Vec3::Z) > 0.9 {
-                    end.rotation
-                } else if direction == Vec3::ZERO {
-                    Quat::IDENTITY // Unity LookRotation(zero) yields identity.
-                } else {
-                    Quat::from_rotation_y(direction.x.atan2(direction.z))
-                };
-                session.phase = Phase::Exiting(LocalMove::new(end, target, rotation, speed)?);
+                session.phase = Phase::Exiting(prepare_exit(world, actor, end, end)?);
                 info!(
                     "[npc-fixture] unit={} source timeline ended; EndLoc exit begins",
                     session.selection.unit
@@ -833,6 +848,26 @@ fn tick(
         return Ok(done);
     }
     Ok(false)
+}
+
+fn prepare_exit(world: &World, actor: Entity, start: Transform, end: Transform) -> Result<LocalMove, String> {
+    let speed = world.get::<WalkSpeed>(actor).ok_or("source NPC walk speed is missing")?.0;
+    let sample = world.get_resource::<ObjectiveFace>()
+        .and_then(|face| face.sample(end.translation.to_array(), 2.0));
+    // Source samples the authored EndLoc and uses it as fallback. The delayed
+    // talk handoff changes only the movement's initial live pose, not its goal.
+    let target = sample.map(Vec3::from).unwrap_or(end.translation);
+    let distance = end.translation.distance(target);
+    let speed = if distance >= 0.1 { speed } else { speed / 5.0 };
+    let direction = (target - end.translation).normalize_or_zero();
+    let rotation = if sample.is_none() || direction.dot(end.rotation * Vec3::Z) > 0.9 {
+        end.rotation
+    } else if direction == Vec3::ZERO {
+        Quat::IDENTITY // Unity LookRotation(zero) yields identity.
+    } else {
+        Quat::from_rotation_y(direction.x.atan2(direction.z))
+    };
+    LocalMove::new(start, target, rotation, speed)
 }
 
 fn pending(session: &mut Session, reason: &str) -> Result<bool, String> {
@@ -1207,5 +1242,47 @@ impl LocalMove {
             }
         };
         (self.pose, phase, t >= 1.0)
+    }
+}
+
+#[cfg(test)]
+mod completed_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn completed_endloc_updates_navigation_without_reflecting_or_rescaling_again() {
+        let mut world = World::new();
+        let actor = world.spawn((
+            Transform::from_xyz(-0.5, 0.0, -0.9).with_scale(Vec3::splat(1.2)),
+            WalkState(moly_law::path::WalkState::new([-0.5, 0.0, -0.9], [0., 0., 1.])),
+        )).id();
+        let end = Transform::from_xyz(0.625, 0., -0.775)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        set_pose(&mut world, actor, end).unwrap();
+        let pose = world.get::<Transform>(actor).unwrap();
+        let walk = &world.get::<WalkState>(actor).unwrap().0;
+        assert_eq!(pose.translation, end.translation);
+        assert_eq!(pose.rotation, end.rotation);
+        assert_eq!(pose.scale, Vec3::splat(1.2));
+        assert_eq!(walk.position, end.translation.to_array());
+        assert_eq!(walk.forward, (end.rotation * Vec3::Z).to_array());
+    }
+
+    #[test]
+    fn delayed_talk_exit_starts_at_live_pose_without_second_endloc_teleport() {
+        let mut world = World::new();
+        let actor = world.spawn(WalkSpeed(1.0)).id();
+        let end = Transform::from_xyz(0.625, 0., -0.775)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        let live = Transform::from_xyz(0.725, 0., -0.775)
+            .with_rotation(Quat::from_rotation_y(0.14));
+        let mut movement = prepare_exit(&world, actor, live, end).unwrap();
+        assert_eq!(movement.pose, live);
+        assert_eq!(movement.leg.start, live.translation.to_array());
+        assert_eq!(movement.leg.target, end.translation.to_array());
+        let (first, _, done) = movement.step(0.0);
+        assert_eq!(first.translation, live.translation);
+        assert_eq!(first.rotation, live.rotation);
+        assert!(!done);
     }
 }

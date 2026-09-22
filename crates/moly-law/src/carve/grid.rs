@@ -3,7 +3,7 @@
 //! 每一步都是引擎原生烘焙链在 2D（单高度面）上的转录，锚点在
 //! [`super`] 的模块注释里。本文件只有形状与常数，不出现任何 bevy。
 
-use super::Obstacle;
+use super::{ColliderPolygon, Obstacle, AGENT_HEIGHT};
 
 /// 烘焙格面：世界 xz 平面上的等距格，`walkable` 是侵蚀与小区过滤都
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
@@ -52,10 +52,7 @@ pub(crate) fn rasterize(tris: &[[[f32; 2]; 3]], voxel: f32) -> Grid {
     for tri in tris {
         for p in tri {
             for axis in 0..2 {
-                assert!(
-                    p[axis].is_finite(),
-                    "可行走面三角有非有限顶点，烘焙拒绝"
-                );
+                assert!(p[axis].is_finite(), "可行走面三角有非有限顶点，烘焙拒绝");
                 lo[axis] = lo[axis].min(p[axis]);
                 hi[axis] = hi[axis].max(p[axis]);
             }
@@ -126,6 +123,115 @@ pub(crate) fn mark_obstacles(grid: &mut Grid, obstacles: &[Obstacle]) -> usize {
                         grid.walkable[index] = false;
                         nulled += 1;
                     }
+                }
+            }
+        }
+    }
+    nulled
+}
+
+/// Height is sampled vertically at the exact grid center. No closest-point
+/// operation is allowed to move x/z while the collision test retains it.
+pub(crate) fn surface_heights(grid: &Grid, triangles: &[[[f32; 3]; 3]]) -> Vec<f32> {
+    let mut heights = vec![f32::NEG_INFINITY; grid.walkable.len()];
+    for tri in triangles {
+        let projected = tri.map(|p| [p[0], p[2]]);
+        let min = projected
+            .iter()
+            .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+        let max = projected.iter().fold([f32::NEG_INFINITY; 2], |a, p| {
+            [a[0].max(p[0]), a[1].max(p[1])]
+        });
+        let (x0, z0) = grid.cell_of(min[0], min[1]);
+        let (x1, z1) = grid.cell_of(max[0], max[1]);
+        let [a, b, c] = projected;
+        let determinant = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if determinant.abs() < 1e-12 {
+            continue;
+        }
+        for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+            for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
+                let p = grid.cell_center(x as usize, z as usize);
+                let u =
+                    ((b[1] - c[1]) * (p[0] - c[0]) + (c[0] - b[0]) * (p[1] - c[1])) / determinant;
+                let v =
+                    ((c[1] - a[1]) * (p[0] - c[0]) + (a[0] - c[0]) * (p[1] - c[1])) / determinant;
+                if u >= -1e-5 && v >= -1e-5 && u + v <= 1.00001 {
+                    let y = u * tri[0][1] + v * tri[1][1] + (1.0 - u - v) * tri[2][1];
+                    let index = z as usize * grid.cols + x as usize;
+                    heights[index] = heights[index].max(y);
+                }
+            }
+        }
+    }
+    heights
+}
+
+pub(crate) fn mark_collider_polygons(
+    grid: &mut Grid,
+    polygons: &[ColliderPolygon],
+    heights: &[f32],
+) -> usize {
+    let mut nulled = 0;
+    for polygon in polygons {
+        if polygon.vertices.is_empty() {
+            continue;
+        }
+        let min = polygon
+            .vertices
+            .iter()
+            .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+        let max = polygon
+            .vertices
+            .iter()
+            .fold([f32::NEG_INFINITY; 2], |a, p| {
+                [a[0].max(p[0]), a[1].max(p[1])]
+            });
+        let (x0, z0) = grid.cell_of(min[0] - grid.voxel, min[1] - grid.voxel);
+        let (x1, z1) = grid.cell_of(max[0] + grid.voxel, max[1] + grid.voxel);
+        for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+            for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
+                let index = z as usize * grid.cols + x as usize;
+                if !grid.walkable[index]
+                    || polygon.max_y <= heights[index] + 1e-4
+                    || polygon.min_y >= heights[index] + AGENT_HEIGHT
+                {
+                    continue;
+                }
+                let p = grid.cell_center(x as usize, z as usize);
+                // Vertical triangles project to line segments. Retain every
+                // touched raster cell instead of silently dropping the wall.
+                if polygon.vertices.len() < 3 {
+                    let a = polygon.vertices[0];
+                    let b = *polygon.vertices.last().unwrap();
+                    let dx = b[0] - a[0];
+                    let dz = b[1] - a[1];
+                    let length = dx * dx + dz * dz;
+                    let t = if length > 0.0 {
+                        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / length).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let distance2 = (p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dz).powi(2);
+                    if distance2 <= grid.voxel * grid.voxel * 0.5 {
+                        grid.walkable[index] = false;
+                        nulled += 1;
+                    }
+                    continue;
+                }
+                // Input is convex (mesh hull or one triangle), in either winding.
+                let mut positive = false;
+                let mut negative = false;
+                for i in 0..polygon.vertices.len() {
+                    let a = polygon.vertices[i];
+                    let b = polygon.vertices[(i + 1) % polygon.vertices.len()];
+                    let cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+                    positive |= cross > 1e-6;
+                    negative |= cross < -1e-6;
+                }
+                if !(positive && negative) {
+                    grid.walkable[index] = false;
+                    nulled += 1;
                 }
             }
         }

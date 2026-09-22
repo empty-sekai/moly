@@ -75,6 +75,7 @@ pub(crate) struct AttachViewIdentity {
     pub file: String,
     pub game_object: i64,
     pub transform: i64,
+    pub scale: Vec3,
 }
 
 impl AttachPoints {
@@ -82,6 +83,7 @@ impl AttachPoints {
     fn parse(text: &str) -> AttachPoints {
         let value: serde_json::Value = serde_json::from_str(text)
             .unwrap_or_else(|err| panic!("家具挂点档案不是合法 JSON：{err}"));
+        moly_assets::coordinates::validate_document(&value).expect("attachment coordinate contract");
         let packages = value
             .get("packages")
             .and_then(|v| v.as_object())
@@ -92,6 +94,14 @@ impl AttachPoints {
             if let Some(source_views) = cell.get("views").and_then(serde_json::Value::as_array) {
                 let mut parsed = Vec::new();
                 for view in source_views {
+                    moly_assets::coordinates::validate_document(view)
+                        .expect("source FixtureView coordinate contract");
+                    assert_eq!(view.get("placementRoot").and_then(serde_json::Value::as_bool),
+                        Some(true), "nested FixtureView placement is unsupported");
+                    let scale = Vec3::from(read_vec3(view.get("localScale"))
+                        .expect("source FixtureView local scale"));
+                    assert!(scale.is_finite() && scale.abs().min_element() > 0.0,
+                        "source FixtureView scale must be finite and nonsingular");
                     let game_object = view
                         .get("gameObject")
                         .expect("source FixtureView GameObject");
@@ -116,6 +126,7 @@ impl AttachPoints {
                         file: file.into(),
                         game_object: id(game_object),
                         transform: id(transform),
+                        scale,
                     });
                 }
                 views.insert(name.clone(), parsed);
@@ -190,9 +201,13 @@ impl AttachPoints {
         world: &GlobalTransform,
     ) -> Option<AttachPair> {
         let entry = self.instance_entry(package, id)?;
+        // Native placement replaces view T/R but preserves authored scale.
+        // Callers supply the placement wrapper, not an independently mirrored
+        // locator frame. A missing/ambiguous source view is not unit scale.
+        let world = world.mul_transform(Transform::from_scale(self.instance_view(package)?.scale));
         let project = |pose: AttachPose| {
-            // Compose before decomposing: reflection and local rotation do
-            // not commute. The resulting actor uses an X-reflected GLB.
+            // Both poses are canonical. Hierarchy composition does not perform
+            // an additional source reflection or model-facing correction.
             let composed = world.mul_transform(
                 Transform::from_translation(Vec3::from(pose.position)).with_rotation(pose.rotation),
             );
@@ -429,6 +444,35 @@ pub(crate) fn parse(
                 composed.worlds.len()
             );
             commands.insert_resource(composed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod coordinate_tests {
+    use super::*;
+    #[test]
+    fn canonical_attach_document_composes_without_a_second_reflection() {
+        let points = AttachPoints::parse(&serde_json::json!({
+            "coordinateContract": moly_assets::coordinates::CONTRACT,
+            "packages": {"asymmetric": {"views":[{
+                "coordinateContract":moly_assets::coordinates::CONTRACT,
+                "placementRoot":true,"localScale":[0.7,1.2,1.1],
+                "gameObject":{"file":"fixture","pathId":"1"},
+                "transform":{"file":"fixture","pathId":"2"}
+            }],"entries": [{
+                "idValue":13,"source":{"entryIndex":0},
+                "start":{"name":"loc_start013","transform":{
+                    "position":[0.5,0.25,-0.9],"rotation":[0.0,0.0,0.0,1.0]}},
+                "end":null
+            }]}}
+        }).to_string());
+        for direction in 0..4 {
+            let world = GlobalTransform::from(crate::fixture::source_transform(
+                [1.25, 0.5, -2.0], direction as f32 * std::f32::consts::FRAC_PI_2));
+            let pose = points.instance_poses("asymmetric", 13, &world).unwrap().start;
+            assert!(Vec3::from(pose.position).distance(world.transform_point(
+                Vec3::new(0.7,1.2,1.1) * Vec3::new(0.5,0.25,-0.9))) < 1e-5);
         }
     }
 }

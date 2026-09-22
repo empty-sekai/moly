@@ -41,6 +41,11 @@ struct ProjectionStamp {
 /// paths can remove only the editor's own overlays and restore captured poses.
 pub(super) fn clear(world: &mut World) {
     world.remove_resource::<ProjectionStamp>();
+    // Preview ownership ends with the session. The catalog keeps paths, not
+    // every GLB ever browsed; committed fixtures own their own source handles.
+    if let Some(mut candidates) = world.get_resource_mut::<CandidateAssets>() {
+        candidates.glbs.clear();
+    }
     let originals: Vec<_> = world
         .query::<(Entity, &OriginalPose)>()
         .iter(world)
@@ -176,6 +181,8 @@ pub(super) fn sync_visuals(world: &mut World) {
 }
 
 fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
+    world.resource_mut::<CandidateAssets>().glbs
+        .retain(|package, _| rows.iter().any(|row| &row.package == package));
     let mut ready = true;
     let previews: Vec<_> = world
         .query::<(Entity, &DraftPreview)>()

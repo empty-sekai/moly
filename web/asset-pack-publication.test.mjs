@@ -9,6 +9,7 @@ import { verifyPublishedStore, storeChannels } from "./asset-pack-store.mjs";
 import { publish } from "./release-artifact.mjs";
 import { workspaceFingerprint } from "./build-source.mjs";
 import { canonicalPackBytes } from "./asset-pack-client.mjs";
+import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const golden = JSON.parse(
   fs.readFileSync(new URL("./fixtures/asset-pack-v2.json", import.meta.url)),
@@ -20,6 +21,55 @@ function extract(root) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, Buffer.from(value, "base64"));
   }
+}
+function addCoordinateFixture(root, region) {
+  const version = JSON.parse(fs.readFileSync(path.join(root, `catalog-${region}.json`))).version;
+  const documents = {
+    "source.json": { coordinateContract: COORDINATE_CONTRACT, source: { region, appVersion: version } },
+    "fixture-models/index.json": { version: 3, coordinateContract: COORDINATE_CONTRACT, packages: {} },
+    "fixture-attach/attach-points.json": { version: 2, coordinateContract: COORDINATE_CONTRACT, packages: {} },
+  };
+  const store = path.join(root, "store");
+  const old = JSON.parse(fs.readFileSync(path.join(store, "catalogs", golden.index.catalogs[region].id + ".json")));
+  const entries = [];
+  for (const [logical, document] of Object.entries(documents)) {
+    const bytes = canonicalPackBytes(document), digest = sha(bytes), blob = `${digest.slice(0,2)}/${digest}.bin`;
+    const sourceFile = path.join(root, `source-${region}`, logical);
+    fs.mkdirSync(path.dirname(sourceFile), { recursive: true }); fs.writeFileSync(sourceFile, bytes);
+    fs.mkdirSync(path.join(store, "blobs", digest.slice(0,2)), { recursive: true }); fs.writeFileSync(path.join(store, "blobs", blob), bytes);
+    entries.push({ path: logical, blob, blob_sha256: digest, bytes: bytes.length, blob_bytes: bytes.length, content_sha256: digest, codec: "identity", http_encoding: "identity", xf: null });
+  }
+  entries.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const first = JSON.parse(fs.readFileSync(path.join(store, old.packages[0].manifest)));
+  const total = entries.reduce((sum, row) => sum + row.bytes, 0);
+  const manifest = { ...first, entries, download_bytes: total, resident_bytes: total, content_bytes: total, logical_bytes: total, transforms: {} };
+  manifest.content_id = sha(canonicalPackBytes({ schema: "moly-asset-content/1", transforms: {}, entries: entries.map(({path,bytes,content_sha256,xf}) => ({path,bytes,content_sha256,xf})) }));
+  const encoded = canonicalPackBytes(manifest), name = `packages/${sha(encoded)}.json`;
+  fs.writeFileSync(path.join(store, name), encoded);
+  old.packages.push({ ...old.packages[0], id: "common/coordinates", kind: "common", manifest: name, content_id: manifest.content_id,
+    dependencies: [], paths: entries.map(row => row.path), download_bytes: total, content_bytes: total });
+  const catalog = canonicalPackBytes(old), id = sha(catalog);
+  fs.writeFileSync(path.join(store, "catalogs", `${id}.json`), catalog);
+  return id;
+}
+function canonicalTestStore(root, region, catalogId) {
+  const source = path.join(root, `source-${region}`), store = path.join(root, "store");
+  const catalog = JSON.parse(fs.readFileSync(path.join(store,"catalogs",catalogId+".json")));
+  const model = {asset:{version:"2.0",extras:{coordinateContract:COORDINATE_CONTRACT}},scenes:[{nodes:[0]}],nodes:[{extras:{coordinateContract:COORDINATE_CONTRACT}}]};
+  let document=Buffer.from(JSON.stringify(model));document=Buffer.concat([document,Buffer.alloc((4-document.length%4)%4,32)]);
+  const header=Buffer.alloc(20);header.write("glTF");header.writeUInt32LE(2,4);header.writeUInt32LE(20+document.length,8);header.writeUInt32LE(document.length,12);header.write("JSON",16);
+  const bytes=Buffer.concat([header,document]);
+  for(const row of catalog.packages)for(const name of row.paths)if(name.endsWith(".glb"))fs.writeFileSync(path.join(source,name),bytes);
+  const basePath=path.join(source,"browser-base.json"),base=JSON.parse(fs.readFileSync(basePath));
+  for(const row of base.files){const data=fs.readFileSync(path.join(source,row.path));row.sha256=sha(data);row.decodedBytes=data.length;row.downloadBytes=data.length;row.encoding="identity";}
+  base.decodedBytes=base.files.reduce((n,row)=>n+row.decodedBytes,0);base.downloadBytes=base.decodedBytes;fs.writeFileSync(basePath,JSON.stringify(base));
+  for(const row of catalog.packages){
+    const entries=row.paths.map(name=>{const data=fs.readFileSync(path.join(source,name)),digest=sha(data),blob=`${digest.slice(0,2)}/${digest}.bin`;fs.mkdirSync(path.join(store,"blobs",digest.slice(0,2)),{recursive:true});fs.writeFileSync(path.join(store,"blobs",blob),data);return {path:name,blob,blob_sha256:digest,bytes:data.length,blob_bytes:data.length,content_sha256:digest,codec:"identity",http_encoding:"identity",xf:null};}).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+    const total=entries.reduce((n,e)=>n+e.bytes,0),manifest={schema:"moly-asset-manifest/2",entries,download_bytes:total,resident_bytes:total,content_bytes:total,logical_bytes:total,transforms:{},encoders:{}};
+    manifest.content_id=sha(canonicalPackBytes({schema:"moly-asset-content/1",transforms:{},entries:entries.map(({path,bytes,content_sha256,xf})=>({path,bytes,content_sha256,xf}))}));
+    const encoded=canonicalPackBytes(manifest);row.manifest=`packages/${sha(encoded)}.json`;row.content_id=manifest.content_id;row.download_bytes=total;row.content_bytes=total;fs.writeFileSync(path.join(store,row.manifest),encoded);
+  }
+  const encoded=canonicalPackBytes(catalog),id=sha(encoded);fs.writeFileSync(path.join(store,"catalogs",id+".json"),encoded);return id;
 }
 function uleb(value) {
   const result = [];
@@ -145,12 +195,13 @@ test("published store verification checks every object and source artifact witho
   }
 });
 
-test("stage publisher pins three regions into one existing store and preserves the previous selector on failure", async () => {
+test("latest stage publisher rejects legacy packed model fixtures before publishing a selector", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "moly-pack-stage-"));
   try {
     extract(root);
     const work = workspace(root),
       output = path.join(root, "publication");
+    const catalogIds = Object.fromEntries(["cn", "jp", "tw"].map(region => [region, addCoordinateFixture(root, region)]));
     fs.mkdirSync(output);
     fs.cpSync(path.join(root, "store"), path.join(output, "asset-store"), {
       recursive: true,
@@ -159,9 +210,25 @@ test("stage publisher pins three regions into one existing store and preserves t
       region,
       assets: path.join(root, `source-${region}`),
       catalog: path.join(root, `catalog-${region}.json`),
-      assetCatalog: golden.index.catalogs[region].id,
+      assetCatalog: catalogIds[region],
     }));
-    await publish({ workspace: work, output, sources });
+    await assert.rejects(publish({ workspace: work, output, sources }), /GLB asset: coordinate contract/);
+    assert.equal(fs.existsSync(path.join(output, "manifest.json")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stage publisher pins canonical packed metadata and preserves the previous selector on failure", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "moly-pack-canonical-stage-"));
+  try {
+    extract(root);
+    // Rebuild only this temporary synthetic publication corpus. The immutable
+    // legacy golden fixture remains unchanged and has a rejection test above.
+    const catalogIds = Object.fromEntries(["cn", "jp", "tw"].map(region => [region, canonicalTestStore(root,region,addCoordinateFixture(root,region))]));
+    const work=workspace(root), output=path.join(root,"publication");fs.mkdirSync(output);fs.cpSync(path.join(root,"store"),path.join(output,"asset-store"),{recursive:true});
+    const sources=["cn","jp","tw"].map(region=>({region,assets:path.join(root,`source-${region}`),catalog:path.join(root,`catalog-${region}.json`),assetCatalog:catalogIds[region]}));
+    await publish({workspace:work,output,sources});
     const first = fs.readFileSync(path.join(output, "manifest.json")),
       manifest = JSON.parse(first);
     assert.equal(manifest.snapshots.length, 3);
@@ -169,7 +236,7 @@ test("stage publisher pins three regions into one existing store and preserves t
       assert.equal(snapshot.assets, "/moly/asset-store/");
       assert.equal(
         snapshot.assetCatalog,
-        golden.index.catalogs[snapshot.region].id,
+        catalogIds[snapshot.region],
       );
       assert.equal(snapshot.packs, true);
       assert.deepEqual(
@@ -203,13 +270,20 @@ test("stage publisher pins three regions into one existing store and preserves t
     const historicalBytes = fs.readFileSync(historicalPath);
     await publish({ workspace: work, output, sources: [sources[0]] });
     assert.deepEqual(fs.readFileSync(historicalPath), historicalBytes);
+    const retained = JSON.parse(fs.readFileSync(path.join(output,"manifest.json")));
+    const retainedPath = path.join(output,"snapshots",retained.snapshots[0].id,"snapshot.json");
+    fs.writeFileSync(retainedPath,JSON.stringify(Object.fromEntries(Object.entries(retained.snapshots[0]).reverse())));
+    await publish({workspace:work,output,reuseEngine:true,reuseSnapshots:true});
+    const missing = JSON.parse(fs.readFileSync(retainedPath));delete missing.coordinateContract;fs.writeFileSync(retainedPath,JSON.stringify(missing));
+    await assert.rejects(publish({workspace:work,output,reuseEngine:true,reuseSnapshots:true}),/coordinate contract/);
+    fs.writeFileSync(retainedPath,JSON.stringify(retained.snapshots[0],null,2)+"\n");
     await publish({ workspace: work, output, sources });
     const catalog = JSON.parse(
       fs.readFileSync(
         path.join(
           output,
           "asset-store/catalogs",
-          golden.index.catalogs.cn.id + ".json",
+          catalogIds.cn + ".json",
         ),
       ),
     );

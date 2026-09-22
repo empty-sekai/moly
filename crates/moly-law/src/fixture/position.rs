@@ -209,10 +209,10 @@ pub fn field_position(
 /// - **枢轴**是视图自己的 transform 原点 —— `eulerAngles` 就是绕自身原点
 ///   转，源里没有任何配套的平移补偿；朝向带来的位移全在足迹那一侧
 ///   （见 [`footprint_rotated`]），不在这个角里；
-/// - **符号**是正角。本库的世界系与源同为左手 Y 向上、格轴不取负，家具
-///   模型也是照 authored 空间原样取件（提取侧对家具明确不做轴反射），
-///   而 `Quat::from_rotation_y(t)` 与源的 `Euler(0, t, 0)` 是同一个矩阵
-///   （两者都把 +Z 映到 `(sin t, 0, cos t)`）⇒ 直接用正角，不翻符号。
+/// - **源角符号**是正角。本律函数不转换坐标系：输入源 Direction 时返回
+///   Unity 源角；moly 的运行时使用统一右手 Y-up（反射源 X）。当前摆放
+///   导入边界先反射格区间并交换 Left/Right，再用本函数求运行时角；
+///   不得在模型/角色包装节点上再反射一次。参见 coordinate-contract.md。
 pub fn direction_yaw_degrees(direction: Direction) -> f32 {
     (direction as i32) as f32 * 90.0
 }

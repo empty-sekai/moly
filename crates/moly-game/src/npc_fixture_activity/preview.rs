@@ -220,7 +220,7 @@ pub(super) fn record_progress(world: &mut World, session: &mut Session) {
     let phase = match session.phase {
         Phase::Approaching => PreviewPhase::Approaching,
         Phase::Preparing => PreviewPhase::Preparing,
-        Phase::Playing => PreviewPhase::Playing,
+        Phase::Playing | Phase::TalkHeld => PreviewPhase::Playing,
         Phase::Exiting(_) => PreviewPhase::Exiting,
     };
     if let Some(mut record) = world.get_resource_mut::<PreviewRecord>() {

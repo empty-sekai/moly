@@ -820,8 +820,9 @@ pub struct PlacedFixture<'a> {
 }
 
 /// Owned editable record. UID is the placed/offline item identity, not a
-/// package or a screen-space proxy. Center/grid_size stay in the source's
-/// unrotated layout frame; all readers derive the footprint through the law.
+/// package or a screen-space proxy. Center/direction/layout are canonical grid
+/// values (source imports were reflected once); grid_size is unrotated extent.
+/// All readers derive the footprint through the source arithmetic law.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditableFixture {
     pub uid: String,
@@ -867,13 +868,11 @@ impl EditableFixture {
     }
 }
 
-/// Furniture geometry and its locators retain authored coordinates. Reflect
-/// their shared root into the same X-reflected frame as sites and characters;
-/// placing only the pivot in that frame leaves asymmetric models facing wrong.
+/// Placement rows and imported geometry share the canonical runtime frame.
+/// Source grid/direction conversion belongs to the player-data import boundary.
 pub(crate) fn source_transform(position: [f32; 3], yaw: f32) -> Transform {
     Transform::from_translation(Vec3::from(position))
         .with_rotation(Quat::from_rotation_y(yaw))
-        .with_scale(Vec3::new(-1., 1., 1.))
 }
 
 /// All local one-shot binders reset against this generation when a map's
@@ -1217,13 +1216,27 @@ struct FixtureScenesReadyCount(usize);
 #[derive(Resource)]
 struct FixtureIndexAsset(Handle<moly_assets::json::JsonAsset>);
 
-/// Validated per-row GLB paths plus the bounded set of handles requested so far.
+/// Validated per-row GLB paths plus handles still needed by the loader.
 /// Paths stay aligned with placement row indices; handles are shared by path so
-/// repeated furniture does not create duplicate load requests.
+/// repeated furniture does not create duplicate load requests. Spawned roots
+/// own their sources; this resource must not pin removed furniture afterwards.
 #[derive(Resource, Default)]
-struct FixtureGltfAssets {
+pub(crate) struct FixtureGltfAssets {
     paths: Vec<String>,
     handles: HashMap<String, Handle<Gltf>>,
+}
+
+impl FixtureGltfAssets {
+    fn release_spawned(&mut self, spawned: usize) {
+        if self.handles.is_empty() { return; }
+        let pending: std::collections::HashSet<_> = self.paths[spawned.min(self.paths.len())..]
+            .iter().map(String::as_str).collect();
+        self.handles.retain(|path, _| pending.contains(path.as_str()));
+    }
+
+    pub(crate) fn residency(&self) -> serde_json::Value {
+        serde_json::json!({"plannedInstances": self.paths.len(), "loaderOwnedGltfs": self.handles.len()})
+    }
 }
 
 /// Keep browser asset decoding and scene expansion under explicit backpressure.
@@ -1432,6 +1445,8 @@ fn plan_when_ready(
         let entry = packages
             .get(&row.package)
             .unwrap_or_else(|| panic!("摆放 mock 点名的包不在清单里：{}", row.package));
+        moly_assets::coordinates::validate_document(entry)
+            .unwrap_or_else(|error| panic!("fixture {}: {error}", row.package));
         let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
         assert_eq!(
             status, "exported",
@@ -1484,13 +1499,14 @@ fn spawn_when_ready(
     let Some(mut assets) = assets else {
         return;
     };
+    assets.release_spawned(spawned.0);
     if assets.paths.is_empty() && scenes_ready.is_none() {
         commands.insert_resource(FixtureScenesReady);
         return;
     }
 
-    // Count only unresolved unique GLBs against the loading window. Loaded
-    // handles stay cached because live FixtureSource components share them.
+    // Count only unresolved unique GLBs against the loading window. Once the
+    // last instance is spawned, ownership transfers to its FixtureSource.
     let pending = assets
         .handles
         .values()
@@ -1609,6 +1625,7 @@ fn spawn_when_ready(
         spawned.0 += 1;
         spawned_this_frame += 1;
     }
+    assets.release_spawned(spawned.0);
 }
 
 /// （`FixtureScenesReady`，换装系统只看它）。
@@ -1618,13 +1635,46 @@ fn on_scene_ready(
     visuals: Query<(), With<FixtureVisualRoot>>,
     children: Query<&Children>,
     extras: Query<&bevy::gltf::GltfExtras>,
-    mesh_parts: Query<&Mesh3d>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut reflected_meshes: Local<HashMap<AssetId<Mesh>, Handle<Mesh>>>,
+    parents: Query<&ChildOf>,
+    source_nodes: Query<&moly_assets::source_navigation::SourceObjectIdentity>,
+    mut transforms: Query<&mut Transform>,
     placements: Res<FixturePlacements>,
     mut count: ResMut<FixtureScenesReadyCount>,
     mut commands: Commands,
 ) {
+    if !visuals.contains(trigger.event().entity) {
+        return;
+    }
+    // The source places FixtureView itself: replace its authored root T/R,
+    // preserve its scale and descendants. The outer wrapper owns placement.
+    let mut pending = vec![trigger.event().entity];
+    let mut views = Vec::new();
+    while let Some(entity) = pending.pop() {
+        if let Ok(children) = children.get(entity) {
+            pending.extend(children.iter());
+        }
+        let Ok(extra) = extras.get(entity) else { continue; };
+        let value: serde_json::Value = serde_json::from_str(&extra.value)
+            .expect("fixture node extras");
+        if value.get("fixtureViewRoot").and_then(serde_json::Value::as_bool) != Some(true) {
+            continue;
+        }
+        moly_assets::coordinates::validate_document(&value).expect("fixture view coordinates");
+        assert!(source_nodes.contains(entity), "FixtureView marker lacks exact source identity");
+        views.push(entity);
+    }
+    let [view] = views.as_slice() else {
+        panic!("fixture scene requires one source FixtureView root; re-export snapshot");
+    };
+    let mut ancestor = *view;
+    while let Ok(parent) = parents.get(ancestor) {
+        ancestor = parent.parent();
+        if ancestor == trigger.event().entity { break; }
+        assert!(!source_nodes.contains(ancestor),
+            "nested source FixtureView needs an explicit placement hierarchy contract");
+    }
+    normalize_placed_view(&mut transforms.get_mut(*view).expect("fixture view transform"));
+    commands.entity(trigger.event().entity).insert(moly_assets::coordinates::CanonicalCoordinates);
     if visuals.contains(trigger.event().entity) {
         commands
             .entity(trigger.event().entity)
@@ -1633,29 +1683,19 @@ fn on_scene_ready(
     if roots.get(trigger.event().entity).is_err() {
         return;
     }
-    // The source GLB keeps native positions, normals and triangle indices.
-    // Our X-reflected placement reverses orientation: reverse the index order
-    // too, so every material/shadow pass still sees the authored front faces.
-    // Clone once per source mesh; non-placed uses of the same GLB stay native.
-    let mut pending = vec![trigger.event().entity];
-    while let Some(entity) = pending.pop() {
-        if let Ok(children) = children.get(entity) {
-            pending.extend(children.iter());
-        }
-        let Ok(part) = mesh_parts.get(entity) else { continue; };
-        let reflected = reflected_meshes.entry(part.0.id()).or_insert_with(|| {
-            let mut mesh = meshes.get(&part.0).expect("ready fixture mesh").clone();
-            mesh.invert_winding().expect("native fixture triangle winding");
-            meshes.add(mesh)
-        }).clone();
-        commands.entity(entity).insert(Mesh3d(reflected));
-    }
+    // Canonical geometry already has correct winding. No per-instance clone or
+    // persistent strong-handle cache is needed after scene destruction.
     fence::bind_scene(trigger.event().entity, &children, &extras, &mut commands);
     count.0 += 1;
     if count.0 == placements.total() {
         info!("家具 scene 全部展开：{}/{}", count.0, placements.total());
         commands.insert_resource(FixtureScenesReady);
     }
+}
+
+fn normalize_placed_view(pose: &mut Transform) {
+    pose.translation = Vec3::ZERO;
+    pose.rotation = Quat::IDENTITY;
 }
 
 /// Update：落地件朝向的**读回**，scene 全部展开后报一次。
@@ -1775,7 +1815,7 @@ fn bind_source_views(
     points: Option<Res<crate::fixture_attach::AttachPoints>>,
     roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureViewResolved>>,
     children: Query<&Children>,
-    extras: Query<&bevy::gltf::GltfExtras>,
+    identities: Query<&moly_assets::source_navigation::SourceObjectIdentity>,
 ) {
     let (Some(_), Some(points)) = (ready, points) else {
         return;
@@ -1796,14 +1836,12 @@ fn bind_source_views(
             if let Ok(kids) = children.get(entity) {
                 stack.extend(kids.iter());
             }
-            let Ok(extra) = extras.get(entity) else {
+            let Ok(identity) = identities.get(entity) else {
                 continue;
             };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&extra.value) else {
-                continue;
-            };
-            if value.get("sourcePathId").and_then(|v| v.as_i64()) == Some(source.transform)
-                && value.get("gameObjectId").and_then(|v| v.as_i64()) == Some(source.game_object)
+            if identity.file == source.file
+                && identity.transform == source.transform
+                && identity.game_object == source.game_object
             {
                 matches.push(entity);
             }
@@ -1836,8 +1874,8 @@ fn bind_source_views(
     }
 }
 
-/// Publish the live ViewObject's local transform, not the placement root's
-/// height. A removed view invalidates its binding so a replacement scene can
+/// Publish the source ViewObject pose reconstructed from wrapper and view.
+/// A removed view invalidates its binding so a replacement scene can
 /// supply a new identity; stale heights must not select a timeline variant.
 pub(crate) fn refresh_activity_view(
     mut commands: Commands,
@@ -1858,7 +1896,8 @@ pub(crate) fn refresh_activity_view(
                 .remove::<(FixtureViewInstance, FixtureViewResolved, SourceFixtureViewLocalY)>();
             continue;
         };
-        let y = transform.translation.y;
+        let Ok(placement) = transforms.get(root) else { continue; };
+        let y = placement.transform_point(transform.translation).y;
         if !y.is_finite() {
             if current.is_some() {
                 commands.entity(root).remove::<SourceFixtureViewLocalY>();
@@ -1877,6 +1916,7 @@ impl Plugin for FixturePlugin {
             .init_resource::<FixtureSpawnedCount>()
             .init_resource::<FixtureScenesReadyCount>()
             .add_systems(Startup, load)
+            .add_systems(PostUpdate, crate::fixture_activity_provider::retire_lookup_caches)
             .add_observer(on_scene_ready)
             .add_systems(
                 Update,
@@ -1896,5 +1936,113 @@ impl Plugin for FixturePlugin {
                     .after(crate::fixture_edit::FixtureEditSystems::Input)
                     .before(crate::walk_face::build),
             );
+    }
+}
+
+#[cfg(test)]
+mod coordinate_tests {
+    use super::*;
+    use moly_assets::coordinates::{source_position, source_rotation};
+
+    #[test]
+    fn placement_replaces_authored_view_offset_and_shares_locator_frame() {
+        // CN flyingcar1's authored FixtureView position is overwritten by
+        // SetPosition. Using a source-asymmetric point catches a second flip.
+        let authored = Vec3::new(-1.97, 0.0, -0.99);
+        let locator = Vec3::new(-0.35, 0.42, 0.91);
+        let source_scale = Vec3::new(0.7, 1.2, 1.1);
+        let source_yaw = Quat::from_rotation_y(0.31);
+        for direction in 0..4 {
+            let placed = Vec3::new(2.125, 0.5, -1.75);
+            let angle = direction as f32 * std::f32::consts::FRAC_PI_2;
+            let q = Quat::from_rotation_y(angle);
+            let wrapper = source_transform(source_position(placed).to_array(), -angle);
+            assert_eq!(wrapper.scale, Vec3::ONE);
+            let mut view = Transform::from_translation(source_position(authored))
+                .with_rotation(source_rotation(source_yaw)).with_scale(source_scale);
+            normalize_placed_view(&mut view);
+            assert_eq!(view.scale, source_scale);
+            assert_eq!(view.rotation, Quat::IDENTITY);
+            let rendered = wrapper.transform_point(view.transform_point(source_position(locator)));
+            let expected = source_position(placed + q * (source_scale * locator));
+            assert!(rendered.distance(expected) < 1e-5);
+            // Locator, collider vertex and render vertex are identical local
+            // points here: all must traverse the same placed hierarchy.
+            let collider = (GlobalTransform::from(wrapper).mul_transform(view))
+                .transform_point(source_position(locator));
+            assert!(rendered.distance(collider) < 1e-5);
+        }
+    }
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::*;
+
+    #[test]
+    fn loader_releases_spawned_sources_but_keeps_later_duplicate_requests() {
+        let assets = Assets::<Gltf>::default();
+        let a = assets.reserve_handle();
+        let b = assets.reserve_handle();
+        let mut loads = FixtureGltfAssets {
+            paths: vec!["a".into(), "b".into(), "a".into()],
+            handles: HashMap::from([("a".into(), a.clone()), ("b".into(), b.clone())]),
+        };
+        loads.release_spawned(1);
+        assert_eq!(loads.handles.len(), 2);
+        loads.release_spawned(2);
+        assert!(loads.handles.contains_key("a"));
+        assert!(!loads.handles.contains_key("b"));
+        loads.release_spawned(3);
+        assert!(loads.handles.is_empty());
+        // These consumer-owned handles remain valid, independently of lookup retention.
+        assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn removing_one_furniture_root_drops_its_last_source_not_other_consumers() {
+        let assets = Assets::<Gltf>::default();
+        let source = assets.reserve_handle();
+        let weak = match &source {
+            Handle::Strong(handle) => std::sync::Arc::downgrade(handle),
+            _ => panic!("reserved asset handle must be strong"),
+        };
+        let mut world = World::new();
+        let root = world.spawn((FixtureRoot, FixtureSource(source.clone()))).id();
+        let active = world.spawn(FixtureSource(source.clone())).id();
+        let mut loads = FixtureGltfAssets {
+            paths: vec!["furniture".into()],
+            handles: HashMap::from([("furniture".into(), source)]),
+        };
+        loads.release_spawned(1);
+        world.despawn(root);
+        assert!(weak.upgrade().is_some(), "another active owner must survive eviction");
+        world.despawn(active);
+        assert!(weak.upgrade().is_none(), "loader must not pin a removed fixture");
+    }
+
+    #[test]
+    fn layout_replacement_removes_roots_and_loader_ownership_only() {
+        let assets = Assets::<Gltf>::default();
+        let source = assets.reserve_handle();
+        let weak = match &source {
+            Handle::Strong(handle) => std::sync::Arc::downgrade(handle),
+            _ => panic!("reserved asset handle must be strong"),
+        };
+        let mut world = World::new();
+        world.init_resource::<FixtureLayoutRevision>();
+        let root = world.spawn((FixtureRoot, FixtureSource(source.clone()))).id();
+        let child = world.spawn(ChildOf(root)).id();
+        let unrelated = world.spawn_empty().id();
+        world.insert_resource(FixtureGltfAssets {
+            paths: vec!["furniture".into()],
+            handles: HashMap::from([("furniture".into(), source)]),
+        });
+        reload_current_layout(&mut world);
+        assert!(!world.entities().contains(root));
+        assert!(!world.entities().contains(child));
+        assert!(world.entities().contains(unrelated));
+        assert!(weak.upgrade().is_none());
+        assert!(!world.contains_resource::<FixtureGltfAssets>());
     }
 }

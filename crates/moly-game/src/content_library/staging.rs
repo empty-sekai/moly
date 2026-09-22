@@ -156,6 +156,138 @@ fn observer_viewing_yaw(mode: ExperienceMode) -> Quat {
     }
 }
 
+fn observer_anchor(
+    fixture: Option<Vec3>,
+    actor: Option<Vec3>,
+    independent_center: Option<Vec3>,
+) -> Option<Vec3> {
+    // A fixture-bound actor still has to approach its source StartLoc after
+    // this staging pass. Its temporary nearby pose is not the content center.
+    fixture.or(actor).or(independent_center)
+}
+
+fn completed_observer_pose(
+    final_anchor: Vec3,
+    current: Transform,
+    occupied: &[Vec3],
+    sample: impl FnMut(Vec3) -> Option<Vec3>,
+) -> Option<Transform> {
+    if !final_anchor.is_finite() {
+        return None;
+    }
+    let point = viewing_position(
+        final_anchor,
+        observer_viewing_yaw(ExperienceMode::Independent),
+        occupied,
+        sample,
+    )?;
+    Some(Transform {
+        translation: point,
+        rotation: facing(point, final_anchor, current.rotation),
+        ..current
+    })
+}
+
+fn replace_preview_observer(
+    world: &mut World,
+    ticket: u64,
+    epoch: u64,
+    player: Entity,
+    after: Transform,
+) -> bool {
+    if world.get::<PlayerControlled>(player).is_none()
+        || world.get::<Transform>(player).is_none()
+        || world.get_resource::<GroundEpoch>().map(|value| value.0) != Some(epoch)
+    {
+        return false;
+    }
+    let Some(mut preview) = world.get_resource_mut::<ScenePreview>() else {
+        return false;
+    };
+    if preview.ticket != ticket || preview.epoch != epoch {
+        return false;
+    }
+    let Some(snapshot) = preview
+        .actors
+        .iter_mut()
+        .find(|actor| actor.entity == player && !actor.npc)
+    else {
+        return false;
+    };
+    // The first staging snapshot is the sole restoration source. Handoff
+    // updates only the expected staged pose, never the user's original pose.
+    snapshot.after = after;
+    world.entity_mut(player).insert(after);
+    true
+}
+
+/// Stage once before the visible approach, using the retained plan's future
+/// talk locator. Never move the observer at the dialogue/animation boundary.
+/// Talk-enabled live loops retain their fixture-centered framing instead.
+pub(crate) fn stage_fixture_talk_observer(
+    world: &mut World,
+    talk_id: i32,
+    player: Entity,
+    final_anchor: Vec3,
+    planned_cast_positions: &[Vec3],
+) -> Result<bool, String> {
+    let Some(ticket) = world
+        .get_resource::<ContentLibrary>()
+        .and_then(|library| library.active.as_ref())
+        .filter(|active| {
+            active.choice.mode == ExperienceMode::Independent
+                && active.choice.key == EntryKey::Talk(TalkBackend::Fixture, talk_id)
+                && !active.choice.preview
+                && !active.completed
+        })
+        .map(|active| active.choice.ticket)
+    else {
+        return Ok(false);
+    };
+    let Some(epoch) = world.get_resource::<ScenePreview>().and_then(|preview| {
+        (preview.ticket == ticket
+            && preview
+                .actors
+                .iter()
+                .any(|actor| actor.entity == player && !actor.npc))
+        .then_some(preview.epoch)
+    }) else {
+        return Ok(false);
+    };
+    if world.get_resource::<GroundEpoch>().map(|value| value.0) != Some(epoch)
+        || world.get::<PlayerControlled>(player).is_none()
+    {
+        return Ok(false);
+    }
+    let current = world
+        .get::<Transform>(player)
+        .copied()
+        .ok_or("独立体验的玩家站位已不可用")?;
+    let mut occupied: Vec<_> = world
+        .query_filtered::<(Entity, &Transform), With<CharacterUnitId>>()
+        .iter(world)
+        .filter(|(entity, _)| *entity != player)
+        .map(|(_, pose)| pose.translation)
+        .collect();
+    occupied.extend_from_slice(planned_cast_positions);
+    let after = {
+        let face = world
+            .get_resource::<ObjectiveFace>()
+            .filter(|face| face.is_fresh(epoch))
+            .ok_or("演出站位的行走区域尚未准备好")?;
+        completed_observer_pose(final_anchor, current, &occupied, |mut point| {
+            point.y = face.ref_y();
+            let point = face.sample(point.to_array(), 0.15)?;
+            face.has_path(current.translation.to_array(), point)
+                .then_some(Vec3::from(point))
+        })
+        .ok_or("动作结束位置附近没有可安全到达的观察站位")?
+    };
+    Ok(replace_preview_observer(
+        world, ticket, epoch, player, after,
+    ))
+}
+
 fn facing(point: Vec3, target: Vec3, fallback: Quat) -> Quat {
     let direction = target - point;
     if direction.x * direction.x + direction.z * direction.z < 1e-6 {
@@ -404,18 +536,22 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
         }
         occupied.push(actor.after.translation);
     }
-    let anchor = actors
-        .first()
-        .map(|actor| actor.after.translation)
-        .or_else(|| bindings.first().map(|(_, _, _, pose)| pose.translation))
-        .or_else(|| {
-            if choice.mode == ExperienceMode::Independent {
-                face.preview_center().map(Vec3::from)
-            } else {
-                None
-            }
+    let fixture_anchor = choice
+        .target
+        .as_ref()
+        .and_then(|target| {
+            bindings
+                .iter()
+                .find(|(_, entity, uid, _)| *entity == target.entity && uid == &target.uid)
         })
-        .ok_or("没有可供体验的场景目标")?;
+        .or_else(|| bindings.first())
+        .map(|(_, _, _, pose)| pose.translation);
+    let anchor = observer_anchor(
+        fixture_anchor,
+        actors.first().map(|actor| actor.after.translation),
+        independent_center,
+    )
+    .ok_or("没有可供体验的场景目标")?;
     // The independent observer must not stand directly between the normal
     // follow camera and a small table/lamp. Preserve the real safe-radius and
     // navigation sampler, but prefer an oblique side of the content. This is
@@ -1175,6 +1311,111 @@ pub(crate) fn retire_scene(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixture_observer_does_not_follow_a_temporary_actor_approach_pose() {
+        let fixture = Vec3::new(0.125, 0., 0.125);
+        let temporary_actor = fixture + Vec3::Z * 0.95;
+        let source_start = Vec3::new(0.625, 0., -0.775);
+        let yaw = observer_viewing_yaw(ExperienceMode::Independent);
+        let before = observer_anchor(Some(fixture), Some(temporary_actor), None).unwrap();
+        let after = observer_anchor(Some(fixture), Some(source_start), None).unwrap();
+        assert_eq!(before, fixture);
+        assert_eq!(after, fixture);
+        let point = viewing_position(before, yaw, &[temporary_actor], Some).unwrap();
+        assert!((point.z - 0.6).abs() < 1e-5);
+        assert!((point.distance(fixture) - 0.95).abs() < 1e-5);
+        assert!(point.distance(temporary_actor) >= 0.62);
+        assert!(point.distance(source_start) >= 0.62);
+        assert_eq!(
+            point,
+            viewing_position(after, yaw, &[temporary_actor], Some).unwrap()
+        );
+    }
+
+    #[test]
+    fn observer_anchor_preserves_nonfixture_talk_and_independent_fallbacks() {
+        let actor = Vec3::new(2., 0., 3.);
+        let center = Vec3::new(4., 0., 5.);
+        assert_eq!(
+            observer_anchor(None, Some(actor), Some(center)),
+            Some(actor)
+        );
+        assert_eq!(observer_anchor(None, None, Some(center)), Some(center));
+        assert_eq!(observer_anchor(None, None, None), None);
+    }
+
+    #[test]
+    fn fixture_observer_still_requires_navigation_and_actor_clearance() {
+        let center = Vec3::new(0.125, 0., 0.125);
+        let yaw = observer_viewing_yaw(ExperienceMode::Independent);
+        let occupied = center + yaw * Vec3::Z * 0.95;
+        let point = viewing_position(center, yaw, &[occupied], Some).unwrap();
+        assert!(point.distance(occupied) >= 0.62);
+        assert!(point.distance(center) < 3.5);
+        assert!(viewing_position(center, yaw, &[occupied], |_| None).is_none());
+    }
+
+    #[test]
+    fn completed_observer_uses_final_action_anchor_not_the_previous_staging_pose() {
+        let initial = Transform::from_xyz(0.947724, 0., 1.55);
+        let final_anchor = Vec3::new(0.625, 0., -0.775);
+        let pose = completed_observer_pose(final_anchor, initial, &[], Some).unwrap();
+        assert!((pose.translation.x - 1.447724).abs() < 1e-5);
+        assert!((pose.translation.z + 0.3).abs() < 1e-5);
+        assert!(pose.translation.distance(final_anchor) < 1.0);
+        assert!(pose.rotation.is_normalized());
+        assert_ne!(pose.translation, initial.translation);
+    }
+
+    #[test]
+    fn completed_observer_handoff_does_not_fabricate_a_blocked_route() {
+        let initial = Transform::from_xyz(0.947724, 0., 1.55);
+        assert!(
+            completed_observer_pose(Vec3::new(0.625, 0., -0.775), initial, &[], |_| None,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn completed_handoff_preserves_the_original_player_restore_snapshot() {
+        let mut world = World::new();
+        world.insert_resource(GroundEpoch(7));
+        let before = Transform::from_xyz(4., 0., 6.);
+        let staged = Transform::from_xyz(0.947724, 0., 0.6);
+        let completed = Transform::from_xyz(1.447724, 0., -0.3);
+        let player = world
+            .spawn((PlayerControlled, staged, GlobalTransform::default()))
+            .id();
+        let camera = camera_snapshot::CameraSnapshot::capture(&mut world);
+        world.insert_resource(ScenePreview {
+            ticket: 12,
+            epoch: 7,
+            actors: vec![ActorPose {
+                entity: player,
+                before,
+                after: staged,
+                npc: false,
+            }],
+            camera,
+        });
+        assert!(!replace_preview_observer(
+            &mut world, 11, 7, player, completed
+        ));
+        assert!(!replace_preview_observer(
+            &mut world, 12, 6, player, completed
+        ));
+        assert_eq!(*world.get::<Transform>(player).unwrap(), staged);
+        assert!(replace_preview_observer(
+            &mut world, 12, 7, player, completed
+        ));
+        let snapshot = &world.resource::<ScenePreview>().actors[0];
+        assert_eq!(snapshot.before, before);
+        assert_eq!(snapshot.after, completed);
+        assert_eq!(*world.get::<Transform>(player).unwrap(), completed);
+        restore_preview(&mut world);
+        assert_eq!(*world.get::<Transform>(player).unwrap(), before);
+    }
+
     #[test]
     fn independent_observer_is_not_collinear_with_the_normal_camera_and_content() {
         let yaw = observer_viewing_yaw(ExperienceMode::Independent);

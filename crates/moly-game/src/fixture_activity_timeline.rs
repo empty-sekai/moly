@@ -6,7 +6,6 @@
 //! Foot IK, start offsets, track matching and mixer differences remain
 //! readable through `coverage`; they are never inferred from clip names.
 
-mod actor_space;
 mod clock;
 mod source;
 
@@ -115,8 +114,8 @@ impl SourceAnimationEvidence {
 }
 
 #[derive(Resource, Default)]
-struct TimelineAssetLoads {
-    json: HashMap<String, Handle<JsonAsset>>,
+pub(crate) struct TimelineAssetLoads {
+    json: crate::asset_cache::AssetCache<Handle<JsonAsset>, 96>,
     // One successful parse per currently observed source text. This caches
     // metadata syntax only, never a prepared actor/fixture binding or its
     // liveness verdict. The original text makes invalidation collision-free.
@@ -124,8 +123,18 @@ struct TimelineAssetLoads {
     // 第一格是「校验这条缓存时 `Assets<JsonAsset>` 的 last_changed」。代没变
     // 就说明期间没有任何 json 资产被动过，这条缓存必然仍成立——省掉一次
     // 对整份文档的逐字节比对。代不同时走原来的比对，判定结果不变。
-    parsed_json: HashMap<String, (Option<Tick>, String, Arc<Value>)>,
-    gltf: HashMap<String, Handle<Gltf>>,
+    parsed_json: crate::asset_cache::AssetCache<(Option<Tick>, String, Arc<Value>), 96>,
+    gltf: crate::asset_cache::AssetCache<Handle<Gltf>, 24>,
+}
+
+impl TimelineAssetLoads {
+    pub(crate) fn cache_counts(&self) -> Value {
+        serde_json::json!({"json":self.json.len(),"documents":self.parsed_json.len(),"gltf":self.gltf.len()})
+    }
+
+    pub(crate) fn sweep_lookup_caches(&mut self) -> usize {
+        self.json.sweep_unused() + self.parsed_json.sweep_unused() + self.gltf.sweep_unused()
+    }
 }
 
 /// Resolve the formal per-actor library into the actual player's graph. This
@@ -265,8 +274,7 @@ fn prepare_actor_tracks(
                 let mut loads = world.resource_mut::<TimelineAssetLoads>();
                 loads
                     .gltf
-                    .entry(path.into())
-                    .or_insert_with(|| server.load(format!("moly://{path}")))
+                    .get_or_insert_with(path, || server.load(format!("moly://{path}")))
                     .clone()
             };
             if let bevy::asset::LoadState::Failed(error) = server.load_state(&handle) {
@@ -344,8 +352,7 @@ fn load_json(
         let mut loads = world.resource_mut::<TimelineAssetLoads>();
         loads
             .json
-            .entry(path.into())
-            .or_insert_with(|| server.load(format!("moly://{path}")))
+            .get_or_insert_with(path, || server.load(format!("moly://{path}")))
             .clone()
     };
     if let bevy::asset::LoadState::Failed(error) = server.load_state(&handle) {
@@ -543,11 +550,11 @@ struct Session {
     status: TimelineStatus,
     clock: clock::Clock,
     nodes: Vec<BoundNode>,
+    prior_pose: Vec<(Entity, Transform)>,
     prior_face: HashMap<Handle<CharacterMaterial>, PriorFace>,
     prior_gates: HashMap<Entity, Option<TimelineFacialState>>,
     sound_entities: Vec<Entity>,
     emoticons: HashMap<TimelineClipKey, crate::emoticon::timeline::EmoteLease>,
-    actor_space: Vec<actor_space::ActorSpaceLease>,
     coverage: Vec<TimelineCoverageGap>,
     cancel: bool,
     release: bool,
@@ -602,11 +609,11 @@ impl FixtureActivityTimelines {
                 status: TimelineStatus::Preparing,
                 clock: Default::default(),
                 nodes: Vec::new(),
+                prior_pose: Vec::new(),
                 prior_face: HashMap::new(),
                 prior_gates: HashMap::new(),
                 sound_entities: Vec::new(),
                 emoticons: HashMap::new(),
-                actor_space: Vec::new(),
                 coverage: Vec::new(),
                 cancel: false,
                 release: false,
@@ -794,13 +801,21 @@ pub(crate) fn validate_start(
     world: &World,
     request: &StartTimeline,
 ) -> Result<(), TimelineFailure> {
-    validate(world, request, None)
+    validate(world, request, None, true)
+}
+
+/// Check cached resource bindings without claiming an animator. An already
+/// running timeline is not a reason to reload its actor GLTF every frame;
+/// actual admission still goes through `validate_start` and its lease check.
+pub(crate) fn validate_prepared(world: &World, request: &StartTimeline) -> Result<(), TimelineFailure> {
+    validate(world, request, None, false)
 }
 
 fn validate(
     world: &World,
     request: &StartTimeline,
     own: Option<TimelineToken>,
+    require_available: bool,
 ) -> Result<(), TimelineFailure> {
     if !world.entities().contains(request.fixture)
         || !world.entities().contains(request.owner.activity.actor)
@@ -855,7 +870,7 @@ fn validate(
                     if graph.0 != binding.graph || graphs.get(&binding.graph).is_none() {
                         return Err(invalid("binding graph differs from actual player's graph"));
                     }
-                    if world
+                    if require_available && world
                         .get::<TimelinePlaybackOwner>(binding.animator)
                         .is_some_and(|p| Some(p.0) != own)
                     {
@@ -1150,6 +1165,9 @@ pub(crate) fn advance(world: &mut World) {
                 || !world.entities().contains(session.request.fixture)
             {
                 session.cancel = true;
+                // No caller can consume this dead owner's result. Retaining a
+                // cancelled session here would pin all its clips and sounds.
+                session.release = true;
             }
             if session.cancel || session.release {
                 cleanup(world, *token, session);
@@ -1201,7 +1219,39 @@ fn initialize(
         AnimationNodeIndex,
     >,
 ) -> Result<(), TimelineFailure> {
-    validate(world, &session.request, Some(token))?;
+    validate(world, &session.request, Some(token), true)?;
+    if world
+        .get::<moly_assets::coordinates::CanonicalCoordinates>(session.request.fixture)
+        .is_none()
+    {
+        return Err(invalid("fixture coordinate contract is missing; re-export this snapshot"));
+    }
+    // Canonical locators, actor models and animation clips share one frame.
+    // Validate before mutating any owned pose; an authored negative scale is
+    // not a signal to introduce another spatial reflection.
+    let animators: HashSet<_> = session
+        .request
+        .bindings
+        .animations
+        .values()
+        .map(|binding| binding.animator)
+        .collect();
+    session.prior_pose = world
+        .query::<(Entity, &bevy::animation::AnimatedBy, &Transform)>()
+        .iter(world)
+        .filter(|(_, by, _)| animators.contains(&by.0))
+        .map(|(entity, _, pose)| (entity, *pose))
+        .collect();
+    for (entity, _) in &session.prior_pose {
+        if let Some(rest) = world
+            .get::<crate::character::CharacterRestTransform>(*entity)
+            .copied()
+        {
+            *world
+                .get_mut::<Transform>(*entity)
+                .expect("animated transform") = rest.0;
+        }
+    }
     // The lookup cache owns only IDs, so a destroyed body graph cannot keep
     // its asset alive. Drop those obsolete keys when a new session starts;
     // repeated body rebuilds must not retain their metadata indefinitely.
@@ -1209,36 +1259,6 @@ fn initialize(
     {
         let graphs = world.resource::<Assets<AnimationGraph>>();
         cache.retain(|(graph, _, _), _| graphs.get(*graph).is_some());
-    }
-    // Every admitted body needs its own coordinate-space lease, while all
-    // tracks still sample ONE Director clock. Never clone/retime the timeline.
-    let mut actors = HashSet::new();
-    for track in &session.request.definition.tracks {
-        if track
-            .clips
-            .iter()
-            .any(|clip| matches!(clip.payload, TimelinePayload::Animation { .. }))
-        {
-            if let Some(actor) = session.request.bindings.actors.get(&track.identity) {
-                actors.insert(*actor);
-            } else if track.name == "CharacterAnimator" {
-                actors.insert(session.request.owner.activity.actor);
-            }
-        }
-    }
-    let mut actors: Vec<_> = actors.into_iter().collect();
-    actors.sort();
-    let source_frame_reflected = world
-        .get::<GlobalTransform>(session.request.fixture)
-        .is_some_and(|pose| pose.affine().matrix3.determinant() < 0.);
-    for actor in actors {
-        // A reflected fixture locator already gives the actor's imported GLB
-        // frame. Only native-frame owners need the temporary inverse bridge.
-        if !source_frame_reflected {
-            session
-                .actor_space
-                .push(actor_space::acquire(world, actor, token)?);
-        }
     }
     let request = &session.request;
     let mut claimed = HashSet::new();
@@ -1254,7 +1274,26 @@ fn initialize(
                 let node = cache.get(&cache_key).copied().filter(|node| graph.graph.node_weight(*node)
                     .is_some_and(|n| matches!(&n.node_type,AnimationNodeType::Clip(handle) if *handle == binding.clip)));
                 let node = node.unwrap_or_else(|| {
-                    let node = graph.add_clip(binding.clip.clone(), 1.0, graph.root);
+                    // Released slots keep stable graph indices (removing a
+                    // petgraph node would move locomotion nodes). Reuse those
+                    // slots instead of retaining every past clip in the graph.
+                    let free = cache
+                        .iter()
+                        .find(|((id, _, _), node)| {
+                            *id == binding.graph.id()
+                                && graph.graph.node_weight(**node).is_some_and(|n| {
+                                    matches!(n.node_type, AnimationNodeType::Blend)
+                                })
+                        })
+                        .map(|(key, node)| (key.clone(), *node));
+                    let node = if let Some((old_key, node)) = free {
+                        cache.remove(&old_key);
+                        graph.graph.node_weight_mut(node).unwrap().node_type =
+                            AnimationNodeType::Clip(binding.clip.clone());
+                        node
+                    } else {
+                        graph.add_clip(binding.clip.clone(), 1.0, graph.root)
+                    };
                     cache.insert(cache_key, node);
                     node
                 });
@@ -1367,7 +1406,7 @@ fn tick(
     }) {
         return Err(invalid("timeline animator ownership was lost"));
     }
-    validate(world, &session.request, Some(token))?;
+    validate(world, &session.request, Some(token), true)?;
     if !delta.is_finite() || delta < 0.0 {
         return Err(invalid("invalid director delta"));
     }
@@ -1675,9 +1714,6 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
 }
 
 fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
-    for lease in session.actor_space.drain(..) {
-        actor_space::restore(world, token, lease);
-    }
     for (_, lease) in session.emoticons.drain() {
         crate::emoticon::timeline::hide(world, lease, true);
     }
@@ -1690,13 +1726,35 @@ fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
             if let Some(mut player) = world.get_mut::<AnimationPlayer>(node.animator) {
                 player.stop(node.node);
             }
+            let binding = &session.request.bindings.animations[&node.key];
+            if let Some(graph) = world
+                .resource_mut::<Assets<AnimationGraph>>()
+                .get_mut(&binding.graph)
+            {
+                if let Some(slot) = graph.graph.node_weight_mut(node.node) {
+                    slot.node_type = AnimationNodeType::Blend;
+                }
+            }
             animators.insert(node.animator);
         }
     }
-    for animator in animators {
-        world.entity_mut(animator).remove::<TimelinePlaybackOwner>();
+    for animator in &animators {
+        world
+            .entity_mut(*animator)
+            .remove::<TimelinePlaybackOwner>();
     }
     session.nodes.clear();
+    for (entity, prior) in session.prior_pose.drain(..) {
+        if !world
+            .get::<bevy::animation::AnimatedBy>(entity)
+            .is_some_and(|by| animators.contains(&by.0))
+        {
+            continue;
+        }
+        if let Some(mut pose) = world.get_mut::<Transform>(entity) {
+            *pose = prior;
+        }
+    }
     for entity in session.sound_entities.drain(..) {
         if world.entities().contains(entity) {
             world.despawn(entity);
@@ -1724,5 +1782,128 @@ fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
                 world.entity_mut(actor).remove::<TimelineFacialState>();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod handoff_regressions {
+    use super::*;
+
+    #[test]
+    fn retired_actor_library_does_not_drop_the_consumers_selected_clip() {
+        let libraries = Assets::<Gltf>::default();
+        let clips = Assets::<AnimationClip>::default();
+        let library = libraries.reserve_handle();
+        let selected_clip = clips.reserve_handle();
+        let library_weak = match &library {
+            Handle::Strong(handle) => Arc::downgrade(handle),
+            _ => unreachable!(),
+        };
+        let clip_weak = match &selected_clip {
+            Handle::Strong(handle) => Arc::downgrade(handle),
+            _ => unreachable!(),
+        };
+        let mut loads = TimelineAssetLoads::default();
+        loads.gltf.insert("actor-animations/library.glb".into(), library);
+        loads.sweep_lookup_caches();
+        assert!(library_weak.upgrade().is_some());
+        loads.sweep_lookup_caches();
+        assert!(library_weak.upgrade().is_none());
+        assert!(clip_weak.upgrade().is_some());
+        drop(selected_clip);
+        assert!(clip_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn destroyed_fixture_releases_cancelled_session_and_its_clip_handles() {
+        let mut world = World::new();
+        world.init_resource::<Assets<AnimationClip>>();
+        let clip = world.resource_mut::<Assets<AnimationClip>>().add(AnimationClip::default());
+        let weak = match &clip {
+            Handle::Strong(handle) => Arc::downgrade(handle),
+            _ => panic!("test clip must own a strong handle"),
+        };
+        let actor = world.spawn_empty().id();
+        let fixture = world.spawn_empty().id();
+        let identity = SourceAssetId { file: "source".into(), path_id: "1".into() };
+        let key = TimelineClipKey { track: identity.clone(), clip_index: 0 };
+        let mut runtime = FixtureActivityTimelines::default();
+        let token = runtime.request_start(StartTimeline {
+            owner: TimelineOwner { activity: FixtureActivityOwner { actor, generation: 1 }, kind: TimelineOwnerKind::Player },
+            fixture,
+            definition: Arc::new(TimelineDefinition { package: "fixture".into(), prefab: "fixture".into(),
+                fixture_view: None, director: identity.clone(), timeline: identity.clone(), duration: 1., tracks: vec![] }),
+            bindings: TimelineBindings { animations: HashMap::from([(key, TimelineAnimationBinding {
+                animator: actor, graph: Handle::default(), clip,
+                source: SourceAnimationEvidence { package: "fixture".into(), clip_name: "clip".into(), asset: identity,
+                    start_time: 0., stop_time: 1., looping: false }, coverage: AnimationCoverage::sampled_pose(),
+            })]), ..Default::default() },
+            companions: vec![], timeout_secs: 5., timeout_budget: TimelineTimeoutBudget::PlayerWall,
+        });
+        world.insert_resource(runtime);
+        world.despawn(fixture);
+        advance(&mut world);
+        assert!(world.resource::<FixtureActivityTimelines>().status(token).is_none());
+        assert!(weak.upgrade().is_none());
+        assert!(world.entities().contains(actor));
+    }
+
+    #[test]
+    fn completed_director_release_removes_root_yaw_before_sparse_hips_talk() {
+        let mut world = World::new();
+        world.init_resource::<Assets<AnimationGraph>>();
+        world.init_resource::<Assets<AnimationClip>>();
+        let clip = world.resource_mut::<Assets<AnimationClip>>().add(AnimationClip::default());
+        let mut graph = AnimationGraph::new();
+        let node = graph.add_clip(clip.clone(), 1., graph.root);
+        let graph = world.resource_mut::<Assets<AnimationGraph>>().add(graph);
+        let animator = world.spawn(AnimationPlayer::default()).id();
+        let actor = world.spawn_empty().id();
+        let fixture = world.spawn_empty().id();
+        let root = world.spawn((
+            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            AnimatedBy(animator),
+        )).id();
+        let hips = world.spawn((Transform::from_xyz(0., 0.5, 0.), AnimatedBy(animator))).id();
+        let id = SourceAssetId { file: "source".into(), path_id: "1".into() };
+        let key = TimelineClipKey { track: id.clone(), clip_index: 0 };
+        let mut timelines = FixtureActivityTimelines::default();
+        let token = timelines.request_start(StartTimeline {
+            owner: TimelineOwner { activity: FixtureActivityOwner { actor, generation: 1 }, kind: TimelineOwnerKind::Talk },
+            fixture,
+            definition: Arc::new(TimelineDefinition {
+                package: "horse2".into(), prefab: "horse2".into(), fixture_view: None,
+                director: id.clone(), timeline: id.clone(), duration: 7., tracks: vec![],
+            }),
+            bindings: TimelineBindings {
+                animations: HashMap::from([(key.clone(), TimelineAnimationBinding {
+                    animator, graph: graph.clone(), clip,
+                    source: SourceAnimationEvidence { package: "horse2".into(), clip_name: "end".into(), asset: id, start_time: 0., stop_time: 7., looping: false },
+                    coverage: AnimationCoverage::sampled_pose(),
+                })]),
+                ..Default::default()
+            },
+            companions: vec![], timeout_secs: 30., timeout_budget: TimelineTimeoutBudget::PlayerWall,
+        });
+        let session = timelines.sessions.get_mut(&token).unwrap();
+        session.status = TimelineStatus::Completed;
+        session.nodes.push(BoundNode { key, animator, node });
+        session.prior_pose.push((root, Transform::IDENTITY));
+        session.prior_pose.push((hips, Transform::from_xyz(0., 0.5, 0.)));
+        world.entity_mut(animator).insert(TimelinePlaybackOwner(token));
+        world.get_mut::<AnimationPlayer>(animator).unwrap().play(node).pause();
+        world.insert_resource(timelines);
+
+        cancel_and_release(&mut world, token);
+        // A sparse shared talk clip writes Hips only. It must not inherit the
+        // previous Director's final 180-degree Root rotation.
+        world.get_mut::<Transform>(hips).unwrap().rotation = Quat::from_rotation_x(0.1);
+        let wrapper = Quat::from_rotation_y(0.138);
+        let visible_forward = wrapper * world.get::<Transform>(root).unwrap().rotation * Vec3::Z;
+        assert!(visible_forward.dot(wrapper * Vec3::Z) > 0.9999);
+        assert!(world.resource::<FixtureActivityTimelines>().status(token).is_none());
+        assert!(world.get::<TimelinePlaybackOwner>(animator).is_none());
+        assert!(world.get::<AnimationPlayer>(animator).unwrap().playing_animations().next().is_none());
+        assert!(matches!(world.resource::<Assets<AnimationGraph>>().get(&graph).unwrap().graph[node].node_type, AnimationNodeType::Blend));
     }
 }

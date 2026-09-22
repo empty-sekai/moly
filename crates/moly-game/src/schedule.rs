@@ -494,6 +494,7 @@ pub fn install(app: &mut App) {
                         // ——输入当帧生效。
                         camera::apply_input
                             .after(camera::parse)
+                            .after(gesture::advance)
                             .run_if(crate::game_settings::camera_input_enabled),
                     ),
                     (

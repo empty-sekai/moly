@@ -9,23 +9,9 @@ import {
   clientResourceOrigin,
   activeResourceRoots,
   isActiveRequiredResource,
-  VisitResourceCache,
 } from "./cache-worker.mjs";
 import { createHash } from "node:crypto";
 const origin = "https://moesekai.test";
-
-test("visit memory has a bounded LRU lifetime and never uses CacheStorage", async () => {
-  const visit = new VisitResourceCache(8);
-  visit.put("a", new Uint8Array([1, 2, 3, 4]), { "Content-Type": "audio/ogg" });
-  visit.put("b", new Uint8Array([5, 6, 7, 8]), {});
-  assert.equal((await visit.get("a").arrayBuffer()).byteLength, 4);
-  visit.put("c", new Uint8Array([9, 10, 11, 12]), {});
-  assert.equal(visit.get("b"), null);
-  assert.equal(visit.get("a").headers.get("X-Moly-Cache"), "visit");
-  visit.clear();
-  assert.equal(visit.bytes, 0);
-  assert.equal(visit.get("a"), null);
-});
 
 test("only open stage versions protect engines and the selected base resources", () => {
   const cdn = "https://cdn.example";

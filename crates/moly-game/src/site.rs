@@ -647,10 +647,11 @@ pub(crate) struct SiteScenePending(usize);
 #[derive(Clone, Copy, Resource)]
 pub struct GroundEpoch(pub u64);
 
-/// Startup：请求主表、室内导航包与站点包清单三份 JSON。站点 glTF 待主
+/// Startup：请求快照身份、主表、室内导航包与站点包清单。站点 glTF 待主
 /// 表解析后由 [`plan`] 按选择请求。
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(MasterHandles {
+        source: server.load::<JsonAsset>(AssetPath::from("moly://source.json".to_owned())),
         sites: server.load::<JsonAsset>(AssetPath::from("moly://site/sites.json".to_owned())),
         navigation: server.load::<JsonAsset>(AssetPath::from(
             "moly://site/indoor/navigation/navigation_mesh/navigation_mesh.json".to_owned(),
@@ -659,15 +660,40 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     });
 }
 
-/// 三份清单的装载请求；解析成功后即撤。
+/// 清单的装载请求；解析成功后即撤。
 #[derive(Resource)]
 pub(crate) struct MasterHandles {
+    source: Handle<JsonAsset>,
     sites: Handle<JsonAsset>,
     navigation: Handle<JsonAsset>,
     index: Handle<JsonAsset>,
 }
 
-/// Update：三份清单到齐后解析一次。装载失败响亮 panic，未到齐静默等
+/// Navigation uses the actual loaded snapshot's region, independently from the
+/// page locale, player-save region, fixture catalog, or shared-weather donor.
+#[derive(Clone, Copy, Resource)]
+pub(crate) struct NavMeshSourceRegion(pub moly_law::carve::NavMeshRegion);
+
+impl NavMeshSourceRegion {
+    fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err("source.json has an unsupported or missing identity version".into());
+        }
+        let region = value
+            .get("source")
+            .and_then(|source| source.get("region"))
+            .and_then(serde_json::Value::as_str);
+        match region {
+            Some("cn") => Ok(Self(moly_law::carve::NavMeshRegion::Cn)),
+            Some("jp") => Ok(Self(moly_law::carve::NavMeshRegion::Jp)),
+            _ => Err(format!(
+                "source.json has unsupported navigation source region {region:?}"
+            )),
+        }
+    }
+}
+
+/// Update：清单到齐后解析一次。装载失败响亮 panic，未到齐静默等
 /// 下一帧。
 pub(crate) fn parse_masters(
     mut commands: Commands,
@@ -678,12 +704,14 @@ pub(crate) fn parse_masters(
     let Some(handles) = handles else {
         return; // 未请求，或已解析并撤下
     };
-    let (Some(sites), Some(navigation), Some(index)) = (
+    let (Some(source), Some(sites), Some(navigation), Some(index)) = (
+        jsons.get(&handles.source),
         jsons.get(&handles.sites),
         jsons.get(&handles.navigation),
         jsons.get(&handles.index),
     ) else {
         for (name, handle) in [
+            ("快照源身份", &handles.source),
             ("站点主表", &handles.sites),
             ("室内导航包清单", &handles.navigation),
             ("站点包清单", &handles.index),
@@ -694,6 +722,12 @@ pub(crate) fn parse_masters(
         }
         return; // 还在装
     };
+    let source = serde_json::from_str(&source.0)
+        .unwrap_or_else(|reason| panic!("[site] 快照源身份 JSON 无效：{reason}"));
+    commands.insert_resource(
+        NavMeshSourceRegion::parse(&source)
+            .unwrap_or_else(|reason| panic!("[site] 导航区域身份无效：{reason}")),
+    );
     commands.insert_resource(Sites::parse(&sites.0, &navigation.0, &index.0));
     commands.remove_resource::<MasterHandles>();
 }
@@ -1340,5 +1374,47 @@ impl Plugin for SitePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SiteSelection::from(self.0.clone()))
             .add_observer(on_scene_ready);
+    }
+}
+
+#[cfg(test)]
+mod source_region_tests {
+    use super::NavMeshSourceRegion;
+    use moly_law::carve::NavMeshRegion;
+    use serde_json::json;
+
+    #[test]
+    fn navigation_region_uses_snapshot_identity_not_donor_or_catalog() {
+        let source = json!({
+            "version": 1,
+            "source": {"region": "cn", "appVersion": "6.0.0"},
+            "weather": {"region": "jp"},
+            "region": "jp"
+        });
+        assert_eq!(
+            NavMeshSourceRegion::parse(&source).unwrap().0,
+            NavMeshRegion::Cn
+        );
+        let source = json!({
+            "version": 1,
+            "source": {"region": "jp", "appVersion": "6.8.1"},
+            "sharedUi": {"donorRegion": "cn"}
+        });
+        assert_eq!(
+            NavMeshSourceRegion::parse(&source).unwrap().0,
+            NavMeshRegion::Jp
+        );
+    }
+
+    #[test]
+    fn missing_or_unsupported_source_region_never_defaults_to_cn() {
+        for source in [
+            json!({}),
+            json!({"version": 1, "region": "cn"}),
+            json!({"version": 1, "source": {"region": "unknown"}}),
+            json!({"version": 2, "source": {"region": "cn"}}),
+        ] {
+            assert!(NavMeshSourceRegion::parse(&source).is_err(), "{source}");
+        }
     }
 }

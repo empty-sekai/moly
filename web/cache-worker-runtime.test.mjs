@@ -6,15 +6,16 @@ import { createHash, webcrypto } from "node:crypto";
 
 // Unit tests execute the shipped worker body with a controllable storage API.
 // Actual browser cache/online behavior is additionally exercised by QA scripts.
-function worker() {
-  const stores = new Map(),
-    handlers = new Map();
+function worker(stores = new Map()) {
+  const handlers = new Map();
   let network = 0,
     readFailure = false,
     writeFailure = false,
     controlFailure = false,
     hold = null,
-    networkHold = null;
+    networkHold = null,
+    responseStatus = 200,
+    responseCacheControl = "public, immutable";
   const cacheFor = (name) => ({
     async match(request) {
       return stores
@@ -94,8 +95,9 @@ function worker() {
         network++;
         if (networkHold) await networkHold;
         return new Response("resource", {
+          status: responseStatus,
           headers: {
-            "Cache-Control": "public, immutable",
+            "Cache-Control": responseCacheControl,
             "X-Moly-Decoded-Bytes": new URL(request.url).pathname.includes(
               "large",
             )
@@ -125,6 +127,8 @@ function worker() {
     networkHold: (value) => {
       networkHold = value;
     },
+    responseStatus: (value) => { responseStatus = value; },
+    responseCacheControl: (value) => { responseCacheControl = value; },
     async message(type, enabled) {
       let result, waiting;
       handlers.get("message")({
@@ -266,6 +270,126 @@ test("a response requested before clear cannot silently refill the resource stor
   await response.settle();
   assert.equal(await response.response.text(), "resource");
   assert.equal((await w.message("query")).bytes, 0);
+});
+
+test("optional models and audio survive a fresh worker without a response memory cache", async () => {
+  const first = worker();
+  await first.message("retain", true);
+  const names = [
+    "/moly/snapshots/cn-source/assets/fixture-models/horse.glb",
+    "/moly/snapshots/cn-source/assets/audio/dialogue.ogg",
+  ];
+  for (const name of names) {
+    const response = await first.request(name);
+    assert.equal(await response.response.text(), "resource");
+    await response.settle();
+  }
+  const restarted = worker(first.stores);
+  const state = await restarted.message("query");
+  assert.equal(state.enabled, true);
+  assert.equal(state.entries, 2);
+  assert.equal(state.bytes, 16);
+  assert.equal(state.limitBytes, 512 * 1024 * 1024);
+  for (const name of names) {
+    const response = await restarted.request(name);
+    assert.equal(response.response.headers.get("X-Moly-Cache"), "retained");
+    assert.equal(await response.response.text(), "resource");
+    await response.settle();
+  }
+  assert.equal(restarted.network(), 0);
+  // Removing the disk store must make the next read miss, even in the same
+  // worker. A leftover visit-response map would incorrectly mask this.
+  first.stores.delete("moly-resource-v1-s-cn-source");
+  const miss = await restarted.request(names[0]);
+  await miss.settle();
+  assert.equal(restarted.network(), 1);
+  assert.equal(miss.response.headers.get("X-Moly-Cache"), null);
+});
+
+test("explicit clear removes every resource-cache version, not preferences or other apps", async () => {
+  const w = worker();
+  await w.message("retain", true);
+  for (const name of [
+    "moly-resource-v0-old-engine",
+    "moly-resource-v1-s-old-source",
+    "moly-resource-v1-shared-pack-store",
+    "moly-resource-v2-new-source",
+  ]) {
+    w.stores.set(name, new Map([["https://qa.test/moly/test.bin", new Response("old", {
+      headers: { "X-Moly-Stored-Bytes": "3", "X-Moly-Stored-At": "1" },
+    })]]));
+  }
+  w.stores.set("other-app-resources", new Map());
+  w.stores.set("moly-layout-preferences", new Map());
+  const state = await w.message("clear");
+  assert.equal(state.ok, true);
+  assert.equal(state.entries, 0);
+  assert.equal(state.bytes, 0);
+  assert.equal(state.enabled, true);
+  assert.ok([...w.stores.keys()].every(name => !name.startsWith("moly-resource-")));
+  assert.ok(w.stores.has("moly-control-v1"));
+  assert.ok(w.stores.has("moly-layout-preferences"));
+  assert.ok(w.stores.has("other-app-resources"));
+});
+
+test("optional request in flight remains readable after clear but cannot refill disk", async () => {
+  const w = worker();
+  await w.message("retain", true);
+  let release;
+  w.networkHold(new Promise(resolve => { release = resolve; }));
+  const pending = w.request("/moly/snapshots/cn-source/assets/audio/dialogue.ogg");
+  while (w.network() === 0) await new Promise(resolve => setTimeout(resolve, 0));
+  await w.message("clear");
+  release();
+  const response = await pending;
+  assert.equal(await response.response.text(), "resource");
+  await response.settle();
+  assert.equal((await w.message("query")).entries, 0);
+  w.networkHold(null);
+  const later = await w.request("/moly/snapshots/cn-source/assets/audio/dialogue.ogg");
+  await later.settle();
+  assert.equal((await w.message("query")).entries, 1);
+});
+
+test("clear waits for an active disk write then removes it without cancelling the response", async () => {
+  const w = worker();
+  await w.message("retain", true);
+  let release;
+  w.hold(new Promise(resolve => { release = resolve; }));
+  const pending = await w.request("/moly/snapshots/cn-source/assets/fixture-models/horse.glb");
+  let cleared = false;
+  const clear = w.message("clear").then(value => { cleared = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(cleared, false);
+  assert.equal(await pending.response.text(), "resource");
+  release();
+  await pending.settle();
+  assert.equal((await clear).entries, 0);
+  assert.equal((await w.message("query")).bytes, 0);
+});
+
+test("404 and development responses are never cached or replaced with false successes", async () => {
+  const w = worker();
+  await w.message("retain", true);
+  const path = "/moly/snapshots/cn-source/assets/fixture-models/missing.glb";
+  w.responseStatus(404);
+  for (let index = 0; index < 2; index++) {
+    const response = await w.request(path);
+    assert.equal(response.response.status, 404);
+    await response.settle();
+  }
+  assert.equal(w.network(), 2);
+  assert.equal((await w.message("query")).entries, 0);
+  w.responseStatus(200);
+  w.responseCacheControl("no-cache");
+  const development = await w.request(path);
+  await development.settle();
+  assert.equal((await w.message("query")).entries, 0);
+  w.responseCacheControl("public, immutable");
+  const repaired = await w.request(path);
+  assert.equal(repaired.response.status, 200);
+  await repaired.settle();
+  assert.equal((await w.message("query")).entries, 1);
 });
 
 test("shared CAS responses are hash-checked, pinned, and retained once across releases", async () => {

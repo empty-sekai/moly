@@ -300,6 +300,7 @@ fn extract_shadow_casters(
     mut overflow_warned: Local<bool>,
 ) {
     let mut draws: Vec<ShadowDraw> = Vec::new();
+    local_bounds.retain(|id, _| meshes.contains(*id));
     let mut bounds: Option<(Vec3, Vec3)> = None;
     for (mesh, transform, visibility, passes, renderer, parent) in &casters {
         if renderer.is_some_and(|renderer| !renderer.casts_shadows()) {

@@ -212,6 +212,7 @@ impl GltfExtensionHandler for SceneStateLoader {
             .as_ref()
             .and_then(|extras| serde_json::from_str::<serde_json::Value>(extras.get()).ok());
         if let Some(extras) = &extras {
+            crate::coordinates::import(extras, entity);
             crate::source_navigation::import(extras, entity);
         }
         // Fence exports predate the generic site node-state spelling. Both
@@ -260,6 +261,7 @@ impl GltfExtensionHandler for SceneStateLoader {
 }
 
 pub(crate) fn register_types(app: &mut App) {
+    app.register_type::<crate::coordinates::CanonicalCoordinates>();
     crate::source_navigation::register(app);
     app.register_type::<SourceNodeActivity>()
         .register_type::<SourceInactive>()
