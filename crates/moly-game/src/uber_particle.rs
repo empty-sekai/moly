@@ -1128,7 +1128,7 @@ pub(crate) struct FixtureParticleRequest {
     planned: Option<Vec<Planned>>,
 }
 #[derive(Component)]
-pub(crate) struct FixtureParticleLive(Runtime);
+pub(crate) struct FixtureParticleLive(pub(crate) Runtime);
 #[derive(Component)]
 pub(crate) struct FixtureParticlesResolved;
 
@@ -1172,18 +1172,25 @@ pub(crate) fn plan_fixture_particles(
             continue;
         };
         let raw: serde_json::Value = serde_json::from_str(&json.0).expect("fixture particle JSON");
-        let doc = match moly_assets::sidecar::parse_fixture_particles(json.0.as_bytes()) {
+        // Source snapshots and legacy material summaries are distinct schemas.
+        // Never feed a source-qualified failure back through the approximate path.
+        let mut legacy = raw.clone();
+        if let Some(emitters) = legacy["emitters"].as_array_mut() {
+            emitters.retain(|p| !crate::weather_fx::fixture::is_source_particle(p));
+        }
+        let doc = match moly_assets::sidecar::parse_fixture_particles(legacy.to_string().as_bytes()) {
             Ok(doc) => doc,
             Err(error) => { warn!("fixture particles {}: {error}", request.package); request.planned = Some(Vec::new()); continue; }
         };
         let mut by_path = HashMap::new();
         crate::inactive_nodes::collect(entity, &mut Vec::new(), &names, &children, &mut by_path);
         let by_path: HashMap<_, _> = by_path.into_iter().map(|(p, entities)| (format!("/{p}"), entities)).collect();
+        crate::weather_fx::fixture::plan(&mut commands, entity, &raw, &by_path, &server);
         let mut tally = Tally::default();
         let mut plans = Vec::new();
         let mut not_play_on_awake = 0usize;
         for (index, particle) in doc.particles.iter().enumerate() {
-            let source = &raw["emitters"][index];
+            let source = &legacy["emitters"][index];
             // An inactive event template requires its actual activation binding.
             // Missing activation metadata cannot be treated as an active instance.
             if source.get("activeInHierarchy").and_then(serde_json::Value::as_bool) != Some(true) {

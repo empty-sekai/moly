@@ -250,6 +250,7 @@ pub fn install(app: &mut App) {
                 uber_particle::request_fixture_particles,
                 uber_particle::plan_fixture_particles,
                 uber_particle::spawn_fixture_particles,
+                crate::weather_fx::fixture::spawn_when_ready,
             )
                 .chain(),
         )
