@@ -15,6 +15,8 @@ swash = "0.2.10"
 async-lock = "3"
 futures-util = "0.3"
 futures-channel = "0.3"
+# Shared particle seed owner: already locked; OS entropy on native and JS crypto on wasm.
+getrandom = { version = "=0.2.17", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = { version = "3", default-features = false }

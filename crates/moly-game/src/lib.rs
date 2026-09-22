@@ -83,6 +83,7 @@ pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
 mod source_curve;
+mod weather_animation;
 pub mod talk;
 pub mod talk_camera;
 mod talk_ingest;

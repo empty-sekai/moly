@@ -303,6 +303,7 @@ pub fn install(app: &mut App) {
         // 同款故事；native 上与天气插件的 init 幂等重合）。
         .init_resource::<weather::CurrentPhenomenonId>()
         .init_resource::<weather_fx::WeatherFxRetirements>()
+        .init_resource::<crate::particle_runtime::seed::SystemSeedManager>()
         .init_resource::<alone_action_runtime::AloneExecutionGate>()
         // 家具时间轴可播集（常驻空表起步，装载期填充——步进系统按 Res
         // 读它，缺资源会在系统参数校验处 panic）。

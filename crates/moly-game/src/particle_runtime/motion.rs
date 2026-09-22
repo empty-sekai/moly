@@ -10,6 +10,22 @@ pub(super) fn size_at_age(system: &super::Runtime, side: &Side, age: f32) -> [f3
         |law| law.evaluate(side.size, side.seed, age * 100.0))
 }
 
+/// Force and linear velocity share the source space transform, including the
+/// emitter scale for world-space modules. Directions are never normalized.
+pub(super) fn module_vector(
+    value: [f32; 3], in_world_space: bool, simulation: SimulationSpace,
+    owner: &GlobalTransform,
+) -> Vec3 {
+    let value = crate::particle_geometry::reflect(Vec3::from_array(value));
+    let affine = owner.affine();
+    match (simulation == SimulationSpace::World, in_world_space) {
+        (false, false) => value,
+        (true, false) => affine.transform_vector3(value),
+        (true, true) => value * owner.to_scale_rotation_translation().0,
+        (false, true) => affine.inverse().transform_vector3(value * owner.to_scale_rotation_translation().0),
+    }
+}
+
 pub(super) fn velocity_at_age(
     params: &VelocityOverLifetime,
     particle: &Particle,
@@ -24,15 +40,7 @@ pub(super) fn velocity_at_age(
     let affine = owner.affine();
     let world = simulation == SimulationSpace::World;
     let sampled = params.sample(side.seed, batch_seed, age * 100.0);
-    let linear = reflect(Vec3::from_array(sampled.linear));
-    // The linear module's world-space value retains the emitter scale. Its
-    // local-space value uses the complete emitter basis when simulated in world.
-    let linear = match (world, params.in_world_space) {
-        (false, false) => linear,
-        (true, false) => affine.transform_vector3(linear),
-        (true, true) => linear * owner.to_scale_rotation_translation().0,
-        (false, true) => affine.inverse().transform_vector3(linear * owner.to_scale_rotation_translation().0),
-    };
+    let linear = module_vector(sampled.linear, params.in_world_space, simulation, owner);
     let modifier = sampled.speed_modifier;
     let position = Vec3::from_array(particle.position);
     let local = if world { affine.inverse().transform_point3(position) } else { position };
@@ -62,7 +70,7 @@ mod tests {
 
     fn side() -> Side {
         Side { rand: 0.5, seed: 17, rot: [0.0; 3], size: [1.0; 3], gravity: 0.0,
-            colour: [1.0; 4], total_velocity: [0.0; 3] }
+            colour: [1.0; 4], total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2] }
     }
 
     #[test]

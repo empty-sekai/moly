@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::{Effects, EmissionState, EmitterParams, LimitVelocity, MinMaxCurve, RotationOverLifetime};
+use moly_law::particle::noise::NoiseLaw;
 use serde_json::Value;
 use std::collections::HashMap;
 use moly_assets::weather_effect::WeatherEffectLifecycle;
@@ -30,8 +31,8 @@ use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_worl
 /// 同流会在两族上画出同一图形的错觉（逐系统再乘质数散列）。
 const RNG_SEED: u64 = 0x7765_6174_0001_0125;
 
-/// prewarm 快进步长：与运行帧率同一量级（雨链同值）。prewarm 的档位
-/// 语义是「开播前把一个周期快进完」，不是精确复算。
+// Legacy prewarm approximation. The native scheduler law remains separate
+// until its lifecycle, clock and module composition is verified.
 const PREWARM_STEP: f32 = 1.0 / 60.0;
 
 // ---- 资源 ----
@@ -59,6 +60,7 @@ pub(crate) struct WeatherFxRequest {
 pub(crate) struct WeatherFxDoc {
     request_serial: u64,
     handle: Handle<JsonAsset>,
+    animations: Option<Handle<JsonAsset>>,
     tier: String,
     env_site: String,
 }
@@ -144,6 +146,7 @@ pub(crate) struct WeatherFxPlan {
 /// 还差什么，是这条通路唯一诚实的进度量。
 #[derive(Default, Debug)]
 struct Tally {
+    animation_refused: Vec<String>,
     /// 选中条目里这一族的记录数（过 shader 门之后计）。
     records: usize,
     no_renderer: usize,
@@ -221,12 +224,47 @@ impl WeatherFxState {
                     crate::particle_runtime::Geometry::Mesh(_) => "source_mesh",
                     crate::particle_runtime::Geometry::Billboard { .. } => "legacy_billboard",
                 };
+                let sheet = s.texture_sheet.map(|sheet| {
+                    let first = s.side.first();
+                    let uv = mesh.and_then(|mesh| match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+                        Some(bevy::mesh::VertexAttributeValues::Float32x2(uv)) => Some(uv.iter().take(4).copied().collect::<Vec<_>>()),
+                        _ => None,
+                    });
+                    serde_json::json!({"firstSeed": first.map(|p| p.seed),
+                        "firstTablePosition": first.map(|p| sheet.position(p.seed)), "firstUvs": uv})
+                });
                 serde_json::json!({
                     "effect": s.effect, "node": s.node,
                     "alive": s.pool.len(), "born": s.born_total, "died": s.died_total,
                     "poolFull": s.full_total, "integrationRefused": s.refused_total,
                     "playbackTime": s.playback_head,
+                    "nativeBirth": s.native_birth.as_ref().map(|birth|serde_json::json!({
+                        "ownerSeed":birth.owner.map(|owner|owner.seed),
+                        "automaticSeed":birth.owner.map(|owner|owner.automatic),
+                        "initialWords":birth.initial.words,
+                        "emissionWords":birth.emission.random.words,
+                        "firstSeed":s.side.first().map(|side|side.seed),
+                        "firstAgePercent":s.pool.first().map(|particle|particle.age_percent),
+                        "firstInverseLifetime":s.pool.first().map(|particle|particle.inverse_lifetime),
+                    })),
+                    "noiseConsumer": s.noise.as_ref().map(|noise| serde_json::json!({
+                        "ownerSeed": noise.owner_seed,
+                        "automaticSeed": noise.owner.automatic,
+                        "scroll": noise.state.scroll,
+                        "qualifiedLaw": true,
+                    })),
+                    "effectAge": s.effect_clock.age(),
                     "geometry": geometry,
+                    "particleSort": format!("{:?}", s.sort_mode),
+                    "textureSheet": sheet,
+                    "forceOverLifetime": s.force_law.as_ref().map(|law| {
+                        let first = s.side.first().zip(s.pool.first());
+                        serde_json::json!({"worldSpace":law.in_world_space,
+                            "firstSeed": first.map(|(side, _)| side.seed),
+                            "firstAgePercent": first.map(|(_, particle)| particle.normalized_age() * 100.0),
+                            "firstSample": first.map(|(side, particle)| law.sample(side.seed, particle.normalized_age() * 100.0)),
+                            "firstVelocity": first.map(|(_, particle)| particle.velocity)})
+                    }),
                     "emissionSurfaceTriangles": s.emission_surface.as_ref().map(|surface| surface.triangles()),
                     "particleBounds": bounds,
                     "nonFiniteParticles": s.pool.iter().filter(|p| p.position.iter().chain(p.velocity.iter()).any(|v| !v.is_finite())).count(),
@@ -243,6 +281,7 @@ struct LiveWeatherEmitter {
     runtime: Runtime,
     draw: Entity,
     lifecycle: WeatherEffectLifecycle,
+    effect_clock: Arc<crate::weather_animation::EffectClock>,
 }
 impl std::ops::Deref for LiveWeatherEmitter {
     type Target = Runtime;
@@ -350,9 +389,12 @@ pub(crate) fn parse(
         .to_owned();
     let handle =
         server.load::<JsonAsset>(AssetPath::from(format!("moly://phenomena/{file}")));
+    let animations = value.pointer(&format!("/phenomena/{}/animations/file", request.tier))
+        .and_then(Value::as_str).map(|file| server.load::<JsonAsset>(AssetPath::from(format!("moly://phenomena/{file}"))));
     commands.insert_resource(WeatherFxDoc {
         request_serial:request.request_serial,
         handle,
+        animations,
         tier: request.tier.clone(),
         env_site: request.env_site.clone(),
     });
@@ -387,6 +429,13 @@ pub(crate) fn plan(
     let Some(effects) = value.get("effects").and_then(Value::as_object) else {
         panic!("现象 {} 的特效档案缺 effects 对象", doc.tier);
     };
+    let animation_document = if let Some(handle) = &doc.animations {
+        if let LoadState::Failed(err) = server.load_state(handle) {
+            panic!("现象 {} 的动画源档案装载失败：{err:?}", doc.tier);
+        }
+        let Some(asset) = json.get(handle) else { return; };
+        Some(serde_json::from_str::<Value>(&asset.0).unwrap_or_else(|err| panic!("weather animation source JSON: {err}")))
+    } else { None };
 
     // ---- 选 effect：sky/camera 各一条（专属优先、全局回退），site 全装 ----
     // 语料里每个 (档, 类) 至多一个匹配，挑选与对象序无关。
@@ -427,6 +476,8 @@ pub(crate) fn plan(
     let mut tally = Tally::default();
     let mut plans = Vec::new();
     for (effect_name, effect) in &selected {
+        let animation = crate::weather_animation::Contract::compile(effect, animation_document.as_ref());
+        info!("[weather-animation] {} {}", effect_name, animation.report);
         let lifecycle = WeatherEffectLifecycle::from_effect(effect)
             .unwrap_or_else(|err| panic!("weather effect {effect_name}: {err}"));
         let kind = match effect_kind_of(effect) {
@@ -452,6 +503,11 @@ pub(crate) fn plan(
         };
         let sub_emitter_owners = source_sub_emitter_owners(particles);
         for particle in particles {
+            if let Some(reason) = particle["node"].as_str().and_then(|node| animation.refusal(node)) {
+                tally.records += 1;
+                tally.animation_refused.push(format!("{effect_name}/{}: {reason}", particle["node"].as_str().unwrap_or("")));
+                continue;
+            }
             match judge(
                 effect_name,
                 particle,
@@ -513,6 +569,9 @@ pub(crate) fn plan(
         tally.start_delay,
         count_names(&tally.shading_shortfall),
     );
+    if !tally.animation_refused.is_empty() {
+        warn!("[weather-animation] source playback refused: {:?}", tally.animation_refused);
+    }
     let Some(selection) = phase.destination.as_ref().filter(|selection| selection.name == doc.tier && selection.environment_site == doc.env_site) else { return; };
     for (ordinal, planned) in plans.iter_mut().enumerate() { planned.ordinal = ordinal; }
     commands.insert_resource(WeatherFxPlan {
@@ -528,14 +587,42 @@ pub(crate) fn plan(
 /// Module capability is checked from the complete serialized inventory, not
 /// just whichever parameters an older producer happened to emit.
 fn source_simulation_admission(system: &Value) -> Result<(), String> {
+    // Preserve +Infinity at the schema boundary, but reject the unverified
+    // scheduler before any other module capability can hide this gap.
+    if system.get("emission").and_then(|v| v.get("bursts")).and_then(Value::as_array)
+        .is_some_and(|bursts| bursts.iter().any(|burst|
+            burst.get("repeatInterval").and_then(Value::as_str) == Some("Infinity")))
+    {
+        return Err("source infinite burst repeat interval scheduling is not yet verified".into());
+    }
     let source = moly_assets::particle_source::ParticleSourceModules::from_system(system)?;
     for module in &source.enabled {
+        // The current snow owner carries an authored null SubModule edge
+        // (emitter=null, sourcePointer 0/0). It does not name a child system
+        // and therefore adds no runtime scheduling obligation. Keep real
+        // non-null SubModule edges gated below via the ordinary capability
+        // rejection path.
+        if module == "SubModule"
+            && system.get("subEmitters").and_then(Value::as_array).is_some_and(|entries| {
+                !entries.is_empty()
+                    && entries.iter().all(|entry| entry.get("emitter") == Some(&Value::Null)
+                        && entry.pointer("/sourcePointer/fileId").and_then(Value::as_i64) == Some(0)
+                        && entry.pointer("/sourcePointer/pathId").and_then(Value::as_str) == Some("0"))
+            })
+        {
+            continue;
+        }
         let field = match module.as_str() {
             "InitialModule" => "start", "EmissionModule" => "emission",
             "ShapeModule" => "shape", "ColorModule" => "colorOverLifetime",
             "SizeModule" => "sizeOverLifetime", "RotationModule" => "rotationOverLifetime",
             "VelocityModule" => "velocityOverLifetime", "ClampVelocityModule" => "limitVelocity",
-            "CustomDataModule" => "customData",
+            "CustomDataModule" => "customData", "UVModule" => "textureSheet",
+            "ForceModule" => "forceOverLifetime",
+            // The isolated Noise kernel/consumer is verified, but its source
+            // birth stream, Shape and prewarm composition still use the legacy
+            // runtime path. A finite-particle smoke test is not a native replay.
+            "NoiseModule" => return Err("enabled source module NoiseModule: native birth/Shape/prewarm composition is not yet verified".into()),
             _ => return Err(format!("enabled source module {module} has no runtime consumer")),
         };
         if !system.get(field).is_some_and(Value::is_object) {
@@ -799,8 +886,24 @@ fn judge(
             return None;
         }
     };
-    // 起始延迟：语料全 0；非 0 的发射次序未实现，具名挡下。
+    if let Some(sheet) = &emitter.texture_sheet {
+        if let Err(error) = moly_law::particle::texture_sheet::TextureSheet::from_params(sheet) {
+            tally.law_reject.push(format!("{node}: {error}")); return None;
+        }
+    }
+    if let Some(noise) = &emitter.noise {
+        if let Err(error) = NoiseLaw::from_params(noise) {
+            tally.law_reject.push(format!("{node}: {error}")); return None;
+        }
+    }
+    if let Some(force) = &emitter.force {
+        if let Err(error) = moly_law::particle::force::ForceOverLifetime::from_params(force) {
+            tally.law_reject.push(format!("{node}: {error}")); return None;
+        }
+    }
     if const_of(&emitter.start_delay) != Some(0.0) {
+        // Current source includes nonzero delays. Their emission clock and
+        // existing-particle simulation are separate native paths, still pending.
         tally.start_delay += 1;
         return None;
     }
@@ -1040,6 +1143,7 @@ pub(crate) fn spawn_when_ready(
     plan: Option<ResMut<WeatherFxPlan>>,
     mut active: Option<ResMut<WeatherFxState>>,
     mut retiring: ResMut<WeatherFxRetirements>,
+    mut seed_manager: ResMut<crate::particle_runtime::seed::SystemSeedManager>,
     anchor: Option<Res<WeatherFxAnchor>>,
     phase: Res<WeatherTransition>,
     time: Res<Time>,
@@ -1119,6 +1223,22 @@ pub(crate) fn spawn_when_ready(
         }
     }
     if !plan.planned.iter().all(|p| matches!(*p.source.readiness.lock().unwrap(), ParticleReadiness::Ready)) { return; }
+    // Prepare the fallible entropy service before retiring the previous scene
+    // or publishing readiness. This does not draw any system seed. A transient
+    // failure retains the plan and existing instances for the next attempt.
+    for planned in &plan.planned {
+        if !crate::particle_runtime::native_birth_eligible(&planned.emitter) { continue; }
+        if planned.emitter.random_seed.is_none() || planned.emitter.auto_random_seed.is_none() {
+            error!(node=%planned.node, "weather source seed ownership is unknown");
+            return;
+        }
+        if planned.emitter.auto_random_seed == Some(true) {
+            if let Err(error) = seed_manager.try_init() {
+                error!(%error, "weather seed entropy preparation failed");
+                return;
+            }
+        }
+    }
     commands.insert_resource(WeatherFxPrepared {selection:plan.selection.clone(),request_serial:plan.request_serial});
     if !phase.can_start_site_fx(&plan.selection) { return; }
 
@@ -1160,6 +1280,9 @@ pub(crate) fn spawn_when_ready(
         commands.insert_resource(crate::weather_transition::WeatherGlobalFxCommitted(plan.request_serial));
     }
     let mut waiting = Vec::new();
+    // Clocks belong to instantiated effects. They are shared by their emitters,
+    // preserved with unchanged global instances, and move intact into retirement.
+    let mut effect_clocks: HashMap<String, Arc<crate::weather_animation::EffectClock>> = HashMap::new();
     for planned in std::mem::take(&mut plan.planned) {
         let is_global = planned.kind != EffectKind::Site;
         if (is_global && preserve_global) || (!is_global && site_timed_out) {
@@ -1171,9 +1294,12 @@ pub(crate) fn spawn_when_ready(
         }
         let (draw, mesh) = planned.draw.expect("GPU preflight must precede installation");
         let mut source = planned.source;
+        let sort_mode = source.sort_mode;
         source.enabled = true;
         commands.entity(draw).remove::<WeatherFxPreflight>().insert((source, WeatherFxDraw));
-        state.live.push(LiveWeatherEmitter { draw, lifecycle: planned.lifecycle, runtime: Runtime {
+        let effect_clock = effect_clocks.entry(planned.effect.clone())
+            .or_insert_with(|| Arc::new(crate::weather_animation::EffectClock::new(now))).clone();
+        state.live.push(LiveWeatherEmitter { draw, lifecycle: planned.lifecycle, effect_clock, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
             emitter: planned.emitter.clone(),
@@ -1191,6 +1317,8 @@ pub(crate) fn spawn_when_ready(
             playback_head: 0.0,
             previous_head: 0.0,
             emission_started: false,
+            native_birth: None,
+            noise: None,
             // 逐系统换一条流：同一个种子在所有系统上会画出同一个图形。
             rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             prewarmed: false,
@@ -1199,15 +1327,65 @@ pub(crate) fn spawn_when_ready(
             limit: planned.limit.clone(),
             velocity_law: planned.emitter.velocity_over_lifetime.as_ref()
                 .map(moly_law::particle::velocity::VelocityOverLifetime::from_params),
+            force_law: planned.emitter.force.as_ref().map(|p|
+                moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
+            gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier),
             size_law: planned.emitter.size_over_lifetime.as_ref()
                 .map(moly_law::particle::size::SizeOverLifetime::from_params),
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
+            custom_law: planned.emitter.custom_data.as_ref()
+                .map(moly_law::particle::custom_data::CustomData::from_params),
+            texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
+                moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
+            sort_mode,
             born_total: 0,
             died_total: 0,
             full_total: 0,
             refused_total: 0,
         }});
+        let mut failed = false;
+        {
+            let live = state.live.last_mut().expect("just installed source instance");
+            match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager) {
+                Ok(true) => info!(node=%live.node, "weather native birth owner installed"),
+                Ok(false) => {},
+                Err(error) => {
+                    error!(%error, node=%live.node, "weather source seed owner unavailable");
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            let failed = state.live.pop().expect("just installed source instance");
+            commands.entity(failed.draw).try_despawn();
+            continue;
+        }
+        // Noise has its own source owner/reset stream. The source simulation
+        // gate currently keeps unverified compositions out, but qualified
+        // Noise consumers are installed here once that gate is lifted; this
+        // does not admit Snow or prewarm systems by itself.
+        let install_noise = state.live.last().is_some_and(|live| {
+            live.emitter.noise.is_some() && live.native_birth.is_none()
+        });
+        if install_noise {
+            let mut noise_failed = false;
+            {
+                let live = state.live.last_mut().expect("just installed source instance");
+                match crate::particle_runtime::install_noise_consumer(&mut live.runtime, &mut seed_manager) {
+                    Ok(true) => info!(node=%live.node, "weather noise owner installed"),
+                    Ok(false) => {},
+                    Err(error) => {
+                        error!(%error, node=%live.node, "weather Noise owner unavailable");
+                        noise_failed = true;
+                    }
+                }
+            }
+            if noise_failed {
+                let failed = state.live.pop().expect("just installed source instance");
+                commands.entity(failed.draw).try_despawn();
+            }
+        }
     }
     plan.planned = waiting;
     state.admitted = state.live.len();
@@ -1231,6 +1409,13 @@ pub(crate) fn advance(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     avatars: Query<&GlobalTransform, With<AvatarRoot>>,
 ) {
+    // Observe instance age even when no camera can produce a particle draw.
+    // This records effect lifecycle time, not a claimed Unity Animator phase.
+    let now = time.elapsed_secs_f64();
+    for live in state.as_deref().into_iter().flat_map(|state| &state.live)
+        .chain(retiring.live.iter().map(|entry| &entry.emitter)) {
+        live.effect_clock.observe(now);
+    }
     if state.as_ref().is_none_or(|s| s.live.is_empty()) && retiring.live.is_empty() { return; }
     // 相机拿不到就整帧跳过：不造替身机位（上一帧的属性池还在，几何
     // 不会闪成错的）。
@@ -1272,12 +1457,9 @@ pub(crate) fn advance(
         // prewarm 只出现在循环系统上（49/49），非循环的 prewarm 未实现。
         if emitting && !system.prewarmed {
             system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping && system.emitter.duration > 0.0
-            {
+            if system.emitter.prewarm && system.emitter.looping && system.emitter.duration > 0.0 {
                 let steps = (system.emitter.duration / PREWARM_STEP).max(1.0) as usize;
-                for _ in 0..steps {
-                    simulate(system, PREWARM_STEP, &ctx);
-                }
+                for _ in 0..steps { simulate(system, PREWARM_STEP, &ctx); }
             }
         }
         let step = dt * system.emitter.simulation_speed;
