@@ -213,15 +213,56 @@ export function resourceOrigin(value) {
     throw new TypeError("Expected a canonical HTTPS resource origin");
   return url.origin;
 }
-export function resourceDirectory(value, base, configuredOrigin = undefined) {
+/**
+ * Explicit public object-store root.  Unlike resourceOrigin this includes the
+ * provider path (`/sekai-extra-assets/`).  Every remote asset and release URL
+ * must be derived from this value; there is deliberately no CDN fallback.
+ */
+export function resourceBase(value) {
+  if (typeof value !== "string" || /[\\\x00-\x20\x7f]/.test(value))
+    throw new TypeError("Expected a canonical HTTPS resource base");
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:" || !url.hostname || url.username || url.password ||
+    !url.pathname.endsWith("/") || url.search || url.hash ||
+    /%2f|%5c|%00/i.test(url.pathname) ||
+    value !== url.href
+  )
+    throw new TypeError("Expected a canonical HTTPS resource base");
+  return url.href;
+}
+
+function remoteDirectoryPath(path, configured) {
+  const configuredUrl = configured === undefined || configured === null
+    ? null
+    : new URL(configured);
+  if (!configuredUrl || configuredUrl.protocol !== "https:" ||
+      configuredUrl.username || configuredUrl.password || configuredUrl.search ||
+      configuredUrl.hash || !configuredUrl.pathname.endsWith("/"))
+    return null;
+  // `resourceOrigin` is retained only for the old `/moly/` deployment.  New
+  // deployments must pass the complete resource_base, including its prefix.
+  if (configuredUrl.pathname === "/") {
+    if (path.startsWith("/moly/snapshots/") || path === "/moly/asset-store/")
+      return path.slice("/moly/".length);
+    return null;
+  }
+  if (!path.startsWith(configuredUrl.pathname)) return null;
+  return path.slice(configuredUrl.pathname.length);
+}
+
+function isRemoteAssetDirectory(path) {
+  return /^(?:snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/|asset-store\/)$/.test(path);
+}
+
+export function resourceDirectory(value, base, configuredBase = undefined) {
   const url = new URL(value, base);
   if (url.origin === new URL(base).origin) return sameOriginDirectory(value, base);
-  if (resourceOrigin(url.origin) !== url.origin ||
-      (configuredOrigin !== undefined && resourceOrigin(configuredOrigin) !== url.origin) ||
-      url.username || url.password ||
-      url.search || url.hash || /[%\\\x00-\x20\x7f]/.test(url.pathname) ||
-      !/^\/moly\/(?:snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/|asset-store\/)$/.test(url.pathname) ||
-      value !== url.href)
+  if (!configuredBase || resourceOrigin(url.origin) !== url.origin ||
+      resourceOrigin(new URL(configuredBase).origin) !== url.origin ||
+      url.username || url.password || url.search || url.hash ||
+      /[%\\\x00-\x20\x7f]/.test(url.pathname) || value !== url.href ||
+      !isRemoteAssetDirectory(remoteDirectoryPath(url.pathname, configuredBase)))
     throw new TypeError("Expected a configured public Moly resource directory");
   return url;
 }

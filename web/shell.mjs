@@ -26,9 +26,12 @@ function action(text, className, click) {
 export class ExperienceShell {
   constructor(assetBase, options = {}) {
     this.assetBase = assetBase;
+    this.resourceBase = options.resourceBase;
     this.packClient =
       options.packs || options.assetCatalog
-        ? new PackClient(assetBase, options.assetCatalog ?? null)
+        ? new PackClient(assetBase, options.assetCatalog ?? null, {
+            resourceBase: options.resourceBase,
+          })
         : null;
     this.packedImages = this.packClient
       ? new PackedImages(this.packClient)

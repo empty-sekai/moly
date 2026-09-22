@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { stripDebugNames, splitCatalog, STAGE_FILES, verifyPortraitCoordinateMigration } from "./release-artifact.mjs";
+import { stripDebugNames, splitCatalog, STAGE_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest } from "./release-artifact.mjs";
 import { sha256 } from "./build-source.mjs";
 import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
 
@@ -15,6 +15,30 @@ test("published stage includes every statically imported local module", () => {
     for (const match of source.matchAll(/\bfrom\s+["']\.\/([^"']+\.mjs)["']/g))
       assert.ok(shipped.has(match[1]), `${name} imports unpublished ${match[1]}`);
   }
+});
+test("S3 publication projection removes host-only /moly prefixes from descriptors", () => {
+  const source = {
+    release: {
+      module: "/moly/releases/stage-a/embed.mjs",
+      stage: "/moly/releases/stage-a/stage.html",
+      engines: { webgpu: { decodedBytes: 1 } },
+    },
+    snapshots: [
+      {
+        id: "cn-a",
+        assets: "/moly/snapshots/cn-a/assets/",
+        catalog: "/moly/snapshots/cn-a/catalog/index.json",
+      },
+      { id: "cn-packed", assets: "/moly/asset-store/", catalog: "/moly/snapshots/cn-packed/catalog/index.json" },
+    ],
+  };
+  const projected = toLogicalResourceManifest(source);
+  assert.equal(projected.release.module, "releases/stage-a/embed.mjs");
+  assert.equal(projected.release.stage, "releases/stage-a/stage.html");
+  assert.equal(projected.snapshots[0].assets, "snapshots/cn-a/assets/");
+  assert.equal(projected.snapshots[0].catalog, "snapshots/cn-a/catalog/index.json");
+  assert.equal(projected.snapshots[1].assets, "asset-store/");
+  assert.equal(source.release.module, "/moly/releases/stage-a/embed.mjs");
 });
 
 const header = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);

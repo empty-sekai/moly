@@ -15,7 +15,7 @@ export function validateCoordinateSources(documents, { region, version }) {
   if (source?.region !== region || source.appVersion !== version)
     throw new Error("Coordinate source manifest region/version mismatch");
   const packages = documents["fixture-models/index.json"].packages;
-  if (documents["fixture-models/index.json"].version !== 3 || documents["fixture-attach/attach-points.json"].version !== 2)
+  if (![3, 4].includes(documents["fixture-models/index.json"].version) || documents["fixture-attach/attach-points.json"].version !== 2)
     throw new Error("Coordinate source document schema mismatch; re-export this snapshot");
   if (!packages || typeof packages !== "object" || Array.isArray(packages))
     throw new Error("Coordinate fixture index has no package identities");
@@ -65,7 +65,7 @@ const parse = bytes => JSON.parse(new TextDecoder("utf-8", { fatal: true }).deco
 /** Validate the source before requesting/initializing WASM. Old immutable
  * releases keep their own old module; this module belongs only to the v1 engine. */
 export async function preflightCoordinates(options, { fetchImpl = fetch, signal } = {}) {
-  const { assets, region, version, packs, assetCatalog, stageUrl } = options;
+  const { assets, region, version, packs, assetCatalog, stageUrl, resourceBase } = options;
   const base = new URL(assets), stage = new URL(stageUrl);
   const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(stage.pathname)?.[1];
   const looseId = /^\/moly\/snapshots\/([a-z0-9][a-z0-9._-]{0,95})\/assets\/$/.exec(base.pathname)?.[1];
@@ -76,19 +76,28 @@ export async function preflightCoordinates(options, { fetchImpl = fetch, signal 
   if (snapshotId) {
     if (!/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshotId)) throw new Error("Invalid coordinate snapshot identity");
     const origin = options.resourceOrigin || stage.origin;
+    const remoteBase = resourceBase ? new URL(resourceBase) : null;
     const [releaseBytes, snapshotBytes] = await Promise.all([
       bytesFrom(new URL("./integrity.json", stage), 1048576, fetchImpl, signal),
-      bytesFrom(new URL(`/moly/snapshots/${snapshotId}/snapshot.json`, origin), 1048576, fetchImpl, signal),
+      bytesFrom(remoteBase
+        ? new URL(`snapshots/${snapshotId}/snapshot.json`, remoteBase)
+        : new URL(`/moly/snapshots/${snapshotId}/snapshot.json`, origin),
+        1048576, fetchImpl, signal),
     ]);
     snapshot = parse(snapshotBytes);
     if (!releaseId) throw new Error("Coordinate release is not an immutable stage path");
     validateCoordinatePair(parse(releaseBytes), snapshot, { region, version, snapshotId, releaseId,
       ...(packs ? { assetCatalog } : {}) });
-    const expectedAssets = packs ? "/moly/asset-store/" : `/moly/snapshots/${snapshotId}/assets/`;
-    if (snapshot.assets !== expectedAssets || Boolean(snapshot.packs) !== Boolean(packs))
+    const expectedAssets = packs
+      ? (remoteBase ? "asset-store/" : "/moly/asset-store/")
+      : (remoteBase ? `snapshots/${snapshotId}/assets/` : `/moly/snapshots/${snapshotId}/assets/`);
+    const publishedAssets = remoteBase && typeof snapshot.assets === "string"
+      ? snapshot.assets.replace(/^\//, "")
+      : snapshot.assets;
+    if (publishedAssets !== expectedAssets || Boolean(snapshot.packs) !== Boolean(packs))
       throw new Error("Coordinate snapshot asset routing mismatch");
   } else if (packs) throw new Error("Packed coordinate preflight requires an explicit snapshot identity");
-  const client = packs ? new PackClient(assets, assetCatalog, { fetchImpl, signal, required: true }) : null;
+  const client = packs ? new PackClient(assets, assetCatalog, { fetchImpl, signal, required: true, resourceBase }) : null;
   const documents = {};
   for (const name of COORDINATE_DOCUMENTS) {
     const bytes = client ? await client.read(name) : await bytesFrom(new URL(name, base), 32 * 1048576, fetchImpl, signal);

@@ -7,6 +7,7 @@ import {
   intent,
   sameOriginDirectory,
   resourceDirectory,
+  resourceBase,
   resourceOrigin,
   EMBED_VERSION,
 } from "./embed-contract.mjs";
@@ -116,6 +117,21 @@ test("public resources support changing the configured HTTPS origin without rebu
   ]) assert.throws(() => resourceDirectory(value, base, cdn), value);
   for (const value of ["http://other.test", "https://other.test/api/", "https://user@other.test", "https://other.test?key=private", "https://other.test/#fragment"])
     assert.throws(() => resourceOrigin(value));
+});
+test("production object-store roots are explicit and use logical keys without /moly", () => {
+  const root = "https://assets.pjsk.moe/sekai-extra-assets/";
+  assert.equal(resourceBase(root), root);
+  assert.equal(
+    resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/", root).href,
+    root + "snapshots/cn-test/assets/",
+  );
+  assert.equal(
+    resourceDirectory(root + "asset-store/", "https://host.test/", root).href,
+    root + "asset-store/",
+  );
+  assert.throws(() => resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/"));
+  assert.throws(() => resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/", "https://assets.pjsk.moe/other/"));
+  assert.throws(() => resourceBase("https://assets.pjsk.moe/sekai-extra-assets"));
 });
 test("wrong source snapshot rejects pending Play without admitting any action", () => {
   const d = driver({ region: "jp", version: "6.8.1" });
@@ -282,6 +298,27 @@ test("CDN resources preserve same-origin iframe and the synchronous activation g
     gate.addEventListener("click", () => { activated = true; });
     handle.play("talk:fixture:6177");
     assert.equal(activated, true);
+  } finally {
+    handle?.dispose();
+    env.cleanup();
+  }
+});
+
+test("production S3 resource_base keeps the iframe same-origin and emits the full prefix", () => {
+  const env = dom();
+  let handle;
+  try {
+    const root = "https://assets.pjsk.moe/sekai-extra-assets/";
+    handle = mountStage(env.target, {
+      ...options,
+      assets: root + "snapshots/cn-test/assets/",
+      resourceBase: root,
+    });
+    const source = new URL(handle.frame.src);
+    assert.equal(source.origin, env.window.location.origin);
+    assert.equal(source.searchParams.get("assets"), root + "snapshots/cn-test/assets/");
+    assert.equal(source.searchParams.get("resource_base"), root);
+    assert.equal(source.searchParams.get("resource_origin"), "https://assets.pjsk.moe");
   } finally {
     handle?.dispose();
     env.cleanup();

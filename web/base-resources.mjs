@@ -98,6 +98,7 @@ export async function warmBaseResources(
           fetchImpl,
           signal,
           required: true,
+          resourceBase: options.resourceBase,
         })
       : null;
   const bytes = client

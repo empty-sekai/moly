@@ -8,6 +8,7 @@ import {
   filters,
   intent,
   resourceDirectory,
+  resourceBase,
   resourceOrigin,
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
@@ -28,6 +29,7 @@ let configuration = null,
   wasm = null,
   controller = null,
   backend = null;
+let configuredResourceBase = null;
 let lastPlayerData = "";
 // The last weather block the runtime published. The dial is drawn from it and
 // the selector admits only IDs the runtime itself listed, so the stage never
@@ -51,6 +53,7 @@ function weatherPresentationOptions() {
     region,
     assets: params.get("assets"),
     baseUrl: location.href,
+    resourceBase: configuredResourceBase,
     packed: params.get("packs") === "1" || Boolean(params.get("asset_catalog")),
     iconUrls: weatherIconUrls,
   };
@@ -259,19 +262,32 @@ async function loadEngine() {
   try {
     if (!["cn", "jp", "tw", "en", "kr"].includes(region))
       throw new Error("An explicit supported resource region is required");
-    const publicOrigin = resourceOrigin(params.get("resource_origin"));
-    resourceDirectory(params.get("assets") || "", location.href, publicOrigin);
+    const configuredBase = params.get("resource_base")
+      ? resourceBase(params.get("resource_base"))
+      : undefined;
+    const publicOrigin = resourceOrigin(params.get("resource_origin") ??
+      (configuredBase ? new URL(configuredBase).origin : undefined));
+    if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
+      throw new Error("resource_origin must match resource_base");
+    resourceDirectory(
+      params.get("assets") || "",
+      location.href,
+      configuredBase ?? publicOrigin,
+    );
+    configuredResourceBase = configuredBase;
     try {
       await preflightCoordinates({
         assets: new URL(params.get("assets"), location.href).href, region, version,
         packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
-        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href, resourceOrigin: publicOrigin,
+        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href,
+        resourceOrigin: publicOrigin, resourceBase: configuredBase,
       }, { signal: abort.signal });
       lastChunk = performance.now();
     } catch (error) { fail("source_mismatch", error); throw error; }
     weatherArtwork = createWeatherArtwork({
       assets: params.get("assets"),
       baseUrl: location.href,
+      resourceBase: configuredBase,
       packs: params.get("packs") === "1",
       assetCatalog: params.get("asset_catalog"),
     });
@@ -280,6 +296,7 @@ async function loadEngine() {
         region,
         version,
         assets: new URL(params.get("assets"), location.href).href,
+        resourceBase: configuredBase,
         packs: params.get("packs") === "1",
         assetCatalog: params.get("asset_catalog") ?? undefined,
       },
@@ -299,9 +316,18 @@ async function loadEngine() {
     backend = renderer.backend;
     mark("backendSelected");
     const localPath = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
-    if (publicOrigin && !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/pkg\/(?:webgpu|webgl2)\/moly-app\.js$/.test(localPath.pathname))
-      throw new Error("Invalid immutable engine path");
-    const path = publicOrigin ? new URL(localPath.pathname, publicOrigin) : localPath;
+    const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
+    let path;
+    if (configuredBase) {
+      if (!releaseId) throw new Error("Invalid immutable stage path");
+      path = new URL(`releases/${releaseId}/pkg/${backend}/moly-app.js`, configuredBase);
+      if (!path.pathname.startsWith(new URL(configuredBase).pathname + "releases/"))
+        throw new Error("Invalid immutable engine path");
+    } else {
+      if (publicOrigin && !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/pkg\/(?:webgpu|webgl2)\/moly-app\.js$/.test(localPath.pathname))
+        throw new Error("Invalid immutable engine path");
+      path = publicOrigin ? new URL(localPath.pathname, publicOrigin) : localPath;
+    }
     const module = await import(path.href);
     if (typeof module.start_stage !== "function")
       throw new Error("Runtime does not implement the stage contract");

@@ -9,6 +9,7 @@ import {
   locale as checkedLocale,
   theme as checkedTheme,
   resourceDirectory,
+  resourceBase,
   resourceOrigin,
   contentKey,
   MAX_PENDING_INTENTS,
@@ -65,10 +66,21 @@ export function mountStage(container, options = {}) {
   url.searchParams.set("embed", "1");
   url.searchParams.set("theme", ui.theme.mode);
   url.searchParams.set("locale", ui.locale);
-  const publicOrigin = resourceOrigin(options.resourceOrigin);
-  const assetRoot = resourceDirectory(options.assets, location.href, publicOrigin);
+  const configuredBase = options.resourceBase === undefined
+    ? undefined
+    : resourceBase(options.resourceBase);
+  const publicOrigin = resourceOrigin(options.resourceOrigin ??
+    (configuredBase ? new URL(configuredBase).origin : undefined));
+  if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
+    throw new TypeError("resourceOrigin must match resourceBase");
+  const assetRoot = resourceDirectory(
+    options.assets,
+    location.href,
+    configuredBase ?? publicOrigin,
+  );
   url.searchParams.set("assets", assetRoot.origin === location.origin ? assetRoot.pathname : assetRoot.href);
   if (publicOrigin) url.searchParams.set("resource_origin", publicOrigin);
+  if (configuredBase) url.searchParams.set("resource_base", configuredBase);
   applyPackSelection(url, options);
   if (options.snapshot) url.searchParams.set("snapshot", options.snapshot);
   if (!["cn", "jp", "tw", "en", "kr"].includes(options.region))

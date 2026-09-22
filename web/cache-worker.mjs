@@ -28,6 +28,21 @@ export function clientResourceOrigin(clientUrl, origin) {
   } catch { return null; }
 }
 
+/** The complete object-store prefix selected by a stage, when present. */
+export function clientResourceBase(clientUrl, origin) {
+  try {
+    const client = new URL(clientUrl);
+    if (client.origin !== origin || client.username || client.password ||
+        !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/stage\.html$/.test(client.pathname)) return null;
+    const value = client.searchParams.get("resource_base");
+    if (!value) return null;
+    const base = new URL(value);
+    return base.protocol === "https:" && base.origin && !base.username && !base.password &&
+      !base.search && !base.hash && base.pathname.endsWith("/") && value === base.href
+      ? base.href : null;
+  } catch { return null; }
+}
+
 /** Only currently open stages protect an engine or a source's base resources.
  * The persisted required list describes base membership, not a permanent pin. */
 export function activeResourceRoots(clients, origin) {
@@ -38,16 +53,22 @@ export function activeResourceRoots(clients, origin) {
       const release = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(url.pathname);
       if (url.origin !== origin || !release || url.username || url.password) continue;
       const remote = clientResourceOrigin(client.url, origin);
+      const remoteBase = clientResourceBase(client.url, origin);
       const releasePath = `/moly/releases/${release[1]}/`;
       releases.add(origin + releasePath);
       if (remote) releases.add(remote + releasePath);
+      if (remoteBase) releases.add(new URL(`releases/${release[1]}/`, remoteBase).href);
       const value = url.searchParams.get("assets");
       if (!value) continue;
       const assets = new URL(value, url);
       if ((assets.origin !== origin && assets.origin !== remote) || assets.username || assets.password ||
           assets.search || assets.hash || /[%\\]/.test(assets.pathname)) continue;
-      if (/^\/moly\/snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/$/.test(assets.pathname)) snapshots.add(assets.href);
-      else if (url.searchParams.get("packs") === "1" && assets.pathname === "/moly/asset-store/") shared.add(assets.href);
+      const basePath = remoteBase ? new URL(remoteBase).pathname : "/moly/";
+      if (assets.origin === (remoteBase ? new URL(remoteBase).origin : remote) &&
+          assets.pathname.startsWith(basePath) &&
+          /^snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/$/.test(assets.pathname.slice(basePath.length))) snapshots.add(assets.href);
+      else if (url.searchParams.get("packs") === "1" && assets.origin === (remoteBase ? new URL(remoteBase).origin : remote) &&
+          assets.pathname === basePath + "asset-store/") shared.add(assets.href);
     } catch { /* An unrelated or invalid client cannot pin resources. */ }
   }
   return { releases, snapshots, shared };
@@ -109,7 +130,7 @@ export class CacheAdmission {
   }
 }
 
-export function resourceIdentity(value, origin, configuredOrigin = null) {
+export function resourceIdentity(value, origin, configuredOrigin = null, configuredBase = null) {
   let url;
   try { url = new URL(value, origin); } catch { return null; }
   if (
@@ -122,8 +143,19 @@ export function resourceIdentity(value, origin, configuredOrigin = null) {
     /%2f|%5c|%00/i.test(url.pathname)
   )
     return null;
-  const shared = url.pathname.match(
-    /^\/moly\/asset-store\/(?:(blobs)\/([a-f0-9]{2})\/([a-f0-9]{64})\.(bin|gzz|brz|br)|(packages|catalogs)\/([a-f0-9]{64})\.json)$/,
+  const basePath = configuredBase ? (() => {
+    try {
+      const base = new URL(configuredBase);
+      return base.origin === url.origin && base.pathname.endsWith("/") ? base.pathname : null;
+    } catch { return null; }
+  })() : null;
+  const logicalPath = basePath && url.pathname.startsWith(basePath)
+    ? url.pathname.slice(basePath.length)
+    : url.pathname.startsWith("/moly/")
+      ? url.pathname.slice("/moly/".length)
+      : null;
+  const shared = logicalPath && logicalPath.match(
+    /^asset-store\/(?:(blobs)\/([a-f0-9]{2})\/([a-f0-9]{64})\.(bin|gzz|brz|br)|(packages|catalogs)\/([a-f0-9]{64})\.json)$/,
   );
   if (shared) {
     const sha256 = shared[3] || shared[6];
@@ -136,10 +168,7 @@ export function resourceIdentity(value, origin, configuredOrigin = null) {
       maximum: shared[1] ? MAX_ENTRY : 16 * 1024 * 1024,
     };
   }
-  const match =
-    /^\/moly\/(releases|snapshots)\/([a-z0-9][a-z0-9._-]{0,95})\/(.+)$/.exec(
-      url.pathname,
-    );
+  const match = logicalPath && /^(releases|snapshots)\/([a-z0-9][a-z0-9._-]{0,95})\/(.+)$/.exec(logicalPath);
   if (
     !match ||
     match[3]
@@ -153,8 +182,8 @@ export function resourceIdentity(value, origin, configuredOrigin = null) {
   };
 }
 /** Only a trusted, source-qualified measured pack can protect assets. */
-export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin = null) {
-  const identity = resourceIdentity(descriptor, origin, configuredOrigin);
+export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin = null, configuredBase = null) {
+  const identity = resourceIdentity(descriptor, origin, configuredOrigin, configuredBase);
   if (
     !identity ||
     pack?.schemaVersion !== 1 ||
@@ -166,12 +195,10 @@ export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin 
   )
     return [];
   const url = new URL(descriptor);
-  if (
-    !url.pathname.startsWith(
-      `/moly/snapshots/${pack.region}-${pack.gameVersion}-`,
-    ) ||
-    !url.pathname.endsWith("/assets/browser-base.json")
-  )
+  const root = configuredBase ? new URL(configuredBase).pathname : "/moly/";
+  if (!url.pathname.startsWith(
+      `${root}snapshots/${pack.region}-${pack.gameVersion}-`,
+    ) || !url.pathname.endsWith("/assets/browser-base.json"))
     return [];
   const base = new URL("./", url);
   const urls = [url.href];
@@ -184,7 +211,7 @@ export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin 
       return [];
     const child = new URL(file.path, base);
     if (
-      !resourceIdentity(child.href, origin, configuredOrigin) ||
+      !resourceIdentity(child.href, origin, configuredOrigin, configuredBase) ||
       !child.pathname.startsWith(base.pathname)
     )
       return [];
@@ -381,16 +408,25 @@ if (
     if (/^\/moly\/snapshots\/[^/]+\/catalog\/entries\/[^/]+\.json$/.test(new URL(request.url).pathname)) return;
     // Prefilter immutable paths synchronously; cross-origin admission also
     // requires the requesting stage client's current configuration.
-    const candidate =
-      request.method === "GET" && !request.headers.has("Range")
-        ? resourceIdentity(request.url, self.location.origin, new URL(request.url).origin)
-        : null;
+    const candidateUrl = new URL(request.url);
+    // The prefix is intentionally not baked into the worker.  A stage may
+    // select any explicit object-store root; this broad prefilter only admits
+    // immutable logical suffixes, while the asynchronous identity check below
+    // still requires the requesting client's exact resource_base.
+    const logicalCandidate =
+      !/%2f|%5c|%00/i.test(candidateUrl.pathname) &&
+      (/(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(candidateUrl.pathname) ||
+       /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(candidateUrl.pathname));
+    const candidate = request.method === "GET" && !request.headers.has("Range") &&
+      (resourceIdentity(request.url, self.location.origin, candidateUrl.origin) ||
+       logicalCandidate);
     if (!candidate) return;
     event.respondWith(
       (async () => {
         const client = event.clientId ? await self.clients.get(event.clientId).catch(() => null) : null;
         const configuredOrigin = clientResourceOrigin(client?.url, self.location.origin);
-        const identity = resourceIdentity(request.url, self.location.origin, configuredOrigin);
+        const configuredBase = clientResourceBase(client?.url, self.location.origin);
+        const identity = resourceIdentity(request.url, self.location.origin, configuredOrigin, configuredBase);
         if (!identity) return fetch(request);
         await initialized;
         const requestEpoch = epoch;
@@ -453,6 +489,7 @@ if (
               identity.url,
               self.location.origin,
               configuredOrigin,
+              configuredBase,
             );
             if (required.size + urls.length <= 20000)
               for (const url of urls) {

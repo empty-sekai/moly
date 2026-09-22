@@ -22,11 +22,12 @@ fn validate_catalog_id(catalog: &Option<String>) -> Result<(), String> {
 
 /// Only immutable public snapshots and the content-addressed store may use CDN.
 fn is_public_asset_path(path: &str) -> bool {
-    if path == "/moly/asset-store/" {
+    if path == "/moly/asset-store/" || path == "/sekai-extra-assets/asset-store/" {
         return true;
     }
-    let Some(id) = path
+    let id = path
         .strip_prefix("/moly/snapshots/")
+        .or_else(|| path.strip_prefix("/sekai-extra-assets/snapshots/"))
         .and_then(|rest| rest.strip_suffix("/assets/"))
     else {
         return false;
@@ -104,6 +105,8 @@ mod public_resource_tests {
             "/moly/sources/local/",
             "https://assets-one.example/moly/snapshots/cn-6.0.0-a/assets/",
             "https://cdn-two.example:8443/moly/asset-store/",
+            "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-6.0.0-a/assets/",
+            "https://assets.pjsk.moe/sekai-extra-assets/asset-store/",
         ] {
             assert!(validate_asset_prefix(value).is_ok(), "{value}");
         }
@@ -116,6 +119,7 @@ mod public_resource_tests {
             "https://cdn.example/moly/snapshots/cn-a/assets/?token=private",
             "https://cdn.example/moly/snapshots/cn-a/assets/%2f",
             "https://cdn.example/moly/snapshots/cn-a/assets/#fragment",
+            "https://assets.pjsk.moe/sekai-extra-assets/releases/current/",
             "//cdn.example/moly/asset-store/",
         ] {
             assert!(validate_asset_prefix(value).is_err(), "{value}");

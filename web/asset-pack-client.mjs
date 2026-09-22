@@ -143,7 +143,7 @@ export class PackClient {
   constructor(
     root,
     catalogId = null,
-    { fetchImpl = fetch, signal, required = false } = {},
+    { fetchImpl = fetch, signal, required = false, resourceBase } = {},
   ) {
     this.root = new URL(root, globalThis.location?.href);
     if (
@@ -153,7 +153,7 @@ export class PackClient {
       this.root.username ||
       this.root.password ||
       !["http:", "https:"].includes(this.root.protocol) ||
-      (globalThis.location && !resourceDirectory(this.root.href, location.href))
+      (globalThis.location && !resourceDirectory(this.root.href, location.href, resourceBase))
     )
       throw new Error("Pack store must be a same-origin directory");
     if (catalogId !== null && !validCatalogId(catalogId))

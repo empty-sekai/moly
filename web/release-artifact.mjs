@@ -43,6 +43,41 @@ export const STAGE_FILES = [
   "weather-ui-locale.mjs",
   "boot.mjs",
 ];
+
+/**
+ * Convert the host-mounted `/moly/` manifest addresses to object-store
+ * logical keys.  The S3 uploader uses this immutable projection when it puts
+ * a release below an explicit resource_base; source publication and local
+ * same-origin serving keep the host form unchanged.
+ */
+export function toLogicalResourceManifest(manifest) {
+  if (!manifest || typeof manifest !== "object")
+    throw new TypeError("Invalid release manifest");
+  const logical = structuredClone(manifest);
+  const logicalPath = value => {
+    if (typeof value !== "string")
+      throw new Error("Manifest contains a non-canonical Moly resource path");
+    const result = value.startsWith("/moly/") ? value.slice("/moly/".length) : value;
+    if (!/^(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/|^asset-store\/$/.test(result))
+      throw new Error("Manifest contains a non-canonical Moly resource path");
+    return result;
+  };
+  if (logical.release) {
+    if (logical.release.module !== undefined)
+      logical.release.module = logicalPath(logical.release.module);
+    if (logical.release.stage !== undefined)
+      logical.release.stage = logicalPath(logical.release.stage);
+  }
+  if (Array.isArray(logical.snapshots)) {
+    for (const snapshot of logical.snapshots) {
+      if (!snapshot || typeof snapshot !== "object")
+        throw new Error("Manifest contains an invalid snapshot");
+      if (snapshot.assets !== undefined) snapshot.assets = logicalPath(snapshot.assets);
+      if (snapshot.catalog !== undefined) snapshot.catalog = logicalPath(snapshot.catalog);
+    }
+  }
+  return logical;
+}
 const MAGIC = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
 const PORTRAIT_MIGRATION_BASELINE = "f79162417628b26ec54155f698a4f197d27c6fcb";
 const COORDINATE_METADATA_ADDITIONS = [

@@ -7,6 +7,7 @@ import {
   verifiedSharedBody,
   requiredResourceURLs,
   clientResourceOrigin,
+  clientResourceBase,
   activeResourceRoots,
   isActiveRequiredResource,
 } from "./cache-worker.mjs";
@@ -48,6 +49,30 @@ test("CDN retention preserves immutable identities and excludes private routes",
   for (const url of [cdn + "/api/player", cdn + "/moly/manifest.json", cdn + ".evil.test/moly/asset-store/"])
     assert.equal(resourceIdentity(url, origin, cdn), null);
   }
+});
+test("production S3 prefix admits only its configured logical resources", () => {
+  const cdn = "https://assets.pjsk.moe";
+  const root = cdn + "/sekai-extra-assets/";
+  const descriptor = root + "snapshots/cn-6.0.0-test/assets/browser-base.json";
+  const client = origin + "/moly/releases/stage-a/stage.html?resource_base=" + encodeURIComponent(root) +
+    "&resource_origin=" + encodeURIComponent(cdn);
+  assert.equal(clientResourceBase(client, origin), root);
+  assert.ok(resourceIdentity(descriptor, origin, cdn, root));
+  assert.equal(resourceIdentity(descriptor, origin, cdn), null);
+  assert.equal(resourceIdentity(root + "manifest.json", origin, cdn, root), null);
+  assert.equal(resourceIdentity(root + "api/player", origin, cdn, root), null);
+  assert.equal(resourceIdentity(cdn + "/other/snapshots/cn-test/assets/a.glb", origin, cdn, root), null);
+});
+test("production S3 prefix pins release and snapshot roots by the stage selection", () => {
+  const cdn = "https://assets.pjsk.moe";
+  const root = cdn + "/sekai-extra-assets/";
+  const assets = root + "snapshots/cn-6.0.0-test/assets/";
+  const client = origin + "/moly/releases/stage-a/stage.html?resource_base=" + encodeURIComponent(root) +
+    "&resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(assets);
+  const active = activeResourceRoots([{ url: client }], origin);
+  assert.ok(isActiveRequiredResource(root + "releases/stage-a/pkg/webgpu/moly-app_bg.wasm", new Set(), active));
+  assert.equal(isActiveRequiredResource(root + "snapshots/old/assets/model.glb", new Set([root + "snapshots/old/assets/model.glb"]), active), false);
+  assert.ok(isActiveRequiredResource(assets + "model.glb", new Set([assets + "model.glb"]), active));
 });
 
 test("only a same-origin stage can select a cache resource origin", () => {
