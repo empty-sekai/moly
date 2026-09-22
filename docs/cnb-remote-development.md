@@ -4,9 +4,10 @@ This repository uses CNB's standard `vscode` workspace only as a remote
 container. Development commands are run by the agent through OpenSSH; the
 browser is used only after an SSH local forward is established.
 
-The workspace starts from CNB's default development environment. It does not
-add a Dockerfile or a second clone of this repository. `.cnb.yml` requests 16
-CPUs, and `.cnb/settings.yml` exposes the same 16-CPU launch choice.
+The workspace builds `.ide/Dockerfile` from CNB's default development
+environment. The image adds the Rust/WASM toolchain and native libraries needed
+by Moly; it does not add a second clone of this repository. `.cnb.yml` requests
+16 CPUs, and `.cnb/settings.yml` exposes the same 16-CPU launch choice.
 
 ## First connection
 

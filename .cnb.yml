@@ -2,5 +2,8 @@ $:
   vscode:
     - runner:
         cpus: 16
+      docker:
+        build: .ide/Dockerfile
+        image: cnbcool/default-dev-env:latest
       services:
         - vscode
