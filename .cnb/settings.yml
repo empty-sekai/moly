@@ -1,0 +1,8 @@
+workspace:
+  launch:
+    button:
+      name: 启动 CNB Rust 工作区
+      description: 通过标准 OpenSSH 编译、测试并启动本地预览
+      autoOpenWebIDE: false
+    cpus: 16
+    disabled: false
