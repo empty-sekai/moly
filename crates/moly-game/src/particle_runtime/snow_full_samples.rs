@@ -47,14 +47,32 @@ fn context() -> Context {
 }
 
 fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
-    let lane = native_path.parent().unwrap().parent().unwrap();
-    let raw_path=lane.join("weather-source-20260918/render-integration-20260919/full-scope-20260920/phenomena/010_snow/fx/effects.json");
-    let overlay_path = native_path
-        .parent()
-        .unwrap()
-        .join("asset-overlay/phenomena/010_snow/fx/effects.json");
-    let raw: Value = serde_json::from_slice(&std::fs::read(raw_path).unwrap()).unwrap();
-    let overlay: Value = serde_json::from_slice(&std::fs::read(overlay_path).unwrap()).unwrap();
+    // Relocate the source inputs explicitly without modifying the native receipt.
+    // Omitted overrides retain the original Windows lane layout.
+    let raw_path = std::env::var_os("MOLY_SNOW_FULL_SOURCE_EFFECTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            native_path.parent().unwrap().parent().unwrap().join(
+                "weather-source-20260918/render-integration-20260919/full-scope-20260920/phenomena/010_snow/fx/effects.json",
+            )
+        });
+    let overlay_path = std::env::var_os("MOLY_SNOW_FULL_OVERLAY_EFFECTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            native_path
+                .parent()
+                .unwrap()
+                .join("asset-overlay/phenomena/010_snow/fx/effects.json")
+        });
+    let raw: Value = serde_json::from_slice(&std::fs::read(&raw_path).unwrap_or_else(|error| {
+        panic!("read source effects {}: {error}", raw_path.display())
+    }))
+    .unwrap();
+    let overlay: Value =
+        serde_json::from_slice(&std::fs::read(&overlay_path).unwrap_or_else(|error| {
+            panic!("read overlay effects {}: {error}", overlay_path.display())
+        }))
+        .unwrap();
     let find = |doc: &Value| {
         doc["effects"][EFFECT]["particles"]
             .as_array()
@@ -446,7 +464,7 @@ fn source_snow_full_prewarm_matches_current_native() {
         .pool
         .iter()
         .zip(&system.side)
-        .map(|(p, s)| motion::size_at_age(&system, s, p.normalized_age())[0].to_bits())
+        .map(|(p, s)| motion::size_at_age_percent(&system, s, p.age_percent)[0].to_bits())
         .collect();
     let prewarm_effective = compare_effective_size(
         &effective,
@@ -469,7 +487,7 @@ fn source_snow_full_prewarm_matches_current_native() {
         .pool
         .iter()
         .zip(&system.side)
-        .map(|(p, s)| motion::size_at_age(&system, s, p.normalized_age())[0].to_bits())
+        .map(|(p, s)| motion::size_at_age_percent(&system, s, p.age_percent)[0].to_bits())
         .collect();
     let normal_effective =
         compare_effective_size(&effective, &normal["effectiveSizeXPoolWords"], "normal");

@@ -9,14 +9,14 @@ the original client seed order is available.
 
 Authoritative inputs inspected for this plan:
 
-- Current source: `F:/mysekai/lane/weather-source-20260918/player-jp-6.8.1`.
+- Current source: `<source-lane>/player-jp-6.8.1`.
 - Runtime: this directory, especially
   `crates/moly-game/src/particle_runtime.rs`,
   `crates/moly-game/src/particle_runtime/birth.rs`,
   `crates/moly-law/src/particle/sub_emission.rs` and `buffer.rs`.
-- Current receipts: `F:/mysekai/lane/weather-complete-20260921/child-command-current.json`
-  and `F:/mysekai/lane/weather-source-20260918/render-integration-20260919/full-scope-20260920/child-emit-native.md`.
-- Current source graph census: `F:/mysekai/lane/weather-complete-20260921/rain-child-chain-audit.json`.
+- Current receipts: `<weather-lane>/child-command-current.json`
+  and `<source-lane>/render-integration-20260919/full-scope-20260920/child-emit-native.md`.
+- Current source graph census: `<weather-lane>/rain-child-chain-audit.json`.
 
 The receipt's current `libunity.so` SHA-256 is
 `937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9`.

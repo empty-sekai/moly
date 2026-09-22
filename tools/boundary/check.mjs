@@ -194,7 +194,7 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.rs', '.wgsl', '.mjs', '.js', '.html'
 // checkSourceDirCoverage() below asserts it has not fallen behind the tree:
 // a stale list does not fail, it silently stops classifying a whole directory
 // of release candidates as release candidates.
-const SOURCE_DIR_PREFIXES = ['web/', 'tools/', 'src/', 'tests/', '.cargo/', '.github/'];
+const SOURCE_DIR_PREFIXES = ['web/', 'tools/', 'src/', 'tests/', '.cargo/', '.github/', '.cnb/', '.ide/'];
 
 // Per-crate source directories. Enumerated rather than collapsed into a single
 // `^crates/[^/]+/` catch-all on purpose: a catch-all would cover every future
@@ -215,7 +215,7 @@ const CRATE_SOURCE_DIR_PATTERNS = [
 const CRATE_ROOT_DIR = /^crates\/[^/]+\/$/;
 
 const SOURCE_DIR_DESCRIPTION =
-  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, crates/*/ and crates/*/{src,tests,examples}/';
+  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, .cnb/, .ide/, crates/*/ and crates/*/{src,tests,examples}/';
 
 // Directories deliberately outside the coverage assertion, each with the reason
 // it is out. Stated explicitly rather than left to "no prefix happens to match

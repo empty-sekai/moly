@@ -99,7 +99,7 @@ fn integrated_motion_matches_engine_observations() {
         let family = row["family"].as_str().unwrap();
         *families.entry(family.to_owned()).or_default() += 1;
         let mut system = from_observation(row);
-        let size = motion::size_at_age(&system, &system.side[0], system.pool[0].normalized_age());
+        let size = motion::size_at_age_percent(&system, &system.side[0], system.pool[0].age_percent);
         simulate_stopped(&mut system, number(row, "dt"), &context);
         assert_eq!(system.pool.len(), 1, "unexpected lifetime removal at row {index}");
         let fields = [

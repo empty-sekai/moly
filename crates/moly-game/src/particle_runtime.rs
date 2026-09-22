@@ -208,7 +208,7 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
         // 归一化年龄：律的倒计时折算。
         let age = particle.normalized_age();
         let scale = system.node_affine.to_scale_rotation_translation().0.x;
-        let evaluated_size = motion::size_at_age(system, &side, age);
+        let evaluated_size = motion::size_at_age_percent(system, &side, particle.age_percent);
         let size = [evaluated_size[0] * scale, evaluated_size[1] * scale];
         // The source render path multiplies byte colour into immutable birth
         // colour. Keep that operation separate from raw gradient evaluation.
@@ -433,7 +433,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
                 age_pre * 100.0,
                 dt,
                 DragSize {
-                    components: motion::size_at_age(system, &side, age_pre),
+                    components: motion::size_at_age_percent(system, &side, system.pool[index].age_percent),
                     size3d: system.emitter.start.size3d || system.emitter.size_over_lifetime
                         .as_ref().is_some_and(|size| size.separate_axes),
                 },
@@ -780,8 +780,7 @@ pub(crate) fn write_geometry(
             let appearance = build_quads(system, to_world);
             let instances: Vec<_> = system.pool.iter().enumerate().map(|(index, particle)| {
                 let side = system.side[index];
-                let age = particle.normalized_age();
-                let size = Vec3::from_array(motion::size_at_age(system, &side, age));
+                let size = Vec3::from_array(motion::size_at_age_percent(system, &side, particle.age_percent));
                 let view = &appearance[index];
                 crate::particle_geometry::Instance {
                     position: crate::particle_geometry::reflect(view.centre),

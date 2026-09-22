@@ -5,9 +5,13 @@ use moly_law::particle::Particle;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::velocity::{VelocityOverLifetime, animated_velocity};
 
-pub(super) fn size_at_age(system: &super::Runtime, side: &Side, age: f32) -> [f32; 3] {
+/// Consume the native age-percent word directly. Normalizing and multiplying
+/// back by 100 rounds it again before SizeOverLifetime performs normalization.
+pub(super) fn size_at_age_percent(
+    system: &super::Runtime, side: &Side, age_percent: f32,
+) -> [f32; 3] {
     system.size_law.as_ref().map_or(side.size,
-        |law| law.evaluate(side.size, side.seed, age * 100.0))
+        |law| law.evaluate(side.size, side.seed, age_percent))
 }
 
 /// Force and linear velocity share the source space transform, including the
@@ -55,8 +59,8 @@ pub(super) fn velocity_at_age(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moly_law::particle::MinMaxCurve;
-    use moly_law::particle::schema::VelocityOverLifetimeParams;
+    use moly_law::particle::{Curve, CurveKey, MinMaxCurve};
+    use moly_law::particle::schema::{SizeOverLifetimeParams, VelocityOverLifetimeParams};
 
     fn params() -> VelocityOverLifetimeParams {
         VelocityOverLifetimeParams {
@@ -71,6 +75,38 @@ mod tests {
     fn side() -> Side {
         Side { rand: 0.5, seed: 17, rot: [0.0; 3], size: [1.0; 3], gravity: 0.0,
             colour: [1.0; 4], total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2] }
+    }
+
+    #[test]
+    fn source_snow_size_keeps_native_age_percent_for_draw() {
+        // Current JP 6.8.1 snow, first normal frame after 12s prewarm,
+        // particle 66. Native pool +0x300 is 0x3b3840b0; the old age
+        // round trip produced 0x3b38418a. Keep the authored Size curve.
+        let keys = [(0.0, 1.0, 0.3333333432674408),
+            (0.9457467198371887, 1.0, 0.0), (1.0, 0.0, 0.0)]
+            .map(|(time, value, weight)| CurveKey {
+                time, value, in_slope: 0.0, out_slope: 0.0,
+                weighted_mode: 0, in_weight: weight, out_weight: weight,
+            });
+        let params = SizeOverLifetimeParams {
+            separate_axes: false,
+            curve: MinMaxCurve::Curve {
+                multiplier: 1.0,
+                max: Curve { keys: keys.to_vec(), multiplier: 1.0 },
+            },
+            y: None, z: None,
+        };
+        let mut system = super::super::test_support::runtime();
+        system.size_law = Some(moly_law::particle::size::SizeOverLifetime::from_params(&params));
+        system.pool[0].age_percent = f32::from_bits(0x42c6_c23d);
+        system.side[0].size = [f32::from_bits(0x3d9e_c5e4); 3];
+        system.side[0].seed = 1_790_689_260;
+        let expected = 0x3b38_40b0;
+        assert_eq!(size_at_age_percent(&system, &system.side[0],
+            system.pool[0].age_percent).map(f32::to_bits), [expected; 3]);
+        let quads = super::super::build_quads(&system, &GlobalTransform::IDENTITY);
+        assert_eq!(quads.len(), 1);
+        assert_eq!(quads[0].size.to_array().map(f32::to_bits), [expected; 2]);
     }
 
     #[test]

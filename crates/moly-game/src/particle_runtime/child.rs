@@ -692,8 +692,15 @@ mod tests {
         let rows = fixture["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 8);
         assert_eq!(fixture["summary"]["failureCount"].as_u64(), Some(0));
-        let effects_path = PathBuf::from(fixture["source"]["effects"].as_str().unwrap());
-        let effects: Value = serde_json::from_slice(&std::fs::read(effects_path).unwrap()).unwrap();
+        // Keep the recorded source path intact; cloud replays opt into relocation.
+        let effects_path = std::env::var_os("MOLY_CHILD_COMMAND_EFFECTS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(fixture["source"]["effects"].as_str().unwrap()));
+        let effects: Value =
+            serde_json::from_slice(&std::fs::read(&effects_path).unwrap_or_else(|error| {
+                panic!("read child effects {}: {error}", effects_path.display())
+            }))
+            .unwrap();
         let effect_name = fixture["source"]["effect"].as_str().unwrap();
         let node_name = fixture["source"]["node"].as_str().unwrap();
         let particle = effects["effects"][effect_name]["particles"]
