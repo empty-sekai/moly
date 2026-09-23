@@ -19,15 +19,16 @@
 //! it runs AddShowButtonStack once, an object leaving it runs
 //! RemoveShowButtonStack, and nothing is re-tested while the player stays
 //! inside. The scan stops in Edit and in a conversation with the player
-//! (ObjectCollisionManager.IsCanUpdate), which produces no edges at all. A
-//! timeline started from the button locks the stack (SetLockActionButton)
-//! until the player leaves UseTimelineFixture; RemoveNotCollisionObject then
-//! prunes it.
+//! (ObjectCollisionManager.IsCanUpdate), which produces no edges at all, and
+//! during a site move. A timeline started from the button locks the stack
+//! (SetLockActionButton) and hides the view until the player leaves
+//! UseTimelineFixture; RemoveNotCollisionObject then prunes it. A Talk tap
+//! prunes the same way once the talk action is done.
 //!
 //! The buttons belong to ScreenLayerMysekaiHome. While another screen is
-//! current they are not shown; when the home screen mounts again its new
-//! presenter starts from an empty stack and runs
-//! ObjectCollisionManager.ForceUpdate.
+//! current, a site move included, they are not shown; when the home screen
+//! mounts again its new presenter starts from an empty, unlocked stack and
+//! runs ObjectCollisionManager.ForceUpdate.
 
 pub(crate) mod admission;
 
@@ -314,13 +315,26 @@ pub(crate) struct ActionButtonState {
     /// Opaque stack handles bind the admitted instance, never a position.
     fixture_targets: HashMap<i32, FixtureTarget>,
     next_fixture_key: i32,
-    /// SetLockActionButton: a timeline started from the button holds the
-    /// stack until the player leaves UseTimelineFixture.
+    /// SetLockActionButton on the current model (BlockStackChange): a
+    /// timeline started from the button holds the stack.
     locked: bool,
+    /// Counts the models: each rebuild of the home screen makes a new one.
+    model: u64,
+    /// TimelineFixtureProcess hid the buttons view; the model whose button
+    /// started that timeline. TimelineFixtureFinishAsync shows the view again
+    /// once the player leaves UseTimelineFixture.
+    timeline: Option<u64>,
+    /// A Talk tap reached the talk action last frame.
+    talk_tapped: bool,
     /// ScreenLayerMysekaiHome was the current screen last frame.
     home_mounted: bool,
     /// The site generation the scan last saw.
     site_epoch: Option<u64>,
+    /// The old site is torn down and the new generation has not arrived.
+    awaiting_site: bool,
+    /// The new generation arrived this frame; its actors are placed after
+    /// this scan.
+    arriving: bool,
     /// ObjectCollisionManager.ForceUpdate waits for the next scan.
     force_update: bool,
     /// This frame's player and world position, for the click's re-check.
@@ -343,8 +357,13 @@ impl Default for ActionButtonState {
             fixture_targets: HashMap::new(),
             next_fixture_key: 0,
             locked: false,
+            model: 0,
+            timeline: None,
+            talk_tapped: false,
             home_mounted: true,
             site_epoch: None,
+            awaiting_site: false,
+            arriving: false,
             force_update: false,
             player: None,
             last_input: f32::NEG_INFINITY,
@@ -355,6 +374,18 @@ impl Default for ActionButtonState {
 }
 
 impl ActionButtonState {
+    /// The home screen's new presenter: a MysekaiActionButtonsModel whose
+    /// constructor writes only its two lists, so the stack starts empty and
+    /// unlocked (only SetLockActionButton writes BlockStackChange); its
+    /// Initialize runs ForceUpdate.
+    fn rebuild(&mut self) {
+        self.stack.clear();
+        self.fixture_targets.clear();
+        self.locked = false;
+        self.model += 1;
+        self.force_update = true;
+    }
+
     /// 当前栈首（决定屏幕上显示哪个按钮）。
     pub(crate) fn current(&self) -> Option<(ButtonType, TargetId)> {
         self.stack.first()
@@ -708,6 +739,7 @@ pub(crate) fn advance(
     mut saved: MessageReader<LayoutSaved>,
     players: Query<(Entity, &Transform, Option<&ChildOf>), With<PlayerControlled>>,
     parents: Query<&GlobalTransform>,
+    scenes_ready: Option<Res<crate::site::SiteScenesReady>>,
     npcs: Query<(Entity, &Transform, &CharacterUnitId), Without<PlayerControlled>>,
     fixtures: Query<
         (
@@ -727,13 +759,29 @@ pub(crate) fn advance(
     if saved.read().count() > 0 {
         state.force_update = true;
     }
-    // ScreenLayerMysekaiHome mounts again: OnBoot builds a new presenter
-    // whose stack is empty, and OnScreenStart's Initialize runs ForceUpdate.
-    let mounted = eligibility.home_screen_current();
+    // A site move: SiteMoveGameState.OnEnter changes to the site-move screen
+    // and GameState SiteMove stops the collision scan. It lasts from the old
+    // site's teardown until the player and NPCs stand on the new site, whose
+    // controller then changes back to the home screen (a new presenter).
+    // npc::reseed and player::reseed place them for a new generation after
+    // this system, in the same frame, so the move ends on the next scan.
+    if scenes_ready.is_none() {
+        state.awaiting_site = true;
+    }
+    let epoch = inputs.site_epoch();
+    if state.site_epoch != epoch {
+        state.site_epoch = epoch;
+        state.awaiting_site = false;
+        state.arriving = true;
+    } else if state.arriving {
+        state.arriving = false;
+    }
+    let site_moving = scenes_ready.is_none() || state.awaiting_site || state.arriving;
+    // ScreenLayerMysekaiHome mounts again: OnBoot builds a new presenter,
+    // and OnScreenStart's Initialize runs ForceUpdate.
+    let mounted = eligibility.home_screen_current() && !site_moving;
     if mounted && !state.home_mounted {
-        state.stack.clear();
-        state.fixture_targets.clear();
-        state.force_update = true;
+        state.rebuild();
         info!("[action_button] home screen current again; stack restarts from ForceUpdate");
     }
     state.home_mounted = mounted;
@@ -757,14 +805,6 @@ pub(crate) fn advance(
     let player_box = state.player_box;
     let position = player.translation;
     state.player = Some((player_entity, position));
-
-    // A new site runs ObjectCollisionManager.ForceUpdate: everything
-    // overlapping re-enters. The stack itself is kept.
-    let epoch = inputs.site_epoch();
-    if state.site_epoch != epoch {
-        state.site_epoch = epoch;
-        state.force_update = true;
-    }
 
     // 场上家具的一次性对账：家具铺完之后报一次「这个站点上哪几件有
     // 交互按钮、在哪」。没有这一条，「走了半天没看到家具按钮」分不出
@@ -895,8 +935,33 @@ pub(crate) fn advance(
     }
 
     // TimelineFixtureFinishAsync: once the player leaves UseTimelineFixture,
-    // RemoveNotCollisionObject runs, then the stack unlocks.
-    if state.locked && eligibility.player_action() != PlayerActionState::UseTimelineFixture {
+    // the presenter that started the timeline runs RemoveNotCollisionObject
+    // and SetLockActionButton(false) on its model, then shows the view again.
+    // The view outlives a home rebuild; that presenter's model does not, and
+    // the new model was never locked.
+    if let Some(owner) = state.timeline {
+        if eligibility.player_action() != PlayerActionState::UseTimelineFixture {
+            if owner == state.model {
+                remove_not_colliding(
+                    state,
+                    &inputs,
+                    &eligibility,
+                    player_entity,
+                    position,
+                    &frame,
+                    &index,
+                );
+                state.locked = false;
+                info!("[action_button] player timeline ended; stack pruned and unlocked");
+            }
+            state.timeline = None;
+        }
+    }
+    // The Talk button's OnClickPlayerTalkAction awaits the talk action and
+    // then always runs RemoveNotCollisionObject. A talk that played pushed
+    // MysekaiTalk, so that call reaches the model the home rebuild replaces;
+    // a refused one reaches the current model now.
+    if std::mem::take(&mut state.talk_tapped) && !eligibility.player_in_talk() {
         remove_not_colliding(
             state,
             &inputs,
@@ -906,12 +971,10 @@ pub(crate) fn advance(
             &frame,
             &index,
         );
-        state.locked = false;
-        info!("[action_button] player timeline ended; stack pruned and unlocked");
     }
 
     // ObjectCollisionManager.IsCanUpdate: no edges at all while it is false.
-    if eligibility.collision_updates() {
+    if eligibility.collision_updates() && !site_moving {
         // ForceUpdate returns the colliding list to the registered objects,
         // behind the others, and scans: the newly overlapping enter first,
         // then the previous list in its order. It produces no exit edge.
@@ -1229,7 +1292,10 @@ pub(crate) fn place_ui(
         // TimelineFixtureProcess hides the action buttons view until the
         // timeline's finish shows it again. They are part of the home
         // screen, which is not shown while another screen is current.
-        *visibility = if head.is_some() && rects.is_some() && !state.locked && state.home_mounted
+        *visibility = if head.is_some()
+            && rects.is_some()
+            && state.timeline.is_none()
+            && state.home_mounted
         {
             Visibility::Visible
         } else {
@@ -1298,6 +1364,15 @@ pub(crate) fn click(
         .filter(|event| event.kind == GestureKind::Tap && event.state == GestureState::End)
         .map(|event| event.position)
         .collect();
+    // Open gap for Talk: available() is closed while any conversation plays,
+    // and the talk dispatcher refuses a request for the same reason. The
+    // source has no such global gate: OnCharacterTalk hands the head's NPC to
+    // MysekaiPlayerTalkAction.OnClickPlayerTalkAction, which routes on that
+    // NPC's own state, and sends an NPC taking part in a conversation between
+    // characters to PlaySomeCharacterTalkFixture, where the player joins it.
+    // Moly does not join conversations, so while NPCs talk to each other the
+    // Talk button stays visible but inert: the tap is not taken and no talk
+    // starts.
     let open = match state.current() {
         Some((ButtonType::GimmickFixture, _)) => eligibility.field_input_open(),
         _ => eligibility.available(),
@@ -1335,6 +1410,11 @@ pub(crate) fn click(
             state.last_input = now;
         }
         consumed.0 = true;
+        // Every Talk tap from here reaches the talk action, refused or not;
+        // its RemoveNotCollisionObject runs on the next scan.
+        if button == ButtonType::Talk {
+            state.talk_tapped = true;
+        }
         if let TargetId::Character(unit) = target {
             if !eligibility.for_unit(unit) {
                 continue;
@@ -1359,8 +1439,10 @@ pub(crate) fn click(
             fixture_target.as_ref(),
         );
         if button == ButtonType::TimelineFixture && fixture_target.is_some() {
-            // SetLockActionButton(true), released by the timeline's finish.
+            // TimelineFixtureProcess hides the view and runs
+            // SetLockActionButton(true); the timeline's finish undoes both.
             state.locked = true;
+            state.timeline = Some(state.model);
         }
     }
 }
