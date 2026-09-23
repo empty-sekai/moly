@@ -286,9 +286,13 @@ impl FixtureActivityProvider {
         };
         let mut request = profile.start_request(owner, &plan.target);
         // An SE found silent stays silent for the session: it is neither
-        // requested again nor reported twice.
+        // requested again nor reported twice. The previous attempt's SE handles
+        // come along too, so a load that has failed since is seen as failed
+        // here, before `prepare_source_sounds` would request it again (loading
+        // a failed path restarts it).
         if let Some(previous) = previous.as_ref() {
             request.bindings.silent_sounds = previous.bindings.silent_sounds.clone();
+            request.bindings.sounds = previous.bindings.sounds.clone();
         }
         silence_player_sounds(world, &plan.target, &mut request);
         // The SE routes need only the parsed tracks: request them now, so they
