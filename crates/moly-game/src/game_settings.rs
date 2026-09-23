@@ -22,35 +22,60 @@ const COMPOSITE_LAYER: usize = 30;
 const UI_ORDER: isize = 100;
 const FONT: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
 
+/// What the source `SetImageQuality` writes for one image quality: the target
+/// DPI it passes to `SetTargetDpi` and `IsFXAAEnable`. High is (299, on),
+/// Normal (200, on) and Low (180, off). Only the source image-quality option
+/// (`info`) sets it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ImageQualityPair {
+    pub(crate) target_dpi: u16,
+    pub(crate) fxaa: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GraphicsSettings {
-    /// Frame limit. The source offers `MysekaiFpsQualityType` High (60) and
-    /// Normal (30); `MysekaiOptionSettingData` leaves the field zero, i.e. High.
+    /// Frame limit (`Application.targetFrameRate`): `MysekaiFpsQualityType`
+    /// High is 60 and Normal 30.
     pub(crate) frame_rate: u16,
     /// Scene camera render scale chosen in the product panel; `None` applies
     /// the source DPI law ([`source_render_scale`]).
     pub(crate) render_scale: Option<f32>,
-    /// `SetImageQuality` target DPI of the current image quality.
-    pub(crate) target_dpi: u16,
+    /// The current image quality's pair. Loading saved settings and Defaults
+    /// keep it, so the scene never runs one quality's target DPI with another
+    /// quality's FXAA.
+    pub(crate) image_quality: ImageQualityPair,
+    /// Scene FXAA in effect: the pair's, or the panel toggle's session-only
+    /// override until the image-quality option applies a pair again.
     pub(crate) fxaa: bool,
 }
 
 /// Frame limits the source offers (High, Normal).
 const FRAME_RATES: [u16; 2] = [60, 30];
 
-/// `SetImageQuality` target DPI of Normal, the image quality the source
-/// constructs by default (High is 299, Low 180).
-pub(crate) const SOURCE_DEFAULT_TARGET_DPI: u16 = 200;
+/// Image quality and frame limit of the no-recommendation path.
+/// `MysekaiOptionSettingData`'s constructor sets image quality Normal and
+/// leaves the fps quality at High. The JP client always starts there, and so
+/// does a CN player who declines the first-run recommendation: the CN
+/// client's `ScreenLayerLiveTop.RecommendSetting` otherwise offers the pair
+/// for the device tier its publisher SDK reports (tier 3 and up High and 60,
+/// tier 2 Normal and 30, tier 1 Low and 30) and saves it when accepted. The
+/// port follows the no-recommendation path because that tier is a device
+/// rating from the publisher SDK, which a browser has no counterpart for.
+const NO_RECOMMENDATION_IMAGE_QUALITY: ImageQualityPair = ImageQualityPair {
+    target_dpi: 200,
+    fxaa: true,
+};
+const NO_RECOMMENDATION_FRAME_RATE: u16 = FRAME_RATES[0];
 
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
-            frame_rate: FRAME_RATES[0],
+            frame_rate: NO_RECOMMENDATION_FRAME_RATE,
             // The DPI law needs the display density. A page provides it as
             // devicePixelRatio; the native window keeps its full resolution.
             render_scale: if cfg!(target_arch = "wasm32") { None } else { Some(1.0) },
-            target_dpi: SOURCE_DEFAULT_TARGET_DPI,
-            fxaa: true,
+            image_quality: NO_RECOMMENDATION_IMAGE_QUALITY,
+            fxaa: NO_RECOMMENDATION_IMAGE_QUALITY.fxaa,
         }
     }
 }
@@ -61,20 +86,35 @@ impl Default for GraphicsSettings {
 /// the page's equivalent of the source's screen DPI.
 const SCREEN_DPI_PER_SCALE_FACTOR: f32 = 160.;
 
+/// Render scale of the Mysekai pipeline asset itself. While the DPI law keeps
+/// the scene at full size ResoDynamix is inactive and restores this value to
+/// the asset every frame, so URP renders the scene at it. Open item: the asset
+/// (`MysekaiRenderPipelineAsset`, together with its upscaling filter, which
+/// only matters when this scale is not 1) is not in the extracted client data
+/// yet, and 1 stands in for its value until the extraction reads it.
+const PIPELINE_ASSET_RENDER_SCALE: f32 = 1.;
+
 /// Scene camera render scale of the source for a target DPI and a window
 /// scale factor. `MysekaiQualitySettings.SetTargetDpi` stores
 /// `clamp01(targetDpi / Screen.dpi)` as `MysekaiRenderSettings.RenderScale`
 /// (an unknown density of 0 gives 1). `SceneMysekai.UpdateResolution` hands
-/// it to ResoDynamix as the base camera scale, which writes it to the URP
-/// asset, whose setter clamps to [0.1, 2]; URP renders at full size when the
-/// scale is within 0.05 of 1.
+/// it to ResoDynamix as the base camera scale; below 1 ResoDynamix writes it
+/// to the URP asset, otherwise the asset keeps its own scale. The asset's
+/// setter clamps to [0.1, 2], and URP renders at full size when the scale is
+/// within 0.05 of 1.
 pub(crate) fn source_render_scale(target_dpi: u16, scale_factor: f32) -> f32 {
     let screen_dpi = SCREEN_DPI_PER_SCALE_FACTOR * scale_factor;
-    if !(screen_dpi > 0.) {
-        return 1.;
+    let render_scale = if screen_dpi > 0. {
+        (f32::from(target_dpi) / screen_dpi).clamp(0., 1.)
+    } else {
+        1.
+    };
+    let asset_scale = if render_scale < 1. {
+        render_scale
+    } else {
+        PIPELINE_ASSET_RENDER_SCALE
     }
-    let render_scale = (f32::from(target_dpi) / screen_dpi).clamp(0., 1.);
-    let asset_scale = render_scale.clamp(0.1, 2.);
+    .clamp(0.1, 2.);
     if (1. - asset_scale).abs() < 0.05 {
         1.
     } else {
@@ -85,7 +125,10 @@ pub(crate) fn source_render_scale(target_dpi: u16, scale_factor: f32) -> f32 {
 fn scene_render_scale(graphics: &GraphicsSettings, window: &Window) -> f32 {
     match graphics.render_scale {
         Some(fixed) => fixed.clamp(0.5, 1.),
-        None => source_render_scale(graphics.target_dpi, window.resolution.base_scale_factor()),
+        None => source_render_scale(
+            graphics.image_quality.target_dpi,
+            window.resolution.base_scale_factor(),
+        ),
     }
 }
 
@@ -192,9 +235,9 @@ pub(crate) fn install(app: &mut App) {
 }
 
 /// Per-frame counters for the browser host: engine assets and every game
-/// material type visible to this module. The fixture surface and tree
-/// materials and the UI clip material are private to their modules and are
-/// not counted.
+/// material type visible to this module. `FixtureSurfaceMaterial`,
+/// `FixtureTreeMaterial` and `UiClipMaterial` are private to their modules
+/// and are not counted.
 pub(crate) fn perf_plugin() -> moly_perf::PerfPlugin {
     moly_perf::PerfPlugin::default()
         .track::<Mesh>("Mesh")
@@ -249,9 +292,7 @@ fn graphics_from_document(document: &Value) -> GraphicsSettings {
         }
         None => {}
     }
-    if let Some(fxaa) = fields["fxaa"].as_bool() {
-        value.fxaa = fxaa;
-    }
+    // FXAA is half of the image-quality pair, so a stored `fxaa` is not read.
     value
 }
 
@@ -264,9 +305,12 @@ pub(crate) fn setup(
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if let Some(document) = store.load() {
+        // The source image-quality option applied its pair at startup; the
+        // panel does not store it.
+        let image_quality = settings.graphics.image_quality;
         settings.graphics = GraphicsSettings {
-            // Applied by the source image-quality option at startup; not stored here.
-            target_dpi: settings.graphics.target_dpi,
+            image_quality,
+            fxaa: image_quality.fxaa,
             ..graphics_from_document(&document)
         };
         panel.status = "Changes apply immediately. Save to keep them after restart.".into();
@@ -678,13 +722,18 @@ pub(crate) fn input(
                 panel.status = "Scene resolution applied; UI stays at display resolution.".into();
             }
             Action::Fxaa => {
+                // A session-only override: FXAA belongs to the image-quality
+                // pair, which the next image-quality change, Defaults or a
+                // restart applies again.
                 settings.graphics.fxaa = !settings.graphics.fxaa;
-                panel.status = "Scene FXAA updated.".into();
+                panel.status = "Scene FXAA changed for this session.".into();
             }
             Action::Defaults => {
-                // The target DPI follows the source image-quality option, not this panel.
+                // The image-quality pair follows the source option, not this panel.
+                let image_quality = settings.graphics.image_quality;
                 settings.graphics = GraphicsSettings {
-                    target_dpi: settings.graphics.target_dpi,
+                    image_quality,
+                    fxaa: image_quality.fxaa,
                     ..GraphicsSettings::default()
                 };
                 volumes.system = VolumeSettingData::default();
@@ -694,7 +743,7 @@ pub(crate) fn input(
             Action::Save => {
                 let g = settings.graphics;
                 let mut sections = audio::settings_sections(&volumes).to_vec();
-                sections.push(("GameSettings",json!({"version":2,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale,"fxaa":g.fxaa}})));
+                sections.push(("GameSettings",json!({"version":2,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale}})));
                 panel.status = if store.save(&sections) {
                     "Saved.".into()
                 } else {

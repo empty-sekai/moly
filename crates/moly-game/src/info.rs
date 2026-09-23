@@ -541,7 +541,7 @@ pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_sett
 fn apply_image_quality(graphics: &mut crate::game_settings::GameSettings, next: ImageQuality) {
     let (dpi, fxaa) = next.target_dpi_and_fxaa();
     graphics.graphics.fxaa = fxaa;
-    graphics.graphics.target_dpi = dpi as u16;
+    graphics.graphics.image_quality = crate::game_settings::ImageQualityPair { target_dpi: dpi as u16, fxaa };
     info!("[info] SetImageQuality: target DPI {dpi}, FXAA {fxaa}");
 }
 
