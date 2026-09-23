@@ -3,11 +3,11 @@
 use crate::read_limits::{self, Budget, Buffer};
 use bevy::asset::io::AssetReaderError;
 use std::sync::Arc;
-use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    AbortController, ReadableStreamDefaultReader, Request, RequestInit, RequestMode,
-    RequestRedirect, Response,
+    AbortController, ReadableStreamDefaultReader, Request, RequestCredentials, RequestInit,
+    RequestMode, RequestRedirect, Response, ResponseType,
 };
 
 fn error(message: impl Into<String>) -> AssetReaderError {
@@ -82,7 +82,10 @@ async fn response(root: &str, path: &str) -> Result<(RequestGuard, Response), As
     let guard = RequestGuard::new()?;
     let url = format!("{root}{}", crate::http_path::encode_path(path));
     let init = RequestInit::new();
-    init.set_mode(RequestMode::SameOrigin);
+    // Root admission is owned by moly-app. Public assets may use the exact
+    // configured CDN; cookies and authorization never accompany asset reads.
+    init.set_mode(RequestMode::Cors);
+    init.set_credentials(RequestCredentials::Omit);
     init.set_redirect(RequestRedirect::Error);
     init.set_signal(Some(&guard.controller.signal()));
     let request = Request::new_with_str_and_init(&url, &init)
@@ -105,14 +108,14 @@ fn bound(response: &Response, path: &str, limit: usize) -> Result<usize, AssetRe
         .ok()
         .flatten()
         .and_then(|v| v.parse::<u64>().ok());
-    let encoded = response
-        .headers()
-        .get("content-encoding")
-        .ok()
-        .flatten()
-        .is_some_and(|value| !value.eq_ignore_ascii_case("identity") && !value.is_empty());
-    crate::http_path::response_bound(length, encoded, limit)
-        .map_err(|cause| error(format!("{cause}: {path}")))
+    let encoding = response.headers().get("content-encoding").ok().flatten();
+    crate::http_path::response_bound(
+        length,
+        encoding.as_deref(),
+        response.type_() == ResponseType::Cors,
+        limit,
+    )
+    .map_err(|cause| error(format!("{cause}: {path}")))
 }
 async fn stream(
     response: Response,

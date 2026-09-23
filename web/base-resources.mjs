@@ -51,7 +51,8 @@ async function consume(url, maximum, signal, fetchImpl, keep = false) {
   try {
     const response = await fetchImpl(url, {
       signal: signal ? AbortSignal.any([signal, abort.signal]) : abort.signal,
-      credentials: "same-origin",
+      credentials: "omit",
+      redirect: "error",
       cache: "no-store",
     });
     if (!response.ok || !response.body)
@@ -97,6 +98,7 @@ export async function warmBaseResources(
           fetchImpl,
           signal,
           required: true,
+          resourceBase: options.resourceBase,
         })
       : null;
   const bytes = client

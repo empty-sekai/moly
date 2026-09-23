@@ -28,6 +28,8 @@ pub struct ParticlePass {
 #[derive(Component, Clone, ExtractComponent)]
 #[require(crate::source_color::EncodedColorOutput)]
 pub struct SourceParticle {
+    /// Material references are relative to their exporting archive, not weather.
+    asset_root: String,
     pub material: Arc<MaterialSnapshot>,
     pub catalogue: Handle<SourceShaderCatalogue>,
     pub streams: ParticleStreams,
@@ -50,6 +52,11 @@ pub enum ParticleReadiness {
 }
 impl SourceParticle {
     pub fn load(renderer: &serde_json::Value, server: &AssetServer) -> Result<Self> {
+        Self::load_from(renderer, server, "phenomena")
+    }
+
+    pub(crate) fn load_from(renderer: &serde_json::Value, server: &AssetServer, asset_root: &str) -> Result<Self> {
+        require(matches!(asset_root, "phenomena" | "fixture-particles-v2"), "unknown source particle archive")?;
         let material = Arc::new(MaterialSnapshot::parse(&renderer["material"])?);
         let streams = ParticleStreams::parse(renderer)?;
         require(
@@ -74,7 +81,7 @@ impl SourceParticle {
             .and_then(moly_law::particle::sort::ParticleSort::from_source)
             .ok_or_else(|| SourceShaderError("source particle sort mode is absent or unsupported".into()))?;
         let catalogue = server.load(format!(
-            "moly://phenomena/{}",
+            "moly://{asset_root}/{}",
             material.shader.variants.file
         ));
         let textures = material
@@ -84,12 +91,13 @@ impl SourceParticle {
                 binding.texture.as_ref().map(|texture| {
                     (
                         name.clone(),
-                        server.load(format!("moly://phenomena/{}", texture.content.file)),
+                        server.load(format!("moly://{asset_root}/{}", texture.content.file)),
                     )
                 })
             })
             .collect();
         Ok(Self {
+            asset_root: asset_root.to_owned(),
             material,
             catalogue,
             streams,
@@ -210,7 +218,7 @@ impl SourceParticle {
             })?;
             passes.push(ParticlePass {
                 program: server.load(format!(
-                    "moly://phenomena/{}",
+                    "moly://{}/{}", self.asset_root,
                     variant.conversion.as_ref().expect("converted variant").file
                 )),
                 state,

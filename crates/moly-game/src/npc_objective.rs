@@ -21,6 +21,9 @@
 //!   落空回落环带（GetLittleFarPosition 同形）；落点交给执行层前过一遍
 //!   身份判定（落点与挂点比 x/z），命中先导航到接近点，再执行局部
 //!   FitTurning/FitWalking。
+//! - 普通对话社交池只含同站、不同角色且有真实 Current TalkData 的成员。
+//!   导航 destination 与 Current.TargetPosition 是独立输入；后者用于
+//!   最终 0.7m 排斥，不能拿前者代替。未完成工厂的占位不算真实 Current。
 //!
 //! 替身，具名：
 //! * **内容绑定**：普通工厂保存所选master、既有preAction投影、目标位
@@ -29,15 +32,12 @@
 //! * **道可得性**：补位级联（未读 → 已读 → 通用，上游有货才落下一级）
 //!   的「有货」替身 = 站点有锚定对话家具（配对语料锚在摆放表非 0 的
 //!   fixtureId 上）。锚定表非空 ⇒ 未读道恒可得，级联首档即中。
-//! * **目标家具抽签**：源在合格动作表上随机取（RandomPick）；产品在
-//!   锚定摆放表上均匀抽——合格集的替身。
-//! * **动作点座位表**：无对话道的 (家具, 座位) 行为表与对话道的先行动作
-//!   入座行（经 talkId 居中联结 timeline 组）都烘成常量表（`NOTALK_*`
-//!   / `TALK_SEATS`）——座位本该从 master 镜像族提取产物读，本单先烘入；
-//!   提取侧落表后换装载是后续单的活。
-//! * **无对话道座位查表**：行为表按 (角色, 家具) 行，恒常行占绝大多数；
-//!   产品按家具查（角色覆写行保留）——角色维的行筛选是抽签域的近似，
-//!   具名。
+//! * **目标家具抽签**：三个家具 Talk 道仍在锚定摆放表上均匀抽，是真源
+//!   合格对话集的替身；NoTalk 已通过独立工厂消费角色/家具/站点源行。
+//! * **对话道动作点座位表**：三个家具 Talk 道仍消费 `TALK_SEATS` 常量；
+//!   已有真实 master 镜像与 qualify_single/prepare_single，尚未接入这些道。
+//! * **无对话道座位查表**：当前 NoTalk 工厂从真实角色行为行及 timeline
+//!   组读取动作点；下方 NOTALK 常量是遗留路径，不代表当前工厂的筛选。
 //! * **对话道先行入座选行**：同一 (角色, 家具) 的多行入座，产品取语料
 //!   序首行（选行归抽签域，首行是具名替身）。
 //! * **贴合身份判定（b__1）**：源比 AITalkData.TargetPosition 与挂点
@@ -152,17 +152,12 @@ impl ObjectiveFace {
             return None;
         }
         if self.field.walkable_at([current[0], current[2]]) {
-            return Some(current);
+            return self.navigation_point_at([current[0], current[2]]);
         }
         let xz = self
             .field
             .nearest_walkable([current[0], current[2]], None)?;
-        let (point, distance) = self.closest([xz[0], current[1], xz[1]]);
-        (distance.is_finite()
-            && distance < f32::MAX
-            && point.iter().all(|value| value.is_finite())
-            && self.field.walkable_at([point[0], point[2]]))
-        .then_some(point)
+        self.navigation_point_at(xz)
     }
 
     /// 面上最近点与距离（含高度的三角最近点；无三角覆盖处距离无穷）。
@@ -188,7 +183,9 @@ impl ObjectiveFace {
         let xz = self
             .field
             .nearest_walkable([target[0], target[2]], Some(tolerance))?;
-        let (point, _) = self.closest([xz[0], target[1], xz[1]]);
+        let (point, _) = self.closest([xz[0],
+            target[1] - self.field.height_offset(xz), xz[1]]);
+        let point = self.navigation_point(point);
         (dist3(point, target) <= tolerance && self.field.walkable_at([point[0], point[2]]))
             .then_some(point)
     }
@@ -197,6 +194,46 @@ impl ObjectiveFace {
     pub(crate) fn surface_sample(&self, target: [f32; 3], tolerance: f32) -> Option<[f32; 3]> {
         let (point, distance) = self.closest(target);
         (distance <= tolerance).then_some(point)
+    }
+
+    /// Height for an already navigation-qualified point. Explicit animation
+    /// locators retain `surface_sample`, which probes the raw site geometry.
+    pub(crate) fn navigation_surface_sample(&self, target: [f32; 3], tolerance: f32) -> Option<[f32; 3]> {
+        let point = self.navigation_point_at([target[0], target[2]])?;
+        (dist3(point, target) <= tolerance).then_some(point)
+    }
+
+    fn navigation_point(&self, mut point: [f32; 3]) -> [f32; 3] {
+        point[1] += self.field.height_offset([point[0], point[2]]);
+        point
+    }
+
+    /// Navigation already owns x/z. A 3-D nearest-point projection would move
+    /// them on slopes, then repeatedly convert a step's height into terrain.
+    /// Use the same highest covering site surface as the single-layer bake.
+    pub(crate) fn navigation_point_at(&self, xz: [f32; 2]) -> Option<[f32; 3]> {
+        if !xz.into_iter().all(f32::is_finite) {
+            return None;
+        }
+        let bucket = self.buckets.get(&cell_of(xz[0], xz[1]))?;
+        let mut height: Option<f32> = None;
+        for &index in bucket {
+            let [a, b, c] = self.tris[index as usize];
+            let determinant = (b[2] - c[2]) * (a[0] - c[0])
+                + (c[0] - b[0]) * (a[2] - c[2]);
+            if determinant.abs() < 1e-12 {
+                continue;
+            }
+            let u = ((b[2] - c[2]) * (xz[0] - c[0])
+                + (c[0] - b[0]) * (xz[1] - c[2])) / determinant;
+            let v = ((c[2] - a[2]) * (xz[0] - c[0])
+                + (a[0] - c[0]) * (xz[1] - c[2])) / determinant;
+            if u >= -1e-5 && v >= -1e-5 && u + v <= 1.00001 {
+                let y = u * a[1] + v * b[1] + (1.0 - u - v) * c[1];
+                height = Some(height.map_or(y, |prior| prior.max(y)));
+            }
+        }
+        height.map(|y| [xz[0], y + self.field.height_offset(xz), xz[1]])
     }
 
     /// 与执行器共用严格完整路径，目标不拉回到其他可达位置。
@@ -216,10 +253,7 @@ impl ObjectiveFace {
         let corners = self.field.path_exact([from.x, from.z], [to.x, to.z])?;
         corners
             .into_iter()
-            .map(|point| {
-                let (height, distance) = self.closest([point[0], self.ref_y, point[1]]);
-                (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(height))
-            })
+            .map(|point| self.navigation_point_at(point).map(Vec3::from))
             .collect()
     }
 
@@ -228,8 +262,7 @@ impl ObjectiveFace {
             return None;
         }
         let point = self.field.constrain_move([from.x, from.z], [to.x, to.z]);
-        let (surface, distance) = self.closest([point[0], from.y, point[1]]);
-        (distance.is_finite() && distance < f32::MAX).then(|| Vec3::from(surface))
+        self.navigation_point_at(point).map(Vec3::from)
     }
 
     /// 可行走格集。
@@ -990,9 +1023,32 @@ struct MemberSnap {
     entity: Entity,
     target_fixture: Option<Entity>,
     unit: u32,
+    site_type: String,
     position: [f32; 3],
     /// 当前导航目的地：执行中 = 目标目的地，停顿中 = 原地（无路径）。
     destination: [f32; 3],
+    /// A source Current may be a valid NoTalk record without a master story.
+    /// Only a missing Current or our explicit unfinished factory is excluded.
+    talk_target: Option<[f32; 3]>,
+}
+
+fn prepared_social_target(slot: &TalkSlot) -> Option<[f32; 3]> {
+    slot.current.as_ref()
+        .filter(|data| data.pending_factory.is_none())
+        .map(|data| data.target_position)
+}
+
+impl MemberSnap {
+    fn social_candidate(&self, unit: u32, site_type: &str) -> Option<objective::SocialCandidate> {
+        if self.unit == unit || self.site_type != site_type {
+            return None;
+        }
+        Some(objective::SocialCandidate {
+            position: self.position,
+            destination: self.destination,
+            talk_target: self.talk_target?,
+        })
+    }
 }
 
 /// Update：目标机推进——停顿计时（对话态冻结）、路线尽收场（无对话目标
@@ -1086,10 +1142,12 @@ pub(crate) fn decide(
     let snaps: Vec<MemberSnap> = npcs
         .iter()
         .map(
-            |(entity, unit, _, _, slot, mind, _, _, state, target, _, _, _, _)| MemberSnap {
+            |(entity, unit, _, _, slot, mind, _, _, state, target, _, _, actions, _)| MemberSnap {
                 entity,
                 target_fixture: slot.current.as_ref().and_then(|data| data.target_fixture),
                 unit: unit.0,
+                site_type: actions.site_type.clone(),
+                talk_target: prepared_social_target(slot),
                 position: state.0.position,
                 destination: if mind.executing {
                     target.0
@@ -1359,17 +1417,13 @@ pub(crate) fn decide(
         let destination = if let Some(lane) = lane {
             match lane {
                 TalkLane::GeneralTalk => {
-                    // 社交链：候选 = 同站其余成员（全员同站；对话能力是
-                    // 名册的输入合同）。未命中回退游走链（源补位级联里
+                    // CN Factory.GetNearOtherCharacterPosition filters other
+                    // unit + non-null TalkData + same site before sampling.
+                    // 未命中回退游走链（源补位级联里
                     // 「就近他人未命中 → 随机位」的同形级联）。
                     let candidates: Vec<objective::SocialCandidate> = snaps
                         .iter()
-                        .filter(|snap| snap.unit != unit.0)
-                        .map(|snap| objective::SocialCandidate {
-                            position: snap.position,
-                            destination: snap.destination,
-                            talk_target: snap.destination,
-                        })
+                        .filter_map(|snap| snap.social_candidate(unit.0, &actions.site_type))
                         .collect();
                     let npc_positions: Vec<[f32; 3]> =
                         snaps.iter().map(|snap| snap.position).collect();
@@ -1789,4 +1843,120 @@ fn scale(a: [f32; 3], t: f32) -> [f32; 3] {
 fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
     let d = sub(a, b);
     dot(d, d).sqrt()
+}
+
+#[cfg(test)]
+mod social_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn current_is_required_but_a_prepared_no_talk_needs_no_master() {
+        let mut slot = TalkSlot::default();
+        assert_eq!(prepared_social_target(&slot), None);
+        slot.current = Some(AiTalkData::pending(TalkType::NoneTalk, 11, [3., 0., 4.]));
+        assert_eq!(prepared_social_target(&slot), None);
+        let current = slot.current.as_mut().unwrap();
+        current.pending_factory = None;
+        assert!(current.content.is_none());
+        assert_eq!(prepared_social_target(&slot), Some([3., 0., 4.]));
+    }
+
+    #[test]
+    fn social_pool_filters_identity_site_and_current_and_keeps_two_targets() {
+        let mut snap = MemberSnap {
+            entity: Entity::PLACEHOLDER, target_fixture: None, unit: 11,
+            site_type: "garden".into(), position: [1., 0., 2.],
+            destination: [9., 0., 8.], talk_target: Some([3., 0., 4.]),
+        };
+        assert!(snap.social_candidate(11, "garden").is_none());
+        assert!(snap.social_candidate(12, "myroom").is_none());
+        let candidate = snap.social_candidate(12, "garden").unwrap();
+        assert_eq!(candidate.position, snap.position);
+        assert_eq!(candidate.destination, [9., 0., 8.]);
+        assert_eq!(candidate.talk_target, [3., 0., 4.]);
+        snap.talk_target = None;
+        assert!(snap.social_candidate(12, "garden").is_none());
+    }
+}
+
+#[cfg(test)]
+mod navigation_height_tests {
+    use super::*;
+    use moly_law::carve::{ColliderPolygon, WalkField};
+
+    fn low_step_face() -> ObjectiveFace {
+        let tris = vec![
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, -4.0], [4.0, 0.0, 4.0]],
+            [[-4.0, 0.0, -4.0], [4.0, 0.0, 4.0], [-4.0, 0.0, 4.0]],
+        ];
+        let step = ColliderPolygon {
+            vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            min_y: 0.0, max_y: 0.05, triangles: Vec::new(), solid: true, carve: false,
+        };
+        let field = std::sync::Arc::new(WalkField::bake_colliders(&tris, &[step], 0.05));
+        let mut buckets = HashMap::new();
+        for x in -16..=16 {
+            for z in -16..=16 {
+                buckets.insert((x, z), vec![0, 1]);
+            }
+        }
+        ObjectiveFace { tris, buckets, grid_min: (-16, -16), grid_max: (16, 16),
+            ref_y: 0.0, walkable: Vec::new(), epoch: 1, field, generation: 1 }
+    }
+
+    #[test]
+    fn navigation_uses_step_height_but_animation_surface_probe_stays_raw() {
+        let face = low_step_face();
+        assert_eq!(face.surface_sample([0.0, 0.0, 0.0], 0.25).unwrap()[1], 0.0);
+        for point in [face.sample([0.0, 0.0, 0.0], 0.25).unwrap(),
+            face.navigation_surface_sample([0.0, 0.0, 0.0], 0.25).unwrap(),
+            face.reattach_after_layout([0.0, 0.0, 0.0]).unwrap()] {
+            assert!((point[1] - 0.05).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn fixture_navigation_move_does_not_accumulate_step_height() {
+        let face = low_step_face();
+        let start = Vec3::new(0.0, 0.05, 0.0);
+        let next = face.fixture_move(start, Vec3::new(0.1, 0.05, 0.0)).unwrap();
+        assert!((next.y - 0.05).abs() < 1e-5);
+        let outside = face.fixture_move(next, Vec3::new(2.0, 0.05, 0.0)).unwrap();
+        assert!(outside.y.abs() < 1e-5);
+        let path = face.fixture_path(Vec3::new(-2.0, 0.0, 0.0), start).unwrap();
+        assert!((path.last().unwrap().y - 0.05).abs() < 1e-5);
+    }
+
+    #[test]
+    fn navigation_height_on_a_sloped_rug_never_moves_valid_xz() {
+        let mut face = low_step_face();
+        for triangle in &mut face.tris {
+            for point in triangle {
+                point[1] = point[0] * 0.25;
+            }
+        }
+        let top = |x: f32, z: f32| [x, x * 0.25 + 0.05, z];
+        let rug = ColliderPolygon {
+            vertices: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            min_y: -0.2, max_y: 0.3,
+            triangles: vec![[top(-1.0, -1.0), top(-1.0, 1.0), top(1.0, 1.0)],
+                [top(-1.0, -1.0), top(1.0, 1.0), top(1.0, -1.0)]],
+            solid: false, carve: false,
+        };
+        face.field = std::sync::Arc::new(WalkField::bake_colliders(&face.tris, &[rug], 0.05));
+        let xz = [0.025, 0.025];
+        assert!(face.field.walkable_at(xz));
+        let y = xz[0] * 0.25 + face.field.height_offset(xz);
+        assert!(face.field.height_offset(xz) > 0.0);
+        let original = [xz[0], y, xz[1]];
+        for result in [face.navigation_surface_sample(original, 0.25).unwrap(),
+            face.reattach_after_layout(original).unwrap(),
+            face.fixture_move(Vec3::from(original), Vec3::from(original)).unwrap().to_array()] {
+            assert_eq!([result[0], result[2]], xz);
+            assert!((result[1] - y).abs() < 1e-5);
+        }
+        let raw = face.surface_sample(original, 0.25).unwrap();
+        assert!((raw[1] - raw[0] * 0.25).abs() < 1e-5,
+            "the raw animation probe still samples the site slope");
+    }
 }

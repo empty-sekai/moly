@@ -61,6 +61,10 @@ export function evidencePaths(evidence) {
         ".wav",
         ".mp3",
         ".ktx2",
+        ".rgba8",
+        ".glsl",
+        ".wgsl",
+        ".spv",
       ].includes(path.extname(relative).toLowerCase())
     )
       throw new Error("Unsupported game resource extension");

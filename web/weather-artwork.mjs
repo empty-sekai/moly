@@ -84,7 +84,7 @@ async function readPng(response, expectedBytes) {
 /** Owns verified thumbnail URLs. Both flat and packed resources must match the
  * producer's typed artifact receipt before any pixels are exposed to the UI. */
 export function createWeatherArtwork(
-  { assets, baseUrl, packs = false, assetCatalog = null },
+  { assets, baseUrl, resourceBase, packs = false, assetCatalog = null },
   {
     createClient = (root, catalog, options) =>
       new PackClient(root, catalog, options),
@@ -97,14 +97,14 @@ export function createWeatherArtwork(
   const packed = Boolean(packs || assetCatalog);
   const root = new URL(assets, baseUrl).href;
   const client = packed
-    ? createClient(root, assetCatalog, { required: true, signal: abort.signal })
+    ? createClient(root, assetCatalog, { required: true, signal: abort.signal, resourceBase })
     : null;
   const pending = new Map();
   const urls = new Set();
   let disposed = false;
   return {
     resolve(file, receipt) {
-      const direct = sourceWeatherIcon(file, assets, baseUrl);
+      const direct = sourceWeatherIcon(file, assets, baseUrl, resourceBase);
       if (!direct || disposed) return Promise.resolve(null);
       try {
         sourceReceipt(file, receipt);
@@ -122,7 +122,8 @@ export function createWeatherArtwork(
               : await readPng(
                   await fetchImpl(direct, {
                     signal: abort.signal,
-                    credentials: "same-origin",
+                    credentials: "omit",
+                    redirect: "error",
                   }),
                   receipt.bytes,
                 );

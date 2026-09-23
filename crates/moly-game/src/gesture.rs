@@ -323,3 +323,41 @@ fn kind_name(kind: GestureKind) -> &'static str {
         GestureKind::LongTouch => "LONG_TOUCH",
     }
 }
+
+#[cfg(test)]
+mod playback_gesture_tests {
+    use super::*;
+    use bevy::ecs::system::SystemState;
+
+    fn pointer_sequence(drag: bool, ui_owned: bool) -> Vec<GestureEvent> {
+        let mut world = World::new();
+        world.init_resource::<Messages<GestureEvent>>();
+        let mut writer = SystemState::<MessageWriter<GestureEvent>>::new(&mut world);
+        let mut layer = GestureLayerState::default();
+        {
+            let mut events = writer.get_mut(&mut world);
+            press_pointer(&mut layer, &mut events, PointerSource::Mouse, Vec2::ZERO, 1., ui_owned);
+            if drag {
+                move_pointer(&mut layer, &mut events, PointerSource::Mouse, Vec2::new(40., 0.), 6.);
+            }
+            release_pointer(&mut layer, &mut events, PointerSource::Mouse, None, 1.1);
+        }
+        world.resource_mut::<Messages<GestureEvent>>().drain().collect()
+    }
+
+    #[test]
+    fn camera_drag_release_cannot_be_a_dialogue_advance_tap() {
+        let events = pointer_sequence(true, false);
+        assert!(events.iter().any(|event| event.kind == GestureKind::Drag && event.state == GestureState::Moved));
+        assert!(events.iter().any(|event| event.kind == GestureKind::Drag && event.state == GestureState::End));
+        assert!(!events.iter().any(|event| event.kind.is_tap_family() && event.state == GestureState::End));
+        assert!(pointer_sequence(false, false).iter().any(|event| event.kind.is_tap_family() && event.state == GestureState::End));
+    }
+
+    #[test]
+    fn ui_drag_keeps_its_original_capture_through_release() {
+        let events = pointer_sequence(true, true);
+        assert!(events.iter().all(|event| event.ui_owned));
+        assert!(!events.iter().any(|event| event.kind.is_tap_family() && event.state == GestureState::End));
+    }
+}

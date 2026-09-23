@@ -26,9 +26,12 @@ function action(text, className, click) {
 export class ExperienceShell {
   constructor(assetBase, options = {}) {
     this.assetBase = assetBase;
+    this.resourceBase = options.resourceBase;
     this.packClient =
       options.packs || options.assetCatalog
-        ? new PackClient(assetBase, options.assetCatalog ?? null)
+        ? new PackClient(assetBase, options.assetCatalog ?? null, {
+            resourceBase: options.resourceBase,
+          })
         : null;
     this.packedImages = this.packClient
       ? new PackedImages(this.packClient)
@@ -858,11 +861,55 @@ export class ExperienceShell {
         this.send("focus", { value: domFocused });
       }
     });
-    $("app-canvas").addEventListener("pointerdown", () => {
-      $("app-canvas").focus({ preventScroll: true });
+    const canvas = $("app-canvas");
+    const capturedPointers = new Set();
+    const capturePointer = (event) => {
+      const id = event.pointerId;
+      if (event.button !== undefined && event.button !== 0) return;
+      if (
+        !Number.isFinite(id) ||
+        typeof canvas.setPointerCapture !== "function"
+      )
+        return;
+      try {
+        canvas.setPointerCapture(id);
+        capturedPointers.add(id);
+      } catch {
+        // Pointer capture is optional; preserve ordinary in-canvas input.
+      }
+    };
+    const recapturePointer = (event) => {
+      const id = event.pointerId;
+      if (
+        !capturedPointers.has(id) ||
+        typeof canvas.hasPointerCapture !== "function" ||
+        canvas.hasPointerCapture(id)
+      )
+        return;
+      capturePointer(event);
+    };
+    const releasePointer = (event) => {
+      const id = event.pointerId;
+      if (
+        !capturedPointers.delete(id) ||
+        typeof canvas.releasePointerCapture !== "function"
+      )
+        return;
+      try {
+        canvas.releasePointerCapture(id);
+      } catch {
+        /* browser released it */
+      }
+    };
+    canvas.addEventListener("pointerdown", (event) => {
+      capturePointer(event);
+      canvas.focus({ preventScroll: true });
       this.focused = false;
       this.send("focus", { value: false });
     });
+    canvas.addEventListener("pointermove", recapturePointer);
+    canvas.addEventListener("pointerup", releasePointer);
+    canvas.addEventListener("pointercancel", releasePointer);
     for (const name of ["pointerdown", "wheel"])
       document.addEventListener(
         name,

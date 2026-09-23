@@ -2,7 +2,7 @@
 // The iframe owns one complete Bevy app: removing it also releases audio,
 // rendering, input listeners and the browser's document storage lease.
 import { applyPackSelection } from "./asset-pack-client.mjs";
-import { sameOriginDirectory } from "./embed-contract.mjs";
+import { resourceBase, resourceDirectory, resourceOrigin } from "./embed-contract.mjs";
 import { mountStage, ACTIVE_MOUNT } from "./embed-stage.mjs";
 
 export function mountMoly(container, options = {}) {
@@ -21,12 +21,6 @@ export function mountMoly(container, options = {}) {
     throw new TypeError("Moly needs a container element");
   if (window[ACTIVE_MOUNT])
     throw new Error("A Moly renderer is already mounted in this page");
-  // A separately configured resource origin belongs to the stage view only.
-  // The shell page resolves its asset base with validAssetBase, which admits a
-  // root-relative path and nothing else, and its pack store is pinned to the
-  // document origin, so an origin accepted here would be quietly dropped.
-  if (options.resourceOrigin)
-    throw new TypeError("The shell view has no configurable resource origin");
   const url = new URL(src, location.href);
   if (
     url.origin !== location.origin ||
@@ -40,11 +34,26 @@ export function mountMoly(container, options = {}) {
   // The asset base reaches the shell through the same contract the stage uses
   // instead of being forwarded verbatim. A value the shell would have rejected
   // used to fall back to /assets/ inside the page; it is now refused here.
-  if (assets)
+  if (assets) {
+    const configuredBase = options.resourceBase === undefined
+      ? undefined
+      : resourceBase(options.resourceBase);
+    const configuredOrigin = resourceOrigin(options.resourceOrigin ??
+      (configuredBase ? new URL(configuredBase).origin : undefined));
+    if (configuredBase && configuredOrigin !== new URL(configuredBase).origin)
+      throw new TypeError("resourceOrigin must match resourceBase");
+    const assetRoot = resourceDirectory(
+      assets,
+      location.href,
+      configuredBase ?? configuredOrigin,
+    );
     url.searchParams.set(
       "assets",
-      sameOriginDirectory(assets, location.href).pathname,
+      assetRoot.origin === location.origin ? assetRoot.pathname : assetRoot.href,
     );
+    if (configuredOrigin) url.searchParams.set("resource_origin", configuredOrigin);
+    if (configuredBase) url.searchParams.set("resource_base", configuredBase);
+  }
   applyPackSelection(url, options);
   if (content) url.searchParams.set("content", content);
   if (tab) url.searchParams.set("tab", tab);

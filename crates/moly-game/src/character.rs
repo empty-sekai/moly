@@ -80,6 +80,11 @@ pub struct CharacterPack {
 #[derive(Component)]
 pub struct CharacterModel;
 
+/// Imported local pose before any locomotion or content clip is evaluated.
+/// Sparse source clips must not inherit transforms left by a previous clip.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CharacterRestTransform(pub Transform);
+
 /// 角色包已挂载：装载门的一次性闩，防重复挂子场景。
 #[derive(Component)]
 pub struct ModelAttached;
@@ -320,6 +325,7 @@ pub(crate) fn wire_when_ready(
     meshes_3d: Query<&Mesh3d>,
     skinned_meshes: Query<(), With<SkinnedMesh>>,
     globals: Query<&GlobalTransform>,
+    locals: Query<&Transform>,
 ) {
     if npcs.is_empty() {
         return;
@@ -394,6 +400,11 @@ pub(crate) fn wire_when_ready(
                     AnimationTargetId::from_names(chain.iter()),
                     AnimatedBy(root),
                 ));
+                if let Ok(pose) = locals.get(entity) {
+                    commands
+                        .entity(entity)
+                        .insert(CharacterRestTransform(*pose));
+                }
                 targets += 1;
             } else {
                 chain.truncate(depth);
@@ -563,6 +574,23 @@ pub(crate) fn wire_when_ready(
     }
 }
 
+/// Transfer a completed source Director back to ordinary idle before a new
+/// talk clip is admitted. The caller must release the Director first so its
+/// sparse Root tracks cannot survive under a Hips-only shared animation.
+pub(crate) fn resume_idle_after_fixture(world: &mut World, actor: Entity) -> Result<(), String> {
+    let driver = world
+        .get::<MotionDriver>(actor)
+        .ok_or("completed fixture actor animator is missing")?;
+    let (animator, idle) = (driver.player, driver.idle);
+    let mut query = world.query::<(&mut AnimationPlayer, &mut AnimationTransitions)>();
+    let (mut player, mut transitions) = query
+        .get_mut(world, animator)
+        .map_err(|_| "completed fixture animation player is missing")?;
+    transitions.play(&mut player, idle, SEGMENT_BLEND).repeat();
+    world.get_mut::<MotionDriver>(actor).unwrap().playing = Some(MotionKind::Idle);
+    Ok(())
+}
+
 /// Update：移动相位驱动动画段——在走播走姿、驻留播待机、转体播转身段；
 /// 起始段播完自动接同段循环段（`_S` → `_L`，段族的衔接约定）。相位变即
 /// 换段，统一 0.5 秒过渡（换段语义见模块注释）。
@@ -576,14 +604,19 @@ pub(crate) fn wire_when_ready(
 /// 是调用的前置条件。
 pub fn drive(
     mut npcs: Query<
-        (&CharacterUnitId, &MotionPhase, &mut MotionDriver),
-        (Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>, Without<crate::talk::fixture_action::TalkFixtureActorLease>),
+        (
+            &CharacterUnitId,
+            &MotionPhase,
+            &mut MotionDriver,
+            Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
+        ),
+        Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
     >,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,
 ) {
-    for (unit, phase, mut driver) in &mut npcs {
-        if driver.alone_holds {
+    for (unit, phase, mut driver, talk_lease) in &mut npcs {
+        if driver.alone_holds || talk_lease.is_some_and(|lease| !lease.approaching) {
             continue; // 演出侧占着播放器：位移相位换段让位
         }
         let mut kind = match phase {

@@ -28,6 +28,7 @@ Adobe 的保留字体名（Reserved Font Name "Source"）。
 | futures-lite | MIT OR Apache-2.0 | 异步任务与 I/O 辅助 |
 | gltf | MIT OR Apache-2.0 | glTF 模型数据解析 |
 | js-sys | MIT OR Apache-2.0 | JavaScript 内建对象绑定 |
+| parry3d | Apache-2.0 | 源凸碰撞网格的三维凸包构建 |
 | serde | MIT OR Apache-2.0 | 数据序列化与反序列化 |
 | serde_json | MIT OR Apache-2.0 | JSON 清单与资源数据解析 |
 | sha2 | MIT OR Apache-2.0 | 资源包 SHA-256 完整性校验 |

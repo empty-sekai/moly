@@ -72,7 +72,9 @@ struct UnitPool {
 impl FacialTables {
     /// Authored per-unit defaults; absence is not a request for a guessed face.
     pub(crate) fn default_patterns(&self, unit: u32) -> Option<(&str, &str)> {
-        self.defaults.get(&unit).map(|(eye, mouth)| (eye.as_str(), mouth.as_str()))
+        self.defaults
+            .get(&unit)
+            .map(|(eye, mouth)| (eye.as_str(), mouth.as_str()))
     }
 
     /// 眼表查键：pattern → open 格值（缺键 None——消费侧响亮失败用）。
@@ -396,7 +398,10 @@ fn parse_steps(steps: &[serde_json::Value], unit: u32, scenario: &str) -> Vec<la
                 "emoticon" => law::Step::ShowEmoticon {
                     t,
                     name: string_of(step, "name", unit).to_owned(),
-                    show_seconds: step.get("showSeconds").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                    show_seconds: step
+                        .get("showSeconds")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32,
                     time_arg: step.get("time").and_then(|v| v.as_f64()),
                     not_play_se_arg: step.get("notPlaySe").and_then(|v| v.as_bool()),
                     host_not_play_se: step
@@ -473,11 +478,22 @@ fn parse_facial(text: &str) -> FacialTables {
             .get("CloseLipSyncIndex")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("口型表行 {name} 缺 CloseLipSyncIndex"));
-        let open = row.get("OpenLipSyncIndex").and_then(|v| v.as_i64())
+        let open = row
+            .get("OpenLipSyncIndex")
+            .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("口型表行 {name} 缺 OpenLipSyncIndex"));
-        let middle = row.get("MiddleLipSyncIndex").and_then(|v| v.as_i64())
+        let middle = row
+            .get("MiddleLipSyncIndex")
+            .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("口型表行 {name} 缺 MiddleLipSyncIndex"));
-        lip.insert(name.to_owned(), LipPattern { open: open as i32, middle: middle as i32, close: close as i32 });
+        lip.insert(
+            name.to_owned(),
+            LipPattern {
+                open: open as i32,
+                middle: middle as i32,
+                close: close as i32,
+            },
+        );
     }
     let mut defaults = HashMap::new();
     for row in value
@@ -650,7 +666,11 @@ pub(crate) fn attach(
             .get(&unit.0)
             .unwrap_or_else(|| panic!("facial 默认脸表没有 unit {}", unit.0));
         apply_eye(&mut materials, &eye_handle, tables.eye.get(eye_name));
-        apply_mouth_pattern(&mut materials, &mouth_handle, tables.lip.get(mouth_name).copied().unwrap_or_default());
+        apply_mouth_pattern(
+            &mut materials,
+            &mouth_handle,
+            tables.lip.get(mouth_name).copied().unwrap_or_default(),
+        );
         commands.entity(npc).insert(AloneRuntime {
             program: pool.map(|pool| pool.program.clone()),
             scenarios: pool.map(|pool| pool.scenarios.clone()).unwrap_or_default(),
@@ -757,7 +777,10 @@ pub(crate) fn apply_mouth(
     ];
     // UpdateMouth writes Close on idle frames too. Read without marking the
     // asset changed, so an already-selected cell does not upload every frame.
-    if materials.get(handle).is_some_and(|material| material.params.main_tex_st != st) {
+    if materials
+        .get(handle)
+        .is_some_and(|material| material.params.main_tex_st != st)
+    {
         if let Some(material) = materials.get_mut(handle) {
             material.params.main_tex_st = st;
         }
@@ -865,7 +888,11 @@ pub(crate) fn advance(
                     rt.eye_pattern = pattern;
                 }
                 law::Step::ChangeMouth { pattern, .. } => {
-                    apply_mouth_pattern(&mut materials, &rt.mouth_handle, tables.lip.get(&pattern).copied().unwrap_or_default());
+                    apply_mouth_pattern(
+                        &mut materials,
+                        &rt.mouth_handle,
+                        tables.lip.get(&pattern).copied().unwrap_or_default(),
+                    );
                     rt.mouth_pattern = pattern;
                 }
                 law::Step::ChangeAnimation {
@@ -1018,7 +1045,12 @@ pub(crate) fn node_for(
     let graph = graphs
         .get_mut(graph_handle)
         .unwrap_or_else(|| panic!("unit {unit} 的动画图资产不在（装配时已建）"));
-    let node = graph.add_clip(clip.clone(), 1.0, graph.root);
+    // Talk sessions have short-lived name maps but share the character's
+    // graph. Reopening the same conversation must not append its clips again.
+    let existing = graph.graph.node_indices().find(|node| {
+        matches!(&graph.graph[*node].node_type, bevy::animation::graph::AnimationNodeType::Clip(handle) if handle == clip)
+    });
+    let node = existing.unwrap_or_else(|| graph.add_clip(clip.clone(), 1.0, graph.root));
     nodes.insert(clip_name.to_owned(), node);
     node
 }

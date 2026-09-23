@@ -29,6 +29,7 @@ use super::contour::Contour;
 use super::funnel::{self, Portal};
 use super::grid::Grid;
 use super::region::Regions;
+use std::cell::RefCell;
 use std::collections::{BinaryHeap, HashMap};
 
 /// 「没有邻居」。
@@ -44,6 +45,64 @@ pub(crate) struct PolyMesh {
     neighbours: Vec<[u32; 3]>,
     /// 区号 → 该区的单元下标。点定位时用它把候选集缩小到一个区。
     by_region: HashMap<u32, Vec<u32>>,
+    /// 单元所属的连通分量（沿邻接边可达的单元同号）。两端不同号时单元图上
+    /// 没有路径，A\* 必然展开完整个起点分量后返回空；这里直接给出同一结论。
+    components: Vec<u32>,
+    /// 单元心的世界坐标，按查询时同一条式子预先算好；只在查询所用的格参数
+    /// 与缓存时一致时读取（见 `cache_centres`）。
+    centres: Vec<[f32; 2]>,
+    centre_grid: Option<([f32; 2], f32)>,
+}
+
+/// A\* 的工作表：稠密数组加代号戳，免去每次查询的哈希表分配与哈希。
+/// 浏览器与原生都在单线程里查询，一线程一份。
+#[derive(Default)]
+struct SearchScratch {
+    best: Vec<f32>,
+    came: Vec<u32>,
+    stamp: Vec<u32>,
+    generation: u32,
+}
+
+impl SearchScratch {
+    fn begin(&mut self, len: usize) {
+        if self.stamp.len() != len {
+            self.best = vec![f32::MAX; len];
+            self.came = vec![NO_NEIGHBOUR; len];
+            self.stamp = vec![0; len];
+            self.generation = 0;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamp.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    fn best(&self, index: u32) -> f32 {
+        let i = index as usize;
+        if self.stamp[i] == self.generation {
+            self.best[i]
+        } else {
+            f32::MAX
+        }
+    }
+
+    fn came(&self, index: u32) -> Option<u32> {
+        let i = index as usize;
+        (self.stamp[i] == self.generation && self.came[i] != NO_NEIGHBOUR).then(|| self.came[i])
+    }
+
+    fn set(&mut self, index: u32, best: f32, came: u32) {
+        let i = index as usize;
+        self.stamp[i] = self.generation;
+        self.best[i] = best;
+        self.came[i] = came;
+    }
+}
+
+thread_local! {
+    static SCRATCH: RefCell<SearchScratch> = RefCell::new(SearchScratch::default());
 }
 
 impl PolyMesh {
@@ -104,12 +163,40 @@ pub(crate) fn build(contours: &[Contour]) -> PolyMesh {
         by_region.entry(*region).or_default().push(index as u32);
     }
 
+    let components = connected_components(&neighbours);
     PolyMesh {
         verts,
         tris,
         neighbours,
         by_region,
+        components,
+        centres: Vec::new(),
+        centre_grid: None,
     }
+}
+
+/// 沿邻接边的连通分量编号（按单元下标顺序起新分量）。
+fn connected_components(neighbours: &[[u32; 3]]) -> Vec<u32> {
+    let mut component = vec![NO_NEIGHBOUR; neighbours.len()];
+    let mut stack = Vec::new();
+    let mut next = 0u32;
+    for seed in 0..neighbours.len() {
+        if component[seed] != NO_NEIGHBOUR {
+            continue;
+        }
+        component[seed] = next;
+        stack.push(seed as u32);
+        while let Some(current) = stack.pop() {
+            for neighbour in neighbours[current as usize] {
+                if neighbour != NO_NEIGHBOUR && component[neighbour as usize] == NO_NEIGHBOUR {
+                    component[neighbour as usize] = next;
+                    stack.push(neighbour);
+                }
+            }
+        }
+        next += 1;
+    }
+    component
 }
 
 /// 有符号面积的两倍（整数，精确）。逆时针为正。
@@ -243,10 +330,7 @@ impl PolyMesh {
 
     fn contains(&self, grid: &Grid, index: u32, p: [f32; 2]) -> bool {
         let triangle = self.tris[index as usize];
-        let corners: Vec<[f32; 2]> = triangle
-            .iter()
-            .map(|v| to_world(grid, self.verts[*v as usize]))
-            .collect();
+        let corners = triangle.map(|v| to_world(grid, self.verts[v as usize]));
         let sign = |a: [f32; 2], b: [f32; 2]| {
             (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
         };
@@ -256,7 +340,23 @@ impl PolyMesh {
         (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0)
     }
 
+    /// Precompute `centre` for the grid this mesh was baked on.
+    pub(crate) fn cache_centres(&mut self, grid: &Grid) {
+        self.centre_grid = None;
+        self.centres = (0..self.tris.len() as u32)
+            .map(|index| self.compute_centre(grid, index))
+            .collect();
+        self.centre_grid = Some((grid.origin, grid.voxel));
+    }
+
     fn centre(&self, grid: &Grid, index: u32) -> [f32; 2] {
+        if self.centre_grid == Some((grid.origin, grid.voxel)) {
+            return self.centres[index as usize];
+        }
+        self.compute_centre(grid, index)
+    }
+
+    fn compute_centre(&self, grid: &Grid, index: u32) -> [f32; 2] {
         let triangle = self.tris[index as usize];
         let mut sum = [0.0f32; 2];
         for v in triangle {
@@ -273,6 +373,20 @@ impl PolyMesh {
         if from == to {
             return Some(vec![from]);
         }
+        if self.components[from as usize] != self.components[to as usize] {
+            return None;
+        }
+        SCRATCH.with(|scratch| self.search(grid, from, to, &mut scratch.borrow_mut()))
+    }
+
+    fn search(
+        &self,
+        grid: &Grid,
+        from: u32,
+        to: u32,
+        scratch: &mut SearchScratch,
+    ) -> Option<Vec<u32>> {
+        scratch.begin(self.tris.len());
         let goal = self.centre(grid, to);
         let heuristic = |index: u32| {
             let c = self.centre(grid, index);
@@ -282,22 +396,20 @@ impl PolyMesh {
         // 比较（这些值都非负有限，位序与数值序一致）。
         let key = |f: f32| -((f.to_bits()) as i64);
         let mut open = BinaryHeap::new();
-        let mut best: HashMap<u32, f32> = HashMap::new();
-        let mut came: HashMap<u32, u32> = HashMap::new();
-        best.insert(from, 0.0);
+        scratch.set(from, 0.0, NO_NEIGHBOUR);
         open.push((key(heuristic(from)), from));
         while let Some((_, current)) = open.pop() {
             if current == to {
                 let mut chain = vec![current];
                 let mut cursor = current;
-                while let Some(previous) = came.get(&cursor) {
-                    cursor = *previous;
+                while let Some(previous) = scratch.came(cursor) {
+                    cursor = previous;
                     chain.push(cursor);
                 }
                 chain.reverse();
                 return Some(chain);
             }
-            let cost = best.get(&current).copied().unwrap_or(f32::MAX);
+            let cost = scratch.best(current);
             let here = self.centre(grid, current);
             for neighbour in self.neighbours[current as usize] {
                 if neighbour == NO_NEIGHBOUR {
@@ -306,9 +418,8 @@ impl PolyMesh {
                 let there = self.centre(grid, neighbour);
                 let step = ((there[0] - here[0]).powi(2) + (there[1] - here[1]).powi(2)).sqrt();
                 let candidate = cost + step;
-                if candidate < best.get(&neighbour).copied().unwrap_or(f32::MAX) {
-                    best.insert(neighbour, candidate);
-                    came.insert(neighbour, current);
+                if candidate < scratch.best(neighbour) {
+                    scratch.set(neighbour, candidate, current);
                     open.push((key(candidate + heuristic(neighbour)), neighbour));
                 }
             }

@@ -166,6 +166,7 @@ pub(super) fn plan_candidates(
         if entry.get("status").and_then(|v| v.as_str()) == Some("exported")
             && entry.get("hasFixtureView").and_then(|v| v.as_bool()) == Some(true)
         {
+            moly_assets::coordinates::validate_document(entry).expect("editor fixture coordinates");
             if let Some(path) = entry.get("glb").and_then(|v| v.as_str()) {
                 candidates
                     .paths

@@ -1148,7 +1148,7 @@ pub(crate) struct FixtureParticleRequest {
     planned: Option<Vec<Planned>>,
 }
 #[derive(Component)]
-pub(crate) struct FixtureParticleLive(Runtime);
+pub(crate) struct FixtureParticleLive(pub(crate) Runtime);
 #[derive(Component)]
 pub(crate) struct FixtureParticlesResolved;
 
@@ -1160,6 +1160,9 @@ pub(crate) fn request_fixture_particles(
     roots: Query<(Entity, &crate::fixture::FixtureSource), (With<crate::fixture::FixtureRoot>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
 ) {
     let handle = index.get_or_insert_with(|| server.load("moly://fixture-particles-v2/index.json"));
+    // The index is only consulted for fixture roots that have not been
+    // requested or resolved yet; with none pending there is nothing to parse.
+    if roots.is_empty() { return; }
     let Some(json) = jsons.get(handle) else { return; };
     let archive: serde_json::Value = serde_json::from_str(&json.0).expect("fixture particle index");
     for (entity, source) in &roots {
@@ -1192,18 +1195,25 @@ pub(crate) fn plan_fixture_particles(
             continue;
         };
         let raw: serde_json::Value = serde_json::from_str(&json.0).expect("fixture particle JSON");
-        let doc = match moly_assets::sidecar::parse_fixture_particles(json.0.as_bytes()) {
+        // Source snapshots and legacy material summaries are distinct schemas.
+        // Never feed a source-qualified failure back through the approximate path.
+        let mut legacy = raw.clone();
+        if let Some(emitters) = legacy["emitters"].as_array_mut() {
+            emitters.retain(|p| !crate::weather_fx::fixture::is_source_particle(p));
+        }
+        let doc = match moly_assets::sidecar::parse_fixture_particles(legacy.to_string().as_bytes()) {
             Ok(doc) => doc,
             Err(error) => { warn!("fixture particles {}: {error}", request.package); request.planned = Some(Vec::new()); continue; }
         };
         let mut by_path = HashMap::new();
         crate::inactive_nodes::collect(entity, &mut Vec::new(), &names, &children, &mut by_path);
         let by_path: HashMap<_, _> = by_path.into_iter().map(|(p, entities)| (format!("/{p}"), entities)).collect();
+        crate::weather_fx::fixture::plan(&mut commands, entity, &raw, &by_path, &server);
         let mut tally = Tally::default();
         let mut plans = Vec::new();
         let mut not_play_on_awake = 0usize;
         for (index, particle) in doc.particles.iter().enumerate() {
-            let source = &raw["emitters"][index];
+            let source = &legacy["emitters"][index];
             // An inactive event template requires its actual activation binding.
             // Missing activation metadata cannot be treated as an active instance.
             if source.get("activeInHierarchy").and_then(serde_json::Value::as_bool) != Some(true) {
@@ -1272,17 +1282,41 @@ pub(crate) fn spawn_fixture_particles(
 }
 
 pub(crate) fn advance_fixture_particles(
-    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive)>,
+    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
+        Option<&mut crate::fixture_timeline_particles::DirectorClock>,
+        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>)>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
     time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else { return; };
-    let Some(viewport) = camera.physical_viewport_size() else { return; };
+    let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
+        commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
+    };
+    let Some(viewport) = camera.physical_viewport_size() else {
+        commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
+    };
     let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32);
-    for (entity, mut particle) in &mut live {
+    for (entity, mut particle, mut clock, stopped) in &mut live {
         let system = &mut particle.0;
-        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
+        let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
+        if let Some(mut stopped) = stopped {
+            if stopped.reactivated(dormant, system.emitter.play_on_awake) {
+                // The source GameObject has genuinely reactivated; removing a
+                // Director clock alone must never manufacture this Play edge.
+                commands.entity(entity).remove::<(
+                    crate::fixture_timeline_particles::StoppedByDirector,
+                    crate::fixture_timeline_particles::DirectorClock,
+                )>().insert(crate::fixture_timeline_particles::RestoredAutonomous);
+                clock = None;
+                system.prewarmed = false;
+            } else {
+                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                }
+                continue;
+            }
+        }
+        if dormant && clock.is_none() {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
@@ -1290,19 +1324,24 @@ pub(crate) fn advance_fixture_particles(
         }
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
         let ctx = Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera_transform };
-        if !system.prewarmed {
-            system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping {
-                for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
+        if let Some(mut clock) = clock {
+            crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant);
+        } else {
+            if !system.prewarmed {
+                system.prewarmed = true;
+                if system.emitter.prewarm && system.emitter.looping {
+                    for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
+                }
             }
+            let dt = time.delta_secs() * system.emitter.simulation_speed;
+            if dt > 0.0 { simulate(system, dt, &ctx); }
         }
-        let dt = time.delta_secs() * system.emitter.simulation_speed;
-        if dt > 0.0 { simulate(system, dt, &ctx); }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if let Some(mesh) = meshes.get_mut(&system.mesh) {
             crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
         }
     }
+    commands.queue(crate::fixture_timeline_particles::collect_garbage);
 }
 
 /// 拆站面：撤下计划与状态，让新站的判读重新起跳。实体随场景树一起撤。

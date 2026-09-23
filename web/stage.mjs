@@ -1,4 +1,5 @@
 import { warmBaseResources } from "./base-resources.mjs";
+import { preflightCoordinates } from "./coordinate-contract.mjs";
 import {
   EMBED_VERSION,
   isEnvelope,
@@ -7,6 +8,7 @@ import {
   filters,
   intent,
   resourceDirectory,
+  resourceBase,
   resourceOrigin,
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
@@ -19,40 +21,6 @@ import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
-const packed =
-  params.get("packs") === "1" || Boolean(params.get("asset_catalog"));
-// Immutable resources may be published on one separately configured origin.
-// This document always stays same-origin with its embedder; only the bytes it
-// downloads move. The admissible set therefore has exactly one element: the
-// origin the embedder sealed into this URL when it configured one, otherwise
-// this document's own origin. There is no fallback between the two, and a
-// malformed parameter fails the boot instead of silently reverting.
-// The engine glue and WASM belong to the immutable release, so they are read
-// from the same configured origin as every other published byte. Only the
-// origin moves: the path stays this document's own release directory, so a
-// release is never assembled from two different publications.
-function engineBase() {
-  const here = new URL("./", import.meta.url);
-  const configured = params.get("resource_origin");
-  return configured
-    ? new URL(here.pathname, `${resourceOrigin(configured)}/`)
-    : here;
-}
-let assetsBase = null;
-function resolveAssets() {
-  if (assetsBase) return assetsBase;
-  const configured = params.get("resource_origin");
-  const directory = resourceDirectory(
-    params.get("assets") || "",
-    configured ? `${resourceOrigin(configured)}/` : location.href,
-  );
-  if (directory.origin !== location.origin && packed)
-    throw new Error(
-      "A packed asset store cannot be served from a separate resource origin",
-    );
-  assetsBase = directory;
-  return directory;
-}
 let ui = {
   locale: validateLocale(params.get("locale") || "zh-CN"),
   theme: validateTheme(params.get("theme") || "light"),
@@ -61,6 +29,7 @@ let configuration = null,
   wasm = null,
   controller = null,
   backend = null;
+let configuredResourceBase = null;
 let lastPlayerData = "";
 // The last weather block the runtime published. The dial is drawn from it and
 // the selector admits only IDs the runtime itself listed, so the stage never
@@ -82,9 +51,10 @@ function weatherPresentationOptions() {
   return {
     locale: ui.locale,
     region,
-    assets: assetsBase?.href ?? params.get("assets"),
-    baseUrl: assetsBase?.href ?? location.href,
-    packed,
+    assets: params.get("assets"),
+    baseUrl: location.href,
+    resourceBase: configuredResourceBase,
+    packed: params.get("packs") === "1" || Boolean(params.get("asset_catalog")),
     iconUrls: weatherIconUrls,
   };
 }
@@ -158,9 +128,8 @@ function report(next = phase) {
 }
 function render() {
   const t = stageMessages(ui.locale);
-  const stalled =
-    (phase === "base" || phase === "resources") &&
-    performance.now() - lastProgress > 30000;
+  const stalled = (phase === "base" || phase === "resources")
+    && performance.now() - lastProgress > 30000;
   document.documentElement.lang = ui.locale;
   document.documentElement.dataset.theme = ui.theme.mode;
   if (ui.theme.accent)
@@ -195,13 +164,11 @@ function render() {
   $("boot-recovery").hidden = !failed && !stalled;
   $("boot-note").textContent = stalled ? t.stalled : "";
   const amount = engineBytes || decodedBytes;
-  $("boot-progress").textContent = failed
-    ? ""
-    : phase === "base" && baseTotal
-      ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
-      : amount
-        ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
-        : "";
+  $("boot-progress").textContent = failed ? "" : phase === "base" && baseTotal
+    ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
+    : amount
+      ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
+      : "";
   $("stage-hint").textContent = t.controls;
   renderWeather();
 }
@@ -295,10 +262,32 @@ async function loadEngine() {
   try {
     if (!["cn", "jp", "tw", "en", "kr"].includes(region))
       throw new Error("An explicit supported resource region is required");
-    const assets = resolveAssets();
+    const configuredBase = params.get("resource_base")
+      ? resourceBase(params.get("resource_base"))
+      : undefined;
+    const publicOrigin = resourceOrigin(params.get("resource_origin") ??
+      (configuredBase ? new URL(configuredBase).origin : undefined));
+    if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
+      throw new Error("resource_origin must match resource_base");
+    resourceDirectory(
+      params.get("assets") || "",
+      location.href,
+      configuredBase ?? publicOrigin,
+    );
+    configuredResourceBase = configuredBase;
+    try {
+      await preflightCoordinates({
+        assets: new URL(params.get("assets"), location.href).href, region, version,
+        packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
+        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href,
+        resourceOrigin: publicOrigin, resourceBase: configuredBase,
+      }, { signal: abort.signal });
+      lastChunk = performance.now();
+    } catch (error) { fail("source_mismatch", error); throw error; }
     weatherArtwork = createWeatherArtwork({
-      assets: assets.href,
-      baseUrl: assets.href,
+      assets: params.get("assets"),
+      baseUrl: location.href,
+      resourceBase: configuredBase,
       packs: params.get("packs") === "1",
       assetCatalog: params.get("asset_catalog"),
     });
@@ -306,7 +295,8 @@ async function loadEngine() {
       {
         region,
         version,
-        assets: assets.href,
+        assets: new URL(params.get("assets"), location.href).href,
+        resourceBase: configuredBase,
         packs: params.get("packs") === "1",
         assetCatalog: params.get("asset_catalog") ?? undefined,
       },
@@ -325,13 +315,26 @@ async function loadEngine() {
     const renderer = await selectRenderer(requested, { navigator, document });
     backend = renderer.backend;
     mark("backendSelected");
-    const path = new URL(`pkg/${backend}/moly-app.js`, engineBase());
+    const localPath = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
+    const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
+    let path;
+    if (configuredBase) {
+      if (!releaseId) throw new Error("Invalid immutable stage path");
+      path = new URL(`releases/${releaseId}/pkg/${backend}/moly-app.js`, configuredBase);
+      if (!path.pathname.startsWith(new URL(configuredBase).pathname + "releases/"))
+        throw new Error("Invalid immutable engine path");
+    } else {
+      if (publicOrigin && !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/pkg\/(?:webgpu|webgl2)\/moly-app\.js$/.test(localPath.pathname))
+        throw new Error("Invalid immutable engine path");
+      path = publicOrigin ? new URL(localPath.pathname, publicOrigin) : localPath;
+    }
     const module = await import(path.href);
     if (typeof module.start_stage !== "function")
       throw new Error("Runtime does not implement the stage contract");
     const response = await fetch(new URL("./moly-app_bg.wasm", path), {
       signal: abort.signal,
       credentials: "omit",
+      redirect: "error",
     });
     if (
       !response.ok ||
@@ -538,10 +541,57 @@ window.addEventListener("keydown", (event) => {
 });
 window.addEventListener("blur", () => controller?.focus(true));
 window.addEventListener("focus", () => controller?.focus(false));
-$("app-canvas").addEventListener("pointerdown", () => {
+// Keep the source gesture alive after the cursor leaves the canvas. Winit
+// cancels its gesture layer on CursorLeft, so relying on browser hit testing
+// makes a camera drag stop at the canvas edge (especially in a small iframe).
+const stageCanvas = $("app-canvas");
+const capturedPointers = new Set();
+function captureStagePointer(event) {
+  const id = event.pointerId;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (
+    !Number.isFinite(id) ||
+    typeof stageCanvas.setPointerCapture !== "function"
+  )
+    return;
+  try {
+    stageCanvas.setPointerCapture(id);
+    capturedPointers.add(id);
+  } catch {
+    // Pointer capture is optional; ordinary in-canvas input still works.
+  }
+}
+function recaptureStagePointer(event) {
+  const id = event.pointerId;
+  if (
+    !capturedPointers.has(id) ||
+    typeof stageCanvas.hasPointerCapture !== "function" ||
+    stageCanvas.hasPointerCapture(id)
+  )
+    return;
+  captureStagePointer(event);
+}
+function releaseStagePointer(event) {
+  const id = event.pointerId;
+  if (
+    !capturedPointers.delete(id) ||
+    typeof stageCanvas.releasePointerCapture !== "function"
+  )
+    return;
+  try {
+    stageCanvas.releasePointerCapture(id);
+  } catch {
+    /* browser released it */
+  }
+}
+stageCanvas.addEventListener("pointerdown", (event) => {
+  captureStagePointer(event);
   controller?.focus(false);
-  $("app-canvas").focus({ preventScroll: true });
+  stageCanvas.focus({ preventScroll: true });
 });
+stageCanvas.addEventListener("pointermove", recaptureStagePointer);
+stageCanvas.addEventListener("pointerup", releaseStagePointer);
+stageCanvas.addEventListener("pointercancel", releaseStagePointer);
 window.addEventListener("pagehide", () => {
   clearInterval(timer);
   observer.disconnect();

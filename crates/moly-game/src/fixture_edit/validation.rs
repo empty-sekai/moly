@@ -93,13 +93,25 @@ pub(super) fn put(
     }
 }
 
-fn cutscene_cells(meta: &MetaGrid, owner: &EditableFixture) -> HashSet<(i8, i8)> {
+fn cutscene_cells(meta: &MetaGrid, owner: &EditableFixture) -> Result<HashSet<(i8, i8)>, String> {
     let mut area = GridAreaData::from_meta(meta.rows, meta.cols, |r, c| meta.cell(r, c));
-    area.rotate(owner.direction, true);
-    let center = rotated_center_grid(owner.center, owner.grid_size, owner.direction);
+    let (source_center, source_direction, _) = moly_assets::player_data::mirror_fixture_layout(
+        owner.center,
+        owner.grid_size,
+        owner.direction,
+        owner.layout,
+    )?;
+    area.rotate(source_direction, true);
+    let center = rotated_center_grid(source_center, owner.grid_size, source_direction);
     area.enable_tiles
         .iter()
-        .map(|tile| (center.x.wrapping_add(tile.x), center.z.wrapping_add(tile.z)))
+        .map(|tile| {
+            Ok((
+                i8::try_from(-i16::from(center.x.wrapping_add(tile.x)) - 1)
+                    .map_err(|_| "cutscene cell exceeds grid domain")?,
+                center.z.wrapping_add(tile.z),
+            ))
+        })
         .collect()
 }
 
@@ -129,7 +141,7 @@ pub(super) fn save(
         .collect::<Result<_, _>>()?;
     for owner in rows {
         if let Some(meta) = areas.cutscene.get(&owner.package) {
-            let protected = cutscene_cells(meta, owner);
+            let protected = cutscene_cells(meta, owner)?;
             if protected
                 .iter()
                 .any(|(x, z)| !axis_inside(*x, floor.width) || !axis_inside(*z, floor.depth))
@@ -157,21 +169,28 @@ pub(super) fn save(
                     item.uid
                 ));
             };
+            let (source_center, source_direction, _) =
+                moly_assets::player_data::mirror_fixture_layout(
+                    item.center,
+                    item.grid_size,
+                    item.direction,
+                    item.layout,
+                )?;
             let bounds = motion_area_bounds(
                 meta.rows,
                 meta.cols,
                 |r, c| meta.cell(r, c),
-                item.center,
+                source_center,
                 item.grid_size,
-                item.direction,
+                source_direction,
             );
             if bounds.iter().any(|bound| {
                 rows.iter()
                     .zip(&footprints)
                     .filter(|(row, _)| row.uid != item.uid && row.layout == layout_type::FLOOR)
                     .any(|(_, (a, b))| {
-                        bound.min.x <= b.x
-                            && bound.max.x >= a.x
+                        -i16::from(bound.max.x) - 1 <= i16::from(b.x)
+                            && -i16::from(bound.min.x) - 1 >= i16::from(a.x)
                             && bound.min.z <= b.z
                             && bound.max.z >= a.z
                     })

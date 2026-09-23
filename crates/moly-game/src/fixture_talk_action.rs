@@ -27,6 +27,7 @@ use moly_law::talk::UniformDraw;
 #[derive(Component, Clone, Copy)]
 pub(crate) struct TalkFixtureActorLease {
     owner: Entity,
+    pub(crate) approaching: bool,
 }
 
 #[derive(Clone)]
@@ -48,6 +49,7 @@ struct Session {
     token: Option<TimelineToken>,
     prior: Vec<PriorActor>,
     elapsed: f32,
+    timeout: f32,
     pending: String,
     failed: Option<String>,
     ready: bool,
@@ -90,6 +92,11 @@ impl UniformDraw for CastDraw {
 }
 
 fn teardown(world: &mut World, session: &mut Session) {
+    // Preparation may have acquired particle/clip leases before a later
+    // source or navigation failure. Drop this request immediately; diagnostics
+    // and a queued cancellation message must not keep those leases alive.
+    // Shared effect instances remain owned by any other live request.
+    session.draft.take();
     if let Some(token) = session.token.take() {
         timeline::cancel_and_release(world, token);
     }
@@ -110,6 +117,7 @@ fn teardown(world: &mut World, session: &mut Session) {
         if let Some(mut driver) = world.get_mut::<MotionDriver>(prior.entity) {
             driver.playing = None;
         }
+        crate::npc::cancel_external_approach(world, prior.entity);
         world
             .entity_mut(prior.entity)
             .remove::<TalkFixtureActorLease>();
@@ -155,11 +163,65 @@ fn body_ready(world: &mut World, session: &mut Session) {
     session.pending.clear();
 }
 
+fn complete_pre_action(world: &mut World, session: &mut Session) -> Result<(), String> {
+    // Native MoveAndPlayTimelineAsync disposes the Director, restores the
+    // parent and applies EndLoc before entering FixtureActionIdle. Holding its
+    // final Root pose through the dialogue adds a second yaw to LookAt for
+    // Root-host actors (e.g. unit 30); shared talk clips only animate Hips.
+    // This is deliberately separate from the talk-enabled live-loop gate.
+    if let Some(token) = session.token.take() {
+        timeline::cancel_and_release(world, token);
+    }
+    let plan = session.plan.as_ref().ok_or("completed pre-action has no source plan")?;
+    for member in &plan.cast {
+        if world.get::<TalkFixtureActorLease>(member.actor).map(|lease| lease.owner)
+            != Some(session.owner)
+        {
+            return Err("completed pre-action actor lease changed".into());
+        }
+        settle_completed_actor(world, member.actor, member.locate.end.unwrap_or(member.locate.start))?;
+        // A talk-enabled loop may already have admitted its own body clip.
+        // Releasing the Director must not replace that newer animation.
+        if !session.ready || !world.get::<MotionDriver>(member.actor).is_some_and(|driver| driver.alone_holds) {
+            crate::character::resume_idle_after_fixture(world, member.actor)?;
+        }
+    }
+    body_ready(world, session);
+    Ok(())
+}
+
+fn settle_completed_actor(
+    world: &mut World,
+    actor: Entity,
+    pose: crate::fixture_activity_data::ActivityPose,
+) -> Result<(), String> {
+    let mut query = world.query::<(&mut Transform, &mut WalkState)>();
+    let (mut transform, mut walk) = query.get_mut(world, actor)
+        .map_err(|_| "completed pre-action actor navigation is missing")?;
+    transform.translation = Vec3::from(pose.position);
+    transform.rotation = pose.rotation;
+    walk.0.position = pose.position;
+    walk.0.forward = (pose.rotation * Vec3::Z).to_array();
+    walk.0.next_corner = 0;
+    world.entity_mut(actor).insert(crate::npc::MotionPhase::Dwelling { remaining: None });
+    Ok(())
+}
+
 fn fail(world: &mut World, session: &mut Session, reason: String) {
     warn!(
         "[fixture-talk-action] talk={} failed: {}",
         session.talk, reason
     );
+    if let Some(mut ledger) = world.get_resource_mut::<crate::player_talk::PlayerTalkLedger>() {
+        ledger.last_outcome = Some(crate::player_talk::PlayerTalkOutcome::Rejected {
+            requested: Some(crate::npc_objective::TalkContent {
+                master_id: session.talk,
+                backend: crate::npc_objective::TalkBackend::Fixture,
+                is_general: None,
+            }),
+            reason: reason.clone(),
+        });
+    }
     session.failed = Some(reason);
     teardown(world, session);
     world.write_message(TalkCancelRequest);
@@ -280,44 +342,92 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
             Ok(())
         },
     )?;
-    // Mutate transforms only once all source bindings pass preflight. Keep full
-    // authored rotation and Y, rather than the stage's approximate idle anchors.
-    for member in &plan.cast {
-        let transform = *world
-            .get::<Transform>(member.actor)
-            .ok_or((false, "actor transform lost".into()))?;
-        let walk = world
-            .get::<WalkState>(member.actor)
-            .ok_or((false, "actor navigation lost".into()))?
-            .0
-            .clone();
-        session.prior.push(PriorActor {
-            entity: member.actor,
-            transform,
-            walk,
-        });
-        let locate = &member.locate.start;
-        {
-            let mut walk = world.get_mut::<WalkState>(member.actor).unwrap();
-            walk.0.position = locate.position;
-            walk.0.forward = (locate.rotation * Vec3::Z).to_array();
+    // Reserve the cast only after every binding passes preflight. Navigation
+    // owns the approach and local fitting, just as for an autonomous activity.
+    if session.prior.is_empty() {
+        // The selected Director already fixes the future talk station. Stage
+        // an independent observer before the visible approach, not at the
+        // completion frame (which would introduce another apparent teleport).
+        // Live talk-enabled loops keep fixture framing; never redraw a plan.
+        if waits_for_completion(&session.draft.as_ref().unwrap().definition) {
+            if let Some(player) = world.get_resource::<ActiveTalk>().and_then(|talk| talk.player) {
+                let main = plan.cast.iter().find(|member| member.actor == session.main)
+                    .ok_or((false, "main actor is absent from source plan".into()))?;
+                let anchor = Vec3::from(main.locate.end.unwrap_or(main.locate.start).position);
+                let occupied: Vec<_> = plan.cast.iter().flat_map(|member| [
+                    Vec3::from(member.locate.start.position),
+                    Vec3::from(member.locate.end.unwrap_or(member.locate.start).position),
+                ]).collect();
+                crate::content_library::stage_fixture_talk_observer(
+                    world, session.talk, player, anchor, &occupied,
+                ).map_err(|reason| (false, reason))?;
+            }
         }
-        {
-            let mut pose = world.get_mut::<Transform>(member.actor).unwrap();
-            pose.translation = Vec3::from_array(locate.position);
-            pose.rotation = locate.rotation;
-        }
-        world.entity_mut(member.actor).insert((
-            TalkFixtureActorLease {
-                owner: session.owner,
-            },
-            TalkHold,
-        ));
-        if let Some(mut driver) = world.get_mut::<MotionDriver>(member.actor) {
-            driver.playing = None;
+        session.elapsed = 0.;
+        for member in &plan.cast {
+            let transform = *world
+                .get::<Transform>(member.actor)
+                .ok_or((false, "actor transform lost".into()))?;
+            let walk = world
+                .get::<WalkState>(member.actor)
+                .ok_or((false, "actor navigation lost".into()))?
+                .0
+                .clone();
+            session.prior.push(PriorActor {
+                entity: member.actor,
+                transform,
+                walk,
+            });
+            world.entity_mut(member.actor).insert((
+                TalkFixtureActorLease {
+                    owner: session.owner,
+                    approaching: true,
+                },
+                TalkHold,
+            ));
+            if let Some(mut driver) = world.get_mut::<MotionDriver>(member.actor) {
+                driver.playing = None;
+            }
+            crate::npc::begin_external_approach(
+                world,
+                member.actor,
+                crate::npc::FitCandidate {
+                    position: member.locate.start.position,
+                    rotation: member.locate.start.rotation,
+                },
+            )
+            .map_err(|reason| (false, reason))?;
         }
     }
+    for member in &plan.cast {
+        match world
+            .get::<crate::npc::RouteStops>(member.actor)
+            .and_then(|route| route.outcome)
+        {
+            Some(crate::npc::RouteOutcome::Arrived) => {}
+            Some(crate::npc::RouteOutcome::Stopped) => {
+                return Err((false, format!("unit {} approach stopped", member.unit)))
+            }
+            None => return Err((true, "cast walking to source action points".into())),
+        }
+    }
+    for member in &plan.cast {
+        // The movement owner reached the exact source position. Only transfer
+        // the authored final orientation and animation ownership here.
+        world.get_mut::<WalkState>(member.actor).unwrap().0.forward =
+            (member.locate.start.rotation * Vec3::Z).to_array();
+        world.get_mut::<Transform>(member.actor).unwrap().rotation = member.locate.start.rotation;
+        world
+            .get_mut::<TalkFixtureActorLease>(member.actor)
+            .unwrap()
+            .approaching = false;
+    }
     world.init_resource::<FixtureActivityTimelines>();
+    // Loading and navigation do not consume the authored Director's time.
+    // Some pre-actions (including the horse statue) last almost 18 seconds
+    // and intentionally never enable talk until their complete ending.
+    session.elapsed = 0.;
+    session.timeout = (session.draft.as_ref().unwrap().definition.duration as f32 + 5.).max(18.);
     let token = world
         .resource_mut::<FixtureActivityTimelines>()
         .request_start(session.draft.take().unwrap());
@@ -330,6 +440,17 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
         plan.cast.len()
     );
     Ok(())
+}
+
+fn waits_for_completion(definition: &timeline::TimelineDefinition) -> bool {
+    let mut has_loop_gate = false;
+    for clip in definition.tracks.iter().flat_map(|track| &track.clips) {
+        if let timeline::TimelinePayload::LoopFlag { enable_talk, .. } = clip.payload {
+            has_loop_gate = true;
+            if enable_talk { return false; }
+        }
+    }
+    has_loop_gate
 }
 
 pub(crate) fn drive(world: &mut World) {
@@ -378,6 +499,7 @@ pub(crate) fn drive(world: &mut World) {
                 token: None,
                 prior: Vec::new(),
                 elapsed: 0.,
+                timeout: 120.,
                 pending: "source pre-action preparation".into(),
                 failed: None,
                 ready: false,
@@ -410,7 +532,11 @@ pub(crate) fn drive(world: &mut World) {
                             body_ready(world, session);
                         }
                     }
-                    Some(TimelineStatus::Completed) => body_ready(world, session),
+                    Some(TimelineStatus::Completed) => {
+                        if let Err(reason) = complete_pre_action(world, session) {
+                            fail(world, session, reason);
+                        }
+                    }
                     Some(TimelineStatus::Failed(error)) => fail(world, session, error.to_string()),
                     Some(TimelineStatus::Cancelled) | None => {
                         fail(world, session, "source pre-action cancelled".into())
@@ -426,7 +552,7 @@ pub(crate) fn drive(world: &mut World) {
                     }
                 }
             }
-            if !session.ready && session.failed.is_none() && session.elapsed > 18. {
+            if !session.ready && session.failed.is_none() && session.elapsed > session.timeout {
                 fail(
                     world,
                     session,
@@ -439,4 +565,68 @@ pub(crate) fn drive(world: &mut World) {
         }
     }
     world.insert_resource(state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_preparation_releases_draft_before_cancel_message_is_consumed() {
+        use std::sync::Arc;
+        let mut app = App::new();
+        app.add_message::<TalkCancelRequest>();
+        let world = app.world_mut();
+        let owner = world.spawn_empty().id();
+        let identity = timeline::SourceAssetId { file: "source".into(), path_id: "1".into() };
+        let definition = Arc::new(timeline::TimelineDefinition {
+            package: "fixture".into(), prefab: "fixture".into(), fixture_view: None,
+            director: identity.clone(), timeline: identity, duration: 1.0, tracks: Vec::new(),
+        });
+        let weak = Arc::downgrade(&definition);
+        let mut session = Session {
+            owner, talk: 970, main: owner, anchor: owner, cast: Vec::new(),
+            plan: None, plan_resolved: true,
+            draft: Some(StartTimeline {
+                owner: TimelineOwner {
+                    activity: FixtureActivityOwner { actor: owner, generation: 1 },
+                    kind: TimelineOwnerKind::Talk,
+                },
+                fixture: owner, definition, bindings: Default::default(), companions: Vec::new(),
+                timeout_secs: 30.0,
+                timeout_budget: TimelineTimeoutBudget::OwnerGated { advance: Some(true) },
+            }),
+            token: None, prior: Vec::new(), elapsed: 0.0, timeout: 120.0,
+            pending: "prepared first effect; second failed".into(), failed: None, ready: false,
+        };
+        assert!(weak.upgrade().is_some());
+        fail(world, &mut session, "source preflight failed".into());
+        assert!(session.draft.is_none());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(session.failed.as_deref(), Some("source preflight failed"));
+        assert!(world.get_entity(owner).is_ok());
+    }
+
+    #[test]
+    fn completed_actor_uses_source_endloc_and_synchronizes_navigation() {
+        let mut world = World::new();
+        let owner = world.spawn_empty().id();
+        let actor = world.spawn((
+            Transform::from_xyz(0.125, 0., 1.075).with_scale(Vec3::splat(1.2)),
+            WalkState(moly_law::path::WalkState::new([0.125, 0., 1.075], [0., 0., 1.])),
+            TalkFixtureActorLease { owner, approaching: false },
+        )).id();
+        let end = crate::fixture_activity_data::ActivityPose {
+            position: [0.625, 0., -0.775], rotation: Quat::from_rotation_y(std::f32::consts::PI),
+        };
+        settle_completed_actor(&mut world, actor, end).unwrap();
+        let pose = world.get::<Transform>(actor).unwrap();
+        let walk = &world.get::<WalkState>(actor).unwrap().0;
+        assert_eq!(pose.translation.to_array(), end.position);
+        assert_eq!(pose.rotation, end.rotation);
+        assert_eq!(pose.scale, Vec3::splat(1.2));
+        assert_eq!(walk.position, end.position);
+        assert_eq!(walk.forward, (end.rotation * Vec3::Z).to_array());
+        assert!(!world.get::<TalkFixtureActorLease>(actor).unwrap().approaching);
+    }
 }

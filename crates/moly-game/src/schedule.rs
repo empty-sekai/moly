@@ -42,7 +42,7 @@ pub fn install(app: &mut App) {
             content_library::build_activity_catalog,
             content_library::refresh_context,
             content_library::prepare_pending,
-            content_library::dispatch,
+            content_library::dispatch.run_if(crate::audio_startup::can_play),
         )
             .chain()
             .after(crate::player_fixture_action::refresh_availability)
@@ -250,6 +250,7 @@ pub fn install(app: &mut App) {
                 uber_particle::request_fixture_particles,
                 uber_particle::plan_fixture_particles,
                 uber_particle::spawn_fixture_particles,
+                crate::weather_fx::fixture::spawn_when_ready,
             )
                 .chain(),
         )
@@ -495,6 +496,7 @@ pub fn install(app: &mut App) {
                         // ——输入当帧生效。
                         camera::apply_input
                             .after(camera::parse)
+                            .after(gesture::advance)
                             .run_if(crate::game_settings::camera_input_enabled),
                     ),
                     (
@@ -785,9 +787,9 @@ pub fn install(app: &mut App) {
             Update,
             (
                 audio::parse,
-                audio::advance_bgm,
-                audio::advance_ambient.after(weather::commit_environment),
-                audio::advance_proximity,
+                audio::advance_bgm.run_if(crate::audio_startup::can_prepare),
+                audio::advance_ambient.after(weather::commit_environment).run_if(crate::audio_startup::can_prepare),
+                audio::advance_proximity.run_if(crate::audio_startup::can_prepare),
                 audio::advance_se
                     .in_set(audio::SeDrainSet::Drain)
                     .after(harvest::on_damage)

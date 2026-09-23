@@ -17,6 +17,7 @@ use moly_assets::{json::JsonAsset, scene_state::SourceInactive};
 use serde_json::Value;
 
 use super::ProviderPending;
+use crate::asset_cache::AssetCache;
 use crate::{
     fixture::FixtureSource,
     fixture_activity_state::{FixtureActivityIdentity, FixtureTarget},
@@ -32,18 +33,37 @@ struct Package {
     validated_at: Option<Tick>,
     text: [String; 3],
     parsed: TimelinePackage,
-    definitions: HashMap<String, Arc<TimelineDefinition>>,
+    definitions: AssetCache<Arc<TimelineDefinition>, 32>,
 }
 
 #[derive(Default)]
 pub(super) struct ActivityAssets {
-    json: HashMap<String, Handle<JsonAsset>>,
-    documents: HashMap<String, (Option<Tick>, String, Arc<Value>)>,
-    gltf: HashMap<String, Handle<Gltf>>,
-    packages: HashMap<String, Package>,
+    json: AssetCache<Handle<JsonAsset>, 96>,
+    documents: AssetCache<(Option<Tick>, String, Arc<Value>), 96>,
+    gltf: AssetCache<Handle<Gltf>, 24>,
+    packages: AssetCache<Package, 24>,
 }
 
 impl ActivityAssets {
+    pub(super) fn cache_counts(&self) -> Value {
+        serde_json::json!({"json":self.json.len(),"documents":self.documents.len(),
+            "gltf":self.gltf.len(),"packages":self.packages.len()})
+    }
+
+    /// Release only lookup ownership which has gone cold. Prepared profiles
+    /// retain their parsed definitions and animation/audio handles, so this
+    /// cannot invalidate a playing request. A complete unused frame retires
+    /// the lookup, never an in-flight request touched by preparation that frame.
+    pub(super) fn sweep_lookup_caches(&mut self) -> usize {
+        let mut removed = self.json.sweep_unused();
+        removed += self.documents.sweep_unused();
+        removed += self.gltf.sweep_unused();
+        for package in self.packages.values_mut() {
+            removed += package.definitions.sweep_unused();
+        }
+        removed += self.packages.sweep_unused();
+        removed
+    }
     /// `Assets<JsonAsset>` 最后一次被改动的 tick。
     ///
     /// 缓存条目记下它在**哪个代**校验过；只要这个代没变，就说明期间没有
@@ -77,8 +97,7 @@ impl ActivityAssets {
             .ok_or_else(|| ProviderPending::new("asset-server", "asset server is not installed"))?;
         let handle = self
             .json
-            .entry(path.into())
-            .or_insert_with(|| server.load(format!("moly://{path}")));
+            .get_or_insert_with(path, || server.load(format!("moly://{path}")));
         if let LoadState::Failed(error) = server.load_state(&*handle) {
             return Err(ProviderPending::new(
                 "json-load-failed",
@@ -93,6 +112,9 @@ impl ActivityAssets {
     }
 
     fn document(&mut self, world: &World, path: &str) -> Result<Arc<Value>, ProviderPending> {
+        // A cached parse still depends on this live JSON generation. Touch its
+        // handle too, or retirement would cause a reload on the next tick.
+        self.json.get(path);
         let generation = Self::json_generation(world);
         if let Some((validated_at, _, value)) = self.documents.get(path) {
             if Self::same_generation(*validated_at, generation) {
@@ -103,9 +125,7 @@ impl ActivityAssets {
         if let Some((_, old, value)) = self.documents.get(path) {
             if old.as_str() == text {
                 let value = value.clone();
-                self.documents
-                    .entry(path.into())
-                    .and_modify(|entry| entry.0 = generation);
+                self.documents.get_mut(path).expect("cached document").0 = generation;
                 return Ok(value);
             }
         }
@@ -133,6 +153,9 @@ impl ActivityAssets {
                 "timeline-route",
                 "package is not an exact timeline package key",
             ));
+        }
+        for kind in ["tracks", "clips", "clip-targets"] {
+            self.json.get(&format!("fixture-timeline/{kind}/{package}.json"));
         }
         let generation = Self::json_generation(world);
         // 快路：这份套件在当前代校验过 ⇒ 三份 json 都没被动过，不必再取、
@@ -175,7 +198,7 @@ impl ActivityAssets {
                         validated_at: generation,
                         text: text.map(str::to_owned),
                         parsed,
-                        definitions: HashMap::new(),
+                        definitions: AssetCache::default(),
                     },
                 );
             }
@@ -240,8 +263,7 @@ impl ActivityAssets {
             .ok_or_else(|| ProviderPending::new("asset-server", "asset server is not installed"))?;
         let handle = self
             .gltf
-            .entry(path.clone())
-            .or_insert_with(|| server.load(format!("moly://{path}")));
+            .get_or_insert_with(&path, || server.load(format!("moly://{path}")));
         if let LoadState::Failed(error) = server.load_state(&*handle) {
             return Err(ProviderPending::new(
                 "fixture-clip-load-failed",
@@ -272,7 +294,10 @@ impl ActivityAssets {
     ) -> Result<(), ProviderPending> {
         let mut bindings = Vec::new();
         for track in &request.definition.tracks {
-            if track.class != "AnimationTrack" || (track.name == "CharacterAnimator" || request.bindings.actors.contains_key(&track.identity)) {
+            if track.class != "AnimationTrack"
+                || (track.name == "CharacterAnimator"
+                    || request.bindings.actors.contains_key(&track.identity))
+            {
                 continue;
             }
             for clip in &track.clips {

@@ -3,7 +3,7 @@
 //! 每一步都是引擎原生烘焙链在 2D（单高度面）上的转录，锚点在
 //! [`super`] 的模块注释里。本文件只有形状与常数，不出现任何 bevy。
 
-use super::Obstacle;
+use super::{ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT};
 
 /// 烘焙格面：世界 xz 平面上的等距格，`walkable` 是侵蚀与小区过滤都
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
@@ -52,10 +52,7 @@ pub(crate) fn rasterize(tris: &[[[f32; 2]; 3]], voxel: f32) -> Grid {
     for tri in tris {
         for p in tri {
             for axis in 0..2 {
-                assert!(
-                    p[axis].is_finite(),
-                    "可行走面三角有非有限顶点，烘焙拒绝"
-                );
+                assert!(p[axis].is_finite(), "可行走面三角有非有限顶点，烘焙拒绝");
                 lo[axis] = lo[axis].min(p[axis]);
                 hi[axis] = hi[axis].max(p[axis]);
             }
@@ -131,6 +128,253 @@ pub(crate) fn mark_obstacles(grid: &mut Grid, obstacles: &[Obstacle]) -> usize {
         }
     }
     nulled
+}
+
+/// Height is sampled vertically at the exact grid center. No closest-point
+/// operation is allowed to move x/z while the collision test retains it.
+pub(crate) fn surface_heights(grid: &Grid, triangles: &[[[f32; 3]; 3]]) -> Vec<f32> {
+    let mut heights = vec![f32::NEG_INFINITY; grid.walkable.len()];
+    for tri in triangles {
+        let projected = tri.map(|p| [p[0], p[2]]);
+        let min = projected
+            .iter()
+            .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+        let max = projected.iter().fold([f32::NEG_INFINITY; 2], |a, p| {
+            [a[0].max(p[0]), a[1].max(p[1])]
+        });
+        let (x0, z0) = grid.cell_of(min[0], min[1]);
+        let (x1, z1) = grid.cell_of(max[0], max[1]);
+        let [a, b, c] = projected;
+        let determinant = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if determinant.abs() < 1e-12 {
+            continue;
+        }
+        for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+            for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
+                let p = grid.cell_center(x as usize, z as usize);
+                let u =
+                    ((b[1] - c[1]) * (p[0] - c[0]) + (c[0] - b[0]) * (p[1] - c[1])) / determinant;
+                let v =
+                    ((c[1] - a[1]) * (p[0] - c[0]) + (a[0] - c[0]) * (p[1] - c[1])) / determinant;
+                if u >= -1e-5 && v >= -1e-5 && u + v <= 1.00001 {
+                    let y = u * tri[0][1] + v * tri[1][1] + (1.0 - u - v) * tri[2][1];
+                    let index = z as usize * grid.cols + x as usize;
+                    heights[index] = heights[index].max(y);
+                }
+            }
+        }
+    }
+    heights
+}
+
+pub(crate) fn mark_collider_polygons(
+    grid: &mut Grid,
+    polygons: &[ColliderPolygon],
+    heights: &[f32],
+) -> (usize, Vec<f32>) {
+    // Resolve the low physical support surfaces before testing ANY headroom.
+    // Otherwise a rug below a canopy is order-dependent and measures clearance
+    // from the original floor, even though the feet stand on the rug's top.
+    // This host only admits tops within one climb of the original site surface;
+    // it does not invent connectivity up a stack of overlapping low objects.
+    let mut support = heights.to_vec();
+    for polygon in polygons.iter().filter(|polygon| !polygon.carve) {
+        for (index, span) in collider_spans(grid, polygon) {
+            if span[1] > heights[index] && span[1] <= heights[index] + AGENT_CLIMB + 1e-5 {
+                support[index] = support[index].max(span[1]);
+            }
+        }
+    }
+    let mut nulled = 0;
+    for polygon in polygons {
+        for (index, span) in collider_spans(grid, polygon) {
+            if grid.walkable[index] && blocks_ground(span, support[index]) {
+                grid.walkable[index] = false;
+                nulled += 1;
+            }
+        }
+    }
+    for (index, height) in support.iter_mut().enumerate() {
+        *height = if grid.walkable[index] {
+            (*height - heights[index]).max(0.0)
+        } else {
+            0.0
+        };
+    }
+    // Do not keep another full-size height array for scenes without low steps.
+    if support.iter().all(|height| *height == 0.0) {
+        support = Vec::new();
+    }
+    (nulled, support)
+}
+
+fn collider_spans(grid: &Grid, polygon: &ColliderPolygon) -> Vec<(usize, [f32; 2])> {
+    // Explicit navigation carving is not physics-surface rasterization. The
+    // source builds an XZ hull with cap planes; for upright/axis-aligned shapes
+    // its foot range is [global_min_y - agentHeight, global_max_y]. Clipping a
+    // rounded solid to each cell would invent clearance beneath its edge.
+    // Arbitrarily tilted cap planes remain an explicit host approximation.
+    if !polygon.carve && !polygon.triangles.is_empty() {
+        return triangle_spans(grid, polygon);
+    }
+    let mut spans = Vec::new();
+    if polygon.vertices.is_empty() {
+        return spans;
+    }
+    let min = polygon
+        .vertices
+        .iter()
+        .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+    let max = polygon
+        .vertices
+        .iter()
+        .fold([f32::NEG_INFINITY; 2], |a, p| {
+            [a[0].max(p[0]), a[1].max(p[1])]
+        });
+    let (x0, z0) = grid.cell_of(min[0] - grid.voxel, min[1] - grid.voxel);
+    let (x1, z1) = grid.cell_of(max[0] + grid.voxel, max[1] + grid.voxel);
+    for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+        for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
+            let index = z as usize * grid.cols + x as usize;
+            if !grid.walkable[index] {
+                continue;
+            }
+            let p = grid.cell_center(x as usize, z as usize);
+            let inside = if polygon.vertices.len() < 3 {
+                let a = polygon.vertices[0];
+                let b = *polygon.vertices.last().unwrap();
+                let dx = b[0] - a[0];
+                let dz = b[1] - a[1];
+                let length = dx * dx + dz * dz;
+                let t = if length > 0.0 {
+                    (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / length).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let distance2 = (p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dz).powi(2);
+                distance2 <= grid.voxel * grid.voxel * 0.5
+            } else {
+                let mut positive = false;
+                let mut negative = false;
+                for i in 0..polygon.vertices.len() {
+                    let a = polygon.vertices[i];
+                    let b = polygon.vertices[(i + 1) % polygon.vertices.len()];
+                    let cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+                    positive |= cross > 1e-6;
+                    negative |= cross < -1e-6;
+                }
+                !(positive && negative)
+            };
+            if inside {
+                spans.push((index, [polygon.min_y, polygon.max_y]));
+            }
+        }
+    }
+    spans
+}
+
+/// Rasterize each face only over its own cells, clipping its geometry to each
+/// cell before measuring height. A global triangle Y range would still block
+/// the clear end of a slope/raised canopy. Convex shapes merge these intervals
+/// before carving, so a tall closed box never becomes an empty walkable room.
+fn triangle_spans(grid: &Grid, polygon: &ColliderPolygon) -> Vec<(usize, [f32; 2])> {
+    let mut spans = std::collections::HashMap::<usize, [f32; 2]>::new();
+    let mut surfaces = Vec::new();
+    for tri in &polygon.triangles {
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        for p in tri {
+            min[0] = min[0].min(p[0]);
+            min[1] = min[1].min(p[2]);
+            max[0] = max[0].max(p[0]);
+            max[1] = max[1].max(p[2]);
+        }
+        // Retain boundary-touching vertical faces, including both cells when
+        // a zero-width wall lies exactly on a raster boundary.
+        let epsilon = grid.voxel * 1e-4;
+        let (x0, z0) = grid.cell_of(min[0] - epsilon, min[1] - epsilon);
+        let (x1, z1) = grid.cell_of(max[0] + epsilon, max[1] + epsilon);
+        for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+            for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
+                let index = z as usize * grid.cols + x as usize;
+                if !grid.walkable[index] {
+                    continue;
+                }
+                let cell_min = [
+                    grid.origin[0] + x as f32 * grid.voxel,
+                    grid.origin[1] + z as f32 * grid.voxel,
+                ];
+                let Some(span) = triangle_cell_interval(tri, cell_min, grid.voxel) else {
+                    continue;
+                };
+                if polygon.solid {
+                    spans
+                        .entry(index)
+                        .and_modify(|range| {
+                            range[0] = range[0].min(span[0]);
+                            range[1] = range[1].max(span[1]);
+                        })
+                        .or_insert(span);
+                } else {
+                    surfaces.push((index, span));
+                }
+            }
+        }
+    }
+    surfaces.extend(spans);
+    surfaces
+}
+
+fn blocks_ground(span: [f32; 2], ground: f32) -> bool {
+    // The low physical top has already become the supporting surface. Carving
+    // sources never raise that surface and therefore receive no climb exemption.
+    span[1] > ground + 1e-5 && span[0] < ground + AGENT_HEIGHT
+}
+
+/// Sutherland-Hodgman against the four vertical cell planes, retaining the Y
+/// coordinate at every cut. Stack buffers avoid a heap allocation per voxel.
+fn triangle_cell_interval(tri: &[[f32; 3]; 3], min: [f32; 2], size: f32) -> Option<[f32; 2]> {
+    let mut input = [[0.0; 3]; 12];
+    input[..3].copy_from_slice(tri);
+    let mut len = 3;
+    for (axis, bound, sign) in [
+        (0, min[0], 1.0),
+        (0, min[0] + size, -1.0),
+        (2, min[1], 1.0),
+        (2, min[1] + size, -1.0),
+    ] {
+        let mut output = [[0.0; 3]; 12];
+        let mut count = 0;
+        let mut previous = input[len - 1];
+        let mut prior_distance = (previous[axis] - bound) * sign;
+        for current in input[..len].iter().copied() {
+            let distance = (current[axis] - bound) * sign;
+            if (distance >= 0.0) != (prior_distance >= 0.0) {
+                let t = prior_distance / (prior_distance - distance);
+                output[count] =
+                    std::array::from_fn(|i| previous[i] + (current[i] - previous[i]) * t);
+                count += 1;
+            }
+            if distance >= 0.0 {
+                output[count] = current;
+                count += 1;
+            }
+            previous = current;
+            prior_distance = distance;
+        }
+        if count == 0 {
+            return None;
+        }
+        input = output;
+        len = count;
+    }
+    Some(
+        input[..len]
+            .iter()
+            .fold([f32::INFINITY, f32::NEG_INFINITY], |a, p| {
+                [a[0].min(p[1]), a[1].max(p[1])]
+            }),
+    )
 }
 
 /// 侵蚀（`rcErodeWalkableArea` 的 2D 转录）：

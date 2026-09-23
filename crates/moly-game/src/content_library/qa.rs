@@ -1,6 +1,8 @@
 //! Opt-in, read-only acceptance telemetry. It never creates actors, fixtures,
 //! requests or synthetic assets. Ordinary runs do not touch the filesystem.
 use super::*;
+#[path = "qa_memory.rs"]
+mod memory;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
@@ -19,6 +21,17 @@ pub fn library_diagnostics() -> String {
         .lock()
         .map(|value| value.clone())
         .unwrap_or_else(|_| r#"{"schemaVersion":1,"ready":false}"#.into())
+}
+
+/// Compact read-only projection used by the browser settings panel.  It is
+/// intentionally the same accounting as `library_diagnostics` and explicitly
+/// excludes allocator/RSS claims, render targets, ECS overhead and drivers.
+pub(crate) fn resource_residency_summary(
+    images: &Assets<Image>,
+    meshes: &Assets<Mesh>,
+    server: &AssetServer,
+) -> serde_json::Value {
+    memory::diagnostics(images, meshes, server)
 }
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct QaDiagnostics<'w, 's> {
@@ -39,6 +52,7 @@ pub(crate) struct QaDiagnostics<'w, 's> {
     site_scenes: Option<Res<'w, crate::site::SiteScenesReady>>,
     appearance: Res<'w, crate::room_appearance::RoomAppearanceState>,
     navigation: Option<Res<'w, crate::walk_face::WalkFace>>,
+    collision: Option<Res<'w, crate::fixture_collision::CollisionBakeStatus>>,
     objective: Option<Res<'w, crate::npc_objective::ObjectiveFace>>,
     layout_revision: Res<'w, crate::fixture::FixtureLayoutRevision>,
     fixture_scenes: Option<Res<'w, crate::fixture::FixtureScenesReady>>,
@@ -59,6 +73,16 @@ pub(crate) struct QaDiagnostics<'w, 's> {
     harvests: Query<'w, 's, Entity, With<crate::harvest::HarvestObject>>,
     fixture_talk_action: Option<Res<'w, crate::talk::fixture_action::FixtureTalkAction>>,
     cast_timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
+    provider: Option<Res<'w, crate::fixture_activity_provider::FixtureActivityProvider>>,
+    timeline_loads: Option<Res<'w, crate::fixture_activity_timeline::TimelineAssetLoads>>,
+    gltfs: Res<'w, Assets<bevy::gltf::Gltf>>,
+    images: Res<'w, Assets<Image>>,
+    clips: Res<'w, Assets<AnimationClip>>,
+    graphs: Res<'w, Assets<AnimationGraph>>,
+    asset_server: Res<'w, AssetServer>,
+    fixture_loads: Option<Res<'w, crate::fixture::FixtureGltfAssets>>,
+    fixture_sources: Query<'w, 's, &'static crate::fixture::FixtureSource, With<crate::fixture::FixtureRoot>>,
+    bones: Query<'w, 's, (&'static Name, &'static bevy::animation::AnimatedBy, &'static Transform)>,
 }
 #[derive(Default)]
 pub(crate) struct QaState {
@@ -77,7 +101,7 @@ pub(crate) fn qa_open(
     pair_session: Option<Res<crate::talk::ActiveTalk>>,
     runtime: Res<PlayerFixtureRuntime>,
     holds: Query<Entity, With<crate::talk::TalkHold>>,
-    actors: Query<(&CharacterUnitId, &Transform)>,
+    actors: Query<(&CharacterUnitId, &Transform, Option<&crate::character::MotionDriver>, Option<&crate::npc::MotionPhase>, Option<&crate::npc::RouteStops>, Option<&crate::npc::WalkState>)>,
     all: Query<Entity>,
     extra: QaDiagnostics,
     mut qa: Local<QaState>,
@@ -124,9 +148,26 @@ pub(crate) fn qa_open(
             "scale":pose.scale.to_array(),"moving":input.active,"direction":input.direction.to_array()}));
         let actor_rows = actors
             .iter()
-            .map(|(unit, transform)| {
+            .map(|(unit, transform, driver, phase, route, walk)| {
+                let basis = driver.map(|driver| extra.bones.iter()
+                    .filter(|(name, by, _)| by.0 == driver.player && matches!(name.as_str(), "Root" | "Hips"))
+                    .map(|(name, _, pose)| serde_json::json!({
+                        "name": name.as_str(), "position": pose.translation.to_array(),
+                        "rotation": pose.rotation.to_array(), "forward": (pose.rotation * Vec3::Z).to_array(),
+                    })).collect::<Vec<_>>());
                 serde_json::json!({
-            "unit":unit.0,"position":transform.translation.to_array(),"rotation":transform.rotation.to_array()})
+            "unit":unit.0,"position":transform.translation.to_array(),"rotation":transform.rotation.to_array(),
+            "phase":phase.map(|phase| match phase {
+                crate::npc::MotionPhase::Walking => "walking",
+                crate::npc::MotionPhase::Turning { .. } => "turning",
+                crate::npc::MotionPhase::FitWalking { .. } => "fit-walking",
+                crate::npc::MotionPhase::FitTurning { .. } => "fit-turning",
+                crate::npc::MotionPhase::Dwelling { .. } => "idle",
+            }),"boneBasis":basis,
+            "navigation":route.map(crate::npc::RouteStops::diagnostics),
+            "walk":walk.map(|walk|serde_json::json!({
+                "position":walk.0.position,"forward":walk.0.forward,"nextCorner":walk.0.next_corner
+            }))})
             })
             .collect::<Vec<_>>();
         let fixture_rows = context.instances.iter().map(|(id, instances)| {
@@ -183,7 +224,30 @@ pub(crate) fn qa_open(
             "player_fixture_active": runtime.active(), "held_actors": holds.iter().count(), "entities": all.iter().count(),
             "actors":actor_rows, "fixtures":fixture_rows
         });
-        value["completed"] = serde_json::json!(state.active.as_ref().is_some_and(|active| active.completed));
+        value["completed"] =
+            serde_json::json!(state.active.as_ref().is_some_and(|active| active.completed));
+        value["navigation_geometry"] = extra.collision.as_ref().map_or(serde_json::Value::Null,
+            |status| serde_json::json!({
+                "ready": status.ready, "reason": status.reason,
+                "colliders": status.colliders, "polygons": status.polygons,
+                "mode": "canonical-collider-cell-spans",
+                "nativeParity": false
+            }));
+        value["resource_counts"] = serde_json::json!({
+            "gltf":extra.gltfs.len(),"meshes":extra.particle_meshes.len(),"images":extra.images.len(),
+            "animationClips":extra.clips.len(),"animationGraphs":extra.graphs.len(),
+            "graphNodes":extra.graphs.iter().map(|(_,graph)|graph.graph.node_count()).sum::<usize>(),
+            "provider":extra.provider.as_ref().map(|p|p.cache_counts()),
+            "timeline":extra.timeline_loads.as_ref().map(|p|p.cache_counts())
+        });
+        value["resource_residency"] = memory::diagnostics(&extra.images, &extra.particle_meshes, &extra.asset_server);
+        value["resource_residency"]["fixtures"] = serde_json::json!({
+            "liveInstances": extra.fixture_sources.iter().count(),
+            "liveUniqueGltfs": extra.fixture_sources.iter().map(|source| source.0.id())
+                .collect::<std::collections::HashSet<_>>().len(),
+            "loader": extra.fixture_loads.as_ref().map(|loads| loads.residency()),
+            "policy": "live instances own assets; loader releases each path after its last spawn",
+        });
         value["fixture_talk_action"] = extra
             .fixture_talk_action
             .as_ref()
@@ -212,7 +276,7 @@ pub(crate) fn qa_open(
             "activity_bubbles":extra.activity_bubbles.iter().count(),
             "harvest_nodes":extra.harvests.iter().count()
         }).as_object().expect("activity QA object").clone());
-        if BROWSER_DIAGNOSTICS.load(Ordering::Relaxed) {
+        if BROWSER_DIAGNOSTICS.swap(false, Ordering::Relaxed) {
             if let Ok(mut slot) = DIAGNOSTICS.get_or_init(|| Mutex::new(String::new())).lock() {
                 *slot = value.to_string();
             }

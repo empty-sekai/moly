@@ -52,6 +52,10 @@ pub(crate) struct GameSettings {
 pub(crate) struct SettingsPanel {
     pub(crate) open: bool,
     pub(crate) player_data: bool,
+    /// Edge-triggered request consumed by fixture colour/cache ownership.
+    /// The panel never removes an asset directly and never reports RSS.
+    pub(crate) resource_clear_requested: bool,
+    pub(crate) resource_status: String,
     release_guard: u8,
     status: String,
 }
@@ -110,6 +114,7 @@ pub(crate) enum Action {
     Capture,
     PlayerData,
     SettingsPage,
+    ClearInactiveResources,
 }
 
 #[derive(Component)]
@@ -120,6 +125,7 @@ pub(crate) enum ValueLabel {
     Scale,
     Fxaa,
     Status,
+    Residency,
 }
 
 /// Register once in the shared app assembly, after DefaultPlugins.
@@ -372,6 +378,30 @@ pub(crate) fn setup(
         "Screenshot  F12",
         Action::Capture,
     );
+    let residency = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        residency,
+        &font,
+        "资源管理：测量中…",
+        14.,
+        Some(ValueLabel::Residency),
+    );
+    add_button(
+        &mut commands,
+        residency,
+        &font,
+        "清理闲置家具换色缓存",
+        Action::ClearInactiveResources,
+    );
+    add_text(
+        &mut commands,
+        content,
+        &font,
+        "内存数字只覆盖可测的图片与网格；GPU 数字不含驱动与渲染目标。硬盘资源缓存请在网站的资源管理页清理。",
+        13.,
+        None,
+    );
     add_text(
         &mut commands,
         content,
@@ -531,6 +561,11 @@ pub(crate) fn input(
             _ if !panel.open => continue,
             Action::PlayerData => panel.player_data = true,
             Action::SettingsPage => panel.player_data = false,
+            Action::ClearInactiveResources => {
+                panel.resource_clear_requested = true;
+                panel.resource_status =
+                    "正在检查家具换色句柄…".into();
+            }
             Action::AudioOptions => {
                 dialogs.menu_open = false;
                 dialogs.option_open = true;
@@ -592,9 +627,13 @@ pub(crate) fn refresh_ui(
     mut roots: Query<&mut Node, With<PanelRoot>>,
     mut bodies: Query<&mut Node, (With<SettingsBody>, Without<PanelRoot>)>,
     mut labels: Query<(&ValueLabel, &mut Text)>,
+    images: Res<Assets<Image>>,
+    meshes: Res<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     time: Res<Time<Real>>,
     mut last_performance: Local<f64>,
+    mut residency_sample: Local<Option<(f64, u64, u64, u64)>>,
 ) {
     for mut node in &mut roots {
         node.display = if panel.open {
@@ -649,6 +688,46 @@ pub(crate) fn refresh_ui(
                 if settings.graphics.fxaa { "On" } else { "Off" }
             ),
             ValueLabel::Status => panel.status.clone(),
+            ValueLabel::Residency => {
+                let now = time.elapsed_secs_f64();
+                if residency_sample.as_ref().is_none_or(|(at, _, _, _)| now - *at >= 1.0) {
+                    let value = crate::content_library::resource_residency_summary(
+                        &images,
+                        &meshes,
+                        &asset_server,
+                    );
+                    *residency_sample = Some((
+                        now,
+                        value["cpuImageBytes"].as_u64().unwrap_or(0)
+                            + value["cpuMeshBufferBytes"].as_u64().unwrap_or(0),
+                        value["estimatedGpuTextureBytes"].as_u64().unwrap_or(0),
+                        value["cpuAndGpuImageCount"].as_u64().unwrap_or(0),
+                    ));
+                }
+                let (_, cpu, gpu, both) = residency_sample.expect("sampled above");
+                let format_bytes = |bytes: u64| {
+                    if bytes >= 1024 * 1024 {
+                        format!("{:.1} MiB", bytes as f64 / (1024. * 1024.))
+                    } else {
+                        format!("{:.0} KiB", bytes as f64 / 1024.)
+                    }
+                };
+                if panel.resource_status.is_empty() {
+                    format!(
+                        "资源管理：CPU 可测 {} · GPU 可测估算 {} · 双份纹理 {}",
+                        format_bytes(cpu),
+                        format_bytes(gpu),
+                        both
+                    )
+                } else {
+                    format!(
+                        "资源管理：CPU 可测 {} · GPU 可测估算 {} · {}",
+                        format_bytes(cpu),
+                        format_bytes(gpu),
+                        panel.resource_status
+                    )
+                }
+            }
         };
         if **text != next {
             **text = next;

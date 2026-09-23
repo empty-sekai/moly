@@ -1,23 +1,35 @@
 import { selectRenderer, holdSettingsWriter } from "./boot.mjs";
 import { ExperienceShell } from "./shell.mjs";
 import { validAssetBase, readableError } from "./presentation.mjs";
+import { resourceBase, resourceDirectory, resourceOrigin } from "./embed-contract.mjs";
 import { installSnapshotPicker } from "./snapshots.mjs";
 
 const url = new URL(location.href);
+const configuredBase = url.searchParams.get("resource_base")
+  ? resourceBase(url.searchParams.get("resource_base"))
+  : undefined;
+const configuredOrigin = resourceOrigin(url.searchParams.get("resource_origin") ??
+  (configuredBase ? new URL(configuredBase).origin : undefined));
 // The standalone bundle also works when mounted below a site's feature route.
 if (!url.searchParams.has("assets")) {
   url.searchParams.set("assets", new URL("./assets/", url).pathname);
   history.replaceState(null, "", url);
 }
 const assetBase = url.searchParams.get("assets");
+const resolvedAssets = validAssetBase(assetBase)
+  ? assetBase
+  : assetBase && (configuredBase || configuredOrigin)
+    ? resourceDirectory(assetBase, url.href, configuredBase ?? configuredOrigin).href
+    : "/assets/";
 const shell = new ExperienceShell(
-  validAssetBase(assetBase) ? assetBase : "/assets/",
+  resolvedAssets,
   {
     packs: url.searchParams.get("packs") === "1",
     assetCatalog: url.searchParams.get("asset_catalog") ?? undefined,
+    resourceBase: configuredBase,
   },
 );
-installSnapshotPicker(assetBase);
+installSnapshotPicker(resolvedAssets);
 
 const panel = document.querySelector("#boot-panel");
 const button = document.querySelector("#boot-start");
@@ -128,7 +140,8 @@ try {
   status.textContent = "正在检查图形支持并加载游戏…";
   const requested =
     new URL(location.href).searchParams.get("renderer") ?? "auto";
-  if (!validAssetBase(assetBase)) throw new Error("Invalid asset base");
+  if (!validAssetBase(assetBase) && !configuredBase && !configuredOrigin)
+    throw new Error("Invalid asset base");
   const renderer = await selectRenderer(requested, { navigator, document });
   backend = renderer.backend;
   wasm = await boundedLoad(async () => {

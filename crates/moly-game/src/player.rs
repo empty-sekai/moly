@@ -227,7 +227,8 @@ pub(crate) fn spawn_when_ready(
     if let Some(face) = face.as_deref() {
         (seed_x, seed_z) = face.seat(seed_x, seed_z);
     }
-    let seed = [seed_x, surface_y(&verts, seed_x, seed_z, center_y), seed_z];
+    let offset = face.as_deref().map_or(0.0, |face| face.height_offset([seed_x, seed_z]));
+    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, offset), seed_z];
     commands.spawn((
         CharacterUnitId(specs.unit_id),
         Transform::from_translation(Vec3::from(seed)),
@@ -307,7 +308,8 @@ pub(crate) fn reseed(
     if let Some(face) = face.as_deref() {
         (seed_x, seed_z) = face.seat(seed_x, seed_z);
     }
-    let seed = [seed_x, surface_y(&verts, seed_x, seed_z, center_y), seed_z];
+    let offset = face.as_deref().map_or(0.0, |face| face.height_offset([seed_x, seed_z]));
+    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, offset), seed_z];
     for (mut transform, mut phase, driver) in &mut players {
         if let Some(mut driver) = driver {
             if let Ok(mut animator) = animators.get_mut(driver.player) {
@@ -532,6 +534,8 @@ pub(crate) fn advance(
     camera_state: Res<crate::camera::FieldCameraState>,
     ground: Option<Res<PlayerGround>>,
     face: Option<Res<walk_face::WalkFace>>,
+    objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
+    epoch: Option<Res<crate::site::GroundEpoch>>,
     // 对话持留让位：玩家参演对话期间位移推进不跑（相位在开场时已钉
     // 驻留；转身由对话域插值直写）。
     mut players: Query<
@@ -555,16 +559,31 @@ pub(crate) fn advance(
     else {
         return;
     };
+    let navigation_y_at = |x: f32, z: f32, raw_fallback: f32| {
+        objective_face.as_deref()
+            .filter(|surface| surface.navigation_generation() == face.generation()
+                && epoch.as_deref().is_some_and(|epoch| surface.is_fresh(epoch.0)))
+            .and_then(|surface| surface.navigation_point_at([x, z]))
+            .map_or_else(|| navigation_y(&ground.0, x, z, raw_fallback,
+                face.height_offset([x, z])), |point| point[1])
+    };
     for (mut transform, mut phase, input, dash, driver) in &mut players {
         if driver.is_some_and(|driver| driver.blocks_manual_movement()) {
             continue;
         }
+        // A prior navigation offset is not terrain. Remove it from the
+        // fallback before sampling, then apply the destination's offset once.
+        let raw_y = transform.translation.y
+            - face.height_offset([transform.translation.x, transform.translation.z]);
         // 新烘焙可能在脚下挖洞；仅修复无效起点，正常位移永不跨洞吸附。
         if !face.walkable_at([transform.translation.x, transform.translation.z]) {
             let (x, z) = face.seat(transform.translation.x, transform.translation.z);
-            transform.translation =
-                Vec3::new(x, surface_y(&ground.0, x, z, transform.translation.y), z);
+            transform.translation = Vec3::new(x, navigation_y_at(x, z, raw_y), z);
         }
+        // Rebuilds can remove a rug without invalidating x/z. A resting
+        // navigation-owned player must settle onto that new floor as well.
+        transform.translation.y = navigation_y_at(
+            transform.translation.x, transform.translation.z, raw_y);
         if input.active {
             let speed = move_speed(&configs, &site, camera_state.0, dash.0);
             let mut position = transform.translation + input.direction * speed * dt;
@@ -605,7 +624,7 @@ pub(crate) fn advance(
             // 朝向直设：真源移动态每帧写 Euler(0, atan2(x, z), 0)。拒进
             // 帧也朝向推挤方向（真源 agent 每帧照样吃 Move 请求）。
             transform.rotation = Quat::from_rotation_y(input.direction.x.atan2(input.direction.z));
-            position.y = surface_y(&ground.0, position.x, position.z, position.y);
+            position.y = navigation_y_at(position.x, position.z, raw_y);
             transform.translation = position;
             *phase = MotionPhase::Walking;
         } else if matches!(*phase, MotionPhase::Walking) {
@@ -738,5 +757,33 @@ fn surface_y(verts: &[Vec3], x: f32, z: f32, fallback: f32) -> f32 {
             dx * dx + dz * dz <= SURFACE_RADIUS * SURFACE_RADIUS
         })
         .map(|v| v.y)
-        .fold(fallback, f32::max)
+        .reduce(f32::max)
+        .unwrap_or(fallback)
+}
+
+fn navigation_y(verts: &[Vec3], x: f32, z: f32, raw_fallback: f32, offset: f32) -> f32 {
+    surface_y(verts, x, z, raw_fallback) + offset
+}
+
+#[cfg(test)]
+mod navigation_height_tests {
+    use super::*;
+
+    #[test]
+    fn low_step_offset_is_applied_once_and_can_be_left() {
+        let ground = [Vec3::ZERO, Vec3::X];
+        let first = navigation_y(&ground, 0.0, 0.0, 0.0, 0.05);
+        let repeated = navigation_y(&ground, 0.0, 0.0, first - 0.05, 0.05);
+        assert!((first - 0.05).abs() < 1e-6);
+        assert!((repeated - first).abs() < 1e-6);
+        assert!(navigation_y(&ground, 1.0, 0.0, repeated - 0.05, 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn removed_rug_cannot_keep_the_previous_foot_height_as_a_floor() {
+        let ground = [Vec3::ZERO];
+        assert_eq!(navigation_y(&ground, 0.0, 0.0, 0.05, 0.0), 0.0);
+        assert_eq!(navigation_y(&[], 0.0, 0.0, 0.05, 0.0), 0.05,
+            "only absent ground uses the fallback");
+    }
 }

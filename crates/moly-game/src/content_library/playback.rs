@@ -299,7 +299,11 @@ pub(crate) fn observe_start(
             .is_some_and(|session| session.talk_id() == id),
         EntryKey::Talk(TalkBackend::Fixture, id) => pair_session
             .as_ref()
-            .is_some_and(|session| session.talk_id() == id && session.body_ready()),
+            // Body admission starts playback; the same owner stays active
+            // while its window is closed and the authored ending still runs.
+            .is_some_and(|session| {
+                session.talk_id() == id && (active.started || session.body_ready())
+            }),
         EntryKey::Fixture(_) => {
             effect_running
                 || active.choice.target.as_ref().is_some_and(|chosen| {
@@ -358,7 +362,13 @@ pub(crate) fn observe_start(
             state.status = "播放中".into();
             state.changed();
             info!("[content-library] started {:?}", active.choice.key);
-        } else if active.elapsed >= 20. {
+        } else if active.elapsed >= 20.
+            && !matches!(active.choice.key, EntryKey::Talk(TalkBackend::Fixture, id)
+                if pair_session.as_ref().is_some_and(|session| session.talk_id() == id))
+        {
+            // Once the exact fixture talk owns its preparation, that owner
+            // times loading, navigation and the authored pre-action. A second
+            // 20-second admission clock must not cancel a healthy long start.
             cancel.write(TalkCancelRequest);
             fixtures.write(PlayerFixtureRequest::Cancel(
                 PlayerFixtureCancelReason::User,
@@ -420,6 +430,8 @@ pub(super) fn human_playback_failure(reason: &str) -> String {
         || reason.contains("占用")
     {
         "角色或家具正在进行其他互动，请停止当前体验后重试。".into()
+    } else if lower.contains("source-effects:") {
+        "这段演出所需的家具特效暂不可用，可以先欣赏其他互动。".into()
     } else if contains(&[
         "locator",
         "endloc",
@@ -455,9 +467,25 @@ pub(super) fn human_playback_failure(reason: &str) -> String {
     }
 }
 fn rejection_message(reason: &str) -> &str {
-    if reason.contains("throttl") {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("failed to fetch") || lower.contains("http") || lower.contains("timeout") {
+        "所需资源暂时未能载入，请稍候重试"
+    } else if reason.contains("throttl") {
         "切换得有点快，请稍候再试"
-    } else if reason.contains("another") || reason.contains("active") || reason.contains("busy") {
+    } else if lower.contains("another") || lower.contains("busy") || lower.contains("reservation") {
+        "角色或家具正在进行其他互动，请稍候再试"
+    } else if [
+        "source-effects:",
+        "controlplayable",
+        "source particle",
+        "itimecontrol",
+        "nested director",
+    ]
+    .iter()
+    .any(|feature| lower.contains(feature))
+    {
+        "这段演出所需的家具特效暂不可用，可以先欣赏其他互动。"
+    } else if reason.contains("active") {
         "角色正在进行其他互动，请稍候再试"
     } else if reason.contains("coher")
         || reason.contains("distance")
@@ -481,6 +509,24 @@ fn rejection_message(reason: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unavailable_source_effect_is_not_misreported_as_a_scene_condition() {
+        let message = rejection_message("source pre-action: unsupported ControlPlayableAsset");
+        assert!(message.contains("家具特效"));
+        assert!(!message.contains("场景不满足"));
+        assert!(!message.contains("ControlPlayableAsset"));
+        assert!(
+            rejection_message("source-effects: component inventory missing").contains("家具特效")
+        );
+        assert!(
+            human_playback_failure("source-effects: component inventory missing")
+                .contains("家具特效")
+        );
+        assert!(rejection_message("source-effects: Asset HTTP failed").contains("载入"));
+        assert!(
+            rejection_message("source-effects: belongs to another Director").contains("正在进行")
+        );
+    }
     #[test]
     fn failure_clears_pending_and_returns_to_browsing() {
         let mut state = ContentLibrary::default();

@@ -17,6 +17,9 @@ futures-util = "0.3"
 futures-channel = "0.3"
 # Shared particle seed owner: already locked; OS entropy on native and JS crypto on wasm.
 getrandom = { version = "=0.2.17", features = ["js"] }
+# Source MeshCollider.convex is a solid 3-D hull, not its concave render mesh.
+# Use the geometry implementation without physics dynamics or triangulation extras.
+parry3d = { version = "0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = { version = "3", default-features = false }
@@ -26,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "net", "fs", "io-util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+tracing-wasm = "0.2.1"
 # 生日门要读墙钟的 epoch 毫秒；wasm 上 std 的 SystemTime 是未实现的桩
 # （sys/pal/unsupported：SystemTime::now() 运行时 panic），epoch 走 JS 的
 # Date.now。版本与 moly-app 同源（锁内 0.3.104，不新增下载）。

@@ -148,6 +148,20 @@ schema-1 boundary, and the stage verifies the runtime region/version before
 forwarding play. Applications should call the adapter instead of constructing
 messages or URLs across unrelated pages.
 
+For the production object store, pass the complete prefix explicitly. The
+iframe and player-data traffic remain same-origin; only immutable engine and
+resource objects are fetched from the configured S3-compatible prefix. There
+is no implicit CDN or legacy OSS fallback:
+
+```js
+resourceBase: "https://assets.pjsk.moe/sekai-extra-assets/",
+assets: "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-6.0.0-.../assets/",
+```
+
+Release objects use `releases/<id>/...`, snapshots use `snapshots/<id>/...`,
+and the shared store uses `asset-store/...` below that prefix. `manifest.json`
+is discovery metadata and is never treated as a cacheable runtime asset.
+
 Call `mountMoly` only when the interactive feature is requested. Catalogue
 browsing can use the separately published compact index/details without creating
 an iframe or downloading WASM. `preload` fetches the engine and necessary base

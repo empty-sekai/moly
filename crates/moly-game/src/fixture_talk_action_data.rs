@@ -55,6 +55,15 @@ fn cast_slots(group: &UnitGroup, participants: &[(u32, Entity)]) -> Result<Vec<(
 }
 
 impl FixtureActivityTables {
+    /// An authored furniture Director is distinct from ordinary talking,
+    /// facial changes and idle character gestures in the conversation script.
+    pub(crate) fn has_talk_timeline(&self, talk_id: i32) -> bool {
+        self.pre_action_by_talk.get(&talk_id)
+            .and_then(|index| self.pre_actions[*index].timeline_group_id)
+            .filter(|group| *group > 0)
+            .is_some_and(|group| self.timelines.rows.iter().any(|row| row.group_id == group))
+    }
+
     pub(crate) fn prepare_fixture_talk_action(
         &self,
         input: FixtureTalkActionInput<'_>,

@@ -10,7 +10,7 @@ use bevy::{
 };
 use moly_assets::{json::JsonAsset, material_textures::SourceMaterialTextures};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Component, Clone)]
 pub(crate) struct FixtureColorChoice {
@@ -37,6 +37,15 @@ pub(crate) struct FixtureColors {
     materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
     error: Option<String>,
 }
+
+/// Furniture recolour textures are sampled by the render world after import;
+/// no gameplay or editor path reads their decoded texel buffer again.  Keeping
+/// the CPU asset copy here doubles residency for every colour/emission image,
+/// which is particularly expensive in a browser/WASM scene.  Explicitly
+/// selecting the render-world usage lets Bevy release the source payload once
+/// the GPU upload has completed.
+pub(crate) const COLOR_IMAGE_USAGE: bevy::asset::RenderAssetUsages =
+    bevy::asset::RenderAssetUsages::RENDER_WORLD;
 
 impl Default for FixtureColors {
     fn default() -> Self {
@@ -112,7 +121,7 @@ fn image(
         format!("moly://{path}"),
         move |settings: &mut ImageLoaderSettings| {
             settings.sampler = ImageSampler::Descriptor(sampler.clone());
-            settings.asset_usage = bevy::asset::RenderAssetUsages::all();
+            settings.asset_usage = COLOR_IMAGE_USAGE;
         },
     );
     colors.images.insert(path.to_owned(), handle.clone());
@@ -264,6 +273,21 @@ pub(crate) fn prepare(world: &mut World) {
     let Some(mut colors) = world.remove_resource::<FixtureColors>() else {
         return;
     };
+    let clear_requested = world
+        .get_resource::<crate::game_settings::SettingsPanel>()
+        .is_some_and(|panel| panel.resource_clear_requested);
+    if clear_requested {
+        // Keep the request edge-triggered even if this frame is waiting for a
+        // colour asset.  The result is a cache-handle count, not an RSS claim.
+        let (materials, images) = clear_inactive_cache_with(&mut colors, world);
+        if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>() {
+            panel.resource_clear_requested = false;
+            panel.resource_status = format!(
+                "已释放未使用缓存句柄：材质 {}，纹理 {}（GPU 回收由引擎异步完成）",
+                materials, images
+            );
+        }
+    }
     if let Err(error) = apply(world, &mut colors) {
         colors.ready = false;
         if colors.error.as_ref() != Some(&error) {
@@ -284,7 +308,88 @@ pub(crate) fn prepare(world: &mut World) {
     world.insert_resource(colors);
 }
 
+fn clear_inactive_cache_with(colors: &mut FixtureColors, world: &mut World) -> (usize, usize) {
+    let active_materials: HashSet<AssetId<StandardMaterial>> = world
+        .query::<&MeshMaterial3d<StandardMaterial>>()
+        .iter(world)
+        .map(|material| material.0.id())
+        .collect();
+    let active_images: HashSet<AssetId<Image>> = world
+        .query::<&moly_assets::material_textures::SourceMaterialTextures>()
+        .iter(world)
+        .flat_map(|textures| textures.0.values().map(Handle::id))
+        .collect();
+    let mut active_images = active_images;
+    // The cache key records exactly which recolour textures produced a live
+    // material. Keep those IDs even when a source material has no imported
+    // texture metadata component (e.g. a minimal test GLB).
+    for ((_, main, emission), material) in &colors.materials {
+        if active_materials.contains(&material.id()) {
+            active_images.insert(*main);
+            if let Some(emission) = emission {
+                active_images.insert(*emission);
+            }
+        }
+    }
+    let old_materials = colors.materials.len();
+    colors
+        .materials
+        .retain(|_, handle| active_materials.contains(&handle.id()));
+    let old_images = colors.images.len();
+    colors
+        .images
+        .retain(|_, handle| active_images.contains(&handle.id()));
+    (
+        old_materials.saturating_sub(colors.materials.len()),
+        old_images.saturating_sub(colors.images.len()),
+    )
+}
+
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<FixtureColors>()
         .add_systems(Update, prepare.after(crate::fixture::FixtureLayoutSet));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recolor_images_are_render_world_only() {
+        assert_eq!(COLOR_IMAGE_USAGE, bevy::asset::RenderAssetUsages::RENDER_WORLD);
+    }
+
+    #[test]
+    fn explicit_clear_keeps_live_recolor_and_releases_retired_handles() {
+        let mut world = World::new();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        let live_image = world.resource_mut::<Assets<Image>>().add(Image::default());
+        let old_image = world.resource_mut::<Assets<Image>>().add(Image::default());
+        let live_material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let old_material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let entity = world.spawn(MeshMaterial3d(live_material.clone())).id();
+        let mut colors = FixtureColors::default();
+        colors.images.insert("live".into(), live_image.clone());
+        colors.images.insert("old".into(), old_image.clone());
+        colors.materials.insert(
+            (live_material.id(), live_image.id(), None),
+            live_material.clone(),
+        );
+        colors.materials.insert(
+            (old_material.id(), old_image.id(), None),
+            old_material,
+        );
+
+        assert_eq!(clear_inactive_cache_with(&mut colors, &mut world), (1, 1));
+        assert!(colors.images.contains_key("live"));
+        assert_eq!(colors.materials.len(), 1);
+        world.entity_mut(entity).despawn();
+        assert_eq!(clear_inactive_cache_with(&mut colors, &mut world), (1, 1));
+        assert!(colors.images.is_empty());
+    }
 }

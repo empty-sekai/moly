@@ -184,39 +184,10 @@ export function isWeather(value) {
     ),
   );
 }
-// An embedder may publish the immutable resource tree on one extra origin, a
-// public CDN. That value is a bare https authority and nothing else: resource
-// paths are appended to it verbatim, so a credential, path, query or fragment
-// here would make the appended address ambiguous. Such a value is refused, not
-// normalized.
-export function resourceOrigin(value) {
-  if (typeof value !== "string" || !/^https:\/\/[^/?#\\\s]+\/?$/i.test(value))
-    throw new TypeError("Expected a bare https resource origin");
-  const url = new URL(value);
-  if (
-    url.protocol !== "https:" ||
-    !url.hostname ||
-    url.username ||
-    url.password ||
-    url.pathname !== "/" ||
-    url.search ||
-    url.hash
-  )
-    throw new TypeError("Expected a bare https resource origin");
-  return url.origin;
-}
-// The origins a resource directory may live on are a closed set, fixed before
-// the first request: the base's own origin, plus at most one explicitly
-// configured resource origin. Passing no origin keeps the single-origin rule
-// this contract has always had, which is why an embed that configures nothing
-// behaves exactly as before.
-export function resourceDirectory(value, base, origin = null) {
+export function sameOriginDirectory(value, base) {
   const url = new URL(value, base);
-  const admitted = new Set([new URL(base).origin]);
-  if (origin !== null && origin !== undefined && origin !== "")
-    admitted.add(resourceOrigin(origin));
   if (
-    !admitted.has(url.origin) ||
+    url.origin !== new URL(base).origin ||
     !["http:", "https:"].includes(url.protocol) ||
     url.username ||
     url.password ||
@@ -225,13 +196,73 @@ export function resourceDirectory(value, base, origin = null) {
     !url.pathname.endsWith("/") ||
     /%2f|%5c|%00/i.test(url.pathname)
   )
-    throw new TypeError(
-      admitted.size > 1
-        ? "Expected a directory on the host or the configured resource origin"
-        : "Expected a same-origin directory",
-    );
+    throw new TypeError("Expected a same-origin directory");
   return url;
 }
-export function sameOriginDirectory(value, base) {
-  return resourceDirectory(value, base, null);
+
+// The host supplies its configured public resource origin. The iframe, SDK,
+// player-data channel and manifest discovery stay on the host's own origin.
+export function resourceOrigin(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || /[\\\x00-\x20\x7f]/.test(value))
+    throw new TypeError("Expected a canonical HTTPS resource origin");
+  const url = new URL(value);
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password ||
+      url.pathname !== "/" || url.search || url.hash ||
+      (value !== url.origin && value !== url.origin + "/"))
+    throw new TypeError("Expected a canonical HTTPS resource origin");
+  return url.origin;
+}
+/**
+ * Explicit public object-store root.  Unlike resourceOrigin this includes the
+ * provider path (`/sekai-extra-assets/`).  Every remote asset and release URL
+ * must be derived from this value; there is deliberately no CDN fallback.
+ */
+export function resourceBase(value) {
+  if (typeof value !== "string" || /[\\\x00-\x20\x7f]/.test(value))
+    throw new TypeError("Expected a canonical HTTPS resource base");
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:" || !url.hostname || url.username || url.password ||
+    !url.pathname.endsWith("/") || url.search || url.hash ||
+    /%2f|%5c|%00/i.test(url.pathname) ||
+    value !== url.href
+  )
+    throw new TypeError("Expected a canonical HTTPS resource base");
+  return url.href;
+}
+
+function remoteDirectoryPath(path, configured) {
+  const configuredUrl = configured === undefined || configured === null
+    ? null
+    : new URL(configured);
+  if (!configuredUrl || configuredUrl.protocol !== "https:" ||
+      configuredUrl.username || configuredUrl.password || configuredUrl.search ||
+      configuredUrl.hash || !configuredUrl.pathname.endsWith("/"))
+    return null;
+  // `resourceOrigin` is retained only for the old `/moly/` deployment.  New
+  // deployments must pass the complete resource_base, including its prefix.
+  if (configuredUrl.pathname === "/") {
+    if (path.startsWith("/moly/snapshots/") || path === "/moly/asset-store/")
+      return path.slice("/moly/".length);
+    return null;
+  }
+  if (!path.startsWith(configuredUrl.pathname)) return null;
+  return path.slice(configuredUrl.pathname.length);
+}
+
+function isRemoteAssetDirectory(path) {
+  return /^(?:snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/|asset-store\/)$/.test(path);
+}
+
+export function resourceDirectory(value, base, configuredBase = undefined) {
+  const url = new URL(value, base);
+  if (url.origin === new URL(base).origin) return sameOriginDirectory(value, base);
+  if (!configuredBase || resourceOrigin(url.origin) !== url.origin ||
+      resourceOrigin(new URL(configuredBase).origin) !== url.origin ||
+      url.username || url.password || url.search || url.hash ||
+      /[%\\\x00-\x20\x7f]/.test(url.pathname) || value !== url.href ||
+      !isRemoteAssetDirectory(remoteDirectoryPath(url.pathname, configuredBase)))
+    throw new TypeError("Expected a configured public Moly resource directory");
+  return url;
 }

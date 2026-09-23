@@ -1,7 +1,8 @@
 import { weatherLabel } from "./stage-locale.mjs";
+import { resourceDirectory } from "./embed-contract.mjs";
 
 /** A missing source icon stays missing; labels never select replacement art. */
-export function sourceWeatherIcon(file, assets, baseUrl) {
+export function sourceWeatherIcon(file, assets, baseUrl, configuredBase = undefined) {
   if (typeof file !== "string" || !file || /[\\:?#\x00-\x1f]/.test(file))
     return null;
   try {
@@ -16,8 +17,8 @@ export function sourceWeatherIcon(file, assets, baseUrl) {
       )
     )
       return null;
-    const base = new URL(assets, baseUrl);
-    const origin = new URL(baseUrl).origin;
+    const base = resourceDirectory(assets, baseUrl, configuredBase);
+    const origin = base.origin;
     if (
       base.origin !== origin ||
       !base.pathname.endsWith("/") ||
@@ -37,7 +38,7 @@ export function sourceWeatherIcon(file, assets, baseUrl) {
 
 export function presentWeather(
   weather,
-  { assets, baseUrl, locale, region, packed = false, iconUrls = new Map() },
+  { assets, baseUrl, resourceBase, locale, region, packed = false, iconUrls = new Map() },
 ) {
   if (!weather) return weather;
   const options = weather.options.map((option) => ({
