@@ -204,6 +204,16 @@ impl FixtureFacts {
     }
 }
 
+/// One placed fixture's table facts, resolved once. The root's model handle
+/// is set at spawn and never replaced, and the parsed tables never change, so
+/// the cached answer is the answer the per-frame lookup would give.
+#[derive(Component, Clone)]
+pub(crate) struct ActionButtonFixture {
+    row: Option<FixtureRow>,
+    button: Option<ButtonType>,
+    glb: String,
+}
+
 /// 本模块的运行态。
 #[derive(Resource)]
 pub(crate) struct ActionButtonState {
@@ -557,8 +567,9 @@ pub(crate) fn spawn_when_ready(
 /// 源侧这一步分在两处：碰撞管理器算进出、屏幕层的回调把它转成压栈与
 /// 出栈。本仓没有那两层，于是在这里一次算完——等价的地方是**边沿**：
 /// 只在「本帧相交且上帧不相交」时压栈，反之出栈；不是每帧重建整个栈。
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn advance(
+    mut commands: Commands,
     mut state: ResMut<ActionButtonState>,
     eligibility: crate::interaction::InteractionEligibility,
     facts: Res<FixtureFacts>,
@@ -572,6 +583,7 @@ pub(crate) fn advance(
             &FixturePlacement,
             &GlobalTransform,
             Option<&FixtureActivityIdentity>,
+            Option<&ActionButtonFixture>,
         ),
         With<FixtureRoot>,
     >,
@@ -608,26 +620,40 @@ pub(crate) fn advance(
         }
     }
 
-    for (entity, transform, source, _, _, identity) in &fixtures {
+    for (entity, transform, source, _, _, identity, cached) in &fixtures {
         placed += 1;
-        let Some(path) = server.get_path(&source.0) else {
-            continue;
+        let resolved;
+        let facts_of = match cached {
+            Some(cached) => cached,
+            None => {
+                let Some(path) = server.get_path(&source.0) else {
+                    continue;
+                };
+                let glb = path
+                    .path()
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let row = facts.row_for_glb(&glb).copied();
+                resolved = ActionButtonFixture {
+                    button: row.as_ref().and_then(fixture_button),
+                    row,
+                    glb,
+                };
+                commands.entity(entity).try_insert(resolved.clone());
+                &resolved
+            }
         };
-        let glb = path
-            .path()
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_owned();
-        let Some(row) = facts.row_for_glb(&glb) else {
+        let Some(row) = facts_of.row.as_ref() else {
             continue;
         };
         joined += 1;
-        let Some(button) = fixture_button(row) else {
+        let Some(button) = facts_of.button else {
             continue;
         };
         if survey {
-            with_button.push((button, transform.translation.to_array(), glb));
+            with_button.push((button, transform.translation.to_array(), facts_of.glb.clone()));
         }
         let target_box = fixture_box(
             transform.translation.to_array(),
