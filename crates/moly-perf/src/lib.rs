@@ -160,16 +160,9 @@ impl Shared {
 /// The most recently built plugin's counters, read by [`snapshot_json`].
 static LATEST: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
 
-/// Main-world access to this app's counters.
+/// Main-world handle of this app's counters, written by the frame markers.
 #[derive(Resource, Clone)]
-pub struct PerfStore(Arc<Shared>);
-
-impl PerfStore {
-    /// Snapshot of this app's counters; see [`snapshot_json`].
-    pub fn snapshot_json(&self, recent: usize) -> String {
-        snapshot(&self.0, recent)
-    }
-}
+struct PerfStore(Arc<Shared>);
 
 /// Render-world handle for the render timing root and the schedule it runs.
 #[derive(Resource)]

@@ -186,7 +186,9 @@ pub fn player_data_command(operation: &str, region: &str, json: &str) -> Result<
 pub fn player_data_snapshot() -> String { moly_game::player_data::browser_snapshot() }
 
 /// Frame counters of the running application as JSON: percentiles over the
-/// last 600 frames and the newest `frames` frames (120 when omitted).
+/// last 600 frames and the newest `frames` frames (120 when omitted). The
+/// browser measurement probe calls it on the imported module, as the QA
+/// harness calls `library_snapshot`; the page itself does not.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn perf_snapshot(frames: Option<u32>) -> String {
