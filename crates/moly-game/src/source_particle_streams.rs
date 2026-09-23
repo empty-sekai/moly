@@ -13,7 +13,7 @@ fn require(value: bool, message: impl Into<String>) -> Result<()> {
 }
 use bevy::mesh::{Indices, VertexAttributeValues};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParticleStreams {
     custom: bool,
 }
@@ -76,16 +76,20 @@ impl ParticleStreams {
     pub fn pack(&self, abi: &ProgramAbi, mesh: &Mesh) -> Result<(Vec<u8>, Vec<u8>, u32)> {
         let layout = self.layout(abi)?;
         let count = mesh.count_vertices();
-        let mut bytes = Vec::with_capacity(count * layout.array_stride as usize);
-        for vertex in 0..count {
-            for field in abi.interfaces.vertex.iter().filter(|f| f.direction == "in") {
+        // Resolve each input's attribute column once; the per-vertex loop
+        // below reads the same values the attribute lookups would.
+        let columns: Vec<Column> = abi
+            .interfaces
+            .vertex
+            .iter()
+            .filter(|f| f.direction == "in")
+            .map(|field| {
                 // Native AddDefaultStreamsToChannelInfo maps absent UV channels
                 // to offset 0 of its zero UNorm8x4 default stream. GLES uses
                 // the same four zeroes when replacing that zero-stride stream
                 // with a generic vertex attribute; w is also zero.
                 if !self.custom && matches!(field.name.as_str(), "in_TEXCOORD1" | "in_TEXCOORD2") {
-                    bytes.extend_from_slice(&[0; 16]);
-                    continue;
+                    return Column::Zero;
                 }
                 let attribute = match field.name.as_str() {
                     "in_POSITION0" => Mesh::ATTRIBUTE_POSITION,
@@ -96,49 +100,79 @@ impl ParticleStreams {
                     "in_TEXCOORD2" => crate::billboard::ATTRIBUTE_CUSTOM2,
                     _ => unreachable!("validated particle interface"),
                 };
-                let values: &[f32] = match mesh.attribute(attribute) {
-                    Some(VertexAttributeValues::Float32x2(v)) => {
-                        v.get(vertex).map(|v| v.as_slice())
-                    }
-                    Some(VertexAttributeValues::Float32x3(v)) => {
-                        v.get(vertex).map(|v| v.as_slice())
-                    }
-                    Some(VertexAttributeValues::Float32x4(v)) => {
-                        v.get(vertex).map(|v| v.as_slice())
-                    }
-                    _ => None,
-                }
-                .ok_or_else(|| {
-                    SourceShaderError(format!(
-                        "particle geometry lacks {} at vertex {vertex}",
-                        field.name
-                    ))
-                })?;
-                for (component, value) in values.iter().enumerate() {
+                let (data, width): (&[f32], usize) = match mesh.attribute(attribute) {
+                    Some(VertexAttributeValues::Float32x2(v)) => (v.as_flattened(), 2),
+                    Some(VertexAttributeValues::Float32x3(v)) => (v.as_flattened(), 3),
+                    Some(VertexAttributeValues::Float32x4(v)) => (v.as_flattened(), 4),
+                    _ => (&[], 0),
+                };
+                Column::Values {
+                    name: &field.name,
+                    data,
+                    width,
                     // Geometry is shared with Bevy consumers in reflected world
                     // space. Original source programs and material vectors use
                     // source world space; undo that reflection at this boundary.
-                    let value = if component == 0 && matches!(field.name.as_str(), "in_POSITION0" | "in_NORMAL0") {
-                        -*value
-                    } else { *value };
+                    reflect: matches!(field.name.as_str(), "in_POSITION0" | "in_NORMAL0"),
+                }
+            })
+            .collect();
+        let mut bytes = Vec::with_capacity(count * layout.array_stride as usize);
+        for vertex in 0..count {
+            for column in &columns {
+                let (name, data, width, reflect) = match column {
+                    Column::Zero => {
+                        bytes.extend_from_slice(&[0; 16]);
+                        continue;
+                    }
+                    Column::Values { name, data, width, reflect } => (name, data, *width, *reflect),
+                };
+                let values = (width > 0)
+                    .then(|| data.get(vertex * width..(vertex + 1) * width))
+                    .flatten()
+                    .ok_or_else(|| {
+                        SourceShaderError(format!(
+                            "particle geometry lacks {name} at vertex {vertex}"
+                        ))
+                    })?;
+                for (component, value) in values.iter().enumerate() {
+                    let value = if component == 0 && reflect { -*value } else { *value };
                     bytes.extend_from_slice(&value.to_le_bytes());
                 }
             }
         }
-        let indices: Vec<u32> = match mesh.indices() {
-            Some(Indices::U32(v)) => v.clone(),
-            Some(Indices::U16(v)) => v.iter().map(|v| u32::from(*v)).collect(),
+        let (length, index_bytes) = match mesh.indices() {
+            Some(Indices::U32(v)) => (v.len(), index_bytes(v.iter().copied(), count)?),
+            Some(Indices::U16(v)) => (v.len(), index_bytes(v.iter().map(|v| u32::from(*v)), count)?),
             None => return Err(SourceShaderError("particle geometry lacks indices".into())),
         };
-        require(
-            indices.iter().all(|i| (*i as usize) < count),
-            "particle index exceeds vertex count",
-        )?;
-        let length = u32::try_from(indices.len()).map_err(|e| SourceShaderError(e.to_string()))?;
-        Ok((
-            bytes,
-            indices.iter().flat_map(|i| i.to_le_bytes()).collect(),
-            length,
-        ))
+        let length = u32::try_from(length).map_err(|e| SourceShaderError(e.to_string()))?;
+        Ok((bytes, index_bytes, length))
     }
+}
+
+/// One vertex input's source column.
+enum Column<'a> {
+    /// The zero default stream of an absent UV channel.
+    Zero,
+    Values {
+        name: &'a str,
+        /// Flattened attribute values; empty with width 0 when the attribute
+        /// is absent or not a float vector.
+        data: &'a [f32],
+        width: usize,
+        reflect: bool,
+    },
+}
+
+fn index_bytes(indices: impl ExactSizeIterator<Item = u32> + Clone, count: usize) -> Result<Vec<u8>> {
+    require(
+        indices.clone().all(|i| (i as usize) < count),
+        "particle index exceeds vertex count",
+    )?;
+    let mut bytes = Vec::with_capacity(indices.len() * 4);
+    for index in indices {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    Ok(bytes)
 }

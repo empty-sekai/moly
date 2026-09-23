@@ -32,12 +32,13 @@ use bevy::render::{
     renderer::{RenderDevice, RenderQueue},
 };
 use moly_assets::source_shader::Result;
-use moly_assets::source_shader::SourceShaderCatalogue;
+use moly_assets::source_shader::{material::MaterialSnapshot, ProgramReceipt, SourceShaderCatalogue};
 use moly_assets::source_shader::{
     loader::SourceProgramAsset, state::SourcePassState, SourceShaderError, UniformValue,
 };
 use std::collections::BTreeMap;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 struct ExtractedParticle {
     entity: Entity,
@@ -49,8 +50,16 @@ struct ExtractedParticle {
 #[derive(Resource, Default)]
 struct ParticleFrame {
     particles: Vec<ExtractedParticle>,
+    /// Render entities of this frame's enabled particles.
+    enabled: HashSet<Entity>,
+    /// (sorting order, render queue) of this frame's particles.
+    order: HashMap<Entity, (i32, i32)>,
     light: [f32; 4],
+    /// Copies of the catalogues this frame's particles reference. A catalogue
+    /// is immutable once loaded; its copy is replaced only after an asset event.
     catalogues: HashMap<AssetId<SourceShaderCatalogue>, SourceShaderCatalogue>,
+    /// Advances with every catalogue asset event, invalidating pass resolutions.
+    catalogue_generation: u64,
     cameras: HashMap<Entity, Projection>,
 }
 fn extract(
@@ -58,29 +67,49 @@ fn extract(
     particles: Extract<Query<(Entity, &RenderEntity, &Mesh3d, &SourceParticle)>>,
     meshes: Extract<Res<Assets<Mesh>>>,
     catalogues: Extract<Res<Assets<SourceShaderCatalogue>>>,
+    mut catalogue_events: Extract<MessageReader<AssetEvent<SourceShaderCatalogue>>>,
     env: Extract<Res<crate::env::SiteEnv>>,
     cameras: Extract<Query<(&RenderEntity, &Projection), With<Camera3d>>>,
 ) {
-    frame.particles.clear();
-    frame.catalogues.clear();
-    frame.cameras = cameras
-        .iter()
-        .map(|(entity, projection)| (entity.id(), projection.clone()))
-        .collect();
+    let frame = &mut *frame;
+    for event in catalogue_events.read() {
+        match event {
+            AssetEvent::Modified { id } | AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
+                frame.catalogues.remove(id);
+            }
+            _ => {}
+        }
+        frame.catalogue_generation += 1;
+    }
+    frame.cameras.clear();
+    frame.cameras.extend(
+        cameras
+            .iter()
+            .map(|(entity, projection)| (entity.id(), projection.clone())),
+    );
     frame.light = env.globals.phenomena_directional_light_color;
-    for (main, entity, mesh, source) in &particles {
-        if source.error.is_some() || source.passes.is_empty() {
+    let mut previous: HashMap<MainEntity, SourceParticle> = frame
+        .particles
+        .drain(..)
+        .map(|particle| (particle.main, particle.source))
+        .collect();
+    frame.enabled.clear();
+    frame.order.clear();
+    let mut referenced = HashSet::new();
+    for (main, entity, mesh, component) in &particles {
+        if component.error.is_some() || component.passes.is_empty() {
             continue;
         }
         let Some(mesh) = meshes.get(&mesh.0) else {
             continue;
         };
-        let Some(catalogue) = catalogues.get(&source.catalogue) else {
+        let Some(catalogue) = catalogues.get(&component.catalogue) else {
             continue;
         };
+        referenced.insert(component.catalogue.id());
         frame
             .catalogues
-            .entry(source.catalogue.id())
+            .entry(component.catalogue.id())
             .or_insert_with(|| catalogue.clone());
         let center = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
             Some(bevy::mesh::VertexAttributeValues::Float32x3(positions))
@@ -96,14 +125,55 @@ fn extract(
             }
             _ => Vec3::ZERO,
         };
+        let main: MainEntity = main.into();
+        // Main-world systems take the component mutably every frame, so change
+        // ticks do not say whether it changed; compare what drawing reads.
+        let source = match previous.remove(&main) {
+            Some(kept) if same_draw(&kept, &component) => kept,
+            _ => SourceParticle::clone(&component),
+        };
+        let entity = entity.id();
+        if source.enabled {
+            frame.enabled.insert(entity);
+        }
+        frame
+            .order
+            .entry(entity)
+            .or_insert((source.sorting_order, source.render_queue));
         frame.particles.push(ExtractedParticle {
-            entity: entity.id(),
-            main: main.into(),
-            source: source.clone(),
+            entity,
+            main,
+            source,
             mesh: mesh.clone(),
             center,
         });
     }
+    frame.catalogues.retain(|id, _| referenced.contains(id));
+}
+
+/// Whether a kept render-world copy draws exactly as a fresh clone would:
+/// every field the renderer reads, by value or by asset identity. Both copies
+/// share the readiness cell, so a kept copy still publishes to the component.
+fn same_draw(kept: &SourceParticle, current: &SourceParticle) -> bool {
+    Arc::ptr_eq(&kept.material, &current.material)
+        && Arc::ptr_eq(&kept.readiness, &current.readiness)
+        && kept.catalogue.id() == current.catalogue.id()
+        && kept.streams == current.streams
+        && kept.enabled == current.enabled
+        && kept.error == current.error
+        && kept.render_queue == current.render_queue
+        && kept.sorting_order == current.sorting_order
+        && kept.sorting_fudge.to_bits() == current.sorting_fudge.to_bits()
+        && kept.passes.len() == current.passes.len()
+        && kept.passes.iter().zip(&current.passes).all(|(a, b)| {
+            a.program.id() == b.program.id() && a.state == b.state && a.effect == b.effect
+        })
+        && kept.textures.len() == current.textures.len()
+        && kept
+            .textures
+            .iter()
+            .zip(&current.textures)
+            .all(|((a_name, a), (b_name, b))| a_name == b_name && a.id() == b.id())
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -125,15 +195,90 @@ struct Packet {
     sorting_order: i32,
     render_queue: i32,
     // View targets may be recycled or resized independently of material assets.
-    resources: Vec<String>,
+    resources: Vec<TextureViewId>,
 }
 #[derive(Resource, Default)]
 struct ParticleGpu {
     pipelines: HashMap<PipelineKey, CachedRenderPipelineId>,
     packets: HashMap<(Entity, Entity, bool), Packet>,
     queued: HashMap<(Entity, Entity, bool), CachedRenderPipelineId>,
+    resolutions: HashMap<(Entity, AssetId<SourceProgramAsset>), PassResolution>,
     errors: BTreeSet<String>,
     depth_sampler: Option<Sampler>,
+}
+
+/// Where one ABI uniform gets its value.
+enum FieldSource {
+    Material(UniformValue),
+    Failed(SourceShaderError),
+    Camera,
+}
+
+/// The material-constant part of a pass: variant selection, the compiled
+/// receipt check and material-owned uniforms. These are functions of the
+/// material, the catalogue and the receipt only, so they are resolved again
+/// only when one of those changes. Camera/global writers stay per frame.
+struct PassResolution {
+    material: Arc<MaterialSnapshot>,
+    catalogue: AssetId<SourceShaderCatalogue>,
+    catalogue_generation: u64,
+    receipt: Arc<ProgramReceipt>,
+    fields: Result<Vec<FieldSource>>,
+}
+impl PassResolution {
+    fn resolve(
+        source: &SourceParticle,
+        catalogue: &SourceShaderCatalogue,
+        catalogue_generation: u64,
+        program: &GpuSourceProgram,
+    ) -> Self {
+        let fields = (|| {
+            let (_, variant) = catalogue.select(
+                program.receipt.source.reference.subshader,
+                program.receipt.source.reference.pass,
+                9,
+                4,
+                &source.material.keywords,
+            )?;
+            program.receipt.matches(catalogue, variant)?;
+            Ok(program
+                .receipt
+                .abi
+                .uniforms
+                .iter()
+                .map(|field| match source.material.uniform(catalogue, field) {
+                    Ok(Some(value)) => FieldSource::Material(value),
+                    Ok(None) => FieldSource::Camera,
+                    Err(error) => FieldSource::Failed(error),
+                })
+                .collect())
+        })();
+        Self {
+            material: source.material.clone(),
+            catalogue: source.catalogue.id(),
+            catalogue_generation,
+            receipt: program.receipt.clone(),
+            fields,
+        }
+    }
+
+    fn current(
+        &self,
+        source: &SourceParticle,
+        catalogue_generation: u64,
+        program: &GpuSourceProgram,
+    ) -> bool {
+        Arc::ptr_eq(&self.material, &source.material)
+            && self.catalogue == source.catalogue.id()
+            && self.catalogue_generation == catalogue_generation
+            && Arc::ptr_eq(&self.receipt, &program.receipt)
+    }
+}
+
+/// A texture a pass samples, resolved for one view.
+enum Sampled<'a> {
+    Depth(&'a TextureView),
+    Asset(&'a GpuSourceTexture),
 }
 fn fail(gpu: &mut ParticleGpu, error: SourceShaderError) {
     if gpu.errors.insert(error.to_string()) {
@@ -280,14 +425,7 @@ fn sort_source_particles(
     frame: Res<ParticleFrame>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
 ) {
-    let order = |entity| {
-        frame
-            .particles
-            .iter()
-            .find(|p| p.entity == entity)
-            .map(|p| (p.source.sorting_order, p.source.render_queue))
-            .unwrap_or((0, 3000))
-    };
+    let order = |entity| frame.order.get(&entity).copied().unwrap_or((0, 3000));
     for phase in phases.values_mut() {
         phase.items.sort_by(|a, b| {
             order(a.entity())
@@ -400,6 +538,13 @@ fn prepare(
         }));
     }
     let depth_sampler = gpu.depth_sampler.as_ref().unwrap().clone();
+    let gpu = &mut *gpu;
+    let drawn: HashSet<Entity> = frame.particles.iter().map(|p| p.entity).collect();
+    gpu.resolutions
+        .retain(|(entity, _), _| drawn.contains(entity));
+    // Packing depends on the program ABI and the geometry, not on the view.
+    let mut packed: HashMap<(Entity, AssetId<SourceProgramAsset>), Result<(Vec<u8>, Vec<u8>, u32)>> =
+        HashMap::new();
     let mut live = std::collections::HashSet::new();
     for (view_entity, view, depth, _) in &views {
         let Some(camera) = frame.cameras.get(&view_entity) else {
@@ -415,47 +560,53 @@ fn prepare(
                 let Some(program) = programs.get(pass.program.id()) else {
                     continue;
                 };
+                let resolution = gpu
+                    .resolutions
+                    .entry((item.entity, pass.program.id()))
+                    .or_insert_with(|| {
+                        PassResolution::resolve(
+                            &item.source,
+                            catalogue,
+                            frame.catalogue_generation,
+                            program,
+                        )
+                    });
+                if !resolution.current(&item.source, frame.catalogue_generation, program) {
+                    *resolution = PassResolution::resolve(
+                        &item.source,
+                        catalogue,
+                        frame.catalogue_generation,
+                        program,
+                    );
+                }
                 let mut updated = false;
                 let result = (|| -> Result<Option<Packet>> {
                     let abi = &program.receipt.abi;
-                    let (_, variant) = catalogue.select(
-                        program.receipt.source.reference.subshader,
-                        program.receipt.source.reference.pass,
-                        9,
-                        4,
-                        &item.source.material.keywords,
-                    )?;
-                    program.receipt.matches(catalogue, variant)?;
+                    let fields = resolution.fields.as_ref().map_err(Clone::clone)?;
                     let values = abi
                         .uniforms
                         .iter()
-                        .map(|field| {
+                        .zip(fields)
+                        .map(|(field, source)| {
                             Ok((
                                 field.name.clone(),
-                                match item.source.material.uniform(catalogue, field)? {
-                                    Some(value) => value,
-                                    None => globals(&field.name, view, camera, frame.light)?,
+                                match source {
+                                    FieldSource::Material(value) => value.clone(),
+                                    FieldSource::Failed(error) => return Err(error.clone()),
+                                    FieldSource::Camera => {
+                                        globals(&field.name, view, camera, frame.light)?
+                                    }
                                 },
                             ))
                         })
                         .collect::<Result<BTreeMap<_, _>>>()?;
-                    let mut bindings = BTreeMap::new();
-                    let mut resources = Vec::new();
+                    let mut sampled = Vec::with_capacity(abi.textures.len());
                     for declaration in &abi.textures {
                         if declaration.name == "_CameraDepthTexture" {
                             let Some(depth) = depth else {
                                 return Ok(None);
                             };
-                            resources.push(format!("{:?}", depth.source_view().id()));
-                            bindings.insert(
-                                declaration.name.clone(),
-                                SourceSampledResource::View {
-                                    view: depth.source_view(),
-                                    sampler: &depth_sampler,
-                                    dimension: TextureViewDimension::D2,
-                                    filterable: false,
-                                },
-                            );
+                            sampled.push(Sampled::Depth(depth.source_view()));
                         } else {
                             let handle =
                                 item.source.textures.get(&declaration.name).ok_or_else(|| {
@@ -468,17 +619,22 @@ fn prepare(
                                 return Ok(None);
                             };
                             let texture = texture.result.as_ref().map_err(Clone::clone)?;
-                            resources.push(format!("{:?}", texture.raw.id()));
-                            bindings.insert(
-                                declaration.name.clone(),
-                                SourceSampledResource::Asset(SourceSampledTexture {
-                                    image: texture,
-                                    encoding: SourceTextureEncoding::Raw,
-                                }),
-                            );
+                            sampled.push(Sampled::Asset(texture));
                         }
                     }
-                    let (vertices, indices, count) = item.source.streams.pack(abi, &item.mesh)?;
+                    let resources: Vec<TextureViewId> = sampled
+                        .iter()
+                        .map(|resource| match resource {
+                            Sampled::Depth(depth_view) => depth_view.id(),
+                            Sampled::Asset(texture) => texture.raw.id(),
+                        })
+                        .collect();
+                    let (vertices, indices, count) = packed
+                        .entry((item.entity, pass.program.id()))
+                        .or_insert_with(|| item.source.streams.pack(abi, &item.mesh))
+                        .as_ref()
+                        .map_err(Clone::clone)?;
+                    let count = *count;
                     let buffer = |label, bytes: &[u8], usage| {
                         let buffer = device.create_buffer(&BufferDescriptor {
                             label: Some(label),
@@ -499,15 +655,15 @@ fn prepare(
                         packet.binding.write_uniforms(&queue, abi, &values)?;
                         if packet.vertex.size() < vertices.len() as u64 {
                             packet.vertex =
-                                buffer("source particle vertices", &vertices, BufferUsages::VERTEX);
+                                buffer("source particle vertices", vertices, BufferUsages::VERTEX);
                         } else if !vertices.is_empty() {
-                            queue.write_buffer(&packet.vertex, 0, &vertices);
+                            queue.write_buffer(&packet.vertex, 0, vertices);
                         }
                         if packet.index.size() < indices.len() as u64 {
                             packet.index =
-                                buffer("source particle indices", &indices, BufferUsages::INDEX);
+                                buffer("source particle indices", indices, BufferUsages::INDEX);
                         } else if !indices.is_empty() {
-                            queue.write_buffer(&packet.index, 0, &indices);
+                            queue.write_buffer(&packet.index, 0, indices);
                         }
                         packet.count = count;
                         packet.distance =
@@ -517,6 +673,30 @@ fn prepare(
                         updated = true;
                         return Ok(None);
                     }
+                    let bindings: BTreeMap<String, SourceSampledResource> = abi
+                        .textures
+                        .iter()
+                        .zip(&sampled)
+                        .map(|(declaration, resource)| {
+                            (
+                                declaration.name.clone(),
+                                match resource {
+                                    Sampled::Depth(depth_view) => SourceSampledResource::View {
+                                        view: *depth_view,
+                                        sampler: &depth_sampler,
+                                        dimension: TextureViewDimension::D2,
+                                        filterable: false,
+                                    },
+                                    Sampled::Asset(texture) => {
+                                        SourceSampledResource::Asset(SourceSampledTexture {
+                                            image: *texture,
+                                            encoding: SourceTextureEncoding::Raw,
+                                        })
+                                    }
+                                },
+                            )
+                        })
+                        .collect();
                     let binding = SourceGpuBinding::create_resources(
                         &device,
                         &cache,
@@ -527,8 +707,8 @@ fn prepare(
                     Ok(Some(Packet {
                         pipeline,
                         binding,
-                        vertex: buffer("source particle vertices", &vertices, BufferUsages::VERTEX),
-                        index: buffer("source particle indices", &indices, BufferUsages::INDEX),
+                        vertex: buffer("source particle vertices", vertices, BufferUsages::VERTEX),
+                        index: buffer("source particle indices", indices, BufferUsages::INDEX),
                         count,
                         resources,
                         distance: view.rangefinder3d().distance(&item.center)
@@ -553,7 +733,7 @@ fn prepare(
                         *item.source.readiness.lock().unwrap() =
                             crate::source_particle::ParticleReadiness::Failed(error.to_string());
                         gpu.packets.remove(&key);
-                        fail(&mut gpu, error);
+                        fail(gpu, error);
                     }
                 }
             }
@@ -664,12 +844,7 @@ impl ViewNode for EffectNode {
             .packets
             .iter()
             .filter(|((view, draw, effect), _)| {
-                *view == entity
-                    && *effect
-                    && frame
-                        .particles
-                        .iter()
-                        .any(|p| p.entity == *draw && p.source.enabled)
+                *view == entity && *effect && frame.enabled.contains(draw)
             })
             .map(|(_, p)| p)
             .collect::<Vec<_>>();
