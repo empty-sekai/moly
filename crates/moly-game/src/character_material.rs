@@ -39,7 +39,7 @@ use moly_law::shading::character::CharacterGlobals;
 use crate::character::{CharacterModel, CharacterPack, MotionDriver};
 use crate::light;
 use crate::npc::CharacterUnitId;
-use crate::render::gpu::store_bits;
+use crate::render::gpu::{store_bits, SharedSamplers};
 
 // ---- 现象常量（晴天配置的源值照抄） ----
 
@@ -158,6 +158,7 @@ impl AsBindGroup for CharacterMaterial {
         SRes<CharacterEnvGpuBuffer>,
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
+        SRes<SharedSamplers>,
     );
 
     fn label() -> &'static str {
@@ -167,8 +168,8 @@ impl AsBindGroup for CharacterMaterial {
     fn unprepared_bind_group(
         &self,
         _layout: &BindGroupLayout,
-        render_device: &RenderDevice,
-        (env_buffer, images, fallback): &mut SystemParamItem<'_, '_, Self::Param>,
+        _render_device: &RenderDevice,
+        (env_buffer, images, fallback, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -189,15 +190,9 @@ impl AsBindGroup for CharacterMaterial {
         // 角色贴图不滚动、ST 是恒等变换，uv 不越 [0,1]；采样态不在语料
         // 记录里，取引擎默认的钳边与三线性——与 GpuImage 自带 sampler 的
         // 过滤一致，只有寻址模式不同。
-        let clamp = render_device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        });
+        // The sampler is created once at render startup and shared by every
+        // character material; its descriptor never varies per material.
+        let clamp = samplers.clamp_linear.clone();
         let bindings = BindingResources(vec![
             // binding 0：材质自己的参数块（含头参考点）。
             (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
@@ -996,6 +991,7 @@ pub struct CharacterMaterialPlugin;
 
 impl Plugin for CharacterMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_shared_samplers(app);
         app.add_plugins((
             MaterialPlugin::<CharacterMaterial>::default(),
             ExtractResourcePlugin::<CharacterEnv>::default(),
