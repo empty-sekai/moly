@@ -100,6 +100,56 @@ impl InteractionEligibility<'_, '_> {
         !self.edits.is_active() && !self.player_in_talk()
     }
 
+    /// ScreenLayerMysekaiHome, which holds the action buttons, is the current
+    /// screen. The layout editor (SiteEditMode), a conversation with the
+    /// player (MysekaiTalk) and every layer of the layer stack are entered by
+    /// PushUIScreen, whose PushUIScreenCore exits the current screen first.
+    /// Dialogs are not screens and leave it current.
+    pub(crate) fn home_screen_current(&self) -> bool {
+        self.layers.on_field() && !self.edits.is_active() && !self.player_in_talk()
+    }
+
+    /// The NPC is a registered collision object: its avatar is set up.
+    pub(crate) fn talk_registered(&self, entity: Entity) -> bool {
+        self.targets
+            .get(entity)
+            .is_ok_and(|(_, _, _, actions, _, _, _)| actions.ready())
+    }
+
+    /// IsActionButtonTypeAvailable for a Talk entry: CheckTargetSite (the
+    /// NPC's site is the current site), then CanShowTalkActionButton (the
+    /// tutorial gate, open outside a tutorial and Moly has no tutorial, and
+    /// the NPC is in the NPC list). `None` when no site is active to compare
+    /// with.
+    pub(crate) fn talk_available(&self, entity: Entity) -> Option<bool> {
+        let site = self.site.as_ref()?;
+        Some(
+            self.targets
+                .get(entity)
+                .is_ok_and(|(_, _, _, actions, _, _, _)| {
+                    actions.ready() && site.site_type == actions.site_type
+                }),
+        )
+    }
+
+    /// AddShowButtonStack for a Talk entry after its lock check:
+    /// IsActionButtonTypeAvailable, then IsCanActionNPC (the NPC's view is
+    /// active and visible). Talk state, EnableTalk and the player's own state
+    /// are read when the button is tapped, not here.
+    pub(crate) fn talk_admitted(&self, entity: Entity) -> Option<bool> {
+        if !self.talk_available(entity)? {
+            return Some(false);
+        }
+        Some(
+            self.targets
+                .get(entity)
+                .is_ok_and(|(_, _, _, _, visibility, inherited, _)| {
+                    !visibility.is_some_and(|v| *v == Visibility::Hidden)
+                        && !inherited.is_some_and(|visible| !visible.get())
+                }),
+        )
+    }
+
     pub(crate) fn player_action(&self) -> PlayerActionState {
         self.player_state.current
     }
