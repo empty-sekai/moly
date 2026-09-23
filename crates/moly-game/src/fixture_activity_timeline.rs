@@ -127,16 +127,133 @@ pub(crate) struct TimelineAssetLoads {
     // 对整份文档的逐字节比对。代不同时走原来的比对，判定结果不变。
     parsed_json: crate::asset_cache::AssetCache<(Option<Tick>, String, Arc<Value>), 96>,
     gltf: crate::asset_cache::AssetCache<Handle<Gltf>, 24>,
+    // Lookup tables derived from one parsed catalogue or library index. An
+    // entry is reused only while `load_json` still returns that same parsed
+    // document, so a replaced text always gets tables built from itself.
+    routes: crate::asset_cache::AssetCache<(Arc<Value>, Arc<CatalogRoutes>), 96>,
+    segments: crate::asset_cache::AssetCache<(Arc<Value>, Arc<IndexSegments>), 96>,
 }
 
 impl TimelineAssetLoads {
     pub(crate) fn cache_counts(&self) -> Value {
-        serde_json::json!({"json":self.json.len(),"documents":self.parsed_json.len(),"gltf":self.gltf.len()})
+        serde_json::json!({"json":self.json.len(),"documents":self.parsed_json.len(),"gltf":self.gltf.len(),
+            "routes":self.routes.len(),"segments":self.segments.len()})
     }
 
     pub(crate) fn sweep_lookup_caches(&mut self) -> usize {
-        self.json.sweep_unused() + self.parsed_json.sweep_unused() + self.gltf.sweep_unused()
+        self.json.sweep_unused()
+            + self.parsed_json.sweep_unused()
+            + self.gltf.sweep_unused()
+            + self.routes.sweep_unused()
+            + self.segments.sweep_unused()
     }
+}
+
+const ACTOR_CATALOG: &str = "actor-animations/index.json";
+
+/// The catalogue's `clipBindings` rows grouped by the (unitId, sourceClip)
+/// pair a character clip is resolved by, each group in document order. A row
+/// whose unit is not an unsigned integer or whose source identity does not
+/// parse equals no request, so it is not indexed. A missing array is kept as
+/// the error the resolution reports at the point it first needs a route.
+struct CatalogRoutes(
+    Result<HashMap<(u64, SourceAssetId), Vec<usize>>, TimelineFailure>,
+);
+
+impl CatalogRoutes {
+    fn build(catalog: &Value) -> Self {
+        Self(array(catalog, "clipBindings").map(|rows| {
+            let mut routes: HashMap<(u64, SourceAssetId), Vec<usize>> = HashMap::new();
+            for (index, row) in rows.iter().enumerate() {
+                if let (Some(unit), Ok(source)) =
+                    (row["unitId"].as_u64(), asset(&row["sourceClip"]))
+                {
+                    routes.entry((unit, source)).or_default().push(index);
+                }
+            }
+            routes
+        }))
+    }
+
+    /// Indices of exactly the rows with this unit and this source clip.
+    fn rows(&self, unit: u64, clip: &SourceAssetId) -> Result<&[usize], TimelineFailure> {
+        let routes = self.0.as_ref().map_err(Clone::clone)?;
+        Ok(routes
+            .get(&(unit, clip.clone()))
+            .map_or(&[][..], Vec::as_slice))
+    }
+}
+
+/// A library index's segments grouped by (exported name, sourceClip), each
+/// group as `(clip group, segment)` keys in document order. Entries without a
+/// string name or a parseable source identity equal no request. A missing
+/// `clips` object is kept as the error reported where segments are needed.
+struct IndexSegments(
+    Result<HashMap<(String, SourceAssetId), Vec<(String, String)>>, TimelineFailure>,
+);
+
+impl IndexSegments {
+    fn build(index: &Value) -> Self {
+        Self(
+            index["clips"]
+                .as_object()
+                .ok_or_else(|| invalid("actor index clips missing"))
+                .map(|groups| {
+                    let mut segments: HashMap<(String, SourceAssetId), Vec<(String, String)>> =
+                        HashMap::new();
+                    for (group_key, group) in groups {
+                        let Some(entries) = group["segments"].as_object() else {
+                            continue;
+                        };
+                        for (segment_key, entry) in entries {
+                            if let (Some(name), Ok(source)) =
+                                (entry["name"].as_str(), asset(&entry["sourceClip"]))
+                            {
+                                segments
+                                    .entry((name.to_owned(), source))
+                                    .or_default()
+                                    .push((group_key.clone(), segment_key.clone()));
+                            }
+                        }
+                    }
+                    segments
+                }),
+        )
+    }
+
+    /// Exactly the segment entries with this exported name and source clip.
+    fn entries<'a>(
+        &self,
+        index: &'a Value,
+        name: &str,
+        clip: &SourceAssetId,
+    ) -> Result<Vec<&'a Value>, TimelineFailure> {
+        let segments = self.0.as_ref().map_err(Clone::clone)?;
+        Ok(segments
+            .get(&(name.to_owned(), clip.clone()))
+            .map_or_else(Vec::new, |keys| {
+                keys.iter()
+                    .map(|(group, segment)| &index["clips"][group]["segments"][segment])
+                    .collect()
+            }))
+    }
+}
+
+/// The tables built from `document`, reused while the same parse is current.
+fn derived<T>(
+    cache: &mut crate::asset_cache::AssetCache<(Arc<Value>, Arc<T>), 96>,
+    path: &str,
+    document: &Arc<Value>,
+    build: impl FnOnce(&Value) -> T,
+) -> Arc<T> {
+    if let Some((cached, tables)) = cache.get(path) {
+        if Arc::ptr_eq(cached, document) {
+            return tables.clone();
+        }
+    }
+    let tables = Arc::new(build(&**document));
+    cache.insert(path.to_owned(), (document.clone(), tables.clone()));
+    tables
 }
 
 /// Resolve the formal per-actor library into the actual player's graph. This
@@ -188,10 +305,13 @@ fn prepare_actor_tracks(
 ) -> Result<(), TimelineFailure> {
     world.init_resource::<TimelineAssetLoads>();
     let server = world.resource::<AssetServer>().clone();
-    let catalog = load_json(world, &server, "actor-animations/index.json")?;
+    let catalog = load_json(world, &server, ACTOR_CATALOG)?;
     if catalog["version"].as_u64() != Some(1) {
         return Err(invalid("unsupported actor animation catalog"));
     }
+    // Built on first need, once per parsed catalogue; every clip then looks
+    // its route up instead of rescanning all rows of the catalogue.
+    let mut catalog_routes: Option<Arc<CatalogRoutes>> = None;
     let mut prepared = Vec::new();
     for track in &request.definition.tracks {
         if track.class != "AnimationTrack"
@@ -212,19 +332,21 @@ fn prepare_actor_tracks(
             let source_clip = target.source_clip.as_ref().ok_or_else(|| {
                 invalid("formal clip target has no resolved source file identity")
             })?;
-            let routes: Vec<_> = array(&catalog, "clipBindings")?
-                .iter()
-                .filter(|row| {
-                    row["unitId"].as_u64() == Some(unit_id as u64)
-                        && asset(&row["sourceClip"]).ok().as_ref() == Some(source_clip)
-                })
-                .collect();
+            let routes = catalog_routes.get_or_insert_with(|| {
+                derived(
+                    &mut world.resource_mut::<TimelineAssetLoads>().routes,
+                    ACTOR_CATALOG,
+                    &catalog,
+                    CatalogRoutes::build,
+                )
+            });
+            let routes = routes.rows(unit_id as u64, source_clip)?;
             if routes.len() != 1 {
                 return Err(invalid(
                     "actor source clip is missing or ambiguous in the formal catalog",
                 ));
             }
-            let route = routes[0];
+            let route = &array(&catalog, "clipBindings")?[routes[0]];
             let route_identity = asset(&route["sourceClip"])?;
             let exported_name = string(route, "clipName")?;
             let library = array(&catalog, "libraries")?
@@ -233,7 +355,8 @@ fn prepare_actor_tracks(
             if library["unitId"].as_u64() != Some(unit_id as u64) {
                 return Err(invalid("actor library unit mismatch"));
             }
-            let index = load_json(world, &server, string(library, "index")?)?;
+            let index_path = string(library, "index")?;
+            let index = load_json(world, &server, index_path)?;
             if index["version"].as_u64() != Some(2) {
                 return Err(invalid("source-qualified v2 actor index required"));
             }
@@ -242,18 +365,13 @@ fn prepare_actor_tracks(
                     return Err(invalid("actor binding root route mismatch"));
                 }
             }
-            let groups = index["clips"]
-                .as_object()
-                .ok_or_else(|| invalid("actor index clips missing"))?;
-            let segments: Vec<_> = groups
-                .values()
-                .filter_map(|group| group["segments"].as_object())
-                .flat_map(|segments| segments.values())
-                .filter(|entry| {
-                    entry["name"].as_str() == Some(exported_name)
-                        && asset(&entry["sourceClip"]).ok().as_ref() == Some(&route_identity)
-                })
-                .collect();
+            let segments = derived(
+                &mut world.resource_mut::<TimelineAssetLoads>().segments,
+                index_path,
+                &index,
+                IndexSegments::build,
+            );
+            let segments = segments.entries(&index, exported_name, &route_identity)?;
             if segments.len() != 1 {
                 return Err(invalid("exact actor source segment missing or duplicated"));
             }
@@ -342,6 +460,22 @@ fn require_actor_path(path: &str) -> Result<(), TimelineFailure> {
         return Err(invalid("actor catalog path is not asset-root-relative"));
     }
     Ok(())
+}
+
+/// Start loading the actor catalogue without reading it, for a caller that
+/// knows it will resolve actor clips once its own tables arrive. It requests
+/// exactly the handle `load_json` requests for the catalogue.
+pub(crate) fn request_actor_catalog(world: &mut World) {
+    let Some(server) = world.get_resource::<AssetServer>().cloned() else {
+        return;
+    };
+    world.init_resource::<TimelineAssetLoads>();
+    world
+        .resource_mut::<TimelineAssetLoads>()
+        .json
+        .get_or_insert_with(ACTOR_CATALOG, || {
+            server.load(format!("moly://{ACTOR_CATALOG}"))
+        });
 }
 
 fn load_json(
@@ -457,6 +591,11 @@ pub(crate) struct TimelineAnimationBinding {
 pub(crate) struct TimelineBindings {
     pub animations: HashMap<TimelineClipKey, TimelineAnimationBinding>,
     pub actors: HashMap<SourceAssetId, Entity>,
+    /// SE clips that play silent because their SE has no route or its audio
+    /// failed to load. Only the player owner fills this (see
+    /// `silence_unavailable_sounds`); every other owner leaves it empty and
+    /// still requires each SE.
+    pub silent_sounds: HashSet<TimelineClipKey>,
     pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
     pub controls:
         HashMap<TimelineClipKey, crate::fixture_timeline_particles::ParticleControlBinding>,
@@ -773,15 +912,79 @@ fn all_tracks(request: &StartTimeline) -> Result<Vec<&TimelineTrack>, TimelineFa
     Ok(result)
 }
 
+/// The audio routing table is built once, from files requested at start. While
+/// that loader is still running this is a wait; once it has finished without
+/// the table, no later frame supplies it, so the failure is final.
+fn routing_absent(world: &World) -> TimelineFailure {
+    if world.contains_resource::<crate::audio::AudioRequests>() {
+        TimelineFailure::loading("audio routing not ready")
+    } else {
+        invalid("audio routing is absent and its loader has finished")
+    }
+}
+
+/// The player owner's SE rule. The source loads each SE bundle of a player
+/// timeline without checking the result (LoadSound ignores what
+/// LoadSoundBundleRefCount returns), and an SE clip whose bundle is missing
+/// only logs when it plays. So here an SE with no route, or whose audio
+/// failed to load, is marked silent instead of failing the request: the
+/// timeline plays on without it. Returns `package/cue: reason` for each clip
+/// newly marked. Decides nothing while the routing table is absent; the
+/// strict preparation reports that wait.
+pub(crate) fn silence_unavailable_sounds(
+    world: &World,
+    request: &mut StartTimeline,
+) -> Vec<String> {
+    let Some(routing) = world.get_resource::<Routing>() else {
+        return Vec::new();
+    };
+    let server = world.get_resource::<AssetServer>();
+    let Ok(tracks) = all_tracks(request) else {
+        return Vec::new();
+    };
+    let mut silenced = Vec::new();
+    for track in tracks {
+        for clip in &track.clips {
+            let TimelinePayload::Se { package, cue } = &clip.payload else {
+                continue;
+            };
+            if request.bindings.silent_sounds.contains(&clip.key) {
+                continue;
+            }
+            let reason = if routing.timeline_se_asset_path(package, cue).is_none() {
+                "no route"
+            } else if request.bindings.sounds.get(&clip.key).is_some_and(|handle| {
+                server.is_some_and(|server| {
+                    matches!(server.load_state(handle), bevy::asset::LoadState::Failed(_))
+                })
+            }) {
+                "audio failed to load"
+            } else {
+                continue;
+            };
+            silenced.push((clip.key.clone(), format!("{package}/{cue}: {reason}")));
+        }
+    }
+    silenced
+        .into_iter()
+        .map(|(key, description)| {
+            request.bindings.sounds.remove(&key);
+            request.bindings.silent_sounds.insert(key);
+            description
+        })
+        .collect()
+}
+
 /// Load exact `(package,cue)` resources through the existing audio Routing
 /// and AssetServer. Calling this does not start audio or admit an action.
+/// A clip in `silent_sounds` is neither routed nor loaded.
 pub(crate) fn prepare_source_sounds(
     world: &World,
     request: &mut StartTimeline,
 ) -> Result<(), TimelineFailure> {
     let routing = world
         .get_resource::<Routing>()
-        .ok_or_else(|| TimelineFailure::loading("audio routing not ready"))?;
+        .ok_or_else(|| routing_absent(world))?;
     let server = world
         .get_resource::<AssetServer>()
         .ok_or_else(|| invalid("asset server missing"))?;
@@ -789,6 +992,9 @@ pub(crate) fn prepare_source_sounds(
     for track in all_tracks(request)? {
         for clip in &track.clips {
             if let TimelinePayload::Se { package, cue } = &clip.payload {
+                if request.bindings.silent_sounds.contains(&clip.key) {
+                    continue;
+                }
                 let path = routing
                     .timeline_se_asset_path(package, cue)
                     .ok_or_else(|| invalid(format!("missing source SE {package}/{cue}")))?;
@@ -972,10 +1178,14 @@ fn validate(
                     }
                 }
                 TimelinePayload::Se { package, cue } => {
+                    // A silent SE plays nothing, so nothing is required of it.
+                    if request.bindings.silent_sounds.contains(&clip.key) {
+                        continue;
+                    }
                     required_sounds.insert(clip.key.clone());
                     let routing = world
                         .get_resource::<Routing>()
-                        .ok_or_else(|| TimelineFailure::loading("audio routing not ready"))?;
+                        .ok_or_else(|| routing_absent(world))?;
                     let path = routing
                         .timeline_se_asset_path(package, cue)
                         .ok_or_else(|| invalid("source SE route unavailable"))?;
@@ -1031,13 +1241,24 @@ fn validate(
                         .get(&track.identity)
                         .ok_or_else(|| invalid("emoticon track actor missing"))?;
                     validate_track_actor(world, request, &track.identity, *actor)?;
+                    // Each is a wait only while its loader is still running:
+                    // the archive while its request is held, the renderer
+                    // until its one-time setup has run.
                     let archive = world
                         .get_resource::<crate::emoticon::EmoticonArchive>()
                         .ok_or_else(|| {
-                            TimelineFailure::loading("emoticon archive still loading")
+                            if world.contains_resource::<crate::emoticon::EmoticonsHandle>() {
+                                TimelineFailure::loading("emoticon archive still loading")
+                            } else {
+                                invalid("emoticon archive is absent and its loader has finished")
+                            }
                         })?;
                     if !world.contains_resource::<crate::emoticon::Emotes>() {
-                        return Err(TimelineFailure::loading("emoticon renderer still loading"));
+                        return Err(if world.contains_resource::<crate::emoticon::Spawned>() {
+                            invalid("emoticon renderer is absent and its setup has run")
+                        } else {
+                            TimelineFailure::loading("emoticon renderer still loading")
+                        });
                     }
                     if !archive.has(name) {
                         return Err(invalid(format!("source emoticon {name} is unavailable")));
@@ -1667,6 +1888,10 @@ fn apply_events(
                 session.emoticons.insert(key.clone(), lease);
             }
             TimelinePayload::Se { .. } => {
+                // A silent SE has no sound; the timeline plays on without it.
+                if session.request.bindings.silent_sounds.contains(key) {
+                    continue;
+                }
                 let handle = session
                     .request
                     .bindings

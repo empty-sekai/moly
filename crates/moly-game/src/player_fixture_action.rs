@@ -5,6 +5,12 @@
 //! The common timeline runner owns all visual sampling and exact companion SE
 //! tracks. This module owns approach, attachment, end requests and cleanup.
 //!
+//! Resources follow the source state entry: a request selects one seat on the
+//! requested fixture and reserves it, then the session loads that seat's
+//! timelines, bindings and sounds before the player starts to move. Nothing is
+//! prepared for fixtures nobody asked for, a request never waits on another
+//! fixture's readiness, and the session's resources are released with it.
+//!
 //! Navigation data is supplied by the scene owner. Missing tiles, agent values,
 //! or visual mappings are unfinished preparation, never successful eligibility.
 
@@ -18,6 +24,9 @@ use bevy::prelude::*;
 
 use crate::{
     fixture_activity_data::{FixtureActivityTables, PlayerTimelineRow},
+    fixture_activity_provider::{
+        self, FixtureActivityProvider, PlayerTimelinePlan, ProviderPending,
+    },
     fixture_activity_state::{
         FixtureActivityIdentity, FixtureActivityOwner, FixtureActivityReservations, FixtureTarget,
     },
@@ -89,7 +98,9 @@ impl PlayerFixtureAvailability {
     }
 }
 
-/// The public master-data owner supplies this join and its exact bindings.
+/// One seat's loaded presentation: the selected player row, the SD visual
+/// row that shows it, and the exact bindings both need. A session owns it
+/// from state entry and releases it with the session.
 /// NoTalk supplies only the visible action; it never supplies player AI rules.
 #[derive(Clone)]
 pub(crate) struct PlayerFixtureVisualProfile {
@@ -114,15 +125,10 @@ pub(crate) struct PlayerFixtureVisualProfile {
     pub coverage_notes: Vec<String>,
 }
 
-#[derive(Resource, Default)]
-pub(crate) struct PlayerFixtureVisualProfiles {
-    pub profiles: Vec<PlayerFixtureVisualProfile>,
-}
-
 impl PlayerFixtureVisualProfile {
-    /// Asset preparation only. Keep this profile alive while sounds load,
-    /// then publish it through the shared profile resource. This does not
-    /// allocate an activity generation or submit a timeline to the runner.
+    /// Asset preparation only. Keep this profile alive while sounds load.
+    /// This does not allocate an activity generation or submit a timeline to
+    /// the runner.
     pub(crate) fn preload_source_sounds(
         &mut self,
         world: &World,
@@ -262,7 +268,8 @@ struct PreparedPlayerFixture {
     player_row: PlayerTimelineRow,
     locate_index: usize,
     slot_id: i32,
-    profile: PlayerFixtureVisualProfile,
+    /// The selected row's data-level join; its assets load after admission.
+    plan: PlayerTimelinePlan,
     end: AttachPose,
     start_anchor_local: Transform,
     approach_path: Vec<Vec3>,
@@ -284,6 +291,9 @@ pub(crate) struct PlayerFixtureControlOwner(pub FixtureActivityOwner);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlayerFixturePhase {
+    /// State entry: the seat is reserved and its resources are loading. The
+    /// player holds still; the run motion starts only once they are ready.
+    Loading,
     Approaching,
     Fitting,
     StartingTimeline,
@@ -295,7 +305,18 @@ pub(crate) enum PlayerFixturePhase {
 pub(crate) enum PlayerFixtureOutcome {
     Completed,
     Cancelled(PlayerFixtureCancelReason),
+    /// Nothing played and no resource failed: admission refused the request,
+    /// or the runner refused to start a loaded session because an animator
+    /// it binds is playing another timeline. A refused session has already
+    /// returned to idle and released its seat.
     NotPrepared(PlayerFixturePreparationError),
+    /// The seat was reserved and its resources were requested, but a load or
+    /// binding failed. The session returned to idle and released everything;
+    /// nothing retries it.
+    LoadFailed {
+        target: FixtureTarget,
+        error: PlayerFixturePreparationError,
+    },
     /// Gimmick is a distinct state-10 workflow. It is not a seat timeline.
     GimmickNotPrepared {
         target: FixtureTarget,
@@ -304,6 +325,20 @@ pub(crate) enum PlayerFixtureOutcome {
     GimmickStarted {
         target: FixtureTarget,
     },
+}
+
+/// Why a session ended before completing.
+enum SessionEnd {
+    Cancelled(PlayerFixtureCancelReason),
+    LoadFailed(PlayerFixturePreparationError),
+    /// Loaded, but the runner cannot start it now (see `verify_loaded`).
+    Refused(PlayerFixturePreparationError),
+}
+
+impl From<PlayerFixtureCancelReason> for SessionEnd {
+    fn from(reason: PlayerFixtureCancelReason) -> Self {
+        Self::Cancelled(reason)
+    }
 }
 
 struct LinearMove {
@@ -341,6 +376,10 @@ impl LinearMove {
 struct PlayerFixtureSession {
     prepared: PreparedPlayerFixture,
     phase: PlayerFixturePhase,
+    /// The seat's resources: the unfinished attempt while loading (it keeps
+    /// in-flight handles alive), then the complete profile. Dropped with the
+    /// session, which releases every handle the session loaded.
+    profile: Option<PlayerFixtureVisualProfile>,
     before_parent: Option<Entity>,
     before_dash: bool,
     anchor: Option<Entity>,
@@ -363,7 +402,6 @@ pub(crate) struct PlayerFixtureRuntime {
     availability: HashMap<FixtureTarget, PlayerFixtureAvailability>,
     availability_sweep: AvailabilitySweep,
     pub last_outcome: Option<PlayerFixtureOutcome>,
-    last_profile: Option<PlayerFixtureVisualProfile>,
     last_navigation_coverage: Vec<String>,
     pub last_timeline_coverage: Vec<TimelineCoverageGap>,
 }
@@ -383,20 +421,21 @@ impl PlayerFixtureRuntime {
             .as_ref()
             .map(|session| &session.prepared.target)
     }
+    /// The live session's loaded profile. An ended session keeps none: its
+    /// resources are released when it ends.
     pub(crate) fn profile(&self) -> Option<&PlayerFixtureVisualProfile> {
         self.session
             .as_ref()
-            .map(|session| &session.prepared.profile)
-            .or(self.last_profile.as_ref())
+            .filter(|session| session.phase != PlayerFixturePhase::Loading)
+            .and_then(|session| session.profile.as_ref())
     }
     pub(crate) fn navigation_coverage(&self) -> Option<&[String]> {
         self.session
             .as_ref()
             .map(|session| session.prepared.navigation_coverage.as_slice())
             .or_else(|| {
-                self.last_profile
-                    .as_ref()
-                    .map(|_| self.last_navigation_coverage.as_slice())
+                (!self.last_navigation_coverage.is_empty())
+                    .then_some(self.last_navigation_coverage.as_slice())
             })
     }
     pub(crate) fn availability(
@@ -450,8 +489,6 @@ pub(crate) fn request_end_from_input(
     }
 }
 
-/// Preparation and the visible button use the same actual binding validator.
-/// This publishes readiness; it does not change the existing button stack.
 /// Work allowed per frame for re-deriving availability. A full layout is
 /// revisited over several frames; placements without an entry come first.
 const AVAILABILITY_BUDGET: Duration = Duration::from_micros(1500);
@@ -463,12 +500,19 @@ struct AvailabilitySweep {
     session_active: bool,
 }
 
-/// Availability is a cache of what `prepare` would answer for each placed
-/// fixture. It is advisory: the library reads it to label and gate entries,
-/// while `advance` prepares the request again at admission, so an entry that
-/// is a few frames old cannot start the wrong seat. The refresh therefore runs
-/// within a per-frame budget instead of re-planning every seat of every fixture
-/// each frame; at least one fixture is re-derived per frame.
+/// Product-layer cache for the content library, which labels and gates its
+/// furniture entries with it. The source has no counterpart: it never sweeps
+/// every placed fixture, and evaluates a seat only for the fixture the player
+/// is touching or has tapped. So nothing on the in-game path reads this: the
+/// action button pushes and dispatches from its own collision state, and
+/// `advance` selects the seat again from the live world when a request
+/// arrives, so an entry that is a few frames old cannot start the wrong seat.
+///
+/// An entry answers what `select` would answer for that fixture now: seat
+/// selection, the data-level SD visual join and the approach query. It needs
+/// no loaded or published timeline; resources load only for a request. The
+/// refresh runs within a per-frame budget instead of re-planning every seat
+/// of every fixture each frame; at least one fixture is re-derived per frame.
 pub(crate) fn refresh_availability(world: &mut World) {
     let Some(mut runtime) = world.remove_resource::<PlayerFixtureRuntime>() else {
         return;
@@ -554,7 +598,7 @@ fn derive_availability(
             }
         };
     }
-    match prepare(world, target, runtime.generation.saturating_add(1)) {
+    match select(world, target, runtime.generation.saturating_add(1)) {
         Ok(prepared) => PlayerFixtureAvailability::Ready {
             player_row_id: prepared.player_row.id,
             locate_index: prepared.locate_index,
@@ -567,12 +611,16 @@ fn derive_availability(
     }
 }
 
-fn prepare(
+/// Admission for one requested fixture, with no asset access: the nearest
+/// unoccupied reachable seat on that fixture (GetNearestPlayerLocatorIndex at
+/// the tap), the data-level join of its player row with the SD visual row,
+/// and the approach query to its StartLoc.
+fn select(
     world: &mut World,
     target: &FixtureTarget,
     generation: u64,
 ) -> Result<PreparedPlayerFixture, PlayerFixturePreparationError> {
-    use PlayerFixturePreparationError::{Invalid, Missing, Rejected, Timeline};
+    use PlayerFixturePreparationError::{Invalid, Missing, Rejected};
     let identity = world
         .get::<FixtureActivityIdentity>(target.entity)
         .filter(|identity| target.matches(identity))
@@ -603,7 +651,7 @@ fn prepare(
     if !states.can_intercept {
         return Err(Rejected("player intercept gate is closed"));
     }
-    let (actor, unit, position, player_animator) = {
+    let (actor, unit, position) = {
         let mut query = world
             .query_filtered::<(Entity, &CharacterUnitId, &AvatarDriver), With<PlayerControlled>>();
         let mut players = query.iter(world);
@@ -625,7 +673,6 @@ fn prepare(
             world_pose(world, actor)
                 .ok_or(Missing("player world pose"))?
                 .translation,
-            driver.player,
         )
     };
     let owner = FixtureActivityOwner { actor, generation };
@@ -733,67 +780,22 @@ fn prepare(
     }
     let (_, selected) = nearest.ok_or(Rejected("no unoccupied reachable player locator"))?;
 
-    // Stage two resolves only the source-selected seat's presentation.
-    let profiles = world
-        .get_resource::<PlayerFixtureVisualProfiles>()
-        .ok_or(Missing("SD visual profile join"))?;
-    let matches: Vec<&PlayerFixtureVisualProfile> = profiles
-        .profiles
-        .iter()
-        .filter(|profile| {
-            profile.actor == actor
-                && profile.target == *target
-                && profile.unit_id == unit
-                && profile.fixture_id == identity.master_id
-                && profile.player_timeline_row_id == selected.row.id
-                && profile.action_point == selected.row.action_point
-        })
-        .collect();
-    let profile = match matches.as_slice() {
-        [profile] => *profile,
-        [] => {
-            return Err(Missing(
-                "source SD action mapping for selected player locator",
-            ))
-        }
-        _ => {
-            return Err(Invalid(
-                "ambiguous SD visual profile for selected player locator".into(),
-            ))
-        }
-    };
-    if profile.visual_action_point != selected.row.action_point
-        || profile.slot_id != selected.slot_id
-    {
+    // Stage two joins only the source-selected seat with its SD visual row,
+    // from master tables; that row's resources load after admission.
+    let plan = fixture_activity_provider::plan_player_row(
+        world,
+        actor,
+        unit,
+        target,
+        &identity,
+        &selected.row,
+    )
+    .map_err(plan_error)?;
+    if plan.visual_point != selected.row.action_point || plan.slot_id != selected.slot_id {
         return Err(Invalid(
             "SD profile changes the source player action point or slot".into(),
         ));
     }
-    validate_visual_relation(tables, profile, &selected.row)?;
-    if !profile
-        .bindings
-        .animations
-        .values()
-        .any(|binding| binding.animator == player_animator)
-    {
-        return Err(Missing("actual SD player animation binding"));
-    }
-    if profile.bindings.animations.values().any(|binding| {
-        binding.animator != player_animator
-            && !is_descendant_of(world, binding.animator, target.entity)
-    }) || profile
-        .bindings
-        .actors
-        .values()
-        .any(|bound| *bound != actor && *bound != target.entity)
-    {
-        return Err(Invalid(
-            "player visual bindings target a nonparticipant actor".into(),
-        ));
-    }
-    let request = profile.start_request(owner, target);
-    fixture_activity_timeline::validate_start(world, &request)
-        .map_err(|error| Timeline(format!("{error:?}")))?;
     let start_position = Vec3::from(selected.start.position);
     let hit = navigation
         .world
@@ -820,7 +822,7 @@ fn prepare(
         player_row: selected.row,
         locate_index: selected.locate_index,
         slot_id: selected.slot_id,
-        profile: profile.clone(),
+        plan,
         end: selected.end,
         start_anchor_local: GlobalTransform::from(Transform {
             translation: start_position,
@@ -833,6 +835,98 @@ fn prepare(
         navigation_generation: navigation.navigation_generation,
         site_generation,
         navigation_coverage,
+    })
+}
+
+/// A data-level join failure in the preparation vocabulary the callers read.
+fn plan_error(pending: ProviderPending) -> PlayerFixturePreparationError {
+    use PlayerFixturePreparationError::{Invalid, Missing};
+    match pending.stage {
+        // The shown SD unit has no visual row for this seat's action point.
+        "source-visual-missing" => Missing("source SD action mapping for selected player locator"),
+        "source-view-local-y" => Missing("source ViewObject local height"),
+        "player-rig" => Missing("installed SD player rig"),
+        "source-tables" => Missing("fixture activity tables"),
+        "source-locators" => Missing("fixture attach points"),
+        "fixture-instance" => Missing("fixture transform"),
+        _ => Invalid(format!("{}: {}", pending.stage, pending.reason)),
+    }
+}
+
+/// A live-instance failure at the tap, or a resource failure while a session
+/// loads: still-arriving input is unfinished, anything else is final.
+fn load_error(pending: ProviderPending) -> PlayerFixturePreparationError {
+    if pending.retryable {
+        PlayerFixturePreparationError::Missing("placed fixture instance")
+    } else {
+        PlayerFixturePreparationError::Timeline(format!("{}: {}", pending.stage, pending.reason))
+    }
+}
+
+/// The loaded profile still describes the admitted seat, the live SD body
+/// and only this fixture's nodes, and the runner would accept it now.
+/// `Rejected` means only the last part failed: an animator the profile binds
+/// is playing another timeline. That is contention, not a failed resource;
+/// every other error is a failed load or binding.
+fn verify_loaded(
+    world: &World,
+    session: &PlayerFixtureSession,
+) -> Result<(), PlayerFixturePreparationError> {
+    use PlayerFixturePreparationError::{Invalid, Missing, Rejected, Timeline};
+    let prepared = &session.prepared;
+    let profile = session
+        .profile
+        .as_ref()
+        .ok_or(Missing("SD visual profile"))?;
+    if profile.visual_action_point != prepared.player_row.action_point
+        || profile.slot_id != prepared.slot_id
+    {
+        return Err(Invalid(
+            "SD profile changes the source player action point or slot".into(),
+        ));
+    }
+    let tables = world
+        .get_resource::<FixtureActivityTables>()
+        .ok_or(Missing("fixture activity tables"))?;
+    validate_visual_relation(tables, profile, &prepared.player_row)?;
+    let actor = prepared.owner.actor;
+    let player_animator = world
+        .get::<AvatarDriver>(actor)
+        .map(|driver| driver.player)
+        .ok_or(Missing("installed SD player"))?;
+    if !profile
+        .bindings
+        .animations
+        .values()
+        .any(|binding| binding.animator == player_animator)
+    {
+        return Err(Missing("actual SD player animation binding"));
+    }
+    if profile.bindings.animations.values().any(|binding| {
+        binding.animator != player_animator
+            && !is_descendant_of(world, binding.animator, prepared.target.entity)
+    }) || profile
+        .bindings
+        .actors
+        .values()
+        .any(|bound| *bound != actor && *bound != prepared.target.entity)
+    {
+        return Err(Invalid(
+            "player visual bindings target a nonparticipant actor".into(),
+        ));
+    }
+    let request = profile.start_request(prepared.owner, &prepared.target);
+    fixture_activity_timeline::validate_start(world, &request).map_err(|_| {
+        // validate_start is validate_prepared plus the runner's rule that an
+        // animator plays one timeline at a time, over the same inputs. When
+        // only that rule fails, a bound animator (for example the fixture's,
+        // driven by an NPC on another seat) is busy: the runner refuses the
+        // start, and no resource failed. Otherwise the failure is reported
+        // as validate_prepared words it, without the ownership rule.
+        match fixture_activity_timeline::validate_prepared(world, &request) {
+            Ok(()) => Rejected("a bound animator is occupied by another timeline"),
+            Err(failure) => Timeline(format!("{failure:?}")),
+        }
     })
 }
 
@@ -1055,12 +1149,16 @@ pub(crate) fn advance(world: &mut World) {
                     .generation
                     .checked_add(1)
                     .expect("player activity generation exhausted");
-                match prepare(world, &target, next).and_then(|prepared| begin(world, prepared)) {
+                // Admission never waits on resources: an unloaded timeline is
+                // loaded by the session this request opens.
+                match select(world, &target, next)
+                    .and_then(|prepared| require_live_instance(world, prepared))
+                    .and_then(|prepared| begin(world, prepared))
+                {
                     Ok(session) => {
                         runtime.generation = next;
                         runtime.last_outcome = None;
                         runtime.last_timeline_coverage.clear();
-                        runtime.last_profile = Some(session.prepared.profile.clone());
                         runtime.last_navigation_coverage =
                             session.prepared.navigation_coverage.clone();
                         runtime.session = Some(session);
@@ -1113,13 +1211,19 @@ pub(crate) fn advance(world: &mut World) {
     }
     if let Some(mut session) = runtime.session.take() {
         capture_coverage(world, &session, &mut runtime);
-        match step_session(world, &mut session, dt) {
+        // A load that completes this frame moves on in the same frame, so a
+        // resident timeline starts its approach as soon as it is admitted.
+        let stepped = match load_session(world, &mut session) {
+            Ok(true) => step_session(world, &mut session, dt).map_err(SessionEnd::Cancelled),
+            other => other.map(|_| false),
+        };
+        match stepped {
             Ok(false) => runtime.session = Some(session),
             Ok(true) => {
                 finish(world, session, false);
                 runtime.last_outcome = Some(PlayerFixtureOutcome::Completed);
             }
-            Err(reason) => {
+            Err(SessionEnd::Cancelled(reason)) => {
                 finish(
                     world,
                     session,
@@ -1127,11 +1231,50 @@ pub(crate) fn advance(world: &mut World) {
                 );
                 runtime.last_outcome = Some(PlayerFixtureOutcome::Cancelled(reason));
             }
+            Err(SessionEnd::LoadFailed(error)) => {
+                // Reported once: the session ends here and nothing retries it.
+                error!(
+                    "[player-fixture] {} player row {} resources failed: {error:?}",
+                    session.prepared.target.uid, session.prepared.player_row.id
+                );
+                let target = session.prepared.target.clone();
+                finish(world, session, false);
+                runtime.last_outcome = Some(PlayerFixtureOutcome::LoadFailed { target, error });
+            }
+            Err(SessionEnd::Refused(error)) => {
+                // Contention, not a failed resource: one line, then the same
+                // release as any other end.
+                warn!(
+                    "[player-fixture] {} player row {} not started: {error:?}",
+                    session.prepared.target.uid, session.prepared.player_row.id
+                );
+                finish(world, session, false);
+                runtime.last_outcome = Some(PlayerFixtureOutcome::NotPrepared(error));
+            }
         }
     }
     world.insert_resource(runtime);
 }
 
+/// The live placed instance behind an admitted seat. The source only offers a
+/// fixture's button once its FixtureView is set up, so a request for an
+/// instance that is not live yet is refused rather than waited on.
+fn require_live_instance(
+    world: &mut World,
+    prepared: PreparedPlayerFixture,
+) -> Result<PreparedPlayerFixture, PlayerFixturePreparationError> {
+    world.init_resource::<FixtureActivityProvider>();
+    world
+        .resource_scope(|world, mut provider: Mut<FixtureActivityProvider>| {
+            provider.require_live_fixture(world, &prepared.target, &prepared.identity.model_package)
+        })
+        .map_err(load_error)?;
+    Ok(prepared)
+}
+
+/// State entry of UseTimelineFixture: reserve the seat, take the state and
+/// input, and start loading. The run motion is not started here; the source
+/// changes to it only after the awaited timeline load.
 fn begin(
     world: &mut World,
     prepared: PreparedPlayerFixture,
@@ -1163,8 +1306,7 @@ fn begin(
     drop(states);
     world.entity_mut(actor).insert((
         PlayerFixtureHeld(prepared.owner),
-        MotionPhase::Walking,
-        DashMode(true),
+        MotionPhase::Dwelling { remaining: None },
     ));
     world.insert_resource(PlayerFixtureControlOwner(prepared.owner));
     if let Some(animator) = world.get::<AvatarDriver>(actor).map(|driver| driver.player) {
@@ -1180,7 +1322,8 @@ fn begin(
     }
     Ok(PlayerFixtureSession {
         prepared,
-        phase: PlayerFixturePhase::Approaching,
+        phase: PlayerFixturePhase::Loading,
+        profile: None,
         before_parent,
         before_dash,
         anchor: None,
@@ -1196,11 +1339,46 @@ fn begin(
     })
 }
 
-fn step_session(
-    world: &mut World,
-    session: &mut PlayerFixtureSession,
-    dt: f32,
-) -> Result<bool, PlayerFixtureCancelReason> {
+/// The loading phase, polled once per frame: load the selected row's own
+/// timeline and its SD visual, bind them to this fixture and the player, and
+/// load their SE, like SetupPlayFixtureTimelineAsync before any movement.
+/// Returns true once the session is past loading. Loads still in flight keep
+/// the session waiting; a failed load or binding ends it (the source's
+/// finally returns the player to idle and releases everything), and nothing
+/// retries it. A loaded session the runner cannot start now (a bound
+/// animator is busy) ends the same way but is reported as a refusal.
+fn load_session(world: &mut World, session: &mut PlayerFixtureSession) -> Result<bool, SessionEnd> {
+    if session.phase != PlayerFixturePhase::Loading {
+        return Ok(true);
+    }
+    check_live(world, session)?;
+    world.init_resource::<FixtureActivityProvider>();
+    let polled = world.resource_scope(|world, mut provider: Mut<FixtureActivityProvider>| {
+        provider.prepare_player_timeline(world, &session.prepared.plan, &mut session.profile)
+    });
+    match polled {
+        Ok(()) => {}
+        Err(pending) if pending.retryable => return Ok(false),
+        Err(pending) => return Err(SessionEnd::LoadFailed(load_error(pending))),
+    }
+    verify_loaded(world, session).map_err(|error| match error {
+        PlayerFixturePreparationError::Rejected(_) => SessionEnd::Refused(error),
+        error => SessionEnd::LoadFailed(error),
+    })?;
+    // ChangeAnimation(RunMotion), then the move to StartLoc.
+    world
+        .entity_mut(session.prepared.owner.actor)
+        .insert((MotionPhase::Walking, DashMode(true)));
+    session.phase = PlayerFixturePhase::Approaching;
+    Ok(true)
+}
+
+/// Everything a live session must still own this frame: the site, the target
+/// instance, the logical player, its control and seat leases and animator.
+fn check_live(
+    world: &World,
+    session: &PlayerFixtureSession,
+) -> Result<(), PlayerFixtureCancelReason> {
     use PlayerFixtureCancelReason::*;
     let actor = session.prepared.owner.actor;
     if world.get_resource::<GroundEpoch>().map(|epoch| epoch.0)
@@ -1247,6 +1425,17 @@ fn step_session(
     {
         return Err(OwnershipLost);
     }
+    Ok(())
+}
+
+fn step_session(
+    world: &mut World,
+    session: &mut PlayerFixtureSession,
+    dt: f32,
+) -> Result<bool, PlayerFixtureCancelReason> {
+    use PlayerFixtureCancelReason::*;
+    let actor = session.prepared.owner.actor;
+    check_live(world, session)?;
     if let (Some(anchor), Some(local)) = (session.anchor, session.anchor_local) {
         let instance = world
             .get::<GlobalTransform>(session.prepared.target.entity)
@@ -1267,6 +1456,8 @@ fn step_session(
     }
     let mut pose = world_pose(world, actor).ok_or(PlayerRemoved)?;
     match session.phase {
+        // Stepped by load_session; the session reaches this match only after it.
+        PlayerFixturePhase::Loading => return Ok(false),
         PlayerFixturePhase::Approaching => {
             if navigation.navigation_generation != session.prepared.navigation_generation {
                 // Keep the destination chosen by AutoMoveTarget. A new nav
@@ -1399,8 +1590,9 @@ fn step_session(
             if done {
                 attach_player(world, session)?;
                 let request = session
-                    .prepared
                     .profile
+                    .as_ref()
+                    .ok_or(AnimationFailed)?
                     .start_request(session.prepared.owner, &session.prepared.target);
                 fixture_activity_timeline::validate_start(world, &request)
                     .map_err(|_| AnimationFailed)?;

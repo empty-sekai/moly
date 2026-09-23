@@ -1,44 +1,37 @@
 //! Source-qualified furniture activity resources for live scene instances.
 //!
-//! This provider prepares every source player row while the player is idle;
-//! navigation/seat selection remains in the player activity owner. A ready
-//! visual is neither an eligible seat nor a playing session. Actor libraries
-//! and source timeline parsing are delegated to their shared preparation layer.
+//! Nothing here walks the placed furniture. When the player asks for a
+//! fixture, the player activity owner selects one seat, joins that seat's
+//! player row with its SD visual row through master tables and locators
+//! (`plan_player_row`, which touches no asset), and then polls
+//! `prepare_player_timeline` from its loading phase until both timelines,
+//! their bindings and their sounds are resolved. The prepared profile belongs
+//! to that session and is released with it. A ready visual is neither an
+//! eligible seat nor a playing session. Actor libraries and source timeline
+//! parsing are delegated to their shared preparation layer, which the NPC and
+//! fixture-talk owners use as well.
 
 mod assets;
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use bevy::{animation::graph::AnimationGraph, prelude::*};
 
 use crate::{
-    fixture::FixtureRoot,
     fixture_activity_data::{self, ActivityTimeline, FixtureActivityTables, PlayerTimelineRow},
     fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner, FixtureTarget},
     fixture_activity_timeline::{
         self as timeline, StartTimeline, TimelineBindings, TimelineDefinition,
     },
     fixture_attach::AttachPoints,
-    npc::CharacterUnitId,
-    player::PlayerControlled,
     player_avatar::AvatarDriver,
-    player_fixture_action::{PlayerFixtureVisualProfile, PlayerFixtureVisualProfiles},
+    player_fixture_action::PlayerFixtureVisualProfile,
 };
 
 /// The source ViewObject's local Y, supplied by its actual scene-node owner.
 /// World Y and a placement's grid center are not substitutes for this value.
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct SourceFixtureViewLocalY(pub f32);
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ProviderKey {
-    pub actor: Entity,
-    pub target: FixtureTarget,
-    pub player_timeline_row_id: i32,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProviderPending {
@@ -54,7 +47,10 @@ impl ProviderPending {
             reason: reason.into(),
             retryable: matches!(
                 stage,
-                "json-loading" | "fixture-clip-loading" | "fixture-instance"
+                "json-loading"
+                    | "fixture-clip-loading"
+                    | "fixture-instance"
+                    | "fixture-animation-surface"
             ),
         }
     }
@@ -77,38 +73,14 @@ impl From<&str> for ProviderPending {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderStatus {
-    Pending(ProviderPending),
-    VisualReady { sd_timeline_row_id: i32 },
-}
-
-struct Entry {
-    status: ProviderStatus,
-    // Drafts also retain sound handles while audio is still loading. Dropping
-    // the only strong handle on each failed preflight would cancel that load.
-    profile: Option<PlayerFixtureVisualProfile>,
-}
-
 #[derive(Resource, Default)]
 pub(crate) struct FixtureActivityProvider {
     assets: assets::ActivityAssets,
-    entries: HashMap<ProviderKey, Entry>,
-    published: HashSet<ProviderKey>,
-    pub global_pending: Option<ProviderPending>,
-    /// Entity-only diagnostics for missing UID/master/host inputs. A missing
-    /// identity cannot be represented by inventing a FixtureTarget UID.
-    pub host_pending: HashMap<Entity, ProviderPending>,
-    pub non_timeline_masters: HashSet<Entity>,
-    pub no_player_locators: HashSet<Entity>,
 }
 
 impl FixtureActivityProvider {
     pub(crate) fn cache_counts(&self) -> serde_json::Value {
         self.assets.cache_counts()
-    }
-    pub(crate) fn statuses(&self) -> impl Iterator<Item = (&ProviderKey, &ProviderStatus)> {
-        self.entries.iter().map(|(key, entry)| (key, &entry.status))
     }
 
     /// Exact package/prefab resolution, also usable by the NPC owner after its
@@ -120,6 +92,18 @@ impl FixtureActivityProvider {
         prefab: &str,
     ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
         self.assets.definition(world, package, prefab)
+    }
+
+    /// The placed instance itself is live: typed identity, formal model GLTF
+    /// route and a ready scene instance. A tapped source FixtureView is always
+    /// set up, so the player owner checks this before it reserves a seat.
+    pub(crate) fn require_live_fixture(
+        &mut self,
+        world: &World,
+        target: &FixtureTarget,
+        model_package: &str,
+    ) -> Result<(), ProviderPending> {
+        assets::require_live_fixture(&mut self.assets, world, target, model_package)
     }
 
     /// Common resource preparation, with no player/NPC activity admission.
@@ -243,186 +227,161 @@ impl FixtureActivityProvider {
             .map_err(|error| ProviderPending::timeline("source-effects", error))?;
         Ok(())
     }
-}
 
-#[derive(Clone)]
-struct Actor {
-    entity: Entity,
-    unit: u32,
-    animator: Entity,
-    graph: Handle<AnimationGraph>,
-}
-
-struct Plan {
-    key: ProviderKey,
-    actor: Actor,
-    fixture_id: i32,
-    model_package: String,
-    player_row: PlayerTimelineRow,
-    locate_index: usize,
-    slot_id: i32,
-    no_talk_row_id: i32,
-    visual_row: ActivityTimeline,
-    visual_point: i32,
-    source_view_local_y: f32,
-    player_package: String,
-    visual_package: String,
-    visual_prefab: String,
-}
-
-struct Discovery {
-    plans: Vec<(ProviderKey, Result<Plan, ProviderPending>)>,
-    host_pending: HashMap<Entity, ProviderPending>,
-    non_timeline_masters: HashSet<Entity>,
-    no_player_locators: HashSet<Entity>,
-}
-
-/// Register before the player's visual readiness/seat preparation, not after
-/// the player has already opened a session. Only this provider's prior entries
-/// are replaced; independently injected profiles are not silently overwritten.
-pub(crate) fn advance(world: &mut World) {
-    world.init_resource::<FixtureActivityProvider>();
-    world.init_resource::<PlayerFixtureVisualProfiles>();
-    let mut provider = world
-        .remove_resource::<FixtureActivityProvider>()
-        .expect("initialized provider");
-    // Discovery may fail during a scene/appearance handoff. That must not keep
-    // the previous scene's drafts (and their strong asset handles) resident.
-    provider.entries.retain(|key, _| provider_key_is_live(world, key));
-    let discovered = discover(world);
-    match discovered {
-        Err(reason) => {
-            provider.global_pending = Some(reason);
-            provider.host_pending.clear();
-            provider.non_timeline_masters.clear();
-            provider.no_player_locators.clear();
-        }
-        Ok(discovered) => {
-            provider.global_pending = None;
-            provider.host_pending = discovered.host_pending;
-            provider.non_timeline_masters = discovered.non_timeline_masters;
-            provider.no_player_locators = discovered.no_player_locators;
-            let plans = discovered.plans;
-            let alive: HashSet<_> = plans.iter().map(|(key, _)| key.clone()).collect();
-            provider.entries.retain(|key, _| alive.contains(key));
-            for (key, result) in plans {
-                let mut entry = provider.entries.remove(&key).unwrap_or(Entry {
-                    status: ProviderStatus::Pending(ProviderPending::new("plan", "not prepared")),
-                    profile: None,
-                });
-                entry.status = match result {
-                    Err(reason) => ProviderStatus::Pending(reason),
-                    Ok(plan) => match prepare_plan(world, &mut provider, &plan, &mut entry.profile)
-                    {
-                        Ok(()) => ProviderStatus::VisualReady {
-                            sd_timeline_row_id: plan.visual_row.id,
-                        },
-                        Err(reason) => ProviderStatus::Pending(reason),
-                    },
-                };
-                provider.entries.insert(key, entry);
+    /// One poll of the resources for one planned player row; later polls
+    /// observe what earlier ones requested. Every call requests both timeline
+    /// definitions and the actor catalogue, so they load together. The rest
+    /// is routed by what those contain: once both definitions are parsed, the
+    /// source SE are requested and the actor clips resolve their library
+    /// index and then the library file. The fixture clips come from the
+    /// placed model's own file, which is already loaded. So a request whose
+    /// inputs are not resident waits for about three load rounds (tables and
+    /// catalogue; library index and SE; library file) before the player
+    /// moves. An SE with no route, or whose audio fails to load, plays
+    /// silent instead of failing the row (`silence_player_sounds`). `draft`
+    /// keeps the handles of an unfinished attempt alive between polls, so an
+    /// in-flight load is not cancelled, and holds the complete profile on
+    /// success.
+    pub(crate) fn prepare_player_timeline(
+        &mut self,
+        world: &mut World,
+        plan: &PlayerTimelinePlan,
+        draft: &mut Option<PlayerFixtureVisualProfile>,
+    ) -> Result<(), ProviderPending> {
+        assets::require_live_fixture(&mut self.assets, world, &plan.target, &plan.model_package)?;
+        let owner = FixtureActivityOwner { actor: plan.actor, generation: 0 };
+        if let Some(profile) = draft.as_ref().filter(|profile| profile_matches_plan(profile, plan)) {
+            let request = profile.start_request(owner, &plan.target);
+            if timeline::validate_prepared(world, &request).is_ok() {
+                // A successful profile owns the exact required clips. Do not touch
+                // its whole GLTF lookup again; unrelated animations can retire.
+                return Ok(());
             }
         }
-    }
-    publish(world, &mut provider);
-    world.insert_resource(provider);
-}
-
-fn provider_key_is_live(world: &World, key: &ProviderKey) -> bool {
-    world.get::<PlayerControlled>(key.actor).is_some()
-        && world.get::<FixtureRoot>(key.target.entity).is_some()
-        && world.get::<FixtureActivityIdentity>(key.target.entity)
-            .is_some_and(|identity| key.target.matches(identity))
-}
-
-/// PostUpdate: all provider/NPC/talk preparation has finished for this frame.
-/// Only redundant lookup references are dropped. Prepared profiles and active
-/// timeline requests own their exact definition/clip/audio handles themselves.
-pub(crate) fn retire_lookup_caches(world: &mut World) {
-    if let Some(mut provider) = world.get_resource_mut::<FixtureActivityProvider>() {
-        provider.assets.sweep_lookup_caches();
-    }
-    if let Some(mut loads) = world.get_resource_mut::<timeline::TimelineAssetLoads>() {
-        loads.sweep_lookup_caches();
-    }
-}
-
-/// Report preparation changes without confusing a ready visual with a running
-/// activity. In particular, missing source resources remain visible even when
-/// the interaction request cannot yet pass navigation admission.
-pub(crate) fn report(
-    provider: Option<Res<FixtureActivityProvider>>,
-    mut previous: Local<Vec<String>>,
-) {
-    let Some(provider) = provider else {
-        return;
-    };
-    let mut current = Vec::new();
-    if let Some(pending) = &provider.global_pending {
-        current.push(format!("global {}: {}", pending.stage, pending.reason));
-    }
-    for (entity, pending) in &provider.host_pending {
-        current.push(format!(
-            "fixture {entity:?} {}: {}",
-            pending.stage, pending.reason
-        ));
-    }
-    for (key, status) in provider.statuses() {
-        current.push(format!(
-            "fixture {:?} player-row {}: {status:?}",
-            key.target.entity, key.player_timeline_row_id,
-        ));
-    }
-    current.sort();
-    if *previous != current {
-        for line in &current {
-            info!("[fixture-activity-provider] {line}");
+        // Poll both before reading either result, so the SD visual's tables
+        // are not held back behind the player row's. The row's own timeline
+        // still reports first, exactly as when they were polled in turn. The
+        // SD body is always bound, so the actor catalogue is always needed.
+        timeline::request_actor_catalog(world);
+        let player_definition =
+            self.definition(world, &plan.player_package, &plan.player_row.asset_name);
+        let definition = self.definition(world, &plan.visual_package, &plan.visual_prefab);
+        let player_definition = player_definition?;
+        let definition = definition?;
+        // Retain the previous attempt's handles until the next draft is installed.
+        let previous = draft.take();
+        let mut profile = PlayerFixtureVisualProfile {
+            target: plan.target.clone(), actor: plan.actor, unit_id: plan.unit,
+            fixture_id: plan.fixture_id, player_timeline_row_id: plan.player_row.id,
+            action_point: plan.player_row.action_point, visual_action_point: plan.visual_point,
+            slot_id: plan.slot_id, no_talk_row_id: plan.no_talk_row_id,
+            timeline_group_id: plan.visual_row.group_id, timeline_row_id: plan.visual_row.id,
+            source_view_local_y: plan.source_view_local_y,
+            definition, player_definition, bindings: TimelineBindings::default(),
+            coverage_notes: vec![
+                "Native SD visual timing; player source SE retains its absolute envelopes on the same clock".into(),
+                "Sampled bone curves do not implement native FootIK, start offset, track matching or all mixer behavior".into(),
+                format!("Source player row {}, locator array index {}, slot {}", plan.player_row.id, plan.locate_index, plan.slot_id),
+            ],
+        };
+        let mut request = profile.start_request(owner, &plan.target);
+        // An SE found silent stays silent for the session: it is neither
+        // requested again nor reported twice.
+        if let Some(previous) = previous.as_ref() {
+            request.bindings.silent_sounds = previous.bindings.silent_sounds.clone();
         }
-        *previous = current;
+        silence_player_sounds(world, &plan.target, &mut request);
+        // The SE routes need only the parsed tracks: request them now, so they
+        // load alongside the actor clips. `prepare_bindings` requests the same
+        // handles again at its end, and only its result counts.
+        let _ = timeline::prepare_source_sounds(world, &mut request);
+        let prepared = self.prepare_bindings(
+            world,
+            &mut request,
+            plan.unit,
+            plan.animator,
+            plan.graph.clone(),
+        );
+        // An SE whose audio has failed to load plays silent as well.
+        silence_player_sounds(world, &plan.target, &mut request);
+        let has_actor_body = request
+            .bindings
+            .animations
+            .values()
+            .any(|binding| binding.animator == plan.animator);
+        profile.bindings = request.bindings;
+        *draft = Some(profile);
+        drop(previous);
+        prepared?;
+        if !has_actor_body {
+            return Err(ProviderPending::new(
+                "actor-body-binding",
+                "selected SD visual has no actual player-body animation binding",
+            ));
+        }
+        // Reuse the business owner's exact companion/timeout construction rather
+        // than duplicating its selection or manufacturing sound event times here.
+        let request = draft
+            .as_ref()
+            .expect("stored draft")
+            .start_request(owner, &plan.target);
+        timeline::validate_prepared(world, &request)
+            .map_err(|error| ProviderPending::timeline("live-binding-preflight", error))
     }
 }
 
-fn discover(world: &mut World) -> Result<Discovery, ProviderPending> {
-    let players: Vec<_> = world.query_filtered::<(Entity, Option<&CharacterUnitId>, Option<&AvatarDriver>), With<PlayerControlled>>()
-        .iter(world).map(|(entity, unit, driver)| {
-            (entity, unit.map(|unit| unit.0), driver.map(AvatarDriver::fixture_timeline_binding))
-        }).collect();
-    let [(entity, unit, binding)] = players.as_slice() else {
-        return Err(ProviderPending::new(
-            "player-identity",
-            "one actual PlayerControlled entity is required",
-        ));
-    };
-    let unit = unit.ok_or_else(|| {
-        ProviderPending::new("player-identity", "current SD unit is not installed")
-    })?;
-    let (animator, graph) = binding.clone().ok_or_else(|| {
-        ProviderPending::new(
-            "player-rig",
-            "AvatarDriver is not installed on the actual player",
-        )
-    })?;
+/// One selected seat's player row joined with the SD visual row that shows
+/// it. The row's own timeline keeps the source route: its `mdl_` package and
+/// its asset name, with no height variant. The SD visual row is a
+/// product-layer substitution (the source plays this row on its player
+/// avatar, while this player is an SD unit), so its prefab takes the NPC
+/// factory's placement-height variant. Built from master tables, locators and
+/// the live instance only; nothing is loaded.
+#[derive(Clone)]
+pub(crate) struct PlayerTimelinePlan {
+    pub target: FixtureTarget,
+    pub actor: Entity,
+    pub unit: u32,
+    pub animator: Entity,
+    pub graph: Handle<AnimationGraph>,
+    pub fixture_id: i32,
+    pub model_package: String,
+    pub player_row: PlayerTimelineRow,
+    pub locate_index: usize,
+    pub slot_id: i32,
+    pub no_talk_row_id: i32,
+    pub visual_row: ActivityTimeline,
+    pub visual_point: i32,
+    pub source_view_local_y: f32,
+    pub player_package: String,
+    pub visual_package: String,
+    pub visual_prefab: String,
+}
+
+/// The data-level join for one player row of one placed fixture.
+pub(crate) fn plan_player_row(
+    world: &World,
+    actor: Entity,
+    unit: u32,
+    target: &FixtureTarget,
+    identity: &FixtureActivityIdentity,
+    player_row: &PlayerTimelineRow,
+) -> Result<PlayerTimelinePlan, ProviderPending> {
+    let (animator, graph) = world
+        .get::<AvatarDriver>(actor)
+        .map(AvatarDriver::fixture_timeline_binding)
+        .ok_or_else(|| {
+            ProviderPending::new(
+                "player-rig",
+                "AvatarDriver is not installed on the actual player",
+            )
+        })?;
     if world.get::<AnimationPlayer>(animator).is_none() {
         return Err(ProviderPending::new(
             "player-rig",
             "AvatarDriver points at a missing AnimationPlayer",
         ));
     }
-    let actor = Actor {
-        entity: *entity,
-        unit,
-        animator,
-        graph,
-    };
-    let fixtures: Vec<_> = world
-        .query_filtered::<(
-            Entity,
-            Option<&FixtureActivityIdentity>,
-            Option<&SourceFixtureViewLocalY>,
-        ), With<FixtureRoot>>()
-        .iter(world)
-        .map(|(entity, identity, view_y)| (entity, identity.cloned(), view_y.map(|y| y.0)))
-        .collect();
     let tables = world
         .get_resource::<FixtureActivityTables>()
         .ok_or_else(|| {
@@ -431,141 +390,7 @@ fn discover(world: &mut World) -> Result<Discovery, ProviderPending> {
     let points = world.get_resource::<AttachPoints>().ok_or_else(|| {
         ProviderPending::new("source-locators", "attachment metadata is not parsed")
     })?;
-    let mut plans = Vec::new();
-    let mut host_pending = HashMap::new();
-    let mut non_timeline_masters = HashSet::new();
-    let mut no_player_locators = HashSet::new();
-    for (fixture, identity, view_y) in fixtures {
-        let Some(identity) = identity else {
-            host_pending.insert(
-                fixture,
-                ProviderPending::new(
-                    "fixture-identity",
-                    "actual FixtureRoot has no typed UID/master/model identity yet",
-                ),
-            );
-            continue;
-        };
-        if identity.uid.is_empty() {
-            host_pending.insert(
-                fixture,
-                ProviderPending::new("fixture-identity", "typed fixture UID is empty"),
-            );
-            continue;
-        }
-        let Some(master) = tables.fixture_master(identity.master_id) else {
-            host_pending.insert(
-                fixture,
-                ProviderPending::new(
-                    "fixture-master",
-                    format!(
-                        "typed master {} is absent; not a no-action classification",
-                        identity.master_id
-                    ),
-                ),
-            );
-            continue;
-        };
-        if identity.model_package != format!("mysekai__fixture__{}", master.model_name) {
-            host_pending.insert(
-                fixture,
-                ProviderPending::new(
-                    "fixture-identity",
-                    "typed model package disagrees with its source master",
-                ),
-            );
-            continue;
-        }
-        match master.player_action_type.as_str() {
-            "no_action" | "loop" | "one_shot" => {
-                non_timeline_masters.insert(fixture);
-                continue;
-            }
-            "timeline" => {}
-            other => {
-                host_pending.insert(
-                    fixture,
-                    ProviderPending::new(
-                        "fixture-master",
-                        format!("unknown source player action type {other}"),
-                    ),
-                );
-                continue;
-            }
-        }
-        let Some(source_points) = points.player_action_points(&identity.model_package) else {
-            host_pending.insert(
-                fixture,
-                ProviderPending::new(
-                    "source-locators",
-                    "source attachment array/name metadata is not complete",
-                ),
-            );
-            continue;
-        };
-        let source_rows: Vec<_> = tables.player_timelines(identity.master_id).collect();
-        if source_rows.is_empty() {
-            host_pending.insert(
-                fixture,
-                ProviderPending::new(
-                    "source-player-rows",
-                    "timeline master has no supplied player timeline rows",
-                ),
-            );
-            continue;
-        }
-        let target = FixtureTarget {
-            entity: fixture,
-            uid: identity.uid.clone(),
-        };
-        let mut seen_rows = HashSet::new();
-        // The source enumerates real view locators and applies FirstOrDefault
-        // to the master table. A known-invalid unused locator cannot block a
-        // different valid player point by requiring every master row to exist.
-        for point in source_points {
-            let Some(player_row) = source_rows
-                .iter()
-                .find(|row| row.action_point == point)
-                .copied()
-            else {
-                continue;
-            };
-            if !seen_rows.insert(player_row.id) {
-                continue;
-            }
-            let key = ProviderKey {
-                actor: actor.entity,
-                target: target.clone(),
-                player_timeline_row_id: player_row.id,
-            };
-            let result = plan_row(
-                world, tables, points, &actor, &key, &identity, view_y, player_row,
-            );
-            plans.push((key, result));
-        }
-        if seen_rows.is_empty() {
-            no_player_locators.insert(fixture);
-        }
-    }
-    Ok(Discovery {
-        plans,
-        host_pending,
-        non_timeline_masters,
-        no_player_locators,
-    })
-}
-
-fn plan_row(
-    world: &World,
-    tables: &FixtureActivityTables,
-    points: &AttachPoints,
-    actor: &Actor,
-    key: &ProviderKey,
-    identity: &FixtureActivityIdentity,
-    view_y: Option<f32>,
-    player_row: &PlayerTimelineRow,
-) -> Result<Plan, ProviderPending> {
-    if !key.target.matches(identity) {
+    if !target.matches(identity) {
         return Err(ProviderPending::new(
             "fixture-identity",
             "fixture UID is absent or stale",
@@ -587,7 +412,7 @@ fn plan_row(
         ));
     }
     let transform = world
-        .get::<GlobalTransform>(key.target.entity)
+        .get::<GlobalTransform>(target.entity)
         .ok_or_else(|| ProviderPending::new("fixture-instance", "instance transform is absent"))?;
     let locate_index = points
         .instance_index(&identity.model_package, player_row.action_point)
@@ -615,14 +440,17 @@ fn plan_row(
             "instance StartLoc/EndLoc pair is incomplete",
         ));
     }
-    let source_view_local_y = view_y.ok_or_else(|| {
-        ProviderPending::new(
-            "source-view-local-y",
-            "source ViewObject.localPosition.y has not been supplied; world Y is not a substitute",
-        )
-    })?;
+    let source_view_local_y = world
+        .get::<SourceFixtureViewLocalY>(target.entity)
+        .map(|y| y.0)
+        .ok_or_else(|| {
+            ProviderPending::new(
+                "source-view-local-y",
+                "source ViewObject.localPosition.y has not been supplied; world Y is not a substitute",
+            )
+        })?;
     let mut candidates = Vec::new();
-    for relation in tables.sd_visual_rows(actor.unit, identity.master_id) {
+    for relation in tables.sd_visual_rows(unit, identity.master_id) {
         for visual in tables.timeline_rows(relation.timeline_group_id) {
             let point = tables
                 .action_point_value(visual.action_point_definition, 0)
@@ -638,7 +466,7 @@ fn plan_row(
         return Err(ProviderPending::new(
             if candidates.is_empty() { "source-visual-missing" } else { "ambiguous-source-visual" },
             format!("unit {}, fixture {}, player point {} has source candidates {:?}; no first/ready fallback",
-                actor.unit, identity.master_id, player_row.action_point,
+                unit, identity.master_id, player_row.action_point,
                 candidates.iter().map(|(relation, row, _)| (*relation, row.id)).collect::<Vec<_>>()),
         ));
     };
@@ -650,9 +478,12 @@ fn plan_row(
         source_view_local_y,
     )
     .map_err(|error| ProviderPending::new("sd-timeline-variant", format!("{error:?}")))?;
-    Ok(Plan {
-        key: key.clone(),
-        actor: actor.clone(),
+    Ok(PlayerTimelinePlan {
+        target: target.clone(),
+        actor,
+        unit,
+        animator,
+        graph,
         fixture_id: identity.master_id,
         model_package: identity.model_package.clone(),
         player_row: player_row.clone(),
@@ -668,83 +499,19 @@ fn plan_row(
     })
 }
 
-fn prepare_plan(
-    world: &mut World,
-    provider: &mut FixtureActivityProvider,
-    plan: &Plan,
-    draft: &mut Option<PlayerFixtureVisualProfile>,
-) -> Result<(), ProviderPending> {
-    assets::require_live_fixture(
-        &mut provider.assets,
-        world,
-        &plan.key.target,
-        &plan.model_package,
-    )?;
-    let owner = FixtureActivityOwner { actor: plan.actor.entity, generation: 0 };
-    if let Some(profile) = draft.as_ref().filter(|profile| profile_matches_plan(profile, plan)) {
-        let request = profile.start_request(owner, &plan.key.target);
-        if timeline::validate_prepared(world, &request).is_ok() {
-            // A successful profile owns the exact required clips. Do not touch
-            // its whole GLTF lookup again; unrelated animations can retire.
-            return Ok(());
-        }
+/// The player timeline's SE rule (`silence_unavailable_sounds`): an SE the
+/// source would fail to load plays silent. Each is reported once, when it is
+/// first found, because it then stays silent for the session.
+fn silence_player_sounds(world: &World, target: &FixtureTarget, request: &mut StartTimeline) {
+    for silenced in timeline::silence_unavailable_sounds(world, request) {
+        warn!("[player-fixture] {} SE {silenced} plays silent", target.uid);
     }
-    let player_definition =
-        provider.definition(world, &plan.player_package, &plan.player_row.asset_name)?;
-    let definition = provider.definition(world, &plan.visual_package, &plan.visual_prefab)?;
-    // Retain the previous attempt's handles until the next draft is installed.
-    let previous = draft.take();
-    let mut profile = PlayerFixtureVisualProfile {
-        target: plan.key.target.clone(), actor: plan.actor.entity, unit_id: plan.actor.unit,
-        fixture_id: plan.fixture_id, player_timeline_row_id: plan.player_row.id,
-        action_point: plan.player_row.action_point, visual_action_point: plan.visual_point,
-        slot_id: plan.slot_id, no_talk_row_id: plan.no_talk_row_id,
-        timeline_group_id: plan.visual_row.group_id, timeline_row_id: plan.visual_row.id,
-        source_view_local_y: plan.source_view_local_y,
-        definition, player_definition, bindings: TimelineBindings::default(),
-        coverage_notes: vec![
-            "Native SD visual timing; player source SE retains its absolute envelopes on the same clock".into(),
-            "Sampled bone curves do not implement native FootIK, start offset, track matching or all mixer behavior".into(),
-            format!("Source player row {}, locator array index {}, slot {}", plan.player_row.id, plan.locate_index, plan.slot_id),
-        ],
-    };
-    let mut request = profile.start_request(owner, &plan.key.target);
-    let prepared = provider.prepare_bindings(
-        world,
-        &mut request,
-        plan.actor.unit,
-        plan.actor.animator,
-        plan.actor.graph.clone(),
-    );
-    let has_actor_body = request
-        .bindings
-        .animations
-        .values()
-        .any(|binding| binding.animator == plan.actor.animator);
-    profile.bindings = request.bindings;
-    *draft = Some(profile);
-    drop(previous);
-    prepared?;
-    if !has_actor_body {
-        return Err(ProviderPending::new(
-            "actor-body-binding",
-            "selected SD visual has no actual player-body animation binding",
-        ));
-    }
-    // Reuse the business owner's exact companion/timeout construction rather
-    // than duplicating its selection or manufacturing sound event times here.
-    let request = draft
-        .as_ref()
-        .expect("stored draft")
-        .start_request(owner, &plan.key.target);
-    timeline::validate_prepared(world, &request)
-        .map_err(|error| ProviderPending::timeline("live-binding-preflight", error))
 }
 
-fn profile_matches_plan(profile: &PlayerFixtureVisualProfile, plan: &Plan) -> bool {
-    profile.target == plan.key.target
-        && profile.actor == plan.actor.entity
-        && profile.unit_id == plan.actor.unit
+fn profile_matches_plan(profile: &PlayerFixtureVisualProfile, plan: &PlayerTimelinePlan) -> bool {
+    profile.target == plan.target
+        && profile.actor == plan.actor
+        && profile.unit_id == plan.unit
         && profile.fixture_id == plan.fixture_id
         && profile.player_timeline_row_id == plan.player_row.id
         && profile.action_point == plan.player_row.action_point
@@ -759,70 +526,17 @@ fn profile_matches_plan(profile: &PlayerFixtureVisualProfile, plan: &Plan) -> bo
         && profile.player_definition.package == plan.player_package
         && profile.player_definition.prefab == plan.player_row.asset_name
         && profile.bindings.animations.values().any(|binding|
-            binding.animator == plan.actor.animator && binding.graph == plan.actor.graph)
+            binding.animator == plan.animator && binding.graph == plan.graph)
 }
 
-fn profile_key(profile: &PlayerFixtureVisualProfile) -> ProviderKey {
-    ProviderKey {
-        actor: profile.actor,
-        target: profile.target.clone(),
-        player_timeline_row_id: profile.player_timeline_row_id,
+/// PostUpdate: all provider/NPC/talk preparation has finished for this frame.
+/// Only redundant lookup references are dropped. Prepared profiles and active
+/// timeline requests own their exact definition/clip/audio handles themselves.
+pub(crate) fn retire_lookup_caches(world: &mut World) {
+    if let Some(mut provider) = world.get_resource_mut::<FixtureActivityProvider>() {
+        provider.assets.sweep_lookup_caches();
     }
-}
-
-fn publish(world: &mut World, provider: &mut FixtureActivityProvider) {
-    let mut profiles = world
-        .remove_resource::<PlayerFixtureVisualProfiles>()
-        .unwrap_or_default();
-    profiles
-        .profiles
-        .retain(|profile| !provider.published.contains(&profile_key(profile)));
-    provider.published.clear();
-    for (key, entry) in &mut provider.entries {
-        if !matches!(entry.status, ProviderStatus::VisualReady { .. }) {
-            continue;
-        }
-        if profiles
-            .profiles
-            .iter()
-            .any(|profile| profile_key(profile) == *key)
-        {
-            entry.status = ProviderStatus::Pending(ProviderPending::new(
-                "profile-publication-owner",
-                "another producer already owns this exact profile key",
-            ));
-            continue;
-        }
-        if let Some(profile) = &entry.profile {
-            profiles.profiles.push(profile.clone());
-            provider.published.insert(key.clone());
-        }
-    }
-    world.insert_resource(profiles);
-}
-
-#[cfg(test)]
-mod residency_tests {
-    use super::*;
-
-    #[test]
-    fn failed_discovery_does_not_keep_a_removed_fixtures_profile() {
-        let mut world = World::new();
-        let actor = world.spawn(PlayerControlled).id();
-        let fixture = world.spawn((FixtureRoot, FixtureActivityIdentity {
-            uid: "old".into(), master_id: 1, model_package: "old-model".into(),
-        })).id();
-        let key = ProviderKey { actor, target: FixtureTarget { entity: fixture, uid: "old".into() }, player_timeline_row_id: 1 };
-        let mut provider = FixtureActivityProvider::default();
-        provider.entries.insert(key.clone(), Entry {
-            status: ProviderStatus::VisualReady { sd_timeline_row_id: 1 }, profile: None,
-        });
-        world.insert_resource(provider);
-        // Same entity, replacement UID: entity existence alone must not pin
-        // the previous player's furniture. Discovery also lacks AvatarDriver.
-        world.get_mut::<FixtureActivityIdentity>(fixture).unwrap().uid = "replacement".into();
-        advance(&mut world);
-        assert!(world.resource::<FixtureActivityProvider>().entries.is_empty());
-        assert!(world.resource::<FixtureActivityProvider>().global_pending.is_some());
+    if let Some(mut loads) = world.get_resource_mut::<timeline::TimelineAssetLoads>() {
+        loads.sweep_lookup_caches();
     }
 }
