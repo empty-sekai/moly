@@ -301,7 +301,8 @@ impl WalkField {
         let walkable = grid.walkable.iter().filter(|w| **w).count();
         let regions = region::build_monotone(&grid);
         let contours = contour::build_contours(&grid, &regions, MAX_SIMPLIFICATION_ERROR);
-        let polys = polymesh::build(&contours);
+        let mut polys = polymesh::build(&contours);
+        polys.cache_centres(&grid);
         WalkField {
             counts: BakeCounts {
                 cells: grid.cols * grid.rows,
