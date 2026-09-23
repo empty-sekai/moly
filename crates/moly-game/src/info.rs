@@ -527,7 +527,7 @@ pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_sett
     commands.init_resource::<InfoDialogState>();
     let settings = InfoSettings::default();
     info!(
-        "[info] 启动施加（进场全量施加律）：画质={} · 刷新率={}（WinitSettings 硬钳制 {}fps）——\
+        "[info] 启动施加（进场全量施加律）：画质={} · 刷新率={}（帧率上限 {}fps）——\
          持久化层未建，当值取构造默认（画质 normal · 刷新率 high，见模块头承重句）",
         settings.image_quality.label(),
         settings.fps.label(),
