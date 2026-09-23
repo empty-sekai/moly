@@ -1091,11 +1091,19 @@ pub(crate) fn apply_graphics(
 ///   wake-up it is registered from a microtask queued behind the wake-up.
 ///   After an update that ran elsewhere (in winit's redraw, or in an event
 ///   handler) it is registered again from a microtask queued by that update,
-///   which runs after the runner's request. After a canvas resize, where winit
-///   requests its animation frame again once the frame's animation-frame
-///   callbacks have run, it is registered again from a resize observer on the
-///   canvas created after winit's; a page notifies resize observers in the
-///   order they were created.
+///   which runs after the runner's request. After a canvas resize, where
+///   winit's resize observer requests its animation frame again once the
+///   frame's animation-frame callbacks have run, it is registered again from
+///   the pacer's resize observer on the canvas: at once, which is behind
+///   winit's request when winit's observer is notified first, and from a task
+///   queued there, which runs after the frame's rendering update and so after
+///   winit's request in either order. Chrome notifies resize observers in the
+///   order they were created, winit's first. Firefox notifies them in the
+///   order they last started observing, and winit observes the canvas again on
+///   every change of the device pixel ratio, so from then on the pacer's
+///   observer is notified first and the task keeps the order. The task runs
+///   before the next frame's animation-frame callbacks when the main thread is
+///   free before that frame starts.
 ///
 /// A wake-up that still finds no redraw since the previous update (the order
 /// was changed by something else) has its update run in winit's redraw of the
@@ -1138,6 +1146,8 @@ mod pacing {
         /// Registers the pacer's next animation frame again, behind every
         /// animation frame registered so far.
         request_again: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// The canvas resize observer's callback.
+        on_resize: RefCell<Option<Closure<dyn FnMut()>>>,
         /// Keeps the canvas resize observer alive.
         resize_observer: RefCell<Option<web_sys::ResizeObserver>>,
     }
@@ -1179,6 +1189,7 @@ mod pacing {
             on_frame: RefCell::new(None),
             after_wake: RefCell::new(None),
             request_again: RefCell::new(None),
+            on_resize: RefCell::new(None),
             resize_observer: RefCell::new(None),
         });
         // The closures own the pacer for the lifetime of the page.
@@ -1189,14 +1200,15 @@ mod pacing {
         *pacer.after_wake.borrow_mut() = Some(Closure::new(move || after_wake(&wake_pacer)));
         let again_pacer = pacer.clone();
         *pacer.request_again.borrow_mut() = Some(Closure::new(move || request_frame(&again_pacer)));
+        let resize_pacer = pacer.clone();
+        *pacer.on_resize.borrow_mut() = Some(Closure::new(move || on_resize(&resize_pacer)));
         observe_canvas(&pacer, &windows);
         request_frame(&pacer);
         PACER.with_borrow_mut(|slot| *slot = Some(pacer));
     }
 
     /// Registers the pacer again after every observed resize of the primary
-    /// window's canvas. The window and its winit observer exist before the
-    /// first update, so this observer is notified after winit's.
+    /// window's canvas (see `on_resize`).
     fn observe_canvas(pacer: &Pacer, windows: &Query<&Window, With<PrimaryWindow>>) {
         // The canvas the window was created on, found the way the engine finds it.
         let canvas = windows
@@ -1216,7 +1228,7 @@ mod pacing {
             );
             return;
         };
-        let observer = pacer.request_again.borrow().as_ref().and_then(|callback| {
+        let observer = pacer.on_resize.borrow().as_ref().and_then(|callback| {
             web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()).ok()
         });
         let Some(observer) = observer else {
@@ -1277,6 +1289,19 @@ mod pacing {
                     .request_animation_frame(callback.as_ref().unchecked_ref())
                     .ok(),
             );
+        }
+    }
+
+    /// Runs in the resize-observer step of a frame that resized the canvas,
+    /// where winit's resize observer requests its animation frame again.
+    fn on_resize(pacer: &Pacer) {
+        // Behind winit's request when winit's observer was notified first.
+        request_frame(pacer);
+        // Behind it in either order: a task runs after the rendering update.
+        if let Some(request_again) = pacer.request_again.borrow().as_ref() {
+            let _ = pacer
+                .window
+                .set_timeout_with_callback(request_again.as_ref().unchecked_ref());
         }
     }
 
