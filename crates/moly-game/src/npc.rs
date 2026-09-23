@@ -331,12 +331,15 @@ pub(crate) fn stop_for_external_activity(world: &mut World, actor: Entity) {
 /// at SitePosition.y (GetTargetPosition), which this host keeps as the site
 /// origin's height; the local fit still ends on the action point itself.
 ///
-/// A move that never completes ends Stacked (Stopped). On that result the
-/// source re-decides only that member's objective (a supporting member's
-/// SubCharacterFixtureAction objective calls ForceUpdateObjective for that
-/// character alone). This host's fixture talk stages one Director for its
-/// whole cast, so a Stopped approach fails the talk and restores every
-/// member: a deliberate difference, not the source's per-member end.
+/// A move that never completes ends Stacked (Stopped). The source ends the
+/// whole talk as well: a stalled supporting member's
+/// SubCharacterFixtureAction objective calls ForceUpdateObjective, which
+/// replaces its talk data, and the main member's gathering watcher then ends
+/// the talk for every member (a Stacked main member ends it too). This host
+/// differs in two ways: its one Director fails the talk at once instead of
+/// after the main member's own move finishes, and its teardown returns every
+/// member to the pose from before the approach, where the source leaves
+/// each one where it stopped.
 pub(crate) fn begin_external_approach(
     world: &mut World,
     actor: Entity,
@@ -1815,8 +1818,10 @@ pub fn advance(
         // wait and poll share one runner, in an order this host cannot
         // observe, so that leg is read from the following frame. A
         // completion ends the move where the NPC stands or starts the local
-        // fit from there; every fit position is the move's target, so that fit
-        // spans at most the switch tolerance plus the goal distance.
+        // fit from there. That fit spans at most the switch tolerance plus the
+        // goal distance, plus the fit position's height above the target
+        // where they differ (a fixture talk cast member's fit keeps the
+        // action point's height while its target sits at the site floor).
         let polls = actions.current != NpcAction::Talk;
         let arrived = matches!(verdict, WalkVerdict::Arrived(_));
         let mut completed = polls && !arrived && route.completed(prior);
