@@ -31,12 +31,15 @@
 //!   帧再试）。
 //! - 本帧没有任何 draw：缓冲照样清——不清会把上一帧的余像喂进泛光。
 //!   管线没编好（首几帧）只跳过对应 draw，pass 仍执行。
+//! - 泛光关且没有诊断探针时缓冲没有读者，两个节点都不跑；不透明节点在
+//!   有粒子 draw、或本视图的相机深度还没被主不透明 pass 首次挂载时照跑。
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use bevy::asset::uuid::Uuid;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d};
 use bevy::ecs::query::QueryItem;
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::mesh::skinning::SkinnedMesh;
@@ -50,12 +53,15 @@ use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, RenderSubGraph, ViewNode,
     ViewNodeRunner,
 };
+use bevy::render::render_phase::ViewBinnedRenderPhases;
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::{GpuImage, TextureCache};
 use bevy::render::sync_world::MainEntity;
-use bevy::render::view::{Msaa, ViewDepthTexture, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bevy::render::view::{
+    ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::env::{SiteEnv, SiteEnvGpuBuffer};
@@ -180,6 +186,23 @@ struct EmissionDraw {
 #[derive(Resource, Default)]
 struct EmissionDrawList {
     draws: Vec<EmissionDraw>,
+}
+
+impl EmissionDrawList {
+    /// Particle draws bind the opaque depth snapshot, and their source pass
+    /// state may write the camera depth.
+    fn has_particle_draws(&self) -> bool {
+        self.draws.iter().any(|draw| draw.particle.is_some())
+    }
+}
+
+/// Whether this frame's emission draws include a particle draw. Without the
+/// draw list in the render world the answer is yes, so a caller that skips
+/// work on `false` never skips it by mistake.
+pub(crate) fn has_particle_emission_draws(world: &World) -> bool {
+    world
+        .get_resource::<EmissionDrawList>()
+        .is_none_or(EmissionDrawList::has_particle_draws)
 }
 
 /// 管线特化键：顶点布局 × 图元 × 材质变体 × 混合 × 采样数。
@@ -573,6 +596,11 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         &'static ViewUniformOffset,
         Option<&'static crate::weather_depth::RawDepthBinding>,
         Option<&'static crate::weather_depth::WeatherCameraRole>,
+        // Only read to tell whether the main opaque pass ran for this view;
+        // they never decide which views this node runs for.
+        Has<ExtractedCamera>,
+        Option<&'static ExtractedView>,
+        Has<ViewTarget>,
     );
 
     #[allow(clippy::type_complexity)]
@@ -580,12 +608,46 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (target, depth, view_offset, depth_binding, role): QueryItem<Self::ViewQuery>,
+        (target, depth, view_offset, depth_binding, role, has_camera, view, has_view_target): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let attachment_compatible = crate::weather_depth::effect_attachment_compatible(
             role.copied(), depth.texture.sample_count());
         let draws = world.resource::<EmissionDrawList>();
+        // The emission target is read only by the weather post node's bloom
+        // path and by diagnostic probe copies, and the opaque node clears it
+        // again before any later reader. With bloom off and no probe, neither
+        // node's colour output is observable. Two depth effects keep the opaque
+        // node running: its particle draws, whose source pass state may write
+        // the camera depth, and its depth attachment when the main opaque pass
+        // did not attach this view's depth first, because the first attachment
+        // with StoreOp::Store performs the camera's depth clear. The transparent
+        // node draws no particles and always follows one of those two
+        // attachments, so its own attachment only loads the depth.
+        let bloom = world
+            .get_resource::<crate::weather::WeatherPostParams>()
+            .is_none_or(|params| params.bloom_on);
+        let probed = world.get_resource::<WeatherEffectProbes>().is_some_and(|probes| {
+            probes.after_opaques.is_some() || probes.after_transparents.is_some()
+        });
+        // The main opaque pass runs for a view with its view query (camera,
+        // view, target, depth, view uniform) and both opaque phases, and then
+        // attaches the depth before returning; the graph orders it before this
+        // node.
+        let depth_attached = has_camera
+            && has_view_target
+            && view.is_some_and(|view| {
+                let phases = &view.retained_view_entity;
+                world
+                    .get_resource::<ViewBinnedRenderPhases<Opaque3d>>()
+                    .is_some_and(|opaque| opaque.contains_key(phases))
+                    && world
+                        .get_resource::<ViewBinnedRenderPhases<AlphaMask3d>>()
+                        .is_some_and(|alpha_mask| alpha_mask.contains_key(phases))
+            });
+        if !bloom && !probed && (!EARLY || (!draws.has_particle_draws() && depth_attached)) {
+            return Ok(());
+        }
         let gpu = world.resource::<EmissionGpu>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let meshes = world.resource::<RenderAssets<RenderMesh>>();
