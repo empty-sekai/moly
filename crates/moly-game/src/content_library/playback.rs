@@ -385,16 +385,21 @@ pub(crate) fn observe_start(
             return;
         }
     } else if !running && state.pending.is_none() {
-        // A furniture session that ended while loading its resources never
-        // played: report the failure, not a finished performance.
-        if let Some(crate::player_fixture_action::PlayerFixtureOutcome::LoadFailed {
-            target,
-            error,
-        }) = &runtime.last_outcome
-        {
-            if matches!(active.choice.key, EntryKey::Fixture(_))
-                && active.choice.target.as_ref() == Some(target)
-            {
+        // A furniture session that ended before it played (its resources
+        // failed to load, or the runner refused to start it) reports why,
+        // not a finished performance.
+        if matches!(active.choice.key, EntryKey::Fixture(_)) {
+            use crate::player_fixture_action::PlayerFixtureOutcome;
+            let unplayed = match &runtime.last_outcome {
+                Some(PlayerFixtureOutcome::LoadFailed { target, error })
+                    if active.choice.target.as_ref() == Some(target) =>
+                {
+                    Some(error)
+                }
+                Some(PlayerFixtureOutcome::NotPrepared(error)) => Some(error),
+                _ => None,
+            };
+            if let Some(error) = unplayed {
                 fail(&mut state, &human_preparation_error(error));
                 return;
             }

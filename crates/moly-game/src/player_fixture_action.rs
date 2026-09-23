@@ -305,6 +305,10 @@ pub(crate) enum PlayerFixturePhase {
 pub(crate) enum PlayerFixtureOutcome {
     Completed,
     Cancelled(PlayerFixtureCancelReason),
+    /// Nothing played and no resource failed: admission refused the request,
+    /// or the runner refused to start a loaded session because an animator
+    /// it binds is playing another timeline. A refused session has already
+    /// returned to idle and released its seat.
     NotPrepared(PlayerFixturePreparationError),
     /// The seat was reserved and its resources were requested, but a load or
     /// binding failed. The session returned to idle and released everything;
@@ -327,6 +331,8 @@ pub(crate) enum PlayerFixtureOutcome {
 enum SessionEnd {
     Cancelled(PlayerFixtureCancelReason),
     LoadFailed(PlayerFixturePreparationError),
+    /// Loaded, but the runner cannot start it now (see `verify_loaded`).
+    Refused(PlayerFixturePreparationError),
 }
 
 impl From<PlayerFixtureCancelReason> for SessionEnd {
@@ -859,11 +865,14 @@ fn load_error(pending: ProviderPending) -> PlayerFixturePreparationError {
 
 /// The loaded profile still describes the admitted seat, the live SD body
 /// and only this fixture's nodes, and the runner would accept it now.
+/// `Rejected` means only the last part failed: an animator the profile binds
+/// is playing another timeline. That is contention, not a failed resource;
+/// every other error is a failed load or binding.
 fn verify_loaded(
     world: &World,
     session: &PlayerFixtureSession,
 ) -> Result<(), PlayerFixturePreparationError> {
-    use PlayerFixturePreparationError::{Invalid, Missing, Timeline};
+    use PlayerFixturePreparationError::{Invalid, Missing, Rejected, Timeline};
     let prepared = &session.prepared;
     let profile = session
         .profile
@@ -907,8 +916,18 @@ fn verify_loaded(
         ));
     }
     let request = profile.start_request(prepared.owner, &prepared.target);
-    fixture_activity_timeline::validate_start(world, &request)
-        .map_err(|error| Timeline(format!("{error:?}")))
+    fixture_activity_timeline::validate_start(world, &request).map_err(|_| {
+        // validate_start is validate_prepared plus the runner's rule that an
+        // animator plays one timeline at a time, over the same inputs. When
+        // only that rule fails, a bound animator (for example the fixture's,
+        // driven by an NPC on another seat) is busy: the runner refuses the
+        // start, and no resource failed. Otherwise the failure is reported
+        // as validate_prepared words it, without the ownership rule.
+        match fixture_activity_timeline::validate_prepared(world, &request) {
+            Ok(()) => Rejected("a bound animator is occupied by another timeline"),
+            Err(failure) => Timeline(format!("{failure:?}")),
+        }
+    })
 }
 
 fn validate_visual_relation(
@@ -1222,6 +1241,16 @@ pub(crate) fn advance(world: &mut World) {
                 finish(world, session, false);
                 runtime.last_outcome = Some(PlayerFixtureOutcome::LoadFailed { target, error });
             }
+            Err(SessionEnd::Refused(error)) => {
+                // Contention, not a failed resource: one line, then the same
+                // release as any other end.
+                warn!(
+                    "[player-fixture] {} player row {} not started: {error:?}",
+                    session.prepared.target.uid, session.prepared.player_row.id
+                );
+                finish(world, session, false);
+                runtime.last_outcome = Some(PlayerFixtureOutcome::NotPrepared(error));
+            }
         }
     }
     world.insert_resource(runtime);
@@ -1316,7 +1345,8 @@ fn begin(
 /// Returns true once the session is past loading. Loads still in flight keep
 /// the session waiting; a failed load or binding ends it (the source's
 /// finally returns the player to idle and releases everything), and nothing
-/// retries it.
+/// retries it. A loaded session the runner cannot start now (a bound
+/// animator is busy) ends the same way but is reported as a refusal.
 fn load_session(world: &mut World, session: &mut PlayerFixtureSession) -> Result<bool, SessionEnd> {
     if session.phase != PlayerFixturePhase::Loading {
         return Ok(true);
@@ -1331,7 +1361,10 @@ fn load_session(world: &mut World, session: &mut PlayerFixtureSession) -> Result
         Err(pending) if pending.retryable => return Ok(false),
         Err(pending) => return Err(SessionEnd::LoadFailed(load_error(pending))),
     }
-    verify_loaded(world, session).map_err(SessionEnd::LoadFailed)?;
+    verify_loaded(world, session).map_err(|error| match error {
+        PlayerFixturePreparationError::Rejected(_) => SessionEnd::Refused(error),
+        error => SessionEnd::LoadFailed(error),
+    })?;
     // ChangeAnimation(RunMotion), then the move to StartLoc.
     world
         .entity_mut(session.prepared.owner.actor)

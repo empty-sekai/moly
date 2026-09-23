@@ -47,7 +47,10 @@ impl ProviderPending {
             reason: reason.into(),
             retryable: matches!(
                 stage,
-                "json-loading" | "fixture-clip-loading" | "fixture-instance"
+                "json-loading"
+                    | "fixture-clip-loading"
+                    | "fixture-instance"
+                    | "fixture-animation-surface"
             ),
         }
     }
@@ -217,11 +220,18 @@ impl FixtureActivityProvider {
         Ok(())
     }
 
-    /// One poll of the resources for one planned player row. The first call
-    /// starts every load (both timeline definitions, the actor and fixture
-    /// clips, the source SE); later calls observe them. `draft` keeps the
-    /// handles of an unfinished attempt alive between polls, so an in-flight
-    /// load is not cancelled, and holds the complete profile on success.
+    /// One poll of the resources for one planned player row; later polls
+    /// observe what earlier ones requested. Every call requests both timeline
+    /// definitions and the actor catalogue, so they load together. The rest
+    /// is routed by what those contain: once both definitions are parsed, the
+    /// source SE are requested and the actor clips resolve their library
+    /// index and then the library file. The fixture clips come from the
+    /// placed model's own file, which is already loaded. So a request whose
+    /// inputs are not resident waits for about three load rounds (tables and
+    /// catalogue; library index and SE; library file) before the player
+    /// moves. `draft` keeps the handles of an unfinished attempt alive
+    /// between polls, so an in-flight load is not cancelled, and holds the
+    /// complete profile on success.
     pub(crate) fn prepare_player_timeline(
         &mut self,
         world: &mut World,
@@ -238,9 +248,16 @@ impl FixtureActivityProvider {
                 return Ok(());
             }
         }
+        // Poll both before reading either result, so the SD visual's tables
+        // are not held back behind the player row's. The row's own timeline
+        // still reports first, exactly as when they were polled in turn. The
+        // SD body is always bound, so the actor catalogue is always needed.
+        timeline::request_actor_catalog(world);
         let player_definition =
-            self.definition(world, &plan.player_package, &plan.player_row.asset_name)?;
-        let definition = self.definition(world, &plan.visual_package, &plan.visual_prefab)?;
+            self.definition(world, &plan.player_package, &plan.player_row.asset_name);
+        let definition = self.definition(world, &plan.visual_package, &plan.visual_prefab);
+        let player_definition = player_definition?;
+        let definition = definition?;
         // Retain the previous attempt's handles until the next draft is installed.
         let previous = draft.take();
         let mut profile = PlayerFixtureVisualProfile {
@@ -258,6 +275,10 @@ impl FixtureActivityProvider {
             ],
         };
         let mut request = profile.start_request(owner, &plan.target);
+        // The SE routes need only the parsed tracks: request them now, so they
+        // load alongside the actor clips. `prepare_bindings` requests the same
+        // handles again at its end, and only its result counts.
+        let _ = timeline::prepare_source_sounds(world, &mut request);
         let prepared = self.prepare_bindings(
             world,
             &mut request,

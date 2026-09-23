@@ -460,6 +460,22 @@ fn require_actor_path(path: &str) -> Result<(), TimelineFailure> {
     Ok(())
 }
 
+/// Start loading the actor catalogue without reading it, for a caller that
+/// knows it will resolve actor clips once its own tables arrive. It requests
+/// exactly the handle `load_json` requests for the catalogue.
+pub(crate) fn request_actor_catalog(world: &mut World) {
+    let Some(server) = world.get_resource::<AssetServer>().cloned() else {
+        return;
+    };
+    world.init_resource::<TimelineAssetLoads>();
+    world
+        .resource_mut::<TimelineAssetLoads>()
+        .json
+        .get_or_insert_with(ACTOR_CATALOG, || {
+            server.load(format!("moly://{ACTOR_CATALOG}"))
+        });
+}
+
 fn load_json(
     world: &mut World,
     server: &AssetServer,
