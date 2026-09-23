@@ -270,16 +270,19 @@ impl Factory<'_, '_> {
         // GetAllFixture is insertion ordered. The offline placement owner is
         // that order in this host; query iteration and package-first lookup are
         // not. Resolve every selected row against exactly one live Entity/UID.
+        // Live instances are grouped by UID once; a row keeps the instances in
+        // query order whose identity and scene placement both carry its UID.
+        let mut live: HashMap<&str, Vec<_>> = HashMap::with_capacity(rows.len());
+        for fixture in self.fixtures.iter() {
+            let (_, identity, placed, _) = fixture;
+            if identity.uid == placed.0.uid {
+                live.entry(identity.uid.as_str()).or_default().push(fixture);
+            }
+        }
         let mut instances = Vec::with_capacity(rows.len());
         for row in &rows {
-            let matches: Vec<_> = self
-                .fixtures
-                .iter()
-                .filter(|(_, identity, placed, _)| {
-                    identity.uid == row.uid && placed.0.uid == row.uid
-                })
-                .collect();
-            let [(entity, identity, placed, world)] = matches.as_slice() else {
+            let matches = live.get(row.uid.as_str()).map_or(&[][..], Vec::as_slice);
+            let [(entity, identity, placed, world)] = matches else {
                 return Err(format!("placement {} has no unique live instance", row.uid));
             };
             if &placed.0 != row || identity.model_package != row.package {
