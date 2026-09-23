@@ -1140,6 +1140,9 @@ pub(crate) fn request_fixture_particles(
     roots: Query<(Entity, &crate::fixture::FixtureSource), (With<crate::fixture::FixtureRoot>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
 ) {
     let handle = index.get_or_insert_with(|| server.load("moly://fixture-particles-v2/index.json"));
+    // The index is only consulted for fixture roots that have not been
+    // requested or resolved yet; with none pending there is nothing to parse.
+    if roots.is_empty() { return; }
     let Some(json) = jsons.get(handle) else { return; };
     let archive: serde_json::Value = serde_json::from_str(&json.0).expect("fixture particle index");
     for (entity, source) in &roots {
