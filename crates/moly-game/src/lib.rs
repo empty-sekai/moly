@@ -154,6 +154,7 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);

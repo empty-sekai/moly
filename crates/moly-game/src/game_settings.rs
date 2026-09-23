@@ -138,6 +138,25 @@ pub(crate) fn install(app: &mut App) {
         .add_message::<SettingsPanelRequest>();
 }
 
+/// Per-frame counters for the browser host: engine assets and every game
+/// material type visible to this module. The fixture surface and tree
+/// materials and the UI clip material are private to their modules and are
+/// not counted.
+pub(crate) fn perf_plugin() -> moly_perf::PerfPlugin {
+    moly_perf::PerfPlugin::default()
+        .track::<Mesh>("Mesh")
+        .track::<Image>("Image")
+        .track::<StandardMaterial>("StandardMaterial")
+        .track::<crate::avatar_material::AvatarMaterial>("AvatarMaterial")
+        .track::<crate::character_material::CharacterMaterial>("CharacterMaterial")
+        .track::<crate::emoticon::EmoticonMaterial>("EmoticonMaterial")
+        .track::<crate::fixture_material::FixtureMaterial>("FixtureMaterial")
+        .track::<crate::fixture::road::RoadMaterial>("RoadMaterial")
+        .track::<crate::site_material::SiteMaterial>("SiteMaterial")
+        .track::<crate::sky::SkyGradient>("SkyGradient")
+        .track::<crate::uber_particle::UberParticleMaterial>("UberParticleMaterial")
+}
+
 pub(crate) fn scene_input_enabled(
     panel: Res<SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,

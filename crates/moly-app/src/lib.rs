@@ -184,3 +184,11 @@ pub fn player_data_command(operation: &str, region: &str, json: &str) -> Result<
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn player_data_snapshot() -> String { moly_game::player_data::browser_snapshot() }
+
+/// Frame counters of the running application as JSON: percentiles over the
+/// last 600 frames and the newest `frames` frames (120 when omitted).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn perf_snapshot(frames: Option<u32>) -> String {
+    moly_perf::snapshot_json(frames.map_or(moly_perf::DEFAULT_RECENT, |frames| frames as usize))
+}
