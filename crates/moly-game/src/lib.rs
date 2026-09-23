@@ -79,6 +79,7 @@ mod player_data_ui;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
+mod render;
 mod room_appearance;
 pub mod schedule;
 mod settings_store;

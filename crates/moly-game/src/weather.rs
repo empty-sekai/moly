@@ -30,8 +30,8 @@ use bevy::render::render_graph::{
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-    BindingResource, Buffer, BufferInitDescriptor, BufferUsages, CachedRenderPipelineId,
+    BindGroup, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+    Buffer, BufferInitDescriptor, BufferUsages, CachedRenderPipelineId,
     ColorTargetState, ColorWrites, FragmentState, Operations, Origin3d, PipelineCache,
     PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
     Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType,
@@ -50,6 +50,8 @@ use std::marker::PhantomData;
 
 use crate::env::SiteEnv;
 use crate::fixture_emission::ViewEmissionTarget;
+use crate::render::gpu::{BindGroupCache, Bound};
+use bevy::diagnostic::FrameCount;
 use crate::fixture_material::EmissionAccount;
 use crate::light;
 use crate::site::SiteActive;
@@ -899,37 +901,141 @@ fn write_environment(
     };
     let (a,b,p) = (resolve(previous),resolve(next),resolve(profile));
     let blended = blend_at_site(a,b,p,phase.progress,previous.environment_site=="home",next.environment_site=="home");
-    env.globals.light_vector = blended.light_dir.to_array();
+    // Every bridge below is written through change detection only on a frame
+    // where one of its bits changes. Render-world extraction, the GPU upload and
+    // the sky material re-prepare all key on that flag, so a steady environment
+    // no longer re-sends identical values every frame.
+    let site = env.bypass_change_detection();
+    let mut site_changed = store(&mut site.globals.light_vector, blended.light_dir.to_array());
     let values = timeline.values;
     let add = moly_law::weather::timeline::additive_light;
-    env.globals.phenomena_directional_light_color = add(blended.light_color, values.light_color, values.light_intensity);
+    site_changed |= store(&mut site.globals.phenomena_directional_light_color,
+        add(blended.light_color, values.light_color, values.light_intensity));
     let character_light = add(lerp4(a.character_light_color, b.character_light_color, phase.progress),
         values.light_color, values.light_intensity);
-    if let Some(character) = character.as_deref_mut() {
-        character.globals.light_vector = blended.light_dir.to_array();
-        character.globals.light_color = character_light;
-        character.globals.skin_shade_color = lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress);
-        character.globals.body_shade_color = lerp4(a.character_body_shade, b.character_body_shade, phase.progress);
-        character.globals.fog_params = blended.fog.fog_params;
-        character.globals.fog_near_color = blended.fog.fog_near_color;
-        character.globals.fog_far_color = blended.fog.fog_far_color;
-        character.fog_ready = true;
+    if let Some(character) = character.as_mut() {
+        let target = character.bypass_change_detection();
+        let mut changed = store(&mut target.globals.light_vector, blended.light_dir.to_array());
+        changed |= store(&mut target.globals.light_color, character_light);
+        changed |= store(&mut target.globals.skin_shade_color,
+            lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress));
+        changed |= store(&mut target.globals.body_shade_color,
+            lerp4(a.character_body_shade, b.character_body_shade, phase.progress));
+        changed |= store(&mut target.globals.fog_params, blended.fog.fog_params);
+        changed |= store(&mut target.globals.fog_near_color, blended.fog.fog_near_color);
+        changed |= store(&mut target.globals.fog_far_color, blended.fog.fog_far_color);
+        changed |= store(&mut target.fog_ready, true);
+        if changed { character.set_changed(); }
     }
-    if let Some(avatar) = avatar.as_deref_mut() { avatar.light_color = character_light; }
-    env.globals.phenomena_shade_color = blended.shade_color;
-    env.drop_shadow_color = blended.drop_shadow;
-    env.sky_bottom_color = blended.sky_bottom_color;
-    env.globals.fog_params = blended.fog.fog_params;
-    env.globals.fog_near_color = blended.fog.fog_near_color;
-    env.globals.fog_far_color = blended.fog.fog_far_color;
-    env.emission_type = blended.post.emission_type as f32;
-    *post = blended.post;
+    if let Some(avatar) = avatar.as_mut() {
+        if store(&mut avatar.bypass_change_detection().light_color, character_light) { avatar.set_changed(); }
+    }
+    site_changed |= store(&mut site.globals.phenomena_shade_color, blended.shade_color);
+    site_changed |= store(&mut site.drop_shadow_color, blended.drop_shadow);
+    site_changed |= store(&mut site.sky_bottom_color, blended.sky_bottom_color);
+    site_changed |= store(&mut site.globals.fog_params, blended.fog.fog_params);
+    site_changed |= store(&mut site.globals.fog_near_color, blended.fog.fog_near_color);
+    site_changed |= store(&mut site.globals.fog_far_color, blended.fog.fog_far_color);
+    site_changed |= store(&mut site.emission_type, blended.post.emission_type as f32);
+    if site_changed { env.set_changed(); }
+    if !post.same_bits(&blended.post) { *post = blended.post; }
     if let Ok(handle) = sky_materials.single() {
-        if let Some(material) = materials.get_mut(&handle.0) {
-            material.set_ramps(a.ramp.clone(),b.ramp.clone(),phase.progress);
-            material.set_timeline_additive(values.sky_color, values.sky_intensity);
+        // `get_mut` always marks the asset modified, and a modified material is
+        // re-prepared with new uniform buffers and a new bind group.
+        let stale = materials.get(&handle.0).is_some_and(|material| {
+            material.differs_from(&a.ramp, &b.ramp, phase.progress, values.sky_color, values.sky_intensity)
+        });
+        if stale {
+            if let Some(material) = materials.get_mut(&handle.0) {
+                material.set_ramps(a.ramp.clone(),b.ramp.clone(),phase.progress);
+                material.set_timeline_additive(values.sky_color, values.sky_intensity);
+            }
         }
     }
+}
+
+/// Bit-exact equality for the values the environment bridges store. Floats
+/// compare by bit pattern, so a store is skipped only when it would write the
+/// very same bits (`-0.0` still replaces `0.0`).
+trait SameBits {
+    fn same_bits(&self, other: &Self) -> bool;
+}
+
+impl SameBits for f32 {
+    fn same_bits(&self, other: &Self) -> bool { self.to_bits() == other.to_bits() }
+}
+
+impl SameBits for i32 {
+    fn same_bits(&self, other: &Self) -> bool { self == other }
+}
+
+impl SameBits for bool {
+    fn same_bits(&self, other: &Self) -> bool { self == other }
+}
+
+impl<T: SameBits, const N: usize> SameBits for [T; N] {
+    fn same_bits(&self, other: &Self) -> bool {
+        self.iter().zip(other).all(|(a, b)| a.same_bits(b))
+    }
+}
+
+impl SameBits for ColorAdjustmentsParams {
+    fn same_bits(&self, other: &Self) -> bool {
+        // Exhaustive destructuring: a new field does not compile until it is compared.
+        let ColorAdjustmentsParams { post_exposure, contrast, color_filter, hue_shift, saturation } = self;
+        post_exposure.same_bits(&other.post_exposure)
+            && contrast.same_bits(&other.contrast)
+            && color_filter.same_bits(&other.color_filter)
+            && hue_shift.same_bits(&other.hue_shift)
+            && saturation.same_bits(&other.saturation)
+    }
+}
+
+impl SameBits for WeatherPostParams {
+    fn same_bits(&self, other: &Self) -> bool {
+        // Exhaustive destructuring: a new field does not compile until it is compared.
+        let WeatherPostParams {
+            diff_on, diff_intensity, diff_contrast, diff_blend_mode, diff_scatter,
+            diff_max_iterations, diff_buffer_height, flare_on, flare_intensity, flare_axis,
+            flare_color1, flare_color2, flare_offset1, flare_offset2, flare_exponent,
+            emission_type, bloom_on, bloom_prefilter, bloom_uber, bloom_overlay,
+            bloom_buffer_height, grade_on, grade, split_shadows, split_highlights,
+        } = self;
+        diff_on.same_bits(&other.diff_on)
+            && diff_intensity.same_bits(&other.diff_intensity)
+            && diff_contrast.same_bits(&other.diff_contrast)
+            && diff_blend_mode.same_bits(&other.diff_blend_mode)
+            && diff_scatter.same_bits(&other.diff_scatter)
+            && diff_max_iterations.same_bits(&other.diff_max_iterations)
+            && diff_buffer_height.same_bits(&other.diff_buffer_height)
+            && flare_on.same_bits(&other.flare_on)
+            && flare_intensity.same_bits(&other.flare_intensity)
+            && flare_axis.same_bits(&other.flare_axis)
+            && flare_color1.same_bits(&other.flare_color1)
+            && flare_color2.same_bits(&other.flare_color2)
+            && flare_offset1.same_bits(&other.flare_offset1)
+            && flare_offset2.same_bits(&other.flare_offset2)
+            && flare_exponent.same_bits(&other.flare_exponent)
+            && emission_type.same_bits(&other.emission_type)
+            && bloom_on.same_bits(&other.bloom_on)
+            && bloom_prefilter.same_bits(&other.bloom_prefilter)
+            && bloom_uber.same_bits(&other.bloom_uber)
+            && bloom_overlay.same_bits(&other.bloom_overlay)
+            && bloom_buffer_height.same_bits(&other.bloom_buffer_height)
+            && grade_on.same_bits(&other.grade_on)
+            && grade.same_bits(&other.grade)
+            && split_shadows.same_bits(&other.split_shadows)
+            && split_highlights.same_bits(&other.split_highlights)
+    }
+}
+
+/// Stores `value` into `slot` only when a bit differs; reports whether it wrote.
+fn store<T: SameBits>(slot: &mut T, value: T) -> bool {
+    if slot.same_bits(&value) {
+        return false;
+    }
+    *slot = value;
+    true
 }
 
 /// Update：两个入口共用这一条切换链——场景输入可用时 C 键循环推进到下一
@@ -1571,6 +1677,11 @@ fn write_weather_uniforms(
     gpu: Res<WeatherPostGpu>,
     queue: Res<RenderQueue>,
 ) {
+    // The three buffers are a pure function of the extracted axis values, which
+    // extraction replaces only on a frame where they changed.
+    if !params.is_changed() {
+        return;
+    }
     queue.write_buffer(&gpu.buffer, 0, &WeatherPostUniform::from_params(&params).gpu_bytes());
     queue.write_buffer(&gpu.scatter, 0, &scatter_weight(params.diff_scatter).to_le_bytes());
     // 泛光金字塔参数：律打包值整块透传（消费侧不二次推导——律里是照
@@ -1670,8 +1781,15 @@ fn prepare_weather_pyramid(
 ///（阈值预滤波 → 平方域降采样 → 平方域上采样）→ 合成（扩散混合 + 泛光 +
 /// 屏幕耀斑）。三条轴全关时整段跳过——不取 post_process_write，主纹理
 /// 原样过（与不挂这条链逐位一致）。
+///
+/// Bind groups are cached by layout and bound resource ids: the pyramid
+/// levels stay the same textures while the viewport and axis values hold, and
+/// the ping-pong source alternates between two views, so steady frames reuse
+/// every group instead of creating the whole set again.
 #[derive(Default)]
-struct WeatherPostNode;
+struct WeatherPostNode {
+    bind_groups: std::sync::Mutex<BindGroupCache>,
+}
 
 impl ViewNode for WeatherPostNode {
     // 只在带金字塔组件的视图上跑（Prepare 只给 Core3d 视图插）。自发光
@@ -1721,9 +1839,13 @@ impl ViewNode for WeatherPostNode {
             return Ok(());
         };
 
-        // 源/目的每帧轮换，bind group 只能在这里建。全部**先建后跑**：设备
-        // 句柄借 render_context 的不可变引用，跑 pass 要可变借用，交叠即撞。
+        // 源/目的每帧轮换，bind group 只能在这里取（按所绑资源缓存）。全部
+        // **先取后跑**：设备句柄借 render_context 的不可变引用，跑 pass 要可
+        // 变借用，交叠即撞。
         let post_process = view_target.post_process_write();
+        let frame = world.resource::<FrameCount>().0;
+        let mut cache = self.bind_groups.lock().unwrap();
+        cache.evict_idle(frame);
         // 扩散金字塔的级数（扩散关着时为 0）。
         let n = if params.diff_on { pyramid.downs.len() } else { 0 };
         // 合成里的扩散层：单级金字塔直取直拷结果，多级取上采样链顶；扩散
@@ -1773,26 +1895,30 @@ impl ViewNode for WeatherPostNode {
             if n > 0 {
                 // 直拷预过滤：源（编码域画面）→ 金字塔第一级。调色 uniform
                 // 也绑上（金字塔的源是已调色的场景色）。
-                copy_bind_group = Some(device.create_bind_group(
+                copy_bind_group = Some(cache.get(
+                    device,
                     "weather_copy_bind_group",
                     &copy_layout,
-                    &BindGroupEntries::with_indices((
-                        (0, post_process.source),
-                        (2, BindingResource::Sampler(sampler)),
-                        (3, gpu.buffer.as_entire_binding()),
-                    )),
+                    &[
+                        (0, Bound::View(post_process.source)),
+                        (2, Bound::Sampler(sampler)),
+                        (3, Bound::whole(&gpu.buffer)),
+                    ],
+                    frame,
                 ));
                 // 逐级降采样：上一级 → 下一级。建组顺序无所谓，跑序才要紧。
                 down_bind_groups = (1..n)
                     .map(|i| {
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "weather_down_bind_group",
                             &copy_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.downs[i - 1].default_view),
-                                (2, BindingResource::Sampler(sampler)),
-                                (3, gpu.buffer.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.downs[i - 1].default_view)),
+                                (2, Bound::Sampler(sampler)),
+                                (3, Bound::whole(&gpu.buffer)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1807,15 +1933,17 @@ impl ViewNode for WeatherPostNode {
                         } else {
                             &pyramid.ups[i + 1].default_view
                         };
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "weather_up_bind_group",
                             &up_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.downs[i].default_view),
-                                (1, low),
-                                (2, BindingResource::Sampler(sampler)),
-                                (4, gpu.scatter.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.downs[i].default_view)),
+                                (1, Bound::View(low)),
+                                (2, Bound::Sampler(sampler)),
+                                (4, Bound::whole(&gpu.scatter)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1829,25 +1957,29 @@ impl ViewNode for WeatherPostNode {
                 // 泛光预滤波：自发光缓冲（已 resolve 的单采样视图）→ 金字塔
                 // 第一级。阈值软膝在着色器里；参数整块绑（预滤波与上采样
                 // 共用同一份打包）。
-                bloom_prefilter_bind_group = Some(device.create_bind_group(
+                bloom_prefilter_bind_group = Some(cache.get(
+                    device,
                     "bloom_prefilter_bind_group",
                     &bloom_prefilter_layout,
-                    &BindGroupEntries::with_indices((
-                        (0, &emission_target.unwrap().resolved),
-                        (2, BindingResource::Sampler(sampler)),
-                        (5, gpu.bloom_params.as_entire_binding()),
-                    )),
+                    &[
+                        (0, Bound::View(&emission_target.unwrap().resolved)),
+                        (2, Bound::Sampler(sampler)),
+                        (5, Bound::whole(&gpu.bloom_params)),
+                    ],
+                    frame,
                 ));
                 bloom_down_bind_groups = (1..bloom_n)
                     .map(|i| {
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "bloom_down_bind_group",
                             &copy_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.bloom_downs[i - 1].default_view),
-                                (2, BindingResource::Sampler(sampler)),
-                                (3, gpu.buffer.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.bloom_downs[i - 1].default_view)),
+                                (2, Bound::Sampler(sampler)),
+                                (3, Bound::whole(&gpu.buffer)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1860,15 +1992,17 @@ impl ViewNode for WeatherPostNode {
                         } else {
                             &pyramid.bloom_uploads[i + 1].default_view
                         };
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "bloom_up_bind_group",
                             &bloom_up_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.bloom_downs[i].default_view),
-                                (1, low),
-                                (2, BindingResource::Sampler(sampler)),
-                                (5, gpu.bloom_params.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.bloom_downs[i].default_view)),
+                                (1, Bound::View(low)),
+                                (2, Bound::Sampler(sampler)),
+                                (5, Bound::whole(&gpu.bloom_params)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1880,18 +2014,21 @@ impl ViewNode for WeatherPostNode {
 
             // 合成：源 + 扩散层 + 泛光层 → 目的。写目的是 post_process_write
             // 的约定——主纹理已被翻到目的侧，不写就丢帧。
-            composite_bind_group = device.create_bind_group(
+            composite_bind_group = cache.get(
+                device,
                 "weather_composite_bind_group",
                 &composite_layout,
-                &BindGroupEntries::with_indices((
-                    (0, post_process.source),
-                    (1, diff_view),
-                    (2, BindingResource::Sampler(sampler)),
-                    (3, gpu.buffer.as_entire_binding()),
-                    (6, bloom_view),
-                )),
+                &[
+                    (0, Bound::View(post_process.source)),
+                    (1, Bound::View(diff_view)),
+                    (2, Bound::Sampler(sampler)),
+                    (3, Bound::whole(&gpu.buffer)),
+                    (6, Bound::View(bloom_view)),
+                ],
+                frame,
             );
         }
+        drop(cache);
 
         // 跑 pass：直拷 → 降采样链 → 上采样链（倒序）→ 泛光三连 → 合成。
         if let Some(bind_group) = copy_bind_group.as_ref() {

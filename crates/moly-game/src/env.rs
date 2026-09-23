@@ -251,6 +251,11 @@ fn write_env_buffer(
     buffer: Res<SiteEnvGpuBuffer>,
     queue: Res<RenderQueue>,
 ) {
+    // Extraction replaces the render-world table only on a frame where the
+    // main-world table changed; the buffer already holds every earlier copy.
+    if !env.is_changed() {
+        return;
+    }
     let bytes = env.gpu_bytes();
     queue.write_buffer(&buffer.buffer, 0, &bytes);
 }

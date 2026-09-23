@@ -63,6 +63,7 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 
 use crate::emoticon::EmoteDraw;
 use crate::env::SiteEnv;
+use crate::render::gpu::{BindGroupCache, Bound};
 use crate::fixture_material::WallLayoutShadowCasterOff;
 use crate::sky::SkyDome;
 use moly_assets::material_passes::SourceMaterialPasses;
@@ -615,11 +616,16 @@ fn prepare_shadow_draws(
 
 /// 深度 pass 节点：一次成图，跨视图共享（站点场景只有一台 3D 相机；
 /// 光源深度本就不依赖取景，多相机也不需要每视图一份）。
-struct ShadowDepthNode;
+///
+/// Its one bind group binds the frame and object buffers, which are replaced
+/// only when they grow, so it is cached by those buffer ids.
+struct ShadowDepthNode {
+    bind_groups: Mutex<BindGroupCache>,
+}
 
 impl FromWorld for ShadowDepthNode {
     fn from_world(_world: &mut World) -> Self {
-        Self
+        Self { bind_groups: Mutex::default() }
     }
 }
 
@@ -671,28 +677,28 @@ impl Node for ShadowDepthNode {
         };
 
         // 帧块 + 矩阵池一个 bind group；逐 draw 用动态 offset 换窗。
-        let bind_group = render_context.render_device().create_bind_group(
-            "site_shadow_depth_bind_group",
-            &pipeline_cache.get_bind_group_layout(&gpu.depth_layout),
-            &BindGroupEntries::with_indices((
-                (
-                    0u32,
-                    BindingResource::Buffer(BufferBinding {
-                        buffer: &gpu.frame_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                ),
-                (
-                    1u32,
-                    BindingResource::Buffer(BufferBinding {
-                        buffer: &gpu.object_buffer,
-                        offset: 0,
-                        size: Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
-                    }),
-                ),
-            )),
-        );
+        let bind_group = {
+            let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+            let mut groups = self.bind_groups.lock().unwrap();
+            groups.evict_idle(frame);
+            groups.get(
+                render_context.render_device(),
+                "site_shadow_depth_bind_group",
+                &pipeline_cache.get_bind_group_layout(&gpu.depth_layout),
+                &[
+                    (0, Bound::Buffer(&gpu.frame_buffer, 0, None)),
+                    (
+                        1,
+                        Bound::Buffer(
+                            &gpu.object_buffer,
+                            0,
+                            Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
+                        ),
+                    ),
+                ],
+                frame,
+            )
+        };
 
         let mut pass = render_context
             .command_encoder()
