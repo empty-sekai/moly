@@ -433,10 +433,11 @@ pub struct RouteStops {
     /// 最后贴合前的导航落点；下一次开启代理时用于从局部挂点返回面。
     reentry: Option<[f32; 3]>,
     pub(crate) outcome: Option<RouteOutcome>,
-    /// Source IsCompleted does not complete at this route's last navigation
-    /// corner (see [`CompletionJudge`]).
-    ends_short: bool,
-    /// That route has run out: only the IsStacked timer can end the movement.
+    /// The talk data target this move completes against (see
+    /// [`is_completed`]); every departure sets it.
+    completion: Option<MoveCompletion>,
+    /// That route has run out without completing: only IsCompleted against
+    /// the last destination or the IsStacked timer can end the movement.
     stalling: bool,
     /// The movement ended as source Stacked rather than by an outside stop.
     stalled: bool,
@@ -509,6 +510,21 @@ impl RouteStops {
     /// Consume the source Stacked marker of the latest Stopped outcome.
     pub(crate) fn take_stalled(&mut self) -> bool {
         std::mem::take(&mut self.stalled)
+    }
+
+    /// Source IsCompleted for an NPC at `position`, judged against the leg
+    /// currently submitted to navigation (Agent.destination). False while no
+    /// leg is submitted.
+    fn completed(&self, position: [f32; 3]) -> bool {
+        match (self.completion, self.navigation_destination) {
+            (Some(completion), Some(destination)) => is_completed(
+                position,
+                completion.target,
+                destination,
+                completion.site_height,
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -1116,6 +1132,8 @@ fn dwell_seconds(pause_seconds: f32) -> f32 {
 /// 家具 Fit 目标先严格导航到接近点，路线完成后才进入局部贴合。
 /// 初始/重复 corner 保持 CheckPoint，不额外驻留；无路返回 None。
 /// 高度几何只为已查询到的导航点落高，侧偏候选由单独的三维采样门准入。
+/// `corner` is also the talk data target the move completes against
+/// ([`is_completed`]); a replan passes the same target again.
 pub(crate) fn depart(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1138,56 +1156,55 @@ pub(crate) fn depart(
     } else {
         walk_face.path(start, goal)?
     };
-    route_along(unit, state, slot, route, walk_face, objective_face, corner, fit, rng, polyline, None)
+    route_along(unit, state, slot, route, walk_face, objective_face, corner, fit, rng, polyline)
 }
 
 /// Source `IsCompleted` judges against the talk data target itself, instead of
 /// the agent destination, once its switch distance reaches this (metres).
 const COMPLETION_DESTINATION_TOLERANCE: f32 = 0.25;
 
-/// Goal distance both objective types pass to the source MoveAsync (metres).
+/// Goal distance every objective passes to the source MoveAsync (metres). A
+/// separate literal from [`ARRIVAL_DISTANCE`], the presenter's per-leg test.
 const MOVE_GOAL_DISTANCE: f32 = 0.1;
 
-/// Source `IsCompleted` for one talk data target, evaluated where the route
-/// ends (the agent destination). Its switch is
-/// `sqrt((t.x - d.x)² + t.y² + (t.z - d.z)²)` for target `t` and destination
-/// `d`: the middle term is the target's own world height, not a height
-/// difference. From the tolerance on, the NPC is judged against the target,
-/// below it against the destination, which the route end reaches. Completion
-/// is a 3-D distance under the goal distance.
+/// What one move completes against: the talk data TargetPosition in this
+/// host's site-local coordinates, and SitePosition.y of the active site.
 #[derive(Clone, Copy, Debug)]
-struct CompletionJudge {
+struct MoveCompletion {
     target: [f32; 3],
-    /// SitePosition.y of the active site. This host renders the site at the
-    /// origin, so a target's world height is this plus its local height; the
-    /// room floors above the first sit hundreds of metres up, where the switch
-    /// always judges against the target.
+    /// This host renders the site at the origin, so a target's world height is
+    /// this plus its local height; the room floors above the first sit hundreds
+    /// of metres up, where the switch always judges against the target.
     site_height: f32,
 }
 
-impl CompletionJudge {
-    /// Whether an NPC standing at `end` (the lifted last corner) completes.
-    fn completes_at(&self, end: [f32; 3]) -> bool {
-        let [tx, ty, tz] = self.target;
-        let dx = tx - end[0];
-        let height = self.site_height + ty;
-        let dz = tz - end[2];
-        // Same operand order as the source: (dx² + h²) + dz².
-        let switch = ((dx * dx + height * height) + dz * dz).sqrt();
-        if switch < COMPLETION_DESTINATION_TOLERANCE {
-            return true;
-        }
-        let [px, py, pz] = [end[0] - tx, end[1] - ty, end[2] - tz];
-        // Same operand order as the source: dz² + (dx² + dy²).
-        (pz * pz + (px * px + py * py)).sqrt() < MOVE_GOAL_DISTANCE
-    }
+/// Source `NPCAvatarMoveExecutor.IsCompleted` with MoveAsync's goal distance,
+/// in site-local coordinates for NPC position `p`, talk data target `t`, agent
+/// destination `d` (the leg currently submitted) and SitePosition.y `site_y`.
+///
+/// The switch is `sqrt((t.x - d.x)² + (site_y + t.y)² + (t.z - d.z)²)`: its
+/// middle term is the target's own world height, not a height difference, so
+/// it is the only term the site offset does not cancel from. From the
+/// tolerance on, the NPC is judged against the target, below it against the
+/// destination. Completion is a 3-D distance under the goal distance. Operand
+/// order follows the source.
+///
+/// MoveAsync polls this every frame of the move ([`advance`]), whichever leg
+/// the presenter is walking, so a move can complete before its waypoints run
+/// out and an NPC standing at the path end may never complete.
+fn is_completed(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32) -> bool {
+    let dx = t[0] - d[0];
+    let height = site_y + t[1];
+    let dz = t[2] - d[2];
+    let switch = ((dx * dx + height * height) + dz * dz).sqrt();
+    let point = if switch >= COMPLETION_DESTINATION_TOLERANCE { t } else { d };
+    let [px, py, pz] = [p[0] - point[0], p[1] - point[1], p[2] - point[2]];
+    (pz * pz + (px * px + py * py)).sqrt() < MOVE_GOAL_DISTANCE
 }
 
 /// The objective's MoveAsync already passed its source gate and generated the
 /// polyline with the source `GeneratePath`. An empty polyline fails the move
-/// (TryGeneratePath). When [`CompletionJudge`] does not complete at the end of
-/// the polyline, reaching it is not arrival: the movement then waits for the
-/// IsStacked timer.
+/// (TryGeneratePath). The move completes by [`is_completed`] against `target`.
 pub(crate) fn depart_along(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1199,16 +1216,11 @@ pub(crate) fn depart_along(
     fit: Option<FitCandidate>,
     rng: &mut crate::npc_objective::MemberRng,
     polyline: Vec<[f32; 2]>,
-    site_height: f32,
 ) -> Option<MotionPhase> {
     route.outcome = None;
     reenter_navigation(state, route, walk_face)?;
     polyline.last()?;
-    let judge = CompletionJudge {
-        target,
-        site_height,
-    };
-    route_along(unit, state, slot, route, walk_face, objective_face, target, fit, rng, polyline, Some(judge))
+    route_along(unit, state, slot, route, walk_face, objective_face, target, fit, rng, polyline)
 }
 
 /// 源下次 MoveAsync 先重新开启 NavMeshAgent。这里只恢复已完成局部 Fit 的
@@ -1243,13 +1255,8 @@ fn route_along(
     fit: Option<FitCandidate>,
     rng: &mut crate::npc_objective::MemberRng,
     polyline: Vec<[f32; 2]>,
-    judge: Option<CompletionJudge>,
 ) -> Option<MotionPhase> {
     let corners = lift_navigation_path(unit, objective_face, polyline);
-    let ends_short = match (judge, corners.last()) {
-        (Some(judge), Some(end)) => !judge.completes_at(*end),
-        _ => false,
-    };
     route.stops = build_waypoints(state.position, &corners, state.forward, rng, |candidate| {
         objective_face
             .sample(candidate, WAYPOINT_SAMPLE_DISTANCE)
@@ -1261,7 +1268,10 @@ fn route_along(
     route.navigation_destination = None;
     route.fit = fit;
     route.reentry = None;
-    route.ends_short = ends_short;
+    route.completion = Some(MoveCompletion {
+        target: corner,
+        site_height: objective_face.site_height(),
+    });
     route.stalling = false;
     route.stalled = false;
     *slot = NpcPathWalkSlot::from_corners(Vec::new());
@@ -1325,18 +1335,21 @@ fn start_waypoint(
     objective_face: &crate::npc_objective::ObjectiveFace,
 ) -> Option<MotionPhase> {
     let Some(mut waypoint) = route.stops.get(route.next).copied() else {
-        let fit = route.fit.take();
         route.stops.clear();
         route.next = 0;
         route.goal = None;
-        route.navigation_destination = None;
-        if std::mem::take(&mut route.ends_short) {
-            // Source IsCompleted stays false for an NPC standing at the path
-            // end, so standing there never completes; no arrival and no local
-            // furniture fit.
+        if route.completion.is_some() {
+            // The presenter has no waypoint left. The per-frame IsCompleted
+            // poll in `advance` runs before this and has not completed
+            // against this last destination, so standing here is no arrival
+            // and no local furniture fit. MoveAsync keeps polling IsCompleted
+            // against that destination until its IsStacked timer ends the
+            // move: keep the destination, the target and the fit.
             route.stalling = true;
             return Some(MotionPhase::Dwelling { remaining: None });
         }
+        let fit = route.fit.take();
+        route.navigation_destination = None;
         let phase = fit
             .and_then(|fit| fit_depart(unit, state, slot, route, fit))
             .unwrap_or(MotionPhase::Dwelling { remaining: None });
@@ -1439,31 +1452,34 @@ fn next_waypoint_or_stop(
     })
 }
 
-/// The source MoveExecutor completion target is independent of the ordered
-/// waypoint list. Preserve its Agent.destination/TargetPosition distinction.
-/// CN NPCAvatarMoveExecutor.IsCompleted first compares TargetPosition with destination's XZ at y=0.
-fn source_goal_completed(position: [f32; 3], goal: [f32; 3], destination: [f32; 3]) -> bool {
-    let goal = Vec3::from(goal);
-    let destination = Vec3::from(destination);
-    let completion = if goal.distance(Vec3::new(destination.x, 0.0, destination.z)) < 0.25 {
-        destination
-    } else {
-        goal
+/// MoveAsync's IsCompleted held: the move ends where the NPC stands, whatever
+/// waypoints the presenter still had. A furniture target continues with
+/// NoUseNavmeshMoveAsync; any other target publishes Arrived now.
+fn complete_move(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+) -> MotionPhase {
+    *slot = NpcPathWalkSlot::from_corners(Vec::new());
+    state.next_corner = 0;
+    route.completion = None;
+    route.stalling = false;
+    let phase = match route.fit.take() {
+        Some(fit) => fit_depart(unit, state, slot, route, fit)
+            .expect("a validated fixture fit has a local phase"),
+        None => {
+            route.stops.clear();
+            route.next = 0;
+            route.goal = None;
+            route.navigation_destination = None;
+            MotionPhase::Dwelling { remaining: None }
+        }
     };
-    Vec3::from(position).distance(completion) < ARRIVAL_DISTANCE
-}
-
-/// A verified navigation leg must have arrived before the approximate host
-/// consumes the source global-goal predicate. Proximity across a wall alone
-/// must not bypass the route. This also stops radially ordered far checkpoints
-/// from taking a furniture actor away again after reaching its real goal.
-fn completed_fixture_fit(route: &mut RouteStops, position: [f32; 3], navigation_arrived: bool) -> Option<FitCandidate> {
-    if !navigation_arrived || route.fit.is_none()
-        || !source_goal_completed(position, route.goal?, route.navigation_destination?)
-    {
-        return None;
+    if matches!(phase, MotionPhase::Dwelling { remaining: None }) {
+        route.outcome = Some(RouteOutcome::Arrived);
     }
-    route.fit.take()
+    phase
 }
 
 /// NoUseNavmeshMoveAsync: disable the agent, move locally, then rotate to the
@@ -1706,10 +1722,13 @@ pub fn advance(
             let goal = route.goal;
             let fit = route.fit;
             let stalling = route.stalling;
+            let (completion, destination) = (route.completion, route.navigation_destination);
             *route = RouteStops::default();
             slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
             state.0.next_corner = 0;
             stuck.0 = None;
+            // The replan departs to the same goal, which is the same talk
+            // data target; the rebuilt objective face is the same site's.
             *phase = if let Some(goal) = goal {
                 match depart(
                     unit,
@@ -1740,8 +1759,14 @@ pub fn advance(
             };
             route.generation = walk_face.generation();
             // A route already waiting at its short end keeps waiting for the
-            // Stacked result; a rebake does not turn it into an arrival.
+            // Stacked result; a rebake does not turn it into an arrival, and
+            // IsCompleted keeps its last destination and target.
             route.stalling = stalling && goal.is_none();
+            if route.stalling {
+                route.completion = completion;
+                route.navigation_destination = destination;
+                route.fit = fit;
+            }
             declare_navigation_action(&mut actions, &mut rest, &phase, &route);
         }
         // 关闭代理的局部贴合结束后，先恢复已验证的导航接近点再让目标机查询。
@@ -1827,10 +1852,27 @@ pub fn advance(
                 };
             }
         }
+        // Source MoveAsync's WaitUntil polls IsCompleted every frame of the
+        // move, before its IsStacked check and whichever leg (or Rest wait)
+        // the presenter is on; the poll pauses while the NPC's state is Talk.
+        // It judges the position this frame's movement reached. A completion
+        // ends the move where the NPC stands or starts the local fit from
+        // there; every fit position is the move's target, so that fit spans at
+        // most the switch tolerance plus the goal distance.
+        let completed = actions.current != NpcAction::Talk && route.completed(state.0.position);
         // 转体完成帧的旋转：完成时相位已离开 Turning、`forward` 还是旧值，
         // 尾写需要一个不回跳的终点朝向。
         let mut finished_turn: Option<Quat> = None;
         match verdict {
+            _ if completed => {
+                stuck.0 = None;
+                *phase = complete_move(unit, &mut state.0, &mut slot.0, &mut route);
+                declare_navigation_action(&mut actions, &mut rest, &phase, &route);
+                info!(
+                    "[npc unit={}] t={now:.1} 移动完成（IsCompleted）于 ({:.2},{:.2},{:.2})",
+                    unit.0, state.0.position[0], state.0.position[1], state.0.position[2]
+                );
+            }
             WalkVerdict::Walking(_) => {
                 *phase = MotionPhase::Walking;
                 actions.change(NpcAction::AutoMove, &mut rest);
@@ -1861,18 +1903,10 @@ pub fn advance(
             }
             WalkVerdict::Arrived(distance) => {
                 let waypoint = route.stops[route.next];
-                let completed_fit = completed_fixture_fit(&mut route, state.0.position, actions.current != NpcAction::Talk);
                 slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
                 state.0.next_corner = 0;
                 stuck.0 = None;
-                if let Some(fit) = completed_fit {
-                    *phase = fit_depart(unit, &mut state.0, &mut slot.0, &mut route, fit)
-                        .expect("a validated fixture fit has a local phase");
-                    if matches!(*phase, MotionPhase::Dwelling { remaining: None }) {
-                        route.outcome = Some(RouteOutcome::Arrived);
-                    }
-                    declare_navigation_action(&mut actions, &mut rest, &phase, &route);
-                } else { match waypoint.kind {
+                match waypoint.kind {
                     WaypointKind::Rest => {
                         let dwell = dwell_seconds(pause.0);
                         *phase = MotionPhase::Dwelling {
@@ -1895,7 +1929,7 @@ pub fn advance(
                         );
                         declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                     }
-                } }
+                }
             }
             WalkVerdict::Idle => match &mut *phase {
                 MotionPhase::Turning {
@@ -1953,8 +1987,9 @@ pub fn advance(
                 MotionPhase::Dwelling { remaining: None } => {
                     if route.stalling {
                         // Source IsPositionStacked: no 0.09 m displacement in
-                        // 5 s ends the movement as Stacked while IsCompleted
-                        // cannot hold at this path end.
+                        // 5 s ends the movement as Stacked while the
+                        // IsCompleted poll above does not complete at this
+                        // path end.
                         match stuck.0 {
                             None => stuck.0 = Some((state.0.position, now)),
                             Some((last, since)) => {
@@ -2154,19 +2189,16 @@ mod fixture_approach_tests {
     use super::*;
 
     #[test]
-    fn source_goal_does_not_consume_fit_before_verified_navigation_arrival() {
+    fn completed_move_takes_the_fit_and_drops_the_remaining_route() {
         let goal = [1., 0., 0.];
         let mut route = RouteStops { stops: vec![
                 Waypoint { position: goal, kind: WaypointKind::CheckPoint },
                 Waypoint { position: [2., 0., 2.], kind: WaypointKind::CheckPoint },
             ], next: 0, goal: Some(goal), navigation_destination: Some(goal),
             fit: Some(FitCandidate { position: goal, rotation: Quat::IDENTITY }), ..default() };
-        assert!(completed_fixture_fit(&mut route, [0.95, 0., 0.], false).is_none());
-        assert!(route.fit.is_some());
-        let fit = completed_fixture_fit(&mut route, goal, true).unwrap();
         let mut state = LawWalkState::new(goal, [0., 0., 1.]);
         let mut slot = NpcPathWalkSlot::from_corners(vec![goal]);
-        fit_depart(&CharacterUnitId(11), &mut state, &mut slot, &mut route, fit).unwrap();
+        complete_move(&CharacterUnitId(11), &mut state, &mut slot, &mut route);
         assert!(route.stops.is_empty() && slot.corners().is_empty());
         assert!(route.fit.is_none());
     }

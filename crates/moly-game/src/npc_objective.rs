@@ -118,6 +118,10 @@ pub struct ObjectiveFace {
     epoch: u64,
     field: std::sync::Arc<moly_law::carve::WalkField>,
     generation: u64,
+    /// SitePosition.y of the site this face was built for. The site renders
+    /// at the origin, so this is the one world height the face's local
+    /// coordinates drop; MoveAsync's IsCompleted reads it.
+    site_height: f32,
 }
 
 impl ObjectiveFace {
@@ -158,6 +162,11 @@ impl ObjectiveFace {
     /// 点拿别的 y 去量，量出来的是那个 y 的影子，不是目标点本身。
     pub(crate) fn ref_y(&self) -> f32 {
         self.ref_y
+    }
+
+    /// SitePosition.y of this face's site.
+    pub(crate) fn site_height(&self) -> f32 {
+        self.site_height
     }
 
     /// Host reattachment using this existing WalkField and its surface mesh.
@@ -336,10 +345,14 @@ pub(crate) fn build_face(
     face: Option<Res<ObjectiveFace>>,
     epoch: Option<Res<GroundEpoch>>,
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
+    site: Option<Res<crate::site::SiteActive>>,
     parts: Query<(&Mesh3d, &GlobalTransform)>,
 ) {
     let epoch = epoch.map(|epoch| epoch.0).unwrap_or(0);
     let Some(walk_face) = walk_face else {
+        return;
+    };
+    let Some(site_height) = site.as_deref().map(|site| site.position[1]) else {
         return;
     };
     if face.is_some_and(|face| face.epoch == epoch && face.generation == walk_face.generation()) {
@@ -443,6 +456,7 @@ pub(crate) fn build_face(
         epoch,
         field: walk_face.field.clone(),
         generation: walk_face.generation(),
+        site_height,
     };
     let mut walkable = Vec::new();
     for x in grid_min.0..=grid_max.0 {
@@ -1112,7 +1126,7 @@ pub(crate) fn decide(
     mut saved_layouts: MessageReader<crate::fixture_edit::LayoutSaved>,
     face: Option<Res<ObjectiveFace>>,
     epoch: Option<Res<GroundEpoch>>,
-    (selection, site): (Option<Res<SiteSelection>>, Option<Res<crate::site::SiteActive>>),
+    selection: Option<Res<SiteSelection>>,
     placements: Res<FixturePlacements>,
     mut anchored_cache: Local<AnchoredFixtureCache>,
     configs: Option<Res<ClientConfigs>>,
@@ -1164,11 +1178,6 @@ pub(crate) fn decide(
         return;
     };
     let Some(config) = configs.as_deref() else {
-        return;
-    };
-    // SitePosition.y of the active site (MoveAsync's IsCompleted reads the
-    // target's world height).
-    let Some(site_height) = site.as_deref().map(|site| site.position[1]) else {
         return;
     };
     // 代数资源在场才算「面已定案」：首站定案（inactiveNodes 清扫）之前
@@ -1828,7 +1837,6 @@ pub(crate) fn decide(
                     fit,
                     &mut *rng,
                     polyline,
-                    site_height,
                 ) {
                     Some(depart_phase) => {
                         if let Some(selected) = fixture_selection.take() {
@@ -2116,7 +2124,7 @@ mod navigation_height_tests {
             }
         }
         ObjectiveFace { tris, buckets, grid_min: (-16, -16), grid_max: (16, 16),
-            ref_y: 0.0, walkable: Vec::new(), epoch: 1, field, generation: 1 }
+            ref_y: 0.0, walkable: Vec::new(), epoch: 1, field, generation: 1, site_height: 0.0 }
     }
 
     #[test]
