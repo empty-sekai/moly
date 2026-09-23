@@ -899,37 +899,141 @@ fn write_environment(
     };
     let (a,b,p) = (resolve(previous),resolve(next),resolve(profile));
     let blended = blend_at_site(a,b,p,phase.progress,previous.environment_site=="home",next.environment_site=="home");
-    env.globals.light_vector = blended.light_dir.to_array();
+    // Every bridge below is written through change detection only on a frame
+    // where one of its bits changes. Render-world extraction, the GPU upload and
+    // the sky material re-prepare all key on that flag, so a steady environment
+    // no longer re-sends identical values every frame.
+    let site = env.bypass_change_detection();
+    let mut site_changed = store(&mut site.globals.light_vector, blended.light_dir.to_array());
     let values = timeline.values;
     let add = moly_law::weather::timeline::additive_light;
-    env.globals.phenomena_directional_light_color = add(blended.light_color, values.light_color, values.light_intensity);
+    site_changed |= store(&mut site.globals.phenomena_directional_light_color,
+        add(blended.light_color, values.light_color, values.light_intensity));
     let character_light = add(lerp4(a.character_light_color, b.character_light_color, phase.progress),
         values.light_color, values.light_intensity);
-    if let Some(character) = character.as_deref_mut() {
-        character.globals.light_vector = blended.light_dir.to_array();
-        character.globals.light_color = character_light;
-        character.globals.skin_shade_color = lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress);
-        character.globals.body_shade_color = lerp4(a.character_body_shade, b.character_body_shade, phase.progress);
-        character.globals.fog_params = blended.fog.fog_params;
-        character.globals.fog_near_color = blended.fog.fog_near_color;
-        character.globals.fog_far_color = blended.fog.fog_far_color;
-        character.fog_ready = true;
+    if let Some(character) = character.as_mut() {
+        let target = character.bypass_change_detection();
+        let mut changed = store(&mut target.globals.light_vector, blended.light_dir.to_array());
+        changed |= store(&mut target.globals.light_color, character_light);
+        changed |= store(&mut target.globals.skin_shade_color,
+            lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress));
+        changed |= store(&mut target.globals.body_shade_color,
+            lerp4(a.character_body_shade, b.character_body_shade, phase.progress));
+        changed |= store(&mut target.globals.fog_params, blended.fog.fog_params);
+        changed |= store(&mut target.globals.fog_near_color, blended.fog.fog_near_color);
+        changed |= store(&mut target.globals.fog_far_color, blended.fog.fog_far_color);
+        changed |= store(&mut target.fog_ready, true);
+        if changed { character.set_changed(); }
     }
-    if let Some(avatar) = avatar.as_deref_mut() { avatar.light_color = character_light; }
-    env.globals.phenomena_shade_color = blended.shade_color;
-    env.drop_shadow_color = blended.drop_shadow;
-    env.sky_bottom_color = blended.sky_bottom_color;
-    env.globals.fog_params = blended.fog.fog_params;
-    env.globals.fog_near_color = blended.fog.fog_near_color;
-    env.globals.fog_far_color = blended.fog.fog_far_color;
-    env.emission_type = blended.post.emission_type as f32;
-    *post = blended.post;
+    if let Some(avatar) = avatar.as_mut() {
+        if store(&mut avatar.bypass_change_detection().light_color, character_light) { avatar.set_changed(); }
+    }
+    site_changed |= store(&mut site.globals.phenomena_shade_color, blended.shade_color);
+    site_changed |= store(&mut site.drop_shadow_color, blended.drop_shadow);
+    site_changed |= store(&mut site.sky_bottom_color, blended.sky_bottom_color);
+    site_changed |= store(&mut site.globals.fog_params, blended.fog.fog_params);
+    site_changed |= store(&mut site.globals.fog_near_color, blended.fog.fog_near_color);
+    site_changed |= store(&mut site.globals.fog_far_color, blended.fog.fog_far_color);
+    site_changed |= store(&mut site.emission_type, blended.post.emission_type as f32);
+    if site_changed { env.set_changed(); }
+    if !post.same_bits(&blended.post) { *post = blended.post; }
     if let Ok(handle) = sky_materials.single() {
-        if let Some(material) = materials.get_mut(&handle.0) {
-            material.set_ramps(a.ramp.clone(),b.ramp.clone(),phase.progress);
-            material.set_timeline_additive(values.sky_color, values.sky_intensity);
+        // `get_mut` always marks the asset modified, and a modified material is
+        // re-prepared with new uniform buffers and a new bind group.
+        let stale = materials.get(&handle.0).is_some_and(|material| {
+            material.differs_from(&a.ramp, &b.ramp, phase.progress, values.sky_color, values.sky_intensity)
+        });
+        if stale {
+            if let Some(material) = materials.get_mut(&handle.0) {
+                material.set_ramps(a.ramp.clone(),b.ramp.clone(),phase.progress);
+                material.set_timeline_additive(values.sky_color, values.sky_intensity);
+            }
         }
     }
+}
+
+/// Bit-exact equality for the values the environment bridges store. Floats
+/// compare by bit pattern, so a store is skipped only when it would write the
+/// very same bits (`-0.0` still replaces `0.0`).
+trait SameBits {
+    fn same_bits(&self, other: &Self) -> bool;
+}
+
+impl SameBits for f32 {
+    fn same_bits(&self, other: &Self) -> bool { self.to_bits() == other.to_bits() }
+}
+
+impl SameBits for i32 {
+    fn same_bits(&self, other: &Self) -> bool { self == other }
+}
+
+impl SameBits for bool {
+    fn same_bits(&self, other: &Self) -> bool { self == other }
+}
+
+impl<T: SameBits, const N: usize> SameBits for [T; N] {
+    fn same_bits(&self, other: &Self) -> bool {
+        self.iter().zip(other).all(|(a, b)| a.same_bits(b))
+    }
+}
+
+impl SameBits for ColorAdjustmentsParams {
+    fn same_bits(&self, other: &Self) -> bool {
+        // Exhaustive destructuring: a new field does not compile until it is compared.
+        let ColorAdjustmentsParams { post_exposure, contrast, color_filter, hue_shift, saturation } = self;
+        post_exposure.same_bits(&other.post_exposure)
+            && contrast.same_bits(&other.contrast)
+            && color_filter.same_bits(&other.color_filter)
+            && hue_shift.same_bits(&other.hue_shift)
+            && saturation.same_bits(&other.saturation)
+    }
+}
+
+impl SameBits for WeatherPostParams {
+    fn same_bits(&self, other: &Self) -> bool {
+        // Exhaustive destructuring: a new field does not compile until it is compared.
+        let WeatherPostParams {
+            diff_on, diff_intensity, diff_contrast, diff_blend_mode, diff_scatter,
+            diff_max_iterations, diff_buffer_height, flare_on, flare_intensity, flare_axis,
+            flare_color1, flare_color2, flare_offset1, flare_offset2, flare_exponent,
+            emission_type, bloom_on, bloom_prefilter, bloom_uber, bloom_overlay,
+            bloom_buffer_height, grade_on, grade, split_shadows, split_highlights,
+        } = self;
+        diff_on.same_bits(&other.diff_on)
+            && diff_intensity.same_bits(&other.diff_intensity)
+            && diff_contrast.same_bits(&other.diff_contrast)
+            && diff_blend_mode.same_bits(&other.diff_blend_mode)
+            && diff_scatter.same_bits(&other.diff_scatter)
+            && diff_max_iterations.same_bits(&other.diff_max_iterations)
+            && diff_buffer_height.same_bits(&other.diff_buffer_height)
+            && flare_on.same_bits(&other.flare_on)
+            && flare_intensity.same_bits(&other.flare_intensity)
+            && flare_axis.same_bits(&other.flare_axis)
+            && flare_color1.same_bits(&other.flare_color1)
+            && flare_color2.same_bits(&other.flare_color2)
+            && flare_offset1.same_bits(&other.flare_offset1)
+            && flare_offset2.same_bits(&other.flare_offset2)
+            && flare_exponent.same_bits(&other.flare_exponent)
+            && emission_type.same_bits(&other.emission_type)
+            && bloom_on.same_bits(&other.bloom_on)
+            && bloom_prefilter.same_bits(&other.bloom_prefilter)
+            && bloom_uber.same_bits(&other.bloom_uber)
+            && bloom_overlay.same_bits(&other.bloom_overlay)
+            && bloom_buffer_height.same_bits(&other.bloom_buffer_height)
+            && grade_on.same_bits(&other.grade_on)
+            && grade.same_bits(&other.grade)
+            && split_shadows.same_bits(&other.split_shadows)
+            && split_highlights.same_bits(&other.split_highlights)
+    }
+}
+
+/// Stores `value` into `slot` only when a bit differs; reports whether it wrote.
+fn store<T: SameBits>(slot: &mut T, value: T) -> bool {
+    if slot.same_bits(&value) {
+        return false;
+    }
+    *slot = value;
+    true
 }
 
 /// Update：两个入口共用这一条切换链——场景输入可用时 C 键循环推进到下一
