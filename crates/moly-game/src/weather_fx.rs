@@ -1309,7 +1309,10 @@ pub(crate) fn advance(
             SimulationSpace::World => GlobalTransform::IDENTITY,
             _ => compose_to_world(system, &ctx),
         };
-        let Some(mesh) = meshes.get_mut(&system.mesh) else {
+        // The source-program renderer extracts Assets<Mesh> directly each frame
+        // and no Bevy material draws this mesh, so a Modified event would only
+        // make the mesh allocator re-upload a buffer nothing reads.
+        let Some(mesh) = meshes.get_mut_untracked(&system.mesh) else {
             continue;
         };
         crate::particle_runtime::write_geometry(mesh, system, &to_world,
