@@ -1529,7 +1529,11 @@ fn spawn_when_ready(
             if assets.handles.contains_key(&path) {
                 continue;
             }
-            let handle = server.load::<Gltf>(bevy::asset::AssetPath::from(path.clone()));
+            let handle = moly_assets::residency::load_gltf(
+                &server,
+                bevy::asset::AssetPath::from(path.clone()),
+                moly_assets::residency::GltfResidency::CpuTextures,
+            );
             assets.handles.insert(path, handle);
             slots -= 1;
         }

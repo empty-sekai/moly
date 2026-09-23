@@ -212,7 +212,11 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
                 return Some(handle.clone());
             }
             let path = candidates.paths.get(&row.package)?.clone();
-            let handle = world.resource::<AssetServer>().load::<Gltf>(path);
+            let handle = moly_assets::residency::load_gltf(
+                world.resource::<AssetServer>(),
+                path,
+                moly_assets::residency::GltfResidency::CpuTextures,
+            );
             candidates.glbs.insert(row.package.clone(), handle.clone());
             Some(handle)
         });

@@ -39,6 +39,7 @@ use bevy::gltf::{Gltf, GltfMesh};
 use bevy::prelude::*;
 use bevy::scene::{SceneInstanceReady, SceneRoot};
 use moly_assets::json::JsonAsset;
+use moly_assets::residency::{load_gltf, GltfResidency};
 use std::collections::HashMap;
 
 /// 缺省站点：入口未传参时装载它（主表的 grasslands 行）。
@@ -774,28 +775,28 @@ pub(crate) fn plan(
         walkable_file: sites.walkable.get(&site_level).cloned().flatten(),
     });
     let module = room.as_ref().map(|_| {
-        server.load::<Gltf>(AssetPath::from(format!(
+        load_gltf(&server, AssetPath::from(format!(
             "moly://site/indoor/modules/lv_{:02}/lv_{:02}.glb",
             site_level, site_level
-        )))
+        )), GltfResidency::GpuTextures)
     });
     let walkable = room
         .as_ref()
         .and_then(|room| room.walkable_file.as_ref())
         .map(|file| {
-            server.load::<Gltf>(AssetPath::from(format!(
+            load_gltf(&server, AssetPath::from(format!(
                 "moly://site/indoor/navigation/navigation_mesh/{file}"
-            )))
+            )), GltfResidency::GpuTextures)
         });
     // 玩家可行走面来自清单中的显式导航输入（草原另用烘档高度网格）。
     // 有无离线瓦片不影响独立导航输入的装载；无独立面时才沿用地表。
     let navmesh = sites.nav_face(&row.scene).map(|face| match face {
-        NavFace::Heightmesh => server.load::<Gltf>(AssetPath::from(format!(
+        NavFace::Heightmesh => load_gltf(&server, AssetPath::from(format!(
             "moly://site/scenes/{}/navmesh/heightmesh-0.glb",
             row.scene
-        ))),
+        )), GltfResidency::GpuTextures),
         NavFace::BakeInput(file) => {
-            server.load::<Gltf>(AssetPath::from(format!("moly://site/{file}")))
+            load_gltf(&server, AssetPath::from(format!("moly://site/{file}")), GltfResidency::GpuTextures)
         }
     });
     let nav_face_name = sites.nav_face(&row.scene).map(|face| match face {
@@ -822,7 +823,7 @@ pub(crate) fn plan(
         nav_face: nav_face_name,
     });
     commands.insert_resource(SiteAssets {
-        gltf: server.load::<Gltf>(moly_assets::site_scene(&row.scene)),
+        gltf: load_gltf(&server, moly_assets::site_scene(&row.scene), GltfResidency::GpuTextures),
         grounds,
         module,
         walkable,

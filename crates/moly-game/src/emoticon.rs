@@ -826,7 +826,10 @@ fn build_item(
     {
         let tname = s_field(t, "name").unwrap_or_default();
         let file = s_field(t, "file").unwrap_or_default();
-        let handle = server.load::<Image>(AssetPath::from(format!("{EMOTICON_DIR}/{file}")));
+        let handle = moly_assets::residency::load_image(
+            &server,
+            AssetPath::from(format!("{EMOTICON_DIR}/{file}")),
+        );
         tex_by_name.insert(tname.clone(), textures.len());
         tex_by_file.insert(file, textures.len());
         textures.push(TexEntry {

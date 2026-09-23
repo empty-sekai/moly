@@ -185,9 +185,14 @@ pub(super) fn plan_candidates(
                 )
             })
             .clone();
-        candidates
-            .glbs
-            .insert(row.package.into(), server.load(path));
+        candidates.glbs.insert(
+            row.package.into(),
+            moly_assets::residency::load_gltf(
+                &server,
+                path,
+                moly_assets::residency::GltfResidency::CpuTextures,
+            ),
+        );
     }
     candidates.index = None;
 }

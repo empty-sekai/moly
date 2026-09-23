@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy::sprite::{BorderRect, SliceScaleMode, TextureSlicer};
 use moly_assets::{
     json::JsonAsset,
+    residency::load_image,
     ui_layout::{
         auto_layout::{compute_overrides, LayoutMetrics},
         RectTransform, UiComponent, UiPrefab, UiRect,
@@ -241,7 +242,7 @@ pub(crate) fn parse(
             layouts
                 .images
                 .entry(path.clone())
-                .or_insert_with(|| server.load(format!("{ROOT}{path}")));
+                .or_insert_with(|| load_image(&server, format!("{ROOT}{path}")));
         }
         layouts.metadata_loaded = true;
     }
@@ -283,7 +284,7 @@ impl UiLayouts {
             assert_eq!(previous, &full_path, "runtime UI texture alias was rebound: {alias}");
         }
         let image = self.images.entry(full_path.clone())
-            .or_insert_with(|| server.load(full_path.clone())).clone();
+            .or_insert_with(|| load_image(server, full_path.clone())).clone();
         self.runtime_textures.insert(alias.to_owned(), full_path);
         image
     }
@@ -330,7 +331,7 @@ impl UiLayouts {
         });
         for path in &paths {
             let id = self.images.entry(path.clone())
-                .or_insert_with(|| server.load(format!("{ROOT}{path}"))).id();
+                .or_insert_with(|| load_image(server, format!("{ROOT}{path}"))).id();
             self.image_documents.entry(id).or_default().push(key.to_owned());
         }
         self.document_images.insert(key.to_owned(), paths);

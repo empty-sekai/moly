@@ -1094,8 +1094,11 @@ fn plan_when_ready(
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("采集物清单条目缺 glb 文件名：{key}"));
         if preview_placements_enabled() {
-            let handle =
-                server.load::<Gltf>(bevy::asset::AssetPath::from(format!("moly://site/{glb}")));
+            let handle = moly_assets::residency::load_gltf(
+                &server,
+                bevy::asset::AssetPath::from(format!("moly://site/{glb}")),
+                moly_assets::residency::GltfResidency::GpuTextures,
+            );
             by_key.insert(key.clone(), handle);
             order.push(key.clone());
         }
