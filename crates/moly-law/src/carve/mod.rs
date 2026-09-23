@@ -45,6 +45,11 @@
 //! 贪心视线拉直」，与原生代理「搜索 + 直线路径后处理」同形（后处理
 //! 本体在原生层，不可读）。
 //!
+//! NPC 出发门与出发路线另走 [`WalkField::calculate_path`]：引擎
+//! `CalculatePath` 本身的格面形态（查询盒映射 + 完整或部分折线），其上
+//! 叠 `IfMoveTargetPosition` / `IfMoveTargetFixtureActionPosition` /
+//! `GeneratePath` 三个源方法的判定。
+//!
 //! # 具名边界（未建模的东西，与为什么）
 //!
 //! * **瓦边豁免不建模**：源按瓦分区，连瓦边的小区不杀（真实面积跨瓦
@@ -97,6 +102,39 @@ pub const MIN_REGION_AREA: f32 = 2.0;
 /// 轮廓简化的最大偏差（格）：原生构造 Recast 配置时写入的常量，
 /// f32 位形 1.2999999523162842。它不随站点变化。
 pub const MAX_SIMPLIFICATION_ERROR: f32 = 1.3;
+
+/// 静态路径查询（`NavMesh.CalculatePath`，不带过滤器）的水平查询半宽。
+/// 引擎为这种调用构造代理类型 −1 的过滤器；导航设置里没有 −1，
+/// `NavMeshManager.GetQueryExtents` 退回管理器构造时写入的缺省查询盒
+/// (0.5, 2.0, 0.5)，两端都用这只盒映射到网上。
+pub const STATIC_QUERY_HALF_EXTENT: f32 = 0.5;
+
+/// 代理路径查询（`NavMeshAgent.CalculatePath`）的水平查询半宽：引擎用代理
+/// 自己的过滤器，`GetQueryExtents` 取该代理类型烘焙设置的
+/// (agentRadius, agentHeight, agentRadius)。查询盒的高度分量在单层格面上
+/// 没有可选的层，不参与。
+pub const AGENT_QUERY_HALF_EXTENT: f32 = AGENT_RADIUS;
+
+/// 家具动作点出发门里 `CanNavmeshMoveTargetPosition` 的阈值（源字面量）。
+pub const FIXTURE_ACTION_REACH_THRESHOLD: f32 = 0.01;
+
+/// `GeneratePath` 重试时 `SamplePosition` 的 maxDistance（源字面量）。
+pub const GENERATE_PATH_SAMPLE_DISTANCE: f32 = 500.0;
+
+/// 引擎路径查询结果（`NavMeshPath` 的拐点与完整性）：首拐点是映射后的
+/// 起点；`complete` 为假时末拐点是起点分量里离目标最近的点。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavPath {
+    pub corners: Vec<[f32; 2]>,
+    pub complete: bool,
+}
+
+/// 引擎 `Mathf.Approximately`：`|b−a| < max(1e-6·max(|a|,|b|), 8·ε)`，ε 取
+/// float 最小非零值；米级坐标上比较完全由相对项决定。
+fn approximately(a: f32, b: f32) -> bool {
+    const EPSILON: f32 = 1.401_298_5e-45;
+    (b - a).abs() < (1e-6 * a.abs().max(b.abs())).max(EPSILON * 8.0)
+}
 
 /// 站点枚举名 → 值（`MysekaiSiteType` 的九值闭集）。
 pub fn site_type_value(name: &str) -> Option<u32> {
@@ -353,6 +391,87 @@ impl WalkField {
     /// 严格完整路线：不拉回目标，起终点必须已在可走场上。
     pub fn path_exact(&self, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
         query::path_exact(&self.grid, &self.polys, &self.regions, start, goal)
+    }
+
+    /// 引擎 `CalculatePath` 的格面形态：两端各在水平半宽 `half_extent` 的
+    /// 查询盒里映射到最近可走格，任一端落空返回 `None`（引擎返回 false）。
+    /// 连通时给完整折线；不连通时给到起点分量里离目标最近处的部分折线——
+    /// 引擎对部分路径同样返回 true，调用方要区分就看 [`NavPath::complete`]
+    /// 或自比末拐点。
+    pub fn calculate_path(
+        &self,
+        source: [f32; 2],
+        target: [f32; 2],
+        half_extent: f32,
+    ) -> Option<NavPath> {
+        query::calculate_path(&self.grid, &self.polys, &self.regions, source, target, half_extent)
+            .map(|(corners, complete)| NavPath { corners, complete })
+    }
+
+    /// `calculate_path(..).is_some()` without the search: once both ends map,
+    /// a complete or a partial result exists, so success is exactly that.
+    pub fn can_calculate_path(&self, source: [f32; 2], target: [f32; 2], half_extent: f32) -> bool {
+        query::calculate_path_succeeds(&self.grid, &self.polys, &self.regions, source, target, half_extent)
+    }
+
+    /// `MoveUtility.CanNavmeshMoveTargetPosition`：静态路径查询成功，且末
+    /// 拐点与目标的水平距离小于阈值。
+    pub fn can_navmesh_move_target_position(
+        &self,
+        from: [f32; 2],
+        target: [f32; 2],
+        threshold: f32,
+    ) -> bool {
+        let Some(path) = self.calculate_path(from, target, STATIC_QUERY_HALF_EXTENT) else {
+            return false;
+        };
+        let Some(last) = path.corners.last() else {
+            return false;
+        };
+        ((last[0] - target[0]).powi(2) + (last[1] - target[1]).powi(2)).sqrt() < threshold
+    }
+
+    /// `NPCAvatarMoveExecutor.IfMoveTargetPosition`（出发门，目标不带家具）：
+    /// 静态路径查询成功，且末拐点的 x、z 分别与目标 Approximately 相等——
+    /// 部分路径与被映射挪开的目标都不过门。
+    pub fn if_move_target_position(&self, current: [f32; 2], target: [f32; 2]) -> bool {
+        let Some(path) = self.calculate_path(current, target, STATIC_QUERY_HALF_EXTENT) else {
+            return false;
+        };
+        path.corners
+            .last()
+            .is_some_and(|last| approximately(target[0], last[0]) && approximately(target[1], last[1]))
+    }
+
+    /// `NPCAvatarMoveExecutor.IfMoveTargetFixtureActionPosition`（出发门，目标
+    /// 带家具）：静态路径查询成功后，把它的**末拐点**（不是目标）交给
+    /// `CanNavmeshMoveTargetPosition(当前位, 末拐点, 0.01)`。部分路径的末拐点
+    /// 在起点分量上，第二次查询照样到得了——所以部分路径也过这道门。
+    pub fn if_move_target_fixture_action_position(&self, current: [f32; 2], target: [f32; 2]) -> bool {
+        let Some(path) = self.calculate_path(current, target, STATIC_QUERY_HALF_EXTENT) else {
+            return false;
+        };
+        let Some(last) = path.corners.last().copied() else {
+            return false;
+        };
+        self.can_navmesh_move_target_position(current, last, FIXTURE_ACTION_REACH_THRESHOLD)
+    }
+
+    /// `NPCAvatarPresenter.GeneratePath`：代理自己的路径查询（代理类型的查询
+    /// 盒）成功就取全部拐点；失败则 `SamplePosition(目标, 500)`（不检查命中，
+    /// 落空时命中位是零向量）后对命中位再查一次，成功取去掉首拐点的其余
+    /// 拐点，再失败给空表。
+    pub fn generate_path(&self, current: [f32; 2], target: [f32; 2]) -> Vec<[f32; 2]> {
+        if let Some(path) = self.calculate_path(current, target, AGENT_QUERY_HALF_EXTENT) {
+            return path.corners;
+        }
+        let hit = self
+            .nearest_walkable(target, Some(GENERATE_PATH_SAMPLE_DISTANCE))
+            .unwrap_or([0.0, 0.0]);
+        match self.calculate_path(current, hit, AGENT_QUERY_HALF_EXTENT) {
+            Some(path) => path.corners.into_iter().skip(1).collect(),
+            None => Vec::new(),
+        }
     }
 
     /// 整条位移线段的超覆盖判定（同路线拉直，不只检查终点）。
