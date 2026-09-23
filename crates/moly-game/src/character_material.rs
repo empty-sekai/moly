@@ -39,6 +39,7 @@ use moly_law::shading::character::CharacterGlobals;
 use crate::character::{CharacterModel, CharacterPack, MotionDriver};
 use crate::light;
 use crate::npc::CharacterUnitId;
+use crate::render::gpu::store_bits;
 
 // ---- 现象常量（晴天配置的源值照抄） ----
 
@@ -467,10 +468,16 @@ pub fn write_frame_state(
         Projection::Orthographic(o) => (o.near, o.far),
         Projection::Custom(_) => panic!("角色全局量不认识自定义投影"),
     };
-    env.projection_params = [1.0, near, far, 1.0 / far];
+    // Written through change detection only when a bit changes: extraction and
+    // the GPU upload key on the flag, and the camera state is steady most frames.
+    let target = env.bypass_change_detection();
+    let mut changed = store_bits(&mut target.projection_params, [1.0, near, far, 1.0 / far]);
     if let Some(size) = camera.physical_viewport_size() {
         let (w, h) = (size.x as f32, size.y as f32);
-        env.globals.screen_params = [w, h, 1.0 + 1.0 / w, 1.0 + 1.0 / h];
+        changed |= store_bits(&mut target.globals.screen_params, [w, h, 1.0 + 1.0 / w, 1.0 + 1.0 / h]);
+    }
+    if changed {
+        env.set_changed();
     }
 }
 
@@ -494,6 +501,11 @@ fn write_env_buffer(
     buffer: Res<CharacterEnvGpuBuffer>,
     queue: Res<RenderQueue>,
 ) {
+    // Extraction replaces the render-world table only on a frame where the
+    // main-world table changed; the buffer already holds every earlier copy.
+    if !env.is_changed() {
+        return;
+    }
     let bytes = env.gpu_bytes();
     queue.write_buffer(&buffer.buffer, 0, &bytes);
 }

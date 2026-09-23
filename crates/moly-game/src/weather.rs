@@ -1675,6 +1675,11 @@ fn write_weather_uniforms(
     gpu: Res<WeatherPostGpu>,
     queue: Res<RenderQueue>,
 ) {
+    // The three buffers are a pure function of the extracted axis values, which
+    // extraction replaces only on a frame where they changed.
+    if !params.is_changed() {
+        return;
+    }
     queue.write_buffer(&gpu.buffer, 0, &WeatherPostUniform::from_params(&params).gpu_bytes());
     queue.write_buffer(&gpu.scatter, 0, &scatter_weight(params.diff_scatter).to_le_bytes());
     // 泛光金字塔参数：律打包值整块透传（消费侧不二次推导——律里是照
