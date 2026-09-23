@@ -589,12 +589,12 @@ pub(crate) struct TimelineAnimationBinding {
 pub(crate) struct TimelineBindings {
     pub animations: HashMap<TimelineClipKey, TimelineAnimationBinding>,
     pub actors: HashMap<SourceAssetId, Entity>,
-    pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
     /// SE clips that play silent because their SE has no route or its audio
     /// failed to load. Only the player owner fills this (see
     /// `silence_unavailable_sounds`); every other owner leaves it empty and
     /// still requires each SE.
     pub silent_sounds: HashSet<TimelineClipKey>,
+    pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
 }
 #[derive(Clone)]
 pub(crate) struct TimelineCompanionTrack {
@@ -906,40 +906,6 @@ fn all_tracks(request: &StartTimeline) -> Result<Vec<&TimelineTrack>, TimelineFa
     Ok(result)
 }
 
-/// Load exact `(package,cue)` resources through the existing audio Routing
-/// and AssetServer. Calling this does not start audio or admit an action.
-/// A clip in `silent_sounds` is neither routed nor loaded.
-pub(crate) fn prepare_source_sounds(
-    world: &World,
-    request: &mut StartTimeline,
-) -> Result<(), TimelineFailure> {
-    let routing = world
-        .get_resource::<Routing>()
-        .ok_or_else(|| routing_absent(world))?;
-    let server = world
-        .get_resource::<AssetServer>()
-        .ok_or_else(|| invalid("asset server missing"))?;
-    let mut sounds = HashMap::new();
-    for track in all_tracks(request)? {
-        for clip in &track.clips {
-            if let TimelinePayload::Se { package, cue } = &clip.payload {
-                if request.bindings.silent_sounds.contains(&clip.key) {
-                    continue;
-                }
-                let path = routing
-                    .timeline_se_asset_path(package, cue)
-                    .ok_or_else(|| invalid(format!("missing source SE {package}/{cue}")))?;
-                sounds.insert(
-                    clip.key.clone(),
-                    server.load::<AudioSource>(AssetPath::from(format!("moly://{path}"))),
-                );
-            }
-        }
-    }
-    request.bindings.sounds = sounds;
-    Ok(())
-}
-
 /// The audio routing table is built once, from files requested at start. While
 /// that loader is still running this is a wait; once it has finished without
 /// the table, no later frame supplies it, so the failure is final.
@@ -1001,6 +967,40 @@ pub(crate) fn silence_unavailable_sounds(
             description
         })
         .collect()
+}
+
+/// Load exact `(package,cue)` resources through the existing audio Routing
+/// and AssetServer. Calling this does not start audio or admit an action.
+/// A clip in `silent_sounds` is neither routed nor loaded.
+pub(crate) fn prepare_source_sounds(
+    world: &World,
+    request: &mut StartTimeline,
+) -> Result<(), TimelineFailure> {
+    let routing = world
+        .get_resource::<Routing>()
+        .ok_or_else(|| routing_absent(world))?;
+    let server = world
+        .get_resource::<AssetServer>()
+        .ok_or_else(|| invalid("asset server missing"))?;
+    let mut sounds = HashMap::new();
+    for track in all_tracks(request)? {
+        for clip in &track.clips {
+            if let TimelinePayload::Se { package, cue } = &clip.payload {
+                if request.bindings.silent_sounds.contains(&clip.key) {
+                    continue;
+                }
+                let path = routing
+                    .timeline_se_asset_path(package, cue)
+                    .ok_or_else(|| invalid(format!("missing source SE {package}/{cue}")))?;
+                sounds.insert(
+                    clip.key.clone(),
+                    server.load::<AudioSource>(AssetPath::from(format!("moly://{path}"))),
+                );
+            }
+        }
+    }
+    request.bindings.sounds = sounds;
+    Ok(())
 }
 
 pub(crate) fn validate_start(
