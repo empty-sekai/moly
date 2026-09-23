@@ -1057,17 +1057,34 @@ pub(crate) fn apply_graphics(
 ///
 /// A page sees each display refresh as an animation frame. The pacer counts
 /// refreshes with `refresh_count::RefreshCount` and wakes the engine on the
-/// animation frame that completes the spacing.
+/// animation frame that completes the spacing. The page does not report its
+/// refresh rate, so the first wake-up waits until two animation-frame
+/// intervals agree on it.
 ///
 /// The engine loop is reactive: its wait is an hour and it ignores window and
 /// device events, so it updates only when this pacer wakes it through the
-/// event-loop proxy. The winit runner handles that wake-up in a microtask of
-/// the same animation frame. The runner updates only after a redraw since
-/// its previous update and requests its own animation frame at the end of
-/// every update, so the pacer registers its next frame from a microtask
-/// queued behind the wake-up; winit's redraw then precedes the pacer in the
-/// next frame. A wake-up that finds no redraw yet is repeated next frame, and
-/// the update then counts from that frame's refresh.
+/// event-loop proxy. The winit runner handles a wake-up in a microtask of the
+/// same animation frame and updates there only if winit's own animation frame
+/// (its redraw) has run since the previous update; otherwise it requests that
+/// animation frame again and updates in it. Two rules keep the redraw ahead
+/// of the wake-up:
+/// - Every update requests a redraw, so winit's animation frame follows each
+///   update.
+/// - The pacer's next animation frame is registered after the runner's request
+///   for its own, so that in the next frame the redraw runs first. After a
+///   wake-up it is registered from a microtask queued behind the wake-up.
+///   After an update that ran elsewhere (in winit's redraw, or in an event
+///   handler) it is registered again from a microtask queued by that update,
+///   which runs after the runner's request. After a canvas resize, where winit
+///   requests its animation frame again once the frame's animation-frame
+///   callbacks have run, it is registered again from a resize observer on the
+///   canvas created after winit's; a page notifies resize observers in the
+///   order they were created.
+///
+/// A wake-up that still finds no redraw since the previous update (the order
+/// was changed by something else) has its update run in winit's redraw of the
+/// next animation frame, and the count then restarts from that frame's
+/// refresh, as the source counts from the refresh a late frame starts on.
 #[cfg(target_arch = "wasm32")]
 mod pacing {
     use std::cell::{Cell, RefCell};
@@ -1075,6 +1092,7 @@ mod pacing {
     use std::time::Duration;
 
     use bevy::prelude::*;
+    use bevy::window::{PrimaryWindow, RequestRedraw};
     use bevy::winit::{
         EventLoopProxy, EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent,
     };
@@ -1090,8 +1108,22 @@ mod pacing {
         refreshes: RefCell<RefreshCount>,
         /// A wake-up was sent and no update has run since.
         pending: Cell<bool>,
+        /// A wake-up was sent and the microtask queued behind it has not run.
+        waking: Cell<bool>,
+        /// The last wake-up found no redraw since the previous update, so its
+        /// update runs in winit's redraw of the next animation frame.
+        late: Cell<bool>,
+        /// An update ran since the pacer's last animation frame.
+        updated: Cell<bool>,
+        /// The pacer's registered animation frame.
+        frame_request: Cell<Option<i32>>,
         on_frame: RefCell<Option<Closure<dyn FnMut(f64)>>>,
         after_wake: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// Registers the pacer's next animation frame again, behind every
+        /// animation frame registered so far.
+        request_again: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// Keeps the canvas resize observer alive.
+        resize_observer: RefCell<Option<web_sys::ResizeObserver>>,
     }
 
     thread_local! {
@@ -1112,7 +1144,10 @@ mod pacing {
         }
     }
 
-    pub(super) fn start(proxy: Res<EventLoopProxyWrapper>) {
+    pub(super) fn start(
+        proxy: Res<EventLoopProxyWrapper>,
+        windows: Query<&Window, With<PrimaryWindow>>,
+    ) {
         // Without the pacer the engine loop would never wake again.
         let window = web_sys::window().expect("frame pacing needs the page window");
         let pacer = Rc::new(Pacer {
@@ -1121,17 +1156,62 @@ mod pacing {
             frame_rate: Cell::new(super::NO_RECOMMENDATION_FRAME_RATE),
             refreshes: RefCell::new(RefreshCount::new()),
             pending: Cell::new(false),
+            waking: Cell::new(false),
+            late: Cell::new(false),
+            updated: Cell::new(false),
+            frame_request: Cell::new(None),
             on_frame: RefCell::new(None),
             after_wake: RefCell::new(None),
+            request_again: RefCell::new(None),
+            resize_observer: RefCell::new(None),
         });
         // The closures own the pacer for the lifetime of the page.
         let frame_pacer = pacer.clone();
         *pacer.on_frame.borrow_mut() =
             Some(Closure::new(move |now: f64| on_frame(&frame_pacer, now)));
         let wake_pacer = pacer.clone();
-        *pacer.after_wake.borrow_mut() = Some(Closure::new(move || request_frame(&wake_pacer)));
+        *pacer.after_wake.borrow_mut() = Some(Closure::new(move || after_wake(&wake_pacer)));
+        let again_pacer = pacer.clone();
+        *pacer.request_again.borrow_mut() = Some(Closure::new(move || request_frame(&again_pacer)));
+        observe_canvas(&pacer, &windows);
         request_frame(&pacer);
         PACER.with_borrow_mut(|slot| *slot = Some(pacer));
+    }
+
+    /// Registers the pacer again after every observed resize of the primary
+    /// window's canvas. The window and its winit observer exist before the
+    /// first update, so this observer is notified after winit's.
+    fn observe_canvas(pacer: &Pacer, windows: &Query<&Window, With<PrimaryWindow>>) {
+        // The canvas the window was created on, found the way the engine finds it.
+        let canvas = windows
+            .single()
+            .ok()
+            .and_then(|window| window.canvas.clone())
+            .and_then(|selector| {
+                pacer
+                    .window
+                    .document()
+                    .and_then(|document| document.query_selector(&selector).ok().flatten())
+            });
+        let Some(canvas) = canvas else {
+            warn!(
+                "Frame pacing: the primary window has no canvas selector to observe; \
+                 a canvas resize can start one update a refresh late."
+            );
+            return;
+        };
+        let observer = pacer.request_again.borrow().as_ref().and_then(|callback| {
+            web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()).ok()
+        });
+        let Some(observer) = observer else {
+            warn!(
+                "Frame pacing: no resize observer; a canvas resize can start one update a \
+                 refresh late."
+            );
+            return;
+        };
+        observer.observe(&canvas);
+        *pacer.resize_observer.borrow_mut() = Some(observer);
     }
 
     pub(super) fn set_frame_rate(rate: u16) {
@@ -1143,36 +1223,68 @@ mod pacing {
     }
 
     /// Runs in `First` of every update.
-    pub(super) fn note_update() {
+    pub(super) fn note_update(mut redraw: MessageWriter<RequestRedraw>) {
+        // winit's animation frame follows every update, so the next wake-up
+        // finds a redraw since this update.
+        redraw.write(RequestRedraw);
         PACER.with_borrow(|pacer| {
-            if let Some(pacer) = pacer {
-                pacer.pending.set(false);
+            let Some(pacer) = pacer else {
+                return;
+            };
+            pacer.pending.set(false);
+            pacer.updated.set(true);
+            // An update outside a wake-up ran after the pacer's animation
+            // frame of this refresh (in winit's redraw or in an event
+            // handler), and the runner requests its animation frame when the
+            // update returns. A late update runs before the pacer's animation
+            // frame of its refresh, which must stay registered.
+            if !pacer.waking.get() && !pacer.late.get() {
+                if let Some(request_again) = pacer.request_again.borrow().as_ref() {
+                    pacer
+                        .window
+                        .queue_microtask(request_again.as_ref().unchecked_ref());
+                }
             }
         });
     }
 
+    /// Replaces the pacer's registered animation frame with a new
+    /// registration, which runs after every animation frame registered so far.
     fn request_frame(pacer: &Pacer) {
+        if let Some(handle) = pacer.frame_request.take() {
+            let _ = pacer.window.cancel_animation_frame(handle);
+        }
         if let Some(callback) = pacer.on_frame.borrow().as_ref() {
-            let _ = pacer
-                .window
-                .request_animation_frame(callback.as_ref().unchecked_ref());
+            pacer.frame_request.set(
+                pacer
+                    .window
+                    .request_animation_frame(callback.as_ref().unchecked_ref())
+                    .ok(),
+            );
         }
     }
 
     fn on_frame(pacer: &Pacer, now: f64) {
-        {
+        pacer.frame_request.set(None);
+        let wake = {
             let mut refreshes = pacer.refreshes.borrow_mut();
-            refreshes.frame(now);
-            if pacer.pending.get() {
-                // The update asked for last frame has not run yet; it starts
-                // on this refresh instead.
+            refreshes.frame(now, !pacer.updated.replace(false));
+            if pacer.late.replace(false) || pacer.pending.get() {
+                // The update the last wake-up asked for starts on this
+                // refresh: it ran in winit's redraw just before this callback,
+                // or runs in it after. The runner still holds the wake-up.
                 refreshes.start_update();
+                false
             } else if refreshes.due(pacer.frame_rate.get()) {
                 refreshes.start_update();
                 pacer.pending.set(true);
+                true
+            } else {
+                false
             }
-        }
-        if pacer.pending.get() {
+        };
+        if wake {
+            pacer.waking.set(true);
             let _ = pacer.proxy.send_event(WinitUserEvent::WakeUp);
             if let Some(after_wake) = pacer.after_wake.borrow().as_ref() {
                 pacer
@@ -1183,6 +1295,15 @@ mod pacing {
             request_frame(pacer);
         }
     }
+
+    /// Runs behind the runner's handling of a wake-up.
+    fn after_wake(pacer: &Pacer) {
+        pacer.waking.set(false);
+        if pacer.pending.get() {
+            pacer.late.set(true);
+        }
+        request_frame(pacer);
+    }
 }
 
 /// Display-refresh counting of the browser pacer; it uses no page API.
@@ -1191,9 +1312,12 @@ mod refresh_count {
     /// Animation-frame intervals kept for the refresh estimate (about half a
     /// second at 60 Hz).
     const WINDOW: usize = 32;
-    /// Longer intervals (a hidden page, a long stall) still advance the count
-    /// but stay out of the refresh estimate.
+    /// Once the refresh interval is measured, longer intervals (a hidden page,
+    /// a long stall) still advance the count but stay out of the estimate.
     const MAX_SAMPLE_MS: f64 = 250.;
+    /// Intervals within this ratio of each other count as the same number of
+    /// refreshes.
+    const SPREAD: f64 = 1.25;
 
     /// Counts display refreshes from animation-frame timestamps and applies
     /// the source's refresh spacing between frame starts.
@@ -1201,10 +1325,11 @@ mod refresh_count {
         intervals: [f64; WINDOW],
         stored: usize,
         next: usize,
-        /// Estimated display refresh interval.
-        refresh_ms: f64,
+        /// Estimated display refresh interval; none until two sampled
+        /// intervals agree.
+        refresh_ms: Option<f64>,
         last_frame_ms: Option<f64>,
-        /// Refreshes counted since the first animation frame.
+        /// Refreshes counted since the refresh interval was measured.
         refreshes: u64,
         /// Refresh the latest update started on.
         update_refresh: Option<u64>,
@@ -1216,7 +1341,7 @@ mod refresh_count {
                 intervals: [0.; WINDOW],
                 stored: 0,
                 next: 0,
-                refresh_ms: 1000. / 60.,
+                refresh_ms: None,
                 last_frame_ms: None,
                 refreshes: 0,
                 update_refresh: None,
@@ -1226,7 +1351,15 @@ mod refresh_count {
         /// Advances to the animation frame stamped `now_ms`. The interval
         /// since the previous animation frame counts as many refreshes as it
         /// spans; a stray callback within the same refresh counts none.
-        pub(super) fn frame(&mut self, now_ms: f64) {
+        ///
+        /// `began_idle` says that no update ran since the previous animation
+        /// frame. An update's work can hold the next animation frame past one
+        /// or more refreshes, so an interval that began with an update feeds
+        /// the refresh estimate only when it is no longer than one estimated
+        /// refresh, and the first estimate comes from intervals without an
+        /// update alone. While every update holds the next animation frame the
+        /// estimate therefore holds.
+        pub(super) fn frame(&mut self, now_ms: f64, began_idle: bool) {
             let Some(last_ms) = self.last_frame_ms.replace(now_ms) else {
                 return;
             };
@@ -1234,16 +1367,28 @@ mod refresh_count {
             if !(interval > 0.) {
                 return;
             }
-            if interval < MAX_SAMPLE_MS {
+            let sample = match self.refresh_ms {
+                None => began_idle,
+                Some(refresh_ms) => {
+                    interval < MAX_SAMPLE_MS && (began_idle || interval <= SPREAD * refresh_ms)
+                }
+            };
+            if sample {
                 self.sample(interval);
             }
-            self.refreshes += (interval / self.refresh_ms).round() as u64;
+            if let Some(refresh_ms) = self.refresh_ms {
+                self.refreshes += (interval / refresh_ms).round() as u64;
+            }
         }
 
-        /// Whether the source starts a frame on the current refresh.
+        /// Whether the source starts a frame on the current refresh. Nothing
+        /// starts before the refresh interval is measured.
         pub(super) fn due(&self, frame_rate: u16) -> bool {
+            let Some(refresh_ms) = self.refresh_ms else {
+                return false;
+            };
             self.update_refresh
-                .is_none_or(|start| self.refreshes - start >= self.spacing(frame_rate))
+                .is_none_or(|start| self.refreshes - start >= Self::spacing(refresh_ms, frame_rate))
         }
 
         /// Records that an update starts on the current refresh.
@@ -1257,15 +1402,16 @@ mod refresh_count {
         /// spacing where the ratio is exactly half-way (90 Hz at a limit of
         /// 60). The spacing is at least one, since a page updates at most once
         /// per animation frame.
-        fn spacing(&self, frame_rate: u16) -> u64 {
-            let refresh_rate = (1000. / self.refresh_ms).round() as f32;
+        fn spacing(refresh_ms: f64, frame_rate: u16) -> u64 {
+            let refresh_rate = (1000. / refresh_ms).round() as f32;
             ((refresh_rate / f32::from(frame_rate.max(1)) + 0.5) as u64).max(1)
         }
 
         /// The refresh interval is the mean of the lowest cluster of stored
-        /// intervals: the shortest interval that has another one within 25%
-        /// above it, together with those. Longer intervals span skipped
-        /// refreshes, and a lone shorter one is a stray callback.
+        /// intervals: the shortest interval that has another one within
+        /// [`SPREAD`] above it, together with those. Longer intervals span
+        /// skipped refreshes, and a lone shorter one is a stray callback, so a
+        /// single interval never sets the estimate.
         fn sample(&mut self, interval: f64) {
             self.intervals[self.next] = interval;
             self.next = (self.next + 1) % WINDOW;
@@ -1273,12 +1419,11 @@ mod refresh_count {
             let mut sorted = self.intervals;
             let sorted = &mut sorted[..self.stored];
             sorted.sort_unstable_by(f64::total_cmp);
-            let members = self.stored.min(2);
             for (index, &low) in sorted.iter().enumerate() {
-                let end = sorted.partition_point(|&value| value <= 1.25 * low);
+                let end = sorted.partition_point(|&value| value <= SPREAD * low);
                 let cluster = &sorted[index..end];
-                if cluster.len() >= members {
-                    self.refresh_ms = cluster.iter().sum::<f64>() / cluster.len() as f64;
+                if cluster.len() >= 2 {
+                    self.refresh_ms = Some(cluster.iter().sum::<f64>() / cluster.len() as f64);
                     return;
                 }
             }
