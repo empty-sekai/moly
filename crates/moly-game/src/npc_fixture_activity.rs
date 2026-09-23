@@ -3,8 +3,9 @@
 //! The selected action row, actual placed Entity/UID, locator array index and
 //! source timeline survive approach, loading, playback and disposal together.
 //! Admission runs no path query: the first fixture passing the locator sample
-//! (within half a tile), tile, slot, occupancy, UnmovableFixtureList, 1000 m
-//! and motion-area checks is selected even when it cannot be reached; the
+//! (within half a tile), tile, slot, occupancy, UnmovableFixtureList, 1000 m,
+//! motion-area and floor-level (a stacked fixture needs a non-block fixture
+//! below it) checks is selected even when it cannot be reached; the
 //! objective's departure gate tests reachability once, for that target only.
 //! This is not a NavMesh implementation: the locator sample and the approach
 //! use the existing, explicitly approximate WalkField/ObjectiveFace host.
@@ -13,12 +14,15 @@ mod areas;
 pub(crate) mod preview;
 pub(crate) use areas::NpcFixtureAreas;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
-use moly_assets::scene_state::SourceInactive;
+use moly_assets::{player_data::mirror_fixture_layout, scene_state::SourceInactive};
 use moly_law::{
-    fixture::position::layout_type,
+    fixture::{
+        position::{layout_type, TILE_SIZE},
+        GridPosition,
+    },
     objective::TalkType,
     path::{
         angle_between, heading_yaw, make_positive_yaw, rotate_time, turn_angle, turn_motion,
@@ -28,7 +32,7 @@ use moly_law::{
 
 use crate::{
     character::MotionDriver,
-    fixture::{FixturePlacements, FixtureRoot},
+    fixture::{FixturePlacements, FixtureRoot, OccupancyRow},
     fixture_activity_data::{
         ActivityKey, ActivityOrigin, ActivitySpec, ActivityTimeline, FixtureActivityTables, PutType,
     },
@@ -42,12 +46,13 @@ use crate::{
     },
     fixture_attach::AttachPoints,
     fixture_scene_inputs::{FixtureScenePlacement, FixtureSceneSupply},
-    fixture_tiles::OccupancyCoverage,
+    fixture_tiles::{FixtureFloorTiles, OccupancyCoverage},
     npc::{
         CharacterUnitId, MotionPhase, NpcAction, NpcActions, PathSlot, PauseSeconds, RestLifecycle,
         RouteOutcome, RouteStops, WalkSpeed, WalkState,
     },
     npc_objective::{AiTalkData, MemberRng, ObjectiveFace, ObjectiveMind, TalkSlot},
+    player_fixture_action::FixtureTileKnowledge,
     site::GroundEpoch,
     talk::TalkHold,
 };
@@ -59,7 +64,79 @@ pub(crate) struct NpcFixtureMotionOwner(pub FixtureActivityOwner);
 
 /// `MysekaiConstants.HALF_TILE_SIZE.x`: half the tile size. The action-point
 /// check compares the whole 3-D distance of the sample hit against it.
-const HALF_TILE_SIZE: f32 = moly_law::fixture::position::TILE_SIZE * 0.5;
+const HALF_TILE_SIZE: f32 = TILE_SIZE * 0.5;
+
+/// IsAvailableFixtureCasePutStatus after its motion-area test. A fixture whose
+/// layout Center is on grid level 0 passes. A stacked one passes only when the
+/// tile directly below its Center, in its own (floor) layout, holds a fixture
+/// that is not a block: `MysekaiFixtureUtility.IsBlock` is true for the handle
+/// types block and block_transparent, and false when the master is missing.
+/// An empty or off-grid tile below fails.
+fn stands_on_usable_tile(
+    row: &OccupancyRow,
+    instances: &[(Entity, &FixtureActivityIdentity, &GlobalTransform, &OccupancyRow)],
+    floor: &FixtureFloorTiles,
+    tables: &FixtureActivityTables,
+) -> Result<bool, FactoryIssue> {
+    if row.center_y == 0 {
+        return Ok(true);
+    }
+    let below = cell_below_center(row).map_err(FactoryIssue::Gap)?;
+    match floor.tile_at_grid(below) {
+        FixtureTileKnowledge::Empty | FixtureTileKnowledge::Missing => Ok(false),
+        FixtureTileKnowledge::Occupied(uid) => {
+            let (_, occupant, _, _) = instances
+                .iter()
+                .find(|(_, identity, _, _)| identity.uid == uid)
+                .ok_or_else(|| {
+                    FactoryIssue::Gap(format!(
+                        "tile below {} belongs to {uid}, which has no resolved placement",
+                        row.uid
+                    ))
+                })?;
+            let block = tables
+                .fixture_master(occupant.master_id)
+                .is_some_and(|master| {
+                    matches!(master.handle_type.as_str(), "block" | "block_transparent")
+                });
+            Ok(!block)
+        }
+        FixtureTileKnowledge::ExistingUnknownOccupant | FixtureTileKnowledge::Unknown => {
+            Err(FactoryIssue::Gap(format!(
+                "tile below {} has no resolved occupant",
+                row.uid
+            )))
+        }
+    }
+}
+
+/// `GetGridPosition() + GridPosition.Down` in this host's floor grid.
+/// GetGridPosition is the layout Center in the source grid frame, whose X axis
+/// this host's floor grid mirrors (x -> -x - 1); the source adds Down with
+/// signed-byte arithmetic.
+fn cell_below_center(row: &OccupancyRow) -> Result<GridPosition, String> {
+    let (center, _, _) = mirror_fixture_layout(
+        row.layout_center,
+        row.layout_grid_size,
+        row.direction,
+        row.layout,
+    )?;
+    Ok(GridPosition::new(
+        (-i16::from(center.x) - 1) as i8,
+        center.y.wrapping_sub(1),
+        center.z,
+    ))
+}
+
+/// `FieldPosition.ToGridPosition` of a position relative to the site: each
+/// axis is floored by the tile size, the height after clamping at zero, and
+/// the source narrows the result to its signed-byte cell without a range
+/// check (an out-of-domain cell then reads as the null tile).
+fn source_grid(floor: &FixtureFloorTiles, world: [f32; 3]) -> GridPosition {
+    let relative = Vec3::from(world) - floor.site_origin;
+    let cell = |value: f32| (value / TILE_SIZE).floor() as i32 as i8;
+    GridPosition::new(cell(relative.x), cell(relative.y.max(0.0)), cell(relative.z))
+}
 
 /// Separate from Rest's alone_holds: the Rest script may dispose without
 /// clearing the actual furniture timeline's animation lease.
@@ -130,6 +207,32 @@ pub(crate) struct NpcFixtureActivities {
     next_generation: u64,
     sessions: HashMap<Entity, Session>,
     pending_factories: HashMap<Entity, String>,
+    /// Host data gaps already reported for the no-talk factory. Each is
+    /// reported once until a layout edit or site change can alter it.
+    reported_gaps: HashSet<String>,
+}
+
+/// Why the no-talk factory produced no result on this frame. Neither kind is
+/// a source state: the source factory always runs to a fixture or to null.
+#[derive(Debug)]
+pub(crate) enum FactoryIssue {
+    /// Inputs the objective loop waits for before drawing (see
+    /// [`Factory::loading`]) are not installed. Retrying the same decision on
+    /// a later frame resolves it.
+    Pending(String),
+    /// Host data the factory reads is incomplete or inconsistent (extraction,
+    /// placement or spawn work). A hold on it could last forever, so the
+    /// no-talk lane yields no action for this decision; the other lanes are
+    /// unaffected.
+    Gap(String),
+}
+
+impl FactoryIssue {
+    fn into_reason(self) -> String {
+        match self {
+            Self::Pending(reason) | Self::Gap(reason) => reason,
+        }
+    }
 }
 
 #[derive(SystemParam)]
@@ -172,10 +275,22 @@ impl Factory<'_, '_> {
         self.runtime.pending_factories.remove(&actor);
     }
 
-    /// Data this factory needs before any objective lottery may draw. The
-    /// source AI never decides without its master data, so the objective loop
-    /// holds in front of the draw while this is Err.
-    pub(crate) fn readiness(&self, epoch: u64, site_type: &str) -> Result<(), String> {
+    /// A [`FactoryIssue::Gap`] is unfinished host data, not a per-NPC wait:
+    /// it is reported once, whichever NPC's decision meets it first.
+    pub(crate) fn report_gap(&mut self, unit: u32, reason: String) {
+        if !self.runtime.reported_gaps.contains(&reason) {
+            warn!("[npc-fixture] no-talk factory not evaluated (first met by unit={unit}): {reason}");
+            self.runtime.reported_gaps.insert(reason);
+        }
+    }
+
+    /// Inputs this host installs while a site loads: the master tables, the
+    /// locator arrays and the placement/floor snapshot of the current site
+    /// generation. The source starts an NPC's AI only after its site and
+    /// master data exist, so the objective loop holds in front of every draw
+    /// while this is Err. Gaps inside a built snapshot are not loading; see
+    /// [`Self::snapshot_gap`].
+    pub(crate) fn loading(&self, epoch: u64, site_type: &str) -> Result<(), String> {
         if self.editor.is_active() {
             return Err(
                 "the layout editor owns fixture mutation; no new activity is admitted".into(),
@@ -192,22 +307,35 @@ impl Factory<'_, '_> {
             .as_deref()
             .and_then(FixtureSceneSupply::current)
             .ok_or("current fixture scene inputs are not ready")?;
-        if inputs.stamp.site_epoch != epoch
-            || inputs.site_type != site_type
-            || inputs.floor.coverage() != OccupancyCoverage::Complete
-            || !inputs.gaps.is_empty()
-        {
-            return Err(
-                "no-talk factory needs the current complete placement/floor snapshot".into(),
-            );
+        if inputs.stamp.site_epoch != epoch || inputs.site_type != site_type {
+            return Err("fixture scene inputs belong to another site generation".into());
         }
         Ok(())
     }
 
+    /// Placement or floor rows the built snapshot could not resolve. They are
+    /// host data gaps that persist until the extractor or placement owner
+    /// closes them, and only the no-talk factory reads the tile occupancy they
+    /// leave incomplete.
+    fn snapshot_gap(&self) -> Option<String> {
+        let inputs = self
+            .inputs
+            .as_deref()
+            .and_then(FixtureSceneSupply::current)?;
+        if let Some(gap) = inputs.gaps.first() {
+            return Some(format!(
+                "placement/floor snapshot has {} gap(s), first: {gap}",
+                inputs.gaps.len()
+            ));
+        }
+        (inputs.floor.coverage() != OccupancyCoverage::Complete)
+            .then(|| "placement/floor snapshot occupancy is incomplete".to_owned())
+    }
+
     /// Source action-row permutation is independent of asset readiness.
-    /// Empty eligible source pool is Ok(None); missing data is Err, not an
-    /// invitation to select a different ready animation or a General story.
-    /// `unmovable` is this NPC's UnmovableFixtureList (placement UIDs).
+    /// Empty eligible source pool is Ok(None); missing host data is an issue,
+    /// not an invitation to select a different ready animation or a General
+    /// story. `unmovable` is this NPC's UnmovableFixtureList (placement UIDs).
     pub(crate) fn select_none_talk(
         &self,
         actor: Entity,
@@ -220,7 +348,7 @@ impl Factory<'_, '_> {
         unmovable: &[String],
         face: &ObjectiveFace,
         rng: &mut MemberRng,
-    ) -> Result<Option<Selection>, String> {
+    ) -> Result<Option<Selection>, FactoryIssue> {
         self.select_internal(
             actor,
             unit,
@@ -273,6 +401,7 @@ impl Factory<'_, '_> {
             rng,
             Some((&spec, target)),
         )
+        .map_err(FactoryIssue::into_reason)
     }
 
     fn select_internal(
@@ -288,21 +417,25 @@ impl Factory<'_, '_> {
         face: &ObjectiveFace,
         rng: &mut MemberRng,
         exact: Option<(&ActivitySpec, &FixtureTarget)>,
-    ) -> Result<Option<Selection>, String> {
-        self.readiness(epoch, site_type)?;
+    ) -> Result<Option<Selection>, FactoryIssue> {
+        use FactoryIssue::{Gap, Pending};
+        self.loading(epoch, site_type).map_err(Pending)?;
+        if let Some(gap) = self.snapshot_gap() {
+            return Err(Gap(gap));
+        }
         let tables = self
             .tables
             .as_deref()
-            .ok_or("no-talk source tables are still loading")?;
+            .ok_or_else(|| Pending("no-talk source tables are still loading".into()))?;
         let points = self
             .points
             .as_deref()
-            .ok_or("source fixture locator arrays are still loading")?;
+            .ok_or_else(|| Pending("source fixture locator arrays are still loading".into()))?;
         let inputs = self
             .inputs
             .as_deref()
             .and_then(FixtureSceneSupply::current)
-            .ok_or("current fixture scene inputs are not ready")?;
+            .ok_or_else(|| Pending("current fixture scene inputs are not ready".into()))?;
         let rows = placements.occupancy_rows();
         // GetAllFixture is insertion ordered. The offline placement owner is
         // that order in this host; query iteration and package-first lookup are
@@ -320,13 +453,16 @@ impl Factory<'_, '_> {
         for row in &rows {
             let matches = live.get(row.uid.as_str()).map_or(&[][..], Vec::as_slice);
             let [(entity, identity, placed, world)] = matches else {
-                return Err(format!("placement {} has no unique live instance", row.uid));
+                return Err(Gap(format!(
+                    "placement {} has no unique live instance",
+                    row.uid
+                )));
             };
             if &placed.0 != row || identity.model_package != row.package {
-                return Err(format!(
+                return Err(Gap(format!(
                     "placement {} no longer agrees with its live owner",
                     row.uid
-                ));
+                )));
             }
             instances.push((*entity, *identity, *world, row));
         }
@@ -389,22 +525,19 @@ impl Factory<'_, '_> {
                 continue;
             }
             let group: Vec<_> = tables.timeline_rows(action.group_id).collect();
+            // CanUseFixtureCaseActionPointsCaseTimelineGroupId is false for
+            // every fixture when the group has no timeline: the row yields no
+            // fixture and the walk moves on to the next row.
             let Some(first) = group.first() else {
-                return Err(format!(
-                    "source action {} has no timeline group {}",
-                    match action.origin {
-                        ActivityOrigin::NoTalk(id) | ActivityOrigin::PreAction(id) => id,
-                    },
-                    action.group_id
-                ));
+                continue;
             };
             // Source factory computes locators from FirstOrDefault(group),
             // then independently RandomPick(group) for the actual director.
             let point = match action.point {
                 Some(point) => point,
-                None => tables
-                    .no_talk_point(unit, first)
-                    .map_err(|error| format!("action {:?} locator: {error:?}", action.origin))?,
+                None => tables.no_talk_point(unit, first).map_err(|error| {
+                    Gap(format!("action {:?} locator: {error:?}", action.origin))
+                })?,
             };
             for (entity, identity, fixture_world, row) in &instances {
                 if identity.master_id != action.fixture_id {
@@ -419,9 +552,7 @@ impl Factory<'_, '_> {
                 }
                 // IsAvailableFixtureCasePutStatus: a fixture this NPC failed to
                 // reach at an earlier departure stays excluded until the list is
-                // cleared. The source reads the list ahead of its distance,
-                // motion-area and floor-level branches, so an excluded fixture
-                // never reaches this host's elevated-fixture refusal below.
+                // cleared.
                 if unmovable.iter().any(|uid| *uid == identity.uid) {
                     continue;
                 }
@@ -432,47 +563,65 @@ impl Factory<'_, '_> {
                 {
                     continue;
                 }
-                // This slice covers placed ground-floor fixtures. Elevated
-                // stack support is an explicit pending branch, not guessed
-                // from render height or silently admitted as ground.
-                if row.layout != layout_type::FLOOR || row.center_y != 0 {
-                    return Err(format!(
-                        "{} needs the elevated/non-floor source fixture branch",
+                // Every no-talk fixture master is floor-only; this host keeps
+                // tile occupancy for the floor layout alone.
+                if row.layout != layout_type::FLOOR {
+                    return Err(Gap(format!(
+                        "{} is a non-floor placement of a floor-only no-talk fixture",
                         identity.uid
-                    ));
+                    )));
                 }
                 if fixture_world.translation().distance(Vec3::from(from)) > 1000.0 {
                     continue;
                 }
-                if self.areas.motion_overlaps(row, &rows, &inputs.floor)? {
+                if self
+                    .areas
+                    .motion_overlaps(row, &rows, &inputs.floor)
+                    .map_err(Gap)?
+                {
                     continue;
                 }
-                let master = tables
-                    .fixture_master(identity.master_id)
-                    .ok_or_else(|| format!("missing fixture master {}", identity.master_id))?;
+                if !stands_on_usable_tile(row, &instances, &inputs.floor, tables)? {
+                    continue;
+                }
+                let master = tables.fixture_master(identity.master_id).ok_or_else(|| {
+                    Gap(format!("missing fixture master {}", identity.master_id))
+                })?;
                 if identity.model_package != format!("mysekai__fixture__{}", master.model_name) {
-                    return Err("source action's instance model/master disagree".into());
+                    return Err(Gap("source action's instance model/master disagree".into()));
+                }
+                // IsPlayableActionPoints: ActionPoints.FirstOrDefault for this
+                // action point. A fixture whose locator array has no entry for
+                // it is not playable, which is data the source ships (a master
+                // row can name a point the fixture does not carry).
+                if points
+                    .player_action_points(&identity.model_package)
+                    .is_some_and(|carried| !carried.contains(&point))
+                {
+                    continue;
                 }
                 let locate_index = points
                     .instance_index(&identity.model_package, point)
                     .ok_or_else(|| {
-                        format!(
+                        Gap(format!(
                             "{} locator {point} lacks a unique source array index",
                             identity.uid
-                        )
+                        ))
                     })?;
                 let slot_id = points
                     .instance_slot(&identity.model_package, point)
                     .ok_or_else(|| {
-                        format!("{} locator {point} lacks a source slot", identity.uid)
+                        Gap(format!("{} locator {point} lacks a source slot", identity.uid))
                     })?;
                 if self.reservations.action_slot_in_use(&target, slot_id) {
                     continue;
                 }
                 let poses = points
                     .instance_poses(&identity.model_package, point, fixture_world)
-                    .ok_or("source selected locator has no instance pose")?;
-                let end = poses.end.ok_or("source selected locator has no EndLoc")?;
+                    .ok_or_else(|| Gap("source selected locator has no instance pose".into()))?;
+                let end = poses
+                    .end
+                    .ok_or_else(|| Gap("source selected locator has no EndLoc".into()))?;
                 let position = [
                     poses.start.position[0],
                     inputs.floor.site_origin.y,
@@ -488,15 +637,14 @@ impl Factory<'_, '_> {
                 if Vec3::from(hit).distance(Vec3::from(position)) > HALF_TILE_SIZE {
                     continue;
                 }
-                let start_grid = inputs
-                    .floor
-                    .world_to_grid(Vec3::from(poses.start.position))
-                    .ok_or("source StartLoc is outside the floor coordinate domain")?;
+                // StartLoc and EndLoc tiles use their own heights: a stacked
+                // fixture's locators sit above grid level 0. A cell outside
+                // the authored floor is the source's null tile.
+                let start_grid = source_grid(&inputs.floor, poses.start.position);
                 if !inputs.floor.contains_grid(start_grid)
-                    || inputs
+                    || !inputs
                         .floor
-                        .world_to_grid(Vec3::from(end.position))
-                        .is_none_or(|grid| !inputs.floor.contains_grid(grid))
+                        .contains_grid(source_grid(&inputs.floor, end.position))
                 {
                     continue;
                 }
@@ -507,7 +655,7 @@ impl Factory<'_, '_> {
                 if !inside
                     && !matches!(
                         inputs.floor.tile_at_grid(start_grid),
-                        crate::player_fixture_action::FixtureTileKnowledge::Empty
+                        FixtureTileKnowledge::Empty
                     )
                 {
                     continue;
@@ -516,7 +664,7 @@ impl Factory<'_, '_> {
                     (**group
                         .iter()
                         .find(|timeline| timeline.id == id)
-                        .ok_or("所选动作已不在原始 Timeline 组中")?)
+                        .ok_or_else(|| Gap("所选动作已不在原始 Timeline 组中".into()))?)
                     .clone()
                 } else {
                     (*group[rng.index(group.len())]).clone()
@@ -1184,6 +1332,7 @@ fn cancel_runtime(world: &mut World, site_changed: bool) {
         dispose(world, session, site_changed, false);
     }
     runtime.pending_factories.clear();
+    runtime.reported_gaps.clear();
     world.insert_resource(runtime);
 }
 

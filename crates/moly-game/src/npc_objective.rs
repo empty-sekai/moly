@@ -28,9 +28,11 @@
 //!   （UnmovableFixtureList，两条家具道此后都跳过它，保存布局或换站清空）；
 //!   其余走 IfMoveTargetPosition。过门后的路线取 GeneratePath。门未过 =
 //!   移动失败，目标收场进停顿。
-//! - **决策前的保持**：无对话工厂的 master 表、挂点表与站点快照未就绪时
-//!   整条决策不抽签（同 CanRunningAI 的位置）；工厂此刻算不了时本次决策的
-//!   抽签作废、下一帧重来——成员抽签序列只在决策提交时前进。
+//! - **决策前的保持**：无对话工厂的 master 表、挂点表与本站本代的站点
+//!   快照还在装载时整条决策不抽签（同 CanRunningAI 的位置）。快照已建成
+//!   但留有缺口（摆放/地块数据未闭合）不算装载：只让无对话道这次选不出
+//!   行为，这一轮按工厂空结果收场，缺口只报一次；工厂读到的其它宿主数据
+//!   缺口同样处理——重试改变不了它们，保持就等于让成员永远站住。
 //! - **工厂空结果**：普通工厂找不到 master、无对话工厂没有合格行时对话
 //!   数据为空，返回的对话目标即刻结束，照常停顿，下一轮走空槽档补位。
 //!
@@ -1376,10 +1378,12 @@ pub(crate) fn decide(
         if mind.executing {
             continue; // 在走向目的地的路上，无事可判
         }
-        // The source AI never decides before its master data and site
-        // snapshot exist. Hold in front of every draw (as CanRunningAI holds
-        // the loop) instead of drawing and discarding a decision each frame.
-        if let Err(reason) = fixture_activities.readiness(epoch.0, &actions.site_type) {
+        // The source AI starts only after its site and master data exist.
+        // Hold in front of every draw while this host is still installing
+        // them (as CanRunningAI holds the loop) instead of drawing and
+        // discarding a decision each frame. Gaps inside a built snapshot are
+        // not loading: they only keep the no-talk lane from selecting.
+        if let Err(reason) = fixture_activities.loading(epoch.0, &actions.site_type) {
             fixture_activities.report_pending(entity, unit.0, reason);
             continue;
         }
@@ -1501,6 +1505,7 @@ pub(crate) fn decide(
         // IfMoveTargetPosition.
         let mut gate_fixture: Option<String> = None;
         let mut none_talk_null = false;
+        let mut none_talk_gap = false;
         let destination = if let Some(lane) = lane {
             match lane {
                 TalkLane::GeneralTalk => {
@@ -1643,11 +1648,22 @@ pub(crate) fn decide(
                     none_talk_null = true;
                     None
                 }
-                Err(reason) => {
-                    // This host cannot evaluate the source factory yet. Drop
-                    // the trial draws and retry on a later frame.
+                Err(crate::npc_fixture_activity::FactoryIssue::Pending(reason)) => {
+                    // Inputs the loop waits for are not installed yet. Drop
+                    // the trial draws and retry the same decision later.
                     fixture_activities.report_pending(entity, unit.0, reason);
                     continue;
+                }
+                Err(crate::npc_fixture_activity::FactoryIssue::Gap(reason)) => {
+                    // Host data the factory reads is incomplete and a retry
+                    // cannot be relied on to change it; holding could stop
+                    // this NPC for good. The cycle ends as the factory's empty
+                    // result does; the gap itself is reported once.
+                    detail = "host data gap, factory not evaluated".into();
+                    fixture_activities.report_gap(unit.0, reason);
+                    none_talk_gap = true;
+                    none_talk_null = true;
+                    None
                 }
             }
         };
@@ -1657,7 +1673,8 @@ pub(crate) fn decide(
             // ForceUpdateNoneTalkObjective resets the AI talk data before
             // CreateNoneTalkData returns null; SelectFixtureTalk then returns a
             // TalkObjective whose null data completes at once. TryRest runs
-            // normally and the next decision takes the null-data arm.
+            // normally and the next decision takes the null-data arm. A host
+            // data gap takes the same path without evaluating the factory.
             slot.reset_ai_talk_data();
             mind.current = Some(ObjectiveType::Talk);
             finish_objective(
@@ -1669,8 +1686,9 @@ pub(crate) fn decide(
                 &mut actions,
                 &mut rest,
             );
+            let outcome_word = if none_talk_gap { "工厂未求值" } else { "工厂空" };
             info!(
-                "[npc unit={}] 目标裁决：{draws_word} → nonetalk 工厂空（{detail}），对话目标即刻结束，进入停顿",
+                "[npc unit={}] 目标裁决：{draws_word} → nonetalk {outcome_word}（{detail}），对话目标即刻结束，进入停顿",
                 unit.0
             );
             continue;
