@@ -488,7 +488,10 @@ fn globals(
         }
         "hlslcc_mtx4x4unity_MatrixVP" => (projection * view_from_world).to_cols_array().to_vec(),
         "hlslcc_mtx4x4unity_MatrixV" => view_from_world.to_cols_array().to_vec(),
-        "_GlobalMipBias" => vec![0.0, 0.0],
+        // URP ScriptableRenderer.SetPerCameraShaderVariables writes (b, 2^b), where
+        // b = min(-log2(camera width / scaled width), 0) and the temporal mip bias;
+        // without render scaling or temporal AA, b is 0.
+        "_GlobalMipBias" => vec![0.0, 1.0],
         "_GlobalPhenomenaDirectionalLightColor" => light.to_vec(),
         "_WorldSpaceCameraPos" => source_to_render
             .transform_point3(world_from_view.w_axis.truncate())
