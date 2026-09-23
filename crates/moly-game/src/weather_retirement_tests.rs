@@ -64,7 +64,7 @@ fn disabled_shape_matches_engine_origin_and_forward_motion() {
 
 fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {
     let draw=world.spawn(WeatherFxDraw).id();
-    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),draw,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0))}],
+    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0))}],
         tier:"old".into(),env_site:"home".into(),admitted:1,records:1 }, draw)
 }
 

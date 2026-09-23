@@ -86,6 +86,22 @@ fn source_runtime(root: &std::path::Path, source: &Value) -> Runtime {
     system
 }
 
+/// The exported system block of the selected source particle.
+fn source_system(root: &std::path::Path, source: &Value) -> Value {
+    let phenomenon = source["phenomenon"].as_str().unwrap();
+    let effect = source["effect"].as_str().unwrap();
+    let node = source["node"].as_str().unwrap();
+    let bytes = std::fs::read(root.join("phenomena").join(phenomenon).join("fx/effects.json")).unwrap();
+    let raw: Value = serde_json::from_slice(&bytes).unwrap();
+    raw["effects"][effect]["particles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["node"] == node)
+        .expect("actual source particle")["system"]
+        .clone()
+}
+
 fn exact(actual: f32, expected: &Value, step: usize, field: &str) {
     let expected = number(expected);
     assert_eq!(
@@ -116,6 +132,8 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
         })
         .unwrap();
     let mut system = source_runtime(&root, &row["source"]);
+    let route = source_route(&source_system(&root, &row["source"]));
+    assert_eq!(route, SourceRoute::Ordinary);
     assert!(system.emitter.play_on_awake && !system.emitter.prewarm);
     assert_eq!(system.emitter.shape_enabled, Some(false));
     assert_eq!(system.emitter.ring_buffer_mode, RingBufferMode::Disabled);
@@ -124,7 +142,10 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
         matches!(system.emitter.start.lifetime, moly_law::particle::MinMaxCurve::Constant(v) if v == f32::INFINITY)
     );
     let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
-    assert!(install_native_birth(&mut system, &mut manager).unwrap());
+    assert!(matches!(
+        install_native_birth(&mut system, &mut manager, &route).unwrap(),
+        BirthPath::Native
+    ));
     let state = system
         .native_birth
         .as_mut()
@@ -264,12 +285,25 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
         other_system.emitter.ring_buffer_mode,
         RingBufferMode::LoopUntilReplaced
     );
-    assert!(!install_native_birth(&mut other_system, &mut manager).unwrap());
+    let other_route = source_route(&source_system(&root, &other["source"]));
+    assert_eq!(other_route, SourceRoute::Procedural);
+    let words_before = manager.manager_words_for_test();
+    let other_reason = match install_native_birth(&mut other_system, &mut manager, &other_route).unwrap() {
+        BirthPath::Legacy(reason) => reason,
+        BirthPath::Native => panic!("procedural source route installed a native owner"),
+    };
+    assert!(other_reason.contains("procedural source route"), "{other_reason}");
     assert!(other_system.native_birth.is_none());
+    assert_ne!(manager.manager_words_for_test(), words_before, "the legacy path resets its seed too");
+    // The ring gate itself, on the otherwise-qualified 009 emitter.
+    let mut ringed = system.emitter.clone();
+    ringed.ring_buffer_mode = RingBufferMode::LoopUntilReplaced;
+    let ring_reason = native_birth_eligible(&ringed, &SourceRoute::Ordinary).unwrap_err();
+    assert!(ring_reason.contains("newborn ring replacement composition"), "{ring_reason}");
     let report = json!({"source":row["source"],"sourceFrames":3,"particleFrames":particle_frames,
         "customChannels":custom_channels,"failureCount":0,"comparison":"Exact scalar bits and all captured Initial/Emission RNG words; zero vector signs ignored; 1D native size X expanded for runtime render side",
         "route":"actual effects.json -> Effects/EmitterParams -> install_native_birth -> simulate -> installed native step",
-        "scope":"Initialized source 009 only, captured probe RNG overwritten after installer, identity owner, all enabled simulation modules retained. Shared OS manager order across nonqualified systems and original-client entropy/world/renderer are not proven. Source 014 prewarm/ringLoop remains refused."});
+        "scope":"Initialized source 009 only, captured probe RNG overwritten after installer, identity owner, all enabled simulation modules retained. Shared OS manager order across nonqualified systems and original-client entropy/world/renderer are not proven. Source 014 takes the procedural source route and stays on the legacy step without drawing a seed.","legacyReason":other_reason});
     if let Some(path) = std::env::var_os("MOLY_PARTICLE_BIRTH_SOURCE_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }

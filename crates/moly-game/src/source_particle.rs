@@ -264,6 +264,12 @@ pub fn resolve_particles(
             particle.error = Some(error);
             continue;
         }
+        // Already resolved: resolve() would return without writing. Checking
+        // through the shared reference keeps the component unchanged, so the
+        // render world's change detection stays meaningful.
+        if !particle.passes.is_empty() {
+            continue;
+        }
         if let Err(error) = particle.resolve(&server, &catalogues) {
             error!(%error, "source particle material preparation failed");
             *particle.readiness.lock().unwrap() = ParticleReadiness::Failed(error.to_string());

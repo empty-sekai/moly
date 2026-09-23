@@ -54,7 +54,7 @@ pub fn animated_velocity(displacement: [f32; 3], dt: f32, speed_modifier: f32) -
 /// ARM FRECPE followed by two FRECPS refinements, with the orbital kernel's
 /// lower dt mask (about 1e-6) rather than InitialModule's 1e-5 admission.
 /// Current JP 6.8.1 orbital path uses this reciprocal sequence; the lower mask remains in animated_velocity.
-fn orbital_reciprocal(value: f32) -> f32 {
+pub(crate) fn orbital_reciprocal(value: f32) -> f32 {
     let bits = value.to_bits();
     let exponent = ((bits >> 23) & 0xff) as i32;
     let index = 256 + ((bits & 0x007f_ffff) >> 15);

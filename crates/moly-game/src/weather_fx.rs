@@ -32,10 +32,6 @@ pub(crate) mod fixture;
 /// 同流会在两族上画出同一图形的错觉（逐系统再乘质数散列）。
 const RNG_SEED: u64 = 0x7765_6174_0001_0125;
 
-// Legacy prewarm approximation. The native scheduler law remains separate
-// until its lifecycle, clock and module composition is verified.
-const PREWARM_STEP: f32 = 1.0 / 60.0;
-
 // ---- 资源 ----
 
 /// 当前装载锚点：档位名 + 站点名。与 `(CurrentPhenomenon, SiteActive)`
@@ -111,6 +107,9 @@ struct Planned {
     node: String,
     effect: String,
     emitter: EmitterParams,
+    /// Native update route read from the exported block; decides whether the
+    /// native birth owner may be installed.
+    route: crate::particle_runtime::SourceRoute,
     kind: EffectKind,
     /// camera 档 `effectiveRotation == "normal"`（继承相机旋转）；
     /// `"fix"` 与缺省都不继承。
@@ -239,6 +238,7 @@ impl WeatherFxState {
                     "alive": s.pool.len(), "born": s.born_total, "died": s.died_total,
                     "poolFull": s.full_total, "integrationRefused": s.refused_total,
                     "playbackTime": s.playback_head,
+                    "nativeRefusal": s.native_refusal,
                     "nativeBirth": s.native_birth.as_ref().map(|birth|serde_json::json!({
                         "ownerSeed":birth.owner.map(|owner|owner.seed),
                         "automaticSeed":birth.owner.map(|owner|owner.automatic),
@@ -280,6 +280,8 @@ impl WeatherFxState {
 
 struct LiveWeatherEmitter {
     runtime: Runtime,
+    /// Named reason the native birth owner was not installed (legacy step).
+    native_refusal: Option<String>,
     draw: Entity,
     lifecycle: WeatherEffectLifecycle,
     effect_clock: Arc<crate::weather_animation::EffectClock>,
@@ -620,10 +622,9 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
             "VelocityModule" => "velocityOverLifetime", "ClampVelocityModule" => "limitVelocity",
             "CustomDataModule" => "customData", "UVModule" => "textureSheet",
             "ForceModule" => "forceOverLifetime",
-            // The isolated Noise kernel/consumer is verified, but its source
-            // birth stream, Shape and prewarm composition still use the legacy
-            // runtime path. A finite-particle smoke test is not a native replay.
-            "NoiseModule" => return Err("enabled source module NoiseModule: native birth/Shape/prewarm composition is not yet verified".into()),
+            // Noise is consumed only together with the native birth owner;
+            // judge() checks that route/composition after the law parse.
+            "NoiseModule" => "noise",
             _ => return Err(format!("enabled source module {module} has no runtime consumer")),
         };
         if !system.get(field).is_some_and(Value::is_object) {
@@ -914,6 +915,14 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: {error}")); return None;
         }
     }
+    let route = crate::particle_runtime::source_route(system);
+    if emitter.noise.is_some() {
+        // Noise reads the system owner seed and the reset scroll, which only
+        // the native birth owner supplies.
+        if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route) {
+            tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
+        }
+    }
     if let Some(force) = &emitter.force {
         if let Err(error) = moly_law::particle::force::ForceOverLifetime::from_params(force) {
             tally.law_reject.push(format!("{node}: {error}")); return None;
@@ -1031,6 +1040,7 @@ fn judge_in_archive(
         effect: effect_name.to_owned(),
         lifecycle,
         emitter,
+        route,
         kind,
         camera_rotation,
         node_affine,
@@ -1244,8 +1254,8 @@ pub(crate) fn spawn_when_ready(
     // Prepare the fallible entropy service before retiring the previous scene
     // or publishing readiness. This does not draw any system seed. A transient
     // failure retains the plan and existing instances for the next attempt.
+    // Every admitted system resets its seed at first Play, native or legacy.
     for planned in &plan.planned {
-        if !crate::particle_runtime::native_birth_eligible(&planned.emitter) { continue; }
         if planned.emitter.random_seed.is_none() || planned.emitter.auto_random_seed.is_none() {
             error!(node=%planned.node, "weather source seed ownership is unknown");
             return;
@@ -1317,7 +1327,8 @@ pub(crate) fn spawn_when_ready(
         commands.entity(draw).remove::<WeatherFxPreflight>().insert((source, WeatherFxDraw));
         let effect_clock = effect_clocks.entry(planned.effect.clone())
             .or_insert_with(|| Arc::new(crate::weather_animation::EffectClock::new(now))).clone();
-        state.live.push(LiveWeatherEmitter { draw, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock, runtime: Runtime {
+        let route = planned.route.clone();
+        state.live.push(LiveWeatherEmitter { draw, native_refusal: None, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
             emitter: planned.emitter.clone(),
@@ -1365,9 +1376,11 @@ pub(crate) fn spawn_when_ready(
         let mut failed = false;
         {
             let live = state.live.last_mut().expect("just installed source instance");
-            match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager) {
-                Ok(true) => info!(node=%live.node, "weather native birth owner installed"),
-                Ok(false) => {},
+            match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route) {
+                Ok(crate::particle_runtime::BirthPath::Native) => {
+                    info!(node=%live.node, noise=live.noise.is_some(), "weather native birth owner installed");
+                }
+                Ok(crate::particle_runtime::BirthPath::Legacy(reason)) => live.native_refusal = Some(reason),
                 Err(error) => {
                     error!(%error, node=%live.node, "weather source seed owner unavailable");
                     failed = true;
@@ -1378,31 +1391,6 @@ pub(crate) fn spawn_when_ready(
             let failed = state.live.pop().expect("just installed source instance");
             commands.entity(failed.draw).try_despawn();
             continue;
-        }
-        // Noise has its own source owner/reset stream. The source simulation
-        // gate currently keeps unverified compositions out, but qualified
-        // Noise consumers are installed here once that gate is lifted; this
-        // does not admit Snow or prewarm systems by itself.
-        let install_noise = state.live.last().is_some_and(|live| {
-            live.emitter.noise.is_some() && live.native_birth.is_none()
-        });
-        if install_noise {
-            let mut noise_failed = false;
-            {
-                let live = state.live.last_mut().expect("just installed source instance");
-                match crate::particle_runtime::install_noise_consumer(&mut live.runtime, &mut seed_manager) {
-                    Ok(true) => info!(node=%live.node, "weather noise owner installed"),
-                    Ok(false) => {},
-                    Err(error) => {
-                        error!(%error, node=%live.node, "weather Noise owner unavailable");
-                        noise_failed = true;
-                    }
-                }
-            }
-            if noise_failed {
-                let failed = state.live.pop().expect("just installed source instance");
-                commands.entity(failed.draw).try_despawn();
-            }
         }
     }
     plan.planned = waiting;
@@ -1470,14 +1458,16 @@ pub(crate) fn advance(
         .map(|s| (&mut s.runtime, true));
     let retired = retiring.live.iter_mut().map(|s| (&mut s.emitter.runtime, false));
     for (system, emitting) in active.chain(retired) {
-        // 惰性 prewarm：首个推进帧把一个周期快进完（雨链同款；只动仿真
-        // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。语料里
-        // prewarm 只出现在循环系统上（49/49），非循环的 prewarm 未实现。
+        // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
+        // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
+        // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
+        // 暖机（非循环 prewarm 原生不暖机，不是缺口）。
         if emitting && !system.prewarmed {
             system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping && system.emitter.duration > 0.0 {
-                let steps = (system.emitter.duration / PREWARM_STEP).max(1.0) as usize;
-                for _ in 0..steps { simulate(system, PREWARM_STEP, &ctx); }
+            if system.emitter.prewarm && system.emitter.looping {
+                if let Err(error) = crate::particle_runtime::prewarm_first_play(system, &ctx) {
+                    error!(%error, effect=%system.effect, node=%system.node, "weather prewarm refused");
+                }
             }
         }
         let step = dt * system.emitter.simulation_speed;

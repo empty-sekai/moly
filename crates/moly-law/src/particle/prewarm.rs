@@ -1,10 +1,10 @@
 //! Bounded JP 6.8.1 ParticleSystem prewarm plan. Source lifecycle admission remains separate.
-//! Evidence: prewarm-current.json, current libunity SHA256 937c6d28...75badd9,
-//! ComputePrewarmStartParameters 0xd8316c, GetTimeStep 0xd80a9c,
-//! Update1b 0xd7e108, Update1Incremental 0xd8aa00.
+//! Evidence: current libunity SHA256 937c6d28...75badd9; prewarm-current.json
+//! (GetTimeStep 0xd80a9c, Update1Incremental 0xd8aa00). First Play runs
+//! ComputePrewarmStartParameters 0xd8316c, then BeginUpdate(dt=out) and
+//! Update1b 0xd7e108, which scales that dt by the simulation speed.
 //! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
-//! positive finite constant/two-constant lifetime, source flags=8 and
-//! simulation speed 1 or 0.5 are qualified.
+//! constant/two-constant lifetime, looping prewarm and source flags=8 are qualified.
 
 #[derive(Clone, Copy, Debug)]
 pub enum Lifetime {
@@ -46,9 +46,29 @@ pub struct PrewarmPlan {
     prior_step: f32,
     duration: f32,
     budget: usize,
+    /// ComputePrewarmStartParameters out value: the explicit dt Play hands to
+    /// BeginUpdate. Update1b scales it by the simulation speed.
+    compute_out: f32,
+    /// System clock (state +0x1b8) written by ComputePrewarmStartParameters:
+    /// the warm window starts mid-cycle so that it ends on a cycle boundary.
+    initial_clock: f32,
 }
 
-impl PrewarmPlan {
+/// First-Play warm window shared by the ordinary (BeginUpdate) and procedural
+/// (Update flags=3) routes: ComputePrewarmStartParameters, then Update1b's
+/// speed scale. Only the incremental slicing after this differs by route.
+#[derive(Clone, Copy, Debug)]
+pub struct FirstPlayWarm {
+    /// Compute out value, the explicit dt Play hands to the update entry.
+    pub compute_out: f32,
+    /// Update1b `dt * max(simulationSpeed, 0)`: system seconds added to the
+    /// remaining incremental time.
+    pub total: f32,
+    /// System clock (state +0x1b8) written by Compute before any update.
+    pub initial_clock: f32,
+}
+
+impl FirstPlayWarm {
     pub fn from_source(
         lifetime: Lifetime,
         time: TimeManagerSnapshot,
@@ -58,7 +78,6 @@ impl PrewarmPlan {
         // the unreplayed Play/Compute branches.
         if !play.native_play_bool_argument
             || !play.world_playing
-            || !play.ordinary_incremental
             || !play.no_real_subemitters
             || !play.prewarm
             || !play.looping
@@ -69,7 +88,8 @@ impl PrewarmPlan {
         }
         if !(play.duration.is_finite()
             && play.duration > 0.0
-            && matches!(play.simulation_speed.to_bits(), 0x3f80_0000 | 0x3f00_0000))
+            && play.simulation_speed.is_finite()
+            && play.simulation_speed > 0.0)
         {
             return Err("unqualified duration or simulation speed");
         }
@@ -80,23 +100,85 @@ impl PrewarmPlan {
         {
             return Err("unqualified TimeManager snapshot");
         }
-        let max_lifetime = match lifetime {
-            Lifetime::Constant(v) => v,
-            Lifetime::TwoConstants { min, max } if min.is_finite() && max.is_finite() => {
-                min.max(max)
+        // ComputePrewarmStartParameters 0xd831a8..0xd83228: the lifetime range
+        // upper lane. Constant mode stores (0, v) only for v > 0, else (v, 0);
+        // two constants are ordered by one `max > min` compare (unordered keeps
+        // the min field in the upper lane).
+        let upper = match lifetime {
+            Lifetime::Constant(v) => {
+                if v > 0.0 {
+                    v
+                } else {
+                    0.0
+                }
             }
-            Lifetime::TwoConstants { .. } => return Err("nonfinite two-constant lifetime"),
+            Lifetime::TwoConstants { min, max } => {
+                if max > min {
+                    max
+                } else {
+                    min
+                }
+            }
         };
-        if !(max_lifetime.is_finite() && max_lifetime > 0.0) {
-            return Err("unqualified maximum lifetime");
+        // 0xd8323c..0xd83240: an upper lane of exactly +Infinity is replaced by
+        // the main-module duration before any warm arithmetic.
+        let upper = if upper == f32::INFINITY {
+            play.duration
+        } else {
+            upper
+        };
+        // No real child: CalculateSubEmitterMaximumLifeTime is not consulted
+        // (disabled module) or resolves no live child, so the sub maximum is 0
+        // and 0xd83284..0xd83288 keeps `upper` only when 0 < upper.
+        let lifetime = if 0.0 < upper { upper } else { 0.0 };
+        // 0xd8328c..0xd832f0, prewarm set: out = (fmod(elapsed, fixed) + L) /
+        // max(speed, 0.001); start = elapsed - L - fmod(elapsed, fixed).
+        let phase = play.elapsed % time.fixed_timestep;
+        let warm = phase + lifetime;
+        let compute_out = warm / play.simulation_speed.max(f32::from_bits(0x3a83_126f));
+        let mut start = (play.elapsed - lifetime) - phase;
+        let magnitude = if start < 0.0 { -start } else { start };
+        // 0xd832fc..0xd8330c: a negative start is moved forward by whole
+        // durations (fcvtps rounds toward +Infinity, then back to f32).
+        if start < 0.0 {
+            let cycles = ((-start) / play.duration).ceil() as i32 as f32;
+            start += play.duration * cycles;
         }
-        // ComputePrewarmStartParameters: elapsed=0, no child maximum and
-        // looping prewarm -> maximum lifetime / simulation speed. The current
-        // ARM body writes s1/s0 at 0xd832ec-0xd832f0.
-        let remaining = max_lifetime / play.simulation_speed;
-        if !(remaining.is_finite() && remaining > 0.0) {
+        let end = magnitude + start;
+        let initial_clock = start % play.duration;
+        // 0xd8332c..0xd8337c: both window ends must still advance by the fixed
+        // step; otherwise Compute logs and Play performs no prewarm update.
+        if !(time.fixed_timestep + start > start && time.fixed_timestep + end > end) {
+            return Err("Compute prewarm window does not advance by the fixed step");
+        }
+        // Play passes out as the explicit dt of the update entry. Update1b
+        // 0xd7e24c..0xd7e268 scales it by max(simulationSpeed, 0) before
+        // GetTimeStep and the remaining sum, on both routes.
+        let total = compute_out * play.simulation_speed.max(0.0);
+        if !(total.is_finite() && total > 0.0) {
             return Err("prewarm total overflows f32");
         }
+        Ok(Self {
+            compute_out,
+            total,
+            initial_clock,
+        })
+    }
+}
+
+impl PrewarmPlan {
+    pub fn from_source(
+        lifetime: Lifetime,
+        time: TimeManagerSnapshot,
+        play: PlayState,
+    ) -> Result<Self, &'static str> {
+        // DetermineSupportsProcedural true takes Update(flags=3) instead of
+        // BeginUpdate; its incremental slicing differs from this plan.
+        if !play.ordinary_incremental {
+            return Err("Play/Compute branch outside qualified first-prewarm path");
+        }
+        let warm = FirstPlayWarm::from_source(lifetime, time, play)?;
+        let remaining = warm.total;
         // GetTimeStep nonfixed: total / ceil(total / maximum particle step),
         // f32 at each ARM fdiv/frintp/fdiv (0xd80af4..0xd80afc).
         let ratio = remaining / time.maximum_particle_timestep;
@@ -108,10 +190,15 @@ impl PrewarmPlan {
         } else {
             remaining
         };
-        if !(base_step.is_finite() && base_step > 0.0) {
+        // Update1b 0xd7e274..0xd7e288 skips the incremental update entirely
+        // below this step.
+        if !(base_step.is_finite() && base_step >= f32::from_bits(0x3727_c5ac)) {
             return Err("unqualified nonfixed timestep");
         }
-        Self::from_incremental_input(remaining, base_step, 8, play.duration)
+        let mut plan = Self::from_incremental_input(remaining, base_step, 8, play.duration)?;
+        plan.compute_out = warm.compute_out;
+        plan.initial_clock = warm.initial_clock;
+        Ok(plan)
     }
 
     /// Boundary after native Compute/GetTimeStep. Input step and flags must
@@ -144,6 +231,8 @@ impl PrewarmPlan {
             prior_step: step,
             duration,
             budget: 1_000_256,
+            compute_out: total,
+            initial_clock: 0.0,
         })
     }
 
@@ -152,6 +241,12 @@ impl PrewarmPlan {
     }
     pub fn base_step(&self) -> f32 {
         self.base_step
+    }
+    pub fn compute_out(&self) -> f32 {
+        self.compute_out
+    }
+    pub fn initial_clock(&self) -> f32 {
+        self.initial_clock
     }
 }
 
@@ -323,16 +418,14 @@ mod tests {
         let compute = receipt.get("computeHalfSpeed").unwrap();
         assert_eq!(compute.get("valid").unwrap().as_bool(), Some(true));
         assert_eq!(number(compute.get("warmupSeconds").unwrap()).to_bits(), 130.0f32.to_bits());
+        // This receipt feeds 130 s straight into Update1Incremental. It is an
+        // incremental-scheduler probe only: first Play scales Compute's 130 s
+        // by the 0.5 speed in Update1b (see the first-Play receipt test).
         let timestep = receipt.get("timeStepHalfSpeed").unwrap();
         let observed = number(timestep.get("result").unwrap());
         let source = receipt.get("sourceDerived130").unwrap();
         assert_eq!(observed.to_bits(), number(source.get("stepArgument").unwrap()).to_bits());
-        let plan = PrewarmPlan::from_source(
-            Lifetime::TwoConstants { min: 65.0, max: 35.0 },
-            time(),
-            PlayState { simulation_speed: 0.5, ..initial_play() },
-        ).unwrap();
-        assert_eq!(plan.base_step().to_bits(), observed.to_bits());
+        let plan = PrewarmPlan::from_incremental_input(130.0, observed, 8, 1.0).unwrap();
         compare(plan, source.get("slices").unwrap().as_array().unwrap(),
             source.get("remaining").unwrap(), true);
         for case in receipt.get("cases").unwrap().as_array().unwrap() {
@@ -344,6 +437,52 @@ mod tests {
             ).unwrap();
             compare(plan, case.get("slices").unwrap().as_array().unwrap(),
                 case.get("remaining").unwrap(), true);
+        }
+    }
+
+    #[test]
+    #[ignore = "MOLY_CURRENT_PREWARM_FIRST_PLAY must identify current JP first-Play Update1b receipt"]
+    fn current_native_first_play_prewarm_matches_bits() {
+        let receipt = read("MOLY_CURRENT_PREWARM_FIRST_PLAY");
+        assert_eq!(
+            receipt.get("sourceSha256").unwrap().as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        let cases = receipt.get("cases").unwrap();
+        // Same serialized inputs as the native probe cases.
+        let inputs = [
+            ("cloudSunInfinite24", Lifetime::Constant(f32::INFINITY), 24.0, 1.0),
+            ("snowTwoConstants12x8", Lifetime::TwoConstants { min: 12.0, max: 8.0 }, 1.0, 1.0),
+            ("halfSpeedTwoConstants65x35", Lifetime::TwoConstants { min: 65.0, max: 35.0 }, 1.0, 0.5),
+            ("clockPhase12over5", Lifetime::Constant(12.0), 5.0, 1.0),
+            ("clockPhase12over5HalfSpeed", Lifetime::Constant(12.0), 5.0, 0.5),
+            ("doubleSpeed12over5", Lifetime::Constant(12.0), 5.0, 2.0),
+            ("thirdSpeedTwoConstants7x3over0p7", Lifetime::TwoConstants { min: 7.0, max: 3.0 }, 0.7, 1.0 / 3.0),
+        ];
+        assert_eq!(cases.as_object().unwrap().len(), inputs.len());
+        for (name, lifetime, duration, speed) in inputs {
+            let case = cases.get(name).expect(name);
+            let compute = case.get("compute").unwrap();
+            assert_eq!(compute.get("valid").unwrap().as_bool(), Some(true), "{name}");
+            let plan = PrewarmPlan::from_source(
+                lifetime,
+                time(),
+                PlayState { simulation_speed: speed, duration, ..initial_play() },
+            )
+            .unwrap();
+            assert_eq!(plan.compute_out().to_bits(),
+                number(compute.get("warmupSeconds").unwrap()).to_bits(), "{name} Compute out");
+            assert_eq!(plan.compute_out().to_bits(),
+                number(case.get("update1bDtArgument").unwrap()).to_bits(), "{name} BeginUpdate dt");
+            assert_eq!(plan.initial_clock().to_bits(),
+                number(compute.get("clock").unwrap()).to_bits(), "{name} Compute clock");
+            let entry = case.get("incrementalEntry").unwrap();
+            assert_eq!(plan.remaining().to_bits(),
+                number(entry.get("stateRemaining").unwrap()).to_bits(), "{name} Update1b total");
+            assert_eq!(plan.base_step().to_bits(),
+                number(entry.get("stepArgument").unwrap()).to_bits(), "{name} GetTimeStep");
+            compare(plan, case.get("slices").unwrap().as_array().unwrap(),
+                case.get("remainingAfter").unwrap(), true);
         }
     }
 
@@ -368,15 +507,12 @@ mod tests {
                 ..qualified
             },
             PlayState {
-                simulation_speed: 2.0,
+                simulation_speed: 0.0,
                 ..qualified
             },
         ] {
             assert!(PrewarmPlan::from_source(Lifetime::Constant(12.0), time(), play).is_err());
         }
-        assert!(
-            PrewarmPlan::from_source(Lifetime::Constant(f32::INFINITY), time(), qualified).is_err()
-        );
         assert!(PrewarmPlan::from_incremental_input(12.0, 0.03, 4, 1.0).is_err());
     }
 }

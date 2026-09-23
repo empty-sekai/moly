@@ -7,6 +7,7 @@ use moly_law::particle::autonomous_emission::{
 use moly_law::particle::{
     curve::CurveSampler,
     initial::{InitialContext, InitialGroupInput, InitialLaw},
+    noise::NoiseLaw,
     random::ParticleRandom,
     seed_owner::ModuleRandom,
     sub_emission::BirthBatch,
@@ -20,26 +21,23 @@ pub(crate) struct NativeBirthState {
     pub emission: AutonomousEmissionState,
 }
 
-pub(super) fn qualifies(system: &Runtime) -> bool {
-    qualifies_emitter(&system.emitter)
-}
-
-pub(super) fn qualifies_emitter(emitter: &EmitterParams) -> bool {
+/// Name-independent qualification of the native birth composition: constant
+/// autonomous emission, the Initial law, the pinned Shape configurations, the
+/// qualified Noise subset and authored-null child edges. The source update
+/// route (ordinary versus procedural) is decided by the caller from the
+/// exported system block, not here.
+pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefused> {
     let Some(emission) = emitter.emission.as_ref() else {
-        return false;
+        return Err(BirthRefused::Unsupported("missing emission"));
     };
-    // The new explicit Shape seam is verified independently. Full source
-    // lifecycle/other module composition must qualify before automatic routing.
-    emitter.shape_enabled == Some(false)
-        && emitter.shape.is_none()
-        && ConstantAutonomousEmission::from_params(
-            &emitter.start_delay,
-            emitter.duration,
-            emitter.looping,
-            emission,
-        )
-        .is_ok()
-        && validate_emitter(emitter, &ModuleRandom::from_owner_seed(0)).is_ok()
+    ConstantAutonomousEmission::from_params(
+        &emitter.start_delay,
+        emitter.duration,
+        emitter.looping,
+        emission,
+    )
+    .map_err(BirthRefused::Emission)?;
+    validate_emitter(emitter, &ModuleRandom::from_owner_seed(0)).map(|_| ())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,16 +48,11 @@ pub(super) enum BirthRefused {
     Emission(moly_law::particle::autonomous_emission::Refused),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Composition {
-    Admitted,
-    #[cfg(test)]
-    SnowSourceProbe,
-}
-
-/// One initialized ordinary slice. Capacity is read only after old particles
-/// have completed their full step and death compaction. No child graph or
-/// automatic seed/lifecycle ownership is inferred by this explicit entry.
+/// One initialized ordinary slice: clock, existing-particle barrier, then the
+/// scheduled births with their partial times. Shape and Noise ride the same
+/// slice. Capacity is read only after old particles have completed their full
+/// step and death compaction. No child graph or automatic seed/lifecycle
+/// ownership is inferred by this explicit entry.
 pub(super) fn step_explicit(
     system: &mut Runtime,
     state: &mut NativeBirthState,
@@ -67,58 +60,7 @@ pub(super) fn step_explicit(
     stopped: bool,
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
-    step_common(system, state, dt, stopped, ctx, Composition::Admitted)
-}
-
-/// Test-only current-JP source composition. Production admission is unchanged.
-#[cfg(test)]
-pub(super) fn step_source_snow_probe(
-    system: &mut Runtime,
-    state: &mut NativeBirthState,
-    dt: f32,
-    ctx: &Context,
-) -> Result<(), BirthRefused> {
-    let e = &system.emitter;
-    if system.effect != "fx_env_sky_010_snow"
-        || system.node != "root/snow_pt_01"
-        || !e.prewarm
-        || e.play_on_awake
-        || e.auto_random_seed != Some(true)
-        || e.shape.is_none()
-        || e.noise.is_none()
-        || e.sub_emitters.len() != 1
-        || !e.sub_emitters[0].source_pointer.is_authored_null()
-        || system.noise.as_ref().map(|n| n.owner_seed) != Some(71)
-        || system.velocity_law.is_none()
-        || system.rol.is_none()
-        || system.size_law.is_none()
-        || system.custom_law.is_none()
-        || e.collision.is_some()
-        || e.trails.is_some()
-    {
-        return Err(BirthRefused::Unsupported(
-            "snow source probe configuration/owner",
-        ));
-    }
-    step_common(system, state, dt, false, ctx, Composition::SnowSourceProbe)
-}
-
-fn step_common(
-    system: &mut Runtime,
-    state: &mut NativeBirthState,
-    dt: f32,
-    stopped: bool,
-    ctx: &Context,
-    composition: Composition,
-) -> Result<(), BirthRefused> {
-    // Current Shape proof is the zero-time initialization boundary. Refuse
-    // before advancing old particles/clocks until the full slice is replayed.
-    if system.emitter.shape.is_some() && composition == Composition::Admitted {
-        return Err(BirthRefused::Unsupported(
-            "Shape full-slice module composition",
-        ));
-    }
-    validate_scoped(system, &state.initial, composition)?;
+    validate(system, &state.initial)?;
     if system.emitter.shape.is_none() {
         validate_unshaped_owner(&system.emitter, &compose_to_world(system, ctx))?;
     }
@@ -169,7 +111,6 @@ fn step_common(
             batch.previous_normalized,
             batch.current_normalized,
             ctx,
-            composition,
         )?;
     }
     Ok(())
@@ -195,13 +136,12 @@ pub(super) fn start_explicit(
         previous_normalized,
         current_normalized,
         ctx,
-        Composition::Admitted,
     )
 }
 
 /// Initial and Shape own independent streams, including all four padded
-/// lanes. Explicit probe/lifecycle caller only; this does not admit new source
-/// systems through the conservative automatic routing above.
+/// lanes. Explicit probe/lifecycle caller; admission of a source system is
+/// decided by the installer, not by this command.
 pub(super) fn start_explicit_with_shape(
     system: &mut Runtime,
     initial: &mut ModuleRandom,
@@ -221,7 +161,6 @@ pub(super) fn start_explicit_with_shape(
         previous_normalized,
         current_normalized,
         ctx,
-        Composition::Admitted,
     )
 }
 
@@ -234,9 +173,8 @@ fn start_common(
     previous_normalized: f32,
     current_normalized: f32,
     ctx: &Context,
-    composition: Composition,
 ) -> Result<(), BirthRefused> {
-    let law = validate_scoped(system, random, composition)?;
+    let law = validate(system, random)?;
     let shape_law = system
         .emitter
         .shape
@@ -249,11 +187,6 @@ fn start_common(
     if shape_law.is_some() && shape_stream.is_none() {
         return Err(BirthRefused::Unsupported(
             "missing independent Shape stream",
-        ));
-    }
-    if shape_law.is_some() && dt != 0.0 && composition == Composition::Admitted {
-        return Err(BirthRefused::Unsupported(
-            "Shape nonzero birth-step composition",
         ));
     }
     if !dt.is_finite() || dt < 0.0 || batch.rate_count > batch.count {
@@ -415,25 +348,12 @@ fn start_common(
 
 /// Validate module/storage qualification without advancing any persistent RNG.
 fn validate(system: &Runtime, random: &ModuleRandom) -> Result<InitialLaw, BirthRefused> {
-    validate_scoped(system, random, Composition::Admitted)
+    validate_emitter(&system.emitter, random)
 }
-fn validate_scoped(
-    system: &Runtime,
-    random: &ModuleRandom,
-    composition: Composition,
-) -> Result<InitialLaw, BirthRefused> {
-    validate_emitter_scoped(&system.emitter, random, composition)
-}
+
 fn validate_emitter(
     emitter: &EmitterParams,
     random: &ModuleRandom,
-) -> Result<InitialLaw, BirthRefused> {
-    validate_emitter_scoped(emitter, random, Composition::Admitted)
-}
-fn validate_emitter_scoped(
-    emitter: &EmitterParams,
-    random: &ModuleRandom,
-    composition: Composition,
 ) -> Result<InitialLaw, BirthRefused> {
     match (emitter.shape_enabled, emitter.shape.as_ref()) {
         (Some(false), None) => {}
@@ -453,14 +373,28 @@ fn validate_emitter_scoped(
         ));
     }
     if emitter.inherit_velocity.is_some()
-        || (emitter.noise.is_some() && composition == Composition::Admitted)
         || emitter.collision.is_some()
         || emitter.trails.is_some()
-        || (!emitter.sub_emitters.is_empty() && composition == Composition::Admitted)
     {
         return Err(BirthRefused::Unsupported(
             "birth module/event owner not installed",
         ));
+    }
+    // An authored null child edge (no emitter, pointer 0/0) names no system
+    // and schedules nothing. A real edge needs the child owner and its
+    // command order, which this step does not install.
+    if emitter
+        .sub_emitters
+        .iter()
+        .any(|edge| edge.emitter.is_some() || !edge.source_pointer.is_authored_null())
+    {
+        return Err(BirthRefused::Unsupported(
+            "sub-emitter child owner not installed",
+        ));
+    }
+    if let Some(noise) = emitter.noise.as_ref() {
+        NoiseLaw::from_params(noise)
+            .map_err(|_| BirthRefused::Unsupported("unqualified Noise configuration"))?;
     }
     if !matches!(emitter.start.speed, moly_law::particle::MinMaxCurve::Constant(v) if v.is_finite())
         && !matches!(emitter.start.speed, moly_law::particle::MinMaxCurve::TwoConstants{min,max}

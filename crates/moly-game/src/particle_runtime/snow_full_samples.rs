@@ -1,9 +1,10 @@
 //! Bounded full source snow replay against current JP native incremental slices.
-//! This is deliberately opt-in and never changes the normal admission gate.
+//! Opt-in receipt test. It drives the production native step, the production
+//! first-Play slice plan and the production eligibility check; only the owner
+//! seed and the initial streams are supplied from the receipt.
 use super::*;
 use moly_law::particle::{
     autonomous_emission::AutonomousEmissionState,
-    prewarm::PrewarmPlan,
     schema::Effects,
     seed_owner::{ModuleRandom, ScalarRandom, SeedOwner},
 };
@@ -47,23 +48,16 @@ fn context() -> Context {
 }
 
 fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
-    // Relocate the source inputs explicitly without modifying the native receipt.
-    // Omitted overrides retain the original Windows lane layout.
-    let raw_path = std::env::var_os("MOLY_SNOW_FULL_SOURCE_EFFECTS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            native_path.parent().unwrap().parent().unwrap().join(
-                "weather-source-20260918/render-integration-20260919/full-scope-20260920/phenomena/010_snow/fx/effects.json",
-            )
-        });
-    let overlay_path = std::env::var_os("MOLY_SNOW_FULL_OVERLAY_EFFECTS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            native_path
-                .parent()
-                .unwrap()
-                .join("asset-overlay/phenomena/010_snow/fx/effects.json")
-        });
+    // Both source inputs are supplied explicitly next to the native receipt.
+    let _ = native_path;
+    let raw_path = std::path::PathBuf::from(
+        std::env::var_os("MOLY_SNOW_FULL_SOURCE_EFFECTS")
+            .expect("MOLY_SNOW_FULL_SOURCE_EFFECTS must name the source effects.json"),
+    );
+    let overlay_path = std::path::PathBuf::from(
+        std::env::var_os("MOLY_SNOW_FULL_OVERLAY_EFFECTS")
+            .expect("MOLY_SNOW_FULL_OVERLAY_EFFECTS must name the overlay effects.json"),
+    );
     let raw: Value = serde_json::from_slice(&std::fs::read(&raw_path).unwrap_or_else(|error| {
         panic!("read source effects {}: {error}", raw_path.display())
     }))
@@ -118,6 +112,7 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
     ] {
         assert!(module_names.contains(&required), "missing {required}");
     }
+    let route = source_route(&selected["system"]);
     let selected = json!({"effects":{EFFECT:{"particles":[selected]}}});
     let mut decoded = Effects::from_json_str(&serde_json::to_vec(&selected).unwrap()).unwrap();
     let emitter = decoded.emitters.remove(0);
@@ -170,6 +165,11 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
     system.died_total = 0;
     system.full_total = 0;
     system.native_birth = None;
+    // Production routes this composition natively: ordinary route, every
+    // enabled module with a native consumer, authored-null child edge.
+    assert_eq!(route, SourceRoute::Ordinary);
+    native_birth_eligible(&system.emitter, &route)
+        .expect("production admits the snow composition on the native birth path");
     system
 }
 
@@ -372,12 +372,14 @@ fn source_snow_full_prewarm_matches_current_native() {
         native["effectsSha256"],
         "7757dd3d7b05d8552770bc9bbd7de51cf0eea143daec9dbbd1af322411b683f4"
     );
+    // Production follows the first-Play warm with the effector's later Play, so
+    // the normal frame is compared against the native case that includes it.
     let row = native["cases"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["label"] == "Full-12s-prewarm")
-        .unwrap();
+        .find(|r| r["label"] == "Full-12s-prewarm+second-Play")
+        .expect("native receipt with the effector's second Play");
     assert_eq!(row["status"], "native_return");
     assert_eq!(
         row["logicalChannels"],
@@ -423,10 +425,15 @@ fn source_snow_full_prewarm_matches_current_native() {
         &mut hash_differences,
     );
     let slices = row["prewarmSlices"].as_array().unwrap();
-    let plan = PrewarmPlan::from_incremental_input(12.0, 0.03, 8, system.emitter.duration).unwrap();
+    // The production first-Play plan: 12 s upper lifetime, start clock 0.
+    let plan = first_play_plan(&system).unwrap();
+    assert_eq!(plan.compute_out().to_bits(), 12.0_f32.to_bits());
+    assert_eq!(plan.initial_clock().to_bits(), 0.0_f32.to_bits());
+    let plan: Vec<_> = plan.collect();
+    assert_eq!(plan.len(), slices.len(), "first-Play plan must yield exactly the native slices");
     let context = context();
     let mut rows = Vec::with_capacity(slices.len());
-    for (index, (planned, reference)) in plan.zip(slices).enumerate() {
+    for (index, (planned, reference)) in plan.into_iter().zip(slices).enumerate() {
         let planned = planned.unwrap();
         compare_field(
             planned.remaining_before.to_bits(),
@@ -442,7 +449,7 @@ fn source_snow_full_prewarm_matches_current_native() {
             index,
             &mut differences,
         );
-        birth::step_source_snow_probe(&mut system, &mut state, planned.duration, &context)
+        birth::step_explicit(&mut system, &mut state, planned.duration, false, &context)
             .unwrap_or_else(|e| panic!("native snow slice {index} refused: {e:?}"));
         let hash = compare_boundary(
             &system,
@@ -471,7 +478,8 @@ fn source_snow_full_prewarm_matches_current_native() {
         &row["prewarmEffectiveSizeXPoolWords"],
         "prewarm",
     );
-    birth::step_source_snow_probe(&mut system, &mut state, 1.0 / 60.0, &context).unwrap();
+    later_play(&mut system);
+    birth::step_explicit(&mut system, &mut state, 1.0 / 60.0, false, &context).unwrap();
     let normal = &row["firstNormalFrame"];
     compare_boundary(
         &system,
@@ -492,7 +500,7 @@ fn source_snow_full_prewarm_matches_current_native() {
     let normal_effective =
         compare_effective_size(&effective, &normal["effectiveSizeXPoolWords"], "normal");
     let report = json!({"owner":format!("{EFFECT}/{NODE}"),"sourceSha256":SOURCE_HASH,
-        "scope":"Explicit owner71/source module composition; no production admission, true Play lifecycle, or renderer claim",
+        "scope":"Supplied owner 71 driven through the production native step, first-Play plan and eligibility check; no live Play lifecycle or renderer claim",
         "slices":rows,"finalCount":system.pool.len(),"boundaryDifferenceCount":differences.len(),
         "boundaryDifferences":differences,"hashDifferenceCount":hash_differences.len(),
         "hashDifferences":hash_differences,"prewarmChannels":prewarm_channels,

@@ -40,10 +40,322 @@ use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
     EmissionState, EmitterParams, LimitVelocity, Particle,
     RingBufferMode, RotationOverLifetime, StepVerdict};
 use moly_law::particle::noise::{NoiseLaw, NoiseState};
+use moly_law::particle::prewarm::{FirstPlayWarm, Lifetime, PlayState, PrewarmPlan};
 use crate::billboard::{Alignment, Quad, SizeClamp};
 const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 
 pub(crate) const PREWARM_STEP: f32 = 1.0 / 60.0;
+
+/// Current JP player TimeManager as serialized in globalgamemanagers
+/// (Fixed Timestep 0.02, Maximum Particle Timestep 0.03). The game assembly
+/// reads Time.fixedDeltaTime and never assigns it or the particle maximum.
+pub(crate) const PLAYER_TIME: moly_law::particle::prewarm::TimeManagerSnapshot =
+    moly_law::particle::prewarm::TimeManagerSnapshot {
+        fixed_timestep: f32::from_bits(0x3ca3_d70a),
+        maximum_particle_timestep: f32::from_bits(0x3cf5_c28f),
+    };
+
+/// Native update route the source selects for a system. Ordinary systems
+/// advance through the incremental Update1 path this runtime transcribes.
+/// Procedural systems (DetermineSupportsProcedural true) are evaluated from
+/// time and prewarm through Update(flags=3); neither is transcribed, so they
+/// stay on the legacy step. `Undecided` names the control the exported block
+/// cannot settle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRoute {
+    Ordinary,
+    Procedural,
+    Undecided(String),
+}
+
+/// Transcription of the native DetermineSupportsProcedural decision over the
+/// exported system block. The native body reads fixed fields and has no side
+/// effects, so the order of the tests does not matter: one failing control makes
+/// the route ordinary, and only a block passing all of them is procedural. An
+/// input the export does not carry makes the verdict undecided, never a default.
+/// Curve validity follows IsValidPolynomialCurve: no keys is valid; otherwise the
+/// first key must sit at time 0 or the pre-wrap mode be 2 or more, the last key
+/// at time 1 or the post-wrap mode be 2 or more, and the segment count (one per
+/// key gap plus one per clamped end) must be fewer than nine.
+pub(crate) fn source_route(system: &serde_json::Value) -> SourceRoute {
+    use serde_json::Value;
+    fn number(value: &Value) -> Option<f64> {
+        value.as_f64().or_else(|| match value.as_str() {
+            Some("Infinity") => Some(f64::INFINITY),
+            Some("-Infinity") => Some(f64::NEG_INFINITY),
+            _ => None,
+        })
+    }
+    // Upper lane of a serialized MinMaxCurve: the constant, the two-constant
+    // maximum, or the curve multiplier.
+    fn upper_scalar(curve: Option<&Value>) -> Option<f64> {
+        let curve = curve?;
+        match curve.get("mode").and_then(Value::as_str)? {
+            "constant" => number(curve.get("value")?),
+            "twoConstants" => number(curve.get("max")?),
+            "curve" | "twoCurves" => curve.get("multiplier").and_then(number),
+            _ => None,
+        }
+    }
+    // One curve lane: its keys and, when exported, its wrap modes.
+    fn lane_valid(curve: &Value, keys: &str, pre: &str, post: &str) -> Option<bool> {
+        let keys = curve.get(keys)?.as_array()?;
+        if keys.is_empty() {
+            return Some(true);
+        }
+        let time = |key: &Value| key.get("time").and_then(Value::as_f64);
+        let first_open = time(&keys[0])? != 0.0;
+        let last_open = time(&keys[keys.len() - 1])? != 1.0;
+        let wrap = |name: &str| curve.get(name).and_then(Value::as_u64);
+        if first_open && wrap(pre)? < 2 {
+            return Some(false);
+        }
+        if last_open && wrap(post)? < 2 {
+            return Some(false);
+        }
+        Some(keys.len() - 1 + usize::from(first_open) + usize::from(last_open) < 9)
+    }
+    fn curve_valid(curve: Option<&Value>) -> Option<bool> {
+        let curve = curve?;
+        match curve.get("mode").and_then(Value::as_str)? {
+            "constant" | "twoConstants" => Some(true),
+            "curve" => lane_valid(curve, "keys", "preInfinity", "postInfinity"),
+            "twoCurves" => {
+                if !lane_valid(curve, "maxKeys", "maxPreInfinity", "maxPostInfinity")? {
+                    return Some(false);
+                }
+                lane_valid(curve, "minKeys", "minPreInfinity", "minPostInfinity")
+            }
+            _ => None,
+        }
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    let mut undecided: Vec<String> = Vec::new();
+    fn curves(label: &str, block: &Value, axes: &[&str], reasons: &mut Vec<String>, undecided: &mut Vec<String>) {
+        for axis in axes {
+            match curve_valid(block.get(*axis)) {
+                Some(false) => reasons.push(format!("{label} {axis} polynomial")),
+                None => undecided.push(format!("{label} {axis} not decidable from the export")),
+                Some(true) => {}
+            }
+        }
+    }
+    let Some(enabled) = system.pointer("/sourceModules/enabled").and_then(Value::as_array) else {
+        return SourceRoute::Undecided("sourceModules not exported".into());
+    };
+    let enabled: Vec<&str> = enabled.iter().filter_map(Value::as_str).collect();
+    let has = |module: &str| enabled.contains(&module);
+    match system.get("simulationSpace").and_then(Value::as_str) {
+        Some("Local") => {}
+        Some(_) => reasons.push("simulationSpace".into()),
+        None => undecided.push("simulationSpace not exported".into()),
+    }
+    match system.get("stopAction").and_then(Value::as_i64) {
+        Some(0) => {}
+        Some(_) => reasons.push("stopAction".into()),
+        None => undecided.push("stopAction not exported".into()),
+    }
+    // Read whether or not the Emission module is enabled; the export carries it
+    // outside the emission block for exactly that reason.
+    let distance = system.get("emissionRateOverDistance")
+        .or_else(|| system.pointer("/emission/rateOverDistance"));
+    match upper_scalar(distance) {
+        Some(rate) if rate == 0.0 => {}
+        Some(_) => reasons.push("rateOverDistance".into()),
+        None => undecided.push("rateOverDistance not exported".into()),
+    }
+    for module in ["ExternalForcesModule", "ClampVelocityModule", "RotationBySpeedModule",
+        "CollisionModule", "TriggerModule", "SubModule", "NoiseModule"] {
+        if has(module) { reasons.push(module.into()); }
+    }
+    // Only a per-particle trail fails the test; ribbon trails stay procedural.
+    // The Lights module is not read by the decision.
+    if has("TrailModule") {
+        match system.pointer("/trails/mode").and_then(Value::as_str) {
+            Some("perParticle") => reasons.push("TrailModule perParticle".into()),
+            Some(_) => {}
+            None => undecided.push("trails.mode not exported".into()),
+        }
+    }
+    // Gravity and lifetime are read only while the Initial module is enabled.
+    if has("InitialModule") {
+        match system.pointer("/start/gravityModifier/mode").and_then(Value::as_str) {
+            Some("constant") => {}
+            Some(_) => reasons.push("gravityModifier not constant".into()),
+            None => undecided.push("gravityModifier not exported".into()),
+        }
+        match upper_scalar(system.pointer("/start/lifetime")) {
+            Some(value) if value == f64::INFINITY => reasons.push("startLifetime +Infinity".into()),
+            Some(_) => {}
+            None => undecided.push("startLifetime not exported".into()),
+        }
+    }
+    if system.get("shapeEnabled").and_then(Value::as_bool) == Some(true) {
+        match system.get("shape").filter(|v| v.is_object()) {
+            None => undecided.push("shape not exported".into()),
+            Some(shape) => {
+                let kind = shape.get("type").and_then(Value::as_str);
+                let mode = |key: &str| shape.get(key).and_then(Value::as_str);
+                match kind {
+                    None => undecided.push("shape type not exported".into()),
+                    Some("Cone" | "ConeVolume" | "Circle" | "Donut") => match mode("arcMode") {
+                        Some("Random") => {}
+                        Some(_) => reasons.push("shape arcMode".into()),
+                        None => undecided.push("shape arcMode not exported".into()),
+                    },
+                    Some("SingleSidedEdge") => match mode("radiusMode") {
+                        Some("Random") => {}
+                        Some(_) => reasons.push("shape radiusMode".into()),
+                        None => undecided.push("shape radiusMode not exported".into()),
+                    },
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    if has("RotationModule") {
+        match system.get("rotationOverLifetime").filter(|v| v.is_object()) {
+            None => undecided.push("rotationOverLifetime not exported".into()),
+            Some(rotation) => match rotation.get("separateAxes").and_then(Value::as_bool) {
+                None => undecided.push("rotation separateAxes not exported".into()),
+                Some(separate) => {
+                    let axes: &[&str] = if separate { &["curve", "x", "y"] } else { &["curve"] };
+                    curves("rotation", rotation, axes, &mut reasons, &mut undecided);
+                }
+            },
+        }
+    }
+    if has("VelocityModule") {
+        match system.get("velocityOverLifetime").filter(|v| v.is_object()) {
+            None => undecided.push("velocityOverLifetime not exported".into()),
+            Some(velocity) => {
+                curves("velocity", velocity, &["x", "y", "z"], &mut reasons, &mut undecided);
+                for key in ["orbitalX", "orbitalY", "orbitalZ", "radial"] {
+                    match upper_scalar(velocity.get(key)) {
+                        Some(value) if value == 0.0 => {}
+                        Some(_) => reasons.push(format!("velocity {key}")),
+                        None => undecided.push(format!("velocity {key} not exported")),
+                    }
+                }
+            }
+        }
+    }
+    if has("ForceModule") {
+        match system.get("forceOverLifetime").filter(|v| v.is_object()) {
+            None => undecided.push("forceOverLifetime not exported".into()),
+            Some(force) => {
+                curves("force", force, &["x", "y", "z"], &mut reasons, &mut undecided);
+                match force.get("randomizePerFrame").and_then(Value::as_bool) {
+                    Some(true) => reasons.push("force randomizePerFrame".into()),
+                    Some(false) => {}
+                    None => undecided.push("force randomizePerFrame not exported".into()),
+                }
+            }
+        }
+    }
+    if !reasons.is_empty() {
+        SourceRoute::Ordinary
+    } else if !undecided.is_empty() {
+        SourceRoute::Undecided(undecided.join(", "))
+    } else {
+        SourceRoute::Procedural
+    }
+}
+
+/// First-Play prewarm. The warm length and the starting clock are the native
+/// ones (ComputePrewarmStartParameters, then Update1b's speed scale). A system
+/// with an installed native birth owner advances through the native
+/// incremental slice schedule (1 s / 0.2 s / GetTimeStep pieces, partial birth
+/// times per particle). The legacy step births whole-slice cohorts, so it
+/// covers the same system time in PREWARM_STEP pieces instead. Play only warms
+/// a looping prewarm system; the caller owns that gate.
+pub(crate) fn prewarm_first_play(system: &mut Runtime, ctx: &Context) -> Result<(), &'static str> {
+    if let Some(mut state) = system.native_birth.take() {
+        let result = prewarm_native(system, &mut state, ctx);
+        system.native_birth = Some(state);
+        return result.map(|()| later_play(system));
+    }
+    let warm = FirstPlayWarm::from_source(
+        first_play_lifetime(&system.emitter)?, PLAYER_TIME, first_play_state(system))?;
+    system.playback_head = warm.initial_clock;
+    if warm.initial_clock != 0.0 {
+        // The window opens mid-cycle: no zero-time burst precedes it.
+        system.emission_started = true;
+        system.previous_head = warm.initial_clock;
+    }
+    let mut remaining = warm.total;
+    while remaining > 0.0 {
+        let step = remaining.min(PREWARM_STEP);
+        simulate(system, step, ctx);
+        remaining -= step;
+    }
+    later_play(system);
+    Ok(())
+}
+
+/// The effector plays every child system more than once within one call (the
+/// managed recursion and the effector's own child array both reach it). A later
+/// Play finds live particles, so it neither resets seeds nor warms again; it
+/// only returns the playback clock, the pending time and the loop count to zero.
+/// A warm that left no particle alive would be reset and warmed again by that
+/// Play; this runtime does not repeat the warm and says so.
+fn later_play(system: &mut Runtime) {
+    if system.pool.is_empty() {
+        warn!(effect=%system.effect, node=%system.node,
+            "first-Play warm left no particle alive; the later Play's reset and second warm are not repeated");
+        return;
+    }
+    system.playback_head = 0.0;
+    system.previous_head = 0.0;
+}
+
+/// The native first-Play slice schedule of an installed ordinary system.
+pub(crate) fn first_play_plan(system: &Runtime) -> Result<PrewarmPlan, &'static str> {
+    PrewarmPlan::from_source(first_play_lifetime(&system.emitter)?, PLAYER_TIME, first_play_state(system))
+}
+
+fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx: &Context)
+    -> Result<(), &'static str> {
+    let plan = first_play_plan(system)?;
+    system.playback_head = plan.initial_clock();
+    for slice in plan {
+        let slice = slice?;
+        if birth::step_explicit(system, state, slice.duration, false, ctx).is_err() {
+            system.refused_total += 1;
+            return Err("native prewarm slice refused");
+        }
+    }
+    Ok(())
+}
+
+fn first_play_lifetime(emitter: &EmitterParams) -> Result<Lifetime, &'static str> {
+    match emitter.start.lifetime {
+        moly_law::particle::MinMaxCurve::Constant(v) => Ok(Lifetime::Constant(v)),
+        moly_law::particle::MinMaxCurve::TwoConstants { min, max } => Ok(Lifetime::TwoConstants { min, max }),
+        // Curve lifetimes go through CalculateCurveRangesValue, not transcribed.
+        _ => Err("curve start lifetime: prewarm range not transcribed"),
+    }
+}
+
+fn first_play_state(system: &Runtime) -> PlayState {
+    let e = &system.emitter;
+    PlayState {
+        elapsed: 0.0,
+        live_count: system.pool.len(),
+        // Awake/EmitEffect Play reaches native Play(true); the managed
+        // withChildren mapping itself is not separately replayed.
+        native_play_bool_argument: true,
+        world_playing: true,
+        // Only an installed ordinary system reaches the native slice plan;
+        // the shared Compute/Update1b arithmetic does not read this flag.
+        ordinary_incremental: true,
+        no_real_subemitters: e.sub_emitters.iter().all(|edge| edge.source_pointer.is_authored_null()),
+        prewarm: e.prewarm,
+        looping: e.looping,
+        simulation_speed: e.simulation_speed,
+        duration: e.duration,
+    }
+}
 /// 三类锚（effect 档案的 `kind`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EffectKind {
@@ -287,10 +599,6 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
             system.emission_started = true;
             -f32::from_bits(1)
         };
-        let rate = emission
-            .rate_over_time
-            .evaluate(system.playback_head, 0.5);
-        let mut emitted = accumulate_rate(&mut system.emission, rate, dt);
         system.playback_head += dt;
         // 非循环系统播到头就停发（现存粒子活完寿命）。循环系统的播头按
         // duration 回卷——burst 的时间轴与率曲线共用它。
@@ -300,6 +608,11 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
                 system.previous_head -= system.emitter.duration;
             }
         }
+        // The source samples the rate at the slice end, in normalized cycle time.
+        let rate = emission
+            .rate_over_time
+            .evaluate(normalized_time(system, system.playback_head), 0.5);
+        let mut emitted = accumulate_rate(&mut system.emission, rate, dt);
         for burst in &emission.bursts {
             let rand_fire = system.rng.next_f32();
             let rand_count = system.rng.next_f32();
@@ -499,25 +812,73 @@ fn simulate_birth_span(system: &mut Runtime, old_count: usize, accepted: usize,
     surviving_count
 }
 
-/// Called once when the admitted source instance is installed. This first
-/// consumer is awake, zero-delay, non-prewarmed and no-shape; other source
-/// configurations retain their separately diagnosed implementation gaps.
-pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager)
-    -> Result<bool, String> {
-    if system.native_birth.is_some() { return Ok(true); }
-    if !native_birth_eligible(&system.emitter) { return Ok(false); }
-    let (owner, streams) = seeds.create_owner(system.emitter.random_seed,system.emitter.auto_random_seed)
-        .map_err(|error|format!("{error:?}"))?;
-    system.native_birth = Some(birth::NativeBirthState {
-        owner:Some(owner), initial:streams.initial, shape:streams.shape,
-        emission:moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(streams.scalar_birth),
-    });
-    Ok(true)
+/// Outcome of installing the source birth owner on an admitted instance.
+pub(crate) enum BirthPath {
+    Native,
+    /// The system stays on the legacy step; the reason is recorded for the
+    /// diagnostics rather than inferred later.
+    Legacy(String),
 }
 
-/// Install the qualified current-JP Noise consumer and its source owner seed.
-/// Source admission remains responsible for deciding whether the whole system
-/// is safe; this function does not waive prewarm, Shape or other module gates.
+/// Whether this emitter takes the native birth path: the source selects the
+/// ordinary incremental route and every enabled module has a verified native
+/// consumer (Initial, constant Emission, the pinned Shape configurations, the
+/// qualified Noise subset, authored-null child edges; lifetime modules are
+/// shared with the legacy step).
+pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
+    match route {
+        SourceRoute::Ordinary => {}
+        SourceRoute::Procedural => return Err(
+            "procedural source route: time-evaluated simulation and Update(flags=3) prewarm are not transcribed".into()),
+        SourceRoute::Undecided(control) => return Err(format!("source route undecided: {control}")),
+    }
+    birth::qualify_emitter(emitter).map_err(|refused| format!("{refused:?}"))
+}
+
+/// Called once when the admitted source instance is installed. The first Play
+/// resets the system seeds (one shared-manager draw for an automatic owner)
+/// and expands the Initial, Shape and scalar emission streams. Noise reads the
+/// same owner seed and starts from the reset scroll, so it is installed from
+/// this event rather than drawing a second owner.
+pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
+    route: &SourceRoute) -> Result<BirthPath, seed::SeedError> {
+    if system.native_birth.is_some() { return Ok(BirthPath::Native); }
+    if let Err(reason) = native_birth_eligible(&system.emitter, route) {
+        // The legacy step does not consume the native streams, but the source
+        // still resets this system's seed at first Play: an automatic owner
+        // takes the next shared-manager word, a manual one its serialized seed.
+        let (owner, _) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;
+        system.rng = Rng(u64::from(owner.seed) | (u64::from(owner.seed) << 32));
+        return Ok(BirthPath::Legacy(reason));
+    }
+    // Qualify the Noise consumer before drawing, so a refused configuration is
+    // reported before the owner is created.
+    let noise_law = match system.emitter.noise.as_ref() {
+        Some(params) => match NoiseLaw::from_params(params) {
+            Ok(law) => Some(law),
+            Err(reason) => return Ok(BirthPath::Legacy(reason.to_owned())),
+        },
+        None => None,
+    };
+    let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;
+    system.native_birth = Some(birth::NativeBirthState {
+        owner: Some(owner), initial: streams.initial, shape: streams.shape,
+        emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(streams.scalar_birth),
+    });
+    if let Some(law) = noise_law {
+        system.noise = Some(NoiseRuntime {
+            law,
+            state: NoiseState { scroll: streams.noise_scroll },
+            owner_seed: owner.seed,
+            owner,
+        });
+    }
+    Ok(BirthPath::Native)
+}
+
+/// Explicit Noise consumer with its own owner draw. Production installs Noise
+/// together with the native birth owner above; only the kernel checks use this.
+#[cfg(test)]
 pub(crate) fn install_noise_consumer(
     system: &mut Runtime,
     seeds: &mut seed::SystemSeedManager,
@@ -543,15 +904,17 @@ pub(crate) fn install_noise_consumer(
     Ok(true)
 }
 
-pub(crate) fn native_birth_eligible(emitter: &EmitterParams) -> bool {
-    !emitter.prewarm && emitter.play_on_awake && emitter.simulation_space == SimulationSpace::Local
-        && matches!(emitter.start.gravity_modifier, moly_law::particle::MinMaxCurve::Constant(0.0))
-        && emitter.rotation_over_lifetime.is_none() && emitter.velocity_over_lifetime.is_none()
-        && emitter.force.is_none() && emitter.limit_velocity.is_none() && emitter.size_over_lifetime.is_none()
-        && birth::qualifies_emitter(emitter)
+/// 出生一颗：形状抽样 → 出生取值 → 律的入池裁决。
+/// Clock time as the fraction of one authored cycle, the time base of every
+/// start value and emission curve.
+fn normalized_time(system: &Runtime, head: f32) -> f32 {
+    let duration = system.emitter.duration;
+    if !(duration.is_finite() && duration > 0.0) {
+        return 0.0;
+    }
+    (head / duration).clamp(0.0, 1.0)
 }
 
-/// 出生一颗：形状抽样 → 出生取值 → 律的入池裁决。
 fn spawn_one(system: &mut Runtime, ctx: &Context) {
     let (position, direction) = if let Some(shape) = system.emitter.shape.as_ref() {    // Current native RNG consumption: Circle/Cone 2, Sphere/Hemisphere 3,
     // SingleSidedEdge 1. A billboard's facing direction is not its birth velocity.
@@ -658,42 +1021,45 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
 
     // ---- 出生取值表（表情链转录：逐项各抽一次，速度与重力共用稳定
     // 因子，种子 u32 最后一抽）----
+    // Start values are sampled at the normalized emission time. The legacy step
+    // births a whole slice at its start, so that is the time it uses.
+    let t0 = normalized_time(system, system.previous_head);
     let r = system.rng.next_f32();
     let lifetime = system
         .emitter
         .start
         .lifetime
-        .evaluate(0.0, system.rng.next_f32())
+        .evaluate(t0, system.rng.next_f32())
         .max(0.01);
     let size_x = system
         .emitter
         .start
         .size
-        .evaluate(0.0, system.rng.next_f32());
+        .evaluate(t0, system.rng.next_f32());
     let size_y = match &system.emitter.start.size_y {
-        Some(curve) => curve.evaluate(0.0, system.rng.next_f32()),
+        Some(curve) => curve.evaluate(t0, system.rng.next_f32()),
         None => size_x,
     };
     let size_z = match &system.emitter.start.size_z {
-        Some(curve) => curve.evaluate(0.0, system.rng.next_f32()),
+        Some(curve) => curve.evaluate(t0, system.rng.next_f32()),
         None => size_x,
     };
     let colour = moly_law::particle::gradient::rgba8_to_float(
         moly_law::particle::color::initial_rgba8(
-            &system.emitter.start.color, 0.0, system.rng.next_f32()));
+            &system.emitter.start.color, t0, system.rng.next_f32()));
     let spin0 = system
         .emitter
         .start
         .rotation
-        .evaluate(0.0, system.rng.next_f32());
+        .evaluate(t0, system.rng.next_f32());
     let (spin_x, spin_y) = if system.emitter.start.rotation3d {
         (system.emitter.start.rotation_x.as_ref().expect("validated source X rotation")
-            .evaluate(0.0, system.rng.next_f32()),
+            .evaluate(t0, system.rng.next_f32()),
          system.emitter.start.rotation_y.as_ref().expect("validated source Y rotation")
-            .evaluate(0.0, system.rng.next_f32()))
+            .evaluate(t0, system.rng.next_f32()))
     } else { (0.0, 0.0) };
-    let speed = system.emitter.start.speed.evaluate(0.0, r);
-    let gravity = system.emitter.start.gravity_modifier.evaluate(0.0, r);
+    let speed = system.emitter.start.speed.evaluate(t0, r);
+    let gravity = system.emitter.start.gravity_modifier.evaluate(t0, r);
     let seed = system.rng.next_u32();
 
     // ---- 空间锚定：世界空间仿真出生即锚（位置过全变换、方向过线性部

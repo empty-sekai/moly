@@ -109,14 +109,19 @@ fn initial_shape_and_start_velocity_match_native_in_shared_pool() {
             moly_law::particle::seed_owner::ScalarRandom::from_seed(1729))};
     let state_before=state.clone();let age_before=guarded.pool[0].age_percent;
     let context=Context{sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
+    // Shape now rides the full slice; ring replacement still has no newborn
+    // consumer and must refuse before any clock or stream is touched.
+    guarded.emitter.ring_buffer_mode=moly_law::particle::RingBufferMode::LoopUntilReplaced;
     assert_eq!(super::birth::step_explicit(&mut guarded,&mut state,0.25,false,&context),
-        Err(super::birth::BirthRefused::Unsupported("Shape full-slice module composition")));
+        Err(super::birth::BirthRefused::Unsupported("newborn ring replacement composition")));
+    guarded.emitter.ring_buffer_mode=moly_law::particle::RingBufferMode::Disabled;
     assert_eq!(guarded.pool.len(),1);assert_eq!(guarded.pool[0].age_percent,age_before);
     assert_eq!(guarded.playback_head,0.0);assert_eq!(state.initial,state_before.initial);
     assert_eq!(state.shape,state_before.shape);assert_eq!(state.emission,state_before.emission);
     let batch=BirthBatch{count:1,rate_count:1,distribution:BirthDistribution{spacing:0.25,offset:0.0,burst_fraction:0.0}};
-    assert_eq!(super::birth::start_explicit_with_shape(&mut guarded,&mut state.initial,&mut state.shape,
-        batch,0.25,0.25,0.25,&context),Err(super::birth::BirthRefused::Unsupported("Shape nonzero birth-step composition")));
+    // A shaped system without its independent Shape stream is refused whole.
+    assert_eq!(super::birth::start_explicit(&mut guarded,&mut state.initial,
+        batch,0.25,0.25,0.25,&context),Err(super::birth::BirthRefused::Unsupported("missing independent Shape stream")));
     assert_eq!(state.initial,state_before.initial);assert_eq!(state.shape,state_before.shape);
     let owner=&receipt["transformRows"][3]["owner"];
     let mut overflow=source_runtime(&receipt["sources"][0],0,Some(SimulationSpace::World),Some(owner));

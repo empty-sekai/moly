@@ -3,9 +3,8 @@
 //! Pure law: the consumer supplies owner seed, scroll and source simulation inputs.
 //! Current JP 6.8.1 libunity SHA256 937c6d28...75badd9:
 //! Update 0xef207c -> CalculateNoise 0xefb474 -> job 0xefbe30 -> Perlin3D 0xef137c.
-//! Independent analytic equations: snow-noise-equation.py, 128 cases / 512 particles,
-//! max error 7.51e-7 against the actual native Update (double reference arithmetic).
-//! Rust f32 replay: 1,024 particle samples, max absolute error 3.58e-7.
+//! Perlin3D follows the native straight-line dataflow operation by operation;
+//! the curl pairing and scales follow the job body.
 //! Complete particle-system timing and source admission are separate obligations.
 //!
 //! The permutation is Ken Perlin's standard improved-noise algorithm table;
@@ -82,8 +81,10 @@ impl NoiseLaw {
         let a = perlin_xy([z, y, x + state.scroll], self.frequency);
         let b = perlin_xy([x + 100.0, z, y + state.scroll], self.frequency);
         let c = perlin_xy([y, x + 100.0, z + state.scroll], self.frequency);
+        // CalculateNoiseJob 0xefc02c..0xefc0a4: damping uses the refined ARM
+        // reciprocal estimate of the clamped frequency, not host division.
         let scale = if self.damping {
-            self.frequency.recip()
+            super::velocity::orbital_reciprocal(self.frequency)
         } else {
             1.0
         } * self.strength;
@@ -120,47 +121,57 @@ fn owner_offset(seed: u32) -> [f32; 3] {
 }
 
 /// Improved Perlin's analytic x/y derivatives, including frequency chain rule.
-/// Accumulation is scalar f32; it is mathematically equivalent to the SIMD
-/// polynomial but does not promise bit-identical evaluation order.
+/// Transcribed from the current straight-line Perlin3D body (0xef137c, no
+/// fused ops): trilinear coefficient form, every f32 operation in native
+/// order. Only the integer corner hash is written semantically. A per-corner
+/// sum is mathematically equal but rounds differently.
 fn perlin_xy(position: [f32; 3], frequency: f32) -> [f32; 2] {
-    let scaled = position.map(|v| v * frequency);
-    let floors = scaled.map(f32::floor);
+    let scaled = position.map(|v| frequency * v);
+    // fcvtzs/scvtf/fcmgt floor: truncation minus one where it exceeds the value.
+    let floors = scaled.map(|v| {
+        let truncated = (v as i32) as f32;
+        truncated - if truncated > v { 1.0 } else { 0.0 }
+    });
     let cell = floors.map(|v| (v as i32 & 255) as usize);
-    let p: [f32; 3] = std::array::from_fn(|i| scaled[i] - floors[i]);
-    let fade = p.map(|t| t * t * t * (t * (t * 6.0 - 15.0) + 10.0));
-    let derivative = p.map(|t| 30.0 * t * t * (t * (t - 2.0) + 1.0));
-    let perm = |v: usize| PERMUTATION[v & 255] as usize;
-    let mut result = [0.0; 2];
-    for z in 0..2 {
-        for y in 0..2 {
-            for x in 0..2 {
-                let corner = [x, y, z];
-                let hash = perm(perm(perm(cell[0] + x) + cell[1] + y) + cell[2] + z);
-                let gradient = GRADIENTS[hash & 15];
-                let dot = gradient[0] * (p[0] - x as f32)
-                    + gradient[1] * (p[1] - y as f32)
-                    + gradient[2] * (p[2] - z as f32);
-                let w: [f32; 3] = std::array::from_fn(|i| {
-                    if corner[i] != 0 {
-                        fade[i]
-                    } else {
-                        1.0 - fade[i]
-                    }
-                });
-                for axis in 0..2 {
-                    let dw = if corner[axis] != 0 {
-                        derivative[axis]
-                    } else {
-                        -derivative[axis]
-                    };
-                    result[axis] += (gradient[axis] * w[axis] + dot * dw)
-                        * w[(axis + 1) % 3]
-                        * w[(axis + 2) % 3];
-                }
-            }
-        }
-    }
-    result.map(|v| v * frequency)
+    let [x, y, z]: [f32; 3] = std::array::from_fn(|i| scaled[i] - floors[i]);
+    let fade = |t: f32| (t * (t * t)) * (t * (t * 6.0 + -15.0) + 10.0);
+    let slope = |t: f32| (t * (t * 30.0)) * (t * (t + -2.0) + 1.0);
+    let (u, v, w) = (fade(x), fade(y), fade(z));
+    let perm = |i: usize| PERMUTATION[i & 255] as usize;
+    let g = |i: usize, j: usize, k: usize| {
+        GRADIENTS[perm(perm(perm(cell[0] + i) + cell[1] + j) + cell[2] + k) & 15]
+    };
+    let (g000, g100, g010, g110) = (g(0, 0, 0), g(1, 0, 0), g(0, 1, 0), g(1, 1, 0));
+    let (g001, g101, g011, g111) = (g(0, 0, 1), g(1, 0, 1), g(0, 1, 1), g(1, 1, 1));
+    let (x1, y1, z1) = (x + -1.0, y + -1.0, z + -1.0);
+    let dot = |g: [f32; 3], x: f32, y: f32, z: f32| x * g[0] + (y * g[1] + z * g[2]);
+    let n000 = dot(g000, x, y, z);
+    let n100 = dot(g100, x1, y, z);
+    let n010 = dot(g010, x, y1, z);
+    let n110 = dot(g110, x1, y1, z);
+    let n001 = dot(g001, x, y, z1);
+    let n101 = dot(g101, x1, y, z1);
+    let n011 = dot(g011, x, y1, z1);
+    let n111 = dot(g111, x1, y1, z1);
+    // Interpolated gradient component: the direct term of each derivative.
+    let direct = |c: usize| {
+        let (a000, a100, a010, a110) = (g000[c], g100[c], g010[c], g110[c]);
+        let (a001, a101, a011, a111) = (g001[c], g101[c], g011[c], g111[c]);
+        let near = (a000 + u * (a100 - a000))
+            + v * ((a010 - a000) + u * (a000 + ((a110 - a010) - a100)));
+        let far_u = (a001 - a000) + u * (a000 + ((a101 - a001) - a100));
+        let far_uv = (a000 + ((a011 - a001) - a010))
+            + u * ((a100 + (a010 + ((a001 + ((a111 - a011) - a101)) - a110))) - a000);
+        near + w * (far_u + v * far_uv)
+    };
+    let k4 = n000 + ((n110 - n010) - n100);
+    let k7 = (n100 + (n010 + ((n001 + ((n111 - n011) - n101)) - n110))) - n000;
+    let x_chain = ((n100 - n000) + v * k4) + w * ((n000 + ((n101 - n001) - n100)) + v * k7);
+    let y_chain = ((n010 - n000) + u * k4) + w * ((n000 + ((n011 - n001) - n010)) + u * k7);
+    [
+        frequency * (direct(0) + slope(x) * x_chain),
+        frequency * (direct(1) + slope(y) * y_chain),
+    ]
 }
 
 // Standard improved Perlin algorithm constants (256 entries; repeat via &255).
@@ -197,3 +208,85 @@ const GRADIENTS: [[f32; 3]; 16] = [
     [0., -1., 1.],
     [0., -1., -1.],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::particle::json::{parse, Value};
+
+    const SOURCE: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
+
+    fn read(key: &str) -> Value {
+        let path = std::env::var_os(key).expect(key);
+        parse(&std::fs::read(path).unwrap()).unwrap()
+    }
+    fn word(v: &Value) -> u32 {
+        v.as_f64().unwrap() as u32
+    }
+    fn number(v: &Value) -> f32 {
+        v.as_f64().unwrap() as f32
+    }
+
+    #[test]
+    #[ignore = "MOLY_CURRENT_PERLIN3D must identify the current JP native Perlin3D bit receipt"]
+    fn current_native_perlin3d_matches_bits() {
+        let receipt = read("MOLY_CURRENT_PERLIN3D");
+        assert_eq!(receipt.get("sourceSha256").unwrap().as_str(), Some(SOURCE));
+        let groups = receipt.get("groups").unwrap().as_array().unwrap();
+        let mut lanes = 0;
+        for (index, group) in groups.iter().enumerate() {
+            let frequency = f32::from_bits(word(group.get("frequencyBits").unwrap()));
+            let positions = group.get("positionBits").unwrap().as_array().unwrap();
+            let outputs = group.get("outputBits").unwrap().as_array().unwrap();
+            for (lane, (position, output)) in positions.iter().zip(outputs).enumerate() {
+                let position = position.as_array().unwrap();
+                let position = [0, 1, 2].map(|i| f32::from_bits(word(&position[i])));
+                let actual = perlin_xy(position, frequency);
+                let output = output.as_array().unwrap();
+                for axis in 0..2 {
+                    assert_eq!(actual[axis].to_bits(), word(&output[axis]),
+                        "group {index} lane {lane} axis {axis}");
+                }
+                lanes += 1;
+            }
+        }
+        assert_eq!(lanes, 4096);
+    }
+
+    #[test]
+    #[ignore = "MOLY_SNOW_NOISE_NATIVE_REPLAY must identify the current JP snow Noise job receipt"]
+    fn current_snow_noise_job_matches_bits() {
+        let receipt = read("MOLY_SNOW_NOISE_NATIVE_REPLAY");
+        assert_eq!(receipt.get("sourceSha256").unwrap().as_str(), Some(SOURCE));
+        // Serialized snow_pt_01 subset: high 3D, one octave, damping, no remap.
+        let law = NoiseLaw {
+            frequency: 0.5,
+            strength: f32::from_bits(0x3e4c_cccd),
+            scroll_speed: 1.0,
+            position_amount: 1.0,
+            damping: true,
+        };
+        let cases = receipt.get("cases").unwrap().as_array().unwrap();
+        assert_eq!(cases.len(), 32);
+        for (index, case) in cases.iter().enumerate() {
+            let input = case.get("input").unwrap();
+            let output = case.get("output").unwrap();
+            let owner = input.get("owner_seed").unwrap().as_f64().unwrap() as u32;
+            let mut state = NoiseState { scroll: number(input.get("scroll").unwrap()) };
+            law.advance_scroll(&mut state, number(input.get("dt").unwrap()), true);
+            assert_eq!(state.scroll.to_bits(), number(output.get("scroll").unwrap()).to_bits());
+            let positions = input.get("positions").unwrap().as_array().unwrap();
+            let animated = output.get("animated").unwrap().as_array().unwrap();
+            for (lane, (position, expected)) in positions.iter().zip(animated).enumerate() {
+                let position = position.as_array().unwrap();
+                let sample = law.sample(state, [0, 1, 2].map(|i| number(&position[i])), owner);
+                let expected = expected.as_array().unwrap();
+                for axis in 0..3 {
+                    // Job adds positionAmount * noise onto the zeroed animated lane.
+                    assert_eq!((sample[axis] + 0.0).to_bits(), number(&expected[axis]).to_bits(),
+                        "case {index} lane {lane} axis {axis}");
+                }
+            }
+        }
+    }
+}

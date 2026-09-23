@@ -1,6 +1,6 @@
 //! Runtime-side Noise phase/owner checks against the current qualified law.
-//! These tests exercise the shared loop only; they do not admit an authored
-//! weather system or claim prewarm/Shape/renderer equivalence.
+//! The kernel checks use the explicit standalone Noise entry; production
+//! installs Noise through install_native_birth, covered below.
 use super::*;
 use moly_law::particle::schema::{Effects, NoiseParams, NoiseQuality};
 use moly_law::particle::MinMaxCurve;
@@ -80,6 +80,53 @@ fn noise_owner_uses_source_seed_and_keeps_manual_manager_unchanged() {
     assert_eq!(installed.owner_seed, 71);
     assert_eq!(installed.state.scroll.to_bits(), 0);
     assert_eq!(manager.manager_words_for_test(), [17, 19, 127, 2471805022]);
+}
+
+#[test]
+fn native_install_draws_one_owner_for_birth_streams_and_noise() {
+    use moly_law::particle::seed_owner::{ModuleRandom, ParticleSeedManager, ScalarRandom};
+    const ENTROPY: [u32; 4] = [17, 19, 127, 2471805022];
+    let mut system = test_support::runtime();
+    system.pool.clear();
+    system.side.clear();
+    system.emitter.random_seed = Some(0);
+    system.emitter.auto_random_seed = Some(true);
+    system.emitter.noise = Some(params());
+    let mut manager = seed::SystemSeedManager::from_entropy_words(ENTROPY);
+    let mut expected = ParticleSeedManager::from_entropy_words(ENTROPY);
+    let seed = expected.next_system_seed();
+    assert!(matches!(
+        install_native_birth(&mut system, &mut manager, &SourceRoute::Ordinary).unwrap(),
+        BirthPath::Native
+    ));
+    assert_eq!(manager.manager_words_for_test(), expected.words(), "exactly one shared draw");
+    let birth = system.native_birth.as_ref().unwrap();
+    assert_eq!(birth.owner.unwrap().seed, seed);
+    assert_eq!(birth.initial, ModuleRandom::from_owner_seed(seed));
+    assert_eq!(birth.shape, ModuleRandom::from_owner_seed(seed));
+    assert_eq!(birth.emission.random, ScalarRandom::from_seed(seed));
+    let noise = system.noise.unwrap();
+    assert_eq!((noise.owner_seed, noise.owner.seed), (seed, seed));
+    assert_eq!(noise.state.scroll.to_bits(), 0.0_f32.to_bits());
+
+    // A refused Noise configuration or route stays on the legacy step: it still
+    // resets its seed once (one shared draw) but installs no native owner or Noise.
+    for (route, octaves) in [(SourceRoute::Ordinary, 2), (SourceRoute::Procedural, 1)] {
+        let mut refused = test_support::runtime();
+        refused.emitter.random_seed = Some(0);
+        refused.emitter.auto_random_seed = Some(true);
+        refused.emitter.noise = Some(NoiseParams { octaves, ..params() });
+        let mut manager = seed::SystemSeedManager::from_entropy_words(ENTROPY);
+        assert!(matches!(
+            install_native_birth(&mut refused, &mut manager, &route).unwrap(),
+            BirthPath::Legacy(_)
+        ));
+        let mut one = ParticleSeedManager::from_entropy_words(ENTROPY);
+        let legacy_seed = one.next_system_seed();
+        assert_eq!(manager.manager_words_for_test(), one.words(), "exactly one shared draw");
+        assert_eq!(refused.rng.0, u64::from(legacy_seed) | (u64::from(legacy_seed) << 32));
+        assert!(refused.native_birth.is_none() && refused.noise.is_none());
+    }
 }
 
 #[test]
