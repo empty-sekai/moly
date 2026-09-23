@@ -9,7 +9,7 @@ use crate::{
     menu_shell::ShellDialogState,
     npc::{CharacterUnitId, NpcAction, NpcActions},
     player::PlayerControlled,
-    player_state::PlayerAvatarStates,
+    player_state::{PlayerActionState, PlayerAvatarStates},
     player_talk::PlayerTalkSession,
     talk::{ActiveTalk, TalkHold},
     ui_layers::UiLayerStack,
@@ -70,6 +70,38 @@ impl InteractionEligibility<'_, '_> {
             && self.player_state.can_intercept
             && self.player_talk.is_none()
             && self.pair_talk.is_none()
+    }
+
+    /// The field accepts a button tap, without any reading of the player's
+    /// own state. A conversation between NPCs does not close it; one with
+    /// the player does.
+    pub(crate) fn field_input_open(&self) -> bool {
+        self.layers.on_field()
+            && !self.settings_panel.blocks_world_input()
+            && !self.edits.is_active()
+            && !self.dialogs.blocks_field_input()
+            && !self.player_in_talk()
+    }
+
+    /// The GameState Talk equivalent: a conversation that includes the player.
+    pub(crate) fn player_in_talk(&self) -> bool {
+        self.player_talk.is_some()
+            || self
+                .pair_talk
+                .as_ref()
+                .is_some_and(|talk| talk.includes_player())
+    }
+
+    /// ObjectCollisionManager.IsCanUpdate holds in GameState Normal, Harvest
+    /// and Sketch. Of the other states Moly has Edit (the layout editor) and
+    /// Talk (a conversation with the player); a harvest, a gimmick switch, a
+    /// timeline, a shell dialog or a pushed layer stay in Normal or Harvest.
+    pub(crate) fn collision_updates(&self) -> bool {
+        !self.edits.is_active() && !self.player_in_talk()
+    }
+
+    pub(crate) fn player_action(&self) -> PlayerActionState {
+        self.player_state.current
     }
 
     pub(crate) fn player_entity(&self) -> Option<Entity> {
