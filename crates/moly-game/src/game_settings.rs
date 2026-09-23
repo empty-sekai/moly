@@ -1046,10 +1046,18 @@ pub(crate) fn apply_graphics(
 
 /// Browser frame pacing for the frame limit.
 ///
-/// The source limits the frame rate with `Application.targetFrameRate`. A
-/// page presents only at the display's refresh, so every update runs inside
-/// an animation frame, and frames that arrive before the limit's interval has
-/// elapsed are skipped; the average rate equals the limit.
+/// The source sets `Application.targetFrameRate`, and its Android player
+/// (Optimized Frame Pacing off) starts a frame on the first display refresh
+/// that is at least `trunc(refresh rate / limit + 0.5)` refreshes after the
+/// refresh the previous frame started on. A frame that starts late counts from
+/// the refresh it started on, so a stall is never caught up. The spacing is a
+/// whole number of refreshes and the rate follows the display: at a limit of
+/// 60 a 120 Hz display updates on every second refresh, and so does a 144 Hz
+/// one, 72 times a second.
+///
+/// A page sees each display refresh as an animation frame. The pacer counts
+/// refreshes with `refresh_count::RefreshCount` and wakes the engine on the
+/// animation frame that completes the spacing.
 ///
 /// The engine loop is reactive: its wait is an hour and it ignores window and
 /// device events, so it updates only when this pacer wakes it through the
@@ -1058,7 +1066,8 @@ pub(crate) fn apply_graphics(
 /// its previous update and requests its own animation frame at the end of
 /// every update, so the pacer registers its next frame from a microtask
 /// queued behind the wake-up; winit's redraw then precedes the pacer in the
-/// next frame. A wake-up that finds no redraw yet is repeated next frame.
+/// next frame. A wake-up that finds no redraw yet is repeated next frame, and
+/// the update then counts from that frame's refresh.
 #[cfg(target_arch = "wasm32")]
 mod pacing {
     use std::cell::{Cell, RefCell};
@@ -1072,14 +1081,13 @@ mod pacing {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
 
+    use super::refresh_count::RefreshCount;
+
     struct Pacer {
         window: web_sys::Window,
         proxy: EventLoopProxy<WinitUserEvent>,
-        interval_ms: Cell<f64>,
-        due_ms: Cell<f64>,
-        last_frame_ms: Cell<f64>,
-        /// Smoothed display frame interval from animation-frame timestamps.
-        display_ms: Cell<f64>,
+        frame_rate: Cell<u16>,
+        refreshes: RefCell<RefreshCount>,
         /// A wake-up was sent and no update has run since.
         pending: Cell<bool>,
         on_frame: RefCell<Option<Closure<dyn FnMut(f64)>>>,
@@ -1110,10 +1118,8 @@ mod pacing {
         let pacer = Rc::new(Pacer {
             window,
             proxy: (**proxy).clone(),
-            interval_ms: Cell::new(1000. / f64::from(super::FRAME_RATES[0])),
-            due_ms: Cell::new(0.),
-            last_frame_ms: Cell::new(0.),
-            display_ms: Cell::new(1000. / 60.),
+            frame_rate: Cell::new(super::NO_RECOMMENDATION_FRAME_RATE),
+            refreshes: RefCell::new(RefreshCount::new()),
             pending: Cell::new(false),
             on_frame: RefCell::new(None),
             after_wake: RefCell::new(None),
@@ -1131,7 +1137,7 @@ mod pacing {
     pub(super) fn set_frame_rate(rate: u16) {
         PACER.with_borrow(|pacer| {
             if let Some(pacer) = pacer {
-                pacer.interval_ms.set(1000. / f64::from(rate.max(1)));
+                pacer.frame_rate.set(rate);
             }
         });
     }
@@ -1154,25 +1160,15 @@ mod pacing {
     }
 
     fn on_frame(pacer: &Pacer, now: f64) {
-        let last = pacer.last_frame_ms.replace(now);
-        let delta = now - last;
-        if last > 0. && delta > 2. && delta < 50. {
-            pacer.display_ms.set(0.9 * pacer.display_ms.get() + 0.1 * delta);
-        }
-        if !pacer.pending.get() {
-            let interval = pacer.interval_ms.get();
-            // Fire on the display frame nearest to the due time.
-            let tolerance = 0.5 * pacer.display_ms.get().min(interval);
-            let due = pacer.due_ms.get();
-            if now + tolerance >= due {
-                // Phase-locked, so the average rate is the limit; after a
-                // stall the schedule restarts instead of catching up.
-                let next = if due + interval <= now {
-                    now + interval
-                } else {
-                    due + interval
-                };
-                pacer.due_ms.set(next);
+        {
+            let mut refreshes = pacer.refreshes.borrow_mut();
+            refreshes.frame(now);
+            if pacer.pending.get() {
+                // The update asked for last frame has not run yet; it starts
+                // on this refresh instead.
+                refreshes.start_update();
+            } else if refreshes.due(pacer.frame_rate.get()) {
+                refreshes.start_update();
                 pacer.pending.set(true);
             }
         }
@@ -1185,6 +1181,107 @@ mod pacing {
             }
         } else {
             request_frame(pacer);
+        }
+    }
+}
+
+/// Display-refresh counting of the browser pacer; it uses no page API.
+#[cfg(target_arch = "wasm32")]
+mod refresh_count {
+    /// Animation-frame intervals kept for the refresh estimate (about half a
+    /// second at 60 Hz).
+    const WINDOW: usize = 32;
+    /// Longer intervals (a hidden page, a long stall) still advance the count
+    /// but stay out of the refresh estimate.
+    const MAX_SAMPLE_MS: f64 = 250.;
+
+    /// Counts display refreshes from animation-frame timestamps and applies
+    /// the source's refresh spacing between frame starts.
+    pub(super) struct RefreshCount {
+        intervals: [f64; WINDOW],
+        stored: usize,
+        next: usize,
+        /// Estimated display refresh interval.
+        refresh_ms: f64,
+        last_frame_ms: Option<f64>,
+        /// Refreshes counted since the first animation frame.
+        refreshes: u64,
+        /// Refresh the latest update started on.
+        update_refresh: Option<u64>,
+    }
+
+    impl RefreshCount {
+        pub(super) fn new() -> Self {
+            Self {
+                intervals: [0.; WINDOW],
+                stored: 0,
+                next: 0,
+                refresh_ms: 1000. / 60.,
+                last_frame_ms: None,
+                refreshes: 0,
+                update_refresh: None,
+            }
+        }
+
+        /// Advances to the animation frame stamped `now_ms`. The interval
+        /// since the previous animation frame counts as many refreshes as it
+        /// spans; a stray callback within the same refresh counts none.
+        pub(super) fn frame(&mut self, now_ms: f64) {
+            let Some(last_ms) = self.last_frame_ms.replace(now_ms) else {
+                return;
+            };
+            let interval = now_ms - last_ms;
+            if !(interval > 0.) {
+                return;
+            }
+            if interval < MAX_SAMPLE_MS {
+                self.sample(interval);
+            }
+            self.refreshes += (interval / self.refresh_ms).round() as u64;
+        }
+
+        /// Whether the source starts a frame on the current refresh.
+        pub(super) fn due(&self, frame_rate: u16) -> bool {
+            self.update_refresh
+                .is_none_or(|start| self.refreshes - start >= self.spacing(frame_rate))
+        }
+
+        /// Records that an update starts on the current refresh.
+        pub(super) fn start_update(&mut self) {
+            self.update_refresh = Some(self.refreshes);
+        }
+
+        /// Refreshes between frame starts, `trunc(refresh rate / limit + 0.5)`
+        /// in single precision as the source computes it. The estimated rate
+        /// is rounded to whole hertz first, so timing noise cannot flip the
+        /// spacing where the ratio is exactly half-way (90 Hz at a limit of
+        /// 60). The spacing is at least one, since a page updates at most once
+        /// per animation frame.
+        fn spacing(&self, frame_rate: u16) -> u64 {
+            let refresh_rate = (1000. / self.refresh_ms).round() as f32;
+            ((refresh_rate / f32::from(frame_rate.max(1)) + 0.5) as u64).max(1)
+        }
+
+        /// The refresh interval is the mean of the lowest cluster of stored
+        /// intervals: the shortest interval that has another one within 25%
+        /// above it, together with those. Longer intervals span skipped
+        /// refreshes, and a lone shorter one is a stray callback.
+        fn sample(&mut self, interval: f64) {
+            self.intervals[self.next] = interval;
+            self.next = (self.next + 1) % WINDOW;
+            self.stored = (self.stored + 1).min(WINDOW);
+            let mut sorted = self.intervals;
+            let sorted = &mut sorted[..self.stored];
+            sorted.sort_unstable_by(f64::total_cmp);
+            let members = self.stored.min(2);
+            for (index, &low) in sorted.iter().enumerate() {
+                let end = sorted.partition_point(|&value| value <= 1.25 * low);
+                let cluster = &sorted[index..end];
+                if cluster.len() >= members {
+                    self.refresh_ms = cluster.iter().sum::<f64>() / cluster.len() as f64;
+                    return;
+                }
+            }
         }
     }
 }
