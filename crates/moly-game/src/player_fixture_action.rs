@@ -8,7 +8,11 @@
 //! Navigation data is supplied by the scene owner. Missing tiles, agent values,
 //! or visual mappings are unfinished preparation, never successful eligibility.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use bevy::prelude::*;
 
@@ -357,6 +361,7 @@ pub(crate) struct PlayerFixtureRuntime {
     session: Option<PlayerFixtureSession>,
     generation: u64,
     availability: HashMap<FixtureTarget, PlayerFixtureAvailability>,
+    availability_sweep: AvailabilitySweep,
     pub last_outcome: Option<PlayerFixtureOutcome>,
     last_profile: Option<PlayerFixtureVisualProfile>,
     last_navigation_coverage: Vec<String>,
@@ -447,6 +452,23 @@ pub(crate) fn request_end_from_input(
 
 /// Preparation and the visible button use the same actual binding validator.
 /// This publishes readiness; it does not change the existing button stack.
+/// Work allowed per frame for re-deriving availability. A full layout is
+/// revisited over several frames; placements without an entry come first.
+const AVAILABILITY_BUDGET: Duration = Duration::from_micros(1500);
+
+/// Round-robin position of the incremental availability refresh.
+#[derive(Default)]
+struct AvailabilitySweep {
+    cursor: usize,
+    session_active: bool,
+}
+
+/// Availability is a cache of what `prepare` would answer for each placed
+/// fixture. It is advisory: the library reads it to label and gate entries,
+/// while `advance` prepares the request again at admission, so an entry that
+/// is a few frames old cannot start the wrong seat. The refresh therefore runs
+/// within a per-frame budget instead of re-planning every seat of every fixture
+/// each frame; at least one fixture is re-derived per frame.
 pub(crate) fn refresh_availability(world: &mut World) {
     let Some(mut runtime) = world.remove_resource::<PlayerFixtureRuntime>() else {
         return;
@@ -459,41 +481,90 @@ pub(crate) fn refresh_availability(world: &mut World) {
             uid: identity.uid.clone(),
         })
         .collect();
-    runtime.availability.clear();
-    for target in targets {
-        let state = if runtime.active() {
-            PlayerFixtureAvailability::Unavailable("player furniture session owns input")
-        } else if world
-            .get::<FixtureActivityIdentity>(target.entity)
-            .and_then(|identity| {
-                world
-                    .get_resource::<FixtureActivityTables>()?
-                    .fixture_master(identity.master_id)
-            })
-            .is_some_and(|master| matches!(master.player_action_type.as_str(), "loop" | "one_shot"))
-        {
-            match crate::fixture_gimmick::session::availability(world, &target) {
-                Ok(()) => PlayerFixtureAvailability::GimmickReady,
-                Err(reason) => PlayerFixtureAvailability::Pending(
-                    PlayerFixturePreparationError::Invalid(reason),
-                ),
-            }
-        } else {
-            match prepare(world, &target, runtime.generation.saturating_add(1)) {
-                Ok(prepared) => PlayerFixtureAvailability::Ready {
-                    player_row_id: prepared.player_row.id,
-                    locate_index: prepared.locate_index,
-                    slot_id: prepared.slot_id,
-                },
-                Err(PlayerFixturePreparationError::Rejected(reason)) => {
-                    PlayerFixtureAvailability::Unavailable(reason)
-                }
-                Err(error) => PlayerFixtureAvailability::Pending(error),
+    let live: HashSet<&FixtureTarget> = targets.iter().collect();
+    runtime.availability.retain(|target, _| live.contains(target));
+    if runtime.active() {
+        for target in targets {
+            runtime.availability.insert(
+                target,
+                PlayerFixtureAvailability::Unavailable("player furniture session owns input"),
+            );
+        }
+        runtime.availability_sweep.session_active = true;
+        world.insert_resource(runtime);
+        return;
+    }
+    if std::mem::take(&mut runtime.availability_sweep.session_active) {
+        // Entries written while a session owned input say nothing about the
+        // seats now; re-derive them before anything else.
+        runtime.availability.clear();
+    }
+    if targets.is_empty() {
+        runtime.availability_sweep.cursor = 0;
+        world.insert_resource(runtime);
+        return;
+    }
+    let started = bevy::platform::time::Instant::now();
+    let within_budget = |derived: usize| derived == 0 || started.elapsed() < AVAILABILITY_BUDGET;
+    let mut derived = 0usize;
+    let missing: Vec<usize> = (0..targets.len())
+        .filter(|index| !runtime.availability.contains_key(&targets[*index]))
+        .collect();
+    for index in missing {
+        if !within_budget(derived) {
+            break;
+        }
+        let state = derive_availability(world, &runtime, &targets[index]);
+        runtime.availability.insert(targets[index].clone(), state);
+        derived += 1;
+    }
+    let count = targets.len();
+    let mut cursor = runtime.availability_sweep.cursor % count;
+    for _ in 0..count {
+        if !within_budget(derived) {
+            break;
+        }
+        let state = derive_availability(world, &runtime, &targets[cursor]);
+        runtime.availability.insert(targets[cursor].clone(), state);
+        derived += 1;
+        cursor = (cursor + 1) % count;
+    }
+    runtime.availability_sweep.cursor = cursor;
+    world.insert_resource(runtime);
+}
+
+fn derive_availability(
+    world: &mut World,
+    runtime: &PlayerFixtureRuntime,
+    target: &FixtureTarget,
+) -> PlayerFixtureAvailability {
+    if world
+        .get::<FixtureActivityIdentity>(target.entity)
+        .and_then(|identity| {
+            world
+                .get_resource::<FixtureActivityTables>()?
+                .fixture_master(identity.master_id)
+        })
+        .is_some_and(|master| matches!(master.player_action_type.as_str(), "loop" | "one_shot"))
+    {
+        return match crate::fixture_gimmick::session::availability(world, target) {
+            Ok(()) => PlayerFixtureAvailability::GimmickReady,
+            Err(reason) => {
+                PlayerFixtureAvailability::Pending(PlayerFixturePreparationError::Invalid(reason))
             }
         };
-        runtime.availability.insert(target, state);
     }
-    world.insert_resource(runtime);
+    match prepare(world, target, runtime.generation.saturating_add(1)) {
+        Ok(prepared) => PlayerFixtureAvailability::Ready {
+            player_row_id: prepared.player_row.id,
+            locate_index: prepared.locate_index,
+            slot_id: prepared.slot_id,
+        },
+        Err(PlayerFixturePreparationError::Rejected(reason)) => {
+            PlayerFixtureAvailability::Unavailable(reason)
+        }
+        Err(error) => PlayerFixtureAvailability::Pending(error),
+    }
 }
 
 fn prepare(
@@ -1627,6 +1698,7 @@ fn cancel_runtime(world: &mut World, site_changed: bool, reason: PlayerFixtureCa
     };
     runtime.pending.clear();
     runtime.availability.clear();
+    runtime.availability_sweep = AvailabilitySweep::default();
     if let Some(session) = runtime.session.take() {
         capture_coverage(world, &session, &mut runtime);
         finish(world, session, site_changed);
