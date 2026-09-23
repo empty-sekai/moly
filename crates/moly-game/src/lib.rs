@@ -54,6 +54,7 @@ mod interaction;
 pub mod joystick;
 pub mod light;
 mod material_order;
+mod mesh_buffer_release;
 pub mod menu_dialog;
 pub mod menu_shell;
 #[cfg(not(target_arch = "wasm32"))]
@@ -153,6 +154,7 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);
 
