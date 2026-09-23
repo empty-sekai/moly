@@ -802,8 +802,8 @@ fn tick(
                 // The talk owner observes the completed generation before
                 // releasing its cast. Do not start locomotion under TalkHold.
                 if joined_talk {
-                    // CN NPCFixtureTimelineView.PlayAsyncForNPC MoveNext
-                    // (RVA 0x5DB6720) stops its Director after the terminal
+                    // CN NPCFixtureTimelineView.PlayAsyncForNPC stops its
+                    // Director after the terminal
                     // wait; the controller then applies EndLoc. A completed
                     // sparse Root track must not remain below Hips-only talk.
                     let (_, end) = live_poses(world, &session.selection)?;

@@ -1322,7 +1322,7 @@ fn next_waypoint_or_stop(
 
 /// The source MoveExecutor completion target is independent of the ordered
 /// waypoint list. Preserve its Agent.destination/TargetPosition distinction.
-/// CN RVA 0x578D138 first compares TargetPosition with destination's XZ at y=0.
+/// CN NPCAvatarMoveExecutor.IsCompleted first compares TargetPosition with destination's XZ at y=0.
 fn source_goal_completed(position: [f32; 3], goal: [f32; 3], destination: [f32; 3]) -> bool {
     let goal = Vec3::from(goal);
     let destination = Vec3::from(destination);

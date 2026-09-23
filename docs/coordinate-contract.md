@@ -138,8 +138,8 @@ site type 4 only; JP uses 0.05 for types 4 through 8. Other site types use 0.01.
   same world frame; adding a compensating 180-degree turn cannot pass.
 - Imported grid layouts round-trip without changing source cells/directions.
 
-Native evidence: CN FixtureController.SetGridPosition (RVA `0x5A0D508`) calls
-FixtureView.SetPosition (RVA `0x5A35004`); ForceSetRotation (RVA `0x5A34AB0`)
+Native evidence: CN FixtureController.SetGridPosition calls
+FixtureView.SetPosition; ForceSetRotation
 writes Euler Y=`90*direction`. NPCAvatarMoveExecutor reads StartLoc world
 position and rotation directly. NavMeshField configures PhysicsColliders
 (`NavMeshCollectGeometry=1`), not the editor's layout rectangles.

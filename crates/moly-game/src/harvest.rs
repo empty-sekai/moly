@@ -629,7 +629,7 @@ pub struct HarvestObject {
 }
 
 impl HarvestObject {
-    /// UpdateHp（真源方法体逐句直迁，RVA 0x56DE7F8）：
+    /// UpdateHp（真源方法体逐句直迁）：
     /// - prev = hp；prevHp = prev；
     /// - prev < 1 且 prev == 0 且 status ≠ harvested ⇒ 终结：
     ///   IsLastAttack 置位、status 转 harvested、返回 lastAttackStamina；

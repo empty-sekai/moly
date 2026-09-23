@@ -123,7 +123,7 @@ pub enum NavMeshRegion {
 }
 
 /// Source voxel size in metres. CN 6.0 selects 0.05 only for type 4;
-/// JP 6.7 (RVA 0x58313D8) selects it when unsigned `siteType - 4 < 5`.
+/// JP 6.7 selects it when unsigned `siteType - 4 < 5`.
 /// Both source implementations select 0.01 for the other values.
 pub fn voxel_size(region: NavMeshRegion, site_type_value: u32) -> f32 {
     let outdoor = match region {
