@@ -905,22 +905,28 @@ fn write_environment(
     // where one of its bits changes. Render-world extraction, the GPU upload and
     // the sky material re-prepare all key on that flag, so a steady environment
     // no longer re-sends identical values every frame.
+    //
+    // The source light pass pushes each global through a per-component zero
+    // flush (`|x| < 0.001` writes +0.0). Colours are flushed here, before they
+    // are stored; the light vector is stored raw because the shadow camera reads
+    // the unflushed setting, and is flushed where it is packed for the GPU.
+    let safe = moly_law::weather::light_pass::clamp_zero4;
     let site = env.bypass_change_detection();
     let mut site_changed = store(&mut site.globals.light_vector, blended.light_dir.to_array());
     let values = timeline.values;
     let add = moly_law::weather::timeline::additive_light;
     site_changed |= store(&mut site.globals.phenomena_directional_light_color,
-        add(blended.light_color, values.light_color, values.light_intensity));
-    let character_light = add(lerp4(a.character_light_color, b.character_light_color, phase.progress),
-        values.light_color, values.light_intensity);
+        safe(add(blended.light_color, values.light_color, values.light_intensity)));
+    let character_light = safe(add(lerp4(a.character_light_color, b.character_light_color, phase.progress),
+        values.light_color, values.light_intensity));
     if let Some(character) = character.as_mut() {
         let target = character.bypass_change_detection();
         let mut changed = store(&mut target.globals.light_vector, blended.light_dir.to_array());
         changed |= store(&mut target.globals.light_color, character_light);
         changed |= store(&mut target.globals.skin_shade_color,
-            lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress));
+            safe(lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress)));
         changed |= store(&mut target.globals.body_shade_color,
-            lerp4(a.character_body_shade, b.character_body_shade, phase.progress));
+            safe(lerp4(a.character_body_shade, b.character_body_shade, phase.progress)));
         changed |= store(&mut target.globals.fog_params, blended.fog.fog_params);
         changed |= store(&mut target.globals.fog_near_color, blended.fog.fog_near_color);
         changed |= store(&mut target.globals.fog_far_color, blended.fog.fog_far_color);
@@ -930,8 +936,8 @@ fn write_environment(
     if let Some(avatar) = avatar.as_mut() {
         if store(&mut avatar.bypass_change_detection().light_color, character_light) { avatar.set_changed(); }
     }
-    site_changed |= store(&mut site.globals.phenomena_shade_color, blended.shade_color);
-    site_changed |= store(&mut site.drop_shadow_color, blended.drop_shadow);
+    site_changed |= store(&mut site.globals.phenomena_shade_color, safe(blended.shade_color));
+    site_changed |= store(&mut site.drop_shadow_color, safe(blended.drop_shadow));
     site_changed |= store(&mut site.sky_bottom_color, blended.sky_bottom_color);
     site_changed |= store(&mut site.globals.fog_params, blended.fog.fog_params);
     site_changed |= store(&mut site.globals.fog_near_color, blended.fog.fog_near_color);
