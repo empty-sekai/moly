@@ -941,7 +941,9 @@ pub(crate) fn apply_graphics(
                 order: camera.order,
             });
         }
-        camera.order = -1;
+        if camera.order != -1 {
+            camera.order = -1;
+        }
         let unchanged = matches!(&*target, RenderTarget::Image(current) if current.handle == image && current.scale_factor == factor);
         if !unchanged {
             *target = RenderTarget::Image(ImageRenderTarget {
@@ -984,8 +986,11 @@ pub(crate) fn apply_graphics(
         surface.image = None;
         surface.physical_size = UVec2::ZERO;
     } else {
+        let quad_size = Some(Vec2::new(window.width(), window.height()));
         for (_, mut sprite) in &mut quads {
-            sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
+            if sprite.custom_size != quad_size {
+                sprite.custom_size = quad_size;
+            }
         }
     }
 }
