@@ -21,6 +21,18 @@
 //!   落空回落环带（GetLittleFarPosition 同形）；落点交给执行层前过一遍
 //!   身份判定（落点与挂点比 x/z），命中先导航到接近点，再执行局部
 //!   FitTurning/FitWalking。
+//! - **选取不验达，出发验一次**：选取只采样；社交链与游走链的验路取静态
+//!   CalculatePath 的布尔（部分路径也算成功）。执行层出发前按 MoveAsync
+//!   的门对选中目标判一次：对话数据带目标家具的走
+//!   IfMoveTargetFixtureActionPosition，失败把该摆放记入本成员的不可达表
+//!   （UnmovableFixtureList，两条家具道此后都跳过它，保存布局或换站清空）；
+//!   其余走 IfMoveTargetPosition。过门后的路线取 GeneratePath。门未过 =
+//!   移动失败，目标收场进停顿。
+//! - **决策前的保持**：无对话工厂的 master 表、挂点表与站点快照未就绪时
+//!   整条决策不抽签（同 CanRunningAI 的位置）；工厂此刻算不了时本次决策的
+//!   抽签作废、下一帧重来——成员抽签序列只在决策提交时前进。
+//! - **工厂空结果**：普通工厂找不到 master、无对话工厂没有合格行时对话
+//!   数据为空，返回的对话目标即刻结束，照常停顿，下一轮走空槽档补位。
 //!
 //! 替身，具名：
 //! * **内容绑定**：普通工厂保存所选master、既有preAction投影、目标位
@@ -48,9 +60,11 @@
 //!   不建模入场位（成员直接落座在可行走面上），只迁它的时序承重件——
 //!   起动旗（首判立即执行）原样迁。
 //! * **可行格与验路**：出生、目标与执行共用侵蚀后格场。高度几何只给
-//!   已验证的导航位置落高；格场仍是原生导航网格的近似。
-//! * **站定收场的无对话目标**：补位照常（断环），跳过旗不立——旗的源
-//!   行为是「执行完毕后立即可执行下一目标」，站定者没有执行过。
+//!   已验证的导航位置落高；格场仍是原生导航网格的近似，引擎路径查询的
+//!   查询盒映射、部分路径与末拐点判定在它上面转写。
+//! * **移动失败收场的无对话目标**：补位照常（断环），不跳过停顿——源在
+//!   执行开始时立的旗，被移动失败分支的 ForceUpdateObjective（先 Reset）
+//!   清掉。
 //!
 //! 目标面（[`ObjectiveFace`]）与玩家的约束面同源网格（站点域解析的
 //! navmesh 面），但保留高度：目标域的采样要的是面上的三维最近点
@@ -67,7 +81,7 @@ use crate::client_config::{
 };
 use crate::fixture::FixturePlacements;
 use crate::npc::{
-    depart, CharacterUnitId, FitCandidate, MotionPhase, MoveTarget, PathSlot, PauseSeconds,
+    depart_along, CharacterUnitId, FitCandidate, MotionPhase, MoveTarget, PathSlot, PauseSeconds,
     RouteStops, WalkState,
 };
 use crate::site::{GroundEpoch, SiteSelection, WalkFaceMeshes};
@@ -286,8 +300,16 @@ impl SurfaceProbe for FaceProbe<'_> {
         self.face.sample(target, tolerance)
     }
 
+    /// The social IsNavigable predicate and the wander search both take the
+    /// boolean of the static `NavMesh.CalculatePath`, which also succeeds for
+    /// a partial path. Whether the target itself is reached is decided later,
+    /// by the objective's departure gate.
     fn has_path(&mut self, source: [f32; 3], target: [f32; 3]) -> bool {
-        self.face.has_path(source, target)
+        self.face.field.can_calculate_path(
+            [source[0], source[2]],
+            [target[0], target[2]],
+            moly_law::carve::STATIC_QUERY_HALF_EXTENT,
+        )
     }
 }
 
@@ -563,6 +585,10 @@ pub struct ObjectiveMind {
     /// enters its next TryRest after Show. Cancelling a running Rest instead
     /// continues past that Rest. Neither operation resets talk data.
     edit_rest_after: Option<ObjectiveType>,
+    /// UnmovableFixtureList: placement UIDs whose departure gate failed.
+    /// Both fixture lanes skip them until a saved layout or a new site
+    /// setup clears the list.
+    pub(crate) unmovable_fixtures: Vec<String>,
 }
 
 impl moly_law::path::WaypointDraw for MemberRng {
@@ -582,6 +608,7 @@ impl ObjectiveMind {
             rest_revision: 0,
             overlap_seconds: 0.0,
             edit_rest_after: None,
+            unmovable_fixtures: Vec::new(),
         }
     }
 }
@@ -907,10 +934,12 @@ fn talk_seat(fixture_id: i32, unit: u32) -> Option<i32> {
 pub(crate) const SAMPLE_GATE_TOLERANCE: f32 = 0.3;
 
 /// 家具目标解算结果：动作点支命中 / 环带兜底命中（带落空理由词）/
-/// 全未命中（理由词串）。
+/// 全未命中（理由词串）。命中两支都带目标家具的摆放 UID：对话道的
+/// 对话数据带目标家具，出发门走家具分支。
 enum FixtureOutcome {
     /// 动作点支命中：落点 = 挂点 x/z + 面 0.3 门采到的 y。
     ActionPoint {
+        uid: String,
         fixture_id: i32,
         seat: i32,
         package: String,
@@ -919,6 +948,7 @@ enum FixtureOutcome {
     /// 环带兜底命中：`reason` 是动作点支落空的理由（无行 / 挂点条目
     /// 缺 / 面门未中）。
     Ring {
+        uid: String,
         fixture_id: i32,
         ring: usize,
         landing: [f32; 3],
@@ -932,8 +962,13 @@ enum FixtureOutcome {
 /// 挂点 x/z 上 0.3 可行走面门 → 命中即动作点落点；任一环落空回落环带
 /// （靠近家具链同形），环带也未命中按未命中站定。落空各档的理由词
 /// 具名——「走了环带」在目标裁决行里必须读得出为什么。
+///
+/// 抽签池先滤掉本成员不可达表里的摆放（CanActionableFixture 读
+/// UnmovableFixtureList）。选取不查路：可达性只由出发门对选中的目标
+/// 判一次。
 fn fixture_target(
     anchored: &[AnchoredFixture],
+    unmovable: &[String],
     face: &ObjectiveFace,
     attach: &crate::fixture_attach::AttachWorlds,
     from: [f32; 3],
@@ -949,7 +984,16 @@ fn fixture_target(
             reason: "无锚定家具".to_owned(),
         };
     }
-    let fixture = &anchored[uniform.draw(anchored.len())];
+    let pool: Vec<&AnchoredFixture> = anchored
+        .iter()
+        .filter(|fixture| !unmovable.contains(&fixture.uid))
+        .collect();
+    if pool.is_empty() {
+        return FixtureOutcome::Missed {
+            reason: "锚定家具全在不可达表".to_owned(),
+        };
+    }
+    let fixture = pool[uniform.draw(pool.len())];
     // —— 动作点支：座位查表 → 挂点条目 → 面 0.3 门；命中即返回，任一
     // 环落空回落环带（理由词具名，随环带行报出）。
     let fallback_reason: &'static str = match seat_of(fixture.fixture_id) {
@@ -960,15 +1004,15 @@ fn fixture_target(
                 // 落点的形状）。
                 let query = [world.position[0], face.ref_y, world.position[2]];
                 match face.sample(query, SAMPLE_GATE_TOLERANCE) {
-                    Some(landed) if face.has_path(from, landed) => {
+                    Some(landed) => {
                         return FixtureOutcome::ActionPoint {
+                            uid: fixture.uid.clone(),
                             fixture_id: fixture.fixture_id,
                             seat,
                             package: fixture.package.clone(),
                             landing: [world.position[0], landed[1], world.position[2]],
                         };
                     }
-                    Some(_) => "动作点接近位置无完整路径",
                     None => "面 0.3 门未中",
                 }
             }
@@ -987,6 +1031,7 @@ fn fixture_target(
     );
     match objective::approach_target(&cells, from, world_of, probe, move_offset) {
         Some(landing) => FixtureOutcome::Ring {
+            uid: fixture.uid.clone(),
             fixture_id: fixture.fixture_id,
             ring: cells.len(),
             landing,
@@ -1030,8 +1075,8 @@ struct MemberSnap {
 
 /// Update：目标机推进——停顿计时（对话态冻结）、路线尽收场（无对话目标
 /// 的断环补位）、停顿尽后的决策（梯子 → 抽签 → 目的地解算 → 出发）。
-/// 出发经 [`depart`] 一次算完整条路线（可行走面折线 → 路点表），无路
-/// （折线全档未命中）按未命中收场。
+/// 出发先过 MoveAsync 的门，再经 [`depart_along`] 把 GeneratePath 的拐点
+/// 一次排成路点表；门未过或没有拐点按移动失败收场。
 ///
 /// 一次决策的抽签账目一行日志：抽签落点、门占比、目标家具与环、落点
 /// 坐标——「每员目标选取可从日志复算」。
@@ -1039,6 +1084,7 @@ struct MemberSnap {
 pub(crate) fn decide(
     time: Res<Time>,
     editor: Res<crate::fixture_edit::EditSessionActive>,
+    mut saved_layouts: MessageReader<crate::fixture_edit::LayoutSaved>,
     face: Option<Res<ObjectiveFace>>,
     epoch: Option<Res<GroundEpoch>>,
     selection: Option<Res<SiteSelection>>,
@@ -1075,6 +1121,14 @@ pub(crate) fn decide(
     // missed while another input (catalog/geometry) is temporarily absent.
     if placements.is_changed() {
         anchored_cache.rows = None;
+    }
+    // The site controllers clear every NPC's UnmovableFixtureList when a
+    // layout edit is saved. Read before the editor return below: the save is
+    // written while the editor still owns the actors.
+    if saved_layouts.read().count() > 0 {
+        for (_, _, _, _, _, mut mind, ..) in &mut npcs {
+            mind.unmovable_fixtures.clear();
+        }
     }
     // Keep change-tick invalidation above, but consume no ordinary AI timer
     // or RNG while Hide owns the actors or saved geometry is still reloading.
@@ -1275,6 +1329,25 @@ pub(crate) fn decide(
             None
         };
         if outcome == Some(crate::npc::RouteOutcome::Stopped) {
+            if route.take_stalled() {
+                // Source Stacked: the objective's MoveAsync failed. A talk
+                // objective raises no ImmediatelyExecuteNextObjective, so the
+                // next TryRest runs in full.
+                finish_objective(
+                    unit.0,
+                    &mut mind,
+                    &mut slot,
+                    pause_seconds.0,
+                    true,
+                    &mut actions,
+                    &mut rest,
+                );
+                info!(
+                    "[npc unit={}] 移动按卡住结束（路线末端距目标超出完成容差），目标失败，进入停顿",
+                    unit.0
+                );
+                continue;
+            }
             // The movement task ended without OnArrive. Do not invent arrival,
             // release the AI content, or resume an interrupted Rest timer.
             mind.executing = false;
@@ -1303,6 +1376,13 @@ pub(crate) fn decide(
         if mind.executing {
             continue; // 在走向目的地的路上，无事可判
         }
+        // The source AI never decides before its master data and site
+        // snapshot exist. Hold in front of every draw (as CanRunningAI holds
+        // the loop) instead of drawing and discarding a decision each frame.
+        if let Err(reason) = fixture_activities.readiness(epoch.0, &actions.site_type) {
+            fixture_activities.report_pending(entity, unit.0, reason);
+            continue;
+        }
         // 停顿门已过（源 TryRest 的产品面）：能走到这里的成员要么停顿计
         // 完（收场时 arm、逐帧倒数到零），要么带旗——出生装配的旗在这
         // 里一次性消费（出生没有收场帧，旗由首判自取）；无对话收场的
@@ -1311,6 +1391,11 @@ pub(crate) fn decide(
         actions.change(crate::npc::NpcAction::Idle, &mut rest);
 
         // —— 决策梯 ——
+        // One decision draws on a copy of the member RNG. The copy replaces
+        // the member RNG only when the decision commits; a factory that
+        // cannot evaluate yet leaves the sequence untouched, so the retry
+        // makes exactly the draws the source makes once per DecideObjective.
+        let mut trial = (*rng).clone();
         let view = objective::LadderView {
             talk_type: slot.kind(),
             photo_shot: false,
@@ -1318,7 +1403,7 @@ pub(crate) fn decide(
             current: mind.current,
             first_talk_complete: false,
         };
-        let mut percent = PercentSource::new(&mut rng);
+        let mut percent = PercentSource::new(&mut trial);
         let decision = objective::decide(&view, &percents, yet_unread_available, &mut percent);
         // 账目串在这取走（借用就地结束）：后面的目的地链还要借 rng。
         let draws_word = percent.account();
@@ -1349,11 +1434,14 @@ pub(crate) fn decide(
 
         // The ordinary factory selects its master before calculating a target.
         // Keep the same member RNG and do not defer this selection until a click.
+        // ForceUpdateGeneralTalkObjective leaves AITalkData null when no master
+        // is found; the TalkObjective it still returns completes at once.
+        let mut null_talk: Option<String> = None;
         let ordinary = if lane == Some(TalkLane::GeneralTalk) {
             // ForceUpdateGeneralTalkObjective resets its old binding before
             // LotteryGeneralTalkId. This is an AI factory edge, not window end.
             slot.reset_ai_talk_data();
-            let mut uniform = UniformSource::new(&mut rng);
+            let mut uniform = UniformSource::new(&mut trial);
             match catalog.lottery(unit.0, &actions.site_type, slot.previous_id(), |len| {
                 uniform.draw(len)
             }) {
@@ -1367,21 +1455,40 @@ pub(crate) fn decide(
                 } {
                     Some(content) => Some(content),
                     None => {
-                        warn!(
-                            "[npc unit={}] selected master {} is not loaded",
-                            unit.0, selection.master_id
-                        );
-                        continue;
+                        null_talk = Some(format!(
+                            "selected master {} is not loaded",
+                            selection.master_id
+                        ));
+                        None
                     }
                 },
                 Err(reason) => {
-                    trace!("[npc unit={}] ordinary factory: {reason}", unit.0);
-                    continue;
+                    null_talk = Some(format!("ordinary factory: {reason}"));
+                    None
                 }
             }
         } else {
             None
         };
+        if let Some(reason) = null_talk {
+            *rng = trial;
+            fixture_activities.clear_pending(entity);
+            mind.current = Some(ObjectiveType::Talk);
+            finish_objective(
+                unit.0,
+                &mut mind,
+                &mut slot,
+                pause_seconds.0,
+                true,
+                &mut actions,
+                &mut rest,
+            );
+            info!(
+                "[npc unit={}] 目标裁决：{draws_word} → talk:general 空数据（{reason}），对话目标即刻结束，进入停顿",
+                unit.0
+            );
+            continue;
+        }
 
         // —— 目的地解算 ——
         let mut probe = FaceProbe { face };
@@ -1389,6 +1496,11 @@ pub(crate) fn decide(
         let from = route.navigation_origin(state.0.position, walk_face);
         let detail;
         let mut fixture_selection = None;
+        // Placement UID of the talk data's TargetFixture: MoveAsync gates such
+        // a target with IfMoveTargetFixtureActionPosition, others with
+        // IfMoveTargetPosition.
+        let mut gate_fixture: Option<String> = None;
+        let mut none_talk_null = false;
         let destination = if let Some(lane) = lane {
             match lane {
                 TalkLane::GeneralTalk => {
@@ -1406,7 +1518,7 @@ pub(crate) fn decide(
                         .collect();
                     let npc_positions: Vec<[f32; 3]> =
                         snaps.iter().map(|snap| snap.position).collect();
-                    let mut uniform = UniformSource::new(&mut rng);
+                    let mut uniform = UniformSource::new(&mut trial);
                     let social = objective::social_target(
                         &candidates,
                         from,
@@ -1429,7 +1541,7 @@ pub(crate) fn decide(
                             .copied()
                             .filter(|cell| !occupied.contains(cell))
                             .collect();
-                        let mut permute = PermuteSource::new(&mut rng);
+                        let mut permute = PermuteSource::new(&mut trial);
                         let wander = objective::wander_target(
                             origin,
                             wander_min,
@@ -1453,9 +1565,10 @@ pub(crate) fn decide(
                     // 家具道：均匀抽目标家具（源 RandomPick 的替身）；目
                     // 标解算动作点优先（对话道经先行动作行入座），环带兜
                     // 底。座位查对话道切片（先行动作表）。
-                    let mut uniform = UniformSource::new(&mut rng);
+                    let mut uniform = UniformSource::new(&mut trial);
                     match fixture_target(
                         anchored,
+                        &mind.unmovable_fixtures,
                         face,
                         attach.expect("fixture destinations wait for attachment data"),
                         from,
@@ -1467,11 +1580,13 @@ pub(crate) fn decide(
                         "对话无先行入座行",
                     ) {
                         FixtureOutcome::ActionPoint {
+                            uid,
                             fixture_id,
                             seat,
                             package,
                             landing,
                         } => {
+                            gate_fixture = Some(uid);
                             action_point_line(unit.0, fixture_id, seat, &package, landing);
                             detail = format!(
                                 "动作点 家具 {fixture_id} 座 {seat} 池抽 {}",
@@ -1480,11 +1595,13 @@ pub(crate) fn decide(
                             Some(landing)
                         }
                         FixtureOutcome::Ring {
+                            uid,
                             fixture_id,
                             ring,
                             landing,
                             reason,
                         } => {
+                            gate_fixture = Some(uid);
                             detail = format!(
                                 "家具 {fixture_id} 环 {ring} 格（{reason}）池抽 {}",
                                 uniform.account()
@@ -1507,31 +1624,62 @@ pub(crate) fn decide(
                 from,
                 &placements,
                 &fixture_targets,
+                &mind.unmovable_fixtures,
                 face,
-                &mut rng,
+                &mut trial,
             ) {
                 Ok(Some(selected)) => {
                     detail = format!(
                         "source no-talk action on {:?}/{}",
                         selected.target.entity, selected.target.uid
                     );
+                    gate_fixture = Some(selected.target.uid.clone());
                     let position = selected.position;
                     fixture_selection = Some(selected);
                     Some(position)
                 }
                 Ok(None) => {
                     detail = "no eligible source no-talk fixture action".into();
+                    none_talk_null = true;
                     None
                 }
                 Err(reason) => {
+                    // This host cannot evaluate the source factory yet. Drop
+                    // the trial draws and retry on a later frame.
                     fixture_activities.report_pending(entity, unit.0, reason);
                     continue;
                 }
             }
         };
+        *rng = trial;
+        fixture_activities.clear_pending(entity);
+        if none_talk_null {
+            // ForceUpdateNoneTalkObjective resets the AI talk data before
+            // CreateNoneTalkData returns null; SelectFixtureTalk then returns a
+            // TalkObjective whose null data completes at once. TryRest runs
+            // normally and the next decision takes the null-data arm.
+            slot.reset_ai_talk_data();
+            mind.current = Some(ObjectiveType::Talk);
+            finish_objective(
+                unit.0,
+                &mut mind,
+                &mut slot,
+                pause_seconds.0,
+                true,
+                &mut actions,
+                &mut rest,
+            );
+            info!(
+                "[npc unit={}] 目标裁决：{draws_word} → nonetalk 工厂空（{detail}），对话目标即刻结束，进入停顿",
+                unit.0
+            );
+            continue;
+        }
 
         let target_position = destination.unwrap_or(state.0.position);
         if let Some(selected) = &fixture_selection {
+            // ForceUpdateNoneTalkObjective: Reset, then SetAITalkData.
+            slot.reset_ai_talk_data();
             slot.set_current(selected.ai_data());
         } else if let Some(ordinary) = ordinary {
             slot.set_current(AiTalkData {
@@ -1583,7 +1731,49 @@ pub(crate) fn decide(
                             rotation: world.rotation,
                         })
                 };
-                match depart(
+                // MoveAsync's gate, once, for the chosen target only. A talk
+                // data TargetFixture takes IfMoveTargetFixtureActionPosition
+                // and a failure enters that placement into this NPC's
+                // UnmovableFixtureList (TryAddUnmovableFixture); any other
+                // target takes IfMoveTargetPosition. Either failure ends the
+                // move as NoneRoute: the objective fails and TryRest runs.
+                let field = &walk_face.field;
+                let from_xz = [from[0], from[2]];
+                let landing_xz = [landing[0], landing[2]];
+                let gate_open = if gate_fixture.is_some() {
+                    field.if_move_target_fixture_action_position(from_xz, landing_xz)
+                } else {
+                    field.if_move_target_position(from_xz, landing_xz)
+                };
+                if !gate_open {
+                    let unmovable = gate_fixture.filter(|uid| !mind.unmovable_fixtures.contains(uid));
+                    if let Some(uid) = &unmovable {
+                        mind.unmovable_fixtures.push(uid.clone());
+                    }
+                    finish_objective(
+                        unit.0,
+                        &mut mind,
+                        &mut slot,
+                        pause_seconds.0,
+                        true,
+                        &mut actions,
+                        &mut rest,
+                    );
+                    info!(
+                        "[npc unit={}] 目标裁决 {source_word}：{draws_word} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 出发门未过{}",
+                        unit.0,
+                        landing[0],
+                        landing[1],
+                        landing[2],
+                        unmovable
+                            .map(|uid| format!("，{uid} 记入不可达表"))
+                            .unwrap_or_default(),
+                    );
+                    continue;
+                }
+                // GeneratePath: the agent's own query, with its sampled retry.
+                let polyline = field.generate_path(from_xz, landing_xz);
+                match depart_along(
                     unit,
                     &mut state.0,
                     &mut path.0,
@@ -1593,6 +1783,7 @@ pub(crate) fn decide(
                     landing,
                     fit,
                     &mut *rng,
+                    polyline,
                 ) {
                     Some(depart_phase) => {
                         if let Some(selected) = fixture_selection.take() {
@@ -1636,8 +1827,8 @@ pub(crate) fn decide(
                         );
                     }
                     None => {
-                        // 折线全档未命中（无路可达落点）：按未命中收场（与
-                        // 三条链全未命中同形——不立跳过旗，进停顿等下一轮）。
+                        // GeneratePath 两次查询都没给出拐点（TryGeneratePath
+                        // 失败 ⇒ NoneRoute）：移动失败收场，进停顿等下一轮。
                         let grounded = true;
                         finish_objective(
                             unit.0,
@@ -1649,7 +1840,7 @@ pub(crate) fn decide(
                             &mut rest,
                         );
                         info!(
-                            "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 无路（折线全档未命中），站定",
+                            "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) GeneratePath 无拐点，移动失败",
                             unit.0,
                             KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
                             percents.fixture_talk,
@@ -1696,9 +1887,9 @@ pub(crate) fn decide(
     }
 }
 
-/// 目标收场：无对话目标补位断环（跳过旗只对执行过的收场立——站定收场
-/// 不立，见模块注释），然后过停顿门（旗立起即跳过整轮停顿、当帧可再判；
-/// 旗未立进入停顿，时长走停顿律）。
+/// 目标收场：无对话目标补位断环（跳过旗只对执行完成的收场立——移动失败
+/// 的收场不立，见模块注释），然后过停顿门（旗立起即跳过整轮停顿、当帧可
+/// 再判；旗未立进入停顿，时长走停顿律）。
 pub(crate) fn finish_objective(
     unit: u32,
     mind: &mut ObjectiveMind,
@@ -1725,7 +1916,7 @@ pub(crate) fn finish_objective(
             mind.skip_next_rest = true;
             info!("[npc unit={unit}] 无对话目标收场：补位 → talk:unread，跳过下一轮停顿");
         } else {
-            info!("[npc unit={unit}] 无对话目标站定收场：补位 → talk:unread，进入停顿");
+            info!("[npc unit={unit}] 无对话目标未完成收场：补位 → talk:unread，进入停顿");
         }
     }
     if objective::try_rest_gate(mind.skip_next_rest) == objective::RestGateOutcome::Skipped {

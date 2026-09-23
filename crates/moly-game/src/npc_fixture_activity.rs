@@ -2,10 +2,12 @@
 //!
 //! The selected action row, actual placed Entity/UID, locator array index and
 //! source timeline survive approach, loading, playback and disposal together.
-//! This is not a NavMesh implementation: admission/approach still use the
-//! existing, explicitly approximate WalkField/ObjectiveFace host. In particular
-//! its .3m locator gate is NOT source IsPlayableActionPoints' complete .125m
-//! post-sample geometry test. A real shared NavMesh producer remains separate.
+//! Admission runs no path query: the first fixture passing the locator sample
+//! (within half a tile), tile, slot, occupancy, UnmovableFixtureList, 1000 m
+//! and motion-area checks is selected even when it cannot be reached; the
+//! objective's departure gate tests reachability once, for that target only.
+//! This is not a NavMesh implementation: the locator sample and the approach
+//! use the existing, explicitly approximate WalkField/ObjectiveFace host.
 
 mod areas;
 pub(crate) mod preview;
@@ -54,6 +56,10 @@ use crate::{
 /// It also protects loading/exit from npc::advance's provisional reentry warp.
 #[derive(Component, Clone, Copy)]
 pub(crate) struct NpcFixtureMotionOwner(pub FixtureActivityOwner);
+
+/// `MysekaiConstants.HALF_TILE_SIZE.x`: half the tile size. The action-point
+/// check compares the whole 3-D distance of the sample hit against it.
+const HALF_TILE_SIZE: f32 = moly_law::fixture::position::TILE_SIZE * 0.5;
 
 /// Separate from Rest's alone_holds: the Rest script may dispose without
 /// clearing the actual furniture timeline's animation lease.
@@ -161,9 +167,47 @@ impl Factory<'_, '_> {
         }
     }
 
+    /// A decision was committed: a later identical pending reason is reported again.
+    pub(crate) fn clear_pending(&mut self, actor: Entity) {
+        self.runtime.pending_factories.remove(&actor);
+    }
+
+    /// Data this factory needs before any objective lottery may draw. The
+    /// source AI never decides without its master data, so the objective loop
+    /// holds in front of the draw while this is Err.
+    pub(crate) fn readiness(&self, epoch: u64, site_type: &str) -> Result<(), String> {
+        if self.editor.is_active() {
+            return Err(
+                "the layout editor owns fixture mutation; no new activity is admitted".into(),
+            );
+        }
+        if self.tables.is_none() {
+            return Err("no-talk source tables are still loading".into());
+        }
+        if self.points.is_none() {
+            return Err("source fixture locator arrays are still loading".into());
+        }
+        let inputs = self
+            .inputs
+            .as_deref()
+            .and_then(FixtureSceneSupply::current)
+            .ok_or("current fixture scene inputs are not ready")?;
+        if inputs.stamp.site_epoch != epoch
+            || inputs.site_type != site_type
+            || inputs.floor.coverage() != OccupancyCoverage::Complete
+            || !inputs.gaps.is_empty()
+        {
+            return Err(
+                "no-talk factory needs the current complete placement/floor snapshot".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Source action-row permutation is independent of asset readiness.
     /// Empty eligible source pool is Ok(None); missing data is Err, not an
     /// invitation to select a different ready animation or a General story.
+    /// `unmovable` is this NPC's UnmovableFixtureList (placement UIDs).
     pub(crate) fn select_none_talk(
         &self,
         actor: Entity,
@@ -173,6 +217,7 @@ impl Factory<'_, '_> {
         from: [f32; 3],
         placements: &FixturePlacements,
         other_targets: &[(Entity, Option<Entity>)],
+        unmovable: &[String],
         face: &ObjectiveFace,
         rng: &mut MemberRng,
     ) -> Result<Option<Selection>, String> {
@@ -184,12 +229,15 @@ impl Factory<'_, '_> {
             from,
             placements,
             other_targets,
+            unmovable,
             face,
             rng,
             None,
         )
     }
 
+    /// Content-library staging of one exact action. It is not an AI decision
+    /// and does not consult an NPC's UnmovableFixtureList.
     pub(crate) fn select_exact(
         &self,
         key: ActivityKey,
@@ -220,6 +268,7 @@ impl Factory<'_, '_> {
             from,
             placements,
             other_targets,
+            &[],
             face,
             rng,
             Some((&spec, target)),
@@ -235,15 +284,12 @@ impl Factory<'_, '_> {
         from: [f32; 3],
         placements: &FixturePlacements,
         other_targets: &[(Entity, Option<Entity>)],
+        unmovable: &[String],
         face: &ObjectiveFace,
         rng: &mut MemberRng,
         exact: Option<(&ActivitySpec, &FixtureTarget)>,
     ) -> Result<Option<Selection>, String> {
-        if self.editor.is_active() {
-            return Err(
-                "the layout editor owns fixture mutation; no new activity is admitted".into(),
-            );
-        }
+        self.readiness(epoch, site_type)?;
         let tables = self
             .tables
             .as_deref()
@@ -257,15 +303,6 @@ impl Factory<'_, '_> {
             .as_deref()
             .and_then(FixtureSceneSupply::current)
             .ok_or("current fixture scene inputs are not ready")?;
-        if inputs.stamp.site_epoch != epoch
-            || inputs.site_type != site_type
-            || inputs.floor.coverage() != OccupancyCoverage::Complete
-            || !inputs.gaps.is_empty()
-        {
-            return Err(
-                "no-talk factory needs the current complete placement/floor snapshot".into(),
-            );
-        }
         let rows = placements.occupancy_rows();
         // GetAllFixture is insertion ordered. The offline placement owner is
         // that order in this host; query iteration and package-first lookup are
@@ -380,6 +417,14 @@ impl Factory<'_, '_> {
                 if exact.is_some_and(|(_, selected)| selected != &target) {
                     continue;
                 }
+                // IsAvailableFixtureCasePutStatus: a fixture this NPC failed to
+                // reach at an earlier departure stays excluded until the list is
+                // cleared. The source reads the list ahead of its distance,
+                // motion-area and floor-level branches, so an excluded fixture
+                // never reaches this host's elevated-fixture refusal below.
+                if unmovable.iter().any(|uid| *uid == identity.uid) {
+                    continue;
+                }
                 if self.reservations.npc_target_in_use(&target)
                     || other_targets
                         .iter()
@@ -433,12 +478,14 @@ impl Factory<'_, '_> {
                     inputs.floor.site_origin.y,
                     poses.start.position[2],
                 ];
-                // Retain the existing approximate host's navigation gate.
-                // Do not call it the native CalculatePath/half-tile contract.
+                // IsPlayableActionPoints: sample the locator at site height
+                // (SamplePosition 0.3) and reject a hit farther than half a
+                // tile from that query point. No path query: reachability is
+                // tested once, for the chosen target only, at departure.
                 let Some(hit) = face.sample(position, 0.3) else {
                     continue;
                 };
-                if !face.has_path(from, hit) {
+                if Vec3::from(hit).distance(Vec3::from(position)) > HALF_TILE_SIZE {
                     continue;
                 }
                 let start_grid = inputs
