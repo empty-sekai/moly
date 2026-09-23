@@ -13,6 +13,7 @@ webgl2 = ["bevy/webgl2"]
 bevy = { workspace = true }
 moly-assets = { path = "../moly-assets" }
 moly-game = { path = "../moly-game" }
+moly-perf = { path = "../moly-perf" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # 钉精确版本随本机 wasm-bindgen CLI：CLI 拒绝 schema 版本不一致的输入，

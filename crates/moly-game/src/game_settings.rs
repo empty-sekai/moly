@@ -10,10 +10,8 @@ use bevy::{
     render::render_resource::TextureFormat,
     ui::{FocusPolicy, UiTargetCamera},
     window::PrimaryWindow,
-    winit::{UpdateMode, WinitSettings},
 };
 use serde_json::{json, Value};
-use std::time::Duration;
 
 use crate::{
     audio::{self, LocalVolumeSettings, VolumeBus, VolumeSettingData},
@@ -24,20 +22,113 @@ const COMPOSITE_LAYER: usize = 30;
 const UI_ORDER: isize = 100;
 const FONT: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
 
+/// What the source `SetImageQuality` writes for one image quality: the target
+/// DPI it passes to `SetTargetDpi` and `IsFXAAEnable`. High is (299, on),
+/// Normal (200, on) and Low (180, off). Only the source image-quality option
+/// (`info`) sets it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct GraphicsSettings {
-    pub(crate) frame_rate: u16,
-    pub(crate) render_scale: f32,
+pub(crate) struct ImageQualityPair {
+    pub(crate) target_dpi: u16,
     pub(crate) fxaa: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GraphicsSettings {
+    /// Frame limit (`Application.targetFrameRate`): `MysekaiFpsQualityType`
+    /// High is 60 and Normal 30.
+    pub(crate) frame_rate: u16,
+    /// Scene camera render scale chosen in the product panel; `None` applies
+    /// the source DPI law ([`source_render_scale`]).
+    pub(crate) render_scale: Option<f32>,
+    /// The current image quality's pair. Loading saved settings and Defaults
+    /// keep it, so the scene never runs one quality's target DPI with another
+    /// quality's FXAA.
+    pub(crate) image_quality: ImageQualityPair,
+    /// Scene FXAA in effect: the pair's, or the panel toggle's session-only
+    /// override until the image-quality option applies a pair again.
+    pub(crate) fxaa: bool,
+}
+
+/// Frame limits the source offers (High, Normal).
+const FRAME_RATES: [u16; 2] = [60, 30];
+
+/// Image quality and frame limit of the no-recommendation path.
+/// `MysekaiOptionSettingData`'s constructor sets image quality Normal and
+/// leaves the fps quality at High. The JP client always starts there, and so
+/// does a CN player who declines the first-run recommendation: the CN
+/// client's `ScreenLayerLiveTop.RecommendSetting` otherwise offers the pair
+/// for the device tier its publisher SDK reports (tier 3 and up High and 60,
+/// tier 2 Normal and 30, tier 1 Low and 30) and saves it when accepted. The
+/// port follows the no-recommendation path because that tier is a device
+/// rating from the publisher SDK, which a browser has no counterpart for.
+const NO_RECOMMENDATION_IMAGE_QUALITY: ImageQualityPair = ImageQualityPair {
+    target_dpi: 200,
+    fxaa: true,
+};
+const NO_RECOMMENDATION_FRAME_RATE: u16 = FRAME_RATES[0];
 
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
-            frame_rate: if cfg!(target_arch = "wasm32") { 30 } else { 60 },
-            render_scale: 1.0,
-            fxaa: true,
+            frame_rate: NO_RECOMMENDATION_FRAME_RATE,
+            // The DPI law needs the display density. A page provides it as
+            // devicePixelRatio; the native window keeps its full resolution.
+            render_scale: if cfg!(target_arch = "wasm32") { None } else { Some(1.0) },
+            image_quality: NO_RECOMMENDATION_IMAGE_QUALITY,
+            fxaa: NO_RECOMMENDATION_IMAGE_QUALITY.fxaa,
         }
+    }
+}
+
+/// Unity's `Screen.dpi` on Android is `DisplayMetrics.densityDpi`, and an
+/// Android browser reports `devicePixelRatio` as `densityDpi / 160`. The
+/// window scale factor (the page's devicePixelRatio) times 160 is therefore
+/// the page's equivalent of the source's screen DPI.
+const SCREEN_DPI_PER_SCALE_FACTOR: f32 = 160.;
+
+/// Render scale of the Mysekai pipeline asset itself. While the DPI law keeps
+/// the scene at full size ResoDynamix is inactive and restores this value to
+/// the asset every frame, so URP renders the scene at it. Open item: the asset
+/// (`MysekaiRenderPipelineAsset`, together with its upscaling filter, which
+/// only matters when this scale is not 1) is not in the extracted client data
+/// yet, and 1 stands in for its value until the extraction reads it.
+const PIPELINE_ASSET_RENDER_SCALE: f32 = 1.;
+
+/// Scene camera render scale of the source for a target DPI and a window
+/// scale factor. `MysekaiQualitySettings.SetTargetDpi` stores
+/// `clamp01(targetDpi / Screen.dpi)` as `MysekaiRenderSettings.RenderScale`
+/// (an unknown density of 0 gives 1). `SceneMysekai.UpdateResolution` hands
+/// it to ResoDynamix as the base camera scale; below 1 ResoDynamix writes it
+/// to the URP asset, otherwise the asset keeps its own scale. The asset's
+/// setter clamps to [0.1, 2], and URP renders at full size when the scale is
+/// within 0.05 of 1.
+pub(crate) fn source_render_scale(target_dpi: u16, scale_factor: f32) -> f32 {
+    let screen_dpi = SCREEN_DPI_PER_SCALE_FACTOR * scale_factor;
+    let render_scale = if screen_dpi > 0. {
+        (f32::from(target_dpi) / screen_dpi).clamp(0., 1.)
+    } else {
+        1.
+    };
+    let asset_scale = if render_scale < 1. {
+        render_scale
+    } else {
+        PIPELINE_ASSET_RENDER_SCALE
+    }
+    .clamp(0.1, 2.);
+    if (1. - asset_scale).abs() < 0.05 {
+        1.
+    } else {
+        asset_scale
+    }
+}
+
+fn scene_render_scale(graphics: &GraphicsSettings, window: &Window) -> f32 {
+    match graphics.render_scale {
+        Some(fixed) => fixed.clamp(0.5, 1.),
+        None => source_render_scale(
+            graphics.image_quality.target_dpi,
+            window.resolution.base_scale_factor(),
+        ),
     }
 }
 
@@ -98,6 +189,8 @@ pub(crate) struct OriginalSceneOutput {
 pub(crate) struct SceneSurface {
     image: Option<Handle<Image>>,
     physical_size: UVec2,
+    /// Scene camera render scale applied by the last `apply_graphics`.
+    applied_scale: f32,
 }
 
 #[derive(Debug, Clone, Copy, Component)]
@@ -106,7 +199,7 @@ pub(crate) enum Action {
     Close,
     Volume(usize, f32),
     Fps(u16),
-    Scale(f32),
+    Scale(Option<f32>),
     Fxaa,
     AudioOptions,
     Save,
@@ -136,6 +229,28 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<SettingsPanel>()
         .init_resource::<SceneSurface>()
         .add_message::<SettingsPanelRequest>();
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Startup, pacing::start)
+        .add_systems(First, pacing::note_update);
+}
+
+/// Per-frame counters for the browser host: engine assets and every game
+/// material type visible to this module. `FixtureSurfaceMaterial`,
+/// `FixtureTreeMaterial` and `UiClipMaterial` are private to their modules
+/// and are not counted.
+pub(crate) fn perf_plugin() -> moly_perf::PerfPlugin {
+    moly_perf::PerfPlugin::default()
+        .track::<Mesh>("Mesh")
+        .track::<Image>("Image")
+        .track::<StandardMaterial>("StandardMaterial")
+        .track::<crate::avatar_material::AvatarMaterial>("AvatarMaterial")
+        .track::<crate::character_material::CharacterMaterial>("CharacterMaterial")
+        .track::<crate::emoticon::EmoticonMaterial>("EmoticonMaterial")
+        .track::<crate::fixture_material::FixtureMaterial>("FixtureMaterial")
+        .track::<crate::fixture::road::RoadMaterial>("RoadMaterial")
+        .track::<crate::site_material::SiteMaterial>("SiteMaterial")
+        .track::<crate::sky::SkyGradient>("SkyGradient")
+        .track::<crate::uber_particle::UberParticleMaterial>("UberParticleMaterial")
 }
 
 pub(crate) fn scene_input_enabled(
@@ -159,22 +274,40 @@ pub(crate) fn talk_input_enabled(
     !panel.blocks_world_input() && !library.blocks_talk_input()
 }
 
+/// Version of the stored `GameSettings` section. Version 2 changed the meaning
+/// or the default of every graphics field it stores: `frameRate` offers the
+/// source's two limits and defaults to 60, `renderScale` may be null for the
+/// source DPI law (the browser default), and `fxaa` is not stored.
+const SETTINGS_VERSION: u64 = 2;
+
 fn graphics_from_document(document: &Value) -> GraphicsSettings {
     let mut value = GraphicsSettings::default();
-    let fields = &document["GameSettings"]["graphics"];
+    let section = &document["GameSettings"];
+    // An earlier section's frameRate, renderScale and fxaa meant something
+    // else, and they are its only graphics fields: it loads as the defaults.
+    if section["version"]
+        .as_u64()
+        .is_none_or(|version| version < SETTINGS_VERSION)
+    {
+        return value;
+    }
+    let fields = &section["graphics"];
     if let Some(rate) = fields["frameRate"].as_u64() {
-        if matches!(rate, 30 | 60 | 120) {
-            value.frame_rate = rate as u16;
+        if let Some(&rate) = FRAME_RATES.iter().find(|&&offered| u64::from(offered) == rate) {
+            value.frame_rate = rate;
         }
     }
-    if let Some(scale) = fields["renderScale"].as_f64() {
-        if scale.is_finite() {
-            value.render_scale = (scale as f32).clamp(0.5, 1.0);
+    // A stored null selects the source DPI law; an absent field keeps the default.
+    match fields.get("renderScale") {
+        Some(Value::Null) => value.render_scale = None,
+        Some(scale) => {
+            if let Some(scale) = scale.as_f64().filter(|scale| scale.is_finite()) {
+                value.render_scale = Some((scale as f32).clamp(0.5, 1.0));
+            }
         }
+        None => {}
     }
-    if let Some(fxaa) = fields["fxaa"].as_bool() {
-        value.fxaa = fxaa;
-    }
+    // FXAA is half of the image-quality pair, so a stored `fxaa` is not read.
     value
 }
 
@@ -187,7 +320,14 @@ pub(crate) fn setup(
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if let Some(document) = store.load() {
-        settings.graphics = graphics_from_document(&document);
+        // The source image-quality option applied its pair at startup; the
+        // panel does not store it.
+        let image_quality = settings.graphics.image_quality;
+        settings.graphics = GraphicsSettings {
+            image_quality,
+            fxaa: image_quality.fxaa,
+            ..graphics_from_document(&document)
+        };
         panel.status = "Changes apply immediately. Save to keep them after restart.".into();
     } else {
         panel.status = "Storage unavailable. Changes will apply to this session.".into();
@@ -330,7 +470,7 @@ pub(crate) fn setup(
         18.,
         Some(ValueLabel::Fps),
     );
-    for rate in [30, 60, 120] {
+    for rate in [FRAME_RATES[1], FRAME_RATES[0]] {
         add_button(
             &mut commands,
             fps,
@@ -348,7 +488,13 @@ pub(crate) fn setup(
         18.,
         Some(ValueLabel::Scale),
     );
-    for (label, value) in [("50%", 0.5), ("67%", 0.67), ("75%", 0.75), ("100%", 1.)] {
+    for (label, value) in [
+        ("Auto", None),
+        ("50%", Some(0.5)),
+        ("67%", Some(0.67)),
+        ("75%", Some(0.75)),
+        ("100%", Some(1.)),
+    ] {
         add_button(&mut commands, scale, &font, label, Action::Scale(value));
     }
     let fxaa = row(&mut commands, content);
@@ -591,11 +737,20 @@ pub(crate) fn input(
                 panel.status = "Scene resolution applied; UI stays at display resolution.".into();
             }
             Action::Fxaa => {
+                // A session-only override: FXAA belongs to the image-quality
+                // pair, which the next image-quality change, Defaults or a
+                // restart applies again.
                 settings.graphics.fxaa = !settings.graphics.fxaa;
-                panel.status = "Scene FXAA updated.".into();
+                panel.status = "Scene FXAA changed for this session.".into();
             }
             Action::Defaults => {
-                settings.graphics = GraphicsSettings::default();
+                // The image-quality pair follows the source option, not this panel.
+                let image_quality = settings.graphics.image_quality;
+                settings.graphics = GraphicsSettings {
+                    image_quality,
+                    fxaa: image_quality.fxaa,
+                    ..GraphicsSettings::default()
+                };
                 volumes.system = VolumeSettingData::default();
                 audio::apply_system_volume(&mut bus, &volumes.system, "Reset game settings");
                 panel.status = "Defaults applied. Save to keep these changes.".into();
@@ -603,7 +758,7 @@ pub(crate) fn input(
             Action::Save => {
                 let g = settings.graphics;
                 let mut sections = audio::settings_sections(&volumes).to_vec();
-                sections.push(("GameSettings",json!({"version":1,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale,"fxaa":g.fxaa}})));
+                sections.push(("GameSettings",json!({"version":SETTINGS_VERSION,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale}})));
                 panel.status = if store.save(&sections) {
                     "Saved.".into()
                 } else {
@@ -631,6 +786,7 @@ pub(crate) fn refresh_ui(
     meshes: Res<Assets<Mesh>>,
     asset_server: Res<AssetServer>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    surface: Res<SceneSurface>,
     time: Res<Time<Real>>,
     mut last_performance: Local<f64>,
     mut residency_sample: Local<Option<(f64, u64, u64, u64)>>,
@@ -682,7 +838,10 @@ pub(crate) fn refresh_ui(
                 }
             ),
             ValueLabel::Fps => format!("Frame limit: {}", settings.graphics.frame_rate),
-            ValueLabel::Scale => format!("Scene: {:.0}%", 100. * settings.graphics.render_scale),
+            ValueLabel::Scale => match settings.graphics.render_scale {
+                Some(scale) => format!("Scene: {:.0}%", 100. * scale),
+                None => format!("Scene: Auto {:.0}%", 100. * surface.applied_scale),
+            },
             ValueLabel::Fxaa => format!(
                 "FXAA: {}",
                 if settings.graphics.fxaa { "On" } else { "Off" }
@@ -760,22 +919,40 @@ pub(crate) fn apply_graphics(
 ) {
     let graphics = settings.graphics;
     if *last_rate != Some(graphics.frame_rate) {
-        let mode = UpdateMode::Reactive {
-            wait: Duration::from_secs_f64(1. / f64::from(graphics.frame_rate.max(1))),
-            react_to_device_events: false,
-            react_to_user_events: false,
-            react_to_window_events: false,
-        };
-        commands.insert_resource(WinitSettings {
-            focused_mode: mode,
-            unfocused_mode: mode,
-        });
+        // Browser: updates paced by animation frames (see `pacing`).
+        #[cfg(target_arch = "wasm32")]
+        {
+            if last_rate.is_none() {
+                commands.insert_resource(pacing::winit_settings());
+            }
+            pacing::set_frame_rate(graphics.frame_rate);
+        }
+        // Native: the engine's reactive wait between updates.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use bevy::winit::{UpdateMode, WinitSettings};
+            let mode = UpdateMode::Reactive {
+                wait: std::time::Duration::from_secs_f64(
+                    1. / f64::from(graphics.frame_rate.max(1)),
+                ),
+                react_to_device_events: false,
+                react_to_user_events: false,
+                react_to_window_events: false,
+            };
+            commands.insert_resource(WinitSettings {
+                focused_mode: mode,
+                unfocused_mode: mode,
+            });
+        }
         *last_rate = Some(graphics.frame_rate);
     }
     let Ok(window) = windows.single() else {
         return;
     };
-    let scale = graphics.render_scale.clamp(0.5, 1.);
+    let scale = scene_render_scale(&graphics, window);
+    if surface.applied_scale != scale {
+        surface.applied_scale = scale;
+    }
     for (entity, mut camera, mut target, mut projection, fxaa, original) in &mut cameras {
         if let Some(mut fxaa) = fxaa {
             if fxaa.enabled != graphics.fxaa {
@@ -798,13 +975,10 @@ pub(crate) fn apply_graphics(
             }
             continue;
         }
+        // URP sizes a scaled camera target as (int)(pixel size * scale), at least 1.
         let size = UVec2::new(
-            (window.resolution.physical_width() as f32 * scale)
-                .round()
-                .max(1.) as u32,
-            (window.resolution.physical_height() as f32 * scale)
-                .round()
-                .max(1.) as u32,
+            ((window.resolution.physical_width() as f32 * scale) as u32).max(1),
+            ((window.resolution.physical_height() as f32 * scale) as u32).max(1),
         );
         let factor = size.x as f32 / window.width().max(1.);
         if surface.image.is_none() || surface.physical_size != size {
@@ -831,7 +1005,9 @@ pub(crate) fn apply_graphics(
                 order: camera.order,
             });
         }
-        camera.order = -1;
+        if camera.order != -1 {
+            camera.order = -1;
+        }
         let unchanged = matches!(&*target, RenderTarget::Image(current) if current.handle == image && current.scale_factor == factor);
         if !unchanged {
             *target = RenderTarget::Image(ImageRenderTarget {
@@ -874,8 +1050,494 @@ pub(crate) fn apply_graphics(
         surface.image = None;
         surface.physical_size = UVec2::ZERO;
     } else {
+        let quad_size = Some(Vec2::new(window.width(), window.height()));
         for (_, mut sprite) in &mut quads {
-            sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
+            if sprite.custom_size != quad_size {
+                sprite.custom_size = quad_size;
+            }
+        }
+    }
+}
+
+/// Browser frame pacing for the frame limit.
+///
+/// The source sets `Application.targetFrameRate`, and its Android player
+/// (Optimized Frame Pacing off) starts a frame on the first display refresh
+/// that is at least `trunc(refresh rate / limit + 0.5)` refreshes after the
+/// refresh the previous frame started on. A frame that starts late counts from
+/// the refresh it started on, so a stall is never caught up. The spacing is a
+/// whole number of refreshes and the rate follows the display: at a limit of
+/// 60 a 120 Hz display updates on every second refresh, and so does a 144 Hz
+/// one, 72 times a second.
+///
+/// A page sees each display refresh as an animation frame. The pacer counts
+/// refreshes with `refresh_count::RefreshCount` and wakes the engine on the
+/// animation frame that completes the spacing. The page does not report its
+/// refresh rate, so the first wake-up waits until two animation-frame
+/// intervals agree on it, and the rate is then measured over the animation
+/// frames of the latest second.
+///
+/// The engine loop is reactive: its wait is an hour and it ignores window and
+/// device events, so it updates only when this pacer wakes it through the
+/// event-loop proxy. The winit runner handles a wake-up in a microtask of the
+/// same animation frame and updates there only if winit's own animation frame
+/// (its redraw) has run since the previous update; otherwise it requests that
+/// animation frame again and updates in it. Two rules keep the redraw ahead
+/// of the wake-up:
+/// - Every update requests a redraw, so winit's animation frame follows each
+///   update.
+/// - The pacer's next animation frame is registered after the runner's request
+///   for its own, so that in the next frame the redraw runs first. After a
+///   wake-up it is registered from a microtask queued behind the wake-up.
+///   After an update that ran elsewhere (in winit's redraw, or in an event
+///   handler) it is registered again from a microtask queued by that update,
+///   which runs after the runner's request. After a canvas resize, where
+///   winit's resize observer requests its animation frame again once the
+///   frame's animation-frame callbacks have run, it is registered again from
+///   the pacer's resize observer on the canvas: at once, which is behind
+///   winit's request when winit's observer is notified first, and from a task
+///   queued there, which runs after the frame's rendering update and so after
+///   winit's request in either order. Chrome notifies resize observers in the
+///   order they were created, winit's first. Firefox notifies them in the
+///   order they last started observing, and winit observes the canvas again on
+///   every change of the device pixel ratio, so from then on the pacer's
+///   observer is notified first and the task keeps the order. The task runs
+///   before the next frame's animation-frame callbacks when the main thread is
+///   free before that frame starts.
+///
+/// A wake-up that still finds no redraw since the previous update (the order
+/// was changed by something else) has its update run in winit's redraw of the
+/// next animation frame, and the count then restarts from that frame's
+/// refresh, as the source counts from the refresh a late frame starts on.
+#[cfg(target_arch = "wasm32")]
+mod pacing {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use bevy::prelude::*;
+    use bevy::window::{PrimaryWindow, RequestRedraw};
+    use bevy::winit::{
+        EventLoopProxy, EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent,
+    };
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    use super::refresh_count::RefreshCount;
+
+    struct Pacer {
+        window: web_sys::Window,
+        proxy: EventLoopProxy<WinitUserEvent>,
+        frame_rate: Cell<u16>,
+        refreshes: RefCell<RefreshCount>,
+        /// A wake-up was sent and no update has run since.
+        pending: Cell<bool>,
+        /// A wake-up was sent and the microtask queued behind it has not run.
+        waking: Cell<bool>,
+        /// The last wake-up found no redraw since the previous update, so its
+        /// update runs in winit's redraw of the next animation frame.
+        late: Cell<bool>,
+        /// An update ran since the pacer's last animation frame.
+        updated: Cell<bool>,
+        /// The pacer's registered animation frame.
+        frame_request: Cell<Option<i32>>,
+        on_frame: RefCell<Option<Closure<dyn FnMut(f64)>>>,
+        after_wake: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// Registers the pacer's next animation frame again, behind every
+        /// animation frame registered so far.
+        request_again: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// The canvas resize observer's callback.
+        on_resize: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// Keeps the canvas resize observer alive.
+        resize_observer: RefCell<Option<web_sys::ResizeObserver>>,
+    }
+
+    thread_local! {
+        static PACER: RefCell<Option<Rc<Pacer>>> = const { RefCell::new(None) };
+    }
+
+    /// The engine loop waits for the pacer's wake-ups only.
+    pub(super) fn winit_settings() -> WinitSettings {
+        let mode = UpdateMode::Reactive {
+            wait: Duration::from_secs(3600),
+            react_to_device_events: false,
+            react_to_user_events: true,
+            react_to_window_events: false,
+        };
+        WinitSettings {
+            focused_mode: mode,
+            unfocused_mode: mode,
+        }
+    }
+
+    pub(super) fn start(
+        proxy: Res<EventLoopProxyWrapper>,
+        windows: Query<&Window, With<PrimaryWindow>>,
+    ) {
+        // Without the pacer the engine loop would never wake again.
+        let window = web_sys::window().expect("frame pacing needs the page window");
+        let pacer = Rc::new(Pacer {
+            window,
+            proxy: (**proxy).clone(),
+            frame_rate: Cell::new(super::NO_RECOMMENDATION_FRAME_RATE),
+            refreshes: RefCell::new(RefreshCount::new()),
+            pending: Cell::new(false),
+            waking: Cell::new(false),
+            late: Cell::new(false),
+            updated: Cell::new(false),
+            frame_request: Cell::new(None),
+            on_frame: RefCell::new(None),
+            after_wake: RefCell::new(None),
+            request_again: RefCell::new(None),
+            on_resize: RefCell::new(None),
+            resize_observer: RefCell::new(None),
+        });
+        // The closures own the pacer for the lifetime of the page.
+        let frame_pacer = pacer.clone();
+        *pacer.on_frame.borrow_mut() =
+            Some(Closure::new(move |now: f64| on_frame(&frame_pacer, now)));
+        let wake_pacer = pacer.clone();
+        *pacer.after_wake.borrow_mut() = Some(Closure::new(move || after_wake(&wake_pacer)));
+        let again_pacer = pacer.clone();
+        *pacer.request_again.borrow_mut() = Some(Closure::new(move || request_frame(&again_pacer)));
+        let resize_pacer = pacer.clone();
+        *pacer.on_resize.borrow_mut() = Some(Closure::new(move || on_resize(&resize_pacer)));
+        observe_canvas(&pacer, &windows);
+        request_frame(&pacer);
+        PACER.with_borrow_mut(|slot| *slot = Some(pacer));
+    }
+
+    /// Registers the pacer again after every observed resize of the primary
+    /// window's canvas (see `on_resize`).
+    fn observe_canvas(pacer: &Pacer, windows: &Query<&Window, With<PrimaryWindow>>) {
+        // The canvas the window was created on, found the way the engine finds it.
+        let canvas = windows
+            .single()
+            .ok()
+            .and_then(|window| window.canvas.clone())
+            .and_then(|selector| {
+                pacer
+                    .window
+                    .document()
+                    .and_then(|document| document.query_selector(&selector).ok().flatten())
+            });
+        let Some(canvas) = canvas else {
+            warn!(
+                "Frame pacing: the primary window has no canvas selector to observe; \
+                 a canvas resize can start one update a refresh late."
+            );
+            return;
+        };
+        let observer = pacer.on_resize.borrow().as_ref().and_then(|callback| {
+            web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()).ok()
+        });
+        let Some(observer) = observer else {
+            warn!(
+                "Frame pacing: no resize observer; a canvas resize can start one update a \
+                 refresh late."
+            );
+            return;
+        };
+        observer.observe(&canvas);
+        *pacer.resize_observer.borrow_mut() = Some(observer);
+    }
+
+    pub(super) fn set_frame_rate(rate: u16) {
+        PACER.with_borrow(|pacer| {
+            if let Some(pacer) = pacer {
+                pacer.frame_rate.set(rate);
+            }
+        });
+    }
+
+    /// Runs in `First` of every update.
+    pub(super) fn note_update(mut redraw: MessageWriter<RequestRedraw>) {
+        // winit's animation frame follows every update, so the next wake-up
+        // finds a redraw since this update.
+        redraw.write(RequestRedraw);
+        PACER.with_borrow(|pacer| {
+            let Some(pacer) = pacer else {
+                return;
+            };
+            pacer.pending.set(false);
+            pacer.updated.set(true);
+            // An update outside a wake-up ran after the pacer's animation
+            // frame of this refresh (in winit's redraw or in an event
+            // handler), and the runner requests its animation frame when the
+            // update returns. A late update runs before the pacer's animation
+            // frame of its refresh, which must stay registered.
+            if !pacer.waking.get() && !pacer.late.get() {
+                if let Some(request_again) = pacer.request_again.borrow().as_ref() {
+                    pacer
+                        .window
+                        .queue_microtask(request_again.as_ref().unchecked_ref());
+                }
+            }
+        });
+    }
+
+    /// Replaces the pacer's registered animation frame with a new
+    /// registration, which runs after every animation frame registered so far.
+    fn request_frame(pacer: &Pacer) {
+        if let Some(handle) = pacer.frame_request.take() {
+            let _ = pacer.window.cancel_animation_frame(handle);
+        }
+        if let Some(callback) = pacer.on_frame.borrow().as_ref() {
+            pacer.frame_request.set(
+                pacer
+                    .window
+                    .request_animation_frame(callback.as_ref().unchecked_ref())
+                    .ok(),
+            );
+        }
+    }
+
+    /// Runs in the resize-observer step of a frame that resized the canvas,
+    /// where winit's resize observer requests its animation frame again.
+    fn on_resize(pacer: &Pacer) {
+        // Behind winit's request when winit's observer was notified first.
+        request_frame(pacer);
+        // Behind it in either order: a task runs after the rendering update.
+        if let Some(request_again) = pacer.request_again.borrow().as_ref() {
+            let _ = pacer
+                .window
+                .set_timeout_with_callback(request_again.as_ref().unchecked_ref());
+        }
+    }
+
+    fn on_frame(pacer: &Pacer, now: f64) {
+        pacer.frame_request.set(None);
+        let wake = {
+            let mut refreshes = pacer.refreshes.borrow_mut();
+            refreshes.frame(now, !pacer.updated.replace(false));
+            if pacer.late.replace(false) || pacer.pending.get() {
+                // The update the last wake-up asked for starts on this
+                // refresh: it ran in winit's redraw just before this callback,
+                // or runs in it after. The runner still holds the wake-up.
+                refreshes.start_update();
+                false
+            } else if refreshes.due(pacer.frame_rate.get()) {
+                refreshes.start_update();
+                pacer.pending.set(true);
+                true
+            } else {
+                false
+            }
+        };
+        if wake {
+            pacer.waking.set(true);
+            let _ = pacer.proxy.send_event(WinitUserEvent::WakeUp);
+            if let Some(after_wake) = pacer.after_wake.borrow().as_ref() {
+                pacer
+                    .window
+                    .queue_microtask(after_wake.as_ref().unchecked_ref());
+            }
+        } else {
+            request_frame(pacer);
+        }
+    }
+
+    /// Runs behind the runner's handling of a wake-up.
+    fn after_wake(pacer: &Pacer) {
+        pacer.waking.set(false);
+        if pacer.pending.get() {
+            pacer.late.set(true);
+        }
+        request_frame(pacer);
+    }
+}
+
+/// Display-refresh counting of the browser pacer; it uses no page API.
+#[cfg(target_arch = "wasm32")]
+mod refresh_count {
+    use std::collections::VecDeque;
+
+    /// Sampled intervals kept for the lowest cluster (about half a second at
+    /// 60 Hz).
+    const SAMPLES: usize = 32;
+    /// Longer intervals (a hidden page, a long stall) still advance the count
+    /// but stay out of the refresh estimate.
+    const MAX_SAMPLE_MS: f64 = 250.;
+    /// Intervals within this ratio of each other count as the same number of
+    /// refreshes.
+    const SPREAD: f64 = 1.25;
+    /// The refresh interval is measured over at least the latest second of
+    /// animation frames.
+    const SPAN_MS: f64 = 1000.;
+    /// Refreshes the measured span covers before it replaces the lowest
+    /// cluster as the estimate.
+    const SPAN_MIN_REFRESHES: u64 = 16;
+    /// Most animation frames the span keeps (a second at 1024 Hz).
+    const SPAN_MAX_FRAMES: usize = 1024;
+
+    /// Counts display refreshes from animation-frame timestamps and applies
+    /// the source's refresh spacing between frame starts.
+    pub(super) struct RefreshCount {
+        samples: [f64; SAMPLES],
+        stored: usize,
+        next: usize,
+        /// Mean of the lowest cluster of sampled intervals, about one refresh;
+        /// none until two sampled intervals agree.
+        cluster_ms: Option<f64>,
+        /// Consecutive animation-frame intervals, oldest first, each with the
+        /// refreshes it was counted as.
+        span: VecDeque<(f64, u64)>,
+        /// Total of the intervals in `span`.
+        span_ms: f64,
+        /// Total of the refreshes in `span`.
+        span_refreshes: u64,
+        last_frame_ms: Option<f64>,
+        /// Refreshes counted since the refresh interval was first measured.
+        refreshes: u64,
+        /// Refresh the latest update started on.
+        update_refresh: Option<u64>,
+    }
+
+    impl RefreshCount {
+        pub(super) fn new() -> Self {
+            Self {
+                samples: [0.; SAMPLES],
+                stored: 0,
+                next: 0,
+                cluster_ms: None,
+                span: VecDeque::new(),
+                span_ms: 0.,
+                span_refreshes: 0,
+                last_frame_ms: None,
+                refreshes: 0,
+                update_refresh: None,
+            }
+        }
+
+        /// Advances to the animation frame stamped `now_ms`. The interval
+        /// since the previous animation frame counts as many refreshes as it
+        /// spans; a stray callback within the same refresh counts none.
+        ///
+        /// The refresh interval is the time the consecutive intervals of the
+        /// latest second took, divided by the refreshes they were counted as,
+        /// whether an update held them or not. The timestamps between the
+        /// first and the last cancel out, so the error of timestamp
+        /// coarsening and jitter shrinks with the length of the span instead
+        /// of staying with each interval. Averaging single intervals would not
+        /// do that: under a steady update cadence the intervals that are one
+        /// refresh long sit at the same phase of it, and their errors add up
+        /// instead of cancelling.
+        ///
+        /// Which multiple of a refresh an interval is starts from the lowest
+        /// cluster of sampled intervals (see `sample`), which is the estimate
+        /// until the span covers [`SPAN_MIN_REFRESHES`]. `began_idle` says
+        /// that no update ran since the previous animation frame. An update's
+        /// work can hold the next animation frame past one or more refreshes,
+        /// so an interval that began with an update is sampled only when it is
+        /// no longer than one estimated refresh, and the first estimate comes
+        /// from intervals without an update alone. When the cluster and the
+        /// span no longer count the same interval as one refresh (the display
+        /// changed its rate), the span starts again.
+        pub(super) fn frame(&mut self, now_ms: f64, began_idle: bool) {
+            let Some(last_ms) = self.last_frame_ms.replace(now_ms) else {
+                return;
+            };
+            let interval = now_ms - last_ms;
+            if !(interval > 0.) {
+                return;
+            }
+            let sample = match self.refresh_ms() {
+                None => began_idle,
+                Some(refresh_ms) => {
+                    interval < MAX_SAMPLE_MS && (began_idle || interval <= SPREAD * refresh_ms)
+                }
+            };
+            if sample {
+                self.sample(interval);
+            }
+            if let (Some(cluster_ms), Some(span_refresh_ms)) =
+                (self.cluster_ms, self.span_refresh_ms())
+            {
+                if cluster_ms > SPREAD * span_refresh_ms || span_refresh_ms > SPREAD * cluster_ms {
+                    self.span.clear();
+                    self.span_ms = 0.;
+                    self.span_refreshes = 0;
+                }
+            }
+            let Some(refresh_ms) = self.refresh_ms() else {
+                return;
+            };
+            let spanned = (interval / refresh_ms).round() as u64;
+            self.refreshes += spanned;
+            if interval < MAX_SAMPLE_MS {
+                self.span.push_back((interval, spanned));
+                self.span_ms += interval;
+                self.span_refreshes += spanned;
+                while let Some(&(oldest_ms, oldest_refreshes)) = self.span.front() {
+                    if self.span_ms - oldest_ms < SPAN_MS && self.span.len() <= SPAN_MAX_FRAMES {
+                        break;
+                    }
+                    self.span.pop_front();
+                    self.span_ms -= oldest_ms;
+                    self.span_refreshes -= oldest_refreshes;
+                }
+            }
+        }
+
+        /// Whether the source starts a frame on the current refresh. Nothing
+        /// starts before the refresh interval is measured.
+        pub(super) fn due(&self, frame_rate: u16) -> bool {
+            let Some(refresh_ms) = self.refresh_ms() else {
+                return false;
+            };
+            self.update_refresh
+                .is_none_or(|start| self.refreshes - start >= Self::spacing(refresh_ms, frame_rate))
+        }
+
+        /// Records that an update starts on the current refresh.
+        pub(super) fn start_update(&mut self) {
+            self.update_refresh = Some(self.refreshes);
+        }
+
+        /// The estimated refresh interval: the span's once it covers enough
+        /// refreshes, the lowest cluster's before.
+        fn refresh_ms(&self) -> Option<f64> {
+            let cluster_ms = self.cluster_ms?;
+            Some(self.span_refresh_ms().unwrap_or(cluster_ms))
+        }
+
+        fn span_refresh_ms(&self) -> Option<f64> {
+            (self.span_refreshes >= SPAN_MIN_REFRESHES)
+                .then(|| self.span_ms / self.span_refreshes as f64)
+        }
+
+        /// Refreshes between frame starts, `trunc(refresh rate / limit + 0.5)`
+        /// in single precision as the source computes it, from the estimated
+        /// rate rounded to whole hertz. Where the ratio is exactly half-way
+        /// (90 Hz at a limit of 60) that keeps the spacing of a whole-hertz
+        /// display only while the estimate is within half a hertz of its rate,
+        /// which the span of `frame` is for. The spacing is at least one, since
+        /// a page updates at most once per animation frame.
+        fn spacing(refresh_ms: f64, frame_rate: u16) -> u64 {
+            let refresh_rate = (1000. / refresh_ms).round() as f32;
+            ((refresh_rate / f32::from(frame_rate.max(1)) + 0.5) as u64).max(1)
+        }
+
+        /// The lowest cluster is the mean of the lowest stored intervals that
+        /// agree: the shortest interval that has another one within
+        /// [`SPREAD`] above it, together with those. Longer intervals span
+        /// skipped refreshes, and a lone shorter one is a stray callback, so a
+        /// single interval never sets it.
+        fn sample(&mut self, interval: f64) {
+            self.samples[self.next] = interval;
+            self.next = (self.next + 1) % SAMPLES;
+            self.stored = (self.stored + 1).min(SAMPLES);
+            let mut sorted = self.samples;
+            let sorted = &mut sorted[..self.stored];
+            sorted.sort_unstable_by(f64::total_cmp);
+            for (index, &low) in sorted.iter().enumerate() {
+                let end = sorted.partition_point(|&value| value <= SPREAD * low);
+                let cluster = &sorted[index..end];
+                if cluster.len() >= 2 {
+                    self.cluster_ms = Some(cluster.iter().sum::<f64>() / cluster.len() as f64);
+                    return;
+                }
+            }
         }
     }
 }
