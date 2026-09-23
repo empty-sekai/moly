@@ -279,11 +279,22 @@ fn update_materials(
             [0.471, 0.105, 0.0, 0.0],
         ];
         if prepared.insert(surface.texture.id()) {
-            if let Some(image) = images.get_mut(&surface.texture) {
-                match crate::fixture_material::generate_mip_chain(image) {
-                    Ok(_) | Err(crate::fixture_material::MipSkip::AlreadyChained) => {}
-                    Err(reason) => warn!("Road mip generation: {reason:?}"),
-                }
+            // Decide through a shared borrow first: `get_mut` always marks the
+            // image Modified, which re-extracts and re-uploads it even when
+            // its chain already exists. The pixels stay in the main world: a
+            // furniture material could still need this image's emission mask
+            // mean, and only the furniture material swap records those.
+            use crate::fixture_material::{generate_mip_chain, mip_chain_plan, MipSkip};
+            let chained = match images.get(&surface.texture).map(mip_chain_plan) {
+                Some(Ok(_)) => images
+                    .get_mut(&surface.texture)
+                    .map_or(Err(MipSkip::NoData), generate_mip_chain),
+                Some(Err(reason)) => Err(reason),
+                None => Ok(0),
+            };
+            match chained {
+                Ok(_) | Err(MipSkip::AlreadyChained) => {}
+                Err(reason) => warn!("Road mip generation: {reason:?}"),
             }
         }
         let key = (
