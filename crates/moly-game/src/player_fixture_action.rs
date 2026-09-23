@@ -23,6 +23,7 @@ use std::{
 use bevy::prelude::*;
 
 use crate::{
+    action_button::admission::can_move_to_locator_with_fallback,
     fixture_activity_data::{FixtureActivityTables, PlayerTimelineRow},
     fixture_activity_provider::{
         self, FixtureActivityProvider, PlayerTimelinePlan, ProviderPending,
@@ -40,7 +41,7 @@ use crate::{
     player::{DashMode, PlayerControlled, PlayerInput},
     player_avatar::{AvatarDriver, PlayerActionToken},
     player_state::{PlayerActionState, PlayerAvatarStates},
-    site::GroundEpoch,
+    site::{GroundEpoch, NavMeshSourceRegion},
 };
 
 // This value belongs specifically to PlayForPlayer's local-player entry. It
@@ -645,6 +646,10 @@ fn select(
         .clone();
     navigation.validate(site_generation)?;
     crate::fixture_scene_inputs::validate_admission(world, &navigation)?;
+    let region = world
+        .get_resource::<NavMeshSourceRegion>()
+        .ok_or(Missing("navigation source region"))?
+        .0;
     let states = world
         .get_resource::<PlayerAvatarStates>()
         .ok_or(Missing("player state owner"))?;
@@ -750,9 +755,12 @@ fn select(
             continue;
         }
         let start = Vec3::from(poses.start.position);
-        if !can_move_to_locator(&navigation, position, start, &target.uid)?
-            || !can_move_to_locator(&navigation, position, Vec3::from(end.position), &target.uid)?
-        {
+        // GetNearestPlayerLocatorIndex here and at the button's admission
+        // calls the same CanMoveToLocator, with the region's fallback.
+        let reach = |locator| {
+            can_move_to_locator_with_fallback(&navigation, region, position, locator, &target.uid)
+        };
+        if !reach(start)? || !reach(Vec3::from(end.position))? {
             continue;
         }
         let path = navigation.world.path(position, start)?;
@@ -1041,74 +1049,6 @@ fn is_descendant_of(world: &World, entity: Entity, root: Entity) -> bool {
         };
         current = parent.parent();
     }
-}
-
-/// The normal navmesh branch and the fixture-tile fallback are OR branches at
-/// each endpoint. An occupied target tile is not the same as another UID.
-fn can_move_to_locator(
-    navigation: &PlayerFixtureNavigation,
-    player: Vec3,
-    locator: Vec3,
-    target_uid: &str,
-) -> Result<bool, PlayerFixturePreparationError> {
-    use FixtureTileKnowledge::*;
-    let tile = navigation.world.tile_at(locator);
-    if matches!(tile, Unknown) {
-        return Err(PlayerFixturePreparationError::Missing(
-            "locator tile identity",
-        ));
-    }
-    if !matches!(tile, Missing) {
-        if let Some(hit) = navigation
-            .world
-            .sample_position(locator, navigation.agent_radius)
-        {
-            if hit.is_finite() && hit.distance(locator) <= navigation.agent_radius {
-                let path = navigation.world.path(player, hit)?;
-                // CanNavmeshMoveTargetPosition uses CalculatePath's boolean,
-                // then the last corner's strictly-less horizontal distance.
-                // It does not compare height or require PathComplete.
-                if path.query_succeeded {
-                    let last = path.corners.last().ok_or_else(|| {
-                        PlayerFixturePreparationError::Invalid(
-                            "successful navigation query has no last corner".into(),
-                        )
-                    })?;
-                    if !last.is_finite() {
-                        return Err(PlayerFixturePreparationError::Invalid(
-                            "navigation returned a nonfinite last corner".into(),
-                        ));
-                    }
-                    if Vec2::new(last.x - hit.x, last.z - hit.z).length() < 0.01 {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-    // Repeated positions may map to the same tile. tile_at is an immutable
-    // lookup, so repeating that read preserves the deduplicated source result.
-    for x in [-1.0, 0.0, 1.0] {
-        for z in [-1.0, 0.0, 1.0] {
-            let p = locator
-                + Vec3::new(
-                    x * navigation.agent_radius,
-                    0.0,
-                    z * navigation.agent_radius,
-                );
-            match navigation.world.tile_at(p) {
-                Unknown | ExistingUnknownOccupant => {
-                    return Err(PlayerFixturePreparationError::Missing(
-                        "locator radius tile identities",
-                    ));
-                }
-                Missing => return Ok(false),
-                Occupied(uid) if uid != target_uid => return Ok(false),
-                Empty | Occupied(_) => {}
-            }
-        }
-    }
-    Ok(true)
 }
 
 /// Run once before the timeline runner and player locomotion each frame. This

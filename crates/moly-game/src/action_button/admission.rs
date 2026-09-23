@@ -20,7 +20,7 @@
 //! evaluated again once the input exists.
 
 use bevy::{ecs::system::SystemParam, prelude::*};
-use moly_law::carve::NavMeshRegion;
+use moly_law::{carve::NavMeshRegion, objective::TILE_SCALE};
 
 use crate::{
     fixture_activity_data::FixtureActivityTables,
@@ -39,10 +39,6 @@ const START_SAMPLE_DISTANCE: f32 = 3.0;
 
 /// The threshold every CanNavmeshMoveTargetPosition call on these paths passes.
 const REACH_THRESHOLD: f32 = 0.01;
-
-/// MysekaiConstants.TILE_SCALE. JP CanReachLocatorByNavMeshPath samples within
-/// twice this value.
-const JP_TILE_SCALE: f32 = 0.25;
 
 /// The two furniture buttons with an admission rule of their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -576,7 +572,7 @@ fn jp_fallback(
     }
     let reach = match navigation
         .world
-        .sample_position(locator, 2.0 * JP_TILE_SCALE)
+        .sample_position(locator, 2.0 * TILE_SCALE)
         .filter(|hit| hit.is_finite())
     {
         Some(hit) => can_navmesh_move(navigation, player, hit)?,
