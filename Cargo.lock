@@ -3773,6 +3773,7 @@ dependencies = [
  "js-sys",
  "moly-assets",
  "moly-game",
+ "moly-perf",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -3810,6 +3811,7 @@ dependencies = [
  "js-sys",
  "moly-assets",
  "moly-law",
+ "moly-perf",
  "naga",
  "parry3d",
  "reqwest",
@@ -3828,6 +3830,13 @@ dependencies = [
 [[package]]
 name = "moly-law"
 version = "0.0.1"
+
+[[package]]
+name = "moly-perf"
+version = "0.0.1"
+dependencies = [
+ "bevy",
+]
 
 [[package]]
 name = "moxcms"

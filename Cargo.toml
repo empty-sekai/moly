@@ -5,6 +5,7 @@ members = [
     "crates/moly-assets",
     "crates/moly-game",
     "crates/moly-app",
+    "crates/moly-perf",
 ]
 exclude = ["crates/vendor-cpal"]
 
