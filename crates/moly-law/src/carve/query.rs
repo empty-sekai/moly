@@ -10,8 +10,10 @@
 //!   为「返回整条折线」（末拐点是折线的最后一个元素，消费侧自取），
 //!   全败折成 `None`（原地把不走折线的决定留给调用方）。
 //! * 同文件的 `CanNavmeshMoveTargetPosition` 证明严判形态（不吸附、
-//!   不拉回、按末拐点与目标的水平距离过阈）也在源里并存——本模块
-//!   不做严判变体，消费侧需要时对折线末点自比即可。
+//!   不拉回、按末拐点与目标的水平距离过阈）也在源里并存——严判与 NPC
+//!   出发门走 [`calculate_path`]：它转写引擎 `CalculatePath` 本身（两端
+//!   各经一只查询盒映射，连通给完整折线、不连通给部分折线，两种都算
+//!   成功），比对末拐点的事由各门自己做。
 //!
 //! 折线的整直：真源 `CalculatePath` 返回的 corners 是整直后的直线路
 //! 径（原生代理内部的搜索 + straight path 后处理在原生墙后）。本模块
@@ -149,6 +151,87 @@ pub(crate) fn path_exact(
         return None;
     }
     polys.path(grid, regions, start, goal)
+}
+
+/// 方盒内最近可走点（引擎 `FindNearestPoly` 的格面形态）：点所在格可走
+/// 即原样返回；否则只在水平半宽 `half_extent` 的方盒里找格心欧氏距离最近
+/// 的可走格。方盒是查询包围盒，不是圆半径——与 [`nearest_walkable`] 的
+/// 吸附圆分开。
+pub(crate) fn nearest_walkable_in_box(
+    grid: &Grid,
+    p: [f32; 2],
+    half_extent: f32,
+) -> Option<[f32; 2]> {
+    if !p.into_iter().all(f32::is_finite) || !half_extent.is_finite() || half_extent < 0.0 {
+        return None;
+    }
+    let (cx, cz) = grid.cell_of(p[0], p[1]);
+    if grid.walkable_cell(cx, cz) {
+        return Some(p);
+    }
+    let limit = (half_extent / grid.voxel).ceil() as isize + 1;
+    let mut best: Option<([f32; 2], f32)> = None;
+    for r in 1..=limit {
+        for dz in -r..=r {
+            let full_row = dz.abs() == r;
+            let count = if full_row { 2 * r + 1 } else { 2 };
+            for index in 0..count {
+                let dx = if full_row { index - r } else if index == 0 { -r } else { r };
+                if !grid.walkable_cell(cx + dx, cz + dz) {
+                    continue;
+                }
+                let center = grid.cell_center((cx + dx) as usize, (cz + dz) as usize);
+                if (center[0] - p[0]).abs() > half_extent || (center[1] - p[1]).abs() > half_extent {
+                    continue;
+                }
+                let d = (center[0] - p[0]).powi(2) + (center[1] - p[1]).powi(2);
+                if best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((center, d));
+                }
+            }
+        }
+        if let Some((_, bd)) = best {
+            let floor = ((r as f32 - 0.5) * grid.voxel).powi(2);
+            if bd <= floor {
+                break;
+            }
+        }
+    }
+    best.map(|(center, _)| center)
+}
+
+/// 引擎 `CalculatePath`（`NavMeshManager.CalculatePolygonPath`）的格面形态：
+/// 起终点各经一次方盒映射，任一端映射失败即 `None`（引擎返回 false）；
+/// 两端连通给完整折线，不连通给部分折线（引擎同样返回 true）。折线首点
+/// 是映射后的起点，完整折线末点是映射后的目标。
+pub(crate) fn calculate_path(
+    grid: &Grid,
+    polys: &PolyMesh,
+    regions: &Regions,
+    source: [f32; 2],
+    target: [f32; 2],
+    half_extent: f32,
+) -> Option<(Vec<[f32; 2]>, bool)> {
+    let start = nearest_walkable_in_box(grid, source, half_extent)?;
+    let goal = nearest_walkable_in_box(grid, target, half_extent)?;
+    polys.path_or_partial(grid, regions, start, goal)
+}
+
+/// [`calculate_path`] 的布尔结果，不做搜索：两端映射成功后，完整与部分
+/// 两种结果都算成功，所以它恰好等于「两端都映射到了网上的单元里」。
+pub(crate) fn calculate_path_succeeds(
+    grid: &Grid,
+    polys: &PolyMesh,
+    regions: &Regions,
+    source: [f32; 2],
+    target: [f32; 2],
+    half_extent: f32,
+) -> bool {
+    let located = |p: [f32; 2]| {
+        nearest_walkable_in_box(grid, p, half_extent)
+            .is_some_and(|mapped| polys.locates(grid, regions, mapped))
+    };
+    located(source) && located(target)
 }
 
 // —— 视线与整直 ——
