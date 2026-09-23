@@ -64,22 +64,94 @@ fn disabled_shape_matches_engine_origin_and_forward_motion() {
 
 fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {
     let draw=world.spawn(WeatherFxDraw).id();
-    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),draw,lifecycle:lifecycle(delay)}],
+    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0))}],
         tier:"old".into(),env_site:"home".into(),admitted:1,records:1 }, draw)
 }
 
 #[test]
 fn stop_emitting_preserves_and_advances_existing_particles_without_rng_or_births() {
     let mut system=runtime();
-    let before=system.pool[0].remaining_lifetime;
+    let before=system.pool[0].remaining_lifetime();
     let ctx=Context {sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
     crate::particle_runtime::simulate_stopped(&mut system,0.25,&ctx);
     assert_eq!(system.pool.len(),1);
     assert_eq!(system.born_total,1);
     assert_eq!(system.rng.0,123);
-    assert!(system.pool[0].remaining_lifetime<before);
+    assert_eq!(system.playback_head,0.25);
+    assert!(system.pool[0].remaining_lifetime()<before);
     assert!((system.pool[0].position[0]-0.5).abs()<1e-6);
     assert!(!system.prewarmed,"Stop must not implicitly prewarm");
+}
+
+#[test]
+fn stopped_system_clock_matches_native_tick_trajectories_and_duration_boundaries() {
+    let ctx=Context {sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
+    // Current Update1 stopped/wait=0 receipt: Tick runs before pre/post for
+    // these exact three sequences, while emission and StartParticles do not.
+    for (steps,expected) in [
+        (vec![0.25;6],vec![0.25,0.5,0.75,1.0,1.25,1.5]),
+        (vec![0.5;3],vec![0.5,1.0,1.5]),
+        (vec![0.75,0.5],vec![0.75,1.25]),
+    ] {
+        let mut system=runtime();
+        system.emission.to_emit_accumulator=0.375;
+        system.previous_head=0.125;
+        for (dt,time) in steps.into_iter().zip(expected) {
+            crate::particle_runtime::simulate_stopped(&mut system,dt,&ctx);
+            assert_eq!(system.playback_head,time);
+            assert_eq!(system.rng.0,123);
+            assert_eq!(system.born_total,1);
+            assert_eq!(system.emission.to_emit_accumulator,0.375);
+            assert_eq!(system.previous_head,0.125);
+            assert!(!system.emission_started);
+        }
+    }
+    // Current Tick body: repeated subtraction for looping, upper clamp for
+    // nonlooping. Stop keeps existing particles moving after either boundary.
+    for (looping,expected) in [(true,[0.125,0.375]),(false,[5.0,5.0])] {
+        let mut system=runtime();
+        system.playback_head=4.875;
+        system.emitter.looping=looping;
+        for time in expected {
+            crate::particle_runtime::simulate_stopped(&mut system,0.25,&ctx);
+            assert_eq!(system.playback_head,time);
+        }
+        assert_eq!(system.pool[0].position[0],1.0);
+        assert_eq!(system.rng.0,123);
+        assert_eq!(system.born_total,1);
+    }
+}
+
+#[test]
+fn stopped_nonconstant_gravity_uses_the_ticked_system_clock() {
+    use moly_law::particle::{Curve,CurveKey,gravity::Gravity};
+    let gravity_curve=MinMaxCurve::Curve { multiplier:1.0,max:Curve {
+        multiplier:1.0,keys:[0.0,1.0].map(|time|CurveKey {
+            time,value:time,in_slope:1.0,out_slope:1.0,weighted_mode:0,
+            in_weight:0.0,out_weight:0.0,
+        }).to_vec(),
+    }};
+    let mut system=runtime();
+    system.emitter.duration=1.0;
+    system.emitter.start.gravity_modifier=gravity_curve.clone();
+    system.gravity_law=Gravity::new(&gravity_curve);
+    system.pool[0].velocity=[0.0;3];
+    let ctx=Context {sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
+    // g(t)=t, four quarter-second steps. Native Tick visits .25/.5/.75/0;
+    // semi-implicit integration weights accumulated acceleration at each step.
+    for (time,velocity_weight,position_weight) in [
+        (0.25,0.0625,0.015625),
+        (0.5,0.1875,0.0625),
+        (0.75,0.375,0.15625),
+        (0.0,0.375,0.25),
+    ] {
+        crate::particle_runtime::simulate_stopped(&mut system,0.25,&ctx);
+        assert_eq!(system.playback_head,time);
+        assert!((system.pool[0].velocity[1]-(-9.81*velocity_weight)).abs()<0.000001);
+        assert!((system.pool[0].position[1]-(-9.81*position_weight)).abs()<0.000001);
+        assert_eq!(system.rng.0,123);
+        assert_eq!(system.born_total,1);
+    }
 }
 
 #[test]
@@ -148,4 +220,35 @@ fn site_replacement_preserves_global_and_retiring_effects() {
     assert!(app.world().contains_resource::<WeatherFxState>());
     assert_eq!(app.world().resource::<WeatherFxRetirements>().live.len(),1);
     assert_eq!(app.world().resource::<WeatherTransition>().site_generation,1);
+}
+
+#[test]
+fn effect_instance_age_survives_stop_and_advances_without_a_camera() {
+    let mut app = App::new();
+    app.init_resource::<Time>()
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<WeatherFxRetirements>()
+        .add_systems(Update, advance);
+    let (mut old, _) = active(app.world_mut(), 2.0);
+    let shared = old.live[0].effect_clock.clone();
+    app.world_mut()
+        .resource_mut::<WeatherFxRetirements>()
+        .stop(&mut old, 0.0);
+    assert!(Arc::ptr_eq(
+        &shared,
+        &app.world().resource::<WeatherFxRetirements>().live[0]
+            .emitter
+            .effect_clock
+    ));
+    app.world_mut()
+        .resource_mut::<Time>()
+        .advance_by(Duration::from_millis(250));
+    app.update();
+    assert_eq!(shared.age(), 0.25);
+    assert_eq!(
+        app.world().resource::<WeatherFxRetirements>().live[0]
+            .emitter
+            .playback_head,
+        0.0
+    );
 }

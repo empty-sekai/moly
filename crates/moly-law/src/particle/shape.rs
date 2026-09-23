@@ -45,7 +45,7 @@ pub fn u01_from_bits(bits: u32) -> f32 {
 
 /// Return the native (sin, cos) pair. Sign-preserving nearest-even reduction is
 /// intentional; using abs(sin) or an incomplete polynomial breaks half a circle.
-fn engine_sincos(angle: f32) -> (f32, f32) {
+pub(crate) fn engine_sincos(angle: f32) -> (f32, f32) {
     fn polynomial(value: f32) -> f32 {
         let square = value * value;
         let fourth = square * square;
@@ -184,8 +184,9 @@ pub fn sphere_position(
     )
 }
 
-/// Hemisphere samples z directly in [0,1], not abs(2*u-1). Those choices have
-/// equal distributions but different authored RNG-to-particle correspondence.
+/// Hemisphere folds its draw into the sphere kernel's upper half. Preserve
+/// the native f32 operations (StartHemiSphere 0xf0214c..0xf02170): replacing
+/// this mathematically equivalent expression with z_random changes low bits.
 pub fn hemisphere_position(
     radius: f32,
     thickness: f32,
@@ -194,7 +195,9 @@ pub fn hemisphere_position(
     z_random: f32,
     radial: f32,
 ) -> ([f32; 3], [f32; 3]) {
-    sphere_sample(radius, thickness, arc_deg, arc, z_random, radial)
+    let z = z_random * 0.5 + 0.5;
+    let z = (z + z) - 1.0;
+    sphere_sample(radius, thickness, arc_deg, arc, z, radial)
 }
 
 fn sphere_sample(
@@ -294,8 +297,35 @@ mod tests {
         let sphere = sphere_position(10.0, 0.0, 360.0, 0.3, 0.1, 0.8);
         let hemisphere = hemisphere_position(10.0, 0.0, 360.0, 0.3, 0.1, 0.8);
         assert!((sphere.1[2] + 0.8).abs() < 1e-7);
-        assert_eq!(hemisphere.1[2], 0.1);
+        assert_eq!(hemisphere.1[2].to_bits(), 0x3dcc_ccd0);
         assert!((magnitude(sphere.0) - 10.0).abs() < 1e-5);
+    }
+    #[test]
+    fn source_snow_hemisphere_first_group_matches_native_bits() {
+        // shape-birth-current.json: source 0, old=0, first one-particle
+        // request. All four native storage lanes remain observable at Store.
+        let expected_position = [
+            [3256462770, 3229795817, 1105218461, 3251943192],
+            [3252131890, 3253306700, 3248049907, 1090117893],
+            [1092670063, 1108744017, 1096315287, 1060524061],
+        ];
+        let expected_direction = [
+            [3209490136, 3182389207, 1061443572, 3212151733],
+            [3205480418, 3206323265, 3204854778, 1049639170],
+            [1045853568, 1061769498, 1052604524, 1020425088],
+        ];
+        let mut stream = crate::particle::seed_owner::ModuleRandom::from_owner_seed(1729);
+        let arc = stream.next4_u32().map(u01_from_bits);
+        let polar = stream.next4_u32().map(u01_from_bits);
+        let radial = stream.next4_u32().map(u01_from_bits);
+        for lane in 0..4 {
+            let (position, direction) = hemisphere_position(50.0, 1.0, 360.0,
+                arc[lane], polar[lane], radial[lane]);
+            for axis in 0..3 {
+                assert_eq!(position[axis].to_bits(), expected_position[axis][lane]);
+                assert_eq!(direction[axis].to_bits(), expected_direction[axis][lane]);
+            }
+        }
     }
     #[test]
     fn euler_zxy_keeps_existing_coordinate_contract() {

@@ -660,6 +660,16 @@ fn judge(
             return None;
         }
     };
+    if let Some(sheet) = &emitter.texture_sheet {
+        if let Err(error) = moly_law::particle::texture_sheet::TextureSheet::from_params(sheet) {
+            tally.law_reject.push(format!("{}: {error}", system.node)); return None;
+        }
+    }
+    if let Some(force) = &emitter.force {
+        if let Err(error) = moly_law::particle::force::ForceOverLifetime::from_params(force) {
+            tally.law_reject.push(format!("{}: {error}", system.node)); return None;
+        }
+    }
     if emitter.emission.is_none() {
         tally.no_emission += 1;
         return None;
@@ -1101,10 +1111,18 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             limit: planned.limit.clone(),
             velocity_law: planned.emitter.velocity_over_lifetime.as_ref()
                 .map(moly_law::particle::velocity::VelocityOverLifetime::from_params),
+            force_law: planned.emitter.force.as_ref().map(|p|
+                moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
+            gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier),
             size_law: planned.emitter.size_over_lifetime.as_ref()
                 .map(moly_law::particle::size::SizeOverLifetime::from_params),
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
+            custom_law: planned.emitter.custom_data.as_ref()
+                .map(moly_law::particle::custom_data::CustomData::from_params),
+            texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
+                moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
+            sort_mode: moly_law::particle::sort::ParticleSort::None,
             mesh,
             pool: Vec::new(),
             side: Vec::new(),
@@ -1112,6 +1130,8 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             playback_head: 0.0,
             previous_head: 0.0,
             emission_started: false,
+            native_birth: None,
+            noise: None,
             // 逐系统换一条流：同一个种子在所有系统上会画出同一个图形。
             rng: Rng(RNG_SEED ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             born_total: 0,

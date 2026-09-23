@@ -71,7 +71,10 @@ pub fn eval_curve(keys: &[CurveKey], t: f32) -> f32 {
 ///
 /// 烘制判定是重建：构建期置位读不到，按「2–3 键且恰好张满 [0,1]」
 /// 判（语料 24 根曲线全部张满 [0,1]；4+ 键结构放不下走通用路）。
-/// 烘制与通用的差是重结合的舍入量级——重建侧以逐值比对报告上界。
+/// 系数算序来自当前 JP `MinMaxCurve::BuildCurves` →
+/// `OptimizedPolynomialCurve::BuildOptimizedCurve`（0xd8cac0 → 0xbe1dac）；
+/// 资格门仍保留上述保守子集。不能把系数式重结合后再除 d²/d³，
+/// 否则三键曲线会产生可观测的端点误差。
 #[derive(Clone, Debug)]
 pub struct BakedCurve {
     /// 第一段 [k0, k1]（时刻从 0 起算，故首键时刻必须为 0）。
@@ -91,17 +94,108 @@ fn segment_coeffs(k0: CurveKey, k1: CurveKey, multiplier: f32) -> Option<[f32; 4
     if !(d > 0.0) {
         return None;
     }
+    let d = d.max(f32::from_bits(0x38d1_b717));
     let dv = k1.value - k0.value;
     let s0 = k0.out_slope;
     let s1 = k1.in_slope;
-    let c2 = (3.0 * dv - d * (2.0 * s0 + s1)) / (d * d);
-    let c3 = (d * (s0 + s1) - 2.0 * dv) / (d * d * d);
+    // Preserve each current ARM64 f32 operation, including reciprocal rounding
+    // and the positive short-segment clamp. Apply the multiplier only at end.
+    let twice_dv = dv + dv;
+    let triple_dv = dv + twice_dv;
+    let m0 = s0 * d;
+    let m1 = d * s1;
+    let c2 = triple_dv - m0;
+    let c2 = c2 - m0;
+    let c3 = m0 + m1;
+    let reciprocal = 1.0 / d;
+    let c3 = c3 - dv;
+    let reciprocal_squared = reciprocal * reciprocal;
+    let c3 = c3 - dv;
+    let c2 = c2 - m1;
+    let c3 = reciprocal_squared * c3;
+    let c3 = reciprocal * c3;
+    let c2 = reciprocal_squared * c2;
     Some([
         c3 * multiplier,
         c2 * multiplier,
         s0 * multiplier,
         k0.value * multiplier,
     ])
+}
+
+#[cfg(test)]
+mod native_cache_tests {
+    use super::*;
+    use crate::particle::json::{parse, Value};
+    use crate::particle::value::Curve;
+
+    fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
+        value.get(key).expect(key)
+    }
+    fn number(value: &Value, key: &str) -> f32 {
+        field(value, key).as_f64().expect(key) as f32
+    }
+    fn bits(value: &Value, key: &str) -> u32 {
+        u32::from_str_radix(field(value, key).as_str().expect(key), 16).unwrap()
+    }
+    fn replay(variable: &str, expected_cases: usize, expected_samples: usize) {
+        let path = std::env::var_os(variable).expect(variable);
+        let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(field(&receipt, "inputsUnchanged").as_bool(), Some(true));
+        assert_eq!(field(&receipt, "inputsBefore"), field(&receipt, "inputsAfter"));
+        let cases = field(&receipt, "curves").as_array().unwrap();
+        assert_eq!(cases.len(), expected_cases);
+        let mut sample_count = 0;
+        for case in cases {
+            let name = field(case, "name").as_str().unwrap();
+            assert_eq!(number(case, "nativeBuildReturned"), 1.0);
+            assert_eq!(field(case, "nativeKeysUnchanged").as_bool(), Some(true));
+            let source = field(case, "sourceCurve");
+            let keys = field(source, "keys").as_array().unwrap().iter().map(|key| CurveKey {
+                time: number(key, "time"), value: number(key, "value"),
+                in_slope: number(key, "inSlope"), out_slope: number(key, "outSlope"),
+                weighted_mode: number(key, "weightedMode") as u8,
+                in_weight: number(key, "inWeight"), out_weight: number(key, "outWeight"),
+            }).collect::<Vec<_>>();
+            let multiplier = number(source, "multiplier");
+            let baked = BakedCurve::bake(&keys, multiplier).unwrap();
+            let native_cache = field(case, "cache").as_array().unwrap();
+            let actual_cache = baked.a.into_iter().chain(baked.b).chain([baked.switch]);
+            assert_eq!(native_cache.len(), 9);
+            for (index, (actual, native)) in actual_cache.zip(native_cache).enumerate() {
+                assert_eq!(actual.to_bits(), bits(native, "nativeBits"), "{name} cache[{index}]");
+            }
+            let sampler = CurveSampler::from_min_max_curve(&MinMaxCurve::Curve {
+                multiplier, max: Curve { multiplier: 1.0, keys },
+            });
+            assert!(matches!(sampler, CurveSampler::CurveBaked(_)));
+            for sample in field(case, "samples").as_array().unwrap() {
+                let t = normalized_age(number(sample, "agePercent"));
+                assert_eq!(t.to_bits(), bits(sample, "timeBits"), "{name} age conversion");
+                let expected = bits(sample, "simdBits");
+                assert_eq!(baked.evaluate(t).to_bits(), expected, "{name} baked at {t}");
+                assert_eq!(sampler.evaluate(t, 0.0).to_bits(), expected, "{name} sampler at {t}");
+                sample_count += 1;
+            }
+        }
+        assert_eq!(sample_count, expected_samples);
+    }
+
+    // Source three-key input, current native BuildCurves cache and native SIMD
+    // samples: both endpoints, both segments and the split's neighboring f32s.
+    #[test]
+    #[ignore = "MOLY_SNOW_CURVE_CACHE_NATIVE identifies the current JP native receipt"]
+    fn source_three_key_native_cache_and_samples_match_bits() {
+        replay("MOLY_SNOW_CURVE_CACHE_NATIVE", 2, 24);
+    }
+
+    // Explicitly derived inputs, not additional source qualification: nonunit
+    // positive/negative multipliers and positive segments shorter than 1e-4.
+    #[test]
+    #[ignore = "MOLY_SNOW_CURVE_CACHE_BOUNDARY_NATIVE identifies the native boundary receipt"]
+    fn derived_multiplier_and_short_segment_native_boundaries_match_bits() {
+        replay("MOLY_SNOW_CURVE_CACHE_BOUNDARY_NATIVE", 4, 48);
+    }
 }
 
 impl BakedCurve {

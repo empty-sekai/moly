@@ -9,15 +9,19 @@
 //! 「接没接线分不清」。
 //!
 //! 识别但**未映射**的键不丢弃也不报错——收进 `unmapped` 具名清单
-//! （subEmitters、collision、forceOverLifetime、scalingMode、
-//! emitterVelocityMode、randomSeed、autoRandomSeed、renderer、以及 shape
+//! （scalingMode、emitterVelocityMode、renderer、以及 shape
 //! 的非圆参数族），消费侧可见「这条数据在，但律没管它」。
 
 use std::fmt;
 
 mod events;
+mod noise;
+mod texture_sheet;
+pub use noise::{NoiseParams, NoiseQuality};
+pub use texture_sheet::TextureSheetParams;
 pub use events::{CollisionMode, CollisionParams, CollisionQuality, CollisionType,
-    ForceParams, SubEmitterParams, SubEmitterTrigger, TrailMode, TrailParams, TrailTextureMode};
+    ForceParams, InheritVelocityMode, InheritVelocityParams, SubEmitterParams, SubEmitterSourcePointer,
+    SubEmitterTrigger, TrailMode, TrailParams, TrailTextureMode};
 
 use crate::particle::buffer::RingBufferMode;
 use crate::particle::emit::{Burst, BurstCycles};
@@ -251,6 +255,9 @@ pub struct EmitterParams {
     pub play_on_awake: bool,
     pub simulation_speed: f32,
     pub simulation_space: SimulationSpace,
+    /// Missing/null source ownership remains unknown; zero/false are authored values.
+    pub random_seed: Option<u32>,
+    pub auto_random_seed: Option<bool>,
     pub start_delay: MinMaxCurve,
     pub ring_buffer_mode: RingBufferMode,
     pub ring_buffer_loop_range: [f32; 2],
@@ -271,21 +278,24 @@ pub struct EmitterParams {
     pub collision: Option<CollisionParams>,
     pub trails: Option<TrailParams>,
     pub force: Option<ForceParams>,
+    pub inherit_velocity: Option<InheritVelocityParams>,
+    pub texture_sheet: Option<TextureSheetParams>,
+    pub noise: Option<NoiseParams>,
     /// system 层 + particle 层识别到但未映射的键（去重、按序）。
     pub unmapped: Vec<String>,
 }
 
 /// system 层已映射进参数的键——之外的键全部进 `unmapped`。
-/// 「识别但具名不迁」的那四个（scalingMode、emitterVelocityMode、
-/// randomSeed、autoRandomSeed）**不在**此列：它们同样落
+/// 「识别但具名不迁」的 scalingMode、emitterVelocityMode **不在**此列：它们落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 24] = [
+const MAPPED_SYSTEM_KEYS: [&str; 29] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed",
     "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
     "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
     "limitVelocity", "customData", "shapeEnabled", "subEmitters", "collision",
-    "trails", "forceOverLifetime",
+    "trails", "forceOverLifetime", "inheritVelocity", "textureSheet",
+    "noise", "randomSeed", "autoRandomSeed",
 ];
 
 /// start 层已映射键。
@@ -389,6 +399,11 @@ impl EmitterParams {
             prewarm: bool_of(system_get(system, "prewarm"), &format!("{ctx}.prewarm"))?,
             play_on_awake: bool_of(system_get(system, "playOnAwake"), &format!("{ctx}.playOnAwake"))?,
             simulation_speed: g("simulationSpeed")?,
+            random_seed: match system_get(system, "randomSeed") {
+                None | Some(Value::Null) => None,
+                value => Some(u32_of(value, &format!("{ctx}.randomSeed"))?),
+            },
+            auto_random_seed: opt_bool_of(system_get(system, "autoRandomSeed"), &format!("{ctx}.autoRandomSeed"))?,
             simulation_space: {
                 let name = str_of(
                     system_get(system, "simulationSpace"),
@@ -431,6 +446,12 @@ impl EmitterParams {
                 .map(|v| TrailParams::from_value(v, &ctx)).transpose()?,
             force: system_get(system, "forceOverLifetime")
                 .map(|v| ForceParams::from_value(v, &ctx)).transpose()?,
+            inherit_velocity: system_get(system, "inheritVelocity")
+                .map(|v| events::InheritVelocityParams::from_value(v, &ctx)).transpose()?,
+            texture_sheet: system_get(system, "textureSheet")
+                .map(|v| TextureSheetParams::from_value(v, &ctx)).transpose()?,
+            noise: system_get(system, "noise")
+                .map(|v| NoiseParams::from_value(v, &ctx)).transpose()?,
             unmapped,
         })
     }
@@ -498,7 +519,7 @@ impl EmissionParams {
                         time: f32_of(b.get("time"), &format!("{bctx}.time"))?,
                         count,
                         cycles,
-                        repeat_interval: f32_of(
+                        repeat_interval: burst_repeat_interval(
                             b.get("repeatInterval"),
                             &format!("{bctx}.repeatInterval"),
                         )?,
@@ -523,6 +544,16 @@ impl EmissionParams {
             bursts,
         })
     }
+}
+
+/// Current source lens-flare bursts store +Infinity with cycleCount=0. Keep
+/// that exact interval and cycle count; this decoder does not qualify their
+/// runtime scheduling. Other fields retain their finite-number contracts.
+fn burst_repeat_interval(v: Option<&Value>, ctx: &str) -> Result<f32, EffectsError> {
+    if v.and_then(Value::as_str) == Some("Infinity") {
+        return Ok(f32::INFINITY);
+    }
+    f32_of(v, ctx)
 }
 
 /// shape 层映射的闭集；其余（angle/length/boxThickness/donutRadius/
@@ -1129,6 +1160,51 @@ mod tests {
     }
 
     #[test]
+    fn burst_interval_preserves_positive_infinity_and_original_cycle_count() {
+        for cycles in [0, 1, 3] {
+            let source = SYNTHETIC.replace(
+                "\"cycleCount\": 1, \"repeatInterval\": 0.01",
+                &format!("\"cycleCount\": {cycles}, \"repeatInterval\": \"Infinity\""),
+            );
+            let effects = Effects::from_json_str(source.as_bytes()).unwrap();
+            let burst = &effects.emitters[0].emission.as_ref().unwrap().bursts[0];
+            assert_eq!(burst.repeat_interval.to_bits(), f32::INFINITY.to_bits());
+            assert_eq!(burst.cycles, BurstCycles::from_serialized(cycles));
+        }
+        for interval in [0.0_f32, -0.0, 0.01, 2.0] {
+            let source = SYNTHETIC.replace(
+                "\"repeatInterval\": 0.01",
+                &format!("\"repeatInterval\": {interval:?}"),
+            );
+            let effects = Effects::from_json_str(source.as_bytes()).unwrap();
+            let burst = &effects.emitters[0].emission.as_ref().unwrap().bursts[0];
+            assert_eq!(burst.repeat_interval.to_bits(), interval.to_bits());
+        }
+    }
+
+    #[test]
+    fn burst_infinity_exception_is_field_specific_and_rejects_other_spellings() {
+        for interval in ["\"-Infinity\"", "\"NaN\"", "\"inf\"", "\"1\"", "null", "true", "1e300"] {
+            let source = SYNTHETIC.replace(
+                "\"repeatInterval\": 0.01",
+                &format!("\"repeatInterval\": {interval}"),
+            );
+            let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+            assert!(error.0.contains("effect fx_rain/root/drop.emission.bursts[0].repeatInterval"), "{error}");
+        }
+        for (before, after, field) in [
+            ("\"time\": 0.0, \"count\"", "\"time\": \"Infinity\", \"count\"", "time"),
+            ("\"probability\": 1.0", "\"probability\": \"Infinity\"", "probability"),
+            ("\"count\": {\"mode\": \"constant\", \"value\": 1.0}",
+             "\"count\": {\"mode\": \"constant\", \"value\": \"Infinity\"}", "count.value"),
+        ] {
+            let source = SYNTHETIC.replace(before, after);
+            let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+            assert!(error.0.contains(&format!("effect fx_rain/root/drop.emission.bursts[0].{field}")), "{error}");
+        }
+    }
+
+    #[test]
     fn parses_full_synthetic_entry() {
         let fx = Effects::from_json_str(SYNTHETIC.as_bytes()).expect("synthetic must parse");
         assert_eq!(fx.emitters.len(), 1);
@@ -1168,16 +1244,74 @@ mod tests {
             e.velocity_over_lifetime.as_ref().unwrap().y,
             MinMaxCurve::TwoConstants { min: -0.5, max: -1.0 }
         );
-        // 未映射键可见：system 层 4 个 + shape 的 angle + renderer。
+        // Typed seed ownership preserves explicit zero/true without starting RNG.
+        assert_eq!(e.random_seed, Some(0));
+        assert_eq!(e.auto_random_seed, Some(true));
+        // 未映射键可见：system 层 2 个 + renderer。
         assert!(e.unmapped.contains(&"scalingMode".to_string()));
         assert!(e.unmapped.contains(&"emitterVelocityMode".to_string()));
-        assert!(e.unmapped.contains(&"randomSeed".to_string()));
-        assert!(e.unmapped.contains(&"autoRandomSeed".to_string()));
+        assert!(!e.unmapped.contains(&"randomSeed".to_string()));
+        assert!(!e.unmapped.contains(&"autoRandomSeed".to_string()));
         assert_eq!(e.shape.as_ref().unwrap().controls.angle, Some(25.0));
         assert!(!e.unmapped.contains(&"shape.angle".to_string()));
         assert!(e.unmapped.contains(&"renderer".to_string()));
         // effect 层键（kind 等）收在 Effects 清单。
         assert!(fx.unmapped_effect_keys.contains(&"kind".to_string()));
+    }
+
+    #[test]
+    fn source_seed_unknown_is_distinct_from_explicit_zero_and_manual_false() {
+        for source in [
+            SYNTHETIC.replace("\"randomSeed\": 0,", "").replace("\"autoRandomSeed\": true,", ""),
+            SYNTHETIC.replace("\"randomSeed\": 0", "\"randomSeed\": null")
+                .replace("\"autoRandomSeed\": true", "\"autoRandomSeed\": null"),
+        ] {
+            let emitter = Effects::from_json_str(source.as_bytes()).unwrap().emitters.remove(0);
+            assert_eq!(emitter.random_seed, None);
+            assert_eq!(emitter.auto_random_seed, None);
+        }
+        for seed in [0, u32::MAX] {
+            let source = SYNTHETIC.replace("\"randomSeed\": 0", &format!("\"randomSeed\": {seed}"))
+                .replace("\"autoRandomSeed\": true", "\"autoRandomSeed\": false");
+            let emitter = Effects::from_json_str(source.as_bytes()).unwrap().emitters.remove(0);
+            assert_eq!(emitter.random_seed, Some(seed));
+            assert_eq!(emitter.auto_random_seed, Some(false));
+        }
+    }
+
+    #[test]
+    fn malformed_seed_controls_fail_with_source_location_instead_of_defaulting() {
+        for seed in ["-1", "4294967296", "0.5", "true", "\"0\""] {
+            let source = SYNTHETIC.replace("\"randomSeed\": 0", &format!("\"randomSeed\": {seed}"));
+            let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+            assert!(error.0.contains("effect fx_rain/root/drop.randomSeed"), "{error}");
+        }
+        let source = SYNTHETIC.replace("\"autoRandomSeed\": true", "\"autoRandomSeed\": 0");
+        let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+        assert!(error.0.contains("effect fx_rain/root/drop.autoRandomSeed"), "{error}");
+    }
+
+    #[test]
+    fn emitter_preserves_noise_block_and_keeps_unqualified_controls_for_law_gate() {
+        let noise = r#""noise":{"separateAxes":true,
+            "strength":{"mode":"twoConstants","min":0.1,"max":0.9},
+            "strengthY":{"mode":"constant","value":2},"strengthZ":{"mode":"constant","value":3},
+            "frequency":0.5,"damping":false,"octaves":3,"octaveMultiplier":0.4,"octaveScale":2,
+            "quality":"medium","dimensions":2,"scrollSpeed":{"mode":"constant","value":-1},
+            "remapEnabled":true,"remap":{"mode":"constant","value":4},
+            "remapY":{"mode":"constant","value":5},"remapZ":{"mode":"constant","value":6},
+            "positionAmount":{"mode":"constant","value":7},"rotationAmount":{"mode":"constant","value":8},
+            "sizeAmount":{"mode":"constant","value":9}},"duration": 5.0"#;
+        let source = SYNTHETIC.replace("\"duration\": 5.0", noise);
+        let emitter = Effects::from_json_str(source.as_bytes()).unwrap().emitters.remove(0);
+        assert!(!emitter.unmapped.iter().any(|key| key == "noise"));
+        let params = emitter.noise.unwrap();
+        assert_eq!(params.quality, NoiseQuality::Medium);
+        assert_eq!(params.dimensions, 2);
+        assert_eq!(params.octaves, 3);
+        assert_eq!(params.strength, MinMaxCurve::TwoConstants { min: 0.1, max: 0.9 });
+        assert_eq!(params.remap_z, MinMaxCurve::Constant(6.0));
+        assert!(crate::particle::noise::NoiseLaw::from_params(&params).is_err());
     }
 
     #[test]

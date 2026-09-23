@@ -15,6 +15,8 @@ swash = "0.2.10"
 async-lock = "3"
 futures-util = "0.3"
 futures-channel = "0.3"
+# Shared particle seed owner: already locked; OS entropy on native and JS crypto on wasm.
+getrandom = { version = "=0.2.17", features = ["js"] }
 # Source MeshCollider.convex is a solid 3-D hull, not its concave render mesh.
 # Use the geometry implementation without physics dynamics or triangulation extras.
 parry3d = { version = "0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }

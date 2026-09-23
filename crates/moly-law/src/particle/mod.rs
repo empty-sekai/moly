@@ -30,6 +30,7 @@ mod json;
 
 pub mod value;
 pub mod shape;
+pub mod shape_birth;
 pub mod emit;
 pub mod step;
 pub mod buffer;
@@ -42,11 +43,24 @@ pub mod curve;
 pub mod size;
 pub mod gradient;
 pub mod color;
+pub mod custom_data;
+pub mod texture_sheet;
+pub mod force;
+pub mod gravity;
+pub mod sort;
+pub mod collision_response;
+pub mod collision_event;
+pub mod noise;
+pub mod seed_owner;
+pub mod initial;
+pub mod autonomous_emission;
+pub mod sub_emission;
+pub mod prewarm;
 
 #[cfg(test)]
 mod corpus;
 
-pub use buffer::{compact, ring_push, RingBufferMode, RingPushVerdict};
+pub use buffer::{birth_capacity, compact, compact_with_side, finish_births, RingBufferMode};
 pub use emit::{accumulate_rate, burst_check, Burst, BurstOutcome, EmissionState};
 pub use limit_velocity::{advance_age_percent, DragLaw, DragSize, LimitVelocity, MagnitudeLaw};
 pub use rotation::{BakedCurve, RotationOverLifetime};

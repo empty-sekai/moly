@@ -3806,6 +3806,7 @@ dependencies = [
  "bevy",
  "futures-channel",
  "futures-util",
+ "getrandom 0.2.17",
  "js-sys",
  "moly-assets",
  "moly-law",
