@@ -125,16 +125,133 @@ pub(crate) struct TimelineAssetLoads {
     // 对整份文档的逐字节比对。代不同时走原来的比对，判定结果不变。
     parsed_json: crate::asset_cache::AssetCache<(Option<Tick>, String, Arc<Value>), 96>,
     gltf: crate::asset_cache::AssetCache<Handle<Gltf>, 24>,
+    // Lookup tables derived from one parsed catalogue or library index. An
+    // entry is reused only while `load_json` still returns that same parsed
+    // document, so a replaced text always gets tables built from itself.
+    routes: crate::asset_cache::AssetCache<(Arc<Value>, Arc<CatalogRoutes>), 96>,
+    segments: crate::asset_cache::AssetCache<(Arc<Value>, Arc<IndexSegments>), 96>,
 }
 
 impl TimelineAssetLoads {
     pub(crate) fn cache_counts(&self) -> Value {
-        serde_json::json!({"json":self.json.len(),"documents":self.parsed_json.len(),"gltf":self.gltf.len()})
+        serde_json::json!({"json":self.json.len(),"documents":self.parsed_json.len(),"gltf":self.gltf.len(),
+            "routes":self.routes.len(),"segments":self.segments.len()})
     }
 
     pub(crate) fn sweep_lookup_caches(&mut self) -> usize {
-        self.json.sweep_unused() + self.parsed_json.sweep_unused() + self.gltf.sweep_unused()
+        self.json.sweep_unused()
+            + self.parsed_json.sweep_unused()
+            + self.gltf.sweep_unused()
+            + self.routes.sweep_unused()
+            + self.segments.sweep_unused()
     }
+}
+
+const ACTOR_CATALOG: &str = "actor-animations/index.json";
+
+/// The catalogue's `clipBindings` rows grouped by the (unitId, sourceClip)
+/// pair a character clip is resolved by, each group in document order. A row
+/// whose unit is not an unsigned integer or whose source identity does not
+/// parse equals no request, so it is not indexed. A missing array is kept as
+/// the error the resolution reports at the point it first needs a route.
+struct CatalogRoutes(
+    Result<HashMap<(u64, SourceAssetId), Vec<usize>>, TimelineFailure>,
+);
+
+impl CatalogRoutes {
+    fn build(catalog: &Value) -> Self {
+        Self(array(catalog, "clipBindings").map(|rows| {
+            let mut routes: HashMap<(u64, SourceAssetId), Vec<usize>> = HashMap::new();
+            for (index, row) in rows.iter().enumerate() {
+                if let (Some(unit), Ok(source)) =
+                    (row["unitId"].as_u64(), asset(&row["sourceClip"]))
+                {
+                    routes.entry((unit, source)).or_default().push(index);
+                }
+            }
+            routes
+        }))
+    }
+
+    /// Indices of exactly the rows with this unit and this source clip.
+    fn rows(&self, unit: u64, clip: &SourceAssetId) -> Result<&[usize], TimelineFailure> {
+        let routes = self.0.as_ref().map_err(Clone::clone)?;
+        Ok(routes
+            .get(&(unit, clip.clone()))
+            .map_or(&[][..], Vec::as_slice))
+    }
+}
+
+/// A library index's segments grouped by (exported name, sourceClip), each
+/// group as `(clip group, segment)` keys in document order. Entries without a
+/// string name or a parseable source identity equal no request. A missing
+/// `clips` object is kept as the error reported where segments are needed.
+struct IndexSegments(
+    Result<HashMap<(String, SourceAssetId), Vec<(String, String)>>, TimelineFailure>,
+);
+
+impl IndexSegments {
+    fn build(index: &Value) -> Self {
+        Self(
+            index["clips"]
+                .as_object()
+                .ok_or_else(|| invalid("actor index clips missing"))
+                .map(|groups| {
+                    let mut segments: HashMap<(String, SourceAssetId), Vec<(String, String)>> =
+                        HashMap::new();
+                    for (group_key, group) in groups {
+                        let Some(entries) = group["segments"].as_object() else {
+                            continue;
+                        };
+                        for (segment_key, entry) in entries {
+                            if let (Some(name), Ok(source)) =
+                                (entry["name"].as_str(), asset(&entry["sourceClip"]))
+                            {
+                                segments
+                                    .entry((name.to_owned(), source))
+                                    .or_default()
+                                    .push((group_key.clone(), segment_key.clone()));
+                            }
+                        }
+                    }
+                    segments
+                }),
+        )
+    }
+
+    /// Exactly the segment entries with this exported name and source clip.
+    fn entries<'a>(
+        &self,
+        index: &'a Value,
+        name: &str,
+        clip: &SourceAssetId,
+    ) -> Result<Vec<&'a Value>, TimelineFailure> {
+        let segments = self.0.as_ref().map_err(Clone::clone)?;
+        Ok(segments
+            .get(&(name.to_owned(), clip.clone()))
+            .map_or_else(Vec::new, |keys| {
+                keys.iter()
+                    .map(|(group, segment)| &index["clips"][group]["segments"][segment])
+                    .collect()
+            }))
+    }
+}
+
+/// The tables built from `document`, reused while the same parse is current.
+fn derived<T>(
+    cache: &mut crate::asset_cache::AssetCache<(Arc<Value>, Arc<T>), 96>,
+    path: &str,
+    document: &Arc<Value>,
+    build: impl FnOnce(&Value) -> T,
+) -> Arc<T> {
+    if let Some((cached, tables)) = cache.get(path) {
+        if Arc::ptr_eq(cached, document) {
+            return tables.clone();
+        }
+    }
+    let tables = Arc::new(build(&**document));
+    cache.insert(path.to_owned(), (document.clone(), tables.clone()));
+    tables
 }
 
 /// Resolve the formal per-actor library into the actual player's graph. This
@@ -186,10 +303,13 @@ fn prepare_actor_tracks(
 ) -> Result<(), TimelineFailure> {
     world.init_resource::<TimelineAssetLoads>();
     let server = world.resource::<AssetServer>().clone();
-    let catalog = load_json(world, &server, "actor-animations/index.json")?;
+    let catalog = load_json(world, &server, ACTOR_CATALOG)?;
     if catalog["version"].as_u64() != Some(1) {
         return Err(invalid("unsupported actor animation catalog"));
     }
+    // Built on first need, once per parsed catalogue; every clip then looks
+    // its route up instead of rescanning all rows of the catalogue.
+    let mut catalog_routes: Option<Arc<CatalogRoutes>> = None;
     let mut prepared = Vec::new();
     for track in &request.definition.tracks {
         if track.class != "AnimationTrack"
@@ -210,19 +330,21 @@ fn prepare_actor_tracks(
             let source_clip = target.source_clip.as_ref().ok_or_else(|| {
                 invalid("formal clip target has no resolved source file identity")
             })?;
-            let routes: Vec<_> = array(&catalog, "clipBindings")?
-                .iter()
-                .filter(|row| {
-                    row["unitId"].as_u64() == Some(unit_id as u64)
-                        && asset(&row["sourceClip"]).ok().as_ref() == Some(source_clip)
-                })
-                .collect();
+            let routes = catalog_routes.get_or_insert_with(|| {
+                derived(
+                    &mut world.resource_mut::<TimelineAssetLoads>().routes,
+                    ACTOR_CATALOG,
+                    &catalog,
+                    CatalogRoutes::build,
+                )
+            });
+            let routes = routes.rows(unit_id as u64, source_clip)?;
             if routes.len() != 1 {
                 return Err(invalid(
                     "actor source clip is missing or ambiguous in the formal catalog",
                 ));
             }
-            let route = routes[0];
+            let route = &array(&catalog, "clipBindings")?[routes[0]];
             let route_identity = asset(&route["sourceClip"])?;
             let exported_name = string(route, "clipName")?;
             let library = array(&catalog, "libraries")?
@@ -231,7 +353,8 @@ fn prepare_actor_tracks(
             if library["unitId"].as_u64() != Some(unit_id as u64) {
                 return Err(invalid("actor library unit mismatch"));
             }
-            let index = load_json(world, &server, string(library, "index")?)?;
+            let index_path = string(library, "index")?;
+            let index = load_json(world, &server, index_path)?;
             if index["version"].as_u64() != Some(2) {
                 return Err(invalid("source-qualified v2 actor index required"));
             }
@@ -240,18 +363,13 @@ fn prepare_actor_tracks(
                     return Err(invalid("actor binding root route mismatch"));
                 }
             }
-            let groups = index["clips"]
-                .as_object()
-                .ok_or_else(|| invalid("actor index clips missing"))?;
-            let segments: Vec<_> = groups
-                .values()
-                .filter_map(|group| group["segments"].as_object())
-                .flat_map(|segments| segments.values())
-                .filter(|entry| {
-                    entry["name"].as_str() == Some(exported_name)
-                        && asset(&entry["sourceClip"]).ok().as_ref() == Some(&route_identity)
-                })
-                .collect();
+            let segments = derived(
+                &mut world.resource_mut::<TimelineAssetLoads>().segments,
+                index_path,
+                &index,
+                IndexSegments::build,
+            );
+            let segments = segments.entries(&index, exported_name, &route_identity)?;
             if segments.len() != 1 {
                 return Err(invalid("exact actor source segment missing or duplicated"));
             }
