@@ -325,6 +325,11 @@ pub(crate) fn observe_start(
                 Some(PlayerFixtureOutcome::NotPrepared(error)) => {
                     Some(human_preparation_error(error))
                 }
+                Some(PlayerFixtureOutcome::LoadFailed { target, error })
+                    if active.choice.target.as_ref() == Some(target) =>
+                {
+                    Some(human_preparation_error(error))
+                }
                 _ => None,
             };
             if let Some(reason) = reason {
@@ -380,6 +385,20 @@ pub(crate) fn observe_start(
             return;
         }
     } else if !running && state.pending.is_none() {
+        // A furniture session that ended while loading its resources never
+        // played: report the failure, not a finished performance.
+        if let Some(crate::player_fixture_action::PlayerFixtureOutcome::LoadFailed {
+            target,
+            error,
+        }) = &runtime.last_outcome
+        {
+            if matches!(active.choice.key, EntryKey::Fixture(_))
+                && active.choice.target.as_ref() == Some(target)
+            {
+                fail(&mut state, &human_preparation_error(error));
+                return;
+            }
+        }
         // The action owners have completed their normal cleanup. Keep the
         // preview ticket alive so staging retains its actors, furniture and
         // return snapshot until an explicit stop/close or replacement intent.
