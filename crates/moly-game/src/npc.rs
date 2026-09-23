@@ -430,6 +430,13 @@ pub struct RouteStops {
     /// 最后贴合前的导航落点；下一次开启代理时用于从局部挂点返回面。
     reentry: Option<[f32; 3]>,
     pub(crate) outcome: Option<RouteOutcome>,
+    /// The source MoveAsync target lies at least the IsCompleted destination
+    /// tolerance beyond this route's last navigation corner.
+    ends_short: bool,
+    /// That route has run out: only the IsStacked timer can end the movement.
+    stalling: bool,
+    /// The movement ended as source Stacked rather than by an outside stop.
+    stalled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -477,6 +484,11 @@ impl RouteStops {
         let generation = self.generation;
         *self = Self::default();
         self.generation = generation;
+    }
+
+    /// Consume the source Stacked marker of the latest Stopped outcome.
+    pub(crate) fn take_stalled(&mut self) -> bool {
+        std::mem::take(&mut self.stalled)
     }
 }
 
@@ -1100,21 +1112,7 @@ pub(crate) fn depart(
     rng: &mut crate::npc_objective::MemberRng,
 ) -> Option<MotionPhase> {
     route.outcome = None;
-    let mut start = [state.position[0], state.position[2]];
-    if !walk_face.walkable_at(start) {
-        // 源下次 MoveAsync 先重新开启 NavMeshAgent。这里只恢复已完成
-        // 局部 Fit 的已验证接近点；禁止任意无效起点用一条直线连入场。
-        let reentry = route.reentry?;
-        if !walk_face.walkable_at([reentry[0], reentry[2]]) {
-            return None;
-        }
-        state.position = reentry;
-        start = [reentry[0], reentry[2]];
-    }
-    // 出生与重烘修复由各自生命周期处理；不把不可走起点插进路线制造穿洞首腿。
-    if !walk_face.walkable_at(start) {
-        return None;
-    }
+    let start = reenter_navigation(state, route, walk_face)?;
     let goal = [corner[0], corner[2]];
     let polyline = if fit.is_some() {
         // MoveExecutor 先 CalculatePath，再严验末拐点可达（0.01）；
@@ -1124,6 +1122,72 @@ pub(crate) fn depart(
     } else {
         walk_face.path(start, goal)?
     };
+    route_along(unit, state, slot, route, walk_face, objective_face, corner, fit, rng, polyline, false)
+}
+
+/// Source `IsCompleted` switches from the agent destination to the target
+/// itself once they are this far apart (horizontal distance, metres).
+const COMPLETION_DESTINATION_TOLERANCE: f32 = 0.25;
+
+/// The objective's MoveAsync already passed its source gate and generated the
+/// polyline with the source `GeneratePath`. An empty polyline fails the move
+/// (TryGeneratePath). When the polyline ends at least the IsCompleted
+/// destination tolerance away from `target`, reaching its end is not
+/// completion: the movement then waits for the IsStacked timer.
+pub(crate) fn depart_along(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    target: [f32; 3],
+    fit: Option<FitCandidate>,
+    rng: &mut crate::npc_objective::MemberRng,
+    polyline: Vec<[f32; 2]>,
+) -> Option<MotionPhase> {
+    route.outcome = None;
+    reenter_navigation(state, route, walk_face)?;
+    let end = polyline.last()?;
+    let ends_short = ((end[0] - target[0]).powi(2) + (end[1] - target[2]).powi(2)).sqrt()
+        >= COMPLETION_DESTINATION_TOLERANCE;
+    route_along(unit, state, slot, route, walk_face, objective_face, target, fit, rng, polyline, ends_short)
+}
+
+/// 源下次 MoveAsync 先重新开启 NavMeshAgent。这里只恢复已完成局部 Fit 的
+/// 已验证接近点；禁止任意无效起点用一条直线连入场。
+fn reenter_navigation(
+    state: &mut LawWalkState,
+    route: &RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+) -> Option<[f32; 2]> {
+    let mut start = [state.position[0], state.position[2]];
+    if !walk_face.walkable_at(start) {
+        let reentry = route.reentry?;
+        if !walk_face.walkable_at([reentry[0], reentry[2]]) {
+            return None;
+        }
+        state.position = reentry;
+        start = [reentry[0], reentry[2]];
+    }
+    // 出生与重烘修复由各自生命周期处理；不把不可走起点插进路线制造穿洞首腿。
+    walk_face.walkable_at(start).then_some(start)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_along(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    corner: [f32; 3],
+    fit: Option<FitCandidate>,
+    rng: &mut crate::npc_objective::MemberRng,
+    polyline: Vec<[f32; 2]>,
+    ends_short: bool,
+) -> Option<MotionPhase> {
     let corners = lift_navigation_path(unit, objective_face, polyline);
     route.stops = build_waypoints(state.position, &corners, state.forward, rng, |candidate| {
         objective_face
@@ -1135,6 +1199,9 @@ pub(crate) fn depart(
     route.goal = Some(corner);
     route.fit = fit;
     route.reentry = None;
+    route.ends_short = ends_short;
+    route.stalling = false;
+    route.stalled = false;
     *slot = NpcPathWalkSlot::from_corners(Vec::new());
     let last = route.stops.last()?.position;
     let rests = route
@@ -1200,6 +1267,13 @@ fn start_waypoint(
         route.stops.clear();
         route.next = 0;
         route.goal = None;
+        if std::mem::take(&mut route.ends_short) {
+            // Source IsCompleted compares the position with the target itself
+            // when the path end is this far from it, so standing at the end
+            // never completes; no arrival and no local furniture fit.
+            route.stalling = true;
+            return Some(MotionPhase::Dwelling { remaining: None });
+        }
         let phase = fit
             .and_then(|fit| fit_depart(unit, state, slot, route, fit))
             .unwrap_or(MotionPhase::Dwelling { remaining: None });
@@ -1537,6 +1611,7 @@ pub fn advance(
             }
             let goal = route.goal;
             let fit = route.fit;
+            let stalling = route.stalling;
             *route = RouteStops::default();
             slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
             state.0.next_corner = 0;
@@ -1570,6 +1645,9 @@ pub fn advance(
                 MotionPhase::Dwelling { remaining: None }
             };
             route.generation = walk_face.generation();
+            // A route already waiting at its short end keeps waiting for the
+            // Stacked result; a rebake does not turn it into an arrival.
+            route.stalling = stalling && goal.is_none();
             declare_navigation_action(&mut actions, &mut rest, &phase, &route);
         }
         // 关闭代理的局部贴合结束后，先恢复已验证的导航接近点再让目标机查询。
@@ -1813,7 +1891,33 @@ pub fn advance(
                     }
                 }
                 // 收场位：路线已尽或未起步，站定的成员由目标机收场与再出发。
-                MotionPhase::Dwelling { remaining: None } => {}
+                MotionPhase::Dwelling { remaining: None } => {
+                    if route.stalling {
+                        // Source IsPositionStacked: no 0.09 m displacement in
+                        // 5 s ends the movement as Stacked while IsCompleted
+                        // cannot hold at this path end.
+                        match stuck.0 {
+                            None => stuck.0 = Some((state.0.position, now)),
+                            Some((last, since)) => {
+                                if Vec3::from(state.0.position).distance(Vec3::from(last))
+                                    >= STUCK_DISTANCE
+                                {
+                                    stuck.0 = Some((state.0.position, now));
+                                } else if now - since > STUCK_SECONDS {
+                                    stuck.0 = None;
+                                    route.stop();
+                                    route.stalled = true;
+                                    actions.change(NpcAction::Idle, &mut rest);
+                                    warn!(
+                                        "[npc unit={}] t={now:.1} 路线末端距目标仍超出完成容差，停留 {:.1}s 后按卡住结束移动",
+                                        unit.0,
+                                        now - since
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 MotionPhase::Walking => {
                     unreachable!("空路径只写在到站帧、卡死帧与转体帧：行走者必在驻留或转体相位")
                 }
