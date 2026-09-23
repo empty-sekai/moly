@@ -30,8 +30,8 @@ use bevy::render::render_graph::{
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-    BindingResource, Buffer, BufferInitDescriptor, BufferUsages, CachedRenderPipelineId,
+    BindGroup, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+    Buffer, BufferInitDescriptor, BufferUsages, CachedRenderPipelineId,
     ColorTargetState, ColorWrites, FragmentState, Operations, Origin3d, PipelineCache,
     PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
     Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType,
@@ -50,6 +50,8 @@ use std::marker::PhantomData;
 
 use crate::env::SiteEnv;
 use crate::fixture_emission::ViewEmissionTarget;
+use crate::render::gpu::{BindGroupCache, Bound};
+use bevy::diagnostic::FrameCount;
 use crate::fixture_material::EmissionAccount;
 use crate::light;
 use crate::site::SiteActive;
@@ -1779,8 +1781,15 @@ fn prepare_weather_pyramid(
 ///（阈值预滤波 → 平方域降采样 → 平方域上采样）→ 合成（扩散混合 + 泛光 +
 /// 屏幕耀斑）。三条轴全关时整段跳过——不取 post_process_write，主纹理
 /// 原样过（与不挂这条链逐位一致）。
+///
+/// Bind groups are cached by layout and bound resource ids: the pyramid
+/// levels stay the same textures while the viewport and axis values hold, and
+/// the ping-pong source alternates between two views, so steady frames reuse
+/// every group instead of creating the whole set again.
 #[derive(Default)]
-struct WeatherPostNode;
+struct WeatherPostNode {
+    bind_groups: std::sync::Mutex<BindGroupCache>,
+}
 
 impl ViewNode for WeatherPostNode {
     // 只在带金字塔组件的视图上跑（Prepare 只给 Core3d 视图插）。自发光
@@ -1830,9 +1839,13 @@ impl ViewNode for WeatherPostNode {
             return Ok(());
         };
 
-        // 源/目的每帧轮换，bind group 只能在这里建。全部**先建后跑**：设备
-        // 句柄借 render_context 的不可变引用，跑 pass 要可变借用，交叠即撞。
+        // 源/目的每帧轮换，bind group 只能在这里取（按所绑资源缓存）。全部
+        // **先取后跑**：设备句柄借 render_context 的不可变引用，跑 pass 要可
+        // 变借用，交叠即撞。
         let post_process = view_target.post_process_write();
+        let frame = world.resource::<FrameCount>().0;
+        let mut cache = self.bind_groups.lock().unwrap();
+        cache.evict_idle(frame);
         // 扩散金字塔的级数（扩散关着时为 0）。
         let n = if params.diff_on { pyramid.downs.len() } else { 0 };
         // 合成里的扩散层：单级金字塔直取直拷结果，多级取上采样链顶；扩散
@@ -1882,26 +1895,30 @@ impl ViewNode for WeatherPostNode {
             if n > 0 {
                 // 直拷预过滤：源（编码域画面）→ 金字塔第一级。调色 uniform
                 // 也绑上（金字塔的源是已调色的场景色）。
-                copy_bind_group = Some(device.create_bind_group(
+                copy_bind_group = Some(cache.get(
+                    device,
                     "weather_copy_bind_group",
                     &copy_layout,
-                    &BindGroupEntries::with_indices((
-                        (0, post_process.source),
-                        (2, BindingResource::Sampler(sampler)),
-                        (3, gpu.buffer.as_entire_binding()),
-                    )),
+                    &[
+                        (0, Bound::View(post_process.source)),
+                        (2, Bound::Sampler(sampler)),
+                        (3, Bound::whole(&gpu.buffer)),
+                    ],
+                    frame,
                 ));
                 // 逐级降采样：上一级 → 下一级。建组顺序无所谓，跑序才要紧。
                 down_bind_groups = (1..n)
                     .map(|i| {
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "weather_down_bind_group",
                             &copy_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.downs[i - 1].default_view),
-                                (2, BindingResource::Sampler(sampler)),
-                                (3, gpu.buffer.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.downs[i - 1].default_view)),
+                                (2, Bound::Sampler(sampler)),
+                                (3, Bound::whole(&gpu.buffer)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1916,15 +1933,17 @@ impl ViewNode for WeatherPostNode {
                         } else {
                             &pyramid.ups[i + 1].default_view
                         };
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "weather_up_bind_group",
                             &up_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.downs[i].default_view),
-                                (1, low),
-                                (2, BindingResource::Sampler(sampler)),
-                                (4, gpu.scatter.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.downs[i].default_view)),
+                                (1, Bound::View(low)),
+                                (2, Bound::Sampler(sampler)),
+                                (4, Bound::whole(&gpu.scatter)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1938,25 +1957,29 @@ impl ViewNode for WeatherPostNode {
                 // 泛光预滤波：自发光缓冲（已 resolve 的单采样视图）→ 金字塔
                 // 第一级。阈值软膝在着色器里；参数整块绑（预滤波与上采样
                 // 共用同一份打包）。
-                bloom_prefilter_bind_group = Some(device.create_bind_group(
+                bloom_prefilter_bind_group = Some(cache.get(
+                    device,
                     "bloom_prefilter_bind_group",
                     &bloom_prefilter_layout,
-                    &BindGroupEntries::with_indices((
-                        (0, &emission_target.unwrap().resolved),
-                        (2, BindingResource::Sampler(sampler)),
-                        (5, gpu.bloom_params.as_entire_binding()),
-                    )),
+                    &[
+                        (0, Bound::View(&emission_target.unwrap().resolved)),
+                        (2, Bound::Sampler(sampler)),
+                        (5, Bound::whole(&gpu.bloom_params)),
+                    ],
+                    frame,
                 ));
                 bloom_down_bind_groups = (1..bloom_n)
                     .map(|i| {
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "bloom_down_bind_group",
                             &copy_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.bloom_downs[i - 1].default_view),
-                                (2, BindingResource::Sampler(sampler)),
-                                (3, gpu.buffer.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.bloom_downs[i - 1].default_view)),
+                                (2, Bound::Sampler(sampler)),
+                                (3, Bound::whole(&gpu.buffer)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1969,15 +1992,17 @@ impl ViewNode for WeatherPostNode {
                         } else {
                             &pyramid.bloom_uploads[i + 1].default_view
                         };
-                        device.create_bind_group(
+                        cache.get(
+                            device,
                             "bloom_up_bind_group",
                             &bloom_up_layout,
-                            &BindGroupEntries::with_indices((
-                                (0, &pyramid.bloom_downs[i].default_view),
-                                (1, low),
-                                (2, BindingResource::Sampler(sampler)),
-                                (5, gpu.bloom_params.as_entire_binding()),
-                            )),
+                            &[
+                                (0, Bound::View(&pyramid.bloom_downs[i].default_view)),
+                                (1, Bound::View(low)),
+                                (2, Bound::Sampler(sampler)),
+                                (5, Bound::whole(&gpu.bloom_params)),
+                            ],
+                            frame,
                         )
                     })
                     .collect();
@@ -1989,18 +2014,21 @@ impl ViewNode for WeatherPostNode {
 
             // 合成：源 + 扩散层 + 泛光层 → 目的。写目的是 post_process_write
             // 的约定——主纹理已被翻到目的侧，不写就丢帧。
-            composite_bind_group = device.create_bind_group(
+            composite_bind_group = cache.get(
+                device,
                 "weather_composite_bind_group",
                 &composite_layout,
-                &BindGroupEntries::with_indices((
-                    (0, post_process.source),
-                    (1, diff_view),
-                    (2, BindingResource::Sampler(sampler)),
-                    (3, gpu.buffer.as_entire_binding()),
-                    (6, bloom_view),
-                )),
+                &[
+                    (0, Bound::View(post_process.source)),
+                    (1, Bound::View(diff_view)),
+                    (2, Bound::Sampler(sampler)),
+                    (3, Bound::whole(&gpu.buffer)),
+                    (6, Bound::View(bloom_view)),
+                ],
+                frame,
             );
         }
+        drop(cache);
 
         // 跑 pass：直拷 → 降采样链 → 上采样链（倒序）→ 泛光三连 → 合成。
         if let Some(bind_group) = copy_bind_group.as_ref() {

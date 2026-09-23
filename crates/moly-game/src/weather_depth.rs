@@ -198,14 +198,22 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
     commands.insert_resource(RawDepthGpu {invalid_view,valid,invalid,copy_pipeline,source_copy_pipeline});
 }
 
+/// Both bind groups are cached by layout and bound resource ids, so a view
+/// whose depth attachment and snapshot textures stay the same reuses them.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_raw_depth(
     mut commands: Commands,
     device: Res<bevy::render::renderer::RenderDevice>,
     cache: Res<PipelineCache>,
     mut textures: ResMut<TextureCache>,
     gpu: Res<RawDepthGpu>,
+    frame: Res<bevy::diagnostic::FrameCount>,
+    mut groups: Local<crate::render::gpu::BindGroupCache>,
     views: Query<(Entity, &ViewDepthTexture, Option<&WeatherDepthSnapshot>, Option<&WeatherCameraRole>)>,
 ) {
+    use crate::render::gpu::Bound;
+    let frame = frame.0;
+    groups.evict_idle(frame);
     for (entity, main, requested, role) in &views {
         let compatible = requested.is_some()
             && effect_attachment_compatible(role.copied(), main.texture.sample_count())
@@ -222,10 +230,11 @@ pub(crate) fn prepare_raw_depth(
                     | TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-            let source_view = main.texture.create_view(&TextureViewDescriptor::default());
-            let source = device.create_bind_group("weather_actual_depth_source",
+            // The attachment's own view is the depth texture's default view,
+            // the same descriptor a per-frame create_view would use.
+            let source = groups.get(&device, "weather_actual_depth_source",
                 &cache.get_bind_group_layout(&depth_copy_layout()),
-                &BindGroupEntries::single(&source_view));
+                &[(0, Bound::View(main.view()))], frame);
             let source_texture = textures.get(&device, TextureDescriptor {
                 label: Some("source_GLES_actual_opaque_depth"),
                 size: main.texture.size(), mip_level_count: 1, sample_count: 1,
@@ -242,9 +251,9 @@ pub(crate) fn prepare_raw_depth(
         };
         // A pending copy pipeline or incompatible/missing camera produces an
         // explicitly invalid binding, never a valid flag over last-frame depth.
-        let group = device.create_bind_group("weather_raw_depth_for_view",
+        let group = groups.get(&device, "weather_raw_depth_for_view",
             &cache.get_bind_group_layout(&raw_depth_layout()),
-            &BindGroupEntries::sequential((view, valid.as_entire_binding())));
+            &[(0, Bound::View(view)), (1, Bound::whole(valid))], frame);
         let mut entity = commands.entity(entity);
         entity.insert(RawDepthBinding { group });
         if let Some(snapshot) = snapshot { entity.insert(snapshot); }

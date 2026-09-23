@@ -59,6 +59,7 @@ use bevy::render::view::{Msaa, ViewDepthTexture, ViewUniform, ViewUniformOffset,
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::env::{SiteEnv, SiteEnvGpuBuffer};
+use crate::render::gpu::{BindGroupCache, Bound};
 use crate::uber_particle::{ParticleEmission, UberParticleMaterial, CullArm, BlendArm, UBER_SHADER};
 use crate::fixture_material::{FixtureMaterialKey, FixtureParams};
 
@@ -553,6 +554,13 @@ fn prepare_emission(
     }
 }
 
+/// Bind groups shared by both emission nodes, cached by layout and bound
+/// resource ids: the object pool, view uniform and skin buffers are replaced
+/// only when they grow, and each (mask, main) pair binds the same GPU images
+/// until either image is re-prepared.
+#[derive(Resource, Default)]
+struct EmissionBindGroups(std::sync::Mutex<BindGroupCache>);
+
 /// 自发光节点：主 pass 之后跑。每个 3D 视图一份；ViewQuery 缺件
 /// （无深度图或无本 pass 组件）的视图直接不匹配，节点不跑。
 #[derive(Default)]
@@ -588,9 +596,13 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         let skins = world.resource::<SkinUniforms>();
         // A ViewUniformOffset is inserted by prepare_view_uniforms only after
         // writing that view's uniform. This is the exact buffer read by the
-        // main fixture vertex shader, including any adjusted projection.
-        let view_binding = view_uniforms.uniforms.binding()
+        // main fixture vertex shader, including any adjusted projection. It is
+        // bound as that uniform buffer's own binding: offset 0, one ViewUniform.
+        let view_buffer = view_uniforms.uniforms.buffer()
             .expect("main view uniforms are prepared before the emission pass");
+        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+        let mut groups = world.resource::<EmissionBindGroups>().0.lock().unwrap();
+        groups.evict_idle(frame);
 
         // 管线就绪表（去重）；没编完的只跳过那条 draw，pass 照常清缓冲。
         let mut ready: Vec<(CachedRenderPipelineId, &RenderPipeline)> = Vec::new();
@@ -616,27 +628,31 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         let device = render_context.render_device();
         // group 0：对象池、主视图与主 pass 同帧的蒙皮 buffer。统一按
         // binding 顺序传动态 offset；storage 蒙皮分支无第三个动态 offset。
-        let object_bind_group = device.create_bind_group(
+        let object_bind_group = groups.get(
+            device,
             "fixture_emission_object_bind_group",
             &pipeline_cache.get_bind_group_layout(&gpu.object_layout),
-            &BindGroupEntries::with_indices((
+            &[
                 (
-                    0u32,
-                    BindingResource::Buffer(BufferBinding {
-                        buffer: &gpu.object_buffer,
-                        offset: 0,
-                        size: Some(
-                            std::num::NonZeroU64::new(gpu.object_binding_size).unwrap(),
-                        ),
-                    }),
+                    0,
+                    Bound::Buffer(
+                        &gpu.object_buffer,
+                        0,
+                        Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
+                    ),
                 ),
-                (1u32, view_binding),
-                (2u32, BindingResource::Buffer(BufferBinding {
-                    buffer: &skins.current_buffer,
-                    offset: 0,
-                    size: gpu.skin_uniforms.then(|| std::num::NonZeroU64::new((MAX_JOINTS * 64) as u64).unwrap()),
-                })),
-            )),
+                (1, Bound::Buffer(view_buffer, 0, Some(ViewUniform::min_size()))),
+                (
+                    2,
+                    Bound::Buffer(
+                        &skins.current_buffer,
+                        0,
+                        gpu.skin_uniforms
+                            .then(|| std::num::NonZeroU64::new((MAX_JOINTS * 64) as u64).unwrap()),
+                    ),
+                ),
+            ],
+            frame,
         );
         // group 1：按 (遮罩, 主贴图) 对去重；缺 GPU 侧资源的对不建组，对应
         // draw 跳过（fail-closed，下一帧再试）。
@@ -657,26 +673,22 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
             };
             texture_groups.insert(
                 (item.mask, item.main),
-                device.create_bind_group(
+                groups.get(
+                    device,
                     "fixture_emission_texture_bind_group",
                     &texture_layout,
-                    &BindGroupEntries::with_indices((
-                        (
-                            0u32,
-                            BindingResource::Buffer(BufferBinding {
-                                buffer: &env.buffer,
-                                offset: 0,
-                                size: None,
-                            }),
-                        ),
-                        (1u32, &mask_image.texture_view),
-                        (2u32, &main_image.texture_view),
-                        (3u32, BindingResource::Sampler(&main_image.sampler)),
-                        (4u32, BindingResource::Sampler(&mask_image.sampler)),
-                    )),
+                    &[
+                        (0, Bound::whole(&env.buffer)),
+                        (1, Bound::View(&mask_image.texture_view)),
+                        (2, Bound::View(&main_image.texture_view)),
+                        (3, Bound::Sampler(&main_image.sampler)),
+                        (4, Bound::Sampler(&mask_image.sampler)),
+                    ],
+                    frame,
                 ),
             );
         }
+        drop(groups);
 
         // The forward and Effect paths use the same per-view alias of the
         // copied camera depth. The alias changes binding type, not its bytes.
@@ -904,6 +916,7 @@ impl Plugin for FixtureEmissionPlugin {
         render_app
             .init_resource::<EmissionDrawList>()
             .init_resource::<EmissionPipelines>()
+            .init_resource::<EmissionBindGroups>()
             .add_systems(RenderStartup, init_emission_resources)
             .add_systems(ExtractSchedule, extract_emission_draws)
             .add_systems(
