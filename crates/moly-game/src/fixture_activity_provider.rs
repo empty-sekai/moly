@@ -229,9 +229,11 @@ impl FixtureActivityProvider {
     /// placed model's own file, which is already loaded. So a request whose
     /// inputs are not resident waits for about three load rounds (tables and
     /// catalogue; library index and SE; library file) before the player
-    /// moves. `draft` keeps the handles of an unfinished attempt alive
-    /// between polls, so an in-flight load is not cancelled, and holds the
-    /// complete profile on success.
+    /// moves. An SE with no route, or whose audio fails to load, plays
+    /// silent instead of failing the row (`silence_player_sounds`). `draft`
+    /// keeps the handles of an unfinished attempt alive between polls, so an
+    /// in-flight load is not cancelled, and holds the complete profile on
+    /// success.
     pub(crate) fn prepare_player_timeline(
         &mut self,
         world: &mut World,
@@ -275,6 +277,12 @@ impl FixtureActivityProvider {
             ],
         };
         let mut request = profile.start_request(owner, &plan.target);
+        // An SE found silent stays silent for the session: it is neither
+        // requested again nor reported twice.
+        if let Some(previous) = previous.as_ref() {
+            request.bindings.silent_sounds = previous.bindings.silent_sounds.clone();
+        }
+        silence_player_sounds(world, &plan.target, &mut request);
         // The SE routes need only the parsed tracks: request them now, so they
         // load alongside the actor clips. `prepare_bindings` requests the same
         // handles again at its end, and only its result counts.
@@ -286,6 +294,8 @@ impl FixtureActivityProvider {
             plan.animator,
             plan.graph.clone(),
         );
+        // An SE whose audio has failed to load plays silent as well.
+        silence_player_sounds(world, &plan.target, &mut request);
         let has_actor_body = request
             .bindings
             .animations
@@ -479,6 +489,15 @@ pub(crate) fn plan_player_row(
         visual_package,
         visual_prefab,
     })
+}
+
+/// The player timeline's SE rule (`silence_unavailable_sounds`): an SE the
+/// source would fail to load plays silent. Each is reported once, when it is
+/// first found, because it then stays silent for the session.
+fn silence_player_sounds(world: &World, target: &FixtureTarget, request: &mut StartTimeline) {
+    for silenced in timeline::silence_unavailable_sounds(world, request) {
+        warn!("[player-fixture] {} SE {silenced} plays silent", target.uid);
+    }
 }
 
 fn profile_matches_plan(profile: &PlayerFixtureVisualProfile, plan: &PlayerTimelinePlan) -> bool {

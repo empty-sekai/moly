@@ -590,6 +590,11 @@ pub(crate) struct TimelineBindings {
     pub animations: HashMap<TimelineClipKey, TimelineAnimationBinding>,
     pub actors: HashMap<SourceAssetId, Entity>,
     pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
+    /// SE clips that play silent because their SE has no route or its audio
+    /// failed to load. Only the player owner fills this (see
+    /// `silence_unavailable_sounds`); every other owner leaves it empty and
+    /// still requires each SE.
+    pub silent_sounds: HashSet<TimelineClipKey>,
 }
 #[derive(Clone)]
 pub(crate) struct TimelineCompanionTrack {
@@ -903,13 +908,14 @@ fn all_tracks(request: &StartTimeline) -> Result<Vec<&TimelineTrack>, TimelineFa
 
 /// Load exact `(package,cue)` resources through the existing audio Routing
 /// and AssetServer. Calling this does not start audio or admit an action.
+/// A clip in `silent_sounds` is neither routed nor loaded.
 pub(crate) fn prepare_source_sounds(
     world: &World,
     request: &mut StartTimeline,
 ) -> Result<(), TimelineFailure> {
     let routing = world
         .get_resource::<Routing>()
-        .ok_or_else(|| TimelineFailure::loading("audio routing not ready"))?;
+        .ok_or_else(|| routing_absent(world))?;
     let server = world
         .get_resource::<AssetServer>()
         .ok_or_else(|| invalid("asset server missing"))?;
@@ -917,6 +923,9 @@ pub(crate) fn prepare_source_sounds(
     for track in all_tracks(request)? {
         for clip in &track.clips {
             if let TimelinePayload::Se { package, cue } = &clip.payload {
+                if request.bindings.silent_sounds.contains(&clip.key) {
+                    continue;
+                }
                 let path = routing
                     .timeline_se_asset_path(package, cue)
                     .ok_or_else(|| invalid(format!("missing source SE {package}/{cue}")))?;
@@ -929,6 +938,69 @@ pub(crate) fn prepare_source_sounds(
     }
     request.bindings.sounds = sounds;
     Ok(())
+}
+
+/// The audio routing table is built once, from files requested at start. While
+/// that loader is still running this is a wait; once it has finished without
+/// the table, no later frame supplies it, so the failure is final.
+fn routing_absent(world: &World) -> TimelineFailure {
+    if world.contains_resource::<crate::audio::AudioRequests>() {
+        TimelineFailure::loading("audio routing not ready")
+    } else {
+        invalid("audio routing is absent and its loader has finished")
+    }
+}
+
+/// The player owner's SE rule. The source loads each SE bundle of a player
+/// timeline without checking the result (LoadSound ignores what
+/// LoadSoundBundleRefCount returns), and an SE clip whose bundle is missing
+/// only logs when it plays. So here an SE with no route, or whose audio
+/// failed to load, is marked silent instead of failing the request: the
+/// timeline plays on without it. Returns `package/cue: reason` for each clip
+/// newly marked. Decides nothing while the routing table is absent; the
+/// strict preparation reports that wait.
+pub(crate) fn silence_unavailable_sounds(
+    world: &World,
+    request: &mut StartTimeline,
+) -> Vec<String> {
+    let Some(routing) = world.get_resource::<Routing>() else {
+        return Vec::new();
+    };
+    let server = world.get_resource::<AssetServer>();
+    let Ok(tracks) = all_tracks(request) else {
+        return Vec::new();
+    };
+    let mut silenced = Vec::new();
+    for track in tracks {
+        for clip in &track.clips {
+            let TimelinePayload::Se { package, cue } = &clip.payload else {
+                continue;
+            };
+            if request.bindings.silent_sounds.contains(&clip.key) {
+                continue;
+            }
+            let reason = if routing.timeline_se_asset_path(package, cue).is_none() {
+                "no route"
+            } else if request.bindings.sounds.get(&clip.key).is_some_and(|handle| {
+                server.is_some_and(|server| {
+                    matches!(server.load_state(handle), bevy::asset::LoadState::Failed(_))
+                })
+            }) {
+                "audio failed to load"
+            } else {
+                continue;
+            };
+            silenced.push((clip.key.clone(), format!("{package}/{cue}: {reason}")));
+        }
+    }
+    silenced
+        .into_iter()
+        .map(|(key, description)| {
+            request.bindings.sounds.remove(&key);
+            request.bindings.silent_sounds.insert(key);
+            description
+        })
+        .collect()
 }
 
 pub(crate) fn validate_start(
@@ -1084,10 +1156,14 @@ fn validate(
                     }
                 }
                 TimelinePayload::Se { package, cue } => {
+                    // A silent SE plays nothing, so nothing is required of it.
+                    if request.bindings.silent_sounds.contains(&clip.key) {
+                        continue;
+                    }
                     required_sounds.insert(clip.key.clone());
                     let routing = world
                         .get_resource::<Routing>()
-                        .ok_or_else(|| TimelineFailure::loading("audio routing not ready"))?;
+                        .ok_or_else(|| routing_absent(world))?;
                     let path = routing
                         .timeline_se_asset_path(package, cue)
                         .ok_or_else(|| invalid("source SE route unavailable"))?;
@@ -1143,13 +1219,24 @@ fn validate(
                         .get(&track.identity)
                         .ok_or_else(|| invalid("emoticon track actor missing"))?;
                     validate_track_actor(world, request, &track.identity, *actor)?;
+                    // Each is a wait only while its loader is still running:
+                    // the archive while its request is held, the renderer
+                    // until its one-time setup has run.
                     let archive = world
                         .get_resource::<crate::emoticon::EmoticonArchive>()
                         .ok_or_else(|| {
-                            TimelineFailure::loading("emoticon archive still loading")
+                            if world.contains_resource::<crate::emoticon::EmoticonsHandle>() {
+                                TimelineFailure::loading("emoticon archive still loading")
+                            } else {
+                                invalid("emoticon archive is absent and its loader has finished")
+                            }
                         })?;
                     if !world.contains_resource::<crate::emoticon::Emotes>() {
-                        return Err(TimelineFailure::loading("emoticon renderer still loading"));
+                        return Err(if world.contains_resource::<crate::emoticon::Spawned>() {
+                            invalid("emoticon renderer is absent and its setup has run")
+                        } else {
+                            TimelineFailure::loading("emoticon renderer still loading")
+                        });
                     }
                     if !archive.has(name) {
                         return Err(invalid(format!("source emoticon {name} is unavailable")));
@@ -1766,6 +1853,10 @@ fn apply_events(
                 session.emoticons.insert(key.clone(), lease);
             }
             TimelinePayload::Se { .. } => {
+                // A silent SE has no sound; the timeline plays on without it.
+                if session.request.bindings.silent_sounds.contains(key) {
+                    continue;
+                }
                 let handle = session
                     .request
                     .bindings
