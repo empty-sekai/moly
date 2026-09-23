@@ -994,8 +994,8 @@ fn fixture_button(row: &FixtureRow) -> Option<ButtonType> {
         return Some(ButtonType::GimmickFixture);
     }
     if FixtureFacts::is_timeline(row.action_value) {
-        // 源侧这一支还要过「动作点位可用」与「玩家能否演出」两道运行时
-        // 门，本仓没有那两个状态；见模块头的缺口条目。
+        // The action point and player gates (IsActionButtonTypeAvailable,
+        // IsCanActionFixture) run on the collision edge, in admission.rs.
         return Some(ButtonType::TimelineFixture);
     }
     if !row.fixture_type.can_action() {
