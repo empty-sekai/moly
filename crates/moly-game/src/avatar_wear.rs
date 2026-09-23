@@ -211,7 +211,9 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     // 荧光棒：真源玩家链恒不挂；面板具名下发才挂。
     let penlight_bundle = panel.penlight.clone();
 
-    let skin_tex = server.load::<Image>(skin_tex_path(&skin_bundle));
+    // 皮肤贴图只由 GPU 采样（avatar 材质取渲染世界里的纹理），没有读纹素的
+    // CPU 读者，也没有别的请求方。
+    let skin_tex = moly_assets::residency::load_image(&server, skin_tex_path(&skin_bundle));
     let (accessory_gltf, accessory_tex) = match &accessory_bundle {
         Some(bundle) => {
             let glb = decoration_glb_path(bundle);
