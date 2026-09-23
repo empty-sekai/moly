@@ -1074,7 +1074,8 @@ pub(crate) fn apply_graphics(
 /// refreshes with `refresh_count::RefreshCount` and wakes the engine on the
 /// animation frame that completes the spacing. The page does not report its
 /// refresh rate, so the first wake-up waits until two animation-frame
-/// intervals agree on it.
+/// intervals agree on it, and the rate is then measured over the animation
+/// frames of the latest second.
 ///
 /// The engine loop is reactive: its wait is an hour and it ignores window and
 /// device events, so it updates only when this pacer wakes it through the
@@ -1324,27 +1325,44 @@ mod pacing {
 /// Display-refresh counting of the browser pacer; it uses no page API.
 #[cfg(target_arch = "wasm32")]
 mod refresh_count {
-    /// Animation-frame intervals kept for the refresh estimate (about half a
-    /// second at 60 Hz).
-    const WINDOW: usize = 32;
-    /// Once the refresh interval is measured, longer intervals (a hidden page,
-    /// a long stall) still advance the count but stay out of the estimate.
+    use std::collections::VecDeque;
+
+    /// Sampled intervals kept for the lowest cluster (about half a second at
+    /// 60 Hz).
+    const SAMPLES: usize = 32;
+    /// Longer intervals (a hidden page, a long stall) still advance the count
+    /// but stay out of the refresh estimate.
     const MAX_SAMPLE_MS: f64 = 250.;
     /// Intervals within this ratio of each other count as the same number of
     /// refreshes.
     const SPREAD: f64 = 1.25;
+    /// The refresh interval is measured over at least the latest second of
+    /// animation frames.
+    const SPAN_MS: f64 = 1000.;
+    /// Refreshes the measured span covers before it replaces the lowest
+    /// cluster as the estimate.
+    const SPAN_MIN_REFRESHES: u64 = 16;
+    /// Most animation frames the span keeps (a second at 1024 Hz).
+    const SPAN_MAX_FRAMES: usize = 1024;
 
     /// Counts display refreshes from animation-frame timestamps and applies
     /// the source's refresh spacing between frame starts.
     pub(super) struct RefreshCount {
-        intervals: [f64; WINDOW],
+        samples: [f64; SAMPLES],
         stored: usize,
         next: usize,
-        /// Estimated display refresh interval; none until two sampled
-        /// intervals agree.
-        refresh_ms: Option<f64>,
+        /// Mean of the lowest cluster of sampled intervals, about one refresh;
+        /// none until two sampled intervals agree.
+        cluster_ms: Option<f64>,
+        /// Consecutive animation-frame intervals, oldest first, each with the
+        /// refreshes it was counted as.
+        span: VecDeque<(f64, u64)>,
+        /// Total of the intervals in `span`.
+        span_ms: f64,
+        /// Total of the refreshes in `span`.
+        span_refreshes: u64,
         last_frame_ms: Option<f64>,
-        /// Refreshes counted since the refresh interval was measured.
+        /// Refreshes counted since the refresh interval was first measured.
         refreshes: u64,
         /// Refresh the latest update started on.
         update_refresh: Option<u64>,
@@ -1353,10 +1371,13 @@ mod refresh_count {
     impl RefreshCount {
         pub(super) fn new() -> Self {
             Self {
-                intervals: [0.; WINDOW],
+                samples: [0.; SAMPLES],
                 stored: 0,
                 next: 0,
-                refresh_ms: None,
+                cluster_ms: None,
+                span: VecDeque::new(),
+                span_ms: 0.,
+                span_refreshes: 0,
                 last_frame_ms: None,
                 refreshes: 0,
                 update_refresh: None,
@@ -1367,13 +1388,26 @@ mod refresh_count {
         /// since the previous animation frame counts as many refreshes as it
         /// spans; a stray callback within the same refresh counts none.
         ///
-        /// `began_idle` says that no update ran since the previous animation
-        /// frame. An update's work can hold the next animation frame past one
-        /// or more refreshes, so an interval that began with an update feeds
-        /// the refresh estimate only when it is no longer than one estimated
-        /// refresh, and the first estimate comes from intervals without an
-        /// update alone. While every update holds the next animation frame the
-        /// estimate therefore holds.
+        /// The refresh interval is the time the consecutive intervals of the
+        /// latest second took, divided by the refreshes they were counted as,
+        /// whether an update held them or not. The timestamps between the
+        /// first and the last cancel out, so the error of timestamp
+        /// coarsening and jitter shrinks with the length of the span instead
+        /// of staying with each interval. Averaging single intervals would not
+        /// do that: under a steady update cadence the intervals that are one
+        /// refresh long sit at the same phase of it, and their errors add up
+        /// instead of cancelling.
+        ///
+        /// Which multiple of a refresh an interval is starts from the lowest
+        /// cluster of sampled intervals (see `sample`), which is the estimate
+        /// until the span covers [`SPAN_MIN_REFRESHES`]. `began_idle` says
+        /// that no update ran since the previous animation frame. An update's
+        /// work can hold the next animation frame past one or more refreshes,
+        /// so an interval that began with an update is sampled only when it is
+        /// no longer than one estimated refresh, and the first estimate comes
+        /// from intervals without an update alone. When the cluster and the
+        /// span no longer count the same interval as one refresh (the display
+        /// changed its rate), the span starts again.
         pub(super) fn frame(&mut self, now_ms: f64, began_idle: bool) {
             let Some(last_ms) = self.last_frame_ms.replace(now_ms) else {
                 return;
@@ -1382,7 +1416,7 @@ mod refresh_count {
             if !(interval > 0.) {
                 return;
             }
-            let sample = match self.refresh_ms {
+            let sample = match self.refresh_ms() {
                 None => began_idle,
                 Some(refresh_ms) => {
                     interval < MAX_SAMPLE_MS && (began_idle || interval <= SPREAD * refresh_ms)
@@ -1391,15 +1425,39 @@ mod refresh_count {
             if sample {
                 self.sample(interval);
             }
-            if let Some(refresh_ms) = self.refresh_ms {
-                self.refreshes += (interval / refresh_ms).round() as u64;
+            if let (Some(cluster_ms), Some(span_refresh_ms)) =
+                (self.cluster_ms, self.span_refresh_ms())
+            {
+                if cluster_ms > SPREAD * span_refresh_ms || span_refresh_ms > SPREAD * cluster_ms {
+                    self.span.clear();
+                    self.span_ms = 0.;
+                    self.span_refreshes = 0;
+                }
+            }
+            let Some(refresh_ms) = self.refresh_ms() else {
+                return;
+            };
+            let spanned = (interval / refresh_ms).round() as u64;
+            self.refreshes += spanned;
+            if interval < MAX_SAMPLE_MS {
+                self.span.push_back((interval, spanned));
+                self.span_ms += interval;
+                self.span_refreshes += spanned;
+                while let Some(&(oldest_ms, oldest_refreshes)) = self.span.front() {
+                    if self.span_ms - oldest_ms < SPAN_MS && self.span.len() <= SPAN_MAX_FRAMES {
+                        break;
+                    }
+                    self.span.pop_front();
+                    self.span_ms -= oldest_ms;
+                    self.span_refreshes -= oldest_refreshes;
+                }
             }
         }
 
         /// Whether the source starts a frame on the current refresh. Nothing
         /// starts before the refresh interval is measured.
         pub(super) fn due(&self, frame_rate: u16) -> bool {
-            let Some(refresh_ms) = self.refresh_ms else {
+            let Some(refresh_ms) = self.refresh_ms() else {
                 return false;
             };
             self.update_refresh
@@ -1411,34 +1469,47 @@ mod refresh_count {
             self.update_refresh = Some(self.refreshes);
         }
 
+        /// The estimated refresh interval: the span's once it covers enough
+        /// refreshes, the lowest cluster's before.
+        fn refresh_ms(&self) -> Option<f64> {
+            let cluster_ms = self.cluster_ms?;
+            Some(self.span_refresh_ms().unwrap_or(cluster_ms))
+        }
+
+        fn span_refresh_ms(&self) -> Option<f64> {
+            (self.span_refreshes >= SPAN_MIN_REFRESHES)
+                .then(|| self.span_ms / self.span_refreshes as f64)
+        }
+
         /// Refreshes between frame starts, `trunc(refresh rate / limit + 0.5)`
-        /// in single precision as the source computes it. The estimated rate
-        /// is rounded to whole hertz first, so timing noise cannot flip the
-        /// spacing where the ratio is exactly half-way (90 Hz at a limit of
-        /// 60). The spacing is at least one, since a page updates at most once
-        /// per animation frame.
+        /// in single precision as the source computes it, from the estimated
+        /// rate rounded to whole hertz. Where the ratio is exactly half-way
+        /// (90 Hz at a limit of 60) that keeps the spacing of a whole-hertz
+        /// display only while the estimate is within half a hertz of its rate,
+        /// which the span of `frame` is for. The spacing is at least one, since
+        /// a page updates at most once per animation frame.
         fn spacing(refresh_ms: f64, frame_rate: u16) -> u64 {
             let refresh_rate = (1000. / refresh_ms).round() as f32;
             ((refresh_rate / f32::from(frame_rate.max(1)) + 0.5) as u64).max(1)
         }
 
-        /// The refresh interval is the mean of the lowest cluster of stored
-        /// intervals: the shortest interval that has another one within
+        /// The lowest cluster is the mean of the lowest stored intervals that
+        /// agree: the shortest interval that has another one within
         /// [`SPREAD`] above it, together with those. Longer intervals span
         /// skipped refreshes, and a lone shorter one is a stray callback, so a
-        /// single interval never sets the estimate.
+        /// single interval never sets it.
         fn sample(&mut self, interval: f64) {
-            self.intervals[self.next] = interval;
-            self.next = (self.next + 1) % WINDOW;
-            self.stored = (self.stored + 1).min(WINDOW);
-            let mut sorted = self.intervals;
+            self.samples[self.next] = interval;
+            self.next = (self.next + 1) % SAMPLES;
+            self.stored = (self.stored + 1).min(SAMPLES);
+            let mut sorted = self.samples;
             let sorted = &mut sorted[..self.stored];
             sorted.sort_unstable_by(f64::total_cmp);
             for (index, &low) in sorted.iter().enumerate() {
                 let end = sorted.partition_point(|&value| value <= SPREAD * low);
                 let cluster = &sorted[index..end];
                 if cluster.len() >= 2 {
-                    self.refresh_ms = Some(cluster.iter().sum::<f64>() / cluster.len() as f64);
+                    self.cluster_ms = Some(cluster.iter().sum::<f64>() / cluster.len() as f64);
                     return;
                 }
             }
