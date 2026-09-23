@@ -92,6 +92,11 @@ impl UniformDraw for CastDraw {
 }
 
 fn teardown(world: &mut World, session: &mut Session) {
+    // Preparation may have acquired particle/clip leases before a later
+    // source or navigation failure. Drop this request immediately; diagnostics
+    // and a queued cancellation message must not keep those leases alive.
+    // Shared effect instances remain owned by any other live request.
+    session.draft.take();
     if let Some(token) = session.token.take() {
         timeline::cancel_and_release(world, token);
     }
@@ -565,6 +570,42 @@ pub(crate) fn drive(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_preparation_releases_draft_before_cancel_message_is_consumed() {
+        use std::sync::Arc;
+        let mut app = App::new();
+        app.add_message::<TalkCancelRequest>();
+        let world = app.world_mut();
+        let owner = world.spawn_empty().id();
+        let identity = timeline::SourceAssetId { file: "source".into(), path_id: "1".into() };
+        let definition = Arc::new(timeline::TimelineDefinition {
+            package: "fixture".into(), prefab: "fixture".into(), fixture_view: None,
+            director: identity.clone(), timeline: identity, duration: 1.0, tracks: Vec::new(),
+        });
+        let weak = Arc::downgrade(&definition);
+        let mut session = Session {
+            owner, talk: 970, main: owner, anchor: owner, cast: Vec::new(),
+            plan: None, plan_resolved: true,
+            draft: Some(StartTimeline {
+                owner: TimelineOwner {
+                    activity: FixtureActivityOwner { actor: owner, generation: 1 },
+                    kind: TimelineOwnerKind::Talk,
+                },
+                fixture: owner, definition, bindings: Default::default(), companions: Vec::new(),
+                timeout_secs: 30.0,
+                timeout_budget: TimelineTimeoutBudget::OwnerGated { advance: Some(true) },
+            }),
+            token: None, prior: Vec::new(), elapsed: 0.0, timeout: 120.0,
+            pending: "prepared first effect; second failed".into(), failed: None, ready: false,
+        };
+        assert!(weak.upgrade().is_some());
+        fail(world, &mut session, "source preflight failed".into());
+        assert!(session.draft.is_none());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(session.failed.as_deref(), Some("source preflight failed"));
+        assert!(world.get_entity(owner).is_ok());
+    }
 
     #[test]
     fn completed_actor_uses_source_endloc_and_synchronizes_navigation() {

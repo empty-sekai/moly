@@ -25,6 +25,7 @@ use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared};
 use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world, simulate};
+pub(crate) mod fixture;
 
 /// 出生抽签的确定性随机种子。与站点链**不同流**：两条链同时在跑，
 /// 同流会在两族上画出同一图形的错觉（逐系统再乘质数散列）。
@@ -119,7 +120,7 @@ struct Planned {
     draw: Option<(Entity, Handle<Mesh>)>,
     geometry: PlannedGeometry,
     emission_surface: Option<PlannedSurface>,
-    lifecycle: WeatherEffectLifecycle,
+    lifecycle: Option<WeatherEffectLifecycle>,
     /// Cone 的半顶角（shape 块的 `angle` 键；律的 `ShapeParams` 不带它）。
     cone_angle: Option<f32>,
     rol: Option<RotationOverLifetime>,
@@ -645,6 +646,23 @@ fn judge(
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
+    judge_in_archive(effect_name, particle, by_path, sub_emitter_owners, kind,
+        camera_rotation, Some(lifecycle), "phenomena", None, server, tally)
+}
+
+fn judge_in_archive(
+    effect_name: &str,
+    particle: &Value,
+    by_path: &HashMap<String, &Value>,
+    sub_emitter_owners: &HashMap<String, Vec<String>>,
+    kind: EffectKind,
+    camera_rotation: bool,
+    lifecycle: Option<WeatherEffectLifecycle>,
+    asset_root: &str,
+    instance_anchor: Option<GlobalTransform>,
+    server: &AssetServer,
+    tally: &mut Tally,
+) -> Option<Planned> {
     tally.records += 1;
     let renderer = match particle.get("renderer").filter(|v| v.is_object()) {
         Some(renderer) => renderer,
@@ -768,7 +786,7 @@ fn judge(
         return None;
     }
 
-    let source = match SourceParticle::load(renderer, server) {
+    let source = match SourceParticle::load_from(renderer, server, asset_root) {
         Ok(source) => source,
         Err(error) => { tally.law_reject.push(format!("source material: {error}")); return None; }
     };
@@ -872,7 +890,7 @@ fn judge(
         tally.node_inactive += 1;
         return None;
     }
-    let Some(node_affine) = compose_affine(by_path, node) else {
+    let Some(node_affine) = instance_anchor.or_else(|| compose_affine(by_path, node)) else {
         tally.node_unresolved += 1;
         return None;
     };
@@ -888,7 +906,7 @@ fn judge(
         if const_of(&emitter.start.speed) != Some(0.0) {
             tally.shape.push("source mesh start-velocity normalization needs independent verification".into()); return None;
         }
-        let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("phenomena/{}", contract.mesh.file))).with_source("moly"));
+        let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", contract.mesh.file))).with_source("moly"));
         Some(PlannedSurface { reference: contract.mesh, glb, source: None })
     } else { None };
     let scaling = match system.get("scalingMode").and_then(Value::as_u64) {
@@ -916,7 +934,7 @@ fn judge(
         source,
         draw: None,
         geometry: if let Some(reference) = mesh_reference {
-            let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("phenomena/{}", reference.file))).with_source("moly"));
+            let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", reference.file))).with_source("moly"));
             PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot) }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
@@ -1173,7 +1191,7 @@ pub(crate) fn spawn_when_ready(
         let mut source = planned.source;
         source.enabled = true;
         commands.entity(draw).remove::<WeatherFxPreflight>().insert((source, WeatherFxDraw));
-        state.live.push(LiveWeatherEmitter { draw, lifecycle: planned.lifecycle, runtime: Runtime {
+        state.live.push(LiveWeatherEmitter { draw, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
             emitter: planned.emitter.clone(),

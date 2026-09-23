@@ -50,15 +50,22 @@ pub(crate) fn encode_path(path: &str) -> String {
 
 /// An unencoded Content-Length is an exact stream bound. With transfer
 /// compression it is a wire length, so retain the decoded-size limit instead.
+/// CORS exposes Content-Length by default but *not* Content-Encoding. An absent
+/// encoding header on a CORS response therefore cannot prove identity bytes.
 pub(crate) fn response_bound(
     length: Option<u64>,
-    encoded: bool,
+    encoding: Option<&str>,
+    cors: bool,
     limit: usize,
 ) -> io::Result<usize> {
     if length.is_some_and(|size| size > limit as u64) {
         return Err(io::Error::other("Asset response exceeds its byte limit"));
     }
-    if encoded {
+    let decoded_length_unknown = match encoding.filter(|value| !value.is_empty()) {
+        Some(value) => !value.eq_ignore_ascii_case("identity"),
+        None => cors,
+    };
+    if decoded_length_unknown {
         return Ok(limit);
     }
     Ok(length.map(|size| size as usize).unwrap_or(limit))
@@ -91,12 +98,28 @@ mod tests {
     #[test]
     fn small_files_do_not_reserve_the_entire_asset_limit() {
         assert_eq!(
-            response_bound(Some(130063), false, 256 * 1024 * 1024).unwrap(),
+            response_bound(Some(130063), None, false, 256 * 1024 * 1024).unwrap(),
             130063
         );
-        assert_eq!(response_bound(Some(40), true, 100).unwrap(), 100);
-        assert_eq!(response_bound(None, false, 100).unwrap(), 100);
-        assert!(response_bound(Some(101), false, 100).is_err());
+        assert_eq!(
+            response_bound(Some(40), Some("br"), false, 100).unwrap(),
+            100
+        );
+        assert_eq!(response_bound(None, None, false, 100).unwrap(), 100);
+        assert!(response_bound(Some(101), None, false, 100).is_err());
+    }
+    #[test]
+    fn cors_hidden_encoding_never_caps_decoded_bytes_to_wire_length() {
+        assert_eq!(response_bound(Some(40), None, true, 100).unwrap(), 100);
+        assert_eq!(
+            response_bound(Some(40), Some("gzip"), true, 100).unwrap(),
+            100
+        );
+        assert_eq!(
+            response_bound(Some(40), Some("identity"), true, 100).unwrap(),
+            40
+        );
+        assert!(response_bound(Some(101), None, true, 100).is_err());
     }
     #[test]
     fn transfer_slots_bound_bursts_and_release_cancelled_waiters() {

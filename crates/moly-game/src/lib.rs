@@ -31,6 +31,7 @@ mod fixture_activity_data;
 mod fixture_activity_provider;
 mod fixture_activity_state;
 mod fixture_activity_timeline;
+mod fixture_timeline_particles;
 pub mod fixture_attach;
 mod fixture_colors;
 pub mod fixture_edit;

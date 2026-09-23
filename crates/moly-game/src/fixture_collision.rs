@@ -7,11 +7,19 @@
 //! their authored triangles without filling between separate surfaces.
 //! This models mathematical convexity, not PhysX's exact cooking/simplification.
 
-use bevy::{ecs::system::SystemParam, gltf::GltfExtras, prelude::*};
+use bevy::{
+    ecs::system::SystemParam,
+    gltf::{Gltf, GltfExtras, GltfNode},
+    prelude::*,
+};
 use moly_law::carve::ColliderPolygon;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+mod documents;
 mod primitives;
 
 const AGENT: i32 = -1372625422;
@@ -26,7 +34,14 @@ pub(crate) struct CollisionBakeStatus {
 
 #[derive(SystemParam)]
 pub(crate) struct CollisionInputs<'w, 's> {
-    roots: Query<'w, 's, Entity, With<crate::fixture::FixtureRoot>>,
+    roots: Query<
+        'w,
+        's,
+        (Entity, Option<&'static crate::fixture::FixtureSource>),
+        With<crate::fixture::FixtureRoot>,
+    >,
+    gltfs: Res<'w, Assets<Gltf>>,
+    gltf_nodes: Res<'w, Assets<GltfNode>>,
     nodes: Query<
         'w,
         's,
@@ -123,7 +138,7 @@ impl CollisionInputs<'_, '_> {
         if self.ready.is_none() {
             return Err("fixture collision scenes loading".into());
         }
-        let roots: HashSet<_> = self.roots.iter().collect();
+        let roots: HashSet<_> = self.roots.iter().map(|(entity, _)| entity).collect();
         if roots.len() != expected {
             return Err(format!(
                 "fixture collision root count {}/{}",
@@ -137,6 +152,10 @@ impl CollisionInputs<'_, '_> {
         let mut source = HashMap::new();
         let mut activities = HashMap::new();
         let mut documents = HashMap::new();
+        // One decoded document per unique source node for this bake, not per
+        // placed instance. This cache owns no asset handles and ends with the
+        // bake; source residency remains owned by the active FixtureSource.
+        let mut document_cache = HashMap::new();
         for (entity, parent, local, extras, inactive, activity) in &self.nodes {
             if let Some(activity) = activity {
                 activities.insert(entity, activity.active_self());
@@ -168,28 +187,37 @@ impl CollisionInputs<'_, '_> {
             let Some(extras) = extras else {
                 continue;
             };
-            let value: serde_json::Value = serde_json::from_str(&extras.value)
+            let value: documents::CollisionExtras = serde_json::from_str(&extras.value)
                 .map_err(|error| format!("fixture collision extras: {error}"))?;
-            if let Some(value) = value.get("fixtureCollision") {
-                let document: Document =
-                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
-                validate_contract(document.schema_version, &document.coordinate_contract)?;
-                if document.units != "source-unity-unit" {
-                    return Err("fixture collision unit contract unsupported".into());
-                }
-                if !document.gaps.is_empty() {
-                    return Err(format!(
-                        "fixture collision extraction has {} unresolved inputs",
-                        document.gaps.len()
-                    ));
-                }
+            if value.fixture_collision.is_some() && value.fixture_collision_ref.is_some() {
+                return Err("fixture collision document and reference are ambiguous".into());
+            }
+            let document = if let Some(document) = value.fixture_collision {
+                documents::validate(&document)?;
+                Some(Arc::new(document))
+            } else if let Some(reference) = value.fixture_collision_ref {
+                let source = self
+                    .roots
+                    .get(root)
+                    .ok()
+                    .and_then(|(_, source)| source)
+                    .ok_or("fixture collision reference has no source asset owner")?;
+                Some(documents::resolve(
+                    &reference,
+                    source,
+                    &self.gltfs,
+                    &self.gltf_nodes,
+                    &mut document_cache,
+                )?)
+            } else {
+                None
+            };
+            if let Some(document) = document {
                 if documents.insert(root, document).is_some() {
                     return Err("fixture has multiple collision scene roots".into());
                 }
             }
-            if let Some(value) = value.get("sourceCollision") {
-                let node: Node =
-                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            if let Some(node) = value.source_collision {
                 validate_contract(node.schema_version, &node.coordinate_contract)?;
                 source.insert(entity, (node, inactive.is_some()));
             }
@@ -621,6 +649,8 @@ mod tests {
     fn collector_uses_live_local_chain_before_global_propagation() {
         use bevy::ecs::system::SystemState;
         let mut world = World::new();
+        world.init_resource::<Assets<Gltf>>();
+        world.init_resource::<Assets<GltfNode>>();
         world.insert_resource(crate::fixture::FixtureScenesReady);
         let root = world
             .spawn((
@@ -640,16 +670,20 @@ mod tests {
         let result = system.get(&world).collect(1).unwrap();
         assert_eq!(result.colliders, 1);
         assert_eq!(result.polygons.len(), 1);
-        assert!(result.polygons[0]
-            .vertices
-            .iter()
-            .all(|p| p[0] >= 9.5 && p[0] <= 10.5 && p[1] >= 2.5 && p[1] <= 3.5));
+        assert!(
+            result.polygons[0]
+                .vertices
+                .iter()
+                .all(|p| p[0] >= 9.5 && p[0] <= 10.5 && p[1] >= 2.5 && p[1] <= 3.5)
+        );
     }
 
     #[test]
     fn collector_rejects_missing_contract_instead_of_using_occupancy() {
         use bevy::ecs::system::SystemState;
         let mut world = World::new();
+        world.init_resource::<Assets<Gltf>>();
+        world.init_resource::<Assets<GltfNode>>();
         world.insert_resource(crate::fixture::FixtureScenesReady);
         world.spawn((crate::fixture::FixtureRoot, Transform::IDENTITY));
         let mut system = SystemState::<CollisionInputs>::new(&mut world);
@@ -672,10 +706,12 @@ mod tests {
         assert_eq!(polygon.vertices.len(), 3);
         assert!((polygon.min_y - 0.0).abs() < 1e-6);
         assert!((polygon.max_y - 1.0).abs() < 1e-6);
-        assert!(polygon
-            .vertices
-            .iter()
-            .any(|p| (p[0] - 6.0).abs() < 1e-5 && (p[1] - 3.0).abs() < 1e-5));
+        assert!(
+            polygon
+                .vertices
+                .iter()
+                .any(|p| (p[0] - 6.0).abs() < 1e-5 && (p[1] - 3.0).abs() < 1e-5)
+        );
     }
 
     #[test]

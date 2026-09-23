@@ -16,7 +16,7 @@
 //!
 //! 常规路线按源调用选步行，速度来自角色表的 walkSpeedMetersPerSecond。
 //! 出生名册/分布仍为离线点名与面内等距散布的具名替身；家具 Fit 的
-//! 旋转次序、完整动作退出与导航再附着仍待收口，不能当作已还原的生命周期。
+//! 局部移动遵循先位移后转向；导航再附着仍非原生代理，不能当作完整还原。
 //! 换站保留实体/装配，由 reseed 在新面定案后重置落位与目标机。
 
 use crate::site::GroundMeshes;
@@ -426,6 +426,9 @@ pub struct RouteStops {
     next: usize,
     generation: u64,
     goal: Option<[f32; 3]>,
+    /// The destination actually accepted for the current navigation leg, not
+    /// an arbitrary geometric goal. Mirrors Agent.destination for completion.
+    navigation_destination: Option<[f32; 3]>,
     fit: Option<FitCandidate>,
     /// 最后贴合前的导航落点；下一次开启代理时用于从局部挂点返回面。
     reentry: Option<[f32; 3]>,
@@ -439,6 +442,23 @@ pub(crate) enum RouteOutcome {
 }
 
 impl RouteStops {
+    pub(crate) fn diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "goal": self.goal,
+            "destination": self.navigation_destination,
+            "currentWaypoint": self.stops.get(self.next).map(|point| serde_json::json!({
+                "position": point.position,
+                "kind": match point.kind { WaypointKind::Rest => "rest", WaypointKind::CheckPoint => "checkpoint" },
+            })),
+            "index": self.next,
+            "total": self.stops.len(),
+            "generation": self.generation,
+            "fit": self.fit.map(|fit| serde_json::json!({ "position": fit.position, "rotation": fit.rotation.to_array() })),
+            "reentry": self.reentry,
+            "outcome": self.outcome.map(|outcome| match outcome { RouteOutcome::Arrived => "arrived", RouteOutcome::Stopped => "stopped" }),
+        })
+    }
+
     fn stop(&mut self) {
         let generation = self.generation;
         self.cancel();
@@ -519,11 +539,8 @@ pub enum MotionPhase {
     /// `None` 也用于未起步、已停止与会话持留，目标机应读 RouteOutcome，
     /// 不能从此形状推断成功到达。
     Dwelling { remaining: Option<f32> },
-    /// 贴合支的先转到位（目标位是某条家具挂点时的第一步）：位置冻结
-    /// （路径槽为空、律每帧报 Idle），朝向在 `duration` 秒内从 `from` 插
-    /// 到 `to`——`to` 是挂点朝向。选段角喂欧拉 y 差折算到 [0,360)。
-    /// 这是现有局部 Fit 实现的第一阶段；其旋转/位移先后仍待按活动链收口。
-    /// 转完接 `FitWalking`（`leg` 随身带），不用于普通导航起步。
+    /// NoUseNavmeshMoveAsync 的最终转向：局部位移已经结束，位置冻结，
+    /// 转至挂点朝向之后才发布 Arrived。零距离也直接进入这一阶段。
     FitTurning {
         motion: TurnMotion,
         from: Quat,
@@ -533,10 +550,9 @@ pub enum MotionPhase {
         leg: FitLeg,
     },
     /// 贴合支的直线插值（关代理后的唯一位移）：位置从 `leg.start` 线性
-    /// 到 `leg.target`（匀速 0.3 m/s，末帧精确落位），朝向逐帧向
-    /// `leg.move_quat` 收敛（插值率 t·1.5，逐帧锁 yaw-only）。无路点
-    /// 驻留——到位即收场位，目标机的停顿照常接手。
-    FitWalking { leg: FitLeg, elapsed: f32 },
+    /// 到 `leg.target`（匀速 0.3 m/s，末帧精确落位），然后才转向
+    /// final_rotation。移动期间朝向跟随本帧位移（t·1.5，yaw-only）。
+    FitWalking { leg: FitLeg, elapsed: f32, final_rotation: Quat },
 }
 
 /// 贴合腿的常量（起步一次算定，两相位随身携带）。
@@ -1133,6 +1149,7 @@ pub(crate) fn depart(
     route.next = 0;
     route.generation = walk_face.generation();
     route.goal = Some(corner);
+    route.navigation_destination = None;
     route.fit = fit;
     route.reentry = None;
     *slot = NpcPathWalkSlot::from_corners(Vec::new());
@@ -1200,6 +1217,7 @@ fn start_waypoint(
         route.stops.clear();
         route.next = 0;
         route.goal = None;
+        route.navigation_destination = None;
         let phase = fit
             .and_then(|fit| fit_depart(unit, state, slot, route, fit))
             .unwrap_or(MotionPhase::Dwelling { remaining: None });
@@ -1266,6 +1284,7 @@ fn start_waypoint(
     // Keep nearby corners, including the query's start. Removing every corner
     // inside the arrival radius can cut a short but necessary obstacle turn.
     *slot = NpcPathWalkSlot::from_corners(corners);
+    route.navigation_destination = Some(target);
     state.next_corner = 0;
     info!(
         "[npc unit={}] 路点 {}/{} {:?} 出发 → ({:.2},{:.2},{:.2})",
@@ -1301,14 +1320,35 @@ fn next_waypoint_or_stop(
     })
 }
 
-/// 贴合支起步：目标位是某条家具挂点时的出发——先原地转到挂点朝向
-/// （[`MotionPhase::FitTurning`]），转完进直线插值腿
-/// （[`MotionPhase::FitWalking`]，由转体完成帧移交）。已面向目标则直
-/// 接起步插值；零行程（已站在挂点上）直接落位收场。
-///
-/// 当前选段使用正值欧拉 y 差，时长使用最短夹角/60；局部 Fit 的次序与
-/// 完整退出生命周期仍未收口。这条局部插值不代替前置导航，也不用于普通
-/// CheckPoint/Rest 之间的位移。
+/// The source MoveExecutor completion target is independent of the ordered
+/// waypoint list. Preserve its Agent.destination/TargetPosition distinction.
+/// CN RVA 0x578D138 first compares TargetPosition with destination's XZ at y=0.
+fn source_goal_completed(position: [f32; 3], goal: [f32; 3], destination: [f32; 3]) -> bool {
+    let goal = Vec3::from(goal);
+    let destination = Vec3::from(destination);
+    let completion = if goal.distance(Vec3::new(destination.x, 0.0, destination.z)) < 0.25 {
+        destination
+    } else {
+        goal
+    };
+    Vec3::from(position).distance(completion) < ARRIVAL_DISTANCE
+}
+
+/// A verified navigation leg must have arrived before the approximate host
+/// consumes the source global-goal predicate. Proximity across a wall alone
+/// must not bypass the route. This also stops radially ordered far checkpoints
+/// from taking a furniture actor away again after reaching its real goal.
+fn completed_fixture_fit(route: &mut RouteStops, position: [f32; 3], navigation_arrived: bool) -> Option<FitCandidate> {
+    if !navigation_arrived || route.fit.is_none()
+        || !source_goal_completed(position, route.goal?, route.navigation_destination?)
+    {
+        return None;
+    }
+    route.fit.take()
+}
+
+/// NoUseNavmeshMoveAsync: disable the agent, move locally, then rotate to the
+/// authored final orientation. This never replaces the preceding navigation.
 fn fit_depart(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1320,6 +1360,7 @@ fn fit_depart(
     route.stops.clear();
     route.next = 0;
     route.goal = None;
+    route.navigation_destination = None;
     route.fit = None;
     route.reentry = Some(state.position);
     *slot = NpcPathWalkSlot::from_corners(Vec::new());
@@ -1348,47 +1389,68 @@ fn fit_depart(
         unit.0, fit.position[0], fit.position[1], fit.position[2], distance, FIT_SPEED
     );
 
-    let attach_forward = fit.rotation * Vec3::Z;
-    let heading = angle_between(
-        state.forward,
-        [attach_forward.x, attach_forward.y, attach_forward.z],
-    );
-    let duration = rotate_time(heading);
-    if duration <= 0.0 {
-        if leg.travel <= 0.0 {
-            // 已面向且零行程：末帧精确落位语义下即已完成。
-            state.position = leg.target;
-            return Some(MotionPhase::Dwelling { remaining: None });
-        }
-        return Some(MotionPhase::FitWalking { leg, elapsed: 0.0 });
+    if leg.travel > 0.0 {
+        return Some(MotionPhase::FitWalking { leg, elapsed: 0.0, final_rotation: fit.rotation });
     }
-    let angle = turn_angle(
-        heading_yaw(state.forward),
-        heading_yaw([attach_forward.x, attach_forward.y, attach_forward.z]),
-    );
-    let motion = turn_motion(angle);
+    state.position = leg.target;
     let from = Quat::from_rotation_arc(Vec3::Z, Vec3::from(state.forward));
-    let mut to = fit.rotation;
-    // 最短角路径：挂点朝向按构造是纯绕 Y 旋转（与 from 同为「Z 到前向」
-    // 约定的四元数），点积为负则翻到同叶短弧——与行走前转身同一处理。
+    Some(begin_fit_turn(state, leg, from, fit.rotation))
+}
+
+fn begin_fit_turn(state: &mut LawWalkState, leg: FitLeg, from: Quat, mut to: Quat) -> MotionPhase {
+    let forward = (from * Vec3::Z).to_array();
+    // MoveExecutor's second await is DOLocalRotateAsync(targetRotation). At
+    // this point position already equals targetPosition; rotate time is the
+    // authored heading delta, never a residual position vector.
+    let duration = rotate_time(angle_between(forward, (to * Vec3::Z).to_array()));
+    if duration <= 0.0 {
+        state.forward = (to * Vec3::Z).to_array();
+        return MotionPhase::Dwelling { remaining: None };
+    }
+    let motion = turn_motion(turn_angle(heading_yaw(forward), heading_yaw((to * Vec3::Z).to_array())));
     if from.dot(to) < 0.0 {
         to = Quat::from_xyzw(-to.x, -to.y, -to.z, -to.w);
     }
-    info!(
-        "[npc unit={}] 贴合转身选段 {} 时长 {:.2}s（差角 {:.1}°）",
-        unit.0,
-        motion.label(),
-        duration,
-        angle
-    );
-    Some(MotionPhase::FitTurning {
-        motion,
-        from,
-        to,
-        duration,
-        elapsed: 0.0,
-        leg,
-    })
+    MotionPhase::FitTurning { motion, from, to, duration, elapsed: 0.0, leg }
+}
+
+/// Returns true only after the final rotation, not on the position-only frame.
+fn step_fit(state: &mut LawWalkState, phase: MotionPhase, current: Quat, dt: f32) -> (MotionPhase, Quat, bool) {
+    match phase {
+        MotionPhase::FitWalking { mut leg, elapsed, final_rotation } => {
+            let elapsed = elapsed + dt;
+            if elapsed < leg.travel {
+                let position = leg.sample_position(elapsed);
+                let delta = position - Vec3::from(state.position);
+                let mut rotation = current;
+                if delta.length() > 0.00001 && (delta.x != 0.0 || delta.z != 0.0) {
+                    leg.move_quat = Quat::from_rotation_y(delta.x.atan2(delta.z));
+                    rotation = leg.sample_rotation(current, elapsed);
+                }
+                state.position = position.to_array();
+                state.forward = (rotation * Vec3::Z).to_array();
+                return (MotionPhase::FitWalking { leg, elapsed, final_rotation }, rotation, false);
+            }
+            // The source last move frame only sets position. Do not force a
+            // movement-facing quaternion or spend the same dt on the new turn.
+            state.position = leg.target;
+            let next = begin_fit_turn(state, leg, current, final_rotation);
+            let done = matches!(next, MotionPhase::Dwelling { remaining: None });
+            (next, if done { final_rotation } else { current }, done)
+        }
+        MotionPhase::FitTurning { motion, from, to, duration, elapsed, leg } => {
+            let elapsed = elapsed + dt;
+            let done = elapsed >= duration;
+            let rotation = if done { to } else { sample_turn_rotation(from, to, elapsed / duration) };
+            state.position = leg.target;
+            state.forward = (rotation * Vec3::Z).to_array();
+            let next = if done { MotionPhase::Dwelling { remaining: None } } else {
+                MotionPhase::FitTurning { motion, from, to, duration, elapsed, leg }
+            };
+            (next, rotation, done)
+        }
+        _ => unreachable!("only the local fixture phases use step_fit"),
+    }
 }
 
 /// 锁 yaw-only（源贴合插值的每帧清 pitch/roll）：取朝向前向的水平航向，
@@ -1400,19 +1462,6 @@ fn yaw_only(rotation: Quat) -> Quat {
         return rotation;
     }
     Quat::from_rotation_y(heading_yaw([forward.x, forward.y, forward.z]).to_radians())
-}
-
-/// 两点的水平行进方向（单位向量）。水平分量近零（纯竖直行程）返回
-/// [`None`]——调用方各自决定退路。
-fn horizontal_direction(start: [f32; 3], target: [f32; 3]) -> Option<[f32; 3]> {
-    let dx = target[0] - start[0];
-    let dz = target[2] - start[2];
-    let length_squared = dx * dx + dz * dz;
-    if length_squared < 1e-12 {
-        return None;
-    }
-    let length = length_squared.sqrt();
-    Some([dx / length, 0.0, dz / length])
 }
 
 /// Called only by the movement producer when it starts a new execution leg.
@@ -1605,18 +1654,26 @@ pub fn advance(
                 valid &= walk_face.segment_walkable([from[0], from[2]], [to[0], to[2]]);
                 from = to;
             }
-            // Furniture approaches are issued by path_exact on the polygon
-            // navigation mesh. Its portal path can graze a 1 cm bake cell that
-            // the voxel supercover rejects even though the polygon corridor
-            // admits it. Replanning that same corridor every frame leaves the
-            // actor at the first such corner indefinitely. Ordinary movement
-            // keeps the stricter voxel guard; a changed field generation still
-            // replans furniture movement before this step.
+            // Both ordinary and furniture routes come from the polygon
+            // corridor. The voxel supercover is an additional, stricter
+            // admission check, not a license to rebuild the same rejected
+            // corridor every frame. Until corridor coverage is retained as
+            // evidence, fail this move explicitly and let the objective layer
+            // choose the next action; never turn this into a wall shortcut.
             if !valid && route.fit.is_none() {
                 state.0.position = prior;
                 state.0.forward = prior_forward;
                 state.0.next_corner = prior_corner;
-                route.generation = 0;
+                route.stop();
+                slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
+                state.0.next_corner = 0;
+                stuck.0 = None;
+                *phase = MotionPhase::Dwelling { remaining: None };
+                actions.change(NpcAction::Idle, &mut rest);
+                warn!(
+                    "[npc unit={}] polygon corridor failed strict walk-cell validation; movement stopped",
+                    unit.0
+                );
                 continue;
             }
             // A low step may lie between two flat route corners. Re-evaluate
@@ -1681,10 +1738,18 @@ pub fn advance(
             }
             WalkVerdict::Arrived(distance) => {
                 let waypoint = route.stops[route.next];
+                let completed_fit = completed_fixture_fit(&mut route, state.0.position, actions.current != NpcAction::Talk);
                 slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
                 state.0.next_corner = 0;
                 stuck.0 = None;
-                match waypoint.kind {
+                if let Some(fit) = completed_fit {
+                    *phase = fit_depart(unit, &mut state.0, &mut slot.0, &mut route, fit)
+                        .expect("a validated fixture fit has a local phase");
+                    if matches!(*phase, MotionPhase::Dwelling { remaining: None }) {
+                        route.outcome = Some(RouteOutcome::Arrived);
+                    }
+                    declare_navigation_action(&mut actions, &mut rest, &phase, &route);
+                } else { match waypoint.kind {
                     WaypointKind::Rest => {
                         let dwell = dwell_seconds(pause.0);
                         *phase = MotionPhase::Dwelling {
@@ -1707,7 +1772,7 @@ pub fn advance(
                         );
                         declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                     }
-                }
+                } }
             }
             WalkVerdict::Idle => match &mut *phase {
                 MotionPhase::Turning {
@@ -1753,64 +1818,13 @@ pub fn advance(
                         declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                     }
                 }
-                MotionPhase::FitTurning {
-                    to,
-                    duration,
-                    elapsed,
-                    leg,
-                    ..
-                } => {
-                    *elapsed += dt;
-                    if *elapsed >= *duration {
-                        // 贴合转身完成：进直线插值腿（终点朝向先取出再写相位，
-                        // 写相位会断开这个借）。零行程的腿跳过插值直接落位。
-                        let end = *to;
-                        let leg = *leg;
-                        if leg.travel <= 0.0 {
-                            state.0.position = leg.target;
-                            *phase = MotionPhase::Dwelling { remaining: None };
-                            route.outcome = Some(RouteOutcome::Arrived);
-                            actions.change(NpcAction::Idle, &mut rest);
-                            finished_turn = Some(end);
-                            info!(
-                                "[npc unit={}] t={now:.1} 贴合完成：转身后零行程，落位 ({:.2},{:.2},{:.2})",
-                                unit.0, leg.target[0], leg.target[1], leg.target[2]
-                            );
-                        } else {
-                            *phase = MotionPhase::FitWalking { leg, elapsed: 0.0 };
-                            actions.change(NpcAction::AutoMove, &mut rest);
-                            finished_turn = Some(end);
-                            info!(
-                                "[npc unit={}] t={now:.1} 贴合转身完成，起步直线插值",
-                                unit.0
-                            );
-                        }
-                    }
-                }
-                MotionPhase::FitWalking { leg, elapsed } => {
-                    // 腿先拷出（写相位会断开模式借，后面还要用腿的常量）。
-                    let leg = *leg;
-                    *elapsed += dt;
-                    if *elapsed >= leg.travel {
-                        // 末帧精确落位：位置直写目标，forward 换行进方向
-                        // （下一轮决策的走前转身从行进末向起算，不回跳）。
-                        state.0.position = leg.target;
-                        let move_forward =
-                            horizontal_direction(leg.start, leg.target).unwrap_or(state.0.forward);
-                        state.0.forward = move_forward;
-                        stuck.0 = None;
-                        *phase = MotionPhase::Dwelling { remaining: None };
-                        route.outcome = Some(RouteOutcome::Arrived);
-                        actions.change(NpcAction::Idle, &mut rest);
-                        info!(
-                            "[npc unit={}] t={now:.1} 贴合完成：精确落位 ({:.2},{:.2},{:.2})",
-                            unit.0, leg.target[0], leg.target[1], leg.target[2]
-                        );
-                    } else {
-                        // 位置 = 匀速线性插值（t 是时间比例，帧率无关的落位）。
-                        let position = leg.sample_position(*elapsed);
-                        state.0.position = [position.x, position.y, position.z];
-                    }
+                MotionPhase::FitTurning { .. } | MotionPhase::FitWalking { .. } => {
+                    let (next, rotation, done) = step_fit(&mut state.0, *phase, transform.rotation, dt);
+                    *phase = next;
+                    finished_turn = Some(rotation);
+                    stuck.0 = None;
+                    if done { route.outcome = Some(RouteOutcome::Arrived); }
+                    declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                 }
                 // 收场位：路线已尽或未起步，站定的成员由目标机收场与再出发。
                 MotionPhase::Dwelling { remaining: None } => {}
@@ -1851,15 +1865,14 @@ pub fn advance(
                 // 即最短路径。贴合转身同机制（同一补间族）。
                 sample_turn_rotation(*from, *to, t)
             }
-            // 转体完成帧的移交朝向（含贴合转身 → 插值腿的交接帧：插值
-            // 首帧的「当前」就是它）。
+            // 转体完成或局部位移采样后的精确朝向，不在阶段交接时重置。
             (_, Some(to)) => to,
             // 贴合插值的朝向律（源 CalcMoveLerp）：当前朝向向行进朝向按
             // t·1.5 插值（t 是腿的时间比例），逐帧锁 yaw-only。「当前」读
             // 上一帧的变换朝向（本帧尚未写）——源读的也是逐帧的当前
             // 变换。四元数 lerp 是线性插值后归一，与引擎 Quaternion.Lerp
             // 同式。
-            (MotionPhase::FitWalking { leg, elapsed }, _) => {
+            (MotionPhase::FitWalking { leg, elapsed, .. }, _) => {
                 leg.sample_rotation(transform.rotation, *elapsed)
             }
             (_, None) => Quat::from_rotation_arc(Vec3::Z, Vec3::from(state.0.forward)),
@@ -1922,7 +1935,7 @@ pub fn report(
                     (elapsed / duration * 100.0).clamp(0.0, 100.0)
                 )
             }
-            MotionPhase::FitWalking { leg, elapsed } => {
+            MotionPhase::FitWalking { leg, elapsed, .. } => {
                 format!(
                     "fitwalk {:.0}%",
                     (elapsed / leg.travel * 100.0).clamp(0.0, 100.0)
@@ -1985,4 +1998,39 @@ fn surface_y(verts: &[Vec3], x: f32, z: f32, fallback: f32) -> f32 {
         })
         .map(|v| v.y)
         .fold(fallback, f32::max)
+}
+
+#[cfg(test)]
+mod fixture_approach_tests {
+    use super::*;
+
+    #[test]
+    fn source_goal_does_not_consume_fit_before_verified_navigation_arrival() {
+        let goal = [1., 0., 0.];
+        let mut route = RouteStops { stops: vec![
+                Waypoint { position: goal, kind: WaypointKind::CheckPoint },
+                Waypoint { position: [2., 0., 2.], kind: WaypointKind::CheckPoint },
+            ], next: 0, goal: Some(goal), navigation_destination: Some(goal),
+            fit: Some(FitCandidate { position: goal, rotation: Quat::IDENTITY }), ..default() };
+        assert!(completed_fixture_fit(&mut route, [0.95, 0., 0.], false).is_none());
+        assert!(route.fit.is_some());
+        let fit = completed_fixture_fit(&mut route, goal, true).unwrap();
+        let mut state = LawWalkState::new(goal, [0., 0., 1.]);
+        let mut slot = NpcPathWalkSlot::from_corners(vec![goal]);
+        fit_depart(&CharacterUnitId(11), &mut state, &mut slot, &mut route, fit).unwrap();
+        assert!(route.stops.is_empty() && slot.corners().is_empty());
+        assert!(route.fit.is_none());
+    }
+
+    #[test]
+    fn zero_distance_fit_starts_final_turn_without_position_motion() {
+        let mut state = LawWalkState::new([0.; 3], [0., 0., 1.]);
+        let mut route = RouteStops::default();
+        let mut slot = NpcPathWalkSlot::from_corners(Vec::new());
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let phase = fit_depart(&CharacterUnitId(11), &mut state, &mut slot, &mut route,
+            FitCandidate { position: [0.; 3], rotation }).unwrap();
+        assert!(matches!(phase, MotionPhase::FitTurning { .. }));
+        assert_eq!(state.position, [0.; 3]);
+    }
 }

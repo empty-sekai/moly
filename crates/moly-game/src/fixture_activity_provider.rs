@@ -192,6 +192,12 @@ impl FixtureActivityProvider {
             }
             pending = Some(ProviderPending::timeline("audio", error));
         }
+        if let Err(error) = timeline::prepare_source_effects(world, request) {
+            if !error.retryable {
+                return Err(ProviderPending::timeline("source-effects", error));
+            }
+            pending = Some(ProviderPending::timeline("source-effects", error));
+        }
         if let Some(pending) = pending {
             return Err(pending);
         }
@@ -233,6 +239,8 @@ impl FixtureActivityProvider {
         self.assets.prepare_fixture_bindings(world, request)?;
         timeline::prepare_source_sounds(world, request)
             .map_err(|error| ProviderPending::timeline("source-sounds", error))?;
+        timeline::prepare_source_effects(world, request)
+            .map_err(|error| ProviderPending::timeline("source-effects", error))?;
         Ok(())
     }
 }

@@ -58,6 +58,20 @@ pub(crate) struct AnimationPlayableSettings {
     pub loop_mode: u64,
 }
 
+/// Unity ControlPlayableAsset fields. These are capabilities to resolve against
+/// the bound source object, not a reason to silently omit particles/directors.
+#[derive(Clone, Debug)]
+pub(crate) struct ControlSettings {
+    pub exposed_name: String,
+    pub update_particle: bool,
+    pub update_director: bool,
+    pub update_itime_control: bool,
+    pub search_hierarchy: bool,
+    pub active: bool,
+    pub post_playback: u64,
+    pub random_seed: u32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum TimelinePayload {
     Animation {
@@ -92,6 +106,7 @@ pub(crate) enum TimelinePayload {
         name: String,
         use_root: bool,
     },
+    Control(ControlSettings),
     Unsupported {
         class: String,
         fields: Value,
@@ -603,7 +618,11 @@ impl TimelinePackage {
             }
             "ChangeEyePresetClip" | "ChangeLipSyncPresetClip" => {
                 let index = integer(f, "SelectIndex")?;
-                let list_key = if class == "ChangeEyePresetClip" { "EyeDataList" } else { "LipSyncDataList" };
+                let list_key = if class == "ChangeEyePresetClip" {
+                    "EyeDataList"
+                } else {
+                    "LipSyncDataList"
+                };
                 let rows = match f.get(list_key) {
                     Some(Value::Null) => None,
                     Some(Value::Array(rows)) => Some(rows),
@@ -615,7 +634,8 @@ impl TimelinePackage {
                 if index < 0 || rows.is_none_or(|rows| rows.is_empty()) {
                     TimelinePayload::NoPresetChange
                 } else if class == "ChangeEyePresetClip" {
-                    let row = rows.unwrap()
+                    let row = rows
+                        .unwrap()
                         .get(index as usize)
                         .ok_or_else(|| invalid("eye SelectIndex out of range"))?;
                     TimelinePayload::Eye {
@@ -625,7 +645,8 @@ impl TimelinePackage {
                         blink: flag(row, "BlinkEnabled")?,
                     }
                 } else {
-                    let row = rows.unwrap()
+                    let row = rows
+                        .unwrap()
                         .get(index as usize)
                         .ok_or_else(|| invalid("lip SelectIndex out of range"))?;
                     TimelinePayload::Lip {
@@ -648,12 +669,43 @@ impl TimelinePackage {
             "ChangeLipSyncStateClip" => TimelinePayload::LipGate,
             "EnableIKTalkClip" => TimelinePayload::NpcIkTalkGate,
             "EmoticonClip" => emoticon_payload(f)?,
+            "ControlPlayableAsset" => TimelinePayload::Control(control_payload(f)?),
             _ => TimelinePayload::Unsupported {
                 class: class.into(),
                 fields: f.clone(),
             },
         })
     }
+}
+
+fn control_payload(fields: &Value) -> Result<ControlSettings, TimelineFailure> {
+    if path_id(&fields["prefabGameObject"]["m_PathID"])? != "0" {
+        return Err(invalid(
+            "ControlPlayableAsset prefab instantiation is not supported",
+        ));
+    }
+    let exposed_name = string(&fields["sourceGameObject"], "exposedName")?.to_owned();
+    if exposed_name.is_empty() {
+        return Err(invalid(
+            "ControlPlayableAsset exposed source binding is empty",
+        ));
+    }
+    let post_playback = unsigned(fields, "postPlayback")?;
+    if post_playback > 2 {
+        return Err(invalid("unknown ControlPlayableAsset postPlayback state"));
+    }
+    Ok(ControlSettings {
+        exposed_name,
+        update_particle: flag(fields, "updateParticle")?,
+        update_director: flag(fields, "updateDirector")?,
+        update_itime_control: flag(fields, "updateITimeControl")?,
+        search_hierarchy: flag(fields, "searchHierarchy")?,
+        active: flag(fields, "active")?,
+        post_playback,
+        random_seed: u32::try_from(unsigned(fields, "particleRandomSeed")?)
+            .map_err(|_| invalid("ControlPlayableAsset seed exceeds uint32"))?
+            .max(1),
+    })
 }
 
 fn emoticon_payload(fields: &Value) -> Result<TimelinePayload, TimelineFailure> {
@@ -689,6 +741,35 @@ mod emoticon_tests {
             bad["SelectIndex"] = serde_json::json!(index);
             assert!(emoticon_payload(&bad).is_err());
         }
+    }
+
+    #[test]
+    fn control_settings_preserve_source_features_and_reject_unknown_policy() {
+        let fields = serde_json::json!({
+            "sourceGameObject":{"exposedName":"source-id","defaultValue":{"m_PathID":"0"}},
+            "prefabGameObject":{"m_PathID":"0"},"updateParticle":1,"updateDirector":1,
+            "updateITimeControl":1,"searchHierarchy":0,"active":1,"postPlayback":2,
+            "particleRandomSeed":8270,
+        });
+        let parsed = control_payload(&fields).unwrap();
+        assert_eq!(parsed.exposed_name, "source-id");
+        assert_eq!(parsed.random_seed, 8270);
+        assert!(parsed.update_particle && parsed.update_director && parsed.update_itime_control);
+        assert!(!parsed.search_hierarchy);
+        assert!(parsed.active);
+        assert_eq!(parsed.post_playback, 2);
+        let mut bad = fields.clone();
+        bad["postPlayback"] = serde_json::json!(3);
+        assert!(control_payload(&bad).is_err());
+        bad = fields.clone();
+        bad["prefabGameObject"]["m_PathID"] = serde_json::json!("123");
+        assert!(control_payload(&bad).is_err());
+        bad = fields.clone();
+        bad["updateDirector"] = Value::Null;
+        assert!(control_payload(&bad).is_err());
+        let mut zero_seed = fields;
+        zero_seed["particleRandomSeed"] = serde_json::json!(0);
+        assert_eq!(control_payload(&zero_seed).unwrap().random_seed, 1);
     }
 }
 
