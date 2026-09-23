@@ -23,7 +23,7 @@ use bevy::{
             allocator::{allocate_and_free_meshes, MeshAllocator},
             RenderMesh,
         },
-        render_asset::ExtractedAssets,
+        render_asset::{prepare_assets, ExtractedAssets},
         render_resource::{Buffer, BufferId},
         Render, RenderApp, RenderSystems,
     },
@@ -44,9 +44,13 @@ impl Plugin for MeshBufferReleasePlugin {
                     snapshot_before_allocation
                         .in_set(RenderSystems::PrepareAssets)
                         .before(allocate_and_free_meshes),
+                    // `prepare_assets::<RenderMesh>` drains the extracted and
+                    // removed sets this pass reads, so it must run between
+                    // the allocator and that drain.
                     destroy_retired_buffers
                         .in_set(RenderSystems::PrepareAssets)
-                        .after(allocate_and_free_meshes),
+                        .after(allocate_and_free_meshes)
+                        .before(prepare_assets::<RenderMesh>),
                 ),
             );
     }
