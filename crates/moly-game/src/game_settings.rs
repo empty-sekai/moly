@@ -274,9 +274,24 @@ pub(crate) fn talk_input_enabled(
     !panel.blocks_world_input() && !library.blocks_talk_input()
 }
 
+/// Version of the stored `GameSettings` section. Version 2 changed the meaning
+/// or the default of every graphics field it stores: `frameRate` offers the
+/// source's two limits and defaults to 60, `renderScale` may be null for the
+/// source DPI law (the browser default), and `fxaa` is not stored.
+const SETTINGS_VERSION: u64 = 2;
+
 fn graphics_from_document(document: &Value) -> GraphicsSettings {
     let mut value = GraphicsSettings::default();
-    let fields = &document["GameSettings"]["graphics"];
+    let section = &document["GameSettings"];
+    // An earlier section's frameRate, renderScale and fxaa meant something
+    // else, and they are its only graphics fields: it loads as the defaults.
+    if section["version"]
+        .as_u64()
+        .is_none_or(|version| version < SETTINGS_VERSION)
+    {
+        return value;
+    }
+    let fields = &section["graphics"];
     if let Some(rate) = fields["frameRate"].as_u64() {
         if let Some(&rate) = FRAME_RATES.iter().find(|&&offered| u64::from(offered) == rate) {
             value.frame_rate = rate;
@@ -743,7 +758,7 @@ pub(crate) fn input(
             Action::Save => {
                 let g = settings.graphics;
                 let mut sections = audio::settings_sections(&volumes).to_vec();
-                sections.push(("GameSettings",json!({"version":2,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale}})));
+                sections.push(("GameSettings",json!({"version":SETTINGS_VERSION,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale}})));
                 panel.status = if store.save(&sections) {
                     "Saved.".into()
                 } else {
