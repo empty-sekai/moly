@@ -27,20 +27,65 @@ pub(crate) struct GraphicsSettings {
     /// Frame limit. The source offers `MysekaiFpsQualityType` High (60) and
     /// Normal (30); `MysekaiOptionSettingData` leaves the field zero, i.e. High.
     pub(crate) frame_rate: u16,
-    pub(crate) render_scale: f32,
+    /// Scene camera render scale chosen in the product panel; `None` applies
+    /// the source DPI law ([`source_render_scale`]).
+    pub(crate) render_scale: Option<f32>,
+    /// `SetImageQuality` target DPI of the current image quality.
+    pub(crate) target_dpi: u16,
     pub(crate) fxaa: bool,
 }
 
 /// Frame limits the source offers (High, Normal).
 const FRAME_RATES: [u16; 2] = [60, 30];
 
+/// `SetImageQuality` target DPI of Normal, the image quality the source
+/// constructs by default (High is 299, Low 180).
+pub(crate) const SOURCE_DEFAULT_TARGET_DPI: u16 = 200;
+
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
             frame_rate: FRAME_RATES[0],
-            render_scale: 1.0,
+            // The DPI law needs the display density. A page provides it as
+            // devicePixelRatio; the native window keeps its full resolution.
+            render_scale: if cfg!(target_arch = "wasm32") { None } else { Some(1.0) },
+            target_dpi: SOURCE_DEFAULT_TARGET_DPI,
             fxaa: true,
         }
+    }
+}
+
+/// Unity's `Screen.dpi` on Android is `DisplayMetrics.densityDpi`, and an
+/// Android browser reports `devicePixelRatio` as `densityDpi / 160`. The
+/// window scale factor (the page's devicePixelRatio) times 160 is therefore
+/// the page's equivalent of the source's screen DPI.
+const SCREEN_DPI_PER_SCALE_FACTOR: f32 = 160.;
+
+/// Scene camera render scale of the source for a target DPI and a window
+/// scale factor. `MysekaiQualitySettings.SetTargetDpi` stores
+/// `clamp01(targetDpi / Screen.dpi)` as `MysekaiRenderSettings.RenderScale`
+/// (an unknown density of 0 gives 1). `SceneMysekai.UpdateResolution` hands
+/// it to ResoDynamix as the base camera scale, which writes it to the URP
+/// asset, whose setter clamps to [0.1, 2]; URP renders at full size when the
+/// scale is within 0.05 of 1.
+pub(crate) fn source_render_scale(target_dpi: u16, scale_factor: f32) -> f32 {
+    let screen_dpi = SCREEN_DPI_PER_SCALE_FACTOR * scale_factor;
+    if !(screen_dpi > 0.) {
+        return 1.;
+    }
+    let render_scale = (f32::from(target_dpi) / screen_dpi).clamp(0., 1.);
+    let asset_scale = render_scale.clamp(0.1, 2.);
+    if (1. - asset_scale).abs() < 0.05 {
+        1.
+    } else {
+        asset_scale
+    }
+}
+
+fn scene_render_scale(graphics: &GraphicsSettings, window: &Window) -> f32 {
+    match graphics.render_scale {
+        Some(fixed) => fixed.clamp(0.5, 1.),
+        None => source_render_scale(graphics.target_dpi, window.resolution.base_scale_factor()),
     }
 }
 
@@ -101,6 +146,8 @@ pub(crate) struct OriginalSceneOutput {
 pub(crate) struct SceneSurface {
     image: Option<Handle<Image>>,
     physical_size: UVec2,
+    /// Scene camera render scale applied by the last `apply_graphics`.
+    applied_scale: f32,
 }
 
 #[derive(Debug, Clone, Copy, Component)]
@@ -109,7 +156,7 @@ pub(crate) enum Action {
     Close,
     Volume(usize, f32),
     Fps(u16),
-    Scale(f32),
+    Scale(Option<f32>),
     Fxaa,
     AudioOptions,
     Save,
@@ -192,10 +239,15 @@ fn graphics_from_document(document: &Value) -> GraphicsSettings {
             value.frame_rate = rate;
         }
     }
-    if let Some(scale) = fields["renderScale"].as_f64() {
-        if scale.is_finite() {
-            value.render_scale = (scale as f32).clamp(0.5, 1.0);
+    // A stored null selects the source DPI law; an absent field keeps the default.
+    match fields.get("renderScale") {
+        Some(Value::Null) => value.render_scale = None,
+        Some(scale) => {
+            if let Some(scale) = scale.as_f64().filter(|scale| scale.is_finite()) {
+                value.render_scale = Some((scale as f32).clamp(0.5, 1.0));
+            }
         }
+        None => {}
     }
     if let Some(fxaa) = fields["fxaa"].as_bool() {
         value.fxaa = fxaa;
@@ -212,7 +264,11 @@ pub(crate) fn setup(
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     if let Some(document) = store.load() {
-        settings.graphics = graphics_from_document(&document);
+        settings.graphics = GraphicsSettings {
+            // Applied by the source image-quality option at startup; not stored here.
+            target_dpi: settings.graphics.target_dpi,
+            ..graphics_from_document(&document)
+        };
         panel.status = "Changes apply immediately. Save to keep them after restart.".into();
     } else {
         panel.status = "Storage unavailable. Changes will apply to this session.".into();
@@ -373,7 +429,13 @@ pub(crate) fn setup(
         18.,
         Some(ValueLabel::Scale),
     );
-    for (label, value) in [("50%", 0.5), ("67%", 0.67), ("75%", 0.75), ("100%", 1.)] {
+    for (label, value) in [
+        ("Auto", None),
+        ("50%", Some(0.5)),
+        ("67%", Some(0.67)),
+        ("75%", Some(0.75)),
+        ("100%", Some(1.)),
+    ] {
         add_button(&mut commands, scale, &font, label, Action::Scale(value));
     }
     let fxaa = row(&mut commands, content);
@@ -620,7 +682,11 @@ pub(crate) fn input(
                 panel.status = "Scene FXAA updated.".into();
             }
             Action::Defaults => {
-                settings.graphics = GraphicsSettings::default();
+                // The target DPI follows the source image-quality option, not this panel.
+                settings.graphics = GraphicsSettings {
+                    target_dpi: settings.graphics.target_dpi,
+                    ..GraphicsSettings::default()
+                };
                 volumes.system = VolumeSettingData::default();
                 audio::apply_system_volume(&mut bus, &volumes.system, "Reset game settings");
                 panel.status = "Defaults applied. Save to keep these changes.".into();
@@ -628,7 +694,7 @@ pub(crate) fn input(
             Action::Save => {
                 let g = settings.graphics;
                 let mut sections = audio::settings_sections(&volumes).to_vec();
-                sections.push(("GameSettings",json!({"version":1,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale,"fxaa":g.fxaa}})));
+                sections.push(("GameSettings",json!({"version":2,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale,"fxaa":g.fxaa}})));
                 panel.status = if store.save(&sections) {
                     "Saved.".into()
                 } else {
@@ -656,6 +722,7 @@ pub(crate) fn refresh_ui(
     meshes: Res<Assets<Mesh>>,
     asset_server: Res<AssetServer>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    surface: Res<SceneSurface>,
     time: Res<Time<Real>>,
     mut last_performance: Local<f64>,
     mut residency_sample: Local<Option<(f64, u64, u64, u64)>>,
@@ -707,7 +774,10 @@ pub(crate) fn refresh_ui(
                 }
             ),
             ValueLabel::Fps => format!("Frame limit: {}", settings.graphics.frame_rate),
-            ValueLabel::Scale => format!("Scene: {:.0}%", 100. * settings.graphics.render_scale),
+            ValueLabel::Scale => match settings.graphics.render_scale {
+                Some(scale) => format!("Scene: {:.0}%", 100. * scale),
+                None => format!("Scene: Auto {:.0}%", 100. * surface.applied_scale),
+            },
             ValueLabel::Fxaa => format!(
                 "FXAA: {}",
                 if settings.graphics.fxaa { "On" } else { "Off" }
@@ -815,7 +885,10 @@ pub(crate) fn apply_graphics(
     let Ok(window) = windows.single() else {
         return;
     };
-    let scale = graphics.render_scale.clamp(0.5, 1.);
+    let scale = scene_render_scale(&graphics, window);
+    if surface.applied_scale != scale {
+        surface.applied_scale = scale;
+    }
     for (entity, mut camera, mut target, mut projection, fxaa, original) in &mut cameras {
         if let Some(mut fxaa) = fxaa {
             if fxaa.enabled != graphics.fxaa {
@@ -838,13 +911,10 @@ pub(crate) fn apply_graphics(
             }
             continue;
         }
+        // URP sizes a scaled camera target as (int)(pixel size * scale), at least 1.
         let size = UVec2::new(
-            (window.resolution.physical_width() as f32 * scale)
-                .round()
-                .max(1.) as u32,
-            (window.resolution.physical_height() as f32 * scale)
-                .round()
-                .max(1.) as u32,
+            ((window.resolution.physical_width() as f32 * scale) as u32).max(1),
+            ((window.resolution.physical_height() as f32 * scale) as u32).max(1),
         );
         let factor = size.x as f32 / window.width().max(1.);
         if surface.image.is_none() || surface.physical_size != size {

@@ -50,8 +50,9 @@
 //! - **画质**（`OnChangeImageQualityToggle`）：写档位**并立即**
 //!   `SetImageQuality`——high → `SetTargetDpi(299)` + FXAA 开 · normal →
 //!   200 + 开 · low → 180 + 关；`SetTargetDpi` 把
-//!   `clamp(目标DPI / 屏DPI, 0, 1)` 写进 RenderScale。FXAA 写入现
-//!   GameSettings；物理屏幕 DPI 尚不可用，目标 DPI 不代替屏幕 DPI。
+//!   `clamp(目标DPI / 屏DPI, 0, 1)` 写进 RenderScale。FXAA 与目标 DPI 写入现
+//!   GameSettings；场景相机按窗口缩放因子推得的屏 DPI 施加渲染比例（见
+//!   `game_settings::source_render_scale`）。
 //! - **刷新率**（`OnChangeFpsToggle`）：写档位并立即 `SetFpsQuality`——
 //!   high → `Application.targetFrameRate = 60` · normal → 30；越界
 //!   LogError；同值且非强制早退（幂等门）。**本仓对应物 = `WinitSettings`
@@ -536,11 +537,12 @@ pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_sett
     apply_fps(&mut graphics, settings.fps);
 }
 
-/// 画质施加：FXAA 写入现游戏设置；目标 DPI 保留源值，等物理屏幕 DPI。
+/// 画质施加：FXAA 与目标 DPI 写入现游戏设置，场景相机据此施加渲染比例。
 fn apply_image_quality(graphics: &mut crate::game_settings::GameSettings, next: ImageQuality) {
     let (dpi, fxaa) = next.target_dpi_and_fxaa();
     graphics.graphics.fxaa = fxaa;
-    info!("[info] SetImageQuality: target DPI {dpi}, FXAA {fxaa}; physical display DPI is not yet available for source render scale");
+    graphics.graphics.target_dpi = dpi as u16;
+    info!("[info] SetImageQuality: target DPI {dpi}, FXAA {fxaa}");
 }
 
 fn apply_fps(graphics: &mut crate::game_settings::GameSettings, next: FpsQuality) {
