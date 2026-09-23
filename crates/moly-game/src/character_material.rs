@@ -381,7 +381,12 @@ impl CharacterEnv {
                 bytes.extend_from_slice(&component.to_le_bytes());
             }
         };
-        push([g.light_vector[0], g.light_vector[1], g.light_vector[2], 0.0]);
+        push(moly_law::weather::light_pass::clamp_zero4([
+            g.light_vector[0],
+            g.light_vector[1],
+            g.light_vector[2],
+            0.0,
+        ]));
         push(g.light_color);
         push(g.skin_shade_color);
         push(g.body_shade_color);
