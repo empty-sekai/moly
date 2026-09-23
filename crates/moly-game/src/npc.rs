@@ -325,6 +325,18 @@ pub(crate) fn stop_for_external_activity(world: &mut World, actor: Entity) {
 /// Show synchronizes the retained actor with the rebuilt field. Unhandled
 /// objective branches keep their route/content and the existing generation
 /// mover replans them; it must not blindly follow a stale path after Save.
+///
+/// A fixture talk cast member walks to its action point `fit`. Its talk data
+/// TargetPosition, the move's completion target, is that action point's x/z
+/// at SitePosition.y (GetTargetPosition), which this host keeps as the site
+/// origin's height; the local fit still ends on the action point itself.
+///
+/// A move that never completes ends Stacked (Stopped). On that result the
+/// source re-decides only that member's objective (a supporting member's
+/// SubCharacterFixtureAction objective calls ForceUpdateObjective for that
+/// character alone). This host's fixture talk stages one Director for its
+/// whole cast, so a Stopped approach fails the talk and restores every
+/// member: a deliberate difference, not the source's per-member end.
 pub(crate) fn begin_external_approach(
     world: &mut World,
     actor: Entity,
@@ -334,6 +346,7 @@ pub(crate) fn begin_external_approach(
     let mut params = SystemState::<(
         Res<crate::walk_face::WalkFace>,
         Res<crate::npc_objective::ObjectiveFace>,
+        Query<&GlobalTransform, With<crate::fixture_scene_inputs::SiteCoordinateOrigin>>,
         Query<(
             &CharacterUnitId,
             &mut WalkState,
@@ -345,7 +358,12 @@ pub(crate) fn begin_external_approach(
             &mut crate::npc_objective::MemberRng,
         )>,
     )>::new(world);
-    let (face, objective, mut actors) = params.get_mut(world);
+    let (face, objective, origins, mut actors) = params.get_mut(world);
+    let site_y = origins
+        .single()
+        .map_err(|_| "one active site origin is required")?
+        .translation()
+        .y;
     let (unit, mut walk, mut path, mut route, mut phase, mut actions, mut rest, mut rng) = actors
         .get_mut(actor)
         .map_err(|_| "actor navigation unavailable")?;
@@ -356,7 +374,7 @@ pub(crate) fn begin_external_approach(
         &mut route,
         &face,
         &objective,
-        fit.position,
+        [fit.position[0], site_y, fit.position[2]],
         Some(fit),
         &mut rng,
     )
@@ -1339,24 +1357,20 @@ fn start_waypoint(
         route.next = 0;
         route.goal = None;
         if route.completion.is_some() {
-            // The presenter has no waypoint left. The per-frame IsCompleted
-            // poll in `advance` runs before this and has not completed
-            // against this last destination, so standing here is no arrival
-            // and no local furniture fit. MoveAsync keeps polling IsCompleted
-            // against that destination until its IsStacked timer ends the
-            // move: keep the destination, the target and the fit.
+            // The presenter has no waypoint left and leaves the destination
+            // where it is. Standing at the path end is no arrival and no local
+            // furniture fit: MoveAsync polls IsCompleted against that last
+            // destination (in `advance`, from this frame on) until its
+            // IsStacked timer ends the move. Keep the destination, the target
+            // and the fit.
             route.stalling = true;
             return Some(MotionPhase::Dwelling { remaining: None });
         }
-        let fit = route.fit.take();
+        // Without a move target no route was departed: an empty route ends
+        // as Arrived.
         route.navigation_destination = None;
-        let phase = fit
-            .and_then(|fit| fit_depart(unit, state, slot, route, fit))
-            .unwrap_or(MotionPhase::Dwelling { remaining: None });
-        if matches!(phase, MotionPhase::Dwelling { remaining: None }) {
-            route.outcome = Some(RouteOutcome::Arrived);
-        }
-        return Some(phase);
+        route.outcome = Some(RouteOutcome::Arrived);
+        return Some(MotionPhase::Dwelling { remaining: None });
     };
     let target = if waypoint.kind == WaypointKind::CheckPoint {
         // Funnel corners can lie exactly on a polygon/voxel boundary. Snap the
@@ -1785,7 +1799,32 @@ pub fn advance(
         let prior_forward = state.0.forward;
         let prior_corner = state.0.next_corner;
         let mut verdict = moly_law::path::advance(&mut state.0, &slot.0, speed.0, dt);
-        if matches!(*phase, MotionPhase::Walking) {
+        // Source frame order: the agent moves; the presenter's per-leg loop
+        // resumes (its yield continuation runs ahead of the player-loop
+        // runner) and, on reaching a CheckPoint within its per-leg test,
+        // submits the next entry as the destination at once; after the last
+        // entry and at a Rest entry the destination stays. Then MoveAsync's
+        // WaitUntil polls IsCompleted against the destination submitted by
+        // then, before its IsStacked check, whichever leg or Rest wait the
+        // presenter is on; the poll pauses while the NPC's state is Talk.
+        // This host judges a leg's arrival at the start of the next frame
+        // (path::advance), so it polls there too: on the frame-start
+        // position, after that arrival has handed a CheckPoint on, and before
+        // this frame's step, which a completion takes back. At the end of a
+        // Rest wait the next leg is submitted after the poll: the source's
+        // wait and poll share one runner, in an order this host cannot
+        // observe, so that leg is read from the following frame. A
+        // completion ends the move where the NPC stands or starts the local
+        // fit from there; every fit position is the move's target, so that fit
+        // spans at most the switch tolerance plus the goal distance.
+        let polls = actions.current != NpcAction::Talk;
+        let arrived = matches!(verdict, WalkVerdict::Arrived(_));
+        let mut completed = polls && !arrived && route.completed(prior);
+        if completed {
+            state.0.position = prior;
+            state.0.forward = prior_forward;
+            state.0.next_corner = prior_corner;
+        } else if matches!(*phase, MotionPhase::Walking) {
             // Validate the travelled polyline, not the chord spanning several
             // valid corners crossed in one frame. A chord can cross a hole even
             // though every actually traversed segment stays on the field.
@@ -1852,14 +1891,34 @@ pub fn advance(
                 };
             }
         }
-        // Source MoveAsync's WaitUntil polls IsCompleted every frame of the
-        // move, before its IsStacked check and whichever leg (or Rest wait)
-        // the presenter is on; the poll pauses while the NPC's state is Talk.
-        // It judges the position this frame's movement reached. A completion
-        // ends the move where the NPC stands or starts the local fit from
-        // there; every fit position is the move's target, so that fit spans at
-        // most the switch tolerance plus the goal distance.
-        let completed = actions.current != NpcAction::Talk && route.completed(state.0.position);
+        // The presenter's per-leg step for an arrival found at the frame
+        // start. A reached Rest entry keeps its destination and starts its
+        // wait below unless the move completes first.
+        let mut stepped = false;
+        if let WalkVerdict::Arrived(distance) = verdict {
+            if route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::CheckPoint) {
+                info!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
+                    unit.0, route.next + 1, route.stops.len());
+                slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
+                state.0.next_corner = 0;
+                stuck.0 = None;
+                *phase = next_waypoint_or_stop(
+                    unit,
+                    &mut state.0,
+                    &mut slot.0,
+                    &mut route,
+                    walk_face,
+                    objective_face,
+                );
+                declare_navigation_action(&mut actions, &mut rest, &phase, &route);
+                stepped = true;
+            }
+        }
+        if arrived {
+            // An arrival found at the frame start moves nothing: poll that
+            // position against the destination submitted by now.
+            completed = polls && route.completed(state.0.position);
+        }
         // 转体完成帧的旋转：完成时相位已离开 Turning、`forward` 还是旧值，
         // 尾写需要一个不回跳的终点朝向。
         let mut finished_turn: Option<Quat> = None;
@@ -1873,6 +1932,8 @@ pub fn advance(
                     unit.0, state.0.position[0], state.0.position[1], state.0.position[2]
                 );
             }
+            // The reached CheckPoint was handed on above.
+            _ if stepped => {}
             WalkVerdict::Walking(_) => {
                 *phase = MotionPhase::Walking;
                 actions.change(NpcAction::AutoMove, &mut rest);
@@ -1901,35 +1962,22 @@ pub fn advance(
                     }
                 }
             }
+            // A reached Rest entry: CheckPoints were handed on above.
             WalkVerdict::Arrived(distance) => {
-                let waypoint = route.stops[route.next];
+                assert!(
+                    route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::Rest),
+                    "a navigation arrival left after the CheckPoint step is a Rest entry"
+                );
                 slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
                 state.0.next_corner = 0;
                 stuck.0 = None;
-                match waypoint.kind {
-                    WaypointKind::Rest => {
-                        let dwell = dwell_seconds(pause.0);
-                        *phase = MotionPhase::Dwelling {
-                            remaining: Some(dwell),
-                        };
-                        actions.begin_waypoint_rest(&mut rest, &route);
-                        info!("[npc unit={}] t={now:.1} 路点 {}/{} Rest 到站，距 {distance:.3}m，驻留 {dwell:.1}s",
-                            unit.0, route.next + 1, route.stops.len());
-                    }
-                    WaypointKind::CheckPoint => {
-                        info!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
-                            unit.0, route.next + 1, route.stops.len());
-                        *phase = next_waypoint_or_stop(
-                            unit,
-                            &mut state.0,
-                            &mut slot.0,
-                            &mut route,
-                            walk_face,
-                            objective_face,
-                        );
-                        declare_navigation_action(&mut actions, &mut rest, &phase, &route);
-                    }
-                }
+                let dwell = dwell_seconds(pause.0);
+                *phase = MotionPhase::Dwelling {
+                    remaining: Some(dwell),
+                };
+                actions.begin_waypoint_rest(&mut rest, &route);
+                info!("[npc unit={}] t={now:.1} 路点 {}/{} Rest 到站，距 {distance:.3}m，驻留 {dwell:.1}s",
+                    unit.0, route.next + 1, route.stops.len());
             }
             WalkVerdict::Idle => match &mut *phase {
                 MotionPhase::Turning {
