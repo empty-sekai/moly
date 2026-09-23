@@ -56,7 +56,8 @@
 //!   high → `Application.targetFrameRate = 60` · normal → 30；越界
 //!   LogError；同值且非强制早退（幂等门）。**本仓对应物 = `WinitSettings`
 //!   的 Reactive 档**：等待 = 1/60 · 1/30，三个反应位全关（只按节拍 tick，
-//!   事件缓冲到下一拍）——运行时改档当帧生效。这是本层接线的真行为。
+//!   事件缓冲到下一拍）——运行时改档当帧生效。这是本层接线的真行为。浏览器
+//!   改为动画帧节拍：到点的动画帧里更新，未到点的帧跳过（`game_settings`）。
 //! - **变换通知**（`OnChangeConvertFixtureNotificationTypeToggle`）：只写
 //!   档位，无即时副作用。
 //! - **访问许可**（`OnChangeVisitSettingToggle`）：非审核状态下只写档位；上报在出场链

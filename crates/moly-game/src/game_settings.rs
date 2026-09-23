@@ -10,10 +10,8 @@ use bevy::{
     render::render_resource::TextureFormat,
     ui::{FocusPolicy, UiTargetCamera},
     window::PrimaryWindow,
-    winit::{UpdateMode, WinitSettings},
 };
 use serde_json::{json, Value};
-use std::time::Duration;
 
 use crate::{
     audio::{self, LocalVolumeSettings, VolumeBus, VolumeSettingData},
@@ -26,15 +24,20 @@ const FONT: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.s
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GraphicsSettings {
+    /// Frame limit. The source offers `MysekaiFpsQualityType` High (60) and
+    /// Normal (30); `MysekaiOptionSettingData` leaves the field zero, i.e. High.
     pub(crate) frame_rate: u16,
     pub(crate) render_scale: f32,
     pub(crate) fxaa: bool,
 }
 
+/// Frame limits the source offers (High, Normal).
+const FRAME_RATES: [u16; 2] = [60, 30];
+
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
-            frame_rate: if cfg!(target_arch = "wasm32") { 30 } else { 60 },
+            frame_rate: FRAME_RATES[0],
             render_scale: 1.0,
             fxaa: true,
         }
@@ -136,6 +139,9 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<SettingsPanel>()
         .init_resource::<SceneSurface>()
         .add_message::<SettingsPanelRequest>();
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Startup, pacing::start)
+        .add_systems(First, pacing::note_update);
 }
 
 /// Per-frame counters for the browser host: engine assets and every game
@@ -182,8 +188,8 @@ fn graphics_from_document(document: &Value) -> GraphicsSettings {
     let mut value = GraphicsSettings::default();
     let fields = &document["GameSettings"]["graphics"];
     if let Some(rate) = fields["frameRate"].as_u64() {
-        if matches!(rate, 30 | 60 | 120) {
-            value.frame_rate = rate as u16;
+        if let Some(&rate) = FRAME_RATES.iter().find(|&&offered| u64::from(offered) == rate) {
+            value.frame_rate = rate;
         }
     }
     if let Some(scale) = fields["renderScale"].as_f64() {
@@ -349,7 +355,7 @@ pub(crate) fn setup(
         18.,
         Some(ValueLabel::Fps),
     );
-    for rate in [30, 60, 120] {
+    for rate in [FRAME_RATES[1], FRAME_RATES[0]] {
         add_button(
             &mut commands,
             fps,
@@ -779,16 +785,31 @@ pub(crate) fn apply_graphics(
 ) {
     let graphics = settings.graphics;
     if *last_rate != Some(graphics.frame_rate) {
-        let mode = UpdateMode::Reactive {
-            wait: Duration::from_secs_f64(1. / f64::from(graphics.frame_rate.max(1))),
-            react_to_device_events: false,
-            react_to_user_events: false,
-            react_to_window_events: false,
-        };
-        commands.insert_resource(WinitSettings {
-            focused_mode: mode,
-            unfocused_mode: mode,
-        });
+        // Browser: updates paced by animation frames (see `pacing`).
+        #[cfg(target_arch = "wasm32")]
+        {
+            if last_rate.is_none() {
+                commands.insert_resource(pacing::winit_settings());
+            }
+            pacing::set_frame_rate(graphics.frame_rate);
+        }
+        // Native: the engine's reactive wait between updates.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use bevy::winit::{UpdateMode, WinitSettings};
+            let mode = UpdateMode::Reactive {
+                wait: std::time::Duration::from_secs_f64(
+                    1. / f64::from(graphics.frame_rate.max(1)),
+                ),
+                react_to_device_events: false,
+                react_to_user_events: false,
+                react_to_window_events: false,
+            };
+            commands.insert_resource(WinitSettings {
+                focused_mode: mode,
+                unfocused_mode: mode,
+            });
+        }
         *last_rate = Some(graphics.frame_rate);
     }
     let Ok(window) = windows.single() else {
@@ -895,6 +916,151 @@ pub(crate) fn apply_graphics(
     } else {
         for (_, mut sprite) in &mut quads {
             sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
+        }
+    }
+}
+
+/// Browser frame pacing for the frame limit.
+///
+/// The source limits the frame rate with `Application.targetFrameRate`. A
+/// page presents only at the display's refresh, so every update runs inside
+/// an animation frame, and frames that arrive before the limit's interval has
+/// elapsed are skipped; the average rate equals the limit.
+///
+/// The engine loop is reactive: its wait is an hour and it ignores window and
+/// device events, so it updates only when this pacer wakes it through the
+/// event-loop proxy. The winit runner handles that wake-up in a microtask of
+/// the same animation frame. The runner updates only after a redraw since
+/// its previous update and requests its own animation frame at the end of
+/// every update, so the pacer registers its next frame from a microtask
+/// queued behind the wake-up; winit's redraw then precedes the pacer in the
+/// next frame. A wake-up that finds no redraw yet is repeated next frame.
+#[cfg(target_arch = "wasm32")]
+mod pacing {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use bevy::prelude::*;
+    use bevy::winit::{
+        EventLoopProxy, EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent,
+    };
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    struct Pacer {
+        window: web_sys::Window,
+        proxy: EventLoopProxy<WinitUserEvent>,
+        interval_ms: Cell<f64>,
+        due_ms: Cell<f64>,
+        last_frame_ms: Cell<f64>,
+        /// Smoothed display frame interval from animation-frame timestamps.
+        display_ms: Cell<f64>,
+        /// A wake-up was sent and no update has run since.
+        pending: Cell<bool>,
+        on_frame: RefCell<Option<Closure<dyn FnMut(f64)>>>,
+        after_wake: RefCell<Option<Closure<dyn FnMut()>>>,
+    }
+
+    thread_local! {
+        static PACER: RefCell<Option<Rc<Pacer>>> = const { RefCell::new(None) };
+    }
+
+    /// The engine loop waits for the pacer's wake-ups only.
+    pub(super) fn winit_settings() -> WinitSettings {
+        let mode = UpdateMode::Reactive {
+            wait: Duration::from_secs(3600),
+            react_to_device_events: false,
+            react_to_user_events: true,
+            react_to_window_events: false,
+        };
+        WinitSettings {
+            focused_mode: mode,
+            unfocused_mode: mode,
+        }
+    }
+
+    pub(super) fn start(proxy: Res<EventLoopProxyWrapper>) {
+        // Without the pacer the engine loop would never wake again.
+        let window = web_sys::window().expect("frame pacing needs the page window");
+        let pacer = Rc::new(Pacer {
+            window,
+            proxy: (**proxy).clone(),
+            interval_ms: Cell::new(1000. / f64::from(super::FRAME_RATES[0])),
+            due_ms: Cell::new(0.),
+            last_frame_ms: Cell::new(0.),
+            display_ms: Cell::new(1000. / 60.),
+            pending: Cell::new(false),
+            on_frame: RefCell::new(None),
+            after_wake: RefCell::new(None),
+        });
+        // The closures own the pacer for the lifetime of the page.
+        let frame_pacer = pacer.clone();
+        *pacer.on_frame.borrow_mut() =
+            Some(Closure::new(move |now: f64| on_frame(&frame_pacer, now)));
+        let wake_pacer = pacer.clone();
+        *pacer.after_wake.borrow_mut() = Some(Closure::new(move || request_frame(&wake_pacer)));
+        request_frame(&pacer);
+        PACER.with_borrow_mut(|slot| *slot = Some(pacer));
+    }
+
+    pub(super) fn set_frame_rate(rate: u16) {
+        PACER.with_borrow(|pacer| {
+            if let Some(pacer) = pacer {
+                pacer.interval_ms.set(1000. / f64::from(rate.max(1)));
+            }
+        });
+    }
+
+    /// Runs in `First` of every update.
+    pub(super) fn note_update() {
+        PACER.with_borrow(|pacer| {
+            if let Some(pacer) = pacer {
+                pacer.pending.set(false);
+            }
+        });
+    }
+
+    fn request_frame(pacer: &Pacer) {
+        if let Some(callback) = pacer.on_frame.borrow().as_ref() {
+            let _ = pacer
+                .window
+                .request_animation_frame(callback.as_ref().unchecked_ref());
+        }
+    }
+
+    fn on_frame(pacer: &Pacer, now: f64) {
+        let last = pacer.last_frame_ms.replace(now);
+        let delta = now - last;
+        if last > 0. && delta > 2. && delta < 50. {
+            pacer.display_ms.set(0.9 * pacer.display_ms.get() + 0.1 * delta);
+        }
+        if !pacer.pending.get() {
+            let interval = pacer.interval_ms.get();
+            // Fire on the display frame nearest to the due time.
+            let tolerance = 0.5 * pacer.display_ms.get().min(interval);
+            let due = pacer.due_ms.get();
+            if now + tolerance >= due {
+                // Phase-locked, so the average rate is the limit; after a
+                // stall the schedule restarts instead of catching up.
+                let next = if due + interval <= now {
+                    now + interval
+                } else {
+                    due + interval
+                };
+                pacer.due_ms.set(next);
+                pacer.pending.set(true);
+            }
+        }
+        if pacer.pending.get() {
+            let _ = pacer.proxy.send_event(WinitUserEvent::WakeUp);
+            if let Some(after_wake) = pacer.after_wake.borrow().as_ref() {
+                pacer
+                    .window
+                    .queue_microtask(after_wake.as_ref().unchecked_ref());
+            }
+        } else {
+            request_frame(pacer);
         }
     }
 }
