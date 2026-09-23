@@ -430,8 +430,8 @@ pub struct RouteStops {
     /// 最后贴合前的导航落点；下一次开启代理时用于从局部挂点返回面。
     reentry: Option<[f32; 3]>,
     pub(crate) outcome: Option<RouteOutcome>,
-    /// The source MoveAsync target lies at least the IsCompleted destination
-    /// tolerance beyond this route's last navigation corner.
+    /// Source IsCompleted does not complete at this route's last navigation
+    /// corner (see [`CompletionJudge`]).
     ends_short: bool,
     /// That route has run out: only the IsStacked timer can end the movement.
     stalling: bool,
@@ -1122,18 +1122,56 @@ pub(crate) fn depart(
     } else {
         walk_face.path(start, goal)?
     };
-    route_along(unit, state, slot, route, walk_face, objective_face, corner, fit, rng, polyline, false)
+    route_along(unit, state, slot, route, walk_face, objective_face, corner, fit, rng, polyline, None)
 }
 
-/// Source `IsCompleted` switches from the agent destination to the target
-/// itself once they are this far apart (horizontal distance, metres).
+/// Source `IsCompleted` judges against the talk data target itself, instead of
+/// the agent destination, once its switch distance reaches this (metres).
 const COMPLETION_DESTINATION_TOLERANCE: f32 = 0.25;
+
+/// Goal distance both objective types pass to the source MoveAsync (metres).
+const MOVE_GOAL_DISTANCE: f32 = 0.1;
+
+/// Source `IsCompleted` for one talk data target, evaluated where the route
+/// ends (the agent destination). Its switch is
+/// `sqrt((t.x - d.x)² + t.y² + (t.z - d.z)²)` for target `t` and destination
+/// `d`: the middle term is the target's own world height, not a height
+/// difference. From the tolerance on, the NPC is judged against the target,
+/// below it against the destination, which the route end reaches. Completion
+/// is a 3-D distance under the goal distance.
+#[derive(Clone, Copy, Debug)]
+struct CompletionJudge {
+    target: [f32; 3],
+    /// SitePosition.y of the active site. This host renders the site at the
+    /// origin, so a target's world height is this plus its local height; the
+    /// room floors above the first sit hundreds of metres up, where the switch
+    /// always judges against the target.
+    site_height: f32,
+}
+
+impl CompletionJudge {
+    /// Whether an NPC standing at `end` (the lifted last corner) completes.
+    fn completes_at(&self, end: [f32; 3]) -> bool {
+        let [tx, ty, tz] = self.target;
+        let dx = tx - end[0];
+        let height = self.site_height + ty;
+        let dz = tz - end[2];
+        // Same operand order as the source: (dx² + h²) + dz².
+        let switch = ((dx * dx + height * height) + dz * dz).sqrt();
+        if switch < COMPLETION_DESTINATION_TOLERANCE {
+            return true;
+        }
+        let [px, py, pz] = [end[0] - tx, end[1] - ty, end[2] - tz];
+        // Same operand order as the source: dz² + (dx² + dy²).
+        (pz * pz + (px * px + py * py)).sqrt() < MOVE_GOAL_DISTANCE
+    }
+}
 
 /// The objective's MoveAsync already passed its source gate and generated the
 /// polyline with the source `GeneratePath`. An empty polyline fails the move
-/// (TryGeneratePath). When the polyline ends at least the IsCompleted
-/// destination tolerance away from `target`, reaching its end is not
-/// completion: the movement then waits for the IsStacked timer.
+/// (TryGeneratePath). When [`CompletionJudge`] does not complete at the end of
+/// the polyline, reaching it is not arrival: the movement then waits for the
+/// IsStacked timer.
 pub(crate) fn depart_along(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1145,13 +1183,16 @@ pub(crate) fn depart_along(
     fit: Option<FitCandidate>,
     rng: &mut crate::npc_objective::MemberRng,
     polyline: Vec<[f32; 2]>,
+    site_height: f32,
 ) -> Option<MotionPhase> {
     route.outcome = None;
     reenter_navigation(state, route, walk_face)?;
-    let end = polyline.last()?;
-    let ends_short = ((end[0] - target[0]).powi(2) + (end[1] - target[2]).powi(2)).sqrt()
-        >= COMPLETION_DESTINATION_TOLERANCE;
-    route_along(unit, state, slot, route, walk_face, objective_face, target, fit, rng, polyline, ends_short)
+    polyline.last()?;
+    let judge = CompletionJudge {
+        target,
+        site_height,
+    };
+    route_along(unit, state, slot, route, walk_face, objective_face, target, fit, rng, polyline, Some(judge))
 }
 
 /// 源下次 MoveAsync 先重新开启 NavMeshAgent。这里只恢复已完成局部 Fit 的
@@ -1186,9 +1227,13 @@ fn route_along(
     fit: Option<FitCandidate>,
     rng: &mut crate::npc_objective::MemberRng,
     polyline: Vec<[f32; 2]>,
-    ends_short: bool,
+    judge: Option<CompletionJudge>,
 ) -> Option<MotionPhase> {
     let corners = lift_navigation_path(unit, objective_face, polyline);
+    let ends_short = match (judge, corners.last()) {
+        (Some(judge), Some(end)) => !judge.completes_at(*end),
+        _ => false,
+    };
     route.stops = build_waypoints(state.position, &corners, state.forward, rng, |candidate| {
         objective_face
             .sample(candidate, WAYPOINT_SAMPLE_DISTANCE)
@@ -1268,9 +1313,9 @@ fn start_waypoint(
         route.next = 0;
         route.goal = None;
         if std::mem::take(&mut route.ends_short) {
-            // Source IsCompleted compares the position with the target itself
-            // when the path end is this far from it, so standing at the end
-            // never completes; no arrival and no local furniture fit.
+            // Source IsCompleted stays false for an NPC standing at the path
+            // end, so standing there never completes; no arrival and no local
+            // furniture fit.
             route.stalling = true;
             return Some(MotionPhase::Dwelling { remaining: None });
         }

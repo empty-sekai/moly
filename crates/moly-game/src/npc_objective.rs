@@ -1089,7 +1089,7 @@ pub(crate) fn decide(
     mut saved_layouts: MessageReader<crate::fixture_edit::LayoutSaved>,
     face: Option<Res<ObjectiveFace>>,
     epoch: Option<Res<GroundEpoch>>,
-    selection: Option<Res<SiteSelection>>,
+    (selection, site): (Option<Res<SiteSelection>>, Option<Res<crate::site::SiteActive>>),
     placements: Res<FixturePlacements>,
     mut anchored_cache: Local<AnchoredFixtureCache>,
     configs: Option<Res<ClientConfigs>>,
@@ -1141,6 +1141,11 @@ pub(crate) fn decide(
         return;
     };
     let Some(config) = configs.as_deref() else {
+        return;
+    };
+    // SitePosition.y of the active site (MoveAsync's IsCompleted reads the
+    // target's world height).
+    let Some(site_height) = site.as_deref().map(|site| site.position[1]) else {
         return;
     };
     // 代数资源在场才算「面已定案」：首站定案（inactiveNodes 清扫）之前
@@ -1802,6 +1807,7 @@ pub(crate) fn decide(
                     fit,
                     &mut *rng,
                     polyline,
+                    site_height,
                 ) {
                     Some(depart_phase) => {
                         if let Some(selected) = fixture_selection.take() {
