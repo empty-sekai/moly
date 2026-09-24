@@ -130,18 +130,16 @@ export class CacheAdmission {
   }
 }
 
+/** URL properties no client configuration changes: a URL failing them never has an identity. */
+function plainResourceUrl(url) {
+  return !url.search && !url.hash && !url.username && !url.password &&
+    ["http:", "https:"].includes(url.protocol) && !/%2f|%5c|%00/i.test(url.pathname);
+}
+
 export function resourceIdentity(value, origin, configuredOrigin = null, configuredBase = null) {
   let url;
   try { url = new URL(value, origin); } catch { return null; }
-  if (
-    (url.origin !== origin && url.origin !== publicOrigin(configuredOrigin)) ||
-    url.search ||
-    url.hash ||
-    url.username ||
-    url.password ||
-    !["http:", "https:"].includes(url.protocol) ||
-    /%2f|%5c|%00/i.test(url.pathname)
-  )
+  if ((url.origin !== origin && url.origin !== publicOrigin(configuredOrigin)) || !plainResourceUrl(url))
     return null;
   const basePath = configuredBase ? (() => {
     try {
@@ -423,10 +421,11 @@ if (
     // immutable logical suffixes, while the asynchronous identity check below
     // still requires the requesting client's exact resource_base.
     const logicalCandidate =
-      !/%2f|%5c|%00/i.test(candidateUrl.pathname) &&
-      (/(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(candidateUrl.pathname) ||
-       /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(candidateUrl.pathname));
-    const candidate = request.method === "GET" && !request.headers.has("Range") &&
+      /(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(candidateUrl.pathname) ||
+      /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(candidateUrl.pathname);
+    // A URL no configuration can admit (a query, a fragment, credentials, an encoded
+    // separator) is left to the browser, so its request and any failure stay its own.
+    const candidate = request.method === "GET" && !request.headers.has("Range") && plainResourceUrl(candidateUrl) &&
       (resourceIdentity(request.url, self.location.origin, candidateUrl.origin) ||
        logicalCandidate);
     if (!candidate) return;
