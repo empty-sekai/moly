@@ -89,7 +89,8 @@ pub(crate) const KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE: i32 = 156;
 pub(crate) const KEY_HARVEST_DROP_DELAY_ITEM_COUNT: i32 = 176;
 
 /// 配送站强制现象 id（DeliveryPhenomenaId，IntConfigs 键 170）：下一站类别为
-/// delivery 时，换站事件带的现象 id 是它，不是当日现象。
+/// delivery 时，换站事件带的现象 id 是它，不是当日现象；BGM 默认选曲里现象 id
+/// 等于它时取站点 normal 档，配送类站点的站点控制器恒以它起 BGM。
 pub(crate) const KEY_DELIVERY_PHENOMENA_ID: i32 = 170;
 
 /// 配送站现象的资产名（DeliveryPhenomenaAssetBundleName，StringConfigs 键
@@ -108,10 +109,6 @@ pub(crate) const KEY_MYSEKAI_HARVEST_MOVE_SCALE: i32 = 78;
 /// Move 乘数是 rate × scale（采集/相机档的 scale 折算在前），动画速率
 /// 不乘它。
 pub(crate) const KEY_MYSEKAI_DASH_SPEED_RATE: i32 = 95;
-
-/// 配送现象 id（DeliveryPhenomenaId，IntConfigs 键 170）：BGM 默认选曲里
-/// 现象 id 等于它时取站点 normal 档；配送类站点的站点控制器恒以它起 BGM。
-pub(crate) const KEY_DELIVERY_PHENOMENA_ID: i32 = 170;
 
 // ---------------------------------------------------------------------------
 // 装载：请求 → 解析
