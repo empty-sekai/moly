@@ -27,6 +27,16 @@
 //! (the engine marks every target stopped each frame), and its parent's
 //! commands of a frame are delivered after every system's frame, in the order
 //! the parent recorded them, with the world's default gravity.
+//!
+//! A World-space target may itself own birth edges. The engine's child Emit
+//! runs the target's own StartModules, whose sub-emitter call records the
+//! newborns' birth events once per new four-lane group (after the newborn
+//! position and age update, before the newborn deaths), and each event's
+//! RecordEmit emits into that target's children at once, inside the parent's
+//! update. Every target has one parent, so handing the recorded commands to
+//! the next level after the command, until no command is left in the frame,
+//! gives each child the same command stream in the same order. The recording
+//! works on a copy that is kept only when the whole command succeeds.
 use super::*;
 use moly_law::particle::{
     child_emit::{self, ChildOwner, StartFrame},
@@ -247,8 +257,19 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     {
         return unsupported("target module outside the child composition");
     }
+    // A target's own edges: birth edges only, recorded by the newborn call
+    // inside the child Emit and by its own post-simulation call. Only a
+    // World-space target reads no owner for its events (a Local one would
+    // need the event owner words of its authored chain).
     if birth::has_real_sub_emitter_edges(emitter) {
-        return unsupported("target with its own sub-emitters");
+        let births = emitter.sub_emitters.iter().all(|edge|
+            edge.trigger == moly_law::particle::schema::SubEmitterTrigger::Birth && birth::real_event_edge(edge));
+        if !births {
+            return unsupported("target with sub-emitter edges other than birth edges");
+        }
+        if emitter.simulation_space != SimulationSpace::World {
+            return unsupported("target with its own birth edges outside World space");
+        }
     }
     let scalar = |curve: &MinMaxCurve| matches!(curve, MinMaxCurve::Constant(_) | MinMaxCurve::TwoConstants { .. });
     if !scalar(&emitter.start.speed) {
@@ -310,6 +331,16 @@ struct Lane {
     custom: [[f32; 4]; 2],
     fraction: f32,
     birth_dt: f32,
+    /// The carries of the target's own birth edges (zero at birth).
+    carry: [f32; 2],
+}
+
+/// The target's own birth events while one command runs: its event owner,
+/// its system time still to simulate and its emission state word.
+pub(super) struct TargetEvents<'a> {
+    pub events: &'a mut super::sub_events::BirthEvents,
+    pub accumulated: f32,
+    pub emission_word: u32,
 }
 
 /// Test instrumentation: one named change to the law per replay arm.
@@ -338,6 +369,24 @@ pub(super) fn apply_command(
     command: &ChildCommand,
     update: ChildUpdate,
 ) -> Result<Applied, Refused> {
+    apply_command_with_events(system, owner, initial, shape, command, update, None)
+}
+
+/// [`apply_command`] for a target with its own birth edges: `events` records
+/// the newborns' birth events, and its queue and carries change only when
+/// the command succeeds.
+pub(super) fn apply_command_with_events(
+    system: &mut Runtime,
+    owner: &ChildOwner,
+    initial: &mut ModuleRandom,
+    shape: Option<&mut dyn ChildShape>,
+    command: &ChildCommand,
+    update: ChildUpdate,
+    events: Option<TargetEvents<'_>>,
+) -> Result<Applied, Refused> {
+    if birth::has_real_sub_emitter_edges(&system.emitter) != events.is_some() {
+        return Err(Refused::Unsupported("target's own birth events do not match its edges"));
+    }
     let noop = |start| Applied {
         born: 0,
         catch_up_steps: 0,
@@ -380,6 +429,11 @@ pub(super) fn apply_command(
         catch_up = child_emit::catch_up_plan(command.catch_up, update.frame_dt, update.world_playing,
             update.flags | 4, system.emitter.duration);
         catch_up.runs &= update.flags & 5 != 0;
+    }
+    // The catch-up steps run the target's post-simulation modules, whose
+    // sub-emitter call is not transcribed on the staged block.
+    if events.is_some() && catch_up.runs {
+        return Err(Refused::Unsupported("catch-up of a target with its own birth edges"));
     }
     assert_eq!(system.pool.len(), system.side.len());
     let old = system.pool.len();
@@ -444,6 +498,7 @@ pub(super) fn apply_command(
                 custom: [[0.0; 4]; 2],
                 fraction: timing[index].fraction,
                 birth_dt: if arms::on("birthDtIsCommandDt") { command.dt } else { timing[index].dt },
+                carry: [0.0; 2],
             });
         }
     }
@@ -466,6 +521,37 @@ pub(super) fn apply_command(
             lane.position[a] = placed + (lane.velocity[a] + lane.animated[a]) * (1.0 * dt);
         }
         integrate_rotation(&laws, lane, dt);
+    }
+    // The target's own sub-emitter call, once per new four-lane group over
+    // its accepted lanes with the group's four birth times, before the
+    // newborn deaths.
+    let mut recorded = None;
+    if let Some(target) = events.as_ref() {
+        let mut copy = target.events.clone();
+        let mut staged: Vec<super::sub_events::StagedLane> = lanes.iter().map(|lane| super::sub_events::StagedLane {
+            particle: moly_law::particle::sub_emission::EventParticle {
+                seed: lane.seed,
+                age_percent: lane.age,
+                inverse_lifetime: lane.inverse,
+                position: lane.position,
+                velocity: std::array::from_fn(|a| lane.velocity[a] + lane.animated[a]),
+            },
+            carry: lane.carry,
+        }).collect();
+        let event_owner = moly_law::particle::sub_emission::EventOwner {
+            local_to_world: owner.local_to_world,
+            world_space,
+            accumulated_time: target.accumulated,
+            emission_word: target.emission_word,
+        };
+        for offset in (0..accepted).step_by(4) {
+            let dt4 = std::array::from_fn(|lane| lanes.get(offset + lane).map_or(f32::NAN, |lane| lane.birth_dt));
+            copy.record_staged(&mut staged, offset, (offset + 4).min(accepted), dt4, event_owner);
+        }
+        for (lane, staged) in lanes.iter_mut().zip(&staged) {
+            lane.carry = staged.carry;
+        }
+        recorded = Some(copy);
     }
     // Newborn deaths over the padded block: the last lane moves into the
     // dead one, and every death takes one off the accepted count.
@@ -558,8 +644,9 @@ pub(super) fn apply_command(
                     colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
                     total_velocity: reflect(std::array::from_fn(|a| lane.velocity[a] + lane.animated[a])),
                     custom_data: lane.custom,
-                    emit_carry: [0.0; 2],
+                    emit_carry: lane.carry,
                     animated: reflect(lane.animated),
+                    current_size: 0.0,
                 },
             )
         })
@@ -579,6 +666,9 @@ pub(super) fn apply_command(
     finish_births(&mut system.pool, &mut system.side, &mut system.ring_cursor, RingBufferMode::Disabled,
         maximum, old, |_, _| {});
     *initial = next_initial;
+    if let (Some(target), Some(recorded)) = (events, recorded) {
+        *target.events = recorded;
+    }
     system.born_total += capacity_accepted as u64;
     system.died_total += deaths;
     system.full_total += (count - capacity_accepted) as u64;
@@ -642,13 +732,25 @@ pub(crate) struct ChildTarget {
 /// Shape law.
 pub(crate) fn child_target_eligible(emitter: &EmitterParams, evidence: Option<ShapeEmitterEvidence>)
     -> Result<(), String> {
-    birth::qualify_emitter(emitter).map_err(|refused| format!("{refused:?}"))?;
+    birth::qualify_emitter(&own_clock_emitter(emitter)).map_err(|refused| format!("{refused:?}"))?;
     native_shape_state_eligible(emitter, evidence)?;
     qualify_target(emitter).map_err(|refused| format!("{refused:?}"))?;
     if let Some(params) = &emitter.shape {
         ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?;
     }
     Ok(())
+}
+
+/// The target as its own frame reads it. That frame is the stopped update,
+/// which emits nothing, so the target's rate over distance is read only by
+/// its parent's edge law (from the parent particle's motion) and never by its
+/// own clock; the clock takes the Emission block without it.
+fn own_clock_emitter(emitter: &EmitterParams) -> EmitterParams {
+    let mut own = emitter.clone();
+    if let Some(emission) = own.emission.as_mut() {
+        emission.rate_over_distance = MinMaxCurve::Constant(0.0);
+    }
+    own
 }
 
 /// Called once when an admitted sub-emitter target is installed: its seed
@@ -660,6 +762,7 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
         return Err("target already has a birth owner".into());
     }
     child_target_eligible(&system.emitter, system.geometry.shape_evidence())?;
+    system.emitter = own_clock_emitter(&system.emitter);
     let (seed_owner, streams) = seeds
         .create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)
         .map_err(|error| format!("{error:?}"))?;
@@ -714,8 +817,13 @@ fn deliver_staged(system: &mut Runtime, native: &mut birth::NativeBirthState,
             uses_axis_of_rotation: system.geometry.shape_evidence().is_some_and(|e| e.mesh_renderer),
         }),
     };
-    let applied = apply_command(system, &owner, &mut native.initial,
-        shape.as_mut().map(|s| s as &mut dyn ChildShape), &ChildCommand::from_event(command), update)
+    let events = native.events.as_mut().map(|events| TargetEvents {
+        events,
+        accumulated: native.frame.pending,
+        emission_word: native.emission.random.words[0],
+    });
+    let applied = apply_command_with_events(system, &owner, &mut native.initial,
+        shape.as_mut().map(|s| s as &mut dyn ChildShape), &ChildCommand::from_event(command), update, events)
         .map_err(|refused| format!("{refused:?}"))?;
     if let Some(shape) = shape {
         native.shape = shape.stream;

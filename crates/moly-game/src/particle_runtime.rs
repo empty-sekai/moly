@@ -7,9 +7,12 @@ mod child;
 mod sub_events;
 mod trails;
 mod collision;
-pub(crate) use collision::{collision_eligible, COLLISION_SCENE_NOT_PORTED};
-pub(crate) use trails::{draw_eligible as trail_draw_eligible, write_mesh as write_trail_mesh, TrailState};
-pub(crate) use sub_events::{BirthEdge, BirthEvents, DeathEdge, EventEdges};
+pub(crate) use collision::{collision_eligible, current_size_source_gate, COLLISION_SCENE_NOT_PORTED};
+pub(crate) use trails::{
+    attach_owner as attach_trail_owner, draw_eligible as trail_draw_eligible, owner_ready as trail_owner_ready,
+    write_mesh as write_trail_mesh, TrailState,
+};
+pub(crate) use sub_events::{BirthEdge, BirthEvents, CollisionEdge, DeathEdge, EventEdges};
 pub(crate) use child::{child_target_eligible, deliver_command, install_child_target};
 pub(crate) mod seed;
 #[cfg(test)]
@@ -52,6 +55,8 @@ mod death_event_samples;
 mod child_emit_samples;
 #[cfg(test)]
 mod collision_samples;
+#[cfg(test)]
+mod recursive_emit_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
@@ -508,6 +513,10 @@ pub(crate) struct Side {
     /// moved with the particle; the collision query and response read it
     /// apart from the persistent velocity.
     pub(crate) animated: [f32; 3],
+    /// The SizeModule's current X size as the collision points last wrote it
+    /// (only a CollisionModule system with the current-size stream writes and
+    /// reads it); moved with the particle.
+    pub(crate) current_size: f32,
 }
 
 /// 出生抽签的确定性随机：splitmix64（站点链同款流算法、不同种子）。
@@ -1277,6 +1286,7 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         custom_data: [[0.0; 4]; 2],
         emit_carry: [0.0; 2],
         animated: [0.0; 3],
+        current_size: 0.0,
     };
     let particle = Particle::born(position, velocity, lifetime);
     system.pool.push(particle);

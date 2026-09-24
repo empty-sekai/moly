@@ -22,11 +22,16 @@ pub(crate) struct TrailState {
     /// The first refusal of the geometry pass, if any (the draw is empty then).
     pub(crate) draw_refusal: Option<Refused>,
     pub(crate) vertices: usize,
+    /// The owner matrix the trail job of a Local simulation composes with the
+    /// view: the engine's owner local-to-world words (source axes, column
+    /// major), attached at install. `None` for a World simulation.
+    pub(crate) owner: Option<[f32; 16]>,
 }
 
 impl TrailState {
     fn new(law: TrailGeometryLaw, particles: usize) -> Self {
-        Self { law, clock: TrailClock::default(), rings: vec![TrailRing::default(); particles], draw_refusal: None, vertices: 0 }
+        Self { law, clock: TrailClock::default(), rings: vec![TrailRing::default(); particles], draw_refusal: None, vertices: 0,
+            owner: None }
     }
 
     /// One module update over `[from, to)`: the clock advances by `dt` once
@@ -82,12 +87,31 @@ pub(crate) fn qualify(emitter: &EmitterParams) -> Result<Option<TrailGeometryLaw
     if params.split_sub_emitter_ribbons || params.attach_ribbons_to_transform {
         return Err("ribbon trail controls on a per-particle trail are not executed");
     }
-    if emitter.simulation_space != SimulationSpace::World {
-        // The geometry composes the view with the engine's own owner matrix;
-        // this runtime's composed transform is not that matrix bit for bit.
-        return Err("trail of a non-World simulation: the owner matrix the geometry composes is not produced here");
+    if emitter.simulation_space == SimulationSpace::Custom {
+        return Err("trail of a Custom simulation: the owner matrix the geometry composes is not produced here");
     }
+    // A Local simulation's geometry composes the view with the engine's own
+    // owner matrix (this runtime's composed transform is not that matrix bit
+    // for bit): the installer attaches the owner words, and a trail without
+    // them draws nothing.
     Ok(Some(law))
+}
+
+/// Attach the owner words a Local simulation's trail job composes with.
+pub(crate) fn attach_owner(system: &mut Runtime, owner: [f32; 16]) -> Result<(), &'static str> {
+    if system.emitter.simulation_space != SimulationSpace::Local {
+        return Err("trail owner words on a system that is not a Local simulation");
+    }
+    let Some(trail) = system.trail.as_mut() else { return Err("trail owner words without an installed trail") };
+    trail.owner = Some(owner);
+    Ok(())
+}
+
+/// Whether an installed trail has every input its draw reads: a Local
+/// simulation's owner words.
+pub(crate) fn owner_ready(system: &Runtime) -> bool {
+    system.trail.as_ref().is_none_or(|trail|
+        system.emitter.simulation_space == SimulationSpace::World || trail.owner.is_some())
 }
 
 fn refusal(refused: Refused) -> &'static str {
@@ -172,18 +196,23 @@ fn build(system: &Runtime, owner: &GlobalTransform, camera: &GlobalTransform) ->
     // Admission and install already refuse these; a system that reaches here
     // otherwise draws no trail rather than a wrong one.
     let Ok(emitter_scale) = emitter_scale(system) else { return Err(Refused::EmitterScale) };
-    if system.emitter.simulation_space != SimulationSpace::World {
-        return Err(Refused::SingularView);
-    }
     let view = (camera.to_matrix().inverse() * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))).to_cols_array();
     let identity = Mat4::IDENTITY.to_cols_array();
+    let simulation_world = system.emitter.simulation_space == SimulationSpace::World;
+    // World simulation: the job composes the view with the identity; Local:
+    // with the engine's owner words attached at install (none: no draw).
+    let job_owner = match (simulation_world, trail.owner) {
+        (true, _) => identity,
+        (false, Some(words)) if system.emitter.simulation_space == SimulationSpace::Local => words,
+        _ => return Err(Refused::SingularView),
+    };
     let evidence = system.geometry.shape_evidence();
     let trail_view = TrailView {
         view,
-        // World simulation: the job composes the view with the identity.
-        owner: identity,
+        owner: job_owner,
+        // Read only by a world-space trail, which is refused.
         local_to_world: birth::source_owner_matrix(owner),
-        simulation_world: true,
+        simulation_world,
         emitter_scale,
         // Particle draws cast no shadow here; the bias applies only to a
         // shadow pass.
@@ -271,6 +300,7 @@ mod tests {
                 rings: vec![TrailRing::default(); n],
                 draw_refusal: None,
                 vertices: 0,
+                owner: None,
             };
             let mut pool: Vec<Particle> = (0..n).map(|i| Particle {
                 position: [0.0; 3], velocity: [0.0; 3], start_lifetime: 1.0,
@@ -278,7 +308,7 @@ mod tests {
             }).collect();
             let side: Vec<Side> = (0..n).map(|i| Side {
                 rand: 0.0, seed: seeds[i], rot: [0.0; 3], size: [1.0; 3], gravity: 0.0, colour: [1.0; 4],
-                total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2], emit_carry: [0.0; 2], animated: [0.0; 3],
+                total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2], emit_carry: [0.0; 2], animated: [0.0; 3], current_size: 0.0,
             }).collect();
             let natives = row["native"].as_array().unwrap();
             for (k, call) in case["calls"].as_array().unwrap().iter().enumerate() {

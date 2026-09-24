@@ -164,6 +164,7 @@ fn load_pool(system: &mut Runtime, pool: &Value) {
             custom_data: std::array::from_fn(|s| std::array::from_fn(|c| lane(&format!("custom{s}{c}"), i))),
             emit_carry: [0.0; 2],
             animated: [0.0; 3],
+            current_size: 0.0,
         });
     }
 }

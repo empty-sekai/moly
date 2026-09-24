@@ -1,13 +1,18 @@
 //! The collision calls of the native birth path against native module rows:
 //! the pool enters in runtime axes (X reflected), goes through the product's
 //! post-simulation or newborn-group call and comes back compared bit for bit
-//! with the engine's written arrays, random words and range words.
+//! with the engine's written arrays, random words and range words. A row
+//! whose query reads the current-size stream enters it as the engine's
+//! current-size array held it (the SizeModule law that writes it has its own
+//! replay), and a row with collision sub-emitter edges delivers every edge:
+//! the queued commands are compared with the engine's RecordEmit commands.
 use super::collision::{newborn_block, post_simulation, CollisionRuntime};
 use super::*;
 use moly_law::particle::collision_query::{
     Candidate, CollisionLaw, CollisionScene, CollisionState, OverlapQuery, OwnerPair, ParticleFlags, SweepHit,
     SweepRequest,
 };
+use moly_law::particle::collision_event::{CollisionEmitEdge, EdgeBurst};
 use moly_law::particle::collision_response::{CollisionRandom, CollisionResponse, QueryAffine};
 use serde_json::Value;
 
@@ -53,6 +58,11 @@ struct Tally {
     refused_past_end: usize,
     /// Compared calls in which the engine wrote some particle.
     changed: usize,
+    /// Compared calls whose query read the current-size stream.
+    current_size: usize,
+    /// Compared calls with collision edges, and the commands compared.
+    with_edges: usize,
+    commands: usize,
     outside: std::collections::BTreeMap<&'static str, usize>,
     mismatched: Vec<String>,
 }
@@ -72,14 +82,12 @@ fn product_collision_calls_match_native_rows() {
         let (from, to, count) = (row["from"].as_u64().unwrap() as usize, row["to"].as_u64().unwrap() as usize,
             row["count"].as_u64().unwrap() as usize);
         let dt = words(&row["dt"]);
-        let outside = if flags[0] != 0 {
-            Some("current-size stream")
+        let outside = if flags[0] != 0 && flags[1] != 0 {
+            Some("current-size stream with the 3D size")
         } else if flags[2] != 0 {
             Some("speed modifier")
         } else if flags[3] != 0 {
             Some("collision events on")
-        } else if !row["sub"].as_array().unwrap().is_empty() {
-            Some("collision sub-emitter edges")
         } else if to == from {
             Some("empty range")
         } else if from == 0 && to == count && dt.iter().all(|&w| w == dt[0]) {
@@ -101,7 +109,7 @@ fn product_collision_calls_match_native_rows() {
         let world = row["space"].as_u64() == Some(1);
         let law = CollisionLaw::from_words(response, bits(&module["radiusScale"]), word(&module["collidesWith"]),
             word(&module["dynamic"]) != 0, module["maxShapes"].as_i64().unwrap() as i32, world,
-            ParticleFlags { current_size: false, size_3d: flags[1] != 0, speed_modifier: false });
+            ParticleFlags { current_size: flags[0] != 0, size_3d: flags[1] != 0, speed_modifier: false });
         let columns = |key: &str| {
             let w = words(&row[key]);
             QueryAffine::from_columns(&std::array::from_fn(|i| f32::from_bits(w[i])))
@@ -134,12 +142,42 @@ fn product_collision_calls_match_native_rows() {
             hits: 0,
             draws: 0,
             unreached: 0,
+            size: None,
+            edges: Vec::new(),
+            pending: Vec::new(),
         };
+        let edges: Vec<super::sub_events::CollisionEdge> = row["sub"].as_array().unwrap().iter().enumerate().map(|(k, edge)| {
+            let e = edge.as_array().unwrap();
+            assert_eq!(e[0].as_u64(), Some(0), "edge properties");
+            let burst = e[2].as_array().unwrap().first().map(|b| {
+                let b = b.as_array().unwrap();
+                assert_eq!(b[1].as_u64(), Some(0), "constant burst count");
+                EdgeBurst::new(bits(&b[0]), bits(&b[2])).expect("burst in range")
+            });
+            super::sub_events::CollisionEdge {
+                target: format!("edge{k}"),
+                law: CollisionEmitEdge::new(bits(&e[1]), burst).expect("edge in range"),
+            }
+        }).collect();
+        let has_edges = !edges.is_empty();
+        collision.attach_edges(edges);
+        for k in 0..collision.edges.len() {
+            collision.deliver_to(&format!("edge{k}"));
+        }
         let arrays = &row["arrays"];
         let at = |key: &str, i: usize| f32::from_bits(word(&arrays[key][i]));
         let v3 = |base: u32, i: usize| std::array::from_fn(|k| at(&(base + 32 * k as u32).to_string(), i));
         let reflect = |v: [f32; 3]| [-v[0], v[1], v[2]];
         let mut system = test_support::runtime();
+        // The row's collision edges are the system's authored ones.
+        system.emitter.sub_emitters = row["sub"].as_array().unwrap().iter().enumerate().map(|(k, edge)|
+            moly_law::particle::schema::SubEmitterParams {
+                emitter: Some(format!("edge{k}")),
+                source_pointer: Default::default(),
+                trigger: moly_law::particle::schema::SubEmitterTrigger::Collision,
+                properties: 0,
+                probability: bits(&edge[1]),
+            }).collect();
         let template = system.side[0];
         system.pool = (0..count).map(|i| Particle {
             position: reflect(v3(0, i)),
@@ -152,6 +190,7 @@ fn product_collision_calls_match_native_rows() {
             seed: word(&arrays["896"][i]),
             size: v3(672, i),
             animated: reflect(v3(192, i)),
+            current_size: at("768", i),
             ..template
         }).collect();
         let pending = bits(&row["s0"]);
@@ -198,6 +237,29 @@ fn product_collision_calls_match_native_rows() {
         if collision.state.range_words != [hex(&after["s10"]), hex(&after["s18"])] {
             differs.push("rangeWords");
         }
+        // Each queued command against the engine's: the three birth
+        // distribution words of its emission state, then the command bytes
+        // (not the emission pointer or the padding word).
+        let ours: Vec<Vec<u32>> = collision.take_commands().iter().map(|(_, command)| {
+            let raw = command.to_bytes();
+            let d = command.emission;
+            let mut w = vec![d.spacing.to_bits(), d.offset.to_bits(), d.burst_fraction.to_bits()];
+            w.extend((0..30).map(|k| if matches!(k, 0 | 1 | 21) { 0 } else {
+                u32::from_le_bytes(raw[4 * k..4 * k + 4].try_into().unwrap()) }));
+            w
+        }).collect();
+        let theirs: Vec<Vec<u32>> = row["log"]["emits"].as_array().unwrap().iter().map(|e| {
+            let w = words(e);
+            let mut out = w[1..4].to_vec();
+            out.extend((0..30).map(|k| if matches!(k, 0 | 1 | 21) { 0 } else { w[8 + k] }));
+            out
+        }).collect();
+        if ours != theirs {
+            differs.push("commands");
+        }
+        tally.commands += ours.len();
+        tally.with_edges += usize::from(has_edges);
+        tally.current_size += usize::from(flags[0] != 0);
         if !differs.is_empty() {
             tally.mismatched.push(format!("{label}: {differs:?}"));
         }
@@ -205,8 +267,9 @@ fn product_collision_calls_match_native_rows() {
             tally.changed += 1;
         }
     }
-    println!("product collision replay: post-simulation calls {}, newborn-group calls {} (unreached {}), refused past-end {}, compared calls that wrote a particle {}, outside the product {:?}, mismatched {}",
-        tally.post, tally.newborn, tally.unreached, tally.refused_past_end, tally.changed, tally.outside, tally.mismatched.len());
+    println!("product collision replay: post-simulation calls {}, newborn-group calls {} (unreached {}), refused past-end {}, compared calls that wrote a particle {}, reading the current-size stream {}, with collision edges {} ({} commands), outside the product {:?}, mismatched {}",
+        tally.post, tally.newborn, tally.unreached, tally.refused_past_end, tally.changed, tally.current_size,
+        tally.with_edges, tally.commands, tally.outside, tally.mismatched.len());
     for line in tally.mismatched.iter().take(20) {
         println!("  {line}");
     }
