@@ -201,7 +201,7 @@ struct WeatherRun {
     current: usize,
 }
 
-/// 当前现象档名——天气域对外的一面：音频（BGM/环境音按档换曲）与小地图
+/// 当前现象档名——天气域对外的一面：音频 BGM（按站点 × 档选曲）与小地图
 /// 天气钮（图标与文本）都读它，不进 `WeatherRun` 的私有下标。两侧同挂后
 /// 随真实档走；`audio::install` 另有同型兜底 `init_resource`（幂等）。
 #[derive(Resource)]
@@ -220,8 +220,8 @@ const DEFAULT_PHENOMENON_ID: i32 = 1;
 /// 当前现象档的 id——问候链 tweet 门的比较对象：真源在选取时读「当前
 /// 现象 id」，与条件行的 value1 相等才放行（名字不进这条门）。与档名
 /// 同点写：装载落定取默认档 id，切档取目标档 id——真源在交叉淡化的
-/// 视觉等待**之前**就写当前现象 id，这里的写点同为淡化起点。wasm 分支
-/// 不装 `WeatherPlugin`，此资源常驻默认值（与档名的 wasm 故事一致）。
+/// 视觉等待**之前**就写当前现象 id，这里的写点同为淡化起点。本机与 wasm
+/// 两端的应用装配都装 `WeatherPlugin`，两端同由天气链写它。
 #[derive(Resource)]
 pub struct CurrentPhenomenonId(pub i32);
 
@@ -819,7 +819,8 @@ fn advance(
     if !started { phase.advance(time.delta_secs()); }
 }
 
-/// Environment audio changes only after the real global FX commit, not at request.
+/// Name of the last real global FX commit (not the request). The ambience SE channel
+/// reads the committed selection and its serial from `WeatherTransition` directly.
 #[derive(Resource)]
 pub(crate) struct CommittedPhenomenon(pub String);
 impl Default for CommittedPhenomenon {
