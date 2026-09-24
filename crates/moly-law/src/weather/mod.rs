@@ -14,22 +14,24 @@
 //! | `_GRAYSCALE` | 不由档案驱动：拍照/截图滤镜的相机捕获桥静态 | 恒关 |
 //! | `_DISTORTION` | 天气路径上没有任何写入者 | 恒关 |
 //!
-//! # 第八个量：引擎原生调色，它不是一条 uber 轴
+//! # 引擎原生后处理：它不是 uber 轴，但每个现象都跑
 //!
-//! 档案还携带 URP 原生的 `ColorAdjustments`，而它**不走** uber 那六条
-//! 关键字。它走引擎自己的两段链——「烘一张调色 LUT」加「uber pass 查
-//! 那张表」——而这两段在本管线的现象相机上是**上游**：Mysekai 的后处理
-//! 特性挂在 `AfterRenderingPostProcessing`（600），引擎的调色 pass 挂在
-//! `BeforeRenderingPostProcessing`（550）；且现象相机用的渲染器自己就
-//! 入队了那两个 pass。⇒ 「不在六轴律的轴集里」是真的，「所以不接」是
-//! 假的。见 [`ColorAdjustmentsParams`]。
+//! 档案还携带 URP 原生组件，它们**不走** uber 那六条关键字，走引擎自己
+//! 的两个 pass：颜色分级 LUT pass（把音量栈里的调色组件烘成一张 32³ 的
+//! LDR 查找表）与引擎后处理 pass（场景色 + 引擎泛光，乘曝光后查那张表）。
+//! 两者在本管线的现象相机上是**上游**：Mysekai 的后处理特性挂在
+//! `AfterRenderingPostProcessing`（600），引擎后处理挂在
+//! `BeforeRenderingPostProcessing`（550）；现象相机的
+//! `renderPostProcessing` 在相机预制体里是开的、运行时没有写入者，所以
+//! 这两个 pass **每个现象都跑**——包括调色组件不活跃的晴天（那一档的表
+//! 也不是恒等表，见 [`lut`]）。
 //!
-//! 同一族里 `WhiteBalance` 在实证档案上**恒等**，不构成缺口（013、014
-//! 两档带，组件级 active 皆为假 ⇒ 落构造默认 ⇒ LMS 系数全 1）。URP 原生
-//! `Bloom` 不恒等：009 带而 active 为假，013_universe 带且 active 为真——
-//! 那一档的引擎泛光本模块不给出，按未做完的活记账。`SplitToning` 在 013、
-//! 014、016（含 016 的 first_floor 覆写）上 active 为真，由
-//! [`PostProcessProfile::resolve_split_toning`] 采纳。
+//! 实证档案里带的原生组件是 `ColorAdjustments`（34 份，晴天全局那份
+//! 组件级不活跃）、`SplitToning`（4 份活跃）、`WhiteBalance`（2 份，都
+//! 不活跃 ⇒ 构造默认 ⇒ LMS 系数全 1）与 `Bloom`（2 份：宇宙那份活跃、
+//! 流星那份不活跃）。三个调色组件的采纳见 [`PostProcessProfile::lut_stack`]，
+//! 引擎泛光见 [`PostProcessProfile::stock_bloom`]；其余原生组件一旦出现且
+//! 活跃，两处都响亮拒绝——它们会改变表或引擎 uber，而本模块没有它们的律。
 //!
 //! # 采纳门 `overrideState` 是门，不是值
 //!
@@ -40,9 +42,8 @@
 //! 每个字段都走「门开取序列化值、门关取构造默认」，下面的构造默认
 //! 逐项转写自真源四个 volume 组件的构造函数，不是发明。
 //!
-//! 组件整体缺席不是错误：各档案携带的组件本就不同（013、014 另带
-//! `SplitToning`/`WhiteBalance`，016 另带 `SplitToning`，009 与 013 带原生
-//! `Bloom`；四个 Mysekai 组件
+//! 组件整体缺席不是错误：各档案携带的组件本就不同（013、014、016 另带
+//! `SplitToning`，013、014 带 `WhiteBalance`，009、013 带原生 `Bloom`；四个 Mysekai 组件
 //! 是闭集），而真源栈为每种组件类型预建了默认实例，行为恰是
 //! 「组件缺席 → 构造默认」。组件在而参数缺才是 `Err`（点名它）：
 //! 序列化资产总是携带整个组件，缺参数是数据损伤，不是游戏状态，
@@ -67,6 +68,8 @@ pub mod color_lerp;
 pub mod light_pass;
 
 pub mod sky;
+
+pub mod lut;
 
 #[cfg(test)]
 mod corpus;
@@ -275,11 +278,13 @@ pub struct DiffusionParams {
 /// 「烘 LUT + uber 查表」两段链，而那两段在本管线的现象相机上是**上游**：
 /// Mysekai 的后处理特性挂在 `AfterRenderingPostProcessing` 这个事件上，
 /// 引擎的调色 pass 挂在它之前。所以「不在六轴律的轴集里」为真、
-/// 「所以不接」为假：档案里 15 档有 14 档的调色是非恒等的。
+/// 「所以不接」为假：18 份全局档案里 17 份的这个组件是活跃的。产品侧
+/// 经 [`PostProcessProfile::lut_stack`] 进 [`lut`] 烘表、由引擎 uber 查表。
 ///
 /// 单位照源参数的原始单位存（`contrast`/`saturation` 是百分数、
 /// `hueShift` 是度、`postExposure` 是 EV），装箱一跳见
-/// [`ColorAdjustmentsParams::pack`]。
+/// [`ColorAdjustmentsParams::pack`]（烘表用的是 [`lut::LdrLutInputs::from_stack`]
+/// 那份完整打包，uber 的曝光倍数见 [`lut::uber_lut_params`]）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorAdjustmentsParams {
     /// EV，`2^x` 是乘在场景色上的线性倍数。
@@ -357,6 +362,70 @@ pub struct SunFlareParams {
     pub offset1: f32,
     pub offset2: f32,
     pub exponent: f32,
+}
+
+/// URP 原生 `Bloom`（场景色上的引擎泛光，与粒子泛光无关）的采纳参数。
+/// 单位照源参数：`threshold` 在 gamma 域（源属性说明原文），`downscale`
+/// 是 `BloomDownscaleMode` 的枚举值（0 = Half，1 = Quarter）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StockBloomParams {
+    pub threshold: f32,
+    pub intensity: f32,
+    pub scatter: f32,
+    pub clamp: f32,
+    pub tint: [f32; 4],
+    pub high_quality_filtering: bool,
+    pub downscale: i32,
+    pub max_iterations: i32,
+    pub dirt_texture_present: bool,
+    pub dirt_intensity: f32,
+}
+
+/// 引擎泛光金字塔的尺寸计划：首级宽高与级数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StockBloomPlan {
+    pub width: u32,
+    pub height: u32,
+    pub mip_count: usize,
+}
+
+impl StockBloomParams {
+    /// 引擎后处理 pass 建泛光金字塔的尺寸律：首级是相机目标尺寸右移
+    /// 1（Half）或 2（Quarter）位；级数 = `FloorToInt(Log(max(宽, 高), 2) − 1)`
+    /// 钳进 `[1, maxIterations]`；之后逐级宽高各右移 1 位、下限 1。对数照
+    /// `Mathf.Log(f, p)` 在双精度里算自然对数之比、再截回单精度。
+    /// 未知的 `downscale` 与源一样拒绝（源侧抛 `ArgumentOutOfRangeException`）。
+    pub fn plan(&self, target_width: u32, target_height: u32) -> Result<StockBloomPlan, String> {
+        let downres = match self.downscale {
+            0 => 1,
+            1 => 2,
+            other => return Err(format!("Bloom.downscale {other} is not Half (0) or Quarter (1)")),
+        };
+        let width = target_width >> downres;
+        let height = target_height >> downres;
+        let max_size = width.max(height);
+        let log = ((f64::from(max_size)).ln() / 2f64.ln()) as f32;
+        let iterations = (log - 1.0).floor() as i32;
+        let mip_count = iterations.clamp(1, self.max_iterations.max(1)) as usize;
+        Ok(StockBloomPlan { width, height, mip_count })
+    }
+
+    /// 预滤波与上采样共用的 `_Params`：`(Lerp(0.05, 0.95, scatter), clamp,
+    /// GammaToLinearSpace(threshold), 线性阈值 × 0.5)`——第四个是源里写死的
+    /// 软膝。
+    #[must_use]
+    pub fn prefilter_params(&self) -> [f32; 4] {
+        let threshold = gamma_to_linear(self.threshold);
+        [scatter_prime(self.scatter), self.clamp, threshold, threshold * 0.5]
+    }
+
+    /// 引擎 uber 的 `_Bloom_Params`：`(intensity, tint′)`，tint′ 是 tint 转线性
+    /// 后被亮度归一（亮度为零取白），与粒子泛光同一条律。
+    #[must_use]
+    pub fn uber_params(&self) -> [f32; 4] {
+        let tint = normalized_linear_tint(self.tint);
+        [self.intensity, tint[0], tint[1], tint[2]]
+    }
 }
 
 /// 一条档案驱动的 uber 轴：本帧的关键字门，加 pass 要读的采纳值。
@@ -467,6 +536,22 @@ mod ctor_defaults {
         exponent: 1.0,
     };
 
+    /// URP 原生 `Bloom` 的构造默认：threshold 0.9、intensity 0、scatter
+    /// 0.7、clamp 65472、tint 白、高质量滤波关、downscale Half、
+    /// maxIterations 6、无脏污贴图、脏污强度 0。
+    pub const STOCK_BLOOM: super::StockBloomParams = super::StockBloomParams {
+        threshold: 0.9,
+        intensity: 0.0,
+        scatter: 0.7,
+        clamp: 65472.0,
+        tint: WHITE,
+        high_quality_filtering: false,
+        downscale: 0,
+        max_iterations: 6,
+        dirt_texture_present: false,
+        dirt_intensity: 0.0,
+    };
+
     pub const SUN_FLARE: SunFlareParams = SunFlareParams {
         intensity: 1.0,
         color1: WHITE,
@@ -515,10 +600,10 @@ use ctor_defaults as cd;
 //   (screenFlareIntensity, screenFlareExponent, 0, 0)。
 // * 太阳光晕：同样的四个形状。它的 param1.xy 与 param2.x 内的亮度因子
 //   是光和相机的绘制时状态，不是 volume 值——这也是
-//   [`SunFlareParams`] 没有方向字段的原因。本侧不解方向光变换，这两处
-//   取真源的零方向与因子恒等：param1.xy = (0, 0)、param2.x =
-//   sunFlareIntensity。档案携带的其余量（颜色、偏移、指数、强度）按
-//   真源自己的式子装箱。
+//   [`SunFlareParams`] 没有方向字段的原因。这两处每帧由
+//   [`sun_flare_screen`] 从方向光向量与相机变换算出；[`uber_post_params`]
+//   里它们停在零方向与因子 1 上，调用方逐帧覆写。档案携带的其余量
+//   （颜色、偏移、指数、强度）按真源自己的式子装箱。
 // * bloom：`_Bloom_Enable_States.x` = brightEnable ? 1 : 0；
 //   `_Bloom_Params` = (intensity, tint')，tint' 是 tint 经
 //   `GammaToLinearSpace` 进线性、再被 `ColorUtils.Luminance` 归一
@@ -715,8 +800,8 @@ impl PhenomenonPostProcess {
         p.screen_flare_param1 = [cos_d, sin_d, screen.offset1, screen.offset2];
         p.screen_flare_param2 = [screen.intensity, screen.exponent, 0.0, 0.0];
 
-        // 太阳光晕：同形；param1.xy 是档案之外的绘制时方向（零方向），
-        // param2.x 直载采纳强度。
+        // 太阳光晕：同形；param1.xy 与 param2.x 的亮度因子是档案之外的
+        // 绘制时量（`sun_flare_screen`），这里停在零方向与因子 1 上。
         let sun = &self.sun_flarepara.params;
         p.sun_flare_color = sun.color1;
         p.sun_flare_color2 = sun.color2;
@@ -766,6 +851,99 @@ pub fn scatter_prime(scatter: f32) -> f32 {
     } else {
         scatter * 0.9 + 0.05
     }
+}
+
+/// `MysekaiFlarePara.GetSunFlareParameter`：太阳光晕的屏幕轴与亮度因子。
+///
+/// 源的做法：取光照设置里的方向光向量 `L`（设置原值，不经光照 pass 的
+/// 零值钳），取渲染相机变换的 `localToWorldMatrix`，求逆，乘
+/// `(L.x, L.y, L.z, 0)`，得相机本地系里的向量 `v`。屏幕轴是 `(v.x, v.y)`
+/// ——**不归一**；亮度因子是 `v.z >= 0 ? min(v.z, 1) : 0`（光向量在相机
+/// 背后时整层熄灭），返回 `因子 × sunFlareIntensity`。一次 `v.z` 被读两次
+/// （一次比较、一次取小），不是两次取值。
+///
+/// 全部量都在**真源坐标系**里：`light_vector` 是真源的方向光向量，
+/// `camera_local_to_world` 是真源相机（Unity 相机本地 +z 为视向）的
+/// 本地到世界矩阵，按列给出（`[列][行]`）。产品侧的坐标适配归调用方。
+/// 矩阵逆用一般 4×4 伴随矩阵法；引擎的原生求逆（`Matrix4x4.inverse` 背后
+/// 的带主元选择的消元）与之只在单精度末位上不同：把游戏自己的引擎求逆与托管
+/// 乘法在采样相机上原生执行对比，屏幕轴与权重的差不超过 2.4e-7。
+#[must_use]
+pub fn sun_flare_screen(
+    light_vector: [f32; 3],
+    camera_local_to_world: [[f32; 4]; 4],
+    sun_flare_intensity: f32,
+) -> ([f32; 2], f32) {
+    let inv = invert4(camera_local_to_world);
+    let l = [light_vector[0], light_vector[1], light_vector[2], 0.0];
+    let row = |i: usize| inv[0][i] * l[0] + inv[1][i] * l[1] + inv[2][i] * l[2] + inv[3][i] * l[3];
+    let (x, y, z) = (row(0), row(1), row(2));
+    let factor = if z.is_nan() {
+        f32::NAN
+    } else if z >= 0.0 {
+        z.min(1.0)
+    } else {
+        0.0
+    };
+    ([x, y], factor * sun_flare_intensity)
+}
+
+/// 一般 4×4 求逆（列主序 `[列][行]`，伴随矩阵除以行列式）。奇异矩阵给
+/// 全零：相机的本地到世界矩阵是刚体变换，这一支对它不可达。
+fn invert4(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    // a[r][c] 行主序视图。
+    let a = |r: usize, c: usize| m[c][r];
+    let mut inv = [[0.0f32; 4]; 4];
+    let s0 = a(0, 0) * a(1, 1) - a(1, 0) * a(0, 1);
+    let s1 = a(0, 0) * a(1, 2) - a(1, 0) * a(0, 2);
+    let s2 = a(0, 0) * a(1, 3) - a(1, 0) * a(0, 3);
+    let s3 = a(0, 1) * a(1, 2) - a(1, 1) * a(0, 2);
+    let s4 = a(0, 1) * a(1, 3) - a(1, 1) * a(0, 3);
+    let s5 = a(0, 2) * a(1, 3) - a(1, 2) * a(0, 3);
+    let c5 = a(2, 2) * a(3, 3) - a(3, 2) * a(2, 3);
+    let c4 = a(2, 1) * a(3, 3) - a(3, 1) * a(2, 3);
+    let c3 = a(2, 1) * a(3, 2) - a(3, 1) * a(2, 2);
+    let c2 = a(2, 0) * a(3, 3) - a(3, 0) * a(2, 3);
+    let c1 = a(2, 0) * a(3, 2) - a(3, 0) * a(2, 2);
+    let c0 = a(2, 0) * a(3, 1) - a(3, 0) * a(2, 1);
+    let det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+    if det == 0.0 || !det.is_finite() {
+        return inv;
+    }
+    let k = 1.0 / det;
+    let b = [
+        [
+            (a(1, 1) * c5 - a(1, 2) * c4 + a(1, 3) * c3) * k,
+            (-a(0, 1) * c5 + a(0, 2) * c4 - a(0, 3) * c3) * k,
+            (a(3, 1) * s5 - a(3, 2) * s4 + a(3, 3) * s3) * k,
+            (-a(2, 1) * s5 + a(2, 2) * s4 - a(2, 3) * s3) * k,
+        ],
+        [
+            (-a(1, 0) * c5 + a(1, 2) * c2 - a(1, 3) * c1) * k,
+            (a(0, 0) * c5 - a(0, 2) * c2 + a(0, 3) * c1) * k,
+            (-a(3, 0) * s5 + a(3, 2) * s2 - a(3, 3) * s1) * k,
+            (a(2, 0) * s5 - a(2, 2) * s2 + a(2, 3) * s1) * k,
+        ],
+        [
+            (a(1, 0) * c4 - a(1, 1) * c2 + a(1, 3) * c0) * k,
+            (-a(0, 0) * c4 + a(0, 1) * c2 - a(0, 3) * c0) * k,
+            (a(3, 0) * s4 - a(3, 1) * s2 + a(3, 3) * s0) * k,
+            (-a(2, 0) * s4 + a(2, 1) * s2 - a(2, 3) * s0) * k,
+        ],
+        [
+            (-a(1, 0) * c3 + a(1, 1) * c1 - a(1, 2) * c0) * k,
+            (a(0, 0) * c3 - a(0, 1) * c1 + a(0, 2) * c0) * k,
+            (-a(3, 0) * s3 + a(3, 1) * s1 - a(3, 2) * s0) * k,
+            (a(2, 0) * s3 - a(2, 1) * s1 + a(2, 2) * s0) * k,
+        ],
+    ];
+    // b 是行主序的逆；转回列主序。
+    for r in 0..4 {
+        for c in 0..4 {
+            inv[c][r] = b[r][c];
+        }
+    }
+    inv
 }
 
 fn field<'a>(v: &'a json::Value, key: &str, context: &str) -> Result<&'a json::Value, String> {
@@ -866,6 +1044,109 @@ impl PostProcessProfile {
         })
     }
 
+    /// 颜色分级 LUT pass 读的三个调色组件的采纳值（原始单位）。组件缺席或
+    /// 组件级不活跃取构造默认（`ColorAdjustments` 全恒等；`SplitToning`
+    /// 阴影与高光都是 `(0.5, 0.5, 0.5, 1)`、平衡 0；`WhiteBalance` 色温与
+    /// 色调都是 0）。LUT pass 在后处理开着时每帧都烘，**不看**这些组件的
+    /// `IsActive()`——所以这里没有门。
+    ///
+    /// 档案里一旦出现活跃的其余原生组件（通道混合、阴中高、升伽马增益、
+    /// 曲线、色调映射、暗角等）就 `Err` 点名：它们会改变表或引擎 uber，
+    /// 而本模块只有上面三个的律，静默按默认烘会给出一张看起来正常的错表。
+    pub fn lut_stack(&self) -> Result<lut::LutStack, String> {
+        self.reject_unported_stock_components()?;
+        let adjust = self.resolve_color_adjustments()?.params;
+        let mut stack = lut::LutStack {
+            post_exposure: adjust.post_exposure,
+            contrast: adjust.contrast,
+            color_filter: adjust.color_filter,
+            hue_shift: adjust.hue_shift,
+            saturation: adjust.saturation,
+            split_shadows: [0.5, 0.5, 0.5, 1.0],
+            split_highlights: [0.5, 0.5, 0.5, 1.0],
+            split_balance: 0.0,
+            white_balance_temperature: 0.0,
+            white_balance_tint: 0.0,
+        };
+        if let Some(c) = self.component("SplitToning").filter(|c| c.active) {
+            const CTX: &str = "postprocess.json.SplitToning";
+            stack.split_shadows = adopt_vector(c, "shadows", stack.split_shadows, CTX)?;
+            stack.split_highlights = adopt_vector(c, "highlights", stack.split_highlights, CTX)?;
+            stack.split_balance = adopt_scalar(c, "balance", 0.0, CTX)?;
+        }
+        if let Some(c) = self.component("WhiteBalance").filter(|c| c.active) {
+            const CTX: &str = "postprocess.json.WhiteBalance";
+            stack.white_balance_temperature = adopt_scalar(c, "temperature", 0.0, CTX)?;
+            stack.white_balance_tint = adopt_scalar(c, "tint", 0.0, CTX)?;
+        }
+        Ok(stack)
+    }
+
+    /// URP 原生 `Bloom` 的采纳与门。门是源组件 `IsActive()`：`intensity > 0`
+    /// （再折进组件级 active：不活跃的组件不进音量栈，栈里是构造默认）。
+    ///
+    /// 高质量滤波（双三次上采样 + 13 点预滤波）与脏污贴图两个变体没有移植：
+    /// 采纳后开着就 `Err`，不静默走普通变体。
+    pub fn stock_bloom(&self) -> Result<AxisState<StockBloomParams>, String> {
+        const CTX: &str = "postprocess.json.Bloom";
+        self.reject_unported_stock_components()?;
+        let d = cd::STOCK_BLOOM;
+        let params = match self.component("Bloom") {
+            None => d,
+            Some(c) if !c.active => d,
+            Some(c) => StockBloomParams {
+                threshold: adopt_scalar(c, "threshold", d.threshold, CTX)?,
+                intensity: adopt_scalar(c, "intensity", d.intensity, CTX)?,
+                scatter: adopt_scalar(c, "scatter", d.scatter, CTX)?,
+                clamp: adopt_scalar(c, "clamp", d.clamp, CTX)?,
+                tint: adopt_vector(c, "tint", d.tint, CTX)?,
+                high_quality_filtering: adopt_flag(
+                    c,
+                    "highQualityFiltering",
+                    d.high_quality_filtering,
+                    CTX,
+                )?,
+                downscale: adopt_scalar(c, "downscale", d.downscale as f32, CTX)? as i32,
+                max_iterations: adopt_scalar(c, "maxIterations", d.max_iterations as f32, CTX)?
+                    as i32,
+                dirt_texture_present: match c.parameter("dirtTexture") {
+                    Some(p) if p.override_state => p.value != ProfileValue::Null,
+                    _ => d.dirt_texture_present,
+                },
+                dirt_intensity: adopt_scalar(c, "dirtIntensity", d.dirt_intensity, CTX)?,
+            },
+        };
+        let enabled = params.intensity > 0.0;
+        if enabled && params.high_quality_filtering {
+            return Err(format!("{CTX}: highQualityFiltering is on; the bicubic variant is not ported"));
+        }
+        if enabled && params.dirt_intensity > 0.0 {
+            return Err(format!("{CTX}: dirtIntensity {} > 0; the lens-dirt variant is not ported", params.dirt_intensity));
+        }
+        Ok(AxisState { enabled, params })
+    }
+
+    /// 活跃的、本模块没有律的原生组件：点名拒绝（见 [`Self::lut_stack`]）。
+    fn reject_unported_stock_components(&self) -> Result<(), String> {
+        const KNOWN: &[&str] = &[
+            "MysekaiFogVolume",
+            "MysekaiParticleBloomVolume",
+            "MysekaiDiffusionVolume",
+            "MysekaiFlareParaVolume",
+            "ColorAdjustments",
+            "SplitToning",
+            "WhiteBalance",
+            "Bloom",
+        ];
+        match self.components.iter().find(|c| c.active && !KNOWN.contains(&c.class.as_str())) {
+            Some(c) => Err(format!(
+                "postprocess.json carries an active {} component; its engine post-processing law is not ported",
+                c.class
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// 引擎原生调色的采纳。门是源组件 `IsActive()` 的逐项转写：
     /// `postExposure != 0 || contrast != 0 || colorFilter != white ||
     /// hueShift != 0 || saturation != 0`——**逐项相等比较，没有 epsilon**，
@@ -873,18 +1154,6 @@ impl PostProcessProfile {
     ///
     /// `colorFilter != Color.white` 比的是四分量（含 alpha）；实证档案
     /// 的 alpha 恒 1，与白的 alpha 相等，所以这里也带上第四分量。
-    pub fn resolve_split_toning(&self) -> Result<([f32; 4], [f32; 4]), String> {
-        let mut shadows = [0.5, 0.5, 0.5, 0.0];
-        let mut highlights = [0.5, 0.5, 0.5, 0.0];
-        if let Some(c) = self.component("SplitToning").filter(|c| c.active) {
-            shadows = adopt_vector(c, "shadows", [0.5, 0.5, 0.5, 1.0], "SplitToning")?;
-            highlights = adopt_vector(c, "highlights", [0.5, 0.5, 0.5, 1.0], "SplitToning")?;
-            shadows[3] = adopt_scalar(c, "balance", 0.0, "SplitToning")? / 100.0;
-            highlights[3] = if shadows[..3] != [0.5; 3] || highlights[..3] != [0.5; 3] { 1.0 } else { 0.0 };
-        }
-        Ok((shadows, highlights))
-    }
-
     fn resolve_color_adjustments(
         &self,
     ) -> Result<AxisState<ColorAdjustmentsParams>, String> {

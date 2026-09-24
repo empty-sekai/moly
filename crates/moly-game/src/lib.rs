@@ -111,6 +111,7 @@ mod voice_pcm;
 pub mod walk_face;
 pub mod weather;
 pub mod weather_fx;
+mod weather_stock_post;
 mod weather_depth;
 mod weather_transition;
 mod source_render_state;
