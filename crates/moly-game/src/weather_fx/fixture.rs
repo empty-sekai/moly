@@ -227,7 +227,7 @@ mod tests {
                 runtime.color_law = runtime.emitter.color_over_lifetime.as_ref()
                     .map(moly_law::particle::color::ColorOverLifetime::from_params);
                 let context = Context { site: GlobalTransform::IDENTITY, sky: GlobalTransform::IDENTITY, camera: GlobalTransform::IDENTITY };
-                for _ in 0..60 { simulate(&mut runtime, 1.0 / 60.0, &context); }
+                for _ in 0..60 { crate::particle_runtime::simulate(&mut runtime, 1.0 / 60.0, &context); }
                 assert!(runtime.born_total > 0, "{node}: source emitter never emitted");
                 assert_eq!(runtime.refused_total, 0, "{node}: source simulation refused");
                 for quad in crate::particle_runtime::build_quads(&runtime, &GlobalTransform::IDENTITY) {

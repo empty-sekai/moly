@@ -9,16 +9,15 @@ use moly_law::particle::{
     MinMaxCurve,
 };
 
-// shape-birth-current.json, transformRows[0] and transformRows[3], shapeExit.
-// Current JP libunity SHA256:
-// 937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9
-// EmitterStoreData (0xf08e90, 2856 bytes) SHA256:
-// af18a68a808ae9c82c63e1788f9c48e03d73dcddf224e3a955c46e5c5aaba134
+// Two transform rows (the first and the fourth) and the Shape exit of the
+// current native shape birth observation: EmitterStoreData executed from the
+// current JP 6.8.1 libunity.
 // Local data is captured after both source normalization operations. World
 // data is independently captured after the outer owner multiply. All eight
 // storage lanes are retained, including the three padded lanes of the 5 birth
-// request. The probe supplied STATE+0x150=[1,1,1] in both cases; this owner
-// 3x3 must not be substituted for that distinct Shape scale input.
+// request. The probe supplied an emitter-state Shape scale of [1,1,1] in both
+// cases; this owner 3x3 must not be substituted for that distinct Shape scale
+// input.
 const LOCAL_DIRECTION_BITS: [[u32; 3]; 8] = [
     [0xbf517538, 0x3d0c48be, 0x3f12ec6b],
     [0xbe0b1ed1, 0x3e4c6120, 0x3f786d27],
@@ -134,7 +133,7 @@ fn real_spawn_one_keeps_no_shape_initial_direction_normalized() {
     let mut system = empty_runtime(false, SimulationSpace::World);
     system.node_affine = reflected_owner();
     spawn_one(&mut system, &context());
-    // Initial.Start 0xd53e54 reads matrix Z; 0xd53e74..0xd53f60 performs
+    // InitialModule::Start reads the matrix's Z axis and normalizes it with
     // FRSQRTE plus two FRSQRTS refinements and a small-vector mask. Shape.Start
     // overrides that result only when Shape is enabled.
     assert_eq!(system.pool[0].velocity, [-1.0, 0.0, 0.0]);

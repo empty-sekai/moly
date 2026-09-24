@@ -65,7 +65,7 @@ pub(super) fn box_mesh(center: Vec3, size: Vec3) -> Result<Mesh, String> {
 }
 
 /// The 34 input points used by Unity 2022.3.62f2 x86_64's capsule branch of
-/// CarveNavMeshTile (0xbcdeb4..0xbce339). This is deliberately NOT the finer
+/// CarveNavMeshTile. This is deliberately NOT the finer
 /// physics-primitive envelope below: changing its eight-sided boundary would
 /// allow locations the source carve still removes. Native downstream plane
 /// clipping/agent expansion remains the navigation host's separate obligation.
@@ -85,7 +85,8 @@ pub(super) fn nav_capsule_points(
         return Err("invalid obstacle capsule geometry".into());
     }
     // Keep the measured f32 constants and multiplication order: these are
-    // rodata 0x1547ec and 0x154714, not runtime trigonometric substitutes.
+    // the two constants the carve code loads from the engine's read-only
+    // data, not runtime trigonometric substitutes.
     let ring_radius = radius * 1.082_392_2_f32;
     let middle_radius = (radius * 0.707_106_77_f32) * 1.082_392_2_f32;
     let segment = (half_height - radius).max(0.0);
