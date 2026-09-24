@@ -63,7 +63,7 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 
 use crate::emoticon::EmoteDraw;
 use crate::env::SiteEnv;
-use crate::render::gpu::{BindGroupCache, Bound};
+use crate::render::gpu::{Bound, SharedBindGroupCache};
 use crate::fixture_material::WallLayoutShadowCasterOff;
 use crate::sky::SkyDome;
 use moly_assets::material_passes::SourceMaterialPasses;
@@ -724,12 +724,12 @@ fn prepare_shadow_draws(
 /// Its one bind group binds the frame and object buffers, which are replaced
 /// only when they grow, so it is cached by those buffer ids.
 struct ShadowDepthNode {
-    bind_groups: Mutex<BindGroupCache>,
+    bind_groups: SharedBindGroupCache,
 }
 
 impl FromWorld for ShadowDepthNode {
-    fn from_world(_world: &mut World) -> Self {
-        Self { bind_groups: Mutex::default() }
+    fn from_world(world: &mut World) -> Self {
+        Self { bind_groups: SharedBindGroupCache::from_world(world) }
     }
 }
 
@@ -783,8 +783,7 @@ impl Node for ShadowDepthNode {
         // 帧块 + 矩阵池一个 bind group；逐 draw 用动态 offset 换窗。
         let bind_group = {
             let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-            let mut groups = self.bind_groups.lock().unwrap();
-            groups.evict_idle(frame);
+            let mut groups = self.bind_groups.lock();
             groups.get(
                 render_context.render_device(),
                 "site_shadow_depth_bind_group",
@@ -1173,6 +1172,7 @@ pub struct ShadowmapPlugin;
 
 impl Plugin for ShadowmapPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_bind_group_caches(app);
         app.add_systems(Startup, load);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

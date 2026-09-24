@@ -26,7 +26,7 @@ use bevy::render::{
 };
 use std::collections::HashMap;
 
-use crate::render::gpu::{BindGroupCache, Bound};
+use crate::render::gpu::{BindGroupCache, Bound, SharedBindGroupCache};
 
 /// Explicit output contract, not inferred from a shader or material name.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
@@ -213,9 +213,14 @@ fn point_copy(
 /// The point-copy bind groups bind only the copy source view, which is one of
 /// the view target's two main textures or the encoded attachment, so they are
 /// cached by that view instead of being created for every span.
-#[derive(Default)]
 struct SourceTransparentNode {
-    bind_groups: std::sync::Mutex<BindGroupCache>,
+    bind_groups: SharedBindGroupCache,
+}
+
+impl FromWorld for SourceTransparentNode {
+    fn from_world(world: &mut World) -> Self {
+        Self { bind_groups: SharedBindGroupCache::from_world(world) }
+    }
 }
 impl ViewNode for SourceTransparentNode {
     type ViewQuery = (
@@ -242,8 +247,7 @@ impl ViewNode for SourceTransparentNode {
         };
         let cache = world.resource::<PipelineCache>();
         let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-        let mut groups = self.bind_groups.lock().unwrap();
-        groups.evict_idle(frame);
+        let mut groups = self.bind_groups.lock();
         let mut start = 0;
         while start < phase.items.len() {
             let encoded = world
@@ -355,6 +359,7 @@ impl ViewNode for SourceTransparentNode {
 pub(crate) struct SourceColorPlugin;
 impl Plugin for SourceColorPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_bind_group_caches(app);
         app.add_plugins(ExtractComponentPlugin::<EncodedColorOutput>::default())
             .add_systems(Startup, load_shader);
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
@@ -366,7 +371,8 @@ impl Plugin for SourceColorPlugin {
         );
         // Replace only the runner, retaining every incoming/outgoing graph edge
         // and the existing phase. add_node would discard the node's own edges.
-        let runner = ViewNodeRunner::new(SourceTransparentNode::default(), render.world_mut());
+        let node = SourceTransparentNode::from_world(render.world_mut());
+        let runner = ViewNodeRunner::new(node, render.world_mut());
         let mut graph = render.world_mut().resource_mut::<RenderGraph>();
         let state = graph
             .sub_graph_mut(Core3d)

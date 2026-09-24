@@ -667,7 +667,12 @@ fn build_material(
     };
     let load = |index: usize| -> Handle<Image> {
         // 角色贴图是资产根下的散装 PNG，URI 即文件名。
-        server.load::<Image>(AssetPath::from(format!("moly://{}", uri_of(index).expect("下标已核"))))
+        // Only the GPU samples them (the material binds them; nothing reads
+        // their texels on the CPU), and this is the only request of these paths.
+        moly_assets::residency::load_image(
+            server,
+            AssetPath::from(format!("moly://{}", uri_of(index).expect("下标已核"))),
+        )
     };
     let main_tex = resolved
         .main_tex
@@ -1072,6 +1077,7 @@ pub struct CharacterMaterialPlugin;
 impl Plugin for CharacterMaterialPlugin {
     fn build(&self, app: &mut App) {
         crate::render::gpu::install_shared_samplers(app);
+        crate::gpu_image_release::prepare_after_images::<CharacterMaterial>(app);
         app.add_plugins((
             MaterialPlugin::<CharacterMaterial>::default(),
             ExtractResourcePlugin::<CharacterEnv>::default(),
