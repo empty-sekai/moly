@@ -24,11 +24,12 @@
 //! 入队了那两个 pass。⇒ 「不在六轴律的轴集里」是真的，「所以不接」是
 //! 假的。见 [`ColorAdjustmentsParams`]。
 //!
-//! 同一族里另有三个组件在实证档案上**恒等**，不构成缺口：`WhiteBalance`
-//! （只有一档带、且组件级 active 为假 ⇒ 落构造默认 ⇒ LMS 系数全 1）、
-//! URP 原生 `Bloom`（只有一档带、active 亦为假）。`SplitToning` 是例外：
-//! 有一档带且 active 为真 ⇒ 那一档的调色比本模块给出的多两次 soft light，
-//! 未接，按未做完的活记账。
+//! 同一族里 `WhiteBalance` 在实证档案上**恒等**，不构成缺口（013、014
+//! 两档带，组件级 active 皆为假 ⇒ 落构造默认 ⇒ LMS 系数全 1）。URP 原生
+//! `Bloom` 不恒等：009 带而 active 为假，013_universe 带且 active 为真——
+//! 那一档的引擎泛光本模块不给出，按未做完的活记账。`SplitToning` 在 013、
+//! 014、016（含 016 的 first_floor 覆写）上 active 为真，由
+//! [`PostProcessProfile::resolve_split_toning`] 采纳。
 //!
 //! # 采纳门 `overrideState` 是门，不是值
 //!
@@ -39,8 +40,9 @@
 //! 每个字段都走「门开取序列化值、门关取构造默认」，下面的构造默认
 //! 逐项转写自真源四个 volume 组件的构造函数，不是发明。
 //!
-//! 组件整体缺席不是错误：各档案携带的组件本就不同（014 另带
-//! `SplitToning`/`WhiteBalance`，009 带原生 `Bloom`；四个 Mysekai 组件
+//! 组件整体缺席不是错误：各档案携带的组件本就不同（013、014 另带
+//! `SplitToning`/`WhiteBalance`，016 另带 `SplitToning`，009 与 013 带原生
+//! `Bloom`；四个 Mysekai 组件
 //! 是闭集），而真源栈为每种组件类型预建了默认实例，行为恰是
 //! 「组件缺席 → 构造默认」。组件在而参数缺才是 `Err`（点名它）：
 //! 序列化资产总是携带整个组件，缺参数是数据损伤，不是游戏状态，
@@ -59,6 +61,8 @@
 //! 形状一致——渲染侧没有从全局读「当前现象 id」的路径。
 
 mod json;
+
+pub mod color_lerp;
 
 pub mod light_pass;
 
