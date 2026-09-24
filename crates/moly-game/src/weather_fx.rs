@@ -1675,7 +1675,12 @@ pub(crate) fn spawn_when_ready(
     }
     if plan.site_installed && plan.global_installed { state.selection = Some(plan.selection.clone()); }
     if create_state { commands.insert_resource(created); }
-    if plan.site_installed && plan.global_installed { commands.remove_resource::<WeatherFxPlan>(); }
+    // The plan also owns the commit notice: an unchanged global effect is "installed" at
+    // the fade's start, and the site effect may install while the fade still runs, so the
+    // plan stays until the fade has ended and the notice above was published.
+    if plan.site_installed && plan.global_installed && phase.can_commit_global_fx(&plan.selection) {
+        commands.remove_resource::<WeatherFxPlan>();
+    }
 }
 
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。

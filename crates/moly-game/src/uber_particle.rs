@@ -515,6 +515,18 @@ pub(crate) fn plan(
             None => {}
         }
     }
+    // An environment site effect can live inside the site scene itself (the festival
+    // garden's `effect_root/fx_env_site_<phenomenon>`: its phenomenon has no unique
+    // environment bundle, so the environment loader never instantiates one). Name those
+    // rows so their admission is visible next to the family totals.
+    let embedded: Vec<&str> = doc.particles.iter().map(|s| s.node.as_str())
+        .filter(|node| node.contains("fx_env_site_")).collect();
+    if !embedded.is_empty() {
+        let admitted: Vec<&str> = plans.iter().map(|p: &Planned| p.node.as_str())
+            .filter(|node| node.contains("fx_env_site_")).collect();
+        info!("[uber-particle] {} scene-embedded environment effect rows {:?}; admitted {:?}",
+            active.scene, embedded, admitted);
+    }
     if tally.records == 0 {
         // 这个站点包里没有这一族的粒子系统：不留资源，也不每帧重扫。
         commands.insert_resource(UberParticlePlan {
