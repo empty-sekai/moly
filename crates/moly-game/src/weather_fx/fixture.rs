@@ -232,9 +232,9 @@ mod tests {
                 runtime.cone_angle = planned.cone_angle;
                 runtime.rol = planned.rol; runtime.limit = planned.limit;
                 runtime.velocity_law = runtime.emitter.velocity_over_lifetime.as_ref()
-                    .map(moly_law::particle::velocity::VelocityOverLifetime::from_params);
+                    .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission"));
                 runtime.size_law = runtime.emitter.size_over_lifetime.as_ref()
-                    .map(moly_law::particle::size::SizeOverLifetime::from_params);
+                    .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
                 runtime.color_law = runtime.emitter.color_over_lifetime.as_ref()
                     .map(moly_law::particle::color::ColorOverLifetime::from_params);
                 let context = Context { site: GlobalTransform::IDENTITY, sky: GlobalTransform::IDENTITY, camera: GlobalTransform::IDENTITY };
@@ -250,6 +250,111 @@ mod tests {
             }
         }
         assert!(mesh_count > 0, "source fixture corpus did not contain any active Mesh emitters");
+    }
+
+    /// Coverage diagnostic, not a correctness test: where every ring-buffer
+    /// system of the supplied fixture docs stops in the fixture host's
+    /// admission. Prints one line per system.
+    #[test]
+    #[ignore = "requires MOLY_FIXTURE_PARTICLE_AUDIT_ROOT containing exported source fixture particles"]
+    fn source_fixture_ring_systems_census() {
+        let root = std::path::PathBuf::from(std::env::var_os("MOLY_FIXTURE_PARTICLE_AUDIT_ROOT").expect("source directory"));
+        let mut app = App::new();
+        moly_assets::install(&mut app, moly_assets::AssetSource::NativeDir { path: root.clone() });
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default(), bevy::image::ImagePlugin::default()));
+        moly_assets::source_shader::loader::register(&mut app);
+        app.init_asset::<Gltf>();
+        app.finish(); app.cleanup();
+        let server = app.world().resource::<AssetServer>();
+        let mut rows = 0;
+        for entry in std::fs::read_dir(root.join("fixture-particles-v2")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let Some(particles) = doc["emitters"].as_array() else { continue; };
+            let by_path = doc["nodes"].as_array().unwrap().iter()
+                .map(|node| (node["node"].as_str().unwrap().to_owned(), node)).collect();
+            let owners = source_sub_emitter_owners(particles);
+            for particle in particles {
+                if particle["system"]["ringBufferMode"].as_u64().is_none_or(|mode| mode == 0) { continue; }
+                let mut tally = Tally::default();
+                let planned = judge_in_archive("fixture", particle, &by_path, &owners, EffectKind::Site, false,
+                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally);
+                println!("ring {} {}: admitted={} {tally:?}", path.file_name().unwrap().to_string_lossy(),
+                    particle["node"].as_str().unwrap_or(""), planned.is_some());
+                rows += 1;
+            }
+        }
+        println!("ring systems {rows}");
+        assert!(rows > 0, "the supplied fixture docs hold no ring-buffer system");
+    }
+
+    /// Coverage diagnostic, not a correctness test: where every system of the
+    /// supplied fixture docs whose shape runs only with the native birth owner
+    /// (Box, the BurstSpread circle and edge, the Loop, PingPong and
+    /// BurstSpread cone) stops in the fixture host's admission, and whether
+    /// its node is active in the exported hierarchy (the next gate). Every
+    /// system of a doc whose file name holds `MOLY_FIXTURE_CENSUS_CONTROL` is
+    /// printed as a control row. One line per system, then counts by reason.
+    #[test]
+    #[ignore = "requires MOLY_FIXTURE_PARTICLE_AUDIT_ROOT containing exported source fixture particles"]
+    fn source_fixture_native_only_shape_census() {
+        let root = std::path::PathBuf::from(std::env::var_os("MOLY_FIXTURE_PARTICLE_AUDIT_ROOT").expect("source directory"));
+        let control = std::env::var("MOLY_FIXTURE_CENSUS_CONTROL").ok().filter(|name| !name.is_empty());
+        let mut app = App::new();
+        moly_assets::install(&mut app, moly_assets::AssetSource::NativeDir { path: root.clone() });
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default(), bevy::image::ImagePlugin::default()));
+        moly_assets::source_shader::loader::register(&mut app);
+        app.init_asset::<Gltf>();
+        app.finish(); app.cleanup();
+        let server = app.world().resource::<AssetServer>();
+        let mut rows = 0;
+        let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut entries: Vec<_> = std::fs::read_dir(root.join("fixture-particles-v2")).unwrap()
+            .map(|entry| entry.unwrap().path()).collect();
+        entries.sort();
+        for path in entries {
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let Some(particles) = doc["emitters"].as_array() else { continue; };
+            let Some(nodes) = doc["nodes"].as_array() else { continue; };
+            let by_path: HashMap<String, &Value> = nodes.iter()
+                .filter_map(|node| Some((node["node"].as_str()?.to_owned(), node))).collect();
+            let owners = source_sub_emitter_owners(particles);
+            let is_control = control.as_deref().is_some_and(|name| file.contains(name));
+            for particle in particles {
+                let system = &particle["system"];
+                let shape = &system["shape"];
+                let kind = shape["type"].as_str().unwrap_or("");
+                let mode = if kind == "SingleSidedEdge" { &shape["radiusMode"] } else { &shape["arcMode"] };
+                let native_only = system["shapeEnabled"] == true && match (kind, mode.as_str()) {
+                    ("Box", _) => true,
+                    ("Circle" | "SingleSidedEdge", Some("BurstSpread")) => true,
+                    ("Cone", Some("Loop" | "PingPong" | "BurstSpread")) => true,
+                    _ => false,
+                };
+                if !native_only && !is_control { continue; }
+                let node = particle["node"].as_str().unwrap_or("");
+                let mut tally = Tally::default();
+                let planned = judge_in_archive("fixture", particle, &by_path, &owners, EffectKind::Site, false,
+                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally);
+                let reason = tally.shape.first().or(tally.law_reject.first()).cloned()
+                    .map(|text| text.strip_prefix(node).map(str::to_owned).unwrap_or(text))
+                    .unwrap_or_else(|| if planned.is_some() { "admitted".into() }
+                        else if tally.node_inactive > 0 { "node inactive".into() } else { format!("{tally:?}") });
+                let label = if native_only { format!("{kind} {}", mode.as_str().unwrap_or("-")) } else { "control".into() };
+                println!("native-only-census {label} | {file} | {node} | admitted={} active_in_hierarchy={} | {reason}",
+                    planned.is_some(), active_in_hierarchy(&by_path, node));
+                if native_only {
+                    *reasons.entry(format!("{label}: {reason}")).or_default() += 1;
+                    rows += 1;
+                }
+            }
+        }
+        for (reason, count) in &reasons { println!("native-only-census count {count} | {reason}"); }
+        println!("native-only-census systems {rows}");
+        assert!(rows > 0, "the supplied fixture docs hold no native-only shape system");
     }
 }
 
@@ -377,16 +482,16 @@ fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {
         playback_head: 0.0, previous_head: 0.0, emission_started: false,
         native_birth: None, noise: None,
         rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
-        prewarmed: false, cone_angle: planned.cone_angle, rol: planned.rol.clone(), limit: planned.limit.clone(),
-        velocity_law: planned.emitter.velocity_over_lifetime.as_ref().map(moly_law::particle::velocity::VelocityOverLifetime::from_params),
+        prewarmed: false, pending: 0.0, cone_angle: planned.cone_angle, rol: planned.rol.clone(), limit: planned.limit.clone(),
+        velocity_law: planned.emitter.velocity_over_lifetime.as_ref().map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission")),
         force_law: planned.emitter.force.as_ref().map(|p|
             moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
-        gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier),
-        custom_law: planned.emitter.custom_data.as_ref().map(moly_law::particle::custom_data::CustomData::from_params),
+        gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier).expect("curves validated during admission"),
+        custom_law: planned.emitter.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission")),
         texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
             moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
         sort_mode: planned.source.sort_mode,
-        size_law: planned.emitter.size_over_lifetime.as_ref().map(moly_law::particle::size::SizeOverLifetime::from_params),
+        size_law: planned.emitter.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission")),
         color_law: planned.emitter.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params),
         born_total: 0, died_total: 0, full_total: 0, refused_total: 0,
     }

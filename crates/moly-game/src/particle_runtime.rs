@@ -32,6 +32,8 @@ mod shape_birth_samples;
 #[cfg(test)]
 mod snow_full_samples;
 #[cfg(test)]
+mod frame_clock_samples;
+#[cfg(test)]
 mod noise_samples;
 #[cfg(test)]
 mod initial_colour_samples;
@@ -48,14 +50,117 @@ const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 
 pub(crate) const PREWARM_STEP: f32 = 1.0 / 60.0;
 
-/// Current JP player TimeManager as serialized in globalgamemanagers
-/// (Fixed Timestep 0.02, Maximum Particle Timestep 0.03). The game assembly
-/// reads Time.fixedDeltaTime and never assigns it or the particle maximum.
+/// The player's TimeManager. The JP 6.8.1 and CN 6.0.0 players serialize the
+/// same one (Fixed Timestep 0.02, Maximum Allowed Timestep 1/3, time scale 1,
+/// Maximum Particle Timestep 0.03, the engine's reset defaults), so one
+/// constant serves both regions. The game assembly calls only Time getters, so
+/// these hold for the whole session. TimeManager::Update clamps Time.deltaTime
+/// to the Maximum Allowed Timestep, and GetTimeStep cuts each particle frame by
+/// the Maximum Particle Timestep.
 pub(crate) const PLAYER_TIME: moly_law::particle::prewarm::TimeManagerSnapshot =
     moly_law::particle::prewarm::TimeManagerSnapshot {
         fixed_timestep: f32::from_bits(0x3ca3_d70a),
         maximum_particle_timestep: f32::from_bits(0x3cf5_c28f),
+        maximum_delta_time: f32::from_bits(0x3eaa_aaab),
     };
+
+/// Maximum frame of the app's virtual clock, the engine's Time.maximumDeltaTime
+/// in whole nanoseconds. The engine clamps a frame longer than
+/// 0.3333333432674408 s (333,333,343.27 ns); the virtual clock clamps a frame
+/// longer than this many nanoseconds, which is the same decision for every
+/// whole-nanosecond frame, and the clamped frame rounds to the same float as the
+/// engine's maximum.
+pub(crate) const PLAYER_MAXIMUM_DELTA: std::time::Duration = std::time::Duration::from_nanos(333_333_343);
+
+/// Time.deltaTime of a frame whose real (or virtual) duration is `elapsed`:
+/// TimeManager::Update clamps it at Time.maximumDeltaTime, floors it at 1e-5 s
+/// and otherwise rounds the elapsed seconds once to float.
+pub(crate) fn source_delta_time(elapsed: std::time::Duration) -> f32 {
+    moly_law::particle::frame_time::source_delta_time(elapsed, PLAYER_TIME)
+}
+
+/// Which engine clock a system's frame reads: ParticleSystem::BeginUpdate
+/// takes Time.unscaledDeltaTime for a system with useUnscaledTime and
+/// Time.deltaTime for any other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameClock {
+    Scaled,
+    Unscaled,
+}
+
+impl FrameClock {
+    pub(crate) fn from_use_unscaled_time(flag: bool) -> Self {
+        if flag { Self::Unscaled } else { Self::Scaled }
+    }
+}
+
+/// The player's one Time.unscaledDeltaTime holder, advanced once per frame from
+/// the real clock (never from the clamped virtual clock).
+#[derive(Resource, Default)]
+pub(crate) struct UnscaledFrameClock {
+    clock: moly_law::particle::frame_time::UnscaledClock,
+    delta: f32,
+}
+
+impl UnscaledFrameClock {
+    /// This frame's Time.unscaledDeltaTime.
+    pub(crate) fn delta(&self) -> f32 {
+        self.delta
+    }
+}
+
+pub(crate) fn advance_unscaled_clock(real: Res<Time<Real>>, mut unscaled: ResMut<UnscaledFrameClock>) {
+    let delta = unscaled.clock.advance(real.delta());
+    unscaled.delta = delta;
+}
+
+/// One frame of a playing system: ParticleSystem::Update1b's frame part and
+/// Update1Incremental. The frame's delta is scaled by FMAX(simulationSpeed, 0),
+/// cut into equal pieces by GetTimeStep with the Maximum Particle Timestep and
+/// added to the time left over from the previous update; a step below 1e-5 s
+/// skips the whole update without keeping its time. Each slice runs one
+/// ordinary update; what is left below 1e-6 s carries to the next frame.
+/// `slice_start` sees the system at the start of every slice, where the
+/// engine checks a non-looping system's time against its duration. Returns
+/// whether the update ran (Update1b then stores the system's bounds). Each
+/// slice runs through `step_frame`; its first refusal ends the frame and is
+/// returned, and the weather host then retires the system (see `step_frame`).
+pub(crate) fn advance_frame(system: &mut Runtime, dt: f32, emitting: bool, ctx: &Context,
+    mut slice_start: impl FnMut(&Runtime)) -> Result<bool, String> {
+    use moly_law::particle::frame_time::{frame_step, FrameStep};
+    match frame_step(system.pending, dt, system.emitter.simulation_speed, PLAYER_TIME, system.emitter.duration) {
+        Ok(FrameStep::Skipped) => Ok(false),
+        Ok(FrameStep::Slices(mut slices)) => {
+            let mut refused = None;
+            for slice in slices.by_ref() {
+                slice_start(system);
+                match slice {
+                    Ok(slice) => {
+                        if let Err(reason) = step_frame(system, slice.duration, ctx, emitting) {
+                            refused = Some(reason);
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        system.refused_total += 1;
+                        error!(%error, effect=%system.effect, node=%system.node, "particle frame slice refused");
+                        break;
+                    }
+                }
+            }
+            system.pending = slices.remaining();
+            match refused {
+                Some(reason) => Err(reason),
+                None => Ok(true),
+            }
+        }
+        Err(error) => {
+            system.refused_total += 1;
+            error!(%error, effect=%system.effect, node=%system.node, "particle frame refused");
+            Ok(false)
+        }
+    }
+}
 
 /// Native update route the source selects for a system. Ordinary systems
 /// advance through the incremental Update1 path this runtime transcribes.
@@ -309,6 +414,7 @@ fn later_play(system: &mut Runtime) {
     }
     system.playback_head = 0.0;
     system.previous_head = 0.0;
+    system.pending = 0.0;
 }
 
 /// The native first-Play slice schedule of an installed ordinary system.
@@ -318,15 +424,17 @@ pub(crate) fn first_play_plan(system: &Runtime) -> Result<PrewarmPlan, &'static 
 
 fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx: &Context)
     -> Result<(), &'static str> {
-    let plan = first_play_plan(system)?;
+    let mut plan = first_play_plan(system)?;
     system.playback_head = plan.initial_clock();
-    for slice in plan {
+    for slice in plan.by_ref() {
         let slice = slice?;
         if birth::step_explicit(system, state, slice.duration, false, ctx).is_err() {
             system.refused_total += 1;
             return Err("native prewarm slice refused");
         }
     }
+    // Update1Incremental leaves what is below 1e-6 s pending for the next update.
+    system.pending = plan.remaining();
     Ok(())
 }
 
@@ -536,6 +644,9 @@ pub(crate) struct Runtime {
     pub(crate) noise: Option<NoiseRuntime>,
     /// 惰性 prewarm 的闸：首个推进帧快进一个周期。
     pub(crate) prewarmed: bool,
+    /// Time the incremental update left pending (below 1e-6 s), added to the
+    /// next frame's scaled delta. Play returns it to zero.
+    pub(crate) pending: f32,
     pub(crate) cone_angle: Option<f32>,
     pub(crate) rol: Option<RotationOverLifetime>,
     pub(crate) limit: Option<LimitVelocity>,
@@ -553,7 +664,7 @@ pub(crate) struct Runtime {
     pub(crate) refused_total: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct NoiseRuntime {
     pub(crate) law: NoiseLaw,
     pub(crate) state: NoiseState,
@@ -764,9 +875,15 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
             }
         }
         // The source samples the rate at the slice end, in normalized cycle time.
-        let rate = emission
-            .rate_over_time
-            .evaluate(normalized_time(system, system.playback_head), 0.5);
+        let rate = match cycle_curve(&emission.rate_over_time,
+            normalized_time(system, system.playback_head), 0.5) {
+            Ok(rate) => rate,
+            Err(reason) => {
+                system.refused_total += 1;
+                error!(%reason, effect=%system.effect, node=%system.node, "rate over time refused");
+                0.0
+            }
+        };
         let mut emitted = accumulate_rate(&mut system.emission, rate, dt);
         for burst in &emission.bursts {
             let rand_fire = system.rng.next_f32();
@@ -875,12 +992,15 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         // Noise contributes transient animated velocity after authored
         // VelocityOverLifetime and before Force/LimitVelocity. Runtime stores
         // reflected coordinates, so reflect the source-space kernel once at
-        // this boundary; it is not a world-space acceleration.
-        let noise_anim = system.noise.map_or([0.0; 3], |noise| {
+        // this boundary; it is not a world-space acceleration. A strength
+        // curve reads the particle's age before this frame's lifetime advance,
+        // the same stored percent the pre-simulation module batch sees.
+        let noise_anim = system.noise.as_ref().map_or([0.0; 3], |noise| {
             let source_position = crate::particle_geometry::reflect(
                 Vec3::from_array(system.pool[index].position)).to_array();
             crate::particle_geometry::reflect(Vec3::from_array(
-                noise.law.sample(noise.state, source_position, noise.owner_seed),
+                noise.law.sample(noise.state, source_position, noise.owner_seed,
+                    system.pool[index].age_percent),
             )).to_array()
         });
         let anim = std::array::from_fn(|axis| velocity_anim[axis] + noise_anim[axis]);
@@ -1036,6 +1156,7 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
     let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;
     system.native_birth = Some(birth::NativeBirthState {
         owner: Some(owner), initial: streams.initial, shape: streams.shape,
+        shape_clock: moly_law::particle::shape::ArcLoopClock::default(),
         emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(streams.scalar_birth),
     });
     if let Some(law) = noise_law {
@@ -1080,6 +1201,58 @@ pub(crate) fn install_noise_consumer(
 /// 出生一颗：形状抽样 → 出生取值 → 律的入池裁决。
 /// Clock time as the fraction of one authored cycle, the time base of every
 /// start value and emission curve.
+/// A MinMaxCurve the legacy step evaluates at its normalized cycle time,
+/// through the engine's curve dispatch. The judge admits every such curve
+/// through [`curve_admission`] before a runtime exists.
+fn cycle_curve(curve: &moly_law::particle::MinMaxCurve, t: f32, random: f32) -> Result<f32, &'static str> {
+    use moly_law::particle::curve::{CurveSampler, CurveTime};
+    Ok(CurveSampler::new(curve, CurveTime::Normalized)?.evaluate(t, random))
+}
+
+/// Every MinMaxCurve a runtime evaluates goes through the engine's curve
+/// dispatch (`moly_law::particle::curve::CurveSampler`). Each consumer is built
+/// once here, so a lane outside the transcribed evaluator refuses the system
+/// before any law is installed; the installation sites rely on it. Force,
+/// rotation, limit velocity and Noise are built by the judge itself.
+pub(crate) fn curve_admission(emitter: &EmitterParams) -> Result<(), String> {
+    use moly_law::particle::curve::{CurveSampler, CurveTime};
+    use moly_law::particle::MinMaxCurve;
+    if let Some(params) = &emitter.size_over_lifetime {
+        moly_law::particle::size::SizeOverLifetime::from_params(params)
+            .map_err(|reason| format!("sizeOverLifetime: {reason}"))?;
+    }
+    if let Some(params) = &emitter.custom_data {
+        moly_law::particle::custom_data::CustomData::from_params(params)
+            .map_err(|reason| format!("customData: {reason}"))?;
+    }
+    if let Some(params) = &emitter.velocity_over_lifetime {
+        moly_law::particle::velocity::VelocityOverLifetime::from_params(params)
+            .map_err(|reason| format!("velocityOverLifetime: {reason}"))?;
+    }
+    moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier)
+        .map_err(|reason| format!("start.gravityModifier: {reason}"))?;
+    // The legacy step's start values, sampled at the normalized cycle time.
+    let start = &emitter.start;
+    for (name, curve) in [("lifetime", Some(&start.lifetime)), ("size", Some(&start.size)),
+        ("sizeY", start.size_y.as_ref()), ("sizeZ", start.size_z.as_ref()),
+        ("rotation", Some(&start.rotation)), ("rotationX", start.rotation_x.as_ref()),
+        ("rotationY", start.rotation_y.as_ref()), ("speed", Some(&start.speed)),
+        ("gravityModifier", Some(&start.gravity_modifier))] {
+        if let Some(curve) = curve {
+            CurveSampler::new(curve, CurveTime::Normalized).map_err(|reason| format!("start.{name}: {reason}"))?;
+        }
+    }
+    if let Some(emission) = &emitter.emission {
+        CurveSampler::new(&emission.rate_over_time, CurveTime::Normalized)
+            .map_err(|reason| format!("emission.rateOverTime: {reason}"))?;
+        if emission.bursts.iter().any(|burst| matches!(burst.count,
+            MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. })) {
+            return Err("emission burst count curve: the time the engine evaluates it at is not transcribed".into());
+        }
+    }
+    Ok(())
+}
+
 fn normalized_time(system: &Runtime, head: f32) -> f32 {
     let duration = system.emitter.duration;
     if !(duration.is_finite() && duration > 0.0) {
@@ -1198,41 +1371,41 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     // births a whole slice at its start, so that is the time it uses.
     let t0 = normalized_time(system, system.previous_head);
     let r = system.rng.next_f32();
-    let lifetime = system
-        .emitter
-        .start
-        .lifetime
-        .evaluate(t0, system.rng.next_f32())
-        .max(0.01);
-    let size_x = system
-        .emitter
-        .start
-        .size
-        .evaluate(t0, system.rng.next_f32());
-    let size_y = match &system.emitter.start.size_y {
-        Some(curve) => curve.evaluate(t0, system.rng.next_f32()),
-        None => size_x,
+    // Each start value goes through the engine's curve dispatch; a curve the
+    // judge did not admit refuses this birth and is counted.
+    let start = &system.emitter.start;
+    let rng = &mut system.rng;
+    let sample = |curve: &moly_law::particle::MinMaxCurve, random: f32| cycle_curve(curve, t0, random);
+    let values = (|| -> Result<_, &'static str> {
+        let lifetime = sample(&start.lifetime, rng.next_f32())?.max(0.01);
+        let size_x = sample(&start.size, rng.next_f32())?;
+        let size_y = match &start.size_y {
+            Some(curve) => sample(curve, rng.next_f32())?,
+            None => size_x,
+        };
+        let size_z = match &start.size_z {
+            Some(curve) => sample(curve, rng.next_f32())?,
+            None => size_x,
+        };
+        let colour = moly_law::particle::gradient::rgba8_to_float(
+            moly_law::particle::color::initial_rgba8(&start.color, t0, rng.next_f32()));
+        let spin0 = sample(&start.rotation, rng.next_f32())?;
+        let (spin_x, spin_y) = if start.rotation3d {
+            (sample(start.rotation_x.as_ref().expect("validated source X rotation"), rng.next_f32())?,
+             sample(start.rotation_y.as_ref().expect("validated source Y rotation"), rng.next_f32())?)
+        } else { (0.0, 0.0) };
+        let speed = sample(&start.speed, r)?;
+        let gravity = sample(&start.gravity_modifier, r)?;
+        Ok((lifetime, size_x, size_y, size_z, colour, spin0, spin_x, spin_y, speed, gravity))
+    })();
+    let (lifetime, size_x, size_y, size_z, colour, spin0, spin_x, spin_y, speed, gravity) = match values {
+        Ok(values) => values,
+        Err(reason) => {
+            system.refused_total += 1;
+            error!(%reason, effect=%system.effect, node=%system.node, "legacy start value refused");
+            return;
+        }
     };
-    let size_z = match &system.emitter.start.size_z {
-        Some(curve) => curve.evaluate(t0, system.rng.next_f32()),
-        None => size_x,
-    };
-    let colour = moly_law::particle::gradient::rgba8_to_float(
-        moly_law::particle::color::initial_rgba8(
-            &system.emitter.start.color, t0, system.rng.next_f32()));
-    let spin0 = system
-        .emitter
-        .start
-        .rotation
-        .evaluate(t0, system.rng.next_f32());
-    let (spin_x, spin_y) = if system.emitter.start.rotation3d {
-        (system.emitter.start.rotation_x.as_ref().expect("validated source X rotation")
-            .evaluate(t0, system.rng.next_f32()),
-         system.emitter.start.rotation_y.as_ref().expect("validated source Y rotation")
-            .evaluate(t0, system.rng.next_f32()))
-    } else { (0.0, 0.0) };
-    let speed = system.emitter.start.speed.evaluate(t0, r);
-    let gravity = system.emitter.start.gravity_modifier.evaluate(t0, r);
     let seed = system.rng.next_u32();
 
     // ---- 空间锚定：世界空间仿真出生即锚（位置过全变换、方向过线性部

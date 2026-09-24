@@ -56,9 +56,13 @@ pub mod initial;
 pub mod autonomous_emission;
 pub mod sub_emission;
 pub mod prewarm;
+pub mod frame_time;
+pub mod culling;
 
 #[cfg(test)]
 mod corpus;
+#[cfg(test)]
+mod ring_lifecycle_samples;
 
 pub use buffer::{birth_capacity, compact, compact_with_side, finish_births, RingBufferMode};
 pub use emit::{accumulate_rate, burst_check, Burst, BurstOutcome, EmissionState};

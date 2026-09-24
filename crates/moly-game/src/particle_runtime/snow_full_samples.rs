@@ -139,11 +139,11 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
     system.effect = emitter.effect.clone();
     system.node = emitter.node.clone();
     system.kind = EffectKind::Sky;
-    system.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier);
+    system.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier).expect("curves validated during admission");
     system.velocity_law = emitter
         .velocity_over_lifetime
         .as_ref()
-        .map(moly_law::particle::velocity::VelocityOverLifetime::from_params);
+        .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission"));
     system.rol = emitter.rotation_over_lifetime.as_ref().map(|p| {
         RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve)
             .unwrap()
@@ -151,7 +151,7 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
     system.size_law = emitter
         .size_over_lifetime
         .as_ref()
-        .map(moly_law::particle::size::SizeOverLifetime::from_params);
+        .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
     system.color_law = emitter
         .color_over_lifetime
         .as_ref()
@@ -159,7 +159,7 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
     system.custom_law = emitter
         .custom_data
         .as_ref()
-        .map(moly_law::particle::custom_data::CustomData::from_params);
+        .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
     let noise_law = NoiseLaw::from_params(emitter.noise.as_ref().unwrap()).unwrap();
     let owner = SeedOwner::from_serialized(71, true);
     system.noise = Some(NoiseRuntime {
@@ -280,7 +280,7 @@ fn compare_boundary(
         );
     }
     compare_field(
-        system.noise.unwrap().state.scroll.to_bits(),
+        system.noise.clone().unwrap().state.scroll.to_bits(),
         &json!(f(&expected["noiseScroll"]).to_bits()),
         "noiseScrollBits",
         at,
@@ -420,6 +420,7 @@ fn source_snow_full_prewarm_matches_current_native() {
         owner: Some(SeedOwner::from_serialized(71, true)),
         initial: module(&initial["initialWords"]),
         shape: module(&initial["shapeWords"]),
+        shape_clock: Default::default(),
         emission: AutonomousEmissionState::initialized(scalar(&initial["scalarEmissionWords"])),
     };
     state.emission.distribution.spacing = f(&initial["carry"][0]);

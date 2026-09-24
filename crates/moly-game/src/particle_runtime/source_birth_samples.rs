@@ -67,11 +67,11 @@ fn source_runtime(root: &std::path::Path, source: &Value) -> Runtime {
     system.node = emitter.node.clone();
     system.effect = emitter.effect.clone();
     system.kind = EffectKind::Sky;
-    system.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier);
+    system.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier).expect("curves validated during admission");
     system.custom_law = emitter
         .custom_data
         .as_ref()
-        .map(moly_law::particle::custom_data::CustomData::from_params);
+        .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
     system.emitter = emitter;
     system.pool.clear();
     system.side.clear();
@@ -295,11 +295,6 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
     assert!(other_reason.contains("procedural source route"), "{other_reason}");
     assert!(other_system.native_birth.is_none());
     assert_ne!(manager.manager_words_for_test(), words_before, "the legacy path resets its seed too");
-    // The ring gate itself, on the otherwise-qualified 009 emitter.
-    let mut ringed = system.emitter.clone();
-    ringed.ring_buffer_mode = RingBufferMode::LoopUntilReplaced;
-    let ring_reason = native_birth_eligible(&ringed, &SourceRoute::Ordinary).unwrap_err();
-    assert!(ring_reason.contains("newborn ring replacement composition"), "{ring_reason}");
     let report = json!({"source":row["source"],"sourceFrames":3,"particleFrames":particle_frames,
         "customChannels":custom_channels,"failureCount":0,"comparison":"Exact scalar bits and all captured Initial/Emission RNG words; zero vector signs ignored; 1D native size X expanded for runtime render side",
         "route":"actual effects.json -> Effects/EmitterParams -> install_native_birth -> simulate -> installed native step",

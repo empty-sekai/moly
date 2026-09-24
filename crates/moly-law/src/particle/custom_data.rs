@@ -1,6 +1,6 @@
 //! CustomDataModule writes persistent channels in the pre-simulation batch.
 //! Each channel has its own salted particle stream and independent curve path.
-use super::{curve::{normalized_age, CurveSampler}, random::ParticleRandom, schema::CustomDataParams};
+use super::{curve::{normalized_age, CurveSampler, CurveTime}, random::ParticleRandom, schema::CustomDataParams};
 
 #[derive(Clone, Debug)]
 pub struct CustomData {
@@ -8,14 +8,18 @@ pub struct CustomData {
 }
 
 impl CustomData {
-    pub fn from_params(params: &CustomDataParams) -> Self {
-        Self {
-            streams: [params.custom1.as_ref(), params.custom2.as_ref()].map(|slot| slot.map(|slot| {
-                assert_eq!(slot.component_count, slot.components.len());
-                assert!(slot.component_count <= 4);
-                slot.components.iter().map(CurveSampler::from_min_max_curve).collect()
-            })),
+    /// Every component follows the engine's curve dispatch on the particle's
+    /// normalized age; a lane outside the transcribed evaluator is refused.
+    pub fn from_params(params: &CustomDataParams) -> Result<Self, &'static str> {
+        let mut streams: [Option<Vec<CurveSampler>>; 2] = [None, None];
+        for (stream, slot) in streams.iter_mut().zip([params.custom1.as_ref(), params.custom2.as_ref()]) {
+            let Some(slot) = slot else { continue; };
+            assert_eq!(slot.component_count, slot.components.len());
+            assert!(slot.component_count <= 4);
+            *stream = Some(slot.components.iter().map(|curve| CurveSampler::new(curve, CurveTime::Normalized))
+                .collect::<Result<Vec<_>, _>>()?);
         }
+        Ok(Self { streams })
     }
 
     /// Disabled streams and components outside the authored count remain intact.

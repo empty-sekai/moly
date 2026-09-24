@@ -17,7 +17,7 @@ fn gravity_matches_native_in_shared_runtime() {
         system.pool.clear();system.side.clear();
         let curve=if row["mode"]==0 {MinMaxCurve::Constant(f(&row["high"]))}
             else {MinMaxCurve::TwoConstants {min:f(&row["low"]),max:f(&row["high"])}};
-        system.gravity_law=Gravity::new(&curve);
+        system.gravity_law=Gravity::new(&curve).unwrap();
         // Native samples supply the time seen by InitialModule after Tick.
         // The runtime fixture starts one step earlier; reference vectors stay
         // unchanged when the stopped path advances its system clock.

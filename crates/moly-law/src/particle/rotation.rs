@@ -27,7 +27,7 @@
 //! k1.value）；合成次序逐指令对齐（value.rs 是 a·v0+b·m0+c·v1+d·m1）。
 
 use crate::particle::value::MinMaxCurve;
-pub use super::curve::{BakedCurve, CurveSampler as AngularVelocityLaw, eval_curve, normalized_age};
+pub use super::curve::{BakedCurve, CurveSampler as AngularVelocityLaw, CurveTime, eval_curve, normalized_age};
 pub(crate) use super::random::hash_mix;
 
 // ---- 杂凑核（常量按位钉死） ----
@@ -96,11 +96,13 @@ impl RotationOverLifetime {
                 y.is_some()
             ));
         }
+        let axis = |curve: &MinMaxCurve| AngularVelocityLaw::new(curve, CurveTime::Normalized)
+            .map_err(|reason| format!("rotationOverLifetime: {reason}"));
         Ok(Self {
             separate_axes,
-            x: x.map(AngularVelocityLaw::from_min_max_curve),
-            y: y.map(AngularVelocityLaw::from_min_max_curve),
-            z: AngularVelocityLaw::from_min_max_curve(z),
+            x: x.map(axis).transpose()?,
+            y: y.map(axis).transpose()?,
+            z: axis(z)?,
         })
     }
 

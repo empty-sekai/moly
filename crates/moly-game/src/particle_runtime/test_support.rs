@@ -22,7 +22,7 @@ pub(crate) fn runtime() -> Runtime {
         node: "test".into(), effect: "test".into(),
         emitter: EmitterParams {
             effect:"test".into(),node:"test".into(), duration:5.0, looping:true, prewarm:true,
-            play_on_awake:true, simulation_speed:1.0, simulation_space:SimulationSpace::Local,
+            play_on_awake:true, simulation_speed:1.0, use_unscaled_time:Some(false), simulation_space:SimulationSpace::Local,
             random_seed:None,auto_random_seed:None,noise:None,
             start_delay:zero.clone(),ring_buffer_mode:RingBufferMode::Disabled,
             ring_buffer_loop_range:[0.0,1.0], max_particles:100,
@@ -42,9 +42,9 @@ pub(crate) fn runtime() -> Runtime {
         pool:vec![Particle::born([0.0;3],[2.0,0.0,0.0],10.0)],
         side:vec![Side {rand:0.5,seed:123,rot:[0.0;3],size:[1.0;3],gravity:0.0,colour:[1.0;4],total_velocity:[0.0;3],custom_data:[[0.0;4];2]}],
         emission:EmissionState::default(),playback_head:0.0,previous_head:0.0,emission_started:false,rng:Rng(123),native_birth:None,noise:None,
-        prewarmed:false,cone_angle:None,rol:None,limit:None,velocity_law:None,force_law:None,size_law:None,color_law:None,texture_sheet:None,
+        prewarmed:false,pending:0.0,cone_angle:None,rol:None,limit:None,velocity_law:None,force_law:None,size_law:None,color_law:None,texture_sheet:None,
         sort_mode: moly_law::particle::sort::ParticleSort::None,
-        gravity_law: moly_law::particle::gravity::Gravity::new(&MinMaxCurve::Constant(0.0)),
+        gravity_law: moly_law::particle::gravity::Gravity::new(&MinMaxCurve::Constant(0.0)).unwrap(),
         custom_law:None,
         born_total:1,died_total:0,full_total:0,refused_total:0,
     }

@@ -682,6 +682,10 @@ fn judge(
             tally.law_reject.push(format!("{}: {error}", system.node)); return None;
         }
     }
+    // Every other curve the runtime evaluates, through the engine's dispatch.
+    if let Err(error) = crate::particle_runtime::curve_admission(&emitter) {
+        tally.law_reject.push(format!("{}: {error}", system.node)); return None;
+    }
     if emitter.emission.is_none() {
         tally.no_emission += 1;
         return None;
@@ -1037,7 +1041,9 @@ pub(crate) fn advance(
         viewport.x as f32 / viewport.y.max(1) as f32,
     );
 
-    let dt = time.delta_secs();
+    // Time.deltaTime: the frame clamped at Time.maximumDeltaTime and floored at
+    // 1e-5 s, rounded once to float.
+    let dt = crate::particle_runtime::source_delta_time(time.delta());
     let state = &mut *state;
     for system in &mut state.live {
         if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
@@ -1055,8 +1061,12 @@ pub(crate) fn advance(
                 for _ in 0..steps { simulate(system, PREWARM_STEP, &ctx); }
             }
         }
-        let step = dt * system.emitter.simulation_speed;
-        if step > 0.0 { simulate(system, step, &ctx); }
+        // Update1b and Update1Incremental: the frame scaled by the simulation
+        // speed, cut by GetTimeStep with the Maximum Particle Timestep, the time
+        // left over carried to the next frame.
+        if let Err(reason) = crate::particle_runtime::advance_frame(system, dt, true, &ctx, |_| {}) {
+            error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
+        }
         let to_world = match system.emitter.simulation_space {
             SimulationSpace::World => GlobalTransform::IDENTITY,
             _ => anchor,
@@ -1118,20 +1128,21 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             },
             ring_cursor: 0,
             prewarmed: false,
+            pending: 0.0,
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),
             velocity_law: planned.emitter.velocity_over_lifetime.as_ref()
-                .map(moly_law::particle::velocity::VelocityOverLifetime::from_params),
+                .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission")),
             force_law: planned.emitter.force.as_ref().map(|p|
                 moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
-            gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier),
+            gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier).expect("curves validated during admission"),
             size_law: planned.emitter.size_over_lifetime.as_ref()
-                .map(moly_law::particle::size::SizeOverLifetime::from_params),
+                .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission")),
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
             custom_law: planned.emitter.custom_data.as_ref()
-                .map(moly_law::particle::custom_data::CustomData::from_params),
+                .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission")),
             texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
                 moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
             sort_mode: moly_law::particle::sort::ParticleSort::None,
@@ -1354,8 +1365,12 @@ pub(crate) fn advance_fixture_particles(
                     for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
                 }
             }
-            let dt = time.delta_secs() * system.emitter.simulation_speed;
-            if dt > 0.0 { simulate(system, dt, &ctx); }
+            // Time.deltaTime sliced as Update1b and Update1Incremental slice it
+            // (the Director path above steps by its own playable time instead).
+            let dt = crate::particle_runtime::source_delta_time(time.delta());
+            if let Err(reason) = crate::particle_runtime::advance_frame(system, dt, true, &ctx, |_| {}) {
+                error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
+            }
         }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if let Some(mesh) = meshes.get_mut(&system.mesh) {

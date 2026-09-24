@@ -1,4 +1,4 @@
-//! Qualified constant, single-octave 3D/high particle Noise.
+//! Qualified single-octave 3D/high particle Noise with a constant or curve strength.
 //!
 //! Pure law: the consumer supplies owner seed, scroll and source simulation inputs.
 //! Transcribed from the current JP 6.8.1 libunity, along the call chain
@@ -16,12 +16,18 @@
 //! constants, not game artwork, assets, or an application-specific lookup table.
 
 pub use super::schema::{NoiseParams, NoiseQuality};
+use super::curve::{curve_time_fmax, CurveSampler, CurveTime};
 use super::MinMaxCurve;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct NoiseLaw {
     frequency: f32,
-    strength: f32,
+    /// A finite constant or a mode 1 curve. `CalculateNoiseJob` evaluates the
+    /// strength per particle through `EvaluateThreaded` at the particle's age
+    /// (see [`NoiseLaw::sample`]); the two-constant and two-curve modes read
+    /// the job's own per-particle random stream, which is not compared, and
+    /// stay refused.
+    strength: CurveSampler,
     scroll_speed: f32,
     position_amount: f32,
     damping: bool,
@@ -51,9 +57,13 @@ impl NoiseLaw {
         if !p.frequency.is_finite() || p.frequency <= 0.0 {
             return Err("noise nonpositive/nonfinite frequency outside qualified subset");
         }
+        let strength = match &p.strength {
+            MinMaxCurve::Curve { .. } => CurveSampler::new(&p.strength, CurveTime::Normalized)?,
+            other => CurveSampler::Constant(constant(other)?),
+        };
         Ok(Self {
             frequency: p.frequency.max(f32::from_bits(0x3586_37bd)),
-            strength: constant(&p.strength)?,
+            strength,
             scroll_speed: constant(&p.scroll_speed)?,
             position_amount: constant(&p.position_amount)?,
             damping: p.damping,
@@ -76,7 +86,12 @@ impl NoiseLaw {
     /// simulation space. owner_seed is the source system's random seed from
     /// its read-only state, never the individual birth seed. Constant curves
     /// ignore individual particle seeds.
-    pub fn sample(&self, state: NoiseState, position: [f32; 3], owner_seed: u32) -> [f32; 3] {
+    /// `age_percent` is the particle's age before this frame's lifetime
+    /// advance (the job reads the age array before SimulateParticles writes
+    /// it; a newborn reads 0). A strength curve is evaluated at
+    /// `fmax(age_percent * 0.01, +0)`; a constant ignores it.
+    pub fn sample(&self, state: NoiseState, position: [f32; 3], owner_seed: u32,
+        age_percent: f32) -> [f32; 3] {
         let shift = owner_offset(owner_seed);
         let [x, y, z] = std::array::from_fn(|i| position[i] + shift[i] * 100.0);
         let a = perlin_xy([z, y, x + state.scroll], self.frequency);
@@ -88,7 +103,7 @@ impl NoiseLaw {
             super::velocity::orbital_reciprocal(self.frequency)
         } else {
             1.0
-        } * self.strength;
+        } * self.strength.evaluate(curve_time_fmax(age_percent), 0.0);
         // Source derivative pairing is deliberate; neither three independent
         // scalar noise calls nor a random displacement has this curl law.
         [
@@ -254,6 +269,108 @@ mod tests {
         assert_eq!(lanes, 4096);
     }
 
+    fn key(words: &Value) -> crate::particle::CurveKey {
+        let w: Vec<u32> = words.as_array().unwrap().iter().map(word).collect();
+        let f = |i: usize| f32::from_bits(w[i]);
+        crate::particle::CurveKey {
+            time: f(0), value: f(1), in_slope: f(2), out_slope: f(3),
+            weighted_mode: w[4] as u8, in_weight: f(5), out_weight: f(6),
+        }
+    }
+
+    // The receipt installs its curves with clamp wraps on both sides.
+    fn curve_params(keys: Vec<crate::particle::CurveKey>, multiplier: f32, frequency: f32,
+        damping: bool, position: f32) -> NoiseParams {
+        let constant = MinMaxCurve::Constant;
+        NoiseParams {
+            separate_axes: false,
+            strength: MinMaxCurve::Curve { multiplier, max: crate::particle::Curve {
+                multiplier: 1.0, keys, pre_wrap: Some(2), post_wrap: Some(2) } },
+            strength_y: constant(1.0),
+            strength_z: constant(1.0),
+            frequency,
+            damping,
+            octaves: 1,
+            octave_multiplier: 0.5,
+            octave_scale: 2.0,
+            quality: NoiseQuality::High,
+            dimensions: 3,
+            scroll_speed: constant(0.0),
+            remap_enabled: false,
+            remap: constant(1.0),
+            remap_y: constant(1.0),
+            remap_z: constant(1.0),
+            position_amount: constant(position),
+            rotation_amount: constant(0.0),
+            size_amount: constant(0.0),
+        }
+    }
+
+    // NaN lanes compare as NaN; every other lane compares bit for bit.
+    fn same(actual: f32, native: u32) -> bool {
+        let native_value = f32::from_bits(native);
+        (actual.is_nan() && native_value.is_nan()) || actual.to_bits() == native
+    }
+
+    fn replay_block(block: &Value, keys: &Value) -> usize {
+        let keys: Vec<_> = keys.as_array().unwrap().iter().map(key).collect();
+        let bits = |name: &str| f32::from_bits(word(block.get(name).unwrap()));
+        let damping = block.get("damping").unwrap().as_bool().unwrap();
+        let params = curve_params(keys, bits("scalar"), bits("frequency"), damping, bits("position"));
+        let law = NoiseLaw::from_params(&params).expect("receipt curve admitted");
+        let mut lanes = 0;
+        for call in block.get("calls").unwrap().as_array().unwrap() {
+            let owner = word(call.get("owner").unwrap());
+            let state = NoiseState { scroll: f32::from_bits(word(call.get("scroll").unwrap())) };
+            for row in call.get("particles").unwrap().as_array().unwrap() {
+                let row: Vec<u32> = row.as_array().unwrap().iter().map(word).collect();
+                let position = [1, 2, 3].map(|i| f32::from_bits(row[i]));
+                let sample = law.sample(state, position, owner, f32::from_bits(row[0]));
+                for axis in 0..3 {
+                    // The job adds onto a zeroed animated lane.
+                    assert!(same(sample[axis] + 0.0, row[5 + axis]),
+                        "age {:#x} axis {axis}: {:#x} vs native {:#x}", row[0],
+                        (sample[axis] + 0.0).to_bits(), row[5 + axis]);
+                }
+                lanes += 1;
+            }
+        }
+        lanes
+    }
+
+    // Unchanged NoiseModule::Update on the source strength curve and on
+    // derived curves of the same unoptimized path, every particle's bits.
+    #[test]
+    #[ignore = "MOLY_NOISE_STRENGTH_CURVE_NATIVE must identify the current JP Noise strength-curve receipt"]
+    fn strength_curve_noise_matches_native_update() {
+        let receipt = read("MOLY_NOISE_STRENGTH_CURVE_NATIVE");
+        assert_eq!(receipt.get("sourceSha256").unwrap().as_str(), Some(SOURCE));
+        let source = receipt.get("sourceCases").unwrap();
+        assert_eq!(replay_block(source, source.get("keys").unwrap()), 2944);
+        let mut derived = 0;
+        for block in receipt.get("derivedCases").unwrap().as_array().unwrap() {
+            derived += replay_block(block, block.get("keys").unwrap());
+        }
+        assert_eq!(derived, 15040);
+    }
+
+    // The asset reader's isOptimizedCurve bit, native BuildCurves per curve.
+    #[test]
+    #[ignore = "MOLY_NOISE_STRENGTH_CURVE_NATIVE must identify the current JP Noise strength-curve receipt"]
+    fn optimized_curve_decision_matches_native_build() {
+        let receipt = read("MOLY_NOISE_STRENGTH_CURVE_NATIVE");
+        let cases = receipt.get("decisionCases").unwrap().as_array().unwrap();
+        let mut optimized = 0;
+        for (index, case) in cases.iter().enumerate() {
+            let case = case.as_array().unwrap();
+            let keys: Vec<_> = case[0].as_array().unwrap().iter().map(key).collect();
+            let native = word(&case[1]) != 0;
+            assert_eq!(super::super::curve::engine_optimizes_curve(&keys), native, "case {index}");
+            optimized += usize::from(native);
+        }
+        assert_eq!((cases.len(), optimized), (1500, 411));
+    }
+
     #[test]
     #[ignore = "MOLY_SNOW_NOISE_NATIVE_REPLAY must identify the current JP snow Noise job receipt"]
     fn current_snow_noise_job_matches_bits() {
@@ -262,7 +379,7 @@ mod tests {
         // Serialized snow_pt_01 subset: high 3D, one octave, damping, no remap.
         let law = NoiseLaw {
             frequency: 0.5,
-            strength: f32::from_bits(0x3e4c_cccd),
+            strength: CurveSampler::Constant(f32::from_bits(0x3e4c_cccd)),
             scroll_speed: 1.0,
             position_amount: 1.0,
             damping: true,
@@ -280,7 +397,7 @@ mod tests {
             let animated = output.get("animated").unwrap().as_array().unwrap();
             for (lane, (position, expected)) in positions.iter().zip(animated).enumerate() {
                 let position = position.as_array().unwrap();
-                let sample = law.sample(state, [0, 1, 2].map(|i| number(&position[i])), owner);
+                let sample = law.sample(state, [0, 1, 2].map(|i| number(&position[i])), owner, 0.0);
                 let expected = expected.as_array().unwrap();
                 for axis in 0..3 {
                     // Job adds positionAmount * noise onto the zeroed animated lane.

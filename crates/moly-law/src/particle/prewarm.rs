@@ -8,16 +8,24 @@
 //! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
 //! constant/two-constant lifetime, looping prewarm and source flags=8 are qualified.
 
+use super::frame_time::{IncrementalEntry, IncrementalSlices};
+pub use super::frame_time::Slice;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Lifetime {
     Constant(f32),
     TwoConstants { min: f32, max: f32 },
 }
 
+/// The player's serialized TimeManager. The game assembly calls only Time
+/// getters, so these values hold for the whole session; the time scale is 1
+/// and is therefore not carried.
 #[derive(Clone, Copy, Debug)]
 pub struct TimeManagerSnapshot {
     pub fixed_timestep: f32,
     pub maximum_particle_timestep: f32,
+    /// Serialized Maximum Allowed Timestep: Time.maximumDeltaTime.
+    pub maximum_delta_time: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,18 +44,8 @@ pub struct PlayState {
     pub duration: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Slice {
-    pub remaining_before: f32,
-    pub duration: f32,
-}
-
 pub struct PrewarmPlan {
-    remaining: f32,
-    base_step: f32,
-    prior_step: f32,
-    duration: f32,
-    budget: usize,
+    slices: IncrementalSlices,
     /// ComputePrewarmStartParameters out value: the explicit dt Play hands to
     /// BeginUpdate. Update1b scales it by the simulation speed.
     compute_out: f32,
@@ -199,52 +197,34 @@ impl PrewarmPlan {
         if !(base_step.is_finite() && base_step >= f32::from_bits(0x3727_c5ac)) {
             return Err("unqualified nonfixed timestep");
         }
-        let mut plan = Self::from_incremental_input(remaining, base_step, 8, play.duration)?;
+        let mut plan =
+            Self::from_incremental_input(remaining, base_step, IncrementalEntry::ExplicitDt, play.duration)?;
         plan.compute_out = warm.compute_out;
         plan.initial_clock = warm.initial_clock;
         Ok(plan)
     }
 
-    /// Boundary after native Compute/GetTimeStep. Input step and flags must
+    /// Boundary after native Compute/GetTimeStep. Input step and entry must
     /// come from those source paths; the extra current-native matrix probes
     /// this function without pretending each step came from GetTimeStep.
     pub fn from_incremental_input(
         total: f32,
         step: f32,
-        flags: u32,
+        entry: IncrementalEntry,
         duration: f32,
     ) -> Result<Self, &'static str> {
-        if flags != 8 {
-            return Err("unqualified incremental flags");
-        }
-        if !(total.is_finite()
-            && total > 0.0
-            && step.is_finite()
-            && step > 0.0
-            && duration.is_finite()
-            && duration > 0.0)
-        {
-            return Err("unqualified incremental input");
-        }
-        if !(total / step).is_finite() || total / step > 1_000_000.0 {
-            return Err("incremental slice budget outside bounded replay");
-        }
         Ok(Self {
-            remaining: total,
-            base_step: step,
-            prior_step: step,
-            duration,
-            budget: 1_000_256,
+            slices: IncrementalSlices::new(total, step, entry, duration)?,
             compute_out: total,
             initial_clock: 0.0,
         })
     }
 
     pub fn remaining(&self) -> f32 {
-        self.remaining
+        self.slices.remaining()
     }
     pub fn base_step(&self) -> f32 {
-        self.base_step
+        self.slices.base_step()
     }
     pub fn compute_out(&self) -> f32 {
         self.compute_out
@@ -254,47 +234,13 @@ impl PrewarmPlan {
     }
 }
 
+/// Update1Incremental's slices: the old selected slice is retained when it
+/// exceeds the 1 s / 0.2 s threshold, hence the observed seven 1 s calls
+/// (including backlog values 10..6), not merely two calls while remaining > 10.
 impl Iterator for PrewarmPlan {
     type Item = Result<Slice, &'static str>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining < f32::from_bits(0x3586_37bd) {
-            return None;
-        }
-        if self.budget == 0 {
-            self.remaining = 0.0;
-            return Some(Err("incremental budget exhausted"));
-        }
-        let before = self.remaining;
-        let mut step = before.min(self.base_step);
-        // Update1Incremental's slice choice, flags bit 2 clear:
-        // the old selected slice is retained when it exceeds the 1/.2
-        // threshold. Hence the observed seven 1s calls (including backlog
-        // values 10..6), not merely two calls while remaining >10.
-        if before > 10.0 {
-            step = if self.prior_step > 1.0 {
-                self.prior_step
-            } else {
-                self.duration.min(1.0)
-            };
-        } else if before > 5.0 {
-            step = if self.prior_step > 0.2 {
-                self.prior_step
-            } else {
-                self.duration.min(0.2)
-            };
-        }
-        if !(step.is_finite() && step > 0.0 && step <= before) || before - step == before {
-            self.budget = 0;
-            self.remaining = 0.0;
-            return Some(Err("incremental slice does not advance"));
-        }
-        self.prior_step = step;
-        self.remaining = before - step;
-        self.budget -= 1;
-        Some(Ok(Slice {
-            remaining_before: before,
-            duration: step,
-        }))
+        self.slices.next()
     }
 }
 
@@ -321,6 +267,7 @@ mod tests {
         TimeManagerSnapshot {
             fixed_timestep: 0.02,
             maximum_particle_timestep: 0.03,
+            maximum_delta_time: 1.0 / 3.0,
         }
     }
     fn read(key: &str) -> Value {
@@ -398,7 +345,7 @@ mod tests {
             let plan = PrewarmPlan::from_incremental_input(
                 number(case.get("total").unwrap()),
                 number(case.get("stepArgument").unwrap()),
-                8,
+                IncrementalEntry::ExplicitDt,
                 1.0,
             )
             .unwrap();
@@ -429,14 +376,14 @@ mod tests {
         let observed = number(timestep.get("result").unwrap());
         let source = receipt.get("sourceDerived130").unwrap();
         assert_eq!(observed.to_bits(), number(source.get("stepArgument").unwrap()).to_bits());
-        let plan = PrewarmPlan::from_incremental_input(130.0, observed, 8, 1.0).unwrap();
+        let plan = PrewarmPlan::from_incremental_input(130.0, observed, IncrementalEntry::ExplicitDt, 1.0).unwrap();
         compare(plan, source.get("slices").unwrap().as_array().unwrap(),
             source.get("remaining").unwrap(), true);
         for case in receipt.get("cases").unwrap().as_array().unwrap() {
             let plan = PrewarmPlan::from_incremental_input(
                 number(case.get("total").unwrap()),
                 number(case.get("stepArgument").unwrap()),
-                8,
+                IncrementalEntry::ExplicitDt,
                 1.0,
             ).unwrap();
             compare(plan, case.get("slices").unwrap().as_array().unwrap(),
@@ -517,6 +464,5 @@ mod tests {
         ] {
             assert!(PrewarmPlan::from_source(Lifetime::Constant(12.0), time(), play).is_err());
         }
-        assert!(PrewarmPlan::from_incremental_input(12.0, 0.03, 4, 1.0).is_err());
     }
 }

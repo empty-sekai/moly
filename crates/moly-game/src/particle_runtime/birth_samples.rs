@@ -256,6 +256,7 @@ fn normal_update_recomputes_birth_capacity_after_existing_deaths() {
             owner: None,
             initial: explicit_probe_random(),
             shape: explicit_probe_random(),
+            shape_clock: Default::default(),
             emission: AutonomousEmissionState::initialized(ScalarRandom {
                 words: [17, 19, 127, 2471805022],
             }),
@@ -580,6 +581,8 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
                     out_weight: 0.0,
                 })
                 .to_vec(),
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         },
     };
     system.playback_head = 0.75;
@@ -589,6 +592,7 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
         owner: None,
         initial: explicit_probe_random(),
         shape: explicit_probe_random(),
+        shape_clock: Default::default(),
         emission: AutonomousEmissionState {
             distribution: BirthDistribution {
                 spacing: 0.25,
