@@ -2195,7 +2195,7 @@ pub(crate) fn advance_se(
         let Some(stream) = stream else {
             if channel.warned_missing.insert(request.cue.to_string()) {
                 warn!(
-                    "SE 跳过：cue {} 不在流表（ExistsCueName fail-closed，真源同支；每 cue 只告警一次）",
+                    "SE 跳过：cue {} 不在本快照的流表（fail-closed 跳过；除非真源的包里也没有这个 cue，这是提取/流表缺口；每 cue 只告警一次）",
                     label(&request.cue)
                 );
             }

@@ -336,7 +336,7 @@ fn ui_values_for_source_comparison() {
                 continue;
             }
             let change = changes.get(&i).copied();
-            let text = change.and_then(|v| v.text.clone()).unwrap_or_else(|| layouts.text(&c.fields));
+            let text = change.and_then(|v| v.text.clone()).unwrap_or_else(|| layouts.text(c));
             let alignment = change.and_then(|v| v.text_alignment);
             let r = &oracle_rects[i];
             let oracle_size = Vec2::new(from_bits(&r[2]), from_bits(&r[3]));

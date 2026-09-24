@@ -17,6 +17,7 @@ use crate::canvas::RootCanvas;
 use crate::frame_capture::CaptureFrame;
 use crate::gesture::{GestureEvent, GestureState, UiPointerEvent, UiPointerPhase};
 use moly_law::ui::custom_button as button_rule;
+use moly_law::ui::graphic_tap_effect as tap_rule;
 use crate::site::SiteActive;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
@@ -725,7 +726,15 @@ pub(crate) fn camera_reset_press(
 ) -> CameraResetHit {
     let target = view.press_target(layouts, pointer, canvas);
     let hovered = view.hovers(layouts, pointer, canvas, node);
-    let (active, interactable) = view.selectable_live(layouts, canvas, node, button).unwrap_or((false, false));
+    let (active, interactable) = match view.selectable_live(layouts, canvas, node, button) {
+        Some(live) => live,
+        None => {
+            // A canvas without area resolves and raycasts nothing, so the
+            // pointer is over no button and these two are never read.
+            assert!(target.is_none() && !hovered, "a canvas without area produced a raycast target");
+            (false, false)
+        }
+    };
     CameraResetHit { pointer, target, over_button: target.is_some_and(|(_, id)| id == button), hovered, active, interactable }
 }
 
@@ -868,24 +877,44 @@ pub(crate) struct SourceInputManager(pub(crate) button_rule::InputManager);
 
 /// The camera reset button's CustomButton state, whether the event
 /// system's current press went to it, the held pointer (its id and latest
-/// position, from press to release) and whether the button is in that
-/// pointer's hover chain.
+/// position, from press to release), whether the button is in that
+/// pointer's hover chain, and the press/release interactions requested this
+/// frame for the tween update that follows the event system.
 #[derive(Resource, Default)]
 pub(crate) struct CameraResetPress {
     state: button_rule::CustomButtonState,
     pressed: bool,
     held: Option<(i32, Vec2)>,
     entered: bool,
+    interactions: Vec<(ShellHost, ViewInteraction)>,
+}
+
+/// `CustomButton.PlayPressEffect` / `PlayReleaseEffect` on a button whose
+/// override delegates are unset: the view interaction's `OnPressed` /
+/// `OnReleased`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewInteraction {
+    Pressed,
+    Released,
 }
 
 /// Source press/release/click for the field camera reset button: the press
 /// goes to the selectable under the pointer by the source raycast; release
 /// finishes it; the click needs the release over the same button and then
-/// passes the CustomButton gate (shared 0.2 s interval, sound), and its click
-/// event runs `MysekaiMenuUIContent.ResetCameraStatus`, the field camera's
-/// `ResetCameraSetting`. The press/release interaction of this button is a
-/// colour fade whose serialized fields and palette colours the layout does
-/// not carry; it is not drawn. A press the handlers cannot resolve is logged.
+/// passes the CustomButton gate (shared 0.2 s interval on the real-time
+/// clock, sound), and its click event runs
+/// `MysekaiMenuUIContent.ResetCameraStatus`, the field camera's
+/// `ResetCameraSetting`. The press and release interactions are handed to
+/// [`camera_reset_tap_effect`], which runs after this system as the tween
+/// manager runs after the event system. A press the handlers cannot resolve
+/// is logged.
+///
+/// A touch the platform cancels is a release to the event system's touch
+/// path, but its raycast is cleared first (`GetTouchPointerEventData` sets an
+/// empty `pointerCurrentRaycast` for `TouchPhase.Canceled`), so the release
+/// finds no click handler and never clicks: the up and the exit run, the
+/// click does not. The gesture layer reports a cancelled touch as `Cancel`,
+/// which this system handles exactly so.
 ///
 /// Enter and exit follow the event system's touch path: the press enters
 /// the pressed object's hover chain; every frame a held pointer's current
@@ -946,6 +975,10 @@ pub(crate) fn camera_reset_input(
     let config = button_config(doc, &component.fields).expect("camera reset CustomButton fields");
     let blocked = dialog.blocks_field_input() || !stack.on_field();
     let key = button as u64;
+    // `Time.realtimeSinceStartup`, read live at each call.
+    let startup = real.startup();
+    let mut clock = move || startup.elapsed().as_secs_f32();
+    let mut interactions = Vec::new();
     let mut run = |effects: Vec<button_rule::ButtonEffect>, commands: &mut Commands| {
         for effect in effects {
             match effect {
@@ -954,9 +987,9 @@ pub(crate) fn camera_reset_input(
                     consumed.0 = true;
                     camera.reset_camera_setting(commands);
                 }
-                button_rule::ButtonEffect::PressEffect
-                | button_rule::ButtonEffect::ReleaseEffect
-                | button_rule::ButtonEffect::StartLongPressCheck
+                button_rule::ButtonEffect::PressEffect => interactions.push((host, ViewInteraction::Pressed)),
+                button_rule::ButtonEffect::ReleaseEffect => interactions.push((host, ViewInteraction::Released)),
+                button_rule::ButtonEffect::StartLongPressCheck
                 | button_rule::ButtonEffect::StartHoldRepeat => {}
             }
         }
@@ -973,7 +1006,7 @@ pub(crate) fn camera_reset_input(
         let over_button = !blocked && hit.over_button;
         let live = button_rule::ButtonLive { active: hit.active, interactable: hit.interactable };
         let mut effects = Vec::new();
-        let CameraResetPress { state, pressed, held, entered } = &mut *press;
+        let CameraResetPress { state, pressed, held, entered, .. } = &mut *press;
         match event.phase {
             UiPointerPhase::Down => {
                 *held = Some((event.pointer_id, event.position));
@@ -988,7 +1021,7 @@ pub(crate) fn camera_reset_input(
                     effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
                     if event.phase == UiPointerPhase::Up && over_button {
                         effects.extend(button_rule::on_pointer_click(
-                            &mut manager.0, state, &config, key, pointer, real.elapsed_secs(), live,
+                            &mut manager.0, state, &config, key, pointer, &mut clock, live,
                         ));
                     }
                 }
@@ -1013,5 +1046,142 @@ pub(crate) fn camera_reset_input(
             run(button_rule::on_pointer_exit(&mut manager.0, state, &config, key, pointer), &mut commands);
         }
         *entered = hovered;
+    }
+    press.interactions.extend(interactions);
+}
+
+/// The camera reset button's view interaction: the CustomButton's
+/// `buttonViewInteraction`, a `GraphicButtonTapEffect`, with the Graphic
+/// components it fades (`_effectGraphic`, and `_effectGraphicIcon` when set)
+/// and its serialized colour fields. None when the button has no view
+/// interaction (the press and release then play nothing). Another
+/// interaction class, or a missing field, is refused.
+fn tap_effect(doc: &UiPrefab, button: i64) -> Option<(Vec<i64>, tap_rule::TapEffectConfig)> {
+    let components = || doc.nodes.iter().flat_map(|node| node.components.iter());
+    let component = |id: i64| components().find(|c| c.path_id == id)
+        .unwrap_or_else(|| panic!("{}: component {id} is not in the layout", doc.prefab));
+    let reference = |fields: &Value, name: &str| -> i64 {
+        let pointer = fields[name].as_array().filter(|p| p.len() == 2)
+            .unwrap_or_else(|| panic!("{}: {name} is not a reference", doc.prefab));
+        assert_eq!(pointer[0].as_i64(), Some(0), "{}: {name} points outside the layout file", doc.prefab);
+        pointer[1].as_i64().unwrap_or_else(|| panic!("{}: {name} has no path id", doc.prefab))
+    };
+    let interaction = reference(&component(button).fields, "buttonViewInteraction");
+    if interaction == 0 {
+        return None;
+    }
+    let effect = component(interaction);
+    assert_eq!(
+        effect.class, "Sekai.UI.GraphicButtonTapEffect",
+        "{}: button {button}'s view interaction class is not ported", doc.prefab
+    );
+    let f = &effect.fields;
+    let number = |name: &str| f[name].as_f64()
+        .unwrap_or_else(|| panic!("{}: GraphicButtonTapEffect {name} is missing", doc.prefab));
+    let flag = |name: &str| f[name].as_bool()
+        .unwrap_or_else(|| panic!("{}: GraphicButtonTapEffect {name} is missing", doc.prefab));
+    let entry = |name: &str| usize::try_from(f[name].as_i64()
+        .unwrap_or_else(|| panic!("{}: GraphicButtonTapEffect {name} is missing", doc.prefab)))
+        .unwrap_or_else(|_| panic!("{}: GraphicButtonTapEffect {name} is negative", doc.prefab));
+    let graphics: Vec<i64> = ["_effectGraphic", "_effectGraphicIcon"].iter()
+        .map(|name| reference(f, name))
+        .filter(|id| *id != 0)
+        .collect();
+    let config = tap_rule::TapEffectConfig {
+        default_palette: entry("_defaultColorPalette"),
+        effect_palette: entry("_effectColorPalette"),
+        use_custom_alpha: flag("_useCustomAlpha"),
+        custom_default_alpha: number("_customDefaultAlpha") as f32,
+        custom_effect_alpha: number("_customEffectAlpha") as f32,
+        refresh_color_when_awake: flag("_refreshColorWhenAwake"),
+    };
+    Some((graphics, config))
+}
+
+/// Per host view: whether Awake ran, the running fade and the effect
+/// graphics' current colours.
+#[derive(Default)]
+struct TapEffectView {
+    awake: bool,
+    state: tap_rule::TapEffectState,
+    colors: std::collections::HashMap<i64, [f32; 4]>,
+}
+
+/// The camera reset buttons' tap effects, one per host view.
+#[derive(Resource, Default)]
+pub(crate) struct CameraResetTapEffect {
+    views: std::collections::HashMap<&'static str, TapEffectView>,
+    unported_root_reported: bool,
+}
+
+/// `GraphicButtonTapEffect` of the field camera reset button: Awake assigns
+/// the default palette colour to the effect graphics once the host view
+/// exists; each press/release from [`camera_reset_input`] starts its fade;
+/// then the running fade takes this frame's step, as the tween manager's
+/// update does after the event system in the same frame (the event system's
+/// script execution order is -1000, the tween manager's 0, and a new tween
+/// is updated in the frame it was created, on the scaled frame delta).
+pub(crate) fn camera_reset_tap_effect(
+    time: Res<Time>,
+    layouts: Res<UiLayouts>,
+    mut press: ResMut<CameraResetPress>,
+    mut effects: ResMut<CameraResetTapEffect>,
+    mut roots: Query<(&MenuShellRoot, &mut UiPrefabView)>,
+) {
+    let interactions = std::mem::take(&mut press.interactions);
+    if layouts.tween_defaults().is_none() {
+        if !interactions.is_empty() && !effects.unported_root_reported {
+            effects.unported_root_reported = true;
+            warn!("camera reset: the UI root carries no palette or tween defaults; the press effect is not drawn");
+        }
+        return;
+    }
+    for (root, mut view) in &mut roots {
+        let Some(doc) = layouts.document(view.key) else { continue; };
+        let Some(button) = camera_reset_button(doc) else { continue; };
+        let Some((graphics, config)) = tap_effect(doc, button) else { continue; };
+        let colors = config.colors(|entry| layouts.palette_color(entry))
+            .unwrap_or_else(|error| panic!("{}: camera reset tap effect: {error}", doc.prefab));
+        let entry = effects.views.entry(view.key).or_default();
+        if !entry.awake {
+            entry.awake = true;
+            for &graphic in &graphics {
+                let node = doc.find(&format!("@{graphic}")).unwrap_or_else(|error| panic!("{error}"));
+                let image = doc.nodes[node].components.iter().find(|c| c.path_id == graphic)
+                    .unwrap_or_else(|| panic!("{}: effect graphic {graphic} missing", doc.prefab));
+                let channels = image.fields["m_Color"].as_array().filter(|v| v.len() == 4)
+                    .unwrap_or_else(|| panic!("{}: effect graphic {graphic} has no m_Color", doc.prefab));
+                let mut color = [0.0; 4];
+                for (channel, value) in color.iter_mut().zip(channels) {
+                    *channel = value.as_f64().expect("m_Color channel") as f32;
+                }
+                entry.colors.insert(graphic, color);
+            }
+            if let Some(color) = entry.state.awake(&config, &colors) {
+                for &graphic in &graphics {
+                    entry.colors.insert(graphic, color);
+                    view.set_graphic_color(graphic, color);
+                }
+            }
+        }
+        for (host, interaction) in &interactions {
+            if *host != root.host {
+                continue;
+            }
+            match interaction {
+                ViewInteraction::Pressed => entry.state.on_pressed(&colors),
+                ViewInteraction::Released => entry.state.on_released(&colors),
+            }
+        }
+        // The effect graphic's tween and the icon graphic's tween are the
+        // same fade on two graphics; the first graphic's colour starts it.
+        let Some(&first) = graphics.first() else { continue; };
+        let current = entry.colors[&first];
+        if let Some(color) = entry.state.update(current, time.delta_secs()) {
+            for &graphic in &graphics {
+                entry.colors.insert(graphic, color);
+                view.set_graphic_color(graphic, color);
+            }
+        }
     }
 }

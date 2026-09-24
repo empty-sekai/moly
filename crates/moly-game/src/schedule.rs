@@ -903,6 +903,15 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::click)
                 .before(pick::pick),
         )
+        // The button's press effect: its fade takes the frame's step after
+        // the press, before the prefab views draw.
+        .init_resource::<menu_shell::CameraResetTapEffect>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_tap_effect
+                .after(menu_shell::camera_reset_input)
+                .before(crate::ui_layout::render),
+        )
         // 层栈推进：读小地图根可见性做直通口对账 + 消费层命令 + 回写槽
         // 位视图。小地图的四条可见性写者（点击 · 自动点 · 解锁推进 ·
         // M 键）与外壳点按全排在它之前——它读的是当帧终值、当帧命令。

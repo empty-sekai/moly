@@ -669,19 +669,54 @@ pub(crate) fn place(
         }
         view.set_visible("MenuRoot/TitleCell",false);
         view.set_visible("MenuHeader/bg/info",mock.stamina_empty());
-        // UIPartsMysekaiRankGauge.Setup. The gauge component and its
-        // UIPartsGaugeExp carry no decoded fields in the layout; these two
-        // paths are the nodes their `_rankText` and `restTextMesh` references
-        // name in the prefab (its `restText` reference is null).
-        let rank="MenuHeader/bg/UIPartsMySekaiRankGauge";
-        view.set_text(&format!("{rank}/CustomTextMesh (2)"),
+        // UIPartsMysekaiRankGauge.Setup: the rank through `_rankText`, the
+        // remaining experience through `_gaugeExp`'s rest text.
+        let doc = layouts.document(view.key).expect("menu dialog layout is loaded");
+        let (rank_text, rest) = rank_gauge_texts(doc);
+        view.set_text(&rank_text,
             moly_law::text::custom_text_mesh::set_text(&mock.rank_level.to_string(), false));
-        let rest=format!("{rank}/CustomTextMesh (3)");
         let (key, args) = rank_rest_wording(&mock);
         if let Some(text) = layouts.set_wording_text(view.key, &rest, key, args.as_deref()) {
             view.set_text(&rest, text);
         }
     }
+}
+
+/// The rank gauge's two texts as view selectors: `MysekaiMenuDialog.
+/// _mysekaiRankGauge` -> `UIPartsMysekaiRankGauge._rankText`, and its
+/// `_gaugeExp` -> `UIPartsGaugeExp`'s rest text (`restText` when set, else
+/// `restTextMesh`, as `UIPartsGaugeExp.Setup` chooses). A region layout
+/// carries these references; the shared root's layouts leave both gauge
+/// classes undecoded, so there the two nodes those references name in the
+/// prefab are addressed by path, a named gap of that root.
+fn rank_gauge_texts(doc: &moly_assets::ui_layout::UiPrefab) -> (String, String) {
+    if doc.source.region.is_none() {
+        let rank = "MenuHeader/bg/UIPartsMySekaiRankGauge";
+        return (format!("{rank}/CustomTextMesh (2)"), format!("{rank}/CustomTextMesh (3)"));
+    }
+    let component = |id: i64, class: &str| {
+        doc.nodes.iter().flat_map(|node| node.components.iter())
+            .find(|c| c.path_id == id)
+            .filter(|c| c.class == class)
+            .unwrap_or_else(|| panic!("{}: component {id} is not a {class}", doc.prefab))
+    };
+    let reference = |fields: &serde_json::Value, name: &str| -> i64 {
+        let pointer = fields[name].as_array().filter(|p| p.len() == 2)
+            .unwrap_or_else(|| panic!("{}: {name} is not a reference", doc.prefab));
+        assert_eq!(pointer[0].as_i64(), Some(0), "{}: {name} points outside the layout file", doc.prefab);
+        pointer[1].as_i64().unwrap_or_else(|| panic!("{}: {name} has no path id", doc.prefab))
+    };
+    let dialog = doc.nodes.iter().flat_map(|node| node.components.iter())
+        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuDialog")
+        .unwrap_or_else(|| panic!("{}: no MysekaiMenuDialog component", doc.prefab));
+    let gauge = component(reference(&dialog.fields, "_mysekaiRankGauge"), "Sekai.Mysekai.UIPartsMysekaiRankGauge");
+    let rank_text = reference(&gauge.fields, "_rankText");
+    let exp = component(reference(&gauge.fields, "_gaugeExp"), "Sekai.UIPartsGaugeExp");
+    let rest = match reference(&exp.fields, "restText") {
+        0 => reference(&exp.fields, "restTextMesh"),
+        custom_text => panic!("{}: rank gauge rest text {custom_text} is a CustomText, which is not drawn", doc.prefab),
+    };
+    (format!("@{rank_text}"), format!("@{rest}"))
 }
 
 // ---------------------------------------------------------------------------

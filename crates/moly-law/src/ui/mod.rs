@@ -1,5 +1,5 @@
 //! UGUI rules as pure functions: canvas scaling, Image mesh generation,
-//! raycast selection and the game's button click semantics.
+//! raycast selection, the game's button click semantics and its button tap effect.
 //!
 //! Every function takes the same inputs the engine code reads and returns the
 //! same numbers it produces, so a comparison harness can feed identical inputs
@@ -9,6 +9,7 @@
 
 pub mod canvas;
 pub mod custom_button;
+pub mod graphic_tap_effect;
 pub mod image;
 pub mod raycast;
 pub mod screen_ray;

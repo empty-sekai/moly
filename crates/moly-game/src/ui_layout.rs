@@ -62,13 +62,23 @@ enum UiSourceFile {
     HostCanvas,
     /// The TMP font assets texts are laid out with (a region root only).
     TmpFontAssets,
+    /// The colour palette palette-bound graphics read (a region root only).
+    Palette,
+    /// The tween defaults tweens without their own settings run with (a
+    /// region root only).
+    TweenSettings,
 }
 
 impl UiSourceFile {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Wordings, Self::RuntimeTextures, Self::RuntimeSprites, Self::TextSettings, Self::HostCanvas,
-        Self::TmpFontAssets,
+        Self::TmpFontAssets, Self::Palette, Self::TweenSettings,
     ];
+
+    /// Files only a region root carries.
+    fn region_only(self) -> bool {
+        matches!(self, Self::TmpFontAssets | Self::Palette | Self::TweenSettings)
+    }
 
     fn file(self) -> &'static str {
         match self {
@@ -78,6 +88,8 @@ impl UiSourceFile {
             Self::TextSettings => "text-settings.json",
             Self::HostCanvas => "host-canvas.json",
             Self::TmpFontAssets => "fonts/tmp-font-assets.json",
+            Self::Palette => "palette.json",
+            Self::TweenSettings => "tween-settings.json",
         }
     }
 
@@ -89,6 +101,8 @@ impl UiSourceFile {
             Self::TextSettings => "tmp-settings",
             Self::HostCanvas => "host-canvas",
             Self::TmpFontAssets => "tmp-font-assets",
+            Self::Palette => "palette",
+            Self::TweenSettings => "tween-settings",
         }
     }
 }
@@ -194,6 +208,11 @@ const DOCUMENTS: &[(&str, &str)] = &[
 
 #[derive(Resource, Default)]
 pub(crate) struct UiLayouts {
+    /// Active-theme colour of every colour palette entry, by `ColorEntry`
+    /// value (a region root only).
+    palette: Option<Vec<[f32; 4]>>,
+    /// The tween defaults, when the root carries them (a region root only).
+    tween_defaults: Option<TweenDefaults>,
     docs: HashMap<String, UiPrefab>,
     document_revisions: HashMap<String, u64>,
     images: HashMap<String, Handle<Image>>,
@@ -278,8 +297,8 @@ impl UiSources {
         let files = UiSourceFile::ALL
             .into_iter()
             .filter(|file| !(stage_only && *file == UiSourceFile::RuntimeSprites))
-            // The shared root carries no TMP font assets.
-            .filter(|file| region.is_some() || *file != UiSourceFile::TmpFontAssets)
+            // The shared root carries no TMP font assets, palette or tween defaults.
+            .filter(|file| region.is_some() || !file.region_only())
             .map(|file| {
                 let path = match (region, file) {
                     (None, UiSourceFile::Wordings) => SHARED_WORDINGS.to_owned(),
@@ -303,12 +322,12 @@ impl UiSources {
 
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>, stage: Option<Res<crate::browser_stage::BrowserStage>>) {
     commands.init_resource::<UiLayouts>();
-    // The stage reads no runtime identity; it draws the Talk layout of the
-    // shared root.
+    // The stage draws only the Talk layout, from the same root the runtime's
+    // region selects.
     commands.insert_resource(UiLayoutRequests {
         stage_only: stage.is_some(),
-        source: stage.is_none().then(|| server.load("moly://source.json")),
-        sources: stage.is_some().then(|| UiSources::request(&server, None, true)),
+        source: Some(server.load("moly://source.json")),
+        sources: None,
     });
 }
 
@@ -337,7 +356,8 @@ pub(crate) fn parse(
         if !own_root {
             info!("UI sources for region {region}: the shared UI root {ROOT}");
         }
-        request.sources = Some(UiSources::request(&server, own_root.then_some(region.as_str()), false));
+        let stage_only = request.stage_only;
+        request.sources = Some(UiSources::request(&server, own_root.then_some(region.as_str()), stage_only));
         request.source = None;
     }
     let stage_only = request.stage_only;
@@ -427,6 +447,22 @@ pub(crate) fn parse(
                 layouts.set_tmp_fonts(None);
             }
         }
+        match sources.region.as_ref() {
+            Some(region) => {
+                layouts.palette = Some(
+                    parse_palette(&parse_json(UiSourceFile::Palette))
+                        .unwrap_or_else(|e| panic!("UI {} root palette: {e}", region.region)),
+                );
+                layouts.tween_defaults = Some(
+                    TweenDefaults::parse(&parse_json(UiSourceFile::TweenSettings))
+                        .unwrap_or_else(|e| panic!("UI {} root tween defaults: {e}", region.region)),
+                );
+            }
+            None => warn!(
+                "UI sources of the shared root carry no colour palette or tween defaults: palette-bound \
+                 button press effects are not drawn"
+            ),
+        }
         let textures: HashMap<String, String> = serde_json::from_str(text(UiSourceFile::RuntimeTextures))
             .expect("UI runtime texture inventory");
         // A region root names its images relative to itself; keys become the
@@ -501,7 +537,77 @@ pub(crate) fn parse(
     }
 }
 
+/// `PaletteUtility.GetColor`'s table: the active theme's value of every
+/// colour palette entry, indexed by `ColorEntry` (the generated enum lists
+/// the entries in the palette's entry order).
+fn parse_palette(doc: &Value) -> Result<Vec<[f32; 4]>, String> {
+    if doc["version"].as_u64() != Some(1) {
+        return Err("unsupported palette document version".into());
+    }
+    let active = doc["activeThemeId"].as_str().ok_or("no active theme id")?;
+    let rows = doc["colorEntries"].as_array().ok_or("no colour entries")?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if row["colorEntry"].as_u64() != Some(index as u64) {
+                return Err(format!("colour entry {index} is out of order"));
+            }
+            let value = row["values"][active].as_array().filter(|v| v.len() == 4)
+                .ok_or_else(|| format!("colour entry {index} has no active-theme colour"))?;
+            let mut color = [0.0; 4];
+            for (channel, number) in color.iter_mut().zip(value) {
+                *channel = number.as_f64().ok_or_else(|| format!("colour entry {index} channel is not a number"))? as f32;
+            }
+            Ok(color)
+        })
+        .collect()
+}
+
+/// DOTween's settings asset, as a tween created without its own ease,
+/// update type or auto-kill reads it. The tweens here implement the
+/// OutQuad ease on scaled frame time with timeScale 1, killed on
+/// completion; other defaults are refused, not approximated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TweenDefaults;
+
+impl TweenDefaults {
+    fn parse(doc: &Value) -> Result<Self, String> {
+        if doc["version"].as_u64() != Some(1) {
+            return Err("unsupported tween settings document version".into());
+        }
+        let settings = &doc["settings"];
+        let int = |name: &str| settings[name].as_i64().ok_or_else(|| format!("{name} is missing"));
+        let flag = |name: &str| settings[name].as_bool().ok_or_else(|| format!("{name} is missing"));
+        let float = |name: &str| settings[name].as_f64().ok_or_else(|| format!("{name} is missing"));
+        // DG.Tweening.Ease 6 = OutQuad; UpdateType 0 = Normal.
+        if int("defaultEaseType")? != 6 {
+            return Err("defaultEaseType is not OutQuad".into());
+        }
+        if int("defaultUpdateType")? != 0 || flag("defaultTimeScaleIndependent")? {
+            return Err("default updates are not scaled frame time".into());
+        }
+        if float("timeScale")? != 1.0 || flag("useSmoothDeltaTime")? {
+            return Err("tween time is scaled or smoothed".into());
+        }
+        if !flag("defaultAutoKill")? {
+            return Err("tweens are not killed on completion by default".into());
+        }
+        Ok(Self)
+    }
+}
+
 impl UiLayouts {
+    /// `PaletteUtility.GetColor(entry)`; None when the root carries no
+    /// palette or the palette has no such entry.
+    pub(crate) fn palette_color(&self, entry: usize) -> Option<[f32; 4]> {
+        self.palette.as_ref()?.get(entry).copied()
+    }
+
+    /// The tween defaults, when the root carries them.
+    pub(crate) fn tween_defaults(&self) -> Option<TweenDefaults> {
+        self.tween_defaults
+    }
+
     /// The host canvas, TMP settings and wording dictionary as the UI reads
     /// them: the root Canvas scaler and camera, the host reference pixels per
     /// unit, the root pixel-perfect flag, the UI layer Canvas' sorting order,
@@ -817,7 +923,7 @@ impl UiLayouts {
                 let text = change
                     .and_then(|v| v.text.as_deref())
                     .map(str::to_owned)
-                    .unwrap_or_else(|| self.text(&comp.fields));
+                    .unwrap_or_else(|| self.text(comp));
                 let rules = self
                     .text_rules
                     .as_ref()
@@ -1046,17 +1152,36 @@ impl UiLayouts {
         let index = doc.find(path).unwrap_or_else(|e| panic!("{e}"));
         Some(self.resolved(key, canvas)?[index].clone())
     }
-    pub(crate) fn text(&self, fields: &Value) -> String {
-        let key = fields["wordingKey"].as_str().unwrap_or("");
-        // CustomTextMesh leaves its serialized text intact when the key is empty.
-        // Numeric fields use this state until their presenter supplies a value.
-        if fields["useWordingKey"].as_bool() == Some(true) && !key.is_empty() {
+    /// The text a text component shows before any code sets it. Only
+    /// `CustomTextMesh` is drawn: its `Start` runs `UpdateWordingText`,
+    /// which assigns the wording of `wordingKey` when `useWordingKey` is on
+    /// and the key is not empty, and otherwise leaves the serialized TMP
+    /// `m_text` (numeric fields keep it until their presenter supplies a
+    /// value). All three fields are serialized by that class and its TMP
+    /// base; a layout without one is refused, as is any other text class.
+    pub(crate) fn text(&self, component: &UiComponent) -> String {
+        assert_eq!(
+            component.class, "Sekai.UI.CustomTextMesh",
+            "UI text component {}: no text rule for this class", component.path_id
+        );
+        let field = |name: &str| {
+            component.fields.get(name).unwrap_or_else(|| {
+                panic!("UI CustomTextMesh {}: serialized {name} is missing", component.path_id)
+            })
+        };
+        let use_key = field("useWordingKey").as_bool()
+            .unwrap_or_else(|| panic!("UI CustomTextMesh {}: useWordingKey is not a bool", component.path_id));
+        let key = field("wordingKey").as_str()
+            .unwrap_or_else(|| panic!("UI CustomTextMesh {}: wordingKey is not a string", component.path_id));
+        let serialized = field("m_text").as_str()
+            .unwrap_or_else(|| panic!("UI CustomTextMesh {}: m_text is not a string", component.path_id));
+        if use_key && !key.is_empty() {
             self.wordings
                 .get(key)
                 .unwrap_or_else(|| panic!("UI wording missing: {key}"))
                 .clone()
         } else {
-            fields["m_text"].as_str().unwrap_or("").to_owned()
+            serialized.to_owned()
         }
     }
     /// `CustomTextMesh.SetWordingText` on the CustomTextMesh at `path` of
@@ -1092,7 +1217,7 @@ impl UiLayouts {
             for n in &doc.nodes {
                 for c in &n.components {
                     if c.fields.get("m_fontSize").is_some() {
-                        chars.extend(self.text(&c.fields).chars());
+                        chars.extend(self.text(c).chars());
                     }
                 }
             }
@@ -1114,6 +1239,8 @@ struct Override {
     alpha: Option<f32>,
     anchored_position: Option<Vec2>,
     size_delta: Option<Vec2>,
+    /// `Graphic.color` set by code on the Graphic component with this id.
+    graphic_color: Option<(i64, [f32; 4])>,
 }
 
 impl Override {
@@ -1124,11 +1251,13 @@ impl Override {
                     && self.text_alignment == other.text_alignment
                     && self.fill == other.fill
                     && self.texture == other.texture
+                    && self.graphic_color == other.graphic_color
             }
             None => self.text.is_none()
                 && self.text_alignment.is_none()
                 && self.fill.is_none()
-                && self.texture.is_none(),
+                && self.texture.is_none()
+                && self.graphic_color.is_none(),
         }
     }
 }
@@ -1263,6 +1392,16 @@ impl UiPrefabView {
             return;
         }
         self.update(path, |v| v.anchored_position = Some(value));
+    }
+    /// `Graphic.color = value` on the Image component `graphic` (its node is
+    /// the one `@graphic` names).
+    pub(crate) fn set_graphic_color(&mut self, graphic: i64, value: [f32; 4]) {
+        assert!(value.iter().all(|channel| channel.is_finite()), "non-finite UI graphic colour");
+        let path = format!("@{graphic}");
+        if self.overrides.get(&path).and_then(|v| v.graphic_color) == Some((graphic, value)) {
+            return;
+        }
+        self.update(&path, |v| v.graphic_color = Some((graphic, value)));
     }
     pub(crate) fn set_size_delta(&mut self, path: &str, value: Vec2) {
         assert!(value.is_finite(), "non-finite UI size delta");
@@ -1468,16 +1607,20 @@ impl UiPrefabView {
         false
     }
 
-    /// `IsActive()` and `IsInteractable()` of the selectable component `id` on `node`.
+    /// `IsActive()` and `IsInteractable()` of the selectable component `id`
+    /// on `node`; None only when the canvas has no area (nothing resolves or
+    /// raycasts then). A missing layout, component or `m_Interactable` (a
+    /// Selectable field) is refused.
     pub(crate) fn selectable_live(&self, layouts: &UiLayouts, canvas: Vec2, node: usize, id: i64) -> Option<(bool, bool)> {
-        let doc = layouts.document(self.key)?;
+        let doc = layouts.document(self.key)
+            .unwrap_or_else(|| panic!("UI layout {} is not loaded", self.key));
+        let component = doc.nodes[node].components.iter().find(|c| c.path_id == id)
+            .unwrap_or_else(|| panic!("UI {}: node {node} has no component {id}", doc.prefab));
+        let serialized = component.fields["m_Interactable"].as_bool()
+            .unwrap_or_else(|| panic!("UI {}: selectable {id} has no m_Interactable", doc.prefab));
         let rects = self.resolved(layouts, canvas)?;
-        let component = doc.nodes[node].components.iter().find(|c| c.path_id == id)?;
         let active = rects[node].active && component.enabled;
-        let interactable = moly_law::ui::raycast::is_interactable(
-            component.fields["m_Interactable"].as_bool() == Some(true),
-            raycast::groups_allow_interaction(doc, node),
-        );
+        let interactable = moly_law::ui::raycast::is_interactable(serialized, raycast::groups_allow_interaction(doc, node));
         Some((active, interactable))
     }
 }
@@ -1689,7 +1832,7 @@ fn rebuild_image_users(
                 let text = overrides
                     .get(&index)
                     .and_then(|v| v.text.clone())
-                    .unwrap_or_else(|| layouts.text(&comp.fields));
+                    .unwrap_or_else(|| layouts.text(comp));
                 let pages: HashSet<_> = text
                     .chars()
                     .filter(|ch| art.glyph_cell(*ch).is_some())
@@ -1985,9 +2128,17 @@ pub(crate) fn render(
                     let clip = clip_render::for_component(comp, rect);
                     let path = image_path(&layouts, comp, change);
                     let image = path.map(|p| layouts.images[p].clone()).unwrap_or_default();
+                    // A colour set by code reaches the vertices as Color32.
+                    let color = match change.and_then(|c| c.graphic_color).filter(|(id, _)| *id == comp.path_id) {
+                        Some((_, value)) => {
+                            let [r, g, b, a] = moly_law::ui::graphic_tap_effect::vertex_color(value);
+                            Color::srgba(r, g, b, a)
+                        }
+                        None => serialized_rgba(f, "m_Color"),
+                    };
                     let sprite = Sprite {
                         image,
-                        color: serialized_rgba(f, "m_Color"),
+                        color,
                         custom_size: Some(rect.size),
                         ..default()
                     };
@@ -2083,7 +2234,7 @@ pub(crate) fn render(
                 if f.get("m_fontSize").is_some() {
                     let text = change
                         .and_then(|v| v.text.clone())
-                        .unwrap_or_else(|| layouts.text(f));
+                        .unwrap_or_else(|| layouts.text(comp));
                     spawn_text(
                         &mut commands,
                         node_contents,

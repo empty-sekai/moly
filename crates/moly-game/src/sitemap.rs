@@ -87,8 +87,8 @@ const HOME_SITE_ICON_INDEX: usize = 0;
 pub(crate) const SITEMAP_LAYER: usize = 2;
 
 // 层内没有再往下的 fit/居中系数：屏幕层被运行时拉伸到 1920×1080 的参照
-// 画布上（ScreenManager.SetUpScreenResolution 的匹配律 = 气泡层同款
-// [`canvas::canvas_scale`]），底图/图标/面板全部按 canvas 单位直读直用。
+// 画布上（ScreenManager.SetUpScreenResolution 的匹配律，见
+// [`crate::canvas`] 的根画布），底图/图标/面板全部按 canvas 单位直读直用。
 
 /// 入场滑动（`PlayInAnimation`：localPosition y+80 起，0.5s 滑回）。
 const IN_SLIDE_PX: f32 = 80.0;
@@ -605,10 +605,12 @@ pub(crate) fn parse(
         serde_json::from_str(&screen_text).unwrap_or_else(|err| panic!("sitemap：screen_layer.json 不是合法 JSON：{err}"));
     let canvas_ref = {
         let canvas = &screen["canvas"]["referenceResolution"];
-        (
-            canvas[0].as_f64().unwrap_or(1920.0) as f32,
-            canvas[1].as_f64().unwrap_or(1080.0) as f32,
-        )
+        let axis = |i: usize| {
+            canvas[i].as_f64().unwrap_or_else(|| {
+                panic!("sitemap：screen_layer.json 的 canvas.referenceResolution[{i}] 缺失或不是数")
+            }) as f32
+        };
+        (axis(0), axis(1))
     };
     assert_eq!(
         (canvas_ref.0, canvas_ref.1),

@@ -10,6 +10,8 @@
 //! debounce (0.2 s of real time since the last accepted click of any button
 //! that uses it; the start time is 0 when the game boots), and, when not
 //! blocked and the button is active and interactable, the button's sound.
+//! The gate reads the real-time clock twice, once to compare and once more
+//! to store, so it takes the clock itself, not one frame's time.
 //! Only when the gate passes does the engine button's click run, which again
 //! requires the left button, an active object and an interactable button.
 //!
@@ -111,16 +113,20 @@ pub struct InputManager {
 }
 
 impl InputManager {
-    /// `CheckAndResetIntervalTime`: true when the click is blocked.
-    pub fn check_and_reset_interval_time(&mut self, interval: IntervalUseType, now: f32) -> bool {
+    /// `CheckAndResetIntervalTime`: true when the click is blocked. `clock`
+    /// is `Time.realtimeSinceStartup`: one read to compare and, when the
+    /// click passes, a second read to store. The click is blocked only when
+    /// the elapsed time compares less than the interval, so an unordered
+    /// comparison passes and resets.
+    pub fn check_and_reset_interval_time(&mut self, interval: IntervalUseType, clock: &mut impl FnMut() -> f32) -> bool {
         if interval == IntervalUseType::None {
             return false;
         }
-        if INTERVAL_SEC <= now - self.interval_start_time {
-            self.interval_start_time = now;
-            false
-        } else {
+        if clock() - self.interval_start_time < INTERVAL_SEC {
             true
+        } else {
+            self.interval_start_time = clock();
+            false
         }
     }
 
@@ -276,11 +282,11 @@ pub fn on_pointer_up(
 pub fn check_pointer_click_action(
     manager: &mut InputManager,
     config: &CustomButtonConfig,
-    now: f32,
+    clock: &mut impl FnMut() -> f32,
     live: ButtonLive,
     effects: &mut Vec<ButtonEffect>,
 ) -> bool {
-    let blocked = manager.check_and_reset_interval_time(config.interval, now);
+    let blocked = manager.check_and_reset_interval_time(config.interval, clock);
     if !blocked && live.active && live.interactable {
         effects.push(ButtonEffect::PlaySe { se: config.se, other_se_name: config.other_se_name.clone() });
     }
@@ -302,7 +308,7 @@ pub fn on_pointer_click(
     config: &CustomButtonConfig,
     button: u64,
     pointer: Pointer,
-    now: f32,
+    clock: &mut impl FnMut() -> f32,
     live: ButtonLive,
 ) -> Vec<ButtonEffect> {
     let mut effects = Vec::new();
@@ -314,12 +320,12 @@ pub fn on_pointer_click(
     }
     manager.release_touch_control(button);
     if !config.enable_long_press {
-        if check_pointer_click_action(manager, config, now, live, &mut effects) {
+        if check_pointer_click_action(manager, config, clock, live, &mut effects) {
             engine_button_click(pointer, live, &mut effects);
         }
         return effects;
     }
-    if !state.executed_long_press && check_pointer_click_action(manager, config, now, live, &mut effects) {
+    if !state.executed_long_press && check_pointer_click_action(manager, config, clock, live, &mut effects) {
         engine_button_click(pointer, live, &mut effects);
     }
     state.executed_long_press = false;
@@ -347,4 +353,40 @@ pub fn on_pointer_exit(
         }
     }
     effects
+}
+
+#[cfg(test)]
+mod source_compare {
+    use super::*;
+
+    /// Runs the interval gate on cases given as text lines
+    /// `interval start read1 read2` (interval 0 or 1, the others f32 bits in
+    /// hex) and writes `blocked stored reads` per line (stored as f32 bits in
+    /// hex, reads the number of clock reads), for comparison with the source
+    /// method executed on the same cases.
+    #[test]
+    #[ignore = "research instrument: needs MOLY_INTERVAL_COMPARE_IN and MOLY_INTERVAL_COMPARE_OUT"]
+    fn interval_gate_for_source_comparison() {
+        let input = std::env::var("MOLY_INTERVAL_COMPARE_IN").expect("MOLY_INTERVAL_COMPARE_IN");
+        let output = std::env::var("MOLY_INTERVAL_COMPARE_OUT").expect("MOLY_INTERVAL_COMPARE_OUT");
+        let text = std::fs::read_to_string(&input).expect("case file");
+        let mut out = String::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(words.len(), 4, "case line: {line}");
+            let interval = IntervalUseType::from_serialized(words[0].parse().expect("interval")).expect("interval type");
+            let bits = |w: &str| u32::from_str_radix(w.trim_start_matches("0x"), 16).expect("hex bits");
+            let mut manager = InputManager { interval_start_time: f32::from_bits(bits(words[1])), ..Default::default() };
+            let reads = [f32::from_bits(bits(words[2])), f32::from_bits(bits(words[3]))];
+            let mut count = 0usize;
+            let mut clock = || {
+                let value = reads[count];
+                count += 1;
+                value
+            };
+            let blocked = manager.check_and_reset_interval_time(interval, &mut clock);
+            out.push_str(&format!("{} {:#010x} {}\n", blocked, manager.interval_start_time.to_bits(), count));
+        }
+        std::fs::write(&output, out).expect("write report");
+    }
 }
