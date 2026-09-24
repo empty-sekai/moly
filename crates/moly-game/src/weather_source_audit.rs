@@ -22,6 +22,19 @@ fn current_corpus_admission() {
             .expect("parse source extraction")
     };
     let index = read(&index_path);
+    // The collider export: the one the caller names, else the one the index
+    // names; without either every collision system is refused by name.
+    let collision_path = std::env::var_os("MOLY_WEATHER_AUDIT_COLLISION").map(std::path::PathBuf::from)
+        .or_else(|| index.pointer("/collision/file").and_then(Value::as_str).map(|file| root.join(file)));
+    let collision_document = match &collision_path {
+        Some(path) => Ok(read(path)),
+        None => Err("this asset root carries no collider export".to_owned()),
+    };
+    let collision_source = collision_path.as_ref().map(|path| {
+        let bytes = std::fs::read(path).expect("read collider export");
+        json!({"bytes": bytes.len()})
+    });
+    let mut scenes = crate::particle_runtime::collision_scene::SceneBuilder::new(collision_document);
     let mut app = App::new();
     moly_assets::install(&mut app, moly_assets::AssetSource::NativeDir {
         path: root.parent().expect("phenomena directory has a parent").to_path_buf(),
@@ -60,6 +73,7 @@ fn current_corpus_admission() {
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
+            let ground = scenes.for_effect(effect_name);
             // Targets admitted by their own judgement and the birth edges of
             // every admitted parent of this effect: a target whose parent is
             // refused outside judge (its animation contract) is withdrawn below,
@@ -72,7 +86,7 @@ fn current_corpus_admission() {
                 if let Some(reason) = animation_refusal { tally.animation_refused.push(reason.into()); }
                 let planned = kind.filter(|_|animation_refusal.is_none()).and_then(|kind| judge(effect_name, particle, &by_path, &sub_emitter_owners, kind,
                     effect["effectiveRotation"].as_str() == Some("normal"),
-                    WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), server, &mut tally));
+                    WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), &ground, server, &mut tally));
                 let material = &particle["renderer"]["material"];
                 let source_member = material["lightModes"].as_array()
                     .map(|tags| tags.iter().any(|tag| tag.as_str() == Some("MysekaiEffect")));
@@ -121,6 +135,10 @@ fn current_corpus_admission() {
                             .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))
                     }),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
+                    "collisionScene": particle["system"]["collision"].is_object().then(|| match &ground {
+                        Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
+                        Err(reason) => json!({"bound": false, "reason": reason}),
+                    }),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
                         v.iter().any(|k| k.as_str() == Some("_SOFT_PARTICLES_ENABLED"))),
@@ -148,6 +166,7 @@ fn current_corpus_admission() {
         "perPhenomenon": per_phenomenon,
         "records": rows.len(),
         "admitted": rows.iter().filter(|r| r["admitted"] == true).count(),
+        "collisionExport": collision_source,
         "gpuVerification": "not_run",
         "rows": rows,
     });
@@ -193,7 +212,9 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.size_law = e.size_over_lifetime.as_ref().map(moly_law::particle::size::SizeOverLifetime::from_params);
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
     system.custom_law = e.custom_data.as_ref().map(moly_law::particle::custom_data::CustomData::from_params);
-    let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route) {
+    let scene = planned.collision_scene.clone().map(|scene| Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene))
+        as Box<dyn moly_law::particle::collision_query::CollisionScene + Send + Sync>);
+    let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route, scene) {
         Ok(crate::particle_runtime::BirthPath::Native) => "native",
         Ok(crate::particle_runtime::BirthPath::Legacy(_)) => "legacy",
         Err(error) => return Some(json!({"measured": false, "reason": error.to_string()})),

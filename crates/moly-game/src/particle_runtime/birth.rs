@@ -93,11 +93,9 @@ pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefuse
             "World-space emitter velocity other than the Transform mode is not transcribed",
         ));
     }
+    // The CollisionModule law is qualified here too; its scene is bound by
+    // the installer, and a slice without it refuses.
     validate_emitter(emitter, &ModuleRandom::from_owner_seed(0))?;
-    // The module law is qualified above; its scene cannot be bound yet.
-    if emitter.collision.is_some() {
-        return Err(BirthRefused::Unsupported(super::collision::COLLISION_SCENE_NOT_PORTED));
-    }
     Ok(())
 }
 

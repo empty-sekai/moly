@@ -51,7 +51,7 @@ pub(crate) fn prepare_control(
                 let mut tally = Tally::default();
                 let mut plan = judge_in_archive(doc["name"].as_str().unwrap_or("fixture"), particle,
                     &by_path, &owners, EffectKind::Site, false, None, "fixture-particles-v2",
-                    Some(GlobalTransform::IDENTITY), &server, &mut tally)
+                    Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()), &server, &mut tally)
                     .ok_or_else(|| format!("{}: source particle control rejected {tally:?}", particle["node"]))?;
                 // Sub-emitter events run only with the native birth owner,
                 // which this fixture path does not install.
@@ -146,7 +146,7 @@ pub(crate) fn plan(
         };
         let mut tally = Tally::default();
         match judge_in_archive(package, particle, &by_path, &owners, EffectKind::Site, false,
-            None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally) {
+            None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()), server, &mut tally) {
             // Noise runs only with the native birth owner, which this fixture
             // path does not install; refuse it rather than drop the module.
             Some(plan) if plan.emitter.noise.is_some() =>
@@ -222,7 +222,7 @@ mod tests {
                 let node = particle["node"].as_str().unwrap();
                 let mut tally = Tally::default();
                 let planned = judge_in_archive("fixture", particle, &by_path, &owners, EffectKind::Site, false,
-                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally);
+                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()), server, &mut tally);
                 assert!(planned.is_some(), "{node}: {tally:?}");
                 let planned = planned.unwrap();
                 assert!(planned.source.catalogue.path().unwrap().path().starts_with("fixture-particles-v2"));

@@ -9,12 +9,11 @@
 //! `moly_law::particle::collision_query`; this file maps the pool into it in
 //! source axes and commits what it writes.
 //!
-//! The module's scene is the effect's ground MeshCollider. The sphere sweep
-//! against a cooked triangle mesh (the leaf test over the triangles, the
-//! midphase order and the depth of an initial overlap) is not ported, so no
-//! scene can be bound: admission refuses every collision system with
-//! [`COLLISION_SCENE_NOT_PORTED`], and a runtime without an installed scene
-//! refuses the slice.
+//! The module's scene is the effect's ground MeshCollider (see
+//! `collision_scene`): admission binds it for an effect whose collider is
+//! cooked with the default options and refuses the others by name, the
+//! native birth installer installs the module with it, and a runtime without
+//! an installed scene refuses the slice.
 use super::*;
 use moly_law::particle::collision_query::{
     CollisionLaw, CollisionParticles, CollisionScene, CollisionState, OwnerPair, ParticleFlags, ParticleLane,
@@ -22,10 +21,6 @@ use moly_law::particle::collision_query::{
 };
 use moly_law::particle::collision_response::CollisionRandom;
 use moly_law::particle::schema::SubEmitterTrigger;
-
-/// Why no collision system is admitted.
-pub(crate) const COLLISION_SCENE_NOT_PORTED: &str = "collision scene: the sphere sweep against the ground \
-    MeshCollider (the triangle leaf test, the midphase and the initial-overlap depth) is not ported";
 
 /// The only collision mask admitted: the ground layer. With it every effect
 /// ships at most one enabled collider, so the order of several broadphase
@@ -57,7 +52,8 @@ pub(crate) struct CollisionRuntime {
 /// layer only, no current-size stream (its SizeModule law at the collision
 /// points needs the engine curve form), no per-particle speed modifier, no
 /// collision sub-emitter commands (no child delivery on this path) and World
-/// or Local space. The particle-state flags follow the module set: without a
+/// space (a Local system's owner words have no producer on this path). The
+/// particle-state flags follow the module set: without a
 /// size-over-lifetime or noise module (a size-by-speed module has no consumer
 /// on this runtime at all) the start-size stream is read, as its X or, with
 /// the 3D start size, the largest component; without a speed modifier none is
@@ -82,7 +78,10 @@ pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, S
     }
     let world = match emitter.simulation_space {
         SimulationSpace::World => true,
-        SimulationSpace::Local => false,
+        SimulationSpace::Local => {
+            return Err("collision in Local space: its owner words (the world-to-local inverse the owner update \
+                stores) have no producer on this path".into())
+        }
         _ => return Err("collision in a custom simulation space".into()),
     };
     let flags = ParticleFlags { current_size: false, size_3d: emitter.start.size3d, speed_modifier: false };
@@ -99,7 +98,6 @@ pub(crate) fn collision_eligible(emitter: &EmitterParams) -> Result<(), String> 
 /// owner. A Local system needs its owner words; `random` is the Collision
 /// stream of the same seed reset that gave the owner its Initial and Shape
 /// streams.
-#[allow(dead_code)]
 pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send + Sync>, owner: Option<OwnerPair>,
     random: moly_law::particle::seed_owner::ModuleRandom) -> Result<(), String> {
     let law = qualify(&system.emitter)?.ok_or("no CollisionModule")?;

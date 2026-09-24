@@ -159,7 +159,7 @@ fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
     };
     let ctx = Context { sky: GlobalTransform::IDENTITY, camera: GlobalTransform::IDENTITY, site: GlobalTransform::IDENTITY };
     let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
-    assert!(matches!(install_native_birth(&mut system, &mut manager, &SourceRoute::Ordinary).unwrap(), BirthPath::Native));
+    assert!(matches!(install_native_birth(&mut system, &mut manager, &SourceRoute::Ordinary, None).unwrap(), BirthPath::Native));
     {
         let state = system.native_birth.as_mut().unwrap();
         state.owner = None;
