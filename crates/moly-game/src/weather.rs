@@ -843,6 +843,13 @@ const DELIVERY_SITE_CATEGORY: &str = "delivery";
 /// site environment's (today's) phenomenon; `SiteEnvironmentUtility.GetPhenomenaAssetBundleName`
 /// resolves that id to `DeliveryPhenomenaAssetBundleName` before any master lookup (the
 /// delivery phenomenon has no master row). Both values come from the client-config panel.
+///
+/// The source sends it only on the publisher's cannon branch (current site home, harvest
+/// or delivery). From a room the publisher nests the target in a move home and asks
+/// `SiteEnvironmentUtility.GetSiteEnvironment` for the target, which answers null for the
+/// delivery category and is then dereferenced: the source has no working map move from a
+/// room straight to the delivery site. The product's room shortcut forces the delivery
+/// phenomenon as the cannon route does.
 fn delivery_phenomenon(phenomena: &[ResolvedPhenomenon], configs: &crate::client_config::ClientConfigs) -> usize {
     use crate::client_config::{KEY_DELIVERY_PHENOMENA_ASSET_BUNDLE_NAME, KEY_DELIVERY_PHENOMENA_ID};
     let id = configs.int(KEY_DELIVERY_PHENOMENA_ID);
