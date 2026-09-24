@@ -1078,12 +1078,14 @@ pub(crate) fn apply_graphics(
 /// frames of the latest second.
 ///
 /// The engine loop is reactive: its wait is an hour and it ignores window and
-/// device events, so it updates only when this pacer wakes it through the
-/// event-loop proxy. The winit runner handles a wake-up in a microtask of the
-/// same animation frame and updates there only if winit's own animation frame
-/// (its redraw) has run since the previous update; otherwise it requests that
-/// animation frame again and updates in it. Two rules keep the redraw ahead
-/// of the wake-up:
+/// device events, so apart from one update each time the hour runs out (and
+/// the page-lifecycle updates) it updates only when this pacer wakes it
+/// through the event-loop proxy; an update the pacer did not ask for restarts
+/// its count like a frame start (see `note_update`). The winit runner handles
+/// a wake-up in a microtask of the same animation frame and updates there only
+/// if winit's own animation frame (its redraw) has run since the previous
+/// update; otherwise it requests that animation frame again and updates in it.
+/// Two rules keep the redraw ahead of the wake-up:
 /// - Every update requests a redraw, so winit's animation frame follows each
 ///   update.
 /// - The pacer's next animation frame is registered after the runner's request
@@ -1259,7 +1261,16 @@ mod pacing {
             let Some(pacer) = pacer else {
                 return;
             };
-            pacer.pending.set(false);
+            // An update the pacer did not ask for (the engine's hour-long wait
+            // running out, or a page-lifecycle update) starts a frame as well,
+            // so the next wake-up counts the spacing from the latest counted
+            // refresh instead of following it within the same refresh. When
+            // that update runs in winit's redraw ahead of the pacer's
+            // animation frame of its refresh, the count restarts one refresh
+            // early.
+            if !pacer.pending.replace(false) {
+                pacer.refreshes.borrow_mut().start_update();
+            }
             pacer.updated.set(true);
             // An update outside a wake-up ran after the pacer's animation
             // frame of this refresh (in winit's redraw or in an event
@@ -1377,7 +1388,7 @@ mod refresh_count {
         stored: usize,
         next: usize,
         /// Mean of the lowest cluster of sampled intervals, about one refresh;
-        /// none until two sampled intervals agree.
+        /// none until sampled intervals agree (see `sample`).
         cluster_ms: Option<f64>,
         /// Consecutive animation-frame intervals, oldest first, each with the
         /// refreshes it was counted as.
@@ -1433,6 +1444,20 @@ mod refresh_count {
         /// from intervals without an update alone. When the cluster and the
         /// span no longer count the same interval as one refresh (the display
         /// changed its rate), the span starts again.
+        ///
+        /// Not handled: when the page's own work between animation frames
+        /// (asset loading at startup) holds most of those first intervals past
+        /// one or more refreshes, the first estimate can form on a multiple of
+        /// the refresh. If every update then holds the next animation frame
+        /// past the following refresh, every interval is that multiple, the
+        /// cluster and the span agree on it, and the spacing stays counted in
+        /// multiples until a quarter of the stored intervals are one refresh
+        /// long again (updates that finish within a refresh, or animation
+        /// frames without an update). The rate differs from the source only
+        /// where the source's spacing is three refreshes or more and the
+        /// multiple still wakes the engine on every animation frame, for
+        /// example 150 to 179 Hz at a limit of 60 or 75 to 89 Hz at a limit of
+        /// 30 with the estimate at twice the refresh.
         pub(super) fn frame(&mut self, now_ms: f64, began_idle: bool) {
             let Some(last_ms) = self.last_frame_ms.replace(now_ms) else {
                 return;
@@ -1489,9 +1514,12 @@ mod refresh_count {
                 .is_none_or(|start| self.refreshes - start >= Self::spacing(refresh_ms, frame_rate))
         }
 
-        /// Records that an update starts on the current refresh.
+        /// Records that an update starts on the current refresh. Before the
+        /// refresh interval is measured there is no count to restart.
         pub(super) fn start_update(&mut self) {
-            self.update_refresh = Some(self.refreshes);
+            if self.cluster_ms.is_some() {
+                self.update_refresh = Some(self.refreshes);
+            }
         }
 
         /// The estimated refresh interval: the span's once it covers enough
@@ -1519,10 +1547,15 @@ mod refresh_count {
         }
 
         /// The lowest cluster is the mean of the lowest stored intervals that
-        /// agree: the shortest interval that has another one within
+        /// agree: the shortest interval that has, itself included, at least a
+        /// quarter of the stored intervals (two at the least) within
         /// [`SPREAD`] above it, together with those. Longer intervals span
-        /// skipped refreshes, and a lone shorter one is a stray callback, so a
-        /// single interval never sets it.
+        /// skipped refreshes, and a shorter one is a stray callback or a
+        /// timestamp displaced within its refresh. Two such short intervals can
+        /// be stored at the same time (a 144 Hz display gives single intervals
+        /// down to 0.7 of a refresh); as the lowest cluster they would count
+        /// as a refresh a fifth shorter than the span's, restart the span and
+        /// be the estimate until it covers [`SPAN_MIN_REFRESHES`] again.
         fn sample(&mut self, interval: f64) {
             self.samples[self.next] = interval;
             self.next = (self.next + 1) % SAMPLES;
@@ -1530,10 +1563,11 @@ mod refresh_count {
             let mut sorted = self.samples;
             let sorted = &mut sorted[..self.stored];
             sorted.sort_unstable_by(f64::total_cmp);
+            let agreeing = (self.stored / 4).max(2);
             for (index, &low) in sorted.iter().enumerate() {
                 let end = sorted.partition_point(|&value| value <= SPREAD * low);
                 let cluster = &sorted[index..end];
-                if cluster.len() >= 2 {
+                if cluster.len() >= agreeing {
                     self.cluster_ms = Some(cluster.iter().sum::<f64>() / cluster.len() as f64);
                     return;
                 }
