@@ -190,7 +190,9 @@ struct Tally {
     alignment: Vec<String>,
     no_system_block: usize,
     no_emission: usize,
-    /// Any authored distance emission requires an emitter-travel consumer.
+    /// A distance rate that is not a constant, on a system that runs its own
+    /// per-frame update (a sub-emitter target's distance rate is read by its
+    /// parent's edge law).
     rate_distance_only: usize,
     /// 率恒 0 且无 burst：永不发射。
     dead_emission: usize,
@@ -1132,8 +1134,10 @@ fn judge_in_archive(
     let time_zero = rate_time.map_or(true, |v| v == 0.0);
     let distance_zero = rate_distance == Some(0.0);
     // A sub-emitter target never emits on its own: its parent's edge law
-    // reads its rate over distance (from the parent particle's motion).
-    if !distance_zero && child_parent.is_none() {
+    // reads its rate over distance (from the parent particle's motion). A
+    // constant distance rate of a system that runs its own per-frame update
+    // is taken by the native frame head (checked after the route below).
+    if !distance_zero && child_parent.is_none() && rate_distance.is_none() {
         tally.rate_distance_only += 1;
         return None;
     }
@@ -1276,6 +1280,15 @@ fn judge_in_archive(
             return None;
         }
     }
+    // Emission over distance runs at the native per-frame head only, from the
+    // emitter translation the frame head reads. A target never takes that
+    // call (its own frame is the stopped update).
+    if !distance_zero && child_parent.is_none() {
+        if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route) {
+            tally.law_reject.push(format!("{node}: emission over distance requires the native birth path: {reason}"));
+            return None;
+        }
+    }
     if emitter.noise.is_some() {
         // Noise reads the system owner seed and the reset scroll, which only
         // the native birth owner supplies.
@@ -1397,6 +1410,13 @@ fn judge_in_archive(
         let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
         if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
             tally.law_reject.push(format!("{node}: sub-emitter events require the native birth path: {reason}"));
+            return None;
+        }
+    }
+    if !distance_zero && child_parent.is_none() {
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
+            tally.law_reject.push(format!("{node}: emission over distance requires the native birth path: {reason}"));
             return None;
         }
     }
@@ -1862,6 +1882,7 @@ pub(crate) fn spawn_when_ready(
             (entity, mesh)
         });
         let has_trail = trail_draw.is_some();
+        let has_distance = crate::particle_runtime::has_distance_emission(&planned.emitter);
         let effect_clock = effect_clocks.entry(planned.effect.clone())
             .or_insert_with(|| Arc::new(crate::weather_animation::EffectClock::new(now))).clone();
         let route = planned.route.clone();
@@ -1969,6 +1990,12 @@ pub(crate) fn spawn_when_ready(
                     // Nor is a system with a trail left drawing without it.
                     Ok(crate::particle_runtime::BirthPath::Legacy(reason)) if has_trail => {
                         error!(%reason, node=%live.node, "trail system refused by the native birth installer");
+                        failed = true;
+                    }
+                    // Nor one that emits over distance, which only the native
+                    // per-frame head takes.
+                    Ok(crate::particle_runtime::BirthPath::Legacy(reason)) if has_distance => {
+                        error!(%reason, node=%live.node, "distance-emitting system refused by the native birth installer");
                         failed = true;
                     }
                     Ok(crate::particle_runtime::BirthPath::Legacy(reason)) => live.native_refusal = Some(reason),
