@@ -92,6 +92,8 @@ pub mod sitemap_phenomena;
 pub mod sky;
 mod source_curve;
 mod weather_animation;
+#[cfg(test)]
+mod weather_animation_replay;
 pub mod talk;
 pub mod talk_camera;
 mod talk_ingest;

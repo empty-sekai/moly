@@ -1,13 +1,18 @@
-//! Source-scoped weather Transform animation preparation.
+//! Source-scoped weather Transform animation preparation and playback.
 //!
 //! A model clip is not an automatic player. Controller layer metadata and scalar
-//! coefficients can be compiled without pretending that additive reference poses
-//! or Animator's initial evaluation phase have been reproduced. Those gates stay
-//! closed until a qualified native evaluation supplies the missing semantics.
+//! coefficients are compiled for every exact Animator scope. Playback is accepted
+//! only for the controller shape whose evaluation was read from the engine: every
+//! layer with states is additive at weight one, holds one looping state whose
+//! blend tree is a single clip leaf, and that clip drives one Transform's Euler
+//! rotation (Z-X-Y order) through three streamed cubic curves. Anything else keeps
+//! its nodes gated with the failing field named.
 
 use bevy::prelude::{GlobalTransform, Quat, Transform, Vec3};
+use moly_law::animator::{self as law, AdditiveRotationLayer};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::source_curve::Curve;
@@ -39,6 +44,96 @@ impl EffectClock {
 
     pub(crate) fn age(&self) -> f64 {
         f64::from_bits(self.elapsed_bits.load(Ordering::Relaxed))
+    }
+}
+
+/// One Transform whose local rotation an accepted additive Animator layer writes.
+#[derive(Clone)]
+pub(crate) struct AnimatedNode {
+    /// Effect node path of the bound Transform.
+    pub(crate) path: String,
+    pub(crate) layer: AdditiveRotationLayer,
+    /// Euler x, y and z curves in degrees, in component order.
+    pub(crate) curves: [Curve; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LayerSnapshot {
+    /// State normalized time after the last evaluation.
+    pub(crate) state_time: f32,
+    /// Sampled Euler angles (degrees) of the last evaluation.
+    pub(crate) euler: [f32; 3],
+    /// Local rotation (Unity x, y, z, w) the last evaluation stored.
+    pub(crate) rotation: [f32; 4],
+}
+
+struct AnimatorState {
+    last_frame: Option<u32>,
+    state_times: Vec<f32>,
+    written: Vec<Option<LayerSnapshot>>,
+}
+
+/// Animator of one effect instance, shared by every emitter of that instance.
+///
+/// The state machine is put in its initial state when the graph is built, so each
+/// layer's state time starts at exactly zero and the Transform holds its
+/// serialized rotation until the first evaluation. Each frame the Animator
+/// evaluates once with that frame's delta time, before the frame's particle
+/// update: `EvaluateState` advances the normalized time, the clip is sampled at the
+/// looped clip time, and the additive result is stored as the local rotation.
+/// Culling mode "always animate" keeps this running without a camera, and the
+/// GameObject (with its Animator) lives on after its particles stop.
+pub(crate) struct EffectAnimator {
+    nodes: Vec<AnimatedNode>,
+    state: Mutex<AnimatorState>,
+}
+
+impl EffectAnimator {
+    pub(crate) fn new(nodes: Vec<AnimatedNode>) -> Self {
+        let times = vec![0.0; nodes.len()];
+        Self::with_state_times(nodes, times)
+    }
+
+    /// An Animator whose layers already hold the given state times.
+    pub(crate) fn with_state_times(nodes: Vec<AnimatedNode>, mut state_times: Vec<f32>) -> Self {
+        state_times.resize(nodes.len(), 0.0);
+        let written = vec![None; nodes.len()];
+        Self { nodes, state: Mutex::new(AnimatorState { last_frame: None, state_times, written }) }
+    }
+
+    /// Evaluate every layer once for `frame`; a second call for the same frame does nothing.
+    pub(crate) fn advance_frame(&self, frame: u32, delta_time: f32) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.last_frame == Some(frame) {
+            return;
+        }
+        state.last_frame = Some(frame);
+        let AnimatorState { state_times, written, .. } = &mut *state;
+        for ((node, time), written) in self.nodes.iter().zip(state_times.iter_mut()).zip(written.iter_mut()) {
+            *time = law::advance_state_time(*time, delta_time, node.layer.state_duration(), law::state_speed(1.0, 1.0));
+            let clip_time = node.layer.clip_time(*time);
+            let euler = node.curves.each_ref().map(|curve| curve.sample(clip_time));
+            *written = Some(LayerSnapshot { state_time: *time, euler, rotation: node.layer.written_rotation(euler) });
+        }
+    }
+
+    /// The local rotation (Unity x, y, z, w) the Animator stored for the node at
+    /// `path`; `None` before its first evaluation or for a node it does not bind.
+    pub(crate) fn rotation(&self, path: &str) -> Option<[f32; 4]> {
+        self.snapshot(path).map(|snapshot| snapshot.rotation)
+    }
+
+    pub(crate) fn snapshot(&self, path: &str) -> Option<LayerSnapshot> {
+        let index = self.nodes.iter().position(|node| node.path == path)?;
+        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.written[index]
+    }
+
+    pub(crate) fn report(&self) -> Value {
+        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Value::Array(self.nodes.iter().zip(&state.written).map(|(node, written)| json!({
+            "node": node.path, "stateTime": written.map(|w| w.state_time),
+            "euler": written.map(|w| w.euler), "rotation": written.map(|w| w.rotation)})).collect())
     }
 }
 
@@ -220,6 +315,7 @@ pub(crate) struct Contract {
     pub(crate) report: Value,
     blocked: Vec<(String, String)>,
     curves: Vec<BoundCurve>,
+    players: Vec<AnimatedNode>,
 }
 
 impl Contract {
@@ -230,11 +326,26 @@ impl Contract {
             .map(|(_, reason)| reason.as_str())
     }
 
+    /// Transforms whose rotation an accepted Animator layer writes.
+    pub(crate) fn players(&self) -> &[AnimatedNode] {
+        &self.players
+    }
+
+    /// Paths of the accepted animated Transforms at or above `node`.
+    pub(crate) fn animated_ancestors(&self, node: &str) -> Vec<&str> {
+        self.players
+            .iter()
+            .filter(|player| in_scope(node, &player.path))
+            .map(|player| player.path.as_str())
+            .collect()
+    }
+
     pub(crate) fn compile(effect: &Value, document: Option<&Value>) -> Self {
         let mut result = Self {
             report: json!({}),
             blocked: Vec::new(),
             curves: Vec::new(),
+            players: Vec::new(),
         };
         let mut reports = Vec::new();
         let declarations = effect["animationComponents"].as_array();
@@ -322,12 +433,14 @@ impl Contract {
                 })
             })
             .count();
+        let playback_refused = reports.iter().any(|report| report["status"] == "prepared_playback_refused");
         result.report = json!({"inventory":if inventoried {"declared"} else {"legacy_animation_inventory_unknown"},
             "components":reports,"preparedCurveSlots":result.curves.len(),
             "modelOnlyClipsWithoutPlaybackOwner":model_only_clips,
             "channels":result.curves.iter().map(|curve|json!({"node":curve.path,"attribute":curve.attribute,"component":curve.component})).collect::<Vec<_>>(),
             "blockedScopes":result.blocked.iter().map(|(path,reason)|json!({"node":path,"reason":reason})).collect::<Vec<_>>(),
-            "playbackAccepted":false});
+            "acceptedPlayers":result.players.iter().map(|player|player.path.as_str()).collect::<Vec<_>>(),
+            "playbackAccepted":!result.players.is_empty() && !playback_refused});
         result
     }
 
@@ -374,6 +487,7 @@ impl Contract {
         }
         let mut layers = Vec::new();
         let mut affected = HashSet::new();
+        let mut played = Vec::new();
         for (layer_index, layer) in array(decoded, "layers")?.iter().enumerate() {
             let layer = layer.get("data").unwrap_or(layer);
             let machine_index = layer["m_StateMachineIndex"]
@@ -433,6 +547,7 @@ impl Contract {
                 return Err("clip clock/events/bindings unverified".into());
             }
             let mut slots = HashSet::new();
+            let first_curve = self.curves.len();
             for curve in array(clip, "curves")? {
                 if !slots.insert(curve["slot"].as_u64().ok_or("missing curve slot")?) {
                     return Err("duplicate curve slot".into());
@@ -459,22 +574,233 @@ impl Contract {
             {
                 return Err("clip scalar binding accounting mismatch".into());
             }
+            played.push(PlayedLayer {
+                index: layer_index,
+                layer,
+                machine: *machine,
+                state,
+                motion,
+                clip: *clip,
+                curves: first_curve..self.curves.len(),
+            });
             layers.push(json!({"index":layer_index,"blending":blending,"serializedWeight":weight,
                 "stateIndex":state["index"],"speed":state["speed"],"clip":clip["source"],"startTime":start,"stopTime":stop,
                 "loopTime":clip["loopTime"],"curveSlots":slots.len(),
                 "gates":if blending == 1 {vec!["additive_reference_pose_and_blending_unverified","animator_initial_phase_unverified"]}
                     else {vec!["controller_layer_evaluation_unverified","animator_initial_phase_unverified"]}}));
         }
-        for affected in affected {
-            self.blocked.push((
-                affected,
-                "Animator layer evaluation and initial phase unverified".into(),
-            ));
+        match qualify_additive_euler(effect, row, decoded, &played, &self.curves) {
+            Ok(players) => {
+                for layer in &mut layers {
+                    if let Some(gates) = layer.get_mut("gates") {
+                        *gates = json!([]);
+                    }
+                }
+                self.players.extend(players);
+                Ok(json!({"component":"Animator","node":path,"status":"prepared_playback_accepted","layers":layers}))
+            }
+            Err(field) => {
+                let reason = format!("Animator layer outside the qualified additive Euler contract: {field}");
+                for affected in affected {
+                    self.blocked.push((affected, reason.clone()));
+                }
+                Ok(json!({"component":"Animator","node":path,"status":"prepared_playback_refused",
+                    "refusal":reason,"layers":layers}))
+            }
         }
-        Ok(
-            json!({"component":"Animator","node":path,"status":"prepared_playback_refused","layers":layers}),
-        )
     }
+}
+
+/// One controller layer with a state, as resolved during preparation.
+struct PlayedLayer<'a> {
+    index: usize,
+    layer: &'a Value,
+    machine: &'a Value,
+    state: &'a Value,
+    motion: &'a Value,
+    clip: &'a Value,
+    curves: std::ops::Range<usize>,
+}
+
+fn inner(value: &Value) -> &Value {
+    value.get("data").unwrap_or(value)
+}
+
+fn empty(value: &Value) -> bool {
+    value.as_array().is_some_and(Vec::is_empty)
+}
+
+fn require(ok: bool, field: &str) -> Result<(), String> {
+    if ok { Ok(()) } else { Err(field.into()) }
+}
+
+fn scalar_is(value: &Value, expected: f32) -> bool {
+    number(value).is_ok_and(|n| n == expected)
+}
+
+fn rotation4(value: &Value) -> Option<[f32; 4]> {
+    let list = value.as_array().filter(|list| list.len() == 4)?;
+    let mut out = [0.0; 4];
+    for (slot, value) in out.iter_mut().zip(list) {
+        *slot = number(value).ok()?;
+    }
+    Some(out)
+}
+
+/// Accept the Animator only when every serialized field the engine evaluation
+/// was read for holds the value it was read at; the first failing field is
+/// returned by name.
+///
+/// - Animator: no Avatar, a Transform hierarchy, and neither disable-path flag
+///   (the weather effects are never deactivated while they play, so those two
+///   only fence the reading of the disable path).
+/// - Every layer: no IK pass, no synced layer, an empty skeleton mask and its own
+///   state machine. A layer whose state machine has no states contributes
+///   nothing whatever its blending mode and weight: the first layer is forced to
+///   weight one over an empty mixer and a later empty layer has motion-set weight
+///   zero.
+/// - A layer with states: additive at serialized weight one and not the first
+///   layer; one default state without transitions and selector transitions
+///   without conditions (selectors are only visited by transition evaluation);
+///   speed one, no cycle offset, mirror,
+///   IK on feet or parameters; looping with write defaults; a blend tree of one
+///   clip leaf with duration one.
+/// - Its clip: starts at zero, stops at a positive time, loops without loop blend,
+///   mirror or cycle offset, has no events or float or object curves and one
+///   generic binding: the Transform's Euler rotation in Z-X-Y order, animated by
+///   three streamed cubic curves whose keys span exactly the clip. The reference
+///   pose is empty, so the clip's delta start values are the additive reference.
+///   The clip's own sample rate is never consulted (its playable carries none).
+/// - One layer per Transform.
+fn qualify_additive_euler(
+    effect: &Value,
+    row: &Value,
+    decoded: &Value,
+    played: &[PlayedLayer],
+    curves: &[BoundCurve],
+) -> Result<Vec<AnimatedNode>, String> {
+    let fields = &row["fields"];
+    require(fields["m_Avatar"]["m_PathID"] == "0", "m_Avatar")?;
+    require(flag(&fields["m_HasTransformHierarchy"]) == Some(true), "m_HasTransformHierarchy")?;
+    require(flag(&fields["m_KeepAnimatorStateOnDisable"]) == Some(false), "m_KeepAnimatorStateOnDisable")?;
+    require(flag(&fields["m_WriteDefaultValuesOnDisable"]) == Some(false), "m_WriteDefaultValuesOnDisable")?;
+    let mut machines = HashSet::new();
+    for layer in array(decoded, "layers")? {
+        let layer = inner(layer);
+        require(flag(&layer["m_IKPass"]) == Some(false), "m_IKPass")?;
+        require(flag(&layer["m_SyncedLayerAffectsTiming"]) == Some(false), "m_SyncedLayerAffectsTiming")?;
+        require(layer["m_StateMachineSynchronizedLayerIndex"].as_u64() == Some(0), "m_StateMachineSynchronizedLayerIndex")?;
+        require(empty(&layer["m_SkeletonMask"]["data"]["m_Data"]), "m_SkeletonMask")?;
+        require(layer["m_StateMachineIndex"].as_u64().is_some_and(|index| machines.insert(index)), "m_StateMachineIndex")?;
+    }
+    let mut players = Vec::new();
+    let mut bound_paths = HashSet::new();
+    for played in played {
+        let layer = inner(played.layer);
+        require(layer["(int&)m_LayerBlendingMode"].as_u64() == Some(1), "m_LayerBlendingMode")?;
+        require(scalar_is(&layer["m_DefaultWeight"], 1.0), "m_DefaultWeight")?;
+        require(played.index >= 1, "layer index")?;
+        require(empty(&played.machine["anyStateTransitions"]) && empty(&played.state["transitions"]), "transitions")?;
+        for selector in played.machine["selectorStates"].as_array().ok_or("selectorStates")? {
+            let transitions = inner(selector)["m_TransitionConstantArray"].as_array().ok_or("selector transitions")?;
+            require(transitions.iter().all(|t| empty(&inner(t)["m_ConditionConstantArray"])), "selector transition conditions")?;
+        }
+        let raw = &played.state["raw"];
+        require(scalar_is(&raw["m_Speed"], 1.0), "m_Speed")?;
+        require(scalar_is(&raw["m_CycleOffset"], 0.0), "m_CycleOffset")?;
+        require(flag(&raw["m_Mirror"]) == Some(false), "m_Mirror")?;
+        require(flag(&raw["m_Loop"]) == Some(true), "m_Loop")?;
+        require(flag(&raw["m_IKOnFeet"]) == Some(false), "m_IKOnFeet")?;
+        require(flag(&raw["m_WriteDefaultValues"]) == Some(true), "m_WriteDefaultValues")?;
+        for key in ["m_SpeedParamID", "m_MirrorParamID", "m_CycleOffsetParamID", "m_TimeParamID"] {
+            require(raw[key].as_u64() == Some(0), key)?;
+        }
+        require(empty(&raw["m_TransitionConstantArray"]), "m_TransitionConstantArray")?;
+        require(raw["m_BlendTreeConstantIndexArray"] == json!([0]), "m_BlendTreeConstantIndexArray")?;
+        let trees = raw["m_BlendTreeConstantArray"].as_array().filter(|trees| trees.len() == 1)
+            .ok_or("m_BlendTreeConstantArray")?;
+        let nodes = inner(&trees[0])["m_NodeArray"].as_array().filter(|nodes| nodes.len() == 1).ok_or("m_NodeArray")?;
+        let leaf = inner(&nodes[0]);
+        require(leaf["m_BlendType"].as_u64() == Some(0), "m_BlendType")?;
+        require(empty(&leaf["m_ChildIndices"]), "m_ChildIndices")?;
+        require(scalar_is(&leaf["m_Duration"], 1.0), "blend node m_Duration")?;
+        require(scalar_is(&leaf["m_CycleOffset"], 0.0), "blend node m_CycleOffset")?;
+        require(flag(&leaf["m_Mirror"]) == Some(false), "blend node m_Mirror")?;
+        require(leaf["m_ClipID"].as_u64().is_some() && leaf["m_ClipID"] == played.motion["clipIndex"], "m_ClipID")?;
+
+        let clip = played.clip;
+        let start = number(&clip["startTime"]).map_err(|_| "startTime")?;
+        let stop = number(&clip["stopTime"]).map_err(|_| "stopTime")?;
+        require(start == 0.0, "startTime")?;
+        require(stop > 0.0, "stopTime")?;
+        require(flag(&clip["loopTime"]) == Some(true), "loopTime")?;
+        require(flag(&clip["legacy"]) == Some(false), "legacy")?;
+        for key in ["events", "floatCurves", "pptrCurves"] {
+            require(empty(&clip[key]), key)?;
+        }
+        let bindings = clip["bindings"]["genericBindings"].as_array().filter(|b| b.len() == 1).ok_or("genericBindings")?;
+        let binding = &bindings[0];
+        for key in ["attribute", "customType", "typeID"] {
+            require(binding[key].as_u64() == Some(4), key)?;
+        }
+        for key in ["isIntCurve", "isPPtrCurve", "isSerializeReferenceCurve"] {
+            require(flag(&binding[key]) == Some(false), key)?;
+        }
+        let rows = array(clip, "curves")?;
+        let bound = curves.get(played.curves.clone()).ok_or("curves")?;
+        require(rows.len() == 3 && bound.len() == 3, "curve count")?;
+        let mut by_component: [Option<Curve>; 3] = [None, None, None];
+        let path = bound[0].path.clone();
+        for (curve_row, bound) in rows.iter().zip(bound) {
+            require(curve_row["kind"] == "cubic", "curve kind")?;
+            require(curve_row["binding"]["attribute"].as_u64() == Some(4) && bound.attribute == 4, "curve attribute")?;
+            require(curve_row["binding"]["pathHash"] == binding["path"], "curve path")?;
+            require(bound.path == path && curve_row["targets"][0]["target"] == rows[0]["targets"][0]["target"],
+                "curve Transform")?;
+            let component = bound.component as usize;
+            require(component < 3 && curve_row["slot"].as_u64() == Some(bound.component), "curve slot")?;
+            let Curve::Cubic(keys) = &bound.curve else { return Err("curve kind".into()) };
+            // The export keeps the streamed keys from the first one on. A key
+            // domain starting after the clip start would leave the engine's
+            // leading segment unrepresented, so both ends must be the clip ends.
+            require(keys.first().is_some_and(|key| key.0 == start) && keys.last().is_some_and(|key| key.0 == stop),
+                "curve key domain")?;
+            require(by_component[component].replace(bound.curve.clone()).is_none(), "curve component")?;
+        }
+        let [Some(x), Some(y), Some(z)] = by_component else { return Err("curve component".into()) };
+        let muscle = &clip["muscleClip"];
+        require(empty(&muscle["m_ValueArrayReferencePose"]), "m_ValueArrayReferencePose")?;
+        let deltas = muscle["m_ValueArrayDelta"].as_array().filter(|d| d.len() == 3).ok_or("m_ValueArrayDelta")?;
+        let mut reference_euler = [0.0; 3];
+        for (slot, delta) in reference_euler.iter_mut().zip(deltas) {
+            *slot = number(&delta["m_Start"]).map_err(|_| "m_ValueArrayDelta")?;
+            number(&delta["m_Stop"]).map_err(|_| "m_ValueArrayDelta")?;
+        }
+        require(scalar_is(&muscle["m_CycleOffset"], 0.0), "muscle m_CycleOffset")?;
+        require(flag(&muscle["m_LoopTime"]) == Some(true), "m_LoopTime")?;
+        require(flag(&muscle["m_LoopBlend"]) == Some(false), "m_LoopBlend")?;
+        require(flag(&muscle["m_Mirror"]) == Some(false), "muscle m_Mirror")?;
+        require(bound_paths.insert(path.clone()), "Transform bound by more than one layer")?;
+        // The Animator binds the Transform's serialized local rotation as the
+        // default the additive delta is applied to; the effect node and the
+        // Animator scope node must carry the same one.
+        let nodes: Vec<_> = effect["nodes"].as_array().ok_or("effect nodes")?.iter()
+            .filter(|node| node["path"].as_str() == Some(path.as_str())).collect();
+        let [node] = nodes.as_slice() else { return Err("bound Transform node".into()) };
+        let default_rotation = rotation4(&node["rotation"]).ok_or("bound Transform rotation")?;
+        let target = &rows[0]["targets"][0]["target"];
+        let scope_nodes: Vec<_> = row["scope"]["nodes"].as_array().ok_or("scope nodes")?.iter()
+            .filter(|scope| &scope["transform"] == target).collect();
+        let [scope] = scope_nodes.as_slice() else { return Err("bound Transform scope node".into()) };
+        require(rotation4(&scope["rotation"]).map(|q| q.map(f32::to_bits)) == Some(default_rotation.map(f32::to_bits)),
+            "bound Transform rotation")?;
+        players.push(AnimatedNode {
+            path,
+            layer: AdditiveRotationLayer { start, stop, cycle_offset: 0.0, reference_euler, default_rotation },
+            curves: [x, y, z],
+        });
+    }
+    Ok(players)
 }
 
 #[cfg(test)]
@@ -627,10 +953,12 @@ mod tests {
                 );
             }
             for curve in &contract.curves {
-                assert!(
-                    contract.refusal(&curve.path).is_some(),
-                    "unqualified layer must stay gated"
-                );
+                if contract.players.iter().all(|player| player.path != curve.path) {
+                    assert!(
+                        contract.refusal(&curve.path).is_some(),
+                        "unqualified layer must stay gated"
+                    );
+                }
             }
             prepared += contract.curves.len();
             reports.insert(name.clone(), contract.report);
@@ -651,8 +979,9 @@ mod tests {
             prepared, expected,
             "all exact Animator clip slots must reach preparation"
         );
-        let receipt = json!({"effects":reports,"preparedCurveSlots":prepared,"playbackAccepted":false,
-            "limitations":["no native Animator sampling or initial phase validation","no additive reference pose execution","no source pixel comparison"]});
+        let accepted = reports.values().any(|report| report["playbackAccepted"] == true);
+        let receipt = json!({"effects":reports,"preparedCurveSlots":prepared,"playbackAccepted":accepted,
+            "limitations":["accepted players only for the additive Euler controller shape","no source pixel comparison"]});
         std::fs::write(
             std::env::var_os("MOLY_WEATHER_ANIMATION_OUT").expect("output path"),
             serde_json::to_vec_pretty(&receipt).unwrap(),
