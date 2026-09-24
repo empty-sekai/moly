@@ -636,14 +636,13 @@ const DEG_TO_RAD: f32 = 0.017453292;
 /// 三通道全 > 1.7，两段式会把它算高约 5.6%。bloom 的 threshold 落在
 /// `[0, 1]`（钳制参数）、tint 恒白，所以补上第三段对既有两条泛光装箱
 /// 逐位无影响——它只在调色这条新轴上出力。
+///
+/// 三处（tint、threshold、colorFilter）在源里都走同一个引擎原生换算，
+/// 所以这里直接用 [`sky::gamma_to_linear`]：同一份分段、同一个设备 libm
+/// `powf` 的移植，而不是再拼一份调 `f32::powf` 的——后者在浏览器目标上
+/// 与设备逐值不同。
 fn gamma_to_linear(x: f32) -> f32 {
-    if x <= 0.04045 {
-        x / 12.92
-    } else if x < 1.0 {
-        ((x + 0.055) / 1.055).powf(2.4)
-    } else {
-        x.powf(2.2)
-    }
+    sky::gamma_to_linear(x)
 }
 
 /// `_Bloom_Params.yzw`：线性空间里的 tint，被 `ColorUtils.Luminance`
@@ -1694,12 +1693,13 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// `Mathf.GammaToLinearSpace`（sRGB 分段）的手算展开：此处拼写而
-    /// 不导入，装箱测试的期望因此与实现不共 helper。
+    /// 不导入，装箱测试的期望因此与实现不共 helper。幂是源里那次 C 库
+    /// `powf` 调用，所以调设备 libm 的移植，不调 `f32::powf`。
     fn hand_gamma_to_linear(x: f32) -> f32 {
         if x <= 0.04045f32 {
             x / 12.92f32
         } else {
-            ((x + 0.055f32) / 1.055f32).powf(2.4f32)
+            crate::powf::powf((x + 0.055f32) / 1.055f32, 2.4f32)
         }
     }
 
