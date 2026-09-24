@@ -800,7 +800,7 @@ pub fn install(app: &mut App) {
         )
         // TransformPropagate 之后：scene 实体当帧展开，取景要读已传播的全局变换。
         // 追角色再排在取景之后：角色就位当帧起，追角色每帧覆盖机位。
-        // 天空钉位收尾：读当帧机位的水平坐标，别把上一帧的机位画进天空。
+        // 天空钉位收尾：读玩家视变换当帧（传播之后）的世界位置。
         .add_systems(
             PostUpdate,
             (
@@ -815,7 +815,7 @@ pub fn install(app: &mut App) {
                 camera::report_follow
                     .after(camera::follow_avatar)
                     .run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                sky::follow_camera.after(camera::follow_avatar),
+                sky::follow_player_view.after(camera::follow_avatar),
                 // 粒子帧推进与属性池重建：变换传播之后（发射节点的世界
                 // 变换是本帧的）、机位定好之后（四角朝的是本帧的相机）。
                 uber_particle::advance
@@ -861,7 +861,7 @@ pub fn install(app: &mut App) {
                     .before(camera::follow_avatar),
                 talk_camera::advance
                     .after(camera::follow_avatar)
-                    .before(sky::follow_camera)
+                    .before(sky::follow_player_view)
                     .before(character_material::write_frame_state)
                     .before(balloon::place)
                     .before(emoticon::advance),
