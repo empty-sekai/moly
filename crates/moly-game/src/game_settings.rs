@@ -1451,9 +1451,9 @@ mod refresh_count {
         /// the refresh. If every update then holds the next animation frame
         /// past the following refresh, every interval is that multiple, the
         /// cluster and the span agree on it, and the spacing stays counted in
-        /// multiples until a quarter of the stored intervals are one refresh
-        /// long again (updates that finish within a refresh, or animation
-        /// frames without an update). The rate differs from the source only
+        /// multiples until two intervals of one refresh are stored at the same
+        /// time (updates that finish within a refresh, or animation frames
+        /// without an update). The rate differs from the source only
         /// where the source's spacing is three refreshes or more and the
         /// multiple still wakes the engine on every animation frame, for
         /// example 150 to 179 Hz at a limit of 60 or 75 to 89 Hz at a limit of
@@ -1556,6 +1556,14 @@ mod refresh_count {
         /// down to 0.7 of a refresh); as the lowest cluster they would count
         /// as a refresh a fifth shorter than the span's, restart the span and
         /// be the estimate until it covers [`SPAN_MIN_REFRESHES`] again.
+        ///
+        /// A smaller cluster of two or more below it is the lowest cluster
+        /// instead when the one holding a quarter spans two or more of its
+        /// intervals: then most stored intervals were held past a refresh (by
+        /// updates, or by the page's own work between animation frames), or
+        /// the display refreshes faster than they show. The stray short
+        /// intervals of a 144 Hz display lie less than a third of a refresh
+        /// below it, so it does not span two of theirs.
         fn sample(&mut self, interval: f64) {
             self.samples[self.next] = interval;
             self.next = (self.next + 1) % SAMPLES;
@@ -1563,15 +1571,25 @@ mod refresh_count {
             let mut sorted = self.samples;
             let sorted = &mut sorted[..self.stored];
             sorted.sort_unstable_by(f64::total_cmp);
+            let sorted = &*sorted;
+            // The stored intervals that agree with the one at `index`.
+            let cluster = move |index: usize| {
+                let end = sorted.partition_point(|&value| value <= SPREAD * sorted[index]);
+                &sorted[index..end]
+            };
+            let mean = |cluster: &[f64]| cluster.iter().sum::<f64>() / cluster.len() as f64;
             let agreeing = (self.stored / 4).max(2);
-            for (index, &low) in sorted.iter().enumerate() {
-                let end = sorted.partition_point(|&value| value <= SPREAD * low);
-                let cluster = &sorted[index..end];
-                if cluster.len() >= agreeing {
-                    self.cluster_ms = Some(cluster.iter().sum::<f64>() / cluster.len() as f64);
-                    return;
-                }
-            }
+            let Some(lowest) = (0..sorted.len()).find(|&index| cluster(index).len() >= agreeing)
+            else {
+                return;
+            };
+            let lowest_ms = mean(cluster(lowest));
+            let spanned_ms = (0..lowest)
+                .map(cluster)
+                .filter(|smaller| smaller.len() >= 2)
+                .map(mean)
+                .find(|&smaller_ms| (lowest_ms / smaller_ms).round() >= 2.);
+            self.cluster_ms = Some(spanned_ms.unwrap_or(lowest_ms));
         }
     }
 }
