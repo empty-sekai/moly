@@ -795,7 +795,7 @@ pub(crate) fn plan(
         load_gltf(&server, AssetPath::from(format!(
             "moly://site/indoor/modules/lv_{:02}/lv_{:02}.glb",
             site_level, site_level
-        )), GltfResidency::GpuTextures)
+        )), GltfResidency::RoomModule)
     });
     let walkable = room
         .as_ref()

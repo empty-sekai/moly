@@ -14,8 +14,11 @@
 //! texture. The module meshes are drawn with their vertex colours:
 //! `Mysekai/Room/Floor` multiplies the texture by them, and `Mysekai/Object`
 //! blends them (usage 10) or reads their red channel as wall occlusion
-//! (usage 2). Bindings are instance-owned; original glTF assets and other
-//! rooms are never mutated.
+//! (usage 2), whose edge factor reads the fourth uv set. Bindings are
+//! instance-owned; the module's materials and other rooms are never mutated.
+//! The module meshes gain the third and fourth uv sets the module glb
+//! carries, which the engine's glTF loader does not map
+//! (`room_shell::attach_source_uv_sets`).
 use crate::client_config::{
     ClientConfigs, KEY_MY_ROOM_FLOOR_ASSET_NAME, KEY_MY_ROOM_WALL_APPEARANCE_ASSET_NAME,
 };
@@ -23,7 +26,7 @@ use crate::room_shell::{self, RoomShellMaterial};
 use crate::site::{GroundEpoch, SiteAssets, SiteScenesReady, SiteSelection};
 use bevy::{
     asset::{AssetId, LoadState},
-    gltf::Gltf,
+    gltf::{Gltf, GltfMesh},
     prelude::*,
 };
 use moly_assets::json::JsonAsset;
@@ -61,8 +64,9 @@ pub(crate) struct RoomAppearanceState {
     /// Wall skin, floor skin, then the module's own sidecar.
     sources: Vec<Handle<JsonAsset>>,
     images: Vec<Handle<Image>>,
-    /// Module material -> room program material and the uv set it samples.
-    replacements: HashMap<AssetId<StandardMaterial>, (Handle<RoomShellMaterial>, u32)>,
+    /// Module material -> room program material, the uv set it samples, and
+    /// whether it also reads the fourth set (the usage-2 wall edge factor).
+    replacements: HashMap<AssetId<StandardMaterial>, (Handle<RoomShellMaterial>, u32, bool)>,
     /// Source behaviour the product cannot draw from the extracted data, named
     /// once per build of the materials.
     named_gaps: Vec<String>,
@@ -199,6 +203,8 @@ fn build(
     module_dir: &str,
     configs: &ClientConfigs,
     module: &Gltf,
+    gltf_meshes: &Assets<GltfMesh>,
+    meshes: &mut Assets<Mesh>,
     server: &AssetServer,
     materials: &mut Assets<RoomShellMaterial>,
     state: &mut RoomAppearanceState,
@@ -206,6 +212,7 @@ fn build(
     let [wall_doc, floor_doc, module_doc] = documents else {
         return Err("房间外观数据不全".into());
     };
+    let [with_uv2, with_uv3] = room_shell::attach_source_uv_sets(module, gltf_meshes, meshes)?;
     let wall_pattern = format_pattern(
         configs.string(KEY_MY_ROOM_WALL_APPEARANCE_ASSET_NAME),
         &appearance.wall,
@@ -260,24 +267,14 @@ fn build(
             }
         };
         let resolved = room_shell::resolve(record, uv)?;
-        // The module glb carries the first two uv sets only.
         let index = resolved.uv_index();
-        if index > 1 {
-            return Err(format!(
-                "房间材质 {name} 取第 {} 套纹理坐标，房间模块 glb 只带两套",
-                index + 1
-            ));
-        }
-        if resolved.wall_ao_edge_missing {
-            state.named_gaps.push(format!(
-                "{name}: wall AO edge factor not drawn (the source reads the fourth uv set, which the module glb does not carry)"
-            ));
-        }
         let image = moly_assets::residency::load_image(server, path);
         let handle = materials.add(resolved.with_texture(image.clone()));
         state.images.push(image);
         slots.push(name.to_owned());
-        state.replacements.insert(original.id(), (handle, index));
+        state
+            .replacements
+            .insert(original.id(), (handle, index, resolved.reads_uv3));
     }
     for required in [WALL_SLOT, FLOOR_SLOT] {
         if !slots.iter().any(|slot| slot == required) {
@@ -288,7 +285,7 @@ fn build(
         warn!("[room-shell] {gap}");
     }
     info!(
-        "[room-shell] module materials on the source programs: {:?} ({} named above differ from the source); wall {wall_uri} uv{wall_uv}, floor {floor_uri} uv{floor_uv}",
+        "[room-shell] module materials on the source programs: {:?} ({} named above differ from the source); wall {wall_uri} uv{wall_uv}, floor {floor_uri} uv{floor_uv}; module primitives with uv2 {with_uv2}, uv3 {with_uv3}",
         slots,
         state.named_gaps.len()
     );
@@ -306,8 +303,9 @@ fn apply(
     server: Res<AssetServer>,
     json: Res<Assets<JsonAsset>>,
     gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
     mut materials: ResMut<Assets<RoomShellMaterial>>,
-    meshes: Res<Assets<Mesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
     drawn: Query<
         (
@@ -419,17 +417,25 @@ fn apply(
             &module_dir,
             configs,
             module,
+            &gltf_meshes,
+            &mut meshes,
             &server,
             &mut materials,
             &mut built,
         );
         *state = built;
         if let Err(reason) = result {
+            // Once per key: a refused build is not retried until the site,
+            // epoch or appearance changes.
+            error!("[room-shell] {reason}");
             state.replacements.clear();
             state.error = Some(reason);
             return;
         }
     }
+    // Checked for every mesh before any is swapped, so a refused room keeps
+    // its module materials instead of drawing part of its shell.
+    let mut swaps = Vec::new();
     for (entity, standard, room, mesh, applied) in &drawn {
         let Some(source) = applied
             .map(|value| value.original)
@@ -437,20 +443,34 @@ fn apply(
         else {
             continue;
         };
-        let Some((replacement, uv)) = state.replacements.get(&source).cloned() else {
+        let Some((replacement, uv, reads_uv3)) = state.replacements.get(&source).cloned() else {
             continue;
         };
         if room.is_some_and(|material| material.0 == replacement) {
             continue;
         }
-        if uv == 1
-            && meshes
-                .get(&mesh.0)
-                .is_some_and(|mesh| mesh.attribute(Mesh::ATTRIBUTE_UV_1).is_none())
-        {
-            state.error = Some("房间模型缺少这款外观所需的纹理坐标".into());
-            return;
+        let sampled = match uv {
+            0 => Mesh::ATTRIBUTE_UV_0,
+            1 => Mesh::ATTRIBUTE_UV_1,
+            _ => room_shell::ATTRIBUTE_UV_2,
+        };
+        if let Some(mesh) = meshes.get(&mesh.0) {
+            let refusal = if mesh.attribute(sampled).is_none() {
+                Some("房间模型缺少这款外观所需的纹理坐标")
+            } else if reads_uv3 && mesh.attribute(room_shell::ATTRIBUTE_UV_3).is_none() {
+                Some("房间墙面模型缺少第四套纹理坐标（墙面边缘压暗读它），请重新提取房间模块")
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                error!("[room-shell] {reason}");
+                state.error = Some(reason.into());
+                return;
+            }
         }
+        swaps.push((entity, replacement, source));
+    }
+    for (entity, replacement, source) in swaps {
         commands
             .entity(entity)
             .remove::<MeshMaterial3d<StandardMaterial>>()

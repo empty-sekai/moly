@@ -12,19 +12,22 @@
 //! floor, both "uv set n - 1"). Every other value is the module material's.
 //! Neither program reads `_Color` or `_MainTex_ST`.
 //!
-//! The main walls are implemented but differ from the source: usage 2
-//! multiplies the wall occlusion by the edge factor
+//! Usage 2 multiplies the wall occlusion by the edge factor
 //! `_WallAOIntensity * (d - 1) + 1`, whose `d` comes from the mesh's fourth uv
-//! set, and `mat_wall_main` carries intensity 0.5, so the factor is live. The
-//! module glb carries only the first two uv sets, so the product omits that
-//! factor; `room_appearance.rs` names it each time the wall material is built.
+//! set, and `mat_wall_main` carries intensity 0.5, so the factor is live. A
+//! skin texture named "uvset3" is drawn with the third set. The module glb
+//! carries both as `TEXCOORD_2` / `TEXCOORD_3`; the engine's glTF loader maps
+//! only the first two, so [`attach_source_uv_sets`] reads them from the glTF
+//! source and puts them on the module meshes ([`ATTRIBUTE_UV_2`] /
+//! [`ATTRIBUTE_UV_3`]), and the pipeline binds whichever of them a mesh has.
 //!
 //! The globals are the site ones (`SiteEnvGpuBuffer`: phenomena light and
 //! shade, drop-shadow colour 1, sky-bottom colour, fog, edge pair, treasure
 //! shadows) and the main-light shadow consumer block of `shadowmap.rs`.
 use bevy::ecs::system::lifetimeless::SRes;
 use bevy::ecs::system::SystemParamItem;
-use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::gltf::{Gltf, GltfMesh};
+use bevy::mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
@@ -41,6 +44,18 @@ pub(crate) const OBJECT_SHADER: &str = "Mysekai/Object";
 pub(crate) const FLOOR_SHADER: &str = "Mysekai/Room/Floor";
 
 const PARAM_SLOTS: usize = 9;
+
+/// The third and fourth uv sets of a module mesh (`TEXCOORD_2` /
+/// `TEXCOORD_3` of the module glb, V flipped like the first two).
+pub(crate) const ATTRIBUTE_UV_2: MeshVertexAttribute =
+    MeshVertexAttribute::new("Room_Uv_2", 0x4d_4f_4c_59_52_02, VertexFormat::Float32x2);
+pub(crate) const ATTRIBUTE_UV_3: MeshVertexAttribute =
+    MeshVertexAttribute::new("Room_Uv_3", 0x4d_4f_4c_59_52_03, VertexFormat::Float32x2);
+
+/// Shader locations of the two sets. The standard attributes keep the mesh
+/// pipeline's locations 0..5; 6 and 7 are the (unused) joint slots.
+const UV_2_LOCATION: u32 = 8;
+const UV_3_LOCATION: u32 = 9;
 
 /// `_UsePhenomenaLighting` as the room programs see it: `RoomController` runs
 /// `MysekaiMaterialExtension.SetPhenomenaLighting(on: true)` over the shared
@@ -75,8 +90,9 @@ pub(crate) struct RoomShellMaterial {
 pub(crate) struct ResolvedShell {
     pub key: RoomShellKey,
     params: [[f32; 4]; PARAM_SLOTS],
-    /// Usage 2 reads a fourth uv set the module glb does not carry.
-    pub wall_ao_edge_missing: bool,
+    /// Usage 2 with a non-zero `_WallAOIntensity`: the edge factor reads the
+    /// mesh's fourth uv set, so a mesh drawn with it must carry that set.
+    pub reads_uv3: bool,
 }
 
 impl ResolvedShell {
@@ -202,14 +218,14 @@ pub(crate) fn resolve(
             let index = match uv_index {
                 Some(index) => index as f32,
                 None => {
-                    // _BaseTextureMappingMode: 0 uv0, 2 uv1 are the sets the
-                    // module glb carries (1 world xz, 3 uv2 not ported here).
+                    // _BaseTextureMappingMode: 0 uv0, 2 uv1, 3 uv2 (1, world
+                    // xz, is not ported here).
                     let mapping = get("_BaseTextureMappingMode")?;
-                    domain(&name, "_BaseTextureMappingMode", mapping, &[0.0, 2.0])?;
-                    if mapping == 2.0 {
-                        1.0
-                    } else {
-                        0.0
+                    domain(&name, "_BaseTextureMappingMode", mapping, &[0.0, 2.0, 3.0])?;
+                    match mapping as u32 {
+                        2 => 1.0,
+                        3 => 2.0,
+                        _ => 0.0,
                     }
                 }
             };
@@ -270,9 +286,9 @@ pub(crate) fn resolve(
                     queue,
                 },
                 params,
-                // The edge factor only matters where it is not multiplied
-                // away; with _WallAOIntensity 0 it is exactly 1.
-                wall_ao_edge_missing: usage == 2.0 && params[6][0] != 0.0,
+                // With _WallAOIntensity 0 the edge factor is exactly 1 and the
+                // fourth set is multiplied away.
+                reads_uv3: usage == 2.0 && params[6][0] != 0.0,
             })
         }
         FLOOR_SHADER => {
@@ -283,7 +299,7 @@ pub(crate) fn resolve(
                 Some(index) => index as f32,
                 None => {
                     let selection = get("_UVSelection")?;
-                    domain(&name, "_UVSelection", selection, &[0.0, 1.0])?;
+                    domain(&name, "_UVSelection", selection, &[0.0, 1.0, 2.0])?;
                     selection
                 }
             };
@@ -303,7 +319,7 @@ pub(crate) fn resolve(
                     queue,
                 },
                 params,
-                wall_ao_edge_missing: false,
+                reads_uv3: false,
             })
         }
         other => Err(format!(
@@ -332,7 +348,7 @@ impl Material for RoomShellMaterial {
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let key = key.bind_group_data;
@@ -346,6 +362,30 @@ impl Material for RoomShellMaterial {
         if key.receive_shadows {
             defs.push("ROOM_RECEIVE_SHADOWS");
         }
+        // The vertex input the room programs read: the standard attributes at
+        // the mesh pipeline's locations (it sets the matching VERTEX_* defs)
+        // and the third and fourth uv sets where the mesh has them.
+        let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
+        for (attribute, location) in [
+            (Mesh::ATTRIBUTE_NORMAL, 1),
+            (Mesh::ATTRIBUTE_UV_0, 2),
+            (Mesh::ATTRIBUTE_UV_1, 3),
+            (Mesh::ATTRIBUTE_COLOR, 5),
+        ] {
+            if layout.0.contains(attribute.id) {
+                attributes.push(attribute.at_shader_location(location));
+            }
+        }
+        for (attribute, location, def) in [
+            (ATTRIBUTE_UV_2, UV_2_LOCATION, "ROOM_UV_2"),
+            (ATTRIBUTE_UV_3, UV_3_LOCATION, "ROOM_UV_3"),
+        ] {
+            if layout.0.contains(attribute.id) {
+                attributes.push(attribute.at_shader_location(location));
+                defs.push(def);
+            }
+        }
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&attributes)?];
         for def in defs {
             descriptor.vertex.shader_defs.push(def.into());
             if let Some(fragment) = descriptor.fragment.as_mut() {
@@ -354,6 +394,84 @@ impl Material for RoomShellMaterial {
         }
         Ok(())
     }
+}
+
+/// Put the third and fourth uv sets of every module primitive on its mesh,
+/// read from the module glb's own `TEXCOORD_2` / `TEXCOORD_3` accessors (the
+/// engine's glTF loader maps only `TEXCOORD_0` / `TEXCOORD_1`). A mesh that
+/// already has a set keeps it. Returns how many primitives carry each set. A
+/// primitive whose mesh does not have one vertex per accessor element is
+/// refused: the set would be misaligned with the vertices.
+pub(crate) fn attach_source_uv_sets(
+    module: &Gltf,
+    gltf_meshes: &Assets<GltfMesh>,
+    meshes: &mut Assets<Mesh>,
+) -> Result<[usize; 2], String> {
+    let source = module
+        .source
+        .as_ref()
+        .ok_or("room module was loaded without its glTF source")?;
+    let blob = source
+        .blob
+        .as_deref()
+        .ok_or("room module glb has no binary chunk")?;
+    let mut counts = [0usize; 2];
+    for (mesh_index, gltf_mesh) in source.document.meshes().enumerate() {
+        let loaded = module
+            .meshes
+            .get(mesh_index)
+            .and_then(|handle| gltf_meshes.get(handle))
+            .ok_or_else(|| format!("room module mesh {mesh_index} is not loaded"))?;
+        for primitive in gltf_mesh.primitives() {
+            let target = &loaded
+                .primitives
+                .get(primitive.index())
+                .ok_or_else(|| {
+                    format!(
+                        "room module mesh {mesh_index} primitive {} is not loaded",
+                        primitive.index()
+                    )
+                })?
+                .mesh;
+            // A glb has one buffer, its binary chunk.
+            let reader = primitive.reader(|buffer| (buffer.index() == 0).then_some(blob));
+            for (slot, (set, attribute)) in [(2, ATTRIBUTE_UV_2), (3, ATTRIBUTE_UV_3)]
+                .into_iter()
+                .enumerate()
+            {
+                let Some(coords) = reader.read_tex_coords(set) else {
+                    continue;
+                };
+                let values: Vec<[f32; 2]> = coords.into_f32().collect();
+                let missing = || {
+                    format!(
+                        "room module mesh {mesh_index} primitive {} has no mesh",
+                        primitive.index()
+                    )
+                };
+                let mesh = meshes.get(target).ok_or_else(missing)?;
+                if values.len() != mesh.count_vertices() {
+                    return Err(format!(
+                        "room module mesh {mesh_index} primitive {}: TEXCOORD_{set} has {} elements for {} vertices",
+                        primitive.index(),
+                        values.len(),
+                        mesh.count_vertices()
+                    ));
+                }
+                // Only a mesh without the set is touched, so a rebuild of the
+                // materials does not re-upload the module meshes.
+                if mesh.attribute(attribute).is_none() {
+                    meshes
+                        .get_mut(target)
+                        .ok_or_else(missing)?
+                        .try_insert_attribute(attribute, values)
+                        .map_err(|error| format!("room module mesh {mesh_index}: {error}"))?;
+                }
+                counts[slot] += 1;
+            }
+        }
+    }
+    Ok(counts)
 }
 
 impl AsBindGroup for RoomShellMaterial {
