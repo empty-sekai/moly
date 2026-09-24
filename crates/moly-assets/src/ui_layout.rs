@@ -8,6 +8,7 @@ pub use runtime::UiInstance;
 use bevy::math::{Mat4, Quat, Vec2, Vec3};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -15,8 +16,174 @@ use std::collections::HashMap;
 pub struct UiPrefab {
     pub version: u32,
     pub prefab: String,
+    /// Where the prefab bytes came from. Documents extracted before the
+    /// extractor tagged regions carry none of these fields.
+    pub source: UiDocumentSource,
     pub nodes: Vec<UiNode>,
     indices: UiIndices,
+}
+
+/// The extractor's record of the serialized file a document was read from.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiDocumentSource {
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub client_version: Option<String>,
+    #[serde(default)]
+    pub unity_version: Option<String>,
+    /// sha256 of the serialized file the prefab was read from.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub resource_key: Option<String>,
+}
+
+/// A region-tagged UI root (its ui-manifest.json): one region and client
+/// version, and one row per document the root carries with its sha256.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiRootManifest {
+    pub version: u32,
+    pub region: String,
+    pub client_version: String,
+    pub unity_version: String,
+    #[serde(default)]
+    pub failures: Vec<Value>,
+    pub documents: Vec<UiRootDocument>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiRootDocument {
+    pub document: String,
+    pub document_sha256: String,
+    pub kind: String,
+    pub region: String,
+    pub client_version: String,
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+    /// Node count of a prefab row, as the extractor wrote it.
+    #[serde(default)]
+    pub nodes: Option<usize>,
+}
+
+/// The identity a document was admitted with, for the load log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiDocumentIdentity {
+    pub region: String,
+    pub client_version: String,
+    pub unity_version: String,
+    pub document_sha256: String,
+    pub source_sha256: Option<String>,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+impl UiRootManifest {
+    /// Parse a root's manifest and require it to be the region the runtime
+    /// was built for, with no extraction failures recorded.
+    pub fn parse(bytes: &str, region: &str) -> Result<Self, String> {
+        let manifest: Self = serde_json::from_str(bytes).map_err(|e| e.to_string())?;
+        if manifest.version != 1 {
+            return Err(format!("UI root manifest version {} is not 1", manifest.version));
+        }
+        if manifest.region != region {
+            return Err(format!(
+                "UI root manifest is region {}, the runtime is {region}",
+                manifest.region
+            ));
+        }
+        if !manifest.failures.is_empty() {
+            return Err(format!("UI root manifest records {} failures", manifest.failures.len()));
+        }
+        Ok(manifest)
+    }
+
+    /// Admit one file of this root: it must have a manifest row of the given
+    /// kind, of this region and client version, whose sha256 equals the
+    /// loaded bytes.
+    pub fn admit(
+        &self,
+        path: &str,
+        kind: &str,
+        bytes: &str,
+    ) -> Result<(&UiRootDocument, UiDocumentIdentity), String> {
+        let row = self
+            .documents
+            .iter()
+            .find(|row| row.document == path)
+            .ok_or_else(|| format!("UI root manifest has no row for {path}"))?;
+        if row.kind != kind {
+            return Err(format!("UI root manifest row {path} is {}, not {kind}", row.kind));
+        }
+        if row.region != self.region || row.client_version != self.client_version {
+            return Err(format!(
+                "UI root manifest row {path} is not {} {}",
+                self.region, self.client_version
+            ));
+        }
+        let document_sha256 = sha256_hex(bytes.as_bytes());
+        if document_sha256 != row.document_sha256 {
+            return Err(format!(
+                "UI document {path} sha256 {document_sha256} differs from its manifest row {}",
+                row.document_sha256
+            ));
+        }
+        let identity = UiDocumentIdentity {
+            region: self.region.clone(),
+            client_version: self.client_version.clone(),
+            unity_version: self.unity_version.clone(),
+            document_sha256,
+            source_sha256: row.source_sha256.clone(),
+        };
+        Ok((row, identity))
+    }
+
+    /// Admit a layout document of this root: it must have a prefab row of
+    /// this region and client version whose sha256 equals the loaded bytes,
+    /// and the document's own source record must agree with the row.
+    pub fn admit_prefab(
+        &self,
+        path: &str,
+        bytes: &str,
+        doc: &UiPrefab,
+    ) -> Result<UiDocumentIdentity, String> {
+        let (row, identity) = self.admit(path, "prefab", bytes)?;
+        let document_sha256 = identity.document_sha256;
+        let source = &doc.source;
+        if source.region.as_deref() != Some(self.region.as_str())
+            || source.client_version.as_deref() != Some(self.client_version.as_str())
+            || source.unity_version.as_deref() != Some(self.unity_version.as_str())
+        {
+            return Err(format!(
+                "UI document {path} source is not {} {}",
+                self.region, self.client_version
+            ));
+        }
+        if row.nodes.is_some_and(|nodes| nodes != doc.nodes.len()) {
+            return Err(format!(
+                "UI document {path} has {} nodes, its manifest row {:?}",
+                doc.nodes.len(),
+                row.nodes
+            ));
+        }
+        if row.source_sha256.is_some() && source.sha256 != row.source_sha256 {
+            return Err(format!(
+                "UI document {path} serialized-file sha256 differs from its manifest row"
+            ));
+        }
+        Ok(UiDocumentIdentity {
+            region: self.region.clone(),
+            client_version: self.client_version.clone(),
+            unity_version: self.unity_version.clone(),
+            document_sha256,
+            source_sha256: source.sha256.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -30,6 +197,8 @@ struct UiIndices {
 struct UiPrefabSource {
     version: u32,
     prefab: String,
+    #[serde(default)]
+    source: UiDocumentSource,
     nodes: Vec<UiNode>,
 }
 
@@ -180,6 +349,7 @@ impl TryFrom<UiPrefabSource> for UiPrefab {
         Ok(Self {
             version: value.version,
             prefab: value.prefab,
+            source: value.source,
             nodes: value.nodes,
             indices,
         })
@@ -189,6 +359,23 @@ impl TryFrom<UiPrefabSource> for UiPrefab {
 impl UiPrefab {
     pub fn parse(bytes: &str) -> Result<Self, String> {
         serde_json::from_str(bytes).map_err(|e| e.to_string())
+    }
+
+    /// Image names inside a document are relative to the root it was read
+    /// from. Rewrite them to full asset paths of that root, so documents of
+    /// different roots never share an image name.
+    pub fn rebase_images(&mut self, root: &str) {
+        for node in &mut self.nodes {
+            for component in &mut node.components {
+                for source in [&mut component.sprite, &mut component.texture].into_iter().flatten() {
+                    if let Some(image) = source.get_mut("image") {
+                        if let Some(name) = image.as_str().filter(|name| !name.contains("://")) {
+                            *image = Value::String(format!("{root}{name}"));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn find(&self, suffix: &str) -> Result<usize, String> {
@@ -208,6 +395,11 @@ impl UiPrefab {
                 self.prefab
             )),
         }
+    }
+
+    /// The parent node of `index` inside this prefab (None for the root).
+    pub fn parent(&self, index: usize) -> Option<usize> {
+        self.indices.parents[index]
     }
 
     pub fn resolve(&self, canvas: Vec2, visible: &HashMap<usize, bool>) -> Vec<UiRect> {

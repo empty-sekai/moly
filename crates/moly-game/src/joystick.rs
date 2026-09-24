@@ -46,7 +46,8 @@
 //! 各含起手/满偏/收场三时刻），段界记玩家位置快照，位移方向逐段
 //! 可对账。
 
-use crate::balloon::{canvas_scale, BALLOON_LAYER};
+use crate::balloon::BALLOON_LAYER;
+use crate::canvas::RootCanvas;
 use crate::player::PlayerControlled;
 use bevy::asset::{AssetPath, LoadState};
 use bevy::camera::visibility::RenderLayers;
@@ -130,6 +131,7 @@ pub(crate) fn advance(
     settings_panel: Res<crate::game_settings::SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
+    root_canvas: Option<Res<RootCanvas>>,
 ) {
     let Some(window) = windows.single().ok() else {
         return;
@@ -154,7 +156,13 @@ pub(crate) fn advance(
         }
         return;
     }
-    let radius = HANDLE_SIZE * canvas_scale(width, height);
+    // The joystick is a HUD control of the root canvas; before that canvas
+    // exists there is no joystick to take a touch.
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        touches.clear();
+        return;
+    };
+    let radius = HANDLE_SIZE * root_canvas.scale(window);
     for touch in touches.read() {
         match touch.phase {
             TouchPhase::Started => {
@@ -339,8 +347,9 @@ pub(crate) fn place_ui(
         (&mut Transform, &mut Sprite),
         (With<JoystickHandle>, Without<JoystickBase>),
     >,
+    root_canvas: Option<Res<RootCanvas>>,
 ) {
-    let Ok(window) = windows.single() else {
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
         return;
     };
     let captured = state.captured.is_some();
@@ -355,7 +364,7 @@ pub(crate) fn place_ui(
         return;
     }
     let (width, height) = (window.width(), window.height());
-    let scale = canvas_scale(width, height);
+    let scale = root_canvas.scale(window);
     let base_world = Vec2::new(state.base.x - width / 2.0, height / 2.0 - state.base.y);
     if let Ok((mut transform, mut sprite)) = bases.single_mut() {
         transform.translation = base_world.extend(0.2);
@@ -395,6 +404,7 @@ pub(crate) fn smoke_autojoystick(
     players: Query<&Transform, With<PlayerControlled>>,
     time: Res<Time>,
     mut run: Local<AutojoystickRun>,
+    root_canvas: Option<Res<RootCanvas>>,
 ) {
     let armed = env_secs("MOLY_JOYSTICK_AUTOSMOKE_SECS");
     if armed <= 0.0 || time.elapsed_secs() >= armed {
@@ -413,7 +423,10 @@ pub(crate) fn smoke_autojoystick(
     const C2_PRESS: f32 = 2.4;
     const C2_FULL: f32 = 3.0;
     const C2_RELEASE: f32 = 3.2;
-    let radius = HANDLE_SIZE * canvas_scale(width, height);
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
+    let radius = HANDLE_SIZE * root_canvas.scale(window);
     // 起手点：区内中部（15% 宽、75% 高——顶原点坐标的左下象限）。
     let start = Vec2::new(width * 0.15, height * 0.75);
     let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {

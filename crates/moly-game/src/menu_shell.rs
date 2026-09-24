@@ -12,17 +12,17 @@ use bevy::window::PrimaryWindow;
 use moly_assets::{json::JsonAsset, ui_layout::UiPrefab};
 use serde_json::Value;
 
-use crate::balloon::{canvas_scale, BALLOON_LAYER};
-use crate::camera::{CameraSetting, FieldCameraModel};
+use crate::balloon::BALLOON_LAYER;
+use crate::canvas::RootCanvas;
 use crate::frame_capture::CaptureFrame;
-use crate::gesture::{GestureEvent, GestureState};
+use crate::gesture::{GestureEvent, GestureState, UiPointerEvent, UiPointerPhase};
+use moly_law::ui::custom_button as button_rule;
 use crate::site::SiteActive;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 const SITES_DATA: &str = "moly://site/sites.json";
-const CAMERA_RESET_DURATION: f32 = 0.25;
 const CHROME_MOVE_DURATION: f32 = 0.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,131 @@ impl ShellHost {
     fn shows_site_map(self) -> bool {
         self != Self::MyRoom
     }
+
+    /// The host of the harvest site category (MysekaiSiteCategory 2); the
+    /// other three hosts are housing_home 0, housing_room 1 and delivery 3.
+    fn is_harvest(self) -> bool {
+        self == Self::Harvest
+    }
+}
+
+/// UIPartsEventBreakTimeGauge's ANIM_OFFSET_Y: a hidden gauge sits this far
+/// above its cached anchored position.
+const GAUGE_HIDE_OFFSET_Y: f32 = 400.;
+
+/// UIPartsEventBreakTimeGauge's position tween duration.
+const GAUGE_SLIDE_SECONDS: f32 = 0.3;
+
+/// Server-decided input of the event break-time gauge: the user's current
+/// event, whose break-time master row the gauge model reads. There is no mock
+/// panel for it yet; the default is "no current event".
+#[derive(Resource, Default)]
+pub(crate) struct EventBreakTimeMock {
+    pub(crate) current_event: Option<i64>,
+}
+
+/// The gauge behind `MysekaiMenuUIContent._eventBreakTimeController`: the
+/// controller's serialized `_gauge` (a UIPartsEventBreakTimeGauge), the
+/// anchored position its first CacheInitialPosition call keeps, the position
+/// this host last wrote, and the gauge's running position tween.
+struct BreakTimeGauge {
+    gauge: String,
+    initial: Vec2,
+    position: Vec2,
+    slide: Option<GaugeSlide>,
+}
+
+/// The hide tween: DOAnchorPosY from the y at its start to the hidden y over
+/// 0.3 s with Ease 5 (InQuad); x stays where it is.
+struct GaugeSlide {
+    from_y: f32,
+    to_y: f32,
+    elapsed: f32,
+}
+
+impl BreakTimeGauge {
+    fn from_document(doc: &UiPrefab, content: &moly_assets::ui_layout::UiComponent) -> Option<Self> {
+        // Older layouts predate the field; there the gauge did not exist.
+        let reference = content.fields.get("_eventBreakTimeController")?;
+        let controller = local_reference(reference, "_eventBreakTimeController")?;
+        let component = doc.nodes.iter().flat_map(|node| node.components.iter())
+            .find(|c| c.path_id == controller)
+            .expect("field menu break-time controller component");
+        assert_eq!(component.class, "Sekai.EventBreakTimeController", "field menu break-time controller class");
+        let gauge = component.fields.get("_gauge")
+            .expect("EventBreakTimeController._gauge is not decoded in this layout");
+        // HideGauge does nothing when the gauge reference is null.
+        let gauge = local_reference(gauge, "_gauge")?;
+        let index = doc.find(&format!("@{gauge}")).unwrap_or_else(|error| panic!("{error}"));
+        let initial = Vec2::from_array(doc.nodes[index].rect.anchored_position);
+        Some(Self { gauge: format!("@{gauge}"), initial, position: initial, slide: None })
+    }
+
+    /// The last branch of MysekaiMenuUIContent.Setup, which runs when this
+    /// host's screen is set up: on the harvest site it calls
+    /// Initialize(false, true, 0), everywhere else HideGauge(false) and
+    /// StopUpdate (which only stops the controller's per-frame refresh).
+    fn setup(&mut self, host: ShellHost, mock: &EventBreakTimeMock, view: &mut UiPrefabView) {
+        if host.is_harvest() {
+            self.initialize(mock, view);
+        } else {
+            self.hide(false, view);
+        }
+    }
+
+    /// EventBreakTimeController.Initialize(useInfoButton false, useAnimation
+    /// true, display mode 0): the gauge view is set up only when an event
+    /// with a break time is in session (event master and server clock) and
+    /// the model initializes, which needs the user's break-time record for
+    /// that event; otherwise HideGauge(useAnimation) and the refresh stops.
+    /// Without a record the model does not initialize whatever the master
+    /// says, so the gauge hides with its slide. (When an event is in session
+    /// the model also logs an error first; the event master is not loaded
+    /// here, so that line is not reproduced.)
+    fn initialize(&mut self, mock: &EventBreakTimeMock, view: &mut UiPrefabView) {
+        if let Some(event) = mock.current_event {
+            panic!(
+                "field menu: the break-time gauge for current event {event} needs the event master \
+                 and the gauge view, which are not built"
+            );
+        }
+        self.hide(true, view);
+    }
+
+    /// UIPartsEventBreakTimeGauge.Hide(useAnimation): its tweens are killed,
+    /// then SetActive(false, useAnimation) sets the GameObject active and
+    /// moves the gauge to the cached position raised by ANIM_OFFSET_Y, at
+    /// once or with the slide.
+    fn hide(&mut self, use_animation: bool, view: &mut UiPrefabView) {
+        self.slide = None;
+        view.set_visible(&self.gauge, true);
+        let hidden_y = self.initial.y + GAUGE_HIDE_OFFSET_Y;
+        if use_animation {
+            self.slide = Some(GaugeSlide { from_y: self.position.y, to_y: hidden_y, elapsed: 0. });
+        } else {
+            self.position = Vec2::new(self.initial.x, hidden_y);
+            view.set_anchored_position(&self.gauge, self.position);
+        }
+    }
+
+    /// Advances the running slide: DOTween InQuad evaluates `(t/d) * (t/d)`.
+    fn advance(&mut self, delta: f32, view: &mut UiPrefabView) {
+        let Some(slide) = self.slide.as_mut() else { return; };
+        slide.elapsed = (slide.elapsed + delta).min(GAUGE_SLIDE_SECONDS);
+        let t = slide.elapsed / GAUGE_SLIDE_SECONDS;
+        self.position.y = slide.from_y + (slide.to_y - slide.from_y) * (t * t);
+        view.set_anchored_position(&self.gauge, self.position);
+        if slide.elapsed >= GAUGE_SLIDE_SECONDS {
+            self.slide = None;
+        }
+    }
+}
+
+/// A same-document reference: `None` for the null reference.
+fn local_reference(value: &Value, field: &str) -> Option<i64> {
+    assert_eq!(value[0].as_i64(), Some(0), "field menu reference must be local: {field}");
+    let id = value[1].as_i64().unwrap_or_else(|| panic!("field menu reference missing: {field}"));
+    (id != 0).then_some(id)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,14 +269,6 @@ pub(crate) enum ShellDialogRequest {
 }
 
 #[derive(Resource)]
-pub(crate) struct CameraResetTween {
-    elapsed: f32,
-    from_pitch: f32,
-    from_distance: f32,
-    duration: f32,
-}
-
-#[derive(Resource)]
 pub(crate) struct ShellSpawned;
 
 #[derive(Component)]
@@ -159,6 +276,63 @@ pub(crate) struct MenuShellRoot {
     host: ShellHost,
     bindings: ShellBindings,
     motion: ChromeMotion,
+    /// This host is the active site's host (its screen has been set up).
+    active: bool,
+}
+
+impl MenuShellRoot {
+    fn new(host: ShellHost, doc: &UiPrefab, view: &mut UiPrefabView) -> Self {
+        let bindings = ShellBindings::from_document(doc, view);
+        let motion = ChromeMotion::new(doc, &bindings);
+        Self { host, bindings, motion, active: false }
+    }
+
+    /// One frame of this host's view state. The gauge's tween runs whether or
+    /// not the chrome is drawn, and the host's screen setup runs when its site
+    /// has just become the active one; while the chrome is drawn, the actions
+    /// visible for this host and the chrome motion are applied.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_view(
+        &mut self,
+        set_up: bool,
+        drawn: bool,
+        hidden: bool,
+        delta: f32,
+        break_time: &EventBreakTimeMock,
+        doc: &UiPrefab,
+        view: &mut UiPrefabView,
+    ) {
+        let host = self.host;
+        if let Some(gauge) = self.bindings.gauge.as_mut() {
+            gauge.advance(delta, view);
+            if set_up {
+                gauge.setup(host, break_time, view);
+            }
+        }
+        if !drawn { return; }
+        for action in ShellAction::ALL {
+            if let Some(path) = self.bindings.refs.get(action.field()) {
+                view.set_visible(path, action.visible(host, hidden));
+            }
+        }
+        self.motion.apply(hidden, delta, doc, &self.bindings, view);
+    }
+}
+
+/// A field-menu host's view as `place` leaves it once the host's site is
+/// active, its screen has been set up with no current event and the chrome
+/// is shown and at rest: the research instrument measures this state.
+#[cfg(test)]
+pub(crate) fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
+    let host = ShellHost::ALL.into_iter().find(|host| host.key() == key)
+        .unwrap_or_else(|| panic!("{key} is not a field-menu host"));
+    let mut view = UiPrefabView::new(host.key(), BALLOON_LAYER);
+    let mut root = MenuShellRoot::new(host, doc, &mut view);
+    let mock = EventBreakTimeMock::default();
+    root.advance_view(true, true, false, 0., &mock, doc, &mut view);
+    // Long enough for the gauge slide and the chrome motion to end.
+    root.advance_view(false, true, false, GAUGE_SLIDE_SECONDS.max(CHROME_MOVE_DURATION), &mock, doc, &mut view);
+    view
 }
 
 #[derive(Component)]
@@ -167,6 +341,7 @@ pub(crate) struct ShellDialogRoot;
 /// These are identities, not a second copy of layout data.
 struct ShellBindings {
     refs: std::collections::HashMap<&'static str, String>,
+    gauge: Option<BreakTimeGauge>,
 }
 
 impl ShellBindings {
@@ -211,7 +386,12 @@ impl ShellBindings {
             let label = doc.nodes[label_index].components.iter()
                 .find(|component| component.class == "Sekai.UI.CustomTextMesh")
                 .expect("housing host edit-button CustomTextMesh");
-            view.set_text_alignment(&format!("@{}", label.path_id), 514);
+            // That Awake is CN 6.0.0 code. The JP views declare no Awake and
+            // never set this alignment, so a JP layout keeps its serialized
+            // one. Layouts extracted before region tagging are the CN ones.
+            if doc.source.region.is_none() {
+                view.set_text_alignment(&format!("@{}", label.path_id), 514);
+            }
             Some(node.path.as_str())
         } else { None };
         // Keep the common chrome and the real housing entry only. Selection,
@@ -227,7 +407,7 @@ impl ShellBindings {
                 view.set_visible(&format!("@{}", node.game_object_id), false);
             }
         }
-        let result = Self { refs };
+        let result = Self { refs, gauge: BreakTimeGauge::from_document(doc, component) };
         // The currently mounted local world is owned by the player. Visitor
         // headers and leave controls require a distinct world context.
         for field in ["_leaveMysekaiButton", "_homeAreaInfo", "_backButton"] {
@@ -292,6 +472,7 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(ShellNamesHandle(server.load(SITES_DATA)));
     commands.init_resource::<ShellUiState>();
     commands.init_resource::<ShellDialogState>();
+    commands.init_resource::<EventBreakTimeMock>();
 }
 
 pub(crate) fn parse(
@@ -356,11 +537,9 @@ pub(crate) fn spawn_when_ready(
     for host in ShellHost::ALL {
         let doc = layouts.document(host.key()).expect("ready field prefab");
         let mut view = UiPrefabView::new(host.key(), BALLOON_LAYER);
-        let bindings = ShellBindings::from_document(doc, &mut view);
-        let motion = ChromeMotion::new(doc, &bindings);
+        let root = MenuShellRoot::new(host, doc, &mut view);
         commands.spawn((
-            MenuShellRoot { host, bindings, motion },
-            Visibility::Hidden, Transform::default(),
+            root, Visibility::Hidden, Transform::default(),
             RenderLayers::layer(BALLOON_LAYER), view,
         ));
     }
@@ -385,23 +564,43 @@ pub(crate) fn place(
     dialog: Res<ShellDialogState>,
     mut roots: Query<(&mut MenuShellRoot, &mut Visibility, &mut Transform, &mut UiPrefabView), Without<ShellDialogRoot>>,
     mut dialogs: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<ShellDialogRoot>, Without<MenuShellRoot>)>,
+    mut solved: Local<std::collections::HashSet<&'static str>>,
+    root_canvas: Option<Res<RootCanvas>>,
+    break_time: Res<EventBreakTimeMock>,
 ) {
-    let Ok(window) = windows.single() else { return; };
-    let scale = canvas_scale(window.width(), window.height());
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
+    let scale = root_canvas.scale(window);
     let host = active.as_deref().map(ShellHost::for_site);
     for (mut root, mut visibility, mut transform, mut view) in &mut roots {
-        let visible = stack.on_field() && host == Some(root.host);
+        let is_host = host == Some(root.host);
+        let set_up = is_host && !root.active;
+        root.active = is_host;
+        let visible = stack.on_field() && is_host;
         *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
         transform.scale = Vec3::splat(scale);
+        let doc = layouts.document(root.host.key()).expect("spawned field prefab");
+        root.advance_view(set_up, visible, ui.hidden, time.delta_secs(), &break_time, doc, &mut view);
         if !visible { continue; }
-        for action in ShellAction::ALL {
-            if let Some(path) = root.bindings.refs.get(action.field()) {
-                view.set_visible(path, action.visible(root.host, ui.hidden));
+        let canvas = root_canvas.size(window);
+        if !solved.contains(view.key) {
+            if let Some(check) = view.solve_check(&layouts, canvas) {
+                solved.insert(view.key);
+                if check.non_finite.is_empty() {
+                    info!("UI {}: {} nodes solved at canvas {canvas}, every world corner finite", view.key, check.nodes);
+                } else {
+                    error!(
+                        "UI {}: {} of {} nodes have a non-finite world corner at canvas {canvas}: {:?}",
+                        view.key, check.non_finite.len(), check.nodes, check.non_finite
+                    );
+                }
+                if !check.negative_size.is_empty() {
+                    warn!(
+                        "UI {}: {} nodes have a negative width or height at canvas {canvas}: {:?}",
+                        view.key, check.negative_size.len(), check.negative_size
+                    );
+                }
             }
         }
-        let doc = layouts.document(root.host.key()).expect("spawned field prefab");
-        let MenuShellRoot { bindings, motion, .. } = &mut *root;
-        motion.apply(ui.hidden, time.delta_secs(), doc, bindings, &mut view);
     }
     for (mut visibility, mut transform, mut view) in &mut dialogs {
         let context = dialog.leave_context.as_ref().filter(|_| dialog.leave_confirm);
@@ -433,29 +632,42 @@ pub(crate) fn advance_dialogs(
     }
 }
 
-pub(crate) fn advance_camera_reset(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut reset: Option<ResMut<CameraResetTween>>,
-    camera_model: Option<ResMut<FieldCameraModel>>,
-    camera_setting: Option<Res<CameraSetting>>,
-) {
-    let Some(reset) = reset.as_deref_mut() else { return; };
-    let (Some(mut model), Some(setting)) = (camera_model, camera_setting) else {
-        commands.remove_resource::<CameraResetTween>();
-        return;
-    };
-    reset.elapsed += time.delta_secs();
-    let t = (reset.elapsed / reset.duration).clamp(0., 1.);
-    model.pitch = reset.from_pitch + (setting.init_pitch - reset.from_pitch) * t;
-    model.distance = reset.from_distance + (setting.distance - reset.from_distance) * t;
-    model.gestured_distance = model.distance;
-    if t >= 1. { commands.remove_resource::<CameraResetTween>(); }
+/// A window position (logical pixels, origin top-left) in root canvas units
+/// (origin at the canvas centre, y up).
+fn to_canvas(position: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
+    Vec2::new(position.x - window.width() / 2., window.height() / 2. - position.y) / root.scale(window)
 }
 
-fn to_canvas(position: Vec2, window: &Window) -> Vec2 {
-    Vec2::new(position.x - window.width() / 2., window.height() / 2. - position.y)
-        / canvas_scale(window.width(), window.height())
+/// The press chain of the field camera reset button for one pointer at a
+/// window position: the point in canvas units, the selectable the source
+/// raycast gives a press there to, and the button's `IsActive()` and
+/// `IsInteractable()`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CameraResetHit {
+    // The point and the target are read by the research instrument only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) point: Vec2,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) target: Option<(usize, i64)>,
+    pub(crate) over_button: bool,
+    pub(crate) active: bool,
+    pub(crate) interactable: bool,
+}
+
+pub(crate) fn camera_reset_hit(
+    view: &UiPrefabView,
+    layouts: &UiLayouts,
+    window: &Window,
+    root: &RootCanvas,
+    position: Vec2,
+    node: usize,
+    button: i64,
+) -> CameraResetHit {
+    let canvas = root.size(window);
+    let point = to_canvas(position, window, root);
+    let target = view.press_target(layouts, point, canvas);
+    let (active, interactable) = view.selectable_live(layouts, canvas, node, button).unwrap_or((false, false));
+    CameraResetHit { point, target, over_button: target.is_some_and(|(_, id)| id == button), active, interactable }
 }
 
 fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, canvas: Vec2, size: Vec2) -> bool {
@@ -476,8 +688,7 @@ pub(crate) fn click(
     active: Option<Res<SiteActive>>,
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
     dialogs: Query<&UiPrefabView, With<ShellDialogRoot>>,
-    camera_model: Option<Res<FieldCameraModel>>,
-    camera_setting: Option<Res<CameraSetting>>,
+    root_canvas: Option<Res<RootCanvas>>,
     mut sounds: ResMut<crate::audio::SeRequests>,
 ) {
     let (mut captures, mut edit_commands) = requests;
@@ -485,9 +696,8 @@ pub(crate) fn click(
         .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
         .map(|event| event.position).collect();
     if taps.is_empty() || consumed.0 { return; }
-    let Ok(window) = windows.single() else { return; };
-    let scale = canvas_scale(window.width(), window.height());
-    let size = Vec2::new(window.width(), window.height()) / scale;
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
+    let size = root_canvas.size(window);
     if dialog.menu_open || dialog.menu_closing || dialog.option_open || dialog.get_resource_open { return; }
     if dialog.leave_confirm {
         // Read ownership before closing. A close must not replay against the
@@ -497,7 +707,7 @@ pub(crate) fn click(
         let on_confirm = context.on_confirm;
         let Ok(view) = dialogs.single() else { return; };
         for position in taps {
-            let canvas = to_canvas(position, window);
+            let canvas = to_canvas(position, window, root_canvas);
             let accept = hit(view, &layouts, "@137046", canvas, size);
             let cancel = hit(view, &layouts, "@113613", canvas, size)
                 || hit(view, &layouts, "WindowRoot/UIPartsCloseButton", canvas, size)
@@ -516,9 +726,10 @@ pub(crate) fn click(
     let host = ShellHost::for_site(&active);
     let Some((root, view)) = roots.iter().find(|(root, _)| root.host == host) else { return; };
     for position in taps {
-        let canvas = to_canvas(position, window);
+        let canvas = to_canvas(position, window, root_canvas);
         if let Some(action) = ShellAction::ALL.into_iter().find(|action| {
-            action.visible(host, ui.hidden)
+            !matches!(action, ShellAction::CameraReset)
+                && action.visible(host, ui.hidden)
                 && hit(view, &layouts, root.bindings.get(action.field()), canvas, size)
         }) {
             consumed.0 = true;
@@ -530,19 +741,163 @@ pub(crate) fn click(
                 ShellAction::ScreenShot => { captures.write(CaptureFrame); }
                 ShellAction::UiHide => { ui.hidden = !ui.hidden; }
                 ShellAction::CameraReset => {
-                    if let (Some(model), Some(setting)) = (camera_model.as_deref(), camera_setting.as_deref()) {
-                        let mut next = model.clone();
-                        next.min_pitch = setting.min_pitch;
-                        next.max_pitch = setting.max_pitch;
-                        commands.insert_resource(next);
-                        commands.insert_resource(CameraResetTween {
-                            elapsed: 0., from_pitch: model.pitch, from_distance: model.distance,
-                            duration: CAMERA_RESET_DURATION,
-                        });
-                    }
+                    unreachable!("the camera reset button is driven by its source pointer handlers")
                 }
             }
             break;
+        }
+    }
+}
+
+/// The CustomButton behind `MysekaiMenuUIContent._cameraResetButton`: the
+/// field holds the MySekai button wrapper, whose `_button` is the CustomButton.
+pub(crate) fn camera_reset_button(doc: &UiPrefab) -> Option<i64> {
+    let content = doc.nodes.iter()
+        .flat_map(|node| node.components.iter())
+        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuUIContent")?;
+    let reference = content.fields["_cameraResetButton"].as_array()?;
+    if reference.first()?.as_i64() != Some(0) {
+        return None;
+    }
+    let id = reference.get(1)?.as_i64()?;
+    let component = doc.nodes.iter().flat_map(|node| node.components.iter()).find(|c| c.path_id == id)?;
+    if component.fields.get("se").is_some() {
+        return Some(id);
+    }
+    let inner = component.fields["_button"].as_array()?;
+    (inner.first()?.as_i64() == Some(0)).then(|| inner.get(1)?.as_i64()).flatten()
+}
+
+/// The CustomButton's serialized click fields. Hold repeat is absent from
+/// layouts serialized before the field existed; there it did not exist.
+fn button_config(fields: &Value) -> Option<button_rule::CustomButtonConfig> {
+    Some(button_rule::CustomButtonConfig {
+        se: button_rule::SeType::from_serialized(fields["se"].as_i64()?)?,
+        other_se_name: fields["otherSeName"].as_str()?.to_owned(),
+        interval: button_rule::IntervalUseType::from_serialized(fields["interval"].as_i64()?)?,
+        absolutely_press: fields["absolutelyPress"].as_bool()?,
+        enable_long_press: fields["enableLongPress"].as_bool()?,
+        enable_hold_repeat: fields["enableHoldRepeat"].as_bool().unwrap_or(false),
+    })
+}
+
+/// The game's input manager state shared by source buttons.
+#[derive(Resource, Default)]
+pub(crate) struct SourceInputManager(pub(crate) button_rule::InputManager);
+
+/// The camera reset button's CustomButton state, and whether the event
+/// system's current press went to it.
+#[derive(Resource, Default)]
+pub(crate) struct CameraResetPress {
+    state: button_rule::CustomButtonState,
+    pressed: bool,
+}
+
+/// Source press/release/click for the field camera reset button: the press
+/// goes to the selectable under the pointer by the source raycast; release
+/// finishes it; the click needs the release over the same button and then
+/// passes the CustomButton gate (shared 0.2 s interval, sound), and its click
+/// event runs `MysekaiMenuUIContent.ResetCameraStatus`, the field camera's
+/// `ResetCameraSetting`. The press/release interaction of this button is a
+/// colour fade whose serialized fields and palette colours the layout does
+/// not carry; it is not drawn. A press the handlers cannot resolve is logged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn camera_reset_input(
+    mut commands: Commands,
+    mut pointers: MessageReader<UiPointerEvent>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    layouts: Res<UiLayouts>,
+    real: Res<Time<Real>>,
+    stack: Res<UiLayerStack>,
+    dialog: Res<ShellDialogState>,
+    active: Option<Res<SiteActive>>,
+    roots: Query<(&MenuShellRoot, &UiPrefabView)>,
+    mut manager: ResMut<SourceInputManager>,
+    mut press: ResMut<CameraResetPress>,
+    mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
+    mut camera: crate::camera::CameraReset,
+    root_canvas: Option<Res<RootCanvas>>,
+    mut sounds: ResMut<crate::audio::SeRequests>,
+) {
+    let events: Vec<UiPointerEvent> = pointers.read().copied().collect();
+    if events.is_empty() { return; }
+    let Ok(window) = windows.single() else {
+        info!("camera reset input: {} pointer events without a single primary window", events.len());
+        return;
+    };
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        info!("camera reset input: pointer events before the host canvas loaded");
+        return;
+    };
+    let Some(active) = active else {
+        info!("camera reset input: pointer events before a site is active");
+        return;
+    };
+    let host = ShellHost::for_site(&active);
+    let Some((_, view)) = roots.iter().find(|(root, _)| root.host == host) else {
+        info!("camera reset input: pointer events before the {host:?} field menu is spawned");
+        return;
+    };
+    let Some(doc) = layouts.document(view.key) else {
+        info!("camera reset input: the {} layout is not loaded", view.key);
+        return;
+    };
+    let Some(button) = camera_reset_button(doc) else {
+        info!("camera reset input: {} has no camera reset CustomButton", view.key);
+        return;
+    };
+    let node = doc.find(&format!("@{button}")).unwrap_or_else(|error| panic!("{error}"));
+    let component = doc.nodes[node].components.iter().find(|c| c.path_id == button)
+        .expect("camera reset CustomButton component");
+    let config = button_config(&component.fields).expect("camera reset CustomButton fields");
+    let blocked = dialog.blocks_field_input() || !stack.on_field();
+    let key = button as u64;
+    for event in events {
+        let pointer = button_rule::Pointer { pointer_id: event.pointer_id, left_button: true };
+        let hit = camera_reset_hit(view, &layouts, window, root_canvas, event.position, node, button);
+        let over_button = !blocked && hit.over_button;
+        let live = button_rule::ButtonLive { active: hit.active, interactable: hit.interactable };
+        let mut effects = Vec::new();
+        match event.phase {
+            UiPointerPhase::Down => {
+                press.pressed = over_button;
+                if press.pressed {
+                    let CameraResetPress { state, .. } = &mut *press;
+                    effects = button_rule::on_pointer_down(&mut manager.0, state, &config, key, pointer, event.touch_count, live);
+                }
+            }
+            UiPointerPhase::Up => {
+                if press.pressed {
+                    let CameraResetPress { state, .. } = &mut *press;
+                    effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
+                    if over_button {
+                        effects.extend(button_rule::on_pointer_click(
+                            &mut manager.0, state, &config, key, pointer, real.elapsed_secs(), live,
+                        ));
+                    }
+                }
+                press.pressed = false;
+            }
+            UiPointerPhase::Cancel => {
+                if press.pressed {
+                    let CameraResetPress { state, .. } = &mut *press;
+                    effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
+                }
+                press.pressed = false;
+            }
+        }
+        for effect in effects {
+            match effect {
+                button_rule::ButtonEffect::PlaySe { se, other_se_name } => sounds.button(se, other_se_name),
+                button_rule::ButtonEffect::Click => {
+                    consumed.0 = true;
+                    camera.reset_camera_setting(&mut commands);
+                }
+                button_rule::ButtonEffect::PressEffect
+                | button_rule::ButtonEffect::ReleaseEffect
+                | button_rule::ButtonEffect::StartLongPressCheck
+                | button_rule::ButtonEffect::StartHoldRepeat => {}
+            }
         }
     }
 }

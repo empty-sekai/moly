@@ -119,7 +119,6 @@ use moly_assets::ui_layout::{UiComponent, UiPrefab};
 use serde_json::Value;
 
 use crate::action_button::ActionTapConsumed;
-use crate::balloon::canvas_scale;
 use crate::gesture::{GestureEvent, GestureState};
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
@@ -580,11 +579,41 @@ struct InfoBindings {
     pages: [InfoPageBinding; PAGE_COUNT],
     tabs: [InfoTabBinding; PAGE_COUNT],
     toggles: Vec<(ToggleGroup, Vec<InfoToggleBinding>)>,
-    review_tip: String,
+    /// None where the option page class declares no review tip.
+    review_tip: Option<String>,
+    /// The rank page's put-limit count and joint count texts; None where the
+    /// rank page class declares neither.
+    put_limit_counts: Option<[String; 2]>,
     voice_download: String,
     rank_info: String,
     arrow_prev: String,
     arrow_next: String,
+}
+
+/// The Info page class fields that differ between the clients whose layouts
+/// this host reads, keyed by the layout's region tag.
+///
+/// Layouts without a tag are the shared root's CN extractions: there
+/// `MysekaiInfoOption1Page` serializes `_reviewTip`, and `MysekaiInfoRankPage`
+/// serializes `_fixturePutLimitCountText` and `_fixtureJointPutLimitCountText`.
+/// The JP classes of the region root declare none of the three: the option
+/// page has six serialized references without the review tip, and the rank
+/// page serializes `_fixtureMyRoomPutLimitCostText` and
+/// `_fixtureHomePutLimitCostText` in their place (not bound here: the rank
+/// page class is not decoded and those cost values have no presenter). On a
+/// region whose class lacks an element, the element is not built; a declared
+/// field the layout lacks is an error.
+struct InfoFieldSet {
+    review_tip: bool,
+    put_limit_counts: bool,
+}
+
+fn info_field_set(doc: &UiPrefab) -> InfoFieldSet {
+    match doc.source.region.as_deref() {
+        None => InfoFieldSet { review_tip: true, put_limit_counts: true },
+        Some("jp") => InfoFieldSet { review_tip: false, put_limit_counts: false },
+        Some(region) => panic!("Info: no declared page field set for region {region}"),
+    }
 }
 
 fn referenced_component<'a>(
@@ -665,11 +694,28 @@ impl InfoBindings {
                 }).collect();
             (group, controls)
         }).collect();
+        let declared = info_field_set(doc);
+        let review_tip = if declared.review_tip {
+            Some(referenced_component(doc, &option.fields["_reviewTip"], "Sekai.UI.CustomTextMesh").0)
+        } else {
+            assert!(option.fields.get("_reviewTip").is_none(),
+                "Info: this region's option page declares no _reviewTip, but the layout carries one");
+            None
+        };
+        // The rank page class is not decoded, so its two serialized text
+        // references are reached through their nodes' paths.
+        let put_limit_counts = declared.put_limit_counts.then(|| {
+            ["PutLimitFixtureCount/Value", "PutLimitFixtureJointCount/Value"].map(|path| {
+                doc.find(path).unwrap_or_else(|e| panic!("Info rank page put-limit text: {e}"));
+                path.to_owned()
+            })
+        });
         Self {
             pages,
             tabs,
             toggles,
-            review_tip: referenced_component(doc, &option.fields["_reviewTip"], "Sekai.UI.CustomTextMesh").0,
+            review_tip,
+            put_limit_counts,
             voice_download: referenced_component(doc, &option.fields["_voiceDLButton"], "Sekai.UI.CustomButton").0,
             rank_info: referenced_component(doc, &root.fields["_rankInfoButton"], "Sekai.UI.CustomButton").0,
             arrow_prev: referenced_component(doc, &root.fields["_leftArrowButton"], "Sekai.UI.CustomButton").0,
@@ -794,6 +840,7 @@ pub(crate) fn place(
     mut dialogs:Query<(&InfoDialogRoot,&mut Visibility,&mut Transform,&mut crate::ui_layout::UiPrefabView),Without<InfoRoot>>,
     mut was_open:Local<bool>,
     time: Res<Time>, mut presentation: Option<ResMut<InfoPresentation>>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let open=stack.current()==LayerId::MysekaiInfo;
     let opening = open && !*was_open;
@@ -807,7 +854,8 @@ pub(crate) fn place(
     // for the initial FadeInAsync; directional page-change choreography is a
     // separate source flow, not a generic dialog-scale animation.
     let alpha = 1. - (1. - t) * (1. - t);
-    let Ok(window)=windows.single() else {return;}; let scale=canvas_scale(window.width(),window.height()); let page=page_state.current;
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
+    let scale = root_canvas.scale(window); let page=page_state.current;
     let bindings = &presentation.bindings;
     let reviewing = settings.access == AccessPermission::Review;
     for (mut visible,mut transform,mut view) in &mut roots {
@@ -824,8 +872,11 @@ pub(crate) fn place(
         view.set_text("RankPage/Right/Rank/CustomTextMesh (2)",mock.rank_level.to_string());
         view.set_text("UIPartsMySekaiRankGauge/CustomTextMesh (2)",mock.rank_level.to_string());
         view.set_fill("GaugeBase/Mask/GaugeFill",mock.rank_gauge);
-        view.set_text("PutLimitFixtureCount/Value",mock.fixture_put_limit.to_string());view.set_text("PutLimitFixtureJointCount/Value",mock.fixture_joint_put_limit.to_string());
-        view.set_visible(&bindings.review_tip, reviewing);
+        if let Some([count, joint]) = &bindings.put_limit_counts {
+            view.set_text(count, mock.fixture_put_limit.to_string());
+            view.set_text(joint, mock.fixture_joint_put_limit.to_string());
+        }
+        if let Some(tip) = &bindings.review_tip { view.set_visible(tip, reviewing); }
         for (group, toggles) in &bindings.toggles {
             let selected = selected_option(*group, &settings);
             for (index, toggle) in toggles.iter().enumerate() {
@@ -1003,6 +1054,7 @@ pub(crate) fn click(
     mut consumed: ResMut<ActionTapConsumed>,
     mut layer_commands: MessageWriter<LayerCommand>,
     mut sounds: ResMut<crate::audio::SeRequests>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let taps: Vec<Vec2> = gestures
         .read()
@@ -1020,9 +1072,12 @@ pub(crate) fn click(
     let Ok(window) = windows.single() else {
         return;
     };
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
     let (width, height) = (window.width(), window.height());
-    let scale = canvas_scale(width, height);
-    let size=Vec2::new(width,height)/scale;
+    let scale = root_canvas.scale(window);
+    let size = root_canvas.size(window);
     let Some((view,_))=views.iter().find(|(v,_)|v.key=="Info") else {return;};
     for position in &taps {
         // 全屏层吃掉这一下（世界射线拿不到——真源 blockRaycasts 同形）。

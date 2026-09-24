@@ -7,6 +7,7 @@
 
 use bevy::math::Vec2;
 use moly_assets::ui_layout::{UiComponent, UiTextFace};
+use moly_law::text::auto_size::{self, AutoSize};
 use moly_law::text::tags::{
     Indent, LineIndent, SizeSpec, TextSegment, parse_rich_segments, transformed_glyphs,
 };
@@ -21,7 +22,7 @@ const FONT: &[u8] = include_bytes!("../../assets/font/ResourceHanRoundedSC-Mediu
 pub(super) const FONT_METRICS_REVISION: &str = "ResourceHanRoundedSC-Medium/metrics-wrap-1-source-face-1";
 const EPSILON: f32 = 0.0001;
 const LARGE: f32 = 32767.0;
-const MAX_ITERATIONS: usize = 100;
+const MAX_ITERATIONS: usize = auto_size::MAX_ITERATION_COUNT as usize;
 
 pub(super) struct TextRules {
     pub(super) leading: HashSet<char>,
@@ -54,6 +55,8 @@ enum Purpose {
 struct Settings {
     face: VerticalFace,
     size: f32,
+    /// `m_fontSizeBase`: where a render pass starts an auto-size search.
+    base: f32,
     min: f32,
     max: f32,
     auto: bool,
@@ -67,6 +70,8 @@ struct Settings {
     paragraph_spacing: f32,
     line_spacing_min: f32,
     width_adjustment_max: f32,
+    /// `m_charWidthMaxAdj` as serialized (percent).
+    char_width_max_adj: f32,
     margin: [f32; 4],
     horizontal: i64,
     vertical: i64,
@@ -190,6 +195,7 @@ impl Settings {
         let result = Self {
             face: VerticalFace::read(source_face)?,
             size: number(f, "m_fontSize")?,
+            base: number(f, "m_fontSizeBase")?,
             min: number(f, "m_fontSizeMin")?,
             max: number(f, "m_fontSizeMax")?,
             auto: boolean(f, "m_enableAutoSizing")?,
@@ -203,6 +209,7 @@ impl Settings {
             paragraph_spacing: number(f, "m_paragraphSpacing")?,
             line_spacing_min: number(f, "m_lineSpacingMax")?,
             width_adjustment_max: number(f, "m_charWidthMaxAdj")? / 100.0,
+            char_width_max_adj: number(f, "m_charWidthMaxAdj")?,
             margin,
             horizontal,
             vertical,
@@ -451,6 +458,27 @@ fn pair_metric(left: char, right: char) -> Result<PairMetric, String> {
         cache.borrow_mut().insert((left, right), result.clone());
         result
     })
+}
+
+/// The open font's advance of one character in em units, as `measure`
+/// reads it before scaling by the point size (0 for the characters it gives
+/// no advance), for the research instrument that feeds the same advances to
+/// a transcription of the source layout.
+#[cfg(test)]
+pub(super) fn open_font_advance(ch: char) -> Option<f32> {
+    if zero_advance(ch) {
+        return Some(0.0);
+    }
+    let font = font();
+    let gid = font.charmap().map(metric_character(ch));
+    (gid != 0).then(|| font.glyph_metrics(&[]).scale(1.0).advance_width(gid))
+}
+
+/// The kerning pair `measure` applies between two characters: the advance
+/// added to each of them and the placement offsets, in em units.
+#[cfg(test)]
+pub(super) fn open_font_pair(left: char, right: char) -> Result<([f32; 2], [[f32; 2]; 2]), String> {
+    pair_metric(left, right).map(|pair| (pair.advance, [pair.offset[0].to_array(), pair.offset[1].to_array()]))
 }
 
 fn metric_character(ch: char) -> char {
@@ -899,11 +927,13 @@ fn calculate(
     rect: Vec2,
     width_only: bool,
 ) -> Result<(Pass, f32, f32), String> {
-    let mut size = if cfg.auto { cfg.max } else { cfg.size };
-    let mut lower = cfg.min;
-    let mut upper = cfg.max;
-    let mut adjustment = 0.0;
-    let mut spacing_delta = 0.0;
+    // Render passes start the search at the base size clamped to the bounds;
+    // preferred-size queries start at the max size.
+    let start = match purpose {
+        Purpose::Render => auto_size::render_start_size(cfg.auto, cfg.size, cfg.base, cfg.min, cfg.max),
+        Purpose::Preferred => auto_size::preferred_start_size(cfg.auto, cfg.size, cfg.max),
+    };
+    let mut search = AutoSize::new(start, cfg.min, cfg.max);
     let inner_width = rect.x - cfg.margin[0] - cfg.margin[2];
     let width = if width_only || (purpose == Purpose::Preferred && inner_width == 0.0) {
         LARGE
@@ -915,48 +945,50 @@ fn calculate(
     } else {
         rect.y - cfg.margin[1] - cfg.margin[3]
     };
+    // Justified and flush alignments are rejected when the settings are read,
+    // so the width adjustment never takes the justified target.
+    let justified_or_flush = false;
     for iteration in 0..=MAX_ITERATIONS {
-        let can_resize = cfg.auto && !width_only && iteration < MAX_ITERATIONS;
+        search.iteration = iteration as u32;
+        let can_resize = cfg.auto && !width_only && search.below_iteration_limit();
+        let size = search.font_size;
         let attempt = pass(
             p,
             cfg,
             rules,
             purpose,
             size,
-            adjustment,
-            spacing_delta,
+            search.char_width_adj_delta,
+            search.line_spacing_delta,
             width,
             height,
             !width_only && cfg.wrap,
             can_resize
-                && (size > cfg.min
-                    || adjustment < cfg.width_adjustment_max
-                    || spacing_delta > cfg.line_spacing_min),
+                && (search.may_reduce_point_size(cfg.min)
+                    || search.may_reduce_char_width(cfg.char_width_max_adj)
+                    || search.line_spacing_delta > cfg.line_spacing_min),
         )?;
         match attempt.resize {
             Some(Resize::Width { actual, available })
-                if can_resize && adjustment < cfg.width_adjustment_max =>
+                if can_resize && search.may_reduce_char_width(cfg.char_width_max_adj) =>
             {
-                let unadjusted = actual / (1.0 - adjustment);
-                adjustment =
-                    (adjustment + (actual - available) / unadjusted).min(cfg.width_adjustment_max);
+                search.reduce_char_width(actual, available, justified_or_flush, cfg.char_width_max_adj);
                 continue;
             }
             Some(Resize::Height { actual, lines })
-                if can_resize && lines > 0 && spacing_delta > cfg.line_spacing_min =>
+                if can_resize && search.may_reduce_line_spacing(cfg.line_spacing_min, lines > 0) =>
             {
-                spacing_delta = (spacing_delta
-                    + (height - actual)
-                        / lines as f32
-                        / (size * cfg.face.unit_scale))
-                    .max(cfg.line_spacing_min);
+                search.reduce_line_spacing(
+                    height,
+                    actual,
+                    lines as u32,
+                    size * cfg.face.unit_scale,
+                    cfg.line_spacing_min,
+                );
                 continue;
             }
-            Some(_) if can_resize && size > cfg.min => {
-                upper = size;
-                size =
-                    (((size - ((size - lower) * 0.5).max(0.05)) * 20.0 + 0.5) as i32) as f32 / 20.0;
-                size = size.max(cfg.min);
+            Some(_) if can_resize && search.may_reduce_point_size(cfg.min) => {
+                search.reduce_point_size(cfg.min);
                 continue;
             }
             Some(_) => {
@@ -966,29 +998,31 @@ fn calculate(
                     rules,
                     purpose,
                     size,
-                    adjustment,
-                    spacing_delta,
+                    search.char_width_adj_delta,
+                    search.line_spacing_delta,
                     width,
                     height,
                     !width_only && cfg.wrap,
                     false,
                 )?;
-                return Ok((final_pass, size, adjustment));
+                return Ok((final_pass, size, search.char_width_adj_delta));
             }
             None => {}
         }
-        if can_resize && upper - lower > 0.051 && size < cfg.max {
-            if adjustment < cfg.width_adjustment_max {
-                adjustment = 0.0;
-            }
-            lower = size;
-            size = (((size + ((upper - size) * 0.5).max(0.05)) * 20.0 + 0.5) as i32) as f32 / 20.0;
-            size = size.min(cfg.max);
+        if !width_only && search.may_increase_point_size(cfg.auto, cfg.max) {
+            search.increase_point_size(cfg.max, cfg.char_width_max_adj);
             continue;
         }
-        return Ok((attempt, size, adjustment));
+        return Ok((attempt, size, search.char_width_adj_delta));
     }
     Err("TMP automatic point size exceeded its source iteration bound".into())
+}
+
+/// TMP's early exit: with an empty text-processing array, or one whose first
+/// code point is U+0000, mesh generation clears the mesh and the preferred
+/// size is zero, before any font scale or layout setting is read.
+fn no_text(text: &str) -> bool {
+    text.chars().next().is_none_or(|first| first == '\0')
 }
 
 pub(super) fn preferred_axis(
@@ -1000,6 +1034,9 @@ pub(super) fn preferred_axis(
 ) -> Result<f32, String> {
     if axis > 1 || !rect_size.is_finite() {
         return Err("TMP invalid layout axis or rect".into());
+    }
+    if no_text(text) {
+        return Ok(0.0);
     }
     // Alignment changes only the placement inside the rect, not preferred size.
     let config = Settings::read(component, None)?;
@@ -1032,6 +1069,9 @@ pub(super) fn layout(
 ) -> Result<TextLayout, String> {
     if !rect_size.is_finite() {
         return Err("TMP non-finite render rect".into());
+    }
+    if no_text(text) {
+        return Ok(TextLayout { glyphs: Vec::new() });
     }
     let config = Settings::read(component, alignment)?;
     let prepared = prepare(text, &config)?;

@@ -217,26 +217,6 @@ const ORDER_PROBE_NEAR: f32 = 4.0;
 /// 话时另有目标 fixture 项参与均值，此处单员式）。
 const ANCHOR_OFFSET: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
-/// 根 UI canvas 的参考分辨率（真值：基准屏常量 (1920, 1080)，与根
-/// canvas 缩放件的序列化参考分辨率一致——36 份缩放件全部
-/// ScaleWithScreenSize + (1920,1080) + MatchWidthOrHeight）。
-pub(crate) const CANVAS_REF_W: f32 = 1920.0;
-pub(crate) const CANVAS_REF_H: f32 = 1080.0;
-
-/// canvas 缩放（真值式）：SPEC 的盒几何/字号是 canvas 单位，上屏 = 单位
-/// × 本系数。选择律（`ScreenManager.SetUpScreenResolution` 写 match，
-/// `CanvasScaler` 的 MatchWidthOrHeight 模式消费它）：
-/// 1080/1920 ≤ H/W（屏幕与 16:9 等高或更高）→ match=0 → W/1920；
-/// 更宽 → match=1 → H/1080，即完整容纳参考画布。CanvasScaler 的 0 是宽，
-/// 1 是高。本层相机 1 单位 = 1 逻辑像素，物理尺寸与窗口 DPI 因子约掉。
-pub(crate) fn canvas_scale(width: f32, height: f32) -> f32 {
-    if CANVAS_REF_H / CANVAS_REF_W <= height / width {
-        width / CANVAS_REF_W
-    } else {
-        height / CANVAS_REF_H
-    }
-}
-
 /// 真源 TextMeshPro 排版的坐标倍率（行量法的内部常数；摆位换算要
 /// 与它同一坐标系）。
 pub(crate) const TEXT_SCALE: f32 = 2.0;
@@ -1953,7 +1933,7 @@ pub(crate) fn tick(
 ///   （不销毁，位置沿用上一帧）；回到前方恢复。
 /// * **顶边缩放**：屏幕 y>H/2 时整体缩（顶边收 0.5×），y≤H/2 恒 1——
 ///   写在根上（与 DOScale 的 animation 节点分层，二者相乘）。
-/// * **canvas 缩放**：见 [`canvas_scale`]。
+/// * **canvas 缩放**：见 [`crate::canvas::RootCanvas::scale`]。
 /// 无屏幕边缘钳制（出界照画；投影失败帧沿用上一帧位置）。
 ///
 /// world_to_viewport 返回的已经是逻辑像素（bevy 走 logical_viewport_rect），
@@ -1975,10 +1955,14 @@ pub(crate) fn place(
     windows: Query<&Window>,
     children_q: Query<&Children>,
     mut parts: Query<(&BalloonPart, &mut Sprite)>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     if balloons.is_empty() {
         return;
     }
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
     let Ok((camera, cam_transform, projection)) = cameras.single() else {
         return;
     };
@@ -1995,7 +1979,7 @@ pub(crate) fn place(
     let fwd = cam_transform.forward();
     let sf = window.scale_factor();
     let (width, height) = (window.width(), window.height());
-    let canvas = canvas_scale(width, height);
+    let canvas = root_canvas.scale(window);
     // 跨气泡层序（真源 `SetSiblingTweetHUD` 每帧重排的对应）：键 = 相机
     // transform 到各气泡目标的欧氏距离（avatar 视图根；投影偏移不参与
     // ——真源排序键与投影锚是两个量），按距离降序 → 远的名次 0；

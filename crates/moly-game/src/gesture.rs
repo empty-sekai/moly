@@ -58,6 +58,40 @@ pub struct GestureEvent {
     pub ui_owned: bool,
 }
 
+/// Pointer press/release as the UI event system sees it: one message per
+/// accepted press, its release, or its loss (focus, cursor leaving, touch
+/// cancel, or the layer dropping the pointer while world input is blocked).
+/// Positions are logical screen pixels, y down. The pointer id is -1 for the
+/// left mouse button (the engine's mouse-left id) and the finger id for
+/// touches.
+///
+/// `touch_count` is the engine's `Input.touchCount` for the frame: every
+/// touch reported that frame, including fingers this layer does not track
+/// (the joystick's) and a finger that lifts during the frame. The left mouse
+/// button stands in for one finger of the source's touch-only input while
+/// it is held.
+#[derive(Debug, Clone, Copy, Message)]
+pub struct UiPointerEvent {
+    pub phase: UiPointerPhase,
+    pub position: Vec2,
+    pub pointer_id: i32,
+    pub touch_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiPointerPhase {
+    Down,
+    Up,
+    Cancel,
+}
+
+fn pointer_id(source: PointerSource) -> i32 {
+    match source {
+        PointerSource::Mouse => -1,
+        PointerSource::Finger(id) => id as i32,
+    }
+}
+
 /// 单触点的跟踪面（真源 TouchData 的字段子集：StartPosition/
 /// CurrentPosition/Delta/touchingTime）+ 输入源标记。
 struct Touch {
@@ -90,6 +124,65 @@ pub(crate) struct GestureLayerState {
     last_gestured_at: f32,
     /// 位移累计量（源 dragDelta；pinchDelta 单指恒 0 不设）。
     drag_delta: f32,
+    /// Every finger currently down, including ones routed to the joystick.
+    fingers: std::collections::HashSet<u64>,
+    /// The left mouse button is held (the desktop stand-in for one finger).
+    mouse_down: bool,
+}
+
+impl GestureLayerState {
+    /// Updates the down set from this frame's events and returns the frame's
+    /// touch count: what was down when the frame began plus what went down
+    /// during it.
+    fn frame_touch_count(&mut self, input: &[bevy::window::WindowEvent], window: Entity) -> u32 {
+        use bevy::{input::ButtonState, window::WindowEvent};
+        let mut reported: std::collections::HashSet<u64> = self.fingers.clone();
+        let mut mouse = self.mouse_down;
+        for event in input {
+            match event {
+                WindowEvent::TouchInput(touch) if touch.window == window => match touch.phase {
+                    TouchPhase::Started => {
+                        reported.insert(touch.id);
+                        self.fingers.insert(touch.id);
+                    }
+                    TouchPhase::Ended | TouchPhase::Canceled => {
+                        self.fingers.remove(&touch.id);
+                    }
+                    TouchPhase::Moved => {}
+                },
+                WindowEvent::MouseButtonInput(button)
+                    if button.window == window && button.button == MouseButton::Left =>
+                {
+                    let down = button.state == ButtonState::Pressed;
+                    mouse |= down;
+                    self.mouse_down = down;
+                }
+                WindowEvent::WindowFocused(focus) if focus.window == window && !focus.focused => {
+                    self.mouse_down = false;
+                }
+                _ => {}
+            }
+        }
+        reported.len() as u32 + u32::from(mouse)
+    }
+}
+
+/// Drops the tracked pointer: the gesture cancel, then the UI pointer's Cancel.
+fn drop_pointer(
+    layer: &mut GestureLayerState,
+    events: &mut MessageWriter<GestureEvent>,
+    pointers: &mut MessageWriter<UiPointerEvent>,
+    touch_count: u32,
+) {
+    cancel(layer, events);
+    if let Some(touch) = layer.touch.take() {
+        pointers.write(UiPointerEvent {
+            phase: UiPointerPhase::Cancel,
+            position: touch.current,
+            pointer_id: pointer_id(touch.source),
+            touch_count,
+        });
+    }
 }
 
 /// 源 Start：拖拽阈值 = min(屏宽, 屏高)/100。Unity 的 Screen 是整个
@@ -107,6 +200,7 @@ const CONSECUTIVE_TAP_THRESHOLD: f32 = 0.3;
 pub(crate) fn advance(
     mut layer: ResMut<GestureLayerState>,
     mut events: MessageWriter<GestureEvent>,
+    mut pointers: MessageWriter<UiPointerEvent>,
     mut input: MessageReader<bevy::window::WindowEvent>,
     joystick: Res<JoystickState>,
     windows: Query<(Entity, &Window), With<bevy::window::PrimaryWindow>>,
@@ -120,19 +214,17 @@ pub(crate) fn advance(
         input.clear();
         return;
     };
+    let input: Vec<WindowEvent> = input.read().cloned().collect();
+    let touch_count = layer.frame_touch_count(&input, window_entity);
     let now = real.elapsed_secs();
     if settings_panel.blocks_world_input() {
-        cancel(&mut layer, &mut events);
-        layer.touch = None;
+        drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
         layer.cursor = window.cursor_position();
-        input.clear();
         return;
     }
     let size = Vec2::new(window.width(), window.height());
     if !size.is_finite() || size.min_element() <= 0. {
-        cancel(&mut layer, &mut events);
-        layer.touch = None;
-        input.clear();
+        drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
         return;
     }
     let threshold = *layer.drag_threshold.get_or_insert_with(|| {
@@ -140,7 +232,7 @@ pub(crate) fn advance(
         info!("[gesture] screen drag threshold {value:.1}px");
         value
     });
-    for event in input.read() {
+    for event in &input {
         match event {
             WindowEvent::CursorMoved(moved) if moved.window == window_entity => {
                 layer.cursor = Some(moved.position);
@@ -152,11 +244,22 @@ pub(crate) fn advance(
                 let position = layer.cursor.or_else(|| window.cursor_position());
                 if button.state == ButtonState::Pressed {
                     if let Some(position) = position {
-                        let ui_owned = ui.captures(position, size);
+                        let ui_owned = ui.captures(position, window);
+                        let accepted = layer.touch.is_none();
                         press_pointer(&mut layer, &mut events, PointerSource::Mouse, position, now, ui_owned);
+                        if accepted {
+                            pointers.write(UiPointerEvent { phase: UiPointerPhase::Down, position,
+                                pointer_id: pointer_id(PointerSource::Mouse), touch_count });
+                        }
                     }
                 } else {
+                    let owned = layer.touch.as_ref().is_some_and(|p| p.source == PointerSource::Mouse);
+                    let at = position.or(layer.touch.as_ref().map(|p| p.current));
                     release_pointer(&mut layer, &mut events, PointerSource::Mouse, position, now);
+                    if let (true, Some(at)) = (owned, at) {
+                        pointers.write(UiPointerEvent { phase: UiPointerPhase::Up, position: at,
+                            pointer_id: pointer_id(PointerSource::Mouse), touch_count });
+                    }
                 }
             }
             WindowEvent::TouchInput(touch) if touch.window == window_entity => {
@@ -166,30 +269,39 @@ pub(crate) fn advance(
                         if joystick.captured == Some(touch.id)
                             || (joystick.enabled && joystick::in_zone(touch.position, size.x, size.y))
                         { continue; }
-                        let ui_owned = ui.captures(touch.position, size);
+                        let ui_owned = ui.captures(touch.position, window);
+                        let accepted = layer.touch.is_none();
                         press_pointer(&mut layer, &mut events, source, touch.position, now, ui_owned);
+                        if accepted {
+                            pointers.write(UiPointerEvent { phase: UiPointerPhase::Down,
+                                position: touch.position, pointer_id: pointer_id(source), touch_count });
+                        }
                     }
                     TouchPhase::Moved => move_pointer(&mut layer, &mut events, source, touch.position, threshold),
-                    TouchPhase::Ended => release_pointer(&mut layer, &mut events, source, Some(touch.position), now),
+                    TouchPhase::Ended => {
+                        let owned = layer.touch.as_ref().is_some_and(|p| p.source == source);
+                        release_pointer(&mut layer, &mut events, source, Some(touch.position), now);
+                        if owned {
+                            pointers.write(UiPointerEvent { phase: UiPointerPhase::Up,
+                                position: touch.position, pointer_id: pointer_id(source), touch_count });
+                        }
+                    }
                     TouchPhase::Canceled => {
                         if layer.touch.as_ref().is_some_and(|p| p.source == source) {
-                            cancel(&mut layer, &mut events);
-                            layer.touch = None;
+                            drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
                         }
                     }
                 }
             }
             WindowEvent::WindowFocused(focus) if focus.window == window_entity && !focus.focused => {
-                cancel(&mut layer, &mut events);
-                layer.touch = None;
+                drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
             }
             WindowEvent::CursorLeft(left) if left.window == window_entity => {
                 layer.cursor = None;
                 // There is no pointer lock/capture in this host. Leaving cancels
                 // ownership; re-entry must not integrate a jump from the old UI.
                 if layer.touch.as_ref().is_some_and(|p| p.source == PointerSource::Mouse) {
-                    cancel(&mut layer, &mut events);
-                    layer.touch = None;
+                    drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
                 }
             }
             _ => {}

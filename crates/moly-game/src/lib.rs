@@ -17,6 +17,7 @@ mod browser_stage;
 mod browser_log;
 pub use browser_stage::configure_browser_stage;
 pub mod camera;
+pub mod canvas;
 pub mod character;
 pub mod character_material;
 pub mod client_config;

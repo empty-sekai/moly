@@ -288,6 +288,7 @@ pub fn install(app: &mut App) {
                 .before(crate::ui_layout::render),
         );
     app.add_message::<gesture::GestureEvent>()
+        .add_message::<gesture::UiPointerEvent>()
         .add_message::<player_talk::PlayerTalkRequest>()
         .add_message::<crate::player_fixture_action::PlayerFixtureRequest>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
@@ -903,6 +904,19 @@ pub fn install(app: &mut App) {
                 .after(action_button::click)
                 .before(pick::pick),
         )
+        // Source press/click of the camera reset button: same input gate and
+        // order as the tap dispatch (after the action buttons' tap flag, before
+        // the world pick).
+        .init_resource::<menu_shell::SourceInputManager>()
+        .init_resource::<menu_shell::CameraResetPress>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_input
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(action_button::click)
+                .after(menu_shell::click)
+                .before(pick::pick),
+        )
         // 层栈推进：读小地图根可见性做直通口对账 + 消费层命令 + 回写槽
         // 位视图。小地图的四条可见性写者（点击 · 自动点 · 解锁推进 ·
         // M 键）与外壳点按全排在它之前——它读的是当帧终值、当帧命令。
@@ -924,13 +938,10 @@ pub fn install(app: &mut App) {
                 .chain()
                 .after(ui_layers::advance)
                 .after(menu_shell::click),
-        )
-        // 相机复位补间推进：相机输入之后（补间期间输入被吞——真源
-        // _isResetAnimation 门，吞门在 apply_input 里读本资源在场与否）。
-        .add_systems(
-            Update,
-            menu_shell::advance_camera_reset.after(camera::apply_input),
         );
+    // The camera reset is a field-camera tween: camera::follow_avatar
+    // advances it, and camera::apply_input swallows drag/pinch while it runs
+    // (the Normal state's _isResetAnimation gate).
     // ---- 情报层视图（追加段：层栈 + 外壳之后的第一个带内容物的屏幕层） ----
     // 资源与启动施加（进场即按存量档全量施加；刷新率档当值取构造默认
     // high ⇒ 60fps 钳制）。

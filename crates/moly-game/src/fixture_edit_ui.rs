@@ -10,7 +10,7 @@ mod icons;
 use crate::{
     action_button::ActionTapConsumed,
     audio::SeRequests,
-    balloon::{BALLOON_LAYER, canvas_scale},
+    balloon::BALLOON_LAYER,
     fixture::EditableFixture,
     fixture_edit::{EditCommand, EditSelectionView, EditView, PutStatus},
     gesture::{GestureEvent, GestureKind, GestureState},
@@ -298,6 +298,7 @@ pub(crate) fn click(
     mut sounds: ResMut<SeRequests>,
     roots: Query<(&EditorRoot, &UiPrefabView)>,
     auxiliaries: Query<(&EditorAuxiliary, &UiPrefabView)>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let events: Vec<_> = gestures.read().copied().collect();
     let scroll_events: Vec<_> = wheel.read().copied().collect();
@@ -312,8 +313,11 @@ pub(crate) fn click(
     if !size.is_finite() || size.min_element() <= 0. {
         return;
     }
-    let scale = canvas_scale(size.x, size.y);
-    let canvas = size / scale;
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
+    let scale = root_canvas.scale(window);
+    let canvas = root_canvas.size(window);
     let Ok((root, view)) = roots.single() else {
         return;
     };
@@ -588,6 +592,7 @@ pub(crate) fn refresh(
         ),
         Without<EditorRoot>,
     >,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -596,8 +601,11 @@ pub(crate) fn refresh(
     if !size.is_finite() || size.min_element() <= 0. {
         return;
     }
-    let scale = canvas_scale(size.x, size.y);
-    let canvas = size / scale;
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
+    let scale = root_canvas.scale(window);
+    let canvas = root_canvas.size(window);
     let active = edit.active && stack.current() == LayerId::MysekaiSiteEdit;
     let Ok((mut root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;

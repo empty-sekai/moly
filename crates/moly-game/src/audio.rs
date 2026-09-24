@@ -2071,26 +2071,44 @@ pub struct SeRequest {
 
 /// 一次性 SE 请求队列。写者（harvest `on_damage`、talk 步进/窗体、
 /// `fixture_edit` 动作）先入队，`advance_se` 后排空——链序在 schedule
-/// 里显式约束。
+/// 里显式约束。The second list holds source buttons'
+/// `CustomSelectableDefine.PlaySE` calls; they resolve against the cue bank
+/// when the queue drains.
 #[derive(Resource, Default)]
-pub struct SeRequests(pub Vec<SeRequest>);
+pub struct SeRequests(pub Vec<SeRequest>, pub(crate) Vec<ButtonSe>);
+
+/// One `CustomSelectableDefine.PlaySE(se, otherSeName)` call.
+#[derive(Debug, Clone)]
+pub(crate) struct ButtonSe {
+    pub(crate) se: moly_law::ui::custom_button::SeType,
+    pub(crate) other_se_name: String,
+}
 
 impl SeRequests {
+    /// A source button's click sound through its serialized SE fields.
     pub(crate) fn source_button(
         &mut self,
         layouts: &crate::ui_layout::UiLayouts,
         key: &str,
         path: &str,
     ) {
-        if let Some(cue) = layouts.button_sound(key, path) {
-            self.0.push(SeRequest {
-                owner: None,
-                cue,
-                class: SeClass::Ui,
-                source: "source-button",
-            });
+        if let Some((se, other_se_name)) = layouts.button_se(key, path) {
+            self.button(se, other_se_name);
         }
     }
+
+    /// Queues a `PlaySE(se, otherSeName)` call.
+    pub(crate) fn button(&mut self, se: moly_law::ui::custom_button::SeType, other_se_name: String) {
+        self.1.push(ButtonSe { se, other_se_name });
+    }
+}
+
+/// The stream a plain cue name plays from: the shared MySekai SE bank, then
+/// the built-in and downloaded common menu banks.
+fn plain_se_stream<'a>(streams: &'a Streams, cue: &str) -> Option<&'a StreamRow> {
+    [SE_PACKAGE, "MenuCommon_Built_in", "MenuCommon"]
+        .iter()
+        .find_map(|package| streams.0.get(&(cue.to_owned(), (*package).to_owned())))
 }
 
 /// 一次性 SE 排空的排序锚：写者系统在各自插件里 `.before(Drain)` 自证
@@ -2137,6 +2155,26 @@ pub(crate) fn advance_se(
     let Some(routing) = routing else {
         return; // 路由表未就绪：请求留队（就绪后排空，窗口照样去重）
     };
+    // PlaySE: a table cue plays; Other plays its serialized name only when
+    // that cue exists in a loaded bank (else the source logs an error and
+    // nothing plays); None plays nothing.
+    let buttons = std::mem::take(&mut queue.1);
+    for button in buttons {
+        let exists = |cue: &str| plain_se_stream(&routing.streams, cue).is_some();
+        match moly_law::ui::custom_button::play_se(button.se, &button.other_se_name, exists) {
+            Some(cue) => queue.0.push(SeRequest {
+                owner: None,
+                cue,
+                class: SeClass::Ui,
+                source: "source-button",
+            }),
+            None if button.se == moly_law::ui::custom_button::SeType::Other => error!(
+                "SE: button cue {:?} is not in a loaded bank; nothing plays",
+                button.other_se_name
+            ),
+            None => {}
+        }
+    }
     for request in queue.0.drain(..) {
         if request
             .owner
@@ -2152,22 +2190,7 @@ pub(crate) fn advance_se(
         let stream = if let Some(package) = source_package {
             routing.streams.0.get(&(cue.to_owned(), package))
         } else {
-            routing
-                .streams
-                .0
-                .get(&(cue.to_owned(), SE_PACKAGE.to_string()))
-                .or_else(|| {
-                    routing
-                        .streams
-                        .0
-                        .get(&(cue.to_owned(), "MenuCommon_Built_in".into()))
-                })
-                .or_else(|| {
-                    routing
-                        .streams
-                        .0
-                        .get(&(cue.to_owned(), "MenuCommon".into()))
-                })
+            plain_se_stream(&routing.streams, cue)
         };
         let Some(stream) = stream else {
             if channel.warned_missing.insert(request.cue.to_string()) {

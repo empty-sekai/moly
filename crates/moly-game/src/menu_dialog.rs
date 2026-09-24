@@ -125,7 +125,6 @@ use bevy::window::PrimaryWindow;
 use moly_assets::ui_layout::{UiComponent, UiPrefab};
 
 use crate::action_button::ActionTapConsumed;
-use crate::balloon::canvas_scale;
 use crate::gesture::{GestureEvent, GestureState};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
@@ -580,12 +579,13 @@ pub(crate) fn place(
     windows: Query<&Window, With<PrimaryWindow>>, mut dialog: ResMut<ShellDialogState>, mock: Res<MenuMock>,
     layouts: Res<UiLayouts>, time: Res<Time>,
     mut roots: Query<(&mut MenuDialogRoot, &mut Visibility, &mut Transform, &mut UiPrefabView)>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
-    let Ok(window)=windows.single() else {return;};
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let size = Vec2::new(window.width(), window.height());
     if !size.is_finite() || size.min_element() <= 0. { return; }
-    let scale = canvas_scale(size.x, size.y);
-    let canvas = size / scale;
+    let scale = root_canvas.scale(window);
+    let canvas = root_canvas.size(window);
     for (mut root,mut visibility,mut transform,mut view) in &mut roots {
         let open = dialog.menu_open;
         let changed = root.requested_open != open;
@@ -677,6 +677,7 @@ pub(crate) fn click(
     mut layer_commands: MessageWriter<LayerCommand>,
     views: Query<&crate::ui_layout::UiPrefabView, With<MenuDialogRoot>>,
     mut sounds: ResMut<crate::audio::SeRequests>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let taps: Vec<Vec2> = gestures
         .read()
@@ -694,8 +695,12 @@ pub(crate) fn click(
     let Ok(window) = windows.single() else {
         return;
     };
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
     let (width, height) = (window.width(), window.height());
-    let scale = canvas_scale(width, height);
+    let scale = root_canvas.scale(window);
+    let size = root_canvas.size(window);
     let mut close_requested = false;
     for position in &taps {
         // 模态：这一下被对话框吃掉（世界射线与外壳件都拿不到）。
@@ -703,7 +708,7 @@ pub(crate) fn click(
         let canvas = to_canvas(*position, width, height, scale);
         let hit = ALL_BUTTONS
             .into_iter()
-            .find(|which| hit_test(canvas, *which, &layouts, view, Vec2::new(width,height)/scale));
+            .find(|which| hit_test(canvas, *which, &layouts, view, size));
         match hit {
             Some(MenuButton::Close) => {
                 sounds.source_button(&layouts, view.key, MenuButton::Close.source_path());

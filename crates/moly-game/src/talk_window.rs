@@ -64,7 +64,7 @@ use moly_law::text::{layout_metrics, LayoutMetrics};
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::balloon::{
-    canvas_scale, walk_glyphs, BalloonArt, GlyphSpot, ASCENT_RATIO, BAKE_PPEM, BALLOON_LAYER,
+    walk_glyphs, BalloonArt, GlyphSpot, ASCENT_RATIO, BAKE_PPEM, BALLOON_LAYER,
     FONT_FAMILY, TEXT_SCALE,
 };
 use crate::gesture::{GestureEvent, GestureState};
@@ -531,6 +531,7 @@ pub(crate) fn tick_window(
     mut end_marks: Query<&mut Visibility, (With<TalkEndMark>, Without<TalkGlyph>)>,
     mut parts: Query<(&TalkWindowPart, &mut Sprite)>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let dt = time.delta_secs();
 
@@ -603,7 +604,7 @@ pub(crate) fn tick_window(
     // --- 呈现：树生死（根至多一棵——只有本系统铺） ---
     let placement = layouts.as_deref().and_then(|layouts| {
         let window = windows.single().ok()?;
-        window_root_transform(layouts, Vec2::new(window.width(), window.height()), stage.is_some())
+        window_root_transform(layouts, root_canvas.as_deref()?, window, stage.is_some())
     });
     if roots.is_empty() {
         // 无树：该在场且纹源齐了才铺；铺完把两栏版本记到当版（同帧已铺）。
@@ -721,16 +722,22 @@ fn update_visibility(
     }
 }
 
-fn window_root_transform(layouts: &UiLayouts, size: Vec2, stage: bool) -> Option<Transform> {
-    let scale = canvas_scale(size.x, size.y);
+fn window_root_transform(
+    layouts: &UiLayouts,
+    root_canvas: &crate::canvas::RootCanvas,
+    window: &Window,
+    stage: bool,
+) -> Option<Transform> {
+    let scale = root_canvas.scale(window);
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
+    let canvas = root_canvas.size(window);
     let panel = if stage {
-        crate::browser_stage::dialogue_panel(layouts.document(PANEL_LAYOUT)?, PANEL_NODE, size / scale)
+        crate::browser_stage::dialogue_panel(layouts.document(PANEL_LAYOUT)?, PANEL_NODE, canvas)
             .unwrap_or_else(|error| panic!("{error}"))
     } else {
-        layouts.rect(PANEL_LAYOUT, PANEL_NODE, size / scale)?
+        layouts.rect(PANEL_LAYOUT, PANEL_NODE, canvas)?
     };
     // Every currently rendered part belongs to this fixed-size panel subtree.
     // Keep the existing font/glyph geometry; move their common root by the

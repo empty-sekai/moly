@@ -103,7 +103,6 @@ use crate::audio::{
     apply_system_volume, save_volume_settings, stop_voice_all, LocalVolumeSettings, SeClass,
     SeRequest, SeRequests, VoiceChannel, VolumeBus, VolumeSettingData,
 };
-use crate::balloon::canvas_scale;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
@@ -452,6 +451,7 @@ pub(crate) fn place(
     mut state: ResMut<OptionDialogState>, mut voice: ResMut<VoiceChannel>, mut se_requests: ResMut<SeRequests>,
     mut roots: Query<(&mut Visibility, &mut Transform, &mut crate::ui_layout::UiPrefabView), With<OptionDialogRoot>>,
     mut was_open: Local<bool>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let open = dialog.option_open;
     match (*was_open, open) {
@@ -487,8 +487,8 @@ pub(crate) fn place(
         }
     }
 
-    let Ok(window) = windows.single() else { return; };
-    let scale = canvas_scale(window.width(),window.height());
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
+    let scale = root_canvas.scale(window);
     for (mut visible,mut transform,mut view) in &mut roots {
         *visible = if open {Visibility::Inherited}else{Visibility::Hidden}; transform.scale=Vec3::splat(scale);
         for tab in TABS {view.set_visible(&format!("ContentRoot/Content/{}",tab.source_name()),tab==OptionTab::Volume);}
@@ -739,6 +739,7 @@ pub(crate) fn click(
     mut bus: ResMut<VolumeBus>,
     mut state: ResMut<OptionDialogState>,
     mut consumed: ResMut<ActionTapConsumed>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let events: Vec<GestureEvent> = gestures.read().cloned().collect();
     if events.is_empty() {
@@ -747,13 +748,16 @@ pub(crate) fn click(
     let Ok(window) = windows.single() else {
         return;
     };
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
     let (width, height) = (window.width(), window.height());
-    let scale = canvas_scale(width, height);
+    let scale = root_canvas.scale(window);
     let now = time.elapsed_secs();
 
     if !dialog.option_open { return; }
     let Ok(view)=views.single() else {return;};
-    let size=Vec2::new(width,height)/scale;
+    let size = root_canvas.size(window);
     // ---- 开态：模态 ----
     let mut close = None::<&'static str>;
     for event in &events {
