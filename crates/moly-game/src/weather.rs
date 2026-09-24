@@ -205,7 +205,7 @@ struct WeatherRun {
     current: usize,
 }
 
-/// 当前现象档名——天气域对外的一面：音频（BGM/环境音按档换曲）与小地图
+/// 当前现象档名——天气域对外的一面：音频 BGM（按站点 × 档选曲）与小地图
 /// 天气钮（图标与文本）都读它，不进 `WeatherRun` 的私有下标。两侧同挂后
 /// 随真实档走；`audio::install` 另有同型兜底 `init_resource`（幂等）。
 #[derive(Resource)]
@@ -226,7 +226,7 @@ const DEFAULT_PHENOMENON_ID: i32 = 1;
 /// 同点写：装载落定取默认档 id，切档取目标档 id——真源在交叉淡化的
 /// 视觉等待**之前**就写当前现象 id，这里的写点同为淡化起点。在配送站
 /// 它是配送现象 id（ClientConfig 面板 IntConfigs 170），不是当日现象。
-/// 两个目标都装 `WeatherPlugin`，所以两边都走这个写点。
+/// 本机与 wasm 两端的应用装配都装 `WeatherPlugin`，两端同由天气链写它。
 #[derive(Resource)]
 pub struct CurrentPhenomenonId(pub i32);
 
@@ -861,7 +861,8 @@ fn delivery_phenomenon(phenomena: &[ResolvedPhenomenon], configs: &crate::client
     index
 }
 
-/// Environment audio changes only after the real global FX commit, not at request.
+/// Name of the last real global FX commit (not the request). The ambience SE channel
+/// reads the committed selection and its serial from `WeatherTransition` directly.
 #[derive(Resource)]
 pub(crate) struct CommittedPhenomenon(pub String);
 impl Default for CommittedPhenomenon {

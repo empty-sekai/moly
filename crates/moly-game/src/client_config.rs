@@ -109,6 +109,10 @@ pub(crate) const KEY_MYSEKAI_HARVEST_MOVE_SCALE: i32 = 78;
 /// 不乘它。
 pub(crate) const KEY_MYSEKAI_DASH_SPEED_RATE: i32 = 95;
 
+/// 配送现象 id（DeliveryPhenomenaId，IntConfigs 键 170）：BGM 默认选曲里
+/// 现象 id 等于它时取站点 normal 档；配送类站点的站点控制器恒以它起 BGM。
+pub(crate) const KEY_DELIVERY_PHENOMENA_ID: i32 = 170;
+
 // ---------------------------------------------------------------------------
 // 装载：请求 → 解析
 // ---------------------------------------------------------------------------
