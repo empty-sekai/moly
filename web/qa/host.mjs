@@ -197,8 +197,8 @@ try {
   await save("context-preparing");
   await page
     .frameLocator(".interaction-runtime iframe")
-    .locator('#stage-start[data-moly-ready="true"]')
-    .waitFor({ timeout: 60000 });
+    .locator("#stage-boot[hidden]")
+    .waitFor({ state: "attached", timeout: 120000 });
   await page.locator('[data-action="play-selected"]').click();
   await playing("fixture:157");
   const original = await realm();
@@ -268,8 +268,8 @@ try {
   await page.locator('[data-selected-content="talk:fixture:261"]').waitFor();
   await page
     .frameLocator(".interaction-runtime iframe")
-    .locator('#stage-start[data-moly-ready="true"]')
-    .waitFor({ timeout: 60000 });
+    .locator("#stage-boot[hidden]")
+    .waitFor({ state: "attached", timeout: 120000 });
   assert.ok(!(await state())?.status?.canStop, "refresh cannot autoplay");
   assert.equal(new URL(page.url()).searchParams.get("snapshot"), source.id);
   await save("refreshed-share");

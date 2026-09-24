@@ -169,7 +169,6 @@ export interface MountOptions {
   locale?: MolyLocale;
   theme?: MolyTheme;
   renderer?: "auto" | "webgpu" | "webgl2";
-  preload?: boolean;
   sound?: boolean;
   fixture?: number;
   tab?: MolyTab;

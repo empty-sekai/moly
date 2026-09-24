@@ -112,14 +112,6 @@ button:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
 }
-.primary {
-  background: var(--accent);
-  color: #fff;
-}
-.primary:disabled {
-  cursor: progress;
-  opacity: 0.6;
-}
 .secondary {
   background: var(--surface);
   color: var(--text);
@@ -226,9 +218,6 @@ button:focus-visible {
 @media (forced-colors: active) {
   button {
     border: 1px solid ButtonText;
-  }
-  .primary {
-    color: ButtonText;
   }
 }
 

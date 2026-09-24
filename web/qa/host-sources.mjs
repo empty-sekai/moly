@@ -53,8 +53,8 @@ await page.addInitScript(() => {
 async function enter() {
   await page
     .frameLocator(".interaction-runtime iframe")
-    .locator('#stage-start[data-moly-ready="true"]')
-    .waitFor({ timeout: 60000 });
+    .locator("#stage-boot[hidden]")
+    .waitFor({ state: "attached", timeout: 120000 });
   await page.locator('[data-action="play-selected"]').click();
 }
 try {

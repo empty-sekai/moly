@@ -36,6 +36,7 @@ export const STAGE_FILES = [
   "stage.css",
   "stage-controller.mjs",
   "stage-activation.mjs",
+  "stage-audio.mjs",
   "stage-locale.mjs",
   "weather-presentation.mjs",
   "weather-artwork.mjs",

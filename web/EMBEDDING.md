@@ -107,7 +107,6 @@ const player = mountMoly(document.querySelector("#stage"), {
   theme: { mode: "dark", accent: "#66ccbb" },
   filters: { tab: "furniture", fixture: 157, mode: "independent" },
   content: "fixture:157",
-  preload: true,
   onSnapshot(snapshot) {
     // Render the authoritative state; do not reimplement eligibility here.
     console.log(snapshot.status.phase);
@@ -164,13 +163,16 @@ is discovery metadata and is never treated as a cacheable runtime asset.
 
 Call `mountMoly` only when the interactive feature is requested. Catalogue
 browsing can use the separately published compact index/details without creating
-an iframe or downloading WASM. `preload` fetches the engine and necessary base
-pack after mounting. Call `play()` or `preview()` synchronously inside the host
-button's trusted click: the adapter forwards activation to the prepared
-same-origin stage gate. Do not await before this call or create another audio
-context. A real user gesture is still required before renderer/audio startup. Theme,
-locale, selection and filters do not require remounting. A second shell or stage
-mount in the same host page is rejected until the existing one is disposed.
+an iframe or downloading WASM. A mounted stage fetches the engine and necessary
+base pack at once and starts the scene when both are ready; it has no start
+button of its own. If the browser has not yet allowed the page to play audio,
+the engine's audio output starts suspended and resumes on the next user
+activation inside the stage, or when `play()` / `preview()` is called
+synchronously inside the host button's click (the adapter forwards that
+activation to the same-origin stage). Do not await before these calls or create
+another audio context. Theme, locale, selection and filters do not require
+remounting. A second shell or stage mount in the same host page is rejected
+until the existing one is disposed.
 
 A retry or WebGL fallback reloads the iframe realm, so two renderers/audio
 contexts are never initialized within one realm. The handshake distinguishes a
