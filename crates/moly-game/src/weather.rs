@@ -50,7 +50,7 @@ use std::marker::PhantomData;
 
 use crate::env::SiteEnv;
 use crate::fixture_emission::ViewEmissionTarget;
-use crate::render::gpu::{BindGroupCache, Bound};
+use crate::render::gpu::{Bound, SharedBindGroupCache};
 use bevy::diagnostic::FrameCount;
 use crate::fixture_material::EmissionAccount;
 use crate::light;
@@ -1792,9 +1792,14 @@ fn prepare_weather_pyramid(
 /// levels stay the same textures while the viewport and axis values hold, and
 /// the ping-pong source alternates between two views, so steady frames reuse
 /// every group instead of creating the whole set again.
-#[derive(Default)]
 struct WeatherPostNode {
-    bind_groups: std::sync::Mutex<BindGroupCache>,
+    bind_groups: SharedBindGroupCache,
+}
+
+impl FromWorld for WeatherPostNode {
+    fn from_world(world: &mut World) -> Self {
+        Self { bind_groups: SharedBindGroupCache::from_world(world) }
+    }
 }
 
 impl ViewNode for WeatherPostNode {
@@ -1850,8 +1855,7 @@ impl ViewNode for WeatherPostNode {
         // 变借用，交叠即撞。
         let post_process = view_target.post_process_write();
         let frame = world.resource::<FrameCount>().0;
-        let mut cache = self.bind_groups.lock().unwrap();
-        cache.evict_idle(frame);
+        let mut cache = self.bind_groups.lock();
         // 扩散金字塔的级数（扩散关着时为 0）。
         let n = if params.diff_on { pyramid.downs.len() } else { 0 };
         // 合成里的扩散层：单级金字塔直取直拷结果，多级取上采样链顶；扩散
@@ -2137,6 +2141,7 @@ pub struct WeatherPlugin;
 
 impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_bind_group_caches(app);
         app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<TransparentCapture>::default());
         app.add_plugins(ExtractResourcePlugin::<WeatherPostParams>::default())
             .init_resource::<WeatherTransition>()

@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
+use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutId, BindingResource,
@@ -14,7 +16,7 @@ use bevy::render::render_resource::{
     TextureViewId,
 };
 use bevy::render::renderer::RenderDevice;
-use bevy::render::{RenderApp, RenderStartup};
+use bevy::render::{Extract, ExtractSchedule, RenderApp, RenderStartup};
 
 /// Stores `value` into `slot` only when a bit differs and reports whether it
 /// wrote. Floats compare by bit pattern, so a store is skipped only when it
@@ -131,8 +133,9 @@ struct BindGroupKey {
 }
 
 /// Bind groups keyed by their layout and the ids of every bound resource
-/// (resource ids are never reused), with frame-age eviction. A render node
-/// keeps one behind a `Mutex`, because nodes run with shared access only.
+/// (resource ids are never reused), with frame-age eviction. Render nodes and
+/// systems hold one through [`SharedBindGroupCache`], which ages it every
+/// frame whether or not its owner runs.
 #[derive(Default)]
 pub(crate) struct BindGroupCache {
     groups: HashMap<BindGroupKey, (BindGroup, u32)>,
@@ -169,7 +172,76 @@ impl BindGroupCache {
     }
 
     /// Drops the groups not used during the last [`MAX_IDLE_FRAMES`] frames.
-    pub(crate) fn evict_idle(&mut self, frame: u32) {
+    fn evict_idle(&mut self, frame: u32) {
         self.groups.retain(|_, (_, used)| frame.wrapping_sub(*used) <= MAX_IDLE_FRAMES);
+    }
+}
+
+/// A [`BindGroupCache`] registered with the render world's
+/// [`BindGroupCaches`]. Render nodes run with shared access only, so the cache
+/// sits behind a mutex. A cached group keeps every resource it binds alive,
+/// textures included; a node that stops running (an early return, a view
+/// that no longer matches its query) must still let its groups age out, so
+/// eviction is a system of its own and not the owner's job.
+pub(crate) struct SharedBindGroupCache(Arc<Mutex<BindGroupCache>>);
+
+impl SharedBindGroupCache {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, BindGroupCache> {
+        self.0.lock().expect("bind group cache lock")
+    }
+}
+
+impl FromWorld for SharedBindGroupCache {
+    fn from_world(world: &mut World) -> Self {
+        let cache = Arc::new(Mutex::new(BindGroupCache::default()));
+        world
+            .get_resource_or_init::<BindGroupCaches>()
+            .0
+            .push(Arc::downgrade(&cache));
+        Self(cache)
+    }
+}
+
+/// Every live [`SharedBindGroupCache`] of the render world.
+#[derive(Resource, Default)]
+pub(crate) struct BindGroupCaches(Vec<Weak<Mutex<BindGroupCache>>>);
+
+/// Ages every registered cache once per frame, during extraction and so
+/// before the render graph runs, with the frame number the graph's nodes stamp
+/// their groups with: the main world's count, which extraction copies to the
+/// render world for this frame. A group a node uses in this frame is stamped
+/// with this number and never dropped by it. The system reads and writes
+/// nothing else, so its place in the extraction schedule is free.
+fn evict_idle_bind_groups(frame: Extract<Option<Res<FrameCount>>>, mut caches: ResMut<BindGroupCaches>) {
+    let Some(frame) = frame.as_ref() else {
+        return;
+    };
+    caches.0.retain(|cache| match cache.upgrade() {
+        Some(cache) => {
+            cache.lock().expect("bind group cache lock").evict_idle(frame.0);
+            true
+        }
+        None => false,
+    });
+}
+
+/// Installs the per-frame ageing of [`SharedBindGroupCache`]s. Every plugin
+/// whose render nodes or systems cache bind groups adds it once through
+/// [`install_bind_group_caches`].
+pub(crate) struct BindGroupCachesPlugin;
+
+impl Plugin for BindGroupCachesPlugin {
+    fn build(&self, app: &mut App) {
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .init_resource::<BindGroupCaches>()
+                .add_systems(ExtractSchedule, evict_idle_bind_groups);
+        }
+    }
+}
+
+pub(crate) fn install_bind_group_caches(app: &mut App) {
+    if !app.is_plugin_added::<BindGroupCachesPlugin>() {
+        app.add_plugins(BindGroupCachesPlugin);
     }
 }
