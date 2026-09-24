@@ -1683,6 +1683,28 @@ pub(crate) fn spawn_when_ready(
     }
 }
 
+/// `SiteEnvironmentViewController.RefreshEffectVisible`: on an indoor site the
+/// source deactivates the GameObjects of the global sky effect, of the current
+/// site view's unique effect and of the field camera's effect, and activates
+/// them again on an outdoor one. The instances stay installed (an unchanged sky
+/// is kept across the move); an inactive GameObject neither draws nor updates
+/// its particle systems, so [`advance`] skips the live emitters as well.
+/// Retiring emitters are no longer referenced by those three owners and keep
+/// their own lifecycle.
+pub(crate) fn refresh_effect_visible(
+    state: Option<Res<WeatherFxState>>,
+    site: Option<Res<SiteActive>>,
+    mut draws: Query<&mut SourceParticle, With<WeatherFxDraw>>,
+) {
+    let Some(state) = state else { return; };
+    let shown = !site.as_deref().is_some_and(SiteActive::is_indoor);
+    for live in &state.live {
+        if let Ok(mut particle) = draws.get_mut(live.draw) {
+            if particle.enabled != shown { particle.enabled = shown; }
+        }
+    }
+}
+
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。
 ///
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
@@ -1696,6 +1718,7 @@ pub(crate) fn advance(
     frame: Res<bevy::diagnostic::FrameCount>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     avatars: Query<&GlobalTransform, With<AvatarRoot>>,
+    site: Option<Res<SiteActive>>,
 ) {
     // Observe instance age even when no camera can produce a particle draw.
     // The effect Animators evaluate here too, once per frame with the frame's
@@ -1741,7 +1764,9 @@ pub(crate) fn advance(
         site: GlobalTransform::IDENTITY,
     };
 
-    let active = state.as_deref_mut().into_iter().flat_map(|s| s.live.iter_mut())
+    // Indoors the three effect owners are inactive (see refresh_effect_visible).
+    let live_active = !site.as_deref().is_some_and(SiteActive::is_indoor);
+    let active = state.as_deref_mut().into_iter().filter(|_| live_active).flat_map(|s| s.live.iter_mut())
         .map(|s| (s, true));
     let retired = retiring.live.iter_mut().map(|s| (&mut s.emitter, false));
     // Systems whose native step was refused this frame; see step_frame.

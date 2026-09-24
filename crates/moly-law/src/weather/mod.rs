@@ -214,7 +214,10 @@ impl FogVolumeState {
     /// 如实转写由配套的 w 配对测试看着。
     ///
     /// `disable_fog` 是宿主侧的总开关，对应真源 client-only 的静态门
-    /// `IsDisable`/`IsDisableFog`（托管侧零调用点，产品恒开、宿主可达）。
+    /// `IsDisable`/`IsDisableFog`。`IsDisableFog` 有写者：布局编辑的游戏
+    /// 状态（`EditGameState`）进入时置真、退出时置假——setter 在那里被内联
+    /// 成对静态字段的直接写，按名字搜调用点会得到一个假的零。宿主把产品的
+    /// 布局编辑会话接到这个参数上。
     /// 如实照真源的 disabled 形状：只把两个 alpha 强制为 0.0，rgb 与
     /// params 照写——合成端靠 `height_factor = fog_color.w * falloff = 0`
     /// 精确化简回 `out = scene`。

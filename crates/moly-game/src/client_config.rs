@@ -109,6 +109,12 @@ pub(crate) const KEY_MYSEKAI_HARVEST_MOVE_SCALE: i32 = 78;
 /// Move 乘数是 rate × scale（采集/相机档的 scale 折算在前），动画速率
 /// 不乘它。
 pub(crate) const KEY_MYSEKAI_DASH_SPEED_RATE: i32 = 95;
+/// Room surface texture name patterns (MyRoomFloorAssetName /
+/// MyRoomWallAppearanceAssetName, StringConfigs keys 99 / 100): formatted
+/// with the skin bundle name and the colour id, the regex whose first group
+/// is the uv set of the texture.
+pub(crate) const KEY_MY_ROOM_FLOOR_ASSET_NAME: i32 = 99;
+pub(crate) const KEY_MY_ROOM_WALL_APPEARANCE_ASSET_NAME: i32 = 100;
 
 // ---------------------------------------------------------------------------
 // 装载：请求 → 解析
