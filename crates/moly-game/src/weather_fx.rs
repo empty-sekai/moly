@@ -928,16 +928,37 @@ fn drop_orphan_targets(plans: &mut Vec<Planned>, start: usize) -> Vec<String> {
 }
 
 /// The gates of a sub-emitter target that read only the export: one parent
-/// (with two, the order of their commands is not in the export), a parent
-/// that is not itself a target, a site effect on its authored chain (the
-/// owner words exist only there), the scaled clock, no warm and the Local
-/// scaling mode (the only owner update transcribed). Returns the parent.
+/// (with two, the order of their commands is not in the export), a chain of
+/// parents that does not come back to a node, a site effect on its authored
+/// chain (the owner words exist only there), the scaled clock, no warm and
+/// the Local scaling mode (the only owner update transcribed). Returns the
+/// parent.
 fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitterGraph<'_>, kind: EffectKind,
     instance_anchor: Option<GlobalTransform>) -> Result<String, String> {
     let [parent] = owners else {
         return Err(format!("{} parents ({}): the order of their commands is not in the export",
             owners.len(), owners.join(", ")));
     };
+    // A target's admission judges its parent's record, and that judgement
+    // judges the parent's own parent when the parent is a target in turn:
+    // the recursion climbs exactly these one-parent edges, and stops at a
+    // node that is not a target or that its own run of this gate refuses
+    // (a count of parents other than one, above). Walk them here, before
+    // anything recurses: a self-edge or a cycle is refused by name, and
+    // every chain let through ends, so the recursion is at most as deep as
+    // the chain has targets.
+    let node = particle.get("node").and_then(Value::as_str).unwrap_or("");
+    let mut visited = std::collections::HashSet::from([node]);
+    let mut next = parent.as_str();
+    loop {
+        if !visited.insert(next) {
+            return Err(format!("sub-emitter chain revisits {next}"));
+        }
+        match graph.get(next).map(Vec::as_slice) {
+            Some([above]) => next = above.as_str(),
+            _ => break,
+        }
+    }
     if kind != EffectKind::Site || instance_anchor.is_some() {
         return Err("owner words are composed only for a site effect on its authored chain".into());
     }
@@ -2281,3 +2302,7 @@ mod source_audit;
 #[cfg(test)]
 #[path = "weather_retirement_tests.rs"]
 mod retirement_tests;
+
+#[cfg(test)]
+#[path = "weather_sub_emitter_chain_tests.rs"]
+mod sub_emitter_chain_tests;
