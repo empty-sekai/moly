@@ -914,6 +914,14 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::click)
                 .before(pick::pick),
         )
+        // The button's disable while pressed: every frame, input enabled or
+        // not, after the input and before the effect's update.
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_disable
+                .after(menu_shell::camera_reset_input)
+                .before(menu_shell::camera_reset_tap_effect),
+        )
         // The button's press effect: its fade takes the frame's step after
         // the press, before the prefab views draw.
         .init_resource::<menu_shell::CameraResetTapEffect>()

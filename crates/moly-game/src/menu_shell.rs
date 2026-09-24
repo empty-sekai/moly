@@ -887,6 +887,27 @@ pub(crate) struct CameraResetPress {
     held: Option<(i32, Vec2)>,
     entered: bool,
     interactions: Vec<(ShellHost, ViewInteraction)>,
+    /// The host view and the button (its CustomButton's id) that took the
+    /// current press.
+    press_host: Option<(ShellHost, u64)>,
+}
+
+/// The host's handling of one button's effects that are not the press
+/// effect, release effect, sound or click: long-press and hold-repeat are
+/// not driven by this button's options (both off), and only this one source
+/// button is driven, so no other button can own the stored finish callback.
+fn unused_button_effect(effect: &button_rule::ButtonEffect) {
+    match effect {
+        button_rule::ButtonEffect::StartLongPressCheck
+        | button_rule::ButtonEffect::CancelLongPressCheck
+        | button_rule::ButtonEffect::StartHoldRepeat
+        | button_rule::ButtonEffect::StopHoldRepeat => {}
+        button_rule::ButtonEffect::FinishedControlOf(owner) => error!(
+            "camera reset: the input manager's finish callback belongs to source button {owner}, \
+             which this host does not drive; its release is not played"
+        ),
+        other => unreachable!("handled by the caller: {other:?}"),
+    }
 }
 
 /// `CustomButton.PlayPressEffect` / `PlayReleaseEffect` on a button whose
@@ -989,8 +1010,7 @@ pub(crate) fn camera_reset_input(
                 }
                 button_rule::ButtonEffect::PressEffect => interactions.push((host, ViewInteraction::Pressed)),
                 button_rule::ButtonEffect::ReleaseEffect => interactions.push((host, ViewInteraction::Released)),
-                button_rule::ButtonEffect::StartLongPressCheck
-                | button_rule::ButtonEffect::StartHoldRepeat => {}
+                other => unused_button_effect(&other),
             }
         }
     };
@@ -1006,18 +1026,21 @@ pub(crate) fn camera_reset_input(
         let over_button = !blocked && hit.over_button;
         let live = button_rule::ButtonLive { active: hit.active, interactable: hit.interactable };
         let mut effects = Vec::new();
-        let CameraResetPress { state, pressed, held, entered, .. } = &mut *press;
+        let CameraResetPress { state, pressed, held, entered, press_host, .. } = &mut *press;
+        // The event system delivers a handler only to a component that is
+        // active and enabled at that moment.
         match event.phase {
             UiPointerPhase::Down => {
                 *held = Some((event.pointer_id, event.position));
                 *entered = !blocked && hit.hovered;
                 *pressed = over_button;
                 if *pressed {
+                    *press_host = Some((host, key));
                     effects = button_rule::on_pointer_down(&mut manager.0, state, &config, key, pointer, event.touch_count, live);
                 }
             }
             UiPointerPhase::Up | UiPointerPhase::Cancel => {
-                if *pressed {
+                if *pressed && live.active {
                     effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
                     if event.phase == UiPointerPhase::Up && over_button {
                         effects.extend(button_rule::on_pointer_click(
@@ -1025,7 +1048,7 @@ pub(crate) fn camera_reset_input(
                         ));
                     }
                 }
-                if *entered {
+                if *entered && live.active {
                     effects.extend(button_rule::on_pointer_exit(&mut manager.0, state, &config, key, pointer));
                 }
                 *pressed = false;
@@ -1041,13 +1064,58 @@ pub(crate) fn camera_reset_input(
     if let Some((pointer_id, position)) = *held {
         let hit = camera_reset_hit(view, &layouts, window, root_canvas, position, node, button);
         let hovered = !blocked && hit.hovered;
-        if *entered && !hovered {
+        if *entered && !hovered && hit.active {
             let pointer = button_rule::Pointer { pointer_id, left_button: true };
             run(button_rule::on_pointer_exit(&mut manager.0, state, &config, key, pointer), &mut commands);
         }
         *entered = hovered;
     }
     press.interactions.extend(interactions);
+}
+
+/// `CustomButton.OnDisable` of the camera reset button: a button that holds
+/// a press and is no longer active and enabled (its host view is gone, or
+/// the button or an ancestor was deactivated) finishes control, so its
+/// release interaction plays and its press ends. Runs every frame, input
+/// enabled or not, before the tap effect's update (the fade-out starts on
+/// this frame's step).
+pub(crate) fn camera_reset_disable(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    layouts: Res<UiLayouts>,
+    roots: Query<(&MenuShellRoot, &UiPrefabView)>,
+    root_canvas: Option<Res<RootCanvas>>,
+    mut manager: ResMut<SourceInputManager>,
+    mut press: ResMut<CameraResetPress>,
+) {
+    if press.state.control != button_rule::ControlState::Press {
+        return;
+    }
+    let Some((host, key)) = press.press_host else { return; };
+    let enabled = match roots.iter().find(|(root, _)| root.host == host) {
+        None => false,
+        Some((_, view)) => {
+            let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
+            let Some(doc) = layouts.document(view.key) else { return; };
+            let Some(button) = camera_reset_button(doc) else { return; };
+            let node = doc.find(&format!("@{button}")).unwrap_or_else(|error| panic!("{error}"));
+            // A canvas without area resolves nothing: the button's state is
+            // unknown there, not disabled.
+            match view.selectable_live(&layouts, root_canvas.size(window), node, button) {
+                Some((active, _)) => active,
+                None => return,
+            }
+        }
+    };
+    if enabled {
+        return;
+    }
+    let CameraResetPress { state, interactions, .. } = &mut *press;
+    for effect in button_rule::on_disable(&mut manager.0, state, key) {
+        match effect {
+            button_rule::ButtonEffect::ReleaseEffect => interactions.push((host, ViewInteraction::Released)),
+            other => unused_button_effect(&other),
+        }
+    }
 }
 
 /// The camera reset button's view interaction: the CustomButton's

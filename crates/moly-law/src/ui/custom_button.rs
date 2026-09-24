@@ -15,6 +15,19 @@
 //! Only when the gate passes does the engine button's click run, which again
 //! requires the left button, an active object and an interactable button.
 //!
+//! Taking control stores the button both as the controlling selectable and
+//! as the owner of the finish callback. Finishing control (a release or an
+//! exit of the pressed pointer, or the button being disabled while pressed)
+//! runs the stored callback, whichever button stored it last, and clears
+//! both: a second, "absolutely press" button that took control while the
+//! first was pressed is the one whose release plays and whose press ends.
+//!
+//! Long-press checking and hold-repeat are started by a press (with the
+//! button's options) and stopped again: every release stops hold-repeat and
+//! cancels the long-press check; an exit stops hold-repeat, and cancels the
+//! long-press check when the exit finishes a press of a long-press button; a
+//! click of a long-press button cancels the check after its gate.
+//!
 //! The gate's sound is a `CustomSelectableDefine.PlaySE(se, otherSeName)`
 //! call, which the host runs against its cue bank with [`play_se`]: the table
 //! maps Decide / Cancel to the common cues and the three MySekai kinds to the
@@ -106,7 +119,9 @@ pub const INTERVAL_SEC: f32 = 0.2;
 pub struct InputManager {
     /// Real time of the last accepted click (0 at boot).
     pub interval_start_time: f32,
-    /// The selectable holding control.
+    /// The selectable holding control, which is also the owner of the stored
+    /// finish callback: a custom button's `StartControlSelectable` call
+    /// stores itself and its own `OnFinishedControlSelectable` together.
     controlled: Option<u64>,
     /// Pointer id registered per selectable.
     pointer_ids: Vec<(u64, i32)>,
@@ -152,8 +167,9 @@ impl InputManager {
         self.pointer_ids.retain(|(s, _)| *s != source);
     }
 
-    /// `FinishControlSelectable`: returns the selectable whose finish
-    /// callback runs (the one that started control), then clears control.
+    /// `FinishControlSelectable`: returns the button whose stored finish
+    /// callback runs (the one that took control last, not necessarily the
+    /// caller), then clears control and the callback.
     fn finish_control_selectable(&mut self) -> Option<u64> {
         self.controlled.take()
     }
@@ -186,8 +202,17 @@ pub enum ButtonEffect {
     ReleaseEffect,
     /// Long-press checking starts (not ported further here).
     StartLongPressCheck,
+    /// `InputManager.CancelLongPressCheck` runs.
+    CancelLongPressCheck,
     /// Hold-repeat starts (not ported further here).
     StartHoldRepeat,
+    /// Hold-repeat stops: the holding flag clears and its cancellation
+    /// source is cancelled and released.
+    StopHoldRepeat,
+    /// The stored finish callback belongs to another button: the host runs
+    /// [`on_finished_control_selectable`] on that button's state (and plays
+    /// its release on that button's view) at this point of the sequence.
+    FinishedControlOf(u64),
     /// `CustomSelectableDefine.PlaySE(se, otherSeName)` runs; [`play_se`]
     /// resolves it against the host's cue bank.
     PlaySe { se: SeType, other_se_name: String },
@@ -211,12 +236,28 @@ pub struct ButtonLive {
     pub interactable: bool,
 }
 
-/// `OnFinishedControlSelectable` for the button that started control.
+/// `OnFinishedControlSelectable` of the button whose callback is stored.
 pub fn on_finished_control_selectable(state: &mut CustomButtonState, effects: &mut Vec<ButtonEffect>) {
     if state.control == ControlState::Press {
         effects.push(ButtonEffect::ReleaseEffect);
     }
     state.control = ControlState::NoControl;
+}
+
+/// `InputManager.FinishControlSelectable` called by `button`: the stored
+/// callback runs, on this button's state when it is this button's, else as
+/// [`ButtonEffect::FinishedControlOf`] for the host.
+fn finish_control(
+    manager: &mut InputManager,
+    state: &mut CustomButtonState,
+    button: u64,
+    effects: &mut Vec<ButtonEffect>,
+) {
+    match manager.finish_control_selectable() {
+        Some(owner) if owner == button => on_finished_control_selectable(state, effects),
+        Some(owner) => effects.push(ButtonEffect::FinishedControlOf(owner)),
+        None => {}
+    }
 }
 
 /// `CustomButton.OnPointerDown`.
@@ -247,6 +288,7 @@ pub fn on_pointer_down(
     effects.push(ButtonEffect::PressEffect);
     if config.enable_long_press {
         state.executed_long_press = false;
+        effects.push(ButtonEffect::CancelLongPressCheck);
         effects.push(ButtonEffect::StartLongPressCheck);
     }
     if config.enable_hold_repeat {
@@ -255,9 +297,10 @@ pub fn on_pointer_down(
     effects
 }
 
-/// `CustomButton.OnPointerUp`. When control finishes, the finish callback
-/// of the selectable that started control runs; for this button that is
-/// [`on_finished_control_selectable`].
+/// `CustomButton.OnPointerUp`. When control finishes, the stored finish
+/// callback runs (see [`finish_control`]); then this button waits for the
+/// click. Every release clears the long-press flag, cancels the long-press
+/// check and stops hold-repeat.
 pub fn on_pointer_up(
     manager: &mut InputManager,
     state: &mut CustomButtonState,
@@ -269,12 +312,12 @@ pub fn on_pointer_up(
     if state.control == ControlState::Press
         && (manager.enable_touch_control(button, pointer.pointer_id) || config.absolutely_press)
     {
-        if manager.finish_control_selectable() == Some(button) {
-            on_finished_control_selectable(state, &mut effects);
-        }
+        finish_control(manager, state, button, &mut effects);
         state.control = ControlState::ClickCheck;
     }
     state.executed_long_press = false;
+    effects.push(ButtonEffect::CancelLongPressCheck);
+    effects.push(ButtonEffect::StopHoldRepeat);
     effects
 }
 
@@ -329,10 +372,13 @@ pub fn on_pointer_click(
         engine_button_click(pointer, live, &mut effects);
     }
     state.executed_long_press = false;
+    effects.push(ButtonEffect::CancelLongPressCheck);
     effects
 }
 
-/// `CustomButton.OnPointerExit` (after the engine selectable's exit).
+/// `CustomButton.OnPointerExit` (after the engine selectable's exit). An
+/// exit of the pressed pointer releases its registration and finishes
+/// control; every exit stops hold-repeat.
 pub fn on_pointer_exit(
     manager: &mut InputManager,
     state: &mut CustomButtonState,
@@ -345,12 +391,24 @@ pub fn on_pointer_exit(
         && (manager.enable_touch_control(button, pointer.pointer_id) || config.absolutely_press)
     {
         manager.release_touch_control(button);
-        if manager.finish_control_selectable() == Some(button) {
-            on_finished_control_selectable(state, &mut effects);
-        }
+        finish_control(manager, state, button, &mut effects);
         if config.enable_long_press {
             state.executed_long_press = false;
+            effects.push(ButtonEffect::CancelLongPressCheck);
         }
+    }
+    effects.push(ButtonEffect::StopHoldRepeat);
+    effects
+}
+
+/// `CustomButton.OnDisable` (after the engine selectable's disable, the
+/// cover and the view interaction's disabled hook, none of which this port
+/// draws): a button disabled while pressed finishes control, which runs the
+/// stored finish callback (the release, when it is this button's).
+pub fn on_disable(manager: &mut InputManager, state: &mut CustomButtonState, button: u64) -> Vec<ButtonEffect> {
+    let mut effects = Vec::new();
+    if state.control == ControlState::Press {
+        finish_control(manager, state, button, &mut effects);
     }
     effects
 }
