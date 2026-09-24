@@ -2,7 +2,7 @@
 //! timing; this entry never advances autonomous clocks or invents a seed.
 use super::*;
 use moly_law::particle::autonomous_emission::{
-    AutonomousEmissionState, ConstantAutonomousEmission,
+    AutonomousEmissionState, ConstantAutonomousEmission, ConstantDistanceEmission,
 };
 use moly_law::particle::{
     curve::CurveSampler,
@@ -56,15 +56,19 @@ impl Default for FrameState {
 /// The emitter velocity is refreshed only for a raw frame dt above this.
 const MIN_VELOCITY_DT: f32 = f32::from_bits(0x38d1_b717);
 
-/// Placement of the time births of one slice along the emitter's motion.
+/// Placement of the births of one command along the emitter's motion.
 /// StartModules moves every World-space birth back by
 /// (births_ahead + fraction) * (dt / speed) times the emitter velocity, after
 /// Shape, start velocity and the newborn pre-simulation modules and before the
-/// newborn integration; in Local space the velocity is masked to zero.
+/// newborn integration; in Local space the velocity is masked to zero. The
+/// elapsed time of a lane is dt * fraction - pending: the slices' time births
+/// pass no pending time, the frame head's distance births the pending time
+/// after the frame's sum.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BirthBacktrack {
     pub births_ahead: f32,
     pub emitter_velocity: [f32; 3],
+    pub pending: f32,
 }
 
 /// Name-independent qualification of the native birth composition: autonomous
@@ -75,16 +79,41 @@ pub(super) struct BirthBacktrack {
 /// route (ordinary versus procedural) is decided by the caller from the
 /// exported system block, not here.
 pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefused> {
+    qualify(emitter, false)
+}
+
+/// The same for a system that runs its own per-frame update (not a
+/// sub-emitter target): emission over distance driven by the emitter's
+/// translation is qualified too. A target never takes that branch (the engine
+/// marks it stopped every frame); its distance births come from its parent.
+pub(super) fn qualify_frame_emitter(emitter: &EmitterParams) -> Result<(), BirthRefused> {
+    qualify(emitter, true)
+}
+
+fn qualify(emitter: &EmitterParams, frame_head: bool) -> Result<(), BirthRefused> {
     let Some(emission) = emitter.emission.as_ref() else {
         return Err(BirthRefused::Unsupported("missing emission"));
     };
-    ConstantAutonomousEmission::from_params(
-        &emitter.start_delay,
-        emitter.duration,
-        emitter.looping,
-        emission,
-    )
-    .map_err(BirthRefused::Emission)?;
+    if frame_head {
+        let (_, distance) = ConstantAutonomousEmission::from_params_with_distance(
+            &emitter.start_delay,
+            emitter.duration,
+            emitter.looping,
+            emission,
+        )
+        .map_err(BirthRefused::Emission)?;
+        if distance.is_some() {
+            qualify_distance_composition(emitter)?;
+        }
+    } else {
+        ConstantAutonomousEmission::from_params(
+            &emitter.start_delay,
+            emitter.duration,
+            emitter.looping,
+            emission,
+        )
+        .map_err(BirthRefused::Emission)?;
+    }
     // A World-space birth is placed back along the emitter velocity; only the
     // Transform mode's velocity (translation change per frame) is transcribed.
     // Local space masks the velocity, so its mode is never read.
@@ -97,6 +126,51 @@ pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefuse
     // The module law is qualified above; its scene cannot be bound yet.
     if emitter.collision.is_some() {
         return Err(BirthRefused::Unsupported(super::collision::COLLISION_SCENE_NOT_PORTED));
+    }
+    Ok(())
+}
+
+/// Emission over distance, as executed: the Transform-mode emitter velocity,
+/// no first-Play warm (the warm's own update would take the branch), and
+/// newborns whose negative elapsed time runs only through Initial gravity
+/// with a constant modifier, CustomData and a Local VelocityModule with
+/// constant or two-constant linear terms, zero orbital and radial terms and a
+/// constant unit speed modifier. Every other module that reads the elapsed
+/// time, the position or the newborn range is refused with it.
+fn qualify_distance_composition(emitter: &EmitterParams) -> Result<(), BirthRefused> {
+    use moly_law::particle::MinMaxCurve;
+    let refuse = |reason| Err(BirthRefused::Unsupported(reason));
+    if emitter.emitter_velocity_mode != Some(0) {
+        return refuse("emission over distance: emitter velocity other than the Transform mode is not transcribed");
+    }
+    if emitter.prewarm {
+        return refuse("emission over distance with a first-Play warm: the warm update's distance call is not transcribed");
+    }
+    if has_real_sub_emitter_edges(emitter) || emitter.collision.is_some() || emitter.trails.is_some()
+        || emitter.noise.is_some() || emitter.force.is_some() || emitter.limit_velocity.is_some()
+        || emitter.rotation_over_lifetime.is_some() || emitter.inherit_velocity.is_some()
+    {
+        return refuse("emission over distance: a module outside the executed newborn composition");
+    }
+    if !matches!(emitter.start.gravity_modifier, MinMaxCurve::Constant(v) if v.is_finite()) {
+        return refuse("emission over distance: gravity modifier other than a constant");
+    }
+    if let Some(velocity) = &emitter.velocity_over_lifetime {
+        let zero = |curve: &MinMaxCurve| match *curve {
+            MinMaxCurve::Constant(v) => v == 0.0,
+            MinMaxCurve::TwoConstants { min, max } => min == 0.0 && max == 0.0,
+            _ => false,
+        };
+        let linear = |curve: &MinMaxCurve| matches!(*curve, MinMaxCurve::Constant(v) if v.is_finite())
+            || matches!(*curve, MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite());
+        if velocity.in_world_space
+            || ![&velocity.x, &velocity.y, &velocity.z].into_iter().all(linear)
+            || !velocity.orbital.iter().all(zero)
+            || !zero(&velocity.radial)
+            || !matches!(velocity.speed_modifier, MinMaxCurve::Constant(v) if v == 1.0)
+        {
+            return refuse("emission over distance: VelocityModule outside the executed subset");
+        }
     }
     Ok(())
 }
@@ -146,7 +220,18 @@ pub(super) fn advance_frame(
         // frame's time is dropped and the pending time stays as it was. The
         // engine has no such refusal.
         match head.plan(state.frame.pending, system.emitter.duration) {
-            Ok(plan) => run_plan(system, state, plan, stopped, ctx),
+            Ok(plan) => {
+                let pending = plan.remaining();
+                let late = super::child::arms::on("distanceAfterSlices");
+                let distance = if stopped || late { Ok(()) } else { emit_over_distance(system, state, head.scaled_dt,
+                    pending, ctx) };
+                let result = distance.and_then(|()| run_plan(system, state, plan, stopped, ctx));
+                if late && !stopped && result.is_ok() {
+                    emit_over_distance(system, state, head.scaled_dt, pending, ctx)
+                } else {
+                    result
+                }
+            }
             Err(_) => Err(BirthRefused::InvalidTiming),
         }
     };
@@ -156,6 +241,62 @@ pub(super) fn advance_frame(
         state.frame.previous_position = current;
     }
     result
+}
+
+/// Emission over distance at the frame head, once per unskipped frame with the
+/// whole scaled dt, after the pending sum and before the first slice; a
+/// stopped system (and so every sub-emitter target) takes no such call. The
+/// births are placed back along the masked emitter velocity with no births
+/// ahead and carry the pending time after the sum, so their elapsed time and
+/// age start negative and every slice of the frame then advances them as old
+/// particles. Nothing is committed when the call or its births are refused.
+fn emit_over_distance(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    scaled_dt: f32,
+    pending: f32,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    let Some(distance) = frame_distance_law(&system.emitter)? else {
+        return Ok(());
+    };
+    let mut emission = state.emission;
+    let batch = distance
+        .emit(&mut emission, state.frame.velocity, scaled_dt, pending, system.playback_head,
+            moly_law::particle::initial::initial_reciprocal)
+        .map_err(BirthRefused::Emission)?;
+    let emitter_velocity = if system.emitter.simulation_space == SimulationSpace::World {
+        state.frame.velocity
+    } else {
+        [0.0; 3]
+    };
+    start_common(
+        system,
+        &mut state.initial,
+        Some(&mut state.shape),
+        BirthBatch { count: batch.count, rate_count: batch.count, distribution: batch.distribution },
+        batch.dt,
+        batch.previous_normalized,
+        batch.current_normalized,
+        Some(BirthBacktrack { births_ahead: 0.0, emitter_velocity, pending: batch.pending }),
+        None,
+        ctx,
+    )?;
+    state.emission = emission;
+    system.emission.to_emit_accumulator = emission.distribution.offset;
+    Ok(())
+}
+
+/// The installed distance law of a system that runs its own per-frame update.
+fn frame_distance_law(emitter: &EmitterParams) -> Result<Option<ConstantDistanceEmission>, BirthRefused> {
+    let emission = emitter.emission.as_ref().ok_or(BirthRefused::Unsupported("missing emission"))?;
+    let (_, distance) = ConstantAutonomousEmission::from_params_with_distance(
+        &emitter.start_delay, emitter.duration, emitter.looping, emission)
+        .map_err(BirthRefused::Emission)?;
+    if distance.is_some() {
+        qualify_distance_composition(emitter)?;
+    }
+    Ok(distance)
 }
 
 /// One incremental update of an installed system from its pending time and
@@ -191,7 +332,7 @@ fn run_plan(
     for slice in plan.by_ref() {
         let result = slice.map_err(|_| BirthRefused::InvalidTiming).and_then(|slice| {
             step_slice(system, state, slice.duration, Some(slice.remaining_before), stopped,
-                Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity }), ctx)
+                Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity, pending: 0.0 }), ctx)
         });
         if let Err(error) = result {
             // A refused slice ends the frame; the rest of its time is
@@ -250,13 +391,18 @@ fn step_slice(
         .emission
         .as_ref()
         .ok_or(BirthRefused::Unsupported("missing emission"))?;
-    let law = ConstantAutonomousEmission::from_params(
+    let (law, distance) = ConstantAutonomousEmission::from_params_with_distance(
         &system.emitter.start_delay,
         system.emitter.duration,
         system.emitter.looping,
         emission,
     )
     .map_err(BirthRefused::Emission)?;
+    // Emission over distance belongs to the per-frame head, which also places
+    // the births; an entry without that head (no placement) would drop it.
+    if distance.is_some() && backtrack.is_none() {
+        return Err(BirthRefused::Unsupported("emission over distance runs only from the per-frame update"));
+    }
     let clock = law
         .prepare_slice(system.playback_head, dt, stopped)
         .map_err(BirthRefused::Emission)?;
@@ -631,7 +777,12 @@ fn start_common(
                 emit_carry: [0.0; 2],
                 animated: [0.0; 3],
             });
-            partial_dts.push(timing[index].dt);
+            // Elapsed time: dt * fraction, less the command's pending argument
+            // (zero for the slices' time births, where it leaves the bits).
+            partial_dts.push(match backtrack {
+                Some(b) if !super::child::arms::on("elapsedWithoutPending") => timing[index].dt - b.pending,
+                _ => timing[index].dt,
+            });
             if let (Some(backtrack), Some(time_per_step)) = (backtrack, time_per_step) {
                 let scale = (backtrack.births_ahead + timing[index].fraction) * time_per_step;
                 if !scale.is_finite()

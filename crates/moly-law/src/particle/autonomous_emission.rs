@@ -4,11 +4,13 @@
 //! (405 scalar emission, 108 clock, 15 newborn cases) and a native EmitOverTime
 //! receipt over every two-constant emission configuration of the corpus, both
 //! with zero failures.
-//! Scope: initialized clock, no delay or distance emission, one incremental
+//! Scope: initialized clock, no delay, one incremental
 //! slice per call (the per-frame head supplies the slices; their births-ahead
 //! argument is applied by the birth placement, not here), a constant or
 //! two-constant rate, <=2 cycle-1 bursts of probability 1 with a constant or
-//! two-constant count.
+//! two-constant count. Emission over distance is a separate law
+//! (`ConstantDistanceEmission`) that the per-frame head runs once before the
+//! slices; `from_params` refuses a distance rate so no other caller drops it.
 //! This prepares phases; it never admits a system or simulates particles.
 //! Never use an old emission-head interval for birth curves after a loop wrap:
 //! StartParticles uses (current - slice_dt, current), both times native reciprocal
@@ -183,7 +185,35 @@ impl AutonomousBirthBatch {
 }
 
 impl ConstantAutonomousEmission {
+    /// The per-slice law of a system without emission over distance; a
+    /// distance rate other than zero is refused here.
     pub fn from_params(
+        delay: &MinMaxCurve,
+        duration: f32,
+        looping: bool,
+        emission: &EmissionParams,
+    ) -> Result<Self, Refused> {
+        if !matches!(&emission.rate_over_distance, MinMaxCurve::Constant(v) if *v == 0.0) {
+            return Err(Refused::UnsupportedConfiguration);
+        }
+        Self::from_time_params(delay, duration, looping, emission)
+    }
+
+    /// The per-slice law together with the distance law the per-frame head
+    /// runs before the slices. Both share the accumulator, spacing and scalar
+    /// stream in `AutonomousEmissionState`.
+    pub fn from_params_with_distance(
+        delay: &MinMaxCurve,
+        duration: f32,
+        looping: bool,
+        emission: &EmissionParams,
+    ) -> Result<(Self, Option<ConstantDistanceEmission>), Refused> {
+        let law = Self::from_time_params(delay, duration, looping, emission)?;
+        let distance = ConstantDistanceEmission::from_params(&law, &emission.rate_over_distance)?;
+        Ok((law, distance))
+    }
+
+    fn from_time_params(
         delay: &MinMaxCurve,
         duration: f32,
         looping: bool,
@@ -191,7 +221,6 @@ impl ConstantAutonomousEmission {
     ) -> Result<Self, Refused> {
         let unsupported = Refused::UnsupportedConfiguration;
         if !matches!(delay, MinMaxCurve::Constant(v) if *v == 0.0)
-            || !matches!(&emission.rate_over_distance, MinMaxCurve::Constant(v) if *v == 0.0)
             || !duration.is_finite()
             || duration <= 0.0
             || emission.bursts.len() > 2
@@ -408,6 +437,123 @@ impl ConstantAutonomousEmission {
             emission_previous: clock.emission_previous,
             dt: clock.dt,
         }))
+    }
+}
+
+/// EmitOverDistance, which the per-frame update runs once at its head with the
+/// frame's whole scaled dt, after the pending sum and before the first slice
+/// (never per slice). It shares the accumulator, spacing and scalar stream
+/// with EmitOverTime, which later draws once per slice and rewrites the
+/// spacing.
+///
+/// Qualified subset, as executed: a finite constant rate above zero, a
+/// looping system with no start delay and no bursts, and a constant rate over
+/// time. A rate of exactly zero is no law at all (the caller's rate test fails
+/// before any draw); a negative, curve or two-constant rate is refused.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConstantDistanceEmission {
+    rate: f32,
+    duration: f32,
+}
+
+/// One EmitOverDistance call and the StartParticles command it issues: the
+/// command time is the frame's end clock t1 = fmod(pending + clock, duration),
+/// its dt is the scaled frame dt, every birth is a rate birth, it has no
+/// births-ahead argument, and its pending argument is the pending time after
+/// this frame's sum, so the elapsed time of a lane is dt * fraction - pending
+/// (negative in general): the frame's slices then advance the newborns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DistanceBirthBatch {
+    pub count: u32,
+    pub distribution: BirthDistribution,
+    pub dt: f32,
+    pub pending: f32,
+    /// The command time t1.
+    pub time: f32,
+    /// t1 - dt and t1, both times the native reciprocal duration.
+    pub previous_normalized: f32,
+    pub current_normalized: f32,
+}
+
+impl ConstantDistanceEmission {
+    fn from_params(law: &ConstantAutonomousEmission, rate: &MinMaxCurve) -> Result<Option<Self>, Refused> {
+        let rate = match *rate {
+            MinMaxCurve::Constant(value) if value == 0.0 => return Ok(None),
+            MinMaxCurve::Constant(value) if value.is_finite() && value > 0.0 => value,
+            _ => return Err(Refused::UnsupportedConfiguration),
+        };
+        if !law.looping || !law.bursts.is_empty() || !matches!(law.rate, EmissionRate::Constant(_)) {
+            return Err(Refused::UnsupportedConfiguration);
+        }
+        Ok(Some(Self { rate, duration: law.duration }))
+    }
+
+    /// `velocity` is the emitter velocity the frame head holds (translation
+    /// change over the raw frame dt, recomputed only above 1e-4 s), `scaled_dt`
+    /// the frame dt times the clamped simulation speed, `pending` the pending
+    /// time after this frame's sum, `clock` the system clock before the
+    /// slices. One draw before the amount (a constant rate ignores its value),
+    /// also at zero velocity. State is committed only on success.
+    pub fn emit(
+        &self,
+        state: &mut AutonomousEmissionState,
+        velocity: [f32; 3],
+        scaled_dt: f32,
+        pending: f32,
+        clock: f32,
+        reciprocal: impl FnOnce(f32) -> Option<f32>,
+    ) -> Result<DistanceBirthBatch, Refused> {
+        let old = state.distribution;
+        if ![old.spacing, old.offset, old.burst_fraction, scaled_dt, pending, clock]
+            .iter()
+            .all(|v| v.is_finite())
+            || old.spacing < 0.0
+            || !(0.0..1.0).contains(&old.offset)
+            || scaled_dt < 0.0
+            || pending < 0.0
+            || !(0.0..self.duration).contains(&clock)
+            || velocity.iter().any(|v| !v.is_finite())
+        {
+            return Err(Refused::InvalidInput);
+        }
+        let mut random = state.random;
+        let _ = random.next_u32();
+        // The squared sum keeps its native grouping ((x*x + y*y) + z*z);
+        // sqrt is the correctly rounded single-precision root.
+        let length = ((velocity[0] * velocity[0] + velocity[1] * velocity[1]) + velocity[2] * velocity[2]).sqrt();
+        let amount = (self.rate * scaled_dt) * length;
+        let full = old.offset + amount;
+        if !full.is_finite() || full > MAX_COUNT {
+            return Err(Refused::CountOutOfRange);
+        }
+        // Truncation toward zero, as the native unsigned convert.
+        let count = full as u32;
+        let distribution = BirthDistribution {
+            spacing: if amount < MIN_AMOUNT { 1.0 } else { 1.0 / amount },
+            offset: full - count as f32,
+            burst_fraction: old.burst_fraction,
+        };
+        // Looping only (the qualified subset): Rust `%` on f32 is fmodf.
+        let current = (pending + clock) % self.duration;
+        let inverse = reciprocal(self.duration)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .ok_or(Refused::ReciprocalUnavailable)?;
+        let previous_normalized = (current - scaled_dt) * inverse;
+        let current_normalized = current * inverse;
+        if !previous_normalized.is_finite() || !current_normalized.is_finite() {
+            return Err(Refused::InvalidInput);
+        }
+        state.random = random;
+        state.distribution = distribution;
+        Ok(DistanceBirthBatch {
+            count,
+            distribution,
+            dt: scaled_dt,
+            pending,
+            time: current,
+            previous_normalized,
+            current_normalized,
+        })
     }
 }
 
@@ -1358,4 +1504,103 @@ mod tests {
             }
         );
     }
+    fn bits(value: &Value) -> f32 {
+        f32::from_bits(value.as_f64().unwrap() as u32)
+    }
+    fn words(value: &Value) -> [u32; 4] {
+        let values = array(value);
+        assert_eq!(values.len(), 4);
+        std::array::from_fn(|i| values[i].as_f64().unwrap() as u32)
+    }
+    fn carry(value: &Value) -> BirthDistribution {
+        let values = array(value);
+        BirthDistribution { spacing: bits(&values[0]), offset: bits(&values[1]), burst_fraction: bits(&values[2]) }
+    }
+
+    /// Every EmitOverDistance call of the native per-frame Update1b receipts
+    /// (the frame head of the transform-driven distance system, with the
+    /// exported start block, Velocity and CustomData modules or none) through
+    /// the law: the state before and the call arguments come from the native
+    /// row, the result is compared bit for bit with the native state after,
+    /// the returned count and the StartParticles command it issued (time,
+    /// dt, pending argument). Two one-rule arms read the same rows.
+    #[test]
+    #[ignore = "MOLY_UPDATE1B_FRAMES, MOLY_UPDATE1B_FRAMES_EXTRA and MOLY_UPDATE1B_FRAMES_MODULES must identify the current JP per-frame Update1b receipts"]
+    fn replays_native_emit_over_distance_at_the_frame_head() {
+        let (mut calls, mut births, mut nonzero) = (0_usize, 0_u64, 0_usize);
+        let (mut unregrouped, mut undrawn) = (0_usize, 0_usize);
+        for variable in ["MOLY_UPDATE1B_FRAMES", "MOLY_UPDATE1B_FRAMES_EXTRA", "MOLY_UPDATE1B_FRAMES_MODULES"] {
+            let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} is not set"));
+            let receipt = json::parse(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(
+                at(&receipt, "sourceSha256").as_str(),
+                Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+            );
+            for group in ["s11Cases", "s1Cases", "controls"] {
+                let Some(cases) = receipt.get(group).and_then(Value::as_array) else { continue };
+                for case in cases {
+                    if case.get("patched").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    let config = at(case, "config");
+                    let rate = field(config, "rate_distance");
+                    let emission = EmissionParams {
+                        rate_over_time: MinMaxCurve::Constant(field(config, "rate_time")),
+                        rate_over_distance: MinMaxCurve::Constant(rate),
+                        bursts: Vec::new(),
+                    };
+                    let (_, law) = ConstantAutonomousEmission::from_params_with_distance(
+                        &MinMaxCurve::Constant(0.0), field(config, "duration"), boolean(config, "looping"), &emission)
+                        .unwrap();
+                    for frame in array(at(case, "frames")) {
+                        let row = at(frame, "eod");
+                        if matches!(row, Value::Null) {
+                            continue;
+                        }
+                        let law = law.expect("a native distance call has a distance rate above zero");
+                        let arguments = array(at(row, "argsBits"));
+                        let command = array(at(frame, "starts")).iter()
+                            .find(|start| field(start, "lr") == 14_148_616.0)
+                            .expect("the distance call issues its StartParticles command");
+                        let command_arguments = array(at(command, "argsBits"));
+                        let pending = bits(&command_arguments[3]);
+                        let velocity = std::array::from_fn(|axis| bits(&array(at(row, "velocityBits"))[axis]));
+                        let before = at(row, "stateBefore");
+                        let mut state = AutonomousEmissionState {
+                            distribution: carry(at(before, "f")),
+                            random: ScalarRandom { words: words(at(before, "rng")) },
+                        };
+                        let batch = law.emit(&mut state, velocity, bits(&arguments[2]), pending, bits(&arguments[0]),
+                            crate::particle::initial::initial_reciprocal).unwrap();
+                        let after = at(row, "stateAfter");
+                        exact_distribution(state.distribution, carry(at(after, "f")));
+                        assert_eq!(state.random.words, words(at(after, "rng")));
+                        assert_eq!(batch.count as f32, field(row, "returned"));
+                        assert_eq!(batch.count as f32, field(command, "requested"));
+                        assert_eq!(batch.count as f32, field(command, "rateCount"));
+                        exact(batch.time, bits(&arguments[1]), "command time");
+                        exact(batch.time, bits(&command_arguments[0]), "command time argument");
+                        exact(batch.dt, bits(&command_arguments[1]), "command dt");
+                        exact(bits(&command_arguments[2]), 0.0, "no births-ahead argument");
+                        calls += 1;
+                        births += u64::from(batch.count);
+                        nonzero += usize::from(batch.count > 0);
+                        // Arm: the squared sum regrouped as x*x + (y*y + z*z).
+                        let length = (velocity[0] * velocity[0] + (velocity[1] * velocity[1] + velocity[2] * velocity[2])).sqrt();
+                        let amount = (rate * bits(&arguments[2])) * length;
+                        let full = carry(at(before, "f")).offset + amount;
+                        unregrouped += usize::from((full - (full as u32) as f32).to_bits() != state.distribution.offset.to_bits());
+                        // Arm: no draw before the amount.
+                        undrawn += usize::from(words(at(before, "rng")) != words(at(after, "rng")));
+                    }
+                }
+            }
+        }
+        println!("emit over distance replay: {calls} native calls, {nonzero} with births, {births} births; \
+            arms: regrouped squared sum {unregrouped}, no draw {undrawn}");
+        assert_eq!(calls, 591);
+        assert!(nonzero > 0 && births > 0);
+        assert!(unregrouped > 0 && undrawn == calls);
+    }
+
 }

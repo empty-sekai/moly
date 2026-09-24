@@ -959,7 +959,14 @@ pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute
             "procedural source route: time-evaluated simulation and Update(flags=3) prewarm are not transcribed".into()),
         SourceRoute::Undecided(control) => return Err(format!("source route undecided: {control}")),
     }
-    birth::qualify_emitter(emitter).map_err(|refused| format!("{refused:?}"))
+    birth::qualify_frame_emitter(emitter).map_err(|refused| format!("{refused:?}"))
+}
+
+/// Whether the emitter authors a distance rate other than zero; only the
+/// native per-frame head consumes it.
+pub(crate) fn has_distance_emission(emitter: &EmitterParams) -> bool {
+    emitter.emission.as_ref().is_some_and(|emission|
+        !matches!(emission.rate_over_distance, moly_law::particle::MinMaxCurve::Constant(v) if v == 0.0))
 }
 
 /// Whether any sub-emitter edge is real (not authored null: no emitter and

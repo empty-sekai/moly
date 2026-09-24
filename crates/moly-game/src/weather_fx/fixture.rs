@@ -62,6 +62,10 @@ pub(crate) fn prepare_control(
                 if plan.trail.is_some() {
                     return Err(format!("{}: trails need the native birth owner and a trail draw", particle["node"]));
                 }
+                // So does emission over distance (the native per-frame head).
+                if crate::particle_runtime::has_distance_emission(&plan.emitter) {
+                    return Err(format!("{}: emission over distance needs the native birth owner", particle["node"]));
+                }
                 plan.ordinal = ordinal;
                 candidates.push(Candidate { anchor, plan });
             }
@@ -155,6 +159,8 @@ pub(crate) fn plan(
                 warn!("[fixture-source] {package}/{node}: sub-emitter events need the native birth owner, which the fixture path does not install"),
             Some(plan) if plan.trail.is_some() =>
                 warn!("[fixture-source] {package}/{node}: trails need the native birth owner and a trail draw, which the fixture path does not install"),
+            Some(plan) if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
+                warn!("[fixture-source] {package}/{node}: emission over distance needs the native birth owner, which the fixture path does not install"),
             Some(mut plan) => {
                 plan.ordinal = ordinal;
                 candidates.push(Candidate { anchor, plan });
