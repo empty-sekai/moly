@@ -1207,11 +1207,20 @@ mod mip_tests {
 ///
 /// 纹素交出后，主世界里只剩一种读者会再要它们：后来的换装批次要遮罩
 /// 均值。均值在交出的那一帧（数据还在）就算过并记下，见 [`MaskMeans`]。
-fn chain_and_release(images: &mut Assets<Image>, handle: &Handle<Image>) -> Result<u32, MipSkip> {
+///
+/// The chained upload replaces the single-level texture the image already
+/// has on the GPU; the replacement is recorded so that the old texture is
+/// destroyed together with the image (see [`crate::gpu_image_release`]).
+fn chain_and_release(
+    images: &mut Assets<Image>,
+    replaced: &mut MessageWriter<crate::gpu_image_release::ImageTextureReplaced>,
+    handle: &Handle<Image>,
+) -> Result<u32, MipSkip> {
     mip_chain_plan(images.get(handle).ok_or(MipSkip::NoData)?)?;
     let image = images.get_mut(handle).ok_or(MipSkip::NoData)?;
     let levels = generate_mip_chain(image)?;
     moly_assets::residency::release_to_render_world(image);
+    replaced.write(crate::gpu_image_release::ImageTextureReplaced(handle.id()));
     Ok(levels)
 }
 
@@ -1381,9 +1390,10 @@ fn switch_materials(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<FixtureMaterial>>,
     mut plan: Local<Option<SwapPlan>>,
-    layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>),
+    layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
+        MessageWriter<crate::gpu_image_release::ImageTextureReplaced>),
 ) {
-    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means) = layout;
+    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced) = layout;
     let mut pending_roots: Vec<_> = roots.iter().map(|(entity, _)| entity).collect();
     pending_roots.sort_unstable();
     if *seen_roots != pending_roots {
@@ -1455,13 +1465,13 @@ fn switch_materials(
     let mut mip_skipped: Vec<(&str, MipSkip)> = Vec::new();
     for item in &state.planned {
         let name = item.name.as_str();
-        match chain_and_release(&mut images, &item.material.main_tex) {
+        match chain_and_release(&mut images, &mut replaced, &item.material.main_tex) {
             Ok(levels) => mipped.push((name, levels)),
             Err(MipSkip::AlreadyChained) => shared_chains += 1,
             Err(reason) => mip_skipped.push((name, reason)),
         }
         if let Some(mask) = &item.mask {
-            match chain_and_release(&mut images, mask) {
+            match chain_and_release(&mut images, &mut replaced, mask) {
                 Ok(_) => {}
                 Err(MipSkip::AlreadyChained) => shared_chains += 1,
                 Err(reason) => mip_skipped.push((name, reason)),
@@ -2076,6 +2086,7 @@ pub struct FixtureMaterialPlugin;
 
 impl Plugin for FixtureMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::gpu_image_release::install(app);
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)

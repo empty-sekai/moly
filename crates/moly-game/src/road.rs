@@ -225,6 +225,7 @@ fn update_materials(
     mut images: ResMut<Assets<Image>>,
     mut cache: Local<MaterialCache>,
     revision: Res<super::FixtureLayoutRevision>,
+    mut replaced: MessageWriter<crate::gpu_image_release::ImageTextureReplaced>,
 ) {
     if revision.is_changed() {
         cache.clear();
@@ -293,6 +294,11 @@ fn update_materials(
                 None => Ok(0),
             };
             match chained {
+                // The chained upload replaces the texture the image already
+                // has on the GPU (see crate::gpu_image_release).
+                Ok(levels) if levels > 0 => {
+                    replaced.write(crate::gpu_image_release::ImageTextureReplaced(surface.texture.id()));
+                }
                 Ok(_) | Err(MipSkip::AlreadyChained) => {}
                 Err(reason) => warn!("Road mip generation: {reason:?}"),
             }
@@ -323,6 +329,7 @@ fn update_materials(
 
 pub(super) fn install(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/road_material.wgsl");
+    crate::gpu_image_release::install(app);
     app.add_plugins(MaterialPlugin::<RoadMaterial>::default())
         .add_systems(
             Update,
