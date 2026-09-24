@@ -19,6 +19,14 @@
 //! The module meshes gain the third and fourth uv sets the module glb
 //! carries, which the engine's glTF loader does not map
 //! (`room_shell::attach_source_uv_sets`).
+//!
+//! What cannot be computed from a module file is refused piece by piece, not
+//! room by room. A wall mesh without the fourth set (a module file exported
+//! before the uv-set export) is drawn without the edge factor, and one error
+//! line per room load names it. A surface whose material samples a uv set its
+//! mesh lacks keeps its module material and is named; every other surface is
+//! drawn with the source programs. Every mesh is checked before any is
+//! swapped, so no surface ends up half-swapped.
 use crate::client_config::{
     ClientConfigs, KEY_MY_ROOM_FLOOR_ASSET_NAME, KEY_MY_ROOM_WALL_APPEARANCE_ASSET_NAME,
 };
@@ -64,12 +72,31 @@ pub(crate) struct RoomAppearanceState {
     /// Wall skin, floor skin, then the module's own sidecar.
     sources: Vec<Handle<JsonAsset>>,
     images: Vec<Handle<Image>>,
-    /// Module material -> room program material, the uv set it samples, and
-    /// whether it also reads the fourth set (the usage-2 wall edge factor).
-    replacements: HashMap<AssetId<StandardMaterial>, (Handle<RoomShellMaterial>, u32, bool)>,
+    /// Module material -> its room program material.
+    replacements: HashMap<AssetId<StandardMaterial>, Replacement>,
     /// Source behaviour the product cannot draw from the extracted data, named
     /// once per build of the materials.
     named_gaps: Vec<String>,
+    /// Module materials kept because a mesh drawn with them lacks the uv set
+    /// their room material samples (named once per room load).
+    refused: Vec<AssetId<StandardMaterial>>,
+    refused_names: Vec<String>,
+    /// Wall meshes drawn without the edge factor (no fourth uv set), and
+    /// whether that has been named for this room load.
+    walls_without_uv3: usize,
+    walls_without_uv3_named: bool,
+}
+
+/// One module material's room program material.
+#[derive(Clone)]
+struct Replacement {
+    material: Handle<RoomShellMaterial>,
+    /// The module material's name (the slot).
+    slot: String,
+    /// The mesh uv set the main texture is sampled with.
+    uv: u32,
+    /// The usage-2 wall edge factor, which reads the fourth set.
+    reads_uv3: bool,
 }
 #[derive(Component)]
 struct AppliedAppearance {
@@ -272,9 +299,15 @@ fn build(
         let handle = materials.add(resolved.with_texture(image.clone()));
         state.images.push(image);
         slots.push(name.to_owned());
-        state
-            .replacements
-            .insert(original.id(), (handle, index, resolved.reads_uv3));
+        state.replacements.insert(
+            original.id(),
+            Replacement {
+                material: handle,
+                slot: name.to_owned(),
+                uv: index,
+                reads_uv3: resolved.reads_uv3,
+            },
+        );
     }
     for required in [WALL_SLOT, FLOOR_SLOT] {
         if !slots.iter().any(|slot| slot == required) {
@@ -433,9 +466,14 @@ fn apply(
             return;
         }
     }
-    // Checked for every mesh before any is swapped, so a refused room keeps
-    // its module materials instead of drawing part of its shell.
+    // Every mesh is checked before any is swapped. A surface (module
+    // material) with a mesh that lacks the uv set its room material samples is
+    // refused as a whole, so none of its meshes is swapped; the other surfaces
+    // are. A wall mesh without the fourth set is swapped and drawn without the
+    // edge factor (its pipeline has no fourth-set input).
     let mut swaps = Vec::new();
+    let mut refused_now: Vec<(AssetId<StandardMaterial>, String)> = Vec::new();
+    let mut walls_without_uv3 = 0usize;
     for (entity, standard, room, mesh, applied) in &drawn {
         let Some(source) = applied
             .map(|value| value.original)
@@ -443,32 +481,58 @@ fn apply(
         else {
             continue;
         };
-        let Some((replacement, uv, reads_uv3)) = state.replacements.get(&source).cloned() else {
-            continue;
-        };
-        if room.is_some_and(|material| material.0 == replacement) {
+        if state.refused.contains(&source) {
             continue;
         }
-        let sampled = match uv {
-            0 => Mesh::ATTRIBUTE_UV_0,
-            1 => Mesh::ATTRIBUTE_UV_1,
-            _ => room_shell::ATTRIBUTE_UV_2,
+        let Some(replacement) = state.replacements.get(&source).cloned() else {
+            continue;
+        };
+        if room.is_some_and(|material| material.0 == replacement.material) {
+            continue;
+        }
+        let (sampled, set) = match replacement.uv {
+            0 => (Mesh::ATTRIBUTE_UV_0, "TEXCOORD_0"),
+            1 => (Mesh::ATTRIBUTE_UV_1, "TEXCOORD_1"),
+            _ => (room_shell::ATTRIBUTE_UV_2, "TEXCOORD_2"),
         };
         if let Some(mesh) = meshes.get(&mesh.0) {
-            let refusal = if mesh.attribute(sampled).is_none() {
-                Some("房间模型缺少这款外观所需的纹理坐标")
-            } else if reads_uv3 && mesh.attribute(room_shell::ATTRIBUTE_UV_3).is_none() {
-                Some("房间墙面模型缺少第四套纹理坐标（墙面边缘压暗读它），请重新提取房间模块")
-            } else {
-                None
-            };
-            if let Some(reason) = refusal {
-                error!("[room-shell] {reason}");
-                state.error = Some(reason.into());
-                return;
+            if mesh.attribute(sampled).is_none() {
+                if !refused_now.iter().any(|(id, _)| *id == source) {
+                    refused_now.push((
+                        source,
+                        format!(
+                            "{}: samples {set}, which a mesh drawn with it lacks",
+                            replacement.slot
+                        ),
+                    ));
+                }
+                continue;
+            }
+            if replacement.reads_uv3 && mesh.attribute(room_shell::ATTRIBUTE_UV_3).is_none() {
+                walls_without_uv3 += 1;
             }
         }
-        swaps.push((entity, replacement, source));
+        swaps.push((entity, replacement.material, source));
+    }
+    swaps.retain(|(_, _, source)| !refused_now.iter().any(|(id, _)| id == source));
+    for (id, reason) in refused_now {
+        error!("[room-shell] surface refused, kept on its module material: {reason}");
+        state.refused.push(id);
+        state.refused_names.push(reason);
+    }
+    state.walls_without_uv3 += walls_without_uv3;
+    if state.walls_without_uv3 > 0 && !state.walls_without_uv3_named {
+        state.walls_without_uv3_named = true;
+        error!(
+            "[room-shell] {} wall mesh(es) have no fourth uv set (TEXCOORD_3): the module file predates the uv-set export, so the wall edge factor is left out; re-extract the release data with the current extractor",
+            state.walls_without_uv3
+        );
+    }
+    if !swaps.is_empty() {
+        info!(
+            "[room-shell] {} module meshes switched to the source programs",
+            swaps.len()
+        );
     }
     for (entity, replacement, source) in swaps {
         commands
@@ -490,14 +554,16 @@ fn apply(
         .iter()
         .all(|image| server.is_loaded_with_dependencies(image));
     state.phase = format!(
-        "images: {:?}; materials={}; named gaps: {:?}",
+        "images: {:?}; materials={}; named gaps: {:?}; refused surfaces: {:?}; walls without the fourth uv set: {}",
         state
             .images
             .iter()
             .map(|h| server.load_state(h))
             .collect::<Vec<_>>(),
         state.replacements.len(),
-        state.named_gaps
+        state.named_gaps,
+        state.refused_names,
+        state.walls_without_uv3
     );
 }
 

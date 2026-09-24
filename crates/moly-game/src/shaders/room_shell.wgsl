@@ -394,8 +394,11 @@ fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @locati
             // log2(|2*uv3 - 1|)) and d = 1 - dot(p, p), in the source's
             // operation order. uv3 is the mesh's fourth uv set (0..1 across
             // each wall) in the source's bottom-left origin; the glb stores V
-            // flipped. room_appearance.rs refuses a wall mesh without it.
+            // flipped. A mesh without the set (a module file exported before
+            // the uv-set export) has no ROOM_UV_3 input and is drawn without
+            // the factor; room_appearance.rs names it.
             var ao = intensity * (-in.color.r) + 1.0;
+#ifdef ROOM_UV_3
             let uv3 = vec2<f32>(in.uv_d.x, 1.0 - in.uv_d.y);
             let edge_uv = uv3 * vec2<f32>(2.0, 2.0) + vec2<f32>(-1.0, -1.0);
             let edge_exponent = vec2<f32>(params.wall_ao.y, params.wall_ao.z)
@@ -403,6 +406,7 @@ fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @locati
             let edge = exp2(edge_exponent * log2(abs(edge_uv)));
             let d = -dot(edge, edge) + 1.0;
             ao = ao * (params.wall_ao.x * (d + -1.0) + 1.0);
+#endif
             let shaded = shade.rgb * rgb;
             let toward = (-rgb) * shade.rgb + rgb;
             rgb = ao * toward + shaded;

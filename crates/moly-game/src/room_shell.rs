@@ -20,6 +20,9 @@
 //! only the first two, so [`attach_source_uv_sets`] reads them from the glTF
 //! source and puts them on the module meshes ([`ATTRIBUTE_UV_2`] /
 //! [`ATTRIBUTE_UV_3`]), and the pipeline binds whichever of them a mesh has.
+//! A wall mesh without the fourth set (a module file exported before the
+//! uv-set export) gets a pipeline without it, which leaves the edge factor
+//! out; `room_appearance.rs` names that once per room load.
 //!
 //! The globals are the site ones (`SiteEnvGpuBuffer`: phenomena light and
 //! shade, drop-shadow colour 1, sky-bottom colour, fog, edge pair, treasure
@@ -91,7 +94,7 @@ pub(crate) struct ResolvedShell {
     pub key: RoomShellKey,
     params: [[f32; 4]; PARAM_SLOTS],
     /// Usage 2 with a non-zero `_WallAOIntensity`: the edge factor reads the
-    /// mesh's fourth uv set, so a mesh drawn with it must carry that set.
+    /// mesh's fourth uv set (a mesh without it is drawn without the factor).
     pub reads_uv3: bool,
 }
 
