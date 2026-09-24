@@ -14,6 +14,37 @@ Resource Han Rounded SC Medium 的一个字形子集，运行时用于烘焙文�
 子集化是 OFL 意义上的修改版本，文件名以 `.subset` 后缀标注。字体名不含
 Adobe 的保留字体名（Reserved Font Name "Source"）。
 
+## Arm Optimized Routines（单精度 powf 移植）
+
+`crates/moly-law/src/powf.rs` 是 Arm Optimized Routines 中单精度 `powf`
+（`math/powf.c`，及其数据表 `math/powf_log2_data.c`、`math/exp2f_data.c`）
+的 Rust 移植，逐位复现 Android 10 起系统 libm 所用的那份实现。上游按
+MIT 许可证授权，许可全文如下：
+
+```text
+MIT License
+
+Copyright (c) 1999-2018, Arm Limited.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Rust 直接依赖
 
 下表覆盖工作区直接使用的第三方 Rust 依赖，包括仅浏览器目标使用的依赖。

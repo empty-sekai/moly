@@ -22,8 +22,16 @@
 //! the gamma arm. The two engine conversions are the native free functions behind the
 //! `Mathf` internal calls; [`super::sky::gamma_to_linear`] and
 //! [`super::sky::linear_to_gamma`] carry them (three and four branches, the single-precision
-//! constants of the native bodies), and the value receipt below executes those native bodies
-//! too.
+//! constants of the native bodies). Those bodies call the C library's `powf`, which on the
+//! phone is the system libm; the port calls [`crate::powf::powf`], a bit-exact port of the
+//! Android 10+ libm `powf`, never the platform `f32::powf` (on the browser build that is a
+//! different function: it changes 67,842 of the 838,568 blended channels of the receipt below).
+//!
+//! The value receipt below executes the game's blend, the engine's native bodies and the
+//! `powf` of an Android 10+ system libm (from the AOSP arm64 emulator images) in one
+//! emulator; the port equals it bit for bit on the native and on the wasm32 build. Android 7
+//! to 9 phones run a different libm `powf` (FreeBSD's) and blend 60,284 of the receipt's
+//! 205,642 gamma rows differently; the port does not follow them.
 
 use super::sky::{gamma_to_linear, linear_to_gamma};
 
@@ -91,17 +99,33 @@ mod tests {
         u32::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
     }
 
-    /// Value by value against the executed game and engine code: the blend entry, the
-    /// colour helpers and the native `Mathf` conversions run in an emulator with the
-    /// active colour space set to Gamma (and, as a control arm, Linear). Every
-    /// non-NaN output channel must equal the port bit for bit; NaN outputs must stay
-    /// NaN (payload bits differ between the emulated core and this host).
+    /// The receipt must say which device libm supplied `powf`: a receipt whose `powf` was
+    /// a host stand-in cannot tell whether the port follows the device.
+    fn device_powf_label(receipt: &super::super::json::Value) -> &str {
+        let powf = receipt
+            .get("powf")
+            .expect("receipt without a device powf (a host stand-in receipt proves nothing here)");
+        assert!(powf
+            .get("libmSha256")
+            .and_then(|v| v.as_str())
+            .is_some_and(|h| h.len() == 64));
+        powf.get("label").and_then(|v| v.as_str()).unwrap_or("?")
+    }
+
+    /// Value by value against the executed game, engine and C library code: the blend
+    /// entry, the colour helpers, the native `Mathf` conversions and the device libm
+    /// `powf` they call run in an emulator with the active colour space set to Gamma (and,
+    /// as a control arm, Linear). Every non-NaN output channel must equal the port bit for
+    /// bit; NaN outputs must stay NaN (the blend's own NaN payloads come from host
+    /// arithmetic). Mismatches are counted, not stopped at, so a control run against
+    /// another libm reports how far apart the two are.
     #[test]
     #[ignore = "MOLY_COLOR_LERP_NATIVE must name the executed colour-lerp receipt"]
     fn color_lerp_matches_the_native_blend() {
         let path = std::env::var("MOLY_COLOR_LERP_NATIVE")
             .expect("MOLY_COLOR_LERP_NATIVE must name the executed colour-lerp receipt");
         let receipt = super::super::json::parse(&std::fs::read(path).unwrap()).unwrap();
+        eprintln!("device powf: {}", device_powf_label(&receipt));
         // The emulated colour-space query must have returned what each arm names; a
         // stale translation of the rewritten stub once ran the Gamma arm twice.
         let stub = receipt.get("colourSpaceStubReturns").unwrap();
@@ -113,6 +137,7 @@ mod tests {
             );
         }
         let mut compared = 0usize;
+        let (mut bad_channels, mut bad_rows, mut first_bad) = (0usize, 0usize, None);
         let mut plain_differs = 0usize;
         let mut round_trip_differs = 0usize;
         let mut linear_not_gamma = 0usize;
@@ -130,20 +155,22 @@ mod tests {
                 let ours = color_lerp(space, a, b, t);
                 let plain = color_lerp(ColorSpace::Linear, a, b, t);
                 let converted = color_lerp(ColorSpace::Gamma, a, b, t);
+                let mut row_bad = false;
                 for c in 0..4 {
                     let native = f32::from_bits(v[9 + c]);
-                    if native.is_nan() {
-                        assert!(
-                            ours[c].is_nan(),
-                            "{arm} row {v:08x?} channel {c}: native NaN, ours {}",
-                            ours[c]
-                        );
+                    let same = if native.is_nan() {
+                        ours[c].is_nan()
                     } else {
-                        assert_eq!(
-                            ours[c].to_bits(),
+                        ours[c].to_bits() == v[9 + c]
+                    };
+                    if !same {
+                        bad_channels += 1;
+                        row_bad = true;
+                        first_bad.get_or_insert(format!(
+                            "{arm} row {v:08x?} channel {c}: native {:#010x}, ours {:#010x}",
                             v[9 + c],
-                            "{arm} row {v:08x?} channel {c}"
-                        );
+                            ours[c].to_bits()
+                        ));
                     }
                     compared += 1;
                     if space == ColorSpace::Gamma && !native.is_nan() {
@@ -154,8 +181,15 @@ mod tests {
                         linear_not_gamma += usize::from(converted[c].to_bits() != v[9 + c]);
                     }
                 }
+                bad_rows += usize::from(row_bad);
             }
         }
+        eprintln!("mismatched {bad_channels} of {compared} channels in {bad_rows} rows");
+        assert!(
+            bad_channels == 0,
+            "first mismatch: {}",
+            first_bad.unwrap_or_default()
+        );
         // Positive arms: the gamma arm is not the plain lerp on these inputs, and even
         // a zero weight changes some stored channels through the round trip.
         assert!(
@@ -173,29 +207,44 @@ mod tests {
         eprintln!("compared {compared} channels; plain lerp differs from the gamma arm on {plain_differs}; zero-weight round trip changes {round_trip_differs}; the conversion differs from the linear arm on {linear_not_gamma}");
     }
 
-    /// The two conversions alone against the native `Mathf` bodies.
+    /// The two conversions alone against the native `Mathf` bodies and the device `powf`.
     #[test]
     #[ignore = "MOLY_COLOR_LERP_NATIVE must name the executed colour-lerp receipt"]
     fn engine_conversions_match_the_native_mathf_bodies() {
         let path = std::env::var("MOLY_COLOR_LERP_NATIVE")
             .expect("MOLY_COLOR_LERP_NATIVE must name the executed colour-lerp receipt");
         let receipt = super::super::json::parse(&std::fs::read(path).unwrap()).unwrap();
+        eprintln!("device powf: {}", device_powf_label(&receipt));
+        let mut total = 0usize;
         for (key, port) in [
             ("g2l", gamma_to_linear as fn(f32) -> f32),
             ("l2g", linear_to_gamma),
         ] {
             let rows = receipt.get(key).unwrap().as_array().unwrap();
             assert!(rows.len() > 1000, "{key}");
+            let mut bad = 0usize;
             for row in rows {
                 let row = row.as_array().unwrap();
                 let (x, native) = (bits(&row[0]), bits(&row[1]));
                 let ours = port(f32::from_bits(x));
-                if f32::from_bits(native).is_nan() {
-                    assert!(ours.is_nan(), "{key} {x:#010x}");
+                let same = if f32::from_bits(native).is_nan() {
+                    ours.is_nan()
                 } else {
-                    assert_eq!(ours.to_bits(), native, "{key} {x:#010x}");
+                    ours.to_bits() == native
+                };
+                if !same {
+                    if bad == 0 {
+                        eprintln!(
+                            "{key} first mismatch {x:#010x}: native {native:#010x}, ours {:#010x}",
+                            ours.to_bits()
+                        );
+                    }
+                    bad += 1;
                 }
             }
+            eprintln!("{key}: mismatched {bad} of {} scalars", rows.len());
+            total += bad;
         }
+        assert_eq!(total, 0, "conversions differ from the native bodies");
     }
 }

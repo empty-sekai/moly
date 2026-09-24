@@ -12,6 +12,7 @@ pub mod material;
 pub mod objective;
 pub mod particle;
 pub mod path;
+pub mod powf;
 pub mod shading;
 pub mod talk;
 pub mod text;
