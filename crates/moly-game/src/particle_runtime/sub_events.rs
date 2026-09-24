@@ -55,12 +55,22 @@ pub(crate) struct DeathEdge {
     pub(crate) law: DeathEmitEdge,
 }
 
+/// One cached collision edge: the child node it names, resolved like a birth
+/// edge, and the RecordEmit law read from that child's first burst. Its
+/// events are recorded by the CollisionModule's own call, not here.
+#[derive(Clone, Debug)]
+pub(crate) struct CollisionEdge {
+    pub(crate) target: String,
+    pub(crate) law: moly_law::particle::collision_event::CollisionEmitEdge,
+}
+
 /// Every real edge of a sub-emitter parent, resolved at admission: the birth
-/// edges and the death edges, each in slot order.
+/// edges, the death edges and the collision edges, each in slot order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EventEdges {
     pub(crate) births: Vec<BirthEdge>,
     pub(crate) deaths: Vec<DeathEdge>,
+    pub(crate) collisions: Vec<CollisionEdge>,
 }
 
 impl EventEdges {
@@ -68,6 +78,7 @@ impl EventEdges {
     pub(crate) fn targets(&self) -> impl Iterator<Item = &str> {
         self.births.iter().map(|edge| edge.target.as_str())
             .chain(self.deaths.iter().map(|edge| edge.target.as_str()))
+            .chain(self.collisions.iter().map(|edge| edge.target.as_str()))
     }
 }
 
@@ -155,7 +166,7 @@ impl BirthEvents {
     /// `edges` in slot order; the admission keeps one or two. Only two carry
     /// slots exist per particle, so a longer list records nothing.
     pub(crate) fn new(edges: Vec<BirthEdge>) -> Self {
-        Self::with_edges(EventEdges { births: edges, deaths: Vec::new() })
+        Self::with_edges(EventEdges { births: edges, ..EventEdges::default() })
     }
 
     /// Birth and death edges, each in slot order.
@@ -372,5 +383,58 @@ fn event_owner(system: &Runtime, accumulated: f32, emission_word: u32, ctx: &Con
         world_space: system.emitter.simulation_space == SimulationSpace::World,
         accumulated_time: accumulated,
         emission_word,
+    }
+}
+
+/// One newborn lane of a child Emit as the target's own sub-emitter call reads
+/// it before the command commits: the particle in source axes and its carries.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StagedLane {
+    pub(super) particle: EventParticle,
+    pub(super) carry: [f32; 2],
+}
+
+impl BirthEvents {
+    /// The newborn call of one four-lane group inside a child Emit of this
+    /// target: lanes `start..end` of the staged newborn block, `dt4` the
+    /// group's four birth times (padding lanes included), every cached birth
+    /// edge in slot order and, per edge, every lane of the range; the carries
+    /// are written back into the staged lanes. The caller records into a copy
+    /// and keeps it only when the whole command succeeds.
+    pub(super) fn record_staged(&mut self, lanes: &mut [StagedLane], start: usize, end: usize, dt4: [f32; 4],
+        owner: EventOwner) {
+        if self.broken.is_some() {
+            return;
+        }
+        'edges: for (slot, edge_slot) in self.slots.iter_mut().enumerate() {
+            for index in start..end {
+                let lane = &mut lanes[index];
+                let mut carry = lane.carry[slot];
+                match edge_slot.edge.law.record(&lane.particle, &mut carry, dt4[index - start], &owner) {
+                    Ok(None) => {}
+                    Ok(Some(record)) => {
+                        lane.carry[slot] = carry;
+                        let tally = &mut edge_slot.tally;
+                        tally.records += 1;
+                        if let Some(commands) = &record.commands {
+                            tally.commands += commands.len() as u64;
+                            tally.births += commands.iter().map(|c| c.count).sum::<u64>();
+                            if edge_slot.delivered {
+                                self.pending.extend(commands.iter().map(|&command| (Slot::Birth(slot), command)));
+                            }
+                        }
+                    }
+                    Err(refused) => {
+                        self.broken = Some(format!("{}: {refused:?}", edge_slot.edge.target));
+                        break 'edges;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether any delivered command waits for its target.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 }

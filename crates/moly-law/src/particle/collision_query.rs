@@ -320,6 +320,11 @@ impl CollisionLaw {
         self.collides_with
     }
 
+    /// Whether the query radius reads the current-size stream.
+    pub fn reads_current_size(&self) -> bool {
+        self.flags.current_size
+    }
+
     /// One `CollisionModule::Update` call over `[from, to)`. Nothing is
     /// committed on a refusal: `state` and `random` change only on success,
     /// and the caller commits `written` and delivers `emits`.

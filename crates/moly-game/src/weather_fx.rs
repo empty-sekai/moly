@@ -140,6 +140,13 @@ struct Planned {
     /// target, which is installed as its parent's child and never emits on
     /// its own.
     child_owner: Option<moly_law::particle::child_emit::ChildOwner>,
+    /// The owner words a Local collision system's query and hits read (its
+    /// authored chain on the site anchor); `None` for every other system.
+    #[allow(dead_code)]
+    collision_owner: Option<moly_law::particle::collision_query::OwnerPair>,
+    /// The owner local-to-world words a Local system's trail job composes
+    /// with the view (the same chain); `None` for every other system.
+    trail_owner: Option<[f32; 16]>,
     /// Cone 的半顶角（shape 块的 `angle` 键；律的 `ShapeParams` 不带它）。
     cone_angle: Option<f32>,
     rol: Option<RotationOverLifetime>,
@@ -672,9 +679,10 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
         // The current snow owner carries an authored null SubModule edge
         // (emitter=null, sourcePointer 0/0). It does not name a child system
         // and therefore adds no runtime scheduling obligation. Real edges are
-        // taken when every edge is a birth or death edge naming a child in
-        // this file: the parent records their events (judge() resolves the
-        // children and their laws). Other triggers, pointers into another
+        // taken when every edge is a birth, death or collision edge naming a
+        // child in this file: the parent records their events (judge()
+        // resolves the children and their laws; the CollisionModule records
+        // the collision events). Other triggers, pointers into another
         // file, a list mixing null and real entries, or an unexported list
         // are refused here.
         if module == "SubModule" {
@@ -683,12 +691,12 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
                 && entry.pointer("/sourcePointer/fileId").and_then(Value::as_i64) == Some(0)
                 && entry.pointer("/sourcePointer/pathId").and_then(Value::as_str) == Some("0");
             let real_event = |entry: &Value| entry.get("emitter").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
-                && matches!(entry.get("type").and_then(Value::as_str), Some("birth" | "death"))
+                && matches!(entry.get("type").and_then(Value::as_str), Some("birth" | "death" | "collision"))
                 && entry.pointer("/sourcePointer/fileId").and_then(Value::as_i64) == Some(0)
                 && entry.pointer("/sourcePointer/pathId").and_then(Value::as_str).is_some_and(|id| id != "0");
             match entries {
                 Some(entries) if entries.iter().all(null) || entries.iter().all(real_event) => continue,
-                Some(_) => return Err("enabled source module SubModule: only authored-null or real birth and death edges into this file are consumed".into()),
+                Some(_) => return Err("enabled source module SubModule: only authored-null or real birth, death and collision edges into this file are consumed".into()),
                 None => return Err("enabled source module SubModule lacks its authored subEmitters edges".into()),
             }
         }
@@ -885,6 +893,11 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
                     .map_err(|refused| format!("{target}: death edge outside the death event law ({refused:?})"))?;
                 edges.deaths.push(crate::particle_runtime::DeathEdge { target: target.to_owned(), law });
             }
+            SubEmitterTrigger::Collision => {
+                let law = moly_law::particle::collision_event::CollisionEmitEdge::from_source(edge, &child)
+                    .map_err(|refused| format!("{target}: collision edge outside the RecordEmit law ({refused:?})"))?;
+                edges.collisions.push(crate::particle_runtime::CollisionEdge { target: target.to_owned(), law });
+            }
             trigger => return Err(format!("{target}: {trigger:?} edge events are not transcribed")),
         }
     }
@@ -923,9 +936,6 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
         return Err(format!("{} parents ({}): the order of their commands is not in the export",
             owners.len(), owners.join(", ")));
     };
-    if graph.get(parent.as_str()).is_some() {
-        return Err(format!("parent {parent} is itself a sub-emitter target: chained targets are not composed"));
-    }
     if kind != EffectKind::Site || instance_anchor.is_some() {
         return Err("owner words are composed only for a site effect on its authored chain".into());
     }
@@ -951,6 +961,13 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
 /// using the zero inverse, which this runtime's own transforms cannot follow.
 fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str)
     -> Result<moly_law::particle::child_emit::ChildOwner, String> {
+    Ok(moly_law::particle::child_emit::ChildOwner::local_scaling(&owner_matrices(by_path, path)?))
+}
+
+/// The owner matrices of the node's authored chain (Local scaling), refused
+/// below the inverse's determinant threshold.
+fn owner_matrices(by_path: &HashMap<String, &Value>, path: &str)
+    -> Result<moly_law::particle::owner::OwnerMatrices, String> {
     use moly_law::particle::owner::{local_scaling_owner, SourceTrs};
     fn words<const N: usize>(node: &Value, key: &str) -> Option<[f32; N]> {
         let list = node.get(key)?.as_array().filter(|list| list.len() == N)?;
@@ -978,7 +995,7 @@ fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str)
     if !owner.invert_ok {
         return Err("owner matrix below the inverse's determinant threshold".into());
     }
-    Ok(moly_law::particle::child_emit::ChildOwner::local_scaling(&owner))
+    Ok(owner)
 }
 
 /// Whether the target's parent is admitted with a birth or death edge to it:
@@ -999,8 +1016,9 @@ fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMa
         None, server, &mut scratch) {
         Some(planned) if planned.event_edges.as_ref().is_some_and(|edges| edges.targets().any(|target| target == node)) =>
             Ok(()),
-        Some(_) => Err(format!("parent {parent} admitted without a birth or death edge to this target")),
-        None => Err(format!("parent {parent} not admitted")),
+        Some(_) => Err(format!("parent {parent} admitted without an event edge to this target")),
+        None => Err(format!("parent {parent} not admitted ({})", scratch.law_reject.last()
+            .cloned().unwrap_or_else(|| format!("{scratch:?}")))),
     }
 }
 
@@ -1113,7 +1131,9 @@ fn judge_in_archive(
     let rate_distance = raw_const(emission.get("rateOverDistance"));
     let time_zero = rate_time.map_or(true, |v| v == 0.0);
     let distance_zero = rate_distance == Some(0.0);
-    if !distance_zero {
+    // A sub-emitter target never emits on its own: its parent's edge law
+    // reads its rate over distance (from the parent particle's motion).
+    if !distance_zero && child_parent.is_none() {
         tally.rate_distance_only += 1;
         return None;
     }
@@ -1220,13 +1240,15 @@ fn judge_in_archive(
         }
     }
     // A CollisionModule runs only on the native birth path with a scene of
-    // the effect's ground collider; the module law is ported, the scene's
-    // sweep is not, so every collision system is refused here by name.
+    // the effect's ground collider. The module law (with its current-size
+    // stream and its collision events) is checked here; the scene is refused
+    // after every other gate, below.
     if emitter.collision.is_some() {
-        let reason = crate::particle_runtime::collision_eligible(&emitter)
-            .err().unwrap_or_else(|| crate::particle_runtime::COLLISION_SCENE_NOT_PORTED.to_owned());
-        tally.law_reject.push(format!("{node}: CollisionModule {reason}"));
-        return None;
+        if let Err(reason) = crate::particle_runtime::collision_eligible(&emitter)
+            .and_then(|()| crate::particle_runtime::current_size_source_gate(system)) {
+            tally.law_reject.push(format!("{node}: CollisionModule {reason}"));
+            return None;
+        }
     }
     let route = crate::particle_runtime::source_route(system);
     // Real sub-emitter birth and death edges: the parent records their
@@ -1247,7 +1269,9 @@ fn judge_in_archive(
                 "{node}: SubModule parent with a first-Play warm: the warm's sub-emitter events are not transcribed"));
             return None;
         }
-        if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route) {
+        // A target takes no route; its composition is judged below.
+        if let Err(reason) = child_parent.as_ref().map_or_else(
+            || crate::particle_runtime::native_birth_eligible(&emitter, &route), |_| Ok(())) {
             tally.law_reject.push(format!("{node}: sub-emitter events require the native birth path: {reason}"));
             return None;
         }
@@ -1396,6 +1420,36 @@ fn judge_in_archive(
     } else {
         None
     };
+    // The owner words of a Local system whose CollisionModule or TrailModule
+    // reads them (the collision query and hits go through the local-to-world
+    // and its inverse, the trail job composes the view with the
+    // local-to-world): the engine's owner update of the authored chain, which
+    // exists only for a site effect on that chain.
+    let local_owner = match emitter.simulation_space {
+        moly_law::particle::schema::SimulationSpace::Local if emitter.collision.is_some() || emitter.trails.is_some() => {
+            if kind != EffectKind::Site || instance_anchor.is_some() {
+                tally.law_reject.push(format!(
+                    "{node}: owner words of a Local collision or trail are composed only for a site effect on its authored chain"));
+                return None;
+            }
+            match owner_matrices(by_path, node) {
+                Ok(owner) => Some(owner),
+                Err(reason) => {
+                    tally.law_reject.push(format!("{node}: owner words of a Local collision or trail: {reason}"));
+                    return None;
+                }
+            }
+        }
+        _ => None,
+    };
+    let collision_owner = local_owner.filter(|_| emitter.collision.is_some()).map(|owner| {
+        use moly_law::particle::collision_response::QueryAffine;
+        moly_law::particle::collision_query::OwnerPair {
+            local_to_world: QueryAffine::from_columns(&owner.local_to_world),
+            world_to_local: QueryAffine::from_columns(&owner.world_to_local),
+        }
+    });
+    let trail_owner = local_owner.filter(|_| emitter.trails.is_some()).map(|owner| owner.local_to_world);
     let child_owner = match &child_parent {
         None => None,
         Some(parent) => {
@@ -1413,10 +1467,17 @@ fn judge_in_archive(
             }
         }
     };
+    // Every other gate passed: the scene is what a collision system lacks.
+    if emitter.collision.is_some() {
+        tally.law_reject.push(format!("{node}: CollisionModule {}", crate::particle_runtime::COLLISION_SCENE_NOT_PORTED));
+        return None;
+    }
     Some(Planned {
         ordinal: 0,
         event_edges,
         child_owner,
+        collision_owner,
+        trail_owner,
         emission_surface,
         node: node.to_owned(),
         effect: effect_name.to_owned(),
@@ -1806,6 +1867,7 @@ pub(crate) fn spawn_when_ready(
         let route = planned.route.clone();
         let event_edges = planned.event_edges;
         let child_owner = planned.child_owner;
+        let trail_owner = planned.trail_owner;
         state.live.push(LiveWeatherEmitter { draw, trail_draw, native_refusal: None, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
@@ -1860,7 +1922,14 @@ pub(crate) fn spawn_when_ready(
                 // A sub-emitter target: its own seed owner and streams, and the
                 // owner words its parent's commands read; never the legacy step.
                 match crate::particle_runtime::install_child_target(&mut live.runtime, &mut seed_manager, owner) {
-                    Ok(()) => info!(node=%live.node, "weather sub-emitter target installed"),
+                    Ok(()) => {
+                        // A target with its own birth edges records their events.
+                        if let Some(edges) = event_edges {
+                            live.runtime.native_birth.as_mut().expect("target owner just installed").events =
+                                Some(crate::particle_runtime::BirthEvents::with_edges(edges));
+                        }
+                        info!(node=%live.node, "weather sub-emitter target installed")
+                    }
                     Err(reason) => {
                         error!(%reason, node=%live.node, "sub-emitter target refused by the child installer");
                         failed = true;
@@ -1870,11 +1939,22 @@ pub(crate) fn spawn_when_ready(
                 match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route) {
                     Ok(crate::particle_runtime::BirthPath::Native) => {
                         if let Some(edges) = event_edges {
+                            // The collision edges' events are recorded by the
+                            // CollisionModule, installed with the birth owner.
+                            if let Some(collision) = live.runtime.collision.as_mut() {
+                                collision.attach_edges(edges.collisions.clone());
+                            }
                             live.runtime.native_birth.as_mut().expect("native birth owner just installed").events =
                                 Some(crate::particle_runtime::BirthEvents::with_edges(edges));
                         }
-                        if has_trail && live.runtime.trail.is_none() {
-                            error!(node=%live.node, "trail system installed without its trail state");
+                        if let Some(words) = trail_owner {
+                            if let Err(reason) = crate::particle_runtime::attach_trail_owner(&mut live.runtime, words) {
+                                error!(%reason, node=%live.node, "trail owner words refused");
+                                failed = true;
+                            }
+                        }
+                        if has_trail && (live.runtime.trail.is_none() || !crate::particle_runtime::trail_owner_ready(&live.runtime)) {
+                            error!(node=%live.node, "trail system installed without its trail state or owner words");
                             failed = true;
                         }
                         info!(node=%live.node, noise=live.noise.is_some(), trail=live.runtime.trail.is_some(),
@@ -1926,11 +2006,13 @@ fn link_sub_emitter_targets(live: &mut [LiveWeatherEmitter]) {
         .collect();
     for emitter in live.iter_mut() {
         let clock = emitter.effect_clock.clone();
-        let Some(events) = emitter.runtime.native_birth.as_mut().and_then(|birth| birth.events.as_mut()) else {
-            continue;
-        };
         for (_, node) in targets.iter().filter(|(target_clock, _)| Arc::ptr_eq(target_clock, &clock)) {
-            events.deliver_to(node);
+            if let Some(events) = emitter.runtime.native_birth.as_mut().and_then(|birth| birth.events.as_mut()) {
+                events.deliver_to(node);
+            }
+            if let Some(collision) = emitter.runtime.collision.as_mut() {
+                collision.deliver_to(node);
+            }
         }
     }
 }
@@ -1940,15 +2022,42 @@ fn link_sub_emitter_targets(live: &mut [LiveWeatherEmitter]) {
 /// target's refusal count; the first refusal of a target is logged. A command
 /// whose target has gone (destroyed before its parent) is dropped: the edge
 /// tally still counts it.
+/// A target that is itself a parent records commands while it takes its
+/// parent's; those are handed to the next level in the same frame, until no
+/// command is left. Chains are bounded by the effect's systems (each target
+/// has one parent), so the rounds are too; a frame that still holds commands
+/// after one round per system drops them.
 fn deliver_sub_emitter_commands(systems: &mut [(&mut LiveWeatherEmitter, bool)], frame_dt: f32) {
+    for _round in 0..systems.len().max(1) {
+        if !deliver_round(systems, frame_dt) {
+            return;
+        }
+    }
+    for (live, _) in systems.iter_mut() {
+        let dropped = live.runtime.native_birth.as_mut().and_then(|birth| birth.events.as_mut())
+            .map_or(0, |events| events.take_commands().len())
+            + live.runtime.collision.as_mut().map_or(0, |collision| collision.take_commands().len());
+        if dropped > 0 {
+            error!(effect=%live.effect, node=%live.node, dropped, "sub-emitter commands left after every delivery round");
+        }
+    }
+}
+
+/// One round: every parent's queued commands, in the order recorded, to its
+/// targets. Returns whether any command was handed over.
+fn deliver_round(systems: &mut [(&mut LiveWeatherEmitter, bool)], frame_dt: f32) -> bool {
+    let mut delivered = false;
     for parent in 0..systems.len() {
-        let commands = match systems[parent].0.runtime.native_birth.as_mut().and_then(|birth| birth.events.as_mut()) {
-            Some(events) => events.take_commands(),
-            None => continue,
-        };
+        let runtime = &mut systems[parent].0.runtime;
+        let mut commands = runtime.native_birth.as_mut().and_then(|birth| birth.events.as_mut())
+            .map_or_else(Vec::new, |events| events.take_commands());
+        if let Some(collision) = runtime.collision.as_mut() {
+            commands.extend(collision.take_commands());
+        }
         if commands.is_empty() {
             continue;
         }
+        delivered = true;
         let clock = systems[parent].0.effect_clock.clone();
         for (target, command) in commands {
             let found = systems.iter_mut().find(|(live, _)| Arc::ptr_eq(&live.effect_clock, &clock)
@@ -1964,6 +2073,7 @@ fn deliver_sub_emitter_commands(systems: &mut [(&mut LiveWeatherEmitter, bool)],
             }
         }
     }
+    delivered
 }
 
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。

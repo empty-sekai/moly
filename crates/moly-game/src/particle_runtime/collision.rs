@@ -15,13 +15,29 @@
 //! scene can be bound: admission refuses every collision system with
 //! [`COLLISION_SCENE_NOT_PORTED`], and a runtime without an installed scene
 //! refuses the slice.
+//!
+//! With a SizeModule the query radius reads the current-size stream, which the
+//! engine writes at the same two points: after the post-simulation collision
+//! call over the whole pool (so that call reads the size the previous write
+//! left), and in each newborn group right before its collision call. The
+//! post-simulation write sits before the trail update here; the trail reads
+//! no current size (a size-affected trail is refused), so the order is not
+//! observable.
+//!
+//! Collision sub-emitter edges record RecordEmit trigger 1 events inside the
+//! module call. Each event's two commands go to the edge's child: queued, in
+//! the order recorded, when the child is an installed target of the same
+//! effect instance (the host hands them over after every system's frame, as
+//! for the birth events), otherwise counted and dropped.
 use super::*;
 use moly_law::particle::collision_query::{
     CollisionLaw, CollisionParticles, CollisionScene, CollisionState, OwnerPair, ParticleFlags, ParticleLane,
     UpdateInput,
 };
+use moly_law::particle::collision_event::CollisionEmitEdge;
 use moly_law::particle::collision_response::CollisionRandom;
-use moly_law::particle::schema::SubEmitterTrigger;
+use moly_law::particle::current_size::CurrentSizeLaw;
+use moly_law::particle::sub_emission::SubEmitterCommand;
 
 /// Why no collision system is admitted.
 pub(crate) const COLLISION_SCENE_NOT_PORTED: &str = "collision scene: the sphere sweep against the ground \
@@ -51,18 +67,62 @@ pub(crate) struct CollisionRuntime {
     /// Newborn calls whose slots past the group end were unknown and whose
     /// lanes reached no collider (exact without a sweep).
     pub(crate) unreached: u64,
+    /// The SizeModule law that writes the current-size stream the query
+    /// reads; `None` without a SizeModule.
+    pub(crate) size: Option<CurrentSizeLaw>,
+    /// The collision sub-emitter edges in slot order.
+    pub(crate) edges: Vec<CollisionEdgeSlot>,
+    /// Commands of delivered edges not yet handed to their target, in the
+    /// order recorded.
+    pub(crate) pending: Vec<(usize, SubEmitterCommand)>,
+}
+
+/// One collision edge in its slot: the edge, whether its child is an
+/// installed target that receives the commands, and what it recorded.
+#[derive(Clone, Debug)]
+pub(crate) struct CollisionEdgeSlot {
+    pub(crate) target: String,
+    pub(crate) law: CollisionEmitEdge,
+    pub(crate) delivered: bool,
+    pub(crate) tally: super::sub_events::EdgeTally,
+}
+
+impl CollisionRuntime {
+    /// The collision edges in slot order, as admission resolved them.
+    pub(crate) fn attach_edges(&mut self, edges: Vec<super::sub_events::CollisionEdge>) {
+        self.edges = edges.into_iter().map(|edge| CollisionEdgeSlot {
+            target: edge.target, law: edge.law, delivered: false, tally: Default::default(),
+        }).collect();
+    }
+
+    /// Marks every edge naming `target` delivered; false when none names it.
+    pub(crate) fn deliver_to(&mut self, target: &str) -> bool {
+        let mut found = false;
+        for slot in self.edges.iter_mut().filter(|slot| slot.target == target) {
+            slot.delivered = true;
+            found = true;
+        }
+        found
+    }
+
+    /// The queued commands with their target, in the order recorded; the
+    /// queue is left empty.
+    pub(crate) fn take_commands(&mut self) -> Vec<(String, SubEmitterCommand)> {
+        let edges = &self.edges;
+        self.pending.drain(..).map(|(slot, command)| (edges[slot].target.clone(), command)).collect()
+    }
 }
 
 /// The module law for an emitter, with the product's own limits: the ground
-/// layer only, no current-size stream (its SizeModule law at the collision
-/// points needs the engine curve form), no per-particle speed modifier, no
-/// collision sub-emitter commands (no child delivery on this path) and World
-/// or Local space. The particle-state flags follow the module set: without a
-/// size-over-lifetime or noise module (a size-by-speed module has no consumer
-/// on this runtime at all) the start-size stream is read, as its X or, with
-/// the 3D start size, the largest component; without a speed modifier none is
-/// applied. The flags of the corpus collision systems agree with this; the
-/// flags' writer was not read.
+/// layer only, a current-size stream only from a qualified SizeModule (no
+/// Noise size), no per-particle speed modifier and World or Local space.
+/// Collision sub-emitter edges are taken; their children are resolved by
+/// admission. The particle-state flags follow the module set: with a
+/// size-over-lifetime module the current-size stream is read, else the
+/// start-size stream (a size-by-speed module has no consumer on this runtime
+/// at all), as its X or, with the 3D start size, the largest component;
+/// without a speed modifier none is applied. The flags of the corpus
+/// collision systems agree with this; the flags' writer was not read.
 pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, String> {
     let Some(params) = emitter.collision.as_ref() else {
         return Ok(None);
@@ -70,23 +130,57 @@ pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, S
     if params.collides_with != GROUND_LAYER_MASK {
         return Err(format!("collision mask {:#x}: only the ground layer is resolved", params.collides_with));
     }
-    if emitter.size_over_lifetime.is_some() || emitter.noise.is_some() {
-        return Err("collision current-size stream: the size law at the collision points needs the engine curve form".into());
+    if emitter.noise.is_some() {
+        return Err("collision current-size stream: the Noise size condition at the collision points is not transcribed".into());
     }
+    current_size_law(emitter)?;
     if emitter.velocity_over_lifetime.as_ref().is_some_and(|velocity|
         !matches!(velocity.speed_modifier, moly_law::particle::MinMaxCurve::Constant(m) if m == 1.0)) {
         return Err("collision with a per-particle speed modifier".into());
-    }
-    if emitter.sub_emitters.iter().any(|edge| edge.trigger == SubEmitterTrigger::Collision) {
-        return Err("collision sub-emitter commands have no child delivery on this path".into());
     }
     let world = match emitter.simulation_space {
         SimulationSpace::World => true,
         SimulationSpace::Local => false,
         _ => return Err("collision in a custom simulation space".into()),
     };
-    let flags = ParticleFlags { current_size: false, size_3d: emitter.start.size3d, speed_modifier: false };
+    let flags = ParticleFlags {
+        current_size: emitter.size_over_lifetime.is_some(),
+        size_3d: emitter.start.size3d,
+        speed_modifier: false,
+    };
     CollisionLaw::from_params(params, world, flags).map(Some).map_err(|refused| format!("{refused:?}"))
+}
+
+/// The SizeModule law of the current-size stream, when the emitter has one.
+fn current_size_law(emitter: &EmitterParams) -> Result<Option<CurrentSizeLaw>, String> {
+    emitter.size_over_lifetime.as_ref()
+        .map(|params| CurrentSizeLaw::from_params(params, emitter.start.size3d))
+        .transpose()
+        .map_err(|refused| format!("collision current-size stream: {refused:?}"))
+}
+
+/// The export's wrap modes of the size curves the current-size stream reads
+/// (the law's curve type does not carry them): only the clamp wraps are
+/// transcribed.
+pub(crate) fn current_size_source_gate(system: &serde_json::Value) -> Result<(), String> {
+    let Some(size) = system.get("sizeOverLifetime").filter(|v| v.is_object()) else {
+        return Ok(());
+    };
+    let separate = size.get("separateAxes").and_then(serde_json::Value::as_bool) == Some(true);
+    let keys: &[&str] = if separate { &["curve", "y", "z"] } else { &["curve"] };
+    for key in keys {
+        let curve = size.get(*key).ok_or_else(|| format!("collision current-size stream: size {key} not exported"))?;
+        if !matches!(curve.get("mode").and_then(serde_json::Value::as_str), Some("curve" | "twoCurves")) {
+            continue;
+        }
+        for wrap in ["preInfinity", "postInfinity"] {
+            if curve.get(wrap).and_then(serde_json::Value::as_u64) != Some(2) {
+                return Err(format!("collision current-size stream: size curve {wrap} {:?} is not the clamp wrap",
+                    curve.get(wrap)));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether the emitter's CollisionModule is inside the ported subset (the
@@ -116,6 +210,9 @@ pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send
         hits: 0,
         draws: 0,
         unreached: 0,
+        size: current_size_law(&system.emitter)?,
+        edges: Vec::new(),
+        pending: Vec::new(),
     });
     Ok(())
 }
@@ -125,6 +222,8 @@ struct PoolView<'a> {
     pool: &'a [Particle],
     side: &'a [Side],
     end: usize,
+    /// The size read is the current-size stream (else the start size).
+    current_size: bool,
 }
 
 fn source(v: [f32; 3]) -> [f32; 3] {
@@ -141,7 +240,7 @@ impl CollisionParticles for PoolView<'_> {
             position: source(particle.position),
             velocity: source(particle.velocity),
             animated: source(side.animated),
-            size: side.size,
+            size: if self.current_size { [side.current_size; 3] } else { side.size },
             // Not read: the speed-modifier flag is refused.
             speed_modifier: 1.0,
             age_percent: particle.age_percent,
@@ -154,8 +253,17 @@ impl CollisionParticles for PoolView<'_> {
 #[allow(clippy::too_many_arguments)]
 fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize, dt: [f32; 4],
     pending: f32, emission_word: u32) -> Result<(), String> {
-    let view = PoolView { pool: &system.pool, side: &system.side, end: to };
-    let input = UpdateInput { from, to, dt, owner: collision.owner, edges: &[], emission_word, pending };
+    // Every collision edge must be attached: a missing one would drop its
+    // events without a trace.
+    let authored = system.emitter.sub_emitters.iter().filter(|edge|
+        edge.trigger == moly_law::particle::schema::SubEmitterTrigger::Collision && edge.emitter.is_some()).count();
+    if collision.edges.len() != authored {
+        return Err(format!("collision: {} of {authored} collision sub-emitter edges attached", collision.edges.len()));
+    }
+    let view = PoolView { pool: &system.pool, side: &system.side, end: to,
+        current_size: collision.law.reads_current_size() };
+    let edges: Vec<CollisionEmitEdge> = collision.edges.iter().map(|slot| slot.law).collect();
+    let input = UpdateInput { from, to, dt, owner: collision.owner, edges: &edges, emission_word, pending };
     let outcome = collision.law
         .update(&mut collision.state, collision.random.as_mut(), &view, &input, collision.scene.as_mut(), None)
         .map_err(|refused| format!("collision {refused:?}"))?;
@@ -165,6 +273,17 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
         particle.velocity = source(written.velocity);
         particle.age_percent = written.age_percent;
     }
+    for emit in &outcome.emits {
+        let slot = &mut collision.edges[emit.edge];
+        slot.tally.records += 1;
+        if let Some(commands) = &emit.commands {
+            slot.tally.commands += commands.len() as u64;
+            slot.tally.births += commands.iter().map(|(command, _)| command.count).sum::<u64>();
+            if slot.delivered {
+                collision.pending.extend(commands.iter().map(|(command, _)| (emit.edge, *command)));
+            }
+        }
+    }
     collision.calls += 1;
     collision.hits += outcome.hits.len() as u64;
     collision.draws += outcome.draws as u64;
@@ -172,15 +291,32 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
     Ok(())
 }
 
-/// The post-simulation call over the whole pool.
+/// The SizeModule's current size of `[from, to)` at the particles' ages.
+fn write_current_size(system: &mut Runtime, collision: &CollisionRuntime, from: usize, to: usize) {
+    let Some(size) = collision.size.as_ref() else {
+        return;
+    };
+    for index in from..to.min(system.pool.len()) {
+        let age = system.pool[index].age_percent;
+        let side = &mut system.side[index];
+        side.current_size = size.current(side.size[0], age, side.seed);
+    }
+}
+
+/// The post-simulation call over the whole pool, then the current-size write
+/// over it.
 pub(super) fn post_simulation(system: &mut Runtime, collision: &mut CollisionRuntime, dt: f32, pending: f32,
     emission_word: u32) -> Result<(), String> {
     let count = system.pool.len();
-    call(system, collision, 0, count, [dt; 4], pending, emission_word)
+    call(system, collision, 0, count, [dt; 4], pending, emission_word)?;
+    write_current_size(system, collision, 0, system.pool.len());
+    Ok(())
 }
 
-/// One newborn group's call over `[from, to)` with the group's birth times.
+/// One newborn group's current-size write and call over `[from, to)` with the
+/// group's birth times.
 pub(super) fn newborn_block(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize,
     dt: [f32; 4], pending: f32, emission_word: u32) -> Result<(), String> {
+    write_current_size(system, collision, from, to);
     call(system, collision, from, to, dt, pending, emission_word)
 }

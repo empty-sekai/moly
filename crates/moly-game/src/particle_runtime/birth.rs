@@ -93,11 +93,10 @@ pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefuse
             "World-space emitter velocity other than the Transform mode is not transcribed",
         ));
     }
+    // The CollisionModule law is qualified inside; its scene is bound (or
+    // refused) where the system is admitted, and a slice without the
+    // installed module refuses (see `validate`).
     validate_emitter(emitter, &ModuleRandom::from_owner_seed(0))?;
-    // The module law is qualified above; its scene cannot be bound yet.
-    if emitter.collision.is_some() {
-        return Err(BirthRefused::Unsupported(super::collision::COLLISION_SCENE_NOT_PORTED));
-    }
     Ok(())
 }
 
@@ -288,7 +287,7 @@ fn step_slice(
     }
     // Post-simulation modules. The collision call comes first, over the whole
     // pool with the slice dt; the parent's pending time and emission word are
-    // read only by collision sub-emitter commands, which this path refuses.
+    // read only by its collision sub-emitter commands.
     if let Some(mut collision) = system.collision.take() {
         let result = super::collision::post_simulation(system, &mut collision, dt,
             accumulated.unwrap_or(f32::NAN), state.emission.random.words[0]);
@@ -355,6 +354,15 @@ fn authored_null(edge: &SubEmitterParams) -> bool {
 /// A named birth or death edge with a complete, non-null source pointer.
 pub(super) fn real_event_edge(edge: &SubEmitterParams) -> bool {
     matches!(edge.trigger, SubEmitterTrigger::Birth | SubEmitterTrigger::Death)
+        && edge.emitter.as_ref().is_some_and(|name| !name.is_empty())
+        && matches!(&edge.source_pointer, SubEmitterSourcePointer::Pointer { .. })
+        && !edge.source_pointer.is_authored_null()
+}
+
+/// A named collision edge with a complete, non-null source pointer; only the
+/// CollisionModule's call records its events.
+fn real_collision_edge(edge: &SubEmitterParams) -> bool {
+    edge.trigger == SubEmitterTrigger::Collision
         && edge.emitter.as_ref().is_some_and(|name| !name.is_empty())
         && matches!(&edge.source_pointer, SubEmitterSourcePointer::Pointer { .. })
         && !edge.source_pointer.is_authored_null()
@@ -630,6 +638,7 @@ fn start_common(
                 custom_data: [[0.0; 4]; 2],
                 emit_carry: [0.0; 2],
                 animated: [0.0; 3],
+                current_size: 0.0,
             });
             partial_dts.push(timing[index].dt);
             if let (Some(backtrack), Some(time_per_step)) = (backtrack, time_per_step) {
@@ -668,7 +677,8 @@ fn start_common(
         // sub-emitter call and the newborn deaths. Slots past the group end
         // are not known here (the engine reads the next group's unfinished
         // lanes or stale memory there). The pending time and emission word
-        // are read only by collision sub-emitter commands, refused here.
+        // are read only by collision sub-emitter commands; a parent with such
+        // edges always has its event owner (the slice refuses otherwise).
         let (pending, word) = events.as_ref().map_or((f32::NAN, 0), |e| (e.accumulated, e.emission_word));
         let mut result = Ok(());
         for offset in (0..accepted).step_by(4) {
@@ -785,7 +795,9 @@ fn validate_emitter(
     // and the installer resolves their children. Other triggers, and a list
     // mixing null and real entries, are not qualified.
     let real = emitter.sub_emitters.iter().filter(|edge| !authored_null(edge)).count();
-    if real > 0 && (real != emitter.sub_emitters.len() || !emitter.sub_emitters.iter().all(real_event_edge)) {
+    let event_edge = |edge: &SubEmitterParams| real_event_edge(edge)
+        || (emitter.collision.is_some() && real_collision_edge(edge));
+    if real > 0 && (real != emitter.sub_emitters.len() || !emitter.sub_emitters.iter().all(event_edge)) {
         return Err(BirthRefused::Unsupported(
             "sub-emitter edges other than real birth and death edges",
         ));
