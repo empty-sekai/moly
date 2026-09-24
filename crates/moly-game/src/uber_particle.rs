@@ -1223,7 +1223,16 @@ pub(crate) fn plan_fixture_particles(
                 not_play_on_awake += 1;
                 continue;
             }
-            if let Some(plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path, &server, &mut tally) { plans.push(plan); }
+            if let Some(mut plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path, &server, &mut tally) {
+                // The fixture setup forces `_PhenomenaLightEnabled` to 1 on every
+                // fixture material (SetPhenomenaLighting(true); see the source
+                // adapter in weather_fx/fixture.rs). Both regions' exports put
+                // every fixture UberUnlit record on the source path, so this
+                // legacy arm keeps the same law for any summary-only record.
+                plan.params.scalars.w = 1.0;
+                if let Some(effect) = plan.effect.as_mut() { effect.params.scalars.w = 1.0; }
+                plans.push(plan);
+            }
         }
         // 家具这条路此前只报 `plans.len()` 与 `law_reject`，其余每一个桶都被
         // 计进 `tally` 然后丢掉——实测 304 条拒绝里 292 条不出现在任何日志

@@ -40,11 +40,16 @@
 //! 唱片主表。普通素材的生日/玻璃球分流仍缺对应材料表消费者，具名保留。
 //!
 //! 掉落物实体不带 [`HarvestRoot`]：材质换装走不到它们，保留 glb 的默认
-//! PBR 材质（与宝箱基形族的具名拒同一裁决——扩族是材质域另一单）。
+//! PBR 材质（扩族是材质域另一单）。
 //!
 //! 挂账（真源可读、本单范围外，接手时从这里的具名出发）：
 //! - 受击演出（PlayMultiActionDamageEffect / PlaySingleActionDamageEffect）
 //!   与稀有序列（IMultiActionObject 的稀有接口调用）——动画/粒子域；
+//! - stone view stay particles (Setup plays `_objectParticle`, a rare
+//!   stone also plays `rareParticleSystem`): `harvest_particles.rs`
+//!   draws the Hidden/particle_circle rows and names the UberUnlit rows it
+//!   does not draw; a rare stone's material swap (RefreshStoneMaterial to
+//!   the Hidden/rare_rock material) is not ported;
 //! - navmesh 合成与落点吸附（grasslands 没有采集 navmesh，脚下高度与
 //!   掉落落点都走地表顶点采样近似——真源落点是 raycast 打地面碰撞体、
 //!   水平走 navmesh 采样，本栈两维都用顶点采样替）；
@@ -129,7 +134,7 @@ const PLACEMENTS: [PlacementMock; 12] = [
         group_id: 0,
     },
     // 宝箱：单击族（treasure_box_transport，master 111：hp 0 · 体力
-    // 20）。材质族 Mysekai/TreasureBox 不在已移植五族内，换装侧具名拒。
+    // 20）。Material family Mysekai/TreasureBox (site pipeline TreasureBox arm).
     PlacementMock {
         package: "mysekai__site__field__object__treasure_box",
         fixture_id: 111,
@@ -1083,8 +1088,21 @@ fn plan_when_ready(
     let mut unknown_classes: Vec<&str> = Vec::new();
     let mut with_view = 0usize;
     let mut companions = 0usize;
+    let mut no_mesh: Vec<&str> = Vec::new();
     for (key, entry) in packages {
         let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        // Index vocabulary: no-mesh = the package opened but wrote no
+        // geometry. Such a package is a companion (no view contract, no glb),
+        // so it is named and not loaded; a failed package still stops here.
+        if status == "no-mesh" {
+            assert!(
+                entry.get("view").is_some_and(serde_json::Value::is_null)
+                    && entry.get("glb").is_some_and(serde_json::Value::is_null),
+                "采集物包 no-mesh 却带视图契约或 glb：{key}"
+            );
+            no_mesh.push(key.as_str());
+            continue;
+        }
         assert_eq!(
             status, "exported",
             "采集物包未导出：{key}（status = {status:?}）"
@@ -1137,10 +1155,12 @@ fn plan_when_ready(
         .collect::<Vec<_>>()
         .join(" · ");
     info!(
-        "采集物装载计划：{} 包全量请求（视图契约 {} · 伴生 {}），视图类分布：{}{}；摆放 mock {} 条（{} 条已收场行）",
-        packages.len(),
+        "采集物装载计划：{} 包全量请求（视图契约 {} · 伴生 {} · no-mesh 不装载 {} {:?}），视图类分布：{}{}；摆放 mock {} 条（{} 条已收场行）",
+        packages.len() - no_mesh.len(),
         with_view,
         companions,
+        no_mesh.len(),
+        no_mesh,
         histogram,
         if unknown_classes.is_empty() {
             String::new()
