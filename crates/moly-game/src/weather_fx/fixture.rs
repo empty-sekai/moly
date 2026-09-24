@@ -54,6 +54,9 @@ pub(crate) fn prepare_control(
                     Some(GlobalTransform::IDENTITY), &server, &mut tally)
                     .ok_or_else(|| format!("{}: source particle control rejected {tally:?}", particle["node"]))?;
                 plan.ordinal = ordinal;
+                // A Control-driven emitter is a renderer of the fixture prefab
+                // too, so the fixture setup forced its material (see `plan`).
+                plan.source.force_phenomena_lighting();
                 candidates.push(Candidate { anchor, plan });
             }
             ControlPreparation(candidates, 0.0)
@@ -144,6 +147,14 @@ pub(crate) fn plan(
                 warn!("[fixture-source] {package}/{node}: Noise needs the native birth owner, which the fixture path does not install"),
             Some(mut plan) => {
                 plan.ordinal = ordinal;
+                // FixtureController.Setup -> FixtureView.SetupRenderer calls
+                // SetPhenomenaLighting(true) on every material gathered by
+                // CollectRenderersAndMaterials: all Renderer components under
+                // the fixture, inactive ones included, with no renderer-subtype
+                // filter (only a null material or a null shader is skipped), so
+                // particle renderers are forced like meshes. Authored flags of
+                // fixture particle materials therefore never reach the draw.
+                plan.source.force_phenomena_lighting();
                 candidates.push(Candidate { anchor, plan });
             }
             None => warn!("[fixture-source] {package}/{node}: rejected {tally:?}"),
@@ -341,8 +352,9 @@ pub(crate) fn spawn_when_ready(
             let runtime = runtime(&planned, anchor, mesh);
             let mut source = planned.source;
             source.enabled = true;
+            info!("[fixture-source] {}: installed; fixture setup phenomena-lighting write {:?}",
+                planned.node, source.phenomena_lighting_written);
             commands.entity(draw).insert((source, crate::uber_particle::FixtureParticleLive(runtime)));
-            info!("[fixture-source] {}: installed", planned.node);
         }
         request.0 = pending;
         if request.0.is_empty() { commands.entity(root).remove::<Request>(); }

@@ -37,6 +37,7 @@ mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
 pub mod fixture_emission;
+mod fixture_clock;
 mod fixture_gimmick;
 pub mod fixture_material;
 mod fixture_player_navigation;
@@ -50,6 +51,7 @@ pub mod get_resource;
 mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
+mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
@@ -196,6 +198,7 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
+        harvest_particles::HarvestParticlePlugin,
     ));
     app
 }

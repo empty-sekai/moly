@@ -309,6 +309,75 @@ impl MaterialSnapshot {
         }
         finite(&declaration["m_DefValue[0]"], name)
     }
+    /// The game's runtime writer `MysekaiMaterialExtension.SetPhenomenaLighting`
+    /// with `on = true`, the only arm the fixture setup calls
+    /// (`FixtureView.SetupRenderer` runs it on every material it collected).
+    /// The source body, in order:
+    ///
+    /// 1. `TryDisableKeyword("_SKIP_PHENOMENA_LIGHT")`: disable only when the
+    ///    keyword is enabled. Only the valid keyword set selects a variant, so
+    ///    the keyword is removed from that set.
+    /// 2. `TrySetInt(_SkipPhenomenaLighting, 0)`.
+    /// 3. Shader named `Mysekai/Effect/UberUnlit`:
+    ///    `TrySetInt(_PhenomenaLightingEnabled, 1)` and
+    ///    `TrySetInt(_PhenomenaLightEnabled, 1)`; every other shader:
+    ///    `TrySetInt(_UsePhenomenaLighting, 1)`.
+    ///
+    /// `TrySetInt` writes only when `Material.HasProperty` holds and
+    /// `GetInt` differs; Unity's `Material.SetInt` stores `(float)value` in the
+    /// float slot (`SetFloatImpl`), so the effect is "declared ⇒ the scalar
+    /// becomes the value". A name the shader does not declare is left alone:
+    /// an undeclared material property never reaches a program here
+    /// ([`Self::uniform`] resolves declared properties only), so the one case
+    /// where `HasProperty` could differ from the declaration has no reader.
+    /// The `on = false` arm (out-game preview) enables the keyword, which needs
+    /// the shader keyword space; it is not ported and has no caller.
+    ///
+    /// Returns the names it wrote, so the owner can report the change.
+    pub fn force_phenomena_lighting_on(
+        &mut self,
+        catalogue: &SourceShaderCatalogue,
+    ) -> Result<Vec<&'static str>> {
+        self.matches(catalogue)?;
+        let mut written = Vec::new();
+        let before = self.keywords.len();
+        self.keywords.retain(|keyword| keyword != "_SKIP_PHENOMENA_LIGHT");
+        if self.keywords.len() != before {
+            written.push("_SKIP_PHENOMENA_LIGHT");
+        }
+        let targets: &[(&'static str, f64)] =
+            if catalogue.name.as_deref() == Some("Mysekai/Effect/UberUnlit") {
+                &[
+                    ("_SkipPhenomenaLighting", 0.0),
+                    ("_PhenomenaLightingEnabled", 1.0),
+                    ("_PhenomenaLightEnabled", 1.0),
+                ]
+            } else {
+                &[("_SkipPhenomenaLighting", 0.0), ("_UsePhenomenaLighting", 1.0)]
+            };
+        for &(name, value) in targets {
+            let Some(declaration) = self.property(catalogue, name)? else {
+                continue;
+            };
+            match declaration["m_Type"].as_i64() {
+                // Float and Range: the float slot SetInt writes.
+                Some(2 | 3) => {
+                    let current = self.scalar_property(catalogue, name)?;
+                    // GetInt truncates the stored float toward zero.
+                    if current as f32 as i32 != value as i32 {
+                        self.floats.insert(name.to_owned(), SourceNumber::Finite(value));
+                        written.push(name);
+                    }
+                }
+                other => {
+                    return Err(SourceShaderError(format!(
+                        "SetInt on {name} of source property type {other:?} is not ported"
+                    )));
+                }
+            }
+        }
+        Ok(written)
+    }
     /// Resolve only material-owned inputs. None is an external writer request,
     /// not a zero or a shader-default substitution for an unknown global.
     pub fn uniform(

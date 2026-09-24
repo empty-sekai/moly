@@ -170,6 +170,16 @@ pub fn install(app: &mut App) {
             crate::fixture_gimmick::parse.before(crate::player_fixture_action::advance),
         )
         .add_systems(Update, crate::fixture_activity_data::parse)
+        .add_systems(Startup, crate::fixture_clock::load)
+        .add_systems(
+            Update,
+            (
+                crate::fixture_clock::supply,
+                crate::fixture_clock::bind,
+                crate::fixture_clock::advance,
+            )
+                .chain(),
+        )
         .add_systems(
             Update,
             crate::fixture_gimmick::catalog_stream::advance

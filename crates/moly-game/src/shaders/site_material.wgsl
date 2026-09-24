@@ -35,8 +35,15 @@
 //   SITE_GROUND_HEIGHT_FADE   _USE_HEIGHT_FADE：Ground 高度淡出（雾后）。
 //   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变。
 //   SITE_BIRTHDAY_DITHER  !_DISABLE_DITHER：Birthday 抖动（0.125）。
+//   SITE_TREASUREBOX      TreasureBox family: selected vertex colour (squared)
+//                         and alpha, phenomena light and shade always on,
+//                         mask-ramped drop shadow, treasure shadows, fog.
+//   SITE_TREASURE_RARE    _USE_RARE: rare base colour lerp plus the
+//                         screen-space rare overlay behind a fract fresnel.
 // 顶点属性键由引擎按网格布局注入：VERTEX_COLORS / VERTEX_UVS_A /
-// VERTEX_UVS_B；网格没有顶点色时按源语义回白色 (1,1,1,1)。
+// VERTEX_UVS_B；网格没有顶点色时按源语义回白色 (1,1,1,1)。SKINNED (a
+// skinned mesh renderer, e.g. a lid) deforms the position and normal by the
+// joint palette before every family's arithmetic.
 //
 // 源程序写两个颜色目标（SV_Target1 = 0 或 emission）；本管线的主 pass
 // 只有一个颜色目标，第二目标不在此列（Object 的 emission 块同此放弃）。
@@ -47,6 +54,7 @@
 
 #import bevy_pbr::forward_io::Vertex
 #import bevy_pbr::mesh_functions
+#import bevy_pbr::skinning
 #import bevy_pbr::view_transformations::position_world_to_clip
 
 // ---- 材质 uniform（group 3 binding 0）：每条 Unity 属性一个 vec4 槽 ----
@@ -100,6 +108,14 @@ struct SiteParams {
     additive_color: vec4<f32>,
     object_texture_mapping: vec4<f32>,
     object_main_texture_local_mapping: vec4<f32>,
+    // TreasureBox rare arm: (_RareBlendRate, _RareFresnelIntensity,
+    // _RareFresnelEmission, _RareFresnelEdge).
+    treasure_rare_blend: vec4<f32>,
+    // (_RareFresnelSmoothness, _RareScrollX, _RareScrollY, 0).
+    treasure_rare_fresnel: vec4<f32>,
+    // _RareOverlayTexture_ST (the program reads .xy only).
+    treasure_rare_overlay_st: vec4<f32>,
+    treasure_rare_base_color: vec4<f32>,
 }
 
 // ---- 全局量（group 3 binding 1）：一帧一份，全部站点材质共用 ----
@@ -255,6 +271,11 @@ struct SiteVertexOutput {
     @location(9) overlay_uv: vec2<f32>,
     // 第二层 overlay：同上（量名带 2nd）。
     @location(10) overlay2nd_uv: vec2<f32>,
+#ifdef SITE_TREASUREBOX
+    // TreasureBox: the source's screen position (TEXCOORD5), clip
+    // (0.5 x + 0.5 w, 0.5 y + 0.5 w, z, w); the rare overlay reads xy / w.
+    @location(11) screen_pos: vec4<f32>,
+#endif
 }
 
 @vertex
@@ -279,7 +300,16 @@ fn vertex(mesh: Vertex) -> SiteVertexOutput {
     swayed = swayed * inverseSqrt(dot(swayed, swayed)) * length(mesh.position);
     local_position = vec4<f32>(swayed, 1.0);
 #endif
+#ifdef SKINNED
+    // A skinned renderer draws in the pose of its joint palette (which
+    // already carries the joints' world transforms and the bind poses); the
+    // mesh instance transform alone would leave it in the bind pose.
+    let world_from_local = skinning::skin_model(
+        mesh.joint_indices, mesh.joint_weights, mesh.instance_index,
+    );
+#else
     let world_from_local = mesh_functions::get_world_from_local(mesh.instance_index);
+#endif
     let world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local,
         local_position,
@@ -290,10 +320,14 @@ fn vertex(mesh: Vertex) -> SiteVertexOutput {
     out.world_position = world_position;
 
 #ifdef VERTEX_NORMALS
+#ifdef SKINNED
+    out.world_normal = skinning::skin_normals(world_from_local, mesh.normal);
+#else
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         mesh.normal,
         mesh.instance_index,
     );
+#endif
 #else
     out.world_normal = vec3<f32>(0.0);
 #endif
@@ -445,6 +479,29 @@ fn vertex(mesh: Vertex) -> SiteVertexOutput {
     out.overlay_uv = vec2<f32>(0.0);
 #endif
     out.overlay2nd_uv = vec2<f32>(0.0);
+#endif
+
+#ifdef SITE_TREASUREBOX
+    // TreasureBox vertex outputs, as its vertex program writes them: the view
+    // direction (TEXCOORD3; perspective: camera minus position through
+    // inversesqrt with no epsilon, orthographic: the view matrix z row), the
+    // vertex colour with squared rgb (TEXCOORD4) and the screen position
+    // (TEXCOORD5). Both clip conventions have y up and the same w, so the
+    // screen position keeps the source's bottom-left origin.
+    let to_camera_tb = env.camera_position.xyz - world_position.xyz;
+    var view_tb = to_camera_tb * inverseSqrt(dot(to_camera_tb, to_camera_tb));
+    if env.ortho_params.w != 0.0 {
+        view_tb = vec3<f32>(env.view_matrix_c0.z, env.view_matrix_c1.z, env.view_matrix_c2.z);
+    }
+    out.view_dir = view_tb;
+    out.color_sq = vec4<f32>(out.color.rgb * out.color.rgb, out.color.a);
+    let clip_tb = out.position;
+    out.screen_pos = vec4<f32>(
+        clip_tb.x * 0.5 + clip_tb.w * 0.5,
+        clip_tb.y * 0.5 + clip_tb.w * 0.5,
+        clip_tb.z,
+        clip_tb.w,
+    );
 #endif
 
     return out;
@@ -964,6 +1021,86 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     let tex_rgb = srgb_format_encode(tex.rgb);
     let col = vec4<f32>(tex_rgb * in.color.rgb, tex.a * in.color.a);
     return vec4<f32>(srgb_format_decode(col.rgb), col.a);
+#endif
+#ifdef SITE_TREASUREBOX
+    // ---- TreasureBox (Base, _MAIN_LIGHT_SHADOWS program; rare arm by
+    // SITE_TREASURE_RARE) ----
+    // Main texture: uv0 - t * (_UVScrollX, _UVScrollY), no fract; the y term
+    // flips sign in the exported v' = 1 - v space (as for Object).
+    let t = env.time.y;
+    let uv = vec2<f32>(in.uv.x - t * params.uv_scroll.x, in.uv.y + t * params.uv_scroll.y);
+    let tex = textureSampleBias(main_tex, main_sampler, uv, env.mip_bias.x);
+    let normal = normalize(in.world_normal);
+    // Main-light shadow first (strength, [0,1) depth range, distance fade),
+    // then the mask ramp on the clamped N.L: atten' = r * (atten - 1) + 1.
+    let shadow_atten_value = main_light_shadow_atten(in.world_position);
+    let ndotl = dot(env.light_vector.xyz, normal);
+    let ndotl_clamped = clamp(ndotl, 0.0, 1.0);
+    let mask_r = clamp(
+        (ndotl_clamped + -env.shadow_mask_edges.x)
+            / (-env.shadow_mask_edges.x + env.shadow_mask_edges.y),
+        0.0,
+        1.0,
+    );
+    let atten_prime = mask_r * (shadow_atten_value + -1.0) + 1.0;
+    // Toon ramp on the global edge pair (no local override in this family).
+    let half_lambert = ndotl * 0.5 + 0.5;
+    let toon = toon_ramp(half_lambert, env.edge_threshold.x, env.edge_smoothness.x);
+    // Vertex colour and alpha: int switches compared against 0.5; the colour
+    // arm multiplies by the squared vertex rgb. `tex_rgb` is the stored-domain
+    // texel (see the colour-domain section).
+    let tex_rgb = srgb_format_encode(tex.rgb);
+    let colour = select(tex_rgb, tex_rgb * in.color_sq.rgb, params.use_vertex_color_blend.x > 0.5);
+    let alpha = select(tex.a, tex.a * in.color_sq.w, params.use_vertex_alpha_opacity.x > 0.5);
+    // Phenomena light and shade: unconditional in this family.
+    var rgb = phenomena_light_blend(colour);
+    rgb = toon * (env.phenomena_shade_color.rgb * rgb - rgb) + rgb;
+    rgb = apply_drop_shadow(rgb, atten_prime);
+#ifdef SITE_TREASURE_RARE
+    // Rare base colour: lerp(rgb, rgb * c.rgb, c.a).
+    let rare_base = params.treasure_rare_base_color;
+    rgb = rare_base.w * (rgb * rare_base.rgb - rgb) + rgb;
+    // Rare overlay in screen space: (screen.xy / w) * ST.xy - t * scroll,
+    // in the source's bottom-left texture space; the exported image rows
+    // start at the top, so the sample takes 1 - y.
+    let screen = in.screen_pos.xy / in.screen_pos.w;
+    let overlay_coord = screen * params.treasure_rare_overlay_st.xy
+        - vec2<f32>(t) * params.treasure_rare_fresnel.yz;
+    let overlay = textureSampleBias(
+        overlay_tex, overlay_sampler, vec2<f32>(overlay_coord.x, 1.0 - overlay_coord.y), env.mip_bias.x,
+    );
+    let overlay_rgb = srgb_format_encode(overlay.rgb);
+    // Fresnel weight: x = fract(-N.V); a hard step at the edge, or a smooth
+    // step of half-width `smoothness` when the edge exceeds 0.004; capped at
+    // 1, scaled by the blend rate, then by (intensity, emission), clamped.
+    let edge = params.treasure_rare_blend.w;
+    let smoothness = params.treasure_rare_fresnel.x;
+    let view = normalize(in.view_dir);
+    let fresnel_x = fract(-dot(normal, view));
+    let hard = select(0.0, 1.0, fresnel_x >= edge);
+    var soft = fresnel_x + -edge;
+    soft = soft + smoothness;
+    soft = (1.0 / (smoothness + smoothness)) * soft;
+    soft = clamp(soft, 0.0, 1.0);
+    let soft_k = soft * -2.0 + 3.0;
+    soft = soft * soft;
+    soft = soft * soft_k;
+    var fresnel_w = select(hard, soft, 0.00400000019 < edge);
+    fresnel_w = min(fresnel_w, 1.0);
+    fresnel_w = fresnel_w * params.treasure_rare_blend.x;
+    let weights = clamp(
+        vec2<f32>(fresnel_w) * params.treasure_rare_blend.yz,
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+    rgb = clamp(weights.x * (overlay_rgb - rgb) + rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    // weights.y scales the overlay into the second colour target (emission),
+    // which this single-target pipeline does not draw.
+#endif
+    rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_0.xz, env.treasure_shadow_intensity.x);
+    rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_1.xz, env.treasure_shadow_intensity.y);
+    rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+    return vec4<f32>(srgb_format_decode(rgb), alpha * params.base_opacity.x);
 #endif
 #ifdef SITE_SCROLL
     // ---- Ground / Water / Ground-Birthday 共用臂 ----
