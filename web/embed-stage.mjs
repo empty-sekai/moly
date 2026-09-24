@@ -1,5 +1,5 @@
 import { applyPackSelection } from "./asset-pack-client.mjs";
-import { activatePreparedStage } from "./stage-activation.mjs";
+import { forwardActivation } from "./stage-activation.mjs";
 import {
   EMBED_VERSION,
   filters,
@@ -96,7 +96,6 @@ export function mountStage(container, options = {}) {
   if (selected) url.searchParams.set("content", selected);
   if (initial.fixture) url.searchParams.set("fixture", String(initial.fixture));
   if (initial.tab) url.searchParams.set("tab", initial.tab);
-  if (options.preload) url.searchParams.set("preload", "1");
   const frame = document.createElement("iframe");
   frame.title = TITLES[ui.locale];
   frame.allow = "autoplay; fullscreen";
@@ -278,11 +277,11 @@ export function mountStage(container, options = {}) {
     },
     play(value) {
       dispatch("play", value);
-      activatePreparedStage(frame);
+      forwardActivation(frame);
     },
     preview(value) {
       dispatch("preview", value);
-      activatePreparedStage(frame);
+      forwardActivation(frame);
     },
     stop() {
       dispatch("stop");

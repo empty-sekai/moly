@@ -786,6 +786,7 @@ pub fn install(app: &mut App) {
                 audio::parse,
                 audio::advance_bgm.run_if(crate::audio_startup::can_prepare),
                 audio::advance_ambient.after(weather::commit_environment).run_if(crate::audio_startup::can_prepare),
+                audio::advance_ambient_sequence.run_if(crate::audio_startup::can_prepare),
                 audio::advance_proximity.run_if(crate::audio_startup::can_prepare),
                 audio::advance_se
                     .in_set(audio::SeDrainSet::Drain)

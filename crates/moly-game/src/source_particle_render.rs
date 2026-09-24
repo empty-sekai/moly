@@ -4,7 +4,7 @@ use crate::source_particle::SourceParticle;
 use crate::source_shader::*;
 use bevy::core_pipeline::core_3d::{
     graph::{Core3d, Node3d},
-    Transparent3d,
+    Transparent3d, CORE_3D_DEPTH_FORMAT,
 };
 use bevy::ecs::{
     query::{QueryItem, ROQueryItem},
@@ -24,7 +24,7 @@ use bevy::render::{
     },
     renderer::RenderContext,
     sync_world::{MainEntity, RenderEntity},
-    view::{ExtractedView, ViewDepthTexture, ViewTarget},
+    view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget},
     Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
 };
 use bevy::render::{
@@ -280,6 +280,11 @@ enum Sampled<'a> {
     Depth(&'a TextureView),
     Asset(&'a GpuSourceTexture),
 }
+fn attachment_mismatch() -> SourceShaderError {
+    SourceShaderError(
+        "source Gamma draws require matching single-sample sRGB scene/depth targets".into(),
+    )
+}
 fn fail(gpu: &mut ParticleGpu, error: SourceShaderError) {
     if gpu.errors.insert(error.to_string()) {
         error!(%error, "source particle draw unresolved");
@@ -296,11 +301,21 @@ fn queue(
     programs: Res<RenderAssets<GpuSourceProgram>>,
     cache: Res<PipelineCache>,
     mut gpu: ResMut<ParticleGpu>,
+    // No ViewDepthTexture here: this frame's depth texture is created in
+    // PrepareResources, after this queue. The component still present is the
+    // previous frame's, whose size differs on the frame a view is resized.
+    // The pipeline is keyed on what this frame's depth texture is created
+    // from (the view's Msaa and the core depth format); `prepare` checks the
+    // actual attachments once they exist. The source renderer reallocates the
+    // camera colour and depth attachments for a new size in its setup, before
+    // any pass of that frame (UniversalRenderer.Setup, CreateCameraRenderTarget,
+    // RenderingUtils.ReAllocateIfNeeded), so a resized frame draws its
+    // particles like any other.
     views: Query<(
         Entity,
         &ExtractedView,
         &ViewTarget,
-        &ViewDepthTexture,
+        &Msaa,
         &crate::weather_depth::WeatherCameraRole,
     )>,
     functions: Res<DrawFunctions<Transparent3d>>,
@@ -317,7 +332,7 @@ fn queue(
         }
     }
     let function = functions.read().id::<DrawSourceParticle>();
-    for (view_entity, view, target, depth, role) in &views {
+    for (view_entity, view, target, msaa, role) in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -344,14 +359,12 @@ fn queue(
                     } else {
                         crate::source_color::ENCODED_FORMAT
                     },
-                    depth: depth.texture.format(),
-                    samples: depth.texture.sample_count(),
+                    depth: CORE_3D_DEPTH_FORMAT,
+                    samples: msaa.samples(),
                     layout,
                 };
-                if !crate::source_color::compatible(target, depth) {
-                    fail_particle(&mut gpu, &item.source, SourceShaderError(
-                        "source Gamma draws require matching single-sample sRGB scene/depth targets".into(),
-                    ));
+                if !crate::source_color::srgb_single_sample(target, key.samples) {
+                    fail_particle(&mut gpu, &item.source, attachment_mismatch());
                     continue;
                 }
                 if pass.effect && key.samples != 1 {
@@ -525,6 +538,8 @@ fn prepare(
     views: Query<(
         Entity,
         &ExtractedView,
+        &ViewTarget,
+        &ViewDepthTexture,
         Option<&crate::weather_depth::PreparedDepthSnapshot>,
         Option<&crate::source_color::SourceColorView>,
     )>,
@@ -549,10 +564,13 @@ fn prepare(
     let mut packed: HashMap<(Entity, AssetId<SourceProgramAsset>), Result<(Vec<u8>, Vec<u8>, u32)>> =
         HashMap::new();
     let mut live = std::collections::HashSet::new();
-    for (view_entity, view, depth, _) in &views {
+    for (view_entity, view, target, attachment, depth, _) in &views {
         let Some(camera) = frame.cameras.get(&view_entity) else {
             continue;
         };
+        // This frame's attachments, which the queued pipeline was keyed for.
+        let attached = crate::source_color::compatible(target, attachment)
+            && attachment.texture.format() == CORE_3D_DEPTH_FORMAT;
         for item in &frame.particles {
             let catalogue = &frame.catalogues[&item.source.catalogue.id()];
             for pass in &item.source.passes {
@@ -560,6 +578,11 @@ fn prepare(
                 let Some(&pipeline) = gpu.queued.get(&key) else {
                     continue;
                 };
+                if !attached {
+                    gpu.packets.remove(&key);
+                    fail_particle(gpu, &item.source, attachment_mismatch());
+                    continue;
+                }
                 let Some(program) = programs.get(pass.program.id()) else {
                     continue;
                 };
@@ -743,7 +766,7 @@ fn prepare(
         }
     }
     gpu.packets.retain(|key, _| live.contains(key));
-    for (view_entity, _, _, color) in &views {
+    for (view_entity, _, _, _, _, color) in &views {
         for item in &frame.particles {
             let mut readiness = item.source.readiness.lock().unwrap();
             if matches!(

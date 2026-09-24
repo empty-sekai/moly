@@ -80,12 +80,22 @@ impl SourceColorView {
 }
 
 /// Do not silently substitute linear blending or discard multisample depth.
+/// Both attachments must be this frame's: the depth texture is created in
+/// `PrepareResources`, after the view target, so a reader earlier in the frame
+/// still holds the previous frame's depth, which differs after a resize.
 pub(crate) fn compatible(target: &ViewTarget, depth: &ViewDepthTexture) -> bool {
+    srgb_single_sample(target, depth.texture.sample_count())
+        && target.main_texture().size() == depth.texture.size()
+}
+
+/// The part of [`compatible`] a queue system can decide before this frame's
+/// depth texture exists: the core 3D depth texture is created from the view's
+/// `Msaa` with its sample count, at the view target's physical size.
+pub(crate) fn srgb_single_sample(target: &ViewTarget, depth_samples: u32) -> bool {
     matches!(
         target.main_texture_format(),
         TextureFormat::Rgba8UnormSrgb | TextureFormat::Bgra8UnormSrgb
-    ) && depth.texture.sample_count() == 1
-        && target.main_texture().size() == depth.texture.size()
+    ) && depth_samples == 1
 }
 
 fn load_shader(mut shaders: ResMut<Assets<Shader>>) {
@@ -365,9 +375,14 @@ impl Plugin for SourceColorPlugin {
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        // After the core depth texture of this frame is inserted (the schedule
+        // applies its commands in between), so a resized view is compared with
+        // its resized depth instead of the previous frame's.
         render.init_resource::<ColorGpu>().add_systems(
             Render,
-            prepare_views.in_set(RenderSystems::PrepareResources),
+            prepare_views
+                .in_set(RenderSystems::PrepareResources)
+                .after(bevy::core_pipeline::core_3d::prepare_core_3d_depth_textures),
         );
         // Replace only the runner, retaining every incoming/outgoing graph edge
         // and the existing phase. add_node would discard the node's own edges.

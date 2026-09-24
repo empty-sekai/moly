@@ -1,4 +1,4 @@
-// Preflight finishes before the trusted click that creates the audio context.
+// Preflight finishes before the stage starts the engine and its audio output.
 export async function selectRenderer(
   requested,
   { navigator, document },
