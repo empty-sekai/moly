@@ -33,6 +33,8 @@ mod shape_birth_samples;
 mod snow_full_samples;
 #[cfg(test)]
 mod noise_samples;
+#[cfg(test)]
+mod initial_colour_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
@@ -369,6 +371,25 @@ pub(crate) enum Geometry {
     Billboard { alignment: Alignment, clamp: SizeClamp, pivot: [f32; 3] },
     Mesh(crate::particle_geometry::MeshDraw),
     SourceBillboard(crate::source_billboard::Draw),
+}
+
+/// Source emitter state the native Shape boundary reads besides the Shape
+/// block: the authored MainModule scaling mode and whether the renderer is in
+/// Mesh render mode (which allocates the axis-of-rotation channel).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShapeEmitterEvidence {
+    pub(crate) scaling: crate::particle_geometry::Scaling,
+    pub(crate) mesh_renderer: bool,
+}
+impl Geometry {
+    /// The legacy billboard carries no authored scaling mode or render mode.
+    pub(crate) fn shape_evidence(&self) -> Option<ShapeEmitterEvidence> {
+        match self {
+            Self::Billboard { .. } => None,
+            Self::Mesh(draw) => Some(ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: true }),
+            Self::SourceBillboard(draw) => Some(ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false }),
+        }
+    }
 }
 
 /// 一条在跑的粒子系统。
@@ -822,9 +843,10 @@ pub(crate) enum BirthPath {
 
 /// Whether this emitter takes the native birth path: the source selects the
 /// ordinary incremental route and every enabled module has a verified native
-/// consumer (Initial, constant Emission, the pinned Shape configurations, the
-/// qualified Noise subset, authored-null child edges; lifetime modules are
-/// shared with the legacy step).
+/// consumer (Initial, constant or two-constant Emission, the qualified Shape configurations,
+/// the qualified Noise subset, authored-null child edges; lifetime modules are
+/// shared with the legacy step). The emitter state a Shape reads is checked
+/// separately by `native_shape_state_eligible`.
 pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
     match route {
         SourceRoute::Ordinary => {}
@@ -835,6 +857,14 @@ pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute
     birth::qualify_emitter(emitter).map_err(|refused| format!("{refused:?}"))
 }
 
+/// Whether the emitter state the native Shape boundary reads is qualified:
+/// the scaling mode, the owner chain it implies and the render mode. An
+/// emitter without a Shape block needs none of it.
+pub(crate) fn native_shape_state_eligible(emitter: &EmitterParams, evidence: Option<ShapeEmitterEvidence>)
+    -> Result<(), String> {
+    birth::shape_emitter_state(emitter, evidence).map(|_| ()).map_err(|refused| format!("{refused:?}"))
+}
+
 /// Called once when the admitted source instance is installed. The first Play
 /// resets the system seeds (one shared-manager draw for an automatic owner)
 /// and expands the Initial, Shape and scalar emission streams. Noise reads the
@@ -843,7 +873,8 @@ pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute
 pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     route: &SourceRoute) -> Result<BirthPath, seed::SeedError> {
     if system.native_birth.is_some() { return Ok(BirthPath::Native); }
-    if let Err(reason) = native_birth_eligible(&system.emitter, route) {
+    if let Err(reason) = native_birth_eligible(&system.emitter, route)
+        .and_then(|()| native_shape_state_eligible(&system.emitter, system.geometry.shape_evidence())) {
         // The legacy step does not consume the native streams, but the source
         // still resets this system's seed at first Play: an automatic owner
         // takes the next shared-manager word, a manual one its serialized seed.

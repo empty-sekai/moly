@@ -166,6 +166,34 @@ pub struct ShapeControls {
     pub random_direction: Option<f32>,
     pub spherical_direction: Option<f32>,
     pub random_position: Option<f32>,
+    /// ShapeModule's texture reference. `None` means the export carries no
+    /// texture field (an older producer), so the value is undecided; it is
+    /// not the null reference.
+    pub texture: Option<ShapeTexture>,
+}
+
+/// ShapeModule's texture reference. The exporter writes `null` for the null
+/// reference and `{fileId, pathId}` for any other. A reference whose file
+/// and path ids are both zero is the null reference too. The samplers read
+/// so far (torus and cone volume) branch on it: a non-null texture makes
+/// them read the texture controls and call ApplyTexture for each birth
+/// group, which is not transcribed; the null reference skips both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShapeTexture {
+    None,
+    Reference { file_id: i32, path_id: String },
+}
+
+impl ShapeTexture {
+    /// `Ok(None)` when the key is absent: the texture is undecided.
+    fn from_value(value: Option<&Value>, ctx: &str) -> Result<Option<Self>, EffectsError> {
+        Ok(match SubEmitterSourcePointer::from_value(value, ctx)? {
+            SubEmitterSourcePointer::Missing => None,
+            SubEmitterSourcePointer::Null => Some(Self::None),
+            pointer if pointer.is_authored_null() => Some(Self::None),
+            SubEmitterSourcePointer::Pointer { file_id, path_id } => Some(Self::Reference { file_id, path_id }),
+        })
+    }
 }
 
 
@@ -556,14 +584,13 @@ fn burst_repeat_interval(v: Option<&Value>, ctx: &str) -> Result<f32, EffectsErr
     f32_of(v, ctx)
 }
 
-/// shape 层映射的闭集；其余（angle/length/boxThickness/donutRadius/
-/// mesh*/alignToDirection/randomDirectionAmount/sphericalDirectionAmount/
-/// scale）收 unmapped。
+/// shape 层映射的闭集；其余（mesh* 与 texture 之外的六个贴图控制键）收
+/// unmapped。
 const MAPPED_SHAPE_KEYS: &[&str] = &[
     "type", "radius", "radiusThickness", "arc", "rotation", "position", "sourceVersion",
     "angle", "length", "donutRadius", "scale", "boxThickness", "arcMode", "arcSpread", "arcSpeed",
     "radiusMode", "radiusSpread", "radiusSpeed", "alignToDirection", "randomDirectionAmount",
-    "sphericalDirectionAmount", "randomPositionAmount",
+    "sphericalDirectionAmount", "randomPositionAmount", "texture",
 ];
 
 impl ShapeMode {
@@ -596,6 +623,7 @@ impl ShapeControls {
                 .map(|v|bool_of(Some(v),ctx)).transpose()?,
             random_direction:number("randomDirectionAmount")?,spherical_direction:number("sphericalDirectionAmount")?,
             random_position:number("randomPositionAmount")?,
+            texture:ShapeTexture::from_value(value.get("texture"),&format!("{ctx}.texture"))?,
         })
     }
 }
@@ -893,7 +921,9 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
 /// `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
 ///
 /// Random colour requires its authored gradient; a flat colour is lost source data.
-fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
+/// Crate-visible so native start-colour replays decode exported blocks with
+/// this decoder rather than a second one.
+pub(crate) fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: MinMaxGradient object missing")))?;
@@ -932,6 +962,9 @@ fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
         "fixed" => GradientMode::Fixed,
         other => return Err(EffectsError(format!("{ctx}.interpolation: unsupported {other:?}"))),
     };
+    // Decode integrity of the exported ColorSpace enum (-1 uninitialized, 0
+    // gamma, 1 linear). It is not a start-colour envelope: the native gradient
+    // kernels never read the colour-space byte.
     let color_space = match obj_get(obj, "colorSpace").and_then(Value::as_f64) {
         Some(-1.0) => GradientColorSpace::Unspecified,
         Some(0.0) => GradientColorSpace::Gamma,

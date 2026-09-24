@@ -6,14 +6,16 @@
 //! Shape, StartVelocity, module updates and the game seed/lifecycle owner.
 //!
 //! Admission is deliberately bounded to constant/two-constant scalar curves,
-//! finite constant colour and an autonomous initial context. Inherited initial
-//! multipliers/offsets and generic curve preparation need their own evidence.
+//! all five start-colour modes over Blend/Fixed gradients, and an autonomous
+//! initial context. Inherited initial multipliers/offsets, the perceptual
+//! gradient kernel and generic curve preparation need their own evidence.
 //! Nonzero randomize-rotation-direction remains unqualified. The native entry
 //! uses the included ARM FRECPE/FRECPS law; host division is not a bit-equivalent
 //! default. An explicit callback variant remains available for diagnostics.
 
 use super::color::initial_rgba8;
 use super::curve::CurveSampler;
+use super::gradient::{Gradient, GradientMode, time_code};
 use super::random::ParticleRandom;
 use super::schema::StartParams;
 use super::seed_owner::ModuleRandom;
@@ -67,7 +69,10 @@ pub struct InitialGroupInput {
     /// Kept independently for the later birth integration phase; Initial
     /// does not evaluate its curves at the birth fraction.
     pub birth_fraction: [f32; 4],
-    /// Native x4 input, one curve evaluation time per SIMD lane.
+    /// Native x4 input, one curve evaluation time per SIMD lane. The ordinary
+    /// StartParticles caller passes its one normalized current time broadcast
+    /// to all four lanes; the per-lane interpolated birth time is
+    /// StartVelocity's input, not this one.
     pub curve_time: [f32; 4],
     pub context: InitialContext,
 }
@@ -177,11 +182,7 @@ impl InitialLaw {
         } else {
             None
         };
-        match &source.color {
-            MinMaxGradient::Color(rgba) if rgba.iter().all(|v| v.is_finite()) => {}
-            MinMaxGradient::Color(_) => return Err(Refused::InvalidColor),
-            _ => return Err(Refused::UnsupportedColor),
-        }
+        validate_color(&source.color)?;
 
         let mut next = *random;
         let seeds = next.next4_u32();
@@ -261,6 +262,55 @@ impl InitialLaw {
             lanes,
             random_after: next,
         })
+    }
+}
+
+/// Start colour of the native MinMaxGradient dispatcher: the block's state
+/// selects the template, and each gradient's own mode selects
+/// Gradient::EvaluateHDR Blend or Fixed inside it (a two-gradient block may
+/// mix them). A template reads only the fields its state names; the gradient
+/// colour space is never read, so it does not gate. The template's quantize
+/// clamps before the byte conversion, so any finite component is evaluated;
+/// an overflowing two-colour difference yields the same infinity or NaN
+/// through the same subtract, multiply, add and clamp as the native path.
+fn validate_color(color: &MinMaxGradient) -> Result<(), Refused> {
+    let finite = |v: &[f32; 4]| v.iter().all(|c| c.is_finite());
+    match color {
+        MinMaxGradient::Color(rgba) if finite(rgba) => Ok(()),
+        MinMaxGradient::TwoColors { min, max } if finite(min) && finite(max) => Ok(()),
+        MinMaxGradient::Color(_) | MinMaxGradient::TwoColors { .. } => Err(Refused::InvalidColor),
+        MinMaxGradient::Gradient(g) | MinMaxGradient::RandomColor(g) => validate_gradient(g),
+        MinMaxGradient::TwoGradients { min, max } => {
+            validate_gradient(min)?;
+            validate_gradient(max)
+        }
+    }
+}
+
+/// The native key table holds at most eight keys per channel group and one
+/// 16-bit time code per key. The kernels clamp the query into the first..last
+/// code and search the codes with one four-lane mask; that equals a per-lane
+/// search only when the codes are non-decreasing, so unordered codes refuse
+/// (the per-lane clamp here would otherwise have an empty range). Fewer than
+/// two keys never comes out of the export decoder and stays refused. The
+/// exhaustive mode match makes a new kernel a compile error here.
+fn validate_gradient(g: &Gradient) -> Result<(), Refused> {
+    let valid_time = |time: f32| (0.0..=1.0).contains(&time);
+    if g.color_keys.iter().any(|k| !valid_time(k.time) || !k.color.iter().all(|c| c.is_finite()))
+        || g.alpha_keys.iter().any(|k| !valid_time(k.time) || !k.alpha.is_finite())
+    {
+        return Err(Refused::InvalidColor);
+    }
+    let ordered = |codes: Vec<u16>| codes.windows(2).all(|pair| pair[0] <= pair[1]);
+    if !(2..=8).contains(&g.color_keys.len())
+        || !(2..=8).contains(&g.alpha_keys.len())
+        || !ordered(g.color_keys.iter().map(|k| time_code(k.time)).collect())
+        || !ordered(g.alpha_keys.iter().map(|k| time_code(k.time)).collect())
+    {
+        return Err(Refused::UnsupportedColor);
+    }
+    match g.mode {
+        GradientMode::Blend | GradientMode::Fixed => Ok(()),
     }
 }
 
@@ -701,5 +751,469 @@ mod tests {
                 assert_eq!(result, lane.as_f64().unwrap() as u32);
             }
         }
+    }
+
+    // ---- Native start colour replays (research instruments, ignored) ----
+
+    /// Exact integer read (bits, words, counts); `number` rounds through f32.
+    fn exact(value: &Value) -> u32 {
+        let n = value.as_f64().unwrap();
+        assert!(n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0, "not a u32: {n}");
+        n as u32
+    }
+    fn bits4(value: &Value) -> [f32; 4] {
+        let list = array(value);
+        assert_eq!(list.len(), 4);
+        std::array::from_fn(|lane| f32::from_bits(exact(&list[lane])))
+    }
+    fn bytes4(value: &Value) -> [u8; 4] {
+        let list = array(value);
+        assert_eq!(list.len(), 4);
+        std::array::from_fn(|c| u8::try_from(exact(&list[c])).unwrap())
+    }
+    fn read_file(variable: &str) -> Value {
+        let path = std::env::var_os(variable)
+            .unwrap_or_else(|| panic!("{variable} must name the native rows file"));
+        json::parse(&std::fs::read(path).expect("native rows path")).unwrap()
+    }
+    fn colour_input(
+        config: &Value,
+        active_lanes: usize,
+        time: [f32; 4],
+        context: InitialContext,
+    ) -> InitialGroupInput {
+        InitialGroupInput {
+            active_lanes,
+            storage_size_3d: boolean(config, "storageSize3D"),
+            storage_rotation_3d: boolean(config, "storageRotation3D"),
+            birth_fraction: [0.25; 4],
+            curve_time: time,
+            context,
+        }
+    }
+    /// The harness's Initial configuration (two-constant scalar curves) with
+    /// the case's authored 3D flags; only the colour block varies.
+    fn colour_law(color: MinMaxGradient, config: &Value) -> InitialLaw {
+        let mut params = probe_source(
+            boolean(config, "authoredSize3D"),
+            boolean(config, "authoredRotation3D"),
+            false,
+        );
+        params.color = color;
+        InitialLaw::from_params(&params, 0.0).unwrap()
+    }
+    /// All groups of one native call. A refusal must come from the first group
+    /// and leave the caller's words untouched.
+    fn colour_call(
+        law: &InitialLaw,
+        config: &Value,
+        count: usize,
+        time: [f32; 4],
+        context: InitialContext,
+        random: &mut ModuleRandom,
+    ) -> Result<Vec<InitialGroup>, Refused> {
+        let before = *random;
+        let mut groups = Vec::new();
+        for offset in (0..count).step_by(4) {
+            let input = colour_input(config, (count - offset).min(4), time, context);
+            match law.start_group_native(random, input) {
+                Ok(group) => groups.push(group),
+                Err(refused) => {
+                    assert_eq!(offset, 0, "refusal after a committed group");
+                    assert_eq!(*random, before, "refusal committed RNG words");
+                    return Err(refused);
+                }
+            }
+        }
+        Ok(groups)
+    }
+    /// Every lane (padding lanes included) against the native group record.
+    fn assert_groups(groups: &[InitialGroup], native: &[Value], label: &str) {
+        assert_eq!(groups.len(), native.len(), "{label} group count");
+        for (index, (group, record)) in groups.iter().zip(native).enumerate() {
+            let colours = array(at(record, "colourBytes"));
+            let seeds = array(&array(at(record, "drawWords"))[0]);
+            for lane in 0..4 {
+                assert_eq!(
+                    group.lanes[lane].color,
+                    bytes4(&colours[lane]),
+                    "{label} group {index} lane {lane} colour"
+                );
+                assert_eq!(
+                    group.lanes[lane].seed,
+                    exact(&seeds[lane]),
+                    "{label} group {index} lane {lane} seed"
+                );
+            }
+        }
+    }
+
+    /// Test-only builder for rows the export decoder refuses (one key,
+    /// unordered keys, non-finite components written as strings). Where the
+    /// decoder accepts a row, the two must agree.
+    fn component(value: &Value) -> f32 {
+        match value.as_str() {
+            Some("NaN") => f32::NAN,
+            Some("Infinity") => f32::INFINITY,
+            Some("-Infinity") => f32::NEG_INFINITY,
+            Some(other) => panic!("component {other:?}"),
+            None => value.as_f64().unwrap() as f32,
+        }
+    }
+    fn gradient_direct(value: &Value) -> Gradient {
+        use crate::particle::gradient::{GradientAlphaKey, GradientColorKey, GradientColorSpace};
+        Gradient {
+            color_keys: array(at(value, "colorKeys"))
+                .iter()
+                .map(|k| GradientColorKey {
+                    time: component(at(k, "time")),
+                    color: std::array::from_fn(|c| component(&array(at(k, "color"))[c])),
+                })
+                .collect(),
+            alpha_keys: array(at(value, "alphaKeys"))
+                .iter()
+                .map(|k| GradientAlphaKey {
+                    time: component(at(k, "time")),
+                    alpha: component(at(k, "alpha")),
+                })
+                .collect(),
+            mode: match at(value, "interpolation").as_str() {
+                Some("blend") => GradientMode::Blend,
+                Some("fixed") => GradientMode::Fixed,
+                other => panic!("interpolation {other:?}"),
+            },
+            color_space: match value.get("colorSpace").and_then(Value::as_f64) {
+                Some(0.0) => GradientColorSpace::Gamma,
+                Some(1.0) => GradientColorSpace::Linear,
+                _ => GradientColorSpace::Unspecified,
+            },
+        }
+    }
+    fn block_direct(value: &Value) -> MinMaxGradient {
+        let vec4 = |name| -> [f32; 4] {
+            std::array::from_fn(|c| component(&array(at(value, name))[c]))
+        };
+        match at(value, "mode").as_str() {
+            Some("color") => MinMaxGradient::Color(vec4("color")),
+            Some("twoColors") => MinMaxGradient::TwoColors {
+                min: vec4("min"),
+                max: vec4("max"),
+            },
+            Some("gradient") => MinMaxGradient::Gradient(gradient_direct(at(value, "gradient"))),
+            Some("randomColor") => {
+                MinMaxGradient::RandomColor(gradient_direct(at(value, "gradient")))
+            }
+            Some("twoGradients") => MinMaxGradient::TwoGradients {
+                min: gradient_direct(at(value, "minGradient")),
+                max: gradient_direct(at(value, "maxGradient")),
+            },
+            other => panic!("mode {other:?}"),
+        }
+    }
+
+    /// Current native start colour: every distinct exported start.color block
+    /// (decoded by the production decoder), targeted key/factor boundaries,
+    /// every storage/authoring flag pair, multi-group calls, random blocks of
+    /// every mode and kernel pairing, the inherited-context control rows, and
+    /// the ordinary StartParticles runs with their observed Initial and
+    /// StartVelocity times.
+    #[test]
+    #[ignore]
+    fn replay_current_native_initial_colour() {
+        use crate::particle::schema::min_max_gradient;
+        use crate::particle::sub_emission::BirthDistribution;
+        let receipt = read_file("MOLY_INITIAL_COLOUR_RECEIPT");
+        assert_eq!(
+            at(at(&receipt, "library"), "sha256").as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        let decode = |v: &Value| min_max_gradient(Some(v), "receipt").unwrap();
+        let blocks: std::collections::HashMap<String, MinMaxGradient> =
+            array(at(&receipt, "blocks"))
+                .iter()
+                .map(|b| (at(b, "id").as_str().unwrap().to_string(), decode(at(b, "block"))))
+                .collect();
+        assert_eq!(blocks.len(), 99);
+        let (mut cases, mut groups, mut inherited) = (0, 0, 0);
+        for case in array(at(&receipt, "cases")) {
+            let color = match case.get("block") {
+                Some(block) => decode(block),
+                None => blocks[at(case, "blockRef").as_str().unwrap()].clone(),
+            };
+            let config = at(case, "config");
+            let law = colour_law(color, config);
+            let count = exact(at(case, "count")) as usize;
+            let time = bits4(at(case, "timeBits"));
+            let mut random = words(at(case, "rngBefore"));
+            let label = format!("case {}", exact(at(case, "id")));
+            if at(case, "set").as_str() == Some("control-inherited") {
+                // A non-white multiplier or a finite curve-time override is the
+                // inherited context: refused before any word is committed.
+                assert!(
+                    exact(at(case, "multiplierBits")) != u32::MAX
+                        || exact(at(case, "overrideBits")) != 0x7f80_0000
+                );
+                let before = random;
+                let refused =
+                    colour_call(&law, config, count, time, InitialContext::Inherited, &mut random);
+                assert_eq!(refused.err(), Some(Refused::UnverifiedInheritedContext), "{label}");
+                assert_eq!(random, before);
+                inherited += 1;
+                continue;
+            }
+            assert_eq!(exact(at(case, "multiplierBits")), u32::MAX, "{label}");
+            assert_eq!(exact(at(case, "overrideBits")), 0x7f80_0000, "{label}");
+            let replayed =
+                colour_call(&law, config, count, time, InitialContext::Autonomous, &mut random)
+                    .unwrap_or_else(|refused| panic!("{label} refused {refused:?}"));
+            assert_groups(&replayed, array(at(case, "groups")), &label);
+            assert_eq!(random, words(at(case, "rngAfter")), "{label} rng after");
+            groups += replayed.len();
+            cases += 1;
+        }
+        assert_eq!((cases, groups, inherited), (1609, 1770, 15));
+
+        let scalar = json::parse(
+            br#"{"authoredSize3D":false,"authoredRotation3D":false,"storageSize3D":false,"storageRotation3D":false}"#,
+        )
+        .unwrap();
+        let (mut runs, mut born_total, mut velocity_lanes, mut per_lane_time_wrong) = (0, 0, 0, 0);
+        for row in array(at(&receipt, "pipeline")) {
+            let run = exact(at(row, "id"));
+            let duration = f32::from_bits(exact(at(row, "durationBits")));
+            let current = f32::from_bits(exact(at(row, "currentBits")));
+            let dt = f32::from_bits(exact(at(row, "dtBits")));
+            // StartParticles: one reciprocal of the duration, times the slice
+            // end and the slice start.
+            let inverse = initial_reciprocal(duration).unwrap();
+            let current_normalized = current * inverse;
+            let previous_normalized = (current - dt) * inverse;
+            let observed = at(row, "observed");
+            let initial = array(at(observed, "initial"));
+            assert_eq!(initial.len(), 1, "one Initial call covers the command");
+            let time = [current_normalized; 4];
+            assert_eq!(
+                time.map(f32::to_bits),
+                bits4(at(&initial[0], "timeBits")).map(f32::to_bits),
+                "run {run} Initial time"
+            );
+            let modules = &array(at(observed, "startModules"))[0];
+            assert_eq!(
+                [previous_normalized; 4].map(f32::to_bits),
+                bits4(at(modules, "previousNormalizedBits")).map(f32::to_bits)
+            );
+            assert_eq!(
+                [current_normalized; 4].map(f32::to_bits),
+                bits4(at(modules, "currentNormalizedBits")).map(f32::to_bits)
+            );
+            let d = array(at(row, "distributionBits"));
+            let distribution = BirthDistribution {
+                spacing: f32::from_bits(exact(&d[0])),
+                offset: f32::from_bits(exact(&d[1])),
+                burst_fraction: f32::from_bits(exact(&d[2])),
+            };
+            let rate = exact(at(row, "rateCount"));
+            let timing = |index: usize| {
+                distribution
+                    .timing(index as u32, rate, dt, previous_normalized, current_normalized)
+                    .unwrap()
+            };
+            for call in array(at(observed, "startVelocity")) {
+                let start = exact(at(call, "start")) as usize;
+                let times = bits4(at(call, "curveTimeBits"));
+                for lane in 0..4 {
+                    assert_eq!(
+                        timing(start + lane).curve_time.to_bits(),
+                        times[lane].to_bits(),
+                        "run {run} StartVelocity lane {}",
+                        start + lane
+                    );
+                    velocity_lanes += 1;
+                }
+            }
+            let requested = exact(at(row, "requested")) as usize;
+            let born = exact(at(row, "bornCount")) as usize;
+            assert_eq!(exact(at(&initial[0], "end")) as usize, requested.next_multiple_of(4));
+            let expected = array(at(row, "colourBytesAfterPack"));
+            assert_eq!(expected.len(), born);
+            let law = colour_law(blocks[at(row, "blockRef").as_str().unwrap()].clone(), &scalar);
+            let mut random = words(at(row, "rngBefore"));
+            let first = random;
+            let replayed =
+                colour_call(&law, &scalar, requested, time, InitialContext::Autonomous, &mut random)
+                    .unwrap();
+            // The per-lane StartVelocity time is not Initial's input: measure
+            // what it would have produced against the same native bytes.
+            let mut shadow = first;
+            let per_lane = (0..requested)
+                .step_by(4)
+                .map(|offset| {
+                    let lanes: [f32; 4] = std::array::from_fn(|lane| timing(offset + lane).curve_time);
+                    let input = colour_input(
+                        &scalar,
+                        (requested - offset).min(4),
+                        lanes,
+                        InitialContext::Autonomous,
+                    );
+                    law.start_group_native(&mut shadow, input).unwrap()
+                })
+                .collect::<Vec<_>>();
+            for index in 0..born {
+                let native = bytes4(&expected[index]);
+                assert_eq!(
+                    replayed[index / 4].lanes[index % 4].color,
+                    native,
+                    "run {run} particle {index}"
+                );
+                per_lane_time_wrong += usize::from(per_lane[index / 4].lanes[index % 4].color != native);
+            }
+            assert_eq!(random, words(at(row, "rngAfter")), "run {run} rng after");
+            born_total += born;
+            runs += 1;
+        }
+        assert_eq!((runs, born_total, velocity_lanes), (25, 150, 176));
+        // The time input is a live dimension of these rows, not a constant.
+        assert_eq!(per_lane_time_wrong, 79);
+        println!(
+            "initial colour receipt: {cases} autonomous cases, {groups} groups exact, {inherited} inherited \
+             refused; pipeline {runs} runs, {born_total} born lanes exact, {velocity_lanes} StartVelocity \
+             lanes exact; the per-lane time would miss {per_lane_time_wrong} lanes"
+        );
+    }
+
+    /// Independent native battery over inputs the receipt did not use:
+    /// quantize rounding edges, huge finite components (overflowing
+    /// differences), extreme finite times, degenerate key layouts, corpus
+    /// blocks with multi-group calls; plus native rows outside the admitted
+    /// envelope, which must refuse with a typed reason before any word moves.
+    #[test]
+    #[ignore]
+    fn replay_independent_native_initial_colour_battery() {
+        use crate::particle::schema::min_max_gradient;
+        let rows = read_file("MOLY_INITIAL_COLOUR_VERIFY_ROWS");
+        assert_eq!(
+            at(at(&rows, "library"), "sha256").as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        let mut tally: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        let (mut groups, mut overflowing_differences) = (0, 0);
+        for case in array(at(&rows, "cases")) {
+            let set = at(case, "set").as_str().unwrap().to_string();
+            let label = format!("{set} case {}", exact(at(case, "id")));
+            let block = at(case, "block");
+            let direct = block_direct(block);
+            let decoded = min_max_gradient(Some(block), "verify");
+            if let Ok(decoded) = &decoded {
+                assert_eq!(decoded, &direct, "{label}: test builder differs from the decoder");
+            }
+            if let MinMaxGradient::TwoColors { min, max } = &direct {
+                overflowing_differences += usize::from((0..4).any(|c| {
+                    min[c].is_finite() && max[c].is_finite() && !(max[c] - min[c]).is_finite()
+                }));
+            }
+            let config = at(case, "config");
+            let law = colour_law(direct, config);
+            let count = exact(at(case, "count")) as usize;
+            let time = bits4(at(case, "timeBits"));
+            let mut random = words(at(case, "rngBefore"));
+            let outcome =
+                match colour_call(&law, config, count, time, InitialContext::Autonomous, &mut random) {
+                    Ok(replayed) => {
+                        assert_groups(&replayed, array(at(case, "groups")), &label);
+                        assert_eq!(random, words(at(case, "rngAfter")), "{label} rng after");
+                        groups += replayed.len();
+                        "exact".to_string()
+                    }
+                    Err(refused) => format!("{refused:?}"),
+                };
+            let decoder = if decoded.is_ok() { "decoded" } else { "decoder-refused" };
+            let outcome = format!("{decoder} {outcome}");
+            let expected = match set.as_str() {
+                s if s.starts_with('V') => "decoded exact",
+                "O-onekey" | "O-unordered" => "decoder-refused UnsupportedColor",
+                "O-nancolor" => "decoder-refused InvalidColor",
+                "O-nantime" if time.iter().all(|t| t.is_finite()) => "decoded exact",
+                "O-nantime" => "decoded InvalidTiming",
+                other => panic!("unknown set {other}"),
+            };
+            assert_eq!(outcome, expected, "{label}");
+            *tally.entry((set, outcome)).or_default() += 1;
+        }
+        println!("{tally:#?}");
+        let total = |prefix: &str| {
+            tally
+                .iter()
+                .filter(|((set, _), _)| set.starts_with(prefix))
+                .map(|(_, n)| n)
+                .sum::<usize>()
+        };
+        assert_eq!((total("V"), total("O-")), (2020, 150));
+        // The widened two-colour branch (difference overflows) was executed.
+        assert_eq!(overflowing_differences, 14);
+        println!(
+            "independent battery: {} in-envelope cases exact over {groups} groups; \
+             {overflowing_differences} two-colour cases with an overflowing difference exact",
+            total("V")
+        );
+    }
+
+    /// Native rows aimed at the split multiply/add of the two-colour template
+    /// and of the Blend kernel's lerp: each colour channel sits where a fused
+    /// multiply-add would round to a different byte on one lane. The receipt
+    /// and the battery cannot tell the two apart; these rows can.
+    #[test]
+    #[ignore]
+    fn replay_split_multiply_add_native_initial_colour_probe() {
+        use crate::particle::gradient::quantize_rgba8;
+        use crate::particle::schema::min_max_gradient;
+        let rows = read_file("MOLY_INITIAL_COLOUR_FUSED_PROBE_ROWS");
+        assert_eq!(
+            at(at(&rows, "library"), "sha256").as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        let (mut cases, mut fused_wrong) = (0, 0);
+        for case in array(at(&rows, "cases")) {
+            let label = format!("probe case {}", exact(at(case, "id")));
+            let color = min_max_gradient(Some(at(case, "block")), "probe").unwrap();
+            let config = at(case, "config");
+            let law = colour_law(color.clone(), config);
+            let time = bits4(at(case, "timeBits"));
+            let mut random = words(at(case, "rngBefore"));
+            let native = array(at(case, "groups"));
+            let replayed = colour_call(&law, config, 4, time, InitialContext::Autonomous, &mut random)
+                .unwrap_or_else(|refused| panic!("{label} refused {refused:?}"));
+            assert_groups(&replayed, native, &label);
+            assert_eq!(random, words(at(case, "rngAfter")), "{label} rng after");
+            // The same inputs with one fused multiply-add per channel, over the
+            // probe's two-key (codes 0 and 65535) gradients.
+            let draws = array(at(&native[0], "drawWords"));
+            let draw: [f32; 4] = std::array::from_fn(|lane| unit(exact(&array(draws.last().unwrap())[lane])));
+            let bytes = array(at(&native[0], "colourBytes"));
+            for lane in 0..4 {
+                let lerp = |g: &Gradient, t: f32| -> [f32; 4] {
+                    let factor = ((t * 65535.0).clamp(0.0, 65535.0) / 65535.0).min(1.0);
+                    let (a, b) = (&g.color_keys, &g.alpha_keys);
+                    let mut out = [0.0; 4];
+                    for c in 0..3 {
+                        out[c] = (a[1].color[c] - a[0].color[c]).mul_add(factor, a[0].color[c]);
+                    }
+                    out[3] = (b[1].alpha - b[0].alpha).mul_add(factor, b[0].alpha);
+                    out
+                };
+                let fused = quantize_rgba8(match &color {
+                    MinMaxGradient::TwoColors { min, max } => {
+                        std::array::from_fn(|c| (max[c] - min[c]).mul_add(draw[lane], min[c]))
+                    }
+                    MinMaxGradient::Gradient(g) => lerp(g, time[lane]),
+                    MinMaxGradient::RandomColor(g) => lerp(g, draw[lane]),
+                    other => panic!("{label}: unexpected probe block {other:?}"),
+                });
+                // Channel `lane` is the one aimed at this lane.
+                fused_wrong += usize::from(fused[lane] != bytes4(&bytes[lane])[lane]);
+            }
+            cases += 1;
+        }
+        assert_eq!((cases, fused_wrong), (192, 768));
+        println!("split multiply/add probe: {cases} native cases exact; a fused multiply-add misses all {fused_wrong} aimed channels");
     }
 }

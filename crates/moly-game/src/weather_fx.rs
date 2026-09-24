@@ -12,7 +12,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
-use moly_law::particle::schema::SimulationSpace;
+use moly_law::particle::schema::{ShapeTexture, SimulationSpace};
 use moly_law::particle::{Effects, EmissionState, EmitterParams, LimitVelocity, MinMaxCurve, RotationOverLifetime};
 use moly_law::particle::noise::NoiseLaw;
 use serde_json::Value;
@@ -85,6 +85,15 @@ enum PlannedGeometry {
     },
 }
 impl PlannedGeometry {
+    /// The audit's view of the emitter state; admission builds the same
+    /// evidence from its locals before the geometry exists.
+    #[cfg(test)]
+    fn shape_evidence(&self) -> crate::particle_runtime::ShapeEmitterEvidence {
+        match self {
+            Self::Billboard(draw) => crate::particle_runtime::ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false },
+            Self::Mesh { scaling, .. } => crate::particle_runtime::ShapeEmitterEvidence { scaling: *scaling, mesh_renderer: true },
+        }
+    }
     fn into_runtime(self) -> crate::particle_runtime::Geometry {
         match self {
             Self::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw),
@@ -905,6 +914,23 @@ fn judge_in_archive(
             return None;
         }
     };
+    // The Start* samplers read so far take an ApplyTexture step for each
+    // birth group when ShapeModule holds a texture. That step is not
+    // transcribed, so a texture is refused for every shape type and either
+    // birth path; an export without the texture field leaves it undecided.
+    if let Some(shape) = &emitter.shape {
+        match &shape.controls.texture {
+            Some(ShapeTexture::None) => {}
+            None => {
+                tally.shape.push(format!("{shape_type}: missing source shape texture reference; re-extract"));
+                return None;
+            }
+            Some(ShapeTexture::Reference { .. }) => {
+                tally.shape.push(format!("{shape_type}: source shape texture (ApplyTexture) consumer pending"));
+                return None;
+            }
+        }
+    }
     if let Some(sheet) = &emitter.texture_sheet {
         if let Err(error) = moly_law::particle::texture_sheet::TextureSheet::from_params(sheet) {
             tally.law_reject.push(format!("{node}: {error}")); return None;
@@ -1021,18 +1047,18 @@ fn judge_in_archive(
         let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", contract.mesh.file))).with_source("moly"));
         Some(PlannedSurface { reference: contract.mesh, glb, source: None })
     } else { None };
-    let scaling = match system.get("scalingMode").and_then(Value::as_u64) {
-        Some(0) => crate::particle_geometry::Scaling::Hierarchy,
-        Some(1) => {
-            let values = by_path[node].get("scale").and_then(Value::as_array);
-            let Some(values) = values.filter(|v| v.len() == 3 && v.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs() <= f32::MAX as f64))) else {
-                tally.render_mode.push("Local particle scale lacks its authored emitter transform".into()); return None;
-            };
-            crate::particle_geometry::Scaling::Local(Vec3::new(values[0].as_f64().unwrap() as f32,
-                values[1].as_f64().unwrap() as f32, values[2].as_f64().unwrap() as f32))
-        }
-        value => { tally.render_mode.push(format!("unconsumed source particle scalingMode {value:?}")); return None; }
+    let scaling = match source_scaling(system, by_path, node, instance_anchor.is_none()) {
+        Ok(scaling) => scaling,
+        Err(reason) => { tally.render_mode.push(reason); return None; }
     };
+    if emitter.noise.is_some() {
+        // Noise runs only with the native birth owner; the emitter state the
+        // native Shape boundary reads must qualify too, or Noise would drop.
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
+            tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
+        }
+    }
     Some(Planned {
         ordinal: 0,
         emission_surface,
@@ -1146,6 +1172,46 @@ fn compose_affine(by_path: &HashMap<String, &Value>, path: &str) -> Option<Globa
         affine = affine * GlobalTransform::from(local);
     }
     Some(affine)
+}
+
+/// Authored MainModule scaling mode of one emitter. Local keeps this node's
+/// own scale for the renderer and whether the node chain carries unit scale
+/// throughout; an instance anchor replaces the authored chain, so it gives no
+/// such evidence.
+pub(crate) fn source_scaling(system: &Value, by_path: &HashMap<String, &Value>, node: &str,
+    authored_chain: bool) -> Result<crate::particle_geometry::Scaling, String> {
+    match system.get("scalingMode").and_then(Value::as_u64) {
+        Some(0) => Ok(crate::particle_geometry::Scaling::Hierarchy),
+        Some(1) => {
+            let values = by_path.get(node).and_then(|n| n.get("scale")).and_then(Value::as_array);
+            let Some(values) = values.filter(|v| v.len() == 3 && v.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs() <= f32::MAX as f64))) else {
+                return Err("Local particle scale lacks its authored emitter transform".into());
+            };
+            Ok(crate::particle_geometry::Scaling::Local {
+                scale: Vec3::new(values[0].as_f64().unwrap() as f32,
+                    values[1].as_f64().unwrap() as f32, values[2].as_f64().unwrap() as f32),
+                unit_chain: authored_chain && unit_scale_chain(by_path, node),
+            })
+        }
+        value => Err(format!("unconsumed source particle scalingMode {value:?}")),
+    }
+}
+
+/// Whether the node and every ancestor on the chain `compose_affine` walks
+/// carry scale exactly one.
+fn unit_scale_chain(by_path: &HashMap<String, &Value>, path: &str) -> bool {
+    let mut current = path.to_owned();
+    while let Some(node) = by_path.get(&current) {
+        if triple(node.get("scale")) != Some([1.0; 3]) {
+            return false;
+        }
+        let parent = node.get("parent").and_then(Value::as_str).unwrap_or("").to_owned();
+        if current == parent {
+            break;
+        }
+        current = parent;
+    }
+    true
 }
 
 fn triple(value: Option<&Value>) -> Option<[f32; 3]> {

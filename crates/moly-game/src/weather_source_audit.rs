@@ -102,6 +102,7 @@ fn current_corpus_admission() {
                     "sourceRoute": format!("{:?}", crate::particle_runtime::source_route(&particle["system"])),
                     "firstPlayWarm": warm,
                     "nativeBirth": planned.as_ref().map(|p| crate::particle_runtime::native_birth_eligible(&p.emitter, &p.route)
+                        .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&p.emitter, Some(p.geometry.shape_evidence())))
                         .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
@@ -146,6 +147,17 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.kind = planned.kind;
     system.camera_rotation = planned.camera_rotation;
     system.node_affine = planned.node_affine;
+    // The warm never draws. The planned render mode and scaling are what the
+    // birth path reads; an empty mesh stands in for an unloaded source GLB.
+    system.geometry = match &planned.geometry {
+        PlannedGeometry::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw.clone()),
+        PlannedGeometry::Mesh { alignment, scaling, pivot, .. } => crate::particle_runtime::Geometry::Mesh(
+            crate::particle_geometry::MeshDraw {
+                source: Arc::new(crate::particle_geometry::SourceMesh { positions: Vec::new(), normals: Vec::new(),
+                    uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
+                alignment: *alignment, scaling: *scaling, pivot: *pivot,
+            }),
+    };
     system.emitter = e.clone();
     system.cone_angle = planned.cone_angle;
     system.rol = planned.rol.clone();

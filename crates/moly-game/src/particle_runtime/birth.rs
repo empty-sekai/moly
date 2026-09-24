@@ -21,9 +21,10 @@ pub(crate) struct NativeBirthState {
     pub emission: AutonomousEmissionState,
 }
 
-/// Name-independent qualification of the native birth composition: constant
-/// autonomous emission, the Initial law, the pinned Shape configurations, the
-/// qualified Noise subset and authored-null child edges. The source update
+/// Name-independent qualification of the native birth composition: autonomous
+/// emission with a constant or two-constant rate and burst count, the Initial
+/// law, the qualified Shape configurations,
+/// the qualified Noise subset and authored-null child edges. The source update
 /// route (ordinary versus procedural) is decided by the caller from the
 /// exported system block, not here.
 pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefused> {
@@ -164,6 +165,64 @@ pub(super) fn start_explicit_with_shape(
     )
 }
 
+/// Emitter-state inputs of the native Shape boundary beyond the Shape block.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ShapeEmitterState {
+    pub emitter_scale: [f32; 3],
+    pub uses_axis_of_rotation: bool,
+}
+
+/// UpdateLocalToWorldMatrixAndScales stores the emitter scale ShapeModule
+/// reads: one for Hierarchy scaling, and one for Local scaling except for a
+/// MeshRenderer shape, which the Shape law does not admit. Its Local branch
+/// builds the world owner from hierarchy rotation and translation only; node
+/// scales enter positions and rotation signs, never the matrix magnitudes. The
+/// composed affine owner therefore equals it only over a unit-scale chain, and
+/// a World-space owner over any other chain is refused: that derivation was
+/// read, not executed. The Shape scaling mode has no qualified derivation and
+/// never reaches here (the source adapter refuses it). The particle arrays
+/// carry the axis-of-rotation channel when the renderer is in Mesh render mode.
+pub(super) fn shape_emitter_state(
+    emitter: &EmitterParams,
+    evidence: Option<ShapeEmitterEvidence>,
+) -> Result<Option<ShapeEmitterState>, BirthRefused> {
+    if emitter.shape.is_none() {
+        return Ok(None);
+    }
+    let Some(evidence) = evidence else {
+        return Err(BirthRefused::Unsupported(
+            "native Shape emitter state lacks the authored scaling and render modes",
+        ));
+    };
+    let emitter_scale = match evidence.scaling {
+        crate::particle_geometry::Scaling::Hierarchy => [1.0; 3],
+        crate::particle_geometry::Scaling::Local { unit_chain, .. } => {
+            if emitter.simulation_space == SimulationSpace::World && !unit_chain {
+                return Err(BirthRefused::Unsupported(
+                    "World-space Local-scaling Shape owner over a non-unit node scale is not executed",
+                ));
+            }
+            [1.0; 3]
+        }
+    };
+    Ok(Some(ShapeEmitterState {
+        emitter_scale,
+        uses_axis_of_rotation: evidence.mesh_renderer,
+    }))
+}
+
+fn shape_refusal(refused: moly_law::particle::shape_birth::Refused) -> BirthRefused {
+    match refused {
+        moly_law::particle::shape_birth::Refused::ExportSchema => BirthRefused::Unsupported(
+            "Shape controls are not the current export schema (an export check, not a ShapeModule member)",
+        ),
+        moly_law::particle::shape_birth::Refused::ShapeTexture => BirthRefused::Unsupported(
+            "Shape texture reference: ApplyTexture is not transcribed",
+        ),
+        _ => BirthRefused::Unsupported("unqualified native Shape configuration"),
+    }
+}
+
 fn start_common(
     system: &mut Runtime,
     random: &mut ModuleRandom,
@@ -180,10 +239,10 @@ fn start_common(
         .shape
         .as_ref()
         .map(|params| {
-            moly_law::particle::shape_birth::ShapeBirthLaw::from_params(params)
-                .map_err(|_| BirthRefused::Unsupported("unqualified native Shape configuration"))
+            moly_law::particle::shape_birth::ShapeBirthLaw::from_params(params).map_err(shape_refusal)
         })
         .transpose()?;
+    let shape_state = shape_emitter_state(&system.emitter, system.geometry.shape_evidence())?;
     if shape_law.is_some() && shape_stream.is_none() {
         return Err(BirthRefused::Unsupported(
             "missing independent Shape stream",
@@ -243,7 +302,11 @@ fn start_common(
                     storage_size_3d: system.emitter.start.size3d,
                     storage_rotation_3d: system.emitter.start.rotation3d,
                     birth_fraction: std::array::from_fn(|lane| timing[lane].fraction),
-                    curve_time: std::array::from_fn(|lane| timing[lane].curve_time),
+                    // StartParticles hands InitialModule::Start one normalized
+                    // current time for the whole command (current times the
+                    // duration reciprocal), broadcast to all four lanes. The
+                    // per-lane interpolated time is StartVelocity's input only.
+                    curve_time: [current_normalized; 4],
                     context: InitialContext::Autonomous,
                 },
             )
@@ -251,6 +314,7 @@ fn start_common(
         let shaped = shape_law
             .as_ref()
             .map(|shape| {
+                let state = shape_state.expect("a Shape block has its validated emitter state");
                 shape
                     .sample_group(
                         next_shape
@@ -258,13 +322,17 @@ fn start_common(
                             .expect("validated independent Shape stream"),
                         source_owner,
                         system.emitter.simulation_space == SimulationSpace::World,
+                        state.emitter_scale,
+                        state.uses_axis_of_rotation,
                     )
                     .map_err(|_| BirthRefused::Unsupported("unqualified native Shape owner/output"))
             })
             .transpose()?;
         for (index, lane) in group.lanes.into_iter().enumerate() {
+            // StartVelocity evaluates at the per-lane birth time, not at
+            // Initial's broadcast input that the lane echoes.
             let sampled_speed = speed.evaluate(
-                lane.curve_time,
+                timing[index].curve_time,
                 ParticleRandom::sample(lane.seed, 0x96aa_4de3),
             );
             let (position, velocity) = if let Some(shaped) = &shaped {
@@ -348,7 +416,9 @@ fn start_common(
 
 /// Validate module/storage qualification without advancing any persistent RNG.
 fn validate(system: &Runtime, random: &ModuleRandom) -> Result<InitialLaw, BirthRefused> {
-    validate_emitter(&system.emitter, random)
+    let law = validate_emitter(&system.emitter, random)?;
+    shape_emitter_state(&system.emitter, system.geometry.shape_evidence())?;
+    Ok(law)
 }
 
 fn validate_emitter(
@@ -358,8 +428,7 @@ fn validate_emitter(
     match (emitter.shape_enabled, emitter.shape.as_ref()) {
         (Some(false), None) => {}
         (Some(true), Some(shape)) => {
-            moly_law::particle::shape_birth::ShapeBirthLaw::from_params(shape)
-                .map_err(|_| BirthRefused::Unsupported("unqualified native Shape configuration"))?;
+            moly_law::particle::shape_birth::ShapeBirthLaw::from_params(shape).map_err(shape_refusal)?;
         }
         _ => {
             return Err(BirthRefused::Unsupported(

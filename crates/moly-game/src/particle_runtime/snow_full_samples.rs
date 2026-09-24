@@ -113,6 +113,17 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
         assert!(module_names.contains(&required), "missing {required}");
     }
     let route = source_route(&selected["system"]);
+    // The emitter state the native Shape boundary reads, classified by the
+    // production adapter from the authored scaling mode and node chain.
+    assert_eq!(selected["renderer"]["renderMode"], "Billboard");
+    let by_path: std::collections::HashMap<String, &Value> = overlay["effects"][EFFECT]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| (n["path"].as_str().unwrap().to_owned(), n))
+        .collect();
+    let scaling = crate::weather_fx::source_scaling(&selected["system"], &by_path, NODE, true)
+        .expect("authored snow scaling mode");
     let selected = json!({"effects":{EFFECT:{"particles":[selected]}}});
     let mut decoded = Effects::from_json_str(&serde_json::to_vec(&selected).unwrap()).unwrap();
     let emitter = decoded.emitters.remove(0);
@@ -124,6 +135,7 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
     assert!(emitter.sub_emitters[0].source_pointer.is_authored_null());
     assert_eq!(native["owner"], format!("{EFFECT}/{NODE}"));
     let mut system = test_support::runtime();
+    system.geometry = test_support::source_billboard(scaling);
     system.effect = emitter.effect.clone();
     system.node = emitter.node.clone();
     system.kind = EffectKind::Sky;

@@ -31,7 +31,7 @@ impl SubEmitterSourcePointer {
         matches!(self, Self::Pointer { file_id: 0, path_id } if path_id == "0")
     }
 
-    fn from_value(value: Option<&Value>, ctx: &str) -> Result<Self, EffectsError> {
+    pub(super) fn from_value(value: Option<&Value>, ctx: &str) -> Result<Self, EffectsError> {
         let Some(value) = value else {
             return Ok(Self::Missing);
         };

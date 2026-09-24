@@ -1,23 +1,41 @@
-//! Current JP 6.8.1 four-lane Shape.Start -> EmitterStoreData boundary.
-//! Current libunity SHA 937c6d28...75badd9; entries 0xefcd6c, 0xf01d50,
-//! 0xf06dac, 0xf08e90. Qualified authored shapes: current snow Hemisphere and
-//! rain Circle, radius 50/full thickness/random 360-degree arc, Euler (-90,0,0),
-//! source scales (1,1,.16)/(1,1,1), randomPosition 0/2, no direction perturbation.
+//! Current JP 6.8.1 four-lane ShapeModule::Start -> EmitterStoreData boundary.
+//! Current libunity SHA 937c6d28...75badd9.
+//! Hemisphere: the Random arc mode of StartHemiSphere over the envelope the
+//! native receipts execute: any finite radius, shape rotation, scale and
+//! position, arc of zero or more degrees, arc spread of zero or more, position
+//! jitter of zero or more, thickness exactly zero or one. ConeVolume: the
+//! Random arc mode of StartConeVolume over any finite radius, thickness, cone
+//! angle and length, arc, arc spread, shape rotation, scale, position and
+//! position jitter. SingleSidedEdge: the Random radius mode of
+//! StartSingleSidedEdge (one draw, the radius-spread quantization included)
+//! over any finite radius and radius spread. Circle: the Random arc mode of
+//! StartCircle on its plain kernel (the arc-spread branch stays refused) over
+//! any finite radius, thickness and arc. Donut: the Random arc mode of
+//! StartDonut, plain and stepped arc, over any finite radius, torus radius,
+//! thickness, arc and arc spread. These three over any finite shape rotation,
+//! scale, position and position jitter.
 //! Initial and Shape RNG are independent. A nonempty birth group consumes all
 //! four lanes including padding; capacity, old-prefix storage, StartVelocity,
 //! lifetime modules, event ownership and renderer admission remain caller work.
 //! Coordinates here are native source coordinates; reflect only at the adapter.
-//! Source authored scale/rotation is distinct from the explicit outer owner.
-//! This boundary assumes emitter state scale=(1,1,1); no later renormalization
-//! follows the outer owner's nonuniform direction multiplication.
-use super::schema::{ShapeMode, ShapeParams};
+//! Source authored scale/rotation is distinct from the explicit outer owner and
+//! from the emitter-state scale the caller supplies with each group.
+//! No later renormalization follows the outer owner's direction multiplication.
+use super::schema::{ShapeMode, ShapeParams, ShapeTexture};
 use super::seed_owner::ModuleRandom;
+use super::shape::{native_rsqrt, Shell};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
     UnsupportedSourceShape,
+    /// The exported shape controls block is missing or of another schema
+    /// version. This is an export check: ShapeModule has no such member.
+    ExportSchema,
     NonfiniteOwner,
     NonfiniteOutput,
+    /// ShapeModule references a texture. The samplers read so far then call
+    /// ApplyTexture for each birth group, which is not transcribed.
+    ShapeTexture,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,103 +54,426 @@ pub struct ShapeBirthGroup {
     pub before_store: ModuleRandom,
     pub after_rng: ModuleRandom,
     pub source_affine: [f32; 16],
+    /// EmitterStoreData's axis-of-rotation channel, all four lanes; present
+    /// only when the particle arrays carry that channel. It draws no RNG.
+    pub axis_of_rotation: Option<[[f32; 3]; 4]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Kernel {
+    Hemisphere { shell: Shell, arc_spread: f32 },
+    Circle { thickness: f32 },
+    ConeVolume { thickness: f32, angle: f32, length: f32, arc_spread: f32 },
+    SingleSidedEdge { spread: f32 },
+    Donut { thickness: f32, donut_radius: f32, arc_spread: f32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShapeBirthLaw {
-    hemisphere: bool,
+    kernel: Kernel,
     radius: f32,
-    thickness: f32,
     arc: f32,
     random_position: f32,
-    affine: [f32; 16],
+    rotation: [f32; 3],
+    scale: [f32; 3],
+    position: [f32; 3],
+    /// Source affine for a unit emitter-state scale.
+    unit_affine: [f32; 16],
 }
 
 impl ShapeBirthLaw {
+    /// A referenced texture is refused for every kernel. An export without the
+    /// texture field is the product admission's refusal (it names the
+    /// missing input before any birth path is chosen); replays of exports
+    /// that predate the field reach this law without it.
     pub fn from_params(params: &ShapeParams) -> Result<Self, Refused> {
+        if let Some(ShapeTexture::Reference { .. }) = params.controls.texture {
+            return Err(Refused::ShapeTexture);
+        }
+        match params.shape_type.as_str() {
+            "Hemisphere" => Self::hemisphere(params),
+            "ConeVolume" => Self::cone_volume(params),
+            "Circle" => Self::circle(params),
+            "SingleSidedEdge" => Self::single_sided_edge(params),
+            "Donut" => Self::donut(params),
+            _ => Err(Refused::UnsupportedSourceShape),
+        }
+    }
+
+    /// Gates name only what the Random-arc hemisphere kernel and the base or
+    /// position-jitter Store path read. Radius mode, spread and speed, arc
+    /// speed, cone angle and length, torus radius and box thickness are never
+    /// loaded by that kernel, so they do not gate it. The Loop, PingPong and
+    /// BurstSpread arc modes dispatch to other kernels, and the random or
+    /// spherical direction and align-to-direction Store branches were not
+    /// executed; they stay refused.
+    fn hemisphere(params: &ShapeParams) -> Result<Self, Refused> {
         let c = &params.controls;
-        let hemisphere = match params.shape_type.as_str() {
-            "Hemisphere" => true,
-            "Circle" => false,
-            _ => return Err(Refused::UnsupportedSourceShape),
+        if c.source_version != Some(1) {
+            return Err(Refused::ExportSchema);
+        }
+        let finite = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let Some(scale) = c.scale.filter(finite) else {
+            return refused;
         };
-        let scale = if hemisphere {
-            [1.0, 1.0, 0.16]
-        } else {
-            [1.0; 3]
+        let Some(shell) = Shell::from_thickness(params.radius_thickness) else {
+            return refused;
         };
-        let random_position = if hemisphere { 0.0 } else { 2.0 };
-        if params.radius != 50.0
-            || params.radius_thickness != 1.0
-            || params.arc != 360.0
-            || params.rotation != [-90.0, 0.0, 0.0]
-            || params.position != [0.0; 3]
-            || c.source_version != Some(1)
-            || c.scale != Some(scale)
+        let Some(arc_spread) = c.arc_spread.filter(|s| s.is_finite() && *s >= 0.0) else {
+            return refused;
+        };
+        let Some(random_position) = c.random_position.filter(|r| r.is_finite() && *r >= 0.0)
+        else {
+            return refused;
+        };
+        if !params.radius.is_finite()
+            || !(params.arc.is_finite() && params.arc >= 0.0)
+            || !finite(&params.rotation)
+            || !finite(&params.position)
             || c.arc_mode != Some(ShapeMode::Random)
-            || c.radius_mode != Some(ShapeMode::Random)
-            || c.arc_spread != Some(0.0)
-            || c.radius_spread != Some(0.0)
             || c.align_to_direction != Some(false)
             || c.random_direction != Some(0.0)
             || c.spherical_direction != Some(0.0)
-            || c.random_position != Some(random_position)
         {
-            return Err(Refused::UnsupportedSourceShape);
+            return refused;
         }
         Ok(Self {
-            hemisphere,
+            kernel: Kernel::Hemisphere { shell, arc_spread },
             radius: params.radius,
-            thickness: params.radius_thickness,
             arc: params.arc,
             random_position,
-            affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
+            rotation: params.rotation,
+            scale,
+            position: params.position,
+            unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
+        })
+    }
+
+    /// Gates name only what the Random-arc cone-volume kernel and the base or
+    /// position-jitter Store path read, and each of those may be any finite
+    /// value: both are plain f32 arithmetic whose overflow or invalid results
+    /// the native code writes as they fall, which the output refusal reports.
+    /// A position jitter of zero or less draws nothing, as natively. The
+    /// kernel consumes only the first lane of the wide loads that also cover
+    /// the radius mode and the word after the arc spread, and never loads the
+    /// radius spread, torus radius or box thickness, so none of those, nor
+    /// the radius or arc speed, gate it. The Loop, PingPong and BurstSpread
+    /// arc modes dispatch to other kernels, and the random or spherical
+    /// direction and align-to-direction Store branches were not executed; they
+    /// stay refused.
+    fn cone_volume(params: &ShapeParams) -> Result<Self, Refused> {
+        let c = &params.controls;
+        if c.source_version != Some(1) {
+            return Err(Refused::ExportSchema);
+        }
+        let finite = |v: &f32| v.is_finite();
+        let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let (Some(scale), Some(angle), Some(length), Some(arc_spread), Some(random_position)) = (
+            c.scale.filter(finite3),
+            c.angle.filter(finite),
+            c.length.filter(finite),
+            c.arc_spread.filter(finite),
+            c.random_position.filter(finite),
+        ) else {
+            return refused;
+        };
+        if !params.radius.is_finite()
+            || !params.radius_thickness.is_finite()
+            || !params.arc.is_finite()
+            || !finite3(&params.rotation)
+            || !finite3(&params.position)
+            || c.arc_mode != Some(ShapeMode::Random)
+            || c.align_to_direction != Some(false)
+            || c.random_direction != Some(0.0)
+            || c.spherical_direction != Some(0.0)
+        {
+            return refused;
+        }
+        Ok(Self {
+            kernel: Kernel::ConeVolume {
+                thickness: params.radius_thickness,
+                angle,
+                length,
+                arc_spread,
+            },
+            radius: params.radius,
+            arc: params.arc,
+            random_position,
+            rotation: params.rotation,
+            scale,
+            position: params.position,
+            unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
+        })
+    }
+
+    /// Gates name only what the Random-arc circle kernel and the base or
+    /// position-jitter Store path read, and each of those may be any finite
+    /// value; overflow or invalid results fall as the native code writes
+    /// them, and the output refusal reports them. The kernel reads the arc,
+    /// thickness, and only the first lane of the wide loads that also cover
+    /// the radius mode and the word after the arc spread; it never loads the
+    /// radius spread, cone angle or length, torus radius or box thickness, so
+    /// none of those, nor the radius or arc speed, gate it. Its arc-spread
+    /// branch is not transcribed and stays refused; so do the Loop,
+    /// PingPong and BurstSpread arc modes (other kernels) and the random or
+    /// spherical direction and align-to-direction Store branches.
+    fn circle(params: &ShapeParams) -> Result<Self, Refused> {
+        let c = &params.controls;
+        if c.source_version != Some(1) {
+            return Err(Refused::ExportSchema);
+        }
+        let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let (Some(scale), Some(arc_spread), Some(random_position)) = (
+            c.scale.filter(finite3),
+            c.arc_spread.filter(|v| v.is_finite()),
+            c.random_position.filter(|v| v.is_finite()),
+        ) else {
+            return refused;
+        };
+        if !params.radius.is_finite()
+            || !params.radius_thickness.is_finite()
+            || !params.arc.is_finite()
+            || super::shape::circle_takes_arc_spread(params.arc, arc_spread)
+            || !finite3(&params.rotation)
+            || !finite3(&params.position)
+            || c.arc_mode != Some(ShapeMode::Random)
+            || c.align_to_direction != Some(false)
+            || c.random_direction != Some(0.0)
+            || c.spherical_direction != Some(0.0)
+        {
+            return refused;
+        }
+        Ok(Self {
+            kernel: Kernel::Circle {
+                thickness: params.radius_thickness,
+            },
+            radius: params.radius,
+            arc: params.arc,
+            random_position,
+            rotation: params.rotation,
+            scale,
+            position: params.position,
+            unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
+        })
+    }
+
+    /// Gates name only what the Random-radius single-sided edge kernel and the
+    /// base or position-jitter Store path read, each any finite value, with
+    /// overflow or invalid results reported by the output refusal. The kernel
+    /// reads the radius and the radius spread and nothing else of the shape:
+    /// thickness, arc, arc mode, arc spread and speed, radius speed, cone
+    /// angle and length, torus radius and box thickness do not gate it. The
+    /// Loop, PingPong and BurstSpread radius modes dispatch to other kernels,
+    /// and the random or spherical direction and align-to-direction Store
+    /// branches were not executed; they stay refused.
+    fn single_sided_edge(params: &ShapeParams) -> Result<Self, Refused> {
+        let c = &params.controls;
+        if c.source_version != Some(1) {
+            return Err(Refused::ExportSchema);
+        }
+        let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let (Some(scale), Some(spread), Some(random_position)) = (
+            c.scale.filter(finite3),
+            c.radius_spread.filter(|v| v.is_finite()),
+            c.random_position.filter(|v| v.is_finite()),
+        ) else {
+            return refused;
+        };
+        if !params.radius.is_finite()
+            || !finite3(&params.rotation)
+            || !finite3(&params.position)
+            || c.radius_mode != Some(ShapeMode::Random)
+            || c.align_to_direction != Some(false)
+            || c.random_direction != Some(0.0)
+            || c.spherical_direction != Some(0.0)
+        {
+            return refused;
+        }
+        Ok(Self {
+            kernel: Kernel::SingleSidedEdge { spread },
+            radius: params.radius,
+            arc: params.arc,
+            random_position,
+            rotation: params.rotation,
+            scale,
+            position: params.position,
+            unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
+        })
+    }
+
+    /// Gates name only what the Random-arc torus kernel and the base or
+    /// position-jitter Store path read, and each of those may be any finite
+    /// value: the kernel is plain f32 arithmetic whose overflow or invalid
+    /// results the native code writes as they fall, which the output refusal
+    /// reports. Both arc paths are the native ones: a positive arc in radians
+    /// times the arc spread takes the stepped `random_arc`, anything else the
+    /// continuous one. The kernel consumes only the first lane of the wide
+    /// loads that also cover the radius mode, the word after the torus radius
+    /// and the word after the arc spread, and never loads the radius spread,
+    /// so none of those, nor the radius or arc speed, cone angle and length
+    /// or box thickness, gate it. The Loop, PingPong and BurstSpread arc modes
+    /// dispatch to other kernels, and the random or spherical direction and
+    /// align-to-direction Store branches were not executed; they stay
+    /// refused.
+    fn donut(params: &ShapeParams) -> Result<Self, Refused> {
+        let c = &params.controls;
+        if c.source_version != Some(1) {
+            return Err(Refused::ExportSchema);
+        }
+        let finite = |v: &f32| v.is_finite();
+        let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let (Some(scale), Some(donut_radius), Some(arc_spread), Some(random_position)) = (
+            c.scale.filter(finite3),
+            c.donut_radius.filter(finite),
+            c.arc_spread.filter(finite),
+            c.random_position.filter(finite),
+        ) else {
+            return refused;
+        };
+        if !params.radius.is_finite()
+            || !params.radius_thickness.is_finite()
+            || !params.arc.is_finite()
+            || !finite3(&params.rotation)
+            || !finite3(&params.position)
+            || c.arc_mode != Some(ShapeMode::Random)
+            || c.align_to_direction != Some(false)
+            || c.random_direction != Some(0.0)
+            || c.spherical_direction != Some(0.0)
+        {
+            return refused;
+        }
+        Ok(Self {
+            kernel: Kernel::Donut {
+                thickness: params.radius_thickness,
+                donut_radius,
+                arc_spread,
+            },
+            radius: params.radius,
+            arc: params.arc,
+            random_position,
+            rotation: params.rotation,
+            scale,
+            position: params.position,
+            unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
         })
     }
 
     /// Explicit owner snapshot, never a guessed source path/scene transform.
-    /// Local space uses identity; World uses the supplied column-major affine.
-    /// Current receipt tests identity and a rotated nonuniform World owner.
-    /// This models a zero local Initial position; owner translation is added
-    /// after outer rotation, just as Initial's already stored birth position.
+    /// Local space uses identity; World uses the supplied column-major affine
+    /// (its fourth row is not read). This models a zero local Initial position;
+    /// owner translation is added after outer rotation, just as Initial's
+    /// already stored birth position. `emitter_scale` is the emitter-state
+    /// scale ShapeModule::Start folds into the source affine;
+    /// `uses_axis_of_rotation` says the particle arrays carry the
+    /// axis-of-rotation channel, which EmitterStoreData then writes.
     pub fn sample_group(
         &self,
         random: &mut ModuleRandom,
         outer_owner: [f32; 16],
         world_space: bool,
+        emitter_scale: [f32; 3],
+        uses_axis_of_rotation: bool,
+    ) -> Result<ShapeBirthGroup, Refused> {
+        let group = self.evaluate_group(
+            *random,
+            outer_owner,
+            world_space,
+            emitter_scale,
+            uses_axis_of_rotation,
+        )?;
+        if group.has_nonfinite_output() {
+            return Err(Refused::NonfiniteOutput);
+        }
+        *random = group.after_rng;
+        Ok(group)
+    }
+
+    /// One group as the native boundary computes it, before the output
+    /// refusal; the stream is advanced on a copy only.
+    fn evaluate_group(
+        &self,
+        random: ModuleRandom,
+        outer_owner: [f32; 16],
+        world_space: bool,
+        emitter_scale: [f32; 3],
+        uses_axis_of_rotation: bool,
     ) -> Result<ShapeBirthGroup, Refused> {
         if world_space && outer_owner.iter().any(|x| !x.is_finite()) {
             return Err(Refused::NonfiniteOwner);
         }
+        if emitter_scale.iter().any(|x| !x.is_finite()) {
+            return Err(Refused::NonfiniteOwner);
+        }
         let owner = if world_space { outer_owner } else { IDENTITY };
-        let before_rng = *random;
-        let mut next = *random;
-        let first = next.next4_u32().map(super::shape::u01_from_bits);
-        let second = next.next4_u32().map(super::shape::u01_from_bits);
-        let third = if self.hemisphere {
-            next.next4_u32().map(super::shape::u01_from_bits)
+        let affine = if emitter_scale == [1.0; 3] {
+            self.unit_affine
         } else {
-            [0.0; 4]
+            source_affine(self.rotation, self.scale, self.position, emitter_scale)
         };
-        let raw: [([f32; 3], [f32; 3]); 4] = std::array::from_fn(|i| {
-            if self.hemisphere {
-                super::shape::hemisphere_position(
-                    self.radius,
-                    self.thickness,
-                    self.arc,
-                    first[i],
-                    second[i],
-                    third[i],
-                )
-            } else {
-                super::shape::circle_base(
-                    self.radius,
-                    self.thickness,
-                    self.arc,
-                    first[i],
-                    second[i],
-                )
+        let before_rng = random;
+        let mut next = random;
+        // Draws per group: Hemisphere, ConeVolume and Donut 3, Circle 2 (arc,
+        // then radial fraction), SingleSidedEdge 1.
+        let first = next.next4_u32().map(super::shape::u01_from_bits);
+        let second = match self.kernel {
+            Kernel::SingleSidedEdge { .. } => [0.0; 4],
+            _ => next.next4_u32().map(super::shape::u01_from_bits),
+        };
+        let third = match self.kernel {
+            Kernel::Hemisphere { .. } | Kernel::ConeVolume { .. } | Kernel::Donut { .. } => {
+                next.next4_u32().map(super::shape::u01_from_bits)
             }
+            Kernel::Circle { .. } | Kernel::SingleSidedEdge { .. } => [0.0; 4],
+        };
+        let raw: [([f32; 3], [f32; 3]); 4] = std::array::from_fn(|i| match self.kernel {
+            Kernel::Hemisphere { shell, arc_spread } => super::shape::hemisphere_native(
+                self.radius,
+                shell,
+                self.arc,
+                arc_spread,
+                first[i],
+                second[i],
+                third[i],
+            ),
+            Kernel::Circle { thickness } => {
+                super::shape::circle_base(self.radius, thickness, self.arc, first[i], second[i])
+            }
+            // Draws: arc, radial fraction, travelled distance.
+            Kernel::ConeVolume {
+                thickness,
+                angle,
+                length,
+                arc_spread,
+            } => super::shape::cone_volume_at(
+                self.radius,
+                thickness,
+                angle,
+                super::shape::random_arc(self.arc, arc_spread, first[i]),
+                length,
+                second[i],
+                third[i],
+            ),
+            Kernel::SingleSidedEdge { spread } => {
+                super::shape::single_sided_edge_spread(self.radius, spread, first[i])
+            }
+            // Draws: major arc, tube angle, tube radius.
+            Kernel::Donut {
+                thickness,
+                donut_radius,
+                arc_spread,
+            } => super::shape::donut_at(
+                self.radius,
+                donut_radius,
+                thickness,
+                super::shape::random_arc(self.arc, arc_spread, first[i]),
+                second[i],
+                third[i],
+            ),
         });
         let before_store = next;
         let (arc, polar) = if self.random_position > 0.0 {
@@ -143,28 +484,25 @@ impl ShapeBirthLaw {
         } else {
             ([0.0; 4], [0.0; 4])
         };
+        let mut axis = [[0.0; 3]; 4];
         let samples = std::array::from_fn(|i| {
             let position =
                 super::shape::randomize_position(raw[i].0, self.random_position, arc[i], polar[i]);
-            let position = vector(&owner, point(&self.affine, position));
-            let position = std::array::from_fn(|axis| position[axis] + owner[12 + axis]);
+            let rotated = vector(&owner, point(&affine, position));
+            let position = std::array::from_fn(|a| rotated[a] + owner[12 + a]);
             // Normalize before source affine, then again before the final
             // owner multiply. Normalizing after owner destroys scale fidelity.
-            let direction = vector(&owner, normalize(vector(&self.affine, normalize(raw[i].1))));
+            let affine_direction = vector(&affine, normalize(raw[i].1));
+            let direction = vector(&owner, normalize(affine_direction));
+            if uses_axis_of_rotation {
+                axis[i] = axis_of_rotation(masked(affine_direction), rotated);
+            }
             ShapeSample {
                 position,
                 direction,
             }
         });
-        if samples.iter().any(|s| {
-            s.position
-                .iter()
-                .chain(s.direction.iter())
-                .any(|v| !v.is_finite())
-        }) {
-            return Err(Refused::NonfiniteOutput);
-        }
-        *random = next;
+        let axis_of_rotation = uses_axis_of_rotation.then_some(axis);
         Ok(ShapeBirthGroup {
             samples,
             raw_position: raw.map(|v| v.0),
@@ -172,8 +510,25 @@ impl ShapeBirthLaw {
             before_rng,
             before_store,
             after_rng: next,
-            source_affine: self.affine,
+            source_affine: affine,
+            axis_of_rotation,
         })
+    }
+}
+
+impl ShapeBirthGroup {
+    fn has_nonfinite_output(&self) -> bool {
+        self.samples.iter().any(|s| {
+            s.position
+                .iter()
+                .chain(s.direction.iter())
+                .any(|v| !v.is_finite())
+        }) || self
+            .axis_of_rotation
+            .iter()
+            .flatten()
+            .flatten()
+            .any(|v| !v.is_finite())
     }
 }
 
@@ -181,47 +536,48 @@ pub const IDENTITY: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
-const fn rsqrt_estimates() -> [u16; 256] {
-    let mut table = [0_u16; 256];
-    let mut i = 0;
-    while i < 256 {
-        let midpoint = (257_u64 + 2 * (i % 128) as u64) << (i / 128);
-        let mut estimate = 256_u64;
-        while midpoint * (2 * estimate + 1) * (2 * estimate + 1) < (1_u64 << 28) {
-            estimate += 1;
-        }
-        table[i] = estimate as u16;
-        i += 1;
+fn square(v: [f32; 3]) -> f32 {
+    v[0] * v[0] + (v[1] * v[1] + v[2] * v[2])
+}
+/// Native keeps a vector only where its square compares greater than the
+/// threshold; any other square, NaN included, selects +Z.
+fn masked(v: [f32; 3]) -> [f32; 3] {
+    if square(v) > f32::from_bits(0x0da24260) {
+        v
+    } else {
+        [0.0, 0.0, 1.0]
     }
-    table
-}
-const RSQRT_ESTIMATE: [u16; 256] = rsqrt_estimates();
-
-// Current ARM FRSQRTE normalized positive domain. Integer midpoint/table
-// quantization, not a host reciprocal sqrt. Native refinement FRSQRTS uses
-// fused rounding of (3-a*b)/2 after the preceding separate f32 FMUL.
-fn rsqrt_estimate(value: f32) -> f32 {
-    assert!(value.is_normal() && value > 0.0);
-    let bits = value.to_bits();
-    let exponent = ((bits >> 23) & 255) as i32;
-    let index = ((bits & 0x7fffff) >> 16) as usize + if exponent & 1 == 0 { 128 } else { 0 };
-    let estimate = RSQRT_ESTIMATE[index] as u32;
-    let estimate_bits = ((((380 - exponent) / 2) as u32) << 23) | (((estimate as u32) - 256) << 15);
-    f32::from_bits(estimate_bits)
-}
-fn rsqrt(value: f32) -> f32 {
-    let r0 = rsqrt_estimate(value);
-    let step = |a: f32, b: f32| ((3.0_f64 - (a as f64) * (b as f64)) * 0.5) as f32;
-    let r1 = r0 * step(r0 * value, r0);
-    r1 * step(value * r1, r1)
 }
 fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let square = v[0] * v[0] + (v[1] * v[1] + v[2] * v[2]);
-    if square <= f32::from_bits(0x0da24260) {
+    let square = square(v);
+    if !(square > f32::from_bits(0x0da24260)) {
         return [0.0, 0.0, 1.0];
     }
-    let r = rsqrt(square);
+    let r = native_rsqrt(square);
     v.map(|x| x * r)
+}
+/// EmitterStoreData's axis of rotation: +Z crossed with the masked source
+/// direction, written with the explicit zero products of the native operand
+/// order; when that cross is short (square at most 0.01) the same cross with
+/// the owner-rotated position before translation; unit after the reciprocal
+/// square root refinement, or +Y when the chosen cross is itself short. The
+/// short test comes first, so a zero or subnormal square never reaches the
+/// reciprocal square root, whose result native discards there.
+fn axis_of_rotation(direction: [f32; 3], rotated: [f32; 3]) -> [f32; 3] {
+    let short = f32::from_bits(0x3c23_d70a);
+    let cross = |v: [f32; 3]| [v[2] * 0.0 - v[1], v[0] - v[2] * 0.0, v[1] * 0.0 - v[0] * 0.0];
+    let axis = cross(direction);
+    let axis = if short >= square(axis) {
+        cross(rotated)
+    } else {
+        axis
+    };
+    let length = square(axis);
+    if short >= length {
+        return [0.0, 1.0, 0.0];
+    }
+    let r = native_rsqrt(length);
+    axis.map(|v| v * r)
 }
 fn vector(matrix: &[f32; 16], v: [f32; 3]) -> [f32; 3] {
     std::array::from_fn(|a| matrix[a] * v[0] + (matrix[4 + a] * v[1] + matrix[8 + a] * v[2]))
@@ -265,11 +621,14 @@ fn source_affine(
         (ext[i] * ([2.0, -2.0, -2.0, 0.0][i] * x) + rev_ext[i] * ([2.0, 2.0, -2.0, 0.0][i] * y))
             + [0.0, 0.0, 1.0, 0.0][i]
     });
-    let axes = [
-        [emitter_scale[0], 0.0, 0.0, 0.0],
-        [0.0, emitter_scale[1], 0.0, 0.0],
-        [0.0, 0.0, emitter_scale[2], 0.0],
+    // Each emitter-scale axis is a unit row multiplied by its scale
+    // component, so a negative component makes that row's zeros -0.
+    const UNIT: [[f32; 4]; 3] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
     ];
+    let axes: [[f32; 4]; 3] = std::array::from_fn(|k| UNIT[k].map(|u| u * emitter_scale[k]));
     let mut out = [0.0; 16];
     for (col, values) in [col0, col1, col2].iter().enumerate() {
         let scaled = values.map(|v| v * scale[col]);
@@ -298,12 +657,12 @@ pub fn replay_native_rows(text: &str) -> usize {
             assert_eq!(words.len(), 3);
             let value = f32::from_bits(words[0]);
             assert_eq!(
-                rsqrt_estimate(value).to_bits(),
+                super::shape::native_rsqrt_estimate(value).to_bits(),
                 words[1],
                 "native FRSQRTE {value}"
             );
             assert_eq!(
-                rsqrt(value).to_bits(),
+                native_rsqrt(value).to_bits(),
                 words[2],
                 "native FRSQRTE/FRSQRTS {value}"
             );
@@ -348,7 +707,9 @@ pub fn replay_native_rows(text: &str) -> usize {
         let law = ShapeBirthLaw::from_params(&source).unwrap();
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let mut random = words(5);
-        let group = law.sample_group(&mut random, owner, v[89] == 1).unwrap();
+        let group = law
+            .sample_group(&mut random, owner, v[89] == 1, [1.0; 3], false)
+            .unwrap();
         assert_eq!(group.before_rng, words(5));
         assert_eq!(
             group.before_store,
@@ -402,6 +763,841 @@ pub fn replay_native_rows(text: &str) -> usize {
     groups
 }
 
+/// What a widened-layout replay did with its native rows.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayCount {
+    /// Rows the law accepted and reproduced bit for bit.
+    pub replayed: usize,
+    /// Rows whose Shape block the gates refuse.
+    pub gate_refused: usize,
+    /// Rows refused as a non-finite output, each one a row whose native
+    /// Store output (or written axis of rotation) is itself non-finite.
+    pub output_refused: usize,
+}
+
+/// Diagnostic replay of native Hemisphere groups in the widened 174-word
+/// layout: the 158-word layout above with any emitter-state scale at 86..89,
+/// then the arc spread bits, the axis-of-rotation flag, the twelve axis words
+/// (axis*4 + lane) and the native kernel and Store draw counts. Expected
+/// native channels never feed the law.
+#[cfg(test)]
+pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
+    use super::schema::ShapeControls;
+    let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
+    let mut count = ReplayCount::default();
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 174, "case {case} row width");
+        assert_eq!(v[0], 2, "case {case}: Hemisphere rows only");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        // The native draw census is self-consistent with the recorded streams.
+        let mut stepped = words(5);
+        for _ in 0..v[172] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(45), "case {case} kernel draws");
+        for _ in 0..v[173] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(61), "case {case} Store draws");
+        let source = ShapeParams {
+            shape_type: "Hemisphere".into(),
+            radius: f32::from_bits(v[1]),
+            radius_thickness: f32::from_bits(v[2]),
+            arc: f32::from_bits(v[3]),
+            rotation: floats(77),
+            position: floats(83),
+            controls: ShapeControls {
+                source_version: Some(1),
+                scale: Some(floats(80)),
+                arc_mode: Some(ShapeMode::Random),
+                arc_spread: Some(f32::from_bits(v[158])),
+                align_to_direction: Some(false),
+                random_direction: Some(0.0),
+                spherical_direction: Some(0.0),
+                random_position: Some(f32::from_bits(v[4])),
+                ..Default::default()
+            },
+        };
+        let law = match ShapeBirthLaw::from_params(&source) {
+            Ok(law) => law,
+            Err(refused) => {
+                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
+                count.gate_refused += 1;
+                continue;
+            }
+        };
+        let world = v[89] == 1;
+        let uses_axis = v[159] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
+        let native_nonfinite =
+            v[134..158].iter().any(nonfinite) || (uses_axis && v[160..172].iter().any(nonfinite));
+        let mut random = words(5);
+        let group = match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
+            Ok(group) => group,
+            Err(Refused::NonfiniteOutput) => {
+                assert!(native_nonfinite, "case {case}: refused a finite native group");
+                assert_eq!(random, words(5), "case {case}: refusal consumed the stream");
+                count.output_refused += 1;
+                continue;
+            }
+            Err(other) => panic!("case {case}: unexpected refusal {other:?}"),
+        };
+        assert_eq!(group.before_rng, words(5));
+        assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(61), "case {case} after Store RNG");
+        assert_eq!(random, group.after_rng);
+        for i in 0..16 {
+            assert_eq!(
+                group.source_affine[i].to_bits(),
+                v[106 + i],
+                "case {case} source affine {i}"
+            );
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[122 + i], "case {case} outer rotation {i}");
+        }
+        for (field, values) in [group.raw_position, group.raw_direction].iter().enumerate() {
+            for lane in 0..4 {
+                for axis in 0..3 {
+                    assert_eq!(
+                        values[lane][axis].to_bits(),
+                        v[21 + field * 12 + axis * 4 + lane],
+                        "case {case} raw {field}/{lane}/{axis}"
+                    );
+                }
+            }
+        }
+        for lane in 0..4 {
+            for (field, values) in [group.samples[lane].position, group.samples[lane].direction]
+                .iter()
+                .enumerate()
+            {
+                for axis in 0..3 {
+                    assert_eq!(
+                        values[axis].to_bits(),
+                        v[134 + field * 12 + axis * 4 + lane],
+                        "case {case} store {field}/{lane}/{axis}"
+                    );
+                }
+            }
+        }
+        match group.axis_of_rotation {
+            Some(axes) => {
+                for lane in 0..4 {
+                    for axis in 0..3 {
+                        assert_eq!(
+                            axes[lane][axis].to_bits(),
+                            v[160 + axis * 4 + lane],
+                            "case {case} axis of rotation {lane}/{axis}"
+                        );
+                    }
+                }
+            }
+            None => assert!(!uses_axis, "case {case}: axis channel not written"),
+        }
+        count.replayed += 1;
+    }
+    count
+}
+
+/// The Shape block of one native ConeVolume row (the arc mode Random, no
+/// direction perturbation, align off). Radius mode and spread stay absent:
+/// the law must not need them.
+#[cfg(test)]
+fn cone_volume_row_source(v: &[u32], random_position: f32) -> ShapeParams {
+    use super::schema::ShapeControls;
+    let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+    ShapeParams {
+        shape_type: "ConeVolume".into(),
+        radius: f32::from_bits(v[0]),
+        radius_thickness: f32::from_bits(v[1]),
+        arc: f32::from_bits(v[4]),
+        rotation: floats(6),
+        position: floats(9),
+        controls: ShapeControls {
+            source_version: Some(1),
+            angle: Some(f32::from_bits(v[2])),
+            length: Some(f32::from_bits(v[3])),
+            scale: Some(floats(12)),
+            arc_mode: Some(ShapeMode::Random),
+            arc_spread: Some(f32::from_bits(v[5])),
+            align_to_direction: Some(false),
+            random_direction: Some(0.0),
+            spherical_direction: Some(0.0),
+            random_position: Some(random_position),
+            ..Default::default()
+        },
+    }
+}
+
+/// Diagnostic replay of native ConeVolume groups, 161 words per row: the
+/// Shape inputs (radius, thickness, angle, length, arc, arc spread, rotation,
+/// position, scale, emitter-state scale, simulation space, owner), then the
+/// Shape stream at group start, before Store and after Store, the kernel's
+/// local position and direction (axis*4 + lane), the Store affine and outer
+/// rotation, the stored position and direction, and the case and group
+/// ordinals. `#` lines are comments. Expected native channels never feed the
+/// law.
+#[cfg(test)]
+pub fn replay_cone_volume_rows(text: &str) -> usize {
+    let mut groups = 0;
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 161, "case {case} row width");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let law = ShapeBirthLaw::from_params(&cone_volume_row_source(&v, 0.0)).unwrap();
+        let world = v[18] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
+        let mut random = words(35);
+        let group = law
+            .sample_group(&mut random, owner, world, floats(15), false)
+            .unwrap();
+        assert_eq!(group.before_rng, words(35));
+        assert_eq!(group.before_store, words(51), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(67), "case {case} after Store RNG");
+        assert_eq!(random, group.after_rng);
+        for i in 0..16 {
+            assert_eq!(group.source_affine[i].to_bits(), v[107 + i], "case {case} source affine {i}");
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[123 + i], "case {case} outer rotation {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                assert_eq!(group.raw_position[lane][axis].to_bits(), v[83 + at], "case {case} local position {lane}/{axis}");
+                assert_eq!(group.raw_direction[lane][axis].to_bits(), v[95 + at], "case {case} local direction {lane}/{axis}");
+                assert_eq!(group.samples[lane].position[axis].to_bits(), v[135 + at], "case {case} stored position {lane}/{axis}");
+                assert_eq!(group.samples[lane].direction[axis].to_bits(), v[147 + at], "case {case} stored direction {lane}/{axis}");
+            }
+        }
+        groups += 1;
+    }
+    groups
+}
+
+/// Diagnostic replay of native ConeVolume edge groups, 177 words per row: the
+/// 161-word layout above, then the position jitter bits, the
+/// axis-of-rotation flag, the twelve axis words (axis*4 + lane, zero without
+/// the flag) and the native kernel and Store draw counts. Every channel of
+/// every row is compared, refused rows included: equal bits, or NaN where
+/// native wrote NaN (a NaN payload is not part of the contract, since a
+/// non-finite output is refused). The refusal itself must fall exactly on
+/// the rows whose native Store output or written axis is non-finite, and
+/// must leave the stream untouched.
+#[cfg(test)]
+pub fn replay_cone_volume_rows_v2(text: &str) -> ReplayCount {
+    let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
+    let mut count = ReplayCount::default();
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 177, "case {case} row width");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let same = |actual: f32, at: usize, what: &str| {
+            let native = v[at];
+            assert!(
+                actual.to_bits() == native || (actual.is_nan() && f32::from_bits(native).is_nan()),
+                "case {case} {what}: law {:#010x} native {native:#010x}",
+                actual.to_bits()
+            );
+        };
+        // The native draw census is self-consistent with the recorded streams.
+        let mut stepped = words(35);
+        for _ in 0..v[175] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(51), "case {case} kernel draws");
+        for _ in 0..v[176] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(67), "case {case} Store draws");
+        let law = match ShapeBirthLaw::from_params(&cone_volume_row_source(&v, f32::from_bits(v[161]))) {
+            Ok(law) => law,
+            Err(refused) => {
+                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
+                count.gate_refused += 1;
+                continue;
+            }
+        };
+        let world = v[18] == 1;
+        let uses_axis = v[162] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
+        let group = law
+            .evaluate_group(words(35), owner, world, floats(15), uses_axis)
+            .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
+        assert_eq!(group.before_rng, words(35));
+        assert_eq!(group.before_store, words(51), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(67), "case {case} after Store RNG");
+        for i in 0..16 {
+            same(group.source_affine[i], 107 + i, "source affine");
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[123 + i], "case {case} outer rotation {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                same(group.raw_position[lane][axis], 83 + at, "local position");
+                same(group.raw_direction[lane][axis], 95 + at, "local direction");
+                same(group.samples[lane].position[axis], 135 + at, "stored position");
+                same(group.samples[lane].direction[axis], 147 + at, "stored direction");
+            }
+        }
+        match group.axis_of_rotation {
+            Some(axes) => {
+                assert!(uses_axis, "case {case}: axis channel written without the flag");
+                for lane in 0..4 {
+                    for axis in 0..3 {
+                        same(axes[lane][axis], 163 + axis * 4 + lane, "axis of rotation");
+                    }
+                }
+            }
+            None => assert!(!uses_axis, "case {case}: axis channel not written"),
+        }
+        let native_nonfinite =
+            v[135..159].iter().any(nonfinite) || (uses_axis && v[163..175].iter().any(nonfinite));
+        let mut random = words(35);
+        match law.sample_group(&mut random, owner, world, floats(15), uses_axis) {
+            Ok(_) => {
+                assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
+                assert_eq!(random, words(67), "case {case}: stream after the group");
+                count.replayed += 1;
+            }
+            Err(Refused::NonfiniteOutput) => {
+                assert!(native_nonfinite, "case {case}: refused a finite native group");
+                assert_eq!(random, words(35), "case {case}: refusal consumed the stream");
+                count.output_refused += 1;
+            }
+            Err(other) => panic!("case {case}: unexpected refusal {other:?}"),
+        }
+    }
+    count
+}
+
+/// The Shape block of one native SingleSidedEdge (type 12) or Circle (type
+/// 10) row of the 167-word layout, with every authored control the row
+/// carries, those the kernel does not read included, and fixed non-zero
+/// values for the controls the row does not carry (cone angle and length,
+/// torus radius, box thickness, radius and arc speed): the gates must not
+/// depend on any of them.
+#[cfg(test)]
+fn edge_circle_row_source(v: &[u32]) -> ShapeParams {
+    use super::schema::ShapeControls;
+    use super::MinMaxCurve;
+    let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+    let mode = |word: u32| match word {
+        0 => ShapeMode::Random,
+        1 => ShapeMode::Loop,
+        2 => ShapeMode::PingPong,
+        3 => ShapeMode::BurstSpread,
+        other => panic!("shape mode {other}"),
+    };
+    ShapeParams {
+        shape_type: match v[0] {
+            10 => "Circle",
+            12 => "SingleSidedEdge",
+            other => panic!("shape type {other}"),
+        }
+        .into(),
+        radius: f32::from_bits(v[1]),
+        radius_thickness: f32::from_bits(v[2]),
+        arc: f32::from_bits(v[3]),
+        rotation: floats(77),
+        position: floats(83),
+        controls: ShapeControls {
+            source_version: Some(1),
+            angle: Some(25.0),
+            length: Some(5.0),
+            donut_radius: Some(0.2),
+            scale: Some(floats(80)),
+            box_thickness: Some([0.5; 3]),
+            arc_mode: Some(mode(v[160])),
+            arc_spread: Some(f32::from_bits(v[161])),
+            arc_speed: Some(MinMaxCurve::Constant(1.5)),
+            radius_mode: Some(mode(v[159])),
+            radius_spread: Some(f32::from_bits(v[158])),
+            radius_speed: Some(MinMaxCurve::Constant(0.75)),
+            align_to_direction: Some(v[166] != 0),
+            random_direction: Some(f32::from_bits(v[164])),
+            spherical_direction: Some(f32::from_bits(v[165])),
+            random_position: Some(f32::from_bits(v[4])),
+            texture: None,
+        },
+    }
+}
+
+/// Diagnostic replay of native SingleSidedEdge and Circle groups, 167 words
+/// per row: the 158-word layout of `replay_native_rows` (unit emitter-state
+/// scale), then the radius spread, radius mode, arc mode and arc spread
+/// (modes 0 Random, 1 Loop, 2 PingPong, 3 BurstSpread), the kernel and Store
+/// draw counts, and the random direction, spherical direction and align
+/// words. Every row must be admitted and reproduced bit for bit, including
+/// the rows whose controls vary only in fields the kernel does not read.
+/// `#` lines are comments. Expected native channels never feed the law.
+#[cfg(test)]
+pub fn replay_edge_circle_rows(text: &str) -> usize {
+    let mut groups = 0;
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 167, "case {case} row width");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let kernel_draws = match v[0] {
+            12 => 1,
+            10 => 2,
+            other => panic!("case {case}: shape type {other}"),
+        };
+        assert_eq!((v[162], v[163]), (kernel_draws, 0), "case {case} draw census");
+        let mut stepped = words(5);
+        for _ in 0..v[162] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(45), "case {case} kernel draws");
+        assert_eq!(words(45), words(61), "case {case} Store draws");
+        assert_eq!(floats(86), [1.0; 3], "case {case} emitter state scale");
+        let law = ShapeBirthLaw::from_params(&edge_circle_row_source(&v))
+            .unwrap_or_else(|refused| panic!("case {case}: gate refused {refused:?}"));
+        let world = v[89] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
+        let mut random = words(5);
+        let group = law
+            .sample_group(&mut random, owner, world, [1.0; 3], false)
+            .unwrap_or_else(|refused| panic!("case {case}: refused {refused:?}"));
+        assert_eq!(group.before_rng, words(5));
+        assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(61), "case {case} after Store RNG");
+        assert_eq!(random, group.after_rng);
+        for i in 0..16 {
+            assert_eq!(group.source_affine[i].to_bits(), v[106 + i], "case {case} source affine {i}");
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[122 + i], "case {case} outer rotation {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                assert_eq!(group.raw_position[lane][axis].to_bits(), v[21 + at], "case {case} local position {lane}/{axis}");
+                assert_eq!(group.raw_direction[lane][axis].to_bits(), v[33 + at], "case {case} local direction {lane}/{axis}");
+                assert_eq!(group.samples[lane].position[axis].to_bits(), v[134 + at], "case {case} stored position {lane}/{axis}");
+                assert_eq!(group.samples[lane].direction[axis].to_bits(), v[146 + at], "case {case} stored direction {lane}/{axis}");
+            }
+        }
+        groups += 1;
+    }
+    groups
+}
+
+/// Diagnostic replay of native SingleSidedEdge and Circle edge groups, 181
+/// words per row: the 167-word layout above with any emitter-state scale at
+/// 86..89, then the axis-of-rotation flag, the twelve axis words (axis*4 +
+/// lane, zero without the flag) and the template path the native call took
+/// (0 the plain kernel; 1 the edge's radius-spread path or the circle's
+/// arc-spread branch). The gates must refuse exactly the rows outside the
+/// executed envelope (the circle's arc-spread branch, a random or spherical
+/// direction, align to direction) and admit every other row; the edge's
+/// spread path must be the native one exactly where its step is positive.
+/// Every channel of every admitted row is compared: equal bits, or NaN where
+/// native wrote NaN (a NaN payload is not part of the contract, since a
+/// non-finite output is refused). The output refusal must fall exactly on
+/// the rows whose native Store output or written axis is non-finite, and
+/// must leave the stream untouched.
+#[cfg(test)]
+pub fn replay_edge_circle_rows_v2(text: &str) -> ReplayCount {
+    let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
+    let mut count = ReplayCount::default();
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 181, "case {case} row width");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let same = |actual: f32, at: usize, what: &str| {
+            let native = v[at];
+            assert!(
+                actual.to_bits() == native || (actual.is_nan() && f32::from_bits(native).is_nan()),
+                "case {case} {what}: law {:#010x} native {native:#010x}",
+                actual.to_bits()
+            );
+        };
+        // The native draw census is self-consistent with the recorded streams.
+        let mut stepped = words(5);
+        for _ in 0..v[162] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(45), "case {case} kernel draws");
+        for _ in 0..v[163] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(61), "case {case} Store draws");
+        let circle = match v[0] {
+            10 => true,
+            12 => false,
+            other => panic!("case {case}: shape type {other}"),
+        };
+        let outside = (circle && v[180] == 1)
+            || f32::from_bits(v[164]) != 0.0
+            || f32::from_bits(v[165]) != 0.0
+            || v[166] != 0;
+        let law = match ShapeBirthLaw::from_params(&edge_circle_row_source(&v)) {
+            Ok(law) => law,
+            Err(refused) => {
+                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
+                assert!(outside, "case {case}: refused a row inside the executed envelope");
+                count.gate_refused += 1;
+                continue;
+            }
+        };
+        assert!(!outside, "case {case}: admitted a row outside the executed envelope");
+        if !circle {
+            let step = f32::from_bits(v[1]) * f32::from_bits(v[158]);
+            assert_eq!(v[180] == 1, step > 0.0, "case {case}: edge spread path");
+        }
+        let world = v[89] == 1;
+        let uses_axis = v[167] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
+        let group = law
+            .evaluate_group(words(5), owner, world, floats(86), uses_axis)
+            .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
+        assert_eq!(group.before_rng, words(5));
+        assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(61), "case {case} after Store RNG");
+        for i in 0..16 {
+            same(group.source_affine[i], 106 + i, "source affine");
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[122 + i], "case {case} outer rotation {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                same(group.raw_position[lane][axis], 21 + at, "local position");
+                same(group.raw_direction[lane][axis], 33 + at, "local direction");
+                same(group.samples[lane].position[axis], 134 + at, "stored position");
+                same(group.samples[lane].direction[axis], 146 + at, "stored direction");
+            }
+        }
+        match group.axis_of_rotation {
+            Some(axes) => {
+                assert!(uses_axis, "case {case}: axis channel written without the flag");
+                for lane in 0..4 {
+                    for axis in 0..3 {
+                        same(axes[lane][axis], 168 + axis * 4 + lane, "axis of rotation");
+                    }
+                }
+            }
+            None => assert!(!uses_axis, "case {case}: axis channel not written"),
+        }
+        let native_nonfinite =
+            v[134..158].iter().any(nonfinite) || (uses_axis && v[168..180].iter().any(nonfinite));
+        let mut random = words(5);
+        match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
+            Ok(_) => {
+                assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
+                assert_eq!(random, words(61), "case {case}: stream after the group");
+                count.replayed += 1;
+            }
+            Err(Refused::NonfiniteOutput) => {
+                assert!(native_nonfinite, "case {case}: refused a finite native group");
+                assert_eq!(random, words(5), "case {case}: refusal consumed the stream");
+                count.output_refused += 1;
+            }
+            Err(other) => panic!("case {case}: unexpected refusal {other:?}"),
+        }
+    }
+    count
+}
+
+/// The Shape block of one native Donut (type 17) row: the torus radius, arc
+/// spread, radius mode and radius spread the row carries (the rows vary the
+/// last two on purpose; the kernel never reads them), the given arc mode and
+/// Store controls, and fixed non-zero values for the controls the row does
+/// not carry (cone angle and length, box thickness, radius and arc speed):
+/// the gates must not depend on any of them.
+#[cfg(test)]
+fn donut_row_source(
+    v: &[u32],
+    arc_mode: ShapeMode,
+    random_direction: f32,
+    spherical_direction: f32,
+    align_to_direction: bool,
+) -> ShapeParams {
+    use super::schema::ShapeControls;
+    use super::MinMaxCurve;
+    let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+    ShapeParams {
+        shape_type: "Donut".into(),
+        radius: f32::from_bits(v[1]),
+        radius_thickness: f32::from_bits(v[2]),
+        arc: f32::from_bits(v[3]),
+        rotation: floats(77),
+        position: floats(83),
+        controls: ShapeControls {
+            source_version: Some(1),
+            angle: Some(25.0),
+            length: Some(5.0),
+            donut_radius: Some(f32::from_bits(v[158])),
+            scale: Some(floats(80)),
+            box_thickness: Some([0.5; 3]),
+            arc_mode: Some(arc_mode),
+            arc_spread: Some(f32::from_bits(v[159])),
+            arc_speed: Some(MinMaxCurve::Constant(1.5)),
+            radius_mode: Some(replay_mode(v[160])),
+            radius_spread: Some(f32::from_bits(v[161])),
+            radius_speed: Some(MinMaxCurve::Constant(0.75)),
+            align_to_direction: Some(align_to_direction),
+            random_direction: Some(random_direction),
+            spherical_direction: Some(spherical_direction),
+            random_position: Some(f32::from_bits(v[4])),
+            texture: None,
+        },
+    }
+}
+
+#[cfg(test)]
+fn replay_mode(word: u32) -> ShapeMode {
+    match word {
+        0 => ShapeMode::Random,
+        1 => ShapeMode::Loop,
+        2 => ShapeMode::PingPong,
+        3 => ShapeMode::BurstSpread,
+        other => panic!("shape mode {other}"),
+    }
+}
+
+/// Diagnostic replay of native Donut groups, 162 words per row: the 158-word
+/// layout of `replay_native_rows` (emitter-state scale at 86..89), then the
+/// torus radius, arc spread, radius mode (0 Random, 1 Loop, 2 PingPong, 3
+/// BurstSpread) and radius spread. Arc mode Random, no direction
+/// perturbation, align off. Every row must be admitted and reproduced bit for
+/// bit, including the rows whose radius mode and spread vary. `#` lines are
+/// comments. Expected native channels never feed the law.
+#[cfg(test)]
+pub fn replay_donut_rows(text: &str) -> usize {
+    let mut groups = 0;
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 162, "case {case} row width");
+        assert_eq!(v[0], 17, "case {case}: Donut rows only");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let law = ShapeBirthLaw::from_params(&donut_row_source(&v, ShapeMode::Random, 0.0, 0.0, false))
+            .unwrap_or_else(|refused| panic!("case {case}: gate refused {refused:?}"));
+        let world = v[89] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
+        let mut random = words(5);
+        let group = law
+            .sample_group(&mut random, owner, world, floats(86), false)
+            .unwrap_or_else(|refused| panic!("case {case}: refused {refused:?}"));
+        assert_eq!(group.before_rng, words(5));
+        assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(61), "case {case} after Store RNG");
+        assert_eq!(random, group.after_rng);
+        for i in 0..16 {
+            assert_eq!(group.source_affine[i].to_bits(), v[106 + i], "case {case} source affine {i}");
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[122 + i], "case {case} outer rotation {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                assert_eq!(group.raw_position[lane][axis].to_bits(), v[21 + at], "case {case} local position {lane}/{axis}");
+                assert_eq!(group.raw_direction[lane][axis].to_bits(), v[33 + at], "case {case} local direction {lane}/{axis}");
+                assert_eq!(group.samples[lane].position[axis].to_bits(), v[134 + at], "case {case} stored position {lane}/{axis}");
+                assert_eq!(group.samples[lane].direction[axis].to_bits(), v[146 + at], "case {case} stored direction {lane}/{axis}");
+            }
+        }
+        groups += 1;
+    }
+    groups
+}
+
+/// Diagnostic replay of native Donut edge groups, 182 words per row: the
+/// 162-word layout above, then the arc mode, random direction, spherical
+/// direction and align words, the axis-of-rotation flag, the twelve axis
+/// words (axis*4 + lane, zero without the flag), the template path the
+/// native call took (0 the plain arc, 1 the stepped arc) and the native
+/// kernel and Store draw counts. The gates must refuse exactly the rows
+/// outside the executed envelope (another arc mode, a random or spherical
+/// direction, align to direction) and admit every other row; the stepped
+/// arc must be the native path exactly where the arc in radians times the
+/// spread compares above zero. Every channel of every admitted row is
+/// compared: equal bits, or NaN where native wrote NaN (a NaN payload is not
+/// part of the contract, since a non-finite output is refused). The output
+/// refusal must fall exactly on the rows whose native Store output or
+/// written axis is non-finite, and must leave the stream untouched.
+#[cfg(test)]
+pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
+    let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
+    let mut count = ReplayCount::default();
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v: Vec<u32> = line
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 182, "case {case} row width");
+        assert_eq!(v[0], 17, "case {case}: Donut rows only");
+        let floats = |at: usize| std::array::from_fn::<_, 3, _>(|a| f32::from_bits(v[at + a]));
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let same = |actual: f32, at: usize, what: &str| {
+            let native = v[at];
+            assert!(
+                actual.to_bits() == native || (actual.is_nan() && f32::from_bits(native).is_nan()),
+                "case {case} {what}: law {:#010x} native {native:#010x}",
+                actual.to_bits()
+            );
+        };
+        // The native draw census is self-consistent with the recorded streams.
+        let mut stepped = words(5);
+        for _ in 0..v[180] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(45), "case {case} kernel draws");
+        for _ in 0..v[181] {
+            stepped.next4_u32();
+        }
+        assert_eq!(stepped, words(61), "case {case} Store draws");
+        let (random_direction, spherical_direction) = (f32::from_bits(v[163]), f32::from_bits(v[164]));
+        let outside =
+            v[162] != 0 || random_direction != 0.0 || spherical_direction != 0.0 || v[165] != 0;
+        let source = donut_row_source(
+            &v,
+            replay_mode(v[162]),
+            random_direction,
+            spherical_direction,
+            v[165] != 0,
+        );
+        let law = match ShapeBirthLaw::from_params(&source) {
+            Ok(law) => law,
+            Err(refused) => {
+                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
+                assert!(outside, "case {case}: refused a row inside the executed envelope");
+                count.gate_refused += 1;
+                continue;
+            }
+        };
+        assert!(!outside, "case {case}: admitted a row outside the executed envelope");
+        let step = (f32::from_bits(v[3]) * f32::from_bits(0x3c8e_fa35)) * f32::from_bits(v[159]);
+        assert_eq!(v[179] == 1, step > 0.0, "case {case}: stepped arc path");
+        let world = v[89] == 1;
+        let uses_axis = v[166] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
+        let group = law
+            .evaluate_group(words(5), owner, world, floats(86), uses_axis)
+            .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
+        assert_eq!(group.before_rng, words(5));
+        assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
+        assert_eq!(group.after_rng, words(61), "case {case} after Store RNG");
+        for i in 0..16 {
+            same(group.source_affine[i], 106 + i, "source affine");
+        }
+        let outer = if world { owner } else { IDENTITY };
+        for i in 0..12 {
+            assert_eq!(outer[i].to_bits(), v[122 + i], "case {case} outer rotation {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                same(group.raw_position[lane][axis], 21 + at, "local position");
+                same(group.raw_direction[lane][axis], 33 + at, "local direction");
+                same(group.samples[lane].position[axis], 134 + at, "stored position");
+                same(group.samples[lane].direction[axis], 146 + at, "stored direction");
+            }
+        }
+        match group.axis_of_rotation {
+            Some(axes) => {
+                assert!(uses_axis, "case {case}: axis channel written without the flag");
+                for lane in 0..4 {
+                    for axis in 0..3 {
+                        same(axes[lane][axis], 167 + axis * 4 + lane, "axis of rotation");
+                    }
+                }
+            }
+            None => assert!(!uses_axis, "case {case}: axis channel not written"),
+        }
+        let native_nonfinite =
+            v[134..158].iter().any(nonfinite) || (uses_axis && v[167..179].iter().any(nonfinite));
+        let mut random = words(5);
+        match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
+            Ok(_) => {
+                assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
+                assert_eq!(random, words(61), "case {case}: stream after the group");
+                count.replayed += 1;
+            }
+            Err(Refused::NonfiniteOutput) => {
+                assert!(native_nonfinite, "case {case}: refused a finite native group");
+                assert_eq!(random, words(5), "case {case}: refusal consumed the stream");
+                count.output_refused += 1;
+            }
+            Err(other) => panic!("case {case}: unexpected refusal {other:?}"),
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::schema::ShapeControls;
@@ -438,10 +1634,138 @@ mod tests {
         owner[5] = f32::MAX;
         owner[10] = f32::MAX;
         assert_eq!(
-            law.sample_group(&mut random, owner, true).unwrap_err(),
+            law.sample_group(&mut random, owner, true, [1.0; 3], false)
+                .unwrap_err(),
             Refused::NonfiniteOutput
         );
         assert_eq!(random, before);
+    }
+    fn rows(variable: &str) -> String {
+        let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} names the native row file"));
+        std::fs::read_to_string(path).unwrap()
+    }
+    /// Every native Hemisphere group of the item receipt that the 158-word
+    /// layout can express (unit emitter-state scale, zero arc spread),
+    /// including all corpus configurations.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_HEMISPHERE_ROWS to the current native Hemisphere rows, 158-word layout"]
+    fn current_hemisphere_item_rows_bit_exact() {
+        assert_eq!(super::replay_native_rows(&rows("MOLY_SHAPE_HEMISPHERE_ROWS")), 1087);
+    }
+    /// Every native group of the item receipt: any emitter-state scale, the
+    /// quantized arc, both shells, position jitter and the axis channel.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_HEMISPHERE_ROWS_V2 to the current native Hemisphere rows, 174-word layout"]
+    fn current_hemisphere_widened_rows_bit_exact() {
+        let count = super::replay_native_rows_v2(&rows("MOLY_SHAPE_HEMISPHERE_ROWS_V2"));
+        println!("{count:?}");
+        assert_eq!(
+            count,
+            super::ReplayCount {
+                replayed: 1989,
+                gate_refused: 0,
+                output_refused: 0
+            }
+        );
+    }
+    /// Independent native edge executions and finite inputs whose f32
+    /// intermediates overflow or underflow: every row either reproduces the
+    /// native bits or, exactly where native writes a non-finite value, is
+    /// refused as a typed non-finite output without consuming the stream.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_HEMISPHERE_ROWS_V3 to the current native Hemisphere edge rows, 174-word layout"]
+    fn current_hemisphere_edge_rows_bit_exact_or_refused() {
+        let text = rows("MOLY_SHAPE_HEMISPHERE_ROWS_V3");
+        let total = text.lines().filter(|l| !l.trim().is_empty()).count();
+        let count = super::replay_native_rows_v2(&text);
+        println!("{count:?} of {total}");
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert!(count.replayed > 0 && count.output_refused > 0);
+    }
+    /// Every native ConeVolume group of the first recorded native run: all
+    /// corpus configurations and the randomized envelope, unit emitter-state
+    /// scale.
+    #[test]
+    #[ignore = "set MOLY_CONE_VOLUME_NATIVE_ROWS to the current native ConeVolume rows, 161-word layout"]
+    fn current_cone_volume_store_all_padded_lanes_bit_exact() {
+        assert_eq!(super::replay_cone_volume_rows(&rows("MOLY_CONE_VOLUME_NATIVE_ROWS")), 401);
+    }
+    /// Independent native ConeVolume executions over the widened gates: any
+    /// emitter-state scale, position jitter, the axis channel, and finite
+    /// inputs whose f32 intermediates overflow, underflow or turn invalid.
+    #[test]
+    #[ignore = "set MOLY_CONE_VOLUME_NATIVE_ROWS_V2 to the current native ConeVolume edge rows, 177-word layout"]
+    fn current_cone_volume_edge_rows_bit_exact_or_refused() {
+        let text = rows("MOLY_CONE_VOLUME_NATIVE_ROWS_V2");
+        let total = text
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .count();
+        let count = super::replay_cone_volume_rows_v2(&text);
+        println!("{count:?} of {total}");
+        assert_eq!(count.gate_refused, 0);
+        assert_eq!(count.replayed + count.output_refused, total);
+        assert!(count.replayed > 0 && count.output_refused > 0);
+    }
+    /// Every native SingleSidedEdge and Circle group of the first recorded
+    /// native run: every corpus configuration of the two Random kernels, the
+    /// controls the kernels do not read, the edge's radius-spread path,
+    /// degenerate authored scales and the randomized envelope, unit
+    /// emitter-state scale.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_EDGE_CIRCLE_NATIVE_ROWS to the current native SingleSidedEdge and Circle rows, 167-word layout"]
+    fn current_edge_and_circle_store_all_padded_lanes_bit_exact() {
+        assert_eq!(super::replay_edge_circle_rows(&rows("MOLY_SHAPE_EDGE_CIRCLE_NATIVE_ROWS")), 1004);
+    }
+    /// Independent native SingleSidedEdge and Circle executions over the
+    /// widened gates: any emitter-state scale, position jitter, the axis
+    /// channel, the gate boundaries, and finite inputs whose f32
+    /// intermediates overflow, underflow or turn invalid.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_EDGE_CIRCLE_NATIVE_ROWS_V2 to the current native SingleSidedEdge and Circle edge rows, 181-word layout"]
+    fn current_edge_and_circle_edge_rows_bit_exact_or_refused() {
+        let text = rows("MOLY_SHAPE_EDGE_CIRCLE_NATIVE_ROWS_V2");
+        let total = text
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .count();
+        let count = super::replay_edge_circle_rows_v2(&text);
+        println!("{count:?} of {total}");
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert!(count.replayed > 0 && count.gate_refused > 0 && count.output_refused > 0);
+    }
+    /// Every native Donut group of the first recorded native run inside its
+    /// envelope file: every corpus configuration (each member re-run, World
+    /// owners), the radius modes and spreads the kernel does not read, and
+    /// the randomized envelope, unit emitter-state scale and zero arc spread.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_DONUT_NATIVE_ROWS to the current native Donut rows, 162-word layout"]
+    fn current_source_donut_store_all_padded_lanes_bit_exact() {
+        assert_eq!(super::replay_donut_rows(&rows("MOLY_SHAPE_DONUT_NATIVE_ROWS")), 1206);
+    }
+    /// Every native Donut group of that run: adds its non-unit emitter-state
+    /// scales and its stepped-arc groups.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_DONUT_NATIVE_ROWS_EXTENDED to every current native Donut row of that run, 162-word layout"]
+    fn current_source_donut_extended_rows_bit_exact() {
+        assert_eq!(super::replay_donut_rows(&rows("MOLY_SHAPE_DONUT_NATIVE_ROWS_EXTENDED")), 1414);
+    }
+    /// Independent native Donut executions over the widened gates: any
+    /// emitter-state scale, position jitter, the axis channel, the stepped
+    /// arc and its boundaries, the gate boundaries, and finite inputs whose
+    /// f32 intermediates overflow, underflow or turn invalid.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_DONUT_NATIVE_ROWS_V2 to the current native Donut edge rows, 182-word layout"]
+    fn current_donut_edge_rows_bit_exact_or_refused() {
+        let text = rows("MOLY_SHAPE_DONUT_NATIVE_ROWS_V2");
+        let total = text
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .count();
+        let count = super::replay_donut_rows_v2(&text);
+        println!("{count:?} of {total}");
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert!(count.replayed > 0 && count.gate_refused > 0 && count.output_refused > 0);
     }
     #[test]
     #[ignore = "set MOLY_SHAPE_BIRTH_NATIVE_ROWS to native rows exported by verify-shape-geometry-exact.py"]

@@ -20,11 +20,15 @@ impl Alignment {
 
 /// Authored MainModule scaling affects particle geometry, independently of
 /// simulation-space ownership. Local uses this emitter node, not its ancestors.
+/// `unit_chain` records whether the emitter node and every ancestor carry
+/// scale exactly one: native Local scaling builds the world owner matrix from
+/// hierarchy rotation and translation only, so the composed affine owner is
+/// that matrix only over such a chain.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Scaling { Hierarchy, Local(Vec3) }
+pub(crate) enum Scaling { Hierarchy, Local { scale: Vec3, unit_chain: bool } }
 impl Scaling {
     pub(crate) fn apply(self, mut frame: Frame) -> Frame {
-        if let Self::Local(scale) = self { frame.scale = scale; }
+        if let Self::Local { scale, .. } = self { frame.scale = scale; }
         frame
     }
 }

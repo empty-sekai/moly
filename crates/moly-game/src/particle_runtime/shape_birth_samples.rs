@@ -29,6 +29,10 @@ fn source_runtime(source: &Value, old: usize, simulation: Option<SimulationSpace
     let mut runtime=test_support::runtime();
     let mut side=runtime.side[0]; side.seed=0; side.total_velocity=[0.0;3];
     runtime.emitter=emitter; runtime.kind=EffectKind::Site;
+    // The probe writes the owner matrix straight into the emitter state and
+    // leaves the axis-of-rotation channel off: the full composed matrix that
+    // Hierarchy scaling stores, on a non-Mesh renderer.
+    runtime.geometry=test_support::source_billboard(crate::particle_geometry::Scaling::Hierarchy);
     if let Some(owner)=owner {
         let source: [f32;16]=std::array::from_fn(|i|number(&owner[i]));
         let reflected=std::array::from_fn(|i|if (i%4==0)^(i/4==0) {-source[i]} else {source[i]});

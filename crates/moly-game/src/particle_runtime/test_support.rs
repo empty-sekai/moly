@@ -4,6 +4,17 @@ use crate::billboard::{Alignment, SizeClamp};
 use moly_law::particle::schema::{StartParams, EmissionParams};
 use moly_law::particle::{MinMaxCurve, MinMaxGradient, RingBufferMode};
 
+/// Source-billboard geometry with an authored MainModule scaling mode, for
+/// receipts that drive the native Shape boundary. Only `scaling` and the
+/// non-Mesh render mode are read by the birth path; the draw fields are inert.
+pub(crate) fn source_billboard(scaling: crate::particle_geometry::Scaling) -> crate::particle_runtime::Geometry {
+    crate::particle_runtime::Geometry::SourceBillboard(crate::source_billboard::Draw {
+        mode: crate::source_billboard::Mode::Billboard,
+        alignment: crate::particle_geometry::Alignment::View,
+        pivot: Vec3::ZERO, screen_size: Vec2::new(0.0, 1.0), allow_roll: true, scaling,
+    })
+}
+
 pub(crate) fn runtime() -> Runtime {
     let zero = MinMaxCurve::Constant(0.0);
     let one = MinMaxCurve::Constant(1.0);
