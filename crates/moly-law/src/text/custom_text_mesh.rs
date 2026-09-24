@@ -27,51 +27,131 @@ pub fn set_text(value: &str, break_space: bool) -> String {
 }
 
 /// `CustomTextMesh.UpdateWordingText`'s `String.Format(wording, args)`:
-/// .NET composite formatting, for the format items the game's wordings use.
-/// `{{` and `}}` are literal braces; `{n}` (an index, optionally followed by
-/// spaces) is replaced by `args[n]`. An alignment or format string after the
-/// index is not ported and is refused, as are an index past the arguments and
-/// a lone brace (both a `FormatException` in the engine).
+/// .NET composite formatting. `{{` and `}}` are literal braces; a format item
+/// is `{index[,alignment]}`: the index (digits, read while it stays below
+/// 1000000), optional spaces, then optionally a comma, optional spaces, an
+/// optional minus and the alignment width (digits, read while it stays below
+/// 1000000) and optional spaces, then the closing brace. The argument's text
+/// is padded with spaces to the width (UTF-16 units), on the left, or on the
+/// right with the minus. An index past the arguments, a lone brace or any
+/// other character where the item expects one is a `FormatException` in the
+/// engine and is refused here.
+///
+/// A `:format` part is not ported and is refused by name: the engine formats
+/// the boxed argument with its own type's formatter under the current culture
+/// (the wordings that use one pass numbers and dates), which these text
+/// arguments do not carry.
 pub fn format_wording(format: &str, args: &[String]) -> Result<String, String> {
+    const LIMIT: usize = 1_000_000;
+    let chars: Vec<char> = format.chars().collect();
+    let len = chars.len();
+    let error = |what: &str| Err(format!("wording format {format:?}: {what}"));
     let mut out = String::with_capacity(format.len());
-    let mut chars = format.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '{' if chars.peek() == Some(&'{') => {
-                chars.next();
-                out.push('{');
-            }
-            '}' if chars.peek() == Some(&'}') => {
-                chars.next();
-                out.push('}');
-            }
-            '}' => return Err(format!("wording format {format:?}: a lone closing brace")),
-            '{' => {
-                let mut index = String::new();
-                while let Some(digit) = chars.peek().copied().filter(char::is_ascii_digit) {
-                    index.push(digit);
-                    chars.next();
+    let mut pos = 0;
+    loop {
+        while pos < len {
+            let ch = chars[pos];
+            pos += 1;
+            if ch == '}' {
+                if pos < len && chars[pos] == '}' {
+                    pos += 1;
+                } else {
+                    return error("a lone closing brace");
                 }
-                while chars.peek() == Some(&' ') {
-                    chars.next();
-                }
-                if index.is_empty() || chars.next() != Some('}') {
-                    return Err(format!(
-                        "wording format {format:?}: only index format items are ported"
-                    ));
-                }
-                let index: usize = index
-                    .parse()
-                    .map_err(|_| format!("wording format {format:?}: index {index} out of range"))?;
-                let value = args.get(index).ok_or_else(|| {
-                    format!("wording format {format:?}: index {index} with {} arguments", args.len())
-                })?;
-                out.push_str(value);
             }
-            _ => out.push(ch),
+            if ch == '{' {
+                if pos < len && chars[pos] == '{' {
+                    pos += 1;
+                } else {
+                    pos -= 1;
+                    break;
+                }
+            }
+            out.push(ch);
+        }
+        if pos == len {
+            return Ok(out);
+        }
+        // The item's opening brace.
+        pos += 1;
+        if pos == len || !chars[pos].is_ascii_digit() {
+            return error("a format item without an index");
+        }
+        let mut ch = chars[pos];
+        let mut index = 0usize;
+        loop {
+            index = index * 10 + (ch as usize - '0' as usize);
+            pos += 1;
+            if pos == len {
+                return error("an unterminated format item");
+            }
+            ch = chars[pos];
+            if !(ch.is_ascii_digit() && index < LIMIT) {
+                break;
+            }
+        }
+        if index >= args.len() {
+            return error(&format!("index {index} with {} arguments", args.len()));
+        }
+        while pos < len && chars[pos] == ' ' {
+            pos += 1;
+            ch = if pos < len { chars[pos] } else { ch };
+        }
+        let mut left_justify = false;
+        let mut width = 0usize;
+        if ch == ',' {
+            pos += 1;
+            while pos < len && chars[pos] == ' ' {
+                pos += 1;
+            }
+            if pos == len {
+                return error("an unterminated alignment");
+            }
+            ch = chars[pos];
+            if ch == '-' {
+                left_justify = true;
+                pos += 1;
+                if pos == len {
+                    return error("an unterminated alignment");
+                }
+                ch = chars[pos];
+            }
+            if !ch.is_ascii_digit() {
+                return error("an alignment without digits");
+            }
+            loop {
+                width = width * 10 + (ch as usize - '0' as usize);
+                pos += 1;
+                if pos == len {
+                    return error("an unterminated alignment");
+                }
+                ch = chars[pos];
+                if !(ch.is_ascii_digit() && width < LIMIT) {
+                    break;
+                }
+            }
+        }
+        while pos < len && chars[pos] == ' ' {
+            pos += 1;
+            ch = if pos < len { chars[pos] } else { ch };
+        }
+        if ch == ':' {
+            return error("a format string part (formatting the argument by its type) is not ported");
+        }
+        if ch != '}' {
+            return error("an unexpected character in a format item");
+        }
+        pos += 1;
+        let text = &args[index];
+        let pad = width.saturating_sub(text.encode_utf16().count());
+        if !left_justify {
+            out.extend(std::iter::repeat_n(' ', pad));
+        }
+        out.push_str(text);
+        if left_justify {
+            out.extend(std::iter::repeat_n(' ', pad));
         }
     }
-    Ok(out)
 }
 
 /// `CustomTextMesh.RECT_WIDTH_CHANGE_THRESHOLD`.
