@@ -10,12 +10,15 @@
 //! ParticleBloom reads the MysekaiEffect/fixture-MRT target, not scene color.
 //! Source pass state, scene-depth sharing and soft particles are handled by
 //! fixture_emission/weather_depth. Fog remains a per-material global consumer.
-//! Stock Bloom, SunFlare, runtime LUT grading, cloud/wind consumers and thunder
-//! timeline remain explicit implementation work until their source paths close.
+//! Stock Bloom, SunFlare and runtime LUT grading remain explicit implementation work.
+//! The cloud-shadow and wind globals have no reader among the Mysekai shaders (the
+//! source writes them for nothing), and the thunder timeline is evaluated below.
+//! Cross-fade colours go through the source colour blend (`moly_law::weather::color_lerp`).
 //! A render node or a nonempty target alone is not a pixel-equivalence claim.
 
 use bevy::asset::uuid::Uuid;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared, WeatherEnvironmentUpdate};
+use moly_law::weather::color_lerp::{color_lerp, PLAYER_COLOR_SPACE};
 use bevy::asset::{AssetPath, LoadState};
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
@@ -145,19 +148,20 @@ struct ResolvedPhenomenon {
     /// 站点覆写变体：真源对 config 与 postprocess 两件是**逐资产**的两级
     /// 查找——站点自己的环境包里 `ExistsAsset` 命中就整件用站点的，否则
     /// 用现象全局包的（两侧独立回退，不是成对门）。提取产物把带覆写的
-    /// 站点列在清单 `overrides` 对象里（键 = 站点类型名；语料里只有
-    /// first_floor 带，成对的 config+postprocess，14/15 档；无覆写的档
-    /// ——如 999——此项为空，站内站外都用全局解）。渐变条覆写包不携带，
-    /// 变体与全局共享同一份。运行时按 `SiteActive.site_type` 取用；切站
-    /// 是整档 profile 即时换（真源 `RefreshPostProcess` 直写
-    /// `Volume.sharedProfile`，CrossFade 机制只淡天空与特效，不淡后处理
-    /// 参数）。
+    /// 站点列在清单 `overrides` 对象里，键是**环境站名**（主表
+    /// `assetbundleName`）：first_floor 带覆写的有 17 档，016 另带
+    /// flowergarden；999 没有覆写，站内站外都用全局解。渐变条覆写包不携带，
+    /// 变体与全局共享同一份。运行时按 `SiteActive.env_site` 取用（见
+    /// [`effective`]）。切站不是即时换：换站的交叉淡化按移动态取时长
+    /// （炮台 0.5 秒、门与楼层间 0 秒，见 `weather_transition::EnvironmentMove`），
+    /// 后处理 profile 在淡化结束那一帧整份替换（真源 `RefreshPostProcess`
+    /// 直写 `Volume.sharedProfile`，不插值）。
     sites: Vec<(String, Box<ResolvedPhenomenon>)>,
 }
 
 impl ResolvedPhenomenon {
     fn selection(&self, site: &SiteActive, site_generation: u64) -> EnvironmentSelection {
-        EnvironmentSelection { name:self.name.clone(), site_id:site.site_id, environment_site:site.env_site.clone(), site_generation, global_effect:GlobalEffectIdentity {
+        EnvironmentSelection { name:self.name.clone(), site_id:site.site_id, site_type:site.site_type.clone(), environment_site:site.env_site.clone(), site_generation, global_effect:GlobalEffectIdentity {
             phenomenon_id:self.id, renderer_type:self.renderer_type,
         }}
     }
@@ -220,8 +224,9 @@ const DEFAULT_PHENOMENON_ID: i32 = 1;
 /// 当前现象档的 id——问候链 tweet 门的比较对象：真源在选取时读「当前
 /// 现象 id」，与条件行的 value1 相等才放行（名字不进这条门）。与档名
 /// 同点写：装载落定取默认档 id，切档取目标档 id——真源在交叉淡化的
-/// 视觉等待**之前**就写当前现象 id，这里的写点同为淡化起点。wasm 分支
-/// 不装 `WeatherPlugin`，此资源常驻默认值（与档名的 wasm 故事一致）。
+/// 视觉等待**之前**就写当前现象 id，这里的写点同为淡化起点。在配送站
+/// 它是配送现象 id（ClientConfig 面板 IntConfigs 170），不是当日现象。
+/// 两个目标都装 `WeatherPlugin`，所以两边都走这个写点。
 #[derive(Resource)]
 pub struct CurrentPhenomenonId(pub i32);
 
@@ -341,27 +346,22 @@ struct Blended {
     post: WeatherPostParams,
 }
 
-fn lerpf(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
 /// 开关门折成 0/1 权重（产品链的混合对 active 标志就是这么做的）。
 fn gate(on: bool) -> f32 {
     if on { 1.0 } else { 0.0 }
 }
 
-fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    [
-        lerpf(a[0], b[0], t),
-        lerpf(a[1], b[1], t),
-        lerpf(a[2], b[2], t),
-        lerpf(a[3], b[3], t),
-    ]
+/// `BlendExtension.BlendWith(Color)` as `EnvironmentShaderView.OnUpdate` calls it for the
+/// light colours: `MysekaiColorUtility.Lerp` on the player's colour space (Gamma: the
+/// blend runs in linear space and converts back). In steady state the source blends the
+/// current config with itself, so even an unchanged colour takes that round trip.
+fn blend_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    color_lerp(PLAYER_COLOR_SPACE, a, b, t)
 }
 
-/// 两档按进度混合：光九项线性（光向球面插值）、雾九参线性后折叠（门折成
-/// 权重缩总密度）、扩散/耀斑数值线性（枚举档按目标取值，门折成权重缩强度）。
-/// t=1 时精确等于 b 档单独生效。
+/// 两档按进度混合：光色走真源颜色混合（[`blend_color`]），光向球面插值；
+/// 雾、扩散、耀斑、泛光、调色取已提交的那一档（`WeatherTransition::committed`，
+/// 淡化结束那一帧整份替换），不插值。
 /// EnvironmentShaderView blends the light/config. Volume.sharedProfile,
 /// sky-bottom color and emission type are committed only after that transition.
 /// They are not interpolated, even when their stored values are numeric.
@@ -377,9 +377,9 @@ fn blend_at_site(a: &ResolvedPhenomenon, b: &ResolvedPhenomenon, p: &ResolvedPhe
     Blended {
         sky_bottom_color: p.sky_bottom_color,
         light_dir: light::slerp_direction(direction_a, direction_b, t),
-        light_color: lerp4(a.light_color, b.light_color, t),
-        shade_color: lerp4(a.shade_color, b.shade_color, t),
-        drop_shadow: lerp4(a.drop_shadow, b.drop_shadow, t),
+        light_color: blend_color(a.light_color, b.light_color, t),
+        shade_color: blend_color(a.shade_color, b.shade_color, t),
+        drop_shadow: blend_color(a.drop_shadow, b.drop_shadow, t),
         fog: fog.globals(false),
         post: WeatherPostParams {
             diff_on: p.diff_on,
@@ -780,10 +780,9 @@ fn resolve_phenomenon(
     }
 }
 
-/// 一档在指定站点的生效解：站点覆写表里列了该站就取覆写变体，否则取
-/// 全局解（真源逐资产两级查找的取用侧）。切站即时换——覆写变体是整档
-/// 解好的值，取用本身没有过渡（真源 `RefreshPostProcess` 直写
-/// `sharedProfile`）。
+/// 一档在指定环境站的生效解：站点覆写表里列了该站就取覆写变体，否则取
+/// 全局解（真源逐资产两级查找的取用侧）。取用本身没有过渡；过渡在
+/// [`write_environment`] 里按淡化进度与提交点发生。
 fn effective<'a>(r: &'a ResolvedPhenomenon, site: &str) -> &'a ResolvedPhenomenon {
     r.sites
         .iter()
@@ -800,13 +799,23 @@ fn advance(
     mut run: ResMut<WeatherRun>,
     site: Option<Res<SiteActive>>,
     prepared: Option<Res<WeatherFxPrepared>>,
+    configs: Option<Res<crate::client_config::ClientConfigs>>,
     mut phase: ResMut<WeatherTransition>,
     mut current: ResMut<CurrentPhenomenon>,
     mut current_id: ResMut<CurrentPhenomenonId>,
 ) {
     if run.phenomena.is_empty() { return; }
     let Some(site) = site.as_deref() else { return; };
-    let to = run.queued.unwrap_or(run.current);
+    // The selected (today's) phenomenon. The delivery site overrides it without
+    // replacing it: leaving the site returns to the selection.
+    let selected = run.queued.unwrap_or(run.current);
+    let to = if site.category == DELIVERY_SITE_CATEGORY {
+        // The panel decides the delivery phenomenon; until it is parsed nothing is requested.
+        let Some(configs) = configs.as_deref() else { return; };
+        delivery_phenomenon(&run.phenomena, configs)
+    } else {
+        selected
+    };
     let destination = effective(&run.phenomena[to], &site.env_site).selection(site, phase.site_generation);
     phase.request(destination.clone());
     // SiteEnvironmentManager writes its public ID before awaiting the view loader.
@@ -815,8 +824,34 @@ fn advance(
     current_id.0 = destination.global_effect.phenomenon_id;
     let ramp_ready = server.load_state(&run.phenomena[to].ramp).is_loaded();
     let started = ramp_ready && prepared.as_deref().is_some_and(|ready| phase.start_prepared(ready));
-    if started { run.current = to; run.queued = None; }
+    if started {
+        run.current = selected;
+        run.queued = None;
+        if let (Some(from), Some(movement)) = (phase.source.as_ref(), phase.movement) {
+            info!("[weather] cross-fade {}@{} -> {}@{}: {movement:?}, {}s",
+                from.name, from.site_type, destination.name, destination.site_type, phase.fade_seconds);
+        }
+    }
     if !started { phase.advance(time.delta_secs()); }
+}
+
+/// Master `mysekaiSites.category` of the delivery site (festival garden).
+const DELIVERY_SITE_CATEGORY: &str = "delivery";
+
+/// `MysekaiUtility.PublishMoveMapEvent` sends `ClientConfig.Mysekai.DeliveryPhenomenaId`
+/// as the next phenomenon when the next site's category is delivery, instead of the
+/// site environment's (today's) phenomenon; `SiteEnvironmentUtility.GetPhenomenaAssetBundleName`
+/// resolves that id to `DeliveryPhenomenaAssetBundleName` before any master lookup (the
+/// delivery phenomenon has no master row). Both values come from the client-config panel.
+fn delivery_phenomenon(phenomena: &[ResolvedPhenomenon], configs: &crate::client_config::ClientConfigs) -> usize {
+    use crate::client_config::{KEY_DELIVERY_PHENOMENA_ASSET_BUNDLE_NAME, KEY_DELIVERY_PHENOMENA_ID};
+    let id = configs.int(KEY_DELIVERY_PHENOMENA_ID);
+    let asset = configs.string(KEY_DELIVERY_PHENOMENA_ASSET_BUNDLE_NAME);
+    let index = phenomena.iter().position(|p| p.id == id)
+        .unwrap_or_else(|| panic!("delivery phenomenon id {id} (ClientConfig IntConfigs {KEY_DELIVERY_PHENOMENA_ID}) is not in the phenomenon index"));
+    let name = &phenomena[index].name;
+    assert!(name == asset, "delivery phenomenon id {id} is indexed as {name}, but ClientConfig StringConfigs {KEY_DELIVERY_PHENOMENA_ASSET_BUNDLE_NAME} names {asset}");
+    index
 }
 
 /// Environment audio changes only after the real global FX commit, not at request.
@@ -833,7 +868,12 @@ pub(crate) fn commit_environment(
 ) {
     if let Some(effects) = effects.as_deref() {
         if phase.commit(effects) {
-            committed_name.0 = phase.committed.as_ref().unwrap().name.clone();
+            let selection = phase.committed.as_ref().unwrap();
+            committed_name.0 = selection.name.clone();
+            // The source commits the post profile, shader data and global effects here,
+            // on the frame its fade loop exits.
+            info!("[weather] committed {}@{} (request {}, fade {:?} {}s)", selection.name, selection.site_type,
+                effects.0, phase.movement, phase.fade_seconds);
         }
     }
 }
@@ -900,7 +940,17 @@ fn write_environment(
         effective(row, &selection.environment_site)
     };
     let (a,b,p) = (resolve(previous),resolve(next),resolve(profile));
-    let blended = blend_at_site(a,b,p,phase.progress,previous.environment_site=="home",next.environment_site=="home");
+    // EnvironmentShaderView.OnUpdate blends the light colours of its current and next
+    // config at the fade progress. When the fade loop exits, CrossFadeCore's
+    // RefreshShaderView -> SetEnvironmentData clears the next config and writes progress
+    // 0 in the same continuation, so from then on OnUpdate blends the destination with
+    // itself at weight 0 (after a cancel, `request` has already made source == loaded).
+    let (light_from, light_weight, light_from_home) = if phase.running {
+        (a, phase.progress, previous.environment_site == "home")
+    } else {
+        (b, 0.0, next.environment_site == "home")
+    };
+    let blended = blend_at_site(light_from,b,p,light_weight,light_from_home,next.environment_site=="home");
     // Every bridge below is written through change detection only on a frame
     // where one of its bits changes. Render-world extraction, the GPU upload and
     // the sky material re-prepare all key on that flag, so a steady environment
@@ -917,16 +967,16 @@ fn write_environment(
     let add = moly_law::weather::timeline::additive_light;
     site_changed |= store(&mut site.globals.phenomena_directional_light_color,
         safe(add(blended.light_color, values.light_color, values.light_intensity)));
-    let character_light = safe(add(lerp4(a.character_light_color, b.character_light_color, phase.progress),
+    let character_light = safe(add(blend_color(light_from.character_light_color, b.character_light_color, light_weight),
         values.light_color, values.light_intensity));
     if let Some(character) = character.as_mut() {
         let target = character.bypass_change_detection();
         let mut changed = store(&mut target.globals.light_vector, blended.light_dir.to_array());
         changed |= store(&mut target.globals.light_color, character_light);
         changed |= store(&mut target.globals.skin_shade_color,
-            safe(lerp4(a.character_skin_shade, b.character_skin_shade, phase.progress)));
+            safe(blend_color(light_from.character_skin_shade, b.character_skin_shade, light_weight)));
         changed |= store(&mut target.globals.body_shade_color,
-            safe(lerp4(a.character_body_shade, b.character_body_shade, phase.progress)));
+            safe(blend_color(light_from.character_body_shade, b.character_body_shade, light_weight)));
         changed |= store(&mut target.globals.fog_params, blended.fog.fog_params);
         changed |= store(&mut target.globals.fog_near_color, blended.fog.fog_near_color);
         changed |= store(&mut target.globals.fog_far_color, blended.fog.fog_far_color);

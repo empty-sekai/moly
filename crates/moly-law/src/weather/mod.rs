@@ -60,6 +60,8 @@
 
 mod json;
 
+pub mod color_lerp;
+
 pub mod light_pass;
 
 pub mod sky;

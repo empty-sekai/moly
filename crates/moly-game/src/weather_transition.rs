@@ -1,12 +1,94 @@
 //! The environment loader, visual fade and global FX commit have separate identities.
 //! A cancelled visual fade reaches its end value without committing its playable,
 //! post profile or global effects. A replacement waits for its own loaded assets.
+//!
+//! The fade duration belongs to the caller of `SiteEnvironmentManager.CrossFade`: a
+//! phenomenon change at the same site passes the home literal, a site move passes
+//! what its move state passes (see [`EnvironmentMove`]). `DoCrossFadeAsync` runs
+//! `while (time < fadeTime)`, so a zero duration skips the loop and writes the end
+//! progress at once; the profile, shader data and global effects then commit in the
+//! same continuation.
 use bevy::prelude::*;
 use serde::Serialize;
 
 /// HomeSiteController and SiteLayoutEditor explicitly pass this duration.
 /// EnvironmentCrossFieldParam's constructor default (1 second) is not this callsite.
 pub(crate) const HOME_ENVIRONMENT_FADE_SECONDS: f32 = 0.25;
+
+/// `MoveSiteUseCannonActionState.ChangeEnvironment` passes
+/// `MysekaiGraphicsConfig.SiteTransition.CrossFadeDuration`. The shipped graphics config
+/// (player-data resource `graphics/data/mysekaigraphicsconfig`, JP 6.8.1) serialises
+/// `_siteTransitionData._crossFadeDuration` as 0.5; the field initialiser's 0.25 is not
+/// the shipped value. The runtime root carries no graphics-config file, so the value is
+/// carried here like the other graphics-config constants.
+pub(crate) const CANNON_SITE_FADE_SECONDS: f32 = 0.5;
+
+/// The source site kinds `SiteMoveActionExecutor.GetActionState` switches on
+/// (`MysekaiSiteType`: home_site 0, the three floors 1..3, the four harvest sites 4..7,
+/// festival_garden 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SiteKind { Home, Room, Harvest, Delivery }
+
+impl SiteKind {
+    /// Master `siteType` names. A name outside the source enum is a data error.
+    pub(crate) fn of(site_type: &str) -> Self {
+        match site_type {
+            "home_site" => Self::Home,
+            "first_floor" | "second_floor" | "third_floor" => Self::Room,
+            "grassland" | "shore" | "flower_garden" | "memorial_place" => Self::Harvest,
+            "festival_garden" => Self::Delivery,
+            other => panic!("site type {other} is not a MysekaiSiteType the site-move dispatch knows"),
+        }
+    }
+}
+
+/// Which `CrossFade` caller changes the environment, and so which duration it passes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum EnvironmentMove {
+    /// Same site, another phenomenon (HomeSiteController / SiteLayoutEditor, 0.25 s).
+    Phenomenon,
+    /// `MoveSiteUseCannonActionState` (home, harvest and delivery sites among
+    /// themselves).
+    Cannon,
+    /// `HomeToMyRoomActionState` / `MyRoomToHomeActionState`: FadeAnimationDuration 0.
+    Door,
+    /// `MyRoomToMyRoomActionState` calls no CrossFade; the floors share one environment
+    /// site, so the product's rebuilt environment is taken at once.
+    RoomToRoom,
+    /// The product reloads the same site (a preview or a restored layout); the source
+    /// dispatch returns no move state for a site to itself, so nothing fades.
+    SameSite,
+    /// A direct switch between a room and a harvest or delivery site. The source
+    /// dispatch refuses it (it logs an error and returns no state); the product allows
+    /// it as a shortcut and takes the duration of the source route's last leg: into an
+    /// outdoor site that leg is the cannon, into a room it is the door.
+    ProductShortcut { last_leg_cannon: bool },
+}
+
+impl EnvironmentMove {
+    /// Classify a switch by the master `siteType` of the site left and the site entered.
+    pub(crate) fn between(from_type: &str, to_type: &str) -> Self {
+        use SiteKind::*;
+        if from_type == to_type { return Self::SameSite; }
+        match (SiteKind::of(from_type), SiteKind::of(to_type)) {
+            (Home, Home) => Self::SameSite,
+            (Home, Room) | (Room, Home) => Self::Door,
+            (Room, Room) => Self::RoomToRoom,
+            (Home | Harvest | Delivery, Home | Harvest | Delivery) => Self::Cannon,
+            (Room, Harvest | Delivery) => Self::ProductShortcut { last_leg_cannon: true },
+            (Harvest | Delivery, Room) => Self::ProductShortcut { last_leg_cannon: false },
+        }
+    }
+    pub(crate) fn fade_seconds(self) -> f32 {
+        match self {
+            Self::Phenomenon => HOME_ENVIRONMENT_FADE_SECONDS,
+            Self::Cannon | Self::ProductShortcut { last_leg_cannon: true } => CANNON_SITE_FADE_SECONDS,
+            Self::Door | Self::RoomToRoom | Self::SameSite | Self::ProductShortcut { last_leg_cannon: false } => 0.0,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +105,8 @@ pub(crate) struct EnvironmentSelection {
     pub name: String,
     pub global_effect: GlobalEffectIdentity,
     pub site_id: u32,
+    /// Master `siteType`: the site-move dispatch classifies moves by it.
+    pub site_type: String,
     pub environment_site: String,
     pub site_generation: u64,
 }
@@ -43,6 +127,10 @@ pub(crate) struct WeatherTransition {
     loaded_serial: Option<u64>,
     committed_serial: Option<u64>,
     elapsed: f32,
+    /// The duration the running fade was started with (0 ends it at its start).
+    pub fade_seconds: f32,
+    /// The CrossFade caller of the last started fade.
+    pub movement: Option<EnvironmentMove>,
 }
 
 /// Stable user-visible state; animation progress stays out of the snapshot so
@@ -106,7 +194,16 @@ impl WeatherTransition {
         self.source = self.loaded.clone();
         self.loaded = self.destination.clone();
         self.loaded_serial = Some(self.request_serial);
-        self.running = self.source.is_some();
+        // A site switch bumps the generation, so the frozen source then belongs to the
+        // site being left; the move between the two site kinds picks the duration.
+        self.movement = match (&self.source, &self.loaded) {
+            (Some(from), Some(to)) if from.site_generation != to.site_generation =>
+                Some(EnvironmentMove::between(&from.site_type, &to.site_type)),
+            (Some(_), Some(_)) => Some(EnvironmentMove::Phenomenon),
+            _ => None,
+        };
+        self.fade_seconds = self.movement.map_or(0.0, EnvironmentMove::fade_seconds);
+        self.running = self.source.is_some() && self.fade_seconds > 0.0;
         self.elapsed = 0.0;
         self.progress = if self.running { 0.0 } else { 1.0 };
         true
@@ -117,7 +214,7 @@ impl WeatherTransition {
         if !self.running { return; }
         // Use the supplied engine deltaTime; do not add a weather-only 50ms cap.
         self.elapsed += delta_seconds;
-        self.progress = (self.elapsed / HOME_ENVIRONMENT_FADE_SECONDS).clamp(0.0, 1.0);
+        self.progress = (self.elapsed / self.fade_seconds).clamp(0.0, 1.0);
         self.running = self.progress < 1.0;
     }
 
@@ -154,7 +251,7 @@ pub(crate) struct WeatherEnvironmentUpdate;
 mod tests {
     use super::*;
     fn selection(id:i32, site:&str, generation:u64) -> EnvironmentSelection {
-        EnvironmentSelection {name:format!("{id:03}"),global_effect:GlobalEffectIdentity {phenomenon_id:id,renderer_type:0},site_id:1,environment_site:site.into(),site_generation:generation}
+        EnvironmentSelection {name:format!("{id:03}"),global_effect:GlobalEffectIdentity {phenomenon_id:id,renderer_type:0},site_id:1,site_type:"home_site".into(),environment_site:site.into(),site_generation:generation}
     }
     fn prepare(phase:&WeatherTransition) -> WeatherFxPrepared {
         WeatherFxPrepared {selection:phase.destination.clone().unwrap(),request_serial:phase.request_serial}
