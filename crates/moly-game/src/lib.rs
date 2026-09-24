@@ -38,6 +38,7 @@ mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
 pub mod fixture_emission;
+mod fixture_clock;
 mod fixture_gimmick;
 pub mod fixture_material;
 mod fixture_player_navigation;
@@ -51,6 +52,7 @@ pub mod get_resource;
 mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
+mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
@@ -81,8 +83,10 @@ mod player_data_ui;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
+mod plain_background;
 mod render;
 mod room_appearance;
+mod room_shell;
 pub mod schedule;
 mod settings_store;
 pub mod shadowmap;
@@ -94,6 +98,8 @@ pub mod sitemap_phenomena;
 pub mod sky;
 mod source_curve;
 mod weather_animation;
+#[cfg(test)]
+mod weather_animation_replay;
 pub mod talk;
 pub mod talk_camera;
 mod talk_ingest;
@@ -106,6 +112,7 @@ mod voice_pcm;
 pub mod walk_face;
 pub mod weather;
 pub mod weather_fx;
+mod weather_stock_post;
 mod weather_depth;
 mod weather_transition;
 mod source_render_state;
@@ -179,6 +186,7 @@ pub fn app(
     schedule::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
+    plain_background::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);
     app.add_plugins(character_material::CharacterMaterialPlugin);
     app.add_plugins(shadowmap::ShadowmapPlugin);
@@ -192,6 +200,7 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
+        harvest_particles::HarvestParticlePlugin,
     ));
     app
 }

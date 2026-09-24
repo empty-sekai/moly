@@ -1,8 +1,10 @@
 //! Bounded JP 6.8.1 ParticleSystem prewarm plan. Source lifecycle admission remains separate.
-//! Evidence: current libunity SHA256 937c6d28...75badd9; prewarm-current.json
-//! (GetTimeStep 0xd80a9c, Update1Incremental 0xd8aa00). First Play runs
-//! ComputePrewarmStartParameters 0xd8316c, then BeginUpdate(dt=out) and
-//! Update1b 0xd7e108, which scales that dt by the simulation speed.
+//! Transcribed from the current JP 6.8.1 libunity: ParticleSystem::GetTimeStep
+//! and ParticleSystem::Update1Incremental; the native prewarm observations are
+//! replayed by opt-in tests that read them from outside the repository. First
+//! Play runs ParticleSystem::ComputePrewarmStartParameters, then
+//! BeginUpdate(dt=out) and ParticleSystem::Update1b, which scales that dt by
+//! the simulation speed.
 //! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
 //! constant/two-constant lifetime, looping prewarm and source flags=8 are qualified.
 
@@ -49,7 +51,8 @@ pub struct PrewarmPlan {
     /// ComputePrewarmStartParameters out value: the explicit dt Play hands to
     /// BeginUpdate. Update1b scales it by the simulation speed.
     compute_out: f32,
-    /// System clock (state +0x1b8) written by ComputePrewarmStartParameters:
+    /// System clock of the particle system state, written by
+    /// ComputePrewarmStartParameters:
     /// the warm window starts mid-cycle so that it ends on a cycle boundary.
     initial_clock: f32,
 }
@@ -64,7 +67,8 @@ pub struct FirstPlayWarm {
     /// Update1b `dt * max(simulationSpeed, 0)`: system seconds added to the
     /// remaining incremental time.
     pub total: f32,
-    /// System clock (state +0x1b8) written by Compute before any update.
+    /// System clock of the particle system state, written by Compute before
+    /// any update.
     pub initial_clock: f32,
 }
 
@@ -100,7 +104,7 @@ impl FirstPlayWarm {
         {
             return Err("unqualified TimeManager snapshot");
         }
-        // ComputePrewarmStartParameters 0xd831a8..0xd83228: the lifetime range
+        // ComputePrewarmStartParameters first takes the lifetime range's
         // upper lane. Constant mode stores (0, v) only for v > 0, else (v, 0);
         // two constants are ordered by one `max > min` compare (unordered keeps
         // the min field in the upper lane).
@@ -120,8 +124,8 @@ impl FirstPlayWarm {
                 }
             }
         };
-        // 0xd8323c..0xd83240: an upper lane of exactly +Infinity is replaced by
-        // the main-module duration before any warm arithmetic.
+        // Compute then replaces an upper lane of exactly +Infinity by the
+        // main-module duration before any warm arithmetic.
         let upper = if upper == f32::INFINITY {
             play.duration
         } else {
@@ -129,16 +133,16 @@ impl FirstPlayWarm {
         };
         // No real child: CalculateSubEmitterMaximumLifeTime is not consulted
         // (disabled module) or resolves no live child, so the sub maximum is 0
-        // and 0xd83284..0xd83288 keeps `upper` only when 0 < upper.
+        // and Compute's comparison with it keeps `upper` only when 0 < upper.
         let lifetime = if 0.0 < upper { upper } else { 0.0 };
-        // 0xd8328c..0xd832f0, prewarm set: out = (fmod(elapsed, fixed) + L) /
+        // With the prewarm flag set, Compute's out = (fmod(elapsed, fixed) + L) /
         // max(speed, 0.001); start = elapsed - L - fmod(elapsed, fixed).
         let phase = play.elapsed % time.fixed_timestep;
         let warm = phase + lifetime;
         let compute_out = warm / play.simulation_speed.max(f32::from_bits(0x3a83_126f));
         let mut start = (play.elapsed - lifetime) - phase;
         let magnitude = if start < 0.0 { -start } else { start };
-        // 0xd832fc..0xd8330c: a negative start is moved forward by whole
+        // Compute moves a negative start forward by whole
         // durations (fcvtps rounds toward +Infinity, then back to f32).
         if start < 0.0 {
             let cycles = ((-start) / play.duration).ceil() as i32 as f32;
@@ -146,13 +150,13 @@ impl FirstPlayWarm {
         }
         let end = magnitude + start;
         let initial_clock = start % play.duration;
-        // 0xd8332c..0xd8337c: both window ends must still advance by the fixed
+        // Compute's last test: both window ends must still advance by the fixed
         // step; otherwise Compute logs and Play performs no prewarm update.
         if !(time.fixed_timestep + start > start && time.fixed_timestep + end > end) {
             return Err("Compute prewarm window does not advance by the fixed step");
         }
         // Play passes out as the explicit dt of the update entry. Update1b
-        // 0xd7e24c..0xd7e268 scales it by max(simulationSpeed, 0) before
+        // scales it by max(simulationSpeed, 0) before
         // GetTimeStep and the remaining sum, on both routes.
         let total = compute_out * play.simulation_speed.max(0.0);
         if !(total.is_finite() && total > 0.0) {
@@ -180,7 +184,7 @@ impl PrewarmPlan {
         let warm = FirstPlayWarm::from_source(lifetime, time, play)?;
         let remaining = warm.total;
         // GetTimeStep nonfixed: total / ceil(total / maximum particle step),
-        // f32 at each ARM fdiv/frintp/fdiv (0xd80af4..0xd80afc).
+        // f32 at each of its ARM fdiv, frintp and fdiv.
         let ratio = remaining / time.maximum_particle_timestep;
         if !(ratio.is_finite() && ratio.ceil() <= 1_000_000.0) {
             return Err("prewarm slice budget outside bounded replay");
@@ -190,7 +194,7 @@ impl PrewarmPlan {
         } else {
             remaining
         };
-        // Update1b 0xd7e274..0xd7e288 skips the incremental update entirely
+        // Update1b skips the incremental update entirely
         // below this step.
         if !(base_step.is_finite() && base_step >= f32::from_bits(0x3727_c5ac)) {
             return Err("unqualified nonfixed timestep");
@@ -262,7 +266,7 @@ impl Iterator for PrewarmPlan {
         }
         let before = self.remaining;
         let mut step = before.min(self.base_step);
-        // Update1Incremental 0xd8ab00..0xd8ab48, flags bit 2 clear:
+        // Update1Incremental's slice choice, flags bit 2 clear:
         // the old selected slice is retained when it exceeds the 1/.2
         // threshold. Hence the observed seven 1s calls (including backlog
         // values 10..6), not merely two calls while remaining >10.

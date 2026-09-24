@@ -1,5 +1,5 @@
 //! Current JP 6.8.1 four-lane ShapeModule::Start -> EmitterStoreData boundary.
-//! Current libunity SHA 937c6d28...75badd9.
+//! Transcribed from the current JP 6.8.1 libunity.
 //! Hemisphere: the Random arc mode of StartHemiSphere over the envelope the
 //! native receipts execute: any finite radius, shape rotation, scale and
 //! position, arc of zero or more degrees, arc spread of zero or more, position
@@ -9,8 +9,8 @@
 //! position jitter. SingleSidedEdge: the Random radius mode of
 //! StartSingleSidedEdge (one draw, the radius-spread quantization included)
 //! over any finite radius and radius spread. Circle: the Random arc mode of
-//! StartCircle on its plain kernel (the arc-spread branch stays refused) over
-//! any finite radius, thickness and arc. Donut: the Random arc mode of
+//! StartCircle, plain and stepped arc, over any finite radius, thickness, arc
+//! and arc spread. Donut: the Random arc mode of
 //! StartDonut, plain and stepped arc, over any finite radius, torus radius,
 //! thickness, arc and arc spread. These three over any finite shape rotation,
 //! scale, position and position jitter.
@@ -28,14 +28,24 @@ use super::shape::{native_rsqrt, Shell};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
     UnsupportedSourceShape,
-    /// The exported shape controls block is missing or of another schema
-    /// version. This is an export check: ShapeModule has no such member.
-    ExportSchema,
+    /// The export cannot say what the kernels read. This is an export
+    /// check: ShapeModule has no such member.
+    ExportSchema(ExportGap),
     NonfiniteOwner,
     NonfiniteOutput,
     /// ShapeModule references a texture. The samplers read so far then call
     /// ApplyTexture for each birth group, which is not transcribed.
     ShapeTexture,
+}
+
+/// What an export lacks for the Shape law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportGap {
+    /// The shape controls block is missing or of another schema version.
+    ControlsVersion,
+    /// The shape block has no texture field (an export older than that
+    /// field), so whether ShapeModule references a texture is undecided.
+    Texture,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,7 +72,7 @@ pub struct ShapeBirthGroup {
 #[derive(Clone, Copy, Debug)]
 enum Kernel {
     Hemisphere { shell: Shell, arc_spread: f32 },
-    Circle { thickness: f32 },
+    Circle { thickness: f32, arc_spread: f32 },
     ConeVolume { thickness: f32, angle: f32, length: f32, arc_spread: f32 },
     SingleSidedEdge { spread: f32 },
     Donut { thickness: f32, donut_radius: f32, arc_spread: f32 },
@@ -82,13 +92,16 @@ pub struct ShapeBirthLaw {
 }
 
 impl ShapeBirthLaw {
-    /// A referenced texture is refused for every kernel. An export without the
-    /// texture field is the product admission's refusal (it names the
-    /// missing input before any birth path is chosen); replays of exports
-    /// that predate the field reach this law without it.
+    /// Only the null texture reference is admitted, for every kernel: a
+    /// referenced texture is refused, and so is an export without the
+    /// texture field, since it cannot say which of the two ShapeModule
+    /// holds. The product admission names that missing input as well,
+    /// before any birth path is chosen.
     pub fn from_params(params: &ShapeParams) -> Result<Self, Refused> {
-        if let Some(ShapeTexture::Reference { .. }) = params.controls.texture {
-            return Err(Refused::ShapeTexture);
+        match params.controls.texture {
+            None => return Err(Refused::ExportSchema(ExportGap::Texture)),
+            Some(ShapeTexture::Reference { .. }) => return Err(Refused::ShapeTexture),
+            Some(ShapeTexture::None) => {}
         }
         match params.shape_type.as_str() {
             "Hemisphere" => Self::hemisphere(params),
@@ -110,7 +123,7 @@ impl ShapeBirthLaw {
     fn hemisphere(params: &ShapeParams) -> Result<Self, Refused> {
         let c = &params.controls;
         if c.source_version != Some(1) {
-            return Err(Refused::ExportSchema);
+            return Err(Refused::ExportSchema(ExportGap::ControlsVersion));
         }
         let finite = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
         let refused = Err(Refused::UnsupportedSourceShape);
@@ -165,7 +178,7 @@ impl ShapeBirthLaw {
     fn cone_volume(params: &ShapeParams) -> Result<Self, Refused> {
         let c = &params.controls;
         if c.source_version != Some(1) {
-            return Err(Refused::ExportSchema);
+            return Err(Refused::ExportSchema(ExportGap::ControlsVersion));
         }
         let finite = |v: &f32| v.is_finite();
         let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
@@ -215,14 +228,16 @@ impl ShapeBirthLaw {
     /// thickness, and only the first lane of the wide loads that also cover
     /// the radius mode and the word after the arc spread; it never loads the
     /// radius spread, cone angle or length, torus radius or box thickness, so
-    /// none of those, nor the radius or arc speed, gate it. Its arc-spread
-    /// branch is not transcribed and stays refused; so do the Loop,
+    /// none of those, nor the radius or arc speed, gate it. Both arc paths are
+    /// the native ones: a positive arc in radians times the arc spread takes
+    /// the stepped `random_arc`, anything else the continuous one. The Loop,
     /// PingPong and BurstSpread arc modes (other kernels) and the random or
-    /// spherical direction and align-to-direction Store branches.
+    /// spherical direction and align-to-direction Store branches stay
+    /// refused.
     fn circle(params: &ShapeParams) -> Result<Self, Refused> {
         let c = &params.controls;
         if c.source_version != Some(1) {
-            return Err(Refused::ExportSchema);
+            return Err(Refused::ExportSchema(ExportGap::ControlsVersion));
         }
         let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
         let refused = Err(Refused::UnsupportedSourceShape);
@@ -236,7 +251,6 @@ impl ShapeBirthLaw {
         if !params.radius.is_finite()
             || !params.radius_thickness.is_finite()
             || !params.arc.is_finite()
-            || super::shape::circle_takes_arc_spread(params.arc, arc_spread)
             || !finite3(&params.rotation)
             || !finite3(&params.position)
             || c.arc_mode != Some(ShapeMode::Random)
@@ -249,6 +263,7 @@ impl ShapeBirthLaw {
         Ok(Self {
             kernel: Kernel::Circle {
                 thickness: params.radius_thickness,
+                arc_spread,
             },
             radius: params.radius,
             arc: params.arc,
@@ -272,7 +287,7 @@ impl ShapeBirthLaw {
     fn single_sided_edge(params: &ShapeParams) -> Result<Self, Refused> {
         let c = &params.controls;
         if c.source_version != Some(1) {
-            return Err(Refused::ExportSchema);
+            return Err(Refused::ExportSchema(ExportGap::ControlsVersion));
         }
         let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
         let refused = Err(Refused::UnsupportedSourceShape);
@@ -322,7 +337,7 @@ impl ShapeBirthLaw {
     fn donut(params: &ShapeParams) -> Result<Self, Refused> {
         let c = &params.controls;
         if c.source_version != Some(1) {
-            return Err(Refused::ExportSchema);
+            return Err(Refused::ExportSchema(ExportGap::ControlsVersion));
         }
         let finite = |v: &f32| v.is_finite();
         let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
@@ -371,6 +386,10 @@ impl ShapeBirthLaw {
     /// scale ShapeModule::Start folds into the source affine;
     /// `uses_axis_of_rotation` says the particle arrays carry the
     /// axis-of-rotation channel, which EmitterStoreData then writes.
+    /// A non-finite stored position or direction refuses the group. The
+    /// axis channel feeds neither and is returned as written, finite or not:
+    /// it does not refuse the group, and a consumer of that channel gates
+    /// its finiteness itself.
     pub fn sample_group(
         &self,
         random: &mut ModuleRandom,
@@ -440,9 +459,16 @@ impl ShapeBirthLaw {
                 second[i],
                 third[i],
             ),
-            Kernel::Circle { thickness } => {
-                super::shape::circle_base(self.radius, thickness, self.arc, first[i], second[i])
-            }
+            // Draws: arc, radial fraction.
+            Kernel::Circle {
+                thickness,
+                arc_spread,
+            } => super::shape::circle_at(
+                self.radius,
+                thickness,
+                super::shape::random_arc(self.arc, arc_spread, first[i]),
+                second[i],
+            ),
             // Draws: arc, radial fraction, travelled distance.
             Kernel::ConeVolume {
                 thickness,
@@ -517,18 +543,15 @@ impl ShapeBirthLaw {
 }
 
 impl ShapeBirthGroup {
+    /// A non-finite stored position or direction in any of the four lanes.
+    /// The axis-of-rotation channel is not part of it.
     fn has_nonfinite_output(&self) -> bool {
         self.samples.iter().any(|s| {
             s.position
                 .iter()
                 .chain(s.direction.iter())
                 .any(|v| !v.is_finite())
-        }) || self
-            .axis_of_rotation
-            .iter()
-            .flatten()
-            .flatten()
-            .any(|v| !v.is_finite())
+        })
     }
 }
 
@@ -598,7 +621,8 @@ fn source_affine(
         rotation.map(|v| super::shape::engine_sincos((v * f32::from_bits(0x3c8efa35)) * 0.5));
     let [sx, sy, sz] = trig.map(|t| t.0);
     let [cx, cy, cz] = trig.map(|t| t.1);
-    // Shape.Start 0xefcf10..0xefcf60: ZXY quaternion with actual sign vectors.
+    // ShapeModule::Start: ZXY quaternion of the shape rotation, with the
+    // engine's own sign vectors.
     let b = [cz * sx, sx * sz, cx * sz, cx * cz];
     let shift = [b[2], b[3], b[0], b[1]];
     let sign_a = [1.0, -1.0, 1.0, 1.0];
@@ -645,9 +669,9 @@ fn source_affine(
     out
 }
 
-/// Diagnostic text fixture emitted directly from shape-birth-current.json by
-/// verify-shape-geometry-exact.py. Expected native channels never feed the law.
-#[cfg(any(test, moly_shape_replay))]
+/// Diagnostic text rows exported unchanged from the current native shape birth
+/// receipt. Expected native channels never feed the law.
+#[cfg(test)]
 pub fn replay_native_rows(text: &str) -> usize {
     use super::schema::ShapeControls;
     let mut groups = 0;
@@ -701,6 +725,8 @@ pub fn replay_native_rows(text: &str) -> usize {
                 random_direction: Some(0.0),
                 spherical_direction: Some(0.0),
                 random_position: Some(f32::from_bits(v[4])),
+                // The native runs held the null texture reference.
+                texture: Some(ShapeTexture::None),
                 ..Default::default()
             },
         };
@@ -763,16 +789,19 @@ pub fn replay_native_rows(text: &str) -> usize {
     groups
 }
 
-/// What a widened-layout replay did with its native rows.
+/// What a widened-layout replay did with its native rows. The counts are a
+/// report, not a contract: every refusal is tied, row by row, to what the
+/// native row itself records.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReplayCount {
     /// Rows the law accepted and reproduced bit for bit.
     pub replayed: usize,
-    /// Rows whose Shape block the gates refuse.
+    /// Rows whose Shape block the gates refuse, each one a row flagged as
+    /// carrying a branch or input the port does not transcribe.
     pub gate_refused: usize,
     /// Rows refused as a non-finite output, each one a row whose native
-    /// Store output (or written axis of rotation) is itself non-finite.
+    /// stored position or direction is itself non-finite.
     pub output_refused: usize,
 }
 
@@ -780,7 +809,21 @@ pub struct ReplayCount {
 /// layout: the 158-word layout above with any emitter-state scale at 86..89,
 /// then the arc spread bits, the axis-of-rotation flag, the twelve axis words
 /// (axis*4 + lane) and the native kernel and Store draw counts. Expected
-/// native channels never feed the law.
+/// native channels never feed the law. The row builder holds the arc mode
+/// Random, no direction perturbation and align off, as the native runs did;
+/// every other input the gates read comes from the row: the thickness, the
+/// radius, arc, arc spread, position jitter, scale, rotation and position.
+/// Of those, only the thickness is flagged from the row: the shell's inner
+/// radius is exp2f(log2f(1 - thickness) * 3) through the device libm, which
+/// libunity does not carry, and whose result is fixed only at a thickness of
+/// 0 or 1. So a gate refusal must fall on a row of another thickness, and
+/// such a row records the harness's libm, not the device's, so it cannot
+/// vouch for an admission either. A refusal by any other gate (a non-finite
+/// radius, scale, rotation or position; a negative or non-finite arc, arc
+/// spread or jitter) turns the replay red, whichever side moved: a gate
+/// narrowed below the recorded inputs, or a row file carrying an input past
+/// those gates, which the native call executed and which the port must then
+/// transcribe or flag from the row.
 #[cfg(test)]
 pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
     use super::schema::ShapeControls;
@@ -826,22 +869,32 @@ pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
                 random_direction: Some(0.0),
                 spherical_direction: Some(0.0),
                 random_position: Some(f32::from_bits(v[4])),
+                // The native runs held the null texture reference.
+                texture: Some(ShapeTexture::None),
                 ..Default::default()
             },
         };
+        let thickness = f32::from_bits(v[2]);
+        let libm_dependent = thickness != 0.0 && thickness != 1.0;
         let law = match ShapeBirthLaw::from_params(&source) {
             Ok(law) => law,
             Err(refused) => {
-                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
+                assert!(
+                    libm_dependent,
+                    "case {case}: gate refused {refused:?} a row inside the native envelope"
+                );
                 count.gate_refused += 1;
                 continue;
             }
         };
+        assert!(
+            !libm_dependent,
+            "case {case}: admitted a thickness whose shell radius the device libm decides"
+        );
         let world = v[89] == 1;
         let uses_axis = v[159] == 1;
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
-        let native_nonfinite =
-            v[134..158].iter().any(nonfinite) || (uses_axis && v[160..172].iter().any(nonfinite));
+        let native_nonfinite = v[134..158].iter().any(nonfinite);
         let mut random = words(5);
         let group = match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
             Ok(group) => group,
@@ -897,10 +950,14 @@ pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
             Some(axes) => {
                 for lane in 0..4 {
                     for axis in 0..3 {
-                        assert_eq!(
-                            axes[lane][axis].to_bits(),
-                            v[160 + axis * 4 + lane],
-                            "case {case} axis of rotation {lane}/{axis}"
+                        // A NaN payload is not part of the contract: the
+                        // channel does not refuse a group, and its consumer
+                        // gates finiteness.
+                        let (ours, native) = (axes[lane][axis], v[160 + axis * 4 + lane]);
+                        assert!(
+                            ours.to_bits() == native || (ours.is_nan() && f32::from_bits(native).is_nan()),
+                            "case {case} axis of rotation {lane}/{axis}: law {:#010x} native {native:#010x}",
+                            ours.to_bits()
                         );
                     }
                 }
@@ -913,8 +970,9 @@ pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
 }
 
 /// The Shape block of one native ConeVolume row (the arc mode Random, no
-/// direction perturbation, align off). Radius mode and spread stay absent:
-/// the law must not need them.
+/// direction perturbation, align off, the null texture reference the native
+/// runs held). Radius mode and spread stay absent: the law must not need
+/// them.
 #[cfg(test)]
 fn cone_volume_row_source(v: &[u32], random_position: f32) -> ShapeParams {
     use super::schema::ShapeControls;
@@ -937,6 +995,7 @@ fn cone_volume_row_source(v: &[u32], random_position: f32) -> ShapeParams {
             random_direction: Some(0.0),
             spherical_direction: Some(0.0),
             random_position: Some(random_position),
+            texture: Some(ShapeTexture::None),
             ..Default::default()
         },
     }
@@ -1003,10 +1062,12 @@ pub fn replay_cone_volume_rows(text: &str) -> usize {
 /// axis-of-rotation flag, the twelve axis words (axis*4 + lane, zero without
 /// the flag) and the native kernel and Store draw counts. Every channel of
 /// every row is compared, refused rows included: equal bits, or NaN where
-/// native wrote NaN (a NaN payload is not part of the contract, since a
-/// non-finite output is refused). The refusal itself must fall exactly on
-/// the rows whose native Store output or written axis is non-finite, and
-/// must leave the stream untouched.
+/// native wrote NaN (a NaN payload is not part of the contract: a non-finite
+/// position or direction is refused, and no product consumer reads the axis
+/// channel, since the admission refuses every Mesh system without 3D
+/// rotation). The refusal itself must fall exactly on the rows
+/// whose native stored position or direction is non-finite, and must leave
+/// the stream untouched; a non-finite written axis alone is not refused.
 #[cfg(test)]
 pub fn replay_cone_volume_rows_v2(text: &str) -> ReplayCount {
     let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
@@ -1042,14 +1103,15 @@ pub fn replay_cone_volume_rows_v2(text: &str) -> ReplayCount {
             stepped.next4_u32();
         }
         assert_eq!(stepped, words(67), "case {case} Store draws");
-        let law = match ShapeBirthLaw::from_params(&cone_volume_row_source(&v, f32::from_bits(v[161]))) {
-            Ok(law) => law,
-            Err(refused) => {
-                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
-                count.gate_refused += 1;
-                continue;
-            }
-        };
+        // The row builder holds the arc mode Random, no direction perturbation
+        // and align off, as the native runs did, and the gates admit every
+        // finite value of the controls the kernel reads. The layout carries
+        // no branch the port leaves untranscribed, so a gate refusal is red:
+        // a narrowed gate turns the replay red.
+        let law = ShapeBirthLaw::from_params(&cone_volume_row_source(&v, f32::from_bits(v[161])))
+            .unwrap_or_else(|refused| {
+                panic!("case {case}: gate refused {refused:?} a row inside the transcribed envelope")
+            });
         let world = v[18] == 1;
         let uses_axis = v[162] == 1;
         let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
@@ -1086,8 +1148,7 @@ pub fn replay_cone_volume_rows_v2(text: &str) -> ReplayCount {
             }
             None => assert!(!uses_axis, "case {case}: axis channel not written"),
         }
-        let native_nonfinite =
-            v[135..159].iter().any(nonfinite) || (uses_axis && v[163..175].iter().any(nonfinite));
+        let native_nonfinite = v[135..159].iter().any(nonfinite);
         let mut random = words(35);
         match law.sample_group(&mut random, owner, world, floats(15), uses_axis) {
             Ok(_) => {
@@ -1153,7 +1214,8 @@ fn edge_circle_row_source(v: &[u32]) -> ShapeParams {
             random_direction: Some(f32::from_bits(v[164])),
             spherical_direction: Some(f32::from_bits(v[165])),
             random_position: Some(f32::from_bits(v[4])),
-            texture: None,
+            // The native runs held the null texture reference.
+            texture: Some(ShapeTexture::None),
         },
     }
 }
@@ -1233,15 +1295,23 @@ pub fn replay_edge_circle_rows(text: &str) -> usize {
 /// 86..89, then the axis-of-rotation flag, the twelve axis words (axis*4 +
 /// lane, zero without the flag) and the template path the native call took
 /// (0 the plain kernel; 1 the edge's radius-spread path or the circle's
-/// arc-spread branch). The gates must refuse exactly the rows outside the
-/// executed envelope (the circle's arc-spread branch, a random or spherical
-/// direction, align to direction) and admit every other row; the edge's
-/// spread path must be the native one exactly where its step is positive.
+/// arc-spread branch). A gate refusal must fall on a row flagged as taking a
+/// branch the port does not transcribe (a random or spherical direction;
+/// align to direction), so a narrowed gate turns the replay red. The
+/// direction perturbations write only channels the row records, so an
+/// admitted row carrying them is compared like any other; the align block
+/// writes the particle rotation, which the row does not record, so an aligned
+/// row must not be admitted. The edge's spread path and the circle's
+/// arc-spread branch must each be the native path exactly where its step (the
+/// radius times the radius spread; the arc in radians times the arc spread)
+/// compares above zero.
 /// Every channel of every admitted row is compared: equal bits, or NaN where
-/// native wrote NaN (a NaN payload is not part of the contract, since a
-/// non-finite output is refused). The output refusal must fall exactly on
-/// the rows whose native Store output or written axis is non-finite, and
-/// must leave the stream untouched.
+/// native wrote NaN (a NaN payload is not part of the contract: a non-finite
+/// position or direction is refused, and no product consumer reads the axis
+/// channel, since the admission refuses every Mesh system without 3D
+/// rotation). The output refusal must fall exactly on the rows
+/// whose native stored position or direction is non-finite, and must leave
+/// the stream untouched; a non-finite written axis alone is not refused.
 #[cfg(test)]
 pub fn replay_edge_circle_rows_v2(text: &str) -> ReplayCount {
     let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
@@ -1282,21 +1352,26 @@ pub fn replay_edge_circle_rows_v2(text: &str) -> ReplayCount {
             12 => false,
             other => panic!("case {case}: shape type {other}"),
         };
-        let outside = (circle && v[180] == 1)
-            || f32::from_bits(v[164]) != 0.0
-            || f32::from_bits(v[165]) != 0.0
-            || v[166] != 0;
+        // Flagged on the row: the Store's random direction, spherical
+        // direction and align words.
+        let align = v[166] != 0;
+        let outside = f32::from_bits(v[164]) != 0.0 || f32::from_bits(v[165]) != 0.0 || align;
         let law = match ShapeBirthLaw::from_params(&edge_circle_row_source(&v)) {
             Ok(law) => law,
             Err(refused) => {
-                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
-                assert!(outside, "case {case}: refused a row inside the executed envelope");
+                assert!(
+                    outside,
+                    "case {case}: gate refused {refused:?} a row inside the transcribed envelope"
+                );
                 count.gate_refused += 1;
                 continue;
             }
         };
-        assert!(!outside, "case {case}: admitted a row outside the executed envelope");
-        if !circle {
+        assert!(!align, "case {case}: admitted align to direction, whose rotation the row does not record");
+        if circle {
+            let step = (f32::from_bits(v[3]) * f32::from_bits(0x3c8e_fa35)) * f32::from_bits(v[161]);
+            assert_eq!(v[180] == 1, step > 0.0, "case {case}: circle arc-spread path");
+        } else {
             let step = f32::from_bits(v[1]) * f32::from_bits(v[158]);
             assert_eq!(v[180] == 1, step > 0.0, "case {case}: edge spread path");
         }
@@ -1336,8 +1411,7 @@ pub fn replay_edge_circle_rows_v2(text: &str) -> ReplayCount {
             }
             None => assert!(!uses_axis, "case {case}: axis channel not written"),
         }
-        let native_nonfinite =
-            v[134..158].iter().any(nonfinite) || (uses_axis && v[168..180].iter().any(nonfinite));
+        let native_nonfinite = v[134..158].iter().any(nonfinite);
         let mut random = words(5);
         match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
             Ok(_) => {
@@ -1397,7 +1471,8 @@ fn donut_row_source(
             random_direction: Some(random_direction),
             spherical_direction: Some(spherical_direction),
             random_position: Some(f32::from_bits(v[4])),
-            texture: None,
+            // The native runs held the null texture reference.
+            texture: Some(ShapeTexture::None),
         },
     }
 }
@@ -1475,15 +1550,22 @@ pub fn replay_donut_rows(text: &str) -> usize {
 /// direction and align words, the axis-of-rotation flag, the twelve axis
 /// words (axis*4 + lane, zero without the flag), the template path the
 /// native call took (0 the plain arc, 1 the stepped arc) and the native
-/// kernel and Store draw counts. The gates must refuse exactly the rows
-/// outside the executed envelope (another arc mode, a random or spherical
-/// direction, align to direction) and admit every other row; the stepped
-/// arc must be the native path exactly where the arc in radians times the
-/// spread compares above zero. Every channel of every admitted row is
-/// compared: equal bits, or NaN where native wrote NaN (a NaN payload is not
-/// part of the contract, since a non-finite output is refused). The output
-/// refusal must fall exactly on the rows whose native Store output or
-/// written axis is non-finite, and must leave the stream untouched.
+/// kernel and Store draw counts. A gate refusal must fall on a row flagged as
+/// taking a branch the port does not transcribe (another arc mode, a random
+/// or spherical direction, align to direction), so a narrowed gate turns the
+/// replay red. The other arc kernels and the direction perturbations write
+/// only channels the row records, so an admitted row carrying them is
+/// compared like any other; the align block writes the particle rotation,
+/// which the row does not record, so an aligned row must not be admitted.
+/// The stepped arc must be the native path exactly where the arc in radians
+/// times the spread compares above zero. Every channel of every admitted row
+/// is compared: equal bits, or NaN where native wrote NaN (a NaN payload is not
+/// part of the contract: a non-finite position or direction is refused, and
+/// no product consumer reads the axis channel, since the admission refuses
+/// every Mesh system without 3D rotation). The output refusal must fall
+/// exactly on the rows whose native stored position or direction is
+/// non-finite, and must leave the stream untouched; a non-finite written
+/// axis alone is not refused.
 #[cfg(test)]
 pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
     let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
@@ -1521,25 +1603,30 @@ pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
         }
         assert_eq!(stepped, words(61), "case {case} Store draws");
         let (random_direction, spherical_direction) = (f32::from_bits(v[163]), f32::from_bits(v[164]));
-        let outside =
-            v[162] != 0 || random_direction != 0.0 || spherical_direction != 0.0 || v[165] != 0;
+        // Flagged on the row: an arc mode other than Random (another kernel),
+        // and the Store's random direction, spherical direction and align
+        // words.
+        let align = v[165] != 0;
+        let outside = v[162] != 0 || random_direction != 0.0 || spherical_direction != 0.0 || align;
         let source = donut_row_source(
             &v,
             replay_mode(v[162]),
             random_direction,
             spherical_direction,
-            v[165] != 0,
+            align,
         );
         let law = match ShapeBirthLaw::from_params(&source) {
             Ok(law) => law,
             Err(refused) => {
-                assert_eq!(refused, Refused::UnsupportedSourceShape, "case {case}");
-                assert!(outside, "case {case}: refused a row inside the executed envelope");
+                assert!(
+                    outside,
+                    "case {case}: gate refused {refused:?} a row inside the transcribed envelope"
+                );
                 count.gate_refused += 1;
                 continue;
             }
         };
-        assert!(!outside, "case {case}: admitted a row outside the executed envelope");
+        assert!(!align, "case {case}: admitted align to direction, whose rotation the row does not record");
         let step = (f32::from_bits(v[3]) * f32::from_bits(0x3c8e_fa35)) * f32::from_bits(v[159]);
         assert_eq!(v[179] == 1, step > 0.0, "case {case}: stepped arc path");
         let world = v[89] == 1;
@@ -1578,8 +1665,7 @@ pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
             }
             None => assert!(!uses_axis, "case {case}: axis channel not written"),
         }
-        let native_nonfinite =
-            v[134..158].iter().any(nonfinite) || (uses_axis && v[167..179].iter().any(nonfinite));
+        let native_nonfinite = v[134..158].iter().any(nonfinite);
         let mut random = words(5);
         match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
             Ok(_) => {
@@ -1623,6 +1709,7 @@ mod tests {
                 random_direction: Some(0.0),
                 spherical_direction: Some(0.0),
                 random_position: Some(0.0),
+                texture: Some(ShapeTexture::None),
                 ..Default::default()
             },
         };
@@ -1654,24 +1741,26 @@ mod tests {
     }
     /// Every native group of the item receipt: any emitter-state scale, the
     /// quantized arc, both shells, position jitter and the axis channel.
+    /// Each refusal is tied to its row inside the replay; the counts are
+    /// reported.
     #[test]
     #[ignore = "set MOLY_SHAPE_HEMISPHERE_ROWS_V2 to the current native Hemisphere rows, 174-word layout"]
     fn current_hemisphere_widened_rows_bit_exact() {
-        let count = super::replay_native_rows_v2(&rows("MOLY_SHAPE_HEMISPHERE_ROWS_V2"));
-        println!("{count:?}");
-        assert_eq!(
-            count,
-            super::ReplayCount {
-                replayed: 1989,
-                gate_refused: 0,
-                output_refused: 0
-            }
-        );
+        let text = rows("MOLY_SHAPE_HEMISPHERE_ROWS_V2");
+        let total = text.lines().filter(|l| !l.trim().is_empty()).count();
+        let count = super::replay_native_rows_v2(&text);
+        println!("{count:?} of {total}");
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert!(count.replayed > 0);
     }
     /// Independent native edge executions and finite inputs whose f32
     /// intermediates overflow or underflow: every row either reproduces the
-    /// native bits or, exactly where native writes a non-finite value, is
-    /// refused as a typed non-finite output without consuming the stream.
+    /// native bits (NaN where native wrote NaN in the axis channel) or,
+    /// exactly where native writes a non-finite position or direction, is
+    /// refused as a non-finite output without consuming the stream; a gate
+    /// refusal must fall on a row whose thickness is neither 0 nor 1 (its
+    /// shell radius comes from the device libm), and a refusal by any other
+    /// gate is red. The counts are reported.
     #[test]
     #[ignore = "set MOLY_SHAPE_HEMISPHERE_ROWS_V3 to the current native Hemisphere edge rows, 174-word layout"]
     fn current_hemisphere_edge_rows_bit_exact_or_refused() {
@@ -1680,7 +1769,7 @@ mod tests {
         let count = super::replay_native_rows_v2(&text);
         println!("{count:?} of {total}");
         assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
-        assert!(count.replayed > 0 && count.output_refused > 0);
+        assert!(count.replayed > 0);
     }
     /// Every native ConeVolume group of the first recorded native run: all
     /// corpus configurations and the randomized envelope, unit emitter-state
@@ -1703,9 +1792,8 @@ mod tests {
             .count();
         let count = super::replay_cone_volume_rows_v2(&text);
         println!("{count:?} of {total}");
-        assert_eq!(count.gate_refused, 0);
-        assert_eq!(count.replayed + count.output_refused, total);
-        assert!(count.replayed > 0 && count.output_refused > 0);
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert!(count.replayed > 0);
     }
     /// Every native SingleSidedEdge and Circle group of the first recorded
     /// native run: every corpus configuration of the two Random kernels, the
@@ -1730,9 +1818,30 @@ mod tests {
             .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
             .count();
         let count = super::replay_edge_circle_rows_v2(&text);
+        let circle_spread_rows = text
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .filter(|w| w[0] == "10" && w[180] == "1")
+            .count();
+        println!("{count:?} of {total}; circle rows on the arc-spread branch {circle_spread_rows}");
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert!(count.replayed > 0);
+    }
+    /// Independent native Circle arc-spread executions the edge rows above do
+    /// not hold: the arc in radians times the spread overflowing to infinity,
+    /// a step of one count, step counts at and around an integer ratio and
+    /// saturating ones, each with position jitter, World owners, emitter-state
+    /// scale and the axis channel, same layout and checks.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_CIRCLE_SPREAD_ROWS to the current native Circle arc-spread rows, 181-word layout"]
+    fn current_circle_arc_spread_rows_bit_exact_or_refused() {
+        let text = rows("MOLY_SHAPE_CIRCLE_SPREAD_ROWS");
+        let total = text.lines().filter(|l| !l.trim().is_empty()).count();
+        let count = super::replay_edge_circle_rows_v2(&text);
         println!("{count:?} of {total}");
         assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
-        assert!(count.replayed > 0 && count.gate_refused > 0 && count.output_refused > 0);
+        assert!(count.replayed > 0);
     }
     /// Every native Donut group of the first recorded native run inside its
     /// envelope file: every corpus configuration (each member re-run, World
@@ -1765,10 +1874,10 @@ mod tests {
         let count = super::replay_donut_rows_v2(&text);
         println!("{count:?} of {total}");
         assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
-        assert!(count.replayed > 0 && count.gate_refused > 0 && count.output_refused > 0);
+        assert!(count.replayed > 0);
     }
     #[test]
-    #[ignore = "set MOLY_SHAPE_BIRTH_NATIVE_ROWS to native rows exported by verify-shape-geometry-exact.py"]
+    #[ignore = "set MOLY_SHAPE_BIRTH_NATIVE_ROWS to the diagnostic native rows exported from the current shape birth receipt"]
     fn current_source_shape_store_all_padded_lanes_bit_exact() {
         let path =
             std::env::var_os("MOLY_SHAPE_BIRTH_NATIVE_ROWS").expect("current native row file");

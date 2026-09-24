@@ -1,8 +1,8 @@
-//! 站点材质：八个站点族的 Base 程序共用一个 Bevy Material。
+//! 站点材质：九个站点族的 Base 程序共用一个 Bevy Material。
 //!
 //! 材质值来自 sidecar 的 [`MaterialSlot`]（key 是 Unity 属性名的原拼写），
 //! 族与 keyword 变体由 [`SiteMaterialKey`] 编码进管线特化；WGSL 在
-//! `shaders/site_material.wgsl`，八族共用一份、按宏分派。
+//! `shaders/site_material.wgsl`，九族共用一份、按宏分派。
 //!
 //! 族门（按真源重定）：门 = 「序列化 keyword 全部落在本族的
 //! 已实现轴清单内」+「族要求的必在键都在」+「值域开关在已实现的取值上」。
@@ -110,10 +110,12 @@ pub const OBJECT_SHADER_NAME: &str = "Mysekai/Object";
 pub const DROPITEM_SHADER_NAME: &str = "Mysekai/DropItem";
 /// UI-Uber 族名。
 pub const UI_UBER_SHADER_NAME: &str = "Mysekai/Effect/UI-Uber";
+/// TreasureBox family (the base shape of the two treasure harvest objects).
+pub const TREASUREBOX_SHADER_NAME: &str = "Mysekai/TreasureBox";
 
 /// 材质 uniform 的槽数与字节数。槽序是本文件与
 /// `shaders/site_material.wgsl` 里 `SiteParams` 结构体之间的契约，两边同改。
-pub const PARAMS_SLOTS: usize = 46;
+pub const PARAMS_SLOTS: usize = 50;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
 
 /// 每条 Unity 属性一个 vec4 槽；族不消费的槽写零。
@@ -145,7 +147,8 @@ pub struct SiteParams {
     pub texture_coord_overlay1st: f32,
     /// `_OverlayColorMap` 的 `(scaleX, scaleY, offsetX, offsetY)`。
     pub overlay_st: [f32; 4],
-    /// `(_UVScrollX, _UVScrollY)`。Ground/Water/Birthday/Object 专属。
+    /// `(_UVScrollX, _UVScrollY)`。Ground/Water/Birthday/Object 专属；
+    /// TreasureBox reads the same pair (main texture scroll, no fract).
     pub uv_scroll: [f32; 2],
     /// `(_UVScrollX_Overlay1st, _UVScrollY_Overlay1st)`。
     pub uv_scroll_overlay1st: [f32; 2],
@@ -211,6 +214,17 @@ pub struct SiteParams {
     pub object_texture_mapping: f32,
     /// `_MainTextureLocalMapping`。Object 的 uv0 覆写开关。
     pub object_main_texture_local_mapping: f32,
+    /// TreasureBox rare arm: `(_RareBlendRate, _RareFresnelIntensity,
+    /// _RareFresnelEmission, _RareFresnelEdge)`.
+    pub treasure_rare_blend: [f32; 4],
+    /// TreasureBox rare arm: `(_RareFresnelSmoothness, _RareScrollX,
+    /// _RareScrollY, 0)`.
+    pub treasure_rare_fresnel: [f32; 4],
+    /// `_RareOverlayTexture_ST`; the rare program reads only `.xy` (the
+    /// overlay is sampled in screen space, scaled, with no offset).
+    pub treasure_rare_overlay_st: [f32; 4],
+    /// `_RareBaseColor` (lerp towards `rgb * c.rgb` by `c.a`).
+    pub treasure_rare_base_color: [f32; 4],
 }
 
 impl SiteParams {
@@ -265,6 +279,10 @@ impl SiteParams {
             additive_color: [0.0; 4],
             object_texture_mapping: 0.0,
             object_main_texture_local_mapping: 0.0,
+            treasure_rare_blend: [0.0; 4],
+            treasure_rare_fresnel: [0.0; 4],
+            treasure_rare_overlay_st: [0.0; 4],
+            treasure_rare_base_color: [0.0; 4],
         }
     }
 
@@ -323,6 +341,10 @@ impl SiteParams {
             self.additive_color,
             [self.object_texture_mapping, 0.0, 0.0, 0.0],
             [self.object_main_texture_local_mapping, 0.0, 0.0, 0.0],
+            self.treasure_rare_blend,
+            self.treasure_rare_fresnel,
+            self.treasure_rare_overlay_st,
+            self.treasure_rare_base_color,
         ] {
             for component in slot {
                 bytes.extend_from_slice(&component.to_le_bytes());
@@ -344,6 +366,9 @@ pub enum SiteFamily {
     Object,
     DropItem,
     UiUber,
+    /// `Mysekai/TreasureBox`; `rare` is the `_USE_RARE` keyword axis (only
+    /// the harvest swap resolves this family).
+    TreasureBox { rare: bool },
 }
 
 /// 管线特化键：族 + keyword 变体。作为 `AsBindGroup::Data` 进管线缓存。
@@ -634,6 +659,11 @@ impl Material for SiteMaterial {
             SiteFamily::DropItem => 2010,
             SiteFamily::FieldObject => 2040,
             SiteFamily::Tree => 2050,
+            // Both treasure materials author renderQueue -1 (take the shader's
+            // queue) and `Mysekai/TreasureBox` declares no Queue tag (its tags
+            // are RenderType only), so the queue is the shader default,
+            // Geometry = 2000.
+            SiteFamily::TreasureBox { .. } => 2000,
             _ => 2065,
         });
         let mut defs: Vec<&str> = Vec::new();
@@ -657,6 +687,12 @@ impl Material for SiteMaterial {
             }
             SiteFamily::Object => defs.push("SITE_OBJECT"),
             SiteFamily::DropItem => defs.push("SITE_DROPITEM"),
+            SiteFamily::TreasureBox { rare } => {
+                defs.push("SITE_TREASUREBOX");
+                if rare {
+                    defs.push("SITE_TREASURE_RARE");
+                }
+            }
             SiteFamily::UiUber => {
                 defs.push("SITE_UI_UBER");
                 // 源 _SrcBlend=5（SrcAlpha）/_DstBlend=10（OneMinusSrcAlpha）：
@@ -788,6 +824,12 @@ const DROPITEM_KEYWORDS: [&str; 2] = ["_RECEIVE_SHADOWS_OFF", "_USE_ALPHA_CLIP"]
 /// UI-Uber：无 keyword 轴；值域门另查 _BlendMode（2 = premultiplied 形未
 /// 移植）。
 const UI_UBER_KEYWORDS: [&str; 0] = [];
+
+/// TreasureBox: the material keyword space of this shader is `_USE_RARE`
+/// only (its program table varies `_MAIN_LIGHT_SHADOWS`, `_USE_RARE` and
+/// `_USE_MYSEKAI_SITE_EXTENSION`; the first and last are engine or global
+/// keywords, never serialized on a material).
+const TREASUREBOX_KEYWORDS: [&str; 1] = ["_USE_RARE"];
 
 fn keywords_within(material: &MaterialSlot, allowed: &[&str]) -> bool {
     material
@@ -1602,6 +1644,109 @@ fn resolve_dropitem(
     })
 }
 
+/// TreasureBox resolve (the Base pass of `Mysekai/TreasureBox`). Its
+/// programs read no `_UsePhenomenaLighting`: the phenomena light and shade
+/// always apply. The keyword axes are `_USE_RARE` (material) and
+/// `_MAIN_LIGHT_SHADOWS` (the site pipeline's main light casts shadows, so
+/// the shadow-receiving program is the drawn one; there is no
+/// `_RECEIVE_SHADOWS_OFF` variant). Value gates: the pass render state
+/// properties must be the opaque arm this pipeline draws (`_SrcBlend` 1,
+/// `_DstBlend` 0, `_ZWrite` 1, `_Cull` 2, and the Base pass's `zTest` and
+/// `colMask` bindings `_ZTest` 4 (less-equal) and `_ColorMask` 15 (all
+/// channels)); the two vertex-colour switches are
+/// int properties compared against 0.5, admitted on {0, 1}. The rare overlay
+/// texture takes the overlay binding (this family has no other overlay).
+/// The second colour target (rare fresnel emission times the overlay) is not
+/// drawn: this pipeline has one colour target, as for every site family.
+pub(crate) fn resolve_treasurebox(
+    sidecar: &SiteSidecar,
+    slot: &MaterialSlot,
+    load_texture: impl Fn(&str) -> Handle<Image>,
+) -> Result<SiteMaterial, String> {
+    if !keywords_within(slot, &TREASUREBOX_KEYWORDS) {
+        return Err(format!(
+            "TreasureBox material {} keywords {:?} are outside the ported axes",
+            slot.name, slot.keywords
+        ));
+    }
+    let get = |key: &str| -> Result<f32, String> {
+        slot.get(key)
+            .ok_or_else(|| format!("TreasureBox material {} lacks float {key}", slot.name))
+    };
+    for (key, domain) in [
+        ("_SrcBlend", &[1.0][..]),
+        ("_DstBlend", &[0.0][..]),
+        ("_ZWrite", &[1.0][..]),
+        ("_Cull", &[2.0][..]),
+        ("_ZTest", &[4.0][..]),
+        ("_ColorMask", &[15.0][..]),
+        ("_UseVertexColorBlend", &[0.0, 1.0][..]),
+        ("_UseVertexAlphaOpacity", &[0.0, 1.0][..]),
+    ] {
+        float_domain(slot, "TreasureBox", key, get(key)?, domain)?;
+    }
+    let rare = has_keyword(slot, "_USE_RARE");
+    let mut params = SiteParams::zeroed();
+    params.use_vertex_color_blend = get("_UseVertexColorBlend")?;
+    params.use_vertex_alpha_opacity = get("_UseVertexAlphaOpacity")?;
+    params.base_opacity = get("_BaseOpacity")?;
+    params.uv_scroll = [get("_UVScrollX")?, get("_UVScrollY")?];
+    params.receive_shadow = 1.0;
+    let mut overlay_tex = None;
+    if rare {
+        let smoothness = get("_RareFresnelSmoothness")?;
+        if smoothness.is_nan() || smoothness <= 0.0 {
+            // The smooth arm divides by twice this value.
+            return Err(format!(
+                "TreasureBox material {} _RareFresnelSmoothness = {smoothness} makes the source's smooth-step divide by zero",
+                slot.name
+            ));
+        }
+        params.treasure_rare_blend = [
+            get("_RareBlendRate")?,
+            get("_RareFresnelIntensity")?,
+            get("_RareFresnelEmission")?,
+            get("_RareFresnelEdge")?,
+        ];
+        params.treasure_rare_fresnel = [smoothness, get("_RareScrollX")?, get("_RareScrollY")?, 0.0];
+        params.treasure_rare_overlay_st = *slot
+            .texture_scale_offsets
+            .get("_RareOverlayTexture")
+            .ok_or_else(|| format!("TreasureBox material {} lacks _RareOverlayTexture_ST", slot.name))?;
+        params.treasure_rare_base_color = *slot
+            .colors
+            .get("_RareBaseColor")
+            .ok_or_else(|| format!("TreasureBox material {} lacks _RareBaseColor", slot.name))?;
+        let index = texture_slot(slot, "_RareOverlayTexture")
+            .ok_or_else(|| format!("TreasureBox material {} lacks a _RareOverlayTexture slot", slot.name))?;
+        let uri = sidecar.texture_uris.get(index).ok_or_else(|| {
+            format!("TreasureBox material {} _RareOverlayTexture index is out of range", slot.name)
+        })?;
+        overlay_tex = Some(load_texture(uri));
+    }
+    let main_tex = read_main_tex("TreasureBox", sidecar, slot, &load_texture)?;
+    Ok(SiteMaterial {
+        key: SiteMaterialKey {
+            family: SiteFamily::TreasureBox { rare },
+            overlay_1st: false,
+            overlay_2nd: false,
+            module_fresnel: false,
+            tree_animation: false,
+            uniform_alpha_clip: false,
+            const_alpha_clip: false,
+            selected_alpha_clip: false,
+            ground_height_fade: false,
+            tree_height_fade: false,
+            birthday_dither: false,
+        },
+        params,
+        main_tex,
+        overlay_tex,
+        overlay2nd_tex: None,
+        leaf_mask_tex: None,
+    })
+}
+
 /// UI-Uber 解析。值域门：_BlendMode 只在 {0, 1}（2 = premultiplied 形未
 /// 移植）；无 keyword 轴；片元是 tex × 顶点色的直乘（无 mip 偏置、无
 /// 光照链）。
@@ -1856,6 +2001,11 @@ fn switch_materials(
                             (&mut tally.dropitem_materials, &mut tally.dropitem_entities)
                         }
                         SiteFamily::UiUber => (&mut tally.ui_uber_materials, &mut tally.ui_uber_entities),
+                        // The site-scene dispatch never resolves this family;
+                        // only the harvest swap does.
+                        family @ SiteFamily::TreasureBox { .. } => panic!(
+                            "site scene swap produced the harvest-only family {family:?}"
+                        ),
                     };
                     *materials_count += 1;
                     *entities_count += swapped_entities;

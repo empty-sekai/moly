@@ -22,7 +22,8 @@ pub(crate) struct NativeBirthState {
 }
 
 /// Name-independent qualification of the native birth composition: autonomous
-/// emission with a constant or two-constant rate and burst count, the Initial
+/// emission with a constant or two-constant rate and up to eight bursts with a
+/// constant or two-constant count, the Initial
 /// law, the qualified Shape configurations,
 /// the qualified Noise subset and authored-null child edges. The source update
 /// route (ordinary versus procedural) is decided by the caller from the
@@ -97,6 +98,17 @@ pub(super) fn step_explicit(
     system.playback_head = clock.current;
     simulate_existing(system, dt, ctx);
     if let Some(batch) = batch {
+        // Native order of ParticleSystem::Update1Incremental: the state Tick,
+        // the pre-simulation, SimulateParticles and post-simulation passes
+        // over the existing particles, then EmissionModule::EmitOverTime
+        // writes the emission state and hands its two counts by value to
+        // StartParticles, which leaves that state as written. The clock, the
+        // existing particles and the emission state are therefore committed
+        // here, before the birth, as natively; a refusal inside the birth
+        // leaves exactly the state native holds on entering StartParticles.
+        // The birth is staged and commits nothing when refused (no particle,
+        // no Initial or Shape draw): only this slice's newborns are missing,
+        // and the caller reports the refusal.
         state.emission = pending;
         system.emission.to_emit_accumulator = pending.distribution.offset;
         start_common(
@@ -181,7 +193,13 @@ pub(super) struct ShapeEmitterState {
 /// a World-space owner over any other chain is refused: that derivation was
 /// read, not executed. The Shape scaling mode has no qualified derivation and
 /// never reaches here (the source adapter refuses it). The particle arrays
-/// carry the axis-of-rotation channel when the renderer is in Mesh render mode.
+/// carry the axis-of-rotation channel when the renderer is in Mesh render mode,
+/// and the renderer reads it only when they do not use 3D rotation, so the
+/// Shape law computes it only for that case, which the admission refuses
+/// until the mesh transform about the axis is ported. The runtime runs the
+/// Initial module for every emitter; the admission decided the rule with the
+/// module's serialized state and refused every Mesh system for which the two
+/// decisions differ.
 pub(super) fn shape_emitter_state(
     emitter: &EmitterParams,
     evidence: Option<ShapeEmitterEvidence>,
@@ -207,14 +225,19 @@ pub(super) fn shape_emitter_state(
     };
     Ok(Some(ShapeEmitterState {
         emitter_scale,
-        uses_axis_of_rotation: evidence.mesh_renderer,
+        uses_axis_of_rotation: evidence.mesh_renderer
+            && crate::particle_runtime::uses_rotation_3d(emitter, true) != Some(true),
     }))
 }
 
 fn shape_refusal(refused: moly_law::particle::shape_birth::Refused) -> BirthRefused {
+    use moly_law::particle::shape_birth::ExportGap;
     match refused {
-        moly_law::particle::shape_birth::Refused::ExportSchema => BirthRefused::Unsupported(
+        moly_law::particle::shape_birth::Refused::ExportSchema(ExportGap::ControlsVersion) => BirthRefused::Unsupported(
             "Shape controls are not the current export schema (an export check, not a ShapeModule member)",
+        ),
+        moly_law::particle::shape_birth::Refused::ExportSchema(ExportGap::Texture) => BirthRefused::Unsupported(
+            "Shape export has no texture reference field (an export check, not a ShapeModule member); re-extract",
         ),
         moly_law::particle::shape_birth::Refused::ShapeTexture => BirthRefused::Unsupported(
             "Shape texture reference: ApplyTexture is not transcribed",
@@ -335,6 +358,33 @@ fn start_common(
                 timing[index].curve_time,
                 ParticleRandom::sample(lane.seed, 0x96aa_4de3),
             );
+            // The group's axis-of-rotation channel stops here: nothing below
+            // reads `shaped.axis_of_rotation`. The native mesh renderer reads
+            // that channel in two places only. CalculateMeshParticleTransform
+            // (every render alignment, in both the instanced and the
+            // CPU-vertex mesh job) loads it only when the particle arrays do
+            // not use 3D rotation, and then turns the mesh by its Z rotation
+            // about the normalised axis (about +Y unless the axis's squared
+            // length exceeds a tiny threshold); with 3D rotation it builds the
+            // rotation from the three Euler angles and never loads the axis.
+            // BuildCustomData copies it only for the
+            // MeshAxisOfRotation custom vertex stream. Besides the renderer,
+            // the engine reads it only in the sub-emitter record, when
+            // SubModule emits a child, and in the script particle API and
+            // managed particle jobs, which the weather objects do not call.
+            // ParticleSystem::AllocateParticleArrays, which Update1b
+            // runs before any birth or draw of the frame, turns 3D rotation on
+            // for the 3D start rotation of an enabled Initial module, an
+            // enabled Shape module's align to direction, or the separate axes
+            // of an enabled RotationOverLifetime or RotationBySpeed module. For
+            // a Mesh system with 3D rotation, without that vertex stream and
+            // without emitting sub-emitters, dropping the channel therefore
+            // equals the source. A Mesh system without 3D rotation is turned
+            // about this axis natively and would need it carried into the
+            // mesh instance transform, which this runtime does not do: the
+            // admission refuses such a system on either birth path
+            // (`MeshRotationRefused::AxisOfRotation`), and only for it would
+            // the Shape law compute the channel.
             let (position, velocity) = if let Some(shaped) = &shaped {
                 let sample = &shaped.samples[index];
                 (

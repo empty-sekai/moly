@@ -64,7 +64,8 @@ fn disabled_shape_matches_engine_origin_and_forward_motion() {
 
 fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {
     let draw=world.spawn(WeatherFxDraw).id();
-    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0))}],
+    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0)),
+        effect_animator:None,animated_chain:None}],
         tier:"old".into(),env_site:"home".into(),admitted:1,records:1 }, draw)
 }
 
@@ -226,6 +227,7 @@ fn site_replacement_preserves_global_and_retiring_effects() {
 fn effect_instance_age_survives_stop_and_advances_without_a_camera() {
     let mut app = App::new();
     app.init_resource::<Time>()
+        .init_resource::<bevy::diagnostic::FrameCount>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<WeatherFxRetirements>()
         .add_systems(Update, advance);

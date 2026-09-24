@@ -1,8 +1,8 @@
 //! Qualified constant, single-octave 3D/high particle Noise.
 //!
 //! Pure law: the consumer supplies owner seed, scroll and source simulation inputs.
-//! Current JP 6.8.1 libunity SHA256 937c6d28...75badd9:
-//! Update 0xef207c -> CalculateNoise 0xefb474 -> job 0xefbe30 -> Perlin3D 0xef137c.
+//! Transcribed from the current JP 6.8.1 libunity, along the call chain
+//! NoiseModule::Update -> CalculateNoise -> NoiseModule::CalculateNoiseJob -> Perlin3D.
 //! Perlin3D follows the native straight-line dataflow operation by operation;
 //! the curl pairing and scales follow the job body.
 //! Complete particle-system timing and source admission are separate obligations.
@@ -12,7 +12,7 @@
 //! duplicates. Their duplicate order is Unity's observed algorithm variant; it
 //! is not claimed to equal Perlin's canonical hash-to-gradient branch order.
 //! All 512 permutation u32 and 48 gradient f32 values were checked against
-//! current bytes at 0x1b3938 and 0x1b3878. These are small mathematical algorithm
+//! the two constant tables of the current library. These are small mathematical algorithm
 //! constants, not game artwork, assets, or an application-specific lookup table.
 
 pub use super::schema::{NoiseParams, NoiseQuality};
@@ -71,17 +71,18 @@ impl NoiseLaw {
         }
     }
 
-    /// Contribution added to animated velocity (+0xc0/+0xe0/+0x100), before
-    /// native motion integration. Position is in particle simulation space.
-    /// owner_seed is the source system seed from ReadOnlyState +0x30, never the
-    /// individual birth seed. Constant curves ignore individual particle seeds.
+    /// Contribution added to the particles' animated velocity arrays (x, y
+    /// and z), before native motion integration. Position is in particle
+    /// simulation space. owner_seed is the source system's random seed from
+    /// its read-only state, never the individual birth seed. Constant curves
+    /// ignore individual particle seeds.
     pub fn sample(&self, state: NoiseState, position: [f32; 3], owner_seed: u32) -> [f32; 3] {
         let shift = owner_offset(owner_seed);
         let [x, y, z] = std::array::from_fn(|i| position[i] + shift[i] * 100.0);
         let a = perlin_xy([z, y, x + state.scroll], self.frequency);
         let b = perlin_xy([x + 100.0, z, y + state.scroll], self.frequency);
         let c = perlin_xy([y, x + 100.0, z + state.scroll], self.frequency);
-        // CalculateNoiseJob 0xefc02c..0xefc0a4: damping uses the refined ARM
+        // CalculateNoiseJob: damping uses the refined ARM
         // reciprocal estimate of the clamped frequency, not host division.
         let scale = if self.damping {
             super::velocity::orbital_reciprocal(self.frequency)
@@ -121,8 +122,8 @@ fn owner_offset(seed: u32) -> [f32; 3] {
 }
 
 /// Improved Perlin's analytic x/y derivatives, including frequency chain rule.
-/// Transcribed from the current straight-line Perlin3D body (0xef137c, no
-/// fused ops): trilinear coefficient form, every f32 operation in native
+/// Transcribed from the current straight-line Perlin3D body (no fused
+/// ops): trilinear coefficient form, every f32 operation in native
 /// order. Only the integer corner hash is written semantically. A per-corner
 /// sum is mathematically equal but rounds differently.
 fn perlin_xy(position: [f32; 3], frequency: f32) -> [f32; 2] {

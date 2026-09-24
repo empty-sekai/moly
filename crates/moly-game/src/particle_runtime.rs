@@ -358,7 +358,7 @@ fn first_play_state(system: &Runtime) -> PlayState {
         duration: e.duration,
     }
 }
-/// 三类锚（effect 档案的 `kind`）。
+/// 三类锚：粒子所在的预制件挂在天空视图的效果根、场景相机的效果根，还是站点视图下。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EffectKind {
     Sky,
@@ -375,7 +375,8 @@ pub(crate) enum Geometry {
 
 /// Source emitter state the native Shape boundary reads besides the Shape
 /// block: the authored MainModule scaling mode and whether the renderer is in
-/// Mesh render mode (which allocates the axis-of-rotation channel).
+/// Mesh render mode (which allocates the axis-of-rotation channel; the
+/// renderer reads it only without 3D rotation, `uses_rotation_3d`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ShapeEmitterEvidence {
     pub(crate) scaling: crate::particle_geometry::Scaling,
@@ -390,6 +391,117 @@ impl Geometry {
             Self::SourceBillboard(draw) => Some(ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false }),
         }
     }
+}
+
+/// Whether the particle arrays use 3D rotation, by the rule the source applies
+/// when it allocates them, every frame before any birth or draw
+/// (ParticleSystem::AllocateParticleArrays): the Initial module's 3D start
+/// rotation, an enabled Shape module's align to direction, or the separate
+/// axes of an enabled RotationOverLifetime or RotationBySpeed module. The
+/// emitter carries the Shape and RotationOverLifetime terms (its
+/// rotation-over-lifetime block exists only for an enabled module);
+/// `initial_enabled` is the Initial module's serialized state. RotationBySpeed
+/// has no consumer here and the module admission refuses an enabled one, so
+/// its term is false for every admitted system. None when a Shape term is not
+/// decided by the export (its enabled state or align flag missing) and no
+/// other term holds.
+pub(crate) fn uses_rotation_3d(emitter: &EmitterParams, initial_enabled: bool) -> Option<bool> {
+    let known = (initial_enabled && emitter.start.rotation3d)
+        || emitter.rotation_over_lifetime.as_ref().is_some_and(|module| module.separate_axes);
+    let align = emitter.shape.as_ref().and_then(|shape| shape.controls.align_to_direction);
+    match (emitter.shape_enabled, align) {
+        (Some(false), _) | (_, Some(false)) => Some(known),
+        (Some(true), Some(true)) => Some(true),
+        _ => known.then_some(true),
+    }
+}
+
+/// Why a Mesh render-mode system's particle rotation is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MeshRotationRefused {
+    /// Without 3D rotation the source mesh renderer turns each particle by its
+    /// Z rotation about the particle's axis of rotation (written at birth,
+    /// by the Shape module's store for a shaped system), composed with an
+    /// angle the draw call passes for its render space
+    /// (ParticleSystemRenderer's CalculateMeshParticleTransform). That
+    /// transform is not ported: the mesh geometry here applies the Euler
+    /// rotation, which for such a particle is a turn about +Z.
+    AxisOfRotation,
+    /// The export does not decide the 3D-rotation rule.
+    RotationRuleUndecided,
+}
+
+impl MeshRotationRefused {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::AxisOfRotation =>
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation) is not consumed",
+            Self::RotationRuleUndecided =>
+                "source Mesh particle 3D rotation is not decided by the export (Shape enabled state or align flag missing)",
+        }
+    }
+}
+
+/// A Mesh render-mode system is admitted only with 3D rotation, whichever
+/// birth path it would take: the legacy step and the native birth feed the
+/// one mesh geometry, which has no axis-of-rotation transform.
+pub(crate) fn mesh_rotation_admission(emitter: &EmitterParams, initial_enabled: bool)
+    -> Result<(), MeshRotationRefused> {
+    match uses_rotation_3d(emitter, initial_enabled) {
+        Some(true) => Ok(()),
+        Some(false) => Err(MeshRotationRefused::AxisOfRotation),
+        None => Err(MeshRotationRefused::RotationRuleUndecided),
+    }
+}
+
+/// A start colour the legacy step does not evaluate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LegacyColourRefused {
+    /// A random colour over a gradient with a key group whose time codes are
+    /// out of order. The source evaluates a birth group's four draws in one
+    /// shared key search (Gradient::EvaluateHDR), and with codes out of order
+    /// a lane's colour then depends on the other lanes' draws.
+    SharedKeySearch,
+}
+
+impl LegacyColourRefused {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::SharedKeySearch =>
+                "legacy step start colour: a random colour over key codes out of order is evaluated by the source with one key search shared by four draws",
+        }
+    }
+}
+
+/// The legacy step evaluates the start colour one particle at a time, at the
+/// slice's one normalized time and the particle's own draw. That is the
+/// source's four-lane evaluation wherever a lane's value does not depend on
+/// the other lanes: a constant or two-colour template, a gradient or two
+/// gradients (the four lanes of a birth group share the command's one time),
+/// and a random colour whose key groups keep their codes in order (a group
+/// with fewer than two keys is skipped for every lane). A random colour over
+/// codes out of order is refused here; the native birth evaluates it four
+/// lanes at a time, as the source does.
+pub(crate) fn legacy_start_colour(color: &moly_law::particle::MinMaxGradient)
+    -> Result<(), LegacyColourRefused> {
+    match color {
+        moly_law::particle::MinMaxGradient::RandomColor(gradient) if !gradient.key_search_is_per_lane() =>
+            Err(LegacyColourRefused::SharedKeySearch),
+        _ => Ok(()),
+    }
+}
+
+/// The legacy step's burst scheduler was never compared with the source for
+/// an infinite repeat interval (the lens-flare bursts author +Infinity with
+/// an endless cycle count), so the legacy step refuses it; the native birth
+/// schedules it as the source does.
+pub(crate) fn legacy_bursts(emitter: &EmitterParams) -> Result<(), &'static str> {
+    if emitter.emission.as_ref().is_some_and(|emission|
+        emission.bursts.iter().any(|burst| burst.repeat_interval == f32::INFINITY))
+    {
+        return Err("legacy step: source infinite burst repeat interval scheduling is not yet verified");
+    }
+    Ok(())
 }
 
 /// 一条在跑的粒子系统。
@@ -568,24 +680,46 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
 
 /// 一个仿真步：发射（率 + burst）→ 模块批 → 推进 → 死亡移除。
 pub(crate) fn simulate(system: &mut Runtime, dt: f32, ctx: &Context) {
-    simulate_with_emission(system, dt, ctx, true);
+    if let Err(reason) = simulate_with_emission(system, dt, ctx, true) {
+        error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
+    }
 }
 
 /// Source ParticleSystem.Stop() uses StopEmitting, not StopEmittingAndClear.
 /// The system clock and existing particles still advance. The host owns
 /// the independent destruction deadline; no prewarm or burst runs after Stop.
+/// The weather host steps a stopped system through `step_frame`; this entry
+/// serves the replays.
+#[cfg(test)]
 pub(crate) fn simulate_stopped(system: &mut Runtime, dt: f32, ctx: &Context) {
-    simulate_with_emission(system, dt, ctx, false);
+    if let Err(reason) = simulate_with_emission(system, dt, ctx, false) {
+        error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
+    }
 }
 
-fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting: bool) {
+/// One frame of an installed system (emitting, or stopped when `emitting` is
+/// false), for a host that retires the system when the step is refused. The
+/// native step refuses only what this port does not reproduce: a
+/// configuration it does not transcribe, or a non-finite birth value. The
+/// source has no such outcome. Each frame its incremental update runs the
+/// emission (EmissionModule::EmitOverTime writes the emission state and
+/// returns the counts), then StartParticles births them, as many as the
+/// capacity allows; no source path keeps the clock and the emission state
+/// running while it skips the birth. A refused system therefore cannot go on
+/// as the source would. Err names the reason, and the caller must not step
+/// the system again.
+pub(crate) fn step_frame(system: &mut Runtime, dt: f32, ctx: &Context, emitting: bool) -> Result<(), String> {
+    simulate_with_emission(system, dt, ctx, emitting)
+}
+
+fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting: bool) -> Result<(), String> {
     if let Some(mut native) = system.native_birth.take() {
-        if let Err(error) = birth::step_explicit(system, &mut native, dt, !emitting, ctx) {
-            system.refused_total += 1;
-            error!(?error, effect=%system.effect, node=%system.node, "native particle step refused");
-        }
+        let result = birth::step_explicit(system, &mut native, dt, !emitting, ctx);
         system.native_birth = Some(native);
-        return;
+        return result.map_err(|error| {
+            system.refused_total += 1;
+            format!("{error:?}")
+        });
     }
     // Current Update1 calls ParticleSystemState::Tick before the stopped gate
     // and before pre-simulation modules. Only zero delay is admitted here:
@@ -665,6 +799,7 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
     }
 
     simulate_existing(system, dt, ctx);
+    Ok(())
 }
 
 /// Existing-particle pre/sim/death barrier. Autonomous births are separate.
@@ -865,6 +1000,14 @@ pub(crate) fn native_shape_state_eligible(emitter: &EmitterParams, evidence: Opt
     birth::shape_emitter_state(emitter, evidence).map(|_| ()).map_err(|refused| format!("{refused:?}"))
 }
 
+/// The birth path `install_native_birth` takes for an admitted system: native
+/// when the route and modules qualify and the emitter state a Shape reads
+/// qualifies, otherwise the legacy step, for the named reason.
+pub(crate) fn native_birth_path(emitter: &EmitterParams, route: &SourceRoute, evidence: Option<ShapeEmitterEvidence>)
+    -> Result<(), String> {
+    native_birth_eligible(emitter, route).and_then(|()| native_shape_state_eligible(emitter, evidence))
+}
+
 /// Called once when the admitted source instance is installed. The first Play
 /// resets the system seeds (one shared-manager draw for an automatic owner)
 /// and expands the Initial, Shape and scalar emission streams. Noise reads the
@@ -873,8 +1016,7 @@ pub(crate) fn native_shape_state_eligible(emitter: &EmitterParams, evidence: Opt
 pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     route: &SourceRoute) -> Result<BirthPath, seed::SeedError> {
     if system.native_birth.is_some() { return Ok(BirthPath::Native); }
-    if let Err(reason) = native_birth_eligible(&system.emitter, route)
-        .and_then(|()| native_shape_state_eligible(&system.emitter, system.geometry.shape_evidence())) {
+    if let Err(reason) = native_birth_path(&system.emitter, route, system.geometry.shape_evidence()) {
         // The legacy step does not consume the native streams, but the source
         // still resets this system's seed at first Play: an automatic owner
         // takes the next shared-manager word, a manual one its serialized seed.
@@ -1185,6 +1327,7 @@ pub(crate) fn write_geometry(
                     rotation: Vec3::from_array(side.rot), size,
                     colour: Vec4::from_array(view.colour),
                     custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),
+                    seed: side.seed, age_percent: particle.age_percent,
                 }
             }).collect();
             match &system.geometry {
