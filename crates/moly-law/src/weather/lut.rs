@@ -112,15 +112,13 @@ pub struct LutStack {
     pub white_balance_tint: f32,
 }
 
-/// `Mathf.GammaToLinearSpace`（与本 crate 其余处同一条三支律）。
+/// `Mathf.GammaToLinearSpace`：颜色分级 LUT pass 在 CPU 上打包参数时调的
+/// 是引擎的原生换算（`Color.linear` 也是它），幂落在设备 libm 的 `powf`。
+/// 所以直接用 [`super::sky::gamma_to_linear`]（同一条三支律、同一个设备
+/// `powf` 的移植），不另拼一份调 `f32::powf` 的——后者在浏览器目标上与
+/// 设备逐值不同。表的烘焙本身是着色器程序里的 `log2`/`exp2`，不经这里。
 fn gamma_to_linear(x: f32) -> f32 {
-    if x <= 0.04045 {
-        x / 12.92
-    } else if x < 1.0 {
-        ((x + 0.055) / 1.055).powf(2.4)
-    } else {
-        x.powf(2.2)
-    }
+    super::sky::gamma_to_linear(x)
 }
 
 fn luminance(c: [f32; 3]) -> f32 {
