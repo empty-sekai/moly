@@ -280,7 +280,7 @@ test("sound preference is carried by configure and live changes use a sound inte
   }
 });
 
-test("CDN resources preserve same-origin iframe and the synchronous activation gate", () => {
+test("CDN resources preserve same-origin iframe and the synchronous activation forward", () => {
   const env = dom();
   let handle;
   try {
@@ -290,14 +290,12 @@ test("CDN resources preserve same-origin iframe and the synchronous activation g
     assert.equal(source.origin, env.window.location.origin);
     assert.equal(source.searchParams.get("assets"), cdn + options.assets);
     assert.equal(source.searchParams.get("resource_origin"), cdn);
-    const gate = handle.frame.contentDocument.createElement("button");
-    gate.id = "stage-start";
-    gate.dataset.molyReady = "true";
-    handle.frame.contentDocument.append(gate);
-    let activated = false;
-    gate.addEventListener("click", () => { activated = true; });
+    let activated = 0;
+    handle.frame.contentWindow.addEventListener("moly-activate", () => { activated++; });
     handle.play("talk:fixture:6177");
-    assert.equal(activated, true);
+    assert.equal(activated, 1, "play forwards the host click before returning");
+    handle.preview("talk:fixture:6177");
+    assert.equal(activated, 2, "preview forwards the host click before returning");
   } finally {
     handle?.dispose();
     env.cleanup();

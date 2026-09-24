@@ -4,7 +4,6 @@ import { parseArgs } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
-import { stageMessages } from "../stage-locale.mjs";
 import { isRenderFailure, inspectScreenshot } from "./render-validation.mjs";
 const { values: options } = parseArgs({
   options: {
@@ -324,16 +323,14 @@ try {
     version,
     assets: assets.pathname,
     locale,
-    preload: "1",
     renderer: options.backend === "auto-fallback" ? "auto" : backend,
   }))
     url.searchParams.set(key, value);
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60000 });
+  // The stage starts itself once the engine and base resources are ready.
   await page
-    .locator("#stage-start")
-    .filter({ hasText: stageMessages(locale).enter })
-    .waitFor({ timeout: 60000 });
-  await page.locator("#stage-start").click();
+    .locator("#stage-boot[hidden]")
+    .waitFor({ state: "attached", timeout: 120000 });
   await page.evaluate(
     async (module) => {
       window.__molyQA.wasm = await import(module);

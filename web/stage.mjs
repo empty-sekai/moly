@@ -12,6 +12,7 @@ import {
   resourceOrigin,
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
+import { audioActivation } from "./stage-audio.mjs";
 import { createStageController } from "./stage-controller.mjs";
 import { stageMessages } from "./stage-locale.mjs";
 import { presentWeather } from "./weather-presentation.mjs";
@@ -21,6 +22,10 @@ import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
+// Installed before the engine module loads, so its output context is tracked.
+const resumeAudio = audioActivation(globalThis);
+for (const type of ["pointerdown", "pointerup", "keydown", "moly-activate"])
+  window.addEventListener(type, resumeAudio, true);
 let ui = {
   locale: validateLocale(params.get("locale") || "zh-CN"),
   theme: validateTheme(params.get("theme") || "light"),
@@ -146,18 +151,10 @@ function render() {
         downloading: t.loading,
         initializing: t.initializing,
         base: t.base,
-        "awaiting-gesture": t.ready,
         renderer: t.renderer,
         resources: t.scene,
-        ready: t.ready,
       }[phase] ?? t.scene);
   $("boot-message").textContent = text;
-  $("stage-start").textContent = wasm ? t.enter : t.prepare;
-  $("stage-start").disabled = loading || started;
-  $("stage-start").dataset.molyReady = String(
-    Boolean(wasm && !started && !failed),
-  );
-  $("stage-start").hidden = failed;
   $("stage-retry").textContent = t.retry;
   $("stage-webgl").textContent = t.fallback;
   $("stage-webgl").hidden = backend === "webgl2" || requested === "webgl2";
@@ -232,7 +229,6 @@ function reload(renderer) {
   // different backend can be constructed. Never initialize both in one realm.
   const url = new URL(location.href);
   if (renderer) url.searchParams.set("renderer", renderer);
-  url.searchParams.set("preload", "1");
   location.replace(url.href);
 }
 $("stage-retry").addEventListener("click", () => reload());
@@ -389,19 +385,19 @@ async function loadEngine() {
     mark("baseResourcesReady");
     wasm = module;
     loading = false;
-    report("awaiting-gesture");
   } catch (error) {
     abort.abort();
     fail(backend ? "engine_failed" : "unsupported", error);
   } finally {
     clearInterval(watchdog);
   }
+  enter();
 }
 
 function enter() {
   if (!wasm || started || failed) return;
   started = true;
-  mark("startClick");
+  mark("stageStart");
   report("renderer");
   try {
     controller = createStageController({
@@ -422,16 +418,13 @@ function enter() {
     );
     for (const command of pending.splice(0))
       controller.dispatch(command.type, command.value);
-    // Must stay synchronous in this trusted click. No await, warm-up audio
-    // context or host-created second playback bus belongs here.
+    // The engine opens its only audio output here; a browser that is still
+    // holding audio back lets `resumeAudio` start it on the next activation.
     wasm.start_stage(backend);
   } catch (error) {
     fail("renderer_failed", error);
   }
 }
-$("stage-start").addEventListener("click", () =>
-  wasm ? enter() : void loadEngine(),
-);
 
 window.addEventListener("message", (event) => {
   if (
@@ -604,4 +597,4 @@ send("hello", {
   instance:
     globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
 });
-if (params.get("preload") === "1") void loadEngine();
+void loadEngine();
