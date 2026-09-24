@@ -34,7 +34,6 @@
 // colours are stored values, and the output is decoded once before the sRGB
 // attachment re-encodes it.
 
-#import bevy_pbr::forward_io::Vertex
 #import bevy_pbr::mesh_functions
 #import bevy_pbr::view_transformations::position_world_to_clip
 
@@ -117,6 +116,33 @@ fn srgb_format_decode(stored: vec3<f32>) -> vec3<f32> {
     return select(hi, e / 12.92, e <= vec3<f32>(0.04045));
 }
 
+// The vertex input room_shell.rs binds: the mesh pipeline's standard
+// locations (it sets the VERTEX_* defs from the mesh) and the third and
+// fourth uv sets (TEXCOORD_2 / TEXCOORD_3 of the module glb) where the mesh
+// has them.
+struct RoomVertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) position: vec3<f32>,
+#ifdef VERTEX_NORMALS
+    @location(1) normal: vec3<f32>,
+#endif
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+#ifdef ROOM_UV_2
+    @location(8) uv_c: vec2<f32>,
+#endif
+#ifdef ROOM_UV_3
+    @location(9) uv_d: vec2<f32>,
+#endif
+}
+
 struct RoomVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -125,10 +151,12 @@ struct RoomVertexOutput {
     @location(3) uv_b: vec2<f32>,
     @location(4) color: vec4<f32>,
     @location(5) fog_ramp: f32,
+    @location(6) uv_c: vec2<f32>,
+    @location(7) uv_d: vec2<f32>,
 }
 
 @vertex
-fn vertex(mesh: Vertex) -> RoomVertexOutput {
+fn vertex(mesh: RoomVertex) -> RoomVertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(mesh.instance_index);
     let world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local,
@@ -161,6 +189,16 @@ fn vertex(mesh: Vertex) -> RoomVertexOutput {
 #else
     out.color = vec4<f32>(1.0);
 #endif
+#ifdef ROOM_UV_2
+    out.uv_c = mesh.uv_c;
+#else
+    out.uv_c = vec2<f32>(0.0);
+#endif
+#ifdef ROOM_UV_3
+    out.uv_d = mesh.uv_d;
+#else
+    out.uv_d = vec2<f32>(0.0);
+#endif
     // Object fog ramp: the source reads the GL clip z; ((z+n)/(n+f))*f equals
     // f*(clip.w-n)/(f-n) there, and clip.w is the eye depth in either clip
     // convention (the same reconstruction as site_material.wgsl).
@@ -173,9 +211,13 @@ fn vertex(mesh: Vertex) -> RoomVertexOutput {
     return out;
 }
 
-// The two uv sets the module meshes carry; index 2 is refused before a
-// material is built (the glb has no third set).
+// The mesh uv set a room texture is drawn with: index 0, 1, 2 are uv0, uv1,
+// uv2 (room_appearance.rs refuses a mesh that lacks the set its material
+// samples).
 fn select_uv(in: RoomVertexOutput, index: f32) -> vec2<f32> {
+    if index == 2.0 {
+        return in.uv_c;
+    }
     return select(in.uv, in.uv_b, index == 1.0);
 }
 
@@ -347,14 +389,24 @@ fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @locati
         let use_local = 0.5 < params.shading.x;
         let intensity = select(1.0, params.shading.y, use_local);
         if usage == 2.0 {
-            // Wall AO: ao = intensity*(-vc.r) + 1, then the source multiplies
-            // it by _WallAOIntensity*(d - 1) + 1 with
-            // d = 1 - |2*uv3.x - 1|^(2*sx*e) - |2*uv3.y - 1|^(2*sy*e), where
-            // uv3 is the mesh's fourth uv set (a 0..1 coordinate across each
-            // wall). The module glb carries only the first two uv sets, so
-            // that edge factor is not applied (named by room_appearance.rs
-            // when the wall material is built).
-            let ao = intensity * (-in.color.r) + 1.0;
+            // Wall AO: ao = intensity*(-vc.r) + 1, times the edge factor
+            // _WallAOIntensity*(d - 1) + 1 with p = exp2((sx, sy)*e *
+            // log2(|2*uv3 - 1|)) and d = 1 - dot(p, p), in the source's
+            // operation order. uv3 is the mesh's fourth uv set (0..1 across
+            // each wall) in the source's bottom-left origin; the glb stores V
+            // flipped. A mesh without the set (a module file exported before
+            // the uv-set export) has no ROOM_UV_3 input and is drawn without
+            // the factor; room_appearance.rs names it.
+            var ao = intensity * (-in.color.r) + 1.0;
+#ifdef ROOM_UV_3
+            let uv3 = vec2<f32>(in.uv_d.x, 1.0 - in.uv_d.y);
+            let edge_uv = uv3 * vec2<f32>(2.0, 2.0) + vec2<f32>(-1.0, -1.0);
+            let edge_exponent = vec2<f32>(params.wall_ao.y, params.wall_ao.z)
+                * vec2<f32>(params.wall_ao.w, params.wall_ao.w);
+            let edge = exp2(edge_exponent * log2(abs(edge_uv)));
+            let d = -dot(edge, edge) + 1.0;
+            ao = ao * (params.wall_ao.x * (d + -1.0) + 1.0);
+#endif
             let shaded = shade.rgb * rgb;
             let toward = (-rgb) * shade.rgb + rgb;
             rgb = ao * toward + shaded;
