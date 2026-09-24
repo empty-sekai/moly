@@ -1,5 +1,5 @@
 use super::OrbitalMotion;
-use crate::particle::curve::{CurveSampler, normalized_age};
+use crate::particle::curve::{CurveSampler, CurveTime, normalized_age};
 use crate::particle::random::ParticleRandom;
 use crate::particle::schema::VelocityOverLifetimeParams;
 use crate::particle::MinMaxCurve;
@@ -22,23 +22,24 @@ pub struct VelocityOverLifetime {
     speed: CurveSampler,
 }
 
-fn axis_group(curves: [&MinMaxCurve; 3]) -> [CurveSampler; 3] {
+fn axis_group(curves: [&MinMaxCurve; 3]) -> Result<[CurveSampler; 3], &'static str> {
     // Native axis-group dispatch only uses its optimized path when all axes
     // qualify. A complex axis must not leave its siblings on a different path.
-    let baked = curves.iter().all(|curve| CurveSampler::can_bake(curve));
-    curves.map(|curve| CurveSampler::with_baking(curve, baked))
+    CurveSampler::group(curves, CurveTime::Normalized)
 }
 
 impl VelocityOverLifetime {
-    pub fn from_params(params: &VelocityOverLifetimeParams) -> Self {
-        Self {
+    /// Every curve follows the engine's dispatch on the particle's normalized
+    /// age; a lane outside the transcribed evaluator is refused.
+    pub fn from_params(params: &VelocityOverLifetimeParams) -> Result<Self, &'static str> {
+        Ok(Self {
             in_world_space: params.in_world_space,
-            linear: axis_group([&params.x, &params.y, &params.z]),
-            angular: axis_group(std::array::from_fn(|axis| &params.orbital[axis])),
-            offset: axis_group(std::array::from_fn(|axis| &params.orbital_offset[axis])),
-            radial: CurveSampler::from_min_max_curve(&params.radial),
-            speed: CurveSampler::from_min_max_curve(&params.speed_modifier),
-        }
+            linear: axis_group([&params.x, &params.y, &params.z])?,
+            angular: axis_group(std::array::from_fn(|axis| &params.orbital[axis]))?,
+            offset: axis_group(std::array::from_fn(|axis| &params.orbital_offset[axis]))?,
+            radial: CurveSampler::new(&params.radial, CurveTime::Normalized)?,
+            speed: CurveSampler::new(&params.speed_modifier, CurveTime::Normalized)?,
+        })
     }
 
     /// `batch_seed` is the first particle seed of the current four-lane native
@@ -79,7 +80,7 @@ mod tests {
 
     #[test]
     fn orbital_sampling_uses_the_particle_seed_without_consuming_birth_rng() {
-        let law = VelocityOverLifetime::from_params(&params());
+        let law = VelocityOverLifetime::from_params(&params()).unwrap();
         let first = law.sample(17, 17, 0.0);
         assert_eq!(first.orbital.angular, [0.8626621961593628, 0.911041259765625, 0.6222929358482361]);
         assert_eq!(first, law.sample(17, 19, 73.0));
@@ -90,7 +91,7 @@ mod tests {
     fn two_constant_speed_modifier_preserves_native_batch_broadcast() {
         let mut params = params();
         params.speed_modifier = MinMaxCurve::TwoConstants { min: 0.0, max: 1.0 };
-        let law = VelocityOverLifetime::from_params(&params);
+        let law = VelocityOverLifetime::from_params(&params).unwrap();
         let a = law.sample(17, 17, 0.0);
         let b = law.sample(19, 17, 0.0);
         assert_eq!(a.speed_modifier, 0.9958391189575195);

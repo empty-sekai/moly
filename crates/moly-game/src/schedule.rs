@@ -290,6 +290,10 @@ pub fn install(app: &mut App) {
         .init_resource::<weather::CurrentPhenomenonId>()
         .init_resource::<weather_fx::WeatherFxRetirements>()
         .init_resource::<crate::particle_runtime::seed::SystemSeedManager>()
+        // The player's Time.unscaledDeltaTime holder: advanced once per frame
+        // from the real clock, right after the app's clocks update.
+        .init_resource::<crate::particle_runtime::UnscaledFrameClock>()
+        .add_systems(bevy::app::First, crate::particle_runtime::advance_unscaled_clock.after(bevy::time::TimeSystems))
         .init_resource::<alone_action_runtime::AloneExecutionGate>()
         // 家具时间轴可播集（常驻空表起步，装载期填充——步进系统按 Res
         // 读它，缺资源会在系统参数校验处 panic）。
@@ -752,6 +756,7 @@ pub fn install(app: &mut App) {
         .add_systems(
             Update,
             (
+                weather_fx::notify_invisible,
                 weather_fx::expire_retirements,
                 weather_fx::watch,
                 weather_fx::parse,

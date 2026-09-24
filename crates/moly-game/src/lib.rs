@@ -159,6 +159,11 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    // Every Time reader sees the engine's Time.maximumDeltaTime as the longest
+    // frame, not the virtual clock's own 250 ms default.
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(particle_runtime::PLAYER_MAXIMUM_DELTA);
     app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
     #[cfg(not(target_arch = "wasm32"))]

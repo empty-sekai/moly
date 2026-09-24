@@ -92,12 +92,12 @@ mod tests {
             separate_axes: false,
             curve: MinMaxCurve::Curve {
                 multiplier: 1.0,
-                max: Curve { keys: keys.to_vec(), multiplier: 1.0 },
+                max: Curve { keys: keys.to_vec(), multiplier: 1.0, pre_wrap: Some(2), post_wrap: Some(2) },
             },
             y: None, z: None,
         };
         let mut system = super::super::test_support::runtime();
-        system.size_law = Some(moly_law::particle::size::SizeOverLifetime::from_params(&params));
+        system.size_law = Some(moly_law::particle::size::SizeOverLifetime::from_params(&params).unwrap());
         system.pool[0].age_percent = f32::from_bits(0x42c6_c23d);
         system.side[0].size = [f32::from_bits(0x3d9e_c5e4); 3];
         system.side[0].seed = 1_790_689_260;
@@ -120,9 +120,9 @@ mod tests {
         let mut params = params();
         for simulation in [SimulationSpace::Local, SimulationSpace::World] {
             params.in_world_space = false;
-            let local = velocity_at_age(&VelocityOverLifetime::from_params(&params), &particle, &side(), 17, simulation, &owner, 0.0, 0.01);
+            let local = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01);
             params.in_world_space = true;
-            let world = velocity_at_age(&VelocityOverLifetime::from_params(&params), &particle, &side(), 17, simulation, &owner, 0.0, 0.01);
+            let world = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01);
             assert_eq!(local, world);
             let expected = if simulation == SimulationSpace::World {
                 [1.9949831, 0.0, 1.0099609]
@@ -139,7 +139,7 @@ mod tests {
         params.y = MinMaxCurve::Constant(2.0);
         params.z = MinMaxCurve::Constant(3.0);
         let particle = Particle::born([0.0; 3], [0.0; 3], 10.0);
-        let (linear, modifier) = velocity_at_age(&VelocityOverLifetime::from_params(&params), &particle, &side(), 17, SimulationSpace::Local,
+        let (linear, modifier) = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, SimulationSpace::Local,
             &GlobalTransform::IDENTITY, 0.0, 0.01);
         assert_eq!(linear, [-1.0, 2.0, 3.0]);
         assert_eq!(modifier, 1.0);

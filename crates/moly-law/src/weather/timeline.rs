@@ -113,7 +113,7 @@ mod tests {
     use crate::particle::value::CurveKey;
     fn constant(value: f32) -> Curve {
         Curve { multiplier: 1.0, keys: vec![CurveKey { time: 0.0, value, in_slope: 0.0, out_slope: 0.0,
-            in_weight: 0.0, out_weight: 0.0, weighted_mode: 0 }] }
+            in_weight: 0.0, out_weight: 0.0, weighted_mode: 0 }], pre_wrap: Some(2), post_wrap: Some(2) }
     }
     fn value_track(value: f32) -> Track {
         Track { target: Target::SkyIntensity, muted: false, scale: 2.0, noise_track: None,

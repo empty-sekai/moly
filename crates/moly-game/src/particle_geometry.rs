@@ -130,7 +130,13 @@ pub(crate) fn mesh_transform(
         * Mat3::from_diagonal(size);
     // The renderer's Z pivot has the opposite sign to its X/Y mesh offset.
     let offset = bounds_size * Vec3::new(pivot.x, pivot.y, -pivot.z);
-    Affine3A::from_mat3_translation(linear, particle.position + linear * offset)
+    // CalculateMeshParticleTransform carries the pivot offset through the
+    // (mirrored) columns as c0 * ox + (c1 * oy + c2 * oz) in single precision,
+    // in that association, and adds the result to the particle position.
+    // glam's Mat3 * Vec3 associates the other way, ((c0 * ox + c1 * oy) + c2 * oz),
+    // which rounds differently once the columns are not axis aligned.
+    let moved = linear.x_axis * offset.x + (linear.y_axis * offset.y + linear.z_axis * offset.z);
+    Affine3A::from_mat3_translation(linear, particle.position + moved)
 }
 
 #[derive(Clone, Debug)]
@@ -308,6 +314,20 @@ mod tests {
     /// the recorded native case file. The per-column sign is read the same way
     /// whatever the particle rotation, since the sign multiplies the size, which
     /// sits to the right of the rotation in the product.
+    ///
+    /// The translation column: the engine adds the pivot offset through the
+    /// mirrored columns, `t + (c0 * ox + (c1 * oy + c2 * oz))` in single
+    /// precision in that association, where `t` is the particle's base
+    /// translation (the output of the same call with the offset zeroed, which
+    /// every case must carry). `mesh_transform` itself is run with the native
+    /// unflipped columns handed in as a view basis (unit scale, zero rotation,
+    /// unit particle size, so its linear part is those columns with the
+    /// product's flip signs), the base translation as the particle position, a
+    /// unit mesh box and the case's offset as the product's pivot. Its own
+    /// translation, in the source basis like the native call, must equal the
+    /// native translation of the flipped and of the unflipped call word for
+    /// word. The same terms in glam's Mat3 * Vec3 association are counted as a
+    /// power figure: on real rotations they differ from the engine.
     #[test]
     #[ignore = "needs MOLY_MESH_FLIP_NATIVE"]
     fn mesh_flip_matches_native_calculate_mesh_particle_transform() {
@@ -316,11 +336,19 @@ mod tests {
         assert_eq!(data["sha256"], "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9",
             "native cases must come from the current game engine library");
         let words = |v: &Value| -> Vec<u32> { v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect() };
-        let (mut cases, mut mirrored, mut dead) = (0, 0, 0);
+        let (mut cases, mut mirrored, mut dead, mut moved, mut glam_order_differs) = (0, 0, 0, 0, 0);
         let mut failures = Vec::new();
+        // Signed zeros of the sums that follow the sign are not part of the law.
+        let equal = |a: u32, b: u32| a == b || (a & 0x7fff_ffff == 0 && b & 0x7fff_ffff == 0);
+        let identity = Frame { rotation: Mat3::IDENTITY, scale: Vec3::ONE, camera_rotation: Mat3::IDENTITY,
+            camera_position: Vec3::ZERO };
         for case in data["cases"].as_array().unwrap() {
             let flipped = words(&case["runs"]["flip"]["affine"]);
             let plain = words(&case["runs"]["noflip"]["affine"]);
+            let base = words(case["runs"].get("noflipNoOffset").map(|run| &run["affine"])
+                .unwrap_or_else(|| panic!("case {} lacks the offset-free run that gives the base translation", case["index"])));
+            let offset = words(&case["offset"]);
+            let offset = Vec3::new(f32::from_bits(offset[0]), f32::from_bits(offset[1]), f32::from_bits(offset[2]));
             let flip = words(&case["flip"]);
             let flip = Vec3::new(f32::from_bits(flip[0]), f32::from_bits(flip[1]), f32::from_bits(flip[2]));
             let seed = case["seed"].as_u64().unwrap() as u32;
@@ -331,11 +359,36 @@ mod tests {
                 colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO, seed, age_percent: age };
             let ours = mesh_size(&unit, flip).to_array();
             let ours_dead = ours == [0.0; 3];
+            // mesh_transform's own translation: the native unflipped columns as the basis, the base translation as
+            // the position, a unit mesh box and the case's offset as the pivot in the product's convention (its Z
+            // pivot has the opposite sign to its X/Y mesh offset).
+            let column = |c: usize| Vec3::new(f32::from_bits(plain[4 * c]), f32::from_bits(plain[4 * c + 1]),
+                f32::from_bits(plain[4 * c + 2]));
+            let basis = Frame { camera_rotation: Mat3::from_cols(column(0), column(1), column(2)), ..identity };
+            let particle = Instance { position: Vec3::new(f32::from_bits(base[12]), f32::from_bits(base[13]),
+                f32::from_bits(base[14])), ..unit };
+            let pivot = Vec3::new(offset.x, offset.y, -offset.z);
+            let product = |flip: Vec3| -> [u32; 3] {
+                let t = mesh_transform(&particle, &basis, Alignment::View, Vec3::ONE, pivot, flip).translation;
+                [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()]
+            };
+            for (label, ours, native) in [("flipped", product(flip), &flipped), ("unflipped", product(Vec3::ZERO), &plain)] {
+                if (0..3).any(|lane| !equal(ours[lane], native[12 + lane])) {
+                    failures.push(format!("{} seed={seed:#x}: {label} translation native={:08x?} ours={ours:08x?}",
+                        case["index"], &native[12..15]));
+                }
+            }
+            // Power figure: the flipped call's terms summed in glam's association.
+            let signs = flip_signs(seed, flip);
+            let flipped_basis = Mat3::from_cols(column(0) * signs.x, column(1) * signs.y, column(2) * signs.z);
+            let glam_order = particle.position + flipped_basis * offset;
+            if !ours_dead && (0..3).any(|lane| !equal(glam_order[lane].to_bits(), flipped[12 + lane])) {
+                glam_order_differs += 1;
+            }
+            if (0..3).any(|lane| !equal(flipped[12 + lane], plain[12 + lane])) { moved += 1; }
             if native_dead != ours_dead {
                 failures.push(format!("{}: dead native={native_dead} ours={ours_dead}", case["index"]));
             } else if !ours_dead {
-                // Signed zeros of the sums that follow the sign are not part of the law.
-                let equal = |a: u32, b: u32| a == b || (a & 0x7fff_ffff == 0 && b & 0x7fff_ffff == 0);
                 let native: Vec<f32> = (0..3).map(|c| {
                     let same = (0..3).all(|l| equal(flipped[4 * c + l], plain[4 * c + l]));
                     let negated = (0..3).all(|l| equal(flipped[4 * c + l], plain[4 * c + l] ^ 0x8000_0000));
@@ -348,7 +401,10 @@ mod tests {
             } else { dead += 1; }
             cases += 1;
         }
-        assert!(cases > 0 && mirrored > 0 && dead > 0, "cases={cases} mirrored={mirrored} dead={dead}");
-        assert!(failures.is_empty(), "{} of {cases} mismatched:\n{}", failures.len(), failures.join("\n"));
+        println!("mesh flip: {cases} cases, {mirrored} mirrored, {dead} dead, translation moved by the flip in {moved}; \
+            glam's association would differ from native in {glam_order_differs}");
+        assert!(failures.is_empty(), "{} mismatches over {cases} cases:\n{}", failures.len(), failures.join("\n"));
+        assert!(cases > 0 && mirrored > 0 && dead > 0 && moved > 0,
+            "cases={cases} mirrored={mirrored} dead={dead} translation moved={moved}");
     }
 }

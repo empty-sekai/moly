@@ -654,10 +654,9 @@ pub(crate) fn advance(
         target - clock.previous.unwrap()
     } * system.emitter.simulation_speed as f64;
     // ParticleControlPlayable casts playable time to float and uses variable
-    // steps capped by Time.maximumDeltaTime (fixedTimeStep=false). CN 6.0.0
-    // APK data.unity3d/globalgamemanagers TimeManager pathId=8 records
-    // Maximum Allowed Timestep = 0.3333333432674408, Unity 2022.3.62f3.
-    const MAX_STEP: f64 = (1.0f32 / 3.0f32) as f64;
+    // steps capped by Time.maximumDeltaTime (fixedTimeStep=false), which the
+    // player serializes as 1/3 and never assigns.
+    const MAX_STEP: f64 = crate::particle_runtime::PLAYER_TIME.maximum_delta_time as f64;
     while remaining > 0.0 {
         let step = remaining.min(MAX_STEP);
         simulate(system, step as f32, ctx);

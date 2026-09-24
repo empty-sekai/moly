@@ -39,6 +39,14 @@ pub struct Curve {
     /// 插值结果上——两处都乘且只乘一次，见 `MinMaxCurve::evaluate`。
     pub multiplier: f32,
     pub keys: Vec<CurveKey>,
+    /// The serialized AnimationCurve wrap before the first key
+    /// (`m_PreInfinity`: 0 ping-pong, 1 repeat, 2 clamp), `None` when the
+    /// export does not carry it. The engine evaluator reads it only for a lane
+    /// the reader leaves unoptimized; `particle::curve::EngineCurve` refuses a
+    /// missing one rather than assuming clamp.
+    pub pre_wrap: Option<u32>,
+    /// The serialized wrap past the last key (`m_PostInfinity`), as above.
+    pub post_wrap: Option<u32>,
 }
 
 // ---- 加权 Hermite（引擎原生逐指令） ----
@@ -237,6 +245,12 @@ impl Curve {
     /// inSlope=0) 在 t=0.25 处求值应为 smoothstep 值 5/32 = 0.15625
     /// （本模块测试已按此锚）；再用非对称斜率 (out=2,in=−1) 于
     /// t=0.5 采一点核对 Hermite 而非线性。
+    ///
+    /// This is the documented Hermite form, not what the engine computes: in
+    /// range `AnimationCurveTpl::Evaluate` evaluates the cached cubic of
+    /// `CalculateCacheData`, which rounds differently, and past the ends it
+    /// applies the wrap modes instead of always clamping. Particle modules evaluate
+    /// through `curve::CurveSampler`.
     pub fn evaluate(&self, time: f32) -> f32 {
         match self.keys.as_slice() {
             [] => 0.0,
@@ -313,6 +327,9 @@ impl MinMaxCurve {
     /// `Lerp` 是 `Mathf.Lerp`：`a + (b-a) * Clamp01(t)`——钳位可读，
     /// 不是猜的。`lerpFactor` 是调用方给的显式随机（典型是 `Random.value`，
     /// 每粒子一次，见 `emit` 的 spawn 口径）。
+    ///
+    /// The lanes go through [`Curve::evaluate`], not the engine's curve
+    /// dispatch; particle modules use `curve::CurveSampler` instead.
     pub fn evaluate(&self, time: f32, lerp_factor: f32) -> f32 {
         match self {
             Constant(c) => *c,
@@ -394,6 +411,8 @@ mod tests {
                 CurveKey { time: 0.0, value: 0.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
                 CurveKey { time: 1.0, value: 1.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
             ],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         }
     }
 
@@ -420,6 +439,8 @@ mod tests {
                 CurveKey { time: 0.0, value: 0.0, in_slope: 0.0, out_slope: 2.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
                 CurveKey { time: 1.0, value: 1.0, in_slope: -1.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
             ],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         };
         assert!((c.evaluate(0.5) - 0.875).abs() < 1e-6);
     }
@@ -436,6 +457,8 @@ mod tests {
         let c = Curve {
             multiplier: 1.0,
             keys: vec![CurveKey { time: 0.0, value: 7.0, in_slope: 1.0, out_slope: 1.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 }],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         };
         assert_eq!(c.evaluate(0.0), 7.0);
         assert_eq!(c.evaluate(0.5), 7.0);
@@ -471,6 +494,8 @@ mod tests {
                 CurveKey { time: 0.0, value: 1.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
                 CurveKey { time: 1.0, value: 3.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
             ],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         }; // t=0.5 -> 2（端点切线 0，中点恰线性中值）
         let c = TwoCurves { multiplier: 10.0, min: lo, max: hi };
         // Lerp(0.5, 2.0, 0.25) = 0.875 * 10 = 8.75。

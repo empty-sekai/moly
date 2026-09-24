@@ -589,7 +589,7 @@ mod tests {
             system.effect = emitter.effect.clone();
             system.kind = EffectKind::Site;
             system.gravity_law =
-                moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier);
+                moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier).expect("curves validated during admission");
             system.color_law = emitter
                 .color_over_lifetime
                 .as_ref()
@@ -597,7 +597,7 @@ mod tests {
             system.custom_law = emitter
                 .custom_data
                 .as_ref()
-                .map(moly_law::particle::custom_data::CustomData::from_params);
+                .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
             system.emitter = emitter;
             system.pool.clear();
             system.side.clear();

@@ -1,5 +1,5 @@
 //! Persistent acceleration sampled from particle-local module streams.
-use super::{curve::{CurveSampler, normalized_age}, random::ParticleRandom, schema::ForceParams};
+use super::{curve::{CurveSampler, CurveTime, normalized_age}, random::ParticleRandom, schema::ForceParams};
 
 #[derive(Clone, Debug)]
 pub struct ForceOverLifetime {
@@ -14,10 +14,11 @@ impl ForceOverLifetime {
         }
         // All three axes enter the same native curve dispatch. A generic axis
         // must also keep its siblings on the generic evaluation path.
-        let baked = params.axes.iter().all(CurveSampler::can_bake);
+        let [x, y, z] = &params.axes;
         Ok(Self {
             in_world_space: params.in_world_space,
-            axes: std::array::from_fn(|axis| CurveSampler::with_baking(&params.axes[axis], baked)),
+            axes: CurveSampler::group([x, y, z], CurveTime::Normalized)
+                .map_err(|reason| format!("forceOverLifetime: {reason}"))?,
         })
     }
 

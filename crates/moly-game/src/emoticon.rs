@@ -240,11 +240,17 @@ struct LoadCounts {
     acc_sound_input: u32,
     acc_loop_end_flag: u32,
     acc_unsupported_text: u32,
-    /// 自旋模块整块拒绝的发射器数（形状未按原生路径实现/提取面缺键；
-    /// 拒绝后自旋冻结，发射器照跑）。
+    /// Emitters whose rotationOverLifetime the engine curve dispatch refuses
+    /// (a lane shape outside the transcribed evaluator, or a lane the export
+    /// lacks a field for). The emitter is refused, not drawn with its
+    /// rotation frozen at the birth angle.
     acc_rol_refused: u32,
-    /// 限速模块整块拒绝的发射器数（同上；拒绝后不钳速）。
+    /// Emitters whose limitVelocity construction refuses; likewise refused,
+    /// not drawn unclamped.
     acc_lim_refused: u32,
+    /// Emitters refused because a module the source runs cannot be evaluated
+    /// (the two counts above, once per emitter).
+    gate_module_refused: u32,
 }
 
 /// 一个表情条目：两族共用节点树，族差异落在绘制槽上。
@@ -374,6 +380,9 @@ enum Gate {
     MissingTexture,
     /// 子发射目标：不自主播放，只由父粒子死亡触发。
     SubEmitterDriven,
+    /// A module the source runs cannot be evaluated here (reason logged at
+    /// error level when the archive loads); the emitter is not drawn.
+    ModuleRefused,
 }
 
 /// 发射器材质槽（绘制需要的那几个量，其余在装载时断言或挂账）。
@@ -552,6 +561,8 @@ fn empty_curve() -> Curve {
     Curve {
         multiplier: 1.0,
         keys: Vec::new(),
+        pre_wrap: None,
+        post_wrap: None,
     }
 }
 
@@ -559,7 +570,12 @@ fn empty_curve() -> Curve {
 /// 加权键按位解析（求值走律的加权 Bezier 路），激活位的权重缺失即拒
 /// （缺会左右结果的键不当默认值）。
 fn parse_curve(obj: &Value) -> Curve {
+    // The wrap modes, when the export carries them; the particle law refuses
+    // an unoptimized lane without them rather than assuming clamp.
+    let wrap = |key: &str| obj.get(key).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok());
     Curve {
+        pre_wrap: wrap("preInfinity"),
+        post_wrap: wrap("postInfinity"),
         multiplier: f_field(obj, "multiplier", 1.0),
         keys: obj
             .get("keys")
@@ -1013,11 +1029,15 @@ fn build_item(
         if system.is_null() {
             panic!("{name}/{node_path}：发射器记录缺 system");
         }
-        let (params, material) = build_emitter(name, &system, &renderer, &tex_by_file, counts);
-        // 门分类（次序与演示件一致：渲染器开关 → 绘制模式 → 节点链 → 贴图槽）。
+        let (params, material, refusal) = build_emitter(name, &system, &renderer, &tex_by_file, counts);
+        // 门分类（次序与演示件一致：渲染器开关 → 模块拒绝 → 绘制模式 → 节点链 → 贴图槽）。
         let gate = if !b_field(&renderer, "enabled", true) {
             counts.gate_disabled += 1;
             Gate::DisabledRenderer
+        } else if let Some(reason) = refusal {
+            counts.gate_module_refused += 1;
+            error!("[emoticon] {name}/{node_path}: emitter refused, a module the source runs cannot be evaluated: {reason}");
+            Gate::ModuleRefused
         } else {
             let mode = s_field(&renderer, "renderMode").unwrap_or_else(|| "Billboard".into());
             if mode != "Billboard" {
@@ -1202,7 +1222,10 @@ fn build_emitter(
     renderer: &Value,
     tex_by_file: &HashMap<String, usize>,
     counts: &mut LoadCounts,
-) -> (SimParams, EmitterMat) {
+) -> (SimParams, EmitterMat, Option<String>) {
+    // The first module refusal, if any: it refuses the whole emitter, since
+    // dropping the module would draw a silently wrong value.
+    let mut refusal: Option<String> = None;
     let start = system.get("start").cloned().unwrap_or(Value::Null);
     let size3d = b_field(&start, "size3D", false);
     // ---- 挂账项（模块在位而未建模/未消费）----
@@ -1281,8 +1304,8 @@ fn build_emitter(
             .unwrap_or(MinMaxCurve::Constant(1.0)),
     });
     // 限速：构造拒绝（separateAxis / 通用曲线幅值 / 非常数或非零拖拽——
-    // 非零拖拽还叠加「尺寸数组取出生还是当前」的未解读选择）时模块整块
-    // 摘除并计数，发射器照跑（不钳速）。
+    // 非零拖拽还叠加「尺寸数组取出生还是当前」的未解读选择）时整个发射器
+    // 被拒（不画一个不钳速的发射器）。
     let limit_velocity = system.get("limitVelocity").and_then(|l| {
         let magnitude = l.get("magnitude").map(parse_min_max_curve)?;
         let drag = l
@@ -1300,7 +1323,7 @@ fn build_emitter(
             Ok(law) => Some(law),
             Err(reason) => {
                 counts.acc_lim_refused += 1;
-                info!("[emoticon] {name}：limitVelocity 模块拒绝（不钳速）：{reason}");
+                if refusal.is_none() { refusal = Some(format!("limitVelocity: {reason}")); }
                 None
             }
         }
@@ -1365,8 +1388,9 @@ fn build_emitter(
         color_over_lifetime: system.get("colorOverLifetime").map(parse_min_max_gradient),
         size_over_lifetime,
         size_over_lifetime_y,
-        // 自旋：构造拒绝（separateAxes 开而 x/y 键缺 = 提取面缺键）时模块
-        // 整块摘除并计数，发射器照跑（自旋冻结在出生角）。
+        // 自旋：构造拒绝（separateAxes 开而 x/y 键缺 = 提取面缺键，或曲线道
+        // 在引擎曲线分派之外，如缺导出的 wrap 模式、带权键）时整个发射器被拒，
+        // 不把自旋冻结在出生角照画。
         rotation_over_lifetime: system.get("rotationOverLifetime").and_then(|r| {
             let curve = r.get("curve").map(parse_min_max_curve)?;
             let x = r.get("x").map(parse_min_max_curve);
@@ -1380,7 +1404,7 @@ fn build_emitter(
                 Ok(law) => Some(law),
                 Err(reason) => {
                     counts.acc_rol_refused += 1;
-                    info!("[emoticon] {name}：rotationOverLifetime 模块拒绝（自旋冻结）：{reason}");
+                    if refusal.is_none() { refusal = Some(reason); }
                     None
                 }
             }
@@ -1465,7 +1489,7 @@ fn build_emitter(
     if sheet_tiled && !identity_st {
         panic!("{name}：片表动画与非恒等 ST 并存，采样链折算不成立");
     }
-    (params, mat)
+    (params, mat, refusal)
 }
 
 // ===== 档案容器与待机编排解析 =====
@@ -1507,13 +1531,14 @@ pub(crate) fn spawn_when_ready(
     }
     let c = &archive.archive.counts;
     info!(
-        "[emoticon] 档案 {} 项：sprite {} · particle {}；发射器记录 {}（仿真 {} · 渲染器关 {} · 绘制模式未实现 {} · 节点链断 {} · 缺基础图 {} · 子发射驱动 {}）；sprite 槽节点链断 {}",
+        "[emoticon] 档案 {} 项：sprite {} · particle {}；发射器记录 {}（仿真 {} · 渲染器关 {} · 模块拒绝 {} · 绘制模式未实现 {} · 节点链断 {} · 缺基础图 {} · 子发射驱动 {}）；sprite 槽节点链断 {}",
         archive.archive.items.len(),
         c.sprite_items,
         c.particle_items,
         c.records,
         c.simulated,
         c.gate_disabled,
+        c.gate_module_refused,
         c.gate_unsupported,
         c.gate_inactive,
         c.gate_missing_texture,
@@ -1521,7 +1546,7 @@ pub(crate) fn spawn_when_ready(
         c.gate_inactive_sprite,
     );
     info!(
-        "[emoticon] 挂账（能力在数据里、本管线无对应开关或消费面，逐项计数）：noise {} · customData {} · rotation3D {} · alignment {} · 渲染器 pivot {} · sortingOrder {} · ZWrite {} · ZTest=2 {} · ZOffset {} · 软粒子 {} · uv 旋转 {} · stretch 绘制 {} · loopEndFlag {} · soundInput {} · 自旋模块拒 {} · 限速模块拒 {}",
+        "[emoticon] 挂账（能力在数据里、本管线无对应开关或消费面，逐项计数）：noise {} · customData {} · rotation3D {} · alignment {} · 渲染器 pivot {} · sortingOrder {} · ZWrite {} · ZTest=2 {} · ZOffset {} · 软粒子 {} · uv 旋转 {} · stretch 绘制 {} · loopEndFlag {} · soundInput {} · 发射器因自旋模块被拒 {} · 发射器因限速模块被拒 {}",
         c.acc_noise,
         c.acc_custom_data,
         c.acc_rotation3d,

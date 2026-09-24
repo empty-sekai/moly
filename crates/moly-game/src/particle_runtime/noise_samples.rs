@@ -43,7 +43,7 @@ fn existing_range_advances_noise_once_and_adds_transient_velocity() {
     let mut system = test_support::runtime();
     system.emitter.emission = None;
     system.noise = Some(NoiseRuntime {
-        law,
+        law: law.clone(),
         state: NoiseState::default(),
         owner_seed: 0x1234_5678,
         owner: moly_law::particle::seed_owner::SeedOwner::from_serialized(0x1234_5678, false),
@@ -53,9 +53,10 @@ fn existing_range_advances_noise_once_and_adds_transient_velocity() {
         NoiseState { scroll: 1.0 / 60.0 },
         crate::particle_geometry::reflect(Vec3::from_array(before)).to_array(),
         0x1234_5678,
+        system.pool[0].age_percent,
     );
     simulate_stopped(&mut system, 1.0 / 60.0, &context());
-    let noise = system.noise.unwrap();
+    let noise = system.noise.clone().unwrap();
     assert_eq!(noise.state.scroll.to_bits(), (1.0f32 / 60.0).to_bits());
     let total = system.side[0].total_velocity;
     let expected_runtime = crate::particle_geometry::reflect(Vec3::from_array(expected)).to_array();
@@ -76,7 +77,7 @@ fn noise_owner_uses_source_seed_and_keeps_manual_manager_unchanged() {
     system.emitter.auto_random_seed = Some(false);
     let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
     assert!(install_noise_consumer(&mut system, &mut manager).unwrap());
-    let installed = system.noise.unwrap();
+    let installed = system.noise.clone().unwrap();
     assert_eq!(installed.owner_seed, 71);
     assert_eq!(installed.state.scroll.to_bits(), 0);
     assert_eq!(manager.manager_words_for_test(), [17, 19, 127, 2471805022]);
@@ -105,7 +106,7 @@ fn native_install_draws_one_owner_for_birth_streams_and_noise() {
     assert_eq!(birth.initial, ModuleRandom::from_owner_seed(seed));
     assert_eq!(birth.shape, ModuleRandom::from_owner_seed(seed));
     assert_eq!(birth.emission.random, ScalarRandom::from_seed(seed));
-    let noise = system.noise.unwrap();
+    let noise = system.noise.clone().unwrap();
     assert_eq!((noise.owner_seed, noise.owner.seed), (seed, seed));
     assert_eq!(noise.state.scroll.to_bits(), 0.0_f32.to_bits());
 
@@ -165,14 +166,15 @@ fn current_snow_noise_source_installs_only_the_qualified_consumer() {
         emitter.random_seed.unwrap()
     };
     assert!(install_noise_consumer(&mut system, &mut manager).unwrap());
-    assert_eq!(system.noise.unwrap().owner_seed, expected_owner);
+    assert_eq!(system.noise.clone().unwrap().owner_seed, expected_owner);
     assert_eq!(
-        system.noise.unwrap().law.sample(
+        system.noise.clone().unwrap().law.sample(
             NoiseState { scroll: 0.0 },
             [0.25, -0.5, 1.0],
-            expected_owner
+            expected_owner,
+            0.0
         ),
-        law.sample(NoiseState::default(), [0.25, -0.5, 1.0], expected_owner)
+        law.sample(NoiseState::default(), [0.25, -0.5, 1.0], expected_owner, 0.0)
     );
 }
 
@@ -194,12 +196,12 @@ fn source_snow_legacy_composition_smoke_is_not_native_prewarm() {
     system.emitter.prewarm = true;
     system.emitter.play_on_awake = true;
     system.gravity_law =
-        moly_law::particle::gravity::Gravity::new(&system.emitter.start.gravity_modifier);
+        moly_law::particle::gravity::Gravity::new(&system.emitter.start.gravity_modifier).expect("curves validated during admission");
     system.velocity_law = system
         .emitter
         .velocity_over_lifetime
         .as_ref()
-        .map(moly_law::particle::velocity::VelocityOverLifetime::from_params);
+        .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission"));
     system.rol = system
         .emitter
         .rotation_over_lifetime
@@ -217,7 +219,7 @@ fn source_snow_legacy_composition_smoke_is_not_native_prewarm() {
         .emitter
         .size_over_lifetime
         .as_ref()
-        .map(moly_law::particle::size::SizeOverLifetime::from_params);
+        .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
     system.color_law = system
         .emitter
         .color_over_lifetime
@@ -227,7 +229,7 @@ fn source_snow_legacy_composition_smoke_is_not_native_prewarm() {
         .emitter
         .custom_data
         .as_ref()
-        .map(moly_law::particle::custom_data::CustomData::from_params);
+        .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
     system.pool.clear();
     system.side.clear();
     system.native_birth = None;
@@ -238,7 +240,7 @@ fn source_snow_legacy_composition_smoke_is_not_native_prewarm() {
     for _ in 0..steps {
         simulate(&mut system, PREWARM_STEP, &ctx);
     }
-    let noise = system.noise.expect("snow Noise owner");
+    let noise = system.noise.clone().expect("snow Noise owner");
     assert!(noise.state.scroll.is_finite());
     assert!(
         !system.pool.is_empty(),

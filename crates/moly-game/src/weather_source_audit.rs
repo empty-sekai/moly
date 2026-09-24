@@ -6,8 +6,12 @@ use bevy::asset::AssetPlugin;
 use bevy::image::ImagePlugin;
 use serde_json::json;
 
+///
+/// Instantiation follows the production selection (`source_environment_selection`) over every site of the
+/// environment prefab census (MOLY_ENVIRONMENT_PREFAB_CENSUS), as the census replay does: a row is a runtime
+/// row exactly when the loader picks its prefab for at least one site, with the kind the loader gives it.
 #[test]
-#[ignore = "requires MOLY_WEATHER_AUDIT_INDEX and MOLY_WEATHER_AUDIT_OUT"]
+#[ignore = "requires MOLY_WEATHER_AUDIT_INDEX, MOLY_WEATHER_AUDIT_OUT and MOLY_ENVIRONMENT_PREFAB_CENSUS"]
 fn current_corpus_admission() {
     let index_path = std::path::PathBuf::from(
         std::env::var_os("MOLY_WEATHER_AUDIT_INDEX").expect("supply extraction index"),
@@ -22,6 +26,14 @@ fn current_corpus_admission() {
             .expect("parse source extraction")
     };
     let index = read(&index_path);
+    let census = read(std::path::Path::new(
+        &std::env::var_os("MOLY_ENVIRONMENT_PREFAB_CENSUS").expect("supply the environment prefab census for its sites"),
+    ));
+    let sites: Vec<String> = census["sites"].as_array().expect("census sites").iter()
+        .map(|site| site.as_str().unwrap_or_else(|| panic!("census site is not a string: {site}")).to_owned())
+        .collect();
+    assert!(!sites.is_empty(), "the census names no site");
+    let mut naming_role_differs = Vec::new();
     let app = corpus_app(root);
     let server = app.world().resource::<AssetServer>();
     let mut rows = Vec::new();
@@ -37,18 +49,30 @@ fn current_corpus_admission() {
         let start = rows.len();
         let mut admitted = 0;
         let mut renderer_enabled = 0;
-        for (effect_name, effect) in doc["effects"].as_object().expect("effects map") {
+        let effects = doc["effects"].as_object().expect("effects map");
+        // The loader's pick for every census site; a prefab has one kind whatever the site.
+        let mut selected: HashMap<String, EffectKind> = HashMap::new();
+        for site in &sites {
+            for (prefab, _, kind) in source_environment_selection(effects, name, site) {
+                let previous = selected.insert(prefab.clone(), kind);
+                assert!(previous.is_none_or(|previous| previous == kind), "{name}/{prefab}: two kinds across sites");
+            }
+        }
+        for (effect_name, effect) in effects {
             let animation = crate::weather_animation::Contract::compile(effect,animation_doc.as_ref());
             // The extractor's name-based kind is only an extraction contract check here.
             match effect["kind"].as_str() {
                 Some("sky" | "camera" | "site" | "other") => {}
                 other => panic!("unclassified effect kind {other:?}; do not silently omit"),
             }
-            // The anchor is the loader's role: a prefab the loader never instantiates on its own (a template
+            // The anchor is the loader's pick: a prefab the loader never instantiates on its own (a template
             // whose baked copies live inside a unique site prefab) stays in the census but is not a runtime row.
             let variant = effect["variant"].as_str()
                 .unwrap_or_else(|| panic!("{name}/{effect_name}: package variant is not a string"));
-            let kind = source_environment_role(effect_name, variant, name);
+            let kind = selected.get(effect_name.as_str()).copied();
+            if kind != source_environment_role(effect_name, variant, name) {
+                naming_role_differs.push(format!("{name}/{effect_name}"));
+            }
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             let particles = effect["particles"].as_array().expect("particles");
@@ -105,6 +129,7 @@ fn current_corpus_admission() {
                         .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&p.emitter, Some(p.geometry.shape_evidence())))
                         .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
+                    "culling": planned.as_ref().map(|p| p.culling.label()),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
                         v.iter().any(|k| k.as_str() == Some("_SOFT_PARTICLES_ENABLED"))),
@@ -118,11 +143,15 @@ fn current_corpus_admission() {
             "admitted": admitted,
         }));
     }
+    println!("instantiation: selection over {} census sites; naming role differs on {} effects {:?}",
+        sites.len(), naming_role_differs.len(), naming_role_differs);
     let report = json!({
         "meaning": "Observed runtime admission over all exported effect variants, not simultaneous scene population and not proof of source equivalence.",
         "perPhenomenon": per_phenomenon,
         "records": rows.len(),
         "admitted": rows.iter().filter(|r| r["admitted"] == true).count(),
+        "cullingExposed": rows.iter().filter(|r| r["culling"]["culled"] == "source").count(),
+        "cullingPorted": rows.iter().filter(|r| r["culling"]["port"] == "cullable").count(),
         "gpuVerification": "not_run",
         "rows": rows,
     });
@@ -232,13 +261,17 @@ fn corpus_app(root: &std::path::Path) -> App {
 /// module's enabled byte clear, every update on both routes and every recorded
 /// frame-time chain enters no emission kernel, starts no particle, records no
 /// emit and leaves the emission state untouched; only the end-of-duration clear
-/// runs. With the byte set, the same configurations enter EmitOverTime. The
-/// production admission must install nothing for exactly the records executed
-/// with the module off, name them source-silent rather than refused, stop
+/// runs. With the byte set, the same configurations enter EmitOverTime. Each
+/// effect's kind is the loader's pick, the production selection
+/// (`source_environment_selection`) over the census sites
+/// (MOLY_ENVIRONMENT_PREFAB_CENSUS), as in the corpus admission: an executed
+/// record of a prefab the loader never instantiates on its own is never judged. The production admission must install nothing for exactly the
+/// other executed records, name them source-silent rather than refused, stop
 /// calling a record silent once its inventory lists the module as enabled, and
-/// never call a record silent that the native run did not execute.
+/// never call a record silent that the native run did not execute. Every
+/// executed record must exist in the extraction.
 #[test]
-#[ignore = "requires MOLY_NO_EMISSION_OWNERS_RECEIPT and the MOLY_WEATHER_AUDIT_INDEX extraction (with MOLY_SOURCE_CORPUS_OVERLAY) it was taken from"]
+#[ignore = "requires MOLY_NO_EMISSION_OWNERS_RECEIPT, MOLY_ENVIRONMENT_PREFAB_CENSUS and the MOLY_WEATHER_AUDIT_INDEX extraction (with MOLY_SOURCE_CORPUS_OVERLAY) it was taken from"]
 fn emission_disabled_weather_systems_follow_the_native_update() {
     use std::collections::BTreeSet;
     let read = |path: &std::path::Path| -> Value {
@@ -293,9 +326,18 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
     let root = index_path.parent().expect("index has a parent");
     let overlay = std::env::var_os("MOLY_SOURCE_CORPUS_OVERLAY").map(std::path::PathBuf::from);
     let index = read(&index_path);
+    // The kind is the loader's pick over the census sites, as in the corpus admission.
+    let census = read(std::path::Path::new(
+        &std::env::var_os("MOLY_ENVIRONMENT_PREFAB_CENSUS").expect("supply the environment prefab census for its sites"),
+    ));
+    let sites: Vec<String> = census["sites"].as_array().expect("census sites").iter()
+        .map(|site| site.as_str().unwrap_or_else(|| panic!("census site is not a string: {site}")).to_owned())
+        .collect();
+    assert!(!sites.is_empty(), "the census names no site");
     let app = corpus_app(root);
     let server = app.world().resource::<AssetServer>();
-    let (mut silent, mut found, mut records) = (BTreeSet::new(), BTreeSet::new(), 0usize);
+    let (mut silent, mut found, mut unjudged, mut records) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), 0usize);
+    let mut naming_role_differs = 0usize;
     for (name, item) in index["phenomena"].as_object().expect("phenomena map") {
         let source_path = |file: &str| overlay.as_ref().map(|root| root.join(file))
             .filter(|path| path.is_file()).unwrap_or_else(|| root.join(file));
@@ -303,15 +345,20 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
         let animation_doc = item["animations"]["file"].as_str().map(|file| read(&source_path(file)))
             .or_else(|| overlay.as_ref().map(|root| root.join(name).join("animations.json"))
                 .filter(|path| path.is_file()).map(|path| read(&path)));
-        for (effect_name, effect) in doc["effects"].as_object().expect("effects map") {
+        let effects = doc["effects"].as_object().expect("effects map");
+        let mut selected: HashMap<String, EffectKind> = HashMap::new();
+        for site in &sites {
+            for (prefab, _, kind) in source_environment_selection(effects, name, site) {
+                let previous = selected.insert(prefab.clone(), kind);
+                assert!(previous.is_none_or(|previous| previous == kind), "{name}/{prefab}: two kinds across sites");
+            }
+        }
+        for (effect_name, effect) in effects {
             let animation = crate::weather_animation::Contract::compile(effect, animation_doc.as_ref());
-            let kind = match effect["kind"].as_str() {
-                Some("sky") => Some(EffectKind::Sky),
-                Some("camera") => Some(EffectKind::Camera),
-                Some("site") => Some(EffectKind::Site),
-                Some("other") => None,
-                other => panic!("unclassified effect kind {other:?}"),
-            };
+            let variant = effect["variant"].as_str()
+                .unwrap_or_else(|| panic!("{name}/{effect_name}: package variant is not a string"));
+            let kind = selected.get(effect_name.as_str()).copied();
+            if kind != source_environment_role(effect_name, variant, name) { naming_role_differs += 1; }
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             let particles = effect["particles"].as_array().expect("particles");
@@ -336,6 +383,13 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
                 }
                 if !executed_off.contains(&key) { continue; }
                 found.insert(key.clone());
+                if kind.is_none() {
+                    // A prefab the loader never instantiates on its own: the admission never judges it.
+                    assert!(!planned && tally.records == 0 && tally.source_emission_disabled == 0,
+                        "{key:?}: a record without a loader role was judged: {tally:?}");
+                    unjudged.insert(key);
+                    continue;
+                }
                 assert!(!planned, "{key:?}: the engine births nothing, so nothing may be installed");
                 assert_eq!(tally.source_emission_disabled, 1, "{key:?}: {tally:?}");
                 // The same record with the module listed as enabled is the
@@ -350,9 +404,101 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
         }
     }
     assert_eq!(found, executed_off, "every native record exists in the extraction");
-    assert_eq!(silent, executed_off, "the source-silent class is exactly the native module-off records");
-    println!("emission-disabled replay: {} records, {} native module-off records over {} updates, {} source-silent",
-        records, executed_off.len(), off_updates, silent.len());
+    let judged_off: BTreeSet<_> = executed_off.difference(&unjudged).cloned().collect();
+    assert_eq!(silent, judged_off,
+        "the source-silent class is exactly the native module-off records the loader instantiates");
+    println!("emission-disabled replay: {} records, {} native module-off records over {} updates, {} without a loader role (not judged), {} source-silent; kind from the selection over {} census sites, naming role differs on {} effects",
+        records, executed_off.len(), off_updates, unjudged.len(), silent.len(), sites.len(), naming_role_differs);
+}
+
+/// Replay of the engine's owner matrix for an emitter below an animated Transform, recorded at sampled Animator
+/// frames: ParticleSystem::UpdateLocalToWorldMatrixAndScales (Local scaling) over the TransformHierarchy chain
+/// anchor -> effect root -> ... -> emitter, every link at the export's serialized TRS except the emitter's own node,
+/// whose rotation is the one the engine's Animator wrote at that frame (or a sampled unit rotation on the same
+/// chain); a synthetic family carries its own chains of the admitted form (identity rotations above the emitter,
+/// unit scales, at most two links with a translation, depth three or four). The product's world matrix of the
+/// same emitter is `NodeChain::affine` over `authored_chain` with that rotation in place of the serialized one,
+/// carried to the world by `compose_to_world` under a translation-only sky anchor. Taken back from the product
+/// frame (X reflected), it must equal the native localToWorld word for word (+-0 equal), and it must move with
+/// the rotation: the serialized chain gives another matrix on some case.
+#[test]
+#[ignore = "requires MOLY_ANIMATED_CHAIN_NATIVE and MOLY_ANIMATED_CHAIN_EFFECTS"]
+fn animated_chain_world_matrix_matches_native_owner_matrix() {
+    let read = |key: &str| -> Value {
+        let path = std::env::var_os(key).unwrap_or_else(|| panic!("{key} not set"));
+        serde_json::from_slice(&std::fs::read(path).expect("read replay input")).expect("parse replay input")
+    };
+    let receipt = read("MOLY_ANIMATED_CHAIN_NATIVE");
+    assert_eq!(receipt["library"]["sha256"], "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9");
+    let effects = read("MOLY_ANIMATED_CHAIN_EFFECTS");
+    let word = |v: &Value| u32::try_from(v.as_u64().expect("u32 word")).expect("u32 word");
+    let words = |v: &Value| -> Vec<u32> { v.as_array().expect("word list").iter().map(word).collect() };
+    let serialized = |v: &Value| -> Vec<u32> {
+        v.as_array().expect("serialized list").iter().map(|x| (x.as_f64().expect("number") as f32).to_bits()).collect()
+    };
+    let same = |a: u32, b: u32| a == b || (a & 0x7fff_ffff == 0 && b & 0x7fff_ffff == 0);
+    let one = 1.0f32.to_bits();
+    // Product frame to engine frame: a 3x3 entry changes sign when exactly one of its row and column is X; the
+    // translation changes sign in X.
+    let engine_words = |world: &GlobalTransform| -> [u32; 12] {
+        let affine = world.affine();
+        let columns = [affine.matrix3.x_axis, affine.matrix3.y_axis, affine.matrix3.z_axis, affine.translation];
+        std::array::from_fn(|i| {
+            let (c, r) = (i / 3, i % 3);
+            let flip = if c < 3 { (r == 0) != (c == 0) } else { r == 0 };
+            columns[c][r].to_bits() ^ if flip { 0x8000_0000 } else { 0 }
+        })
+    };
+    let (mut cases, mut moved) = (0usize, 0usize);
+    let mut mismatches = Vec::new();
+    for case in receipt["cases"].as_array().expect("cases") {
+        let effect_name = case["effect"].as_str().expect("effect");
+        let node = case["node"].as_str().expect("node");
+        // A case of the synthetic family carries its own export-shaped node list.
+        let nodes = case.get("nodes").unwrap_or(&effects["effects"][effect_name]["nodes"]);
+        let by_path: HashMap<String, &Value> = nodes.as_array().expect("nodes")
+            .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
+        let chain = authored_chain(&by_path, node).unwrap_or_else(|| panic!("{effect_name}/{node}: chain does not resolve"));
+        let written = words(&case["written"]);
+        let anchor = words(&case["anchor"]);
+        // The chain the engine ran: the anchor, then the export's links at their serialized TRS with the emitter's
+        // rotation replaced by the written one.
+        let links = case["links"].as_array().expect("links");
+        assert_eq!(links.len(), chain.links.len() + 1, "{effect_name}/{node}: chain length");
+        assert_eq!(words(&links[0]["t"]), vec![anchor[0] ^ 0x8000_0000, anchor[1], anchor[2]], "anchor translation");
+        assert_eq!((words(&links[0]["q"]), words(&links[0]["s"])), (vec![0, 0, 0, one], vec![one; 3]), "anchor");
+        for (link, native) in chain.links.iter().zip(&links[1..]) {
+            assert_eq!(native["path"].as_str(), Some(link.path.as_str()), "{effect_name}/{node}: link order");
+            let n = by_path[&link.path];
+            let rotation = if link.path == node { written.clone() } else { serialized(&n["rotation"]) };
+            assert_eq!((words(&native["t"]), words(&native["q"]), words(&native["s"])),
+                (serialized(&n["position"]), rotation, serialized(&n["scale"])), "{}: native link", link.path);
+        }
+        let rotation: [f32; 4] = std::array::from_fn(|i| f32::from_bits(written[i]));
+        let ctx = crate::particle_runtime::Context {
+            sky: GlobalTransform::from_translation(Vec3::new(f32::from_bits(anchor[0]), f32::from_bits(anchor[1]),
+                f32::from_bits(anchor[2]))),
+            camera: GlobalTransform::IDENTITY, site: GlobalTransform::IDENTITY,
+        };
+        let mut system = crate::particle_runtime::test_support::runtime();
+        system.kind = EffectKind::Sky;
+        system.node_affine = chain.affine(|path| (path == node).then_some(rotation));
+        let ours = engine_words(&crate::particle_runtime::compose_to_world(&system, &ctx));
+        system.node_affine = chain.serialized_affine();
+        let still = engine_words(&crate::particle_runtime::compose_to_world(&system, &ctx));
+        let native = words(&case["localToWorld"]);
+        let expected: [u32; 12] = std::array::from_fn(|i| native[4 * (i / 3) + i % 3]);
+        if (0..12).any(|i| !same(ours[i], expected[i])) {
+            mismatches.push(format!("{node} {} frame {} anchor {anchor:08x?}: native {expected:08x?} ours {ours:08x?}",
+                case["seq"], case["frame"]));
+        }
+        moved += usize::from((0..12).any(|i| !same(ours[i], still[i])));
+        cases += 1;
+    }
+    println!("animated chain: {cases} cases, {} mismatched, matrix moved by the rotation in {moved}", mismatches.len());
+    assert!(mismatches.is_empty(), "{} of {cases} mismatched:\n{}", mismatches.len(),
+        mismatches.iter().take(8).cloned().collect::<Vec<_>>().join("\n"));
+    assert!(cases > 0 && moved > 0, "cases={cases} moved={moved}");
 }
 
 /// First-Play warm of one admitted system on the path production would take,
@@ -388,12 +534,12 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.cone_angle = planned.cone_angle;
     system.rol = planned.rol.clone();
     system.limit = planned.limit.clone();
-    system.velocity_law = e.velocity_over_lifetime.as_ref().map(moly_law::particle::velocity::VelocityOverLifetime::from_params);
+    system.velocity_law = e.velocity_over_lifetime.as_ref().map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission"));
     system.force_law = e.force.as_ref().map(|p| moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission"));
-    system.gravity_law = moly_law::particle::gravity::Gravity::new(&e.start.gravity_modifier);
-    system.size_law = e.size_over_lifetime.as_ref().map(moly_law::particle::size::SizeOverLifetime::from_params);
+    system.gravity_law = moly_law::particle::gravity::Gravity::new(&e.start.gravity_modifier).expect("curves validated during admission");
+    system.size_law = e.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
-    system.custom_law = e.custom_data.as_ref().map(moly_law::particle::custom_data::CustomData::from_params);
+    system.custom_law = e.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
     let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route) {
         Ok(crate::particle_runtime::BirthPath::Native) => "native",
         Ok(crate::particle_runtime::BirthPath::Legacy(_)) => "legacy",

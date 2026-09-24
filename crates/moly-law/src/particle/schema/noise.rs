@@ -166,6 +166,8 @@ mod tests {
         let MinMaxCurve::Curve { multiplier, max } = &params.strength else {
             panic!("curve preserved");
         };
+        // The source carries no wrap for this lane; it stays unknown.
+        assert_eq!((max.pre_wrap, max.post_wrap), (None, None));
         assert_eq!(*multiplier, 2.0);
         assert_eq!((max.keys[0].in_slope, max.keys[0].out_slope), (-4.0, 5.0));
         assert_eq!(
@@ -190,7 +192,10 @@ mod tests {
             (max.keys[0].in_slope, max.keys[0].out_slope),
             (f32::INFINITY, f32::NEG_INFINITY)
         );
-        assert!(NoiseLaw::from_params(&params).is_err());
+        // A one-key strength curve is on the polynomial path: the reader's
+        // validity test passes any curve with fewer than two keys before it
+        // looks at weights. The remap curves are not read with remap off.
+        assert!(NoiseLaw::from_params(&params).is_ok());
     }
 
     #[test]

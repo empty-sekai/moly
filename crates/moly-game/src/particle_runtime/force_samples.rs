@@ -12,7 +12,7 @@ fn curve(v: &Value) -> MinMaxCurve {
         Curve { multiplier: 1.0, keys: [0.0, 1.0].map(|time| CurveKey {
             time, value: if time == 0.0 { start } else { end },
             in_slope: slope, out_slope: slope, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0,
-        }).to_vec() }
+        }).to_vec(), pre_wrap: Some(2), post_wrap: Some(2) }
     };
     match v["mode"].as_u64().unwrap() {
         0 => MinMaxCurve::Constant(number(&v["max"])),

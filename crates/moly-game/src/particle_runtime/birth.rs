@@ -18,6 +18,10 @@ pub(crate) struct NativeBirthState {
     pub owner: Option<moly_law::particle::seed_owner::SeedOwner>,
     pub initial: ModuleRandom,
     pub shape: ModuleRandom,
+    /// ShapeModule's arc clock (current, previous), in binary64. The seed
+    /// reset of the system zeroes it together with the Shape stream; every
+    /// ordinary update slice advances it before that slice's births.
+    pub shape_clock: moly_law::particle::shape::ArcLoopClock,
     pub emission: AutonomousEmissionState,
 }
 
@@ -95,6 +99,19 @@ pub(super) fn step_explicit(
     }
     system.previous_head = clock.previous;
     system.playback_head = clock.current;
+    // ParticleSystem::Update1Incremental runs the pre-simulation module
+    // update, ShapeModule::Update among it, before the slice's births: the
+    // arc clock moves by the slice dt times the arc speed. Only the Loop and
+    // PingPong cones read the clock, and only a constant arc speed is admitted.
+    if let Some(speed) = system
+        .emitter
+        .shape
+        .as_ref()
+        .and_then(|params| moly_law::particle::shape_birth::ShapeBirthLaw::from_params(params).ok())
+        .and_then(|law| law.arc_clock_speed())
+    {
+        state.shape_clock.advance(speed, dt);
+    }
     simulate_existing(system, dt, ctx);
     if let Some(batch) = batch {
         state.emission = pending;
@@ -103,6 +120,7 @@ pub(super) fn step_explicit(
             system,
             &mut state.initial,
             Some(&mut state.shape),
+            Some(state.shape_clock),
             BirthBatch {
                 count: batch.total,
                 rate_count: batch.rate_count,
@@ -132,6 +150,7 @@ pub(super) fn start_explicit(
         system,
         random,
         None,
+        None,
         batch,
         dt,
         previous_normalized,
@@ -157,6 +176,7 @@ pub(super) fn start_explicit_with_shape(
         system,
         initial,
         Some(shape),
+        None,
         batch,
         dt,
         previous_normalized,
@@ -227,6 +247,7 @@ fn start_common(
     system: &mut Runtime,
     random: &mut ModuleRandom,
     mut shape_stream: Option<&mut ModuleRandom>,
+    shape_clock: Option<moly_law::particle::shape::ArcLoopClock>,
     batch: BirthBatch,
     dt: f32,
     previous_normalized: f32,
@@ -262,7 +283,32 @@ fn start_common(
         system.full_total += batch.count as u64;
         return Ok(());
     }
-    let speed = CurveSampler::with_baking(&system.emitter.start.speed, false);
+    // One ShapeBatch per StartParticles call: the accepted count after the
+    // capacity decision, the emission spacing and offset of this call, and
+    // the arc clock as the slice's module update left it.
+    let mut shape_batch = match shape_law.as_ref() {
+        Some(law) => {
+            if law.arc_clock_speed().is_some() && shape_clock.is_none() {
+                return Err(BirthRefused::Unsupported("arc clock owner is not installed"));
+            }
+            let accepted = u32::try_from(accepted)
+                .ok()
+                .and_then(std::num::NonZeroU32::new)
+                .ok_or(BirthRefused::InvalidTiming)?;
+            Some(moly_law::particle::shape_birth::ShapeBatch::new(
+                accepted,
+                batch.distribution.spacing,
+                batch.distribution.offset,
+                shape_clock.unwrap_or_default(),
+            ))
+        }
+        None => None,
+    };
+    // ParticleSystem::StartVelocity evaluates the start speed through
+    // Evaluate(MinMaxCurve), which follows the reader's isOptimizedCurve bit.
+    let speed = CurveSampler::new(&system.emitter.start.speed,
+        moly_law::particle::curve::CurveTime::Normalized)
+        .map_err(BirthRefused::Unsupported)?;
     let owner = compose_to_world(system, ctx);
     // The runtime owner is reflected-X; module parameters are source Unity
     // coordinates. Convert its basis once, retaining native multiplication order.
@@ -317,6 +363,7 @@ fn start_common(
                 let state = shape_state.expect("a Shape block has its validated emitter state");
                 shape
                     .sample_group(
+                        shape_batch.as_mut().expect("a Shape law has its batch"),
                         next_shape
                             .as_mut()
                             .expect("validated independent Shape stream"),
@@ -396,15 +443,22 @@ fn start_common(
     let live_newborns = simulate_birth_span(system, old_count, accepted, &partial_dts, ctx);
     system.pool.truncate(old_count + live_newborns);
     system.side.truncate(old_count + live_newborns);
+    // CopyParticlesToUnalignedDst packs the newborns after the newborn death
+    // scan. In a ring mode, once the pool exceeds maxParticles, Pause records
+    // the death of the particle at the ring cursor and overwrites it, and Loop
+    // swaps every newborn with the cursor, leaving the displaced particle in the
+    // overflow span where it finishes its life without looping.
+    let mut replaced = 0_u64;
     finish_births(
         &mut system.pool,
         &mut system.side,
         &mut system.ring_cursor,
-        RingBufferMode::Disabled,
+        system.emitter.ring_buffer_mode,
         system.emitter.max_particles as usize,
         old_count,
-        |_, _| {},
+        |_, _| replaced += 1,
     );
+    system.died_total += replaced;
     *random = next;
     if let (Some(destination), Some(next)) = (shape_stream.as_mut(), next_shape) {
         **destination = next;
@@ -435,11 +489,6 @@ fn validate_emitter(
                 "missing Shape enabled/configuration evidence",
             ))
         }
-    }
-    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
-        return Err(BirthRefused::Unsupported(
-            "newborn ring replacement composition",
-        ));
     }
     if emitter.inherit_velocity.is_some()
         || emitter.collision.is_some()
