@@ -1687,10 +1687,15 @@ pub(crate) fn spawn_when_ready(
 /// source deactivates the GameObjects of the global sky effect, of the current
 /// site view's unique effect and of the field camera's effect, and activates
 /// them again on an outdoor one. The instances stay installed (an unchanged sky
-/// is kept across the move); an inactive GameObject neither draws nor updates
-/// its particle systems, so [`advance`] skips the live emitters as well.
-/// Retiring emitters are no longer referenced by those three owners and keep
-/// their own lifecycle.
+/// is kept across the move). The product hides their draws here, and
+/// [`advance`] stops stepping their particle systems while the site is indoor;
+/// back outdoors they resume from the state they stopped in (freeze and
+/// resume), while their Animators and effect clocks keep running indoors. What
+/// the engine does to a particle system and an Animator whose GameObject is
+/// deactivated and activated again (for example stopping and clearing the
+/// particles and replaying on activation) has not been read: an unverified
+/// residual. Retiring emitters are no longer referenced by those three owners
+/// and keep their own lifecycle.
 pub(crate) fn refresh_effect_visible(
     state: Option<Res<WeatherFxState>>,
     site: Option<Res<SiteActive>>,

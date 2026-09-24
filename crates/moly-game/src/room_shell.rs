@@ -12,6 +12,13 @@
 //! floor, both "uv set n - 1"). Every other value is the module material's.
 //! Neither program reads `_Color` or `_MainTex_ST`.
 //!
+//! The main walls are implemented but differ from the source: usage 2
+//! multiplies the wall occlusion by the edge factor
+//! `_WallAOIntensity * (d - 1) + 1`, whose `d` comes from the mesh's fourth uv
+//! set, and `mat_wall_main` carries intensity 0.5, so the factor is live. The
+//! module glb carries only the first two uv sets, so the product omits that
+//! factor; `room_appearance.rs` names it each time the wall material is built.
+//!
 //! The globals are the site ones (`SiteEnvGpuBuffer`: phenomena light and
 //! shade, drop-shadow colour 1, sky-bottom colour, fog, edge pair, treasure
 //! shadows) and the main-light shadow consumer block of `shadowmap.rs`.
@@ -34,6 +41,12 @@ pub(crate) const OBJECT_SHADER: &str = "Mysekai/Object";
 pub(crate) const FLOOR_SHADER: &str = "Mysekai/Room/Floor";
 
 const PARAM_SLOTS: usize = 9;
+
+/// `_UsePhenomenaLighting` as the room programs see it: `RoomController` runs
+/// `MysekaiMaterialExtension.SetPhenomenaLighting(on: true)` over the shared
+/// materials of all renderers under the room, and for any shader other than
+/// `Mysekai/Effect/UberUnlit` that writes `on` (1) into this property.
+const PHENOMENA_LIGHTING_ON: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ShellProgram {
@@ -210,7 +223,10 @@ pub(crate) fn resolve(
             params[2] = [
                 get("_UseFresnel")?,
                 get("_FresnelPower")?,
-                get("_UsePhenomenaLighting")?,
+                // `RoomController` calls `MysekaiMaterialExtension.SetPhenomenaLighting(on: true)`
+                // on every material of every renderer of the room, which writes 1 into
+                // `_UsePhenomenaLighting`, overwriting the authored value.
+                PHENOMENA_LIGHTING_ON,
                 get("_BaseOpacity")?,
             ];
             params[3] = color(record, &name, "_FresnelColor")?;
@@ -275,7 +291,8 @@ pub(crate) fn resolve(
             params[2] = [
                 get("_UseFresnel")?,
                 get("_FresnelPower")?,
-                get("_UsePhenomenaLighting")?,
+                // Forced on by `SetPhenomenaLighting(on: true)`, as on the Object materials.
+                PHENOMENA_LIGHTING_ON,
                 1.0,
             ];
             params[3] = color(record, &name, "_FresnelColor")?;

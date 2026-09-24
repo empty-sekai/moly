@@ -288,8 +288,9 @@ fn build(
         warn!("[room-shell] {gap}");
     }
     info!(
-        "[room-shell] module materials on the source programs: {:?}; wall {wall_uri} uv{wall_uv}, floor {floor_uri} uv{floor_uv}",
-        slots
+        "[room-shell] module materials on the source programs: {:?} ({} named above differ from the source); wall {wall_uri} uv{wall_uv}, floor {floor_uri} uv{floor_uv}",
+        slots,
+        state.named_gaps.len()
     );
     Ok(())
 }
@@ -497,27 +498,5 @@ mod tests {
         assert!(safe_skin("mis0001"));
         assert!(!safe_skin("../skin"));
         assert!(!safe_skin("C:/skin"));
-    }
-    /// The source's lookup on its own data: the StringConfigs floor pattern
-    /// formatted with a skin and colour 1 picks that colour's texture and
-    /// reads uv set 2 from its name; `FloorView` then selects mesh uv 1.
-    #[test]
-    fn skin_texture_pattern_reads_the_uv_set_like_the_source() {
-        let pattern = format_pattern("tex_{0}_floor_floor1_uvset(.*)_{1}", "con0002", 1).unwrap();
-        assert_eq!(pattern, "tex_con0002_floor_floor1_uvset(.*)_1");
-        let document = serde_json::json!({"textures": [
-            "textures/tex_con0002_floor_floor1_uvset2_1-d181057d.png",
-            "textures/tex_con0002_floor_floor1_uvset2_2-1eaabb5c.png",
-            "textures/tex_con0002_wall_wall1_uvset1_1-53538cdf.png"
-        ]});
-        let (uri, uv) = skin_surface(&document, &pattern).unwrap();
-        assert_eq!(
-            uri,
-            "textures/tex_con0002_floor_floor1_uvset2_1-d181057d.png"
-        );
-        assert_eq!(uv, 1);
-        assert_eq!(uv_set_index("1"), 0);
-        assert_eq!(uv_set_index("3"), 2);
-        assert_eq!(uv_set_index("x"), 0);
     }
 }

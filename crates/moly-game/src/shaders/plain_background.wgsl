@@ -4,7 +4,10 @@
 // clip z is the depth of the eye distance `_PositionZ` (the source writes the
 // value its depth buffer holds at that distance, from _ZBufferParams). Here
 // the same eye distance goes through this view's projection, so the quad
-// sits at that distance in this renderer's depth convention.
+// sits at that distance in this renderer's depth convention. That is the
+// reversed-Z (Vulkan) reading of the source value; under OpenGL ES the same
+// value lands at another depth. The source's graphics API is not decided, so
+// this choice is open (see plain_background.rs).
 // Fragment: rgb = lerp(_Color2, _Color1, uv.y), alpha 1.
 //
 // Colour domain: the source is a Gamma-space player and writes the colour as
