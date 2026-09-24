@@ -1242,9 +1242,9 @@ impl FixtureGltfAssets {
 /// Keep browser asset decoding and scene expansion under explicit backpressure.
 /// A real Home site currently contains hundreds of instances; unbounded loading
 /// makes wasm spend multi-second stretches on one update.
-const FIXTURE_UNIQUE_LOADS_IN_FLIGHT: usize = 12;
+const FIXTURE_UNIQUE_LOADS_IN_FLIGHT: usize = 6;
 const FIXTURE_SCENE_SPAWN_BUDGET: usize = 3;
-const FIXTURE_SCENES_IN_FLIGHT: usize = 6;
+const FIXTURE_SCENES_IN_FLIGHT: usize = 3;
 
 /// 已展开的摆放数（spawn 闩的计数）。
 #[derive(Resource, Default)]
@@ -1529,7 +1529,11 @@ fn spawn_when_ready(
             if assets.handles.contains_key(&path) {
                 continue;
             }
-            let handle = server.load::<Gltf>(bevy::asset::AssetPath::from(path.clone()));
+            let handle = moly_assets::residency::load_gltf(
+                &server,
+                bevy::asset::AssetPath::from(path.clone()),
+                moly_assets::residency::GltfResidency::CpuTextures,
+            );
             assets.handles.insert(path, handle);
             slots -= 1;
         }

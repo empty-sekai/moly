@@ -398,8 +398,11 @@ pub(crate) fn load(
     mut commands: Commands,
     server: Res<AssetServer>,
 ) {
-    let page = server.load::<Image>(AssetPath::from(PANEL_PAGE.to_owned()));
-    let end_mark = server.load("moly://ui/atlas/sprites/ScenarioAtlas/icon_pageForward_gn.png");
+    let page = moly_assets::residency::load_image(&server, AssetPath::from(PANEL_PAGE.to_owned()));
+    let end_mark = moly_assets::residency::load_image(
+        &server,
+        "moly://ui/atlas/sprites/ScenarioAtlas/icon_pageForward_gn.png",
+    );
     commands.insert_resource(WindowArt { page, end_mark });
     commands.init_resource::<TalkWindowState>();
 }

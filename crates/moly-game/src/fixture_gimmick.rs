@@ -605,39 +605,18 @@ fn prepare_binding(world: &World, target: &FixtureTarget) -> Result<Prepared, St
     Ok(Prepared { definition, view, rotation, outputs, light, one_shot })
 }
 
+/// The player's gimmick tap, in OnClickGimmickAction's order: resolve the
+/// fixture, stop on a one-shot that is still on, switch the fixture's state,
+/// aim the player at its view, then ChangeState(SwitchGimmick). The state
+/// change is a separate step that can fail; the fixture's toggle stands.
 pub(crate) fn start(
     world: &mut World,
     target: &FixtureTarget,
     generation: u64,
 ) -> Result<(), String> {
     let Prepared { definition, view, rotation, outputs, light, one_shot } = prepare_binding(world, target)?;
-    if world.contains_resource::<PlayerFixtureControlOwner>()
-        || !world.resource::<PlayerAvatarStates>().can_intercept
-    {
-        return Err("player controls are occupied".into());
-    }
-    let actors: Vec<_> = world
-        .query_filtered::<(Entity, &AvatarDriver, &DashMode), With<PlayerControlled>>()
-        .iter(world)
-        .filter(|(_, driver, _)| driver.locomotion_owns_animator())
-        .map(|(entity, _, dash)| (entity, dash.0))
-        .collect();
-    let [(actor, before_dash)] = actors.as_slice() else {
-        return Err("one free SD player is required".into());
-    };
-    if world.get::<crate::talk::TalkHold>(*actor).is_some() {
-        return Err("player is in a conversation".into());
-    }
-    let owner = FixtureActivityOwner {
-        actor: *actor,
-        generation,
-    };
-    let site_epoch = world
-        .get_resource::<GroundEpoch>()
-        .ok_or("active site generation missing")?
-        .0;
     world.resource_scope(|world, mut runtime: Mut<Gimmicks>| {
-        if runtime.player.is_some() { return Err("player switch interval is occupied".into()); }
+        let runtime = &mut *runtime;
         let instance = runtime.instances.entry(target.clone()).or_insert_with(|| Instance {
             on: false,
             definition: definition.clone(),
@@ -650,30 +629,155 @@ pub(crate) fn start(
         if one_shot && instance.on {
             return Err("fixture one-shot is still on".into());
         }
+        toggle(instance, &definition, outputs, target);
+        // ChangeStatus returns early on the running switch state, which keeps
+        // reading the look-at target that SetLookAtTarget just replaced.
+        if world.resource::<PlayerAvatarStates>().current == PlayerActionState::SwitchGimmick {
+            match runtime.player.as_mut() {
+                Some(player) => {
+                    player.view = view;
+                    player.target = target.clone();
+                    player.light = light;
+                    info!("[fixture-gimmick] {} running switch interval looks at this fixture", target.uid);
+                }
+                None => info!("[fixture-gimmick] {} switched; player state unchanged: already switching", target.uid),
+            }
+            return Ok(());
+        }
+        if let Err(reason) = enter_switch(world, runtime, target, view, light, generation) {
+            info!("[fixture-gimmick] {} switched; player state unchanged: {reason}", target.uid);
+        }
+        Ok(())
+    })
+}
+
+/// All-or-nothing: the switch interval must be available before the fixture's
+/// state changes. This is the library preview's contract, not the tap's.
+fn start_exclusive(
+    world: &mut World,
+    target: &FixtureTarget,
+    generation: u64,
+) -> Result<(), String> {
+    let Prepared { definition, view, rotation, outputs, light, one_shot } = prepare_binding(world, target)?;
+    let actor = switch_actor(world)?;
+    let owner = FixtureActivityOwner {
+        actor: actor.entity,
+        generation,
+    };
+    world.resource_scope(|world, mut runtime: Mut<Gimmicks>| {
+        let runtime = &mut *runtime;
+        if runtime.player.is_some() { return Err("player switch interval is occupied".into()); }
+        let instance = runtime.instances.entry(target.clone()).or_insert_with(|| Instance {
+            on: false,
+            definition: definition.clone(),
+            playback: None,
+            rotation,
+            pending: PendingTriggers::default(),
+            outputs: outputs.clone(),
+        });
+        if one_shot && instance.on {
+            return Err("fixture one-shot is still on".into());
+        }
         // Resolve the exact adapted clip and take this body's existing
         // animator lease before the irreversible furniture model trigger.
         let gesture = switch_gesture::start(world, owner.actor)?;
-        instance.on = !instance.on;
-        let program = if instance.on { definition.on.clone() } else { definition.off.clone() };
-        info!("[fixture-gimmick] {} trigger={} source-clip={:?} outputs={}", target.uid, if instance.on { "On" } else { "Off" }, program.clip, outputs.len());
-        instance.outputs = outputs.clone();
-        if instance.rotation.is_some() {
-            // The source business model changed above, but the Animator may
-            // still be blending another state. Set only the requested bool.
-            instance.pending.set(if instance.on { Trigger::On } else { Trigger::Off });
-        } else {
-            // Event-only packages keep their already adopted scheduling.
-            instance.playback = Some(Playback::new(program, outputs, None));
-        }
-        let states = &mut *world.resource_mut::<PlayerAvatarStates>();
-        states.change_status(PlayerActionState::SwitchGimmick);
-        states.can_intercept = false;
-        world.entity_mut(owner.actor).insert((PlayerFixtureHeld(owner), MotionPhase::Dwelling { remaining: None }));
-        world.insert_resource(PlayerFixtureControlOwner(owner));
-        if let Some(mut input) = world.get_mut::<PlayerInput>(owner.actor) { input.active = false; input.direction = Vec3::ZERO; }
-        runtime.player = Some(PlayerSwitch { owner, gesture, target: target.clone(), view, site_epoch, elapsed: 0.0, sound_checked: false, light, before_dash: *before_dash });
+        toggle(instance, &definition, outputs, target);
+        install_switch(world, runtime, owner, gesture, target, view, actor.site_epoch, light, actor.before_dash);
         Ok(())
     })
+}
+
+/// SwitchGimmickFixtureState: flip the business state and send its trigger.
+fn toggle(instance: &mut Instance, definition: &Definition, outputs: Vec<Entity>, target: &FixtureTarget) {
+    instance.on = !instance.on;
+    let program = if instance.on { definition.on.clone() } else { definition.off.clone() };
+    info!("[fixture-gimmick] {} trigger={} source-clip={:?} outputs={}", target.uid, if instance.on { "On" } else { "Off" }, program.clip, outputs.len());
+    instance.outputs = outputs.clone();
+    if instance.rotation.is_some() {
+        // The source business model changed above, but the Animator may
+        // still be blending another state. Set only the requested bool.
+        instance.pending.set(if instance.on { Trigger::On } else { Trigger::Off });
+    } else {
+        // Event-only packages keep their already adopted scheduling.
+        instance.playback = Some(Playback::new(program, outputs, None));
+    }
+}
+
+struct SwitchActor {
+    entity: Entity,
+    before_dash: bool,
+    site_epoch: u64,
+}
+
+/// The player that can take the switch interval now: the intercept gate is
+/// open, no furniture action holds its controls, and one free SD body can
+/// play the adapted switch motion.
+fn switch_actor(world: &mut World) -> Result<SwitchActor, String> {
+    if world.contains_resource::<PlayerFixtureControlOwner>()
+        || !world.resource::<PlayerAvatarStates>().can_intercept
+    {
+        return Err("player controls are occupied".into());
+    }
+    let actors: Vec<_> = world
+        .query_filtered::<(Entity, &AvatarDriver, &DashMode), With<PlayerControlled>>()
+        .iter(world)
+        .filter(|(_, driver, _)| driver.locomotion_owns_animator())
+        .map(|(entity, _, dash)| (entity, dash.0))
+        .collect();
+    let [(entity, before_dash)] = actors.as_slice() else {
+        return Err("one free SD player is required".into());
+    };
+    if world.get::<crate::talk::TalkHold>(*entity).is_some() {
+        return Err("player is in a conversation".into());
+    }
+    let site_epoch = world
+        .get_resource::<GroundEpoch>()
+        .ok_or("active site generation missing")?
+        .0;
+    Ok(SwitchActor { entity: *entity, before_dash: *before_dash, site_epoch })
+}
+
+/// ChangeState(SwitchGimmick) for the player's tap.
+fn enter_switch(
+    world: &mut World,
+    runtime: &mut Gimmicks,
+    target: &FixtureTarget,
+    view: Entity,
+    light: bool,
+    generation: u64,
+) -> Result<(), String> {
+    let actor = switch_actor(world)?;
+    if runtime.player.is_some() {
+        return Err("player switch interval is occupied".into());
+    }
+    let owner = FixtureActivityOwner {
+        actor: actor.entity,
+        generation,
+    };
+    let gesture = switch_gesture::start(world, owner.actor)?;
+    install_switch(world, runtime, owner, gesture, target, view, actor.site_epoch, light, actor.before_dash);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_switch(
+    world: &mut World,
+    runtime: &mut Gimmicks,
+    owner: FixtureActivityOwner,
+    gesture: switch_gesture::Lease,
+    target: &FixtureTarget,
+    view: Entity,
+    site_epoch: u64,
+    light: bool,
+    before_dash: bool,
+) {
+    let states = &mut *world.resource_mut::<PlayerAvatarStates>();
+    states.change_status(PlayerActionState::SwitchGimmick);
+    states.can_intercept = false;
+    world.entity_mut(owner.actor).insert((PlayerFixtureHeld(owner), MotionPhase::Dwelling { remaining: None }));
+    world.insert_resource(PlayerFixtureControlOwner(owner));
+    if let Some(mut input) = world.get_mut::<PlayerInput>(owner.actor) { input.active = false; input.direction = Vec3::ZERO; }
+    runtime.player = Some(PlayerSwitch { owner, gesture, target: target.clone(), view, site_epoch, elapsed: 0.0, sound_checked: false, light, before_dash });
 }
 
 pub(crate) fn advance(world: &mut World) {

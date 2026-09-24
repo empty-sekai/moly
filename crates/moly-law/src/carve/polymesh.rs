@@ -328,6 +328,11 @@ impl PolyMesh {
             })
     }
 
+    /// 点能否落进某个单元（[`Self::locate`] 成功与否）。
+    pub(crate) fn locates(&self, grid: &Grid, regions: &Regions, p: [f32; 2]) -> bool {
+        self.locate(grid, regions, p).is_some()
+    }
+
     fn contains(&self, grid: &Grid, index: u32, p: [f32; 2]) -> bool {
         let triangle = self.tris[index as usize];
         let corners = triangle.map(|v| to_world(grid, self.verts[v as usize]));
@@ -452,10 +457,104 @@ impl PolyMesh {
         let from = self.locate(grid, regions, start)?;
         let to = self.locate(grid, regions, goal)?;
         let corridor = self.find_corridor(grid, from, to)?;
+        self.straighten(grid, &corridor, start, goal)
+    }
+
+    /// 完整或部分折线（Detour `findPath` 的两种成功结果）。两端都已映射到
+    /// 可走格上。同一连通分量：完整折线，末点即 `goal`。不同分量：Detour
+    /// 把走廊收在起点分量里启发距离最小的单元（搜索展开完整个分量后的
+    /// `lastBestNode`），`findStraightPath` 再把终点夹到该单元上离目标
+    /// 最近的点——引擎的 `CalculatePath` 对这种部分路径同样返回成功。
+    /// 本网的单元位置是单元心（与本文件的 A\* 一致，Detour 用门中点），
+    /// 部分终点另外落回可走格，使同一场上的后续查询与路线执行对得上。
+    pub(crate) fn path_or_partial(
+        &self,
+        grid: &Grid,
+        regions: &Regions,
+        start: [f32; 2],
+        goal: [f32; 2],
+    ) -> Option<(Vec<[f32; 2]>, bool)> {
+        let from = self.locate(grid, regions, start)?;
+        let to = self.locate(grid, regions, goal)?;
+        if self.components[from as usize] == self.components[to as usize] {
+            let corridor = self.find_corridor(grid, from, to)?;
+            return Some((self.straighten(grid, &corridor, start, goal)?, true));
+        }
+        let component = self.components[from as usize];
+        // Iterator::min_by keeps the first of equal minima: ties resolve to the
+        // lowest cell index, a stable stand-in for Detour's expansion order.
+        let best = (0..self.tris.len() as u32)
+            .filter(|index| self.components[*index as usize] == component)
+            .min_by(|a, b| {
+                distance2(self.centre(grid, *a), goal).total_cmp(&distance2(self.centre(grid, *b), goal))
+            })?;
+        let corridor = self.find_corridor(grid, from, best)?;
+        let end = self.partial_end(grid, best, goal);
+        Some((self.straighten(grid, &corridor, start, end)?, false))
+    }
+
+    fn straighten(
+        &self,
+        grid: &Grid,
+        corridor: &[u32],
+        start: [f32; 2],
+        end: [f32; 2],
+    ) -> Option<Vec<[f32; 2]>> {
         let mut portals = Vec::with_capacity(corridor.len().saturating_sub(1));
         for pair in corridor.windows(2) {
             portals.push(self.portal(grid, pair[0], pair[1])?);
         }
-        Some(funnel::straight_path(start, goal, &portals))
+        Some(funnel::straight_path(start, end, &portals))
     }
+
+    /// 部分路径终点：单元上离目标最近的点（`ClosestPointOnPoly`）。轮廓简化
+    /// 允许单元边偏离格面，所以该点若不在可走格上，就沿它到单元心的线段
+    /// 退回到第一处可走格；单元心也不可走时取离它最近的可走格心。
+    fn partial_end(&self, grid: &Grid, index: u32, goal: [f32; 2]) -> [f32; 2] {
+        let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+        let closest = closest_on_triangle(goal, corners);
+        let centre = self.centre(grid, index);
+        const STEPS: u32 = 8;
+        for step in 0..=STEPS {
+            let t = step as f32 / STEPS as f32;
+            let point = [
+                closest[0] + (centre[0] - closest[0]) * t,
+                closest[1] + (centre[1] - closest[1]) * t,
+            ];
+            if super::query::walkable_at(grid, point) {
+                return point;
+            }
+        }
+        super::query::nearest_walkable(grid, centre, None).unwrap_or(centre)
+    }
+}
+
+/// 平面三角形上离 `p` 最近的点：`p` 在三角形内即原样返回，否则取三条边上
+/// 最近点中最近者。
+fn closest_on_triangle(p: [f32; 2], corners: [[f32; 2]; 3]) -> [f32; 2] {
+    let side = |a: [f32; 2], b: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+    let s0 = side(corners[0], corners[1]);
+    let s1 = side(corners[1], corners[2]);
+    let s2 = side(corners[2], corners[0]);
+    if (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0) {
+        return p;
+    }
+    let on_segment = |a: [f32; 2], b: [f32; 2]| {
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let length2 = ab[0] * ab[0] + ab[1] * ab[1];
+        let t = if length2 > 0.0 {
+            (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / length2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        [a[0] + ab[0] * t, a[1] + ab[1] * t]
+    };
+    [
+        on_segment(corners[0], corners[1]),
+        on_segment(corners[1], corners[2]),
+        on_segment(corners[2], corners[0]),
+    ]
+    .into_iter()
+    .min_by(|a, b| distance2(*a, p).total_cmp(&distance2(*b, p)))
+    .expect("three candidate points")
 }

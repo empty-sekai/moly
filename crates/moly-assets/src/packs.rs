@@ -289,13 +289,16 @@ impl PackReader {
         self
     }
 
-    async fn bytes(&self, path: &str, limit: usize) -> Result<Vec<u8>, AssetReaderError> {
+    /// `exact` says that `limit` is the authenticated size of the payload.
+    /// The reader path allocates its whole bound up front either way.
+    async fn bytes(&self, path: &str, limit: usize, exact: bool) -> Result<Vec<u8>, AssetReaderError> {
         let path = key(Path::new(path))?;
         let inner = match &self.source {
             Source::Reader(inner) => inner,
             #[cfg(target_arch = "wasm32")]
-            Source::Http(root) => return crate::http::read_bytes(root, &path, limit).await,
+            Source::Http(root) => return crate::http::read_bytes(root, &path, limit, exact).await,
         };
+        let _ = exact;
         let mut reader = inner.read(Path::new(&path)).await?;
         let mut bytes = read_limits::buffer(
             limit
@@ -326,7 +329,7 @@ impl PackReader {
         let _slot = self.budget.slots.acquire().await;
         let reservation = self.budget.reserve(MAX_DOCUMENT_BYTES + 1).await?;
         Ok(Buffer {
-            bytes: self.bytes(path, MAX_DOCUMENT_BYTES).await?,
+            bytes: self.bytes(path, MAX_DOCUMENT_BYTES, false).await?,
             _reservation: reservation,
         })
     }
@@ -554,7 +557,7 @@ impl PackReader {
             .get_or_try_init(|| async {
                 let _slot = self.budget.slots.acquire().await;
                 let mut reservation = self.budget.reserve(entry.buffer_peak()?).await?;
-                let bytes = self.bytes(path, entry.blob_bytes).await?;
+                let bytes = self.bytes(path, entry.blob_bytes, true).await?;
                 if bytes.len() != entry.blob_bytes
                     || format!("{:x}", Sha256::digest(&bytes)) != entry.blob_sha256
                 {

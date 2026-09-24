@@ -1,0 +1,10 @@
+[package]
+name = "moly-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Engine-level frame instrumentation. It depends on the engine only, so the
+# game crate can install it without the counters knowing any game type.
+[dependencies]
+bevy = { workspace = true }

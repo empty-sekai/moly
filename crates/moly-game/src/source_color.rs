@@ -26,6 +26,8 @@ use bevy::render::{
 };
 use std::collections::HashMap;
 
+use crate::render::gpu::{BindGroupCache, Bound};
+
 /// Explicit output contract, not inferred from a shader or material name.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
 pub(crate) struct EncodedColorOutput;
@@ -168,6 +170,8 @@ fn prepare_views(
 fn point_copy(
     context: &mut RenderContext,
     world: &World,
+    groups: &mut BindGroupCache,
+    frame: u32,
     pipeline: CachedRenderPipelineId,
     source: &TextureView,
     destination: &TextureView,
@@ -176,10 +180,12 @@ fn point_copy(
     let Some(pipeline) = cache.get_render_pipeline(pipeline) else {
         return;
     };
-    let group = context.render_device().create_bind_group(
+    let group = groups.get(
+        context.render_device(),
         "source colour format conversion",
         &cache.get_bind_group_layout(&copy_layout()),
-        &BindGroupEntries::single(source),
+        &[(0, Bound::View(source))],
+        frame,
     );
     let attachments = [Some(RenderPassColorAttachment {
         view: destination,
@@ -204,8 +210,13 @@ fn point_copy(
     pass.draw(0..3, 0..1);
 }
 
+/// The point-copy bind groups bind only the copy source view, which is one of
+/// the view target's two main textures or the encoded attachment, so they are
+/// cached by that view instead of being created for every span.
 #[derive(Default)]
-struct SourceTransparentNode;
+struct SourceTransparentNode {
+    bind_groups: std::sync::Mutex<BindGroupCache>,
+}
 impl ViewNode for SourceTransparentNode {
     type ViewQuery = (
         &'static ExtractedCamera,
@@ -230,6 +241,9 @@ impl ViewNode for SourceTransparentNode {
             return Ok(());
         };
         let cache = world.resource::<PipelineCache>();
+        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+        let mut groups = self.bind_groups.lock().unwrap();
+        groups.evict_idle(frame);
         let mut start = 0;
         while start < phase.items.len() {
             let encoded = world
@@ -268,6 +282,8 @@ impl ViewNode for SourceTransparentNode {
                 point_copy(
                     context,
                     world,
+                    &mut groups,
+                    frame,
                     raw.to_encoded,
                     target.main_texture_view(),
                     &raw.texture.default_view,
@@ -309,6 +325,8 @@ impl ViewNode for SourceTransparentNode {
                 point_copy(
                     context,
                     world,
+                    &mut groups,
+                    frame,
                     raw.to_linear,
                     &raw.texture.default_view,
                     target.main_texture_view(),
@@ -348,7 +366,7 @@ impl Plugin for SourceColorPlugin {
         );
         // Replace only the runner, retaining every incoming/outgoing graph edge
         // and the existing phase. add_node would discard the node's own edges.
-        let runner = ViewNodeRunner::new(SourceTransparentNode, render.world_mut());
+        let runner = ViewNodeRunner::new(SourceTransparentNode::default(), render.world_mut());
         let mut graph = render.world_mut().resource_mut::<RenderGraph>();
         let state = graph
             .sub_graph_mut(Core3d)

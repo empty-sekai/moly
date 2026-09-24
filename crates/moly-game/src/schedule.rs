@@ -135,7 +135,6 @@ pub fn install(app: &mut App) {
                 .after(content_library::dispatch)
                 .after(npc::advance)
                 .after(crate::fixture_scene_inputs::advance)
-                .after(crate::fixture_activity_provider::advance)
                 .before(crate::fixture_activity_timeline::advance),
         );
     app.init_resource::<crate::fixture_scene_inputs::FixtureFloorAreas>()
@@ -161,7 +160,7 @@ pub fn install(app: &mut App) {
     app.init_resource::<crate::fixture_activity_state::FixtureActivityReservations>()
         .init_resource::<crate::fixture_activity_timeline::FixtureActivityTimelines>()
         .init_resource::<crate::player_fixture_action::PlayerFixtureRuntime>()
-        .init_resource::<crate::player_fixture_action::PlayerFixtureVisualProfiles>()
+        .init_resource::<crate::fixture_activity_provider::FixtureActivityProvider>()
         .init_resource::<crate::fixture_gimmick::Gimmicks>()
         .add_systems(Startup, crate::fixture_activity_data::load)
         .add_systems(Startup, crate::fixture_gimmick::load)
@@ -177,20 +176,6 @@ pub fn install(app: &mut App) {
                 .after(crate::fixture_activity_data::parse)
                 .after(crate::fixture::refresh_activity_view)
                 .before(crate::player_fixture_action::refresh_availability),
-        )
-        .add_systems(
-            Update,
-            crate::fixture_activity_provider::advance
-                .after(crate::fixture_activity_data::parse)
-                .after(crate::fixture::refresh_activity_view)
-                .after(character::wire_when_ready)
-                .before(crate::player_fixture_action::refresh_availability),
-        )
-        .add_systems(
-            Update,
-            crate::fixture_activity_provider::report
-                .after(crate::fixture_activity_provider::advance)
-                .run_if(common_conditions::on_timer(Duration::from_secs(2))),
         );
     crate::game_settings::install(app);
     crate::player_data::install(app);

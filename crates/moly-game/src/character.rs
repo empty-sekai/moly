@@ -229,7 +229,12 @@ pub(crate) fn plan_when_ready(
             .copied()
             .unwrap_or_else(|| panic!("清单里没有成员 unit {} 的角色包（代号 {code}）", unit.0));
         commands.entity(entity).insert(CharacterPack {
-            gltf: server.load::<Gltf>(moly_assets::character_glb(glb)),
+            // 包内嵌贴图只在换装之前被画、只由 GPU 采样，没有读纹素的 CPU 读者。
+            gltf: moly_assets::residency::load_gltf(
+                &server,
+                moly_assets::character_glb(glb),
+                moly_assets::residency::GltfResidency::Character,
+            ),
             file: glb.to_string(),
             rig: server.load::<JsonAsset>(AssetPath::from(format!("moly://{rig}"))),
             rig_file: rig.to_string(),

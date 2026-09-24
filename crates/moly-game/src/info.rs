@@ -50,13 +50,15 @@
 //! - **画质**（`OnChangeImageQualityToggle`）：写档位**并立即**
 //!   `SetImageQuality`——high → `SetTargetDpi(299)` + FXAA 开 · normal →
 //!   200 + 开 · low → 180 + 关；`SetTargetDpi` 把
-//!   `clamp(目标DPI / 屏DPI, 0, 1)` 写进 RenderScale。FXAA 写入现
-//!   GameSettings；物理屏幕 DPI 尚不可用，目标 DPI 不代替屏幕 DPI。
+//!   `clamp(目标DPI / 屏DPI, 0, 1)` 写进 RenderScale。FXAA 与目标 DPI 写入现
+//!   GameSettings；场景相机按窗口缩放因子推得的屏 DPI 施加渲染比例（见
+//!   `game_settings::source_render_scale`）。
 //! - **刷新率**（`OnChangeFpsToggle`）：写档位并立即 `SetFpsQuality`——
 //!   high → `Application.targetFrameRate = 60` · normal → 30；越界
 //!   LogError；同值且非强制早退（幂等门）。**本仓对应物 = `WinitSettings`
 //!   的 Reactive 档**：等待 = 1/60 · 1/30，三个反应位全关（只按节拍 tick，
-//!   事件缓冲到下一拍）——运行时改档当帧生效。这是本层接线的真行为。
+//!   事件缓冲到下一拍）——运行时改档当帧生效。这是本层接线的真行为。浏览器
+//!   改为动画帧节拍：到点的动画帧里更新，未到点的帧跳过（`game_settings`）。
 //! - **变换通知**（`OnChangeConvertFixtureNotificationTypeToggle`）：只写
 //!   档位，无即时副作用。
 //! - **访问许可**（`OnChangeVisitSettingToggle`）：非审核状态下只写档位；上报在出场链
@@ -525,7 +527,7 @@ pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_sett
     commands.init_resource::<InfoDialogState>();
     let settings = InfoSettings::default();
     info!(
-        "[info] 启动施加（进场全量施加律）：画质={} · 刷新率={}（WinitSettings 硬钳制 {}fps）——\
+        "[info] 启动施加（进场全量施加律）：画质={} · 刷新率={}（帧率上限 {}fps）——\
          持久化层未建，当值取构造默认（画质 normal · 刷新率 high，见模块头承重句）",
         settings.image_quality.label(),
         settings.fps.label(),
@@ -535,11 +537,12 @@ pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_sett
     apply_fps(&mut graphics, settings.fps);
 }
 
-/// 画质施加：FXAA 写入现游戏设置；目标 DPI 保留源值，等物理屏幕 DPI。
+/// 画质施加：FXAA 与目标 DPI 写入现游戏设置，场景相机据此施加渲染比例。
 fn apply_image_quality(graphics: &mut crate::game_settings::GameSettings, next: ImageQuality) {
     let (dpi, fxaa) = next.target_dpi_and_fxaa();
     graphics.graphics.fxaa = fxaa;
-    info!("[info] SetImageQuality: target DPI {dpi}, FXAA {fxaa}; physical display DPI is not yet available for source render scale");
+    graphics.graphics.image_quality = crate::game_settings::ImageQualityPair { target_dpi: dpi as u16, fxaa };
+    info!("[info] SetImageQuality: target DPI {dpi}, FXAA {fxaa}");
 }
 
 fn apply_fps(graphics: &mut crate::game_settings::GameSettings, next: FpsQuality) {

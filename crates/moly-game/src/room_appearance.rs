@@ -319,7 +319,7 @@ fn apply(
                     return;
                 }
             };
-            let image = server.load::<Image>(format!("moly://site/skins/{skin}/{path}"));
+            let image = moly_assets::residency::load_image(&server, format!("moly://site/skins/{skin}/{path}"));
             let handle = materials.add(RoomMaterial {
                 base: StandardMaterial {
                     base_color: Color::linear_rgba(color[0], color[1], color[2], color[3]),

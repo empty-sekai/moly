@@ -79,6 +79,7 @@ mod player_data_ui;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
+mod render;
 mod room_appearance;
 pub mod schedule;
 mod settings_store;
@@ -156,6 +157,7 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);

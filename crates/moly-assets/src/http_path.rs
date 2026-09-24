@@ -48,6 +48,15 @@ pub(crate) fn encode_path(path: &str) -> String {
     result
 }
 
+/// A response body's stream bound. `exact` says the decoded body is exactly
+/// `bytes` long, so its buffer can be allocated once; otherwise `bytes` is
+/// only a ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResponseBound {
+    pub(crate) bytes: usize,
+    pub(crate) exact: bool,
+}
+
 /// An unencoded Content-Length is an exact stream bound. With transfer
 /// compression it is a wire length, so retain the decoded-size limit instead.
 /// CORS exposes Content-Length by default but *not* Content-Encoding. An absent
@@ -57,7 +66,7 @@ pub(crate) fn response_bound(
     encoding: Option<&str>,
     cors: bool,
     limit: usize,
-) -> io::Result<usize> {
+) -> io::Result<ResponseBound> {
     if length.is_some_and(|size| size > limit as u64) {
         return Err(io::Error::other("Asset response exceeds its byte limit"));
     }
@@ -66,9 +75,12 @@ pub(crate) fn response_bound(
         None => cors,
     };
     if decoded_length_unknown {
-        return Ok(limit);
+        return Ok(ResponseBound { bytes: limit, exact: false });
     }
-    Ok(length.map(|size| size as usize).unwrap_or(limit))
+    Ok(match length {
+        Some(size) => ResponseBound { bytes: size as usize, exact: true },
+        None => ResponseBound { bytes: limit, exact: false },
+    })
 }
 
 #[cfg(test)]
@@ -98,25 +110,25 @@ mod tests {
     #[test]
     fn small_files_do_not_reserve_the_entire_asset_limit() {
         assert_eq!(
-            response_bound(Some(130063), None, false, 256 * 1024 * 1024).unwrap(),
+            response_bound(Some(130063), None, false, 256 * 1024 * 1024).unwrap().bytes,
             130063
         );
         assert_eq!(
-            response_bound(Some(40), Some("br"), false, 100).unwrap(),
+            response_bound(Some(40), Some("br"), false, 100).unwrap().bytes,
             100
         );
-        assert_eq!(response_bound(None, None, false, 100).unwrap(), 100);
+        assert_eq!(response_bound(None, None, false, 100).unwrap().bytes, 100);
         assert!(response_bound(Some(101), None, false, 100).is_err());
     }
     #[test]
     fn cors_hidden_encoding_never_caps_decoded_bytes_to_wire_length() {
-        assert_eq!(response_bound(Some(40), None, true, 100).unwrap(), 100);
+        assert_eq!(response_bound(Some(40), None, true, 100).unwrap().bytes, 100);
         assert_eq!(
-            response_bound(Some(40), Some("gzip"), true, 100).unwrap(),
+            response_bound(Some(40), Some("gzip"), true, 100).unwrap().bytes,
             100
         );
         assert_eq!(
-            response_bound(Some(40), Some("identity"), true, 100).unwrap(),
+            response_bound(Some(40), Some("identity"), true, 100).unwrap().bytes,
             40
         );
         assert!(response_bound(Some(101), None, true, 100).is_err());

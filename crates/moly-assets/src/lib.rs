@@ -21,6 +21,7 @@ pub mod material_textures;
 mod packs;
 pub mod player_data;
 mod read_limits;
+pub mod residency;
 pub mod scene_state;
 pub mod sidecar;
 pub mod source_navigation;

@@ -60,6 +60,8 @@
 
 mod json;
 
+pub mod light_pass;
+
 pub mod sky;
 
 #[cfg(test)]
