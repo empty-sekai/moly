@@ -345,8 +345,16 @@ impl MaterialSnapshot {
         if self.keywords.len() != before {
             written.push("_SKIP_PHENOMENA_LIGHT");
         }
+        // The writer branches on the shader's name; a catalogue without one
+        // cannot say which arm the source takes.
+        let shader_name = catalogue.name.as_deref().ok_or_else(|| {
+            SourceShaderError(
+                "SetPhenomenaLighting branches on the shader name, and this catalogue has none"
+                    .to_owned(),
+            )
+        })?;
         let targets: &[(&'static str, f64)] =
-            if catalogue.name.as_deref() == Some("Mysekai/Effect/UberUnlit") {
+            if shader_name == "Mysekai/Effect/UberUnlit" {
                 &[
                     ("_SkipPhenomenaLighting", 0.0),
                     ("_PhenomenaLightingEnabled", 1.0),

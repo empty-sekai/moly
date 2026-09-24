@@ -1286,7 +1286,7 @@ fn switch_phenomenon(
 // ---- 渲染侧 ---------------------------------------------------------------
 
 /// uniform 块的 GPU 形：与 `weather_post.wgsl` 的 `WeatherPostUniform` 逐 lane
-/// 对齐（8 个 vec4，128 字节）。
+/// 对齐（12 个 vec4，192 字节）。
 #[derive(Debug, Clone, Copy, ShaderType)]
 struct WeatherPostUniform {
     /// (门, 强度, 对比, 混合模式)

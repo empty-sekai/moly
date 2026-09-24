@@ -134,7 +134,8 @@ const PLACEMENTS: [PlacementMock; 12] = [
         group_id: 0,
     },
     // 宝箱：单击族（treasure_box_transport，master 111：hp 0 · 体力
-    // 20）。Material family Mysekai/TreasureBox (site pipeline TreasureBox arm).
+    // 20）。Material family Mysekai/TreasureBox (site pipeline TreasureBox arm),
+    // reachable only through this preview gallery.
     PlacementMock {
         package: "mysekai__site__field__object__treasure_box",
         fixture_id: 111,

@@ -1,8 +1,8 @@
-//! 站点材质：八个站点族的 Base 程序共用一个 Bevy Material。
+//! 站点材质：九个站点族的 Base 程序共用一个 Bevy Material。
 //!
 //! 材质值来自 sidecar 的 [`MaterialSlot`]（key 是 Unity 属性名的原拼写），
 //! 族与 keyword 变体由 [`SiteMaterialKey`] 编码进管线特化；WGSL 在
-//! `shaders/site_material.wgsl`，八族共用一份、按宏分派。
+//! `shaders/site_material.wgsl`，九族共用一份、按宏分派。
 //!
 //! 族门（按真源重定）：门 = 「序列化 keyword 全部落在本族的
 //! 已实现轴清单内」+「族要求的必在键都在」+「值域开关在已实现的取值上」。
@@ -659,6 +659,11 @@ impl Material for SiteMaterial {
             SiteFamily::DropItem => 2010,
             SiteFamily::FieldObject => 2040,
             SiteFamily::Tree => 2050,
+            // Both treasure materials author renderQueue -1 (take the shader's
+            // queue) and `Mysekai/TreasureBox` declares no Queue tag (its tags
+            // are RenderType only), so the queue is the shader default,
+            // Geometry = 2000.
+            SiteFamily::TreasureBox { .. } => 2000,
             _ => 2065,
         });
         let mut defs: Vec<&str> = Vec::new();
@@ -1646,7 +1651,9 @@ fn resolve_dropitem(
 /// the shadow-receiving program is the drawn one; there is no
 /// `_RECEIVE_SHADOWS_OFF` variant). Value gates: the pass render state
 /// properties must be the opaque arm this pipeline draws (`_SrcBlend` 1,
-/// `_DstBlend` 0, `_ZWrite` 1, `_Cull` 2); the two vertex-colour switches are
+/// `_DstBlend` 0, `_ZWrite` 1, `_Cull` 2, and the Base pass's `zTest` and
+/// `colMask` bindings `_ZTest` 4 (less-equal) and `_ColorMask` 15 (all
+/// channels)); the two vertex-colour switches are
 /// int properties compared against 0.5, admitted on {0, 1}. The rare overlay
 /// texture takes the overlay binding (this family has no other overlay).
 /// The second colour target (rare fresnel emission times the overlay) is not
@@ -1671,6 +1678,8 @@ pub(crate) fn resolve_treasurebox(
         ("_DstBlend", &[0.0][..]),
         ("_ZWrite", &[1.0][..]),
         ("_Cull", &[2.0][..]),
+        ("_ZTest", &[4.0][..]),
+        ("_ColorMask", &[15.0][..]),
         ("_UseVertexColorBlend", &[0.0, 1.0][..]),
         ("_UseVertexAlphaOpacity", &[0.0, 1.0][..]),
     ] {

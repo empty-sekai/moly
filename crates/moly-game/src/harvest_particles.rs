@@ -30,6 +30,10 @@
 //!
 //! The draw follows the anchor's visibility: a harvested stone is hidden
 //! with its whole hierarchy, and so is its glow.
+//!
+//! Reachability: harvest objects are placed only by the development preview
+//! gallery (`MOLY_HARVEST_PREVIEW=1`); ordinary play places none, so this
+//! glow is drawn only there.
 
 use std::collections::HashMap;
 
@@ -250,10 +254,18 @@ fn install_stay_particles(
         let fields: Value = serde_json::from_str(&view.fields_json)
             .unwrap_or_else(|err| panic!("stone view fields of {} are not JSON: {err}", object.leaf));
 
-        // Setup plays _objectParticle; RefreshParticle(Rare) plays the rare system.
-        let mut played = vec![("_objectParticle", system_reference(&fields, "_objectParticle", &object.leaf))];
+        // Setup plays _objectParticle only when it is not null (a null reference
+        // is valid source input and simply plays nothing); RefreshParticle(Rare)
+        // dereferences rareParticleSystem without a null check.
+        let mut played = Vec::new();
+        if let Some(component) = system_reference(&fields, "_objectParticle", &object.leaf) {
+            played.push(("_objectParticle", component));
+        }
         if object.is_rare {
-            played.push(("rareParticleSystem", system_reference(&fields, "rareParticleSystem", &object.leaf)));
+            let component = system_reference(&fields, "rareParticleSystem", &object.leaf).unwrap_or_else(|| {
+                panic!("{}: stone view rareParticleSystem is null, which RefreshParticle(Rare) dereferences", object.leaf)
+            });
+            played.push(("rareParticleSystem", component));
         }
         let mut installed = Vec::new();
         let mut not_drawn: Vec<String> = Vec::new();
@@ -350,17 +362,23 @@ fn install_stay_particles(
     }
 }
 
-/// A stone view field that names a ParticleSystem in the prefab's own file.
-fn system_reference(fields: &Value, field: &str, leaf: &str) -> i64 {
-    let reference = &fields[field];
+/// A stone view field that names a ParticleSystem in the prefab's own file,
+/// or `None` for a null reference (serialized `id` 0, or null).
+fn system_reference(fields: &Value, field: &str, leaf: &str) -> Option<i64> {
+    let reference = fields
+        .get(field)
+        .unwrap_or_else(|| panic!("{leaf}: stone view has no field {field}"));
+    if reference.is_null() || reference["id"].as_str() == Some("0") || reference["id"].as_i64() == Some(0) {
+        return None;
+    }
     if reference["file"].as_i64() != Some(0) {
         panic!("{leaf}: stone view {field} is not a component of the prefab itself: {reference}");
     }
-    reference["id"]
+    let id = reference["id"]
         .as_str()
         .and_then(|id| id.parse().ok())
-        .filter(|id| *id != 0)
-        .unwrap_or_else(|| panic!("{leaf}: stone view {field} names no particle system: {reference}"))
+        .unwrap_or_else(|| panic!("{leaf}: stone view {field} names no particle system: {reference}"));
+    Some(id)
 }
 
 /// Admission of one Hidden/particle_circle row. Every consumed control is

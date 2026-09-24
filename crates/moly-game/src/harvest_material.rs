@@ -10,14 +10,16 @@
 //! 时退回按名 join，且只在名字在文档里唯一时成立。句柄在 scene 实例间
 //! 共享：同包两条摆放只解析一次、同时换上。
 //!
-//! 族分派（采集物九个子类的视图族谱）：`Mysekai/Site/FieldObject` 与
-//! `Mysekai/Site/Tree` 是已移植两族——复用站点材质管线
+//! 族分派（采集物九个子类的视图族谱）：已移植三族。`Mysekai/Site/FieldObject`
+//! 与 `Mysekai/Site/Tree` 复用站点材质管线
 //! （`SiteMaterial` 与其 MaterialPlugin 都由站点材质插件装着），解析走
 //! 同一族门（keyword 全集 + 律的标量校验），贴图从 `site/props/<leaf>`
 //! 目录装载（著色空间按文档声明）。`Mysekai/TreasureBox` (the base shape
 //! of the two treasure packages) resolves to the site pipeline's TreasureBox
 //! family (`resolve_treasurebox`: phenomena light and shade, drop shadow,
-//! rare overlay, treasure shadows, fog). 其余
+//! rare overlay, treasure shadows, fog). Harvest objects are placed only by
+//! the development preview gallery (`MOLY_HARVEST_PREVIEW=1`), so this
+//! family, like the other two here, is drawn only there. 其余
 //! （`Mysekai/Effect/UberUnlit` 演出族、粒子 listen point 一族）是
 //! 范围外：按 shader 名计数保留。Particle system materials are not glb
 //! materials; the stay particles are drawn by `harvest_particles.rs`.

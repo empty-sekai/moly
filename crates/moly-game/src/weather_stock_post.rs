@@ -8,9 +8,10 @@
 //! `AfterRenderingPostProcessing` 上，读的是引擎后处理写出的相机色。所以
 //! 这个节点排在色调映射之后、天气链之前，**每个现象都跑**。
 //!
-//! 表的烘焙在主世界 CPU 上做（律在 `moly_law::weather::lut`，逐字节对过
-//! 随包的构建程序）：真源每帧烘，而它的输入只在后处理档案整档切换时变，
-//! 本侧在输入变的那一帧烘一次，输出同一张表。
+//! 表的烘焙在主世界 CPU 上做（律在 `moly_law::weather::lut`，与随包的构建
+//! 程序逐值对过：值差在 1e-5 以内，8 位量化后有 40 个字节差 1，都落在舍入
+//! 边界上，来自数学库末位的差）：真源每帧烘，而它的输入只在后处理档案整档
+//! 切换时变，本侧在输入变的那一帧烘一次，输出同一张表。
 //!
 //! 引擎泛光（`Bloom` 组件活跃且强度 > 0 时）：半分辨率阈值预滤波 → 逐级
 //! 「横向 9 点高斯并降一半 + 纵向 5 点」→ 逐级按散射权重上采样 → uber
@@ -444,6 +445,11 @@ fn prepare_stock_bloom_pyramid(
             Ok(plan) => plan,
             Err(err) => {
                 error!("引擎泛光：{err}；本帧不画泛光");
+                // Drop last frame's pyramid too, or the node would keep
+                // compositing a stale one.
+                if previous.is_some() {
+                    commands.entity(entity).remove::<StockBloomPyramid>();
+                }
                 continue;
             }
         };

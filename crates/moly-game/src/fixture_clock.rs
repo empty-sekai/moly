@@ -38,7 +38,7 @@ use crate::fixture::{FixtureVisualRoot, FixtureVisualSceneReady};
 use crate::fixture_colors::FixtureColorChoice;
 
 const INDEX: &str = "moly://fixture-gimmick/browser-index.json";
-/// `Mathf.Deg2Rad` as libunity's Euler conversion uses it.
+/// `Mathf.Deg2Rad` as the engine's Euler-angle conversion uses it.
 const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -487,8 +487,9 @@ mod tests {
 
     /// Research instrument: `MOLY_CLOCK_SOURCE_TABLE` names a table of the two
     /// hand angles produced by executing the source's own SetupClockTime
-    /// arithmetic (JP 6.8.1 native code, run instruction by instruction) for
-    /// every local (hour, minute). The port must reproduce every bit pattern.
+    /// arithmetic (the game's own compiled code, executed instruction by
+    /// instruction) for every local (hour, minute). The port must reproduce
+    /// every bit pattern.
     #[test]
     #[ignore = "requires a caller-supplied table executed from the source binary"]
     fn hand_angles_equal_the_source_binary() {

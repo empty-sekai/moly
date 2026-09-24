@@ -26,8 +26,9 @@
 //! 这两个 pass **每个现象都跑**——包括调色组件不活跃的晴天（那一档的表
 //! 也不是恒等表，见 [`lut`]）。
 //!
-//! 实证档案里带的原生组件是 `ColorAdjustments`（34 份，晴天全局那份
-//! 组件级不活跃）、`SplitToning`（4 份活跃）、`WhiteBalance`（2 份，都
+//! 实证档案里带的原生组件是 `ColorAdjustments`（35 份：18 份全局 + 17 份
+//! first_floor 覆写，其中 34 份活跃，只有晴天全局那份组件级不活跃）、
+//! `SplitToning`（4 份活跃）、`WhiteBalance`（2 份，都
 //! 不活跃 ⇒ 构造默认 ⇒ LMS 系数全 1）与 `Bloom`（2 份：宇宙那份活跃、
 //! 流星那份不活跃）。三个调色组件的采纳见 [`PostProcessProfile::lut_stack`]，
 //! 引擎泛光见 [`PostProcessProfile::stock_bloom`]；其余原生组件一旦出现且
