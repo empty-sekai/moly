@@ -358,7 +358,7 @@ fn first_play_state(system: &Runtime) -> PlayState {
         duration: e.duration,
     }
 }
-/// 三类锚（effect 档案的 `kind`）。
+/// 三类锚：粒子所在的预制件挂在天空视图的效果根、场景相机的效果根，还是站点视图下。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EffectKind {
     Sky,
@@ -1327,6 +1327,7 @@ pub(crate) fn write_geometry(
                     rotation: Vec3::from_array(side.rot), size,
                     colour: Vec4::from_array(view.colour),
                     custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),
+                    seed: side.seed, age_percent: particle.age_percent,
                 }
             }).collect();
             match &system.geometry {

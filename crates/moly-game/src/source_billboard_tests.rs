@@ -36,6 +36,8 @@ fn independent_billboard_vertices_and_normals_match_all_supported_engine_cases()
             colour: Vec4::ONE,
             custom1: Vec4::ZERO,
             custom2: Vec4::ZERO,
+            seed: 0,
+            age_percent: 0.0,
         };
         let alignment = match row["alignment"].as_str().unwrap() {
             "View" => Alignment::View,
@@ -109,6 +111,8 @@ fn source_billboard_writer_retains_zero_size_and_non_unit_normal() {
         colour: Vec4::ONE,
         custom1: Vec4::ZERO,
         custom2: Vec4::ZERO,
+        seed: 0,
+        age_percent: 0.0,
     };
     let (_, normal) = vertices(&p, &frame, &draw, false);
     assert!((normal.z + 12.0 / 13.0).abs() < 0.000001);
@@ -153,6 +157,8 @@ fn screen_limits_match_120_current_native_vertex_results() {
             colour: Vec4::ONE,
             custom1: Vec4::ZERO,
             custom2: Vec4::ZERO,
+            seed: 0,
+            age_percent: 0.0,
         };
         let limited = screen_limited(
             p.size,
@@ -199,6 +205,8 @@ fn camera_roll_matches_24_current_native_vertex_results() {
             colour: Vec4::ONE,
             custom1: Vec4::ZERO,
             custom2: Vec4::ZERO,
+            seed: 0,
+            age_percent: 0.0,
         };
         let (actual, _) = vertices(&p, &frame, &draw, false);
         for (vertex, actual) in actual.into_iter().enumerate() {
