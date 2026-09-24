@@ -59,8 +59,9 @@ pub struct GestureEvent {
 }
 
 /// Pointer press/release as the UI event system sees it: one message per
-/// accepted press, its release, or its loss (focus, cursor leaving, touch
-/// cancel, or the layer dropping the pointer while world input is blocked).
+/// accepted press, each move of that pointer while it is down, its release,
+/// or its loss (focus, cursor leaving, touch cancel, or the layer dropping
+/// the pointer while world input is blocked).
 /// Positions are logical screen pixels, y down. The pointer id is -1 for the
 /// left mouse button (the engine's mouse-left id) and the finger id for
 /// touches.
@@ -81,6 +82,7 @@ pub struct UiPointerEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiPointerPhase {
     Down,
+    Move,
     Up,
     Cancel,
 }
@@ -237,6 +239,10 @@ pub(crate) fn advance(
             WindowEvent::CursorMoved(moved) if moved.window == window_entity => {
                 layer.cursor = Some(moved.position);
                 move_pointer(&mut layer, &mut events, PointerSource::Mouse, moved.position, threshold);
+                if layer.touch.as_ref().is_some_and(|p| p.source == PointerSource::Mouse) {
+                    pointers.write(UiPointerEvent { phase: UiPointerPhase::Move, position: moved.position,
+                        pointer_id: pointer_id(PointerSource::Mouse), touch_count });
+                }
             }
             WindowEvent::MouseButtonInput(button)
                 if button.window == window_entity && button.button == MouseButton::Left =>
@@ -277,7 +283,13 @@ pub(crate) fn advance(
                                 position: touch.position, pointer_id: pointer_id(source), touch_count });
                         }
                     }
-                    TouchPhase::Moved => move_pointer(&mut layer, &mut events, source, touch.position, threshold),
+                    TouchPhase::Moved => {
+                        move_pointer(&mut layer, &mut events, source, touch.position, threshold);
+                        if layer.touch.as_ref().is_some_and(|p| p.source == source) {
+                            pointers.write(UiPointerEvent { phase: UiPointerPhase::Move,
+                                position: touch.position, pointer_id: pointer_id(source), touch_count });
+                        }
+                    }
                     TouchPhase::Ended => {
                         let owned = layer.touch.as_ref().is_some_and(|p| p.source == source);
                         release_pointer(&mut layer, &mut events, source, Some(touch.position), now);

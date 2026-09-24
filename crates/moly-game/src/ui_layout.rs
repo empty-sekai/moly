@@ -1,9 +1,11 @@
 //! Shared prefab view: geometry, images and text use the same resolved nodes as hit testing.
 
 mod filled_image;
+mod tmp_font;
 mod tmp_layout;
 mod clip_render;
 mod raycast;
+pub(crate) use raycast::Pointer;
 #[cfg(test)]
 mod ui_source_compare;
 
@@ -58,11 +60,14 @@ enum UiSourceFile {
     TextSettings,
     /// The host scene's root Canvas, its scaler, camera and layer Canvases.
     HostCanvas,
+    /// The TMP font assets texts are laid out with (a region root only).
+    TmpFontAssets,
 }
 
 impl UiSourceFile {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Wordings, Self::RuntimeTextures, Self::RuntimeSprites, Self::TextSettings, Self::HostCanvas,
+        Self::TmpFontAssets,
     ];
 
     fn file(self) -> &'static str {
@@ -72,6 +77,7 @@ impl UiSourceFile {
             Self::RuntimeSprites => "runtime-sprites.json",
             Self::TextSettings => "text-settings.json",
             Self::HostCanvas => "host-canvas.json",
+            Self::TmpFontAssets => "fonts/tmp-font-assets.json",
         }
     }
 
@@ -82,6 +88,7 @@ impl UiSourceFile {
             Self::RuntimeSprites => "runtime-sprites",
             Self::TextSettings => "tmp-settings",
             Self::HostCanvas => "host-canvas",
+            Self::TmpFontAssets => "tmp-font-assets",
         }
     }
 }
@@ -139,9 +146,11 @@ impl PointerUi<'_, '_> {
                 return true;
             }
             // The field camera reset button: ownership by the source raycast
-            // (padded hit graphic, raycast filters, highest depth wins).
+            // (padded hit graphic, raycast filters, highest depth wins) of the
+            // pointer its press chain casts.
             if let Some(button) = crate::menu_shell::camera_reset_button(doc) {
-                if view.press_target(layouts, local, canvas).is_some_and(|(_, id)| id == button) {
+                let pointer = crate::menu_shell::event_pointer(window, root, position);
+                if view.press_target(layouts, pointer, canvas).is_some_and(|(_, id)| id == button) {
                     return true;
                 }
             }
@@ -269,6 +278,8 @@ impl UiSources {
         let files = UiSourceFile::ALL
             .into_iter()
             .filter(|file| !(stage_only && *file == UiSourceFile::RuntimeSprites))
+            // The shared root carries no TMP font assets.
+            .filter(|file| region.is_some() || *file != UiSourceFile::TmpFontAssets)
             .map(|file| {
                 let path = match (region, file) {
                     (None, UiSourceFile::Wordings) => SHARED_WORDINGS.to_owned(),
@@ -397,6 +408,25 @@ pub(crate) fn parse(
             camera_fields,
         );
         commands.insert_resource(root_canvas);
+        match sources.region.as_ref() {
+            Some(region) => {
+                let manifest = region.parsed.as_ref().expect("UI region manifest parsed");
+                let fonts = tmp_font::TmpFonts::parse(
+                    &parse_json(UiSourceFile::TmpFontAssets),
+                    &manifest.region,
+                    &manifest.client_version,
+                )
+                .unwrap_or_else(|e| panic!("UI {} root: {e}", region.region));
+                layouts.set_tmp_fonts(Some(fonts));
+            }
+            None => {
+                warn!(
+                    "UI sources of the shared root carry no TMP font assets: texts are laid out with the \
+                     open font's advances and pairs, not the source glyph tables"
+                );
+                layouts.set_tmp_fonts(None);
+            }
+        }
         let textures: HashMap<String, String> = serde_json::from_str(text(UiSourceFile::RuntimeTextures))
             .expect("UI runtime texture inventory");
         // A region root names its images relative to itself; keys become the
@@ -518,6 +548,7 @@ impl UiLayouts {
             modern_hangul: text_settings["useModernHangulLineBreakingRules"]
                 .as_bool()
                 .expect("UI modern Hangul rule flag"),
+            fonts: None,
         });
         self.measurement_revision = self.measurement_revision.wrapping_add(1);
         self.wordings = words["entries"]
@@ -527,6 +558,14 @@ impl UiLayouts {
             .filter_map(|(k, v)| v["value"].as_str().map(|v| (k.clone(), v.to_owned())))
             .collect();
         root_canvas
+    }
+
+    /// The TMP font assets the root's texts are laid out with (None: the
+    /// open font's advances). Set after the host sources.
+    fn set_tmp_fonts(&mut self, fonts: Option<tmp_font::TmpFonts>) {
+        let rules = self.text_rules.as_mut().expect("UI TMP line rules are loaded before the font assets");
+        rules.fonts = fonts.map(Arc::new);
+        self.measurement_revision = self.measurement_revision.wrapping_add(1);
     }
 
     /// The runtime Sprite metrics document of the UI root, once loaded
@@ -1020,6 +1059,33 @@ impl UiLayouts {
             fields["m_text"].as_str().unwrap_or("").to_owned()
         }
     }
+    /// `CustomTextMesh.SetWordingText` on the CustomTextMesh at `path` of
+    /// layout `doc_key`: it stores the key and the arguments (none for the
+    /// one-parameter overload), then `UpdateWordingText` assigns
+    /// `WordingManager.Get(key)`, passed through `String.Format` when there
+    /// are arguments, through the TMP text setter (so without `SetText`'s
+    /// no-break spaces), but only when the component's serialized
+    /// `useWordingKey` is on and the key is not empty. Otherwise the text
+    /// stays as it is (None). The source's lookup yields null for a key its
+    /// dictionary lacks, so a missing key is refused here.
+    pub(crate) fn set_wording_text(&self, doc_key: &str, path: &str, key: &str, args: Option<&[String]>) -> Option<String> {
+        let doc = self.document(doc_key).unwrap_or_else(|| panic!("UI layout {doc_key} is not loaded"));
+        let index = doc.find(path).unwrap_or_else(|error| panic!("{error}"));
+        let component = doc.nodes[index].components.iter()
+            .find(|c| c.class == "Sekai.UI.CustomTextMesh")
+            .unwrap_or_else(|| panic!("UI {}: {path} has no CustomTextMesh", doc.prefab));
+        let use_key = component.fields["useWordingKey"].as_bool()
+            .unwrap_or_else(|| panic!("UI {}: {path} CustomTextMesh lacks useWordingKey", doc.prefab));
+        if !use_key || key.is_empty() {
+            return None;
+        }
+        let wording = self.wordings.get(key).unwrap_or_else(|| panic!("UI wording missing: {key}"));
+        Some(match args {
+            Some(args) => moly_law::text::custom_text_mesh::format_wording(wording, args)
+                .unwrap_or_else(|error| panic!("UI wording {key}: {error}")),
+            None => wording.clone(),
+        })
+    }
     pub(crate) fn text_chars(&self) -> Vec<char> {
         let mut chars = Vec::new();
         for doc in self.docs.values() {
@@ -1372,14 +1438,34 @@ impl UiPrefabView {
         Some(check)
     }
 
-    /// The selectable (node, component identity) a press at `point` (view
-    /// canvas units) goes to by the source raycast over this view, if any.
-    pub(crate) fn press_target(&self, layouts: &UiLayouts, point: Vec2, canvas: Vec2) -> Option<(usize, i64)> {
+    /// The node of the graphic the source raycast puts first for `pointer`
+    /// over this view: the pointer's enter target.
+    pub(crate) fn raycast_winner(&self, layouts: &UiLayouts, pointer: Pointer, canvas: Vec2) -> Option<usize> {
         let doc = layouts.document(self.key)?;
         let rects = self.resolved(layouts, canvas)?;
         let order = layouts.ui_layer_sorting_order.expect("UI host layer sorting order is loaded");
-        let graphic = raycast::winner(doc, &rects, point, order)?;
-        raycast::selectable_handler(doc, graphic)
+        raycast::winner(doc, &rects, pointer, order)
+    }
+
+    /// The selectable (node, component identity) a press of `pointer` goes
+    /// to by the source raycast over this view, if any.
+    pub(crate) fn press_target(&self, layouts: &UiLayouts, pointer: Pointer, canvas: Vec2) -> Option<(usize, i64)> {
+        let graphic = self.raycast_winner(layouts, pointer, canvas)?;
+        raycast::selectable_handler(layouts.document(self.key)?, graphic)
+    }
+
+    /// Whether `node` is the enter target of `pointer` or one of its
+    /// ancestors: the objects the event system's enter and exit reach.
+    pub(crate) fn hovers(&self, layouts: &UiLayouts, pointer: Pointer, canvas: Vec2, node: usize) -> bool {
+        let Some(doc) = layouts.document(self.key) else { return false; };
+        let mut cursor = self.raycast_winner(layouts, pointer, canvas);
+        while let Some(i) = cursor {
+            if i == node {
+                return true;
+            }
+            cursor = doc.parent(i);
+        }
+        false
     }
 
     /// `IsActive()` and `IsInteractable()` of the selectable component `id` on `node`.
@@ -1901,12 +1987,12 @@ pub(crate) fn render(
                     let image = path.map(|p| layouts.images[p].clone()).unwrap_or_default();
                     let sprite = Sprite {
                         image,
-                        color: rgba(&f["m_Color"], Color::WHITE),
+                        color: serialized_rgba(f, "m_Color"),
                         custom_size: Some(rect.size),
                         ..default()
                     };
-                    if let Some(mesh) = path.and_then(|path| {
-                        image_rule_mesh(&layouts, doc, index, comp, change, rect, &images, path)
+                    if let Some(mesh) = path.and_then(|_| {
+                        image_rule_mesh(&layouts, doc, index, comp, change, rect)
                     }) {
                         if let Some(clip) = clip {
                             clip_render::Draw { commands: &mut commands, images: &images,
@@ -1939,7 +2025,7 @@ pub(crate) fn render(
                     if f["m_Type"].as_i64() == Some(3) {
                         let fill = change
                             .and_then(|c| c.fill)
-                            .unwrap_or_else(|| num(&f["m_FillAmount"]));
+                            .unwrap_or_else(|| serialized_number(f, "m_FillAmount"));
                         let method = filled_image::FillMethod::from_serialized(
                             f["m_FillMethod"].as_i64().expect("Image fill method"),
                         );
@@ -2059,7 +2145,6 @@ fn effective_pixel_perfect(layouts: &UiLayouts, doc: &UiPrefab, index: usize) ->
 /// (no Image type), a Filled image, or (reported once per document and
 /// component) an Image the rules cannot draw, which the caller then draws as
 /// a plain stretched sprite.
-#[allow(clippy::too_many_arguments)]
 fn image_rule_mesh(
     layouts: &UiLayouts,
     doc: &UiPrefab,
@@ -2067,11 +2152,8 @@ fn image_rule_mesh(
     comp: &UiComponent,
     change: Option<&Override>,
     rect: &UiRect,
-    images: &Assets<Image>,
-    path: &str,
 ) -> Option<Mesh> {
-    let loaded_size = || images.get(&layouts.images[path]).map(|image| image.size_f32());
-    match image_rule_mesh_data(layouts, doc, index, comp, change, rect, &loaded_size) {
+    match image_rule_mesh_data(layouts, doc, index, comp, change, rect) {
         Ok(data) => Some(data.into_mesh()),
         Err(ImageDraw::OtherPath) => None,
         Err(ImageDraw::Fallback(reason)) => {
@@ -2122,14 +2204,14 @@ impl ImageMeshData {
     }
 }
 
-/// The doc-to-mesh mapping of the Image rule path. `loaded_size` is the
-/// size of the loaded image behind a runtime replacement without authored
-/// metrics (the only case that reads it).
+/// The doc-to-mesh mapping of the Image rule path.
 ///
 /// The exported image of an atlas sprite is its texture rect snapped to whole
 /// texels (min corner rounded, size as exported), so atlas UVs map into it by
 /// that crop. A runtime replacement with authored metrics is a whole-image
-/// sprite; one without metrics is drawn as a whole-image sprite without a border.
+/// sprite. A replacement without authored Sprite metrics has no rect size,
+/// border or pixels per unit to give the rules, so the rules do not draw it
+/// (the same case the preferred-size query refuses).
 #[allow(clippy::too_many_arguments)]
 fn image_rule_mesh_data(
     layouts: &UiLayouts,
@@ -2138,7 +2220,6 @@ fn image_rule_mesh_data(
     comp: &UiComponent,
     change: Option<&Override>,
     rect: &UiRect,
-    loaded_size: &dyn Fn() -> Option<Vec2>,
 ) -> Result<ImageMeshData, ImageDraw> {
     use moly_law::ui::image as rule;
     let f = &comp.fields;
@@ -2152,15 +2233,13 @@ fn image_rule_mesh_data(
         rule::ImageType::Tiled => return Err(ImageDraw::Fallback("Tiled images have no draw path")),
     }
     let (sprite, crop) = if let Some(name) = change.and_then(|v| v.texture.as_deref()) {
-        let size = match layouts.runtime_sprite_layouts.get(name) {
-            Some(metrics) => metrics.rect_size,
-            None => loaded_size().ok_or(ImageDraw::Fallback("the runtime replacement image is not loaded"))?,
-        };
-        let metrics = layouts.runtime_sprite_layouts.get(name);
+        let metrics = layouts.runtime_sprite_layouts.get(name)
+            .ok_or(ImageDraw::Fallback("its runtime replacement has no authored Sprite metrics"))?;
+        let size = metrics.rect_size;
         let sprite = rule::SpriteData {
             rect_size: size.to_array(),
-            border: metrics.map_or([0.0; 4], |m| m.border),
-            pixels_per_unit: metrics.map_or(100.0, |m| m.pixels_per_unit),
+            border: metrics.border,
+            pixels_per_unit: metrics.pixels_per_unit,
             texture_rect: [0.0, 0.0, size.x, size.y],
             texture_rect_offset: [0.0, 0.0],
             downscale_multiplier: 1.0,
@@ -2290,15 +2369,21 @@ fn sprite_downscale_multiplier(
     Ok(multiplier)
 }
 
-fn num(value: &Value) -> f32 {
-    value.as_f64().unwrap_or(0.) as f32
+/// A serialized float field of a component; a layout without it is refused.
+fn serialized_number(fields: &Value, name: &str) -> f32 {
+    fields[name].as_f64().unwrap_or_else(|| panic!("UI component {name} is missing or not a number")) as f32
 }
-fn rgba(value: &Value, default: Color) -> Color {
-    value
+/// A serialized Color field of a component (four channels); a layout
+/// without it is refused.
+fn serialized_rgba(fields: &Value, name: &str) -> Color {
+    let channels = fields[name]
         .as_array()
         .filter(|v| v.len() == 4)
-        .map(|v| Color::srgba(num(&v[0]), num(&v[1]), num(&v[2]), num(&v[3])))
-        .unwrap_or(default)
+        .unwrap_or_else(|| panic!("UI component {name} is missing or not four channels"));
+    let channel = |i: usize| {
+        channels[i].as_f64().unwrap_or_else(|| panic!("UI component {name} channel {i} is not a number")) as f32
+    };
+    Color::srgba(channel(0), channel(1), channel(2), channel(3))
 }
 
 fn spawn_text(
@@ -2323,10 +2408,7 @@ fn spawn_text(
     let fields = &component.fields;
     let layout = tmp_layout::layout(text, component, rect.size, rules, alignment)
         .unwrap_or_else(|error| panic!("UI TMP layout failed: {error}"));
-    let base_color = rgba(
-        &fields["m_fontColor"],
-        Color::srgba(0.26666668, 0.26666668, 0.4, 1.),
-    );
+    let base_color = serialized_rgba(fields, "m_fontColor");
     let (cell, pen_x, base_top) = art.cell_geometry();
     let mut clipped_glyphs = Vec::new();
     for glyph in &layout.glyphs {

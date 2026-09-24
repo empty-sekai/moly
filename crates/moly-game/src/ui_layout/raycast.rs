@@ -1,6 +1,12 @@
 //! Source raycast over a prefab view: which graphic receives a pointer and
 //! which selectable handles it, by the engine rules in `moly_law::ui::raycast`.
 //!
+//! A pointer is either the event camera's screen-point ray in world space,
+//! against which the padded corners are taken from the view's canvas units
+//! into the world through the root canvas pose (the views sit at the root
+//! canvas), or a point already in the view's canvas units, tested in the
+//! canvas plane.
+//!
 //! Graphics are the components that serialize the Graphic fields (a
 //! `m_RaycastTarget` flag); selectables are the components that serialize
 //! the Selectable fields (`m_Transition` with `m_Interactable`). Each graphic
@@ -18,7 +24,16 @@
 
 use bevy::math::{Vec2, Vec3};
 use moly_assets::ui_layout::{UiComponent, UiPrefab, UiRect};
-use moly_law::ui::{image::Rect, raycast as rule};
+use moly_law::ui::{image::Rect, raycast as rule, screen_ray};
+
+/// A pointer as the raycast tests it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Pointer {
+    /// The event camera's ray in world space and the root canvas' world pose.
+    Ray { ray: screen_ray::Ray, root: screen_ray::Pose },
+    /// A point in the view's canvas units.
+    Canvas(Vec2),
+}
 use serde_json::Value;
 
 fn vec4(value: &Value) -> Option<[f32; 4]> {
@@ -49,12 +64,18 @@ fn padding(component: &UiComponent, name: &str) -> [f32; 4] {
     })
 }
 
-/// The padded rect test in the view's canvas space.
-pub(crate) fn padded_contains(rect: &UiRect, padding: [f32; 4], point: Vec2) -> bool {
+/// The padded rect test for a pointer.
+pub(crate) fn padded_contains(rect: &UiRect, padding: [f32; 4], pointer: Pointer) -> bool {
     let local = Rect::from_size_pivot(rect.size.to_array(), rect.pivot.to_array());
     let quad = rule::padded_local_quad(local, padding);
-    let corners = quad.map(|c| rect.world.transform_point3(Vec3::new(c[0], c[1], 0.0)).truncate().to_array());
-    rule::quad_contains(corners, point.to_array())
+    let canvas = quad.map(|c| rect.world.transform_point3(Vec3::new(c[0], c[1], 0.0)));
+    match pointer {
+        Pointer::Ray { ray, root } => {
+            let corners = canvas.map(|c| root.transform_point(c.to_array()));
+            rule::quad_hit_by_ray(corners, ray.origin, ray.direction)
+        }
+        Pointer::Canvas(point) => rule::quad_contains(canvas.map(|c| c.truncate().to_array()), point.to_array()),
+    }
 }
 
 fn is_graphic(component: &UiComponent) -> bool {
@@ -96,7 +117,7 @@ fn sorting_order(doc: &UiPrefab, rects: &[UiRect], canvas: Option<usize>, host_o
 }
 
 /// `Graphic.Raycast`'s levels from `node` up to the view root.
-fn levels(doc: &UiPrefab, rects: &[UiRect], node: usize, point: Vec2) -> Vec<Vec<rule::LevelComponent>> {
+fn levels(doc: &UiPrefab, rects: &[UiRect], node: usize, pointer: Pointer) -> Vec<Vec<rule::LevelComponent>> {
     let mut out = Vec::new();
     let mut cursor = Some(node);
     while let Some(i) = cursor {
@@ -113,10 +134,10 @@ fn levels(doc: &UiPrefab, rects: &[UiRect], node: usize, point: Vec2) -> Vec<Vec
                 }),
                 "UnityEngine.UI.RectMask2D" => level.push(rule::LevelComponent::Filter {
                     valid: !(rects[i].active && c.enabled)
-                        || padded_contains(&rects[i], padding(c, "m_Padding"), point),
+                        || padded_contains(&rects[i], padding(c, "m_Padding"), pointer),
                 }),
                 "UnityEngine.UI.Mask" => level.push(rule::LevelComponent::Filter {
-                    valid: !(rects[i].active && c.enabled) || padded_contains(&rects[i], [0.0; 4], point),
+                    valid: !(rects[i].active && c.enabled) || padded_contains(&rects[i], [0.0; 4], pointer),
                 }),
                 _ => {}
             }
@@ -127,8 +148,8 @@ fn levels(doc: &UiPrefab, rects: &[UiRect], node: usize, point: Vec2) -> Vec<Vec
     out
 }
 
-/// The node of the graphic that wins the pointer at `point` (canvas units).
-pub(crate) fn winner(doc: &UiPrefab, rects: &[UiRect], point: Vec2, host_sorting_order: i32) -> Option<usize> {
+/// The node of the graphic that wins the pointer.
+pub(crate) fn winner(doc: &UiPrefab, rects: &[UiRect], pointer: Pointer, host_sorting_order: i32) -> Option<usize> {
     // Raycasters in first-seen order: the host canvas, then nested ones.
     let mut modules: Vec<Option<usize>> = vec![None];
     let mut candidates: Vec<(Option<usize>, usize, rule::GraphicCandidate)> = Vec::new();
@@ -159,13 +180,13 @@ pub(crate) fn winner(doc: &UiPrefab, rects: &[UiRect], point: Vec2, host_sorting
                     0
                 }
             };
-            let contains_point = padded_contains(&rects[i], padding(c, "m_RaycastPadding"), point);
+            let contains_point = padded_contains(&rects[i], padding(c, "m_RaycastPadding"), pointer);
             let candidate = rule::GraphicCandidate {
                 raycast_target: flag(c, "m_RaycastTarget"),
                 culled: false,
                 depth,
                 contains_point,
-                raycast: contains_point && rule::graphic_raycast(true, &levels(doc, rects, i, point)),
+                raycast: contains_point && rule::graphic_raycast(true, &levels(doc, rects, i, pointer)),
             };
             candidates.push((module, i, candidate));
         }

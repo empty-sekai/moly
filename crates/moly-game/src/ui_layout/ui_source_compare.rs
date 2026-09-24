@@ -4,26 +4,29 @@
 //! own code or by a cited transcription of the engine source.
 //!
 //! It drives the product's own paths, not copies of them. The host canvas,
-//! TMP settings and wordings are applied by `UiLayouts::apply_host_sources`;
+//! TMP settings and wordings are applied by `UiLayouts::apply_host_sources`,
+//! the root's TMP font assets (when the input names them) by the loader's
+//! `UiLayouts::set_tmp_fonts`;
 //! the layout is installed into `UiLayouts`; the host view is set up by
 //! `menu_shell::settled_host_view` (the bindings' visibility, the break-time
 //! gauge after its screen setup, the chrome at rest). Rects are that view's
 //! drawn rects (host overrides and layout controllers applied); image meshes
 //! come from the renderer's doc-to-mesh function; text from the renderer's
-//! text layout call; presses from the view's press target at canvas points
-//! and from the camera-reset press chain fed window pixel positions.
+//! text layout call; presses from the view's press target at canvas points,
+//! from the camera-reset press chain fed engine screen points (the event
+//! camera's ray) and fed window pixel positions; the event camera's matrices
+//! from the root canvas, and its ray on a given control camera.
 //!
 //! It asserts nothing about the values and pins no behaviour of this crate;
 //! it only reports. Ignored by default: it reads the input description named
 //! by `MOLY_UI_COMPARE_IN` and writes the report to `MOLY_UI_COMPARE_OUT`.
 
-use super::{group_alphas, image_path, image_rule_mesh_data, rgba, tmp_layout, ImageDraw, ImageMeshData, Override, UiLayouts};
+use super::{group_alphas, image_path, image_rule_mesh_data, serialized_rgba, tmp_layout, ImageDraw, ImageMeshData, Override, Pointer, UiLayouts};
 use crate::canvas::RootCameraFields;
-use bevy::color::Color;
 use bevy::math::{Mat4, Vec2, Vec3};
 use bevy::window::{Window, WindowResolution};
 use moly_assets::ui_layout::{UiPrefab, UiRect};
-use moly_law::ui::{canvas as canvas_rule, image as rule};
+use moly_law::ui::{canvas as canvas_rule, image as rule, screen_ray};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -33,6 +36,45 @@ fn bits(value: f32) -> u32 {
 
 fn from_bits(value: &Value) -> f32 {
     f32::from_bits(value.as_u64().expect("f32 bit pattern") as u32)
+}
+
+fn ray_bits(ray: &screen_ray::Ray) -> Vec<u32> {
+    ray.origin.iter().chain(ray.direction.iter()).map(|v| v.to_bits()).collect()
+}
+
+fn pointer_json(pointer: Pointer) -> Value {
+    match pointer {
+        Pointer::Ray { ray, root } => json!({
+            "rayBits": ray_bits(&ray),
+            "rootPositionBits": root.position.map(bits),
+            "rootRotationBits": root.rotation.map(bits),
+            "rootScaleBits": root.scale.map(bits),
+        }),
+        Pointer::Canvas(point) => json!({"canvasBits": point.to_array().map(bits)}),
+    }
+}
+
+fn numbers<const N: usize>(value: &Value, what: &str) -> [f32; N] {
+    let items = value.as_array().filter(|a| a.len() == N).unwrap_or_else(|| panic!("{what}: {N} numbers"));
+    std::array::from_fn(|k| items[k].as_f64().unwrap_or_else(|| panic!("{what}: not a number")) as f32)
+}
+
+/// The event camera's matrices, aspect and pose for a camera on a screen.
+fn camera_json(camera: &screen_ray::OrthographicCamera, target: [f32; 2]) -> Value {
+    let (world_to_camera, projection, world_to_clip) = screen_ray::matrices(camera, target);
+    let rect = screen_ray::camera_pixel_rect(
+        screen_ray::Rect { x: 0.0, y: 0.0, width: target[0], height: target[1] },
+        camera.viewport,
+    );
+    json!({
+        "worldToCamera": world_to_camera.map(bits),
+        "projection": projection.map(bits),
+        "worldToClip": world_to_clip.map(bits),
+        "aspectBits": bits(screen_ray::implicit_aspect(rect)),
+        "viewportInt": screen_ray::rect_to_rect_int(rect),
+        "worldPositionBits": camera.world_position.map(bits),
+        "worldRotationBits": camera.world_rotation.map(bits),
+    })
 }
 
 fn read_json(path: &str) -> Value {
@@ -74,6 +116,23 @@ fn mesh_json(mesh: Result<ImageMeshData, ImageDraw>) -> Value {
 }
 
 /// A node rect of the given size at the node's own pivot, at the origin.
+/// The RectTransform values the layout controllers produce, by node.
+fn layout_values(values: &HashMap<usize, moly_assets::ui_layout::RectTransform>) -> Value {
+    let mut nodes: Vec<_> = values.iter().collect();
+    nodes.sort_unstable_by_key(|(index, _)| **index);
+    json!(nodes
+        .into_iter()
+        .map(|(index, r)| json!({
+            "node": index,
+            "anchorMin": r.anchors_min.map(bits),
+            "anchorMax": r.anchors_max.map(bits),
+            "anchoredPosition": r.anchored_position.map(bits),
+            "sizeDelta": r.size_delta.map(bits),
+            "pivot": r.pivot.map(bits),
+        }))
+        .collect::<Vec<_>>())
+}
+
 fn bare_rect(size: Vec2, pivot: Vec2) -> UiRect {
     UiRect { size, pivot, world: Mat4::IDENTITY, active: true, clipping: Default::default() }
 }
@@ -98,6 +157,12 @@ fn ui_values_for_source_comparison() {
         &read_json(input["wordings"].as_str().expect("wordings")),
         camera_fields,
     );
+    if let Some(path) = input["tmpFontAssets"].as_str() {
+        let region = source_doc.source.region.as_deref().expect("region document");
+        let client = source_doc.source.client_version.as_deref().expect("region document client version");
+        let fonts = super::tmp_font::TmpFonts::parse(&read_json(path), region, client).expect("TMP font document");
+        layouts.set_tmp_fonts(Some(fonts));
+    }
     let key: &'static str = match input["hostKey"].as_str().expect("hostKey") {
         "ShellHome" => "ShellHome",
         "ShellMyRoom" => "ShellMyRoom",
@@ -162,6 +227,12 @@ fn ui_values_for_source_comparison() {
         let driven_bare = layouts.layout_driven_nodes(key, canvas).expect("layout-driven nodes");
         let driven_drawn = view.layout_driven(&layouts, canvas).expect("layout-driven nodes of the view");
         let check = view.solve_check(&layouts, canvas).expect("solve check");
+        // The prefab's own activity with the layout controllers applied, and
+        // the values the controllers write in both states.
+        let bare_layout = layouts.resolved(key, canvas).expect("bare rects with the layout");
+        let values_bare = layouts.layout_overrides(doc, canvas, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let (host_visibility, host_rects, host_changes) = view.host_state(doc);
+        let values_drawn = layouts.layout_overrides(doc, canvas, &host_visibility, &host_rects, &host_changes);
 
         // Images drawn by the Image rules: at the drawn rect, and at the
         // oracle's rect size (same input on both sides).
@@ -175,7 +246,7 @@ fn ui_values_for_source_comparison() {
                 let change = changes.get(&i).copied();
                 let r = &oracle_rects[i];
                 let oracle_rect = bare_rect(Vec2::new(from_bits(&r[2]), from_bits(&r[3])), Vec2::from_array(node.rect.pivot));
-                let tint = rgba(&c.fields["m_Color"], Color::WHITE).to_srgba();
+                let tint = serialized_rgba(&c.fields, "m_Color").to_srgba();
                 let tint_bits = [tint.red, tint.green, tint.blue, tint.alpha].map(bits);
                 images.push(json!({
                     "node": i, "pathId": c.path_id, "class": c.class, "type": c.fields["m_Type"],
@@ -184,21 +255,33 @@ fn ui_values_for_source_comparison() {
                     "pivotBits": drawn[i].pivot.to_array().map(bits),
                     // The renderer draws an Image without an image by its plain sprite path.
                     "hasImage": image_path(&layouts, c, change).is_some(),
-                    "drawn": mesh_json(image_rule_mesh_data(&layouts, doc, i, c, change, &drawn[i], &|| None)),
-                    "oracleRect": mesh_json(image_rule_mesh_data(&layouts, doc, i, c, change, &oracle_rect, &|| None)),
+                    "drawn": mesh_json(image_rule_mesh_data(&layouts, doc, i, c, change, &drawn[i])),
+                    "oracleRect": mesh_json(image_rule_mesh_data(&layouts, doc, i, c, change, &oracle_rect)),
                     "materialTintBits": tint_bits,
                     "groupAlphaBits": bits(alphas[i]),
                 }));
             }
         }
 
-        // Presses: the view's press target at the oracle's canvas points, and
-        // the camera-reset press chain at the window pixel position whose
-        // exact image under the canvas mapping is that point.
+        // Presses: the view's press target at the oracle's canvas points; the
+        // camera-reset press chain at the engine screen point (origin
+        // bottom-left) whose image under the canvas mapping is that point,
+        // through the event camera's ray; and the same chain at the window
+        // pixel position (origin top-left) of that point.
+        let pixels = [w as f32, h as f32];
+        let (event_camera, event_root) = root_canvas.event_camera(pixels).expect("the host canvas carries the event camera pose");
         let mut presses = Vec::new();
         for p in res["points"].as_array().expect("points") {
             let point = Vec2::new(from_bits(&p[0]), from_bits(&p[1]));
-            let target = view.press_target(&layouts, point, canvas);
+            let target = view.press_target(&layouts, Pointer::Canvas(point), canvas);
+            let engine_screen = [
+                (f64::from(w) / 2. + f64::from(point.x) * f64::from(scale)) as f32,
+                (f64::from(h) / 2. + f64::from(point.y) * f64::from(scale)) as f32,
+            ];
+            let pointer = crate::menu_shell::screen_pointer(&window, &root_canvas, engine_screen)
+                .expect("the host canvas carries the event camera pose");
+            let ray_error = root_canvas.event_ray(pixels, engine_screen).and_then(|event| event.error);
+            let ray_hit = crate::menu_shell::camera_reset_press(&view, &layouts, canvas, pointer, button_node, button);
             let screen = Vec2::new(
                 (f64::from(w) / 2. + f64::from(point.x) * f64::from(scale)) as f32,
                 (f64::from(h) / 2. - f64::from(point.y) * f64::from(scale)) as f32,
@@ -206,8 +289,14 @@ fn ui_values_for_source_comparison() {
             let hit = crate::menu_shell::camera_reset_hit(&view, &layouts, &window, &root_canvas, screen, button_node, button);
             presses.push(json!({
                 "canvasTarget": target.map(|(n, id)| json!([n, id])),
+                "engineScreenBits": engine_screen.map(bits),
+                "enginePointer": pointer_json(ray_hit.pointer),
+                "engineRayError": ray_error,
+                "engineTarget": ray_hit.target.map(|(n, id)| json!([n, id])),
+                "engineOverButton": ray_hit.over_button,
+                "engineHovered": ray_hit.hovered,
                 "screenBits": screen.to_array().map(bits),
-                "screenCanvasBits": hit.point.to_array().map(bits),
+                "screenPointer": pointer_json(hit.pointer),
                 "screenTarget": hit.target.map(|(n, id)| json!([n, id])),
                 "screenOverButton": hit.over_button,
                 "buttonActive": hit.active, "buttonInteractable": hit.interactable,
@@ -216,9 +305,14 @@ fn ui_values_for_source_comparison() {
         resolutions.insert(res_key.clone(), json!({
             "rootSizeBits": canvas.to_array().map(bits),
             "windowScaleBits": bits(scale),
+            "eventCamera": camera_json(&event_camera, pixels),
+            "eventRootScaleBits": event_root.scale.map(bits),
             "bare": all_corners(&bare),
             "drawn": all_corners(&drawn),
             "drawnOracleRoot": all_corners(&drawn_oracle_root),
+            "bareLayout": all_corners(&bare_layout),
+            "layoutValuesBare": layout_values(&values_bare),
+            "layoutValuesDrawn": layout_values(&values_drawn),
             "drawnActive": drawn.iter().map(|r| r.active).collect::<Vec<_>>(),
             "layoutDrivenBare": driven_bare,
             "layoutDrivenDrawn": driven_drawn,
@@ -317,9 +411,47 @@ fn ui_values_for_source_comparison() {
         })
     });
 
+    // Control of the screen-point ray on a camera the host does not use: a
+    // rotated, off-centre camera under a moved and scaled parent, over a
+    // partial viewport, through the same pose and ray functions.
+    let ray_control = input.get("rayControl").map(|control| {
+        let screen: [f32; 2] = numbers(&control["screen"], "rayControl screen");
+        let parent = screen_ray::Pose {
+            position: numbers(&control["rootPos"], "rayControl rootPos"),
+            rotation: numbers(&control["rootRot"], "rayControl rootRot"),
+            scale: numbers(&control["rootScale"], "rayControl rootScale"),
+        };
+        let (world_position, world_rotation) = screen_ray::child_world_pose(
+            &parent,
+            numbers(&control["localPos"], "rayControl localPos"),
+            numbers(&control["localRot"], "rayControl localRot"),
+        );
+        let viewport: [f32; 4] = numbers(&control["viewport"], "rayControl viewport");
+        let camera = screen_ray::OrthographicCamera {
+            orthographic_size: control["orthoSize"].as_f64().expect("rayControl orthoSize") as f32,
+            near: control["near"].as_f64().expect("rayControl near") as f32,
+            far: control["far"].as_f64().expect("rayControl far") as f32,
+            viewport: screen_ray::Rect { x: viewport[0], y: viewport[1], width: viewport[2], height: viewport[3] },
+            world_position,
+            world_rotation,
+        };
+        let rays: Vec<Value> = control["pixels"]
+            .as_array()
+            .expect("rayControl pixels")
+            .iter()
+            .map(|p| {
+                let point: [f32; 2] = numbers(p, "rayControl pixel");
+                let (ray, error) = screen_ray::screen_point_to_ray(&camera, screen, point);
+                json!({"pixelBits": point.map(bits), "rayBits": ray_bits(&ray), "error": error})
+            })
+            .collect();
+        json!({"camera": camera_json(&camera, screen), "rays": rays})
+    });
+
     let report = json!({
         "doc": input["doc"], "hostKey": key, "hostCanvasRoot": input["hostCanvasRoot"],
         "solveCheckControl": control,
+        "rayControl": ray_control,
         "cameraResetButton": [button_node, button],
         "viewHidden": view_hidden, "viewMoved": view_moved,
         "scaleGrid": scale_grid, "resolutions": resolutions, "texts": texts,

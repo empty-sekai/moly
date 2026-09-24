@@ -49,6 +49,12 @@
 //! - **等级格**：`MysekaiRankModel` 读 `UserMysekaiGamedata.totalExp`
 //!   （**服务端用户态**）→ 查 `MasterMysekaiRank` 表（**master 镜像不在
 //!   提取管线**）得等级与距下一级经验，进 `UIPartsMysekaiRankGauge`。
+//!   `UIPartsMysekaiRankGauge.Setup` 把等级经 `_rankText.SetText` 写成数字，
+//!   再调 `_gaugeExp.Setup(等级, 最高等级, 总经验, 本级累计, 下级累计,
+//!   "MSG_REST_VALUE")`：未到最高等级时剩余文字走
+//!   `SetWordingText("MSG_REST_VALUE", [下级累计 - 总经验])`，到最高等级时走
+//!   `SetWordingText("WORD_MAX")`；写进的是 `restTextMesh`（`restText` 为空
+//!   时）。两区的客户端都是这两个键。
 //! - ⚠ **普查的「宝石余额」一格在真源里不存在**：字段表穷举无 jewel
 //!   字段、原生树本文件 `grep -ic jewel` = 0 ⇒ 三格修正为两格。宝石是
 //!   恢复对话框的消耗货币，不在本对话框的显示面。
@@ -87,11 +93,13 @@
 //! 环境变量覆写，非法值响亮告警回默认）
 //!
 //! 体力三值 · 体力量表上限（master）· 等级 · 距下一级经验（master 派生）
-//! · 访客态（使能输入）· 拍照许可 · 水晶商店许可 · 写生可用 ⇒ 全部
-//! 具名 mock。环境变量：`MOLY_MENU_MOCK_STAMINA_NORMAL` ·
+//! · 是否已到最高等级（master 派生）· 访客态（使能输入）· 拍照许可 ·
+//! 水晶商店许可 · 写生可用 ⇒ 全部具名 mock。环境变量：
+//! `MOLY_MENU_MOCK_STAMINA_NORMAL` ·
 //! `MOLY_MENU_MOCK_STAMINA_ENHANCE` · `MOLY_MENU_MOCK_STAMINA_BOOST` ·
 //! `MOLY_MENU_MOCK_STAMINA_MAX` · `MOLY_MENU_MOCK_RANK_LEVEL` ·
-//! `MOLY_MENU_MOCK_RANK_EXP_NEXT` · `MOLY_MENU_MOCK_VISITING` ·
+//! `MOLY_MENU_MOCK_RANK_EXP_NEXT` · `MOLY_MENU_MOCK_RANK_AT_MAX` ·
+//! `MOLY_MENU_MOCK_VISITING` ·
 //! `MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED` · `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`
 //! · `MOLY_MENU_MOCK_SKETCH_AVAILABLE`。
 //!
@@ -302,8 +310,10 @@ pub(crate) struct MenuMock {
     /// 等级（`totalExp` 查 `MasterMysekaiRank` 的派生值，master 不在管线
     /// ⇒ 直接 mock 派生结果）。
     rank_level: u32,
-    /// 距下一级经验（同上，派生结果）。
+    /// 距下一级经验（同上，派生结果）：`TotalExpToNextRank - TotalExp`。
     rank_exp_next: u32,
+    /// 等级是否等于 `MaxMysekaiRank`（master 最高等级，同上，派生结果）。
+    rank_at_max: bool,
     /// `MysekaiMultiplayController.IsVisiting()`——多人访客态（使能输入；
     /// 本仓无多人域，默认 false）。
     visiting: bool,
@@ -380,6 +390,7 @@ impl Default for MenuMock {
             stamina_max: env_u32("MOLY_MENU_MOCK_STAMINA_MAX", 240),
             rank_level: crate::player_data::saved_rank().unwrap_or_else(|| env_u32("MOLY_MENU_MOCK_RANK_LEVEL", 3)),
             rank_exp_next: env_u32("MOLY_MENU_MOCK_RANK_EXP_NEXT", 450),
+            rank_at_max: env_bool("MOLY_MENU_MOCK_RANK_AT_MAX", false),
             visiting: env_bool("MOLY_MENU_MOCK_VISITING", false),
             photo_shot_allowed: env_bool("MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED", true),
             crystal_shop_allowed: env_bool("MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED", true),
@@ -562,6 +573,22 @@ fn on_open(mock: &MenuMock) {
     );
 }
 
+/// The wording keys `UIPartsGaugeExp.Setup` writes into the rank gauge's
+/// rest text; the shell's glyph set takes their text.
+pub(crate) const RANK_GAUGE_WORDINGS: [&str; 2] = ["MSG_REST_VALUE", "WORD_MAX"];
+
+/// `UIPartsGaugeExp.Setup`'s rest-text call for the rank gauge:
+/// `SetWordingText("WORD_MAX")` (no arguments) at the highest rank,
+/// otherwise `SetWordingText("MSG_REST_VALUE", [experience left])`, the
+/// argument boxed from the int and so formatted as its decimal digits.
+fn rank_rest_wording(mock: &MenuMock) -> (&'static str, Option<Vec<String>>) {
+    if mock.rank_at_max {
+        (RANK_GAUGE_WORDINGS[1], None)
+    } else {
+        (RANK_GAUGE_WORDINGS[0], Some(vec![mock.rank_exp_next.to_string()]))
+    }
+}
+
 /// 关框沿（CloseProcess 的同形日志）。
 fn on_close() {
     info!(
@@ -642,10 +669,18 @@ pub(crate) fn place(
         }
         view.set_visible("MenuRoot/TitleCell",false);
         view.set_visible("MenuHeader/bg/info",mock.stamina_empty());
+        // UIPartsMysekaiRankGauge.Setup. The gauge component and its
+        // UIPartsGaugeExp carry no decoded fields in the layout; these two
+        // paths are the nodes their `_rankText` and `restTextMesh` references
+        // name in the prefab (its `restText` reference is null).
         let rank="MenuHeader/bg/UIPartsMySekaiRankGauge";
-        view.set_text(&format!("{rank}/CustomTextMesh (2)"),mock.rank_level.to_string());
-        let remaining=layouts.wordings.get("W_C_713").cloned().unwrap_or_default().replace("{0}",&mock.rank_exp_next.to_string());
-        view.set_text(&format!("{rank}/CustomTextMesh (3)"),remaining);
+        view.set_text(&format!("{rank}/CustomTextMesh (2)"),
+            moly_law::text::custom_text_mesh::set_text(&mock.rank_level.to_string(), false));
+        let rest=format!("{rank}/CustomTextMesh (3)");
+        let (key, args) = rank_rest_wording(&mock);
+        if let Some(text) = layouts.set_wording_text(view.key, &rest, key, args.as_deref()) {
+            view.set_text(&rest, text);
+        }
     }
 }
 

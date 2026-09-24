@@ -26,6 +26,54 @@ pub fn set_text(value: &str, break_space: bool) -> String {
     }
 }
 
+/// `CustomTextMesh.UpdateWordingText`'s `String.Format(wording, args)`:
+/// .NET composite formatting, for the format items the game's wordings use.
+/// `{{` and `}}` are literal braces; `{n}` (an index, optionally followed by
+/// spaces) is replaced by `args[n]`. An alignment or format string after the
+/// index is not ported and is refused, as are an index past the arguments and
+/// a lone brace (both a `FormatException` in the engine).
+pub fn format_wording(format: &str, args: &[String]) -> Result<String, String> {
+    let mut out = String::with_capacity(format.len());
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                out.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                out.push('}');
+            }
+            '}' => return Err(format!("wording format {format:?}: a lone closing brace")),
+            '{' => {
+                let mut index = String::new();
+                while let Some(digit) = chars.peek().copied().filter(char::is_ascii_digit) {
+                    index.push(digit);
+                    chars.next();
+                }
+                while chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+                if index.is_empty() || chars.next() != Some('}') {
+                    return Err(format!(
+                        "wording format {format:?}: only index format items are ported"
+                    ));
+                }
+                let index: usize = index
+                    .parse()
+                    .map_err(|_| format!("wording format {format:?}: index {index} out of range"))?;
+                let value = args.get(index).ok_or_else(|| {
+                    format!("wording format {format:?}: index {index} with {} arguments", args.len())
+                })?;
+                out.push_str(value);
+            }
+            _ => out.push(ch),
+        }
+    }
+    Ok(out)
+}
+
 /// `CustomTextMesh.RECT_WIDTH_CHANGE_THRESHOLD`.
 pub const RECT_WIDTH_CHANGE_THRESHOLD: f32 = 0.01;
 

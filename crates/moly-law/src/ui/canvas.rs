@@ -15,12 +15,18 @@
 //! The root rect of a screen-space-camera canvas is set by the engine's
 //! native canvas update from its camera, not from the screen size: it takes
 //! the camera's pixel rect, the frustum plane size at the canvas plane
-//! distance (for an orthographic camera with an implicit aspect: height =
+//! distance at the pixel rect's aspect (for an orthographic camera: height =
 //! size + size, width = height * (pixel width / pixel height)), the frustum
 //! units per pixel (|frustum height| / pixel height), and sets the root size
 //! to (frustum width / units per pixel, frustum height / units per pixel)
 //! divided by the scale factor. A zero or NaN pixel height skips the frustum
-//! and divides the pixel rect itself by the scale factor.
+//! and divides the pixel rect itself by the scale factor. The same update
+//! sets the root's uniform local scale to the frustum units per pixel times
+//! the scale factor (the scale factor alone for a zero or NaN pixel height),
+//! which places canvas units in the camera's world. The host checks the
+//! camera's serialized fields this reads (orthographic, a projection built
+//! from its fields, a full viewport); nothing here depends on a camera aspect
+//! set by a script, since the frustum size is taken at the pixel rect's.
 
 use super::unity_math;
 
@@ -95,7 +101,8 @@ pub struct Scaler {
 }
 
 /// The root canvas camera fields the root rect reads. Only an orthographic
-/// camera with an implicit aspect over the full viewport is ported.
+/// camera whose projection is built from its fields, over the full viewport,
+/// is ported.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RootCamera {
     /// `orthographicSize`.
@@ -111,6 +118,8 @@ pub struct CanvasRoot {
     pub scale_factor: f32,
     /// Root rect size in canvas units.
     pub size: [f32; 2],
+    /// The root's uniform local scale (world units per canvas unit).
+    pub local_scale: f32,
 }
 
 /// The native screen-space-camera root size for a camera pixel rect of
@@ -133,6 +142,19 @@ pub fn camera_root_size(pixel: [f32; 2], camera: &RootCamera, scale_factor: f32)
     [width / scale_factor, height / scale_factor]
 }
 
+/// The native screen-space-camera root local scale for a camera pixel rect
+/// of `pixel` (full viewport: the screen size) and a scale factor.
+pub fn camera_root_scale(pixel: [f32; 2], camera: &RootCamera, scale_factor: f32) -> f32 {
+    let height = pixel[1];
+    let units_per_pixel = if height != 0.0 && !height.is_nan() {
+        let frustum_height = camera.orthographic_size + camera.orthographic_size;
+        frustum_height.abs() / height
+    } else {
+        1.0
+    };
+    units_per_pixel * scale_factor
+}
+
 /// The root canvas for a screen of `screen` pixels: the game's match rule,
 /// the scaler against its serialized reference, then the camera root size.
 pub fn root(screen: [f32; 2], scaler: &Scaler, camera: &RootCamera) -> CanvasRoot {
@@ -147,5 +169,6 @@ pub fn root(screen: [f32; 2], scaler: &Scaler, camera: &RootCamera) -> CanvasRoo
         match_width_or_height,
         scale_factor,
         size: camera_root_size(screen, camera, scale_factor),
+        local_scale: camera_root_scale(screen, camera, scale_factor),
     }
 }

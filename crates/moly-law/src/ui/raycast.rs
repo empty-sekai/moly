@@ -15,11 +15,12 @@
 //! is the engine's `IntersectRayTriangle` with its tolerances, so the hit
 //! area reaches slightly past the exact edges.
 //!
-//! The engine casts the camera's screen-point ray in world space. This port
-//! casts, in the event frame the corners are given in (the canvas plane at
-//! z = 0), a ray from one unit in front of the plane along +z through the
-//! point: for a canvas facing the camera that is the same ray, and it is not
-//! the engine's world-space arithmetic.
+//! The engine casts the event camera's screen-point ray (`screen_ray`)
+//! against the corners taken into world space; `quad_hit_by_ray` is that
+//! test. `quad_contains` is the same test in the canvas plane (z = 0) for a
+//! point already in canvas units: a ray from one unit in front of the plane
+//! along +z through the point, which is not the engine's world-space
+//! arithmetic.
 
 use super::image::Rect;
 use std::cmp::Ordering;
@@ -85,14 +86,19 @@ pub fn intersect_ray_triangle(
     Some(t)
 }
 
-/// `RectTransformUtility.RectangleContainsScreenPoint(rect, point, cam, padding)`
-/// given the padded corners already mapped into the event frame.
-pub fn quad_contains(corners: [[f32; 2]; 4], point: [f32; 2]) -> bool {
-    let origin = [point[0], point[1], -1.0];
-    let direction = [0.0, 0.0, 1.0];
-    let [c0, c1, c2, c3] = corners.map(|c| [c[0], c[1], 0.0]);
+/// The native `PointInRectangle` after its screen-point ray: the ray
+/// against the triangles (c0, c1, c2), then (c0, c2, c3) of the padded
+/// corners in world space.
+pub fn quad_hit_by_ray(corners: [[f32; 3]; 4], origin: [f32; 3], direction: [f32; 3]) -> bool {
+    let [c0, c1, c2, c3] = corners;
     intersect_ray_triangle(origin, direction, c0, c1, c2).is_some()
         || intersect_ray_triangle(origin, direction, c0, c2, c3).is_some()
+}
+
+/// `RectTransformUtility.RectangleContainsScreenPoint(rect, point, cam, padding)`
+/// given the padded corners and the point in the canvas plane.
+pub fn quad_contains(corners: [[f32; 2]; 4], point: [f32; 2]) -> bool {
+    quad_hit_by_ray(corners.map(|c| [c[0], c[1], 0.0]), [point[0], point[1], -1.0], [0.0, 0.0, 1.0])
 }
 
 /// One component on one transform, as `Graphic.Raycast` sees it.

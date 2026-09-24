@@ -255,6 +255,11 @@ pub struct UiComponent {
 pub struct UiTextFont {
     #[serde(default)]
     pub source_face: Option<UiTextFace>,
+    /// The serialized file and path id `m_fontAsset` resolves to.
+    #[serde(default)]
+    pub serialized_file: Option<String>,
+    #[serde(default)]
+    pub path_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -356,6 +361,17 @@ impl TryFrom<UiPrefabSource> for UiPrefab {
     }
 }
 
+/// The size of a RectTransform's rect as the engine solves it: the anchor
+/// references are the parent rect's corner (its pivot times minus its size)
+/// plus the parent size scaled by each anchor, and the size is the size delta
+/// plus the distance between them.
+pub(crate) fn rect_size(parent_size: Vec2, parent_pivot: Vec2, rect: &RectTransform) -> Vec2 {
+    let corner = parent_pivot * -parent_size;
+    let reference_min = corner + parent_size * Vec2::from_array(rect.anchors_min);
+    let reference_max = corner + parent_size * Vec2::from_array(rect.anchors_max);
+    Vec2::from_array(rect.size_delta) + (reference_max - reference_min)
+}
+
 impl UiPrefab {
     pub fn parse(bytes: &str) -> Result<Self, String> {
         serde_json::from_str(bytes).map_err(|e| e.to_string())
@@ -428,7 +444,7 @@ impl UiPrefab {
             let amin = Vec2::from_array(r.anchors_min);
             let amax = Vec2::from_array(r.anchors_max);
             let pivot = Vec2::from_array(r.pivot);
-            let size = parent.size * (amax - amin) + Vec2::from_array(r.size_delta);
+            let size = rect_size(parent.size, parent.pivot, r);
             let position = parent.size * (amin + (amax - amin) * pivot - parent.pivot)
                 + Vec2::from_array(r.anchored_position);
             let local = Mat4::from_scale_rotation_translation(

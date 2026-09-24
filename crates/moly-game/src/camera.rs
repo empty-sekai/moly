@@ -1880,7 +1880,9 @@ pub(crate) fn follow_avatar(
         tw.elapsed += time.delta_secs();
         let e = (tw.elapsed / tw.duration).clamp(0.0, 1.0);
         let k = out_quad(e);
-        models.look_at = tw.look_at.0.lerp(tw.look_at.1, k);
+        // DOTween's Vector3 and float plugins write start + change * eased,
+        // with change = end - start, per component.
+        models.look_at = tw.look_at.0 + (tw.look_at.1 - tw.look_at.0) * k;
         models.pitch = tw.pitch.0 + (tw.pitch.1 - tw.pitch.0) * k;
         models.yaw = tw.yaw.0 + (tw.yaw.1 - tw.yaw.0) * k;
         models.distance = tw.distance.0 + (tw.distance.1 - tw.distance.0) * k;

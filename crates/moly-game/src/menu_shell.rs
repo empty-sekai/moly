@@ -20,7 +20,7 @@ use moly_law::ui::custom_button as button_rule;
 use crate::site::SiteActive;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
-use crate::ui_layout::{UiLayouts, UiPrefabView};
+use crate::ui_layout::{Pointer, UiLayouts, UiPrefabView};
 
 const SITES_DATA: &str = "moly://site/sites.json";
 const CHROME_MOVE_DURATION: f32 = 0.2;
@@ -102,8 +102,26 @@ struct GaugeSlide {
 
 impl BreakTimeGauge {
     fn from_document(doc: &UiPrefab, content: &moly_assets::ui_layout::UiComponent) -> Option<Self> {
-        // Older layouts predate the field; there the gauge did not exist.
-        let reference = content.fields.get("_eventBreakTimeController")?;
+        // Whether the region's MysekaiMenuUIContent declares the field, by the
+        // layout's region tag: the shared root's untagged CN extractions have
+        // no break-time controller (nor gauge); the JP class serializes it.
+        let declared = match doc.source.region.as_deref() {
+            None => false,
+            Some("jp") => true,
+            Some(region) => panic!("MysekaiMenuUIContent: no declared field set for region {region}"),
+        };
+        let reference = content.fields.get("_eventBreakTimeController");
+        if !declared {
+            assert!(
+                reference.is_none(),
+                "{}: MysekaiMenuUIContent serializes _eventBreakTimeController, which its region's class does not declare",
+                doc.prefab
+            );
+            return None;
+        }
+        let reference = reference.unwrap_or_else(|| {
+            panic!("{}: MysekaiMenuUIContent lacks its declared _eventBreakTimeController", doc.prefab)
+        });
         let controller = local_reference(reference, "_eventBreakTimeController")?;
         let component = doc.nodes.iter().flat_map(|node| node.components.iter())
             .find(|c| c.path_id == controller)
@@ -378,7 +396,7 @@ impl ShellBindings {
                 .find(|component| component.class == "Sekai.UI.CustomButton")
                 .expect("housing host edit button");
             refs.insert("_fixtureEditButton", format!("@{}", button.path_id));
-            // CN 6.0.0 HomeView.Awake / MyRoomView.Awake find the direct
+            // The CN client's HomeView.Awake / MyRoomView.Awake find the direct
             // "Text" child and assign TMP TextAlignmentOptions.Center (514).
             // Both prefabs serialize Left (513); keep their authored rects.
             let label_index = doc.find(&format!("{}/Text", node.path))
@@ -386,7 +404,7 @@ impl ShellBindings {
             let label = doc.nodes[label_index].components.iter()
                 .find(|component| component.class == "Sekai.UI.CustomTextMesh")
                 .expect("housing host edit-button CustomTextMesh");
-            // That Awake is CN 6.0.0 code. The JP views declare no Awake and
+            // That Awake is the CN client's. The JP views declare no Awake and
             // never set this alignment, so a JP layout keeps its serialized
             // one. Layouts extracted before region tagging are the CN ones.
             if doc.source.region.is_none() {
@@ -508,7 +526,8 @@ pub(crate) fn parse(
         chars.extend(row["name"].as_str().expect("site name").chars());
     }
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
-        "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION"] {
+        "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION"]
+        .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wordings.get(wording).unwrap_or_else(|| panic!("UI wording missing: {wording}")).chars());
     }
     for texts in [
@@ -638,22 +657,50 @@ fn to_canvas(position: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
     Vec2::new(position.x - window.width() / 2., window.height() / 2. - position.y) / root.scale(window)
 }
 
-/// The press chain of the field camera reset button for one pointer at a
-/// window position: the point in canvas units, the selectable the source
-/// raycast gives a press there to, and the button's `IsActive()` and
-/// `IsInteractable()`.
+/// A window position (logical pixels, origin top-left) as the engine's
+/// screen point (physical pixels, origin bottom-left).
+fn to_screen_point(position: Vec2, window: &Window) -> [f32; 2] {
+    let ratio = window.scale_factor();
+    [position.x * ratio, window.physical_height() as f32 - position.y * ratio]
+}
+
+/// The event camera's ray through an engine screen point, as the raycast
+/// pointer; None when the host canvas carries no camera pose. A point the
+/// camera cannot see gets the engine's fallback ray and its error is logged.
+pub(crate) fn screen_pointer(window: &Window, root: &RootCanvas, screen: [f32; 2]) -> Option<Pointer> {
+    let pixels = [window.physical_width() as f32, window.physical_height() as f32];
+    let event = root.event_ray(pixels, screen)?;
+    if let Some(error) = &event.error {
+        warn!("{error}");
+    }
+    Some(Pointer::Ray { ray: event.ray, root: event.root })
+}
+
+/// The raycast pointer of a window position: the event camera's ray, or the
+/// point in canvas units when the host canvas carries no camera pose.
+pub(crate) fn event_pointer(window: &Window, root: &RootCanvas, position: Vec2) -> Pointer {
+    screen_pointer(window, root, to_screen_point(position, window))
+        .unwrap_or_else(|| Pointer::Canvas(to_canvas(position, window, root)))
+}
+
+/// The press chain of the field camera reset button for one pointer: the
+/// pointer, the selectable the source raycast gives a press there to,
+/// whether the button's node is the pointer's enter target or an ancestor
+/// of it, and the button's `IsActive()` and `IsInteractable()`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CameraResetHit {
-    // The point and the target are read by the research instrument only.
+    // The pointer and the target are read by the research instrument only.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) point: Vec2,
+    pub(crate) pointer: Pointer,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) target: Option<(usize, i64)>,
     pub(crate) over_button: bool,
+    pub(crate) hovered: bool,
     pub(crate) active: bool,
     pub(crate) interactable: bool,
 }
 
+/// The camera reset press chain for a pointer at a window position.
 pub(crate) fn camera_reset_hit(
     view: &UiPrefabView,
     layouts: &UiLayouts,
@@ -663,11 +710,23 @@ pub(crate) fn camera_reset_hit(
     node: usize,
     button: i64,
 ) -> CameraResetHit {
-    let canvas = root.size(window);
-    let point = to_canvas(position, window, root);
-    let target = view.press_target(layouts, point, canvas);
+    camera_reset_press(view, layouts, root.size(window), event_pointer(window, root, position), node, button)
+}
+
+/// The camera reset press chain for a raycast pointer over a root canvas of
+/// `canvas` units.
+pub(crate) fn camera_reset_press(
+    view: &UiPrefabView,
+    layouts: &UiLayouts,
+    canvas: Vec2,
+    pointer: Pointer,
+    node: usize,
+    button: i64,
+) -> CameraResetHit {
+    let target = view.press_target(layouts, pointer, canvas);
+    let hovered = view.hovers(layouts, pointer, canvas, node);
     let (active, interactable) = view.selectable_live(layouts, canvas, node, button).unwrap_or((false, false));
-    CameraResetHit { point, target, over_button: target.is_some_and(|(_, id)| id == button), active, interactable }
+    CameraResetHit { pointer, target, over_button: target.is_some_and(|(_, id)| id == button), hovered, active, interactable }
 }
 
 fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, canvas: Vec2, size: Vec2) -> bool {
@@ -768,16 +827,38 @@ pub(crate) fn camera_reset_button(doc: &UiPrefab) -> Option<i64> {
     (inner.first()?.as_i64() == Some(0)).then(|| inner.get(1)?.as_i64()).flatten()
 }
 
-/// The CustomButton's serialized click fields. Hold repeat is absent from
-/// layouts serialized before the field existed; there it did not exist.
-fn button_config(fields: &Value) -> Option<button_rule::CustomButtonConfig> {
+/// Whether this layout's CustomButton class serializes `enableHoldRepeat`,
+/// by the layout's region tag. Layouts without a tag are the shared root's
+/// CN extractions, whose CustomButton has no hold repeat at all; the JP
+/// class serializes it.
+fn declares_hold_repeat(doc: &UiPrefab) -> bool {
+    match doc.source.region.as_deref() {
+        None => false,
+        Some("jp") => true,
+        Some(region) => panic!("CustomButton: no declared field set for region {region}"),
+    }
+}
+
+/// The CustomButton's serialized click fields. A field the region's class
+/// declares must be in the layout, and one it does not declare must not be.
+fn button_config(doc: &UiPrefab, fields: &Value) -> Option<button_rule::CustomButtonConfig> {
+    let enable_hold_repeat = if declares_hold_repeat(doc) {
+        fields["enableHoldRepeat"].as_bool()?
+    } else {
+        assert!(
+            fields.get("enableHoldRepeat").is_none(),
+            "{}: CustomButton serializes enableHoldRepeat, which its region's class does not declare",
+            doc.prefab
+        );
+        false
+    };
     Some(button_rule::CustomButtonConfig {
         se: button_rule::SeType::from_serialized(fields["se"].as_i64()?)?,
         other_se_name: fields["otherSeName"].as_str()?.to_owned(),
         interval: button_rule::IntervalUseType::from_serialized(fields["interval"].as_i64()?)?,
         absolutely_press: fields["absolutelyPress"].as_bool()?,
         enable_long_press: fields["enableLongPress"].as_bool()?,
-        enable_hold_repeat: fields["enableHoldRepeat"].as_bool().unwrap_or(false),
+        enable_hold_repeat,
     })
 }
 
@@ -785,12 +866,16 @@ fn button_config(fields: &Value) -> Option<button_rule::CustomButtonConfig> {
 #[derive(Resource, Default)]
 pub(crate) struct SourceInputManager(pub(crate) button_rule::InputManager);
 
-/// The camera reset button's CustomButton state, and whether the event
-/// system's current press went to it.
+/// The camera reset button's CustomButton state, whether the event
+/// system's current press went to it, the held pointer (its id and latest
+/// position, from press to release) and whether the button is in that
+/// pointer's hover chain.
 #[derive(Resource, Default)]
 pub(crate) struct CameraResetPress {
     state: button_rule::CustomButtonState,
     pressed: bool,
+    held: Option<(i32, Vec2)>,
+    entered: bool,
 }
 
 /// Source press/release/click for the field camera reset button: the press
@@ -801,6 +886,15 @@ pub(crate) struct CameraResetPress {
 /// `ResetCameraSetting`. The press/release interaction of this button is a
 /// colour fade whose serialized fields and palette colours the layout does
 /// not carry; it is not drawn. A press the handlers cannot resolve is logged.
+///
+/// Enter and exit follow the event system's touch path: the press enters
+/// the pressed object's hover chain; every frame a held pointer's current
+/// position is raycast again, and leaving the button's chain sends it
+/// `OnPointerExit` (coming back sends `OnPointerEnter`); a release sends
+/// the up and the click first and then the exit. CustomButton overrides
+/// only the exit: a held press that leaves finishes control, so the
+/// release no longer clicks. The enter it inherits changes only the
+/// selectable's transition state, which is not drawn.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn camera_reset_input(
     mut commands: Commands,
@@ -820,7 +914,7 @@ pub(crate) fn camera_reset_input(
     mut sounds: ResMut<crate::audio::SeRequests>,
 ) {
     let events: Vec<UiPointerEvent> = pointers.read().copied().collect();
-    if events.is_empty() { return; }
+    if events.is_empty() && press.held.is_none() { return; }
     let Ok(window) = windows.single() else {
         info!("camera reset input: {} pointer events without a single primary window", events.len());
         return;
@@ -849,49 +943,16 @@ pub(crate) fn camera_reset_input(
     let node = doc.find(&format!("@{button}")).unwrap_or_else(|error| panic!("{error}"));
     let component = doc.nodes[node].components.iter().find(|c| c.path_id == button)
         .expect("camera reset CustomButton component");
-    let config = button_config(&component.fields).expect("camera reset CustomButton fields");
+    let config = button_config(doc, &component.fields).expect("camera reset CustomButton fields");
     let blocked = dialog.blocks_field_input() || !stack.on_field();
     let key = button as u64;
-    for event in events {
-        let pointer = button_rule::Pointer { pointer_id: event.pointer_id, left_button: true };
-        let hit = camera_reset_hit(view, &layouts, window, root_canvas, event.position, node, button);
-        let over_button = !blocked && hit.over_button;
-        let live = button_rule::ButtonLive { active: hit.active, interactable: hit.interactable };
-        let mut effects = Vec::new();
-        match event.phase {
-            UiPointerPhase::Down => {
-                press.pressed = over_button;
-                if press.pressed {
-                    let CameraResetPress { state, .. } = &mut *press;
-                    effects = button_rule::on_pointer_down(&mut manager.0, state, &config, key, pointer, event.touch_count, live);
-                }
-            }
-            UiPointerPhase::Up => {
-                if press.pressed {
-                    let CameraResetPress { state, .. } = &mut *press;
-                    effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
-                    if over_button {
-                        effects.extend(button_rule::on_pointer_click(
-                            &mut manager.0, state, &config, key, pointer, real.elapsed_secs(), live,
-                        ));
-                    }
-                }
-                press.pressed = false;
-            }
-            UiPointerPhase::Cancel => {
-                if press.pressed {
-                    let CameraResetPress { state, .. } = &mut *press;
-                    effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
-                }
-                press.pressed = false;
-            }
-        }
+    let mut run = |effects: Vec<button_rule::ButtonEffect>, commands: &mut Commands| {
         for effect in effects {
             match effect {
                 button_rule::ButtonEffect::PlaySe { se, other_se_name } => sounds.button(se, other_se_name),
                 button_rule::ButtonEffect::Click => {
                     consumed.0 = true;
-                    camera.reset_camera_setting(&mut commands);
+                    camera.reset_camera_setting(commands);
                 }
                 button_rule::ButtonEffect::PressEffect
                 | button_rule::ButtonEffect::ReleaseEffect
@@ -899,5 +960,58 @@ pub(crate) fn camera_reset_input(
                 | button_rule::ButtonEffect::StartHoldRepeat => {}
             }
         }
+    };
+    for event in events {
+        let pointer = button_rule::Pointer { pointer_id: event.pointer_id, left_button: true };
+        if event.phase == UiPointerPhase::Move {
+            if let Some(held) = press.held.as_mut().filter(|(id, _)| *id == event.pointer_id) {
+                held.1 = event.position;
+            }
+            continue;
+        }
+        let hit = camera_reset_hit(view, &layouts, window, root_canvas, event.position, node, button);
+        let over_button = !blocked && hit.over_button;
+        let live = button_rule::ButtonLive { active: hit.active, interactable: hit.interactable };
+        let mut effects = Vec::new();
+        let CameraResetPress { state, pressed, held, entered } = &mut *press;
+        match event.phase {
+            UiPointerPhase::Down => {
+                *held = Some((event.pointer_id, event.position));
+                *entered = !blocked && hit.hovered;
+                *pressed = over_button;
+                if *pressed {
+                    effects = button_rule::on_pointer_down(&mut manager.0, state, &config, key, pointer, event.touch_count, live);
+                }
+            }
+            UiPointerPhase::Up | UiPointerPhase::Cancel => {
+                if *pressed {
+                    effects = button_rule::on_pointer_up(&mut manager.0, state, &config, key, pointer);
+                    if event.phase == UiPointerPhase::Up && over_button {
+                        effects.extend(button_rule::on_pointer_click(
+                            &mut manager.0, state, &config, key, pointer, real.elapsed_secs(), live,
+                        ));
+                    }
+                }
+                if *entered {
+                    effects.extend(button_rule::on_pointer_exit(&mut manager.0, state, &config, key, pointer));
+                }
+                *pressed = false;
+                *held = None;
+                *entered = false;
+            }
+            UiPointerPhase::Move => unreachable!("moves only update the held position"),
+        }
+        run(effects, &mut commands);
+    }
+    // The input module's per-frame move of a held pointer.
+    let CameraResetPress { state, held, entered, .. } = &mut *press;
+    if let Some((pointer_id, position)) = *held {
+        let hit = camera_reset_hit(view, &layouts, window, root_canvas, position, node, button);
+        let hovered = !blocked && hit.hovered;
+        if *entered && !hovered {
+            let pointer = button_rule::Pointer { pointer_id, left_button: true };
+            run(button_rule::on_pointer_exit(&mut manager.0, state, &config, key, pointer), &mut commands);
+        }
+        *entered = hovered;
     }
 }
