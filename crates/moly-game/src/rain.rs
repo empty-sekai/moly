@@ -172,6 +172,7 @@ impl Rng {
 /// 不挂它，引用该材质的 system 会在参数校验上响亮失败。在 `app()` 里
 /// DefaultPlugins 之后调用一次。
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<RainMaterial>(app);
     app.add_plugins(MaterialPlugin::<RainMaterial>::default());
 }
 

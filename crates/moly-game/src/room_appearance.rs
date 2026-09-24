@@ -430,6 +430,7 @@ fn apply(
 }
 
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<RoomMaterial>(app);
     app.add_plugins(MaterialPlugin::<RoomMaterial>::default())
         .init_resource::<RoomAppearance>()
         .init_resource::<RoomAppearanceState>()

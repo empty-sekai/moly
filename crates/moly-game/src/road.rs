@@ -330,6 +330,7 @@ fn update_materials(
 pub(super) fn install(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/road_material.wgsl");
     crate::gpu_image_release::install(app);
+    crate::gpu_image_release::prepare_after_images::<RoadMaterial>(app);
     app.add_plugins(MaterialPlugin::<RoadMaterial>::default())
         .add_systems(
             Update,

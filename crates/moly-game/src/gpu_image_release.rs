@@ -41,26 +41,51 @@
 //! kept this way; each such image is replaced at most once (a chained image is
 //! never chained again), so the list is bounded by the number of images.
 //!
+//! # Material preparation order
+//!
+//! [`prepare_after_images`] orders each 3D material type's preparation after
+//! image preparation, so that a material created in the frame an image is
+//! uploaded (again) binds that frame's texture.
+//!
 //! # Schedule
 //!
 //! The release system runs in the extraction schedule and orders against
 //! nothing: it reads the main world's image events and the recorded
 //! replacements, and the render world's prepared images, which change only in
-//! image preparation after extraction. The render schedule is left as it is.
+//! image preparation after extraction. The render schedule gains only the
+//! ordering points of the material preparation order.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
+use bevy::pbr::decal::ForwardDecalMaterialExt;
+use bevy::pbr::{ExtendedMaterial, Material, MeshMaterial3d};
 use bevy::prelude::*;
-use bevy::render::render_asset::RenderAssets;
+use bevy::render::erased_render_asset::prepare_erased_assets;
+use bevy::render::render_asset::{prepare_assets, RenderAssets};
 use bevy::render::render_resource::Texture;
 use bevy::render::texture::GpuImage;
-use bevy::render::{Extract, ExtractSchedule, RenderApp};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 
 pub struct GpuImageReleasePlugin;
 
 impl Plugin for GpuImageReleasePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<ImageTextureReplaced>();
+        // 3D material types added by Bevy's own plugins, and the particle
+        // material, whose plugin lives with the weather effects.
+        //
+        // 2D material types (the UI's plain and clipped materials) are left
+        // unordered on purpose. Their images are loaded for the GPU only or
+        // created in the render world and never uploaded again, so a 2D
+        // material cannot bind a replaced texture; prepared before a first
+        // upload it only waits a frame. Ordering them moves where the 2D
+        // queue systems land in the render schedule, and the 2D transparent
+        // phase sorts by depth with a stable sort, so equal-depth UI items of
+        // different material types could change draw order.
+        prepare_after_images::<StandardMaterial>(app);
+        prepare_after_images::<ExtendedMaterial<StandardMaterial, ForwardDecalMaterialExt>>(app);
+        prepare_after_images::<crate::uber_particle::UberParticleMaterial>(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -116,3 +141,33 @@ fn release_image_textures(
         }
     }
 }
+
+/// Orders the preparation of material type `M` after this frame's image
+/// preparation. Bevy prepares images and materials in the same system set
+/// without an order between them (their relative order follows from the rest
+/// of the schedule and changes when unrelated systems are added), and does not
+/// prepare a material again when one of its images is uploaded again. A
+/// material prepared before the images of its own frame binds whatever texture
+/// each image had before that frame's upload, or waits a frame for an image
+/// uploaded for the first time; prepared after them, it binds this frame's
+/// textures. Every 3D material type calls this once, from the plugin that adds
+/// its `MaterialPlugin`; the types added by Bevy's own plugins are ordered by
+/// [`GpuImageReleasePlugin`].
+pub(crate) fn prepare_after_images<M: Material>(app: &mut App)
+where
+    M::Data: PartialEq + Eq + Hash + Clone,
+{
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(
+            Render,
+            images_prepared::<M>
+                .in_set(RenderSystems::PrepareAssets)
+                .after(prepare_assets::<GpuImage>)
+                .before(prepare_erased_assets::<MeshMaterial3d<M>>),
+        );
+    }
+}
+
+/// The ordering point between image preparation and the preparation of
+/// material type `M`. It does no work; its two ordering edges are its purpose.
+fn images_prepared<M: Material>() {}

@@ -2039,6 +2039,7 @@ pub struct SiteMaterialPlugin;
 impl Plugin for SiteMaterialPlugin {
     fn build(&self, app: &mut App) {
         crate::render::gpu::install_shared_samplers(app);
+        crate::gpu_image_release::prepare_after_images::<SiteMaterial>(app);
         app.add_plugins((
             crate::env::SiteEnvPlugin,
             MaterialPlugin::<SiteMaterial>::default(),

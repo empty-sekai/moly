@@ -2087,6 +2087,7 @@ pub struct FixtureMaterialPlugin;
 impl Plugin for FixtureMaterialPlugin {
     fn build(&self, app: &mut App) {
         crate::gpu_image_release::install(app);
+        crate::gpu_image_release::prepare_after_images::<FixtureMaterial>(app);
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)

@@ -1072,6 +1072,7 @@ pub struct CharacterMaterialPlugin;
 impl Plugin for CharacterMaterialPlugin {
     fn build(&self, app: &mut App) {
         crate::render::gpu::install_shared_samplers(app);
+        crate::gpu_image_release::prepare_after_images::<CharacterMaterial>(app);
         app.add_plugins((
             MaterialPlugin::<CharacterMaterial>::default(),
             ExtractResourcePlugin::<CharacterEnv>::default(),

@@ -100,6 +100,7 @@ impl Material for EmoticonMaterial {
 
 /// Material 管线注册：在 `app()` 里 DefaultPlugins 之后调用一次（同天空壳）。
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<EmoticonMaterial>(app);
     app.add_plugins(MaterialPlugin::<EmoticonMaterial>::default());
 }
 
