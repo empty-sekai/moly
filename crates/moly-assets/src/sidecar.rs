@@ -229,8 +229,9 @@ impl AssetLoader for MolyJsonLoader {
         if load_context.path().path().ends_with("postprocess.json") {
             let profile = PostProcessProfile::from_bytes(&bytes).map_err(MolyJsonError::Law)?;
             let post = profile.resolve().map_err(MolyJsonError::Law)?;
-            // 站点渲染侧没有关雾开关：档案自己的 enabled 门已进采纳结果，
-            // 关着时 alpha 为 0、高度雾项精确化简为无贡献。
+            // 装载器不持有关雾开关：档案自己的 enabled 门已进采纳结果，
+            // 关着时 alpha 为 0、高度雾项精确化简为无贡献。布局编辑态的
+            // 关雾（IsDisableFog）由每帧的环境写入施加，不在这里。
             Ok(MolyJson::PostProcessFog(post.fog.params.globals(false)))
         } else {
             Ok(MolyJson::SiteSidecar(parse_site_sidecar(&bytes)?))

@@ -890,6 +890,7 @@ fn write_environment(
     mut avatar: Option<ResMut<crate::avatar_material::AvatarEnv>>,
     sky_materials: Query<&MeshMaterial3d<SkyGradient>, With<SkyDome>>,
     mut materials: ResMut<Assets<SkyGradient>>,
+    edits: Option<Res<crate::fixture_edit::EditSessionActive>>,
 ) {
     let Some(next) = phase.loaded.as_ref() else { return; };
     let previous = phase.source.as_ref().unwrap_or(next);
@@ -900,7 +901,17 @@ fn write_environment(
         effective(row, &selection.environment_site)
     };
     let (a,b,p) = (resolve(previous),resolve(next),resolve(profile));
-    let blended = blend_at_site(a,b,p,phase.progress,previous.environment_site=="home",next.environment_site=="home");
+    let mut blended = blend_at_site(a,b,p,phase.progress,previous.environment_site=="home",next.environment_site=="home");
+    // MysekaiRenderSettings.PostProcess.IsDisableFog: the source EditGameState
+    // sets it on enter (with the field camera's FloorEdit state) and clears it
+    // on exit; the fog pass then switches the fog keyword off and writes both
+    // colour alphas as zero. The product's layout-edit session is that state,
+    // at home and in the rooms alike.
+    if edits.as_deref().is_some_and(crate::fixture_edit::EditSessionActive::is_active) {
+        let mut fog = p.fog;
+        fog.enabled = p.fog_on;
+        blended.fog = fog.globals(true);
+    }
     // Every bridge below is written through change detection only on a frame
     // where one of its bits changes. Render-world extraction, the GPU upload and
     // the sky material re-prepare all key on that flag, so a steady environment

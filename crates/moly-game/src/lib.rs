@@ -80,8 +80,10 @@ mod player_data_ui;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
+mod plain_background;
 mod render;
 mod room_appearance;
+mod room_shell;
 pub mod schedule;
 mod settings_store;
 pub mod shadowmap;
@@ -178,6 +180,7 @@ pub fn app(
     schedule::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
+    plain_background::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);
     app.add_plugins(character_material::CharacterMaterialPlugin);
     app.add_plugins(shadowmap::ShadowmapPlugin);

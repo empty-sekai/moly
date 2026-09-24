@@ -580,6 +580,16 @@ pub struct SiteActive {
     pub nav_face: Option<String>,
 }
 
+impl SiteActive {
+    /// The source's indoor predicate: `MysekaiSiteModel.IsIndoor` is
+    /// `SiteType - 1 < 3` (first, second and third floor), and the load path
+    /// tests the site name against the same three floors. The environment view
+    /// hides the weather effects and shows the plain background on it.
+    pub fn is_indoor(&self) -> bool {
+        is_room(&self.site_type)
+    }
+}
+
 /// 房间等级与寻路面来源（锚行报它：寻路面从哪来是可对账的）。
 #[derive(Clone)]
 pub struct RoomInfo {

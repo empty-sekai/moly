@@ -757,6 +757,7 @@ pub fn install(app: &mut App) {
                 weather_fx::parse,
                 weather_fx::plan,
                 weather_fx::spawn_when_ready,
+                weather_fx::refresh_effect_visible,
                 weather_fx::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
             )
                 .chain().after(crate::weather_transition::WeatherEnvironmentUpdate),

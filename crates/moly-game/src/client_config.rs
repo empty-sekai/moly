@@ -100,6 +100,12 @@ pub(crate) const KEY_MYSEKAI_HARVEST_MOVE_SCALE: i32 = 78;
 /// Move 乘数是 rate × scale（采集/相机档的 scale 折算在前），动画速率
 /// 不乘它。
 pub(crate) const KEY_MYSEKAI_DASH_SPEED_RATE: i32 = 95;
+/// Room surface texture name patterns (MyRoomFloorAssetName /
+/// MyRoomWallAppearanceAssetName, StringConfigs keys 99 / 100): formatted
+/// with the skin bundle name and the colour id, the regex whose first group
+/// is the uv set of the texture.
+pub(crate) const KEY_MY_ROOM_FLOOR_ASSET_NAME: i32 = 99;
+pub(crate) const KEY_MY_ROOM_WALL_APPEARANCE_ASSET_NAME: i32 = 100;
 
 // ---------------------------------------------------------------------------
 // 装载：请求 → 解析
@@ -144,8 +150,8 @@ pub(crate) fn parse(
             .map(|n| n as i32)
             .unwrap_or_else(|| panic!("ClientConfig 面板 IntConfigs 键 {key} 的值不是整数"))
     });
-    // StringConfigs / BoolConfigs 面板里在（提取侧定型），消费面还没有
-    // 读者——先验形状不建访问器，键随读者一起加。
+    // BoolConfigs 面板里在（提取侧定型），消费面还没有读者——先验形状
+    // 不建访问器，键随读者一起加。
     let string = parse_table(&value, "StringConfigs", |v, key| {
         v.as_str()
             .map(str::to_owned)
@@ -162,7 +168,7 @@ pub(crate) fn parse(
         string.len(),
         bool.len()
     );
-    commands.insert_resource(ClientConfigs { float, int });
+    commands.insert_resource(ClientConfigs { float, int, string });
     commands.remove_resource::<ClientConfigHandle>();
 }
 
@@ -198,6 +204,7 @@ fn parse_table<T>(
 pub struct ClientConfigs {
     float: HashMap<i32, f32>,
     int: HashMap<i32, i32>,
+    string: HashMap<i32, String>,
 }
 
 impl ClientConfigs {
@@ -217,5 +224,12 @@ impl ClientConfigs {
             .int
             .get(&key)
             .unwrap_or_else(|| panic!("ClientConfig 面板 IntConfigs 缺键 {key}"))
+    }
+
+    /// StringConfigs 键，缺键响亮拒绝（同 [`Self::float`]）。
+    pub(crate) fn string(&self, key: i32) -> &str {
+        self.string
+            .get(&key)
+            .unwrap_or_else(|| panic!("ClientConfig 面板 StringConfigs 缺键 {key}"))
     }
 }
