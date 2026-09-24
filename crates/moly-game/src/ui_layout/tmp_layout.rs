@@ -8,8 +8,13 @@
 //! point size over the asset's sampling point size times its face scale,
 //! times the character and glyph scales; the pen step is (advance times the
 //! horizontal FX scale plus the pair advance) times that scale, plus the
-//! spacing terms in em units, times one less the width adjustment. The line
-//! gap and the base scale are the text's own asset's. A character a dynamic
+//! spacing terms in em units (the pass's point size over 100), times one
+//! less the width adjustment; a whitespace character or U+200B then adds the
+//! word spacing as a separate addition. The line gap and the base scale are
+//! the text's own asset's. Placement follows the text rect's corners in its
+//! own local space (origin at the pivot): the vertical anchor from the first
+//! line's ascender and the last line's descender, each line justified in the
+//! text area width. A character a dynamic
 //! asset adds at run time from its source font file has no stored advance:
 //! it is laid out with the open font's advance at that asset's sampling
 //! point size and reported, once per text, as unsourced.
@@ -57,7 +62,8 @@ pub(super) struct PlacedGlyph {
     pub(super) font_size: f32,
     pub(super) scale: f32,
     pub(super) width_scale: f32,
-    /// Pen origin / baseline, relative to the text rect centre, positive Y up.
+    /// Pen origin / baseline in the text rect's local space (origin at its
+    /// pivot), positive Y up.
     pub(super) pen: Vec2,
     pub(super) color: Option<[f32; 4]>,
 }
@@ -240,9 +246,10 @@ impl Settings {
         if boolean(f, "m_isRightToLeft")? {
             return Err("TMP RTL placement is not implemented".into());
         }
-        if !boolean(f, "m_isOrthographic")? {
-            return Err("TMP perspective text is not a UI rect".into());
-        }
+        // The serialized `m_isOrthographic` is not read: the UI text
+        // component's Awake sets it to true unconditionally and nothing sets
+        // it again, so every UI text lays out orthographic (scale factor 1,
+        // em unit size * 0.01) whatever the prefab stored.
         if integer(f, "m_fontStyle")? != 0 || integer(f, "m_fontWeight")? != 400 {
             return Err("TMP requested a font style not supplied by the current atlas".into());
         }
@@ -623,6 +630,9 @@ struct Measured {
     scale: f32,
     fit: f32,
     step: f32,
+    /// The word spacing a whitespace character or U+200B adds to the pen as
+    /// its own addition after `step` (0 for every other character).
+    word: f32,
     pair_offset: Vec2,
     ascent: f32,
     descent: f32,
@@ -659,11 +669,12 @@ fn measure(
     prepared: &Prepared,
     config: &Settings,
     fonts: Option<&TmpFonts>,
+    purpose: Purpose,
     size: f32,
     adjustment: f32,
 ) -> Result<Vec<Measured>, String> {
     match (fonts, config.primary) {
-        (Some(fonts), Some(primary)) => measure_assets(prepared, config, fonts, primary, size, adjustment),
+        (Some(fonts), Some(primary)) => measure_assets(prepared, config, fonts, primary, purpose, size, adjustment),
         (None, None) => measure_open_font(prepared, config, size, adjustment),
         _ => Err("TMP text settings and font assets disagree on the font source".into()),
     }
@@ -683,13 +694,20 @@ fn open_font_em(ch: char) -> Result<f32, String> {
     Ok(font.glyph_metrics(&[]).scale(1.0).advance_width(gid))
 }
 
-/// The per-character metrics of TMP 3.0.7 `GenerateTextMesh` with the
-/// root's font assets.
+/// The per-character metrics of TMP 3.0.7 with the root's font assets:
+/// `GenerateTextMesh` for a render pass, `CalculatePreferredValues` for a
+/// preferred-size pass (whose element scale has no glyph scale factor).
+///
+/// Every character takes the pen step from its glyph's advance, the
+/// synthesized zero-metric control characters included (they still take the
+/// spacing terms); a whitespace character or U+200B then adds the word
+/// spacing as a second, separate addition.
 fn measure_assets(
     prepared: &Prepared,
     config: &Settings,
     fonts: &TmpFonts,
     primary: usize,
+    purpose: Purpose,
     size: f32,
     adjustment: f32,
 ) -> Result<Vec<Measured>, String> {
@@ -728,14 +746,15 @@ fn measure_assets(
         if token.ch == '\u{ad}' {
             return Err("TMP soft hyphen substitution is not implemented".into());
         }
-        // currentEmScale of an orthographic text.
-        let em = point_size * 0.01;
+        // currentEmScale of an orthographic text: set once per pass from the
+        // pass's point size, not from a <size> segment's.
+        let em = size * 0.01;
         let cspace = style.cspace.unwrap_or(0.0);
         let voffset = style.voffset.unwrap_or(0.0);
         let Some(hit) = resolved[i] else {
             // A <space> pen event: no character, the text's own face.
             result.push(Measured {
-                size: point_size, scale: fx * small_caps, fit: 0.0, step: 0.0, pair_offset: Vec2::ZERO,
+                size: point_size, scale: fx * small_caps, fit: 0.0, step: 0.0, word: 0.0, pair_offset: Vec2::ZERO,
                 ascent: config.face.ascent * point_size, descent: config.face.descent * point_size,
                 voffset, cspace, spacing_offset: 0.0, drawn: token.ch, baseline: 0.0,
             });
@@ -750,8 +769,13 @@ fn measure_assets(
         };
         // adjustedScale and currentElementScale; the font scale
         // multiplier is 1 without sub/superscript, which is refused above.
+        // The render pass multiplies by the glyph scale too; the preferred
+        // pass stops at the character (text element) scale.
         let adjusted = point_size * small_caps / face.point_size * face.scale;
-        let element_scale = adjusted * 1.0 * character_scale * glyph.map_or(1.0, |g| g.scale);
+        let element_scale = match purpose {
+            Purpose::Render => adjusted * 1.0 * character_scale * glyph.map_or(1.0, |g| g.scale),
+            Purpose::Preferred => adjusted * 1.0 * character_scale,
+        };
         let advance = match glyph {
             Some(glyph) => glyph.horizontal_advance,
             None if zero_advance(token.ch) => 0.0,
@@ -807,17 +831,28 @@ fn measure_assets(
         // The spacing terms of the step and of the line's max advance
         // (xAdvance and maxAdvanceOffset); bold spacing is 0 for regular text.
         let spacing = (asset.normal_spacing_offset + character_spacing + 0.0) * em;
-        let mut step = ((advance * fx + x_advance) * element_scale + spacing + cspace) * (1.0 - adjustment);
-        if token.ch.is_whitespace() || token.ch == '\u{200b}' {
-            step += config.word_spacing * em;
-        }
+        // The preferred pass's step has no horizontal FX factor on the advance.
+        let fx_step = match purpose {
+            Purpose::Render => fx,
+            Purpose::Preferred => 1.0,
+        };
+        let step = ((advance * fx_step + x_advance) * element_scale + spacing + cspace) * (1.0 - adjustment);
+        let word = if token.ch.is_whitespace() || token.ch == '\u{200b}' {
+            config.word_spacing * em
+        } else {
+            0.0
+        };
         let fit = advance * (1.0 - adjustment) * element_scale;
-        let (step, fit) = if zero_advance(token.ch) { (0.0, 0.0) } else { (step, fit) };
+        // U+FEFF and U+0000 keep the zero advance they had: U+0000 ends the
+        // source's processing array and never reaches here, and U+FEFF is
+        // not drawn by this port (a named gap, not a TMP rule).
+        let (step, word, fit) = if matches!(token.ch, '\u{feff}' | '\0') { (0.0, 0.0, 0.0) } else { (step, word, fit) };
         result.push(Measured {
             size: point_size,
             scale: fx * small_caps,
             fit,
             step,
+            word,
             pair_offset: placement * element_scale,
             // Element ascender and descender in line space;
             // descent is stored as a depth below the baseline.
@@ -900,30 +935,32 @@ fn measure_open_font(
                 pair_offset += pair.offset[1];
             }
         }
-        let em = point_size * 0.01;
+        // The pass's em unit, as with the font assets.
+        let em = size * 0.01;
         let cspace = style.cspace.unwrap_or(0.0);
         let fit = glyph_advance * point_size * scale * (1.0 - adjustment);
-        let mut step = ((glyph_advance + pair_advance) * point_size * scale
+        let step = ((glyph_advance + pair_advance) * point_size * scale
             + config.char_spacing * em
             + cspace)
             * (1.0 - adjustment);
-        if token.ch.is_whitespace() || token.ch == '\u{200b}' {
-            step += config.word_spacing * em;
-        }
-        if zero_advance(token.ch) {
-            step = 0.0;
-        }
+        let word = if token.ch.is_whitespace() || token.ch == '\u{200b}' {
+            config.word_spacing * em
+        } else {
+            0.0
+        };
+        let (step, word) = if matches!(token.ch, '\u{feff}' | '\0') { (0.0, 0.0) } else { (step, word) };
         result.push(Measured {
             size: point_size,
             scale,
             fit,
             step,
+            word,
             pair_offset: pair_offset * point_size * scale,
             ascent: config.face.ascent * point_size * scale,
             descent: config.face.descent * point_size * scale,
             voffset: style.voffset.unwrap_or(0.0),
             cspace,
-            spacing_offset: (config.char_spacing * point_size * 0.01 - cspace) * (1.0 - adjustment),
+            spacing_offset: (config.char_spacing * em - cspace) * (1.0 - adjustment),
             drawn: metric_character(token.ch),
             baseline: 0.0,
         });
@@ -950,7 +987,11 @@ struct Pass {
     lines: Vec<Line>,
     measured: Vec<Measured>,
     content: Vec2,
+    /// `m_maxTextAscender`: the first line's maximum ascender.
     ascent: f32,
+    /// `maxVisibleDescender`: the last laid-out line's descender (signed,
+    /// line offset included).
+    descender: f32,
     resize: Option<Resize>,
 }
 #[derive(Clone, Copy)]
@@ -966,24 +1007,43 @@ fn make_line(
     p: &Prepared,
     m: &[Measured],
 ) -> Line {
-    let mut ascent: f32 = 0.0;
-    let mut descent: f32 = 0.0;
+    // m_maxLineAscender / m_maxLineDescender start at -32767 / 32767 (the
+    // descender is kept here as a depth below the baseline, so both start
+    // at -32767). Only the line's first character and non-whitespace
+    // characters raise them; with a baseline offset (<voffset>) a character
+    // offers the larger of its shifted and unshifted extents, the unshifted
+    // one computed back from the shifted value.
+    let mut ascent: f32 = -LARGE;
+    let mut descent: f32 = -LARGE;
     let mut width: f32 = 0.0;
     let mut preferred_width: f32 = 0.0;
     let mut before_carriage_return: f32 = 0.0;
-    for pos in &positions {
+    for (k, pos) in positions.iter().enumerate() {
         let token = &p.tokens[pos.index];
         let metric = &m[pos.index];
-        ascent = ascent.max(metric.ascent + metric.voffset);
-        descent = descent.max(metric.descent - metric.voffset);
+        if k == 0 || !token.ch.is_whitespace() {
+            let element_ascender = metric.ascent + metric.voffset;
+            let element_descender = -metric.descent + metric.voffset;
+            let (adjusted_ascender, adjusted_descender) = if metric.voffset != 0.0 {
+                (
+                    ((element_ascender - metric.voffset) / 1.0).max(element_ascender),
+                    ((element_descender - metric.voffset) / 1.0).min(element_descender),
+                )
+            } else {
+                (element_ascender, element_descender)
+            };
+            ascent = adjusted_ascender.max(ascent);
+            descent = (-adjusted_descender).max(descent);
+        }
         if token.ch == '\r' {
             before_carriage_return = before_carriage_return.max(pos.pen);
         }
         if visible(token.ch) || (positions.len() == 1 && token.ch.is_whitespace()) {
-            // maxAdvance subtracts (character spacing - rich cSpacing).
+            // maxAdvance subtracts (character spacing - rich cSpacing) from
+            // the character's stored xAdvance (after the word spacing).
             // The minus on cSpacing is authored behaviour, not a typo: its
             // closing-tag event also adjusts xAdvance before this expression.
-            width = pos.pen + metric.step - metric.spacing_offset;
+            width = pos.pen + metric.step + metric.word - metric.spacing_offset;
         }
         // Preferred keeps the last tested visible-character width, while a
         // carriage return saves the previous pen extent before zeroing it.
@@ -1019,8 +1079,26 @@ fn pass(
     height: f32,
     wrapping: bool,
     resize_allowed: bool,
+    // The preferred pass's own character array (`m_internalCharacterInfo`):
+    // the pass writes each character into it as it processes it, and its
+    // "next character is a following character" test reads the next slot
+    // from it, which holds what an earlier pass of this component (or this
+    // pass before a line wrap went back) wrote there, or U+0000 in a slot
+    // nothing wrote since the array was allocated. None for a render pass,
+    // which tests the parsed text.
+    mut internal: Option<&mut Vec<char>>,
 ) -> Result<Pass, String> {
-    let measured = measure(p, cfg, rules.fonts.as_deref(), size, adjustment)?;
+    let measured = measure(p, cfg, rules.fonts.as_deref(), purpose, size, adjustment)?;
+    let total = p.tokens.len();
+    if let Some(array) = internal.as_deref_mut() {
+        // TMP reallocates the array (zeroed) only when it is missing or
+        // shorter than the text: to the next power of two, or the count plus
+        // 256 above 1024 characters.
+        if array.len() < total {
+            let length = if total > 1024 { total + 256 } else { total.next_power_of_two() };
+            *array = vec!['\0'; length];
+        }
+    }
     let mut lines = Vec::new();
     let mut start = 0;
     let mut previous_hard = true;
@@ -1049,6 +1127,9 @@ fn pass(
             let token = &p.tokens[i];
             let m = &measured[i];
             let style = &p.segments[token.segment];
+            if let Some(array) = internal.as_deref_mut() {
+                array[i] = token.ch;
+            }
             if style.position != previous_position {
                 if style.position.is_some() {
                     pen = indent(&style.position, m.size, percent_base);
@@ -1074,9 +1155,12 @@ fn pass(
                 if resize_allowed
                     && ((can_wrap && first_word) || (!can_wrap && purpose == Purpose::Render))
                 {
+                    // The reduction's base is the text area width the
+                    // overflow test compares against: the margin width plus
+                    // 0.0001 (less the zero tag margins).
                     resize = Some(Resize::Width {
                         actual: fit,
-                        available: width,
+                        available: width + EPSILON,
                     });
                     break;
                 }
@@ -1104,16 +1188,19 @@ fn pass(
                 pen: origin,
             });
             pen += mono.map_or(m.step, |mono| {
-                mono * (1.0 - adjustment) + cfg.char_spacing * m.size * 0.01 + m.cspace
+                mono * (1.0 - adjustment) + cfg.char_spacing * size * 0.01 + m.cspace
             });
+            // The word spacing is its own addition to the pen, after the step.
+            pen += m.word;
             if hard_break(token.ch) {
                 next_start = i + 1;
                 hard = true;
                 break;
             }
+            // A carriage return resets the pen and, being whitespace, then
+            // saves a word-break state like any breaking space.
             if token.ch == '\r' {
                 pen = indent(&style.indent, m.size, percent_base);
-                continue;
             }
             if break_space(token.ch) {
                 saved = Some((i + 1, positions.len()));
@@ -1122,10 +1209,11 @@ fn pass(
                 last_cjk = false;
             } else if east_asian(token.ch, rules.modern_hangul) {
                 let leading = rules.leading.contains(&token.ch);
-                let following = p
-                    .tokens
-                    .get(i + 1)
-                    .is_some_and(|next| rules.following.contains(&next.ch));
+                let following = i + 1 < total
+                    && match internal.as_deref() {
+                        Some(array) => rules.following.contains(&array[i + 1]),
+                        None => rules.following.contains(&p.tokens[i + 1].ch),
+                    };
                 let permitted = !leading || (purpose == Purpose::Preferred && first_word);
                 if permitted {
                     if !following {
@@ -1169,6 +1257,9 @@ fn pass(
     }
     let mut content = Vec2::ZERO;
     let mut ascent: f32 = 0.0;
+    // m_ElementDescender at each line end: that line's descender (the
+    // text's height is the first line's ascender less the current line's
+    // descender, not a running minimum).
     let mut lowest: f32 = 0.0;
     for i in 0..lines.len() {
         if i == 0 {
@@ -1192,7 +1283,7 @@ fn pass(
                 previous.offset + gap + (cfg.line_spacing + paragraph) * size * 0.01
             };
         }
-        lowest = lowest.min(-lines[i].descent - lines[i].offset);
+        lowest = -lines[i].descent - lines[i].offset;
         content.x = content.x.max(if purpose == Purpose::Preferred {
             lines[i].preferred_width
         } else {
@@ -1219,12 +1310,20 @@ fn pass(
         measured,
         content,
         ascent,
+        descender: lowest,
         resize,
     })
 }
 
+/// `(int)(value * 100 + 1f) / 100f` as the game compiles it: the float to
+/// int conversion saturates, gives 0 for NaN, and gives int.MinValue for
+/// +infinity (the compiled code tests that one value).
 fn preferred_round(value: f32) -> f32 {
-    ((value * 100.0 + 1.0) as i32) as f32 / 100.0
+    let scaled = value * 100.0 + 1.0;
+    if scaled == f32::INFINITY {
+        return i32::MIN as f32 / 100.0;
+    }
+    (scaled as i32) as f32 / 100.0
 }
 
 fn calculate(
@@ -1234,6 +1333,7 @@ fn calculate(
     purpose: Purpose,
     rect: Vec2,
     width_only: bool,
+    mut internal: Option<&mut Vec<char>>,
 ) -> Result<(Pass, f32, f32), String> {
     // Render passes start the search at the base size clamped to the bounds;
     // preferred-size queries start at the max size.
@@ -1243,25 +1343,42 @@ fn calculate(
     };
     let mut search = AutoSize::new(start, cfg.min, cfg.max);
     let inner_width = rect.x - cfg.margin[0] - cfg.margin[2];
+    // A render pass clamps the margin width and height at 0 (`m_marginWidth
+    // > 0 ? m_marginWidth : 0`); the preferred-height query passes the
+    // margin width unclamped, 32767 when it is exactly 0.
     let width = if width_only {
         LARGE_POSITIVE_VECTOR
-    } else if purpose == Purpose::Preferred && inner_width == 0.0 {
-        LARGE
-    } else {
+    } else if purpose == Purpose::Preferred {
+        if inner_width != 0.0 { inner_width } else { LARGE }
+    } else if inner_width > 0.0 {
         inner_width
+    } else {
+        0.0
     };
     let height = if purpose == Purpose::Preferred {
         LARGE
     } else {
-        rect.y - cfg.margin[1] - cfg.margin[3]
+        let inner_height = rect.y - cfg.margin[1] - cfg.margin[3];
+        if inner_height > 0.0 { inner_height } else { 0.0 }
     };
     // Justified and flush alignments are rejected when the settings are read,
     // so the width adjustment never takes the justified target.
     let justified_or_flush = false;
     for iteration in 0..=MAX_ITERATIONS {
-        search.iteration = iteration as u32;
+        // The iteration counter the resize tests read. The render loop adds
+        // one after each generation pass. The preferred-height loop also adds
+        // one after each pass, and each preferred pass adds one more at its
+        // start, so its k-th pass (from 0) tests 2k + 1 against the limit.
+        search.iteration = match purpose {
+            Purpose::Render => iteration as u32,
+            Purpose::Preferred => 2 * iteration as u32 + 1,
+        };
         let can_resize = cfg.auto && !width_only && search.below_iteration_limit();
         let size = search.font_size;
+        // The source continues the same pass when a resize it asked for is
+        // not allowed; here that pass is run again without resizing, so the
+        // character array goes back to its state before the attempt.
+        let before_attempt = internal.as_deref().cloned();
         let attempt = pass(
             p,
             cfg,
@@ -1278,6 +1395,7 @@ fn calculate(
                 && (search.may_reduce_point_size(cfg.min)
                     || search.may_reduce_char_width(cfg.char_width_max_adj)
                     || search.line_spacing_delta > cfg.line_spacing_min),
+            internal.as_deref_mut(),
         )?;
         match attempt.resize {
             Some(Resize::Width { actual, available })
@@ -1303,6 +1421,9 @@ fn calculate(
                 continue;
             }
             Some(_) => {
+                if let (Some(array), Some(saved)) = (internal.as_deref_mut(), before_attempt) {
+                    *array = saved;
+                }
                 let final_pass = pass(
                     p,
                     cfg,
@@ -1316,6 +1437,7 @@ fn calculate(
                     height,
                     !width_only && cfg.wrap,
                     false,
+                    internal.as_deref_mut(),
                 )?;
                 return Ok((final_pass, size, search.char_width_adj_delta));
             }
@@ -1337,12 +1459,18 @@ fn no_text(text: &str) -> bool {
     text.chars().next().is_none_or(|first| first == '\0')
 }
 
+/// The preferred width (axis 0) or height (axis 1) of a text component.
+///
+/// `internal` is the component's own character array, which its preferred
+/// passes read and write (see [`pass`]); the caller keeps one per component
+/// for as long as the component lives, starting empty.
 pub(super) fn preferred_axis(
     text: &str,
     component: &UiComponent,
     axis: usize,
     rect_size: Vec2,
     rules: &TextRules,
+    internal: &mut Vec<char>,
 ) -> Result<f32, String> {
     if axis > 1 || !rect_size.is_finite() {
         return Err("TMP invalid layout axis or rect".into());
@@ -1353,9 +1481,8 @@ pub(super) fn preferred_axis(
     // Alignment changes only the placement inside the rect, not preferred size.
     let config = Settings::read(component, None, rules.fonts.as_deref())?;
     let prepared = prepare(text, &config)?;
-    if prepared.tokens.is_empty() {
-        return Ok(0.0);
-    }
+    // A text of tags only still runs the pass (no characters, size 0) and
+    // then the margins and the rounding below: 0.01 with zero margins.
     let (result, _, _) = calculate(
         &prepared,
         &config,
@@ -1363,23 +1490,27 @@ pub(super) fn preferred_axis(
         Purpose::Preferred,
         rect_size,
         axis == 0,
+        Some(internal),
     )?;
-    let margins = if axis == 0 {
-        config.margin[0].max(0.0) + config.margin[2].max(0.0)
+    // Each positive margin is added on its own, leading side first.
+    let (leading, trailing) = if axis == 0 {
+        (config.margin[0], config.margin[2])
     } else {
-        config.margin[1].max(0.0) + config.margin[3].max(0.0)
+        (config.margin[1], config.margin[3])
     };
-    Ok(preferred_round(result.content[axis] + margins))
+    let positive = |margin: f32| if margin > 0.0 { margin } else { 0.0 };
+    Ok(preferred_round(result.content[axis] + positive(leading) + positive(trailing)))
 }
 
 pub(super) fn layout(
     text: &str,
     component: &UiComponent,
     rect_size: Vec2,
+    pivot: Vec2,
     rules: &TextRules,
     alignment: Option<i64>,
 ) -> Result<TextLayout, String> {
-    if !rect_size.is_finite() {
+    if !rect_size.is_finite() || !pivot.is_finite() {
         return Err("TMP non-finite render rect".into());
     }
     if no_text(text) {
@@ -1391,24 +1522,32 @@ pub(super) fn layout(
         return Ok(TextLayout { glyphs: Vec::new() });
     }
     let (result, _, adjustment) =
-        calculate(&prepared, &config, rules, Purpose::Render, rect_size, false)?;
-    let inner = Vec2::new(
-        rect_size.x - config.margin[0] - config.margin[2],
-        rect_size.y - config.margin[1] - config.margin[3],
-    );
-    let left = -rect_size.x * 0.5 + config.margin[0];
-    let top = rect_size.y * 0.5 - config.margin[1];
-    let y_shift = match config.vertical {
-        256 => 0.0,
-        512 => (inner.y - result.content.y) * 0.5,
-        1024 => inner.y - result.content.y,
+        calculate(&prepared, &config, rules, Purpose::Render, rect_size, false, None)?;
+    let margin = config.margin;
+    // The rect's local corners (bottom-left, top-left), origin at the pivot.
+    let x_min = -(pivot.x * rect_size.x);
+    let y_min = -(pivot.y * rect_size.y);
+    let y_max = y_min + rect_size.y;
+    let (ascender, descender) = (result.ascent, result.descender);
+    // The vertical anchor offset, from the corners, the margins, the first
+    // line's ascender and the last line's descender.
+    let anchor = match config.vertical {
+        256 => Vec2::new(x_min + (0.0 + margin[0]), y_max + ((0.0 - ascender) - margin[1])),
+        512 => Vec2::new(
+            (x_min + x_min) * 0.5 + (0.0 + margin[0]),
+            (y_min + y_max) * 0.5 + ((((margin[1] + ascender) + descender) - margin[3]) * -0.5 + 0.0),
+        ),
+        1024 => Vec2::new(x_min + (0.0 + margin[0]), y_min + ((0.0 - descender) + margin[3])),
         _ => unreachable!(),
     };
     // Each line records the text area width, which TMP computes as the
-    // margin width plus 0.0001 less the `<margin>` tag margins; that tag has
-    // no placement here (it is refused above), so those margins are 0, and so
-    // is the line's left margin in the justification offsets below.
-    let line_width = inner.x + EPSILON;
+    // margin width (clamped at 0) plus 0.0001 less the `<margin>` tag
+    // margins; that tag has no placement here (it is refused above), so
+    // those margins are 0, and so is the line's left margin in the
+    // justification offsets below.
+    let inner_width = rect_size.x - margin[0] - margin[2];
+    let margin_width = if inner_width > 0.0 { inner_width } else { 0.0 };
+    let line_width = margin_width + EPSILON;
     let mut glyphs = Vec::new();
     for line in &result.lines {
         let style = &prepared.segments[prepared.tokens[line.start].segment];
@@ -1420,12 +1559,13 @@ pub(super) fn layout(
         };
         // Left: margin left; Center: margin left + width / 2 - max advance / 2;
         // Right: margin left + width - max advance.
-        let x_shift = match horizontal {
-            1 => 0.0,
-            2 => line_width / 2.0 - line.width / 2.0,
-            4 => line_width - line.width,
+        let justification = match horizontal {
+            1 => 0.0 + 0.0,
+            2 => (0.0 + line_width * 0.5) - line.width * 0.5,
+            4 => (0.0 + line_width) - line.width,
             _ => unreachable!(),
         };
+        let offset = Vec2::new(anchor.x + justification, anchor.y + 0.0);
         for placed in &line.positions {
             let token = &prepared.tokens[placed.index];
             if !visible(token.ch) || token.fixed_space.is_some() {
@@ -1453,9 +1593,13 @@ pub(super) fn layout(
                 font_size: m.size,
                 scale: m.scale,
                 width_scale: 1.0 - adjustment,
+                // origin += offset.x; baseLine (element baseline offset less
+                // the line offset, plus the <voffset> offset) += offset.y.
+                // The pair placement is this port's pen shift for the glyph
+                // bitmap (0 without pair records).
                 pen: Vec2::new(
-                    left + x_shift + placed.pen + m.pair_offset.x * (1.0 - adjustment),
-                    top - y_shift - result.ascent - line.offset + m.baseline + m.voffset + m.pair_offset.y,
+                    (placed.pen + offset.x) + m.pair_offset.x * (1.0 - adjustment),
+                    (((m.baseline - line.offset) + m.voffset) + offset.y) + m.pair_offset.y,
                 ),
                 color,
             });

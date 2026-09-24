@@ -842,6 +842,10 @@ impl UiLayouts {
         changes: &HashMap<usize, &Override>,
     ) -> HashMap<usize, RectTransform> {
         let mut measurement_error = None;
+        // Each resolution lays the document out as a freshly enabled
+        // instance, so each text component's preferred-pass character array
+        // starts empty here and lives for this resolution.
+        let mut internal: HashMap<i64, Vec<char>> = HashMap::new();
         let automatic = compute_overrides(
             doc,
             canvas,
@@ -851,7 +855,7 @@ impl UiLayouts {
                 if measurement_error.is_some() {
                     return None;
                 }
-                match self.measure_node(doc, index, axis, size, changes.get(&index).copied()) {
+                match self.measure_node(doc, index, axis, size, changes.get(&index).copied(), &mut internal) {
                     Ok(metrics) => metrics,
                     Err(error) => {
                         measurement_error = Some(format!("{}: {error}", doc.nodes[index].path));
@@ -898,6 +902,7 @@ impl UiLayouts {
         axis: usize,
         size: Vec2,
         change: Option<&Override>,
+        internal: &mut HashMap<i64, Vec<char>>,
     ) -> Result<Option<LayoutMetrics>, String> {
         let mut preferred: Option<f32> = None;
         let preferred_field = if axis == 0 {
@@ -934,6 +939,7 @@ impl UiLayouts {
                     axis,
                     size,
                     rules,
+                    internal.entry(comp.path_id).or_default(),
                 )?)
             } else if comp.fields.get("m_Type").is_some() {
                 Some(if preferred_overridden {
@@ -2557,7 +2563,7 @@ fn spawn_text(
     clip_pixel_size: Vec2,
 ) {
     let fields = &component.fields;
-    let layout = tmp_layout::layout(text, component, rect.size, rules, alignment)
+    let layout = tmp_layout::layout(text, component, rect.size, rect.pivot, rules, alignment)
         .unwrap_or_else(|error| panic!("UI TMP layout failed: {error}"));
     let base_color = serialized_rgba(fields, "m_fontColor");
     let (cell, pen_x, base_top) = art.cell_geometry();
@@ -2575,9 +2581,8 @@ fn spawn_text(
                 (cell * 0.5 - pen_x) * factor * glyph.width_scale,
                 -(cell * 0.5 - base_top) * factor,
             );
-        let position = rect
-            .world
-            .transform_point3((offset + (Vec2::splat(0.5) - rect.pivot) * rect.size).extend(0.));
+        // The pen is already in the rect's local space (origin at the pivot).
+        let position = rect.world.transform_point3(offset.extend(0.));
         let (scale, rotation, _) = rect.world.to_scale_rotation_translation();
         let color = glyph
             .color

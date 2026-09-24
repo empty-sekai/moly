@@ -341,7 +341,8 @@ fn ui_values_for_source_comparison() {
             let r = &oracle_rects[i];
             let oracle_size = Vec2::new(from_bits(&r[2]), from_bits(&r[3]));
             let run = |size: Vec2| -> Value {
-                match tmp_layout::layout(&text, c, size, rules, alignment) {
+                // Pens are relative to the rect's pivot (the drawn rect's).
+                match tmp_layout::layout(&text, c, size, drawn[i].pivot, rules, alignment) {
                     Ok(layout) => json!(layout.glyphs.iter().map(|g| json!({
                         "ch": g.ch.to_string(), "sourceIndex": g.source_index,
                         "fontSizeBits": bits(g.font_size), "scaleBits": bits(g.scale),
