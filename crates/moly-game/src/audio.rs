@@ -25,9 +25,14 @@
 //!   纪念地四类放，家园、三层房间、祭会场只停），过门则取该站本现象的行、
 //!   否则该站「其它」条件的行；每次调用都先停旧声再放（同 cue 也从头放）；
 //!   现象没有主表行时记错误并停。这边的触发点是天气链的每次真实提交
-//!   （提交序号前进一次＝真源一次调用）。一个 cue 带多条波形时它是多轨序列
-//!   （流星那条：洗牌选轨、各轨起播延迟、序列放完即重放），运行时根的音频
-//!   索引没有导出序列结构，这条通道对它具名拒绝，不拿其中一条波形顶替。
+//!   （提交序号前进一次＝真源一次调用）。cue 是按它的**序列结构**放的：
+//!   提取侧在 loop.json 的包条目里导出结构（`sequenceExport` 计数 +
+//!   `sequences` 块）。列了、没有块的 cue 是 plain（一轨一条波形、从 cue
+//!   起点放），照单流放。带块且是洗牌序列（类型 2）的按移植的律放
+//!   （[`crate::audio_sequence`]）：每轮一轨，等该轨的起播延迟，把那条波形
+//!   放完，没被叫停且带重放标志就起下一轮。位置与顺序表挂在 cue 表的
+//!   工作区上，停了再放接着走。其余序列形状，以及条目没被读过、却带多条
+//!   波形的键，都具名拒绝，不拿其中一条波形顶替。
 //!
 //! **A 套邻近环境音管理器**（声源对象管理器）是第三个消费者：声源组件 +
 //! 距离调音 `clamp(1 - d/max, 0, 1)` + 单通道就近选择。声源由站点场景
@@ -68,6 +73,7 @@
 //! 消费 `bgm`、`se_area_ambient`、`vox_scenario`、`se_ingame`、`se_ui`
 //! 五类，其余四类是骨架，等各自的通道落地再接。
 
+use crate::audio_sequence::{advance_shuffle, SequenceRng, ShuffleWork, SEQUENCE_TYPE_SHUFFLE};
 use crate::character::AvatarRoot;
 use crate::client_config::ClientConfigs;
 use crate::site::SiteActive;
@@ -575,20 +581,8 @@ struct StreamRow {
     /// 整轨时长（秒）——talk voice 的起播账目用（行→cue→包→时长）。
     duration: f64,
     /// 这个 (cue, package) 键下的波形条数。大于 1 时这个 cue 是多轨序列：
-    /// 选哪条、何时放由 cue 表的序列结构决定（客户端 ACB 数据，不是服务端
-    /// 配置），运行时根的音频索引没有导出那份结构。
-    ///
-    /// 流星那条（序列类型 2，即 `CriAtomEx.CueType.Shuffle`；六轨；序列命令
-    /// 带重放标志）在 CRI 原生运行时里的律：每起一轮序列只放一轨——位置 +1、
-    /// 到尾归 0，放顺序表里该位置那一轨；位置归 0 时（首轮也算）重洗顺序表：
-    /// 逐格与一个均匀抽中的格对换（不是 Fisher-Yates），轨数不少于 3 且不是
-    /// 首轮时，若新表首格等于上一轮表的末格，再把首格与 [1, n-1] 里抽中的一格
-    /// 对换，所以跨轮不连放同一轨。抽签是 xorshift128，种子取单调时钟纳秒数，
-    /// 按 Mersenne Twister 的初始化递推铺成四个状态字；区间抽签 = 低端 +
-    /// 随机数模区间宽。每轨的事件先把轨时钟往回拨它的起播延迟（毫秒项 ×1000 +
-    /// 微秒项）再发 noteOn；波形无循环点，放完即止；这一轨的声音全部放完且
-    /// 没有被叫停时，序列从头再起一轮（这就是 cue 长度记为无限的来由）。
-    /// 移植需要提取侧先导出：序列类型、重放标志、各轨起播延迟、轨到 subsong。
+    /// 选哪条、何时放由 cue 表的序列结构决定（客户端 cue 表数据，不是服务端
+    /// 配置），结构见 [`SequenceIndex`]，洗牌序列的律见 [`crate::audio_sequence`]。
     waveforms: usize,
 }
 
@@ -687,6 +681,8 @@ pub(crate) struct Routing {
     /// 档名 → 该档的音频面。
     phenomena: HashMap<String, PhenomenonAudio>,
     streams: Streams,
+    /// 提取侧导出的序列结构（只来自现象音频的 loop.json）。
+    sequences: SequenceIndex,
 }
 
 /// talk voice 包的包名前缀（提取侧清单族 `mysekai/talk/voice/` 的扁平形）。
@@ -891,6 +887,24 @@ pub(crate) fn parse(
         routing.streams.0.len(),
     );
     info!(
+        "序列结构就绪：读过的 (cue, 包) {} 个 · 带结构块 {} 个（洗牌 {} · 其它类型 {}）· 按轨取的流 {} 条",
+        routing.sequences.read.len(),
+        routing.sequences.blocks.len(),
+        routing
+            .sequences
+            .blocks
+            .values()
+            .filter(|block| block.kind == SEQUENCE_TYPE_SHUFFLE)
+            .count(),
+        routing
+            .sequences
+            .blocks
+            .values()
+            .filter(|block| block.kind != SEQUENCE_TYPE_SHUFFLE)
+            .count(),
+        routing.sequences.subsongs.len(),
+    );
+    info!(
         "talk voice 语料账本就绪：上游无包 {} 条具名（缺 cue 日志的分类依据）",
         voice_corpus.uncovered.len(),
     );
@@ -1013,6 +1027,7 @@ fn parse_routing(index: &serde_json::Value, loops: &serde_json::Value) -> Routin
         sites_with_sounds,
         phenomena,
         streams: parse_streams(loops, "phenomena/"),
+        sequences: parse_sequences(loops, "phenomena/"),
     };
     // 任何站点 × 现象可达的路由都必须落到一条解码好的流上。解析期全量核过
     // 之后，消费侧就不再需要「cue 无流」的运行期分支。
@@ -1132,6 +1147,347 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
     let streams = Streams(streams.into_iter().map(|(k, (_, v))| (k, v)).collect());
 
     streams
+}
+
+/// 提取侧序列导出的版本（`sequenceExport.version`）。别的版本号响亮拒绝：
+/// 字段语义可能变了，按旧读法读会静默读错。
+const SEQUENCE_EXPORT_VERSION: i64 = 1;
+
+/// 按轨取的一条流（多轨序列的一轨对应一个 subsong）。
+#[derive(Clone, Debug)]
+struct SubStream {
+    ogg: String,
+    loops: bool,
+    loop_start: f64,
+    loop_end: f64,
+}
+
+/// 一轨的 noteOn 指向（只区分消费侧移植了的那一种形状）。
+#[derive(Clone, Debug)]
+enum NoteOn {
+    /// noteOn → synth → 恰一条波形引用；`subsong` 是解码器的流号（外存
+    /// 波形没有流号）。
+    Waveform { subsong: Option<i64> },
+    /// 其余形状（synth 引用多条、嵌套 synth、noteOn 指向序列……）：未移植。
+    Other(String),
+}
+
+/// 序列的一轨。
+#[derive(Clone, Debug)]
+struct SequenceTrack {
+    /// 轨号（cue 表的轨行号）：顺序表里存的就是它。
+    track_index: u16,
+    /// 起播延迟，微秒（毫秒项 ×1000 + 微秒项，提取侧已合算）。
+    start_delay_us: i64,
+    /// 事件程序里提取侧没解码的事件码。非空 = 这一轨还有别的事，未移植。
+    events_not_decoded: Vec<i64>,
+    note_ons: Vec<NoteOn>,
+}
+
+/// 一个 cue 的序列结构（提取侧 `sequences` 块里消费侧读的那部分）。
+#[derive(Clone, Debug)]
+struct SequenceBlock {
+    /// 所在归档（同包多归档时区分工作区）。
+    archive: String,
+    /// 序列行号：工作区挂在 cue 表的序列行上，同一行的别名 cue 共用。
+    sequence_index: u16,
+    kind: u8,
+    type_name: String,
+    /// 重放标志（序列命令里的那一字节；无此命令 = `None`）。
+    repeat: Option<u8>,
+    playback_ratio: i64,
+    action_tracks: i64,
+    plugin_tracks: i64,
+    tracks: Vec<SequenceTrack>,
+    /// 消费侧不读的参数，原样记一行（总线送量、参数 69、未解码的命令码）：
+    /// 本仓的混音器没有总线效果器，这些不进声音。
+    not_consumed: String,
+}
+
+/// 提取侧导出的序列结构（loop.json 包条目的 `sequenceExport`/`sequences`）。
+///
+/// 读法：条目带 `sequenceExport` ＝ 提取侧读过这个归档的 cue 表。它列了、
+/// 却没有块的 cue 是 plain（一轨一条波形、从 cue 起点放）。有块的 cue
+/// 按块里的结构放或具名拒绝。条目不带 `sequenceExport` ＝ 从没读过，
+/// 那时只能看波形条数：多于一条具名拒绝。
+#[derive(Default)]
+struct SequenceIndex {
+    blocks: HashMap<(String, String), SequenceBlock>,
+    read: HashSet<(String, String)>,
+    subsongs: HashMap<(String, String, i64), SubStream>,
+}
+
+/// JSON 值取整数；缺或不是整数是结构损伤。
+fn value_i64(value: &serde_json::Value, what: &str) -> i64 {
+    value
+        .as_i64()
+        .unwrap_or_else(|| panic!("序列导出里 {what} 不是整数"))
+}
+
+fn parse_sequence_block(
+    block: &serde_json::Value,
+    archive: &str,
+    cue_label: &str,
+) -> SequenceBlock {
+    let kind = value_i64(&block["type"], "type");
+    let kind = u8::try_from(kind)
+        .unwrap_or_else(|_| panic!("cue {cue_label} 的序列类型 {kind} 超出一字节"));
+    let repeat = match &block["repeat"] {
+        serde_json::Value::Null => None,
+        value => Some(
+            u8::try_from(value_i64(value, "repeat"))
+                .unwrap_or_else(|_| panic!("cue {cue_label} 的重放标志超出一字节")),
+        ),
+    };
+    let sequence_index = u16::try_from(value_i64(&block["sequenceIndex"], "sequenceIndex"))
+        .unwrap_or_else(|_| panic!("cue {cue_label} 的序列行号超出 16 位"));
+    let tracks = block["tracks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("cue {cue_label} 的序列没有 tracks 数组"))
+        .iter()
+        .map(|track| {
+            let track_index = u16::try_from(value_i64(&track["trackIndex"], "trackIndex"))
+                .unwrap_or_else(|_| panic!("cue {cue_label} 的轨号超出 16 位"));
+            let note_ons = track["noteOns"]
+                .as_array()
+                .unwrap_or_else(|| panic!("cue {cue_label} 轨 {track_index} 没有 noteOns 数组"))
+                .iter()
+                .map(|note| {
+                    let note_kind = value_i64(&note["kind"], "noteOn kind");
+                    let references = note["synth"]["references"].as_array();
+                    match references {
+                        Some(items)
+                            if note_kind == 2
+                                && items.len() == 1
+                                && value_i64(&items[0]["kind"], "reference kind") == 1 =>
+                        {
+                            NoteOn::Waveform {
+                                subsong: items[0]["waveform"]["subsong"].as_i64(),
+                            }
+                        }
+                        Some(items) if note_kind == 2 => {
+                            NoteOn::Other(format!("synth 引用 {} 条（要恰一条波形）", items.len()))
+                        }
+                        _ => NoteOn::Other(format!("noteOn 指向种类 {note_kind}（要 synth）")),
+                    }
+                })
+                .collect();
+            SequenceTrack {
+                track_index,
+                start_delay_us: value_i64(
+                    &track["startDelayMicroseconds"],
+                    "startDelayMicroseconds",
+                ),
+                events_not_decoded: track["eventCodesNotDecoded"]
+                    .as_array()
+                    .unwrap_or_else(|| {
+                        panic!("cue {cue_label} 轨 {track_index} 没有 eventCodesNotDecoded")
+                    })
+                    .iter()
+                    .map(|code| value_i64(code, "event code"))
+                    .collect(),
+                note_ons,
+            }
+        })
+        .collect();
+    let not_consumed = format!(
+        "总线送量 {} · 参数69 {} · 未解码命令码 {}",
+        block["busSends"], block["parameter69"], block["commandCodesNotDecoded"]
+    );
+    SequenceBlock {
+        archive: archive.to_string(),
+        sequence_index,
+        kind,
+        type_name: block["typeName"].as_str().unwrap_or("未命名").to_string(),
+        repeat,
+        playback_ratio: value_i64(&block["playbackRatio"], "playbackRatio"),
+        action_tracks: value_i64(&block["actionTracks"]["count"], "actionTracks.count"),
+        plugin_tracks: value_i64(
+            &block["instrumentPluginTracks"]["count"],
+            "instrumentPluginTracks.count",
+        ),
+        tracks,
+        not_consumed,
+    }
+}
+
+/// 解 loop.json 的序列导出（见 [`SequenceIndex`]）。导出版本不认得、有计数
+/// 却没有块表、同一 (cue, 包) 两个块：都是提取产物的结构损伤，响亮拒绝。
+fn parse_sequences(loops: &serde_json::Value, base: &str) -> SequenceIndex {
+    let mut index = SequenceIndex::default();
+    for package in loops["packages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("loop.json 的 packages 不是数组"))
+    {
+        let package_name = field_str(package, "package").to_string();
+        let streams = package["streams"]
+            .as_array()
+            .unwrap_or_else(|| panic!("loop.json 的 streams 不是数组"));
+        for stream in streams {
+            if stream.get("error").is_some() {
+                continue; // 诊断行：parse_streams 已具名
+            }
+            let cue = field_str(stream, "cue").to_string();
+            // 单流归档的流没有编号，在归档自己的波形容器里它是第 1 条。
+            let subsong = stream["subsong"].as_i64().unwrap_or(1);
+            let loops_flag = stream["loop"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("流 {} 的 loop 不是布尔", label(&cue)));
+            let (loop_start, loop_end) = if loops_flag {
+                (
+                    field_f64(stream, "loopStartSeconds"),
+                    field_f64(stream, "loopEndSeconds"),
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let source = stream["ogg"]
+                .as_str()
+                .or_else(|| stream["wav"].as_str())
+                .unwrap_or_else(|| panic!("流 {} 既无 ogg 也无 wav 路径", label(&cue)));
+            index.subsongs.insert(
+                (cue, package_name.clone(), subsong),
+                SubStream {
+                    ogg: format!("{base}{source}"),
+                    loops: loops_flag,
+                    loop_start,
+                    loop_end,
+                },
+            );
+        }
+        let Some(export) = package.get("sequenceExport") else {
+            continue; // 从没读过这个归档的 cue 表
+        };
+        let version = value_i64(&export["version"], "sequenceExport.version");
+        if version != SEQUENCE_EXPORT_VERSION {
+            panic!(
+                "包 {} 的序列导出版本 {version} 不认得（本仓读 {SEQUENCE_EXPORT_VERSION}）",
+                label(&package_name)
+            );
+        }
+        let archive = field_str(package, "archive").to_string();
+        for stream in streams {
+            if let Some(cue) = stream["cue"].as_str() {
+                index.read.insert((cue.to_string(), package_name.clone()));
+            }
+        }
+        let blocks = package["sequences"].as_object().unwrap_or_else(|| {
+            panic!(
+                "包 {} 有序列导出计数却没有 sequences 表",
+                label(&package_name)
+            )
+        });
+        for (cue, block) in blocks {
+            let key = (cue.clone(), package_name.clone());
+            let parsed = parse_sequence_block(block, &archive, &label(cue));
+            if index.blocks.insert(key, parsed).is_some() {
+                panic!("cue {} @ {} 有两个序列块", label(cue), label(&package_name));
+            }
+        }
+    }
+    index
+}
+
+/// 一轨的起播计划：轨号、起播延迟、要放的流。
+#[derive(Clone, Debug)]
+struct PlanVoice {
+    track_index: u16,
+    start_delay_us: i64,
+    stream: SubStream,
+}
+
+/// 一条可以按移植的律放的洗牌序列。
+#[derive(Clone, Debug)]
+struct ShufflePlan {
+    /// 作者序的轨号表（顺序表的来源）。
+    tracks: Vec<u16>,
+    voices: Vec<PlanVoice>,
+    repeat: bool,
+}
+
+/// 从导出的结构里取洗牌计划；`Err` 是具名拒绝的理由（哪一样本仓没移植）。
+fn shuffle_plan(
+    index: &SequenceIndex,
+    cue: &str,
+    package: &str,
+    block: &SequenceBlock,
+) -> Result<ShufflePlan, String> {
+    if block.kind != SEQUENCE_TYPE_SHUFFLE {
+        return Err(format!(
+            "序列类型 {}（{}）的律本仓没有移植（只移植了洗牌）",
+            block.kind, block.type_name
+        ));
+    }
+    if block.playback_ratio != 100 {
+        return Err(format!(
+            "序列的播放倍率是 {}（本仓只按 100 走时）",
+            block.playback_ratio
+        ));
+    }
+    if block.action_tracks != 0 || block.plugin_tracks != 0 {
+        return Err(format!(
+            "序列带动作轨 {} 条、插件轨 {} 条（未移植）",
+            block.action_tracks, block.plugin_tracks
+        ));
+    }
+    if block.tracks.is_empty() {
+        return Err("序列没有轨".to_string());
+    }
+    let mut voices = Vec::with_capacity(block.tracks.len());
+    for track in &block.tracks {
+        if !track.events_not_decoded.is_empty() {
+            return Err(format!(
+                "轨 {} 的事件程序里有提取侧没解码的事件码 {:?}",
+                track.track_index, track.events_not_decoded
+            ));
+        }
+        if track.start_delay_us < 0 {
+            return Err(format!(
+                "轨 {} 的起播延迟为负（{} 微秒）",
+                track.track_index, track.start_delay_us
+            ));
+        }
+        let [note] = track.note_ons.as_slice() else {
+            return Err(format!(
+                "轨 {} 有 {} 个 noteOn（本仓只放恰一个的轨）",
+                track.track_index,
+                track.note_ons.len()
+            ));
+        };
+        let subsong = match note {
+            NoteOn::Waveform {
+                subsong: Some(subsong),
+            } => *subsong,
+            NoteOn::Waveform { subsong: None } => {
+                return Err(format!(
+                    "轨 {} 的波形没有流号（外存波形）",
+                    track.track_index
+                ))
+            }
+            NoteOn::Other(shape) => {
+                return Err(format!("轨 {} 的 noteOn：{shape}", track.track_index))
+            }
+        };
+        let stream = index
+            .subsongs
+            .get(&(cue.to_string(), package.to_string(), subsong))
+            .ok_or_else(|| {
+                format!(
+                    "轨 {} 要的流 {subsong} 没有解码进运行时根",
+                    track.track_index
+                )
+            })?;
+        voices.push(PlanVoice {
+            track_index: track.track_index,
+            start_delay_us: track.start_delay_us,
+            stream: stream.clone(),
+        });
+    }
+    Ok(ShufflePlan {
+        tracks: block.tracks.iter().map(|track| track.track_index).collect(),
+        voices,
+        repeat: block.repeat.is_some_and(|flag| flag != 0),
+    })
 }
 
 /// JSON 行取字符串字段：缺字段是结构损伤，响亮拒绝。
@@ -1635,6 +1991,133 @@ pub(crate) struct AmbientChannel {
     handled_commit: Option<u64>,
     /// 在响的 cue（账目用）。
     playing: Option<String>,
+    /// 在跑的洗牌序列（plain cue 与停着时为 `None`）。
+    sequence: Option<SequencePlayback>,
+    /// 这条通道的播放器抽签源：首次起序列时起种，此后整局沿用（真源在
+    /// 播放器建立时起种、由这个播放器放的所有 cue 共用；本仓这条通道只为
+    /// 洗牌序列抽签，别的 cue 在真源里对同一个源的抽签不在这里重演）。
+    rng: Option<SequenceRng>,
+}
+
+/// 洗牌序列的工作区（位置 + 顺序表），按 (包, 归档, 序列行号) 挂。真源把
+/// 它们存在已装载 cue 表的序列行上，装载时置 -1、此后只有起轮会写。本仓
+/// 的 cue 表随路由表整局常驻，所以这张表整局只建不清：停了再放接着走。
+#[derive(Resource, Default)]
+pub(crate) struct SequenceWorkAreas(HashMap<(String, String, u16), ShuffleWork>);
+
+/// 一轮的阶段。
+enum RoundPhase {
+    /// 等这一轨的起播延迟。
+    Delay { slot: usize, due: f64 },
+    /// 这一轨的声音在响。
+    Voice { slot: usize, sink: Entity },
+}
+
+/// 在跑的一条洗牌序列。
+struct SequencePlayback {
+    cue: String,
+    work_key: (String, String, u16),
+    plan: ShufflePlan,
+    /// 各轨的音频句柄：起序列时一并请求并持有（句柄丢了装载就取消），
+    /// 到点起声时源已在内存里——真源的波形也在 cue 表自带的内存容器里。
+    handles: Vec<Handle<AudioSource>>,
+    site_id: i64,
+    phenomenon: String,
+    round: u64,
+    phase: RoundPhase,
+}
+
+/// 洗牌抽签种子的环境变量（十进制 u32）：给了就用它起种，便于把一局的
+/// 选轨拿去逐值复算；不给按本机时钟起种（真源的种子也是运行时时钟）。
+const SEQUENCE_SEED_ENV: &str = "MOLY_AUDIO_SEQUENCE_SEED";
+
+/// 时钟种子：纪元纳秒数的低 32 位。wasm 上 std 没有墙钟，取 JS 的毫秒数。
+#[cfg(not(target_arch = "wasm32"))]
+fn clock_seed() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时钟早于 Unix 纪元")
+        .as_nanos() as u32
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clock_seed() -> u32 {
+    (js_sys::Date::now() * 1.0e6) as u64 as u32
+}
+
+fn seeded_sequence_rng() -> SequenceRng {
+    let (seed, source) = match std::env::var(SEQUENCE_SEED_ENV) {
+        Ok(raw) => (
+            raw.trim()
+                .parse::<u32>()
+                .unwrap_or_else(|_| panic!("{SEQUENCE_SEED_ENV} 不是十进制 u32：{raw:?}")),
+            "环境变量",
+        ),
+        Err(_) => (clock_seed(), "时钟"),
+    };
+    let rng = SequenceRng::seeded(seed);
+    info!(
+        "[audio-seq] 环境音通道抽签源起种：seed={seed} source={source} state={:?}",
+        rng.state()
+    );
+    rng
+}
+
+/// 起一轮：推进位置、按需重洗，进入这一轨的延迟阶段。
+fn start_round(
+    playback: &mut SequencePlayback,
+    work: &mut SequenceWorkAreas,
+    rng: &mut SequenceRng,
+    now: f64,
+) {
+    let tracks = playback.plan.tracks.len();
+    let area = work
+        .0
+        .entry(playback.work_key.clone())
+        .or_insert_with(|| ShuffleWork::loaded(tracks));
+    let old = area.position;
+    let track = advance_shuffle(area, &playback.plan.tracks, rng)
+        .unwrap_or_else(|| panic!("洗牌计划没有轨"));
+    let slot = playback
+        .plan
+        .tracks
+        .iter()
+        .position(|id| *id == track)
+        .unwrap_or_else(|| panic!("顺序表里的轨号 {track} 不在作者序轨表里"));
+    playback.round += 1;
+    let delay_us = playback.plan.voices[slot].start_delay_us;
+    playback.phase = RoundPhase::Delay {
+        slot,
+        due: now + delay_us as f64 / 1.0e6,
+    };
+    info!(
+        "[audio-seq] 序列轮起：站点 {} · 档 {} · cue={} round={} pos_before={} pos={} track={} delay_us={} order={:?} t={:.6}",
+        playback.site_id,
+        label(&playback.phenomenon),
+        label(&playback.cue),
+        playback.round,
+        old,
+        area.position,
+        track,
+        delay_us,
+        area.order,
+        now
+    );
+}
+
+/// 停掉在跑的序列（新一次现象 SE 调用先停旧声：延迟里的轨不再起声）。
+fn stop_sequence(channel: &mut AmbientChannel, now: f64) {
+    if let Some(playback) = channel.sequence.take() {
+        let phase = match playback.phase {
+            RoundPhase::Delay { .. } => "delay",
+            RoundPhase::Voice { .. } => "voice",
+        };
+        info!(
+            "[audio-seq] 序列停：cue={} round={} phase={phase} t={now:.6}",
+            label(&playback.cue),
+            playback.round
+        );
+    }
 }
 
 /// Update：区域环境音——每次环境提交按「站点 × 现象」选行，平铺 2D，
@@ -1642,12 +2125,14 @@ pub(crate) struct AmbientChannel {
 pub(crate) fn advance_ambient(
     mut commands: Commands,
     server: Res<AssetServer>,
+    time: Res<Time<Real>>,
     bus: Res<VolumeBus>,
     gate: Res<AudioGate>,
     transition: Option<Res<WeatherTransition>>,
     site: Option<Res<SiteActive>>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<AmbientChannel>,
+    mut work: ResMut<SequenceWorkAreas>,
 ) {
     let (Some(routing), Some(transition), Some(site)) = (routing, transition, site) else {
         return; // 路由表、天气链或站点未就绪
@@ -1664,12 +2149,14 @@ pub(crate) fn advance_ambient(
         return; // 提交属于上一站（换站途中）：等本站自己的提交
     }
     channel.handled_commit = Some(serial);
-    // 真源每一支都先停旧声。
+    let now = time.elapsed_secs_f64();
+    // 真源每一支都先停旧声（在跑的序列连同延迟里的轨一起停）。
     if let Some(sink) = channel.sink.take() {
         if let Ok(mut entity_commands) = commands.get_entity(sink) {
             entity_commands.despawn();
         }
     }
+    stop_sequence(&mut channel, now);
     channel.playing = None;
     let site_id = i64::from(site.site_id);
     if !plays_site_phenomena_sound(&site.site_type) {
@@ -1719,9 +2206,72 @@ pub(crate) fn advance_ambient(
             label(&route.package)
         );
     };
+    let key = (route.cue.clone(), route.package.clone());
+    if let Some(block) = routing.sequences.blocks.get(&key) {
+        match shuffle_plan(&routing.sequences, &route.cue, &route.package, block) {
+            Ok(plan) => {
+                let handles = plan
+                    .voices
+                    .iter()
+                    .map(|voice| {
+                        server.load::<AudioSource>(AssetPath::from(format!(
+                            "moly://{}",
+                            voice.stream.ogg
+                        )))
+                    })
+                    .collect();
+                info!(
+                    "环境音：站点 {site_id} · 档 {} → {}（洗牌序列 {} 轨 · 重放 {} · 不进声音的参数：{}）",
+                    label(&committed.name),
+                    label(&route.cue),
+                    plan.tracks.len(),
+                    if plan.repeat { "有" } else { "无" },
+                    block.not_consumed
+                );
+                let mut playback = SequencePlayback {
+                    cue: route.cue.clone(),
+                    work_key: (
+                        route.package.clone(),
+                        block.archive.clone(),
+                        block.sequence_index,
+                    ),
+                    plan,
+                    handles,
+                    site_id,
+                    phenomenon: committed.name.clone(),
+                    round: 0,
+                    phase: RoundPhase::Delay { slot: 0, due: now },
+                };
+                let rng = channel.rng.get_or_insert_with(seeded_sequence_rng);
+                start_round(&mut playback, &mut work, rng, now);
+                channel.sequence = Some(playback);
+                channel.playing = Some(route.cue.clone());
+            }
+            Err(reason) => error!(
+                "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 是 {} 序列，{reason}；不拿其中一条波形顶替",
+                label(&committed.name),
+                label(&route.cue),
+                label(&route.package),
+                block.type_name
+            ),
+        }
+        return;
+    }
+    if routing.sequences.read.contains(&key) && stream.waveforms != 1 {
+        // 提取侧读过、判为 plain（恰一条波形），流表这个键下却有多条：两边
+        // 对不上（比如同一包里两个归档各有一个同名 cue），不猜哪一条。
+        error!(
+            "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 被序列导出判为 plain，流表里却有 {} 条波形",
+            label(&committed.name),
+            label(&route.cue),
+            label(&route.package),
+            stream.waveforms
+        );
+        return;
+    }
     if stream.waveforms > 1 {
         error!(
-            "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 带 {} 条波形——这是多轨序列 cue，序列结构（类型、各轨延迟、重放标志、轨到波形）不在运行时根的音频索引里，不拿其中一条顶替",
+            "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 带 {} 条波形——这是多轨序列 cue，它所在的条目没有序列导出（提取侧没读过这个归档的 cue 表），不拿其中一条顶替",
             label(&committed.name),
             label(&route.cue),
             label(&route.package),
@@ -1760,6 +2310,99 @@ pub(crate) fn advance_ambient(
             "整轨一次性".to_string()
         },
     );
+}
+
+/// Update：推进在跑的洗牌序列。延迟到点起声（平铺 2D、一次性、音量同
+/// 环境音通道）；这一轨的声音放完（sink 空了，或源装载失败）就收这一轮，
+/// 带重放标志则同帧起下一轮——真源在同一次更新里收轮并重起序列。叫停
+/// （新一次环境提交）由 [`advance_ambient`] 做，这里只见到还在跑的。
+///
+/// 起声点落在延迟到点后的第一帧，最多晚一帧（真源按音频服务器自己的
+/// 节拍推进，不按画面帧）；收轮同理最多晚一帧。没有音频输出设备时 sink
+/// 不会出现，轮次停在起声那一步，不拿墙钟冒充放完。
+pub(crate) fn advance_ambient_sequence(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    time: Res<Time<Real>>,
+    bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
+    mut channel: ResMut<AmbientChannel>,
+    mut work: ResMut<SequenceWorkAreas>,
+    players: Query<&AudioPlayer<AudioSource>>,
+    sinks: Query<&AudioSink>,
+) {
+    let now = time.elapsed_secs_f64();
+    let channel = &mut *channel;
+    let AmbientChannel {
+        sink,
+        sequence,
+        rng,
+        playing,
+        ..
+    } = channel;
+    let Some(playback) = sequence.as_mut() else {
+        return;
+    };
+    loop {
+        match playback.phase {
+            RoundPhase::Delay { slot, due } => {
+                if now < due {
+                    return;
+                }
+                let voice = &playback.plan.voices[slot];
+                let settings = if voice.stream.loops {
+                    PlaybackSettings::LOOP
+                        .with_start_position(Duration::from_secs_f64(voice.stream.loop_start))
+                        .with_duration(Duration::from_secs_f64(
+                            voice.stream.loop_end - voice.stream.loop_start,
+                        ))
+                } else {
+                    PlaybackSettings::ONCE
+                };
+                let volume = bus.se_area_ambient * gate.factor();
+                let entity = commands
+                    .spawn((
+                        AudioPlayer::new(playback.handles[slot].clone()),
+                        settings.with_volume(Volume::Linear(volume)),
+                        BusVolume::Ambient,
+                    ))
+                    .id();
+                *sink = Some(entity);
+                playback.phase = RoundPhase::Voice { slot, sink: entity };
+                info!(
+                    "[audio-seq] 序列轨起声：cue={} round={} track={} due={due:.6} t={now:.6} 音量 {volume:.2}{}",
+                    label(&playback.cue),
+                    playback.round,
+                    voice.track_index,
+                    if voice.stream.loops { "（波形带循环：这一轮不会自己收）" } else { "" }
+                );
+                return;
+            }
+            RoundPhase::Voice { slot, sink: entity } => {
+                if !one_shot_finished_or_failed(entity, &server, &players, &sinks) {
+                    return;
+                }
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.despawn();
+                }
+                *sink = None;
+                info!(
+                    "[audio-seq] 序列轮终：cue={} round={} track={} t={now:.6} repeat={}",
+                    label(&playback.cue),
+                    playback.round,
+                    playback.plan.voices[slot].track_index,
+                    u8::from(playback.plan.repeat)
+                );
+                if !playback.plan.repeat {
+                    *sequence = None;
+                    *playing = None;
+                    return;
+                }
+                let rng = rng.get_or_insert_with(seeded_sequence_rng);
+                start_round(playback, &mut work, rng, now);
+            }
+        }
+    }
 }
 
 // ---- A 套邻近环境音管理器 -----------------------------------------------------
@@ -2737,6 +3380,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<UserMusicPlaySettings>()
         .init_resource::<BgmChannel>()
         .init_resource::<AmbientChannel>()
+        .init_resource::<SequenceWorkAreas>()
         .init_resource::<ProximityState>()
         .init_resource::<VoicePrefetchCache>()
         .init_resource::<VoiceChannel>()

@@ -5,6 +5,7 @@
 pub mod action_button;
 pub mod alone_action_runtime;
 pub mod audio;
+mod audio_sequence;
 mod asset_cache;
 mod audio_startup;
 pub mod avatar_material;
