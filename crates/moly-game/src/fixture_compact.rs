@@ -2,6 +2,10 @@
 //! dimensions and master IDs are from the same source table as activity lookup.
 //! The full showcase stays available through scene_content=full. No assets or
 //! user-edited/saved placements are deleted when this preset is selected.
+//! These rows are the CN starter. Under a JP snapshot the CN-only star rug
+//! `mdl_cncollect_rug_star3` takes its JP stand-in `mdl_ext0008_rug_rug1` from
+//! the full table's stand-in list, and its master id 90005 becomes that rug's
+//! JP id 238; every other row already exists in JP and stays as it is.
 
 use super::{layout_type, Direction, GridPosition, PlacementMock};
 

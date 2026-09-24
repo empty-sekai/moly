@@ -240,6 +240,7 @@ impl SiteSelection {
         &mut self,
         sites: &Sites,
         layouts: &crate::fixture::layouts::SiteFixtureLayouts,
+        region: Option<NavMeshSourceRegion>,
     ) -> Result<u32, String> {
         let row = sites.row(&self.site);
         let level = if let Some(level) = self.levels.get(&self.site) {
@@ -269,6 +270,7 @@ impl SiteSelection {
             &self.site,
             sites.floor_grid(&self.site, level)?,
             self.content,
+            region,
         )?;
         self.levels.insert(self.site.clone(), level);
         Ok(level)
@@ -672,6 +674,10 @@ pub(crate) struct MasterHandles {
 
 /// Navigation uses the actual loaded snapshot's region, independently from the
 /// page locale, player-save region, fixture catalog, or shared-weather donor.
+/// The offline HOME starter layout reads the same identity: its mock rows must
+/// name packages of this snapshot's own fixture-model index. It is inserted
+/// together with [`Sites`], so every layout consumer that has the site catalog
+/// also has it; a missing or unknown value stops the load here, loudly.
 #[derive(Clone, Copy, Resource)]
 pub(crate) struct NavMeshSourceRegion(pub moly_law::carve::NavMeshRegion);
 
@@ -688,7 +694,7 @@ impl NavMeshSourceRegion {
             Some("cn") => Ok(Self(moly_law::carve::NavMeshRegion::Cn)),
             Some("jp") => Ok(Self(moly_law::carve::NavMeshRegion::Jp)),
             _ => Err(format!(
-                "source.json has unsupported navigation source region {region:?}"
+                "source.json has unsupported source region {region:?} (source.region must be cn or jp; navigation and the offline HOME starter layout are keyed by it)"
             )),
         }
     }
@@ -727,7 +733,7 @@ pub(crate) fn parse_masters(
         .unwrap_or_else(|reason| panic!("[site] 快照源身份 JSON 无效：{reason}"));
     commands.insert_resource(
         NavMeshSourceRegion::parse(&source)
-            .unwrap_or_else(|reason| panic!("[site] 导航区域身份无效：{reason}")),
+            .unwrap_or_else(|reason| panic!("[site] 快照源区域身份无效：{reason}")),
     );
     commands.insert_resource(Sites::parse(&sites.0, &navigation.0, &index.0));
     commands.remove_resource::<MasterHandles>();
@@ -745,6 +751,7 @@ pub(crate) fn plan(
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
     temporary: Option<Res<TemporarySiteActive>>,
     mut last_input_error: Local<Option<String>>,
+    source_region: Option<Res<NavMeshSourceRegion>>,
 ) {
     if assets.is_some() {
         return;
@@ -755,7 +762,7 @@ pub(crate) fn plan(
     let site_level = match if temporary.is_some() {
         selection.resolve_temporary_level(&sites)
     } else {
-        selection.resolve_level(&sites, &layouts)
+        selection.resolve_level(&sites, &layouts, source_region.as_deref().copied())
     } {
         Ok(level) => {
             *last_input_error = None;
@@ -1069,7 +1076,8 @@ pub(crate) fn read_switch(
     selection: Res<SiteSelection>,
     roots: Query<Entity, With<SiteRoot>>,
     active: Option<Res<SiteActive>>,
-    sites: Option<Res<Sites>>,
+    // Paired in one parameter: this system is at the parameter-count limit.
+    (sites, source_region): (Option<Res<Sites>>, Option<Res<NavMeshSourceRegion>>),
     epoch: Option<Res<GroundEpoch>>,
     pending: Option<Res<SiteChangeRequest>>,
     preview: Option<Res<TemporarySiteChangeRequest>>,
@@ -1133,7 +1141,7 @@ pub(crate) fn read_switch(
     let resolved = if temporary {
         next.resolve_temporary_level(sites)
     } else {
-        next.resolve_level(sites, &layouts)
+        next.resolve_level(sites, &layouts, source_region.as_deref().copied())
     };
     if let Err(error) = resolved {
         warn!("[site] switch refused: {error}; current map and saved data were retained");
