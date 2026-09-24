@@ -72,7 +72,7 @@ pub fn eval_curve(keys: &[CurveKey], t: f32) -> f32 {
 /// 烘制判定是重建：构建期置位读不到，按「2–3 键且恰好张满 [0,1]」
 /// 判（语料 24 根曲线全部张满 [0,1]；4+ 键结构放不下走通用路）。
 /// 系数算序来自当前 JP `MinMaxCurve::BuildCurves` →
-/// `OptimizedPolynomialCurve::BuildOptimizedCurve`（0xd8cac0 → 0xbe1dac）；
+/// `OptimizedPolynomialCurve::BuildOptimizedCurve`；
 /// 资格门仍保留上述保守子集。不能把系数式重结合后再除 d²/d³，
 /// 否则三键曲线会产生可观测的端点误差。
 #[derive(Clone, Debug)]

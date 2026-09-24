@@ -124,7 +124,7 @@ fn rsqrt_estimate(value: f32) -> f32 {
 }
 
 /// The FRSQRTE table lookup alone, for replaying recorded estimates.
-#[cfg(any(test, moly_shape_replay))]
+#[cfg(test)]
 pub(crate) fn native_rsqrt_estimate(value: f32) -> f32 {
     rsqrt_estimate(value)
 }
@@ -201,7 +201,20 @@ pub fn circle_base(
     arc: f32,
     radial: f32,
 ) -> ([f32; 3], [f32; 3]) {
-    let (sin, cos) = engine_sincos((arc_deg * DEG_TO_RAD) * arc);
+    circle_at(radius, thickness, (arc_deg * DEG_TO_RAD) * arc, radial)
+}
+
+/// StartCircle's lane body at an angle in radians: the plain kernel's angle
+/// is the arc in radians times the arc draw (`circle_base`), the Random arc
+/// mode's is `random_arc`; both then take the same sine, cosine and radial
+/// fraction.
+pub fn circle_at(
+    radius: f32,
+    thickness: f32,
+    arc_radians: f32,
+    radial: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let (sin, cos) = engine_sincos(arc_radians);
     let inner_squared = (1.0 - thickness) * (1.0 - thickness);
     let sample_radius = radius * (inner_squared + (1.0 - inner_squared) * radial).sqrt();
     (
@@ -255,19 +268,14 @@ fn spread_quantized(extent: f32, spread: f32, u: f32) -> f32 {
     step * if whole > steps { whole - 1.0 } else { whole }
 }
 
-/// The Random arc mode's angle in radians, shared by StartHemiSphere and
-/// StartConeVolume: `spread_quantized` over the arc in radians.
+/// The Random arc mode's angle in radians, shared by StartHemiSphere,
+/// StartConeVolume, StartDonut and StartCircle: `spread_quantized` over the
+/// arc in radians. Where the arc in radians times the spread is not above
+/// zero (NaN included) this is the continuous arc times the draw, which is
+/// StartCircle's plain kernel angle; above zero it is StartCircle's
+/// arc-spread branch, the same operations in the same order.
 pub fn random_arc(arc_deg: f32, arc_spread: f32, u: f32) -> f32 {
     spread_quantized(arc_deg * DEG_TO_RAD, arc_spread, u)
-}
-
-/// StartCircle in its Random arc mode leaves its plain kernel (`circle_base`)
-/// exactly where the arc in radians times the arc spread compares greater
-/// than zero; that is the native branch predicate itself, evaluated once per
-/// call, so an arc of zero with any spread, or a negative product, stays on
-/// the plain kernel.
-pub fn circle_takes_arc_spread(arc_deg: f32, arc_spread: f32) -> bool {
-    (arc_deg * DEG_TO_RAD) * arc_spread > 0.0
 }
 
 /// Current native StartConeVolume lane body: the Cone base (clamped linear
@@ -336,7 +344,7 @@ pub fn sphere_position(
 }
 
 /// Hemisphere folds its draw into the sphere kernel's upper half. Preserve
-/// the native f32 operations (StartHemiSphere 0xf0214c..0xf02170): replacing
+/// the native f32 operations of StartHemiSphere's fold: replacing
 /// this mathematically equivalent expression with z_random changes low bits.
 pub fn hemisphere_position(
     radius: f32,
@@ -509,7 +517,7 @@ mod tests {
     }
     #[test]
     fn source_snow_hemisphere_first_group_matches_native_bits() {
-        // shape-birth-current.json: source 0, old=0, first one-particle
+        // The current native shape birth receipt: source 0, old=0, first one-particle
         // request. All four native storage lanes remain observable at Store.
         let expected_position = [
             [3256462770, 3229795817, 1105218461, 3251943192],

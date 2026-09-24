@@ -2,7 +2,8 @@
 //! Unity's particle conventions; the rendering boundary performs the one X
 //! reflection used by moly-root's GLB producer. A Mesh particle never becomes a
 //! billboard. Numeric engine observations live in tests/data, independently of
-//! this implementation; current-native call-site receipts live in the lane.
+//! this implementation; the current-native call-site observations are replayed
+//! by opt-in tests that read them from outside the repository.
 use bevy::math::Affine3A;
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;

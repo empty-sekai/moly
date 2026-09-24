@@ -1,10 +1,11 @@
 //! Minimal current JP seed ownership laws. No entropy provider or runtime wiring.
 //!
-//! Current libunity SHA256 937c6d28...75badd9: ResetSeeds 0xd837dc,
-//! RandN.SetSeed 0x5abc9c, RandomizeState 0x5abd74. Reset evidence has
+//! Transcribed from the current JP 6.8.1 libunity: ParticleSystem::ResetSeeds,
+//! RandN.SetSeed and RandomizeState. Reset evidence has
 //! 192 exact native cases + 32 entropy-success passthrough cases.
-//! Current global manager pointer is 0x1466620; 0x18b3610 belongs only to the
-//! bundled symbol reference. Owner seed is ReadOnlyState +0x30; auto flag +0x34.
+//! The global seed manager's pointer lies at another place in the current
+//! library than in the bundled symbol reference. The owner seed is the random
+//! seed field of the system's read-only state, beside its auto-seed flag.
 
 const EXPANSION: u32 = 0x6c07_8965;
 

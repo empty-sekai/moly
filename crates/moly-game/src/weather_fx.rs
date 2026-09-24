@@ -25,7 +25,7 @@ use crate::site::SiteActive;
 use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared};
-use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world, simulate};
+use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world};
 pub(crate) mod fixture;
 
 /// 出生抽签的确定性随机种子。与站点链**不同流**：两条链同时在跑，
@@ -599,14 +599,9 @@ pub(crate) fn plan(
 /// Module capability is checked from the complete serialized inventory, not
 /// just whichever parameters an older producer happened to emit.
 fn source_simulation_admission(system: &Value) -> Result<(), String> {
-    // Preserve +Infinity at the schema boundary, but reject the unverified
-    // scheduler before any other module capability can hide this gap.
-    if system.get("emission").and_then(|v| v.get("bursts")).and_then(Value::as_array)
-        .is_some_and(|bursts| bursts.iter().any(|burst|
-            burst.get("repeatInterval").and_then(Value::as_str) == Some("Infinity")))
-    {
-        return Err("source infinite burst repeat interval scheduling is not yet verified".into());
-    }
+    // A +Infinity burst repeat interval is kept at the schema boundary; the
+    // native birth schedules it as the source does, and the legacy step
+    // refuses it (`legacy_bursts`, below where the birth path is known).
     let source = moly_assets::particle_source::ParticleSourceModules::from_system(system)?;
     for module in &source.enabled {
         // The current snow owner carries an authored null SubModule edge
@@ -1059,6 +1054,31 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
         }
     }
+    // The mesh geometry has no transform about the particle's axis of
+    // rotation, whichever birth path feeds it.
+    if mesh_reference.is_some() {
+        let initial_enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
+            .is_some_and(|modules| modules.iter().any(|module| module.as_str() == Some("InitialModule")));
+        if let Err(refused) = crate::particle_runtime::mesh_rotation_admission(&emitter, initial_enabled) {
+            tally.render_mode.push(refused.reason().into());
+            return None;
+        }
+    }
+    // A system that runs the legacy step must carry a start colour that step
+    // evaluates as the source does. The weather host installs the native
+    // birth owner where `native_birth_path` allows it; the fixture host (no
+    // lifecycle) never installs it.
+    let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+    if lifecycle.is_none() || crate::particle_runtime::native_birth_path(&emitter, &route, Some(evidence)).is_err() {
+        if let Err(refused) = crate::particle_runtime::legacy_start_colour(&emitter.start.color) {
+            tally.law_reject.push(format!("{node}: {}", refused.reason()));
+            return None;
+        }
+        if let Err(reason) = crate::particle_runtime::legacy_bursts(&emitter) {
+            tally.law_reject.push(format!("{node}: {reason}"));
+            return None;
+        }
+    }
     Some(Planned {
         ordinal: 0,
         emission_surface,
@@ -1474,6 +1494,7 @@ pub(crate) fn spawn_when_ready(
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
 /// 之后是因为四角展开要读当帧机位。
 pub(crate) fn advance(
+    mut commands: Commands,
     mut state: Option<ResMut<WeatherFxState>>,
     mut retiring: ResMut<WeatherFxRetirements>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1521,9 +1542,11 @@ pub(crate) fn advance(
 
     let dt = time.delta_secs();
     let active = state.as_deref_mut().into_iter().flat_map(|s| s.live.iter_mut())
-        .map(|s| (&mut s.runtime, true));
-    let retired = retiring.live.iter_mut().map(|s| (&mut s.emitter.runtime, false));
-    for (system, emitting) in active.chain(retired) {
+        .map(|s| (s.draw, &mut s.runtime, true));
+    let retired = retiring.live.iter_mut().map(|s| (s.emitter.draw, &mut s.emitter.runtime, false));
+    // Systems whose native step was refused this frame; see step_frame.
+    let mut refused = Vec::new();
+    for (draw, system, emitting) in active.chain(retired) {
         // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
         // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
         // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
@@ -1538,8 +1561,12 @@ pub(crate) fn advance(
         }
         let step = dt * system.emitter.simulation_speed;
         if step > 0.0 {
-            if emitting { simulate(system, step, &ctx); }
-            else { crate::particle_runtime::simulate_stopped(system, step, &ctx); }
+            if let Err(reason) = crate::particle_runtime::step_frame(system, step, &ctx, emitting) {
+                error!(%reason, effect=%system.effect, node=%system.node,
+                    "native particle step refused: the system is retired and draws nothing");
+                refused.push(draw);
+                continue;
+            }
         }
         // 局部空间仿真：律状态是发射节点局部坐标，用锚∘链的当帧值换算成
         // 世界坐标。世界空间仿真的状态出生时就是世界坐标，恒等。
@@ -1555,6 +1582,18 @@ pub(crate) fn advance(
         };
         crate::particle_runtime::write_geometry(mesh, system, &to_world,
             &compose_to_world(system, &ctx), camera_transform, basis);
+    }
+    // A refused system is final: it leaves the active and retiring sets and
+    // its draw is despawned, rather than running a clock without births.
+    if !refused.is_empty() {
+        if let Some(state) = state.as_deref_mut() {
+            state.live.retain(|live| !refused.contains(&live.draw));
+            state.admitted = state.live.len();
+        }
+        retiring.live.retain(|entry| !refused.contains(&entry.emitter.draw));
+        for draw in refused {
+            commands.entity(draw).try_despawn();
+        }
     }
 }
 
