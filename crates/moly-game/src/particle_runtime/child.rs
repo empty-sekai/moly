@@ -423,7 +423,9 @@ pub(super) fn apply_command(
         let translation = [frame.matrix[12], frame.matrix[13], frame.matrix[14]];
         let samples = match shape.as_deref_mut() {
             Some(shape) => shape.group(&frame.matrix)?,
-            None => [ShapeSample { position: translation, direction: [0.0; 3] }; 4],
+            // Without Shape every newborn keeps what Initial's start wrote:
+            // the start translation and the unit z axis of the start matrix.
+            None => [ShapeSample { position: translation, direction: child_emit::unshaped_direction(&frame.matrix) }; 4],
         };
         for (index, initial_lane) in group.lanes.into_iter().enumerate() {
             let sample = samples[index];

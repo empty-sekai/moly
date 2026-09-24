@@ -22,6 +22,9 @@ const NOT_PLAYING_DT: f32 = f32::from_bits(0x3ca3_d70a);
 const RAISED_STEP: f32 = f32::from_bits(0x3e4c_cccd);
 /// Gravity below this squared length adds nothing.
 const GRAVITY_EPSILON: f32 = f32::from_bits(0x322b_cc76);
+/// A start-matrix z axis whose squared length is not above this gives no
+/// birth direction.
+const UNSHAPED_EPSILON: f32 = f32::from_bits(0x0da2_4260);
 
 /// The target state words the command reads: its local-to-world, its
 /// world-to-local, its own rotation 3x3, the emitter scale and the shape
@@ -235,6 +238,23 @@ pub fn gravity_delta(gravity: [f32; 3], modifier: f32, dt: f32, world_to_local: 
     })
 }
 
+/// The birth direction the target's Initial start writes for every newborn
+/// before Shape runs (an enabled Shape overwrites it): the start matrix's z
+/// axis times the reciprocal square root of its squared length
+/// ((x*x + y*y) + z*z), taken as the estimate and two refinement steps; zero
+/// when that squared length is not above the epsilon (NaN included).
+/// StartVelocity then multiplies it by the start speed, so a zero speed
+/// keeps the signs of this axis.
+pub fn unshaped_direction(matrix: &[f32; 16]) -> [f32; 3] {
+    let z = [matrix[8], matrix[9], matrix[10]];
+    let square = (z[0] * z[0] + z[1] * z[1]) + (z[2] * z[2] + 0.0);
+    if !(square > UNSHAPED_EPSILON) {
+        return [0.0; 3];
+    }
+    let r = super::armf::rsqrt2(square);
+    z.map(|v| v * r)
+}
+
 /// The minimum with NaN propagated (the ARM minimum instruction).
 pub fn min_propagating(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
@@ -267,6 +287,8 @@ mod tests {
                 let _ = start_frame(&owner, true, [a, b, a], [b, a, b]);
                 let _ = catch_up_plan(a, b, a > 0.0, 5, b);
                 let _ = gravity_delta([a, b, a], b, a, Some(&owner.world_to_local));
+                let _ = unshaped_direction(&owner.local_to_world);
+                let _ = unshaped_direction(&owner.world_to_local);
             }
         }
     }

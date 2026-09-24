@@ -832,16 +832,6 @@ pub(crate) fn source_sub_emitter_owners(particles: &[Value]) -> SubEmitterGraph<
     SubEmitterGraph { owners, records }
 }
 
-/// The birth edges of a parent whose real edges are all birth edges.
-pub(crate) fn birth_edges(emitter: &EmitterParams, graph: &SubEmitterGraph<'_>)
-    -> Result<Vec<crate::particle_runtime::BirthEdge>, String> {
-    let edges = sub_emitter_edges(emitter, graph)?;
-    if !edges.deaths.is_empty() {
-        return Err(format!("{} death edges besides the birth edges", edges.deaths.len()));
-    }
-    Ok(edges.births)
-}
-
 /// Resolve every edge of a parent with real sub-emitter edges to its child
 /// (the record at the edge's node path whose system object id is the
 /// pointer's, in this file). A birth edge reads the child's start delay,

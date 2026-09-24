@@ -19,6 +19,9 @@
 //! Hermite evaluator, which is not the engine's cached cubic, so those words
 //! are counted with their distance instead.
 //!
+//! A custom stream the target leaves disabled has no storage in the engine
+//! (its rows carry no array for it); it is neither loaded nor compared.
+//!
 //! Where this tree's Shape law refuses the target's shape, the engine's
 //! stored Shape output of each group (after its own store with the start
 //! matrix) is fed in its place and the Shape stream is not compared; the
@@ -161,11 +164,21 @@ fn load_pool(system: &mut Runtime, pool: &Value) {
             gravity: 0.0,
             colour: moly_law::particle::gradient::rgba8_to_float(colour),
             total_velocity: velocity,
-            custom_data: std::array::from_fn(|s| std::array::from_fn(|c| lane(&format!("custom{s}{c}"), i))),
+            // A stream without storage has no array in the row; nothing reads it.
+            custom_data: std::array::from_fn(|s| std::array::from_fn(|c| {
+                let key = format!("custom{s}{c}");
+                if stored(pool, &key, count) { lane(&key, i) } else { 0.0 }
+            })),
             emit_carry: [0.0; 2],
             animated: [0.0; 3],
         });
     }
+}
+
+/// Whether the row holds a stored array for `key` over the pool's `count`
+/// particles (a disabled custom stream has none).
+fn stored(pool: &Value, key: &str, count: usize) -> bool {
+    pool[key].as_array().is_some_and(|lanes| lanes.len() >= count)
 }
 
 /// X compares with the reflection; a zero on X compares by value.
@@ -250,7 +263,9 @@ fn pool_mismatches(system: &Runtime, pool: &Value, size: &mut SizeWords) -> Vec<
         for stream in 0..2 {
             for channel in 0..4 {
                 let key = format!("custom{stream}{channel}");
-                check(&key, s.custom_data[stream][channel].to_bits() == lane(&key, i));
+                if stored(pool, &key, count) {
+                    check(&key, s.custom_data[stream][channel].to_bits() == lane(&key, i));
+                }
             }
         }
         bad.extend(size_bad);
@@ -372,19 +387,18 @@ fn run_row(seq: &Value, row: &Value, block: &Value, tally: &mut Tally, record: b
 const ARMS: [&str; 10] = ["noLookRotation", "noInverse", "backtrackWorldVelocity", "noEmitterScale", "noUpperGate",
     "birthDtIsCommandDt", "paddingKillKeepsAccepted", "noStepRaise", "noGravity", "gravityWorld"];
 
-#[test]
-#[ignore = "needs MOLY_CHILD_EMIT_RECEIPT, MOLY_CHILD_EMIT_EXTRA, MOLY_CHILD_EMIT_GRAVITY and MOLY_CHILD_EMIT_EFFECTS"]
-fn product_child_emit_matches_current_native_rows() {
-    let corpus = read("MOLY_CHILD_EMIT_EFFECTS");
+/// Every row of the receipts named by `keys` through apply_command, and
+/// every arm on each compared row.
+fn replay(corpus: &Value, keys: &[&str]) -> (Tally, std::collections::BTreeMap<&'static str, usize>) {
     let mut arm_red = std::collections::BTreeMap::<&str, usize>::new();
     let mut tally = Tally::default();
-    for key in ["MOLY_CHILD_EMIT_RECEIPT", "MOLY_CHILD_EMIT_EXTRA", "MOLY_CHILD_EMIT_GRAVITY"] {
+    for &key in keys {
         let receipt = read(key);
         assert_eq!(receipt["librarySha256"], SOURCE_SHA256);
         for group in ["childChained", "childSynthetic"] {
             let Some(seqs) = receipt.get(group).and_then(Value::as_array) else { continue };
             for seq in seqs {
-                let block = target_block(seq, &corpus);
+                let block = target_block(seq, corpus);
                 let randomized = block["start"]["randomizeRotationDirection"].as_f64() != Some(0.0);
                 for (index, row) in seq["rows"].as_array().unwrap().iter().enumerate() {
                     tally.rows += 1;
@@ -412,6 +426,10 @@ fn product_child_emit_matches_current_native_rows() {
             }
         }
     }
+    (tally, arm_red)
+}
+
+fn report(tally: &Tally, arm_red: &std::collections::BTreeMap<&str, usize>) {
     eprintln!("child emit replay: rows {} compared {} emitted {} catch-up {} injected Shape groups {} \
         kernel Shape groups {} direction-randomized (not admitted) {} mismatched {}; arms {:?}",
         tally.rows, tally.compared, tally.emitted, tally.catch_up_rows, tally.injected_groups,
@@ -424,9 +442,40 @@ fn product_child_emit_matches_current_native_rows() {
         .any(|field| !field.starts_with("f300"))).take(12) {
         eprintln!("  other: {line}");
     }
+}
+
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_RECEIPT, MOLY_CHILD_EMIT_EXTRA, MOLY_CHILD_EMIT_GRAVITY and MOLY_CHILD_EMIT_EFFECTS"]
+fn product_child_emit_matches_current_native_rows() {
+    let corpus = read("MOLY_CHILD_EMIT_EFFECTS");
+    let (tally, arm_red) = replay(&corpus, &["MOLY_CHILD_EMIT_RECEIPT", "MOLY_CHILD_EMIT_EXTRA", "MOLY_CHILD_EMIT_GRAVITY"]);
+    report(&tally, &arm_red);
     assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
     assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0 && tally.size.exact > 0);
     for arm in ARMS {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}
+
+/// Death-event commands through the product's child Emit: the commands the
+/// native death-edge parent runs recorded (count 0, then the child's first
+/// burst count; dt 0, both normalized times 1, rate count 0, a zero
+/// distribution, the parent's pending time as catch-up), executed by the
+/// engine's child Emit into the raindrop ring target (no Shape, World, one
+/// custom stream disabled) and the ground-strike core target (Sphere, Local,
+/// a two-constant count), with the product's update inputs (flags 0, the
+/// world playing, gravity (0, -9.81, 0)). Every row carries its target block.
+/// A zero-dt command leaves the arms that act through the birth dt, the
+/// catch-up or gravity without effect; the two that act through the start
+/// frame must differ from native.
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_DEATH (the native death-command child rows)"]
+fn product_child_emit_matches_native_death_command_rows() {
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_DEATH"]);
+    report(&tally, &arm_red);
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.size.exact + tally.size.generic > 0);
+    for arm in ["noLookRotation", "noInverse"] {
         assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
     }
 }
