@@ -426,6 +426,9 @@ impl PlayerDataImport {
         let sites = world
             .get_resource::<Sites>()
             .ok_or("Scene catalog is still loading")?;
+        let source_region = world
+            .get_resource::<crate::site::NavMeshSourceRegion>()
+            .copied();
         let mut restored_selection = None;
         let document = settings_store::update_document_checked(|document| {
             let backup = document
@@ -448,8 +451,11 @@ impl PlayerDataImport {
             }
             layouts::validate_document(&candidate, sites)?;
             let mut selection = SiteSelection::from_snapshot(&backup["selection"])?;
-            selection
-                .resolve_level(sites, &SiteFixtureLayouts::from_document(candidate.clone()))?;
+            selection.resolve_level(
+                sites,
+                &SiteFixtureLayouts::from_document(candidate.clone()),
+                source_region,
+            )?;
             candidate.as_object_mut().unwrap().remove(BACKUP);
             *document = candidate;
             restored_selection = Some(selection);
