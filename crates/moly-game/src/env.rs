@@ -105,7 +105,17 @@ impl SiteEnv {
     pub fn gpu_bytes(&self) -> Vec<u8> {
         let g = &self.globals;
         let mut bytes = Vec::with_capacity(ENV_BYTES);
-        push(&mut bytes, [g.light_vector[0], g.light_vector[1], g.light_vector[2], 0.0]);
+        // 光向只在推进全局量的这一份上钳零：`light_vector` 原值另有 CPU 读者
+        // （影子相机），真源那一路读的也是未钳的设置值。
+        push(
+            &mut bytes,
+            moly_law::weather::light_pass::clamp_zero4([
+                g.light_vector[0],
+                g.light_vector[1],
+                g.light_vector[2],
+                0.0,
+            ]),
+        );
         push(&mut bytes, g.phenomena_directional_light_color);
         push(&mut bytes, g.phenomena_shade_color);
         push(&mut bytes, self.drop_shadow_color);
@@ -251,6 +261,11 @@ fn write_env_buffer(
     buffer: Res<SiteEnvGpuBuffer>,
     queue: Res<RenderQueue>,
 ) {
+    // Extraction replaces the render-world table only on a frame where the
+    // main-world table changed; the buffer already holds every earlier copy.
+    if !env.is_changed() {
+        return;
+    }
     let bytes = env.gpu_bytes();
     queue.write_buffer(&buffer.buffer, 0, &bytes);
 }

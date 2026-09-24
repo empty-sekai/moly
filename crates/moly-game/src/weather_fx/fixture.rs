@@ -138,6 +138,10 @@ pub(crate) fn plan(
         let mut tally = Tally::default();
         match judge_in_archive(package, particle, &by_path, &owners, EffectKind::Site, false,
             None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally) {
+            // Noise runs only with the native birth owner, which this fixture
+            // path does not install; refuse it rather than drop the module.
+            Some(plan) if plan.emitter.noise.is_some() =>
+                warn!("[fixture-source] {package}/{node}: Noise needs the native birth owner, which the fixture path does not install"),
             Some(mut plan) => {
                 plan.ordinal = ordinal;
                 candidates.push(Candidate { anchor, plan });
@@ -359,9 +363,17 @@ fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {
         emission_surface: planned.emission_surface.as_ref().map(|surface| surface.source.clone().expect("prepared source surface")),
         ring_cursor: 0, pool: Vec::new(), side: Vec::new(), emission: EmissionState::default(),
         playback_head: 0.0, previous_head: 0.0, emission_started: false,
+        native_birth: None, noise: None,
         rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false, cone_angle: planned.cone_angle, rol: planned.rol.clone(), limit: planned.limit.clone(),
         velocity_law: planned.emitter.velocity_over_lifetime.as_ref().map(moly_law::particle::velocity::VelocityOverLifetime::from_params),
+        force_law: planned.emitter.force.as_ref().map(|p|
+            moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
+        gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier),
+        custom_law: planned.emitter.custom_data.as_ref().map(moly_law::particle::custom_data::CustomData::from_params),
+        texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
+            moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
+        sort_mode: planned.source.sort_mode,
         size_law: planned.emitter.size_over_lifetime.as_ref().map(moly_law::particle::size::SizeOverLifetime::from_params),
         color_law: planned.emitter.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params),
         born_total: 0, died_total: 0, full_total: 0, refused_total: 0,

@@ -317,6 +317,8 @@ pub(super) struct FixtureSurfacePlugin;
 
 impl Plugin for FixtureSurfacePlugin {
     fn build(&self, app: &mut App) {
+        crate::gpu_image_release::prepare_after_images::<FixtureSurfaceMaterial>(app);
+        crate::gpu_image_release::prepare_after_images::<FixtureTreeMaterial>(app);
         app.add_plugins((MaterialPlugin::<FixtureSurfaceMaterial>::default(), MaterialPlugin::<FixtureTreeMaterial>::default()))
             .init_resource::<FixtureSurfaceReadiness>()
             .init_resource::<TransparentBlockAppearance>()

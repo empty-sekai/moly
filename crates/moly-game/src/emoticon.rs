@@ -100,6 +100,7 @@ impl Material for EmoticonMaterial {
 
 /// Material 管线注册：在 `app()` 里 DefaultPlugins 之后调用一次（同天空壳）。
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<EmoticonMaterial>(app);
     app.add_plugins(MaterialPlugin::<EmoticonMaterial>::default());
 }
 
@@ -826,7 +827,10 @@ fn build_item(
     {
         let tname = s_field(t, "name").unwrap_or_default();
         let file = s_field(t, "file").unwrap_or_default();
-        let handle = server.load::<Image>(AssetPath::from(format!("{EMOTICON_DIR}/{file}")));
+        let handle = moly_assets::residency::load_image(
+            &server,
+            AssetPath::from(format!("{EMOTICON_DIR}/{file}")),
+        );
         tex_by_name.insert(tname.clone(), textures.len());
         tex_by_file.insert(file, textures.len());
         textures.push(TexEntry {
@@ -2531,7 +2535,7 @@ fn advance_emitter(
         // 引擎的模块批（自旋/叠加速/限速）先于推进跑，读的是**推进前**
         // 的年寿进程量。
         let start_lifetime = run.particles[i].core.start_lifetime;
-        let pre_remaining = run.particles[i].core.remaining_lifetime;
+        let age_pre = run.particles[i].core.normalized_age();
         let verdict = advance_lifetime(
             &mut run.particles[i].core,
             sim_dt,
@@ -2553,7 +2557,6 @@ fn advance_emitter(
         let p = &mut run.particles[i];
         // 推进前年寿进程量：模块批的曲线时刻（0..1 口径；喂引擎原生律时
         // ×100 成 agePercent 口径）。
-        let age_pre = (1.0 - pre_remaining / start_lifetime).clamp(0.0, 1.0);
         // ---- 模块批（引擎次序：自旋 → 叠加速度 → 限速）----
         // 自旋：弧度每秒；公告板只画 z 轴，三轴声明时 x/y 角速度照积
         // （状态存三轴，绘制件只读 z）。randomizeDirection 本作资产结构
@@ -2594,7 +2597,7 @@ fn advance_emitter(
         // ---- 推进（引擎的 Simulate 段）----
         // 有效速度 = 状态速度 + 叠加速度，再整体乘 speedModifier（叠加
         // 值不入状态）。
-        let u = (1.0 - p.core.remaining_lifetime / p.core.start_lifetime).clamp(0.0, 1.0);
+        let u = p.core.normalized_age();
         let mut eff = Vec3::from(p.core.velocity) + anim;
         if let Some(vol) = &params.vol {
             let modifier = vol.speed_modifier.evaluate(u, p.r);

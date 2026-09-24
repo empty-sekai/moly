@@ -98,6 +98,24 @@ impl SkyGradient {
         self.ramp2 = ramp2;
         self.params.y = progress.clamp(0.0, 1.0);
     }
+
+    /// Whether `set_ramps(ramp1, ramp2, progress)` followed by
+    /// `set_timeline_additive(color, intensity)` would change this material:
+    /// ramps compare by asset id, floats by bit pattern.
+    pub(crate) fn differs_from(
+        &self,
+        ramp1: &Handle<Image>,
+        ramp2: &Handle<Image>,
+        progress: f32,
+        color: [f32; 4],
+        intensity: f32,
+    ) -> bool {
+        self.ramp1 != *ramp1
+            || self.ramp2 != *ramp2
+            || self.params.y.to_bits() != progress.clamp(0.0, 1.0).to_bits()
+            || self.params.x.to_bits() != intensity.to_bits()
+            || self.additive_color.to_array().map(f32::to_bits) != color.map(f32::to_bits)
+    }
 }
 
 /// 站点包清单的装载请求；解析成功后即撤。
@@ -142,6 +160,7 @@ pub(crate) struct Spawned;
 /// App；不挂它，任何引用该材质资产的 system 都会在参数校验上响亮失败。
 /// 在 `app()` 里 DefaultPlugins 之后调用一次。
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<SkyGradient>(app);
     app.add_plugins(MaterialPlugin::<SkyGradient>::default());
 }
 

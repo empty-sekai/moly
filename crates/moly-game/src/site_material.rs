@@ -73,11 +73,14 @@ pub(crate) fn load_dir_texture(
                  前提已经不成立：要么提取侧的声明错了，要么本族真的开始消费\
                  非颜色贴图、着色器需要一个按槽的域旋钮。"
             );
-            server.load_with_settings::<Image, _>(path, |settings: &mut ImageLoaderSettings| {
+            moly_assets::residency::load_image_with(server, path, |settings: &mut ImageLoaderSettings| {
                 settings.is_srgb = false;
             })
         }
-        _ => server.load::<Image>(path),
+        // Only the GPU samples these textures (site, harvest and particle
+        // materials bind them; nothing reads their texels on the CPU), and
+        // every request of these paths comes through this function.
+        _ => moly_assets::residency::load_image(server, path),
     }
 }
 
@@ -94,6 +97,7 @@ use moly_law::material::{texture_slot, FloatLookup, MaterialSlot};
 use moly_law::shading::fieldobject;
 
 use crate::env::SiteEnvGpuBuffer;
+use crate::render::gpu::SharedSamplers;
 use crate::shadowmap::ShadowMapGpu;
 use crate::site::{SiteAssets, SiteScenesReady, SiteVisualPending};
 
@@ -399,6 +403,7 @@ impl AsBindGroup for SiteMaterial {
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
         SRes<FallbackImageZero>,
+        SRes<SharedSamplers>,
     );
 
     fn label() -> &'static str {
@@ -408,8 +413,8 @@ impl AsBindGroup for SiteMaterial {
     fn unprepared_bind_group(
         &self,
         _layout: &BindGroupLayout,
-        render_device: &RenderDevice,
-        (env_buffer, shadow, images, fallback, fallback_zero): &mut SystemParamItem<'_, '_, Self::Param>,
+        _render_device: &RenderDevice,
+        (env_buffer, shadow, images, fallback, fallback_zero, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -439,15 +444,9 @@ impl AsBindGroup for SiteMaterial {
         // 站点贴图按源语义平铺（uv 滚动与 ST 缩放都会越出 [0,1]）；
         // GpuImage 自带的 sampler 是引擎默认的 ClampToEdge，在这里换成
         // 三向 Repeat、过滤模式与引擎默认图像 sampler 同为三级线性。
-        let repeat = render_device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::Repeat,
-            address_mode_v: AddressMode::Repeat,
-            address_mode_w: AddressMode::Repeat,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        });
+        // The sampler is created once at render startup and shared by every
+        // site material; its descriptor never varies per material.
+        let repeat = samplers.repeat_linear.clone();
         let bindings = BindingResources(vec![
             // binding 0：材质自己的参数块。
             (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
@@ -2042,6 +2041,8 @@ pub struct SiteMaterialPlugin;
 
 impl Plugin for SiteMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_shared_samplers(app);
+        crate::gpu_image_release::prepare_after_images::<SiteMaterial>(app);
         app.add_plugins((
             crate::env::SiteEnvPlugin,
             MaterialPlugin::<SiteMaterial>::default(),

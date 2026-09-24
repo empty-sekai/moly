@@ -225,6 +225,7 @@ fn update_materials(
     mut images: ResMut<Assets<Image>>,
     mut cache: Local<MaterialCache>,
     revision: Res<super::FixtureLayoutRevision>,
+    mut replaced: MessageWriter<crate::gpu_image_release::ImageTextureReplaced>,
 ) {
     if revision.is_changed() {
         cache.clear();
@@ -279,11 +280,27 @@ fn update_materials(
             [0.471, 0.105, 0.0, 0.0],
         ];
         if prepared.insert(surface.texture.id()) {
-            if let Some(image) = images.get_mut(&surface.texture) {
-                match crate::fixture_material::generate_mip_chain(image) {
-                    Ok(_) | Err(crate::fixture_material::MipSkip::AlreadyChained) => {}
-                    Err(reason) => warn!("Road mip generation: {reason:?}"),
+            // Decide through a shared borrow first: `get_mut` always marks the
+            // image Modified, which re-extracts and re-uploads it even when
+            // its chain already exists. The pixels stay in the main world: a
+            // furniture material could still need this image's emission mask
+            // mean, and only the furniture material swap records those.
+            use crate::fixture_material::{generate_mip_chain, mip_chain_plan, MipSkip};
+            let chained = match images.get(&surface.texture).map(mip_chain_plan) {
+                Some(Ok(_)) => images
+                    .get_mut(&surface.texture)
+                    .map_or(Err(MipSkip::NoData), generate_mip_chain),
+                Some(Err(reason)) => Err(reason),
+                None => Ok(0),
+            };
+            match chained {
+                // The chained upload replaces the texture the image already
+                // has on the GPU (see crate::gpu_image_release).
+                Ok(levels) if levels > 0 => {
+                    replaced.write(crate::gpu_image_release::ImageTextureReplaced(surface.texture.id()));
                 }
+                Ok(_) | Err(MipSkip::AlreadyChained) => {}
+                Err(reason) => warn!("Road mip generation: {reason:?}"),
             }
         }
         let key = (
@@ -312,6 +329,8 @@ fn update_materials(
 
 pub(super) fn install(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/road_material.wgsl");
+    crate::gpu_image_release::install(app);
+    crate::gpu_image_release::prepare_after_images::<RoadMaterial>(app);
     app.add_plugins(MaterialPlugin::<RoadMaterial>::default())
         .add_systems(
             Update,

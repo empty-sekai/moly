@@ -38,15 +38,6 @@ pub(crate) struct FixtureColors {
     error: Option<String>,
 }
 
-/// Furniture recolour textures are sampled by the render world after import;
-/// no gameplay or editor path reads their decoded texel buffer again.  Keeping
-/// the CPU asset copy here doubles residency for every colour/emission image,
-/// which is particularly expensive in a browser/WASM scene.  Explicitly
-/// selecting the render-world usage lets Bevy release the source payload once
-/// the GPU upload has completed.
-pub(crate) const COLOR_IMAGE_USAGE: bevy::asset::RenderAssetUsages =
-    bevy::asset::RenderAssetUsages::RENDER_WORLD;
-
 impl Default for FixtureColors {
     fn default() -> Self {
         Self {
@@ -117,11 +108,15 @@ fn image(
         return Ok(Some(handle.clone()));
     }
     let sampler = sampler(&value["sampler"]);
-    let handle = world.resource::<AssetServer>().load_with_settings(
+    // Furniture recolour textures are sampled by the render world after
+    // import; no gameplay or editor path reads their decoded texel buffer
+    // again, so they load render-world-only and Bevy releases the source
+    // payload once the GPU upload has completed.
+    let handle = moly_assets::residency::load_image_with(
+        world.resource::<AssetServer>(),
         format!("moly://{path}"),
         move |settings: &mut ImageLoaderSettings| {
             settings.sampler = ImageSampler::Descriptor(sampler.clone());
-            settings.asset_usage = COLOR_IMAGE_USAGE;
         },
     );
     colors.images.insert(path.to_owned(), handle.clone());
@@ -356,7 +351,7 @@ mod tests {
 
     #[test]
     fn recolor_images_are_render_world_only() {
-        assert_eq!(COLOR_IMAGE_USAGE, bevy::asset::RenderAssetUsages::RENDER_WORLD);
+        assert_eq!(moly_assets::residency::GPU_ONLY, bevy::asset::RenderAssetUsages::RENDER_WORLD);
     }
 
     #[test]

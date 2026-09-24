@@ -48,12 +48,10 @@ fn from_observation(row: &Value) -> Runtime {
         other => panic!("unknown source simulation space {other}"),
     };
     system.prewarmed = true;
-    system.pool[0] = Particle {
-        position: reflect(vector(row, "beforePosition")).to_array(),
-        velocity: reflect(vector(row, "beforeVelocity")).to_array(),
-        remaining_lifetime: number(row, "beforeLifetime"),
-        start_lifetime: number(row, "startLifetime"),
-    };
+    system.pool[0] = Particle::born(
+        reflect(vector(row, "beforePosition")).to_array(),
+        reflect(vector(row, "beforeVelocity")).to_array(), number(row, "startLifetime"),
+    ).with_remaining(number(row, "beforeLifetime"));
     let side = &mut system.side[0];
     side.seed = row["seed"].as_u64().unwrap().try_into().unwrap();
     let birth_size = vector(row, "birthSize");
@@ -101,7 +99,7 @@ fn integrated_motion_matches_engine_observations() {
         let family = row["family"].as_str().unwrap();
         *families.entry(family.to_owned()).or_default() += 1;
         let mut system = from_observation(row);
-        let size = motion::size_at_age(&system, &system.side[0], system.pool[0].normalized_age());
+        let size = motion::size_at_age_percent(&system, &system.side[0], system.pool[0].age_percent);
         simulate_stopped(&mut system, number(row, "dt"), &context);
         assert_eq!(system.pool.len(), 1, "unexpected lifetime removal at row {index}");
         let fields = [
@@ -122,7 +120,7 @@ fn integrated_motion_matches_engine_observations() {
                     "input": row }));
             }
         }
-        let actual = system.pool[0].remaining_lifetime;
+        let actual = system.pool[0].remaining_lifetime();
         let expected = number(row, "afterLifetime");
         if (actual - expected).abs() > 0.00002 {
             failures.push(json!({ "row": index, "family": family, "field": "lifetime", "actual": actual, "expected": expected }));

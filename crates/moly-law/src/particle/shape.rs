@@ -45,7 +45,7 @@ pub fn u01_from_bits(bits: u32) -> f32 {
 
 /// Return the native (sin, cos) pair. Sign-preserving nearest-even reduction is
 /// intentional; using abs(sin) or an incomplete polynomial breaks half a circle.
-fn engine_sincos(angle: f32) -> (f32, f32) {
+pub(crate) fn engine_sincos(angle: f32) -> (f32, f32) {
     fn polynomial(value: f32) -> f32 {
         let square = value * value;
         let fourth = square * square;
@@ -63,10 +63,96 @@ fn engine_sincos(angle: f32) -> (f32, f32) {
     (polynomial(fold(turns - 0.25)), polynomial(fold(turns)))
 }
 
+/// Radial shell of the native sphere kernels, restricted to the two authored
+/// thickness values whose scalar shell preparation is fixed bit for bit by
+/// IEEE 754 / C99 Annex F: `exp2f(log2f(1 - thickness) * 3)`. Thickness one is
+/// `log2f(+0) = -inf`, times three, `exp2f(-inf) = +0` (a filled ball);
+/// thickness zero is `log2f(1) = +0`, `exp2f(+0) = 1` (the outer surface).
+/// Every other thickness takes its bits from the device libm, which is not
+/// part of the engine library, so it cannot be constructed here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shell {
+    Full,
+    Surface,
+}
+impl Shell {
+    pub fn from_thickness(thickness: f32) -> Option<Self> {
+        if thickness == 1.0 {
+            Some(Self::Full)
+        } else if thickness == 0.0 {
+            Some(Self::Surface)
+        } else {
+            None
+        }
+    }
+    /// The inner radius cubed that the scalar shell preparation returns.
+    pub fn inner_cube(self) -> f32 {
+        match self {
+            Self::Full => 0.0,
+            Self::Surface => 1.0,
+        }
+    }
+}
+
+const fn rsqrt_estimates() -> [u16; 256] {
+    let mut table = [0_u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let midpoint = (257_u64 + 2 * (i % 128) as u64) << (i / 128);
+        let mut estimate = 256_u64;
+        while midpoint * (2 * estimate + 1) * (2 * estimate + 1) < (1_u64 << 28) {
+            estimate += 1;
+        }
+        table[i] = estimate as u16;
+        i += 1;
+    }
+    table
+}
+const RSQRT_ESTIMATE: [u16; 256] = rsqrt_estimates();
+
+// Current ARM FRSQRTE normalized positive domain. Integer midpoint/table
+// quantization, not a host reciprocal sqrt. Native refinement FRSQRTS uses
+// fused rounding of (3-a*b)/2 after the preceding separate f32 FMUL.
+fn rsqrt_estimate(value: f32) -> f32 {
+    assert!(value.is_normal() && value > 0.0);
+    let bits = value.to_bits();
+    let exponent = ((bits >> 23) & 255) as i32;
+    let index = ((bits & 0x7fffff) >> 16) as usize + if exponent & 1 == 0 { 128 } else { 0 };
+    let estimate = RSQRT_ESTIMATE[index] as u32;
+    let estimate_bits = ((((380 - exponent) / 2) as u32) << 23) | (((estimate as u32) - 256) << 15);
+    f32::from_bits(estimate_bits)
+}
+
+/// The FRSQRTE table lookup alone, for replaying recorded estimates.
+#[cfg(any(test, moly_shape_replay))]
+pub(crate) fn native_rsqrt_estimate(value: f32) -> f32 {
+    rsqrt_estimate(value)
+}
+
+/// FRSQRTE followed by two FRSQRTS refinements, each multiplying the current
+/// estimate by the square first. Every caller first masks its square at or
+/// below a positive threshold, so the value is normal positive, +inf or NaN.
+/// FRSQRTE of +inf is +0, whose first refinement multiplies back into inf
+/// times zero, so the native result is NaN, as it is for NaN input; both
+/// return NaN here and the caller's output refusal reports them.
+pub(crate) fn native_rsqrt(value: f32) -> f32 {
+    if !(value.is_normal() && value > 0.0) {
+        return f32::NAN;
+    }
+    let r0 = rsqrt_estimate(value);
+    let step = |a: f32, b: f32| ((3.0_f64 - (a as f64) * (b as f64)) * 0.5) as f32;
+    let r1 = r0 * step(r0 * value, r0);
+    r1 * step(value * r1, r1)
+}
+
 /// Native vector log2/exp2 cube-root kernel. It is not the host cbrt intrinsic.
-/// The scalar shell preparation remains the source log2f/exp2f call sequence.
+/// The scalar shell preparation remains the source log2f/exp2f call sequence;
+/// host libm stands in for the device one here, exact only at `Shell` values.
 fn sphere_radius(radius: f32, thickness: f32, random: f32) -> f32 {
-    let inner_cube = ((1.0 - thickness).log2() * 3.0).exp2();
+    sphere_radius_from_inner(radius, ((1.0 - thickness).log2() * 3.0).exp2(), random)
+}
+
+fn sphere_radius_from_inner(radius: f32, inner_cube: f32, random: f32) -> f32 {
     let volume = inner_cube * random + (1.0 - random);
     let bits = volume.to_bits();
     let exponent = (bits as i32 >> 23) as f32;
@@ -146,22 +232,87 @@ pub fn cone_base(
     )
 }
 
-/// Current native StartConeVolume samples the same base as Cone, then travels
-/// a uniform authored distance along its normalised initial direction. It is
-/// not a uniformly filled frustum and is not radius + tan(angle) * height.
-/// The returned direction is still the pre-EmitterStoreData source vector.
+/// The Random mode's spread quantization of one draw over an extent (the arc
+/// in radians, or the single-sided edge's radius). With a positive step
+/// (extent times spread) the value snaps down to a multiple of the step: the
+/// step count is the extent over the step rounded up, and both roundings go
+/// through a saturating float-to-int conversion (FCVTZS, NaN to zero) and a
+/// compare-and-adjust, not floor/ceil, which agree only below 2^31. The
+/// quotient keeps the native order ((step * count) * u) / step; the
+/// algebraic shortcut count * u rounds differently for a few draws per
+/// configuration. A zero, negative or unordered step keeps the continuous
+/// extent * u.
+fn spread_quantized(extent: f32, spread: f32, u: f32) -> f32 {
+    let step = extent * spread;
+    if !(step > 0.0) {
+        return extent * u;
+    }
+    let ratio = extent / step;
+    let whole = (ratio as i32) as f32;
+    let count = if ratio > whole { 1.0 + whole } else { whole };
+    let steps = ((step * count) * u) / step;
+    let whole = (steps as i32) as f32;
+    step * if whole > steps { whole - 1.0 } else { whole }
+}
+
+/// The Random arc mode's angle in radians, shared by StartHemiSphere and
+/// StartConeVolume: `spread_quantized` over the arc in radians.
+pub fn random_arc(arc_deg: f32, arc_spread: f32, u: f32) -> f32 {
+    spread_quantized(arc_deg * DEG_TO_RAD, arc_spread, u)
+}
+
+/// StartCircle in its Random arc mode leaves its plain kernel (`circle_base`)
+/// exactly where the arc in radians times the arc spread compares greater
+/// than zero; that is the native branch predicate itself, evaluated once per
+/// call, so an arc of zero with any spread, or a negative product, stays on
+/// the plain kernel.
+pub fn circle_takes_arc_spread(arc_deg: f32, arc_spread: f32) -> bool {
+    (arc_deg * DEG_TO_RAD) * arc_spread > 0.0
+}
+
+/// Current native StartConeVolume lane body: the Cone base (clamped linear
+/// inner-area fraction, radial draw reversed) at the given arc angle, then a
+/// uniform authored distance along the unit initial direction. It is not a
+/// uniformly filled frustum and is not radius + tan(angle) * height. The unit
+/// vector comes from the native reciprocal square root of the direction's
+/// square (x*x + (cos^2 + y*y)), and where that square is not above the tiny
+/// threshold (NaN included) the unit vector is masked to +0, not to +Z; the
+/// travelled z keeps the native + 0.0. The returned direction is the
+/// un-normalised pre-EmitterStoreData source vector.
+pub fn cone_volume_at(
+    radius: f32, thickness: f32, angle_deg: f32, arc_radians: f32,
+    length: f32, radial: f32, distance: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let inner = (1.0 - thickness).max(MIN_INNER);
+    let (sin, cos) = engine_sincos(arc_radians);
+    let fraction = (inner * radial + (1.0 - radial)).sqrt();
+    let x = fraction * cos;
+    let y = fraction * sin;
+    let (sin_angle, cos_angle) = engine_sincos(angle_deg * DEG_TO_RAD);
+    let direction = [sin_angle * x, sin_angle * y, cos_angle];
+    let square = direction[0] * direction[0]
+        + (direction[2] * direction[2] + direction[1] * direction[1]);
+    let keep = square > f32::from_bits(0x0da2_4260);
+    let inverse = if keep { native_rsqrt(square) } else { 0.0 };
+    let unit = direction.map(|v| if keep { v * inverse } else { 0.0 });
+    let travel = length * distance;
+    (
+        [
+            radius * x + unit[0] * travel,
+            radius * y + unit[1] * travel,
+            unit[2] * travel + 0.0,
+        ],
+        direction,
+    )
+}
+
+/// StartConeVolume with a zero arc spread, for the legacy step: independent
+/// draws arc, radial fraction, travelled distance.
 pub fn cone_volume(
     radius: f32, thickness: f32, angle_deg: f32, arc_deg: f32,
     length: f32, arc: f32, radial: f32, distance: f32,
 ) -> ([f32; 3], [f32; 3]) {
-    let (base, direction) = cone_base(radius, thickness, angle_deg, arc_deg, arc, radial);
-    // Preserve the native sum order. ARM64 uses two reciprocal-sqrt refinement
-    // steps; the scalar reciprocal sqrt differs by at most a few float ULP.
-    let square = direction[0] * direction[0]
-        + (direction[2] * direction[2] + direction[1] * direction[1]);
-    let inverse = if square > f32::from_bits(0x0da2_4260) { 1.0 / square.sqrt() } else { 0.0 };
-    let travel = length * distance;
-    (std::array::from_fn(|axis| base[axis] + (direction[axis] * inverse) * travel), direction)
+    cone_volume_at(radius, thickness, angle_deg, random_arc(arc_deg, 0.0, arc), length, radial, distance)
 }
 
 /// Sphere consumes three independent draws: arc, z and radius. Arc is authored
@@ -184,8 +335,9 @@ pub fn sphere_position(
     )
 }
 
-/// Hemisphere samples z directly in [0,1], not abs(2*u-1). Those choices have
-/// equal distributions but different authored RNG-to-particle correspondence.
+/// Hemisphere folds its draw into the sphere kernel's upper half. Preserve
+/// the native f32 operations (StartHemiSphere 0xf0214c..0xf02170): replacing
+/// this mathematically equivalent expression with z_random changes low bits.
 pub fn hemisphere_position(
     radius: f32,
     thickness: f32,
@@ -194,7 +346,34 @@ pub fn hemisphere_position(
     z_random: f32,
     radial: f32,
 ) -> ([f32; 3], [f32; 3]) {
-    sphere_sample(radius, thickness, arc_deg, arc, z_random, radial)
+    let z = z_random * 0.5 + 0.5;
+    let z = (z + z) - 1.0;
+    sphere_sample(radius, thickness, arc_deg, arc, z, radial)
+}
+
+/// StartHemiSphere in its Random arc mode, one lane, native operation order.
+/// The arc angle is `random_arc`'s. The three draws are the arc, the
+/// hemisphere z and the radial fraction, in that order.
+pub fn hemisphere_native(
+    radius: f32,
+    shell: Shell,
+    arc_deg: f32,
+    arc_spread: f32,
+    arc: f32,
+    z_random: f32,
+    radial: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let angle = random_arc(arc_deg, arc_spread, arc);
+    let z = z_random * 0.5 + 0.5;
+    let z = (z + z) - 1.0;
+    let (sin, cos) = engine_sincos(angle);
+    let xy = (1.0 - z * z).sqrt();
+    let direction = [cos * xy, sin * xy, z];
+    let sample_radius = sphere_radius_from_inner(radius, shell.inner_cube(), radial);
+    (
+        direction.map(|component| component * sample_radius),
+        direction,
+    )
 }
 
 fn sphere_sample(
@@ -216,7 +395,9 @@ fn sphere_sample(
 }
 
 /// The torus tube radius is linearly sampled, unlike the circle's area law.
-/// Three draws belong to the major arc, tube angle and tube radius respectively.
+/// Three draws belong to the major arc, tube angle and tube radius
+/// respectively. Zero arc spread: the major angle is the arc in radians
+/// times the draw, as `random_arc` gives it.
 pub fn donut_position(
     radius: f32,
     donut_radius: f32,
@@ -226,18 +407,36 @@ pub fn donut_position(
     tube_angle: f32,
     radial: f32,
 ) -> ([f32; 3], [f32; 3]) {
-    let (sin, cos) = engine_sincos((arc_deg * DEG_TO_RAD) * arc);
+    donut_at(radius, donut_radius, thickness, random_arc(arc_deg, 0.0, arc), tube_angle, radial)
+}
+
+/// Current native StartDonut lane body at a given major angle in radians
+/// (`random_arc` of the Random arc mode, the stepped arc included). The tube
+/// fraction is the inner bound max(1 - thickness, tiny) plus the rest times
+/// the draw, times the torus radius. The native code factors the major
+/// cosine and sine out of the ring: x = cos * (radius + tube * tube_cos),
+/// not radius * cos + (cos * tube_cos) * tube, which rounds differently in
+/// most lanes; z is tube * tube_sin. The returned direction is the
+/// un-normalised pre-EmitterStoreData source vector (cos * tube_cos,
+/// sin * tube_cos, tube_sin). The inner bound uses a maximum that would
+/// drop a NaN where the native one keeps it; 1 - thickness is finite for
+/// every finite thickness, so the two agree on every finite input.
+pub fn donut_at(
+    radius: f32,
+    donut_radius: f32,
+    thickness: f32,
+    arc_radians: f32,
+    tube_angle: f32,
+    radial: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let (sin, cos) = engine_sincos(arc_radians);
     let (tube_sin, tube_cos) = engine_sincos(tube_angle * NATIVE_TAU);
     let inner = (1.0 - thickness).max(MIN_INNER);
     let tube = (inner + (1.0 - inner) * radial) * donut_radius;
-    let direction = [cos * tube_cos, sin * tube_cos, tube_sin];
+    let ring = radius + tube * tube_cos;
     (
-        [
-            radius * cos + direction[0] * tube,
-            radius * sin + direction[1] * tube,
-            direction[2] * tube,
-        ],
-        direction,
+        [cos * ring, sin * ring, tube * tube_sin],
+        [cos * tube_cos, sin * tube_cos, tube_sin],
     )
 }
 
@@ -246,6 +445,17 @@ pub fn single_sided_edge(radius: f32, random: f32) -> ([f32; 3], [f32; 3]) {
     // Current native scales first, then doubles and subtracts. Reassociating
     // (2*u-1)*R produces a measurable error for samples near the edge centre.
     let scaled = radius * random;
+    ([(scaled + scaled) - radius, 0.0, 0.0], [0.0, 1.0, 0.0])
+}
+
+/// StartSingleSidedEdge in its Random radius mode, one lane, one draw: the
+/// draw is `spread_quantized` over the radius with the radius spread, then
+/// doubled and the radius subtracted (never reassociated to (2u-1)R). A
+/// zero, negative or unordered step (radius times spread) is exactly
+/// `single_sided_edge`. The kernel reads only the radius and its spread:
+/// thickness, arc, arc mode and arc spread never reach it.
+pub fn single_sided_edge_spread(radius: f32, spread: f32, random: f32) -> ([f32; 3], [f32; 3]) {
+    let scaled = spread_quantized(radius, spread, random);
     ([(scaled + scaled) - radius, 0.0, 0.0], [0.0, 1.0, 0.0])
 }
 
@@ -294,8 +504,35 @@ mod tests {
         let sphere = sphere_position(10.0, 0.0, 360.0, 0.3, 0.1, 0.8);
         let hemisphere = hemisphere_position(10.0, 0.0, 360.0, 0.3, 0.1, 0.8);
         assert!((sphere.1[2] + 0.8).abs() < 1e-7);
-        assert_eq!(hemisphere.1[2], 0.1);
+        assert_eq!(hemisphere.1[2].to_bits(), 0x3dcc_ccd0);
         assert!((magnitude(sphere.0) - 10.0).abs() < 1e-5);
+    }
+    #[test]
+    fn source_snow_hemisphere_first_group_matches_native_bits() {
+        // shape-birth-current.json: source 0, old=0, first one-particle
+        // request. All four native storage lanes remain observable at Store.
+        let expected_position = [
+            [3256462770, 3229795817, 1105218461, 3251943192],
+            [3252131890, 3253306700, 3248049907, 1090117893],
+            [1092670063, 1108744017, 1096315287, 1060524061],
+        ];
+        let expected_direction = [
+            [3209490136, 3182389207, 1061443572, 3212151733],
+            [3205480418, 3206323265, 3204854778, 1049639170],
+            [1045853568, 1061769498, 1052604524, 1020425088],
+        ];
+        let mut stream = crate::particle::seed_owner::ModuleRandom::from_owner_seed(1729);
+        let arc = stream.next4_u32().map(u01_from_bits);
+        let polar = stream.next4_u32().map(u01_from_bits);
+        let radial = stream.next4_u32().map(u01_from_bits);
+        for lane in 0..4 {
+            let (position, direction) = hemisphere_position(50.0, 1.0, 360.0,
+                arc[lane], polar[lane], radial[lane]);
+            for axis in 0..3 {
+                assert_eq!(position[axis].to_bits(), expected_position[axis][lane]);
+                assert_eq!(direction[axis].to_bits(), expected_direction[axis][lane]);
+            }
+        }
     }
     #[test]
     fn euler_zxy_keeps_existing_coordinate_contract() {
@@ -382,13 +619,15 @@ mod tests {
             // Scalar shell preparation calls platform libm in the source too.
             // All tested components must agree within 8 f32 ULP, not pixel-level
             // tolerance. Incorrect signs, RNG counts and radial laws fail hard.
+            // The torus kernel calls no libm and is exact.
+            let exact = v.shape == "Donut";
             for (kind, actual, expected) in [
                 ("position", position, v.position),
                 ("direction", direction, v.direction),
             ] {
                 for (axis, (a, b)) in actual.into_iter().zip(expected).enumerate() {
                     let ulp = a.to_bits().abs_diff(b.to_bits());
-                    if a != b && (ulp > 8 || !a.is_finite()) {
+                    if (exact && a.to_bits() != b.to_bits()) || (a != b && (ulp > 8 || !a.is_finite())) {
                         failures.push(format!("{} thickness={} arc={} {kind}[{axis}] actual={a:?} native={b:?} ulp={ulp}",v.shape,v.thickness,v.arc));
                     }
                 }
@@ -415,9 +654,11 @@ mod tests {
             let v: Vec<f32> = row.split('\t').map(|x| x.parse().unwrap()).collect();
             assert_eq!(v.len(),14);
             let (position,direction) = cone_volume(v[0],v[1],v[3],v[2],v[4],v[5],v[6],v[7]);
+            // Exact: the reciprocal square root is the native table and
+            // refinement, not a host 1/sqrt.
             for (axis,(actual,expected)) in position.into_iter().chain(direction).zip(v[8..].iter().copied()).enumerate() {
-                let ulp=actual.to_bits().abs_diff(expected.to_bits());
-                if actual != expected && (!actual.is_finite() || ulp>8) {
+                if actual.to_bits() != expected.to_bits() {
+                    let ulp=actual.to_bits().abs_diff(expected.to_bits());
                     failures.push(format!("case={count} axis={axis} actual={actual:?} source={expected:?} ulp={ulp}"));
                 }
             }

@@ -41,6 +41,7 @@ pub struct SourceParticle {
     pub render_queue: i32,
     pub sorting_order: i32,
     pub sorting_fudge: f32,
+    pub sort_mode: moly_law::particle::sort::ParticleSort,
 }
 #[derive(Clone, Debug, Default)]
 pub enum ParticleReadiness {
@@ -75,6 +76,10 @@ impl SourceParticle {
             .filter(|v| v.is_finite())
             .ok_or_else(|| SourceShaderError("source sorting fudge is absent".into()))?
             as f32;
+        let sort_mode = renderer["sortMode"].as_u64()
+            .and_then(|mode| u32::try_from(mode).ok())
+            .and_then(moly_law::particle::sort::ParticleSort::from_source)
+            .ok_or_else(|| SourceShaderError("source particle sort mode is absent or unsupported".into()))?;
         let catalogue = server.load(format!(
             "moly://{asset_root}/{}",
             material.shader.variants.file
@@ -104,6 +109,7 @@ impl SourceParticle {
             render_queue,
             sorting_order,
             sorting_fudge,
+            sort_mode,
         })
     }
 
@@ -256,6 +262,12 @@ pub fn resolve_particles(
             *particle.readiness.lock().unwrap() = ParticleReadiness::Failed(error.clone());
             error!(%error, "source particle dependency failed");
             particle.error = Some(error);
+            continue;
+        }
+        // Already resolved: resolve() would return without writing. Checking
+        // through the shared reference keeps the component unchanged, so the
+        // render world's change detection stays meaningful.
+        if !particle.passes.is_empty() {
             continue;
         }
         if let Err(error) = particle.resolve(&server, &catalogues) {

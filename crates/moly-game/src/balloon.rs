@@ -118,6 +118,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::renderer::RenderDevice;
 use moly_assets::json::JsonAsset;
+use moly_assets::residency::load_image;
 use moly_law::text::advance::{force_fallback_glyph, resolve_glyph_advance};
 use moly_law::text::layout_metrics;
 use moly_law::text::tags::{parse_rich_segments, transformed_glyphs, SizeSpec, TextSegment};
@@ -445,11 +446,11 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
         tables: server.load::<JsonAsset>(tweet_tables()),
     });
     commands.insert_resource(SkinHandle {
-        bg: server.load::<Image>(moly_assets::ui_atlas_sprite("CommonAtlas", "btn_r30_wh")),
-        arrow: server.load::<Image>(moly_assets::ui_atlas_sprite(
-            "CommonAtlas",
-            "balloon_direction_triangle_wh",
-        )),
+        bg: load_image(&server, moly_assets::ui_atlas_sprite("CommonAtlas", "btn_r30_wh")),
+        arrow: load_image(
+            &server,
+            moly_assets::ui_atlas_sprite("CommonAtlas", "balloon_direction_triangle_wh"),
+        ),
     });
 }
 

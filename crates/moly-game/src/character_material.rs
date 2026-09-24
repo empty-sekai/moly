@@ -10,6 +10,13 @@
 //! 的 uniform、按渲染器各写各的，所以它进每材质自己的参数块，由头骨
 //! 实体的世界位逐帧回写——缺省留在原点时球面距离场中心滑到世界原点，
 //! 球面界线整条错位（分界线成因之一）。
+//!
+//! The parameter block lives in a uniform buffer that the material owns for
+//! its whole life. The per-frame head reference and dither values are stored
+//! into the asset without an asset event, and the render world copies every
+//! material's current parameters into that buffer during extraction whenever
+//! they differ from the last upload. The shader reads the same bytes a
+//! re-prepared material would carry, without a new bind group every frame.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -26,7 +33,7 @@ use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::{FallbackImage, GpuImage};
-use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::ShaderRef;
 use moly_assets::json::JsonAsset;
 use moly_assets::sidecar::MolyJson;
@@ -39,6 +46,7 @@ use moly_law::shading::character::CharacterGlobals;
 use crate::character::{CharacterModel, CharacterPack, MotionDriver};
 use crate::light;
 use crate::npc::CharacterUnitId;
+use crate::render::gpu::{store_bits, SharedSamplers};
 
 // ---- 现象常量（晴天配置的源值照抄） ----
 
@@ -99,8 +107,9 @@ pub struct CharacterParams {
 
 impl CharacterParams {
     /// 按上面的槽序摊平成字节。
-    pub fn bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(PARAMS_BYTES);
+    pub fn byte_array(&self) -> [u8; PARAMS_BYTES] {
+        let mut bytes = [0u8; PARAMS_BYTES];
+        let mut chunks = bytes.chunks_exact_mut(4);
         for slot in [
             [
                 self.shader_usage,
@@ -118,10 +127,13 @@ impl CharacterParams {
             self.head_position,
         ] {
             for component in slot {
-                bytes.extend_from_slice(&component.to_le_bytes());
+                chunks
+                    .next()
+                    .expect("PARAMS_SLOTS vec4 slots fill PARAMS_BYTES exactly")
+                    .copy_from_slice(&component.to_le_bytes());
             }
         }
-        debug_assert_eq!(bytes.len(), PARAMS_BYTES);
+        debug_assert!(chunks.next().is_none());
         bytes
     }
 }
@@ -139,6 +151,10 @@ pub struct CharacterKey {
 pub struct CharacterMaterial {
     pub key: CharacterKey,
     pub params: CharacterParams,
+    /// Binding 0: the GPU copy of `params`, created with the material and
+    /// rewritten by `upload_params` whenever `params` changes. Every material
+    /// asset holds its own buffer; two assets never share one.
+    pub(crate) params_buffer: Buffer,
     /// Instance-local full-row input for the actor's mouth controller. These
     /// host fields are not GPU bindings; speech texture writes never touch them.
     pub(crate) lip_pattern: Option<moly_law::facial::LipPattern>,
@@ -157,6 +173,7 @@ impl AsBindGroup for CharacterMaterial {
         SRes<CharacterEnvGpuBuffer>,
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
+        SRes<SharedSamplers>,
     );
 
     fn label() -> &'static str {
@@ -166,8 +183,8 @@ impl AsBindGroup for CharacterMaterial {
     fn unprepared_bind_group(
         &self,
         _layout: &BindGroupLayout,
-        render_device: &RenderDevice,
-        (env_buffer, images, fallback): &mut SystemParamItem<'_, '_, Self::Param>,
+        _render_device: &RenderDevice,
+        (env_buffer, images, fallback, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -188,18 +205,12 @@ impl AsBindGroup for CharacterMaterial {
         // 角色贴图不滚动、ST 是恒等变换，uv 不越 [0,1]；采样态不在语料
         // 记录里，取引擎默认的钳边与三线性——与 GpuImage 自带 sampler 的
         // 过滤一致，只有寻址模式不同。
-        let clamp = render_device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        });
+        // The sampler is created once at render startup and shared by every
+        // character material; its descriptor never varies per material.
+        let clamp = samplers.clamp_linear.clone();
         let bindings = BindingResources(vec![
             // binding 0：材质自己的参数块（含头参考点）。
-            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
+            (0, OwnedBindingResource::Buffer(self.params_buffer.clone())),
             // binding 1：全局量，全部角色材质共用一个 buffer。
             (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
@@ -370,7 +381,12 @@ impl CharacterEnv {
                 bytes.extend_from_slice(&component.to_le_bytes());
             }
         };
-        push([g.light_vector[0], g.light_vector[1], g.light_vector[2], 0.0]);
+        push(moly_law::weather::light_pass::clamp_zero4([
+            g.light_vector[0],
+            g.light_vector[1],
+            g.light_vector[2],
+            0.0,
+        ]));
         push(g.light_color);
         push(g.skin_shade_color);
         push(g.body_shade_color);
@@ -467,10 +483,16 @@ pub fn write_frame_state(
         Projection::Orthographic(o) => (o.near, o.far),
         Projection::Custom(_) => panic!("角色全局量不认识自定义投影"),
     };
-    env.projection_params = [1.0, near, far, 1.0 / far];
+    // Written through change detection only when a bit changes: extraction and
+    // the GPU upload key on the flag, and the camera state is steady most frames.
+    let target = env.bypass_change_detection();
+    let mut changed = store_bits(&mut target.projection_params, [1.0, near, far, 1.0 / far]);
     if let Some(size) = camera.physical_viewport_size() {
         let (w, h) = (size.x as f32, size.y as f32);
-        env.globals.screen_params = [w, h, 1.0 + 1.0 / w, 1.0 + 1.0 / h];
+        changed |= store_bits(&mut target.globals.screen_params, [w, h, 1.0 + 1.0 / w, 1.0 + 1.0 / h]);
+    }
+    if changed {
+        env.set_changed();
     }
 }
 
@@ -494,6 +516,11 @@ fn write_env_buffer(
     buffer: Res<CharacterEnvGpuBuffer>,
     queue: Res<RenderQueue>,
 ) {
+    // Extraction replaces the render-world table only on a frame where the
+    // main-world table changed; the buffer already holds every earlier copy.
+    if !env.is_changed() {
+        return;
+    }
     let bytes = env.gpu_bytes();
     queue.write_buffer(&buffer.buffer, 0, &bytes);
 }
@@ -621,6 +648,7 @@ fn build_material(
     slot: &MaterialSlot,
     file: &str,
     server: &AssetServer,
+    render_device: &RenderDevice,
     fog: bool,
 ) -> Result<CharacterMaterial, String> {
     // 配件族的 shader 名不同、程序与本族逐字节相同（律的注释），按名放行。
@@ -639,7 +667,12 @@ fn build_material(
     };
     let load = |index: usize| -> Handle<Image> {
         // 角色贴图是资产根下的散装 PNG，URI 即文件名。
-        server.load::<Image>(AssetPath::from(format!("moly://{}", uri_of(index).expect("下标已核"))))
+        // Only the GPU samples them (the material binds them; nothing reads
+        // their texels on the CPU), and this is the only request of these paths.
+        moly_assets::residency::load_image(
+            server,
+            AssetPath::from(format!("moly://{}", uri_of(index).expect("下标已核"))),
+        )
     };
     let main_tex = resolved
         .main_tex
@@ -662,6 +695,11 @@ fn build_material(
         main_tex_st: resolved.main_tex_st.unwrap_or([1.0, 1.0, 0.0, 0.0]),
         head_position: [0.0; 4],
     };
+    let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("character_material_params"),
+        contents: &params.byte_array(),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
     Ok(CharacterMaterial {
         key: CharacterKey {
             // 眉变体的门在真源是 keyword 变体 + 独立渲染通道（MysekaiEyebrow
@@ -674,6 +712,7 @@ fn build_material(
             fog,
         },
         params,
+        params_buffer,
         lip_pattern: None,
         lip_pattern_revision: 0,
         main_tex: load(main_tex),
@@ -731,6 +770,7 @@ pub struct HeadBone;
 pub fn plan_when_wired(
     mut commands: Commands,
     server: Res<AssetServer>,
+    render_device: Res<RenderDevice>,
     gltfs: Res<Assets<Gltf>>,
     jsons: Res<Assets<JsonAsset>>,
     env: Res<CharacterEnv>,
@@ -826,7 +866,7 @@ pub fn plan_when_wired(
             let slot = rig.slots.get(name.as_str()).unwrap_or_else(|| {
                 panic!("unit {} 的骨架档案里没有 glb 网格材质 {name}", unit.0)
             });
-            let material = match build_material(&rig, slot, &pack.rig_file, &server, true) {
+            let material = match build_material(&rig, slot, &pack.rig_file, &server, &render_device, true) {
                 Ok(material) => material,
                 Err(reason) => panic!("unit {} 的角色材质解析失败：{reason}", unit.0),
             };
@@ -898,6 +938,10 @@ pub fn swap_when_planned(
 /// PostUpdate（TransformPropagate 之后）：头参考点回写——头骨实体的
 /// 世界位写进该成员全部材质槽。源每帧写、这里同节奏；动画在
 /// Propagate 之前推进，读到的是当帧姿势。
+///
+/// The values are stored without an asset event, so the material is not
+/// re-prepared; `upload_params` copies them into the material's parameter
+/// buffer during this frame's extraction.
 pub fn update_head(
     mut materials: ResMut<Assets<CharacterMaterial>>,
     registry: Option<Res<crate::npc::Registry>>,
@@ -948,7 +992,7 @@ pub fn update_head(
             if !changed {
                 continue;
             }
-            if let Some(material) = materials.get_mut(handle) {
+            if let Some(material) = materials.get_mut_untracked(handle) {
                 material.params.head_position = head_position;
                 material.params.dither_alpha = alpha;
                 material.params.use_dither = use_dither;
@@ -976,6 +1020,54 @@ pub fn report_head(
     }
 }
 
+/// Render world: the bytes last uploaded into each material's parameter
+/// buffer, and which material owns each buffer in the current frame.
+#[derive(Resource, Default)]
+struct ParamUploads {
+    written: HashMap<AssetId<CharacterMaterial>, ([u8; PARAMS_BYTES], u64)>,
+    owners: HashMap<BufferId, AssetId<CharacterMaterial>>,
+    frame: u64,
+}
+
+/// Extract: copies each character material's current parameters into its
+/// parameter buffer when they differ from the last upload. Extraction runs
+/// after the main schedule, so the buffer holds the parameters as they stand
+/// at the end of the frame, which is what a material re-prepared this frame
+/// would have packed into a new buffer. The write is queued before the frame
+/// is submitted, so this frame's draws read it.
+fn upload_params(
+    materials: Extract<Res<Assets<CharacterMaterial>>>,
+    mut uploads: ResMut<ParamUploads>,
+    queue: Res<RenderQueue>,
+) {
+    let uploads = &mut *uploads;
+    uploads.frame += 1;
+    let frame = uploads.frame;
+    uploads.owners.clear();
+    for (id, material) in materials.iter() {
+        if let Some(other) = uploads.owners.insert(material.params_buffer.id(), id) {
+            panic!("角色材质 {other:?} 与 {id:?} 共用同一块参数 buffer：每个材质资产必须持有自己的一块");
+        }
+        let bytes = material.params.byte_array();
+        let stale = match uploads.written.get_mut(&id) {
+            Some((written, seen)) => {
+                *seen = frame;
+                let stale = *written != bytes;
+                *written = bytes;
+                stale
+            }
+            None => {
+                uploads.written.insert(id, (bytes, frame));
+                true
+            }
+        };
+        if stale {
+            queue.write_buffer(&material.params_buffer, 0, &bytes);
+        }
+    }
+    uploads.written.retain(|_, (_, seen)| *seen == frame);
+}
+
 /// 角色材质插件：材质管线 + 全局量桥（含渲染侧 buffer）。
 /// `.json` 装载器只在 wasm 注册：native 侧站点插件先于本插件把同一对
 /// 注册进了 AssetServer，重复注册打 WARN；wasm 没有站点插件，雾档案
@@ -984,6 +1076,8 @@ pub struct CharacterMaterialPlugin;
 
 impl Plugin for CharacterMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_shared_samplers(app);
+        crate::gpu_image_release::prepare_after_images::<CharacterMaterial>(app);
         app.add_plugins((
             MaterialPlugin::<CharacterMaterial>::default(),
             ExtractResourcePlugin::<CharacterEnv>::default(),
@@ -993,6 +1087,8 @@ impl Plugin for CharacterMaterialPlugin {
             .init_asset_loader::<MolyJsonLoader>();
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
+                .init_resource::<ParamUploads>()
+                .add_systems(ExtractSchedule, upload_params)
                 .add_systems(RenderStartup, create_env_buffer)
                 // Prepare 链在 ExtractCommands 之后：抽取资源用 Commands 落
                 // 渲染世界，无序挂载会读到不存在的那一帧。

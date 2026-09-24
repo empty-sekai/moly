@@ -220,6 +220,15 @@ export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin 
   return [...new Set(urls)];
 }
 
+/** Decoded size published with the object: the local server's header or the
+ * object store's user metadata (OSS and S3 spellings). A store that does not
+ * expose it through CORS reads as 0, which disables retention, not playback. */
+export function declaredDecodedBytes(headers) {
+  return Number(headers.get("X-Moly-Decoded-Bytes") ||
+    headers.get("x-oss-meta-moly-decoded-bytes") ||
+    headers.get("x-amz-meta-moly-decoded-bytes") || 0);
+}
+
 export function isCacheMessage(value) {
   return (
     value &&
@@ -469,8 +478,7 @@ if (
         // Controlled large runtime requests bypass the browser's opaque HTTP
         // cache. Optional retained copies are therefore measurable and removable.
         const response = await fetch(request, { cache: "no-store", credentials: "omit", redirect: "error" });
-        const bytes = Number(response.headers.get("X-Moly-Decoded-Bytes") ||
-          response.headers.get("x-oss-meta-moly-decoded-bytes") || 0);
+        const bytes = declaredDecodedBytes(response.headers);
         let pinsChanged = false;
         if (
           enabled &&

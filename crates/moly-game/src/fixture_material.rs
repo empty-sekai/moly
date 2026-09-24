@@ -969,6 +969,15 @@ fn srgb_encode(c: f32) -> f32 {
     if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
+/// 8 位存储值的解码表：第 `v` 项就是 `srgb_decode(v / 255)`，由同一个函数对
+/// 同一个 f32 输入算出。存储值只有 256 种，所以查表与逐纹素现算逐位相同；
+/// 滤波里的累加次序不变，链上每一级的字节也就不变。编码一侧的输入是均值，
+/// 不是有限集，仍逐值现算。
+fn srgb_decode_table() -> &'static [f32; 256] {
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|value| srgb_decode(value as f32 / 255.0)))
+}
+
 /// CPU 生成完整 2×2 box mip 链：对 2 的幂形状（含非方形——级数按最长
 /// 边，短边先到 1 就保持 1）的 RGBA8 主贴图，在采样输出的域里滤波
 /// （sRGB 格式先解码后平均再编码），纹素按 LayerMajor 的 dense mip 序
@@ -994,7 +1003,11 @@ pub(crate) enum MipSkip {
     NotSrgb,
 }
 
-pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
+/// 补链前的只读核验：拒绝理由与次序即 [`generate_mip_chain`] 的，另给出补链
+/// 要用的量。`Assets::get_mut` 无条件发 Modified，而一次被 Modified 的贴图
+/// 会整份重新提取、另建 GPU 纹理——已补好链或补不了的贴图应当先经共享借用
+/// 在这里判掉。
+pub(crate) fn mip_chain_plan(image: &Image) -> Result<MipChainPlan, MipSkip> {
     let width = image.texture_descriptor.size.width;
     let height = image.texture_descriptor.size.height;
     if image.texture_descriptor.mip_level_count > 1 {
@@ -1014,10 +1027,6 @@ pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
     if data.len() != base_len {
         return Err(MipSkip::BadLength);
     }
-    // Reuse the decoded base-level buffer. Reserve the complete
-    // chain once, then read the previous level and write its disjoint tail.
-    // No full-resolution clone or per-level scratch buffer is needed; the CPU
-    // image remains available to every existing caller after generation.
     let mut chain_len = base_len;
     let (mut w, mut h) = (width as usize, height as usize);
     for _ in 1..levels {
@@ -1025,11 +1034,33 @@ pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
         h = (h / 2).max(1);
         chain_len = chain_len.checked_add(w * h * 4).ok_or(MipSkip::BadLength)?;
     }
+    Ok(MipChainPlan { levels, srgb, base_len, chain_len })
+}
+
+/// [`mip_chain_plan`] 核过的一条链：级数、是否 sRGB 格式、第 0 级与整条链
+/// 的字节数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MipChainPlan {
+    levels: u32,
+    srgb: bool,
+    base_len: usize,
+    chain_len: usize,
+}
+
+pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
+    let MipChainPlan { levels, srgb, base_len, chain_len } = mip_chain_plan(image)?;
+    let width = image.texture_descriptor.size.width as usize;
+    let height = image.texture_descriptor.size.height as usize;
+    // Reuse the decoded base-level buffer. Reserve the complete
+    // chain once, then read the previous level and write its disjoint tail.
+    // No full-resolution clone or per-level scratch buffer is needed; the CPU
+    // image remains available to every existing caller after generation.
     let chain = image.data.as_mut().expect("base data validated above");
     chain.reserve_exact(chain_len - base_len);
     chain.resize(chain_len, 0);
+    let decode = srgb_decode_table();
     let (mut src_offset, mut dst_offset) = (0, base_len);
-    let (mut w, mut h) = (width as usize, height as usize);
+    let (mut w, mut h) = (width, height);
     while w > 1 || h > 1 {
         let cw = (w / 2).max(1);
         let ch = (h / 2).max(1);
@@ -1049,11 +1080,10 @@ pub(crate) fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
                     for dx in 0..taps_x {
                         let i = ((y * taps_y + dy) * w + (x * taps_x + dx)) * 4;
                         for c in 0..4 {
-                            let channel = src[i + c] as f32 / 255.0;
                             let linear = if srgb && c < 3 {
-                                srgb_decode(channel)
+                                decode[src[i + c] as usize]
                             } else {
-                                channel
+                                src[i + c] as f32 / 255.0
                             };
                             acc[c] += linear;
                         }
@@ -1168,6 +1198,48 @@ mod mip_tests {
         assert_eq!(generate_mip_chain(&mut image), Err(MipSkip::BadLength));
         assert_eq!(image.data, expected);
         assert_eq!(image.texture_descriptor.mip_level_count, 1);
+    }
+}
+
+/// 补链并把纹素交给渲染世界：本帧的提取把整条链搬过去而不是复制一份，
+/// 主世界只留描述符。补不了或已补好的贴图先经 [`mip_chain_plan`] 判掉，
+/// 不借可变、不发 Modified。句柄不在 Assets 里记 `NoData`。
+///
+/// 纹素交出后，主世界里只剩一种读者会再要它们：后来的换装批次要遮罩
+/// 均值。均值在交出的那一帧（数据还在）就算过并记下，见 [`MaskMeans`]。
+///
+/// The chained upload replaces the single-level texture the image already
+/// has on the GPU; the replacement is recorded so that the old texture is
+/// destroyed together with the image (see [`crate::gpu_image_release`]).
+fn chain_and_release(
+    images: &mut Assets<Image>,
+    replaced: &mut MessageWriter<crate::gpu_image_release::ImageTextureReplaced>,
+    handle: &Handle<Image>,
+) -> Result<u32, MipSkip> {
+    mip_chain_plan(images.get(handle).ok_or(MipSkip::NoData)?)?;
+    let image = images.get_mut(handle).ok_or(MipSkip::NoData)?;
+    let levels = generate_mip_chain(image)?;
+    moly_assets::residency::release_to_render_world(image);
+    replaced.write(crate::gpu_image_release::ImageTextureReplaced(handle.id()));
+    Ok(levels)
+}
+
+/// 已算出的遮罩均值，按贴图资产记。均值只取第 0 级的存储值，而第 0 级在
+/// 一个资产的一生里不变（补链只在其后追加），所以纹素交给渲染世界之后，
+/// 后来的换装批次读这份记录与读纹素得到同一个数。资产被移除即丢弃。
+#[derive(Default)]
+struct MaskMeans(HashMap<AssetId<Image>, [f32; 3]>);
+
+impl MaskMeans {
+    fn read(&mut self, id: AssetId<Image>, image: &Image) -> Result<[f32; 3], MipSkip> {
+        match mask_storage_mean(image) {
+            Ok(mean) => {
+                self.0.insert(id, mean);
+                Ok(mean)
+            }
+            Err(MipSkip::NoData) => self.0.get(&id).copied().ok_or(MipSkip::NoData),
+            Err(reason) => Err(reason),
+        }
     }
 }
 
@@ -1318,9 +1390,10 @@ fn switch_materials(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<FixtureMaterial>>,
     mut plan: Local<Option<SwapPlan>>,
-    layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>),
+    layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
+        MessageWriter<crate::gpu_image_release::ImageTextureReplaced>),
 ) {
-    let (surfaces_ready, revision, mut seen_revision, mut seen_roots) = layout;
+    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced) = layout;
     let mut pending_roots: Vec<_> = roots.iter().map(|(entity, _)| entity).collect();
     pending_roots.sort_unstable();
     if *seen_roots != pending_roots {
@@ -1392,22 +1465,16 @@ fn switch_materials(
     let mut mip_skipped: Vec<(&str, MipSkip)> = Vec::new();
     for item in &state.planned {
         let name = item.name.as_str();
-        match images.get_mut(&item.material.main_tex) {
-            Some(image) => match generate_mip_chain(image) {
-                Ok(levels) => mipped.push((name, levels)),
-                Err(MipSkip::AlreadyChained) => shared_chains += 1,
-                Err(reason) => mip_skipped.push((name, reason)),
-            },
-            None => mip_skipped.push((name, MipSkip::NoData)),
+        match chain_and_release(&mut images, &mut replaced, &item.material.main_tex) {
+            Ok(levels) => mipped.push((name, levels)),
+            Err(MipSkip::AlreadyChained) => shared_chains += 1,
+            Err(reason) => mip_skipped.push((name, reason)),
         }
         if let Some(mask) = &item.mask {
-            match images.get_mut(mask) {
-                Some(image) => match generate_mip_chain(image) {
-                    Ok(_) => {}
-                    Err(MipSkip::AlreadyChained) => shared_chains += 1,
-                    Err(reason) => mip_skipped.push((name, reason)),
-                },
-                None => mip_skipped.push((name, MipSkip::NoData)),
+            match chain_and_release(&mut images, &mut replaced, mask) {
+                Ok(_) => {}
+                Err(MipSkip::AlreadyChained) => shared_chains += 1,
+                Err(reason) => mip_skipped.push((name, reason)),
             }
         }
     }
@@ -1428,6 +1495,7 @@ fn switch_materials(
     // 账。天气切档日志读这份账目推逐材质贡献行。
     let mut account = EmissionAccount::default();
     let mut mask_mean_skipped: Vec<(String, MipSkip)> = Vec::new();
+    mask_means.0.retain(|id, _| images.contains(*id));
     for item in &state.planned {
         let armed = item.mask.is_some()
             || item.emission.bright == Some(1.0)
@@ -1446,7 +1514,7 @@ fn switch_materials(
         }
         let mask_mean = match &item.mask {
             Some(mask) => match images.get(mask) {
-                Some(image) => match mask_storage_mean(image) {
+                Some(image) => match mask_means.read(mask.id(), image) {
                     Ok(mean) => Some(mean),
                     Err(reason) => {
                         mask_mean_skipped.push((item.name.clone(), reason));
@@ -2018,6 +2086,8 @@ pub struct FixtureMaterialPlugin;
 
 impl Plugin for FixtureMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::gpu_image_release::install(app);
+        crate::gpu_image_release::prepare_after_images::<FixtureMaterial>(app);
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)

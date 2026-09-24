@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 moly-law = { path = "../moly-law" }
 moly-assets = { path = "../moly-assets" }
+moly-perf = { path = "../moly-perf" }
 bevy = { workspace = true }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +16,8 @@ swash = "0.2.10"
 async-lock = "3"
 futures-util = "0.3"
 futures-channel = "0.3"
+# Shared particle seed owner: already locked; OS entropy on native and JS crypto on wasm.
+getrandom = { version = "=0.2.17", features = ["js"] }
 # Source MeshCollider.convex is a solid 3-D hull, not its concave render mesh.
 # Use the geometry implementation without physics dynamics or triangulation extras.
 parry3d = { version = "0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }
@@ -36,7 +39,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 # 本地档（音量设置持久化）在浏览器侧落 localStorage：Window + Storage
 # 绑定。与 moly-app 同一版本源（锁内已有，不新增下载）。
-web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers", "ResizeObserver"] }
 
 [dev-dependencies]
 # Compile the actual depth-sampling helper to GLSL ES before a WASM rebuild.

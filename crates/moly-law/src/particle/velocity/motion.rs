@@ -47,8 +47,29 @@ pub fn animated_velocity(displacement: [f32; 3], dt: f32, speed_modifier: f32) -
     {
         return [0.0; 3];
     }
-    let inverse_dt = 1.0 / dt;
+    let inverse_dt = orbital_reciprocal(dt);
     displacement.map(|value| (value / speed_modifier) * inverse_dt)
+}
+
+/// ARM FRECPE followed by two FRECPS refinements, with the orbital kernel's
+/// lower dt mask (about 1e-6) rather than InitialModule's 1e-5 admission.
+/// Current JP 6.8.1 orbital path uses this reciprocal sequence; the lower mask remains in animated_velocity.
+pub(crate) fn orbital_reciprocal(value: f32) -> f32 {
+    let bits = value.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let index = 256 + ((bits & 0x007f_ffff) >> 15);
+    let estimate = (((1_u32 << 19) / (2 * index + 1)) + 1) / 2;
+    let result_exponent = 253 - exponent;
+    let estimate_bits = if result_exponent > 0 {
+        ((result_exponent as u32) << 23) | ((estimate - 256) << 15)
+    } else {
+        estimate << (14 + result_exponent) as u32
+    };
+    let r0 = f32::from_bits(estimate_bits);
+    let c0 = (2.0_f64 - (value as f64) * (r0 as f64)) as f32;
+    let r1 = ((r0 as f64) * (c0 as f64)) as f32;
+    let c1 = (2.0_f64 - (value as f64) * (r1 as f64)) as f32;
+    ((r1 as f64) * (c1 as f64)) as f32
 }
 
 /// The particle kernel uses a periodic polynomial rather than platform libm.

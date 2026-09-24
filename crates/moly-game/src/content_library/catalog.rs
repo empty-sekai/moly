@@ -67,10 +67,13 @@ pub(crate) fn parse_assets(
     }
     if handles.processed.iter().all(|done| *done) {
         load_thumbnail_handles(&mut catalog, state.external_ui, |path| {
-            server.load::<Image>(AssetPath::from(format!("moly://fixture-thumbnails/{path}")))
+            moly_assets::residency::load_image(
+                &server,
+                AssetPath::from(format!("moly://fixture-thumbnails/{path}")),
+            )
         });
         load_character_portrait_handles(&mut catalog, state.external_ui, |path| {
-            server.load::<Image>(AssetPath::from(format!("moly://{path}")))
+            moly_assets::residency::load_image(&server, AssetPath::from(format!("moly://{path}")))
         });
         catalog.fixtures.sort_by_key(|row| row.id);
         catalog.source_ready = true;

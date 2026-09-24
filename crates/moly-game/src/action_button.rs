@@ -12,6 +12,25 @@
 //! Tutorial/registered NPC timeline
 //! producers still need their own source-backed inputs; no nearby-furniture
 //! pairing flag is a substitute for them.
+//!
+//! Buttons follow the collision manager's edges, not the current overlap.
+//! One ordered colliding list (collideObjList) holds the fixtures and NPCs
+//! the player's box overlaps, apart from the button stack: an object joining
+//! it runs AddShowButtonStack once, an object leaving it runs
+//! RemoveShowButtonStack, and nothing is re-tested while the player stays
+//! inside. The scan stops in Edit and in a conversation with the player
+//! (ObjectCollisionManager.IsCanUpdate), which produces no edges at all, and
+//! during a site move. A timeline started from the button locks the stack
+//! (SetLockActionButton) and hides the view until the player leaves
+//! UseTimelineFixture; RemoveNotCollisionObject then prunes it. A Talk tap
+//! prunes the same way once the talk action is done.
+//!
+//! The buttons belong to ScreenLayerMysekaiHome. While another screen is
+//! current, a site move included, they are not shown; when the home screen
+//! mounts again its new presenter starts from an empty, unlocked stack and
+//! runs ObjectCollisionManager.ForceUpdate.
+
+pub(crate) mod admission;
 
 use std::collections::HashMap;
 
@@ -27,14 +46,20 @@ use moly_law::action_button::{
     ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
 };
 
+use admission::{
+    AdmissionInputs, Availability, Enter, FixtureKind, InputRevision, Probe, Retry,
+};
+
 use crate::balloon::BALLOON_LAYER;
 use crate::canvas::RootCanvas;
 use crate::fixture::{FixturePlacement, FixtureRoot, FixtureSource};
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureTarget};
+use crate::fixture_edit::LayoutSaved;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::joystick::{JoystickState, HANDLE_SIZE};
 use crate::npc::{CharacterUnitId, WalkState};
 use crate::player::PlayerControlled;
+use crate::player_state::PlayerActionState;
 use crate::player_talk::PlayerTalkRequest;
 use crate::ui_layers::{LayerCommand, LayerId};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
@@ -109,7 +134,12 @@ impl ActionButtonSkin {
         let mut geometry = UiPrefabView::new(SKIN_LAYOUT, BALLOON_LAYER);
         geometry.set_visible(BUTTON_NODE, true);
         Some(Self {
-            background: server.load(crate::ui_layout::image_asset_path(image)),
+            // The prefab UI loads its images through the same asset path for
+            // the GPU only; the first request's settings win, so this one agrees.
+            background: moly_assets::residency::load_image(
+                server,
+                crate::ui_layout::image_asset_path(image),
+            ),
             background_color: color(background),
             icon_color: color(icon),
             geometry,
@@ -211,15 +241,116 @@ impl FixtureFacts {
     }
 }
 
+/// One placed fixture's table facts, resolved once. The root's model handle
+/// is set at spawn and never replaced, and the parsed tables never change, so
+/// the cached answer is the answer the per-frame lookup would give.
+#[derive(Component, Clone)]
+pub(crate) struct ActionButtonFixture {
+    row: Option<FixtureRow>,
+    button: Option<ButtonType>,
+    glb: String,
+}
+
+/// One collision object the player's box overlaps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Collider {
+    /// A placed fixture, by instance and identity.
+    Fixture(Entity, String),
+    /// An NPC, by instance and character.
+    Character(Entity, u32),
+}
+
+impl Collider {
+    fn entity(&self) -> Entity {
+        match self {
+            Collider::Fixture(entity, _) | Collider::Character(entity, _) => *entity,
+        }
+    }
+}
+
+/// collideObjList: the overlapped objects in the order they joined.
+/// ForceUpdate re-enters them in this order, after the newly overlapping.
+#[derive(Default)]
+struct CollideList(Vec<Collider>);
+
+impl CollideList {
+    fn contains(&self, entity: Entity) -> bool {
+        self.0.iter().any(|collider| collider.entity() == entity)
+    }
+
+    fn fixture_uid(&self, entity: Entity) -> Option<&str> {
+        self.0.iter().find_map(|collider| match collider {
+            Collider::Fixture(joined, uid) if *joined == entity => Some(uid.as_str()),
+            _ => None,
+        })
+    }
+
+    /// IsCollisionObject for a Talk entry: the NPC instance of that character.
+    fn character(&self, unit: u32) -> Option<Entity> {
+        self.0.iter().find_map(|collider| match collider {
+            Collider::Character(entity, joined) if *joined == unit => Some(*entity),
+            _ => None,
+        })
+    }
+
+    /// TryAddObjToCollideList: appended once.
+    fn join(&mut self, collider: Collider) {
+        if !self.contains(collider.entity()) {
+            self.0.push(collider);
+        }
+    }
+
+    fn leave(&mut self, entity: Entity) -> Option<Collider> {
+        let index = self.0.iter().position(|collider| collider.entity() == entity)?;
+        Some(self.0.remove(index))
+    }
+
+    fn retain(&mut self, keep: impl FnMut(&Collider) -> bool) {
+        self.0.retain(keep);
+    }
+
+    fn take(&mut self) -> Vec<Collider> {
+        std::mem::take(&mut self.0)
+    }
+}
+
 /// 本模块的运行态。
 #[derive(Resource)]
 pub(crate) struct ActionButtonState {
     /// 玩家的附加碰撞盒，每帧被重建。
     player_box: CollisionBox2D,
     stack: ButtonStack,
-    /// Opaque stack handles bind the actual candidate, never a world/grid position.
-    fixture_candidates: HashMap<i32, FixtureButtonCandidate>,
+    /// collideObjList. Admission runs only when an object joins it.
+    colliding: CollideList,
+    /// Rising edges the given navigation snapshot could not evaluate.
+    deferred: HashMap<Entity, InputRevision>,
+    /// Opaque stack handles bind the admitted instance, never a position.
+    fixture_targets: HashMap<i32, FixtureTarget>,
     next_fixture_key: i32,
+    /// SetLockActionButton on the current model (BlockStackChange): a
+    /// timeline started from the button holds the stack.
+    locked: bool,
+    /// Counts the models: each rebuild of the home screen makes a new one.
+    model: u64,
+    /// TimelineFixtureProcess hid the buttons view; the model whose button
+    /// started that timeline. TimelineFixtureFinishAsync shows the view again
+    /// once the player leaves UseTimelineFixture.
+    timeline: Option<u64>,
+    /// A Talk tap reached the talk action last frame.
+    talk_tapped: bool,
+    /// ScreenLayerMysekaiHome was the current screen last frame.
+    home_mounted: bool,
+    /// The site generation the scan last saw.
+    site_epoch: Option<u64>,
+    /// The old site is torn down and the new generation has not arrived.
+    awaiting_site: bool,
+    /// The new generation arrived this frame; its actors are placed after
+    /// this scan.
+    arriving: bool,
+    /// ObjectCollisionManager.ForceUpdate waits for the next scan.
+    force_update: bool,
+    /// This frame's player and world position, for the click's re-check.
+    player: Option<(Entity, Vec3)>,
     /// 上一次接受输入的时刻（秒）。源用一个常量间隔节流。
     last_input: f32,
     /// 已上报过一次的栈首，用来只在变化时打日志。
@@ -228,19 +359,25 @@ pub(crate) struct ActionButtonState {
     surveyed: bool,
 }
 
-struct FixtureButtonCandidate {
-    entity: Entity,
-    /// Identity may arrive after appearance; that must not hide/reorder the button.
-    uid: Option<String>,
-}
-
 impl Default for ActionButtonState {
     fn default() -> Self {
         ActionButtonState {
             player_box: CollisionBox2D::new([0.0, 0.0], PLAYER_ADDITIONAL_HALF_EXTEND, 0.0),
             stack: ButtonStack::new(),
-            fixture_candidates: HashMap::new(),
+            colliding: CollideList::default(),
+            deferred: HashMap::new(),
+            fixture_targets: HashMap::new(),
             next_fixture_key: 0,
+            locked: false,
+            model: 0,
+            timeline: None,
+            talk_tapped: false,
+            home_mounted: true,
+            site_epoch: None,
+            awaiting_site: false,
+            arriving: false,
+            force_update: false,
+            player: None,
             last_input: f32::NEG_INFINITY,
             reported: None,
             surveyed: false,
@@ -249,51 +386,90 @@ impl Default for ActionButtonState {
 }
 
 impl ActionButtonState {
+    /// The home screen's new presenter: a MysekaiActionButtonsModel whose
+    /// constructor writes only its two lists, so the stack starts empty and
+    /// unlocked (only SetLockActionButton writes BlockStackChange); its
+    /// Initialize runs ForceUpdate.
+    fn rebuild(&mut self) {
+        self.stack.clear();
+        self.fixture_targets.clear();
+        self.locked = false;
+        self.model += 1;
+        self.force_update = true;
+    }
+
     /// 当前栈首（决定屏幕上显示哪个按钮）。
     pub(crate) fn current(&self) -> Option<(ButtonType, TargetId)> {
         self.stack.first()
     }
 
-    fn fixture_key(&mut self, entity: Entity, identity: Option<&FixtureActivityIdentity>) -> i32 {
-        let uid = identity.map(|identity| identity.uid.as_str());
-        if let Some((&key, candidate)) =
-            self.fixture_candidates.iter_mut().find(|(_, candidate)| {
-                candidate.entity == entity
-                    && candidate
-                        .uid
-                        .as_deref()
-                        .zip(uid)
-                        .map_or(true, |(previous, current)| previous == current)
-            })
-        {
-            // Bind a late identity to this same entity. Once known, retain it
-            // through temporary absence; the existing activity owner rejects
-            // stale Entity/UID pairs. A different known UID gets a new handle.
-            if candidate.uid.is_none() {
-                candidate.uid = uid.map(str::to_owned);
-            }
-            return key;
-        }
-        let key = self.next_fixture_key;
-        self.next_fixture_key = key
-            .checked_add(1)
-            .expect("fixture button handle space exhausted");
-        self.fixture_candidates.insert(
-            key,
-            FixtureButtonCandidate {
-                entity,
-                uid: uid.map(str::to_owned),
-            },
-        );
-        key
+    fn fixture_target(&self, key: i32) -> Option<FixtureTarget> {
+        self.fixture_targets.get(&key).cloned()
     }
 
-    fn fixture_target(&self, key: i32) -> Option<FixtureTarget> {
-        let candidate = self.fixture_candidates.get(&key)?;
-        Some(FixtureTarget {
-            entity: candidate.entity,
-            uid: candidate.uid.clone()?,
-        })
+    /// Push when absent. One instance keeps one handle while it is stacked.
+    fn push_fixture(&mut self, button: ButtonType, target: FixtureTarget) {
+        let key = match self
+            .fixture_targets
+            .iter()
+            .find(|(_, stacked)| **stacked == target)
+        {
+            Some((&key, _)) => key,
+            None => {
+                let key = self.next_fixture_key;
+                self.next_fixture_key = key
+                    .checked_add(1)
+                    .expect("fixture button handle space exhausted");
+                self.fixture_targets.insert(key, target);
+                key
+            }
+        };
+        self.stack.push(button, TargetId::Fixture(key), false);
+    }
+
+    /// RemoveShowButtonStack for one instance.
+    fn remove_fixture(&mut self, entity: Entity, uid: &str) {
+        let keys: Vec<i32> = self
+            .fixture_targets
+            .iter()
+            .filter(|(_, target)| target.entity == entity && target.uid == uid)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            self.stack.remove(TargetId::Fixture(key));
+            self.fixture_targets.remove(&key);
+        }
+    }
+}
+
+/// A fixture with a button, as the scan saw it this frame.
+struct Candidate<'a> {
+    entity: Entity,
+    button: ButtonType,
+    touching: bool,
+    identity: Option<&'a FixtureActivityIdentity>,
+    world: &'a GlobalTransform,
+}
+
+/// A registered NPC, as the scan saw it this frame.
+struct NpcCandidate {
+    entity: Entity,
+    unit: u32,
+    touching: bool,
+}
+
+/// One object of this frame's scan, in the order its enter edge runs.
+#[derive(Clone, Copy)]
+enum Slot {
+    Fixture(usize),
+    Npc(usize),
+}
+
+fn kind_of(button: ButtonType) -> FixtureKind {
+    if button == ButtonType::TimelineFixture {
+        FixtureKind::Timeline
+    } else {
+        FixtureKind::Gimmick
     }
 }
 
@@ -562,91 +738,143 @@ pub(crate) fn spawn_when_ready(
 /// Update：每帧重建玩家的碰撞盒、与场上目标求交、把进出边沿写进栈。
 ///
 /// 源侧这一步分在两处：碰撞管理器算进出、屏幕层的回调把它转成压栈与
-/// 出栈。本仓没有那两层，于是在这里一次算完——等价的地方是**边沿**：
-/// 只在「本帧相交且上帧不相交」时压栈，反之出栈；不是每帧重建整个栈。
-#[allow(clippy::type_complexity)]
+/// 出栈。本仓没有那两层，于是在这里一次算完。Fixtures and NPCs both
+/// follow the colliding list's edges: admission runs once when an object
+/// joins, removal when it leaves, and nothing is re-tested in between.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn advance(
+    mut commands: Commands,
     mut state: ResMut<ActionButtonState>,
     eligibility: crate::interaction::InteractionEligibility,
+    inputs: AdmissionInputs,
     facts: Res<FixtureFacts>,
-    players: Query<&Transform, With<PlayerControlled>>,
-    npcs: Query<(&Transform, &CharacterUnitId, &WalkState), Without<PlayerControlled>>,
+    mut saved: MessageReader<LayoutSaved>,
+    players: Query<(Entity, &Transform, Option<&ChildOf>), With<PlayerControlled>>,
+    parents: Query<&GlobalTransform>,
+    scenes_ready: Option<Res<crate::site::SiteScenesReady>>,
+    npcs: Query<(Entity, &Transform, &CharacterUnitId), Without<PlayerControlled>>,
     fixtures: Query<
         (
             Entity,
             &Transform,
             &FixtureSource,
-            &FixturePlacement,
             &GlobalTransform,
             Option<&FixtureActivityIdentity>,
+            Option<&ActionButtonFixture>,
         ),
         With<FixtureRoot>,
     >,
     server: Res<AssetServer>,
 ) {
-    let Ok(player) = players.single() else {
+    let state = &mut *state;
+    // A saved layout re-fires entry once the scan next runs.
+    if saved.read().count() > 0 {
+        state.force_update = true;
+    }
+    // A site move: SiteMoveGameState.OnEnter changes to the site-move screen
+    // and GameState SiteMove stops the collision scan. It lasts from the old
+    // site's teardown until the player and NPCs stand on the new site, whose
+    // controller then changes back to the home screen (a new presenter).
+    // npc::reseed and player::reseed place them for a new generation after
+    // this system, in the same frame, so the move ends on the next scan.
+    if scenes_ready.is_none() {
+        state.awaiting_site = true;
+    }
+    let epoch = inputs.site_epoch();
+    if state.site_epoch != epoch {
+        state.site_epoch = epoch;
+        state.awaiting_site = false;
+        state.arriving = true;
+    } else if state.arriving {
+        state.arriving = false;
+    }
+    let site_moving = scenes_ready.is_none() || state.awaiting_site || state.arriving;
+    // ScreenLayerMysekaiHome mounts again: OnBoot builds a new presenter,
+    // and OnScreenStart's Initialize runs ForceUpdate.
+    let mounted = eligibility.home_screen_current() && !site_moving;
+    if mounted && !state.home_mounted {
+        state.rebuild();
+        info!("[action_button] home screen current again; stack restarts from ForceUpdate");
+    }
+    state.home_mounted = mounted;
+    let Ok((player_entity, local, parent)) = players.single() else {
+        state.player = None;
         return;
     };
     if !facts.parsed {
         return;
     }
-    state.player_box = crate::interaction::player_box(player);
+    // The scan and admission read the player's world pose: a player timeline
+    // parents the actor to its seat.
+    let player = match parent {
+        None => *local,
+        Some(parent) => match parents.get(parent.parent()) {
+            Ok(parent) => parent.mul_transform(*local).compute_transform(),
+            Err(_) => return,
+        },
+    };
+    state.player_box = crate::interaction::player_box(&player);
     let player_box = state.player_box;
-
-    // 本帧相交的目标全集，连带它该出哪个按钮。
-    let mut touching: Vec<(ButtonType, TargetId)> = Vec::new();
+    let position = player.translation;
+    state.player = Some((player_entity, position));
 
     // 场上家具的一次性对账：家具铺完之后报一次「这个站点上哪几件有
     // 交互按钮、在哪」。没有这一条，「走了半天没看到家具按钮」分不出
     // 是这条链没接上、还是这个站点上本来就没有可交互家具——两者在
     // 屏幕上长得一样。数是每次运行现算的，不是写死的清单。
-    let survey = !state.surveyed && fixtures.iter().len() > 0;
+    let survey = !state.surveyed && !fixtures.is_empty();
     let mut placed = 0usize;
     let mut joined = 0usize;
     let mut with_button: Vec<(ButtonType, [f32; 3], String)> = Vec::new();
 
-    // Appearance reads proximity/site/visibility. Talk state and EnableTalk are
-    // click-time checks in the sole dispatcher, not reasons to hide the button.
-    for (transform, unit, _) in &npcs {
-        if player_box.collides(&character_box(transform.translation.to_array()))
-            && eligibility.for_unit(unit.0)
-        {
-            touching.push((ButtonType::Talk, TargetId::Character(unit.0)));
-        }
-    }
-
-    for (entity, transform, source, _, _, identity) in &fixtures {
+    let mut frame: Vec<Candidate> = Vec::new();
+    for (entity, transform, source, world, identity, cached) in &fixtures {
         placed += 1;
-        let Some(path) = server.get_path(&source.0) else {
-            continue;
+        let resolved;
+        let facts_of = match cached {
+            Some(cached) => cached,
+            None => {
+                let Some(path) = server.get_path(&source.0) else {
+                    continue;
+                };
+                let glb = path
+                    .path()
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let row = facts.row_for_glb(&glb).copied();
+                resolved = ActionButtonFixture {
+                    button: row.as_ref().and_then(fixture_button),
+                    row,
+                    glb,
+                };
+                commands.entity(entity).try_insert(resolved.clone());
+                &resolved
+            }
         };
-        let glb = path
-            .path()
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_owned();
-        let Some(row) = facts.row_for_glb(&glb) else {
+        let Some(row) = facts_of.row else {
             continue;
         };
         joined += 1;
-        let Some(button) = fixture_button(row) else {
+        let Some(button) = facts_of.button else {
             continue;
         };
         if survey {
-            with_button.push((button, transform.translation.to_array(), glb));
+            with_button.push((button, transform.translation.to_array(), facts_of.glb.clone()));
         }
         let target_box = fixture_box(
             transform.translation.to_array(),
             row.grid_width,
             row.grid_depth,
         );
-        if player_box.collides(&target_box) {
-            // Preserve the exact collision candidate. Missing activity identity
-            // is not a new appearance gate and never selects another root.
-            let key = state.fixture_key(entity, identity);
-            touching.push((button, TargetId::Fixture(key)));
-        }
+        frame.push(Candidate {
+            entity,
+            button,
+            touching: player_box.collides(&target_box),
+            identity,
+            world,
+        });
     }
 
     if survey {
@@ -663,20 +891,162 @@ pub(crate) fn advance(
         }
     }
 
-    // 进沿：本帧相交而栈里没有 → 压栈（非优先，接队尾）。
-    for (button, target) in &touching {
-        if !state.stack.contains(*button, *target) {
-            state.stack.push(*button, *target, false);
+    // An NPC is a collision object once its avatar is registered.
+    let npc_frame: Vec<NpcCandidate> = npcs
+        .iter()
+        .filter(|(entity, _, _)| eligibility.talk_registered(*entity))
+        .map(|(entity, transform, unit)| NpcCandidate {
+            entity,
+            unit: unit.0,
+            touching: player_box.collides(&character_box(transform.translation.to_array())),
+        })
+        .collect();
+
+    // An object that left the scene, whose identity changed, or an NPC no
+    // longer registered, leaves the colliding list and the stack.
+    let index: HashMap<Entity, usize> = frame
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| (candidate.entity, i))
+        .collect();
+    let npc_index: HashMap<Entity, usize> = npc_frame
+        .iter()
+        .enumerate()
+        .map(|(i, npc)| (npc.entity, i))
+        .collect();
+    let live = |entity: Entity, uid: &str| {
+        index
+            .get(&entity)
+            .and_then(|&i| frame[i].identity)
+            .is_some_and(|identity| identity.uid == uid)
+    };
+    state.colliding.retain(|collider| match collider {
+        Collider::Fixture(entity, uid) => live(*entity, uid),
+        Collider::Character(entity, unit) => npc_index
+            .get(entity)
+            .is_some_and(|&i| npc_frame[i].unit == *unit),
+    });
+    state.deferred.retain(|entity, _| index.contains_key(entity));
+    let stale: Vec<i32> = state
+        .fixture_targets
+        .iter()
+        .filter(|(_, target)| !live(target.entity, &target.uid))
+        .map(|(key, _)| *key)
+        .collect();
+    for key in stale {
+        state.stack.remove(TargetId::Fixture(key));
+        state.fixture_targets.remove(&key);
+    }
+    // For an NPC, RemoveCollisionObject runs RemoveShowButtonStack, which
+    // returns at once while the stack is locked.
+    if !state.locked {
+        state.stack.retain_targets(&|target| match target {
+            TargetId::Character(unit) => npc_frame.iter().any(|npc| npc.unit == unit),
+            TargetId::Fixture(_) => true,
+        });
+    }
+
+    // TimelineFixtureFinishAsync: once the player leaves UseTimelineFixture,
+    // the presenter that started the timeline runs RemoveNotCollisionObject
+    // and SetLockActionButton(false) on its model, then shows the view again.
+    // The view outlives a home rebuild; that presenter's model does not, and
+    // the new model was never locked.
+    if let Some(owner) = state.timeline {
+        if eligibility.player_action() != PlayerActionState::UseTimelineFixture {
+            if owner == state.model {
+                remove_not_colliding(
+                    state,
+                    &inputs,
+                    &eligibility,
+                    player_entity,
+                    position,
+                    &frame,
+                    &index,
+                );
+                state.locked = false;
+                info!("[action_button] player timeline ended; stack pruned and unlocked");
+            }
+            state.timeline = None;
         }
     }
-    // 出沿：栈里有而本帧不相交 → 出栈。
-    let alive: Vec<TargetId> = touching.iter().map(|(_, t)| *t).collect();
-    state
-        .stack
-        .retain_targets(&|target| alive.contains(&target));
-    state
-        .fixture_candidates
-        .retain(|key, _| alive.contains(&TargetId::Fixture(*key)));
+    // The Talk button's OnClickPlayerTalkAction awaits the talk action and
+    // then always runs RemoveNotCollisionObject. A talk that played pushed
+    // MysekaiTalk, so that call reaches the model the home rebuild replaces;
+    // a refused one reaches the current model now.
+    if std::mem::take(&mut state.talk_tapped) && !eligibility.player_in_talk() {
+        remove_not_colliding(
+            state,
+            &inputs,
+            &eligibility,
+            player_entity,
+            position,
+            &frame,
+            &index,
+        );
+    }
+
+    // ObjectCollisionManager.IsCanUpdate: no edges at all while it is false.
+    if eligibility.collision_updates() && !site_moving {
+        // ForceUpdate returns the colliding list to the registered objects,
+        // behind the others, and scans: the newly overlapping enter first,
+        // then the previous list in its order. It produces no exit edge.
+        let previous = if state.force_update {
+            state.force_update = false;
+            state.deferred.clear();
+            Some(state.colliding.take())
+        } else {
+            None
+        };
+        let fresh = |entity: Entity| {
+            previous
+                .as_ref()
+                .is_none_or(|previous| !previous.iter().any(|collider| collider.entity() == entity))
+        };
+        // Moly has no registration order across fixtures and NPCs; the scan
+        // takes fixtures, then NPCs, each in query order.
+        let mut order: Vec<Slot> = frame
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.touching && fresh(candidate.entity))
+            .map(|(i, _)| Slot::Fixture(i))
+            .chain(
+                npc_frame
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, npc)| npc.touching && fresh(npc.entity))
+                    .map(|(i, _)| Slot::Npc(i)),
+            )
+            .collect();
+        for collider in previous.iter().flatten() {
+            let slot = match collider {
+                Collider::Fixture(entity, _) => index
+                    .get(entity)
+                    .filter(|&&i| frame[i].touching)
+                    .map(|&i| Slot::Fixture(i)),
+                Collider::Character(entity, _) => npc_index
+                    .get(entity)
+                    .filter(|&&i| npc_frame[i].touching)
+                    .map(|&i| Slot::Npc(i)),
+            };
+            order.extend(slot);
+        }
+        // CheckEnterCollide, then CheckExitCollide.
+        let revision = inputs.revision();
+        for slot in order {
+            match slot {
+                Slot::Fixture(i) => {
+                    fixture_enter(state, &inputs, player_entity, position, &frame[i], revision)
+                }
+                Slot::Npc(i) => npc_enter(state, &eligibility, &npc_frame[i]),
+            }
+        }
+        for candidate in frame.iter().filter(|candidate| !candidate.touching) {
+            fixture_exit(state, candidate.entity);
+        }
+        for npc in npc_frame.iter().filter(|npc| !npc.touching) {
+            npc_exit(state, npc.entity, npc.unit);
+        }
+    }
 
     let head = state.stack.first();
     if head != state.reported {
@@ -701,6 +1071,195 @@ pub(crate) fn advance(
     }
 }
 
+/// CheckExitCollide for a fixture that no longer overlaps.
+fn fixture_exit(state: &mut ActionButtonState, entity: Entity) {
+    state.deferred.remove(&entity);
+    // RemoveShowButtonStack returns at once while the stack is locked.
+    if let Some(Collider::Fixture(_, uid)) = state.colliding.leave(entity) {
+        if !state.locked {
+            state.remove_fixture(entity, &uid);
+        }
+    }
+}
+
+/// CheckEnterCollide for an overlapping fixture.
+fn fixture_enter(
+    state: &mut ActionButtonState,
+    inputs: &AdmissionInputs,
+    player: Entity,
+    position: Vec3,
+    candidate: &Candidate,
+    revision: Option<InputRevision>,
+) {
+    let entity = candidate.entity;
+    if state.colliding.contains(entity) {
+        return;
+    }
+    let Some(identity) = candidate.identity else {
+        return;
+    };
+    if revision.is_some() && state.deferred.get(&entity) == revision.as_ref() {
+        return;
+    }
+    let target = FixtureTarget {
+        entity,
+        uid: identity.uid.clone(),
+    };
+    let joined = Collider::Fixture(entity, target.uid.clone());
+    // TryAddObjToCollideList precedes AddShowButtonStack, whose lock check
+    // then drops the entry.
+    if state.locked {
+        state.colliding.join(joined);
+        return;
+    }
+    let probe = Probe {
+        player,
+        position,
+        target: &target,
+        identity,
+        world: candidate.world,
+        kind: kind_of(candidate.button),
+    };
+    match inputs.enter(&probe) {
+        Ok(Enter::Push) => {
+            state.deferred.remove(&entity);
+            state.colliding.join(joined);
+            state.push_fixture(candidate.button, target);
+        }
+        Ok(Enter::Remove) => {
+            state.deferred.remove(&entity);
+            state.colliding.join(joined);
+            state.remove_fixture(entity, &target.uid);
+            info!(
+                "[action_button] {:?} {} entered; IsCanActionFixture is false, not stacked",
+                candidate.button, target.uid
+            );
+        }
+        Ok(Enter::Skip(reason)) => {
+            state.deferred.remove(&entity);
+            state.colliding.join(joined);
+            info!(
+                "[action_button] {:?} {} entered; {reason}, not stacked",
+                candidate.button, target.uid
+            );
+        }
+        Err(deferred) => match deferred.retry {
+            Retry::NextFrame => {}
+            Retry::NewInputs(at) => {
+                if state.deferred.insert(entity, at) != Some(at) {
+                    warn!(
+                        "[action_button] {:?} {} entry undecided with this navigation snapshot: {}",
+                        candidate.button, target.uid, deferred.reason
+                    );
+                }
+            }
+            Retry::Never => {
+                state.deferred.remove(&entity);
+                state.colliding.join(joined);
+                warn!(
+                    "[action_button] {:?} {} entered without a button; attachment data cannot answer: {}",
+                    candidate.button, target.uid, deferred.reason
+                );
+            }
+        },
+    }
+}
+
+/// CheckEnterCollide for an overlapping NPC: TryAddObjToCollideList, then
+/// AddShowButtonStack for its Talk entry.
+fn npc_enter(
+    state: &mut ActionButtonState,
+    eligibility: &crate::interaction::InteractionEligibility,
+    npc: &NpcCandidate,
+) {
+    if state.colliding.contains(npc.entity) {
+        return;
+    }
+    // Without an active site CheckTargetSite has nothing to compare with;
+    // the edge waits for one.
+    let Some(admitted) = eligibility.talk_admitted(npc.entity) else {
+        return;
+    };
+    state
+        .colliding
+        .join(Collider::Character(npc.entity, npc.unit));
+    if state.locked || !admitted {
+        return;
+    }
+    state
+        .stack
+        .push(ButtonType::Talk, TargetId::Character(npc.unit), false);
+}
+
+/// CheckExitCollide for an NPC: RemoveShowButtonStack, which returns at
+/// once while the stack is locked.
+fn npc_exit(state: &mut ActionButtonState, entity: Entity, unit: u32) {
+    if state.colliding.leave(entity).is_some() && !state.locked {
+        state.stack.remove(TargetId::Character(unit));
+    }
+}
+
+/// RemoveNotCollisionObject: an entry whose object left the colliding list
+/// is removed; one still inside is removed when IsActionButtonTypeAvailable
+/// is false. It has no lock check.
+fn remove_not_colliding(
+    state: &mut ActionButtonState,
+    inputs: &AdmissionInputs,
+    eligibility: &crate::interaction::InteractionEligibility,
+    player: Entity,
+    position: Vec3,
+    frame: &[Candidate],
+    index: &HashMap<Entity, usize>,
+) {
+    let mut removed = Vec::new();
+    for (&key, target) in &state.fixture_targets {
+        if state.colliding.fixture_uid(target.entity) != Some(target.uid.as_str()) {
+            removed.push(key);
+            continue;
+        }
+        let Some(candidate) = index.get(&target.entity).map(|&i| &frame[i]) else {
+            removed.push(key);
+            continue;
+        };
+        let Some(identity) = candidate.identity else {
+            continue;
+        };
+        let probe = Probe {
+            player,
+            position,
+            target,
+            identity,
+            world: candidate.world,
+            kind: kind_of(candidate.button),
+        };
+        match inputs.availability(&probe) {
+            Ok(Availability::Available) => {}
+            Ok(Availability::Unavailable) => removed.push(key),
+            Ok(Availability::Raises) => warn!(
+                "[action_button] {} is stacked although the source raises on its availability; kept",
+                target.uid
+            ),
+            Err(deferred) => info!(
+                "[action_button] {} availability undecided while pruning ({}); kept",
+                target.uid, deferred.reason
+            ),
+        }
+    }
+    for key in removed {
+        state.stack.remove(TargetId::Fixture(key));
+        state.fixture_targets.remove(&key);
+    }
+    // A Talk entry: its NPC left the colliding list, or CheckTargetSite or
+    // CanShowTalkActionButton is false. Without an active site it is kept.
+    let colliding = &state.colliding;
+    state.stack.retain_targets(&|target| match target {
+        TargetId::Fixture(_) => true,
+        TargetId::Character(unit) => colliding
+            .character(unit)
+            .is_some_and(|entity| eligibility.talk_available(entity) != Some(false)),
+    });
+}
+
 /// 一件家具该出哪个按钮。三支照源的次序：机关 → 演出 → 按类别。
 ///
 /// 生日演出那一支源侧还在前面插一道「当前是否在生日档期内」，本仓的
@@ -710,8 +1269,8 @@ fn fixture_button(row: &FixtureRow) -> Option<ButtonType> {
         return Some(ButtonType::GimmickFixture);
     }
     if FixtureFacts::is_timeline(row.action_value) {
-        // 源侧这一支还要过「动作点位可用」与「玩家能否演出」两道运行时
-        // 门，本仓没有那两个状态；见模块头的缺口条目。
+        // The action point and player gates (IsActionButtonTypeAvailable,
+        // IsCanActionFixture) run on the collision edge, in admission.rs.
         return Some(ButtonType::TimelineFixture);
     }
     if !row.fixture_type.can_action() {
@@ -741,7 +1300,14 @@ pub(crate) fn place_ui(
     let scale = screen.scale(window);
     let rects = screen.rects(window);
     for (mut visibility, mut transform) in &mut roots {
-        *visibility = if head.is_some() && rects.is_some() {
+        // TimelineFixtureProcess hides the action buttons view until the
+        // timeline's finish shows it again. They are part of the home
+        // screen, which is not shown while another screen is current.
+        *visibility = if head.is_some()
+            && rects.is_some()
+            && state.timeline.is_none()
+            && state.home_mounted
+        {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -780,12 +1346,20 @@ pub(crate) fn place_ui(
 /// Update（拾取之前）：点按落在按钮上就分派动作并吃掉这一帧的点按。
 ///
 /// 节流照源：两次输入之间至少隔 [`ACTION_BUTTON_INPUT_INTERVAL`] 秒。
+///
+/// OnGimmickFixture reads only its input interval and the multiplayer dialog;
+/// the player's own state is a later, separate step of the switch. The other
+/// buttons keep the full interaction gate. OnTimelineFixture asks
+/// IsCanActionFixture for the head again before it locks the stack.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut commands: Commands,
     mut state: ResMut<ActionButtonState>,
     mut consumed: ResMut<ActionTapConsumed>,
     eligibility: crate::interaction::InteractionEligibility,
+    inputs: AdmissionInputs,
+    views: Query<(&FixtureActivityIdentity, &GlobalTransform), With<FixtureRoot>>,
     time: Res<Time>,
     screen: ActionButtonScreen,
     roots: Query<&Visibility, With<ActionButtonRoot>>,
@@ -803,8 +1377,21 @@ pub(crate) fn click(
         .filter(|event| event.kind == GestureKind::Tap && event.state == GestureState::End)
         .map(|event| event.position)
         .collect();
+    // Open gap for Talk: available() is closed while any conversation plays,
+    // and the talk dispatcher refuses a request for the same reason. The
+    // source has no such global gate: OnCharacterTalk hands the head's NPC to
+    // MysekaiPlayerTalkAction.OnClickPlayerTalkAction, which routes on that
+    // NPC's own state, and sends an NPC taking part in a conversation between
+    // characters to PlaySomeCharacterTalkFixture, where the player joins it.
+    // Moly does not join conversations, so while NPCs talk to each other the
+    // Talk button stays visible but inert: the tap is not taken and no talk
+    // starts.
+    let open = match state.current() {
+        Some((ButtonType::GimmickFixture, _)) => eligibility.field_input_open(),
+        _ => eligibility.available(),
+    };
     if taps.is_empty()
-        || !eligibility.available()
+        || !open
         || !roots
             .iter()
             .any(|visibility| *visibility != Visibility::Hidden)
@@ -835,9 +1422,22 @@ pub(crate) fn click(
             state.last_input = now;
         }
         consumed.0 = true;
+        // Every Talk tap from here reaches the talk action, refused or not;
+        // its RemoveNotCollisionObject runs on the next scan.
+        if button == ButtonType::Talk {
+            state.talk_tapped = true;
+        }
         if let TargetId::Character(unit) = target {
             if !eligibility.for_unit(unit) {
                 continue;
+            }
+        }
+        if button == ButtonType::TimelineFixture {
+            if let Some(target) = fixture_target.as_ref() {
+                if let Err(reason) = timeline_ready(state.player, &inputs, &views, target) {
+                    info!("[action_button] TimelineFixture tap on {} ignored: {reason}", target.uid);
+                    continue;
+                }
             }
         }
         dispatch(
@@ -850,6 +1450,42 @@ pub(crate) fn click(
             &mut layer_commands,
             fixture_target.as_ref(),
         );
+        if button == ButtonType::TimelineFixture && fixture_target.is_some() {
+            // TimelineFixtureProcess hides the view and runs
+            // SetLockActionButton(true); the timeline's finish undoes both.
+            state.locked = true;
+            state.timeline = Some(state.model);
+        }
+    }
+}
+
+/// OnTimelineFixture's head check: the fixture and its view exist and
+/// IsCanActionFixture holds now.
+fn timeline_ready(
+    player: Option<(Entity, Vec3)>,
+    inputs: &AdmissionInputs,
+    views: &Query<(&FixtureActivityIdentity, &GlobalTransform), With<FixtureRoot>>,
+    target: &FixtureTarget,
+) -> Result<(), String> {
+    let (player, position) = player.ok_or("player pose is not ready")?;
+    let (identity, world) = views
+        .get(target.entity)
+        .map_err(|_| "fixture left the scene")?;
+    if identity.uid != target.uid {
+        return Err("fixture identity changed".into());
+    }
+    let probe = Probe {
+        player,
+        position,
+        target,
+        identity,
+        world,
+        kind: FixtureKind::Timeline,
+    };
+    match inputs.can_action(&probe) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("IsCanActionFixture is false".into()),
+        Err(deferred) => Err(format!("IsCanActionFixture undecided: {}", deferred.reason)),
     }
 }
 

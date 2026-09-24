@@ -101,7 +101,11 @@ async fn response(root: &str, path: &str) -> Result<(RequestGuard, Response), As
         status => Err(error(format!("Asset HTTP {status}: {path}"))),
     }
 }
-fn bound(response: &Response, path: &str, limit: usize) -> Result<usize, AssetReaderError> {
+fn bound(
+    response: &Response,
+    path: &str,
+    limit: usize,
+) -> Result<crate::http_path::ResponseBound, AssetReaderError> {
     let length = response
         .headers()
         .get("content-length")
@@ -122,11 +126,13 @@ async fn stream(
     guard: &RequestGuard,
     path: &str,
     limit: usize,
+    exact: bool,
 ) -> Result<Vec<u8>, AssetReaderError> {
     // A loose thumbnail must not allocate MAX_ASSET_BYTES merely because that
     // is its safety ceiling. Grow only for bytes actually received, retaining
-    // a capacity ceiling even as larger bodies grow geometrically.
-    let mut bytes = read_limits::buffer(limit.min(64 * 1024))?;
+    // a capacity ceiling even as larger bodies grow geometrically. A bound
+    // that is the body's exact size is allocated once instead.
+    let mut bytes = read_limits::buffer(if exact { limit } else { limit.min(64 * 1024) })?;
     let Some(body) = response.body() else {
         return Ok(bytes);
     };
@@ -173,14 +179,16 @@ async fn stream(
 }
 
 /// Packed callers already own a representation-specific buffer reservation.
+/// `exact` says that `limit` is the authenticated size of the body.
 pub(crate) async fn read_bytes(
     root: &str,
     path: &str,
     limit: usize,
+    exact: bool,
 ) -> Result<Vec<u8>, AssetReaderError> {
     let (guard, response) = response(root, path).await?;
-    let limit = bound(&response, path, limit)?;
-    stream(response, &guard, path, limit).await
+    let size = bound(&response, path, limit)?;
+    stream(response, &guard, path, size.bytes, exact || size.exact).await
 }
 
 /// Loose assets have no manifest size. Reserve their actual Content-Length
@@ -193,9 +201,9 @@ pub(crate) async fn read_budgeted(
     budget: &Arc<Budget>,
 ) -> Result<Buffer, AssetReaderError> {
     let (guard, response) = response(root, path).await?;
-    let limit = bound(&response, path, limit)?;
-    let mut reservation = budget.reserve(limit).await?;
-    let bytes = stream(response, &guard, path, limit).await?;
+    let size = bound(&response, path, limit)?;
+    let mut reservation = budget.reserve(size.bytes).await?;
+    let bytes = stream(response, &guard, path, size.bytes, size.exact).await?;
     reservation.shrink_to(bytes.capacity());
     Ok(Buffer {
         bytes,

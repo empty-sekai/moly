@@ -49,7 +49,7 @@ fn trigger(instance: &mut Instance, on: bool) {
 /// On/Off controller. The library observes the effect, not merely the 1s gesture.
 pub(crate) fn start_preview(world: &mut World, target: &FixtureTarget, owner: Entity, generation: u64) -> Result<(), String> {
     acquire(world, target, owner, Scope::Library)?;
-    if let Err(reason) = super::start(world, target, generation) {
+    if let Err(reason) = super::start_exclusive(world, target, generation) {
         finish_owner(world, owner);
         return Err(reason);
     }

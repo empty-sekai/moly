@@ -276,7 +276,7 @@ pub(crate) struct JoystickArt {
 
 /// Startup：请求整页贴图（两件共用一页，一次装载）。
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
-    let page = server.load::<Image>(AssetPath::from(PAGE.to_owned()));
+    let page = moly_assets::residency::load_image(&server, AssetPath::from(PAGE.to_owned()));
     commands.insert_resource(JoystickArt { page });
 }
 

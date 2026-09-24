@@ -25,6 +25,7 @@ use crate::{
         AnimationCoverage, SourceAnimationEvidence, StartTimeline, TimelineAnimationBinding,
         TimelineDefinition, TimelinePackage, TimelinePayload,
     },
+    fixture_talk::FixtureAnimation,
 };
 
 struct Package {
@@ -111,6 +112,19 @@ impl ActivityAssets {
             .ok_or_else(|| ProviderPending::new("json-loading", path))
     }
 
+    /// Start loading `path` without reading it, so tables that are read one
+    /// after another still arrive together. It requests exactly the handle
+    /// `json_text` would request; any error is reported when that reads it.
+    fn request_json(&mut self, world: &World, path: &str) {
+        if safe_path(path).is_err() {
+            return;
+        }
+        if let Some(server) = world.get_resource::<AssetServer>() {
+            self.json
+                .get_or_insert_with(path, || server.load(format!("moly://{path}")));
+        }
+    }
+
     fn document(&mut self, world: &World, path: &str) -> Result<Arc<Value>, ProviderPending> {
         // A cached parse still depends on this live JSON generation. Touch its
         // handle too, or retirement would cause a reload on the next tick.
@@ -165,6 +179,11 @@ impl ActivityAssets {
             .get(package)
             .is_some_and(|cached| Self::same_generation(cached.validated_at, generation));
         if !validated {
+            // Request all three tables before reading the first, so a cold
+            // package costs one load round instead of three in sequence.
+            for kind in ["tracks", "clips", "clip-targets"] {
+                self.request_json(world, &format!("fixture-timeline/{kind}/{package}.json"));
+            }
             let text = [
                 self.json_text(world, &format!("fixture-timeline/tracks/{package}.json"))?,
                 self.json_text(world, &format!("fixture-timeline/clips/{package}.json"))?,
@@ -353,6 +372,20 @@ impl ActivityAssets {
                     }
                     ids
                 };
+                // The source binds the FixtureView's own serialized Animator,
+                // present from the moment the view exists. Here the placed
+                // fixture's animator is installed later, once its visual setup
+                // has finished (after the material swap), and only then does
+                // the root carry `FixtureAnimation`. Until that, the animator is
+                // still-arriving input: wait for it. Once it is resolved, zero
+                // or several matching animators (including a root whose
+                // animation targets are ambiguous) are final.
+                if world.get::<FixtureAnimation>(request.fixture).is_none() {
+                    return Err(ProviderPending::new(
+                        "fixture-animation-surface",
+                        "placed fixture's animator is not installed yet",
+                    ));
+                }
                 let mut target_sets: HashMap<Entity, HashSet<AnimationTargetId>> = HashMap::new();
                 for (entity, id, by) in world
                     .query::<(Entity, &AnimationTargetId, &AnimatedBy)>()

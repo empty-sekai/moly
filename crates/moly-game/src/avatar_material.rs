@@ -475,6 +475,7 @@ pub struct AvatarMaterialPlugin;
 
 impl Plugin for AvatarMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::gpu_image_release::prepare_after_images::<AvatarMaterial>(app);
         app.add_plugins((
             MaterialPlugin::<AvatarMaterial>::default(),
             ExtractResourcePlugin::<AvatarEnv>::default(),

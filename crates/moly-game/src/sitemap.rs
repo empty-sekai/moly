@@ -788,7 +788,10 @@ pub(crate) fn parse(
         let uri = &srgb_names[name];
         textures.insert(
             name.clone(),
-            server.load::<Image>(AssetPath::from(format!("moly://site/sitemap/texture/{uri}"))),
+            moly_assets::residency::load_image(
+                &server,
+                AssetPath::from(format!("moly://site/sitemap/texture/{uri}")),
+            ),
         );
     }
 

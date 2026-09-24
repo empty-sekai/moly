@@ -48,6 +48,7 @@ mod frame_capture;
 pub mod game_settings;
 pub mod gesture;
 pub mod get_resource;
+mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
 pub mod inactive_nodes;
@@ -80,6 +81,7 @@ mod player_data_ui;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
+mod render;
 mod room_appearance;
 pub mod schedule;
 mod settings_store;
@@ -91,6 +93,7 @@ pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
 mod source_curve;
+mod weather_animation;
 pub mod talk;
 pub mod talk_camera;
 mod talk_ingest;
@@ -156,7 +159,9 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
+    gpu_image_release::install(&mut app);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);
 

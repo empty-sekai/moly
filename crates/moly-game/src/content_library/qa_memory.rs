@@ -1,6 +1,11 @@
 //! Read-only byte accounting for live assets, not allocator/OS memory claims.
+use std::collections::BTreeMap;
+
 use bevy::{
-    asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::TextureDimension,
+    asset::{AssetPath, RenderAssetUsages},
+    mesh::Indices,
+    prelude::*,
+    render::render_resource::TextureDimension,
 };
 use serde_json::{Value, json};
 
@@ -53,6 +58,46 @@ fn wasm_capacity() -> Option<u64> {
     None
 }
 
+/// The family an asset belongs to, derived from its asset path alone: the
+/// first directory of the path (the first two under `site/`, whose
+/// subdirectories are loaded by different code), then the file extension, and
+/// `#` when the asset is a labelled part of a package (a glTF texture or
+/// mesh). Files at the root of the asset source are `(root)`; assets created at
+/// runtime have no path and are `(runtime)`.
+fn family(path: Option<&AssetPath>) -> String {
+    let Some(path) = path else {
+        return "(runtime)".to_owned();
+    };
+    let segments: Vec<&str> = path.path().iter().filter_map(|segment| segment.to_str()).collect();
+    let directory = match segments.as_slice() {
+        [] | [_] => "(root)".to_owned(),
+        ["site", second, _, ..] => format!("site/{second}"),
+        [first, ..] => (*first).to_owned(),
+    };
+    let extension = path.path().extension().and_then(|extension| extension.to_str()).unwrap_or("");
+    let label = if path.label().is_some() { "#" } else { "" };
+    format!("{directory}/*.{extension}{label}")
+}
+
+#[derive(Default)]
+struct ImageFamily {
+    images: u64,
+    cpu_images: u64,
+    cpu_bytes: u64,
+    cpu_capacity: u64,
+    gpu_bytes: u64,
+    unknown_gpu: u64,
+    cpu_and_gpu: u64,
+    largest_cpu: Option<(u64, String)>,
+}
+
+#[derive(Default)]
+struct MeshFamily {
+    meshes: u64,
+    cpu_meshes: u64,
+    cpu_bytes: u64,
+}
+
 pub(super) fn diagnostics(
     images: &Assets<Image>,
     meshes: &Assets<Mesh>,
@@ -64,7 +109,9 @@ pub(super) fn diagnostics(
     let mut unknown_gpu_images = 0;
     let mut both_world_images = 0;
     let mut rows = Vec::new();
+    let mut image_families: BTreeMap<String, ImageFamily> = BTreeMap::new();
     for (id, image) in images.iter() {
+        let path = server.get_path(id);
         let cpu = image.data.as_ref().map_or(0, |data| data.len() as u64);
         let capacity = image.data.as_ref().map_or(0, |data| data.capacity() as u64);
         image_bytes += cpu;
@@ -79,13 +126,28 @@ pub(super) fn diagnostics(
             Some(0)
         };
         gpu_bytes += gpu.unwrap_or(0);
-        if cpu > 0 && image.asset_usage.contains(RenderAssetUsages::RENDER_WORLD) {
+        let both = cpu > 0 && image.asset_usage.contains(RenderAssetUsages::RENDER_WORLD);
+        if both {
             both_world_images += 1;
+        }
+        let entry = image_families.entry(family(path.as_ref())).or_default();
+        entry.images += 1;
+        entry.cpu_bytes += cpu;
+        entry.cpu_capacity += capacity;
+        entry.gpu_bytes += gpu.unwrap_or(0);
+        entry.unknown_gpu += u64::from(gpu.is_none());
+        entry.cpu_and_gpu += u64::from(both);
+        if capacity > 0 {
+            entry.cpu_images += 1;
+            if entry.largest_cpu.as_ref().is_none_or(|(largest, _)| capacity > *largest) {
+                let name = path.as_ref().map_or_else(|| format!("{id:?}"), |path| path.to_string());
+                entry.largest_cpu = Some((capacity, name));
+            }
         }
         rows.push((
             capacity + gpu.unwrap_or(0),
             json!({
-                "path": server.get_path(id).map(|path| path.to_string()),
+                "path": path.map(|path| path.to_string()),
                 "cpuPixelBytes": cpu, "cpuPixelCapacityBytes": capacity,
                 "estimatedGpuTextureBytes": gpu,
                 "width": image.width(), "height": image.height(),
@@ -94,10 +156,39 @@ pub(super) fn diagnostics(
         ));
     }
     rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    let mut mesh_families: BTreeMap<String, MeshFamily> = BTreeMap::new();
+    let mut mesh_bytes = 0u64;
+    for (id, mesh) in meshes.iter() {
+        let bytes = mesh_cpu_bytes(mesh);
+        mesh_bytes += bytes;
+        let entry = mesh_families.entry(family(server.get_path(id).as_ref())).or_default();
+        entry.meshes += 1;
+        entry.cpu_meshes += u64::from(bytes > 0);
+        entry.cpu_bytes += bytes;
+    }
+    let mut image_families: Vec<(String, ImageFamily)> = image_families.into_iter().collect();
+    image_families.sort_by(|(a_name, a), (b_name, b)| {
+        (b.cpu_capacity + b.gpu_bytes)
+            .cmp(&(a.cpu_capacity + a.gpu_bytes))
+            .then_with(|| a_name.cmp(b_name))
+    });
+    let mut mesh_families: Vec<(String, MeshFamily)> = mesh_families.into_iter().collect();
+    mesh_families.sort_by(|(a_name, a), (b_name, b)| b.cpu_bytes.cmp(&a.cpu_bytes).then_with(|| a_name.cmp(b_name)));
     json!({
         "scope": "live-asset-payloads; excludes allocator overhead, clips, ECS, drivers and internal render targets",
         "cpuImageBytes": image_bytes, "cpuImageCapacityBytes": image_capacity,
-        "cpuMeshBufferBytes": meshes.iter().map(|(_, mesh)| mesh_cpu_bytes(mesh)).sum::<u64>(),
+        "cpuMeshBufferBytes": mesh_bytes,
+        "imageFamilies": image_families.into_iter().map(|(name, family)| json!({
+            "family": name, "images": family.images, "cpuImages": family.cpu_images,
+            "cpuPixelBytes": family.cpu_bytes, "cpuPixelCapacityBytes": family.cpu_capacity,
+            "estimatedGpuTextureBytes": family.gpu_bytes, "unknownGpuImageCount": family.unknown_gpu,
+            "cpuAndGpuImageCount": family.cpu_and_gpu,
+            "largestCpuImage": family.largest_cpu.map(|(_, path)| path),
+        })).collect::<Vec<_>>(),
+        "meshFamilies": mesh_families.into_iter().map(|(name, family)| json!({
+            "family": name, "meshes": family.meshes, "cpuMeshes": family.cpu_meshes,
+            "cpuMeshBufferBytes": family.cpu_bytes,
+        })).collect::<Vec<_>>(),
         "estimatedGpuTextureBytes": gpu_bytes, "unknownGpuImageCount": unknown_gpu_images,
         "cpuAndGpuImageCount": both_world_images,
         "wasmLinearMemoryCapacityBytes": wasm_capacity(),
