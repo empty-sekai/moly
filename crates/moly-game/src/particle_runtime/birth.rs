@@ -9,6 +9,7 @@ use moly_law::particle::{
     initial::{InitialContext, InitialGroupInput, InitialLaw},
     noise::NoiseLaw,
     random::ParticleRandom,
+    schema::{SubEmitterParams, SubEmitterSourcePointer, SubEmitterTrigger},
     seed_owner::ModuleRandom,
     sub_emission::BirthBatch,
 };
@@ -19,12 +20,58 @@ pub(crate) struct NativeBirthState {
     pub initial: ModuleRandom,
     pub shape: ModuleRandom,
     pub emission: AutonomousEmissionState,
+    pub frame: FrameState,
+    /// Parent side of the sub-emitter birth and death events, attached by the
+    /// installer when the emitter has real birth or death edges; `None`
+    /// otherwise.
+    pub events: Option<super::sub_events::BirthEvents>,
+    /// The child side when this system is an installed sub-emitter target;
+    /// `None` for every other system.
+    pub target: Option<super::child::ChildTarget>,
+}
+
+/// Per-system state the engine's per-frame update head keeps between frames.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FrameState {
+    /// System seconds still to simulate: each unskipped frame adds its scaled
+    /// dt, every slice subtracts itself, and a rest below the loop threshold
+    /// carries into the next frame. Zero at construction and at every Play.
+    pub pending: f32,
+    /// Emitter translation at the end of the last frame with a nonzero dt.
+    pub previous_position: [f32; 3],
+    /// Emitter velocity (translation change over the raw frame dt). Zero at
+    /// construction; Play does not clear it.
+    pub velocity: [f32; 3],
+    /// Set at construction and by Play: the next frame takes its own
+    /// translation as the previous one.
+    pub reset_previous: bool,
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        Self { pending: 0.0, previous_position: [0.0; 3], velocity: [0.0; 3], reset_previous: true }
+    }
+}
+
+/// The emitter velocity is refreshed only for a raw frame dt above this.
+const MIN_VELOCITY_DT: f32 = f32::from_bits(0x38d1_b717);
+
+/// Placement of the time births of one slice along the emitter's motion.
+/// StartModules moves every World-space birth back by
+/// (births_ahead + fraction) * (dt / speed) times the emitter velocity, after
+/// Shape, start velocity and the newborn pre-simulation modules and before the
+/// newborn integration; in Local space the velocity is masked to zero.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BirthBacktrack {
+    pub births_ahead: f32,
+    pub emitter_velocity: [f32; 3],
 }
 
 /// Name-independent qualification of the native birth composition: autonomous
 /// emission with a constant or two-constant rate and burst count, the Initial
 /// law, the qualified Shape configurations,
-/// the qualified Noise subset and authored-null child edges. The source update
+/// the qualified Noise subset and authored-null or real birth child edges
+/// (their event owner is attached by the installer). The source update
 /// route (ordinary versus procedural) is decided by the caller from the
 /// exported system block, not here.
 pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefused> {
@@ -38,7 +85,20 @@ pub(super) fn qualify_emitter(emitter: &EmitterParams) -> Result<(), BirthRefuse
         emission,
     )
     .map_err(BirthRefused::Emission)?;
-    validate_emitter(emitter, &ModuleRandom::from_owner_seed(0)).map(|_| ())
+    // A World-space birth is placed back along the emitter velocity; only the
+    // Transform mode's velocity (translation change per frame) is transcribed.
+    // Local space masks the velocity, so its mode is never read.
+    if emitter.simulation_space == SimulationSpace::World && emitter.emitter_velocity_mode != Some(0) {
+        return Err(BirthRefused::Unsupported(
+            "World-space emitter velocity other than the Transform mode is not transcribed",
+        ));
+    }
+    validate_emitter(emitter, &ModuleRandom::from_owner_seed(0))?;
+    // The module law is qualified above; its scene cannot be bound yet.
+    if emitter.collision.is_some() {
+        return Err(BirthRefused::Unsupported(super::collision::COLLISION_SCENE_NOT_PORTED));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,13 +107,111 @@ pub(super) enum BirthRefused {
     InvalidTiming,
     Initial(moly_law::particle::initial::Refused),
     Emission(moly_law::particle::autonomous_emission::Refused),
+    Collision(String),
+}
+
+/// One rendered frame of an installed system, as the engine's per-frame
+/// update head runs it before its slices: refresh the emitter velocity from
+/// the owner translation, scale the frame dt by the simulation speed, take
+/// the slice length, skip the frame below the minimum step (only the velocity
+/// and the end-of-frame translation change then), otherwise add the scaled
+/// dt to the pending time and run every slice of the incremental loop. The
+/// displacement of a skipped frame is lost, as in the engine. A stopped system
+/// runs the same slices without emission.
+pub(super) fn advance_frame(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    frame_dt: f32,
+    stopped: bool,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    let current = compose_to_world(system, ctx).translation().to_array();
+    let frame = &mut state.frame;
+    if frame.reset_previous {
+        frame.previous_position = current;
+        frame.reset_previous = false;
+    }
+    // Divided by the raw frame dt, not the speed-scaled one; a NaN dt keeps
+    // the previous velocity.
+    if frame_dt > MIN_VELOCITY_DT {
+        let previous = frame.previous_position;
+        frame.velocity = std::array::from_fn(|axis| (current[axis] - previous[axis]) / frame_dt);
+    }
+    let head = moly_law::particle::prewarm::FrameStep::new(
+        frame_dt, system.emitter.simulation_speed, PLAYER_TIME);
+    let result = if head.skips() {
+        Ok(())
+    } else {
+        // A backlog the bounded slice schedule refuses commits nothing: the
+        // frame's time is dropped and the pending time stays as it was. The
+        // engine has no such refusal.
+        match head.plan(state.frame.pending, system.emitter.duration) {
+            Ok(plan) => run_plan(system, state, plan, stopped, ctx),
+            Err(_) => Err(BirthRefused::InvalidTiming),
+        }
+    };
+    // End of the frame's update: a zero dt keeps the old translation; NaN
+    // compares unequal to zero and replaces it.
+    if frame_dt != 0.0 {
+        state.frame.previous_position = current;
+    }
+    result
+}
+
+/// One incremental update of an installed system from its pending time and
+/// slice length, as the engine's incremental loop takes them from the frame
+/// head: every slice, then the rest below the loop threshold stays pending.
+#[cfg(test)]
+pub(super) fn run_incremental(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    pending: f32,
+    step: f32,
+    stopped: bool,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    let plan = moly_law::particle::prewarm::PrewarmPlan::from_incremental_input(
+        pending, step, 0, system.emitter.duration)
+        .map_err(|_| BirthRefused::InvalidTiming)?;
+    run_plan(system, state, plan, stopped, ctx)
+}
+
+fn run_plan(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    mut plan: moly_law::particle::prewarm::PrewarmPlan,
+    stopped: bool,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    let emitter_velocity = if system.emitter.simulation_space == SimulationSpace::World {
+        state.frame.velocity
+    } else {
+        [0.0; 3]
+    };
+    for slice in plan.by_ref() {
+        let result = slice.map_err(|_| BirthRefused::InvalidTiming).and_then(|slice| {
+            step_slice(system, state, slice.duration, Some(slice.remaining_before), stopped,
+                Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity }), ctx)
+        });
+        if let Err(error) = result {
+            // A refused slice ends the frame; the rest of its time is
+            // dropped rather than carried as an unbounded backlog.
+            state.frame.pending = 0.0;
+            return Err(error);
+        }
+    }
+    state.frame.pending = plan.remaining();
+    Ok(())
 }
 
 /// One initialized ordinary slice: clock, existing-particle barrier, then the
 /// scheduled births with their partial times. Shape and Noise ride the same
 /// slice. Capacity is read only after old particles have completed their full
 /// step and death compaction. No child graph or automatic seed/lifecycle
-/// ownership is inferred by this explicit entry.
+/// ownership is inferred by this explicit entry. It places births without the
+/// emitter-motion backtrack, which is exact whenever the emitter velocity is
+/// zero (as in the first-Play warm, whose update consumes the Play reset).
+/// It carries no pending time, so a system with sub-emitter events refuses it.
 pub(super) fn step_explicit(
     system: &mut Runtime,
     state: &mut NativeBirthState,
@@ -61,7 +219,29 @@ pub(super) fn step_explicit(
     stopped: bool,
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
+    step_slice(system, state, dt, None, stopped, None, ctx)
+}
+
+/// `accumulated` is the system time still to simulate when the slice starts
+/// (this slice's own step not yet taken off); the sub-emitter events read it.
+fn step_slice(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    dt: f32,
+    accumulated: Option<f32>,
+    stopped: bool,
+    backtrack: Option<BirthBacktrack>,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
     validate(system, &state.initial)?;
+    if has_real_sub_emitter_edges(&system.emitter) && state.events.is_none() {
+        return Err(BirthRefused::Unsupported("sub-emitter event owner not installed"));
+    }
+    if state.events.is_some() && accumulated.is_none() {
+        return Err(BirthRefused::Unsupported(
+            "sub-emitter events need the slice's pending time",
+        ));
+    }
     if system.emitter.shape.is_none() {
         validate_unshaped_owner(&system.emitter, &compose_to_world(system, ctx))?;
     }
@@ -95,10 +275,45 @@ pub(super) fn step_explicit(
     }
     system.previous_head = clock.previous;
     system.playback_head = clock.current;
-    simulate_existing(system, dt, ctx);
+    // The kill pass inside the existing particles' simulation records the
+    // death events: before the module batch after it, and before this
+    // slice's emission draws, so the parent's emission word is still the one
+    // the previous slice left. It does not test the stopped state either.
+    let mut deaths = state.events.as_ref().filter(|events| events.records_deaths()).map(|_| Vec::new());
+    simulate_existing(system, dt, ctx, deaths.as_mut());
+    if let (Some(events), Some(deaths), Some(accumulated)) = (state.events.as_mut(), deaths.as_ref(), accumulated) {
+        let word = if super::child::arms::on("deathWordAfterDraws") { pending.random.words[0] }
+            else { state.emission.random.words[0] };
+        events.record_deaths(system, deaths, false, 0, accumulated, word, ctx);
+    }
+    // Post-simulation modules. The collision call comes first, over the whole
+    // pool with the slice dt; the parent's pending time and emission word are
+    // read only by collision sub-emitter commands, which this path refuses.
+    if let Some(mut collision) = system.collision.take() {
+        let result = super::collision::post_simulation(system, &mut collision, dt,
+            accumulated.unwrap_or(f32::NAN), state.emission.random.words[0]);
+        system.collision = Some(collision);
+        result.map_err(BirthRefused::Collision)?;
+    }
+    // Then the trail update over the whole pool with the slice dt, after the
+    // simulation and death pass and before the size and sub-emitter calls.
+    if let Some(trail) = system.trail.as_mut() {
+        trail.update(&system.pool, &system.side, 0, system.pool.len(), dt, system.emitter.start.size3d);
+    }
+    if let (Some(events), Some(accumulated)) = (state.events.as_mut(), accumulated) {
+        // After simulation and death, before this slice's emission draws: the
+        // parent's emission word is still the one the previous slice left.
+        events.record_existing(system, dt, accumulated, state.emission.random.words[0], ctx);
+    }
     if let Some(batch) = batch {
         state.emission = pending;
         system.emission.to_emit_accumulator = pending.distribution.offset;
+        let emission_word = state.emission.random.words[0];
+        let events = state.events.as_mut().zip(accumulated).map(|(events, accumulated)| NewbornEvents {
+            events,
+            accumulated,
+            emission_word,
+        });
         start_common(
             system,
             &mut state.initial,
@@ -111,10 +326,38 @@ pub(super) fn step_explicit(
             batch.dt,
             batch.previous_normalized,
             batch.current_normalized,
+            backtrack,
+            events,
             ctx,
         )?;
     }
     Ok(())
+}
+
+/// The newborn groups' sub-emitter calls of one birth: the event owner, the
+/// slice's pending time and the parent's emission word after this slice's
+/// emission draws.
+pub(super) struct NewbornEvents<'a> {
+    events: &'a mut super::sub_events::BirthEvents,
+    accumulated: f32,
+    emission_word: u32,
+}
+
+/// An edge that is not authored null (no emitter, pointer 0/0).
+pub(super) fn has_real_sub_emitter_edges(emitter: &EmitterParams) -> bool {
+    emitter.sub_emitters.iter().any(|edge| !authored_null(edge))
+}
+
+fn authored_null(edge: &SubEmitterParams) -> bool {
+    edge.emitter.is_none() && edge.source_pointer.is_authored_null()
+}
+
+/// A named birth or death edge with a complete, non-null source pointer.
+pub(super) fn real_event_edge(edge: &SubEmitterParams) -> bool {
+    matches!(edge.trigger, SubEmitterTrigger::Birth | SubEmitterTrigger::Death)
+        && edge.emitter.as_ref().is_some_and(|name| !name.is_empty())
+        && matches!(&edge.source_pointer, SubEmitterSourcePointer::Pointer { .. })
+        && !edge.source_pointer.is_authored_null()
 }
 
 /// Ordinary no-shape birth. All calculations are staged before modifying the
@@ -136,6 +379,8 @@ pub(super) fn start_explicit(
         dt,
         previous_normalized,
         current_normalized,
+        None,
+        None,
         ctx,
     )
 }
@@ -161,6 +406,8 @@ pub(super) fn start_explicit_with_shape(
         dt,
         previous_normalized,
         current_normalized,
+        None,
+        None,
         ctx,
     )
 }
@@ -231,6 +478,8 @@ fn start_common(
     dt: f32,
     previous_normalized: f32,
     current_normalized: f32,
+    backtrack: Option<BirthBacktrack>,
+    events: Option<NewbornEvents<'_>>,
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
     let law = validate(system, random)?;
@@ -264,21 +513,15 @@ fn start_common(
     }
     let speed = CurveSampler::with_baking(&system.emitter.start.speed, false);
     let owner = compose_to_world(system, ctx);
-    // The runtime owner is reflected-X; module parameters are source Unity
-    // coordinates. Convert its basis once, retaining native multiplication order.
-    let source_owner = owner.to_matrix().to_cols_array();
-    let source_owner = std::array::from_fn(|i| {
-        if (i % 4 == 0) ^ (i / 4 == 0) {
-            -source_owner[i]
-        } else {
-            source_owner[i]
-        }
-    });
+    let source_owner = source_owner_matrix(&owner);
     let mut next = *random;
     let mut next_shape = shape_stream.as_deref().copied();
     let mut particles = Vec::with_capacity(accepted.next_multiple_of(4));
     let mut sides = Vec::with_capacity(particles.capacity());
     let mut partial_dts = Vec::with_capacity(particles.capacity());
+    // One quotient per command: the slice dt over the simulation speed.
+    let time_per_step = backtrack.map(|_| dt / system.emitter.simulation_speed);
+    let mut backtrack_scales = Vec::with_capacity(particles.capacity());
     for offset in (0..accepted).step_by(4) {
         let timing = (0..4)
             .map(|lane| {
@@ -385,26 +628,99 @@ fn start_common(
                 colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
                 total_velocity: velocity,
                 custom_data: [[0.0; 4]; 2],
+                emit_carry: [0.0; 2],
+                animated: [0.0; 3],
             });
             partial_dts.push(timing[index].dt);
+            if let (Some(backtrack), Some(time_per_step)) = (backtrack, time_per_step) {
+                let scale = (backtrack.births_ahead + timing[index].fraction) * time_per_step;
+                if !scale.is_finite()
+                    || backtrack.emitter_velocity.iter().any(|v| !(scale * v).is_finite())
+                {
+                    return Err(BirthRefused::Unsupported("nonfinite birth backtrack"));
+                }
+                backtrack_scales.push(scale);
+            }
         }
     }
     // The actual rounded-span death/packing contract is installed below. It
     // must keep generated padding available until native cleanup has finished.
     system.pool.extend(particles);
     system.side.extend(sides);
-    let live_newborns = simulate_birth_span(system, old_count, accepted, &partial_dts, ctx);
+    if let Some(trail) = system.trail.as_mut() {
+        // InitialModule resets the ring of every lane of each new group.
+        trail.rings.resize_with(system.pool.len(), Default::default);
+        // One trail update per new four-lane group with dt 0, over the group's
+        // accepted lanes: after the newborn pre-simulation modules (which
+        // write velocity, rotation and custom data, never position or age)
+        // and before the newborn age, backtrack and integration, so it
+        // records the Shape position at age 0.
+        for offset in (0..accepted).step_by(4) {
+            trail.update(&system.pool, &system.side, old_count + offset,
+                old_count + (offset + 4).min(accepted), 0.0, system.emitter.start.size3d);
+        }
+    }
+    let backtrack = backtrack.map(|b| (backtrack_scales.as_slice(), b.emitter_velocity));
+    simulate_birth_modules(system, old_count, &partial_dts, backtrack, ctx);
+    if let Some(mut collision) = system.collision.take() {
+        // One collision call per new four-lane group with its birth times,
+        // after the group's modules, age and integration and before its
+        // sub-emitter call and the newborn deaths. Slots past the group end
+        // are not known here (the engine reads the next group's unfinished
+        // lanes or stale memory there). The pending time and emission word
+        // are read only by collision sub-emitter commands, refused here.
+        let (pending, word) = events.as_ref().map_or((f32::NAN, 0), |e| (e.accumulated, e.emission_word));
+        let mut result = Ok(());
+        for offset in (0..accepted).step_by(4) {
+            let dts = std::array::from_fn(|lane| partial_dts.get(offset + lane).copied().unwrap_or(f32::NAN));
+            result = super::collision::newborn_block(system, &mut collision, old_count + offset,
+                old_count + (offset + 4).min(accepted), dts, pending, word);
+            if result.is_err() {
+                break;
+            }
+        }
+        system.collision = Some(collision);
+        if let Err(reason) = result {
+            // Nothing of this birth is committed: the newborns leave the pool
+            // and neither stream advances.
+            system.pool.truncate(old_count);
+            system.side.truncate(old_count);
+            if let Some(trail) = system.trail.as_mut() {
+                trail.rings.truncate(old_count);
+            }
+            return Err(BirthRefused::Collision(reason));
+        }
+    }
+    let mut events = events;
+    if let Some(NewbornEvents { events, accumulated, emission_word }) = events.as_mut() {
+        // One call per new four-lane group, after the group's pre-simulation
+        // modules and its position and age update and before newborn deaths
+        // are removed. The range stops at the accepted count; the time vector
+        // is the group's four birth times.
+        for offset in (0..accepted).step_by(4) {
+            events.record_newborn(system, old_count, old_count + offset,
+                old_count + (offset + 4).min(accepted), &partial_dts, *accumulated, *emission_word, ctx);
+        }
+    }
+    // The newborn kill pass records its death events after every group's
+    // call, with the same pending time and emission word.
+    let mut deaths = events.as_ref().filter(|newborn| newborn.events.records_deaths()).map(|_| Vec::new());
+    let live_newborns = kill_newborns(system, old_count, accepted, deaths.as_mut());
+    if let (Some(NewbornEvents { events, accumulated, emission_word }), Some(deaths)) = (events.as_mut(), deaths.as_ref()) {
+        events.record_deaths(system, deaths, true, old_count, *accumulated, *emission_word, ctx);
+    }
     system.pool.truncate(old_count + live_newborns);
     system.side.truncate(old_count + live_newborns);
-    finish_births(
-        &mut system.pool,
-        &mut system.side,
-        &mut system.ring_cursor,
-        RingBufferMode::Disabled,
-        system.emitter.max_particles as usize,
-        old_count,
-        |_, _| {},
-    );
+    let maximum = system.emitter.max_particles as usize;
+    match system.trail.as_mut() {
+        Some(trail) => {
+            trail.rings.truncate(old_count + live_newborns);
+            finish_births_with(&mut system.pool, &mut system.side, &mut trail.rings, &mut system.ring_cursor,
+                RingBufferMode::Disabled, maximum, old_count, |_, _| {});
+        }
+        None => finish_births(&mut system.pool, &mut system.side, &mut system.ring_cursor,
+            RingBufferMode::Disabled, maximum, old_count, |_, _| {}),
+    }
     *random = next;
     if let (Some(destination), Some(next)) = (shape_stream.as_mut(), next_shape) {
         **destination = next;
@@ -414,10 +730,20 @@ fn start_common(
     Ok(())
 }
 
+/// The runtime owner is reflected-X; module parameters are source Unity
+/// coordinates. Convert its basis once, retaining native multiplication order.
+pub(super) fn source_owner_matrix(owner: &GlobalTransform) -> [f32; 16] {
+    let matrix = owner.to_matrix().to_cols_array();
+    std::array::from_fn(|i| if (i % 4 == 0) ^ (i / 4 == 0) { -matrix[i] } else { matrix[i] })
+}
+
 /// Validate module/storage qualification without advancing any persistent RNG.
 fn validate(system: &Runtime, random: &ModuleRandom) -> Result<InitialLaw, BirthRefused> {
     let law = validate_emitter(&system.emitter, random)?;
     shape_emitter_state(&system.emitter, system.geometry.shape_evidence())?;
+    if system.emitter.collision.is_some() && system.collision.is_none() {
+        return Err(BirthRefused::Unsupported("CollisionModule without its installed scene"));
+    }
     Ok(law)
 }
 
@@ -441,24 +767,44 @@ fn validate_emitter(
             "newborn ring replacement composition",
         ));
     }
-    if emitter.inherit_velocity.is_some()
-        || emitter.collision.is_some()
-        || emitter.trails.is_some()
-    {
+    if emitter.inherit_velocity.is_some() {
         return Err(BirthRefused::Unsupported(
             "birth module/event owner not installed",
         ));
     }
+    // A CollisionModule rides the native slices (its two call points are in
+    // step_slice and start_common) inside the qualified subset.
+    super::collision::qualify(emitter).map_err(BirthRefused::Collision)?;
+    // A TrailModule rides the native slices (its two update points are in
+    // step_slice and start_common) only inside the qualified subset.
+    super::trails::qualify(emitter).map_err(BirthRefused::Unsupported)?;
     // An authored null child edge (no emitter, pointer 0/0) names no system
-    // and schedules nothing. A real edge needs the child owner and its
-    // command order, which this step does not install.
-    if emitter
-        .sub_emitters
-        .iter()
-        .any(|edge| edge.emitter.is_some() || !edge.source_pointer.is_authored_null())
+    // and schedules nothing. Real edges are taken only when every edge is a
+    // named birth or death edge with a complete pointer: their events need
+    // the event owner the installer attaches (each slice checks it is there),
+    // and the installer resolves their children. Other triggers, and a list
+    // mixing null and real entries, are not qualified.
+    let real = emitter.sub_emitters.iter().filter(|edge| !authored_null(edge)).count();
+    if real > 0 && (real != emitter.sub_emitters.len() || !emitter.sub_emitters.iter().all(real_event_edge)) {
+        return Err(BirthRefused::Unsupported(
+            "sub-emitter edges other than real birth and death edges",
+        ));
+    }
+    // A particle with a non-positive start lifetime is killed here without
+    // its update (see simulate_range); what its death event would read then
+    // was never executed. The trail keep-alive branch of the kill pass (a
+    // per-particle trail that outlives its particle skips the kill and its
+    // event) is refused with every trail that does not die with its
+    // particles, so every admitted kill records.
+    if emitter.sub_emitters.iter().any(|edge| edge.trigger == SubEmitterTrigger::Death && !authored_null(edge))
+        && !match emitter.start.lifetime {
+            moly_law::particle::MinMaxCurve::Constant(value) => value > 0.0,
+            moly_law::particle::MinMaxCurve::TwoConstants { min, max } => min > 0.0 && max > 0.0,
+            _ => false,
+        }
     {
         return Err(BirthRefused::Unsupported(
-            "sub-emitter child owner not installed",
+            "death events of a start lifetime that is not a positive constant or two positive constants",
         ));
     }
     if let Some(noise) = emitter.noise.as_ref() {

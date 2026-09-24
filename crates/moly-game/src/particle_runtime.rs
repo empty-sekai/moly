@@ -4,6 +4,13 @@ use bevy::prelude::*;
 mod motion;
 mod birth;
 mod child;
+mod sub_events;
+mod trails;
+mod collision;
+pub(crate) use collision::{collision_eligible, COLLISION_SCENE_NOT_PORTED};
+pub(crate) use trails::{draw_eligible as trail_draw_eligible, write_mesh as write_trail_mesh, TrailState};
+pub(crate) use sub_events::{BirthEdge, BirthEvents, DeathEdge, EventEdges};
+pub(crate) use child::{child_target_eligible, deliver_command, install_child_target};
 pub(crate) mod seed;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -35,13 +42,25 @@ mod snow_full_samples;
 mod noise_samples;
 #[cfg(test)]
 mod initial_colour_samples;
+#[cfg(test)]
+mod frame_samples;
+#[cfg(test)]
+mod sub_event_samples;
+#[cfg(test)]
+mod death_event_samples;
+#[cfg(test)]
+mod child_emit_samples;
+#[cfg(test)]
+mod collision_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
-    birth_capacity, compact_with_side, euler_rotate_deg, finish_births, integrate, BurstOutcome, DragSize,
+    birth_capacity, compact_with_sides_indexed, euler_rotate_deg, finish_births, finish_births_with,
+    integrate, BurstOutcome, DragSize,
     EmissionState, EmitterParams, LimitVelocity, Particle,
     RingBufferMode, RotationOverLifetime, StepVerdict};
 use moly_law::particle::noise::{NoiseLaw, NoiseState};
+use moly_law::particle::death_event::DeathParent;
 use moly_law::particle::prewarm::{FirstPlayWarm, Lifetime, PlayState, PrewarmPlan};
 use crate::billboard::{Alignment, Quad, SizeClamp};
 const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
@@ -309,6 +328,9 @@ fn later_play(system: &mut Runtime) {
     }
     system.playback_head = 0.0;
     system.previous_head = 0.0;
+    if let Some(native) = system.native_birth.as_mut() {
+        native.frame.pending = 0.0;
+    }
 }
 
 /// The native first-Play slice schedule of an installed ordinary system.
@@ -318,15 +340,18 @@ pub(crate) fn first_play_plan(system: &Runtime) -> Result<PrewarmPlan, &'static 
 
 fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx: &Context)
     -> Result<(), &'static str> {
-    let plan = first_play_plan(system)?;
+    let mut plan = first_play_plan(system)?;
     system.playback_head = plan.initial_clock();
-    for slice in plan {
+    for slice in plan.by_ref() {
         let slice = slice?;
         if birth::step_explicit(system, state, slice.duration, false, ctx).is_err() {
             system.refused_total += 1;
             return Err("native prewarm slice refused");
         }
     }
+    // The rest below the loop threshold stays pending. The emitter reset set
+    // by Play is left for the first frame, which takes its own translation.
+    state.frame.pending = plan.remaining();
     Ok(())
 }
 
@@ -422,6 +447,12 @@ pub(crate) struct Runtime {
     /// whether a system may be admitted; this state is only installed after
     /// an owner seed/reset has been proven by the caller.
     pub(crate) noise: Option<NoiseRuntime>,
+    /// The per-particle trail, installed with the native birth owner when the
+    /// system has a qualified TrailModule. Its rings move with the pool.
+    pub(crate) trail: Option<TrailState>,
+    /// The CollisionModule with its scene, installed with the native birth
+    /// owner; `None` for every system without one.
+    pub(crate) collision: Option<collision::CollisionRuntime>,
     /// 惰性 prewarm 的闸：首个推进帧快进一个周期。
     pub(crate) prewarmed: bool,
     pub(crate) cone_angle: Option<f32>,
@@ -470,6 +501,13 @@ pub(crate) struct Side {
     pub(crate) total_velocity: [f32; 3],
     /// Persistent pre-simulation Custom1/Custom2, moved with the particle owner.
     pub(crate) custom_data: [[f32; 4]; 2],
+    /// Emission carry of each cached sub-emitter birth edge (at most two),
+    /// zero at birth and moved with the particle.
+    pub(crate) emit_carry: [f32; 2],
+    /// Animated velocity of the last pre-simulation pass (runtime axes),
+    /// moved with the particle; the collision query and response read it
+    /// apart from the persistent velocity.
+    pub(crate) animated: [f32; 3],
 }
 
 /// 出生抽签的确定性随机：splitmix64（站点链同款流算法、不同种子）。
@@ -566,6 +604,30 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
     quads
 }
 
+/// One rendered frame of raw dt. A system with the native birth owner runs the
+/// engine's per-frame update (speed scale, minimum-step skip, pending time,
+/// every incremental slice, emitter-motion placement of World births); the
+/// legacy step keeps one whole-frame step of dt times the simulation speed.
+/// `emitting` false is Stop: the clock and existing particles still advance.
+pub(crate) fn advance_frame(system: &mut Runtime, frame_dt: f32, ctx: &Context, emitting: bool) {
+    if let Some(mut native) = system.native_birth.take() {
+        // A sub-emitter target never emits on its own: the engine marks every
+        // target stopped each frame, so its clock and particles advance and
+        // its births come only from its parents' commands.
+        let stopped = !emitting || native.target.is_some();
+        if let Err(error) = birth::advance_frame(system, &mut native, frame_dt, stopped, ctx) {
+            system.refused_total += 1;
+            error!(?error, effect=%system.effect, node=%system.node, "native particle frame refused");
+        }
+        system.native_birth = Some(native);
+        return;
+    }
+    let step = frame_dt * system.emitter.simulation_speed;
+    if step > 0.0 {
+        if emitting { simulate(system, step, ctx) } else { simulate_stopped(system, step, ctx) }
+    }
+}
+
 /// 一个仿真步：发射（率 + burst）→ 模块批 → 推进 → 死亡移除。
 pub(crate) fn simulate(system: &mut Runtime, dt: f32, ctx: &Context) {
     simulate_with_emission(system, dt, ctx, true);
@@ -580,7 +642,8 @@ pub(crate) fn simulate_stopped(system: &mut Runtime, dt: f32, ctx: &Context) {
 
 fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting: bool) {
     if let Some(mut native) = system.native_birth.take() {
-        if let Err(error) = birth::step_explicit(system, &mut native, dt, !emitting, ctx) {
+        let stopped = !emitting || native.target.is_some();
+        if let Err(error) = birth::step_explicit(system, &mut native, dt, stopped, ctx) {
             system.refused_total += 1;
             error!(?error, effect=%system.effect, node=%system.node, "native particle step refused");
         }
@@ -664,24 +727,43 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
 
     }
 
-    simulate_existing(system, dt, ctx);
+    simulate_existing(system, dt, ctx, None);
 }
 
 /// Existing-particle pre/sim/death barrier. Autonomous births are separate.
-fn simulate_existing(system: &mut Runtime, dt: f32, ctx: &Context) {
-    simulate_range(system, 0, system.pool.len(), dt, None, ctx);
-    system.died_total += compact_with_side(&mut system.pool, &mut system.side,
-        system.emitter.ring_buffer_mode, system.emitter.max_particles as usize, |_, _| {}) as u64;
+/// `deaths`, when given, receives every killed particle in removal order as
+/// the death event reads it, before its slot is overwritten.
+fn simulate_existing(system: &mut Runtime, dt: f32, ctx: &Context, mut deaths: Option<&mut Vec<DeathParent>>) {
+    simulate_range(system, 0, system.pool.len(), dt, None, None, ctx);
+    let (mode, maximum) = (system.emitter.ring_buffer_mode, system.emitter.max_particles as usize);
+    let mut on_death = |index: usize, particle: &Particle, side: &Side| {
+        if let Some(deaths) = deaths.as_mut() {
+            deaths.push(sub_events::dying(index, particle, side));
+        }
+    };
+    // A dying particle's trail points go with it: the engine moves every
+    // per-particle array of the last particle into the dead slot.
+    system.died_total += match system.trail.as_mut() {
+        Some(trail) => compact_with_sides_indexed(&mut system.pool, &mut system.side, &mut trail.rings, mode, maximum,
+            &mut on_death),
+        None => {
+            let mut none = vec![(); system.pool.len()];
+            compact_with_sides_indexed(&mut system.pool, &mut system.side, &mut none, mode, maximum, &mut on_death)
+        }
+    } as u64;
 }
 
 /// Run module math before packing. Birth lanes use times relative to their own
 /// aligned native block, so an unaligned old prefix cannot supply a batch seed.
 /// Newborn inline integration differs from the existing SimulateParticles path.
 fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
-    birth_dts: Option<&[f32]>, ctx: &Context) {
+    birth_dts: Option<&[f32]>, birth_backtrack: Option<(&[f32], [f32; 3])>, ctx: &Context) {
     assert!(start <= end && end <= system.pool.len());
     assert_eq!(system.pool.len(), system.side.len());
     if let Some(times) = birth_dts { assert_eq!(times.len(), end - start); }
+    if let Some((scales, _)) = birth_backtrack {
+        assert!(birth_dts.is_some() && scales.len() == end - start);
+    }
     // Native Noise.Update advances its system scroll once for a nonempty
     // existing-particle range. StartModules birth ranges reuse that scroll and
     // must not advance it again. Empty ranges do not consume a scroll step.
@@ -749,6 +831,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             )).to_array()
         });
         let anim = std::array::from_fn(|axis| velocity_anim[axis] + noise_anim[axis]);
+        system.side[index].animated = anim;
         // Force modifies persistent velocity before velocity limiting. Animated
         // velocity is still transient and shares the final integration modifier.
         if let Some(force) = &system.force_law {
@@ -798,6 +881,13 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         // 积分：律的 `integrate` 会用帧速度覆写状态速度——先存后还原。
         let state_velocity = system.pool[index].velocity;
         if birth_dts.is_some() {
+            // The emitter-motion backtrack comes after the pre-simulation
+            // modules above (they see the unmoved position) and before the
+            // newborn integration.
+            if let Some((scales, velocity)) = birth_backtrack {
+                let scale = scales[index - start];
+                for axis in 0..3 { system.pool[index].position[axis] -= scale * velocity[axis]; }
+            }
             // Native inline birth arithmetic groups modifier*dt before the
             // velocity multiply. Reassociation changes several f32 results.
             let step = modifier * dt;
@@ -809,20 +899,35 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
     }
  }
 
-/// Complete just this newly appended span. The caller supplies native partial
-/// times and performs finish_births only after this barrier has returned.
-fn simulate_birth_span(system: &mut Runtime, old_count: usize, accepted: usize,
-    partial_dts: &[f32], ctx: &Context) -> usize {
+/// The newborn span's pre-simulation modules and its position and age update.
+fn simulate_birth_modules(system: &mut Runtime, old_count: usize, partial_dts: &[f32],
+    backtrack: Option<(&[f32], [f32; 3])>, ctx: &Context) {
     assert_eq!(old_count + partial_dts.len(), system.pool.len());
-    simulate_range(system, old_count, system.pool.len(), 0.0, Some(partial_dts), ctx);
+    simulate_range(system, old_count, system.pool.len(), 0.0, Some(partial_dts), backtrack, ctx);
+}
+
+/// Newborn deaths after the span's modules; returns the surviving count.
+/// `deaths`, when given, receives the killed particles whose kill records
+/// death events, in removal order, before their slot is overwritten.
+fn kill_newborns(system: &mut Runtime, old_count: usize, accepted: usize,
+    mut deaths: Option<&mut Vec<DeathParent>>) -> usize {
     // StartModules scans its newborn range forward and retests each swapped
     // tail; existing four-wide death compaction has a different removal order.
     let mut index = old_count;
     let mut surviving_count = accepted;
     while index < system.pool.len() {
         if system.pool[index].age_percent > 100.0 {
+            // The kill records the death events only while the accepted count
+            // it decrements is still nonzero, so a padding lane records too
+            // until that count runs out.
+            if surviving_count != 0 || child::arms::on("newbornDeathAlwaysRecords") {
+                if let Some(deaths) = deaths.as_mut() {
+                    deaths.push(sub_events::dying(index, &system.pool[index], &system.side[index]));
+                }
+            }
             system.pool.swap_remove(index);
             system.side.swap_remove(index);
+            if let Some(trail) = system.trail.as_mut() { trail.rings.swap_remove(index); }
             system.died_total += 1;
             // The native cleanup visits rounded SIMD storage, including the
             // padding. Every kill saturating-decrements the accepted count;
@@ -855,6 +960,12 @@ pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute
         SourceRoute::Undecided(control) => return Err(format!("source route undecided: {control}")),
     }
     birth::qualify_emitter(emitter).map_err(|refused| format!("{refused:?}"))
+}
+
+/// Whether any sub-emitter edge is real (not authored null: no emitter and
+/// pointer 0/0).
+pub(crate) fn has_real_sub_emitter_edges(emitter: &EmitterParams) -> bool {
+    birth::has_real_sub_emitter_edges(emitter)
 }
 
 /// Whether the emitter state the native Shape boundary reads is qualified:
@@ -891,10 +1002,19 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
         },
         None => None,
     };
+    // The trail law was qualified with the rest of the composition; parse it
+    // again here, before the owner draw, so a refusal draws nothing.
+    let trail_law = match trails::qualify(&system.emitter) {
+        Ok(law) => law,
+        Err(reason) => return Ok(BirthPath::Legacy(reason.to_owned())),
+    };
     let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;
     system.native_birth = Some(birth::NativeBirthState {
         owner: Some(owner), initial: streams.initial, shape: streams.shape,
         emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(streams.scalar_birth),
+        frame: birth::FrameState::default(),
+        events: None,
+        target: None,
     });
     if let Some(law) = noise_law {
         system.noise = Some(NoiseRuntime {
@@ -903,6 +1023,11 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
             owner_seed: owner.seed,
             owner,
         });
+    }
+    // The module clock starts at zero and no Play resets it; every ring starts
+    // empty (the first update's reset of all rings).
+    if let Some(law) = trail_law {
+        trails::install(system, law);
     }
     Ok(BirthPath::Native)
 }
@@ -1150,6 +1275,8 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         colour,
         total_velocity: velocity,
         custom_data: [[0.0; 4]; 2],
+        emit_carry: [0.0; 2],
+        animated: [0.0; 3],
     };
     let particle = Particle::born(position, velocity, lifetime);
     system.pool.push(particle);

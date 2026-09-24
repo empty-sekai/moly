@@ -259,6 +259,9 @@ fn normal_update_recomputes_birth_capacity_after_existing_deaths() {
             emission: AutonomousEmissionState::initialized(ScalarRandom {
                 words: [17, 19, 127, 2471805022],
             }),
+            frame: Default::default(),
+            events: None,
+            target: None,
         };
         let initial_before = state.initial;
         super::birth::step_explicit(&mut system, &mut state, dt, false, &context).unwrap();
@@ -599,6 +602,9 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
                 words: [17, 19, 127, 2471805022],
             },
         },
+        frame: Default::default(),
+        events: None,
+        target: None,
     };
     let runtime_before = mutable_runtime_snapshot(&system);
     let initial_before = state.initial;

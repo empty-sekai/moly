@@ -46,6 +46,8 @@ struct ExtractedParticle {
     source: SourceParticle,
     mesh: Mesh,
     center: Vec3,
+    /// 1 for a draw that follows another draw of the same renderer, else 0.
+    rank: u8,
 }
 #[derive(Resource, Default)]
 struct ParticleFrame {
@@ -54,6 +56,9 @@ struct ParticleFrame {
     enabled: HashSet<Entity>,
     /// (sorting order, render queue) of this frame's particles.
     order: HashMap<Entity, (i32, i32)>,
+    /// Rank of each render entity among the draws of its renderer (the trail
+    /// draw after the particle draw at the same distance).
+    rank: HashMap<Entity, u8>,
     light: [f32; 4],
     /// Copies of the catalogues this frame's particles reference. A catalogue
     /// is immutable once loaded; its copy is replaced only after an asset event.
@@ -95,6 +100,7 @@ fn extract(
         .collect();
     frame.enabled.clear();
     frame.order.clear();
+    frame.rank.clear();
     let mut referenced = HashSet::new();
     for (main, entity, mesh, component) in &particles {
         if component.error.is_some() || component.passes.is_empty() {
@@ -140,13 +146,25 @@ fn extract(
             .order
             .entry(entity)
             .or_insert((source.sorting_order, source.render_queue));
+        let rank = u8::from(source.follows.is_some());
+        frame.rank.insert(entity, rank);
         frame.particles.push(ExtractedParticle {
             entity,
             main,
             source,
             mesh: mesh.clone(),
             center,
+            rank,
         });
+    }
+    // A follower sorts at its leader's distance: the renderer is one object
+    // with one sort position, whatever each material's geometry spans.
+    let centers: HashMap<Entity, Vec3> = frame.particles.iter()
+        .map(|particle| (particle.main.id(), particle.center)).collect();
+    for particle in &mut frame.particles {
+        if let Some(center) = particle.source.follows.and_then(|leader| centers.get(&leader)) {
+            particle.center = *center;
+        }
     }
     frame.catalogues.retain(|id, _| referenced.contains(id));
 }
@@ -164,6 +182,7 @@ fn same_draw(kept: &SourceParticle, current: &SourceParticle) -> bool {
         && kept.render_queue == current.render_queue
         && kept.sorting_order == current.sorting_order
         && kept.sorting_fudge.to_bits() == current.sorting_fudge.to_bits()
+        && kept.follows == current.follows
         && kept.passes.len() == current.passes.len()
         && kept.passes.iter().zip(&current.passes).all(|(a, b)| {
             a.program.id() == b.program.id() && a.state == b.state && a.effect == b.effect
@@ -194,6 +213,7 @@ struct Packet {
     distance: f32,
     sorting_order: i32,
     render_queue: i32,
+    rank: u8,
     // View targets may be recycled or resized independently of material assets.
     resources: Vec<TextureViewId>,
 }
@@ -426,11 +446,13 @@ fn sort_source_particles(
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
 ) {
     let order = |entity| frame.order.get(&entity).copied().unwrap_or((0, 3000));
+    let rank = |entity| frame.rank.get(&entity).copied().unwrap_or(0);
     for phase in phases.values_mut() {
         phase.items.sort_by(|a, b| {
             order(a.entity())
                 .cmp(&order(b.entity()))
                 .then_with(|| a.distance.total_cmp(&b.distance))
+                .then_with(|| rank(a.entity()).cmp(&rank(b.entity())))
         });
     }
 }
@@ -673,6 +695,7 @@ fn prepare(
                             view.rangefinder3d().distance(&item.center) - item.source.sorting_fudge;
                         packet.sorting_order = item.source.sorting_order;
                         packet.render_queue = item.source.render_queue;
+                        packet.rank = item.rank;
                         updated = true;
                         return Ok(None);
                     }
@@ -718,6 +741,7 @@ fn prepare(
                             - item.source.sorting_fudge,
                         sorting_order: item.source.sorting_order,
                         render_queue: item.source.render_queue,
+                        rank: item.rank,
                     }))
                 })();
                 match result {
@@ -856,6 +880,7 @@ impl ViewNode for EffectNode {
                 .cmp(&b.sorting_order)
                 .then_with(|| a.render_queue.cmp(&b.render_queue))
                 .then_with(|| a.distance.total_cmp(&b.distance))
+                .then_with(|| a.rank.cmp(&b.rank))
         });
         let attachments = [Some(RenderPassColorAttachment {
             view: &target.resolved,

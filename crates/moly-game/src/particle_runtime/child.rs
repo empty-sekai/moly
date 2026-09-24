@@ -1,17 +1,49 @@
-//! Explicit current-native child commands into one shared Runtime pool.
-//! The caller supplies persistent Initial RNG and captured update inputs. This
-//! entry never advances old particles or autonomous clocks and has no weather
-//! admission route. Qualified: Local identity owner, neutral inheritance, zero
-//! speed/gravity, Initial/Color/CustomData, no overflow/death/recursive events.
+//! A sub-emitter command applied to its target system's one shared pool, as
+//! the engine's child Emit does it: the start matrix (the command velocity's
+//! direction looked along, the target's own rotation, the command position,
+//! the target's world-to-local unless it is World-space, the emitter scale),
+//! the capacity clip, Initial and Shape over whole four-lane groups,
+//! StartVelocity, the newborn pre-simulation modules and position and age
+//! update, the newborn deaths, the catch-up steps, and the pack into the
+//! alignment gap. The old particles of the pool are never touched.
+//!
+//! Qualified target composition: Initial with constant or two-constant
+//! lifetime, size, speed and rotation, a constant start colour source the
+//! Initial law takes, a constant gravity modifier, Shape through the target's
+//! own Shape law (or no Shape with zero speed), RotationOverLifetime with
+//! constant or two-constant axes, SizeOverLifetime and ColorOverLifetime
+//! (render-time), CustomData, no ring buffer, simulation speed one. Any other
+//! module on the target refuses. The inherited block must be the neutral one
+//! (the parent inherits nothing); the parent particle's seed it ends with is
+//! not a child random word.
+//!
+//! The catch-up runs only when the parent's update flags enable it (bit 0 or
+//! bit 2); the per-frame update passes no such flag. Size is not stored: the
+//! renderer evaluates the size law at the final age, which is what the
+//! engine's size write after the catch-up holds.
+//!
+//! In the product a target is installed with its own seed owner and the
+//! owner words of its authored chain; its own frame is the stopped update
+//! (the engine marks every target stopped each frame), and its parent's
+//! commands of a frame are delivered after every system's frame, in the order
+//! the parent recorded them, with the world's default gravity.
 use super::*;
 use moly_law::particle::{
+    child_emit::{self, ChildOwner, StartFrame},
+    curve::CurveSampler,
     initial::{InitialContext, InitialGroupInput, InitialLaw},
+    random::ParticleRandom,
     seed_owner::ModuleRandom,
-    sub_emission::{BirthDistribution, CatchUp},
+    shape_birth::{ShapeBirthLaw, ShapeSample},
+    sub_emission::BirthDistribution,
     MinMaxCurve,
 };
 
 const MAX_EXACT_COUNT: u64 = 16_777_215;
+/// Newborn and catch-up ages are capped at this (just above 100 percent).
+const AGE_CAP: f32 = f32::from_bits(0x42c8_0001);
+/// The world's gravity in source axes (y up), as the physics settings hold it.
+pub(super) const SOURCE_GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ChildCommand {
@@ -28,13 +60,15 @@ pub(super) struct ChildCommand {
     pub catch_up: f32,
 }
 
+/// The parent's update inputs the command reads.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ChildUpdate {
+    /// The parent's update flags; only bits 0 and 2 are read here.
     pub flags: u32,
     pub frame_dt: f32,
     pub world_playing: bool,
-    /// Captured Initial upper-lifetime cache, not the system duration.
-    pub upper_lifetime: f32,
+    /// The world's gravity the Initial update reads, source axes.
+    pub gravity: [f32; 3],
 }
 
 #[derive(Debug, PartialEq)]
@@ -42,6 +76,7 @@ pub(super) enum Refused {
     InvalidCommand(&'static str),
     Unsupported(&'static str),
     Initial(moly_law::particle::initial::Refused),
+    Shape(moly_law::particle::shape_birth::Refused),
 }
 
 #[derive(Debug, PartialEq)]
@@ -49,6 +84,35 @@ pub(super) struct Applied {
     pub born: usize,
     pub catch_up_steps: usize,
     pub catch_up_remainder: f32,
+    /// The command's start frame, when the command got that far.
+    pub start: Option<StartFrame>,
+}
+
+/// The Shape step of one command: one call per new four-lane group, in order,
+/// with the command's start matrix as the owner (its rotation columns and its
+/// translation), returning the stored position and direction of all four
+/// lanes. The seam works on its own copy of the Shape stream; the caller
+/// commits that copy only after the whole command succeeded.
+pub(super) trait ChildShape {
+    fn group(&mut self, start: &[f32; 16]) -> Result<[ShapeSample; 4], Refused>;
+}
+
+/// The target's own Shape law with its Shape stream: the shape transform is
+/// scaled by the target's shape scale and the store uses the start matrix.
+pub(super) struct SourceShape {
+    pub law: ShapeBirthLaw,
+    pub stream: ModuleRandom,
+    pub shape_scale: [f32; 3],
+    pub uses_axis_of_rotation: bool,
+}
+
+impl ChildShape for SourceShape {
+    fn group(&mut self, start: &[f32; 16]) -> Result<[ShapeSample; 4], Refused> {
+        self.law
+            .sample_group(&mut self.stream, *start, true, self.shape_scale, self.uses_axis_of_rotation)
+            .map(|group| group.samples)
+            .map_err(Refused::Shape)
+    }
 }
 
 impl ChildCommand {
@@ -59,15 +123,21 @@ impl ChildCommand {
         if raw.len() != 0x78 || emission.len() != 12 {
             return Err(Refused::InvalidCommand("native command/payload length"));
         }
-        let word = |offset| u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
+        let word = |offset: usize| {
+            u32::from_le_bytes([raw[offset], raw[offset + 1], raw[offset + 2], raw[offset + 3]])
+        };
         let float = |offset| f32::from_bits(word(offset));
+        let long = |offset: usize| u64::from(word(offset)) | (u64::from(word(offset + 4)) << 32);
+        let payload = |offset: usize| {
+            f32::from_le_bytes([emission[offset], emission[offset + 1], emission[offset + 2], emission[offset + 3]])
+        };
         Ok(Self {
-            count: u64::from_le_bytes(raw[0x58..0x60].try_into().unwrap()),
-            rate_count: u64::from_le_bytes(raw[0x60..0x68].try_into().unwrap()),
+            count: long(0x58),
+            rate_count: long(0x60),
             distribution: BirthDistribution {
-                spacing: f32::from_le_bytes(emission[0..4].try_into().unwrap()),
-                offset: f32::from_le_bytes(emission[4..8].try_into().unwrap()),
-                burst_fraction: f32::from_le_bytes(emission[8..12].try_into().unwrap()),
+                spacing: payload(0),
+                offset: payload(4),
+                burst_fraction: payload(8),
             },
             position: std::array::from_fn(|a| float(8 + a * 4)),
             velocity: std::array::from_fn(|a| float(20 + a * 4)),
@@ -79,7 +149,23 @@ impl ChildCommand {
         })
     }
 
-    fn validate(&self, update: ChildUpdate) -> Result<(), Refused> {
+    /// The command as the parent's event recording issued it.
+    pub fn from_event(command: &moly_law::particle::sub_emission::SubEmitterCommand) -> Self {
+        Self {
+            count: command.count,
+            rate_count: command.rate_count,
+            distribution: command.emission,
+            position: command.position,
+            velocity: command.velocity,
+            inherited_words: command.inherited,
+            dt: command.dt,
+            previous: command.previous_normalized,
+            current: command.current_normalized,
+            catch_up: command.catch_up,
+        }
+    }
+
+    fn validate(&self) -> Result<(), Refused> {
         if self.count > MAX_EXACT_COUNT || self.rate_count > self.count {
             return Err(Refused::InvalidCommand("count outside exact range"));
         }
@@ -89,16 +175,8 @@ impl ChildCommand {
             .chain(self.velocity.iter())
             .any(|v| !v.is_finite())
             || !self.catch_up.is_finite()
-            || self.catch_up < 0.0
-            || !update.upper_lifetime.is_finite()
-            || update.upper_lifetime <= 0.0
         {
-            return Err(Refused::InvalidCommand(
-                "nonfinite position or lifetime/timing",
-            ));
-        }
-        if !matches!(update.flags, 0 | 1 | 4 | 5) {
-            return Err(Refused::Unsupported("update flags"));
+            return Err(Refused::InvalidCommand("nonfinite command position, velocity or catch-up"));
         }
         // Parent command seed is retained separately; it is not child RandN.
         // Native Math initialization supplies Vector3.forward, including the
@@ -121,188 +199,528 @@ impl ChildCommand {
             return Err(Refused::Unsupported("non-neutral inherited context"));
         }
         self.distribution
-            .timing(
-                0,
-                self.rate_count as u32,
-                self.dt,
-                self.previous,
-                self.current,
-            )
+            .timing(0, self.rate_count as u32, self.dt, self.previous, self.current)
             .map_err(|_| Refused::InvalidCommand("birth distribution"))?;
         Ok(())
     }
 }
 
-/// Execute one complete command before the next arrival. Source admission has
-/// no caller here; the same actual Runtime/pool code is used by native replay.
-pub(super) fn apply_command(
-    system: &mut Runtime,
-    random: &mut ModuleRandom,
-    command: &ChildCommand,
-    update: ChildUpdate,
-    ctx: &Context,
-) -> Result<Applied, Refused> {
-    let noop = || Applied {
-        born: 0,
-        catch_up_steps: 0,
-        catch_up_remainder: command.catch_up,
-    };
-    if command.count == 0 {
-        return Ok(noop());
+/// The target laws one command uses, read from the target's modules.
+struct ChildLaws {
+    initial: InitialLaw,
+    speed: CurveSampler,
+    gravity_modifier: f32,
+    /// The start-lifetime scalar the world-playing gate compares the
+    /// catch-up with: the constant, or the two-constant maximum.
+    upper_lifetime: f32,
+    /// The particle arrays carry 3D rotation (Initial rotation3D or a
+    /// RotationOverLifetime with separate axes) and angular speed (a
+    /// RotationOverLifetime module).
+    rotation_3d: bool,
+    angular_speed: bool,
+}
+
+/// Whether the target's modules are within the qualified composition.
+pub(super) fn qualify_target(emitter: &EmitterParams) -> Result<(), Refused> {
+    child_laws(emitter).map(|_| ())
+}
+
+fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
+    let unsupported = |reason| Err(Refused::Unsupported(reason));
+    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
+        return unsupported("ring-buffer target");
     }
-    command.validate(update)?;
-    if update.world_playing && command.catch_up >= update.upper_lifetime {
-        return Ok(noop());
+    if emitter.simulation_speed != 1.0 {
+        return unsupported("target simulation speed other than one");
     }
-    let mut catch_up = CatchUp::new(command.catch_up, update.frame_dt, update.flags & 5 != 0)
-        .map_err(|_| Refused::Unsupported("catch-up range"))?;
-    // CatchUp is Copy: consuming by value leaves the original remainder intact.
-    let steps: Vec<_> = catch_up.by_ref().collect();
-    let emitter = &system.emitter;
-    let zero = |curve: &MinMaxCurve| {
-        matches!(curve, MinMaxCurve::Constant(0.0))
-            || matches!(curve, MinMaxCurve::TwoConstants { min: 0.0, max: 0.0 })
-    };
-    if emitter.simulation_space != SimulationSpace::Local
-        || compose_to_world(system, ctx) != GlobalTransform::IDENTITY
-        || emitter.simulation_speed != 1.0
-        || emitter.prewarm
-        || emitter.shape_enabled != Some(false)
-        || emitter.shape.is_some()
-        || emitter.ring_buffer_mode != RingBufferMode::Disabled
-        || !zero(&emitter.start.speed)
-        || !zero(&emitter.start.gravity_modifier)
-        || emitter.velocity_over_lifetime.is_some()
-        || emitter.rotation_over_lifetime.is_some()
-        || emitter.size_over_lifetime.is_some()
+    if emitter.start.size3d {
+        return unsupported("target 3D start size");
+    }
+    if emitter.velocity_over_lifetime.is_some()
         || emitter.force.is_some()
         || emitter.limit_velocity.is_some()
         || emitter.inherit_velocity.is_some()
         || emitter.noise.is_some()
         || emitter.collision.is_some()
         || emitter.trails.is_some()
-        || !emitter.sub_emitters.is_empty()
-        || system.noise.is_some()
-        || system.velocity_law.is_some()
-        || system.rol.is_some()
-        || system.limit.is_some()
-        || system.force_law.is_some()
-        || system.size_law.is_some()
+        || emitter.texture_sheet.is_some()
     {
-        return Err(Refused::Unsupported("child module/owner composition"));
+        return unsupported("target module outside the child composition");
+    }
+    if birth::has_real_sub_emitter_edges(emitter) {
+        return unsupported("target with its own sub-emitters");
+    }
+    let scalar = |curve: &MinMaxCurve| matches!(curve, MinMaxCurve::Constant(_) | MinMaxCurve::TwoConstants { .. });
+    if !scalar(&emitter.start.speed) {
+        return unsupported("target start speed curve mode");
+    }
+    let gravity_modifier = match emitter.start.gravity_modifier {
+        MinMaxCurve::Constant(value) if value.is_finite() => value,
+        _ => return unsupported("target gravity modifier other than a finite constant"),
+    };
+    let upper_lifetime = match emitter.start.lifetime {
+        MinMaxCurve::Constant(value) => value,
+        MinMaxCurve::TwoConstants { max, .. } => max,
+        _ => return unsupported("target start lifetime curve mode"),
+    };
+    if let Some(rol) = &emitter.rotation_over_lifetime {
+        let axes = [Some(&rol.curve), rol.x.as_ref(), rol.y.as_ref()];
+        if axes.iter().flatten().any(|curve| !scalar(curve)) {
+            return unsupported("target RotationOverLifetime curve mode");
+        }
+    }
+    match (emitter.shape_enabled, emitter.shape.as_ref()) {
+        (Some(false), None) => {
+            let zero = |curve: &MinMaxCurve| matches!(curve, MinMaxCurve::Constant(v) if *v == 0.0)
+                || matches!(curve, MinMaxCurve::TwoConstants { min, max } if *min == 0.0 && *max == 0.0);
+            if !zero(&emitter.start.speed) {
+                return unsupported("target without Shape and with a start speed");
+            }
+        }
+        (Some(true), Some(_)) => {}
+        _ => return unsupported("missing target Shape enabled/configuration evidence"),
+    }
+    // The source admission fixes the rotation direction randomization at 0.
+    let initial = InitialLaw::from_params(&emitter.start, 0.0).map_err(Refused::Initial)?;
+    Ok(ChildLaws {
+        initial,
+        speed: CurveSampler::with_baking(&emitter.start.speed, false),
+        gravity_modifier,
+        upper_lifetime,
+        rotation_3d: emitter.start.rotation3d
+            || emitter.rotation_over_lifetime.as_ref().is_some_and(|rol| rol.separate_axes),
+        angular_speed: emitter.rotation_over_lifetime.is_some(),
+    })
+}
+
+/// One newborn lane in source axes while the command runs.
+#[derive(Clone, Copy)]
+struct Lane {
+    position: [f32; 3],
+    velocity: [f32; 3],
+    animated: [f32; 3],
+    rotation: [f32; 3],
+    angular: [f32; 3],
+    size: f32,
+    color: [u8; 4],
+    seed: u32,
+    age: f32,
+    inverse: f32,
+    lifetime: f32,
+    custom: [[f32; 4]; 2],
+    fraction: f32,
+    birth_dt: f32,
+}
+
+/// Test instrumentation: one named change to the law per replay arm.
+#[cfg(test)]
+pub(super) mod arms {
+    use std::cell::Cell;
+    thread_local! { static ARM: Cell<Option<&'static str>> = const { Cell::new(None) }; }
+    pub fn set(arm: Option<&'static str>) { ARM.with(|a| a.set(arm)); }
+    pub fn on(name: &str) -> bool { ARM.with(|a| a.get() == Some(name)) }
+}
+#[cfg(not(test))]
+pub(super) mod arms {
+    #[inline(always)]
+    pub fn on(_: &str) -> bool { false }
+}
+
+/// Execute one complete command before the next arrival. `owner` holds the
+/// target's owner words of the frame the command was issued in; `initial`
+/// is the target's Initial stream; `shape` is the Shape step (None when the
+/// target has no Shape module). A refusal changes nothing.
+pub(super) fn apply_command(
+    system: &mut Runtime,
+    owner: &ChildOwner,
+    initial: &mut ModuleRandom,
+    shape: Option<&mut dyn ChildShape>,
+    command: &ChildCommand,
+    update: ChildUpdate,
+) -> Result<Applied, Refused> {
+    let noop = |start| Applied {
+        born: 0,
+        catch_up_steps: 0,
+        catch_up_remainder: command.catch_up,
+        start,
+    };
+    if command.count == 0 {
+        return Ok(noop(None));
+    }
+    command.validate()?;
+    let laws = child_laws(&system.emitter)?;
+    if system.emitter.shape.is_some() != shape.is_some() {
+        return Err(Refused::Unsupported("Shape step does not match the target's Shape module"));
+    }
+    if update.world_playing && command.catch_up >= laws.upper_lifetime && !arms::on("noUpperGate") {
+        return Ok(noop(None));
+    }
+    let world_space = system.emitter.simulation_space == SimulationSpace::World;
+    let mut frame_owner = *owner;
+    if arms::on("noEmitterScale") {
+        frame_owner.emitter_scale = [1.0; 3];
+    }
+    let mut frame = child_emit::start_frame(&frame_owner, world_space, command.position, command.velocity);
+    if arms::on("noInverse") && !world_space {
+        frame = child_emit::start_frame(&frame_owner, true, command.position, command.velocity);
+    }
+    if arms::on("backtrackWorldVelocity") {
+        frame.emitter_velocity = command.velocity;
+    }
+    if arms::on("noLookRotation") {
+        // The identity in place of the look rotation (a zero direction fails it).
+        frame.matrix = child_emit::start_frame(&frame_owner, world_space, command.position, [0.0; 3]).matrix;
+    }
+    if frame.matrix.iter().chain(frame.emitter_velocity.iter()).any(|v| !v.is_finite()) {
+        return Err(Refused::InvalidCommand("nonfinite start matrix"));
+    }
+    let mut catch_up = child_emit::catch_up_plan(command.catch_up, update.frame_dt, update.world_playing,
+        update.flags, system.emitter.duration);
+    if arms::on("noStepRaise") {
+        catch_up = child_emit::catch_up_plan(command.catch_up, update.frame_dt, update.world_playing,
+            update.flags | 4, system.emitter.duration);
+        catch_up.runs &= update.flags & 5 != 0;
     }
     assert_eq!(system.pool.len(), system.side.len());
-    let old_count = system.pool.len();
-    let requested = command.count as usize;
-    let accepted = birth_capacity(
-        old_count,
-        emitter.ring_buffer_mode,
-        emitter.max_particles as usize,
-        requested,
-    );
-    if accepted != requested {
-        return Err(Refused::Unsupported("child capacity overflow"));
-    }
-    let law = InitialLaw::from_params(&emitter.start, 0.0).map_err(Refused::Initial)?;
-    let mut next = *random;
-    let mut particles = Vec::with_capacity(accepted.next_multiple_of(4));
-    let mut sides = Vec::with_capacity(particles.capacity());
-    let mut partial_dts = Vec::with_capacity(particles.capacity());
-    for offset in (0..accepted).step_by(4) {
+    let old = system.pool.len();
+    let maximum = system.emitter.max_particles as usize;
+    let count = command.count as usize;
+    let mut accepted = if old >= maximum { 0 } else { (maximum.min(count + old) - old).min(count) };
+    let capacity_accepted = accepted;
+    let groups = accepted.div_ceil(4);
+    let aligned_lanes = groups * 4;
+
+    // Staged: nothing below writes the system until the command succeeded.
+    let mut next_initial = *initial;
+    let mut lanes: Vec<Lane> = Vec::with_capacity(aligned_lanes);
+    let mut shape = shape;
+    for group_index in 0..groups {
+        let offset = group_index * 4;
         let timing = (0..4)
             .map(|lane| {
                 command
                     .distribution
-                    .timing(
-                        (offset + lane) as u32,
-                        command.rate_count as u32,
-                        command.dt,
-                        command.previous,
-                        command.current,
-                    )
+                    .timing((offset + lane) as u32, command.rate_count as u32, command.dt,
+                        command.previous, command.current)
                     .map_err(|_| Refused::InvalidCommand("birth timing"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let group = law
+        let group = laws
+            .initial
             .start_group_native(
-                &mut next,
+                &mut next_initial,
                 InitialGroupInput {
                     active_lanes: (accepted - offset).min(4),
-                    storage_size_3d: emitter.start.size3d,
-                    storage_rotation_3d: emitter.start.rotation3d,
+                    storage_size_3d: false,
+                    storage_rotation_3d: laws.rotation_3d,
                     birth_fraction: std::array::from_fn(|lane| timing[lane].fraction),
-                    // Initial receives current broadcast; StartVelocity's separate
-                    // per-lane curve time must not replace this input.
+                    // The command's current normalized time, broadcast.
                     curve_time: [command.current; 4],
                     context: InitialContext::Autonomous,
                 },
             )
             .map_err(Refused::Initial)?;
-        for (i, lane) in group.lanes.into_iter().enumerate() {
-            let mut age = (timing[i].dt * 100.0) * lane.inverse_lifetime;
-            for step in &steps {
-                age += (*step * 100.0) * lane.inverse_lifetime;
-            }
-            if !age.is_finite() || age > 100.0 {
-                return Err(Refused::Unsupported("death during child birth/catch-up"));
-            }
-            // There are no position-sensitive pre modules or nonzero born
-            // speed in this subset. Backtracking before pre is equivalent only
-            // under these gates; keep native division/multiply operation order.
-            let backtrack = (command.dt / emitter.simulation_speed) * timing[i].fraction;
-            let position = std::array::from_fn(|axis| {
-                command.position[axis] - command.velocity[axis] * backtrack
+        let translation = [frame.matrix[12], frame.matrix[13], frame.matrix[14]];
+        let samples = match shape.as_deref_mut() {
+            Some(shape) => shape.group(&frame.matrix)?,
+            None => [ShapeSample { position: translation, direction: [0.0; 3] }; 4],
+        };
+        for (index, initial_lane) in group.lanes.into_iter().enumerate() {
+            let sample = samples[index];
+            let speed = laws.speed.evaluate(timing[index].curve_time,
+                ParticleRandom::sample(initial_lane.seed, 0x96aa_4de3));
+            lanes.push(Lane {
+                position: sample.position,
+                velocity: sample.direction.map(|d| speed * d),
+                animated: [0.0; 3],
+                rotation: initial_lane.rotation.map(|v| v.unwrap_or(0.0)),
+                angular: [0.0; 3],
+                size: initial_lane.size[0].unwrap_or(0.0),
+                color: initial_lane.color,
+                seed: initial_lane.seed,
+                age: 0.0,
+                inverse: initial_lane.inverse_lifetime,
+                lifetime: initial_lane.lifetime,
+                custom: [[0.0; 4]; 2],
+                fraction: timing[index].fraction,
+                birth_dt: if arms::on("birthDtIsCommandDt") { command.dt } else { timing[index].dt },
             });
-            if position.iter().any(|v| !v.is_finite()) {
-                return Err(Refused::InvalidCommand("birth position overflow"));
-            }
-            particles.push(Particle {
-                position: crate::particle_geometry::reflect(Vec3::from_array(position)).to_array(),
-                velocity: [0.0; 3],
-                start_lifetime: lane.lifetime,
-                inverse_lifetime: lane.inverse_lifetime,
-                age_percent: 0.0,
-            });
-            sides.push(Side {
-                rand: 0.0,
-                seed: lane.seed,
-                rot: lane.rotation.map(|v| v.unwrap_or(0.0)),
-                size: lane.size.map(|v| v.unwrap_or(lane.size[0].unwrap())),
-                gravity: 0.0,
-                colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
-                total_velocity: [0.0; 3],
-                custom_data: [[0.0; 4]; 2],
-            });
-            partial_dts.push(timing[i].dt);
         }
     }
-    // All padded lanes, including possible catch-up death, were checked before
-    // mutation. The old pool, clocks, carries and RNG have not been advanced.
-    system.pool.extend(particles);
-    system.side.extend(sides);
-    let survivors = simulate_birth_span(system, old_count, accepted, &partial_dts, ctx);
-    assert_eq!(survivors, accepted, "qualified child span must not die");
-    for step in &steps {
-        simulate_range(system, old_count, old_count + accepted, *step, None, ctx);
+
+    // Newborn pre-simulation modules with each lane's birth dt, then the
+    // newborn position and age update; the placement moves each birth back
+    // along the command velocity in the target's space.
+    let back_scale = command.dt / system.emitter.simulation_speed;
+    let gravity_space = (!world_space && !arms::on("gravityWorld")).then_some(&owner.world_to_local);
+    for lane in &mut lanes {
+        pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space);
     }
-    system.pool.truncate(old_count + accepted);
-    system.side.truncate(old_count + accepted);
-    finish_births(
-        &mut system.pool,
-        &mut system.side,
-        &mut system.ring_cursor,
-        RingBufferMode::Disabled,
-        system.emitter.max_particles as usize,
-        old_count,
-        |_, _| {},
-    );
-    *random = next;
-    system.born_total += accepted as u64;
+    for lane in &mut lanes {
+        let dt = lane.birth_dt;
+        let age = if lane.age >= 100.0 { lane.age } else { (dt * 100.0) * lane.inverse };
+        lane.age = child_emit::min_propagating(age, AGE_CAP);
+        let back = back_scale * (0.0 + lane.fraction);
+        for a in 0..3 {
+            let placed = lane.position[a] - back * frame.emitter_velocity[a];
+            lane.position[a] = placed + (lane.velocity[a] + lane.animated[a]) * (1.0 * dt);
+        }
+        integrate_rotation(&laws, lane, dt);
+    }
+    // Newborn deaths over the padded block: the last lane moves into the
+    // dead one, and every death takes one off the accepted count.
+    let mut deaths = 0_u64;
+    let mut index = 0;
+    while index < lanes.len() {
+        if lanes[index].age > 100.0 {
+            lanes.swap_remove(index);
+            accepted = accepted.saturating_sub(1);
+            deaths += 1;
+        } else {
+            index += 1;
+        }
+    }
+    // Catch-up steps on the new block only.
+    let mut remaining = command.catch_up;
+    let mut steps = 0;
+    if catch_up.runs {
+        let dt = catch_up.frame_dt;
+        loop {
+            if lanes.is_empty() || accepted == 0 {
+                break;
+            }
+            let mut end = accepted;
+            remaining -= dt;
+            steps += 1;
+            let covered = (4 * end.div_ceil(4)).min(lanes.len());
+            for lane in &mut lanes[..covered] {
+                pre_modules(system, &laws, lane, dt, update.gravity, gravity_space);
+            }
+            for lane in &mut lanes[..covered] {
+                let age = lane.age;
+                let advanced = child_emit::min_propagating(age + (dt * 100.0) * lane.inverse, AGE_CAP);
+                lane.age = if age > 100.0 { age } else { advanced };
+                for a in 0..3 {
+                    lane.position[a] = (lane.velocity[a] + lane.animated[a]) * dt + lane.position[a];
+                }
+            }
+            // Four-wide from the block start while the group starts before
+            // the end: dead lanes 3..0 take the last lane, the group is
+            // retested; lanes of the last group past the end are tested too.
+            let mut group = 0;
+            while group < end && group < lanes.len() {
+                let dead: [bool; 4] =
+                    std::array::from_fn(|l| group + l < lanes.len() && lanes[group + l].age > 100.0);
+                if !dead.iter().any(|&d| d) {
+                    group += 4;
+                    continue;
+                }
+                for l in (0..4).rev() {
+                    if dead[l] {
+                        let padding = group + l >= accepted;
+                        lanes.swap_remove(group + l);
+                        deaths += 1;
+                        if accepted > 0 && !(arms::on("paddingKillKeepsAccepted") && padding) {
+                            accepted -= 1;
+                        }
+                    }
+                }
+            }
+            end = end.min(lanes.len());
+            let covered = (4 * end.div_ceil(4)).min(lanes.len());
+            for lane in &mut lanes[..covered] {
+                integrate_rotation(&laws, lane, dt);
+            }
+            if !(remaining >= catch_up.step) {
+                break;
+            }
+        }
+    }
+    lanes.truncate(accepted);
+    let born: Vec<(Particle, Side)> = lanes
+        .iter()
+        .map(|lane| {
+            let reflect = |v: [f32; 3]| crate::particle_geometry::reflect(Vec3::from_array(v)).to_array();
+            (
+                Particle {
+                    position: reflect(lane.position),
+                    velocity: reflect(lane.velocity),
+                    start_lifetime: lane.lifetime,
+                    inverse_lifetime: lane.inverse,
+                    age_percent: lane.age,
+                },
+                Side {
+                    rand: 0.0,
+                    seed: lane.seed,
+                    rot: lane.rotation,
+                    size: [lane.size; 3],
+                    gravity: 0.0,
+                    colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
+                    total_velocity: reflect(std::array::from_fn(|a| lane.velocity[a] + lane.animated[a])),
+                    custom_data: lane.custom,
+                    emit_carry: [0.0; 2],
+                    animated: reflect(lane.animated),
+                },
+            )
+        })
+        .collect();
+    if born
+        .iter()
+        .any(|(p, s)| p.position.iter().chain(&p.velocity).chain(&s.total_velocity).any(|v| !v.is_finite()))
+    {
+        return Err(Refused::InvalidCommand("nonfinite child birth"));
+    }
+    // Commit.
+    let accepted = born.len();
+    for (particle, side) in born {
+        system.pool.push(particle);
+        system.side.push(side);
+    }
+    finish_births(&mut system.pool, &mut system.side, &mut system.ring_cursor, RingBufferMode::Disabled,
+        maximum, old, |_, _| {});
+    *initial = next_initial;
+    system.born_total += capacity_accepted as u64;
+    system.died_total += deaths;
+    system.full_total += (count - capacity_accepted) as u64;
     Ok(Applied {
         born: accepted,
-        catch_up_steps: steps.len(),
-        catch_up_remainder: catch_up.remainder(),
+        catch_up_steps: steps,
+        catch_up_remainder: remaining,
+        start: Some(frame),
     })
+}
+
+/// The pre-simulation modules of one lane over dt: gravity into the
+/// persistent velocity, animated velocity cleared, angular speed cleared and
+/// rebuilt by RotationOverLifetime, CustomData at the current age.
+fn pre_modules(system: &Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
+    gravity_space: Option<&[f32; 16]>) {
+    if !arms::on("noGravity") {
+        if let Some(delta) = child_emit::gravity_delta(gravity, laws.gravity_modifier, dt, gravity_space) {
+            lane.velocity = std::array::from_fn(|a| delta[a] + lane.velocity[a]);
+        }
+    }
+    lane.animated = [0.0; 3];
+    if let Some(rol) = &system.rol {
+        lane.angular = [0.0; 3];
+        let speed = rol.angular_velocity(lane.seed, 0.0, lane.age);
+        lane.angular = std::array::from_fn(|a| lane.angular[a] + speed[a]);
+    }
+    if let Some(custom) = &system.custom_law {
+        custom.update(lane.seed, lane.age, &mut lane.custom);
+    }
+}
+
+/// rotation = angular speed * dt + rotation, on the three axes when the
+/// arrays carry 3D rotation, else on z; nothing without angular speed.
+fn integrate_rotation(laws: &ChildLaws, lane: &mut Lane, dt: f32) {
+    if !laws.angular_speed {
+        return;
+    }
+    let axes = if laws.rotation_3d { 0..3 } else { 2..3 };
+    for axis in axes {
+        lane.rotation[axis] = lane.angular[axis] * dt + lane.rotation[axis];
+    }
+}
+
+/// The installed child side of a sub-emitter target: the owner words its
+/// commands read and what the delivered commands did. The target never
+/// emits on its own (the engine marks every sub-emitter target stopped each
+/// frame), so its own frame is the stopped update.
+#[derive(Clone, Debug)]
+pub(crate) struct ChildTarget {
+    pub(crate) owner: ChildOwner,
+    pub(crate) commands: u64,
+    pub(crate) births: u64,
+    pub(crate) refused: u64,
+    pub(crate) last_refusal: Option<String>,
+}
+
+/// Whether a system can be a sub-emitter target on this path: the native
+/// birth composition (without the route, which a target does not take), the
+/// native Shape emitter state, the child composition and the target's own
+/// Shape law.
+pub(crate) fn child_target_eligible(emitter: &EmitterParams, evidence: Option<ShapeEmitterEvidence>)
+    -> Result<(), String> {
+    birth::qualify_emitter(emitter).map_err(|refused| format!("{refused:?}"))?;
+    native_shape_state_eligible(emitter, evidence)?;
+    qualify_target(emitter).map_err(|refused| format!("{refused:?}"))?;
+    if let Some(params) = &emitter.shape {
+        ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?;
+    }
+    Ok(())
+}
+
+/// Called once when an admitted sub-emitter target is installed: its seed
+/// owner and streams as any system's first Play makes them, and the child
+/// owner words its commands read.
+pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
+    owner: ChildOwner) -> Result<(), String> {
+    if system.native_birth.is_some() {
+        return Err("target already has a birth owner".into());
+    }
+    child_target_eligible(&system.emitter, system.geometry.shape_evidence())?;
+    let (seed_owner, streams) = seeds
+        .create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)
+        .map_err(|error| format!("{error:?}"))?;
+    system.native_birth = Some(birth::NativeBirthState {
+        owner: Some(seed_owner),
+        initial: streams.initial,
+        shape: streams.shape,
+        emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(
+            streams.scalar_birth),
+        frame: birth::FrameState::default(),
+        events: None,
+        target: Some(ChildTarget { owner, commands: 0, births: 0, refused: 0, last_refusal: None }),
+    });
+    Ok(())
+}
+
+/// One parent command delivered to its installed target in the frame it was
+/// issued: the per-frame update passes no catch-up flag, the world plays and
+/// the world gravity is the physics default. The Shape stream is committed
+/// only when the whole command succeeded; a refusal changes nothing but the
+/// target's refusal count.
+pub(crate) fn deliver_command(system: &mut Runtime,
+    command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32) -> Result<usize, String> {
+    let Some(mut native) = system.native_birth.take() else {
+        return Err("target has no child owner".into());
+    };
+    let result = deliver_staged(system, &mut native, command, frame_dt);
+    if let Some(target) = native.target.as_mut() {
+        target.commands += 1;
+        match &result {
+            Ok(born) => target.births += *born as u64,
+            Err(reason) => {
+                target.refused += 1;
+                target.last_refusal = Some(reason.clone());
+            }
+        }
+    }
+    system.native_birth = Some(native);
+    result
+}
+
+fn deliver_staged(system: &mut Runtime, native: &mut birth::NativeBirthState,
+    command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32) -> Result<usize, String> {
+    let owner = native.target.as_ref().ok_or("system is not a sub-emitter target")?.owner;
+    let update = ChildUpdate { flags: 0, frame_dt, world_playing: true, gravity: SOURCE_GRAVITY };
+    let mut shape = match &system.emitter.shape {
+        None => None,
+        Some(params) => Some(SourceShape {
+            law: ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?,
+            stream: native.shape,
+            shape_scale: owner.shape_scale,
+            uses_axis_of_rotation: system.geometry.shape_evidence().is_some_and(|e| e.mesh_renderer),
+        }),
+    };
+    let applied = apply_command(system, &owner, &mut native.initial,
+        shape.as_mut().map(|s| s as &mut dyn ChildShape), &ChildCommand::from_event(command), update)
+        .map_err(|refused| format!("{refused:?}"))?;
+    if let Some(shape) = shape {
+        native.shape = shape.stream;
+    }
+    Ok(applied.born)
 }
 
 #[cfg(test)]
@@ -348,13 +766,9 @@ mod tests {
             (0x08, 1.0_f32),
             (0x0c, 2.0),
             (0x10, 3.0),
-            (0x14, 0.0),
-            (0x18, 0.0),
-            (0x1c, 0.0),
             (0x68, 0.25),
             (0x6c, 0.25),
             (0x70, 0.5),
-            (0x74, 0.0),
         ] {
             put32(&mut bytes, at, value.to_bits());
         }
@@ -370,50 +784,51 @@ mod tests {
     }
 
     #[test]
-    fn zero_count_native_command_is_parseable_noop_metadata() {
-        let (raw, emission) = raw(0);
-        let command = ChildCommand::from_native_bytes(&raw, &emission).unwrap();
-        assert_eq!(command.count, 0);
-        assert_eq!(
-            command.distribution.burst_fraction.to_bits(),
-            1.0_f32.to_bits()
-        );
-    }
-
-    #[test]
-    fn neutral_context_requires_initialized_native_forward_vector() {
-        let (mut bytes, emission) = raw(1);
-        let update = ChildUpdate {
-            flags: 0,
-            frame_dt: 0.125,
-            world_playing: true,
-            upper_lifetime: 1.0,
-        };
+    fn native_command_layout_parses() {
+        let (bytes, emission) = raw(0);
         let command = ChildCommand::from_native_bytes(&bytes, &emission).unwrap();
+        assert_eq!(command.count, 0);
+        assert_eq!(command.distribution.burst_fraction.to_bits(), 1.0_f32.to_bits());
         assert_eq!(command.inherited_words[9], 1.0_f32.to_bits());
-        assert_eq!(command.validate(update), Ok(()));
-        bytes[0x44..0x48].fill(0);
-        let uninitialized = ChildCommand::from_native_bytes(&bytes, &emission).unwrap();
-        assert_eq!(uninitialized.validate(update),
-            Err(Refused::Unsupported("non-neutral inherited context")));
+        assert_eq!(command.validate(), Ok(()));
     }
 
+    /// No finite or non-finite command input panics: every word of the
+    /// command and every update input runs through a qualified target.
     #[test]
-    fn parser_retains_inherited_words_and_rejects_non_exact_count() {
-        let (mut raw, emission) = raw(1);
-        raw[0x58..0x60].copy_from_slice(&(MAX_EXACT_COUNT + 1).to_le_bytes());
-        let command = ChildCommand::from_native_bytes(&raw, &emission).unwrap();
-        assert_eq!(command.inherited_words[0], u32::MAX);
-        let update = ChildUpdate {
-            flags: 0,
-            frame_dt: 0.125,
-            world_playing: true,
-            upper_lifetime: 1.0,
+    fn no_command_input_panics() {
+        let mut system = test_support::runtime();
+        system.emitter.shape_enabled = Some(false);
+        system.emitter.shape = None;
+        system.emitter.start.speed = MinMaxCurve::Constant(0.0);
+        let owner = ChildOwner {
+            local_to_world: moly_law::particle::shape_birth::IDENTITY,
+            world_to_local: moly_law::particle::shape_birth::IDENTITY,
+            local_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            emitter_scale: [1.0; 3],
+            shape_scale: [1.0; 3],
         };
-        assert_eq!(
-            command.validate(update),
-            Err(Refused::InvalidCommand("count outside exact range"))
-        );
+        let values = [0.0, -0.0, 1.0, -1.0, 0.5, 1e-30, 1e30, f32::MAX, f32::NAN, f32::INFINITY,
+            f32::NEG_INFINITY];
+        let (bytes, emission) = raw(3);
+        let base = ChildCommand::from_native_bytes(&bytes, &emission).unwrap();
+        for &a in &values {
+            for &b in &values {
+                let mut command = base.clone();
+                command.position = [a, b, a];
+                command.velocity = [b, a, b];
+                command.catch_up = a;
+                command.dt = b;
+                command.distribution.spacing = a;
+                command.distribution.offset = b;
+                command.distribution.burst_fraction = a;
+                command.count = if a > 0.0 { 40 } else { 3 };
+                let mut random = ModuleRandom::from_owner_seed(7);
+                let update = ChildUpdate { flags: 5, frame_dt: b, world_playing: a > 0.0, gravity: [a, b, a] };
+                let _ = apply_command(&mut system, &owner, &mut random, None, &command, update);
+                assert_eq!(system.pool.len(), system.side.len());
+            }
+        }
     }
 
     #[test]
@@ -612,7 +1027,6 @@ mod tests {
             random: &mut ModuleRandom,
             row: &Value,
             update: ChildUpdate,
-            context: &Context,
             label: &str,
         ) -> Applied {
             let value = &row["command"];
@@ -639,7 +1053,15 @@ mod tests {
                 system.previous_head.to_bits(),
             );
             let old_born = system.born_total;
-            let applied = apply_command(system, random, &command, update, context)
+            // The probe owner is the identity (checked below).
+            let owner = ChildOwner {
+                local_to_world: moly_law::particle::shape_birth::IDENTITY,
+                world_to_local: moly_law::particle::shape_birth::IDENTITY,
+                local_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                emitter_scale: [1.0; 3],
+                shape_scale: [1.0; 3],
+            };
+            let applied = apply_command(system, &owner, random, None, &command, update)
                 .unwrap_or_else(|e| panic!("{label} apply: {e:?}"));
             assert_eq!(applied.born as u64, command.count, "{label} born count");
             assert_eq!(
@@ -730,29 +1152,19 @@ mod tests {
         assert_eq!(fixture["probeInputs"]["owner"], identity);
         assert_eq!(fixture["probeInputs"]["inverseChildOwner"], identity);
         assert_eq!(number(&fixture["probeInputs"]["simulationSpeed"]), 1.0);
-        let context = Context {
-            sky: GlobalTransform::IDENTITY,
-            camera: GlobalTransform::IDENTITY,
-            site: GlobalTransform::IDENTITY,
-        };
         let update = ChildUpdate {
             flags: fixture["probeInputs"]["chainUpdateFlags"].as_u64().unwrap() as u32,
             frame_dt: number(&fixture["probeInputs"]["frameDt"]),
             world_playing: true,
-            upper_lifetime: number(&fixture["probeInputs"]["upperLifetimeSlot"]),
+            // The flash's authored modifier is zero, so gravity changes at
+            // most the sign of a zero velocity, which compares by value here.
+            gravity: SOURCE_GRAVITY,
         };
         let mut system = source_runtime(particle, effect_name);
         let mut random = words(&fixture["initialWords"]);
         let mut nonzero = 0;
         for (i, row) in rows.iter().enumerate() {
-            let applied = replay(
-                &mut system,
-                &mut random,
-                row,
-                update,
-                &context,
-                &format!("row {i}"),
-            );
+            let applied = replay(&mut system, &mut random, row, update, &format!("row {i}"));
             nonzero += usize::from(applied.born > 0);
             assert_eq!(applied.catch_up_steps, 0);
         }
@@ -785,7 +1197,6 @@ mod tests {
                     .unwrap() as u32,
                 ..update
             },
-            &context,
             "explicitCatchup",
         );
         assert_eq!(applied.born, 4);

@@ -12,6 +12,7 @@
 //! ring/death side data must not be replaced with a linear append here.
 
 use crate::particle::emit::{BurstCycles, EmissionState};
+use crate::particle::seed_owner::ScalarRandom;
 use crate::particle::schema::{EmissionParams, SubEmitterParams, SubEmitterTrigger};
 use crate::particle::value::MinMaxCurve;
 
@@ -26,7 +27,6 @@ pub enum Refused {
     UnsupportedConfiguration,
     InvalidInput,
     CountOutOfRange,
-    UnverifiedCatchUpRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -196,29 +196,7 @@ impl ConstantBirthSchedule {
         inverse_lifetime: f32,
         dt: f32,
     ) -> Result<Option<BirthInterval>, Refused> {
-        if ![age, inverse_lifetime, dt].iter().all(|v| v.is_finite())
-            || inverse_lifetime <= 0.0
-            || dt < 0.0
-        {
-            return Err(Refused::InvalidInput);
-        }
-        let current_normalized = age * 0.01 - inverse_lifetime * self.delay;
-        let current = current_normalized / inverse_lifetime;
-        if !(0.0..1.0).contains(&current_normalized) || current >= self.duration {
-            return Ok(None);
-        }
-        let previous_normalized =
-            (age + inverse_lifetime * (dt * -100.0)) * 0.01 - inverse_lifetime * self.delay;
-        let previous = previous_normalized / inverse_lifetime;
-        if !previous.is_finite() || !current.is_finite() || previous > current {
-            return Err(Refused::InvalidInput);
-        }
-        Ok(Some(BirthInterval {
-            previous,
-            current,
-            previous_normalized,
-            current_normalized,
-        }))
+        birth_interval(self.delay, self.duration, age, inverse_lifetime, dt)
     }
 
     /// Distance and time consume the SAME parent-particle/edge carry in that
@@ -332,48 +310,449 @@ fn accumulate(
     ))
 }
 
-/// Explicit, bounded native full-frame catch-up iterator. The caller decides
-/// `enabled` from a proven update owner; this type never guesses flag meaning.
-/// Each yielded dt must run pre/sim/post only on the new birth span. The
-/// remainder is not integrated, and normal pool packing follows the batch.
-#[derive(Debug, Clone, Copy)]
-pub struct CatchUp {
-    remaining: f32,
-    frame_dt: f32,
-    enabled: bool,
+/// The parent particle's life window for one edge. The child's start delay
+/// shifts it; outside the shifted [0, 1) or at and past the child duration
+/// the particle records nothing. Parent age is percent, not seconds.
+fn birth_interval(
+    delay: f32,
+    duration: f32,
+    age: f32,
+    inverse_lifetime: f32,
+    dt: f32,
+) -> Result<Option<BirthInterval>, Refused> {
+    if ![age, inverse_lifetime, dt].iter().all(|v| v.is_finite())
+        || inverse_lifetime <= 0.0
+        || dt < 0.0
+    {
+        return Err(Refused::InvalidInput);
+    }
+    let current_normalized = age * 0.01 - inverse_lifetime * delay;
+    let current = current_normalized / inverse_lifetime;
+    if !(0.0..1.0).contains(&current_normalized) || current >= duration {
+        return Ok(None);
+    }
+    let previous_normalized =
+        (age + inverse_lifetime * (dt * -100.0)) * 0.01 - inverse_lifetime * delay;
+    let previous = previous_normalized / inverse_lifetime;
+    if !previous.is_finite() || !current.is_finite() || previous > current {
+        return Err(Refused::InvalidInput);
+    }
+    Ok(Some(BirthInterval {
+        previous,
+        current,
+        previous_normalized,
+        current_normalized,
+    }))
 }
 
-impl CatchUp {
-    pub fn new(elapsed: f32, frame_dt: f32, enabled: bool) -> Result<Self, Refused> {
-        if !elapsed.is_finite() || elapsed < 0.0 || !frame_dt.is_finite() || frame_dt <= 0.0 {
-            return Err(Refused::InvalidInput);
+// ---- Parent side: one recorded birth event per active parent particle ----
+//
+// The parent's sub-emitter module visits, per cached birth edge in slot order,
+// every particle of the range it is handed and records an event for each one
+// whose life window is open for that edge's child. The event seeds its own
+// emission state, runs the child's distance emission and then its time
+// emission (rate and the one burst) on it, writes the carry back to the parent
+// particle and, when anything was counted, issues two commands to the child:
+// the distance batch, then the time and burst batch.
+
+/// Parent state the recording reads besides the particle, as the parent holds
+/// it at the call: its local-to-world matrix (column-major, source axes; not
+/// read in World space), whether it simulates in World space, the system time
+/// it still has to simulate (the current slice's own step not yet taken off)
+/// and the first word of its own emission random stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EventOwner {
+    pub local_to_world: [f32; 16],
+    pub world_space: bool,
+    pub accumulated_time: f32,
+    pub emission_word: u32,
+}
+
+/// One parent particle as the recording reads it, in source axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EventParticle {
+    pub seed: u32,
+    pub age_percent: f32,
+    pub inverse_lifetime: f32,
+    pub position: [f32; 3],
+    /// Persistent plus animated velocity, summed per axis.
+    pub velocity: [f32; 3],
+}
+
+/// The emission state one event hands to the child's emission functions:
+/// the three birth-distribution scalars (the carry is the middle one) and the
+/// event's own random words.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EventEmission {
+    pub distribution: BirthDistribution,
+    pub random: ScalarRandom,
+}
+
+impl EventEmission {
+    /// Every event is seeded afresh from the particle seed plus the parent's
+    /// emission word (wrapping), expanded by three LCG steps. It never reads
+    /// or advances the parent's own emission stream beyond that one word, and
+    /// it is not the child's Initial stream.
+    pub fn seeded(particle_seed: u32, emission_word: u32, carry: f32) -> Self {
+        Self {
+            distribution: BirthDistribution {
+                spacing: 0.0,
+                offset: carry,
+                burst_fraction: 0.0,
+            },
+            random: ScalarRandom::from_seed(particle_seed.wrapping_add(emission_word)),
         }
-        // Native changes its threshold above 5/10 seconds. The receipt for
-        // this first implementation reaches one second; do not silently
-        // extend its accepted domain to the larger untested interval.
-        if elapsed > 1.0 {
-            return Err(Refused::UnverifiedCatchUpRange);
+    }
+}
+
+/// A command to the child system, with the fields the child consumes; the
+/// native byte layout is [`SubEmitterCommand::to_bytes`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubEmitterCommand {
+    /// World position and world velocity of the parent particle, source axes.
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    /// The inherited block; an edge that inherits nothing sends the neutral
+    /// words with the parent particle's seed last.
+    pub inherited: [u32; 13],
+    pub count: u64,
+    pub rate_count: u64,
+    /// The interval in child seconds (current minus previous, one f32
+    /// subtraction), both normalized ends, then the parent's time still to
+    /// simulate at the call (the child's catch-up).
+    pub dt: f32,
+    pub previous_normalized: f32,
+    pub current_normalized: f32,
+    pub catch_up: f32,
+    /// The scalars this command's births are spread with.
+    pub emission: BirthDistribution,
+}
+
+impl SubEmitterCommand {
+    /// The native command bytes. The first word is a pointer to the emission
+    /// scalars ([`Self::emission_bytes`]) and the word after the inherited
+    /// block is not a field; both are written as zero.
+    pub fn to_bytes(&self) -> [u8; 0x78] {
+        let mut raw = [0_u8; 0x78];
+        let mut put = |offset: usize, bytes: [u8; 4]| raw[offset..offset + 4].copy_from_slice(&bytes);
+        for axis in 0..3 {
+            put(0x08 + axis * 4, self.position[axis].to_le_bytes());
+            put(0x14 + axis * 4, self.velocity[axis].to_le_bytes());
         }
+        for (index, word) in self.inherited.iter().enumerate() {
+            put(0x20 + index * 4, word.to_le_bytes());
+        }
+        put(0x68, self.dt.to_le_bytes());
+        put(0x6c, self.previous_normalized.to_le_bytes());
+        put(0x70, self.current_normalized.to_le_bytes());
+        put(0x74, self.catch_up.to_le_bytes());
+        raw[0x58..0x60].copy_from_slice(&self.count.to_le_bytes());
+        raw[0x60..0x68].copy_from_slice(&self.rate_count.to_le_bytes());
+        raw
+    }
+
+    pub fn emission_bytes(&self) -> [u8; 12] {
+        let mut out = [0_u8; 12];
+        out[0..4].copy_from_slice(&self.emission.spacing.to_le_bytes());
+        out[4..8].copy_from_slice(&self.emission.offset.to_le_bytes());
+        out[8..12].copy_from_slice(&self.emission.burst_fraction.to_le_bytes());
+        out
+    }
+}
+
+/// One recorded event: the window, the emission state before and after, and
+/// the two commands unless the distance count, the time count and the rate
+/// count were all zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BirthEventRecord {
+    pub interval: BirthInterval,
+    pub before: EventEmission,
+    pub after: EventEmission,
+    pub commands: Option<[SubEmitterCommand; 2]>,
+}
+
+/// The burst count as the burst accumulation reads it at probability one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EventBurstCount {
+    /// The constant truncated toward zero; no draw.
+    Constant(u32),
+    /// Smaller and larger constant, each truncated toward zero. Every hit
+    /// takes one draw from the event's stream and counts lo + word mod
+    /// (hi + 1 - lo) on the whole 32-bit word. Built only by the gate, which
+    /// keeps 0 <= lo <= hi <= 16,777,215 so the modulus is never zero.
+    TwoConstants { lo: u32, hi: u32 },
+}
+
+impl EventBurstCount {
+    fn sample(self, random: &mut ScalarRandom) -> u32 {
+        match self {
+            Self::Constant(count) => count,
+            Self::TwoConstants { lo, hi } => lo + random.next_u32() % (hi + 1 - lo),
+        }
+    }
+}
+
+/// The count law of one cached birth edge, read from the child's start delay,
+/// duration, loop flag and Emission module: a constant start delay, constant
+/// rate over time and over distance, and at most one burst of probability one
+/// and one cycle with a constant or two-constant count. The child's own
+/// update never runs here; this only decides what the parent sends it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BirthEdgeLaw {
+    delay: f32,
+    /// The child duration, or f32::MAX for a looping child.
+    duration: f32,
+    time_rate: f32,
+    distance_rate: f32,
+    burst: Option<(f32, EventBurstCount)>,
+}
+
+impl BirthEdgeLaw {
+    /// `cached_birth_edges` counts the parent's resolved birth edges. Only the
+    /// first two own a persistent per-particle carry; a third would use a
+    /// carry computed inside the call, which is not transcribed, so a parent
+    /// with more than two is refused.
+    pub fn from_params(
+        edge: &SubEmitterParams,
+        cached_birth_edges: usize,
+        delay: &MinMaxCurve,
+        duration: f32,
+        looping: bool,
+        emission: &EmissionParams,
+    ) -> Result<Self, Refused> {
+        let unsupported = Refused::UnsupportedConfiguration;
+        if edge.trigger != SubEmitterTrigger::Birth
+            || edge.properties != 0
+            || edge.probability != 1.0
+            || edge.emitter.as_ref().is_none_or(|s| s.is_empty())
+            || !(1..=2).contains(&cached_birth_edges)
+            || emission.bursts.len() > 1
+            || !duration.is_finite()
+            || duration <= 0.0
+        {
+            return Err(unsupported);
+        }
+        let constant = |curve: &MinMaxCurve| match curve {
+            MinMaxCurve::Constant(value) if value.is_finite() && *value >= 0.0 => Ok(*value),
+            _ => Err(unsupported),
+        };
+        let burst = emission
+            .bursts
+            .first()
+            .map(|b| {
+                if b.probability != 1.0
+                    || !matches!(b.cycles, BurstCycles::Finite(n) if n.get() == 1)
+                    || !b.time.is_finite()
+                    || b.time < 0.0
+                {
+                    return Err(unsupported);
+                }
+                let count = match b.count {
+                    MinMaxCurve::Constant(value) if value.is_finite() && value >= 0.0 => {
+                        if value > MAX_EXACT_COUNT {
+                            return Err(Refused::CountOutOfRange);
+                        }
+                        EventBurstCount::Constant(value as u32)
+                    }
+                    MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite() => {
+                        // The smaller and the larger by the same strict
+                        // comparisons the native count uses.
+                        let low = if max < min { max } else { min };
+                        let high = if min < max { max } else { min };
+                        if low <= -1.0 {
+                            return Err(unsupported);
+                        }
+                        if high > MAX_EXACT_COUNT {
+                            return Err(Refused::CountOutOfRange);
+                        }
+                        // Truncation toward zero; both lie in (-1, 2^24).
+                        EventBurstCount::TwoConstants { lo: low as u32, hi: high as u32 }
+                    }
+                    _ => return Err(unsupported),
+                };
+                Ok((b.time, count))
+            })
+            .transpose()?;
         Ok(Self {
-            remaining: elapsed,
-            frame_dt,
-            enabled: enabled && frame_dt > MIN_AMOUNT,
+            delay: constant(delay)?,
+            duration: if looping { f32::MAX } else { duration },
+            time_rate: constant(&emission.rate_over_time)?,
+            distance_rate: constant(&emission.rate_over_distance)?,
+            burst,
         })
     }
-    pub fn remainder(&self) -> f32 {
-        self.remaining
+
+    /// The child duration the window closes at (f32::MAX when looping).
+    pub fn duration(&self) -> f32 {
+        self.duration
+    }
+
+    /// Record the event of one parent particle for this edge. `carry` is the
+    /// particle's persistent carry for this edge; it is replaced by the
+    /// carry after the event even when no command is issued, and left alone
+    /// when the particle's window is closed or the event is refused. `dt` is
+    /// this particle's lane of the call's time vector.
+    pub fn record(
+        &self,
+        particle: &EventParticle,
+        carry: &mut f32,
+        dt: f32,
+        owner: &EventOwner,
+    ) -> Result<Option<BirthEventRecord>, Refused> {
+        let Some(interval) =
+            birth_interval(self.delay, self.duration, particle.age_percent, particle.inverse_lifetime, dt)?
+        else {
+            return Ok(None);
+        };
+        self.record_window(particle, carry, interval, owner).map(Some)
+    }
+
+    /// The event of a particle whose window for this edge is open, from that
+    /// window: world position and velocity, the seeded state, the distance
+    /// and time emission, the carry write-back and the commands.
+    pub fn record_window(
+        &self,
+        particle: &EventParticle,
+        carry: &mut f32,
+        interval: BirthInterval,
+        owner: &EventOwner,
+    ) -> Result<BirthEventRecord, Refused> {
+        if !carry.is_finite()
+            || !(0.0..1.0).contains(carry)
+            || ![interval.previous, interval.current, interval.previous_normalized, interval.current_normalized]
+                .iter()
+                .all(|v| v.is_finite())
+            || interval.previous > interval.current
+        {
+            return Err(Refused::InvalidInput);
+        }
+        let (position, velocity) = world_particle(particle, owner);
+        if position.iter().chain(velocity.iter()).any(|v| !v.is_finite()) {
+            return Err(Refused::InvalidInput);
+        }
+        let before = EventEmission::seeded(particle.seed, owner.emission_word, *carry);
+        let mut state = before;
+        let seconds = interval.current - interval.previous;
+        // Distance: a zero rate returns before drawing or writing anything.
+        let distance_count = if self.distance_rate == 0.0 {
+            0
+        } else {
+            // The draw's random factor does not enter a constant rate.
+            state.random.next_u32();
+            let speed = ((velocity[0] * velocity[0] + velocity[1] * velocity[1])
+                + velocity[2] * velocity[2])
+                .sqrt();
+            let amount = (self.distance_rate * seconds) * speed;
+            spread(&mut state.distribution, amount)?
+        };
+        let distance_emission = state.distribution;
+        // Time: one unconditional draw first; a constant rate does not read it.
+        state.random.next_u32();
+        let previous = non_negative(interval.previous);
+        let current = non_negative(interval.current);
+        if current < previous {
+            return Err(Refused::InvalidInput);
+        }
+        let amount = if self.time_rate > 0.0 {
+            0.0 + (current - previous) * self.time_rate
+        } else {
+            0.0
+        };
+        let mut burst_total = 0_u32;
+        if let Some((time, count)) = self.burst {
+            // Left-closed, right-open; the count is drawn before the fraction
+            // is written, and the fraction is written on a zero count too.
+            if previous <= time && time < current {
+                burst_total = count.sample(&mut state.random);
+                let relative = (time - previous) / (current - previous);
+                state.distribution.burst_fraction = if relative < 0.0 {
+                    1.0
+                } else {
+                    1.0 - relative.min(1.0)
+                };
+            }
+        }
+        let rate_count = spread(&mut state.distribution, amount)?;
+        let total = rate_count
+            .checked_add(burst_total)
+            .filter(|total| *total as f32 <= MAX_EXACT_COUNT)
+            .ok_or(Refused::CountOutOfRange)?;
+        *carry = state.distribution.offset;
+        let commands = (distance_count != 0 || total != 0 || rate_count != 0).then(|| {
+            let command = |count: u32, rate_count: u32, emission: BirthDistribution| SubEmitterCommand {
+                position,
+                velocity,
+                inherited: neutral_inherited(particle.seed),
+                count: u64::from(count),
+                rate_count: u64::from(rate_count),
+                dt: seconds,
+                previous_normalized: interval.previous_normalized,
+                current_normalized: interval.current_normalized,
+                catch_up: owner.accumulated_time,
+                emission,
+            };
+            [
+                command(distance_count, distance_count, distance_emission),
+                command(total, rate_count, state.distribution),
+            ]
+        });
+        Ok(BirthEventRecord {
+            interval,
+            before,
+            after: state,
+            commands,
+        })
     }
 }
 
-impl Iterator for CatchUp {
-    type Item = f32;
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.enabled || self.remaining < self.frame_dt {
-            return None;
-        }
-        self.remaining -= self.frame_dt;
-        Some(self.frame_dt)
+/// The inherited block of an edge that inherits nothing: white, unit size,
+/// zero rotation, the forward axis, unit lifetime, unbounded duration, then
+/// the parent particle's seed.
+pub(crate) fn neutral_inherited(seed: u32) -> [u32; 13] {
+    let one = 1.0_f32.to_bits();
+    [u32::MAX, one, one, one, 0, 0, 0, 0, 0, one, one, f32::INFINITY.to_bits(), seed]
+}
+
+/// The particle's world position and velocity: in World space as stored; else
+/// through the owner matrix, each axis the three products summed first to
+/// last and the translation added after them (velocity takes no translation).
+fn world_particle(particle: &EventParticle, owner: &EventOwner) -> ([f32; 3], [f32; 3]) {
+    if owner.world_space {
+        return (particle.position, particle.velocity);
     }
+    let m = &owner.local_to_world;
+    let linear = |v: [f32; 3]| -> [f32; 3] {
+        std::array::from_fn(|a| (m[a] * v[0] + m[4 + a] * v[1]) + m[8 + a] * v[2])
+    };
+    let local = linear(particle.position);
+    (
+        std::array::from_fn(|a| m[12 + a] + local[a]),
+        linear(particle.velocity),
+    )
+}
+
+/// The larger of the value and +0, with a NaN or a negative value (or -0)
+/// giving +0, as the emission functions clamp their window ends.
+fn non_negative(value: f32) -> f32 {
+    if value > 0.0 {
+        value
+    } else {
+        0.0
+    }
+}
+
+/// Add `amount` to the carry and take the whole part as the count: the
+/// spacing becomes 1 / amount (1 below the minimum amount), the carry the
+/// fractional rest. The burst fraction is left as it is.
+fn spread(distribution: &mut BirthDistribution, amount: f32) -> Result<u32, Refused> {
+    let sum = amount + distribution.offset;
+    if !amount.is_finite() || amount < 0.0 || !sum.is_finite() || sum > MAX_EXACT_COUNT {
+        return Err(Refused::CountOutOfRange);
+    }
+    let count = sum as u32;
+    distribution.spacing = if amount >= MIN_AMOUNT { 1.0 / amount } else { 1.0 };
+    distribution.offset = sum - count as f32;
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -491,18 +870,6 @@ mod tests {
                 burst_fraction: 0.5
             }
         );
-    }
-
-    #[test]
-    fn catch_up_runs_complete_steps_without_eating_fractional_remainder() {
-        let mut steps = CatchUp::new(0.4375, 0.125, true).unwrap();
-        assert_eq!(steps.by_ref().collect::<Vec<_>>(), vec![0.125; 3]);
-        assert_eq!(steps.remainder(), 0.0625);
-        assert_eq!(CatchUp::new(0.4375, 0.125, false).unwrap().count(), 0);
-        assert!(matches!(
-            CatchUp::new(6.0, 0.125, true),
-            Err(Refused::UnverifiedCatchUpRange)
-        ));
     }
 
     #[test]
@@ -648,13 +1015,19 @@ mod tests {
                     }
                 }
             }
-            let expected_steps = CatchUp::new(
-                field("catchup"),
-                field("frame_dt"),
-                (field("flags") as u32 & 5) != 0,
-            )
-            .unwrap()
-            .count();
+            let expected_steps = {
+                let plan = crate::particle::child_emit::catch_up_plan(
+                    field("catchup"), field("frame_dt"), true, field("flags") as u32, f32::MAX);
+                let (mut remaining, mut steps) = (field("catchup"), 0);
+                while plan.runs {
+                    remaining -= plan.frame_dt;
+                    steps += 1;
+                    if !(remaining >= plan.step) {
+                        break;
+                    }
+                }
+                steps
+            };
             let actual_steps = calls
                 .iter()
                 .filter(|c| {
@@ -672,5 +1045,388 @@ mod tests {
         }
         assert!(timed_lanes > 0);
         println!("current-native examples: {parent_cases} parent cases, {timed_lanes} birth lanes");
+    }
+
+    /// Parent birth events against native sub-emitter calls: every call of the
+    /// receipt is rerun from the inputs recorded at the call (range, per-lane
+    /// time vector, the parent arrays and both carries, accumulated time,
+    /// emission word, owner matrix, space) and every record and command byte
+    /// is compared. The child blocks are the receipt's own image of them.
+    #[test]
+    #[ignore = "MOLY_SUBEMITTER_PARENT_RECEIPT must identify the current native parent-event receipt"]
+    fn replays_current_native_parent_birth_events() {
+        use crate::particle::emit::Burst;
+        use crate::particle::json::{parse, Value};
+        let path = std::env::var_os("MOLY_SUBEMITTER_PARENT_RECEIPT").expect("receipt path");
+        let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            receipt.get("librarySha256").and_then(Value::as_str),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        fn word(v: &Value) -> u32 {
+            v.as_f64().expect("native word") as u32
+        }
+        fn bits(v: &Value) -> f32 {
+            f32::from_bits(word(v))
+        }
+        fn at<'a>(v: &'a Value, k: &str) -> &'a Value {
+            v.get(k).unwrap_or_else(|| panic!("missing {k}"))
+        }
+        fn array(v: &Value) -> &[Value] {
+            v.as_array().expect("array")
+        }
+        fn lane<'a>(particles: &'a Value, key: &str, index: usize) -> &'a Value {
+            &array(at(particles, key))[index]
+        }
+        let hex = |v: &Value| -> Vec<u8> {
+            let text = v.as_str().expect("hex");
+            (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+        };
+        let curve = |c: &Value| -> MinMaxCurve {
+            match word(at(c, "mode")) {
+                0 => MinMaxCurve::Constant(bits(at(c, "bits"))),
+                3 => MinMaxCurve::TwoConstants { min: bits(at(c, "minBits")), max: bits(at(c, "maxBits")) },
+                mode => panic!("curve mode {mode} is not in this receipt"),
+            }
+        };
+        // arm: None = the law; "catchUpZero", "sliceDt", "burstLow", "burstHigh" one rule each. The
+        // carry has no signal here: both children have zero rate and distance, so it stays zero; the
+        // window-given replay below carries it.
+        let run = |arm: Option<&str>| -> (usize, usize, usize, usize, usize) {
+            let (mut calls, mut records, mut commands, mut mismatched, mut newborn) = (0, 0, 0, 0, 0);
+            for parent in array(at(&receipt, "parentEvents")) {
+                let sub = at(at(parent, "image"), "subEmitters");
+                let edges = array(at(sub, "edges"));
+                let children = array(at(sub, "children"));
+                let births = edges.iter().filter(|e| word(at(e, "trigger")) == 0).count();
+                assert_eq!(word(at(sub, "numEmitAccumulators")) as usize, births.min(2));
+                let laws: Vec<BirthEdgeLaw> = edges.iter().zip(children).map(|(edge, child)| {
+                    assert_eq!(word(at(edge, "trigger")), 0);
+                    let bursts = array(at(child, "bursts")).iter().map(|b| {
+                        let mut count = curve(at(b, "count"));
+                        if let (Some(which), MinMaxCurve::TwoConstants { min, max }) = (arm, count.clone()) {
+                            let (low, high) = if max < min { (max, min) } else { (min, max) };
+                            if which == "burstLow" { count = MinMaxCurve::Constant(low); }
+                            if which == "burstHigh" { count = MinMaxCurve::Constant(high); }
+                        }
+                        Burst {
+                            time: bits(at(b, "timeBits")),
+                            count,
+                            cycles: BurstCycles::from_serialized(word(at(b, "cycles"))),
+                            repeat_interval: bits(at(b, "intervalBits")),
+                            probability: bits(at(b, "probabilityBits")),
+                        }
+                    }).collect();
+                    let emission = EmissionParams {
+                        rate_over_time: curve(at(child, "rate")),
+                        rate_over_distance: curve(at(child, "distance")),
+                        bursts,
+                    };
+                    let params = SubEmitterParams {
+                        emitter: Some(at(edge, "node").as_str().unwrap().to_owned()),
+                        source_pointer: Default::default(),
+                        trigger: SubEmitterTrigger::Birth,
+                        properties: word(at(edge, "properties")),
+                        probability: bits(at(edge, "probabilityBits")),
+                    };
+                    BirthEdgeLaw::from_params(&params, births, &curve(at(child, "startDelay")),
+                        bits(at(child, "durationBits")), at(child, "looping").as_bool().unwrap(), &emission)
+                        .expect("receipt child block is inside the law")
+                }).collect();
+                let native_records = array(at(parent, "records"));
+                let native_commands = array(at(parent, "commands"));
+                let subcalls = array(at(parent, "subcalls"));
+                // The slice step of every call, for the arm that gives newborn lanes the slice dt.
+                let mut slice_step = vec![0.0_f32; subcalls.len()];
+                for frame in array(at(parent, "frames")) {
+                    let range = array(at(frame, "subcalls"));
+                    for index in word(&range[0]) as usize..word(&range[1]) as usize {
+                        slice_step[index] = bits(at(frame, "stepBits"));
+                    }
+                }
+                for (index, call) in subcalls.iter().enumerate() {
+                    calls += 1;
+                    newborn += usize::from(at(call, "lr").as_str() == Some("0xd81240"));
+                    let start = word(at(call, "start")) as usize;
+                    let end = word(at(call, "end")) as usize;
+                    let dt4: Vec<f32> = if arm == Some("sliceDt") {
+                        vec![slice_step[index]; 4]
+                    } else {
+                        array(at(call, "dt4")).iter().map(bits).collect()
+                    };
+                    let owner = EventOwner {
+                        local_to_world: std::array::from_fn(|i| bits(&array(at(call, "owner"))[i])),
+                        world_space: word(at(call, "simulation")) == 1,
+                        accumulated_time: if arm == Some("catchUpZero") { 0.0 } else { bits(at(call, "stateZero")) },
+                        emission_word: word(at(call, "ownerSeed")),
+                    };
+                    assert_eq!(word(at(call, "numAccumulators")) as usize, births.min(2));
+                    let p = at(call, "particles");
+                    let mut carries = [
+                        array(at(p, "carry0")).iter().map(bits).collect::<Vec<_>>(),
+                        array(at(p, "carry1")).iter().map(bits).collect::<Vec<_>>(),
+                    ];
+                    let first = word(at(call, "firstRecord")) as usize;
+                    let last = subcalls.get(index + 1).map_or(native_records.len(), |c| word(at(c, "firstRecord")) as usize);
+                    let mut cursor = first;
+                    for (slot, law) in laws.iter().enumerate() {
+                        for i in start..end {
+                            let local = i - start;
+                            let particle = EventParticle {
+                                seed: word(lane(p, "seed", local)),
+                                age_percent: bits(lane(p, "age", local)),
+                                inverse_lifetime: bits(lane(p, "inv", local)),
+                                position: ["px", "py", "pz"].map(|k| bits(lane(p, k, local))),
+                                velocity: [("vx", "ax"), ("vy", "ay"), ("vz", "az")]
+                                    .map(|(v, a)| bits(lane(p, v, local)) + bits(lane(p, a, local))),
+                            };
+                            let mut carry = carries[slot][local];
+                            let Some(record) = law.record(&particle, &mut carry, dt4[local & 3], &owner).unwrap() else {
+                                continue;
+                            };
+                            carries[slot][local] = carry;
+                            records += 1;
+                            let Some(native) = native_records.get(cursor).filter(|_| cursor < last) else {
+                                mismatched += 1;
+                                continue;
+                            };
+                            cursor += 1;
+                            let words = |v: &Value| array(v).iter().map(word).collect::<Vec<u32>>();
+                            let state = |e: &EventEmission| {
+                                let d = e.distribution;
+                                let mut out = vec![d.spacing.to_bits(), d.offset.to_bits(), d.burst_fraction.to_bits()];
+                                out.extend(e.random.words);
+                                out
+                            };
+                            let times = vec![record.interval.previous.to_bits(), record.interval.current.to_bits(),
+                                record.interval.previous_normalized.to_bits(), record.interval.current_normalized.to_bits(),
+                                law.duration().to_bits()];
+                            let mut same = word(at(native, "index")) as usize == i
+                                && word(at(native, "slot")) as usize == slot
+                                && words(at(native, "timesBits")) == times
+                                && words(at(native, "stateBefore")) == state(&record.before)
+                                && words(at(native, "stateAfter")) == state(&record.after);
+                            let ids = words(at(native, "commandIds"));
+                            match record.commands {
+                                None => same &= ids.is_empty(),
+                                Some(pair) if ids.len() == 2 => {
+                                    for (command, id) in pair.iter().zip(&ids) {
+                                        commands += 1;
+                                        let raw = hex(at(&native_commands[*id as usize], "rawHex"));
+                                        let ours = command.to_bytes();
+                                        // The pointer word and the word after the inherited block are not fields.
+                                        same &= raw[8..0x54] == ours[8..0x54] && raw[0x58..] == ours[0x58..]
+                                            && hex(at(&native_commands[*id as usize], "emissionHex")) == command.emission_bytes();
+                                    }
+                                }
+                                Some(_) => same = false,
+                            }
+                            if !same {
+                                mismatched += 1;
+                            }
+                        }
+                    }
+                    if cursor != last {
+                        mismatched += last - cursor;
+                    }
+                }
+            }
+            (calls, newborn, records, commands, mismatched)
+        };
+        let (calls, newborn, records, commands, mismatched) = run(None);
+        println!("parent birth events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
+        assert_eq!((calls, newborn, records, commands, mismatched), (1426, 296, 13285, 800, 0));
+        // One-rule arms read against the same native rows must fail.
+        for arm in ["catchUpZero", "sliceDt", "burstLow", "burstHigh"] {
+            let wrong = run(Some(arm)).4;
+            println!("arm {arm}: {wrong} records differ");
+            assert!(wrong > 0, "{arm} arm matched every native record");
+        }
+    }
+
+    /// The recording from the native window on, against the sub-emitter
+    /// receipt's birth records: that receipt stores each record's window,
+    /// state before and after, the parent particle it read and the command
+    /// bytes, but not the particle's age or the call's time vector, so the
+    /// window is taken from the record. This is the replay that carries the
+    /// persistent carry (children with a nonzero rate or distance rate).
+    /// Records of children outside the law (curve rates, several bursts,
+    /// repeating bursts, start delays) are counted per configuration and
+    /// skipped; each of those configurations is one the law refuses.
+    #[test]
+    #[ignore = "MOLY_SUBEMITTER_EVENT_RECEIPT and MOLY_SUBEMITTER_EVENT_CENSUS must identify the current native sub-emitter receipt and its edge census"]
+    fn replays_current_native_birth_events_from_the_recorded_window() {
+        use crate::particle::emit::Burst;
+        use crate::particle::json::{parse, Value};
+        let read = |key: &str| parse(&std::fs::read(std::env::var_os(key).expect(key)).unwrap()).unwrap();
+        let receipt = read("MOLY_SUBEMITTER_EVENT_RECEIPT");
+        // The receipt names each edge configuration; the census it was built from holds the child blocks.
+        let census = read("MOLY_SUBEMITTER_EVENT_CENSUS");
+        assert_eq!(
+            receipt.get("librarySha256").and_then(Value::as_str),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        fn word(v: &Value) -> u32 {
+            v.as_f64().expect("native word") as u32
+        }
+        fn bits(v: &Value) -> f32 {
+            f32::from_bits(word(v))
+        }
+        fn at<'a>(v: &'a Value, k: &str) -> &'a Value {
+            v.get(k).unwrap_or_else(|| panic!("missing {k}"))
+        }
+        fn array(v: &Value) -> &[Value] {
+            v.as_array().expect("array")
+        }
+        fn number(v: &Value) -> f32 {
+            v.as_f64().expect("number") as f32
+        }
+        let hex = |v: &Value| -> Vec<u8> {
+            let text = v.as_str().expect("hex");
+            (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+        };
+        // Census curves are authored JSON: constant / twoConstants carry their values, other modes are
+        // outside the law and map to a curve the gate refuses.
+        let curve = |c: &Value| -> MinMaxCurve {
+            match at(c, "mode").as_str() {
+                Some("constant") => MinMaxCurve::Constant(number(at(c, "value"))),
+                Some("twoConstants") => MinMaxCurve::TwoConstants { min: number(at(c, "min")), max: number(at(c, "max")) },
+                _ => MinMaxCurve::Curve { multiplier: 1.0, max: crate::particle::value::Curve { multiplier: 1.0, keys: Vec::new() } },
+            }
+        };
+        let groups = array(at(&census, "groups"));
+        let named = array(at(at(&receipt, "census"), "groups"));
+        assert_eq!(groups.len(), named.len());
+        for (group, name) in groups.iter().zip(named) {
+            assert_eq!(word(at(group, "configId")), word(at(name, "configId")));
+            assert_eq!(word(at(group, "count")), word(at(name, "count")));
+        }
+        let law_of = |config: usize, cached: usize, arm: Option<&str>| -> Result<BirthEdgeLaw, Refused> {
+            let key = at(&groups[config], "key");
+            assert_eq!(word(at(&groups[config], "configId")) as usize, config);
+            let schedule = at(key, "schedule");
+            let emission = at(schedule, "emission");
+            let bursts = array(at(emission, "bursts")).iter().map(|b| {
+                let mut count = curve(at(b, "count"));
+                if let (Some(which), MinMaxCurve::TwoConstants { min, max }) = (arm, count.clone()) {
+                    let (low, high) = if max < min { (max, min) } else { (min, max) };
+                    if which == "burstLow" { count = MinMaxCurve::Constant(low); }
+                    if which == "burstHigh" { count = MinMaxCurve::Constant(high); }
+                }
+                Burst {
+                    time: number(at(b, "time")),
+                    count,
+                    cycles: BurstCycles::from_serialized(word(at(b, "cycleCount"))),
+                    repeat_interval: number(at(b, "repeatInterval")),
+                    probability: number(at(b, "probability")),
+                }
+            }).collect();
+            let params = SubEmitterParams {
+                emitter: Some("resolved-child".into()),
+                source_pointer: Default::default(),
+                trigger: SubEmitterTrigger::Birth,
+                properties: word(at(key, "properties")),
+                probability: number(at(key, "probability")),
+            };
+            BirthEdgeLaw::from_params(&params, cached, &curve(at(schedule, "startDelay")),
+                number(at(schedule, "duration")), at(schedule, "looping").as_bool().unwrap(),
+                &EmissionParams {
+                    rate_over_time: curve(at(emission, "rateOverTime")),
+                    rate_over_distance: curve(at(emission, "rateOverDistance")),
+                    bursts,
+                })
+        };
+        // (records compared, mismatched, records per refused configuration)
+        let run = |arm: Option<&str>| -> (usize, usize, std::collections::BTreeMap<usize, usize>) {
+            let (mut compared, mut mismatched) = (0, 0);
+            let mut refused = std::collections::BTreeMap::new();
+            for parent in array(at(at(&receipt, "birthEventRecording"), "byParent")) {
+                let configs: Vec<usize> = array(at(parent, "edgeConfigIds")).iter().map(|v| word(v) as usize).collect();
+                let cached = word(at(parent, "cachedBirthEdges")) as usize;
+                let owner_bits = array(at(parent, "ownerBits"));
+                for record in array(at(parent, "records")) {
+                    let slot = word(at(record, "slot")) as usize;
+                    let config = configs[slot];
+                    let law = match law_of(config, cached, arm) {
+                        Ok(law) => law,
+                        Err(_) => {
+                            *refused.entry(config).or_insert(0) += 1;
+                            continue;
+                        }
+                    };
+                    let times: Vec<f32> = array(at(record, "timesBits")).iter().map(bits).collect();
+                    assert_eq!(times[4].to_bits(), law.duration().to_bits());
+                    let commands = array(at(record, "commands"));
+                    // The accumulated time at the call is not stored; every command carries it.
+                    let accumulated = commands.first().map_or(0.0, |c| {
+                        let raw = hex(at(c, "rawHex"));
+                        f32::from_le_bytes(raw[0x74..0x78].try_into().unwrap())
+                    });
+                    let owner = EventOwner {
+                        local_to_world: std::array::from_fn(|i| bits(&owner_bits[i])),
+                        world_space: word(at(parent, "simulation")) == 1,
+                        accumulated_time: accumulated,
+                        emission_word: word(at(parent, "ownerSeed")),
+                    };
+                    let persistent = array(at(record, "parentPersistentVelBits"));
+                    let animated = array(at(record, "parentAnimatedVelBits"));
+                    let particle = EventParticle {
+                        seed: word(at(record, "parentSeed")),
+                        age_percent: 0.0,
+                        inverse_lifetime: 1.0,
+                        position: std::array::from_fn(|a| bits(&array(at(record, "parentPositionBits"))[a])),
+                        velocity: std::array::from_fn(|a| bits(&persistent[a]) + bits(&animated[a])),
+                    };
+                    let before: Vec<u32> = array(at(record, "stateBefore")).iter().map(word).collect();
+                    let mut carry = if arm == Some("noCarry") { 0.0 } else { f32::from_bits(before[1]) };
+                    let interval = BirthInterval {
+                        previous: times[0],
+                        current: times[1],
+                        previous_normalized: times[2],
+                        current_normalized: times[3],
+                    };
+                    let ours = law.record_window(&particle, &mut carry, interval, &owner).unwrap();
+                    compared += 1;
+                    let state = |e: &EventEmission| {
+                        let d = e.distribution;
+                        let mut out = vec![d.spacing.to_bits(), d.offset.to_bits(), d.burst_fraction.to_bits()];
+                        out.extend(e.random.words);
+                        out
+                    };
+                    let after: Vec<u32> = array(at(record, "stateAfter")).iter().map(word).collect();
+                    let mut same = state(&ours.before) == before && state(&ours.after) == after;
+                    match ours.commands {
+                        None => same &= commands.is_empty(),
+                        Some(pair) if commands.len() == 2 => {
+                            for (command, native) in pair.iter().zip(commands) {
+                                let raw = hex(at(native, "rawHex"));
+                                let bytes = command.to_bytes();
+                                same &= raw[8..0x54] == bytes[8..0x54] && raw[0x58..] == bytes[0x58..]
+                                    && hex(at(native, "emissionHex")) == command.emission_bytes();
+                            }
+                        }
+                        Some(_) => same = false,
+                    }
+                    if !same {
+                        mismatched += 1;
+                    }
+                }
+            }
+            (compared, mismatched, refused)
+        };
+        let (compared, mismatched, refused) = run(None);
+        println!("birth events from the recorded window: {compared} records compared, {mismatched} mismatched, refused configurations {refused:?}");
+        assert_eq!(mismatched, 0);
+        assert!(compared > 0);
+        // Only configurations outside the law may be refused: curve rates (5, 8), several or repeating
+        // bursts or a start delay (7, 9), a repeating burst (17).
+        assert!(refused.keys().all(|config| [5, 7, 8, 9, 17].contains(config)), "{refused:?}");
+        // The burst arms have no signal here (no recorded window holds a burst time); the
+        // per-call replay above carries them.
+        for arm in ["noCarry"] {
+            let wrong = run(Some(arm)).1;
+            println!("arm {arm}: {wrong} records differ");
+            assert!(wrong > 0, "{arm} arm matched every native record");
+        }
     }
 }

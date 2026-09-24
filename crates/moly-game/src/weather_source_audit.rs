@@ -60,6 +60,12 @@ fn current_corpus_admission() {
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
+            // Targets admitted by their own judgement and the birth edges of
+            // every admitted parent of this effect: a target whose parent is
+            // refused outside judge (its animation contract) is withdrawn below,
+            // as the plan withdraws it.
+            let mut target_rows: Vec<(usize, String)> = Vec::new();
+            let mut delivered = std::collections::HashSet::<String>::new();
             for particle in particles {
                 let mut tally = Tally::default();
                 let animation_refusal = particle["node"].as_str().and_then(|node|animation.refusal(node));
@@ -87,6 +93,12 @@ fn current_corpus_admission() {
                     // subemitters, animation and timeline can trigger emission.
                     "runtime_admission_rejected"
                 };
+                if let Some(plan) = &planned {
+                    if plan.child_owner.is_some() {
+                        target_rows.push((rows.len(), node.to_owned()));
+                    }
+                    delivered.extend(plan.event_edges.iter().flat_map(|edges| edges.targets().map(str::to_owned)));
+                }
                 let warm = planned.as_ref().and_then(|p| first_play_warm_cost(p, &mut warm_seeds));
                 admitted += usize::from(planned.is_some());
                 renderer_enabled += usize::from(particle["renderer"]["enabled"].as_bool() == Some(true));
@@ -101,14 +113,27 @@ fn current_corpus_admission() {
                     "admitted": planned.is_some(), "sourceEffectPassDeclared": source_member,
                     "sourceRoute": format!("{:?}", crate::particle_runtime::source_route(&particle["system"])),
                     "firstPlayWarm": warm,
-                    "nativeBirth": planned.as_ref().map(|p| crate::particle_runtime::native_birth_eligible(&p.emitter, &p.route)
-                        .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&p.emitter, Some(p.geometry.shape_evidence())))
-                        .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))),
+                    "nativeBirth": planned.as_ref().map(|p| if p.child_owner.is_some() {
+                        json!({"path":"subEmitterTarget"})
+                    } else {
+                        crate::particle_runtime::native_birth_eligible(&p.emitter, &p.route)
+                            .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&p.emitter, Some(p.geometry.shape_evidence())))
+                            .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))
+                    }),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
                         v.iter().any(|k| k.as_str() == Some("_SOFT_PARTICLES_ENABLED"))),
                 }));
+            }
+            for (row, node) in target_rows {
+                if !delivered.contains(&node) {
+                    admitted -= 1;
+                    rows[row]["admitted"] = json!(false);
+                    rows[row]["classification"] = json!("runtime_admission_rejected");
+                    rows[row]["nativeBirth"] = Value::Null;
+                    rows[row]["gates"] = json!(format!("sub-emitter target {node}: its parent is not admitted in this effect"));
+                }
             }
         }
         let total = rows.len() - start;

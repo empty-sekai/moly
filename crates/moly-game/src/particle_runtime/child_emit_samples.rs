@@ -1,0 +1,432 @@
+//! Child commands through the product's child Emit against the engine's own
+//! child Emit rows (three receipts: the ground-strike targets' chained and
+//! synthetic commands, the target variants, and the gravity rows). Each row
+//! holds the command bytes, the target's owner words, the update inputs, the
+//! pool and both random streams before the command, and the pool, both
+//! streams, the start matrix and the command velocity in the target's space
+//! after it. The target is the exported system block (or the receipt's
+//! override of it); the owner words, streams and pool are the harness's
+//! inputs, not claims about scene placement or client entropy.
+//!
+//! Compared per row: the count and, per lane, position and velocity (X is
+//! the reflected axis; a zero there compares by value), rotation, birth size,
+//! colour, seed, age, inverse lifetime and every CustomData channel; the
+//! Initial stream after; the start matrix and the command velocity in the
+//! target's space. Angular speed is not stored by the product (it is rebuilt
+//! every update), so it is not compared. The size the renderer evaluates at
+//! the final age is compared with the engine's current size where the size
+//! curve is constant or baked; a keyed size curve goes through this tree's
+//! Hermite evaluator, which is not the engine's cached cubic, so those words
+//! are counted with their distance instead.
+//!
+//! Where this tree's Shape law refuses the target's shape, the engine's
+//! stored Shape output of each group (after its own store with the start
+//! matrix) is fed in its place and the Shape stream is not compared; the
+//! injected groups are counted. Rows whose block randomizes the rotation
+//! direction are outside the source admission (it refuses any value but 0)
+//! and are counted, not compared.
+use super::child::{apply_command, arms, ChildCommand, ChildShape, ChildUpdate, Refused, SourceShape};
+use super::*;
+use moly_law::particle::child_emit::ChildOwner;
+use moly_law::particle::seed_owner::ModuleRandom;
+use moly_law::particle::shape_birth::{ShapeBirthLaw, ShapeSample};
+use moly_law::particle::schema::Effects;
+use serde_json::{json, Value};
+
+const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
+
+fn word(value: &Value) -> u32 {
+    value.as_u64().expect("native word") as u32
+}
+fn words(value: &Value) -> Vec<u32> {
+    value.as_array().expect("native array").iter().map(word).collect()
+}
+fn floats<const N: usize>(value: &Value) -> [f32; N] {
+    let w = words(value);
+    assert_eq!(w.len(), N, "native word count");
+    std::array::from_fn(|i| f32::from_bits(w[i]))
+}
+fn read(key: &str) -> Value {
+    let path = std::env::var_os(key).unwrap_or_else(|| panic!("{key} is not set"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+fn hex(value: &Value) -> Vec<u8> {
+    let text = value.as_str().expect("hex");
+    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+}
+fn module_random(value: &Value) -> ModuleRandom {
+    let flat = words(value);
+    assert_eq!(flat.len(), 16);
+    ModuleRandom { words: std::array::from_fn(|w| std::array::from_fn(|lane| flat[w * 4 + lane])) }
+}
+fn flat_random(random: &ModuleRandom) -> Vec<u32> {
+    random.words.iter().flatten().copied().collect()
+}
+
+/// The engine's stored Shape output of each group of one command, in order.
+struct NativeShape {
+    groups: Vec<[ShapeSample; 4]>,
+    next: usize,
+}
+impl ChildShape for NativeShape {
+    fn group(&mut self, _start: &[f32; 16]) -> Result<[ShapeSample; 4], Refused> {
+        let Some(group) = self.groups.get(self.next).copied() else {
+            return Err(Refused::Unsupported("native row has no further stored Shape group"));
+        };
+        self.next += 1;
+        Ok(group)
+    }
+}
+fn native_shape(row: &Value) -> NativeShape {
+    let groups = row["shapeEvents"].as_array().unwrap().iter()
+        .filter(|event| event["phase"] == "store")
+        .map(|event| {
+            let storage = &event["storage"];
+            let axis = |key: &str, a: usize, lane: usize| f32::from_bits(word(&storage[key][a][lane]));
+            std::array::from_fn(|lane| ShapeSample {
+                position: std::array::from_fn(|a| axis("position", a, lane)),
+                direction: std::array::from_fn(|a| axis("direction", a, lane)),
+            })
+        })
+        .collect();
+    NativeShape { groups, next: 0 }
+}
+
+/// The target block: the receipt's override, else the exported block.
+fn target_block<'a>(seq: &'a Value, corpus: &'a Value) -> &'a Value {
+    if let Some(block) = seq.get("systemOverride") {
+        return block;
+    }
+    let source = &seq["source"];
+    let effect = source["effect"].as_str().unwrap();
+    let particles = corpus["effects"][effect]["particles"].as_array().unwrap();
+    let found: Vec<_> = particles.iter().filter(|p| p["node"] == seq["node"]).collect();
+    assert_eq!(found.len(), 1, "one exported block for {}", seq["node"]);
+    assert_eq!(found[0]["systemPathId"], source["systemPathId"]);
+    &found[0]["system"]
+}
+
+/// The target Runtime from its block, with the product's module laws.
+fn target_runtime(node: &str, block: &Value, simulation: u64) -> Runtime {
+    let selected = json!({"effects": {"target": {"particles": [{"node": node, "system": block}]}}});
+    let mut decoded = Effects::from_json_str(&serde_json::to_vec(&selected).unwrap()).expect("decode target");
+    assert_eq!(decoded.emitters.len(), 1);
+    let mut emitter = decoded.emitters.remove(0);
+    emitter.simulation_space = match simulation {
+        0 => SimulationSpace::Local,
+        1 => SimulationSpace::World,
+        2 => SimulationSpace::Custom,
+        other => panic!("simulation space {other}"),
+    };
+    let mut system = test_support::runtime();
+    system.node = node.to_owned();
+    system.kind = EffectKind::Site;
+    system.rol = emitter.rotation_over_lifetime.as_ref().map(|p| {
+        RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve).unwrap()
+    });
+    system.size_law = emitter.size_over_lifetime.as_ref().map(moly_law::particle::size::SizeOverLifetime::from_params);
+    system.custom_law = emitter.custom_data.as_ref().map(moly_law::particle::custom_data::CustomData::from_params);
+    system.color_law = emitter.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
+    system.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier);
+    system.emitter = emitter;
+    system.pool.clear();
+    system.side.clear();
+    system.born_total = 0;
+    system
+}
+
+/// The native pool as the product holds it (X reflected).
+fn load_pool(system: &mut Runtime, pool: &Value) {
+    system.pool.clear();
+    system.side.clear();
+    let count = pool["count"].as_u64().unwrap() as usize;
+    let lane = |key: &str, i: usize| f32::from_bits(word(&pool[key][i]));
+    for i in 0..count {
+        let position = [-lane("px", i), lane("py", i), lane("pz", i)];
+        let velocity = [-lane("vx", i), lane("vy", i), lane("vz", i)];
+        let inverse = lane("inv", i);
+        system.pool.push(Particle {
+            position,
+            velocity,
+            start_lifetime: 1.0 / inverse,
+            inverse_lifetime: inverse,
+            age_percent: lane("age", i),
+        });
+        let colour = word(&pool["color"][i]).to_le_bytes();
+        system.side.push(Side {
+            rand: 0.0,
+            seed: word(&pool["seed"][i]),
+            rot: [lane("rx", i), lane("ry", i), lane("rz", i)],
+            size: [lane("sx", i); 3],
+            gravity: 0.0,
+            colour: moly_law::particle::gradient::rgba8_to_float(colour),
+            total_velocity: velocity,
+            custom_data: std::array::from_fn(|s| std::array::from_fn(|c| lane(&format!("custom{s}{c}"), i))),
+            emit_carry: [0.0; 2],
+            animated: [0.0; 3],
+        });
+    }
+}
+
+/// X compares with the reflection; a zero on X compares by value.
+fn same_reflected(ours: f32, native: u32) -> bool {
+    let native = -f32::from_bits(native);
+    if native == 0.0 { ours == 0.0 } else { ours.to_bits() == native.to_bits() }
+}
+
+/// Whether the target's size curve takes this tree's keyed (unbaked) curve
+/// evaluator, the Hermite form that rounds differently from the engine's
+/// cached cubic. Its size words are then counted with their distance, not
+/// compared; the baked and constant forms are compared bit for bit.
+fn size_curve_generic(system: &Runtime) -> bool {
+    use moly_law::particle::curve::CurveSampler;
+    system.emitter.size_over_lifetime.as_ref().is_some_and(|p| {
+        [Some(&p.curve), p.y.as_ref(), p.z.as_ref()].into_iter().flatten().any(|c| !CurveSampler::can_bake(c))
+    })
+}
+
+/// The size words of one row: compared bit for bit, or, under the keyed
+/// evaluator, counted with their largest distance in f32 steps.
+#[derive(Default, Debug)]
+struct SizeWords {
+    exact: usize,
+    generic: usize,
+    generic_differ: usize,
+    generic_max_steps: u32,
+}
+
+/// The fields of the pool after the command that differ from native.
+fn pool_mismatches(system: &Runtime, pool: &Value, size: &mut SizeWords) -> Vec<String> {
+    let count = pool["count"].as_u64().unwrap() as usize;
+    if system.pool.len() != count || system.side.len() != count {
+        return vec![format!("count {} vs native {count}", system.pool.len())];
+    }
+    let mut bad = Vec::new();
+    let lane = |key: &str, i: usize| word(&pool[key][i]);
+    let generic = size_curve_generic(system);
+    for i in 0..count {
+        let p = &system.pool[i];
+        let s = &system.side[i];
+        let current = motion::size_at_age_percent(system, s, p.age_percent)[0];
+        let native_size = lane("f300", i);
+        let mut size_bad = None;
+        if generic {
+            size.generic += 1;
+            if current.to_bits() != native_size {
+                size.generic_differ += 1;
+                let steps = if current.is_sign_negative() == f32::from_bits(native_size).is_sign_negative() {
+                    current.to_bits().abs_diff(native_size)
+                } else {
+                    u32::MAX
+                };
+                size.generic_max_steps = size.generic_max_steps.max(steps);
+            }
+        } else {
+            size.exact += 1;
+            size_bad = (current.to_bits() != native_size).then(|| format!(
+                "f300[{i}] age {:08x} ours {:08x} native {native_size:08x}", p.age_percent.to_bits(),
+                current.to_bits()));
+        }
+        let mut check = |name: &str, ok: bool| if !ok { bad.push(format!("{name}[{i}]")) };
+        check("px", same_reflected(p.position[0], lane("px", i)));
+        check("py", p.position[1].to_bits() == lane("py", i));
+        check("pz", p.position[2].to_bits() == lane("pz", i));
+        check("vx", same_reflected(p.velocity[0], lane("vx", i)));
+        check("vy", p.velocity[1].to_bits() == lane("vy", i));
+        check("vz", p.velocity[2].to_bits() == lane("vz", i));
+        // The targets carry no animated velocity: the engine's is zero.
+        for key in ["ax", "ay", "az"] {
+            check(key, f32::from_bits(lane(key, i)) == 0.0);
+        }
+        for (a, key) in ["rx", "ry", "rz"].iter().enumerate() {
+            check(key, s.rot[a].to_bits() == lane(key, i));
+        }
+        check("sx", s.size[0].to_bits() == lane("sx", i));
+        let colour = u32::from_le_bytes(moly_law::particle::gradient::quantize_rgba8(s.colour));
+        check("color", colour == lane("color", i));
+        check("seed", s.seed == lane("seed", i));
+        check("age", p.age_percent.to_bits() == lane("age", i));
+        check("inv", p.inverse_lifetime.to_bits() == lane("inv", i));
+        for stream in 0..2 {
+            for channel in 0..4 {
+                let key = format!("custom{stream}{channel}");
+                check(&key, s.custom_data[stream][channel].to_bits() == lane(&key, i));
+            }
+        }
+        bad.extend(size_bad);
+    }
+    bad
+}
+
+#[derive(Default, Debug)]
+struct Tally {
+    rows: usize,
+    compared: usize,
+    emitted: usize,
+    catch_up_rows: usize,
+    injected_groups: usize,
+    kernel_groups: usize,
+    direction_randomized: usize,
+    mismatched: Vec<String>,
+    families: std::collections::BTreeMap<String, usize>,
+    size: SizeWords,
+}
+
+/// One row through apply_command; the fields that differ from native.
+fn run_row(seq: &Value, row: &Value, block: &Value, tally: &mut Tally, record: bool) -> Vec<String> {
+    let image = &seq["image"];
+    let node = seq["node"].as_str().unwrap();
+    let mut system = target_runtime(node, block, image["simulation"].as_u64().unwrap());
+    assert_eq!(system.emitter.max_particles as u64, image["maximum"].as_u64().unwrap());
+    assert_eq!(system.emitter.duration.to_bits(), word(&image["duration"]));
+    assert_eq!(system.emitter.simulation_speed.to_bits(), word(&image["simulationSpeed"]));
+    let owner = ChildOwner {
+        local_to_world: floats(&image["owner"]),
+        world_to_local: floats(&image["inverse"]),
+        local_rotation: floats(&image["st114"]),
+        emitter_scale: floats(&image["scale"]),
+        shape_scale: floats(&image["shapeScale"]),
+    };
+    assert!(image["unscaled"] == false, "unscaled-time rows are not in these receipts");
+    let before = &row["before"];
+    assert!(before.is_object(), "every row carries its own pool before");
+    load_pool(&mut system, &before["pool"]);
+    let mut initial = module_random(&before["rng"]["initial"]);
+    let shape_before = module_random(&before["rng"]["shape"]);
+    let command = ChildCommand::from_native_bytes(&hex(&row["command"]["rawHex"]), &hex(&row["command"]["emissionHex"]))
+        .unwrap();
+    // The gravity the harness's physics service returned.
+    let gravity: [f32; 3] = floats(&image["gravity"]);
+    let update = ChildUpdate {
+        flags: word(&row["updateFlags"]),
+        frame_dt: f32::from_bits(word(&row["frameDtBits"])),
+        world_playing: row["worldPlaying"].as_bool().unwrap(),
+        gravity,
+    };
+    let shape_params = system.emitter.shape.clone();
+    let law = shape_params.as_ref().map(ShapeBirthLaw::from_params);
+    let mut kernel = None;
+    let mut injected = None;
+    let shape: Option<&mut dyn ChildShape> = match law {
+        None => None,
+        Some(Ok(law)) => {
+            kernel = Some(SourceShape { law, stream: shape_before, shape_scale: owner.shape_scale,
+                uses_axis_of_rotation: false });
+            kernel.as_mut().map(|k| k as &mut dyn ChildShape)
+        }
+        Some(Err(moly_law::particle::shape_birth::Refused::UnsupportedSourceShape)) => {
+            injected = Some(native_shape(row));
+            injected.as_mut().map(|k| k as &mut dyn ChildShape)
+        }
+        Some(Err(other)) => panic!("{node}: Shape law refused {other:?}"),
+    };
+    let applied = apply_command(&mut system, &owner, &mut initial, shape, &command, update);
+    let native_after = &row["after"];
+    let mut bad = match &applied {
+        Ok(_) if record => pool_mismatches(&system, &native_after["pool"], &mut tally.size),
+        Ok(_) => pool_mismatches(&system, &native_after["pool"], &mut SizeWords::default()),
+        Err(refused) => vec![format!("refused {refused:?}")],
+    };
+    if flat_random(&initial) != words(&native_after["rng"]["initial"]) {
+        bad.push("rngInitial".into());
+    }
+    if let Some(kernel) = &kernel {
+        if flat_random(&kernel.stream) != words(&native_after["rng"]["shape"]) {
+            bad.push("rngShape".into());
+        }
+    }
+    if let Ok(applied) = &applied {
+        if let Some(frame) = &applied.start {
+            let enter = row["shapeEvents"].as_array().unwrap().iter().find(|e| e["phase"] == "shapeEnter");
+            if let Some(enter) = enter {
+                if frame.matrix.map(f32::to_bits).to_vec() != words(&enter["startMatrix"]) {
+                    bad.push("startMatrix".into());
+                }
+            }
+            // The StartVelocity call is the one call that records the command
+            // velocity in the target's space.
+            let call = row["calls"].as_array().unwrap().iter().find(|c| c.get("emitterVelocity").is_some());
+            if let Some(call) = call {
+                let native: Vec<u32> = call["emitterVelocity"].as_array().unwrap().iter()
+                    .map(|v| (v.as_f64().unwrap() as f32).to_bits()).collect();
+                if frame.emitter_velocity.map(f32::to_bits).to_vec() != native {
+                    bad.push("emitterVelocity".into());
+                }
+            }
+        }
+    }
+    if record {
+        tally.compared += 1;
+        if let Ok(applied) = &applied {
+            tally.emitted += usize::from(applied.start.is_some());
+            tally.catch_up_rows += usize::from(applied.catch_up_steps > 0);
+        }
+        tally.injected_groups += injected.as_ref().map_or(0, |s| s.next);
+        if let (Some(_), Ok(applied)) = (&kernel, &applied) {
+            tally.kernel_groups += applied.born.div_ceil(4);
+        }
+    }
+    bad
+}
+
+const ARMS: [&str; 10] = ["noLookRotation", "noInverse", "backtrackWorldVelocity", "noEmitterScale", "noUpperGate",
+    "birthDtIsCommandDt", "paddingKillKeepsAccepted", "noStepRaise", "noGravity", "gravityWorld"];
+
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_RECEIPT, MOLY_CHILD_EMIT_EXTRA, MOLY_CHILD_EMIT_GRAVITY and MOLY_CHILD_EMIT_EFFECTS"]
+fn product_child_emit_matches_current_native_rows() {
+    let corpus = read("MOLY_CHILD_EMIT_EFFECTS");
+    let mut arm_red = std::collections::BTreeMap::<&str, usize>::new();
+    let mut tally = Tally::default();
+    for key in ["MOLY_CHILD_EMIT_RECEIPT", "MOLY_CHILD_EMIT_EXTRA", "MOLY_CHILD_EMIT_GRAVITY"] {
+        let receipt = read(key);
+        assert_eq!(receipt["librarySha256"], SOURCE_SHA256);
+        for group in ["childChained", "childSynthetic"] {
+            let Some(seqs) = receipt.get(group).and_then(Value::as_array) else { continue };
+            for seq in seqs {
+                let block = target_block(seq, &corpus);
+                let randomized = block["start"]["randomizeRotationDirection"].as_f64() != Some(0.0);
+                for (index, row) in seq["rows"].as_array().unwrap().iter().enumerate() {
+                    tally.rows += 1;
+                    if randomized {
+                        tally.direction_randomized += 1;
+                        continue;
+                    }
+                    arms::set(None);
+                    let bad = run_row(seq, row, block, &mut tally, true);
+                    for field in &bad {
+                        let family: String = field.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                        *tally.families.entry(family).or_default() += 1;
+                    }
+                    if !bad.is_empty() {
+                        tally.mismatched.push(format!("{key} {} row {index}: {:?}", seq["label"],
+                            &bad[..bad.len().min(6)]));
+                    }
+                    for arm in ARMS {
+                        arms::set(Some(arm));
+                        let red = !run_row(seq, row, block, &mut tally, false).is_empty();
+                        *arm_red.entry(arm).or_default() += usize::from(red);
+                    }
+                    arms::set(None);
+                }
+            }
+        }
+    }
+    eprintln!("child emit replay: rows {} compared {} emitted {} catch-up {} injected Shape groups {} \
+        kernel Shape groups {} direction-randomized (not admitted) {} mismatched {}; arms {:?}",
+        tally.rows, tally.compared, tally.emitted, tally.catch_up_rows, tally.injected_groups,
+        tally.kernel_groups, tally.direction_randomized, tally.mismatched.len(), arm_red);
+    eprintln!("mismatched field families: {:?}; size words {:?}", tally.families, tally.size);
+    for line in tally.mismatched.iter().take(12) {
+        eprintln!("  {line}");
+    }
+    for line in tally.mismatched.iter().filter(|l| l.contains("\"") && l.split('"').skip(3).step_by(2)
+        .any(|field| !field.starts_with("f300"))).take(12) {
+        eprintln!("  other: {line}");
+    }
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0 && tally.size.exact > 0);
+    for arm in ARMS {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}

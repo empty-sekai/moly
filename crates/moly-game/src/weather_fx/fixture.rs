@@ -53,6 +53,15 @@ pub(crate) fn prepare_control(
                     &by_path, &owners, EffectKind::Site, false, None, "fixture-particles-v2",
                     Some(GlobalTransform::IDENTITY), &server, &mut tally)
                     .ok_or_else(|| format!("{}: source particle control rejected {tally:?}", particle["node"]))?;
+                // Sub-emitter events run only with the native birth owner,
+                // which this fixture path does not install.
+                if plan.event_edges.is_some() {
+                    return Err(format!("{}: sub-emitter events need the native birth owner", particle["node"]));
+                }
+                // Trails likewise need the native birth owner and a trail draw.
+                if plan.trail.is_some() {
+                    return Err(format!("{}: trails need the native birth owner and a trail draw", particle["node"]));
+                }
                 plan.ordinal = ordinal;
                 candidates.push(Candidate { anchor, plan });
             }
@@ -142,6 +151,10 @@ pub(crate) fn plan(
             // path does not install; refuse it rather than drop the module.
             Some(plan) if plan.emitter.noise.is_some() =>
                 warn!("[fixture-source] {package}/{node}: Noise needs the native birth owner, which the fixture path does not install"),
+            Some(plan) if plan.event_edges.is_some() =>
+                warn!("[fixture-source] {package}/{node}: sub-emitter events need the native birth owner, which the fixture path does not install"),
+            Some(plan) if plan.trail.is_some() =>
+                warn!("[fixture-source] {package}/{node}: trails need the native birth owner and a trail draw, which the fixture path does not install"),
             Some(mut plan) => {
                 plan.ordinal = ordinal;
                 candidates.push(Candidate { anchor, plan });
@@ -158,6 +171,7 @@ pub(crate) fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::particle_runtime::simulate;
     use serde_json::json;
 
     #[test]
@@ -363,7 +377,7 @@ fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {
         emission_surface: planned.emission_surface.as_ref().map(|surface| surface.source.clone().expect("prepared source surface")),
         ring_cursor: 0, pool: Vec::new(), side: Vec::new(), emission: EmissionState::default(),
         playback_head: 0.0, previous_head: 0.0, emission_started: false,
-        native_birth: None, noise: None,
+        native_birth: None, noise: None, trail: None, collision: None,
         rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false, cone_angle: planned.cone_angle, rol: planned.rol.clone(), limit: planned.limit.clone(),
         velocity_law: planned.emitter.velocity_over_lifetime.as_ref().map(moly_law::particle::velocity::VelocityOverLifetime::from_params),

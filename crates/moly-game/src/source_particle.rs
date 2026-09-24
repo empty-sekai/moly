@@ -42,6 +42,9 @@ pub struct SourceParticle {
     pub sorting_order: i32,
     pub sorting_fudge: f32,
     pub sort_mode: moly_law::particle::sort::ParticleSort,
+    /// A second draw of the same renderer (the trail material): it takes the
+    /// sort key of the draw entity named here and is drawn right after it.
+    pub follows: Option<Entity>,
 }
 #[derive(Clone, Debug, Default)]
 pub enum ParticleReadiness {
@@ -110,6 +113,7 @@ impl SourceParticle {
             sorting_order,
             sorting_fudge,
             sort_mode,
+            follows: None,
         })
     }
 

@@ -5,6 +5,8 @@
 //! Update1b 0xd7e108, which scales that dt by the simulation speed.
 //! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
 //! constant/two-constant lifetime, looping prewarm and source flags=8 are qualified.
+//! Every later frame goes through the same Update1b head ([`FrameStep`]) and the
+//! same incremental slice loop, with flags 0 (BeginUpdate while the world plays).
 
 #[derive(Clone, Copy, Debug)]
 pub enum Lifetime {
@@ -38,6 +40,70 @@ pub struct PlayState {
 pub struct Slice {
     pub remaining_before: f32,
     pub duration: f32,
+}
+
+impl Slice {
+    /// StartParticles' backtrack argument for the time births of this slice:
+    /// FMAXNM((remaining / slice) + -1, 0), the slices still to come in the
+    /// frame (fractional when a remainder below the loop threshold is carried).
+    pub fn births_ahead(self) -> f32 {
+        // f32::max returns the non-NaN operand, as FMAXNM does.
+        ((self.remaining_before / self.duration) + -1.0).max(0.0)
+    }
+}
+
+/// Update1b returns before the pending sum, the emission, the slices and the
+/// clock when GetTimeStep gives less than this (or NaN).
+pub const MIN_UPDATE_STEP: f32 = f32::from_bits(0x3727_c5ac);
+
+/// Head of Update1b on the non-fixed route, shared by first-Play prewarm and
+/// every later frame: the frame dt scaled by the simulation speed, then
+/// GetTimeStep's slice length.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameStep {
+    /// dt * FMAX(speed, +0): the system seconds this frame adds to the pending
+    /// time. FMAX keeps a NaN speed, so the frame then skips.
+    pub scaled_dt: f32,
+    /// GetTimeStep: the scaled dt up to the maximum particle timestep, else
+    /// scaled / ceil(scaled / maximum), each an f32 fdiv / frintp / fdiv.
+    pub step: f32,
+}
+
+impl FrameStep {
+    pub fn new(frame_dt: f32, simulation_speed: f32, time: TimeManagerSnapshot) -> Self {
+        let speed = if simulation_speed.is_nan() || simulation_speed > 0.0 {
+            simulation_speed
+        } else {
+            0.0
+        };
+        let scaled_dt = frame_dt * speed;
+        let maximum = time.maximum_particle_timestep;
+        // Only an ordered `maximum < scaled` divides; NaN keeps the NaN.
+        let step = if maximum < scaled_dt {
+            let step = scaled_dt / (scaled_dt / maximum).ceil();
+            // An infinite dt divides infinity by infinity: the ARM result is
+            // the default NaN (positive quiet), not the host's.
+            if step.is_nan() { f32::from_bits(0x7fc0_0000) } else { step }
+        } else {
+            scaled_dt
+        };
+        Self { scaled_dt, step }
+    }
+
+    /// A skipped frame adds nothing to the pending time and runs no slice.
+    pub fn skips(self) -> bool {
+        !(self.step >= MIN_UPDATE_STEP)
+    }
+
+    /// Slices of an unskipped frame: this frame's scaled dt plus the pending
+    /// time earlier frames left below the loop threshold. The pending sum
+    /// adds the scaled dt, never the step.
+    pub fn plan(self, pending: f32, duration: f32) -> Result<PrewarmPlan, &'static str> {
+        if self.skips() {
+            return Err("skipped frame has no incremental update");
+        }
+        PrewarmPlan::from_incremental_input(self.scaled_dt + pending, self.step, 0, duration)
+    }
 }
 
 pub struct PrewarmPlan {
@@ -192,7 +258,7 @@ impl PrewarmPlan {
         };
         // Update1b 0xd7e274..0xd7e288 skips the incremental update entirely
         // below this step.
-        if !(base_step.is_finite() && base_step >= f32::from_bits(0x3727_c5ac)) {
+        if !(base_step.is_finite() && base_step >= MIN_UPDATE_STEP) {
             return Err("unqualified nonfixed timestep");
         }
         let mut plan = Self::from_incremental_input(remaining, base_step, 8, play.duration)?;
@@ -204,13 +270,15 @@ impl PrewarmPlan {
     /// Boundary after native Compute/GetTimeStep. Input step and flags must
     /// come from those source paths; the extra current-native matrix probes
     /// this function without pretending each step came from GetTimeStep.
+    /// Flags 8 is Play's explicit dt and 0 the per-frame BeginUpdate while the
+    /// world plays; the loop reads only bits 0 to 2, clear in both.
     pub fn from_incremental_input(
         total: f32,
         step: f32,
         flags: u32,
         duration: f32,
     ) -> Result<Self, &'static str> {
-        if flags != 8 {
+        if flags != 8 && flags != 0 {
             return Err("unqualified incremental flags");
         }
         if !(total.is_finite()
@@ -483,6 +551,125 @@ mod tests {
                 number(entry.get("stepArgument").unwrap()).to_bits(), "{name} GetTimeStep");
             compare(plan, case.get("slices").unwrap().as_array().unwrap(),
                 case.get("remainingAfter").unwrap(), true);
+        }
+    }
+
+    fn bits(v: &Value) -> f32 {
+        f32::from_bits(v.as_f64().unwrap() as u32)
+    }
+
+    /// One frame of the per-frame head and slice loop, or of a one-rule arm.
+    /// Returns (step, entry pending, slices as (remaining, slice), births
+    /// ahead per slice, pending after); `None` for the entry of a skipped frame.
+    #[allow(clippy::type_complexity)]
+    fn frame_law(
+        dt: f32,
+        speed: f32,
+        pending: f32,
+        duration: f32,
+        arm: Option<&str>,
+    ) -> (f32, Option<f32>, Vec<(f32, f32)>, Vec<f32>, f32) {
+        let head = FrameStep::new(dt, speed, time());
+        if head.skips() {
+            return (head.step, None, Vec::new(), Vec::new(), pending);
+        }
+        let (total, mut plan) = match arm {
+            Some("accumulateStep") => (head.step + pending,
+                PrewarmPlan::from_incremental_input(head.step + pending, head.step, 0, duration).unwrap()),
+            Some("singleSlice") => (head.scaled_dt + pending, PrewarmPlan::from_incremental_input(
+                head.scaled_dt + pending, head.scaled_dt + pending, 0, duration).unwrap()),
+            _ => (head.scaled_dt + pending, head.plan(pending, duration).unwrap()),
+        };
+        let mut slices = Vec::new();
+        let mut ahead = Vec::new();
+        for slice in plan.by_ref() {
+            let slice = slice.unwrap();
+            slices.push((slice.remaining_before, slice.duration));
+            ahead.push(slice.births_ahead());
+        }
+        (head.step, Some(total), slices, ahead, plan.remaining())
+    }
+
+    /// Replays every frame of the native per-frame Update1b receipts through
+    /// the head and slice law; returns (frames, mismatched frames).
+    fn replay_frames(receipts: &[Value], arm: Option<&str>) -> (usize, usize) {
+        let (mut frames, mut mismatched) = (0, 0);
+        for receipt in receipts {
+            for group in ["s11Cases", "s1Cases", "controls"] {
+                let Some(cases) = receipt.get(group).and_then(Value::as_array) else { continue };
+                for case in cases {
+                    if case.get("patched").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    let config = case.get("config").unwrap();
+                    let speed = match config.get("speed").unwrap() {
+                        Value::Str(text) if text == "nan" => f32::NAN,
+                        value => number(value),
+                    };
+                    let duration = number(config.get("duration").unwrap());
+                    let mut pending = 0.0_f32;
+                    for frame in case.get("frames").unwrap().as_array().unwrap() {
+                        frames += 1;
+                        let input = frame.get("input").unwrap();
+                        let flags = number(input.get("flags").unwrap());
+                        assert!(flags == 0.0 || flags == 8.0);
+                        let dt = bits(input.get("dtBits").unwrap());
+                        let (step, entry, slices, ahead, after) = frame_law(dt, speed, pending, duration, arm);
+                        let mut same = step.to_bits() == bits(frame.get("stepBits").unwrap()).to_bits();
+                        match (entry, frame.get("incremental").unwrap()) {
+                            (None, Value::Null) => {}
+                            (Some(total), native) if !matches!(native, Value::Null) => {
+                                same &= total.to_bits() == bits(native.get("pendingBits").unwrap()).to_bits()
+                                    && step.to_bits() == bits(native.get("stepBits").unwrap()).to_bits();
+                            }
+                            _ => same = false,
+                        }
+                        let native_slices = frame.get("slices").unwrap().as_array().unwrap();
+                        same &= native_slices.len() == slices.len()
+                            && native_slices.iter().zip(&slices).all(|(pair, (remaining, slice))| {
+                                let pair = pair.as_array().unwrap();
+                                bits(&pair[0]).to_bits() == remaining.to_bits()
+                                    && bits(&pair[1]).to_bits() == slice.to_bits()
+                            });
+                        // The per-slice StartParticles rows carry the births-ahead argument.
+                        let per_slice: Vec<f32> = frame.get("starts").unwrap().as_array().unwrap().iter()
+                            .filter(|row| number(row.get("lr").unwrap()) == 14_200_180.0)
+                            .map(|row| bits(&row.get("argsBits").unwrap().as_array().unwrap()[2]))
+                            .collect();
+                        same &= per_slice.len() == ahead.len()
+                            && per_slice.iter().zip(&ahead).all(|(native, rust)| native.to_bits() == rust.to_bits());
+                        same &= after.to_bits()
+                            == bits(frame.get("after").unwrap().get("pendingBits").unwrap()).to_bits();
+                        if !same {
+                            mismatched += 1;
+                        }
+                        // Continue from the native state so one arm error is counted per frame.
+                        pending = bits(frame.get("after").unwrap().get("pendingBits").unwrap());
+                    }
+                }
+            }
+        }
+        (frames, mismatched)
+    }
+
+    #[test]
+    #[ignore = "MOLY_UPDATE1B_FRAMES and MOLY_UPDATE1B_FRAMES_EXTRA must identify the current JP per-frame Update1b receipts"]
+    fn current_native_per_frame_head_and_slices_match_bits() {
+        let receipts = [read("MOLY_UPDATE1B_FRAMES"), read("MOLY_UPDATE1B_FRAMES_EXTRA")];
+        for receipt in &receipts {
+            assert_eq!(
+                receipt.get("sourceSha256").unwrap().as_str(),
+                Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+            );
+        }
+        let (frames, mismatched) = replay_frames(&receipts, None);
+        assert_eq!(frames, 667);
+        assert_eq!(mismatched, 0);
+        // One-rule arms read against the same native rows must fail.
+        for arm in ["singleSlice", "accumulateStep"] {
+            let (_, wrong) = replay_frames(&receipts, Some(arm));
+            assert!(wrong > 0, "{arm} arm matched every native frame");
+            println!("arm {arm}: {wrong} of {frames} frames differ");
         }
     }
 

@@ -50,17 +50,25 @@ pub mod gravity;
 pub mod sort;
 pub mod collision_response;
 pub mod collision_event;
+pub mod death_event;
+pub mod collision_query;
 pub mod noise;
 pub mod seed_owner;
 pub mod initial;
 pub mod autonomous_emission;
 pub mod sub_emission;
+pub mod owner;
+pub mod child_emit;
 pub mod prewarm;
+mod armf;
+pub mod trail;
+pub mod trail_geometry;
 
 #[cfg(test)]
 mod corpus;
 
-pub use buffer::{birth_capacity, compact, compact_with_side, finish_births, RingBufferMode};
+pub use buffer::{birth_capacity, compact, compact_with_side, compact_with_sides, compact_with_sides_indexed,
+    finish_births, finish_births_with, RingBufferMode};
 pub use emit::{accumulate_rate, burst_check, Burst, BurstOutcome, EmissionState};
 pub use limit_velocity::{advance_age_percent, DragLaw, DragSize, LimitVelocity, MagnitudeLaw};
 pub use rotation::{BakedCurve, RotationOverLifetime};

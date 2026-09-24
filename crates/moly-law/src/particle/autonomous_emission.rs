@@ -4,9 +4,11 @@
 //! (405 scalar emission, 108 clock, 15 newborn cases) and a native EmitOverTime
 //! receipt over every two-constant emission configuration of the corpus, both
 //! with zero failures.
-//! Scope: initialized clock, flags=4, no delay or distance emission, one slice
-//! with frame_dt == accumulated_dt, a constant or two-constant rate, <=2
-//! cycle-1 bursts of probability 1 with a constant or two-constant count.
+//! Scope: initialized clock, no delay or distance emission, one incremental
+//! slice per call (the per-frame head supplies the slices; their births-ahead
+//! argument is applied by the birth placement, not here), a constant or
+//! two-constant rate, <=2 cycle-1 bursts of probability 1 with a constant or
+//! two-constant count.
 //! This prepares phases; it never admits a system or simulates particles.
 //! Never use an old emission-head interval for birth curves after a loop wrap:
 //! StartParticles uses (current - slice_dt, current), both times native reciprocal
@@ -223,9 +225,10 @@ impl ConstantAutonomousEmission {
         })
     }
 
-    /// This is one flags=4 normal slice with no backlog and no start delay.
-    /// A caller with frame_dt < accumulated_dt must model each native slice and
-    /// its backtrack argument separately; passing accumulated_dt here is wrong.
+    /// This is one normal slice with no start delay: `dt` is the slice, never
+    /// the frame's pending time. A frame whose pending time exceeds one slice
+    /// runs each native slice separately and places its births with that
+    /// slice's backtrack argument; passing the pending time here is wrong.
     pub fn prepare_slice(
         &self,
         previous: f32,
