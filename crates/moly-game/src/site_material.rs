@@ -73,11 +73,14 @@ pub(crate) fn load_dir_texture(
                  前提已经不成立：要么提取侧的声明错了，要么本族真的开始消费\
                  非颜色贴图、着色器需要一个按槽的域旋钮。"
             );
-            server.load_with_settings::<Image, _>(path, |settings: &mut ImageLoaderSettings| {
+            moly_assets::residency::load_image_with(server, path, |settings: &mut ImageLoaderSettings| {
                 settings.is_srgb = false;
             })
         }
-        _ => server.load::<Image>(path),
+        // Only the GPU samples these textures (site, harvest and particle
+        // materials bind them; nothing reads their texels on the CPU), and
+        // every request of these paths comes through this function.
+        _ => moly_assets::residency::load_image(server, path),
     }
 }
 

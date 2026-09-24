@@ -126,7 +126,9 @@ impl ActionButtonSkin {
         let mut geometry = UiPrefabView::new(SKIN_LAYOUT, BALLOON_LAYER);
         geometry.set_visible(BUTTON_NODE, true);
         Some(Self {
-            background: server.load(format!("moly://ui-layout-v2/{image}")),
+            // The prefab UI loads its images from the same directory for the
+            // GPU only; the first request's settings win, so this one agrees.
+            background: moly_assets::residency::load_image(server, format!("moly://ui-layout-v2/{image}")),
             background_color: color(background),
             icon_color: color(icon),
             geometry,
