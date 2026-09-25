@@ -62,6 +62,9 @@ pub(crate) struct WeatherFxDoc {
     /// The collider export the index names; `None` when the index names
     /// none (every collision system is then refused by name).
     collision: Option<Handle<JsonAsset>>,
+    /// The index's records of components the extraction does not model, with
+    /// their effect; `None` when the index carries no such census.
+    unsupported: Option<Value>,
     tier: String,
     env_site: String,
 }
@@ -168,6 +171,9 @@ struct Planned {
     /// The effect's ground scene for a system with a CollisionModule; the
     /// native birth installer installs the module with it.
     collision_scene: Option<Arc<crate::particle_runtime::collision_scene::GroundScene>>,
+    /// The sub-emitter term of the first-Play warm length (0 for a system
+    /// that does not warm or reaches no live child).
+    sub_emitter_max_lifetime: f32,
 }
 
 struct PlannedTrail {
@@ -590,6 +596,7 @@ pub(crate) fn parse(
         handle,
         animations,
         collision,
+        unsupported: value.pointer("/summary/unsupported").cloned(),
         tier: request.tier.clone(),
         env_site: request.env_site.clone(),
     });
@@ -679,6 +686,7 @@ pub(crate) fn plan(
         let sub_emitter_owners = source_sub_emitter_owners(particles);
         children.insert(effect_name.clone(), lifecycle::effect_children(particles, &by_path, &sub_emitter_owners));
         let ground = scenes.for_effect(effect_name);
+        let bodies = census_names_no_body(effect_name, effect, doc.unsupported.as_ref());
         let effect_start = plans.len();
         for particle in particles {
             if let Some(reason) = particle["node"].as_str().and_then(|node| animation.refusal(node)) {
@@ -695,6 +703,7 @@ pub(crate) fn plan(
                 camera_rotation,
                 lifecycle,
                 &ground,
+                &bodies,
                 &server,
                 &mut tally,
             ) {
@@ -1169,6 +1178,117 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
     Ok(edges)
 }
 
+/// Whether the effect's extracted component census rules out a Rigidbody or
+/// Rigidbody2D on its nodes: the effect's omitted and collider records, and
+/// the index's records of the components the extraction does not model,
+/// which name their effect. A census that is not exported rules out nothing,
+/// and neither does a component whose kind the export could not read.
+pub(crate) fn census_names_no_body(effect_name: &str, effect: &Value, unsupported: Option<&Value>)
+    -> Result<(), String> {
+    for (list, name) in [(effect.get("omitted"), "omitted"), (effect.get("colliders"), "collider"),
+        (unsupported, "unsupported")] {
+        let Some(list) = list.and_then(Value::as_array) else {
+            return Err(format!("the export carries no {name} component census"));
+        };
+        for entry in list {
+            if name == "unsupported" && entry.get("effect").and_then(Value::as_str) != Some(effect_name) {
+                continue;
+            }
+            let node = entry.get("node").and_then(Value::as_str).unwrap_or("");
+            match entry.get("component") {
+                Some(Value::Null) => return Err(format!("a component of unread kind on {node}")),
+                Some(Value::String(component)) if component.starts_with("Rigidbody") =>
+                    return Err(format!("{component} on {node}")),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// emitterVelocityMode 1 reads the velocity of a Rigidbody or Rigidbody2D on
+/// the system's GameObject or a Transform ancestor. With none, or with a
+/// kinematic one, the engine caches that no body was found and takes the
+/// Transform delta, which is mode 0 bit for bit in every consumer (emission
+/// over distance, the World birth placement, Initial and InheritVelocity
+/// inheritance). When the effect's census names no body (`bodies`), and the
+/// run-time ancestors are this runtime's anchors, which carry none, the system
+/// takes the Transform mode. Without that proof mode 1 stays, and the native
+/// path refuses it.
+pub(crate) fn resolve_velocity_mode(emitter: &mut EmitterParams, bodies: &Result<(), String>) {
+    if emitter.emitter_velocity_mode == Some(1) && bodies.is_ok() {
+        emitter.emitter_velocity_mode = Some(0);
+    }
+}
+
+/// An exported constant or two-constant start lifetime; `None` for any other
+/// mode.
+fn source_lifetime(curve: &Value) -> Option<moly_law::particle::prewarm::Lifetime> {
+    use moly_law::particle::prewarm::Lifetime;
+    let number = |value: &Value| value.as_f64().map(|n| n as f32).or_else(|| match value.as_str() {
+        Some("Infinity") => Some(f32::INFINITY),
+        Some("-Infinity") => Some(f32::NEG_INFINITY),
+        _ => None,
+    });
+    match curve.get("mode").and_then(Value::as_str)? {
+        "constant" => Some(Lifetime::Constant(number(curve.get("value")?)?)),
+        "twoConstants" => Some(Lifetime::TwoConstants { min: number(curve.get("min")?)?, max: number(curve.get("max")?)? }),
+        _ => None,
+    }
+}
+
+/// The sub-emitter term of the first-Play warm length of `record`, read from
+/// the authored graph: every system its edges reach, each edge's child
+/// resolved as admission resolves it (the record at the edge's node whose
+/// system object id is the pointer's) and a null pointer as no child, over
+/// every edge whatever its trigger and whatever admission later makes of it.
+/// A system whose SubModule is disabled hands out no child. A curve-mode
+/// start lifetime of the system itself is refused by the warm before the
+/// term is read, so the term is 0 there.
+pub(crate) fn warm_child_term(record: &Value, emitter: &EmitterParams, graph: &SubEmitterGraph<'_>) -> Result<f32, String> {
+    use moly_law::particle::prewarm::{sub_emitter_maximum_lifetime, Lifetime, SubEmitterNode};
+    let own = match emitter.start.lifetime {
+        MinMaxCurve::Constant(v) => Lifetime::Constant(v),
+        MinMaxCurve::TwoConstants { min, max } => Lifetime::TwoConstants { min, max },
+        _ => return Ok(0.0),
+    };
+    let mut records: Vec<&Value> = vec![record];
+    let mut nodes = Vec::new();
+    while nodes.len() < records.len() {
+        let system = &records[nodes.len()]["system"];
+        let enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
+            .is_some_and(|modules| modules.iter().any(|module| module.as_str() == Some("SubModule")));
+        let mut children = Vec::new();
+        if enabled {
+            for edge in system.get("subEmitters").and_then(Value::as_array).into_iter().flatten() {
+                let pointer = (edge.pointer("/sourcePointer/fileId").and_then(Value::as_i64),
+                    edge.pointer("/sourcePointer/pathId").and_then(Value::as_str));
+                match pointer {
+                    (Some(0), Some("0")) => children.push(None),
+                    (Some(0), Some(path_id)) => {
+                        let target = edge.get("emitter").and_then(Value::as_str)
+                            .ok_or("an edge with a pointer names no child")?;
+                        let child = graph.child(target, path_id)
+                            .ok_or_else(|| format!("{target}: child system {path_id} not resolved to one record"))?;
+                        let index = match records.iter().position(|known| std::ptr::eq(*known, child)) {
+                            Some(index) => index,
+                            None => {
+                                records.push(child);
+                                records.len() - 1
+                            }
+                        };
+                        children.push(Some(index));
+                    }
+                    _ => return Err("a sub-emitter pointer that is not an object of this file".into()),
+                }
+            }
+        }
+        nodes.push(SubEmitterNode { sub_module_enabled: enabled, children,
+            lifetime: source_lifetime(&system["start"]["lifetime"]) });
+    }
+    sub_emitter_maximum_lifetime(&nodes, 0, own.first_play_upper(emitter.duration)).map_err(str::to_owned)
+}
+
 /// Removes, from the plans of one effect (`start..`), every sub-emitter
 /// target no admitted plan of that effect has an edge to, and returns
 /// their nodes. The target's own judgement asks whether its parent's record
@@ -1290,7 +1410,8 @@ fn owner_matrices(by_path: &HashMap<String, &Value>, path: &str)
 fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMap<String, &Value>,
     graph: &SubEmitterGraph<'_>, kind: EffectKind, camera_rotation: bool,
     lifecycle: Option<WeatherEffectLifecycle>, asset_root: &str,
-    ground: &crate::particle_runtime::collision_scene::SceneVerdict, server: &AssetServer) -> Result<(), String> {
+    ground: &crate::particle_runtime::collision_scene::SceneVerdict, bodies: &Result<(), String>,
+    server: &AssetServer) -> Result<(), String> {
     let records: Vec<&Value> = graph.records.get(parent).into_iter().flatten().copied()
         .filter(|record| record.pointer("/system/subEmitters").and_then(Value::as_array)
             .is_some_and(|edges| edges.iter().any(|edge| edge.get("emitter").and_then(Value::as_str) == Some(node))))
@@ -1300,7 +1421,7 @@ fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMa
     };
     let mut scratch = Tally::default();
     match judge_in_archive(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, asset_root,
-        None, ground, server, &mut scratch) {
+        None, ground, bodies, server, &mut scratch) {
         Some(planned) if planned.event_edges.as_ref().is_some_and(|edges| edges.targets().any(|target| target == node)) =>
             Ok(()),
         Some(_) => Err(format!("parent {parent} admitted without an event edge to this target")),
@@ -1375,11 +1496,12 @@ fn judge(
     camera_rotation: bool,
     lifecycle: WeatherEffectLifecycle,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
+    bodies: &Result<(), String>,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
     judge_in_archive(effect_name, particle, by_path, sub_emitter_owners, kind,
-        camera_rotation, Some(lifecycle), "phenomena", None, ground, server, tally)
+        camera_rotation, Some(lifecycle), "phenomena", None, ground, bodies, server, tally)
 }
 
 fn judge_in_archive(
@@ -1393,6 +1515,9 @@ fn judge_in_archive(
     asset_root: &str,
     instance_anchor: Option<GlobalTransform>,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
+    // Whether the effect's component census rules out a Rigidbody on its
+    // nodes ([`census_names_no_body`]).
+    bodies: &Result<(), String>,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
@@ -1586,7 +1711,7 @@ fn judge_in_archive(
         }
     });
     let archive_bytes = archive.to_string();
-    let emitter = match Effects::from_json_str(archive_bytes.as_bytes()) {
+    let mut emitter = match Effects::from_json_str(archive_bytes.as_bytes()) {
         Ok(mut effects) if effects.emitters.len() == 1 => effects.emitters.remove(0),
         Ok(effects) => {
             // 一条进、一条出是构造就保证的；不符说明律的入口改了形状。
@@ -1619,6 +1744,21 @@ fn judge_in_archive(
         }
         _ => {}
     }
+    resolve_velocity_mode(&mut emitter, bodies);
+    // The first-Play warm length adds the sub-emitter term: the longest chain
+    // of child lifetimes the authored graph reaches. Only a looping prewarm
+    // system warms.
+    let sub_emitter_max_lifetime = if emitter.prewarm && emitter.looping {
+        match warm_child_term(particle, &emitter, sub_emitter_owners) {
+            Ok(term) => term,
+            Err(reason) => {
+                tally.law_reject.push(format!("{node}: first-Play warm length: {reason}"));
+                return None;
+            }
+        }
+    } else {
+        0.0
+    };
     // The Start* samplers read so far take an ApplyTexture step for each
     // birth group when ShapeModule holds a texture. That step is not
     // transcribed, so a texture is refused for every shape type and either
@@ -1695,11 +1835,6 @@ fn judge_in_archive(
         None
     };
     if event_edges.is_some() {
-        if emitter.prewarm && emitter.looping {
-            tally.law_reject.push(format!(
-                "{node}: SubModule parent with a first-Play warm: the warm's sub-emitter events are not transcribed"));
-            return None;
-        }
         // A target takes no route; its composition is judged below.
         if let Err(reason) = child_parent.as_ref().map_or_else(
             || crate::particle_runtime::native_birth_eligible(&emitter, &route), |_| Ok(())) {
@@ -1979,7 +2114,7 @@ fn judge_in_archive(
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
                 .and_then(|()| child_owner_words(by_path, node))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
-                    camera_rotation, lifecycle, asset_root, ground, server).map(|()| owner));
+                    camera_rotation, lifecycle, asset_root, ground, bodies, server).map(|()| owner));
             match owner {
                 Ok(owner) => Some(owner),
                 Err(reason) => {
@@ -2035,6 +2170,7 @@ fn judge_in_archive(
         limit,
         trail,
         collision_scene,
+        sub_emitter_max_lifetime,
     })
 }
 
@@ -2485,6 +2621,7 @@ pub(crate) fn spawn_when_ready(
             rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             prewarmed: false,
             pending: 0.0,
+            sub_emitter_max_lifetime: planned.sub_emitter_max_lifetime,
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),
@@ -2729,6 +2866,57 @@ fn deliver_round(systems: &mut [(&mut LiveWeatherEmitter, bool)], frame_dt: f32)
     delivered
 }
 
+/// The first Play of looping prewarm system `parent`, which the engine runs
+/// inside Play as one frame before any ordinary one. The parent's
+/// sub-emitter targets are not played; the warm frame gathers them: each
+/// direct target of the same effect instance first runs its own update of
+/// the warm's length (stopped, with its own speed and duration, so its clock
+/// and pending time move and nothing is emitted), then the parent's warm,
+/// whose slices record their sub-emitter events, then those events'
+/// commands, handed to the targets in the order recorded. A command whose
+/// catch-up has reached the target's lifetime does nothing, so only the last
+/// slices' commands give particles, and those are first simulated by the
+/// target's first ordinary frame. A target of a target takes no time in the
+/// warm frame.
+fn first_play_warm(systems: &mut [(&mut LiveWeatherEmitter, bool)], parent: usize, ctx: &Context,
+    refused: &mut Vec<Entity>) {
+    let warm_dt = crate::particle_runtime::first_play_plan(&systems[parent].0.runtime).map(|plan| plan.compute_out());
+    if let Ok(warm_dt) = warm_dt {
+        let clock = systems[parent].0.effect_clock.clone();
+        let targets = direct_targets(&systems[parent].0.runtime);
+        for (live, emitting) in systems.iter_mut() {
+            if Arc::ptr_eq(&live.effect_clock, &clock) && targets.iter().any(|target| *target == live.node)
+                && live.native_birth.as_ref().is_some_and(|birth| birth.target.is_some()) {
+                if let Err(reason) = crate::particle_runtime::advance_frame(&mut live.runtime, warm_dt, *emitting, ctx, |_| {}) {
+                    error!(%reason, effect=%live.effect, node=%live.node,
+                        "native particle step refused in its parent's warm: the system is retired and draws nothing");
+                    refused.push(live.draw);
+                }
+            }
+        }
+    }
+    let system = &mut systems[parent].0.runtime;
+    if let Err(error) = crate::particle_runtime::prewarm_first_play(system, ctx) {
+        error!(%error, effect=%system.effect, node=%system.node, "weather prewarm refused");
+    }
+    if let Ok(warm_dt) = warm_dt {
+        deliver_sub_emitter_commands(systems, warm_dt);
+    }
+}
+
+/// Every child a system's edges name: its birth and death edges and its
+/// CollisionModule's.
+fn direct_targets(system: &Runtime) -> Vec<String> {
+    let mut targets: Vec<String> = system.native_birth.as_ref().and_then(|birth| birth.events.as_ref())
+        .map(|events| events.slots().iter().map(|slot| slot.edge.target.clone())
+            .chain(events.death_slots().iter().map(|slot| slot.edge.target.clone())).collect())
+        .unwrap_or_default();
+    if let Some(collision) = system.collision.as_ref() {
+        targets.extend(collision.edges.iter().map(|slot| slot.target.clone()));
+    }
+    targets
+}
+
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。
 ///
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
@@ -2802,21 +2990,34 @@ pub(crate) fn advance(
         .collect();
     // Systems whose native step was refused this frame; see step_frame.
     let mut refused = Vec::new();
+    // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
+    // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
+    // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
+    // 暖机（非循环 prewarm 原生不暖机，不是缺口）。Every warm, with its
+    // targets' updates and its commands, lands before any system's first
+    // ordinary frame.
+    for index in 0..systems.len() {
+        let warms = {
+            let (live, emitting) = &mut systems[index];
+            let system = &mut live.runtime;
+            if !*emitting || system.prewarmed {
+                continue;
+            }
+            system.prewarmed = true;
+            system.emitter.prewarm && system.emitter.looping
+        };
+        if warms {
+            first_play_warm(&mut systems, index, &ctx, &mut refused);
+        }
+    }
     for (live, emitting) in systems.iter_mut() {
         let emitting = *emitting;
         let LiveWeatherEmitter { draw, runtime: system, effect_animator, animated_chain, frame_clock, play, .. } = &mut **live;
         let draw = *draw;
-        // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
-        // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
-        // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
-        // 暖机（非循环 prewarm 原生不暖机，不是缺口）。
-        if emitting && !system.prewarmed {
-            system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping {
-                if let Err(error) = crate::particle_runtime::prewarm_first_play(system, &ctx) {
-                    error!(%error, effect=%system.effect, node=%system.node, "weather prewarm refused");
-                }
-            }
+        // A target refused in a parent's warm is retired below; it is not
+        // stepped again.
+        if refused.contains(&draw) {
+            continue;
         }
         // The first Play warms inside the instantiating call, before any
         // Animator write, so the prewarm above saw the serialized chain. The

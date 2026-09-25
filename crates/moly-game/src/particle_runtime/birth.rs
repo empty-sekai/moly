@@ -335,7 +335,7 @@ pub(super) fn run_incremental(
 fn run_plan(
     system: &mut Runtime,
     state: &mut NativeBirthState,
-    mut plan: moly_law::particle::prewarm::PrewarmPlan,
+    plan: moly_law::particle::prewarm::PrewarmPlan,
     stopped: bool,
     ctx: &Context,
     slice_start: &mut dyn FnMut(&Runtime),
@@ -345,10 +345,46 @@ fn run_plan(
     } else {
         [0.0; 3]
     };
+    run_slices(system, state, plan, stopped, emitter_velocity, ctx, slice_start)
+}
+
+/// The first-Play warm of an installed system: one ordinary update of the
+/// warm length, so every slice records its sub-emitter events (births,
+/// deaths, collisions) with the slice's pending time before its own
+/// decrement, the commands' catch-up. Play resets the emitter motion head, so
+/// the whole warm places its births with no emitter velocity. The rest below
+/// the loop threshold stays pending.
+pub(super) fn run_warm(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    plan: moly_law::particle::prewarm::PrewarmPlan,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    run_slices(system, state, plan, false, [0.0; 3], ctx, &mut |_| {})
+}
+
+fn run_slices(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    mut plan: moly_law::particle::prewarm::PrewarmPlan,
+    stopped: bool,
+    emitter_velocity: [f32; 3],
+    ctx: &Context,
+    slice_start: &mut dyn FnMut(&Runtime),
+) -> Result<(), BirthRefused> {
     for slice in plan.by_ref() {
         slice_start(system);
         let result = slice.map_err(|_| BirthRefused::InvalidTiming).and_then(|slice| {
-            step_slice(system, state, slice.duration, Some(slice.remaining_before), stopped,
+            let accumulated = if super::child::arms::on("catchUpIsStep") {
+                slice.duration
+            } else if super::child::arms::on("catchUpAfterDecrement") {
+                slice.remaining_before - slice.duration
+            } else if super::child::arms::on("catchUpZero") {
+                0.0
+            } else {
+                slice.remaining_before
+            };
+            step_slice(system, state, slice.duration, Some(accumulated), stopped,
                 Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity, pending: 0.0 }), ctx)
         });
         if let Err(error) = result {

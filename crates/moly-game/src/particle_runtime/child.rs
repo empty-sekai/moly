@@ -286,6 +286,8 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     };
     let upper_lifetime = match emitter.start.lifetime {
         MinMaxCurve::Constant(value) => value,
+        // The engine's gate reads the max field, not the ordered maximum.
+        MinMaxCurve::TwoConstants { min, max } if arms::on("gateUsesOrderedMax") => if max < min { min } else { max },
         MinMaxCurve::TwoConstants { max, .. } => max,
         _ => return unsupported("target start lifetime curve mode"),
     };

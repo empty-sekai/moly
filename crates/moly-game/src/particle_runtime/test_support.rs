@@ -43,7 +43,7 @@ pub(crate) fn runtime() -> Runtime {
         pool:vec![Particle::born([0.0;3],[2.0,0.0,0.0],10.0)],
         side:vec![Side {rand:0.5,seed:123,rot:[0.0;3],size:[1.0;3],gravity:0.0,colour:[1.0;4],total_velocity:[0.0;3],custom_data:[[0.0;4];2],emit_carry:[0.0;2],animated:[0.0;3],current_size:0.0}],
         emission:EmissionState::default(),playback_head:0.0,previous_head:0.0,emission_started:false,rng:Rng(123),native_birth:None,noise:None,trail:None,collision:None,
-        prewarmed:false,pending:0.0,cone_angle:None,rol:None,limit:None,velocity_law:None,force_law:None,size_law:None,color_law:None,texture_sheet:None,
+        prewarmed:false,pending:0.0,sub_emitter_max_lifetime:0.0,cone_angle:None,rol:None,limit:None,velocity_law:None,force_law:None,size_law:None,color_law:None,texture_sheet:None,
         sort_mode: moly_law::particle::sort::ParticleSort::None,
         gravity_law: moly_law::particle::gravity::Gravity::new(&MinMaxCurve::Constant(0.0)).unwrap(),
         custom_law:None,
