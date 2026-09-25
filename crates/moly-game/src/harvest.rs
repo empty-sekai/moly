@@ -24,6 +24,8 @@
 //!
 //! - `prop_animator`: the Animator of the barrel, the toolbox and the
 //!   treasure boxes, run from the controller in the package document.
+//! - `airplane`: the paper airplane that delivers the transported treasure
+//!   box (`TreasureBoxListMock` / `TreasureBoxSpawnMock` in the mock panel).
 //!
 //! Named gaps: harvest objects do not carve the walk field (the source's
 //! NavMeshObstacle, also the ones the driftage and treasure views switch);
@@ -31,6 +33,7 @@
 //! stop are not drawn; drop models keep their glb materials.
 
 pub(crate) mod action;
+mod airplane;
 mod arrival;
 pub(crate) mod catalog;
 mod clips;
@@ -731,6 +734,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<damage::HarvestStartHides>()
             .init_resource::<damage::HarvestEffectOnly>()
             .init_resource::<damage::HarvestTurnRequests>()
+            .init_resource::<airplane::PaperAirplanes>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),
@@ -745,6 +749,7 @@ impl Plugin for HarvestPlugin {
                     arrival::place,
                     arrival::bind_views,
                     prop_animator::bind,
+                    airplane::advance,
                 )
                     .chain(),
             )
