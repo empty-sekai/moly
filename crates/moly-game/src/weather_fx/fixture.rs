@@ -859,7 +859,10 @@ pub(crate) fn spawn_when_ready(
             source.enabled = true;
             info!("[fixture-source] {}: installed ({}); fixture setup phenomena-lighting write {:?}",
                 planned.node, played.birth_path(), source.phenomena_lighting_written);
-            commands.entity(draw).insert((source, crate::uber_particle::FixtureParticleLive(runtime), played));
+            // The prefab can be destroyed on the frame its draw turns ready (a
+            // cannon's effects go with the cannon); its draw is gone then, and
+            // so is the system the source played, so nothing is left to attach.
+            commands.entity(draw).try_insert((source, crate::uber_particle::FixtureParticleLive(runtime), played));
         }
         request.0 = pending;
         if request.0.is_empty() { commands.entity(root).remove::<Request>(); }
