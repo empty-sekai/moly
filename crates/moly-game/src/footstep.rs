@@ -2,7 +2,8 @@
 //!
 //! Source chain, once per `PublishFootSE` animation event of the player
 //! avatar (the component that publishes it is added only to the player;
-//! NPCs have no footsteps):
+//! NPCs have no footsteps). Of the avatar's motions only the walk clip the
+//! Move state plays and the run clip the Dash state plays carry the event:
 //!
 //! 1. Nothing happens unless the avatar is visible and is the local player,
 //!    and the current site's controller holds a `FootSEController` (the
@@ -627,7 +628,14 @@ fn detect_events(
         clock.node = None;
         return;
     };
-    let Some((run, node, clip)) = driver.gait_clip() else {
+    // Only the Move and Dash states play the avatar clips that carry the
+    // events (the walk and the run clip); the auto-move walk and every other
+    // avatar motion carry none. A locomotion clip playing in another state
+    // (a product walk toward a fixture, for one) therefore has no footsteps.
+    let gait = driver
+        .gait_clip()
+        .filter(|_| matches!(state, PlayerActionState::Move | PlayerActionState::Dash));
+    let Some((run, node, clip)) = gait else {
         clock.node = None;
         return;
     };
