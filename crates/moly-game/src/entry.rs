@@ -467,7 +467,7 @@ fn exit_house(world: &mut World, seq: &mut EntrySequence, house: HouseBinding, p
     );
     // ChangeState(ExitMoveHouse): ChangeStatus, then the state's Initialize
     // closes the intercept gate and plays the exit clip with the presenter's
-    // 0.25 s crossfade (the state and its SD stand-in are shared with the
+    // 0.25 s crossfade (the state and its clip are shared with the
     // room-to-home door move).
     let token = crate::site_move::door_state::change_state(
         world,
@@ -497,14 +497,15 @@ fn finish(
     world.entity_mut(player).remove::<EntryHold>();
     world.resource_mut::<PlayerAvatarStates>().can_intercept = true;
     let mut params = bevy::ecs::system::SystemState::<(
+        ResMut<Assets<AnimationGraph>>,
         Query<&mut AvatarDriver>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
     if let Ok(mut driver) = drivers.get_mut(player) {
         if let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) {
             let blend = Duration::from_secs_f32(law::FINISH_IDLE_CROSSFADE);
-            driver.play_idle(token, blend, &mut animator, &mut transitions);
+            driver.play_idle(token, blend, &mut graphs, &mut animator, &mut transitions);
         }
     }
     world

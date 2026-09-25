@@ -42,8 +42,8 @@ use crate::avatar_wear::{AvatarWear, WearPart};
 use crate::player::PlayerControlled;
 use moly_law::shading::avatar as law;
 
-/// Explicit audience-body marker. Normal SD players never carry this, so the
-/// retained audience material helper cannot recolour SD bodies or their tools.
+/// The player's audience body (the avatar model): the swap below recolours
+/// only this body, never an SD character or a tool.
 #[derive(Component)]
 pub struct AudienceBody;
 
@@ -470,7 +470,8 @@ fn assert_part_index(mesh: &Mesh) {
     }
 }
 
-/// avatar 材质插件：材质管线 + 全局量桥（含渲染侧 buffer）。
+/// avatar 材质插件：材质管线 + 全局量桥（含渲染侧 buffer）+ 玩家身体的
+/// 换装链（穿戴集面板 → 身体网格换 `Mysekai/Avatar` → 饰件/荧光棒）。
 pub struct AvatarMaterialPlugin;
 
 impl Plugin for AvatarMaterialPlugin {
@@ -480,6 +481,18 @@ impl Plugin for AvatarMaterialPlugin {
             MaterialPlugin::<AvatarMaterial>::default(),
             ExtractResourcePlugin::<AvatarEnv>::default(),
         ));
+        app.add_systems(Startup, (insert_neutral, crate::avatar_wear::load))
+            .add_systems(
+                Update,
+                (
+                    plan_and_swap,
+                    crate::avatar_wear::attach_accessory,
+                    crate::avatar_wear::attach_penlight,
+                )
+                    .chain()
+                    .after(crate::player_avatar::body::wire),
+            )
+            .add_systems(PostUpdate, write_frame_state);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .add_systems(RenderStartup, create_env_buffer)

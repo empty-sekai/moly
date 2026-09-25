@@ -179,7 +179,6 @@ pub fn install(app: &mut App) {
         .init_resource::<crate::fixture_gimmick::Gimmicks>()
         .add_systems(Startup, crate::fixture_activity_data::load)
         .add_systems(Startup, crate::fixture_gimmick::load)
-        .add_systems(Startup, player_avatar::switch_gesture::load)
         .add_systems(
             Update,
             crate::fixture_gimmick::parse.before(crate::player_fixture_action::advance),
@@ -338,6 +337,7 @@ pub fn install(app: &mut App) {
         // SitePlugin owns the site SceneInstanceReady observer. Registering it
         // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
+        .add_observer(player_avatar::body::on_scene_ready)
         // 气泡链的选取门要读当前现象 id；wasm 分支不装天气插件，资源在
         // 这里兜底建（默认值 = 真源默认现象 1，与档名资源在音频侧兜底建
         // 同款故事；native 上与天气插件的 init 幂等重合）。
@@ -425,8 +425,6 @@ pub fn install(app: &mut App) {
                 .chain(),
         )
         .add_systems(Update, character_material::apply_fog)
-        // The player uses the shared SD body/rig/material installation. No
-        // audience model, audience recolouring or spectator wear is registered.
         .add_systems(
             Update,
             (
@@ -550,8 +548,12 @@ pub fn install(app: &mut App) {
                         // toon 计划（解析骨架档案建材质）→ toon 换装（等贴图到齐
                         // 摘 Standard 换 Character）。链内命令自动同步点逐级生效：
                         // 前一级插的组件，后一级当帧读得到。
-                        player::parse,
-                        player::spawn_when_ready.after(player::parse),
+                        player::spawn_when_ready,
+                        // The player's body: request -> attach -> wire (the
+                        // loader's animator gets the graph and the driver).
+                        player_avatar::body::request.after(player::spawn_when_ready),
+                        player_avatar::body::attach.after(player_avatar::body::request),
+                        player_avatar::body::wire.after(player_avatar::body::attach),
                         character::plan_when_ready
                             .after(player::spawn_when_ready)
                             .after(npc::spawn_when_ready),
@@ -572,8 +574,8 @@ pub fn install(app: &mut App) {
                         // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
                         // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
                         (player::read_input.after(player::reseed), player::advance).chain(),
-                        // SD body/model wiring is shared with character above;
-                        // its player branch installs the sole AvatarDriver.
+                        // The player's body is installed by player_avatar::body
+                        // above; it installs the sole AvatarDriver.
                     ),
                     (
                         // 待机动作链：两张表解析（装载失败在此响亮失败）→ 逐名挂
@@ -598,7 +600,7 @@ pub fn install(app: &mut App) {
                         // 调用集之后）→ 存活计时与淡坡。
                         player_avatar::drive
                             .after(player::advance)
-                            .after(character::wire_when_ready),
+                            .after(player_avatar::body::wire),
                         player::tune_animation_speed.after(player_avatar::drive),
                         character::probe_playback.after(character::drive),
                         player_avatar::probe_playback.after(player::tune_animation_speed),
