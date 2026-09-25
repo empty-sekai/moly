@@ -542,17 +542,6 @@ impl FixtureActivityTables {
             .filter(move |row| row.fixture_id == fixture_id)
     }
 
-    pub(crate) fn sd_visual_rows(
-        &self,
-        unit: u32,
-        fixture_id: i32,
-    ) -> impl Iterator<Item = &NoTalkVisualRow> {
-        self.no_talk_visuals
-            .rows
-            .iter()
-            .filter(move |row| row.unit == unit && row.fixture_id == fixture_id)
-    }
-
     /// The full source row order, before the no-talk Guid-key permutation.
     pub(crate) fn no_talk_rows(&self) -> &[NoTalkVisualRow] {
         &self.no_talk_visuals.rows

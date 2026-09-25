@@ -1,15 +1,15 @@
 //! Source-qualified furniture activity resources for live scene instances.
 //!
 //! Nothing here walks the placed furniture. When the player asks for a
-//! fixture, the player activity owner selects one seat, joins that seat's
-//! player row with its SD visual row through master tables and locators
-//! (`plan_player_row`, which touches no asset), and then polls
-//! `prepare_player_timeline` from its loading phase until both timelines,
-//! their bindings and their sounds are resolved. The prepared profile belongs
-//! to that session and is released with it. A ready visual is neither an
-//! eligible seat nor a playing session. Actor libraries and source timeline
-//! parsing are delegated to their shared preparation layer, which the NPC and
-//! fixture-talk owners use as well.
+//! fixture, the player activity owner selects one seat, plans that seat's
+//! player row from master tables and locators (`plan_player_row`, which
+//! touches no asset), and then polls `prepare_player_timeline` from its
+//! loading phase until the row's own timeline, its bindings and its sounds
+//! are resolved. The prepared profile belongs to that session and is released
+//! with it. A ready profile is neither an eligible seat nor a playing
+//! session. Actor libraries and source timeline parsing are delegated to
+//! their shared preparation layer, which the NPC and fixture-talk owners use
+//! as well.
 
 mod assets;
 
@@ -18,14 +18,14 @@ use std::sync::Arc;
 use bevy::{animation::graph::AnimationGraph, prelude::*};
 
 use crate::{
-    fixture_activity_data::{self, ActivityTimeline, FixtureActivityTables, PlayerTimelineRow},
+    fixture_activity_data::{self, FixtureActivityTables, PlayerTimelineRow},
     fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner, FixtureTarget},
     fixture_activity_timeline::{
         self as timeline, StartTimeline, TimelineBindings, TimelineDefinition,
     },
     fixture_attach::AttachPoints,
     player_avatar::AvatarDriver,
-    player_fixture_action::PlayerFixtureVisualProfile,
+    player_fixture_action::PlayerTimelineProfile,
 };
 
 /// The source ViewObject's local Y, supplied by its actual scene-node owner.
@@ -92,6 +92,18 @@ impl FixtureActivityProvider {
         prefab: &str,
     ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
         self.assets.definition(world, package, prefab)
+    }
+
+    /// One prefab's timeline from a site package's three timeline tables
+    /// (a site's step items).
+    pub(crate) fn site_definition(
+        &mut self,
+        world: &World,
+        package: &str,
+        prefab: &str,
+    ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        self.assets
+            .family_definition(world, assets::TimelineFamily::SITE, package, prefab)
     }
 
     /// The placed instance itself is live: typed identity, formal model GLTF
@@ -229,28 +241,32 @@ impl FixtureActivityProvider {
     }
 
     /// One poll of the resources for one planned player row; later polls
-    /// observe what earlier ones requested. Every call requests both timeline
-    /// definitions and the actor catalogue, so they load together. The rest
-    /// is routed by what those contain: once both definitions are parsed, the
-    /// source SE are requested and the actor clips resolve their library
-    /// index and then the library file. The fixture clips come from the
-    /// placed model's own file, which is already loaded. So a request whose
-    /// inputs are not resident waits for about three load rounds (tables and
-    /// catalogue; library index and SE; library file) before the player
-    /// moves. An SE with no route, or whose audio fails to load, plays
-    /// silent instead of failing the row (`silence_player_sounds`). `draft`
-    /// keeps the handles of an unfinished attempt alive between polls, so an
-    /// in-flight load is not cancelled, and holds the complete profile on
-    /// success.
+    /// observe what earlier ones requested. The row's own timeline is the
+    /// only timeline: its CharacterAnimator clips come from the timeline
+    /// package's avatar clip file and play on the avatar's animator, its
+    /// fixture clips from the placed model's own file, its SE through the
+    /// audio routing. So a request whose inputs are not resident waits for
+    /// about two load rounds (the timeline tables; the avatar clip manifest,
+    /// index and file with the SE) before the player moves. An SE with no
+    /// route, or whose audio fails to load, plays silent instead of failing
+    /// the row (`silence_player_sounds`). `draft` keeps the handles of an
+    /// unfinished attempt alive between polls, so an in-flight load is not
+    /// cancelled, and holds the complete profile on success.
     pub(crate) fn prepare_player_timeline(
         &mut self,
         world: &mut World,
         plan: &PlayerTimelinePlan,
-        draft: &mut Option<PlayerFixtureVisualProfile>,
+        draft: &mut Option<PlayerTimelineProfile>,
     ) -> Result<(), ProviderPending> {
         assets::require_live_fixture(&mut self.assets, world, &plan.target, &plan.model_package)?;
-        let owner = FixtureActivityOwner { actor: plan.actor, generation: 0 };
-        if let Some(profile) = draft.as_ref().filter(|profile| profile_matches_plan(profile, plan)) {
+        let owner = FixtureActivityOwner {
+            actor: plan.actor,
+            generation: 0,
+        };
+        if let Some(profile) = draft
+            .as_ref()
+            .filter(|profile| profile_matches_plan(profile, plan))
+        {
             let request = profile.start_request(owner, &plan.target);
             if timeline::validate_prepared(world, &request).is_ok() {
                 // A successful profile owns the exact required clips. Do not touch
@@ -258,28 +274,16 @@ impl FixtureActivityProvider {
                 return Ok(());
             }
         }
-        // Poll both before reading either result, so the SD visual's tables
-        // are not held back behind the player row's. The row's own timeline
-        // still reports first, exactly as when they were polled in turn. The
-        // SD body is always bound, so the actor catalogue is always needed.
-        timeline::request_actor_catalog(world);
-        let player_definition =
-            self.definition(world, &plan.player_package, &plan.player_row.asset_name);
-        let definition = self.definition(world, &plan.visual_package, &plan.visual_prefab);
-        let player_definition = player_definition?;
-        let definition = definition?;
+        let definition =
+            self.definition(world, &plan.player_package, &plan.player_row.asset_name)?;
         // Retain the previous attempt's handles until the next draft is installed.
         let previous = draft.take();
-        let mut profile = PlayerFixtureVisualProfile {
-            target: plan.target.clone(), actor: plan.actor, unit_id: plan.unit,
-            fixture_id: plan.fixture_id, player_timeline_row_id: plan.player_row.id,
-            action_point: plan.player_row.action_point, visual_action_point: plan.visual_point,
-            slot_id: plan.slot_id, no_talk_row_id: plan.no_talk_row_id,
-            timeline_group_id: plan.visual_row.group_id, timeline_row_id: plan.visual_row.id,
-            source_view_local_y: plan.source_view_local_y,
-            definition, player_definition, bindings: TimelineBindings::default(),
+        let mut profile = PlayerTimelineProfile {
+            target: plan.target.clone(), actor: plan.actor, fixture_id: plan.fixture_id,
+            player_timeline_row_id: plan.player_row.id, action_point: plan.player_row.action_point,
+            slot_id: plan.slot_id, definition, bindings: TimelineBindings::default(),
             coverage_notes: vec![
-                "Native SD visual timing; player source SE retains its absolute envelopes on the same clock".into(),
+                "The player's own timeline on the avatar animator; its avatar clips are the source clips exported against the avatar skeleton".into(),
                 "Sampled bone curves do not implement native FootIK, start offset, track matching or all mixer behavior".into(),
                 format!("Source player row {}, locator array index {}, slot {}", plan.player_row.id, plan.locate_index, plan.slot_id),
             ],
@@ -296,19 +300,13 @@ impl FixtureActivityProvider {
         }
         silence_player_sounds(world, &plan.target, &mut request);
         // The SE routes need only the parsed tracks: request them now, so they
-        // load alongside the actor clips. `prepare_bindings` requests the same
-        // handles again at its end, and only its result counts.
+        // load alongside the avatar clips. `prepare_player_bindings` requests
+        // the same handles again at its end, and only its result counts.
         let _ = timeline::prepare_source_sounds(world, &mut request);
-        let prepared = self.prepare_bindings(
-            world,
-            &mut request,
-            plan.unit,
-            plan.animator,
-            plan.graph.clone(),
-        );
+        let prepared = self.prepare_player_bindings(world, &mut request, plan);
         // An SE whose audio has failed to load plays silent as well.
         silence_player_sounds(world, &plan.target, &mut request);
-        let has_actor_body = request
+        let has_avatar_body = request
             .bindings
             .animations
             .values()
@@ -317,14 +315,15 @@ impl FixtureActivityProvider {
         *draft = Some(profile);
         drop(previous);
         prepared?;
-        if !has_actor_body {
+        if !has_avatar_body {
             return Err(ProviderPending::new(
-                "actor-body-binding",
-                "selected SD visual has no actual player-body animation binding",
+                "avatar-body-binding",
+                "the player timeline has no CharacterAnimator clip on the avatar",
             ));
         }
-        // Reuse the business owner's exact companion/timeout construction rather
-        // than duplicating its selection or manufacturing sound event times here.
+        name_avatar_clips(world, plan, draft.as_ref().expect("stored draft"));
+        // Reuse the business owner's exact timeout construction rather than
+        // duplicating it here.
         let request = draft
             .as_ref()
             .expect("stored draft")
@@ -332,20 +331,40 @@ impl FixtureActivityProvider {
         timeline::validate_prepared(world, &request)
             .map_err(|error| ProviderPending::timeline("live-binding-preflight", error))
     }
+
+    /// The player row's timeline bound as `SetupPlayFixtureTimelineAsync`
+    /// binds it: BindFixture (the fixture's own clips), BindPlayer (the
+    /// CharacterAnimator stream on the avatar), then its SE and effects.
+    fn prepare_player_bindings(
+        &mut self,
+        world: &mut World,
+        request: &mut StartTimeline,
+        plan: &PlayerTimelinePlan,
+    ) -> Result<(), ProviderPending> {
+        timeline::prepare_player_avatar_bindings(world, request, plan.animator, plan.graph.clone())
+            .map_err(|error| {
+                let mut issue = ProviderPending::timeline("avatar-clips", error);
+                issue.reason = format!("player row {}: {}", plan.player_row.id, issue.reason);
+                issue
+            })?;
+        self.assets.prepare_fixture_bindings(world, request)?;
+        timeline::prepare_source_sounds(world, request)
+            .map_err(|error| ProviderPending::timeline("source-sounds", error))?;
+        timeline::prepare_source_effects(world, request)
+            .map_err(|error| ProviderPending::timeline("source-effects", error))?;
+        Ok(())
+    }
 }
 
-/// One selected seat's player row joined with the SD visual row that shows
-/// it. The row's own timeline keeps the source route: its `mdl_` package and
-/// its asset name, with no height variant. The SD visual row is a
-/// product-layer substitution (the source plays this row on its player
-/// avatar, while this player is an SD unit), so its prefab takes the NPC
-/// factory's placement-height variant. Built from master tables, locators and
-/// the live instance only; nothing is loaded.
+/// One selected seat's player row, with the route of its own timeline: the
+/// `mdl_` package and the row's asset name, with no height variant
+/// (`SetupAndPlayTimelineAsync` loads `mysekai/fixture_timeline/mdl_<name>`
+/// and the row's asset name as they are). Built from master tables,
+/// locators and the live instance only; nothing is loaded.
 #[derive(Clone)]
 pub(crate) struct PlayerTimelinePlan {
     pub target: FixtureTarget,
     pub actor: Entity,
-    pub unit: u32,
     pub animator: Entity,
     pub graph: Handle<AnimationGraph>,
     pub fixture_id: i32,
@@ -353,20 +372,13 @@ pub(crate) struct PlayerTimelinePlan {
     pub player_row: PlayerTimelineRow,
     pub locate_index: usize,
     pub slot_id: i32,
-    pub no_talk_row_id: i32,
-    pub visual_row: ActivityTimeline,
-    pub visual_point: i32,
-    pub source_view_local_y: f32,
     pub player_package: String,
-    pub visual_package: String,
-    pub visual_prefab: String,
 }
 
-/// The data-level join for one player row of one placed fixture.
+/// The data-level plan for one player row of one placed fixture.
 pub(crate) fn plan_player_row(
     world: &World,
     actor: Entity,
-    unit: u32,
     target: &FixtureTarget,
     identity: &FixtureActivityIdentity,
     player_row: &PlayerTimelineRow,
@@ -444,48 +456,11 @@ pub(crate) fn plan_player_row(
             "instance StartLoc/EndLoc pair is incomplete",
         ));
     }
-    let source_view_local_y = world
-        .get::<SourceFixtureViewLocalY>(target.entity)
-        .map(|y| y.0)
-        .ok_or_else(|| {
-            ProviderPending::new(
-                "source-view-local-y",
-                "source ViewObject.localPosition.y has not been supplied; world Y is not a substitute",
-            )
-        })?;
-    let mut candidates = Vec::new();
-    for relation in tables.sd_visual_rows(unit, identity.master_id) {
-        for visual in tables.timeline_rows(relation.timeline_group_id) {
-            let point = tables
-                .action_point_value(visual.action_point_definition, 0)
-                .map_err(|error| {
-                    ProviderPending::new("source-visual-point", format!("{error:?}"))
-                })?;
-            if point == Some(player_row.action_point) {
-                candidates.push((relation.id, visual.clone(), point.expect("matching point")));
-            }
-        }
-    }
-    let [(no_talk_row_id, visual_row, visual_point)] = candidates.as_slice() else {
-        return Err(ProviderPending::new(
-            if candidates.is_empty() { "source-visual-missing" } else { "ambiguous-source-visual" },
-            format!("unit {}, fixture {}, player point {} has source candidates {:?}; no first/ready fallback",
-                unit, identity.master_id, player_row.action_point,
-                candidates.iter().map(|(relation, row, _)| (*relation, row.id)).collect::<Vec<_>>()),
-        ));
-    };
     let player_package = fixture_activity_data::timeline_package(&player_row.asset_name)
         .map_err(|error| ProviderPending::new("player-timeline-route", format!("{error:?}")))?;
-    let (visual_package, visual_prefab) = fixture_activity_data::timeline_asset(
-        &visual_row.asset_name,
-        master.put_type,
-        source_view_local_y,
-    )
-    .map_err(|error| ProviderPending::new("sd-timeline-variant", format!("{error:?}")))?;
     Ok(PlayerTimelinePlan {
         target: target.clone(),
         actor,
-        unit,
         animator,
         graph,
         fixture_id: identity.master_id,
@@ -493,14 +468,30 @@ pub(crate) fn plan_player_row(
         player_row: player_row.clone(),
         locate_index,
         slot_id,
-        no_talk_row_id: *no_talk_row_id,
-        visual_row: visual_row.clone(),
-        visual_point: *visual_point,
-        source_view_local_y,
         player_package,
-        visual_package,
-        visual_prefab,
     })
+}
+
+/// The avatar probe names the clip each playing node holds from the body's
+/// clip table; the timeline's avatar clips come from another file, so their
+/// names join that table once they are bound.
+fn name_avatar_clips(
+    world: &mut World,
+    plan: &PlayerTimelinePlan,
+    profile: &PlayerTimelineProfile,
+) {
+    let named: Vec<_> = profile
+        .bindings
+        .animations
+        .values()
+        .filter(|binding| binding.animator == plan.animator)
+        .map(|binding| (binding.clip.id(), binding.source.clip_name.clone()))
+        .collect();
+    if let Some(mut names) = world.get_mut::<crate::player_avatar::body::BodyNames>(plan.actor) {
+        for (id, name) in named {
+            names.0.entry(id).or_insert(name);
+        }
+    }
 }
 
 /// The player timeline's SE rule (`silence_unavailable_sounds`): an SE the
@@ -512,25 +503,20 @@ fn silence_player_sounds(world: &World, target: &FixtureTarget, request: &mut St
     }
 }
 
-fn profile_matches_plan(profile: &PlayerFixtureVisualProfile, plan: &PlayerTimelinePlan) -> bool {
+fn profile_matches_plan(profile: &PlayerTimelineProfile, plan: &PlayerTimelinePlan) -> bool {
     profile.target == plan.target
         && profile.actor == plan.actor
-        && profile.unit_id == plan.unit
         && profile.fixture_id == plan.fixture_id
         && profile.player_timeline_row_id == plan.player_row.id
         && profile.action_point == plan.player_row.action_point
-        && profile.visual_action_point == plan.visual_point
         && profile.slot_id == plan.slot_id
-        && profile.no_talk_row_id == plan.no_talk_row_id
-        && profile.timeline_group_id == plan.visual_row.group_id
-        && profile.timeline_row_id == plan.visual_row.id
-        && profile.source_view_local_y.to_bits() == plan.source_view_local_y.to_bits()
-        && profile.definition.package == plan.visual_package
-        && profile.definition.prefab == plan.visual_prefab
-        && profile.player_definition.package == plan.player_package
-        && profile.player_definition.prefab == plan.player_row.asset_name
-        && profile.bindings.animations.values().any(|binding|
-            binding.animator == plan.animator && binding.graph == plan.graph)
+        && profile.definition.package == plan.player_package
+        && profile.definition.prefab == plan.player_row.asset_name
+        && profile
+            .bindings
+            .animations
+            .values()
+            .any(|binding| binding.animator == plan.animator && binding.graph == plan.graph)
 }
 
 /// PostUpdate: all provider/NPC/talk preparation has finished for this frame.

@@ -31,6 +31,7 @@
 //! animator with a token and play their own source clips on it.
 
 pub(crate) mod body;
+pub(crate) mod item_timeline;
 pub(crate) mod switch_gesture;
 
 use crate::npc::MotionPhase;
@@ -49,8 +50,15 @@ pub(crate) const IDLE_CLIP: &str = "c_000_mov_idle_00";
 pub(crate) const WALK_CLIP: &str = "mov_u000_site_walk001_o";
 /// Dash state clip (`AvatarConfig.MysekaiDashMotion`).
 pub(crate) const DASH_CLIP: &str = "mov_u000_site_run001_o";
-/// AutoMove state clip (`AvatarConfig.RunMotion`).
+/// AutoMove state clip (`AvatarConfig.RunMotion`, master avatar motion 37).
+/// The furniture timeline state also plays it for its approach.
 pub(crate) const AUTO_MOVE_CLIP: &str = "motion_avatar_run";
+/// `AvatarConfig.IdleMotion` (master avatar motion 1): the furniture timeline
+/// state's finally plays it before the Idle state takes over.
+pub(crate) const IDLE_MOTION: &str = "motion_avatar_idle";
+/// `AvatarConfig.WalkMotion` (master avatar motion 36): the furniture
+/// timeline state plays it for the walk to EndLoc.
+pub(crate) const WALK_MOTION: &str = "motion_avatar_walk";
 
 /// One clip of the body's motion group, as the model file and its manifest
 /// carry it.
@@ -104,6 +112,8 @@ pub(crate) enum PlayerActionOwner {
     Cannon,
     FixtureTimeline,
     SwitchGimmick,
+    /// The step item's director (`PlayerAvatarItemTimelineView`).
+    StepItem,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,10 +144,20 @@ pub(crate) enum PlayerMotionError {
     InvalidSpeed,
 }
 
+impl std::fmt::Display for PlayerMotionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(owner) => write!(f, "the animator is owned by {owner:?}"),
+            Self::StaleOwner => f.write_str("the action's token no longer owns the animator"),
+            Self::UnknownClip(name) => write!(f, "the motion group has no clip {name}"),
+            Self::MissingGraph => f.write_str("the animator's graph is missing"),
+            Self::InvalidSpeed => f.write_str("the clip speed is not a positive number"),
+        }
+    }
+}
+
 struct OwnedAction {
     token: PlayerActionToken,
-    node: AnimationNodeIndex,
-    looping: bool,
     blocks_manual_movement: bool,
 }
 
@@ -153,8 +173,6 @@ pub struct AvatarDriver {
     clips: Arc<BodyClips>,
     /// Graph nodes by source literal.
     nodes: HashMap<String, AnimationNodeIndex>,
-    /// Source literal of each graph node, for the probe.
-    literals: HashMap<AnimationNodeIndex, String>,
     playing: Option<Locomotion>,
     action: Option<OwnedAction>,
     next_generation: u64,
@@ -173,7 +191,6 @@ impl AvatarDriver {
             graph,
             clips,
             nodes: HashMap::new(),
-            literals: HashMap::new(),
             playing: None,
             action: None,
             next_generation: 0,
@@ -187,11 +204,6 @@ impl AvatarDriver {
     /// Length of one clip of the motion group (`GetAnimationTime`).
     pub(crate) fn clip_length(&self, literal: &str) -> Option<f32> {
         self.clips.get(literal).map(|clip| clip.length)
-    }
-
-    /// The source literal a graph node plays, if the driver added it.
-    pub(crate) fn literal_of(&self, node: AnimationNodeIndex) -> Option<&str> {
-        self.literals.get(&node).map(String::as_str)
     }
 
     pub(crate) fn node_of(&self, literal: &str) -> Option<AnimationNodeIndex> {
@@ -230,27 +242,6 @@ impl AvatarDriver {
         (self.player, self.graph.clone())
     }
 
-    /// The source activity owns approach/attachment; the timeline then owns
-    /// sampling this same animator, rather than starting a second body clock.
-    pub(crate) fn acquire_fixture_timeline(
-        &mut self,
-    ) -> Result<PlayerActionToken, PlayerMotionError> {
-        if let Some(action) = &self.action {
-            return Err(PlayerMotionError::Owned(action.token.owner));
-        }
-        let token = self.next_token(PlayerActionOwner::FixtureTimeline);
-        let lease_node = self.nodes.get(IDLE_CLIP).copied().unwrap_or_default();
-        self.action = Some(OwnedAction {
-            token,
-            // Lease only: this method never starts a node.
-            node: lease_node,
-            looping: true,
-            blocks_manual_movement: true,
-        });
-        self.playing = None;
-        Ok(token)
-    }
-
     /// Take the animator for a business action without starting a clip:
     /// the state it enters replays nothing (`ChangeStatus` to the current
     /// state returns at once), so the clip on the animator keeps playing
@@ -263,11 +254,8 @@ impl AvatarDriver {
             return Err(PlayerMotionError::Owned(action.token.owner));
         }
         let token = self.next_token(owner);
-        let lease_node = self.nodes.get(IDLE_CLIP).copied().unwrap_or_default();
         self.action = Some(OwnedAction {
             token,
-            node: lease_node,
-            looping: true,
             blocks_manual_movement: true,
         });
         self.playing = None;
@@ -323,8 +311,7 @@ impl AvatarDriver {
             .get_mut(&self.graph)
             .ok_or(PlayerMotionError::MissingGraph)?;
         let node = graph.add_clip(handle, 1.0, graph.root);
-        self.nodes.insert(key.clone(), node);
-        self.literals.insert(node, key);
+        self.nodes.insert(key, node);
         Ok((node, looping))
     }
 
@@ -392,27 +379,9 @@ impl AvatarDriver {
         animation.set_speed(motion.speed);
         self.action = Some(OwnedAction {
             token,
-            node,
-            looping,
             blocks_manual_movement: motion.blocks_manual_movement,
         });
         self.playing = None;
-    }
-
-    /// A finished clip does not itself release a session that may still await a
-    /// door, camera, or another source-side completion.
-    pub(crate) fn action_finished(
-        &self,
-        token: PlayerActionToken,
-        animator: &AnimationPlayer,
-    ) -> bool {
-        self.action.as_ref().is_some_and(|action| {
-            action.token == token
-                && !action.looping
-                && animator
-                    .playing_animations()
-                    .any(|(node, animation)| *node == action.node && animation.is_finished())
-        })
     }
 
     /// A business action that ends without a clip of its own while the
