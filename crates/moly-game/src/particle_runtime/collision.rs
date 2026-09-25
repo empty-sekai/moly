@@ -155,8 +155,7 @@ fn current_size_law(emitter: &EmitterParams) -> Result<Option<CurrentSizeLaw>, S
 }
 
 /// The export's wrap modes of the size curves the current-size stream reads
-/// (the law's curve type does not carry them): only the clamp wraps are
-/// transcribed.
+/// (the law reads the keys only): only the clamp wraps are transcribed.
 pub(crate) fn current_size_source_gate(system: &serde_json::Value) -> Result<(), String> {
     let Some(size) = system.get("sizeOverLifetime").filter(|v| v.is_object()) else {
         return Ok(());
