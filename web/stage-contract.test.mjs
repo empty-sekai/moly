@@ -5,6 +5,7 @@ import {
   contentKey,
   filters,
   intent,
+  isSnapshot,
   sameOriginDirectory,
   resourceDirectory,
   resourceBase,
@@ -251,6 +252,8 @@ test("stage validates mount inputs before creating a renderer", () => {
       { version: "current" },
       { renderer: "invented" },
       { snapshot: "../jp" },
+      { site: "../shore" },
+      { site: 5 },
     ]) {
       assert.throws(() => mountStage(env.target, { ...options, ...invalid }));
       assert.equal(env.target.children.length, 0);
@@ -280,7 +283,7 @@ test("sound preference is carried by configure and live changes use a sound inte
   }
 });
 
-test("CDN resources preserve same-origin iframe and the synchronous activation gate", () => {
+test("CDN resources preserve same-origin iframe and the synchronous activation forward", () => {
   const env = dom();
   let handle;
   try {
@@ -290,14 +293,12 @@ test("CDN resources preserve same-origin iframe and the synchronous activation g
     assert.equal(source.origin, env.window.location.origin);
     assert.equal(source.searchParams.get("assets"), cdn + options.assets);
     assert.equal(source.searchParams.get("resource_origin"), cdn);
-    const gate = handle.frame.contentDocument.createElement("button");
-    gate.id = "stage-start";
-    gate.dataset.molyReady = "true";
-    handle.frame.contentDocument.append(gate);
-    let activated = false;
-    gate.addEventListener("click", () => { activated = true; });
+    let activated = 0;
+    handle.frame.contentWindow.addEventListener("moly-activate", () => { activated++; });
     handle.play("talk:fixture:6177");
-    assert.equal(activated, true);
+    assert.equal(activated, 1, "play forwards the host click before returning");
+    handle.preview("talk:fixture:6177");
+    assert.equal(activated, 2, "preview forwards the host click before returning");
   } finally {
     handle?.dispose();
     env.cleanup();
@@ -478,6 +479,39 @@ test("legacy shell and stage share one renderer lease in either mount order", as
   } finally {
     shell?.dispose();
     stage?.dispose();
+    env.cleanup();
+  }
+});
+
+test("sites are chosen by runtime ID and survive a document reload before Play", () => {
+  assert.deepEqual(intent("site", "first_floor"), { type: "site", value: "first_floor" });
+  for (const bad of ["Shore", "shore/..", "", 3, null])
+    assert.throws(() => intent("site", bad));
+  const options_ = [{ id: "home_site", name: "home" }, { id: "shore", name: "shore" }];
+  assert.ok(isSnapshot(state({ site: { id: "shore", options: options_ } })));
+  assert.ok(!isSnapshot(state({ site: { id: "moon", options: options_ } })));
+  assert.ok(!isSnapshot(state({ site: { id: "shore", options: [] } })));
+  const env = dom();
+  let handle;
+  try {
+    handle = mountStage(env.target, { ...options, site: "shore" });
+    assert.equal(new URL(handle.frame.src).searchParams.get("site"), "shore");
+    const sent = [];
+    handle.frame.contentWindow.postMessage = (message) => sent.push(message);
+    emit(env.window, handle.frame, "hello", { contract: 2, instance: "one" });
+    handle.setSite("flower_garden");
+    handle.play("talk:general:3912");
+    sent.length = 0;
+    emit(env.window, handle.frame, "hello", { contract: 2, instance: "two" });
+    assert.deepEqual(
+      sent.slice(1).map((message) => message.value),
+      [
+        { type: "site", value: "flower_garden" },
+        { type: "play", value: "talk:general:3912" },
+      ],
+    );
+  } finally {
+    handle?.dispose();
     env.cleanup();
   }
 });

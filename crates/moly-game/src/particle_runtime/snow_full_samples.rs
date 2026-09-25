@@ -186,7 +186,8 @@ fn source_runtime(native_path: &std::path::Path, native: &Value) -> Runtime {
 }
 
 // These are the native source-coordinate logical channels, not unused SIMD
-// padding, expanded sizeY/Z, or the separate effective size pool at +0x300.
+// padding, expanded sizeY/Z, or the separate effective-size array the particle
+// storage keeps apart from them.
 fn particle_words(system: &Runtime) -> Vec<[u32; 15]> {
     system
         .pool

@@ -77,6 +77,8 @@ export function createStageController({
     // Weather owns no playback state: it is one deterministic dial value the
     // Rust weather chain either admits (a real档位) or rejects.
     else if (item.type === "weather") command("weather", item.value);
+    // A site is admitted or refused by the runtime's own switch path.
+    else if (item.type === "site") command("site", item.value);
     else if (item.type === "sound") command("sound", item.value);
     else if (item.type === "close") {
       closing = true;

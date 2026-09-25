@@ -3,19 +3,26 @@
 //! 数据面：每个摆放点名包的文档（`site/props/<leaf>/<leaf>.json`，与
 //! glb 同目录）带 `materials[]`（shader 名 · keyword 集 · 浮点表 · 槽表）
 //! 与 `textureColourSpace`——与站点 sidecar 同一提取产物形状，走同一个
-//! [`parse_site_sidecar`]。glb 侧按 `GltfMaterialName` 与文档材质条目
-//! 按名 join（句柄在 scene 实例间共享：同包两条摆放只解析一次、同时
-//! 换上）。
+//! [`parse_site_sidecar`]。glb 侧的材质句柄按它在 glb `materials` 里的下标
+//! 与文档材质条目 join（提取产物两侧同序），并核对 `GltfMaterialName` 与
+//! 条目名一致；一个包里可以有同名的两个材质（`treasure_box1` 的两个
+//! `mat_base`，贴图不同），按名 join 会把第二个解析成第一个。下标对不上
+//! 时退回按名 join，且只在名字在文档里唯一时成立。句柄在 scene 实例间
+//! 共享：同包两条摆放只解析一次、同时换上。
 //!
-//! 族分派（采集物九个子类的视图族谱）：`Mysekai/Site/FieldObject` 与
-//! `Mysekai/Site/Tree` 是已移植两族——复用站点材质管线
+//! 族分派（采集物九个子类的视图族谱）：已移植三族。`Mysekai/Site/FieldObject`
+//! 与 `Mysekai/Site/Tree` 复用站点材质管线
 //! （`SiteMaterial` 与其 MaterialPlugin 都由站点材质插件装着），解析走
 //! 同一族门（keyword 全集 + 律的标量校验），贴图从 `site/props/<leaf>`
-//! 目录装载（著色空间按文档声明）。`Mysekai/TreasureBox`（宝箱两个包
-//! 的基形族）不在已移植五族里——**具名拒**：按名计数、保留 PBR 默认
-//! 材质（扩 SITE 家族键是另一单的事，这里把数报出来）。其余
+//! 目录装载（著色空间按文档声明）。`Mysekai/TreasureBox` (the base shape
+//! of the two treasure packages) resolves to the site pipeline's TreasureBox
+//! family (`resolve_treasurebox`: phenomena light and shade, drop shadow,
+//! rare overlay, treasure shadows, fog). Harvest objects are placed only by
+//! the development preview gallery (`MOLY_HARVEST_PREVIEW=1`), so this
+//! family, like the other two here, is drawn only there. 其余
 //! （`Mysekai/Effect/UberUnlit` 演出族、粒子 listen point 一族）是
-//! 范围外：按 shader 名计数保留。
+//! 范围外：按 shader 名计数保留。Particle system materials are not glb
+//! materials; the stay particles are drawn by `harvest_particles.rs`.
 //!
 //! 换装时机：全部摆放的 scene 展开完毕（`HarvestScenesReady`）后一次
 //! 性建 plan、等贴图到齐、逐实体换。挂账：采集物贴图不补 mip 链
@@ -24,19 +31,17 @@
 use std::collections::HashMap;
 
 use bevy::asset::LoadState;
-use bevy::gltf::GltfMaterialName;
+use bevy::gltf::{Gltf, GltfMaterialName};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use moly_assets::sidecar::{parse_site_sidecar, SiteSidecar};
 use moly_law::shading::fieldobject;
 
-use crate::harvest::{HarvestDocs, HarvestObject, HarvestRoot, HarvestScenesReady};
+use crate::harvest::{HarvestDocs, HarvestGltfs, HarvestObject, HarvestRoot, HarvestScenesReady};
 use crate::site_material::{
-    load_dir_texture, resolve_fieldobject, resolve_tree, SiteFamily, SiteMaterial,
+    load_dir_texture, resolve_fieldobject, resolve_treasurebox, resolve_tree, SiteFamily,
+    SiteMaterial, TREASUREBOX_SHADER_NAME,
 };
-
-/// 采集物特有、不在已移植五族里的族（宝箱基形）：具名拒，报数。
-const TREASUREBOX_SHADER: &str = "Mysekai/TreasureBox";
 
 /// 换装完成标记。
 #[derive(Resource)]
@@ -53,8 +58,6 @@ struct Planned {
 #[derive(Clone, Copy)]
 enum GltfClass {
     Swap(usize),
-    /// TreasureBox 族（具名拒）：单独计数。
-    TreasureBox,
     Retain,
 }
 
@@ -73,9 +76,11 @@ struct SwapTally {
     fieldobject_entities: usize,
     tree_materials: usize,
     tree_entities: usize,
-    /// TreasureBox 族：具名拒的材质名。
-    treasurebox_names: Vec<String>,
+    treasurebox_materials: usize,
     treasurebox_entities: usize,
+    /// Handles joined by name because their glb index did not name the same
+    /// document entry (or the glb had no index for them).
+    name_joined: usize,
     /// 其他 shader（演出/粒子族）：按 shader 名计数保留。
     retained_by_shader: HashMap<String, usize>,
     retained_entities: usize,
@@ -96,6 +101,8 @@ fn switch_materials(
     server: Res<AssetServer>,
     json: Res<Assets<moly_assets::json::JsonAsset>>,
     docs: Option<Res<HarvestDocs>>,
+    gltfs: Res<Assets<Gltf>>,
+    glbs: Option<Res<HarvestGltfs>>,
     roots: Query<(Entity, &HarvestObject), With<HarvestRoot>>,
     children: Query<&Children>,
     parts: Query<(&MeshMaterial3d<StandardMaterial>, &GltfMaterialName)>,
@@ -108,7 +115,7 @@ fn switch_materials(
     if ready.is_none() {
         return;
     }
-    let Some(docs) = docs else {
+    let (Some(docs), Some(glbs)) = (docs, glbs) else {
         return;
     };
     // 文档全部到位（计划阶段已请求摆放点名包）。装载失败具名 panic——
@@ -122,7 +129,7 @@ fn switch_materials(
     }
     let Some(mut state) = plan
         .take()
-        .or_else(|| build_swap_plan(&server, &json, &docs, &roots, &children, &parts))
+        .or_else(|| build_swap_plan(&server, &json, &docs, &gltfs, &glbs, &roots, &children, &parts))
     else {
         return;
     };
@@ -187,16 +194,18 @@ fn switch_materials(
                         state.tally.tree_materials += 1;
                         state.tally.tree_entities += entities.len();
                     }
-                    // 换装计划只由 resolve_fieldobject/resolve_tree 产出，
-                    // 另两族在采集物族谱里不存在——出现即数据面错位。
+                    SiteFamily::TreasureBox { .. } => {
+                        state.tally.treasurebox_materials += 1;
+                        state.tally.treasurebox_entities += entities.len();
+                    }
+                    // 换装计划只由 resolve_fieldobject/resolve_tree/
+                    // resolve_treasurebox 产出，其余族在采集物族谱里不存在——
+                    // 出现即数据面错位。
                     family => panic!(
                         "采集物换装出现了不可能的族 {family:?}（材质 {}）",
                         item.name
                     ),
                 }
-            }
-            Some(GltfClass::TreasureBox) => {
-                state.tally.treasurebox_entities += entities.len();
             }
             _ => {
                 state.tally.retained_entities += entities.len();
@@ -205,16 +214,17 @@ fn switch_materials(
     }
 
     info!(
-        "采集物材质换装：FieldObject {} 材质 {} 实体，Tree {} 材质 {} 实体；TreasureBox 族具名拒 {} 材质 {} 实体（{TREASUREBOX_SHADER} 不在已移植五族，保留默认材质）；其他 shader 保留 {} 材质 {} 实体（按 shader：{:?}）",
+        "采集物材质换装：FieldObject {} 材质 {} 实体，Tree {} 材质 {} 实体，TreasureBox {} 材质 {} 实体；其他 shader 保留 {} 材质 {} 实体（按 shader：{:?}）；按名 join {} 个句柄（其余按 glb 材质下标）",
         state.tally.fieldobject_materials,
         state.tally.fieldobject_entities,
         state.tally.tree_materials,
         state.tally.tree_entities,
-        state.tally.treasurebox_names.len(),
+        state.tally.treasurebox_materials,
         state.tally.treasurebox_entities,
         state.tally.retained_by_shader.values().sum::<usize>(),
         state.tally.retained_entities,
         state.tally.retained_by_shader,
+        state.tally.name_joined,
     );
     // 逐材质采样行（验收对账：族与变体从日志可推导——树动画变体是
     // 针叶树与绣球的分界）。
@@ -225,13 +235,6 @@ fn switch_materials(
             item.leaf,
             item.material.key.family,
             item.material.key.tree_animation,
-        );
-    }
-    if !state.tally.treasurebox_names.is_empty() {
-        warn!(
-            "TreasureBox 族具名拒 {} 条：{:?}",
-            state.tally.treasurebox_names.len(),
-            state.tally.treasurebox_names
         );
     }
     if !state.tally.refused.is_empty() {
@@ -256,11 +259,15 @@ fn switch_materials(
 }
 
 /// 建 plan：走全部摆放的层级按句柄收首见（句柄在同包摆放间共享，一次
-/// 解析全体换上），逐包解析文档材质表，按名 join、按 shader 名分派族。
+/// 解析全体换上），逐包解析文档材质表，按 glb 材质下标 join（名字核对；
+/// 下标对不上时按唯一名字 join），按 shader 名分派族。
+#[allow(clippy::too_many_arguments)]
 fn build_swap_plan(
     server: &AssetServer,
     json: &Assets<moly_assets::json::JsonAsset>,
     docs: &HarvestDocs,
+    gltfs: &Assets<Gltf>,
+    glbs: &HarvestGltfs,
     roots: &Query<(Entity, &HarvestObject), With<HarvestRoot>>,
     children: &Query<&Children>,
     parts: &Query<(&MeshMaterial3d<StandardMaterial>, &GltfMaterialName)>,
@@ -310,60 +317,64 @@ fn build_swap_plan(
     for (handle, (name, package, leaf)) in &seen {
         let sidecar = &sidecars[package];
         tally.unmatched_texture_slots += sidecar.unmatched.len();
-        let Some(slot) = sidecar
-            .materials
-            .iter()
-            .find(|source| source.name == *name)
-        else {
-            tally.glb_only.push(format!("{name}（{leaf}）"));
-            classes.insert(handle.clone(), GltfClass::Retain);
-            continue;
+        // The glb material index of this handle names the document entry at
+        // the same index (the export writes both lists in one order).
+        let glb_index = glbs
+            .by_key
+            .get(package)
+            .and_then(|glb| gltfs.get(glb))
+            .and_then(|gltf| gltf.materials.iter().position(|candidate| candidate == handle));
+        let by_index = glb_index
+            .and_then(|index| sidecar.materials.get(index))
+            .filter(|source| source.name == *name);
+        let slot = match by_index {
+            Some(source) => source,
+            None => {
+                let mut same_name = sidecar.materials.iter().filter(|source| source.name == *name);
+                match (same_name.next(), same_name.next()) {
+                    (Some(source), None) => {
+                        tally.name_joined += 1;
+                        source
+                    }
+                    (None, _) => {
+                        tally.glb_only.push(format!("{name}（{leaf}）"));
+                        classes.insert(handle.clone(), GltfClass::Retain);
+                        continue;
+                    }
+                    (Some(_), Some(_)) => {
+                        tally.refused.push(format!(
+                            "{leaf}: material name {name} is not unique in the document and glb index {glb_index:?} does not name it"
+                        ));
+                        classes.insert(handle.clone(), GltfClass::Retain);
+                        continue;
+                    }
+                }
+            }
         };
         let dir = format!("site/props/{leaf}");
-        match slot.shader.as_str() {
-            fieldobject::SHADER_NAME => {
-                match resolve_fieldobject(sidecar, slot, |uri| {
-                    load_dir_texture(server, sidecar, &dir, uri)
-                }) {
-                    Ok(material) => {
-                        planned.push(Planned {
-                            name: name.clone(),
-                            leaf: leaf.clone(),
-                            material,
-                        });
-                        classes.insert(handle.clone(), GltfClass::Swap(planned.len() - 1));
-                    }
-                    Err(reason) => {
-                        tally.refused.push(reason);
-                        classes.insert(handle.clone(), GltfClass::Retain);
-                    }
-                }
-            }
-            moly_law::shading::tree::SHADER_NAME => {
-                match resolve_tree(sidecar, slot, |uri| {
-                    load_dir_texture(server, sidecar, &dir, uri)
-                }) {
-                    Ok(material) => {
-                        planned.push(Planned {
-                            name: name.clone(),
-                            leaf: leaf.clone(),
-                            material,
-                        });
-                        classes.insert(handle.clone(), GltfClass::Swap(planned.len() - 1));
-                    }
-                    Err(reason) => {
-                        tally.refused.push(reason);
-                        classes.insert(handle.clone(), GltfClass::Retain);
-                    }
-                }
-            }
-            TREASUREBOX_SHADER => {
-                tally.treasurebox_names.push(format!("{name}（{leaf}）"));
-                classes.insert(handle.clone(), GltfClass::TreasureBox);
-            }
+        let load = |uri: &str| load_dir_texture(server, sidecar, &dir, uri);
+        let resolved = match slot.shader.as_str() {
+            fieldobject::SHADER_NAME => resolve_fieldobject(sidecar, slot, load),
+            moly_law::shading::tree::SHADER_NAME => resolve_tree(sidecar, slot, load),
+            TREASUREBOX_SHADER_NAME => resolve_treasurebox(sidecar, slot, load),
             // 其他（UberUnlit 演出族等）：范围外，按 shader 名计数保留。
             other => {
                 *tally.retained_by_shader.entry(other.to_string()).or_default() += 1;
+                classes.insert(handle.clone(), GltfClass::Retain);
+                continue;
+            }
+        };
+        match resolved {
+            Ok(material) => {
+                planned.push(Planned {
+                    name: name.clone(),
+                    leaf: leaf.clone(),
+                    material,
+                });
+                classes.insert(handle.clone(), GltfClass::Swap(planned.len() - 1));
+            }
+            Err(reason) => {
+                tally.refused.push(reason);
                 classes.insert(handle.clone(), GltfClass::Retain);
             }
         }

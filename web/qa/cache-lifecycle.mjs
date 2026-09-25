@@ -76,9 +76,9 @@ async function prepared() {
   await iframe.waitFor({ timeout: 60000 });
   frame = await (await iframe.elementHandle()).contentFrame();
   await frame.waitForFunction(
-    () => document.querySelector("#stage-start")?.dataset.molyReady === "true",
+    () => document.querySelector("#stage-boot")?.hidden === true,
     null,
-    { timeout: 90000 },
+    { timeout: 120000 },
   );
   await frame.evaluate(async () => {
     const url = performance

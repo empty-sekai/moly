@@ -53,6 +53,16 @@ use moly_law::fixture::{Direction, GridPosition};
 /// 家具动作点链的两条锚定臂（入座臂与「挂点条目缺」的环带反例臂，
 /// 见各自的行注释）。余下 21 条铺自发光族的可见面（材质参数
 /// `_BrightPhenomenaEmission` > 0 的 21 包全取，选位理由见该节注释）。
+///
+/// Region: this is the CN starter and stays exactly as it is. A JP snapshot's
+/// fixture-model index lacks four of these packages, so the JP starter is the
+/// same rows with JP stand-ins for those four ([`JP_STAND_INS`], picked by the
+/// rule stated there): the star rug `mdl_cncollect_rug_star3` becomes
+/// `mdl_ext0008_rug_rug1`, the table `mdl_twcollect_fixture_table1` becomes
+/// `mdl_env0012_fixture_snowman1`, the planter `mdl_twcollect_fixture_planter1`
+/// becomes `mdl_ext0019_fixture_floatring1`, and the tea stand
+/// `mdl_cncollect_fixture_tea3` becomes `mdl_ext0009_fixture_lamp1`. The region
+/// is the loaded snapshot's own identity (see [`full_starter_rows`]).
 const PLACEMENTS: [PlacementMock; 38] = [
     // Rug coverage: a rectangular picnic sheet under the birthday chair,
     // and an alpha-clipped star beside the player, in the initial camera.
@@ -692,6 +702,110 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
 ];
 
+/// A JP stand-in for a starter package that only the CN or TW client ships.
+/// The JP snapshot's fixture-model index has no such package, so the JP
+/// starter names this JP package in the same row instead. The row keeps its
+/// position, Center.Y, layout, direction and texture; only the package, and a
+/// master-id anchor that belongs to it, change.
+struct RegionStandIn {
+    /// The CN/TW-only package and its id in the master of the client that ships it.
+    replaces: &'static str,
+    replaces_id: i32,
+    /// The JP package and its id in the JP master.
+    package: &'static str,
+    id: i32,
+}
+
+/// JP stand-ins for the CN/TW-only starter packages (named server-domain mock
+/// values; the JP master has no starter layout of its own).
+///
+/// How each was picked, the same way for all four: from the JP fixture master
+/// and the JP fixture-model index, keep the pieces with the same master grid
+/// size (width, depth, height), the same settable layout type and the same put
+/// type, whose model is exported with a fixture view. Among those, prefer the
+/// fewest differences in fixture type, handle type and player action type (so
+/// a stand-in neither adds nor drops an interaction), then the same main and
+/// sub genre, then the same main genre, then the lowest master id.
+///
+/// Every row keeps its own grid footprint, so the placed footprint is the
+/// replaced row's in every direction; the equal grid size means the stand-in
+/// is also the same size as the piece it stands in for. All other starter rows
+/// already exist in the JP index and stay as they are.
+const JP_STAND_INS: [RegionStandIn; 4] = [
+    // CN star rug: both are 8x8 rugs one cell high, no put type, in the rug
+    // genre, with no handle or action. Four JP rugs fit; this is the lowest id.
+    RegionStandIn {
+        replaces: "mysekai__fixture__mdl_cncollect_rug_star3",
+        replaces_id: 90005,
+        package: "mysekai__fixture__mdl_ext0008_rug_rug1",
+        id: 238,
+    },
+    // TW table: both stand on 2x2 floor cells, 4 high, no put type, with no
+    // handle or action, in the same main genre. JP has no table of this size;
+    // of the 40 fitting pieces, three have no interaction, and this is the
+    // lowest id of those. The laptop row sits at Center.Y 4, the top of this
+    // 4-high volume for either piece, and stays where it is.
+    RegionStandIn {
+        replaces: "mysekai__fixture__mdl_twcollect_fixture_table1",
+        replaces_id: 9000003,
+        package: "mysekai__fixture__mdl_env0012_fixture_snowman1",
+        id: 464,
+    },
+    // TW planter: both stand on 4x4 floor cells, 2 high, no put type, in the
+    // same main and sub genre, with no handle or action. It is the only JP
+    // piece that fits.
+    RegionStandIn {
+        replaces: "mysekai__fixture__mdl_twcollect_fixture_planter1",
+        replaces_id: 9000004,
+        package: "mysekai__fixture__mdl_ext0019_fixture_floatring1",
+        id: 689,
+    },
+    // CN tea stand: both stand on 2x2 floor cells, 3 high, no put type, and
+    // both carry the light handle type and the loop player action, so the
+    // starter keeps a piece with that interaction. It is the only fitting JP
+    // piece with that behaviour; its genre differs.
+    RegionStandIn {
+        replaces: "mysekai__fixture__mdl_cncollect_fixture_tea3",
+        replaces_id: 90008,
+        package: "mysekai__fixture__mdl_ext0009_fixture_lamp1",
+        id: 257,
+    },
+];
+
+/// The full offline HOME showcase rows for the loaded snapshot's region. CN
+/// is the accepted table, unchanged. JP is the same table row for row, with
+/// only the CN/TW-only packages replaced by their [`JP_STAND_INS`]. A package
+/// still missing from the index is refused by the loader, never filtered out.
+/// (The compact starter is the server panel's housing layout.)
+fn full_starter_rows(
+    region: moly_law::carve::NavMeshRegion,
+) -> Result<Vec<PlacementMock>, String> {
+    let rows = PLACEMENTS.to_vec();
+    match region {
+        moly_law::carve::NavMeshRegion::Cn => Ok(rows),
+        moly_law::carve::NavMeshRegion::Jp => rows.into_iter().map(jp_row).collect(),
+    }
+}
+
+fn jp_row(mut row: PlacementMock) -> Result<PlacementMock, String> {
+    let Some(stand_in) = JP_STAND_INS.iter().find(|s| s.replaces == row.package) else {
+        return Ok(row);
+    };
+    // A starter fixture_id is either 0 (no anchor) or the package's own master
+    // id; the latter must follow the package into the JP master.
+    if row.fixture_id != 0 {
+        if row.fixture_id != stand_in.replaces_id {
+            return Err(format!(
+                "starter row {} carries fixture id {}, not its master id {}; no JP stand-in was applied",
+                row.package, row.fixture_id, stand_in.replaces_id
+            ));
+        }
+        row.fixture_id = stand_in.id;
+    }
+    row.package = stand_in.package;
+    Ok(row)
+}
+
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
 #[derive(Clone, Copy, PartialEq)]
 struct PlacementMock<P = &'static str> {
@@ -1281,6 +1395,7 @@ fn restore_selected_layout(
     temporary: Option<Res<crate::site::TemporarySiteActive>>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
     exploration: Option<Res<crate::player_data::TransientExploration>>,
+    source_region: Option<Res<crate::site::NavMeshSourceRegion>>,
 ) {
     let Some(sites) = sites else {
         return;
@@ -1323,6 +1438,7 @@ fn restore_selected_layout(
             selection.site_type(),
             floor.level,
             selection.content(),
+            source_region.as_deref().copied(),
         )
     };
     match restored.and_then(|layout| {

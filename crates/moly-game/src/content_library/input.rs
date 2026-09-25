@@ -31,6 +31,8 @@ pub(crate) struct LibraryInput<'w, 's> {
     pub(super) audio_gate: ResMut<'w, crate::audio::AudioGate>,
     /// 宿主天气钮的写入端：改服务端面板的当前日程行，面板再写出档位请求。
     pub(super) weather: MessageWriter<'w, crate::server_panel::PhenomenaScheduleEdit>,
+    /// 宿主地点选择的写入端：换站请求交给站点域的同一条拆站重装链。
+    pub(super) commands: Commands<'w, 's>,
     paste: Res<'w, PasteInbox>,
 }
 

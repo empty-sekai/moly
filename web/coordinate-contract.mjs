@@ -94,8 +94,11 @@ export async function preflightCoordinates(options, { fetchImpl = fetch, signal 
     const expectedAssets = packs
       ? (remoteBase ? "asset-store/" : "/moly/asset-store/")
       : (remoteBase ? `snapshots/${snapshotId}/assets/` : `/moly/snapshots/${snapshotId}/assets/`);
+    // Published descriptors keep their logical `/moly/` paths; below a
+    // resource base they resolve the way the host resolves them,
+    // `/moly/<tail>` -> `<base><tail>`.
     const publishedAssets = remoteBase && typeof snapshot.assets === "string"
-      ? snapshot.assets.replace(/^\//, "")
+      ? snapshot.assets.replace(/^\/(?:moly\/)?/, "")
       : snapshot.assets;
     if (publishedAssets !== expectedAssets || Boolean(snapshot.packs) !== Boolean(packs))
       throw new Error("Coordinate snapshot asset routing mismatch");

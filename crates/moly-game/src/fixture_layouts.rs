@@ -7,8 +7,11 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::{gallery, Direction, FixturePlacements, GridPosition, PlacementMock, PLACEMENTS};
-use crate::{settings_store, site::OfflineSceneContent};
+use super::{gallery, Direction, FixturePlacements, GridPosition, PlacementMock};
+use crate::{
+    settings_store,
+    site::{NavMeshSourceRegion, OfflineSceneContent},
+};
 
 #[path = "fixture_layout_inventory.rs"]
 mod inventory;
@@ -256,17 +259,22 @@ impl SiteFixtureLayouts {
         site_type: &str,
         floor: crate::site::FloorGridLayout,
         content: OfflineSceneContent,
+        region: Option<NavMeshSourceRegion>,
     ) -> Result<(), String> {
-        let layout = self.restore(site_id, site_type, floor.level, content)?;
+        let layout = self.restore(site_id, site_type, floor.level, content, region)?;
         validate_floor_layout(&layout, floor)
     }
 
+    /// `region` is the loaded snapshot's own source identity. Only the HOME
+    /// starter reads it: visited and saved layouts name their packages
+    /// themselves, and other sites start empty.
     pub(crate) fn restore(
         &self,
         site_id: u32,
         site_type: &str,
         level: u32,
         content: OfflineSceneContent,
+        region: Option<NavMeshSourceRegion>,
     ) -> Result<FixturePlacements, String> {
         if let Some(cached) = self.visited.get(&site_id) {
             if cached.site_type != site_type {
@@ -284,9 +292,16 @@ impl SiteFixtureLayouts {
         // This showcase is a HOME starter only. A room or harvest map without
         // a saved layout starts empty; it must never inherit outdoor rows.
         // The compact starter is the server panel's housing layout; the full
-        // showcase is still this module's table.
+        // showcase is still this module's table. The full table is
+        // region-keyed: without the snapshot's own region there is no table to
+        // pick, and no region is assumed.
         let mut rows: Vec<PlacementMock<String>> = Vec::new();
         if site_type == "home_site" {
+            let region = region.ok_or(concat!(
+                "offline HOME starter: the loaded snapshot's source region ",
+                "(source.json source.region) is not available; the starter rows ",
+                "are region-keyed, so none were installed"
+            ))?;
             let mut showcase = match content {
                 OfflineSceneContent::Compact => {
                     rows = HOME_STARTER
@@ -295,7 +310,7 @@ impl SiteFixtureLayouts {
                         .ok_or("the server panel's home housing layout is not installed yet")?;
                     Vec::new()
                 }
-                OfflineSceneContent::Full => PLACEMENTS.to_vec(),
+                OfflineSceneContent::Full => super::full_starter_rows(region.0)?,
             };
             gallery::append_preview(&mut showcase);
             rows.extend(showcase.into_iter().map(PlacementMock::into_owned));

@@ -25,9 +25,14 @@ pub const GPU_ONLY: RenderAssetUsages = RenderAssetUsages::RENDER_WORLD;
 /// How a glTF package's material textures are held after loading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GltfResidency {
-    /// Only the GPU samples the textures: site scenes, site props, indoor
-    /// modules and navigation packages.
+    /// Only the GPU samples the textures: site scenes, site props and
+    /// navigation packages.
     GpuTextures,
+    /// A room module. Textures as [`GltfResidency::GpuTextures`], and the
+    /// parsed glTF source is kept: the room programs read the third and
+    /// fourth uv sets of the module meshes (`TEXCOORD_2` / `TEXCOORD_3`), which
+    /// the engine's glTF loader does not map, so they are read from the source.
+    RoomModule,
     /// A skinned character pack. Its textures are GPU-only as above, and it
     /// spawns no cameras or lights.
     Character,
@@ -67,6 +72,12 @@ pub fn load_gltf<'a>(
         GltfResidency::GpuTextures => {
             server.load_with_settings(path, |settings: &mut GltfLoaderSettings| {
                 settings.load_materials = GPU_ONLY;
+            })
+        }
+        GltfResidency::RoomModule => {
+            server.load_with_settings(path, |settings: &mut GltfLoaderSettings| {
+                settings.load_materials = GPU_ONLY;
+                settings.include_source = true;
             })
         }
         GltfResidency::Character => {

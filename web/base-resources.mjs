@@ -124,13 +124,17 @@ export async function warmBaseResources(
             "Packed base resource differs from its measured descriptor",
           );
         decodedBytes += bytes.byteLength;
-      } else
-        decodedBytes += await consume(
+      } else {
+        // Add after the await: `decodedBytes += await ...` reads the total
+        // first and drops what the other workers added meanwhile.
+        const received = await consume(
           row.url,
           row.decodedBytes,
           signal,
           fetchImpl,
         );
+        decodedBytes += received;
+      }
       completed++;
       onProgress({ completed, total: rows.length, decodedBytes });
     }

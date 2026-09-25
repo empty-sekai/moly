@@ -73,6 +73,8 @@ test("worker retains each stage's configured CDN without authorizing other origi
     assert.equal(requests.length, 3, "the first stage cannot read the second origin's retained copy");
     assert.equal(requests.at(-1).options, undefined, "unselected origin passes through without cache interception");
     assert.equal(await dispatch(second + "/api/player", "second"), undefined, "private routes are never intercepted");
+    assert.equal(await dispatch(origin + "/moly/releases/stage-test/stage.html?embed=1", ""), undefined,
+      "a URL no configuration can admit is left to the browser");
   } finally {
     for (const [key, descriptor] of Object.entries(previous)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);

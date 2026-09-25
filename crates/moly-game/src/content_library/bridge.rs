@@ -45,6 +45,7 @@ pub(super) enum BrowserCommand {
     Settings,
     Sound(bool),
     Weather(i32),
+    Site(String),
 }
 fn commands() -> &'static Mutex<Vec<BrowserCommand>> {
     COMMANDS.get_or_init(|| Mutex::new(Vec::new()))
@@ -242,6 +243,15 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
                 .filter(|id| *id > 0)
                 .ok_or("天气档位不正确")?,
         ),
+        // A site type from the published catalogue. The switch path still
+        // checks the loaded master row before it tears anything down.
+        "site" => {
+            let site = string(&value, "value")?;
+            if !crate::site::is_supported(site) {
+                return Err("未知的地点".into());
+            }
+            BrowserCommand::Site(site.to_owned())
+        }
         _ => return Err("未知的内容操作".into()),
     })
 }
@@ -335,6 +345,17 @@ pub(super) fn apply_command(
         BrowserCommand::Weather(id) => {
             io.weather
                 .write(crate::server_panel::PhenomenaScheduleEdit::Set(id));
+        }
+        // A site switch changes the scene an experience would own, so it waits
+        // until that experience is stopped and restored. The ordinary switch
+        // path then admits or refuses it (unloaded row, unsaved layout).
+        BrowserCommand::Site(site) => {
+            if busy(state) {
+                reject(state, "请先停止当前体验并等待场景恢复，再切换地点");
+                return;
+            }
+            io.commands
+                .insert_resource(crate::site::SiteChangeRequest(site));
         }
         BrowserCommand::Focus(value) => {
             state.external_input_capture = value;
@@ -712,9 +733,15 @@ pub(crate) fn publish(
     >,
     text_art: Option<Res<crate::balloon::BalloonArt>>,
     layouts: Option<Res<crate::ui_layout::UiLayouts>>,
-    phenomenon: Option<Res<crate::weather::CurrentPhenomenonId>>,
-    catalogue: Option<Res<crate::weather::PhenomenonCatalogue>>,
-    weather_transition: Option<Res<crate::weather_transition::WeatherTransition>>,
+    (phenomenon, catalogue, weather_transition): (
+        Option<Res<crate::weather::CurrentPhenomenonId>>,
+        Option<Res<crate::weather::PhenomenonCatalogue>>,
+        Option<Res<crate::weather_transition::WeatherTransition>>,
+    ),
+    (sites, selection): (
+        Option<Res<crate::site::Sites>>,
+        Option<Res<crate::site::SiteSelection>>,
+    ),
     server: Res<AssetServer>,
     mut audio_startup: Option<ResMut<crate::audio_startup::BrowserAudioStartup>>,
     preview: Option<Res<staging::ScenePreview>>,
@@ -750,8 +777,9 @@ pub(crate) fn publish(
         .map(|phenomenon| phenomenon.0)
         .unwrap_or_default();
     let weather_view = weather_transition.as_deref().map(|phase| phase.presentation());
+    let site_id = selection.as_deref().map(|selection| selection.site_type());
     let stamp = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}",
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{}:{:?}",
         state.revision,
         catalog.revision,
         world.revision,
@@ -761,7 +789,10 @@ pub(crate) fn publish(
         state.active.is_some(),
         state.pending.is_some(),
         scene_ready,
-        weather_id, weather_view
+        weather_id,
+        weather_view,
+        sites.is_some(),
+        site_id
     );
     if *previous == stamp {
         return;
@@ -797,6 +828,18 @@ pub(crate) fn publish(
                         "icon": option.icon, "metadata": option.metadata,
                         "iconSource": option.icon_source,
                     }))
+                    .collect::<Vec<_>>(),
+            });
+        }
+        // The site dial: the site the scene is on (or switching to) and every
+        // switchable site in master order, named by the master itself. It is
+        // absent until the site table has loaded.
+        if let (Some(sites), Some(site_id)) = (sites.as_deref(), site_id) {
+            snapshot["site"] = json!({
+                "id": site_id,
+                "options": sites
+                    .switchable()
+                    .map(|(id, name)| json!({ "id": id, "name": name }))
                     .collect::<Vec<_>>(),
             });
         }
@@ -853,6 +896,8 @@ mod tests {
             r#"{"schemaVersion":1,"type":"play","key":"missing"}"#,
             r#"{"schemaVersion":1,"type":"focus","value":"true"}"#,
             r#"{"schemaVersion":1,"type":"pageSize","value":0}"#,
+            r#"{"schemaVersion":1,"type":"site","value":"moon"}"#,
+            r#"{"schemaVersion":1,"type":"site","value":7}"#,
         ] {
             assert!(parse_command(bad).is_err());
         }

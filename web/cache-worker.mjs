@@ -130,18 +130,16 @@ export class CacheAdmission {
   }
 }
 
+/** URL properties no client configuration changes: a URL failing them never has an identity. */
+function plainResourceUrl(url) {
+  return !url.search && !url.hash && !url.username && !url.password &&
+    ["http:", "https:"].includes(url.protocol) && !/%2f|%5c|%00/i.test(url.pathname);
+}
+
 export function resourceIdentity(value, origin, configuredOrigin = null, configuredBase = null) {
   let url;
   try { url = new URL(value, origin); } catch { return null; }
-  if (
-    (url.origin !== origin && url.origin !== publicOrigin(configuredOrigin)) ||
-    url.search ||
-    url.hash ||
-    url.username ||
-    url.password ||
-    !["http:", "https:"].includes(url.protocol) ||
-    /%2f|%5c|%00/i.test(url.pathname)
-  )
+  if ((url.origin !== origin && url.origin !== publicOrigin(configuredOrigin)) || !plainResourceUrl(url))
     return null;
   const basePath = configuredBase ? (() => {
     try {
@@ -218,6 +216,15 @@ export function requiredResourceURLs(pack, descriptor, origin, configuredOrigin 
     urls.push(child.href);
   }
   return [...new Set(urls)];
+}
+
+/** Decoded size published with the object: the local server's header or the
+ * object store's user metadata (OSS and S3 spellings). A store that does not
+ * expose it through CORS reads as 0, which disables retention, not playback. */
+export function declaredDecodedBytes(headers) {
+  return Number(headers.get("X-Moly-Decoded-Bytes") ||
+    headers.get("x-oss-meta-moly-decoded-bytes") ||
+    headers.get("x-amz-meta-moly-decoded-bytes") || 0);
 }
 
 export function isCacheMessage(value) {
@@ -414,10 +421,11 @@ if (
     // immutable logical suffixes, while the asynchronous identity check below
     // still requires the requesting client's exact resource_base.
     const logicalCandidate =
-      !/%2f|%5c|%00/i.test(candidateUrl.pathname) &&
-      (/(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(candidateUrl.pathname) ||
-       /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(candidateUrl.pathname));
-    const candidate = request.method === "GET" && !request.headers.has("Range") &&
+      /(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(candidateUrl.pathname) ||
+      /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(candidateUrl.pathname);
+    // A URL no configuration can admit (a query, a fragment, credentials, an encoded
+    // separator) is left to the browser, so its request and any failure stay its own.
+    const candidate = request.method === "GET" && !request.headers.has("Range") && plainResourceUrl(candidateUrl) &&
       (resourceIdentity(request.url, self.location.origin, candidateUrl.origin) ||
        logicalCandidate);
     if (!candidate) return;
@@ -469,8 +477,7 @@ if (
         // Controlled large runtime requests bypass the browser's opaque HTTP
         // cache. Optional retained copies are therefore measurable and removable.
         const response = await fetch(request, { cache: "no-store", credentials: "omit", redirect: "error" });
-        const bytes = Number(response.headers.get("X-Moly-Decoded-Bytes") ||
-          response.headers.get("x-oss-meta-moly-decoded-bytes") || 0);
+        const bytes = declaredDecodedBytes(response.headers);
         let pinsChanged = false;
         if (
           enabled &&

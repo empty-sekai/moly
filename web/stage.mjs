@@ -12,6 +12,7 @@ import {
   resourceOrigin,
 } from "./embed-contract.mjs";
 import { selectRenderer } from "./boot.mjs";
+import { audioActivation } from "./stage-audio.mjs";
 import { createStageController } from "./stage-controller.mjs";
 import { stageMessages } from "./stage-locale.mjs";
 import { presentWeather } from "./weather-presentation.mjs";
@@ -21,6 +22,10 @@ import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
+// Installed before the engine module loads, so its output context is tracked.
+const resumeAudio = audioActivation(globalThis);
+for (const type of ["pointerdown", "pointerup", "keydown", "moly-activate"])
+  window.addEventListener(type, resumeAudio, true);
 let ui = {
   locale: validateLocale(params.get("locale") || "zh-CN"),
   theme: validateTheme(params.get("theme") || "light"),
@@ -45,6 +50,22 @@ const weatherPicker = createWeatherPicker({
   },
   onFocus: (captured) => controller?.focus(captured),
 });
+// The last site block the runtime published, and whether a switch may be
+// asked for now: never while the scene is loading or an experience owns it.
+let site = null,
+  siteLocked = true;
+const siteSelect = $("site-select");
+siteSelect.addEventListener("change", () => {
+  const id = siteSelect.value;
+  if (!siteLocked && id !== site?.id && site?.options.some((option) => option.id === id))
+    controller?.dispatch("site", id);
+  else if (site) siteSelect.value = site.id;
+});
+// Keys pressed in the menu belong to it, not to the scene behind it.
+for (const type of ["keydown", "keyup"])
+  siteSelect.addEventListener(type, (event) => event.stopPropagation());
+siteSelect.addEventListener("focus", () => controller?.focus(true));
+siteSelect.addEventListener("blur", () => controller?.focus(false));
 const weatherIconUrls = new Map();
 const weatherIconRequests = new Set();
 function weatherPresentationOptions() {
@@ -146,18 +167,10 @@ function render() {
         downloading: t.loading,
         initializing: t.initializing,
         base: t.base,
-        "awaiting-gesture": t.ready,
         renderer: t.renderer,
         resources: t.scene,
-        ready: t.ready,
       }[phase] ?? t.scene);
   $("boot-message").textContent = text;
-  $("stage-start").textContent = wasm ? t.enter : t.prepare;
-  $("stage-start").disabled = loading || started;
-  $("stage-start").dataset.molyReady = String(
-    Boolean(wasm && !started && !failed),
-  );
-  $("stage-start").hidden = failed;
   $("stage-retry").textContent = t.retry;
   $("stage-webgl").textContent = t.fallback;
   $("stage-webgl").hidden = backend === "webgl2" || requested === "webgl2";
@@ -171,6 +184,25 @@ function render() {
       : "";
   $("stage-hint").textContent = t.controls;
   renderWeather();
+  renderSite();
+}
+function renderSite() {
+  const field = $("stage-site");
+  if (!site) {
+    field.hidden = true;
+    return;
+  }
+  const names = JSON.stringify(site.options.map((option) => [option.id, option.name]));
+  if (siteSelect.dataset.options !== names) {
+    siteSelect.dataset.options = names;
+    siteSelect.replaceChildren(
+      ...site.options.map((option) => new Option(option.name, option.id)),
+    );
+  }
+  if (siteSelect.value !== site.id) siteSelect.value = site.id;
+  siteSelect.disabled = siteLocked;
+  siteSelect.setAttribute("aria-label", stageMessages(ui.locale).site);
+  field.hidden = false;
 }
 function renderWeather() {
   const button = $("stage-weather");
@@ -232,7 +264,6 @@ function reload(renderer) {
   // different backend can be constructed. Never initialize both in one realm.
   const url = new URL(location.href);
   if (renderer) url.searchParams.set("renderer", renderer);
-  url.searchParams.set("preload", "1");
   location.replace(url.href);
 }
 $("stage-retry").addEventListener("click", () => reload());
@@ -389,19 +420,19 @@ async function loadEngine() {
     mark("baseResourcesReady");
     wasm = module;
     loading = false;
-    report("awaiting-gesture");
   } catch (error) {
     abort.abort();
     fail(backend ? "engine_failed" : "unsupported", error);
   } finally {
     clearInterval(watchdog);
   }
+  enter();
 }
 
 function enter() {
   if (!wasm || started || failed) return;
   started = true;
-  mark("startClick");
+  mark("stageStart");
   report("renderer");
   try {
     controller = createStageController({
@@ -422,16 +453,13 @@ function enter() {
     );
     for (const command of pending.splice(0))
       controller.dispatch(command.type, command.value);
-    // Must stay synchronous in this trusted click. No await, warm-up audio
-    // context or host-created second playback bus belongs here.
+    // The engine opens its only audio output here; a browser that is still
+    // holding audio back lets `resumeAudio` start it on the next activation.
     wasm.start_stage(backend);
   } catch (error) {
     fail("renderer_failed", error);
   }
 }
-$("stage-start").addEventListener("click", () =>
-  wasm ? enter() : void loadEngine(),
-);
 
 window.addEventListener("message", (event) => {
   if (
@@ -510,6 +538,11 @@ window.addEventListener("moly-ready", () => {
       if (state.weather) {
         weather = state.weather;
         renderWeather();
+      }
+      if (state.site) {
+        site = state.site;
+        siteLocked = !state.scene?.ready || state.status.canStop;
+        renderSite();
       }
       if (state.ready) mark("catalogReady");
       if (state.scene?.ready) {
@@ -604,4 +637,4 @@ send("hello", {
   instance:
     globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
 });
-if (params.get("preload") === "1") void loadEngine();
+void loadEngine();

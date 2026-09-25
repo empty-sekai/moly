@@ -4,8 +4,11 @@
 // 式：扩散的预滤波是直拷（没有阈值）、降采样 4-tap box、上采样低一级
 // 4-tap box 后按散射权重混合；泛光的预滤波走阈值软膝曲线并把输出平方
 // 压缩，金字塔两级都在平方域滤波；合成里扩散层先绕枢轴提对比再按混合
-// 模式并入，泛光块按强度-着色-overlay 三段式并入，屏幕耀斑沿轴两条
-// 反向线性渐变各叠一层 hard light。
+// 模式并入，泛光块按强度-着色-overlay 三段式并入，屏幕耀斑与太阳光晕
+// 各沿自己的轴两条反向线性渐变各叠一层 hard light（先屏幕、后太阳）。
+//
+// 本链的输入是**引擎后处理之后**的相机色：引擎的调色查表与引擎泛光在
+// 上游节点里已经做完（见 weather_stock_post.wgsl），这里不再调色。
 //
 // # 色彩域约定（与产品链同形）
 //
@@ -19,7 +22,10 @@
 // 编回存储域，缓冲是 `Rgba16Float`、硬件不再编码），预滤波把存储域值开方
 // 压缩后各级携带压缩值，合成里先平方回存储域再消费。
 //
-// 顶点用引擎的全屏三角形（3 顶点覆盖全屏），uv 即屏幕坐标。
+// 顶点用引擎的全屏三角形（3 顶点覆盖全屏），uv 即屏幕坐标，原点在左上、
+// v 向下。真源的全屏 blit 原点在左下、v 向上（顶点程序把 uv 直接映成裁剪
+// 坐标 uv·2−1），两个光晕的渐变轴按那个坐标定义 ⇒ 光晕一律用
+// `source_uv = (u, 1 − v)`；只做纹理采样的地方与原点无关。
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
@@ -41,12 +47,14 @@ struct WeatherPostUniform {
     bloom_a: vec4<f32>,
     // 泛光：rgb 是着色 tint。
     bloom_b: vec4<f32>,
-    // 调色：(曝光线性倍数, 色相偏移, 饱和系数, 对比系数)。
-    grade_a: vec4<f32>,
-    // 调色：(滤色.rgb 线性域, 门)。
-    grade_b: vec4<f32>,
-    split_shadows: vec4<f32>,
-    split_highlights: vec4<f32>,
+    // 太阳光晕：(屏幕轴.x, 屏幕轴.y, 因子 × 强度, 衰减指数)；轴与因子是
+    // 每帧由方向光向量与相机算的绘制时量。
+    sun_axis: vec4<f32>,
+    // 太阳光晕两层色：rgb 是混色，alpha 是该层权重。
+    sun_c1: vec4<f32>,
+    sun_c2: vec4<f32>,
+    // 太阳光晕：(衰减偏移1, 衰减偏移2, 门, 0)。
+    sun_off: vec4<f32>,
 };
 
 // 直拷与降采样读 binding 0；上采样的高级别也读 binding 0、低级别读
@@ -92,125 +100,11 @@ fn pow_safe(x: f32, e: f32) -> f32 {
     return select(0.0, pow(x, e), x > 0.0);
 }
 
-// ---- 引擎原生调色（ColorAdjustments）------------------------------------
-//
-// 这一族不是本链自己的轴：它走引擎「烘一张调色 LUT + 在 uber pass 查
-// 那张表」的两段链，而那两段在现象相机上排在本链**上游**（引擎调色挂
-// BeforeRenderingPostProcessing、本链的对位挂 AfterRenderingPostProcessing）。
-// 所以场景色在进本链之前就已经调过色了。
-//
-// 本链没有那张表，改为把两段链的式子**逐像素直算**：结果少了 32³ 表的
-// 三线性插值误差，多的是每像素一次 LogC 往返。式子逐条对位——
-//   uber 侧：先乘曝光倍数（源注释写明「不影响 bloom / dof」），再走
-//            LDR 支路的 tonemap（本档色调映射为 None ⇒ 退化成 saturate），
-//            然后查表；
-//   LUT 侧：白平衡（本档 LMS 系数全 1 ⇒ 恒等，不写）→ LogC 域绕
-//            ACEScc 中灰做对比 → 线性域乘滤色（无钳制）→ 负值抹平 →
-//            分离色调（未接，见宿主的记账）→ 通道混合 / 阴中高 /
-//            升伽马增益（本档全恒等，不写）→ HSV 域色相偏移 → 绕亮度
-//            的整体饱和 → YRGB 曲线（本档为恒等曲线，不写）→ saturate。
-//
-// 调用点有两处且必须一致：合成 pass 的基色，与扩散预过滤（金字塔的
-// 输入也是上游那条已调色的场景色）。泛光那座金字塔**不调色**——它的
-// 源在真源侧是特效缓冲，不是相机色。
-const ACESCC_MIDGRAY: f32 = 0.4135884;
-const LOGC_A: f32 = 5.555556;
-const LOGC_B: f32 = 0.047996;
-const LOGC_C: f32 = 0.244161;
-const LOGC_D: f32 = 0.386036;
-const LOG2_OF_10: f32 = 3.321928;
-const LUMA_COEFF: vec3<f32> = vec3<f32>(0.2126729, 0.7151522, 0.0721750);
-
-fn linear_to_logc(x: vec3<f32>) -> vec3<f32> {
-    // log10(t) = log2(t) / log2(10)。参数下界是 LOGC_B > 0（输入非负），
-    // 所以这里取不到 log(0)。
-    let t = max(LOGC_A * x + vec3<f32>(LOGC_B), vec3<f32>(0.0));
-    return LOGC_C * (log2(t) / LOG2_OF_10) + vec3<f32>(LOGC_D);
-}
-
-fn logc_to_linear(x: vec3<f32>) -> vec3<f32> {
-    // pow(10, u) = exp2(u * log2(10))。
-    let u = (x - vec3<f32>(LOGC_D)) / LOGC_C;
-    return (exp2(u * LOG2_OF_10) - vec3<f32>(LOGC_B)) / LOGC_A;
-}
-
-fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
-    let k = vec4<f32>(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-    let p = mix(
-        vec4<f32>(c.b, c.g, k.w, k.z),
-        vec4<f32>(c.g, c.b, k.x, k.y),
-        vec4<f32>(step(c.b, c.g)),
-    );
-    let q = mix(
-        vec4<f32>(p.x, p.y, p.w, c.r),
-        vec4<f32>(c.r, p.y, p.z, p.x),
-        vec4<f32>(step(p.x, c.r)),
-    );
-    let d = q.x - min(q.w, q.y);
-    let e = 1.0e-4;
-    return vec3<f32>(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
-}
-
-fn hsv_to_rgb(c: vec3<f32>) -> vec3<f32> {
-    let k = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-    let p = abs(fract(vec3<f32>(c.x) + k.xyz) * 6.0 - vec3<f32>(k.w));
-    return c.z * mix(vec3<f32>(k.x), clamp(p - vec3<f32>(k.x), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(c.y));
-}
-
-// 色相回卷：只回卷一圈（源侧就是两个单边判断，不是取模）。
-fn rotate_hue(v: f32, low: f32, hi: f32) -> f32 {
-    if v < low {
-        return v + hi;
-    }
-    if v > hi {
-        return v - hi;
-    }
-    return v;
-}
-
-fn split_soft_light(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
-    let r1 = 2.0 * base * blend + base * base * (1.0 - 2.0 * blend);
-    let r2 = sqrt(base) * (2.0 * blend - 1.0) + 2.0 * base * (1.0 - blend);
-    return select(r1, r2, blend >= vec3<f32>(0.5));
-}
-fn color_grade(c_in: vec3<f32>) -> vec3<f32> {
-    if u_post.grade_b.w <= 0.5 && u_post.split_highlights.w <= 0.0 {
-        return c_in;
-    }
-    // uber 侧：曝光 → LDR 支路的 tonemap（None ⇒ saturate）。
-    var c = clamp(c_in * u_post.grade_a.x, vec3<f32>(0.0), vec3<f32>(1.0));
-    // LUT 侧：LogC 域的对比。
-    var cl = linear_to_logc(c);
-    cl = (cl - vec3<f32>(ACESCC_MIDGRAY)) * u_post.grade_a.w + vec3<f32>(ACESCC_MIDGRAY);
-    c = logc_to_linear(cl);
-    // 滤色是无钳制乘子；随后源侧显式抹平负值（LogC 往返会把 0 带成
-    // 一个小负数）。
-    c = c * u_post.grade_b.rgb;
-    c = max(c, vec3<f32>(0.0));
-    if u_post.split_highlights.w > 0.0 {
-        var gamma = pow(c, vec3<f32>(1.0 / 2.2));
-        let luma_split = clamp(dot(clamp(gamma, vec3<f32>(0.0), vec3<f32>(1.0)), LUMA_COEFF) + u_post.split_shadows.w, 0.0, 1.0);
-        gamma = split_soft_light(gamma, mix(vec3<f32>(0.5), u_post.split_shadows.rgb, 1.0 - luma_split));
-        gamma = split_soft_light(gamma, mix(vec3<f32>(0.5), u_post.split_highlights.rgb, luma_split));
-        c = pow(gamma, vec3<f32>(2.2));
-    }
-    // HSV 域的色相偏移。
-    var hsv = rgb_to_hsv(c);
-    hsv.x = rotate_hue(hsv.x + u_post.grade_a.y, 0.0, 1.0);
-    c = hsv_to_rgb(hsv);
-    // 绕亮度的整体饱和（曲线族恒等 ⇒ 源里的 satMult 为 1，不出现）。
-    let luma = dot(c, LUMA_COEFF);
-    c = vec3<f32>(luma) + u_post.grade_a.z * (c - vec3<f32>(luma));
-    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 // 预过滤（扩散）：直拷进编码域——扩散的预过滤没有阈值，整幅画面都进模糊。
-// 场景色先过调色：真源侧这座金字塔的源就是**已调色的**相机色（引擎的调色
-// pass 排在本链上游），所以这里与合成 pass 施加同一个纯函数，等价于先调色
-// 一次再分给两个读者。
+// 源是上游引擎后处理写出的相机色（已调色）。
 @fragment
 fn weather_copy_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let c = color_grade(textureSample(t_a, s_linear, in.uv).rgb);
+    let c = textureSample(t_a, s_linear, in.uv).rgb;
     return vec4<f32>(linear_to_srgb(c), 1.0);
 }
 
@@ -289,13 +183,36 @@ fn bloom_up_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(sqrt(max(u_bloom_params.x * (low_sq - s_sq) + s_sq, vec3<f32>(0.0))), 1.0);
 }
 
-// 合成：基色先过引擎的调色（上游那两段链），再 clamp 到 100 进线性域
-//（硬件解码已经给出线性值），先扩散后屏幕耀斑（固定链序里耀斑排在扩散
-// 之后），收尾硬件编码回存储域。
+// 一层光晕：沿轴 `axis` 的两条反向线性渐变，各按 (偏移, 指数, 色的 alpha,
+// 强度) 取权重，依次叠一层 hard light（先色1、后色2）。屏幕耀斑与太阳光晕
+// 是同一个函数在两套 uniform 上各跑一次（真源程序里两段逐字同形）。
+fn flare_layer(
+    b_in: vec3<f32>,
+    uv: vec2<f32>,
+    axis: vec2<f32>,
+    strength: f32,
+    exponent: f32,
+    offsets: vec2<f32>,
+    c1: vec4<f32>,
+    c2: vec4<f32>,
+) -> vec3<f32> {
+    var b = b_in;
+    let t = dot(uv - vec2<f32>(0.5), axis);
+    let w1 = pow_safe(clamp(t - offsets.x, 0.0, 1.0), exponent) * c1.a * strength;
+    let w2 = pow_safe(clamp((1.0 - t) - offsets.y, 0.0, 1.0), exponent) * c2.a * strength;
+    b = mix(b, hard_light(b, c1.rgb), w1);
+    b = mix(b, hard_light(b, c2.rgb), w2);
+    return b;
+}
+
+// 合成：基色（上游引擎后处理之后的相机色）clamp 到 100 进线性域（硬件解码
+// 已经给出线性值），扩散 → 泛光 → 屏幕耀斑 → 太阳光晕（真源程序的段序），
+// 收尾硬件编码回存储域。
 @fragment
 fn weather_composite_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let c = color_grade(textureSample(t_a, s_linear, in.uv).rgb);
+    let c = textureSample(t_a, s_linear, in.uv).rgb;
     var b = min(c, vec3<f32>(100.0));
+    let source_uv = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
 
     if u_post.diff_a.x > 0.5 {
         var d = textureSample(t_b, s_linear, in.uv).rgb;
@@ -328,12 +245,12 @@ fn weather_composite_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f
     b = tinted * u_post.bloom_b.rgb + b;
 
     if u_post.flare_off.z > 0.5 {
-        let t = dot(in.uv - vec2<f32>(0.5), u_post.flare_axis.xy);
-        let e = u_post.flare_axis.w;
-        let w1 = pow_safe(clamp(t - u_post.flare_off.x, 0.0, 1.0), e) * u_post.flare_c1.a * u_post.flare_axis.z;
-        let w2 = pow_safe(clamp((1.0 - t) - u_post.flare_off.y, 0.0, 1.0), e) * u_post.flare_c2.a * u_post.flare_axis.z;
-        b = mix(b, hard_light(b, u_post.flare_c1.rgb), w1);
-        b = mix(b, hard_light(b, u_post.flare_c2.rgb), w2);
+        b = flare_layer(b, source_uv, u_post.flare_axis.xy, u_post.flare_axis.z, u_post.flare_axis.w,
+            u_post.flare_off.xy, u_post.flare_c1, u_post.flare_c2);
+    }
+    if u_post.sun_off.z > 0.5 {
+        b = flare_layer(b, source_uv, u_post.sun_axis.xy, u_post.sun_axis.z, u_post.sun_axis.w,
+            u_post.sun_off.xy, u_post.sun_c1, u_post.sun_c2);
     }
 
     return vec4<f32>(max(b, vec3<f32>(0.0)), 1.0);

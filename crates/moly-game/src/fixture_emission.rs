@@ -65,7 +65,7 @@ use bevy::render::view::{
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::env::{SiteEnv, SiteEnvGpuBuffer};
-use crate::render::gpu::{BindGroupCache, Bound};
+use crate::render::gpu::{Bound, SharedBindGroupCache};
 use crate::uber_particle::{ParticleEmission, UberParticleMaterial, CullArm, BlendArm, UBER_SHADER};
 use crate::fixture_material::{FixtureMaterialKey, FixtureParams};
 
@@ -581,8 +581,14 @@ fn prepare_emission(
 /// resource ids: the object pool, view uniform and skin buffers are replaced
 /// only when they grow, and each (mask, main) pair binds the same GPU images
 /// until either image is re-prepared.
-#[derive(Resource, Default)]
-struct EmissionBindGroups(std::sync::Mutex<BindGroupCache>);
+#[derive(Resource)]
+struct EmissionBindGroups(SharedBindGroupCache);
+
+impl FromWorld for EmissionBindGroups {
+    fn from_world(world: &mut World) -> Self {
+        Self(SharedBindGroupCache::from_world(world))
+    }
+}
 
 /// 自发光节点：主 pass 之后跑。每个 3D 视图一份；ViewQuery 缺件
 /// （无深度图或无本 pass 组件）的视图直接不匹配，节点不跑。
@@ -663,8 +669,7 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         let view_buffer = view_uniforms.uniforms.buffer()
             .expect("main view uniforms are prepared before the emission pass");
         let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-        let mut groups = world.resource::<EmissionBindGroups>().0.lock().unwrap();
-        groups.evict_idle(frame);
+        let mut groups = world.resource::<EmissionBindGroups>().0.lock();
 
         // 管线就绪表（去重）；没编完的只跳过那条 draw，pass 照常清缓冲。
         let mut ready: Vec<(CachedRenderPipelineId, &RenderPipeline)> = Vec::new();
@@ -969,6 +974,7 @@ pub struct FixtureEmissionPlugin;
 
 impl Plugin for FixtureEmissionPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_bind_group_caches(app);
         app.add_systems(Startup, load)
             .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<WeatherEffectProbes>::default())
             .add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<crate::weather_depth::WeatherCameraRole>::default());

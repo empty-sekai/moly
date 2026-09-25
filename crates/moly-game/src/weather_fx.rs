@@ -25,7 +25,7 @@ use crate::site::SiteActive;
 use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared};
-use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world, simulate};
+use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, compose_to_world};
 pub(crate) mod fixture;
 
 /// 出生抽签的确定性随机种子。与站点链**不同流**：两条链同时在跑，
@@ -82,6 +82,7 @@ enum PlannedGeometry {
         source: Option<Arc<crate::particle_geometry::SourceMesh>>,
         scaling: crate::particle_geometry::Scaling,
         pivot: Vec3,
+        flip: Vec3,
     },
 }
 impl PlannedGeometry {
@@ -97,8 +98,8 @@ impl PlannedGeometry {
     fn into_runtime(self) -> crate::particle_runtime::Geometry {
         match self {
             Self::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw),
-            Self::Mesh { alignment, source, scaling, pivot, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
-                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot,
+            Self::Mesh { alignment, source, scaling, pivot, flip, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
+                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot, flip,
             }),
         }
     }
@@ -126,6 +127,11 @@ struct Planned {
     /// 根记录 → 发射节点链的 TRS 合成（语料根记录全档恒等，仍参与合成）。
     /// 链缩放由出生步从它折算（X 分量；语料全部均匀）。
     node_affine: GlobalTransform,
+    /// The authored chain `node_affine` was composed from; `None` when an
+    /// instance anchor replaces it.
+    node_chain: Option<NodeChain>,
+    /// A Transform on `node_chain` is rotated by the effect's accepted Animator.
+    animated: bool,
     source: SourceParticle,
     draw: Option<(Entity, Handle<Mesh>)>,
     geometry: PlannedGeometry,
@@ -146,6 +152,8 @@ pub(crate) struct WeatherFxPlan {
     site_installed: bool,
     global_installed: bool,
     planned: Vec<Planned>,
+    /// Accepted Animator players per selected effect, instantiated with the effect.
+    animators: HashMap<String, Vec<crate::weather_animation::AnimatedNode>>,
     tally: Tally,
     tier: String,
     env_site: String,
@@ -166,6 +174,9 @@ struct Tally {
     alignment: Vec<String>,
     no_system_block: usize,
     no_emission: usize,
+    /// The source EmissionModule is disabled and no owner can emit into the
+    /// system, so it never holds a particle. Counted, not refused.
+    source_emission_disabled: usize,
     /// Any authored distance emission requires an emitter-travel consumer.
     rate_distance_only: usize,
     /// 率恒 0 且无 burst：永不发射。
@@ -264,6 +275,8 @@ impl WeatherFxState {
                         "qualifiedLaw": true,
                     })),
                     "effectAge": s.effect_clock.age(),
+                    "animator": s.effect_animator.as_ref().map(|animator| animator.report()),
+                    "animatedChain": s.animated_chain.is_some(),
                     "geometry": geometry,
                     "particleSort": format!("{:?}", s.sort_mode),
                     "textureSheet": sheet,
@@ -294,6 +307,12 @@ struct LiveWeatherEmitter {
     draw: Entity,
     lifecycle: WeatherEffectLifecycle,
     effect_clock: Arc<crate::weather_animation::EffectClock>,
+    /// The effect instance's Animator, shared by every emitter of the instance
+    /// and kept through retirement (the GameObject outlives its particles).
+    effect_animator: Option<Arc<crate::weather_animation::EffectAnimator>>,
+    /// Set when the Animator rotates a Transform on this emitter's chain: the
+    /// node affine is recomposed from it every frame.
+    animated_chain: Option<NodeChain>,
 }
 impl std::ops::Deref for LiveWeatherEmitter {
     type Target = Runtime;
@@ -449,55 +468,20 @@ pub(crate) fn plan(
         Some(serde_json::from_str::<Value>(&asset.0).unwrap_or_else(|err| panic!("weather animation source JSON: {err}")))
     } else { None };
 
-    // ---- 选 effect：sky/camera 各一条（专属优先、全局回退），site 全装 ----
-    // 语料里每个 (档, 类) 至多一个匹配，挑选与对象序无关。
-    let unique = format!("unique__{}", doc.env_site);
-    let mut selected: Vec<(String, &Value)> = Vec::new();
-    for kind in ["sky", "camera"] {
-        let mut pick = None;
-        for (name, effect) in effects {
-            if effect_kind_of(effect) == Some(kind)
-                && effect_variant_of(effect) == Some(unique.as_str())
-            {
-                pick = Some((name.clone(), effect));
-                break;
-            }
-        }
-        if pick.is_none() {
-            for (name, effect) in effects {
-                if effect_kind_of(effect) == Some(kind)
-                    && effect_variant_of(effect) == Some("global")
-                {
-                    pick = Some((name.clone(), effect));
-                    break;
-                }
-            }
-        }
-        if let Some(pick) = pick {
-            selected.push(pick);
-        }
-    }
-    for (name, effect) in effects {
-        if effect_kind_of(effect) == Some("site")
-            && effect_variant_of(effect) == Some(unique.as_str())
-        {
-            selected.push((name.clone(), effect));
-        }
-    }
+    // ---- 选 effect：只取源环境装载器按名字构造的三份预制件（见 source_environment_selection）----
+    let selected = source_environment_selection(effects, &doc.tier, &doc.env_site);
 
     let mut tally = Tally::default();
     let mut plans = Vec::new();
-    for (effect_name, effect) in &selected {
+    let mut animators = HashMap::new();
+    for &(ref effect_name, effect, kind) in &selected {
         let animation = crate::weather_animation::Contract::compile(effect, animation_document.as_ref());
         info!("[weather-animation] {} {}", effect_name, animation.report);
+        if !animation.players().is_empty() {
+            animators.insert(effect_name.clone(), animation.players().to_vec());
+        }
         let lifecycle = WeatherEffectLifecycle::from_effect(effect)
             .unwrap_or_else(|err| panic!("weather effect {effect_name}: {err}"));
-        let kind = match effect_kind_of(effect) {
-            Some("sky") => EffectKind::Sky,
-            Some("camera") => EffectKind::Camera,
-            Some("site") => EffectKind::Site,
-            _ => continue,
-        };
         let camera_rotation = effect
             .get("effectiveRotation")
             .and_then(Value::as_str)
@@ -532,8 +516,10 @@ pub(crate) fn plan(
                 &mut tally,
             ) {
                 Some(planned) => {
-                    tally.admitted += 1;
-                    plans.push(planned);
+                    if let Some(planned) = admit_animated(&animation, planned, &mut tally) {
+                        tally.admitted += 1;
+                        plans.push(planned);
+                    }
                 }
                 None => {}
             }
@@ -542,7 +528,7 @@ pub(crate) fn plan(
     info!(
         "[weather-fx] {} @ {} 判读：选中 effect {} 个；本族记录 {}；放行 {}；\
          挡下——无渲染器 {} · 无材质 {} · 非本族 {:?} · 渲染器关 {} · \
-         绘制模式 {:?} · 对齐档 {:?} · 缺 system 块 {} · 缺 emission {} · \
+         绘制模式 {:?} · 对齐档 {:?} · 缺 system 块 {} · 缺 emission {} · 源发射模块关 {} · \
          只按距离发射 {} · 死发射 {} · 缺形状 {} · 形状律缺 {:?} · \
          仿真空间 {} · 起始三轴旋转 {} · 状态档 {:?} · 关键字 {:?} · \
          缺基础贴图 {} · 节点未解析 {} · 节点链关 {} · 律拒 {:?} · \
@@ -562,6 +548,7 @@ pub(crate) fn plan(
         count_names(&tally.alignment),
         tally.no_system_block,
         tally.no_emission,
+        tally.source_emission_disabled,
         tally.rate_distance_only,
         tally.dead_emission,
         tally.no_shape,
@@ -589,6 +576,7 @@ pub(crate) fn plan(
     commands.insert_resource(WeatherFxPlan {
         selection: selection.clone(), request_serial:doc.request_serial, site_started_at:None, site_installed:false, global_installed:false,
         planned: plans,
+        animators,
         tally,
         tier: doc.tier.clone(),
         env_site: doc.env_site.clone(),
@@ -599,14 +587,9 @@ pub(crate) fn plan(
 /// Module capability is checked from the complete serialized inventory, not
 /// just whichever parameters an older producer happened to emit.
 fn source_simulation_admission(system: &Value) -> Result<(), String> {
-    // Preserve +Infinity at the schema boundary, but reject the unverified
-    // scheduler before any other module capability can hide this gap.
-    if system.get("emission").and_then(|v| v.get("bursts")).and_then(Value::as_array)
-        .is_some_and(|bursts| bursts.iter().any(|burst|
-            burst.get("repeatInterval").and_then(Value::as_str) == Some("Infinity")))
-    {
-        return Err("source infinite burst repeat interval scheduling is not yet verified".into());
-    }
+    // A +Infinity burst repeat interval is kept at the schema boundary; the
+    // native birth schedules it as the source does, and the legacy step
+    // refuses it (`legacy_bursts`, below where the birth path is known).
     let source = moly_assets::particle_source::ParticleSourceModules::from_system(system)?;
     for module in &source.enabled {
         // The current snow owner carries an authored null SubModule edge
@@ -647,6 +630,25 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
         return Err("source birth rotation direction randomization is not consumed".into());
     }
     Ok(())
+}
+
+/// A system whose serialized EmissionModule is disabled never births a
+/// particle through the engine's own update: the per-frame update, the
+/// emitter-travel pass and the prewarm pass all skip rate and burst emission
+/// on the module's enabled flag. The remaining ways in are a script call to
+/// ParticleSystem.Emit or SetParticles, or one that re-enables the module
+/// (the game makes none on the weather effects: its effect component only
+/// plays and stops them), an animation or timeline binding (the weather clips
+/// bind transforms, the weather timeline tracks drive environment colours and
+/// values) and a parent's sub-emitter event, which births into the child
+/// regardless of the child's enabled flag; the owner check in judge refuses
+/// that case before this point. Only the module inventory the evidence covers
+/// is accepted: the main module alone. Such a system still plays and stops
+/// with its effect and reads as playing until its clock reaches the duration;
+/// it holds no particle and draws nothing, so nothing is installed for it.
+fn source_emission_disabled(system: &Value) -> bool {
+    moly_assets::particle_source::ParticleSourceModules::from_system(system)
+        .is_ok_and(|source| source.enabled.len() == 1 && source.enabled[0] == "InitialModule")
 }
 
 /// effect 档案的 `kind`（字符串原样）。
@@ -691,8 +693,74 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
     None
 }
 
-fn effect_kind_of(effect: &Value) -> Option<&str> {
-    effect.get("kind").and_then(Value::as_str)
+/// Which of the source environment loader's prefabs an exported effect is, if any.
+///
+/// `SiteEnvironmentAssetBundleLoader.LoadEnvironmentDataAsync` builds exactly three prefab names from the
+/// phenomenon package name P and the site package name S, and reads no other `GameObject` from a phenomenon
+/// package:
+/// - sky `fx_env_sky_` + P and camera `fx_env_camera_` + P, each read from the site's unique package when that
+///   package holds it, otherwise from the global package;
+/// - the unique effect `fx_env_site_` + P + `_` + S, read from the unique package only; the global package is
+///   never asked for it.
+///
+/// `SiteEnvironmentUtility.EmitEffect` instantiates them under the sky view's effect root, the field camera's
+/// effect root and the site view. Every other prefab of a phenomenon package is never instantiated on its own.
+/// This includes the templates in the shared `common` package (the rain-night raindrop tree, the snow-night ice,
+/// the rain and thunder raindrops, the meteor and rainbow ground trees):
+/// - the loader never names the common package; it arrives only as a bundle dependency of the global and unique
+///   packages, for its materials and meshes;
+/// - no code names those prefabs, and no serialized object references a template member.
+///
+/// The templates reach the screen as baked copies nested inside the unique site prefab, so they are simulated
+/// as part of that prefab. Instantiating a template as well would draw the same emitter tree twice, and some
+/// templates cannot emit alone: the ice template's mesh shape has no mesh, and each site copy assigns its own.
+/// A `fx_env_site_` prefab placed in a global package is not read either.
+fn source_environment_role(effect_name: &str, variant: &str, phenomenon: &str) -> Option<EffectKind> {
+    let site = variant.strip_prefix("unique__");
+    if variant != "global" && site.is_none() {
+        return None;
+    }
+    if effect_name.strip_prefix("fx_env_sky_") == Some(phenomenon) {
+        return Some(EffectKind::Sky);
+    }
+    if effect_name.strip_prefix("fx_env_camera_") == Some(phenomenon) {
+        return Some(EffectKind::Camera);
+    }
+    let site = site?;
+    (effect_name == format!("fx_env_site_{phenomenon}_{site}")).then_some(EffectKind::Site)
+}
+
+/// The loader's three prefabs for one phenomenon and site, in the order sky, camera, unique; an absent one is
+/// skipped the way the loader leaves its field null (see `source_environment_role`). The sky and camera prefabs
+/// come from the site's unique package when it holds them, otherwise from the global package; the unique prefab
+/// only from the unique package. An entry of the right name whose package variant is not a string is refused:
+/// the extraction always records the package, so reading such an entry as absent would hide a malformed file.
+fn source_environment_selection<'a>(
+    effects: &'a serde_json::Map<String, Value>,
+    phenomenon: &str,
+    site: &str,
+) -> Vec<(String, &'a Value, EffectKind)> {
+    let unique = format!("unique__{site}");
+    let held = |name: &str, variant: &str| -> Option<&'a Value> {
+        let effect = effects.get(name)?;
+        let package = effect_variant_of(effect)
+            .unwrap_or_else(|| panic!("weather effect {name}: package variant is not a string"));
+        (package == variant).then_some(effect)
+    };
+    let mut selected = Vec::new();
+    for (kind, name) in [
+        (EffectKind::Sky, format!("fx_env_sky_{phenomenon}")),
+        (EffectKind::Camera, format!("fx_env_camera_{phenomenon}")),
+    ] {
+        if let Some(effect) = held(&name, &unique).or_else(|| held(&name, "global")) {
+            selected.push((name, effect, kind));
+        }
+    }
+    let name = format!("fx_env_site_{phenomenon}_{site}");
+    if let Some(effect) = held(&name, &unique) {
+        selected.push((name, effect, EffectKind::Site));
+    }
+    selected
 }
 
 /// effect 档案的 `variant`。
@@ -729,6 +797,31 @@ fn source_sub_emitter_owners(particles: &[Value]) -> HashMap<String, Vec<String>
     }
     for value in owners.values_mut() { value.sort(); value.dedup(); }
     owners
+}
+
+/// An emitter at or below a Transform the effect's accepted Animator rotates
+/// follows that rotation through its authored node chain every frame. Only an
+/// emitter that composes the chain itself and simulates in Local space is
+/// covered: World-space births, inherited emitter velocity and shape placement
+/// against a moving Transform were not part of the evaluation that was read.
+fn admit_animated(animation: &crate::weather_animation::Contract, mut planned: Planned, tally: &mut Tally)
+    -> Option<Planned> {
+    let animated = animation.animated_ancestors(&planned.node);
+    if animated.is_empty() {
+        return Some(planned);
+    }
+    let composed = planned.node_chain.as_ref().is_some_and(|chain|
+        animated.iter().all(|path| chain.links.iter().any(|link| link.path == *path)));
+    let reason = if !composed {
+        "emitter below an animated Transform does not compose its authored node chain"
+    } else if planned.emitter.simulation_space != SimulationSpace::Local {
+        "emitter below an animated Transform does not simulate in Local space"
+    } else {
+        planned.animated = true;
+        return Some(planned);
+    };
+    tally.animation_refused.push(format!("{}/{}: {reason}", planned.effect, planned.node));
+    None
 }
 
 /// 逐条判读。放行回 Some，挡下回 None 并在盘点里具名。
@@ -805,11 +898,46 @@ fn judge_in_archive(
             Ok(value) if value.validate().is_ok() => value,
             value => { tally.render_mode.push(format!("invalid source Mesh reference: {value:?}")); return None; },
         };
-        if reference.mesh_slot != 0 || renderer.get("flip").and_then(Value::as_array)
-            .is_none_or(|v| v.len()!=3 || v.iter().any(|x| x.as_f64()!=Some(0.0))) {
-            tally.render_mode.push("unconsumed source Mesh slot selection or particle flip".into()); return None;
+        // ParticleSystemRenderer caches, in slot order, its populated slots
+        // whose mesh is drawable, so a single populated slot draws the same mesh
+        // whichever slot index holds it. The resolved list above names only the
+        // slots the export could resolve; a populated slot that failed to
+        // resolve still takes part in the cache and in the per-particle mesh
+        // selection, so the serialized slot table must hold exactly one
+        // populated reference, the resolved one.
+        let populated = renderer.get("meshSlots").and_then(Value::as_array).and_then(|slots| {
+            slots.iter().map(|slot| {
+                let index = slot.get("slot")?.as_u64()?;
+                let path_id = slot.get("reference")?.get("pathId")?.as_str()?.parse::<i64>().ok()?;
+                Some((index, path_id != 0))
+            }).collect::<Option<Vec<_>>>()
+        });
+        let Some(populated) = populated else {
+            tally.render_mode.push("source Mesh renderer slot table is missing or malformed".into()); return None;
+        };
+        let populated: Vec<u64> = populated.into_iter().filter_map(|(index, used)| used.then_some(index)).collect();
+        if populated != [u64::from(reference.mesh_slot)] {
+            tally.render_mode.push("source Mesh requires exactly one populated mesh slot, the resolved one; multi-mesh selection not yet consumed".into());
+            return None;
         }
-        Some(reference)
+        // Mesh flipping is consumed by the mesh transform.
+        let flip = renderer.get("flip").and_then(Value::as_array)
+            .and_then(|v| v.iter().map(|x| x.as_f64().filter(|n| n.is_finite()).map(|n| n as f32)).collect::<Option<Vec<_>>>())
+            .and_then(|v| <[f32; 3]>::try_from(v).ok());
+        let Some(flip) = flip else {
+            tally.render_mode.push("source Mesh renderer flip is not three finite numbers".into()); return None;
+        };
+        // Whether a particle mirrors follows its own seed only for a proportion
+        // strictly between zero and one: at or below zero none mirrors, above one
+        // all do, and at exactly one all but the particle whose draw is exactly
+        // one. Only the native birth path carries the engine's particle seed; a
+        // system on the legacy step path draws its particle seeds itself, so at
+        // exactly one the rare particle that keeps its orientation (one draw
+        // value in 2^23 per axis) is a different particle than in the source.
+        if flip.iter().any(|p| *p > 0.0 && *p < 1.0) {
+            tally.render_mode.push("source Mesh flip proportion between zero and one needs the native particle seed".into()); return None;
+        }
+        Some((reference, Vec3::from_array(flip)))
     } else { None };
 
     let system = match particle.get("system").filter(|v| v.is_object()) {
@@ -827,7 +955,14 @@ fn judge_in_archive(
     let emission = match system.get("emission").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
         Some(emission) => emission,
         None => {
-            tally.no_emission += 1;
+            // Only a weather effect played by the environment effect component
+            // has had its owners enumerated; a fixture system can be driven by
+            // fixture views and timelines, so it keeps the refusal.
+            if lifecycle.is_some() && source_emission_disabled(system) {
+                tally.source_emission_disabled += 1;
+            } else {
+                tally.no_emission += 1;
+            }
             return None;
         }
     };
@@ -982,9 +1117,9 @@ fn judge_in_archive(
     if renderer.get("normalDirection").and_then(Value::as_f64) != Some(1.0) {
         tally.render_mode.push("source billboard normalDirection other than one is not yet verified".into()); return None;
     }
-    if renderer.get("flip").and_then(Value::as_array)
+    if mesh_reference.is_none() && renderer.get("flip").and_then(Value::as_array)
         .is_none_or(|v| v.len()!=3 || v.iter().any(|x| x.as_f64()!=Some(0.0))) {
-        tally.render_mode.push("source particle flip stream permutation is not yet consumed".into()); return None;
+        tally.render_mode.push("source billboard particle flip is not yet consumed".into()); return None;
     }
     let pivot = renderer
         .get("pivot")
@@ -1028,7 +1163,8 @@ fn judge_in_archive(
         tally.node_inactive += 1;
         return None;
     }
-    let Some(node_affine) = instance_anchor.or_else(|| compose_affine(by_path, node)) else {
+    let node_chain = if instance_anchor.is_none() { authored_chain(by_path, node) } else { None };
+    let Some(node_affine) = instance_anchor.or_else(|| node_chain.as_ref().map(NodeChain::serialized_affine)) else {
         tally.node_unresolved += 1;
         return None;
     };
@@ -1059,6 +1195,31 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
         }
     }
+    // The mesh geometry has no transform about the particle's axis of
+    // rotation, whichever birth path feeds it.
+    if mesh_reference.is_some() {
+        let initial_enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
+            .is_some_and(|modules| modules.iter().any(|module| module.as_str() == Some("InitialModule")));
+        if let Err(refused) = crate::particle_runtime::mesh_rotation_admission(&emitter, initial_enabled) {
+            tally.render_mode.push(refused.reason().into());
+            return None;
+        }
+    }
+    // A system that runs the legacy step must carry a start colour that step
+    // evaluates as the source does. The weather host installs the native
+    // birth owner where `native_birth_path` allows it; the fixture host (no
+    // lifecycle) never installs it.
+    let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+    if lifecycle.is_none() || crate::particle_runtime::native_birth_path(&emitter, &route, Some(evidence)).is_err() {
+        if let Err(refused) = crate::particle_runtime::legacy_start_colour(&emitter.start.color) {
+            tally.law_reject.push(format!("{node}: {}", refused.reason()));
+            return None;
+        }
+        if let Err(reason) = crate::particle_runtime::legacy_bursts(&emitter) {
+            tally.law_reject.push(format!("{node}: {reason}"));
+            return None;
+        }
+    }
     Some(Planned {
         ordinal: 0,
         emission_surface,
@@ -1070,11 +1231,13 @@ fn judge_in_archive(
         kind,
         camera_rotation,
         node_affine,
+        node_chain,
+        animated: false,
         source,
         draw: None,
-        geometry: if let Some(reference) = mesh_reference {
+        geometry: if let Some((reference, flip)) = mesh_reference {
             let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", reference.file))).with_source("moly"));
-            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot) }
+            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
                 mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },
@@ -1135,13 +1298,53 @@ fn active_in_hierarchy(by_path: &HashMap<String, &Value>, path: &str) -> bool {
     true
 }
 
-/// 根记录 → 发射节点链的 TRS 合成（父∘子）。记录缺席或 TRS 形状不对回
-/// None（调用方按节点未解析挡下）。
-fn compose_affine(by_path: &HashMap<String, &Value>, path: &str) -> Option<GlobalTransform> {
-    let mut chain: Vec<&Value> = Vec::new();
+/// One link of an authored node chain: its path and its local TRS in the
+/// product frame.
+#[derive(Clone)]
+struct ChainLink {
+    path: String,
+    local: Transform,
+}
+
+/// The authored Transform chain from the effect root down to an emitter node,
+/// parent first.
+#[derive(Clone)]
+struct NodeChain {
+    links: Vec<ChainLink>,
+}
+
+impl NodeChain {
+    /// 父∘子 composition of the chain, with the local rotation of every link for
+    /// which `rotation` returns a stored Unity rotation (x, y, z, w) replaced by it,
+    /// converted exactly as a serialized rotation is.
+    fn affine(&self, rotation: impl Fn(&str) -> Option<[f32; 4]>) -> GlobalTransform {
+        let mut affine = GlobalTransform::IDENTITY;
+        for link in &self.links {
+            let mut local = link.local;
+            if let Some(quat) = rotation(&link.path) {
+                local.rotation = source_rotation(quat);
+            }
+            affine = affine * GlobalTransform::from(local);
+        }
+        affine
+    }
+
+    fn serialized_affine(&self) -> GlobalTransform {
+        self.affine(|_| None)
+    }
+}
+
+fn source_rotation(quat: [f32; 4]) -> Quat {
+    Quat::from_xyzw(quat[0], -quat[1], -quat[2], quat[3])
+}
+
+/// 根记录 → 发射节点链（父先）。记录缺席或 TRS 形状不对回 None（调用方按节点
+/// 未解析挡下）。
+fn authored_chain(by_path: &HashMap<String, &Value>, path: &str) -> Option<NodeChain> {
+    let mut chain: Vec<(String, &Value)> = Vec::new();
     let mut current = path.to_owned();
     while let Some(node) = by_path.get(&current) {
-        chain.push(*node);
+        chain.push((current.clone(), *node));
         let parent = node
             .get("parent")
             .and_then(Value::as_str)
@@ -1152,8 +1355,8 @@ fn compose_affine(by_path: &HashMap<String, &Value>, path: &str) -> Option<Globa
         }
         current = parent;
     }
-    let mut affine = GlobalTransform::IDENTITY;
-    for node in chain.iter().rev() {
+    let mut links = Vec::with_capacity(chain.len());
+    for (path, node) in chain.into_iter().rev() {
         let position = triple(node.get("position"))?;
         let rotation = node
             .get("rotation")
@@ -1166,12 +1369,12 @@ fn compose_affine(by_path: &HashMap<String, &Value>, path: &str) -> Option<Globa
         let scale = triple(node.get("scale"))?;
         let local = Transform {
             translation: crate::particle_geometry::reflect(Vec3::from_array(position)),
-            rotation: Quat::from_xyzw(quat[0], -quat[1], -quat[2], quat[3]),
+            rotation: source_rotation(quat),
             scale: Vec3::from_array(scale),
         };
-        affine = affine * GlobalTransform::from(local);
+        links.push(ChainLink { path, local });
     }
-    Some(affine)
+    Some(NodeChain { links })
 }
 
 /// Authored MainModule scaling mode of one emitter. Local keeps this node's
@@ -1197,7 +1400,7 @@ pub(crate) fn source_scaling(system: &Value, by_path: &HashMap<String, &Value>, 
     }
 }
 
-/// Whether the node and every ancestor on the chain `compose_affine` walks
+/// Whether the node and every ancestor on the chain `authored_chain` walks
 /// carry scale exactly one.
 fn unit_scale_chain(by_path: &HashMap<String, &Value>, path: &str) -> bool {
     let mut current = path.to_owned();
@@ -1377,6 +1580,7 @@ pub(crate) fn spawn_when_ready(
     // Clocks belong to instantiated effects. They are shared by their emitters,
     // preserved with unchanged global instances, and move intact into retirement.
     let mut effect_clocks: HashMap<String, Arc<crate::weather_animation::EffectClock>> = HashMap::new();
+    let mut effect_animators: HashMap<String, Option<Arc<crate::weather_animation::EffectAnimator>>> = HashMap::new();
     for planned in std::mem::take(&mut plan.planned) {
         let is_global = planned.kind != EffectKind::Site;
         if (is_global && preserve_global) || (!is_global && site_timed_out) {
@@ -1393,8 +1597,13 @@ pub(crate) fn spawn_when_ready(
         commands.entity(draw).remove::<WeatherFxPreflight>().insert((source, WeatherFxDraw));
         let effect_clock = effect_clocks.entry(planned.effect.clone())
             .or_insert_with(|| Arc::new(crate::weather_animation::EffectClock::new(now))).clone();
+        let effect_animator = effect_animators.entry(planned.effect.clone())
+            .or_insert_with(|| plan.animators.get(&planned.effect)
+                .map(|nodes| Arc::new(crate::weather_animation::EffectAnimator::new(nodes.clone())))).clone();
+        let animated_chain = if planned.animated { planned.node_chain } else { None };
         let route = planned.route.clone();
-        state.live.push(LiveWeatherEmitter { draw, native_refusal: None, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock, runtime: Runtime {
+        state.live.push(LiveWeatherEmitter { draw, native_refusal: None, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock,
+            effect_animator, animated_chain, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
             emitter: planned.emitter.clone(),
@@ -1466,7 +1675,39 @@ pub(crate) fn spawn_when_ready(
     }
     if plan.site_installed && plan.global_installed { state.selection = Some(plan.selection.clone()); }
     if create_state { commands.insert_resource(created); }
-    if plan.site_installed && plan.global_installed { commands.remove_resource::<WeatherFxPlan>(); }
+    // The plan also owns the commit notice: an unchanged global effect is "installed" at
+    // the fade's start, and the site effect may install while the fade still runs, so the
+    // plan stays until the fade has ended and the notice above was published.
+    if plan.site_installed && plan.global_installed && phase.can_commit_global_fx(&plan.selection) {
+        commands.remove_resource::<WeatherFxPlan>();
+    }
+}
+
+/// `SiteEnvironmentViewController.RefreshEffectVisible`: on an indoor site the
+/// source deactivates the GameObjects of the global sky effect, of the current
+/// site view's unique effect and of the field camera's effect, and activates
+/// them again on an outdoor one. The instances stay installed (an unchanged sky
+/// is kept across the move). The product hides their draws here, and
+/// [`advance`] stops stepping their particle systems while the site is indoor;
+/// back outdoors they resume from the state they stopped in (freeze and
+/// resume), while their Animators and effect clocks keep running indoors. What
+/// the engine does to a particle system and an Animator whose GameObject is
+/// deactivated and activated again (for example stopping and clearing the
+/// particles and replaying on activation) has not been read: an unverified
+/// residual. Retiring emitters are no longer referenced by those three owners
+/// and keep their own lifecycle.
+pub(crate) fn refresh_effect_visible(
+    state: Option<Res<WeatherFxState>>,
+    site: Option<Res<SiteActive>>,
+    mut draws: Query<&mut SourceParticle, With<WeatherFxDraw>>,
+) {
+    let Some(state) = state else { return; };
+    let shown = !site.as_deref().is_some_and(SiteActive::is_indoor);
+    for live in &state.live {
+        if let Ok(mut particle) = draws.get_mut(live.draw) {
+            if particle.enabled != shown { particle.enabled = shown; }
+        }
+    }
 }
 
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。
@@ -1474,19 +1715,28 @@ pub(crate) fn spawn_when_ready(
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
 /// 之后是因为四角展开要读当帧机位。
 pub(crate) fn advance(
+    mut commands: Commands,
     mut state: Option<ResMut<WeatherFxState>>,
     mut retiring: ResMut<WeatherFxRetirements>,
     mut meshes: ResMut<Assets<Mesh>>,
     time: Res<Time>,
+    frame: Res<bevy::diagnostic::FrameCount>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     avatars: Query<&GlobalTransform, With<AvatarRoot>>,
+    site: Option<Res<SiteActive>>,
 ) {
     // Observe instance age even when no camera can produce a particle draw.
-    // This records effect lifecycle time, not a claimed Unity Animator phase.
+    // The effect Animators evaluate here too, once per frame with the frame's
+    // delta time: before the frame's particle update, and whether or not a
+    // camera can draw (culling mode "always animate").
     let now = time.elapsed_secs_f64();
+    let dt = time.delta_secs();
     for live in state.as_deref().into_iter().flat_map(|state| &state.live)
         .chain(retiring.live.iter().map(|entry| &entry.emitter)) {
         live.effect_clock.observe(now);
+        if let Some(animator) = &live.effect_animator {
+            animator.advance_frame(frame.0, dt);
+        }
     }
     if state.as_ref().is_none_or(|s| s.live.is_empty()) && retiring.live.is_empty() { return; }
     // 相机拿不到就整帧跳过：不造替身机位（上一帧的属性池还在，几何
@@ -1519,11 +1769,16 @@ pub(crate) fn advance(
         site: GlobalTransform::IDENTITY,
     };
 
-    let dt = time.delta_secs();
-    let active = state.as_deref_mut().into_iter().flat_map(|s| s.live.iter_mut())
-        .map(|s| (&mut s.runtime, true));
-    let retired = retiring.live.iter_mut().map(|s| (&mut s.emitter.runtime, false));
-    for (system, emitting) in active.chain(retired) {
+    // Indoors the three effect owners are inactive (see refresh_effect_visible).
+    let live_active = !site.as_deref().is_some_and(SiteActive::is_indoor);
+    let active = state.as_deref_mut().into_iter().filter(|_| live_active).flat_map(|s| s.live.iter_mut())
+        .map(|s| (s, true));
+    let retired = retiring.live.iter_mut().map(|s| (&mut s.emitter, false));
+    // Systems whose native step was refused this frame; see step_frame.
+    let mut refused = Vec::new();
+    for (live, emitting) in active.chain(retired) {
+        let LiveWeatherEmitter { draw, runtime: system, effect_animator, animated_chain, .. } = live;
+        let draw = *draw;
         // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
         // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
         // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
@@ -1536,10 +1791,21 @@ pub(crate) fn advance(
                 }
             }
         }
+        // The first Play warms inside the instantiating call, before any
+        // Animator write, so the prewarm above saw the serialized chain. The
+        // Animator's rotation of this frame lands before the particle update
+        // and is what rendering reads.
+        if let (Some(chain), Some(animator)) = (animated_chain.as_ref(), effect_animator.as_ref()) {
+            system.node_affine = chain.affine(|path| animator.rotation(path));
+        }
         let step = dt * system.emitter.simulation_speed;
         if step > 0.0 {
-            if emitting { simulate(system, step, &ctx); }
-            else { crate::particle_runtime::simulate_stopped(system, step, &ctx); }
+            if let Err(reason) = crate::particle_runtime::step_frame(system, step, &ctx, emitting) {
+                error!(%reason, effect=%system.effect, node=%system.node,
+                    "native particle step refused: the system is retired and draws nothing");
+                refused.push(draw);
+                continue;
+            }
         }
         // 局部空间仿真：律状态是发射节点局部坐标，用锚∘链的当帧值换算成
         // 世界坐标。世界空间仿真的状态出生时就是世界坐标，恒等。
@@ -1555,6 +1821,18 @@ pub(crate) fn advance(
         };
         crate::particle_runtime::write_geometry(mesh, system, &to_world,
             &compose_to_world(system, &ctx), camera_transform, basis);
+    }
+    // A refused system is final: it leaves the active and retiring sets and
+    // its draw is despawned, rather than running a clock without births.
+    if !refused.is_empty() {
+        if let Some(state) = state.as_deref_mut() {
+            state.live.retain(|live| !refused.contains(&live.draw));
+            state.admitted = state.live.len();
+        }
+        retiring.live.retain(|entry| !refused.contains(&entry.emitter.draw));
+        for draw in refused {
+            commands.entity(draw).try_despawn();
+        }
     }
 }
 

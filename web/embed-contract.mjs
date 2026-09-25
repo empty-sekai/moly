@@ -49,6 +49,13 @@ function choice(value, values, name) {
   if (!values.includes(value)) throw new TypeError(`Invalid ${name}`);
   return value;
 }
+// A site type as the runtime names it (`shore`, `first_floor`). The host picks
+// from the catalogue the runtime publishes; the runtime refuses anything else.
+export function site(value) {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(value))
+    throw new TypeError("Invalid site");
+  return value;
+}
 export function locale(value = "zh-CN") {
   return choice(value, LOCALES, "locale");
 }
@@ -129,6 +136,8 @@ export function intent(type, value) {
     // catalogue the runtime publishes.
     case "weather":
       return { type, value: integer(value, 1, 2147483647, "weather") };
+    case "site":
+      return { type, value: site(value) };
     case "sound":
       if (typeof value !== "boolean")
         throw new TypeError("Invalid sound preference");
@@ -159,7 +168,30 @@ export function isSnapshot(value) {
     value.status &&
     typeof value.status.canStop === "boolean" &&
     TABS.includes(value.tab) &&
-    (value.weather === undefined || isWeather(value.weather))
+    (value.weather === undefined || isWeather(value.weather)) &&
+    (value.site === undefined || isSite(value.site))
+  );
+}
+// Like the weather block: optional, and when present the whole ordered list of
+// switchable sites with the one the scene is on.
+export function isSite(value) {
+  const id = (item) =>
+    typeof item === "string" && item.length > 0 && item.length <= 64;
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    id(value.id) &&
+    Array.isArray(value.options) &&
+    value.options.length > 0 &&
+    value.options.length <= 64 &&
+    value.options.every(
+      (option) =>
+        option &&
+        typeof option === "object" &&
+        id(option.id) &&
+        typeof option.name === "string",
+    ) &&
+    value.options.some((option) => option.id === value.id),
   );
 }
 // The weather block is optional so a runtime without it keeps working; when it

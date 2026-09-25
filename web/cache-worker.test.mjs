@@ -8,6 +8,7 @@ import {
   requiredResourceURLs,
   clientResourceOrigin,
   clientResourceBase,
+  declaredDecodedBytes,
   activeResourceRoots,
   isActiveRequiredResource,
 } from "./cache-worker.mjs";
@@ -175,4 +176,11 @@ test("shared cache stream validation enforces size while reading and verifies SH
     resourceIdentity(`/moly/asset-store/packages/${hash}.json`, origin).maximum,
     16 * 1048576,
   );
+});
+
+test("decoded size is read from the server header and both object-store metadata spellings", () => {
+  assert.equal(declaredDecodedBytes(new Headers({ "X-Moly-Decoded-Bytes": "7" })), 7);
+  assert.equal(declaredDecodedBytes(new Headers({ "x-oss-meta-moly-decoded-bytes": "8" })), 8);
+  assert.equal(declaredDecodedBytes(new Headers({ "x-amz-meta-moly-decoded-bytes": "9" })), 9);
+  assert.equal(declaredDecodedBytes(new Headers({ "Content-Length": "10" })), 0, "an encoded length is never a decoded size");
 });

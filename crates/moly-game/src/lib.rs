@@ -5,6 +5,7 @@
 pub mod action_button;
 pub mod alone_action_runtime;
 pub mod audio;
+mod audio_sequence;
 mod asset_cache;
 mod audio_startup;
 pub mod avatar_material;
@@ -37,6 +38,7 @@ mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
 pub mod fixture_emission;
+mod fixture_clock;
 mod fixture_gimmick;
 pub mod fixture_material;
 mod fixture_player_navigation;
@@ -47,8 +49,10 @@ mod frame_capture;
 pub mod game_settings;
 pub mod gesture;
 pub mod get_resource;
+mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
+mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
@@ -86,8 +90,10 @@ mod player_data_ui;
 mod player_fixture_action;
 pub mod player_state;
 pub mod player_talk;
+mod plain_background;
 mod render;
 mod room_appearance;
+mod room_shell;
 pub mod schedule;
 mod server_panel;
 mod settings_store;
@@ -100,6 +106,8 @@ pub mod sitemap_phenomena;
 pub mod sky;
 mod source_curve;
 mod weather_animation;
+#[cfg(test)]
+mod weather_animation_replay;
 pub mod talk;
 pub mod talk_camera;
 mod talk_ingest;
@@ -112,6 +120,7 @@ mod voice_pcm;
 pub mod walk_face;
 pub mod weather;
 pub mod weather_fx;
+mod weather_stock_post;
 mod weather_depth;
 mod weather_transition;
 mod source_render_state;
@@ -167,6 +176,7 @@ pub fn app(
     app.add_plugins(plugins);
     app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
+    gpu_image_release::install(&mut app);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);
 
@@ -186,6 +196,7 @@ pub fn app(
     app.add_plugins(npc_state::NpcStatePlugin);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
+    plain_background::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);
     app.add_plugins(character_material::CharacterMaterialPlugin);
     app.add_plugins(shadowmap::ShadowmapPlugin);
@@ -199,6 +210,7 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
+        harvest_particles::HarvestParticlePlugin,
     ));
     app
 }

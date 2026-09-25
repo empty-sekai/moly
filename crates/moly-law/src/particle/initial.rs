@@ -1,6 +1,6 @@
 //! Current JP InitialModule::Start, one dispatched four-lane group.
 //!
-//! Current libunity 937c6d28...75badd9, entry 0xd53e2c. The caller owns
+//! Transcribed from the current JP 6.8.1 libunity. The caller owns
 //! capacity, aligned birth storage and packing. Every nonempty group consumes
 //! all four random lanes, including discarded tail lanes. This law excludes
 //! Shape, StartVelocity, module updates and the game seed/lifecycle owner.
@@ -13,9 +13,9 @@
 //! uses the included ARM FRECPE/FRECPS law; host division is not a bit-equivalent
 //! default. An explicit callback variant remains available for diagnostics.
 
-use super::color::initial_rgba8;
+use super::color::initial_rgba8x4;
 use super::curve::CurveSampler;
-use super::gradient::{Gradient, GradientMode, time_code};
+use super::gradient::{Gradient, GradientMode};
 use super::random::ParticleRandom;
 use super::schema::StartParams;
 use super::seed_owner::ModuleRandom;
@@ -194,8 +194,9 @@ impl InitialLaw {
                 evaluate4(&axes[1], &mut next, input.curve_time).map(nonnegative),
             ]
         });
-        // Current body 0xd54300..0xd543b0, particle-seed hash independent of
-        // RandN. Even the admitted threshold zero uses strict >: a zero hash
+        // InitialModule::Start draws the rotation direction sign from a
+        // particle-seed hash, independent of RandN. Even the admitted
+        // threshold zero uses strict >: a zero hash
         // sample selects -1. Nonzero thresholds remain gated by construction.
         let signs = seeds.map(|seed| {
             if ParticleRandom::sample(seed, 0xff2b_b1a4) > self.randomize_rotation_direction {
@@ -212,6 +213,8 @@ impl InitialLaw {
             ]
         });
         let color_draw = next.next4_u32().map(unit);
+        // The gradient kernels search their keys for the four lanes together.
+        let colours = initial_rgba8x4(&source.color, input.curve_time, color_draw);
         let mut inverses = [0.0; 4];
         for lane in 0..4 {
             let inverse = reciprocal(life[lane]).ok_or(Refused::ReciprocalUnavailable)?;
@@ -251,7 +254,7 @@ impl InitialLaw {
                 inverse_lifetime: inverses[lane],
                 size,
                 rotation,
-                color: initial_rgba8(&source.color, input.curve_time[lane], color_draw[lane]),
+                color: colours[lane],
                 birth_fraction: input.birth_fraction[lane],
                 curve_time: input.curve_time[lane],
             }
@@ -288,11 +291,10 @@ fn validate_color(color: &MinMaxGradient) -> Result<(), Refused> {
 }
 
 /// The native key table holds at most eight keys per channel group and one
-/// 16-bit time code per key. The kernels clamp the query into the first..last
-/// code and search the codes with one four-lane mask; that equals a per-lane
-/// search only when the codes are non-decreasing, so unordered codes refuse
-/// (the per-lane clamp here would otherwise have an empty range). Fewer than
-/// two keys never comes out of the export decoder and stays refused. The
+/// 16-bit time code per key. Both kernels are transcribed for any key order
+/// (their shared four-lane key search included, `Gradient::evaluate4`) and
+/// for a single key, whose group the kernels skip, leaving the channels at
+/// 1.0. A group without keys was not executed and stays refused. The
 /// exhaustive mode match makes a new kernel a compile error here.
 fn validate_gradient(g: &Gradient) -> Result<(), Refused> {
     let valid_time = |time: f32| (0.0..=1.0).contains(&time);
@@ -301,12 +303,7 @@ fn validate_gradient(g: &Gradient) -> Result<(), Refused> {
     {
         return Err(Refused::InvalidColor);
     }
-    let ordered = |codes: Vec<u16>| codes.windows(2).all(|pair| pair[0] <= pair[1]);
-    if !(2..=8).contains(&g.color_keys.len())
-        || !(2..=8).contains(&g.alpha_keys.len())
-        || !ordered(g.color_keys.iter().map(|k| time_code(k.time)).collect())
-        || !ordered(g.alpha_keys.iter().map(|k| time_code(k.time)).collect())
-    {
+    if !(1..=8).contains(&g.color_keys.len()) || !(1..=8).contains(&g.alpha_keys.len()) {
         return Err(Refused::UnsupportedColor);
     }
     match g.mode {
@@ -350,7 +347,8 @@ fn nonnegative(value: f32) -> f32 {
     if value > 0.0 { value } else { 0.0 }
 }
 
-// Current JP 6.8.1 InitialModule::Start at 0xd54104..0xd54124.
+// Current JP 6.8.1 InitialModule::Start: the start-lifetime reciprocal, an ARM
+// FRECPE estimate refined by FRECPS steps.
 // Contract: FPCR round-to-nearest ties-to-even, FZ=0, input already clamped by
 // Initial's FMAX to at least f32::from_bits(0x3727c5ac), or positive infinity.
 // NaN, negative infinity and values below the source clamp are refused.
@@ -848,9 +846,9 @@ mod tests {
         }
     }
 
-    /// Test-only builder for rows the export decoder refuses (one key,
-    /// unordered keys, non-finite components written as strings). Where the
-    /// decoder accepts a row, the two must agree.
+    /// Test-only builder for rows the export decoder refuses (non-finite
+    /// components written as strings). Where the decoder accepts a row, the
+    /// two must agree.
     fn component(value: &Value) -> f32 {
         match value.as_str() {
             Some("NaN") => f32::NAN,
@@ -920,21 +918,22 @@ mod tests {
     #[test]
     #[ignore]
     fn replay_current_native_initial_colour() {
-        use crate::particle::schema::min_max_gradient;
+        use crate::particle::schema::start_color;
         use crate::particle::sub_emission::BirthDistribution;
         let receipt = read_file("MOLY_INITIAL_COLOUR_RECEIPT");
         assert_eq!(
             at(at(&receipt, "library"), "sha256").as_str(),
             Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
         );
-        let decode = |v: &Value| min_max_gradient(Some(v), "receipt").unwrap();
+        let decode = |v: &Value| start_color(Some(v), "receipt").unwrap();
         let blocks: std::collections::HashMap<String, MinMaxGradient> =
             array(at(&receipt, "blocks"))
                 .iter()
                 .map(|b| (at(b, "id").as_str().unwrap().to_string(), decode(at(b, "block"))))
                 .collect();
         assert_eq!(blocks.len(), 99);
-        let (mut cases, mut groups, mut inherited) = (0, 0, 0);
+        let (mut cases, mut groups) = (0, 0);
+        let (mut inherited_exact, mut inherited_refused) = (0, 0);
         for case in array(at(&receipt, "cases")) {
             let color = match case.get("block") {
                 Some(block) => decode(block),
@@ -948,17 +947,25 @@ mod tests {
             let label = format!("case {}", exact(at(case, "id")));
             if at(case, "set").as_str() == Some("control-inherited") {
                 // A non-white multiplier or a finite curve-time override is the
-                // inherited context: refused before any word is committed.
+                // inherited context, which the port does not transcribe. A
+                // refusal commits no word; an admission is compared with the
+                // native groups like any other case.
                 assert!(
                     exact(at(case, "multiplierBits")) != u32::MAX
                         || exact(at(case, "overrideBits")) != 0x7f80_0000
                 );
                 let before = random;
-                let refused =
-                    colour_call(&law, config, count, time, InitialContext::Inherited, &mut random);
-                assert_eq!(refused.err(), Some(Refused::UnverifiedInheritedContext), "{label}");
-                assert_eq!(random, before);
-                inherited += 1;
+                match colour_call(&law, config, count, time, InitialContext::Inherited, &mut random) {
+                    Ok(replayed) => {
+                        assert_groups(&replayed, array(at(case, "groups")), &label);
+                        assert_eq!(random, words(at(case, "rngAfter")), "{label} rng after");
+                        inherited_exact += 1;
+                    }
+                    Err(_) => {
+                        assert_eq!(random, before, "{label}: a refusal committed words");
+                        inherited_refused += 1;
+                    }
+                }
                 continue;
             }
             assert_eq!(exact(at(case, "multiplierBits")), u32::MAX, "{label}");
@@ -971,7 +978,7 @@ mod tests {
             groups += replayed.len();
             cases += 1;
         }
-        assert_eq!((cases, groups, inherited), (1609, 1770, 15));
+        assert_eq!((cases, groups), (1609, 1770));
 
         let scalar = json::parse(
             br#"{"authoredSize3D":false,"authoredRotation3D":false,"storageSize3D":false,"storageRotation3D":false}"#,
@@ -1075,21 +1082,25 @@ mod tests {
         // The time input is a live dimension of these rows, not a constant.
         assert_eq!(per_lane_time_wrong, 79);
         println!(
-            "initial colour receipt: {cases} autonomous cases, {groups} groups exact, {inherited} inherited \
-             refused; pipeline {runs} runs, {born_total} born lanes exact, {velocity_lanes} StartVelocity \
-             lanes exact; the per-lane time would miss {per_lane_time_wrong} lanes"
+            "initial colour receipt: {cases} autonomous cases, {groups} groups exact, inherited \
+             controls {inherited_exact} exact and {inherited_refused} refused; pipeline {runs} runs, \
+             {born_total} born lanes exact, {velocity_lanes} StartVelocity lanes exact; the per-lane \
+             time would miss {per_lane_time_wrong} lanes"
         );
     }
 
     /// Independent native battery over inputs the receipt did not use:
     /// quantize rounding edges, huge finite components (overflowing
     /// differences), extreme finite times, degenerate key layouts, corpus
-    /// blocks with multi-group calls; plus native rows outside the admitted
-    /// envelope, which must refuse with a typed reason before any word moves.
+    /// blocks with multi-group calls, single-key groups and key codes out of
+    /// order (whose lanes share the kernels' key search); plus native rows
+    /// authoring what the port does not transcribe (a non-finite colour or
+    /// time), whose outcome is reported: a refusal commits no word, and an
+    /// admission is compared with the native groups.
     #[test]
     #[ignore]
     fn replay_independent_native_initial_colour_battery() {
-        use crate::particle::schema::min_max_gradient;
+        use crate::particle::schema::start_color;
         let rows = read_file("MOLY_INITIAL_COLOUR_VERIFY_ROWS");
         assert_eq!(
             at(at(&rows, "library"), "sha256").as_str(),
@@ -1102,7 +1113,7 @@ mod tests {
             let label = format!("{set} case {}", exact(at(case, "id")));
             let block = at(case, "block");
             let direct = block_direct(block);
-            let decoded = min_max_gradient(Some(block), "verify");
+            let decoded = start_color(Some(block), "verify");
             if let Ok(decoded) = &decoded {
                 assert_eq!(decoded, &direct, "{label}: test builder differs from the decoder");
             }
@@ -1128,15 +1139,21 @@ mod tests {
                 };
             let decoder = if decoded.is_ok() { "decoded" } else { "decoder-refused" };
             let outcome = format!("{decoder} {outcome}");
-            let expected = match set.as_str() {
-                s if s.starts_with('V') => "decoded exact",
-                "O-onekey" | "O-unordered" => "decoder-refused UnsupportedColor",
-                "O-nancolor" => "decoder-refused InvalidColor",
-                "O-nantime" if time.iter().all(|t| t.is_finite()) => "decoded exact",
-                "O-nantime" => "decoded InvalidTiming",
+            // The battery's V sets, its single-key and unordered-code rows
+            // lie inside the envelope the port transcribes, and so does an
+            // O-nantime row whose four times are all finite: such a row must
+            // decode and replay exactly, so a narrowed gate turns the battery
+            // red.
+            let inside = match set.as_str() {
+                s if s.starts_with('V') => true,
+                "O-onekey" | "O-unordered" => true,
+                "O-nancolor" => false,
+                "O-nantime" => time.iter().all(|t| t.is_finite()),
                 other => panic!("unknown set {other}"),
             };
-            assert_eq!(outcome, expected, "{label}");
+            if inside {
+                assert_eq!(outcome, "decoded exact", "{label}");
+            }
             *tally.entry((set, outcome)).or_default() += 1;
         }
         println!("{tally:#?}");
@@ -1165,7 +1182,7 @@ mod tests {
     #[ignore]
     fn replay_split_multiply_add_native_initial_colour_probe() {
         use crate::particle::gradient::quantize_rgba8;
-        use crate::particle::schema::min_max_gradient;
+        use crate::particle::schema::start_color;
         let rows = read_file("MOLY_INITIAL_COLOUR_FUSED_PROBE_ROWS");
         assert_eq!(
             at(at(&rows, "library"), "sha256").as_str(),
@@ -1174,7 +1191,7 @@ mod tests {
         let (mut cases, mut fused_wrong) = (0, 0);
         for case in array(at(&rows, "cases")) {
             let label = format!("probe case {}", exact(at(case, "id")));
-            let color = min_max_gradient(Some(at(case, "block")), "probe").unwrap();
+            let color = start_color(Some(at(case, "block")), "probe").unwrap();
             let config = at(case, "config");
             let law = colour_law(color.clone(), config);
             let time = bits4(at(case, "timeBits"));

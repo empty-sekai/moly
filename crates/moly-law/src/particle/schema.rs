@@ -516,7 +516,7 @@ impl StartParams {
             rotation_y: obj_get(obj, "rotationY")
                 .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationY"))).transpose()?,
             rotation3d: bool_of(obj_get(obj, "rotation3D"), &format!("{ctx}.start.rotation3D"))?,
-            color: min_max_gradient(obj_get(obj, "color"), &format!("{ctx}.start.color"))?,
+            color: start_color(obj_get(obj, "color"), &format!("{ctx}.start.color"))?,
             gravity_modifier: min_max_curve(
                 obj_get(obj, "gravityModifier"),
                 &format!("{ctx}.start.gravityModifier"),
@@ -921,9 +921,34 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
 /// `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
 ///
 /// Random colour requires its authored gradient; a flat colour is lost source data.
-/// Crate-visible so native start-colour replays decode exported blocks with
-/// this decoder rather than a second one.
+/// Every gradient consumer but the start colour takes 2..8 keys per group in
+/// time order: the start colour's evaluation is the only one transcribed for
+/// a single key and for keys out of order (`start_color`).
 pub(crate) fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
+    min_max_gradient_with(v, ctx, KeyTable::Ordered)
+}
+
+/// The start colour block: 1..8 keys per group in any time order, as the
+/// native table holds them. Crate-visible so native start-colour replays
+/// decode exported blocks with this decoder rather than a second one.
+pub(crate) fn start_color(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
+    min_max_gradient_with(v, ctx, KeyTable::StartColor)
+}
+
+/// Which gradient key tables a decode admits.
+#[derive(Clone, Copy, PartialEq)]
+enum KeyTable {
+    /// 2..8 keys per group, times non-decreasing.
+    Ordered,
+    /// 1..8 keys per group, any order.
+    StartColor,
+}
+
+fn min_max_gradient_with(
+    v: Option<&Value>,
+    ctx: &str,
+    keys: KeyTable,
+) -> Result<MinMaxGradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: MinMaxGradient object missing")))?;
@@ -936,23 +961,24 @@ pub(crate) fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGra
         "gradient" => Ok(MinMaxGradient::Gradient(gradient_of(
             obj_get(obj, "gradient"),
             &format!("{ctx}.gradient"),
+            keys,
         )?)),
         "twoColors" => Ok(MinMaxGradient::TwoColors {
             min: vec4_of(obj_get(obj, "min"), &format!("{ctx}.min"))?,
             max: vec4_of(obj_get(obj, "max"), &format!("{ctx}.max"))?,
         }),
         "twoGradients" => Ok(MinMaxGradient::TwoGradients {
-            min: gradient_of(obj_get(obj, "minGradient"), &format!("{ctx}.minGradient"))?,
-            max: gradient_of(obj_get(obj, "maxGradient"), &format!("{ctx}.maxGradient"))?,
+            min: gradient_of(obj_get(obj, "minGradient"), &format!("{ctx}.minGradient"), keys)?,
+            max: gradient_of(obj_get(obj, "maxGradient"), &format!("{ctx}.maxGradient"), keys)?,
         }),
         "randomColor" => Ok(MinMaxGradient::RandomColor(gradient_of(
-            obj_get(obj, "gradient"), &format!("{ctx}.gradient"),
+            obj_get(obj, "gradient"), &format!("{ctx}.gradient"), keys,
         )?)),
         _ => Err(EffectsError(format!("{ctx}.mode: unknown {mode:?}"))),
     }
 }
 
-fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
+fn gradient_of(v: Option<&Value>, ctx: &str, keys: KeyTable) -> Result<Gradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: gradient object missing")))?;
@@ -999,10 +1025,19 @@ fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
         })
         .collect::<Result<Vec<_>, EffectsError>>()?;
     let validate_times = |times: Vec<f32>, field: &str| -> Result<(), EffectsError> {
-        if !(2..=8).contains(&times.len()) || times.iter().any(|time| !(0.0..=1.0).contains(time))
-            || times.windows(2).any(|pair| pair[0] > pair[1])
-        {
-            return Err(EffectsError(format!("{ctx}.{field}: expected 2..8 ordered keys in [0,1]")));
+        let in_range = times.iter().all(|time| (0.0..=1.0).contains(time));
+        let admitted = match keys {
+            KeyTable::Ordered => {
+                (2..=8).contains(&times.len()) && times.windows(2).all(|pair| pair[0] <= pair[1])
+            }
+            KeyTable::StartColor => (1..=8).contains(&times.len()),
+        };
+        if !in_range || !admitted {
+            let expected = match keys {
+                KeyTable::Ordered => "2..8 ordered keys in [0,1]",
+                KeyTable::StartColor => "1..8 keys in [0,1]",
+            };
+            return Err(EffectsError(format!("{ctx}.{field}: expected {expected}")));
         }
         Ok(())
     };

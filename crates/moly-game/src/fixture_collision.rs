@@ -381,9 +381,9 @@ fn obstacle_polygon(
     transform: &GlobalTransform,
     world_rotation: Quat,
 ) -> Result<ColliderPolygon, String> {
-    // Unity 2022.3.62f2 x86_64 NavMeshObstacle::GetWorldExtents (0xbacede)
+    // Unity 2022.3.62f2 x86_64 NavMeshObstacle::GetWorldExtents
     // uses absolute lossy scale, sharing max(X,Z) between capsule radii.
-    // GetWorldCenterAndAxes (0xbacfa4) transforms the center and separately
+    // GetWorldCenterAndAxes transforms the center and separately
     // converts Transform::GetRotation to orthonormal axes (not affine skew).
     let center = transform.transform_point(Vec3::from(
         obstacle.center.ok_or("obstacle center missing")?,
@@ -403,8 +403,8 @@ fn obstacle_polygon(
         }
         Some(0) => {
             let radius = extents.x * scale.x.max(scale.z);
-            // Both CalcCapsuleWorldExtents (0xbcc43a) and the capsule branch
-            // of CarveNavMeshTile (0xbcdeb4..0xbcded3) use max(halfHeight-r,0).
+            // Both CalcCapsuleWorldExtents and the capsule branch
+            // of CarveNavMeshTile use max(halfHeight-r,0).
             // A serialized "thin capsule" is therefore a sphere, NOT a disk.
             let points = primitives::nav_capsule_points(
                 center,

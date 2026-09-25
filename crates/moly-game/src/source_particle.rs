@@ -42,6 +42,15 @@ pub struct SourceParticle {
     pub sorting_order: i32,
     pub sorting_fudge: f32,
     pub sort_mode: moly_law::particle::sort::ParticleSort,
+    /// A runtime material write requested by the renderer's owner before the
+    /// first draw: `FixtureView.SetupRenderer` forces phenomena lighting on
+    /// for every material of a placed fixture. Applied in [`Self::resolve`],
+    /// where the shader catalogue (property declarations) is first available,
+    /// and before the variant is selected.
+    phenomena_lighting_forced: bool,
+    /// What that write changed once applied (property and keyword names), for
+    /// the owner's install report; `None` while no write was applied.
+    pub(crate) phenomena_lighting_written: Option<Vec<&'static str>>,
 }
 #[derive(Clone, Debug, Default)]
 pub enum ParticleReadiness {
@@ -110,7 +119,20 @@ impl SourceParticle {
             sorting_order,
             sorting_fudge,
             sort_mode,
+            phenomena_lighting_forced: false,
+            phenomena_lighting_written: None,
         })
+    }
+
+    /// Request the fixture setup's `SetPhenomenaLighting(true)` on this
+    /// renderer's material. Must precede [`Self::resolve`]; a request after the
+    /// passes were bound would be a write the draw never sees.
+    pub(crate) fn force_phenomena_lighting(&mut self) {
+        assert!(
+            self.passes.is_empty(),
+            "phenomena-lighting write requested after the source passes were bound"
+        );
+        self.phenomena_lighting_forced = true;
     }
 
     pub fn resolve(
@@ -130,6 +152,12 @@ impl SourceParticle {
             return Ok(false);
         };
         self.material.matches(catalogue)?;
+        if self.phenomena_lighting_forced {
+            let mut material = (*self.material).clone();
+            self.phenomena_lighting_written = Some(material.force_phenomena_lighting_on(catalogue)?);
+            self.material = Arc::new(material);
+            self.phenomena_lighting_forced = false;
+        }
         let subshaders = catalogue
             .passes
             .iter()

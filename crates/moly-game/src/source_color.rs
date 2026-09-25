@@ -26,7 +26,7 @@ use bevy::render::{
 };
 use std::collections::HashMap;
 
-use crate::render::gpu::{BindGroupCache, Bound};
+use crate::render::gpu::{BindGroupCache, Bound, SharedBindGroupCache};
 
 /// Explicit output contract, not inferred from a shader or material name.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
@@ -80,12 +80,22 @@ impl SourceColorView {
 }
 
 /// Do not silently substitute linear blending or discard multisample depth.
+/// Both attachments must be this frame's: the depth texture is created in
+/// `PrepareResources`, after the view target, so a reader earlier in the frame
+/// still holds the previous frame's depth, which differs after a resize.
 pub(crate) fn compatible(target: &ViewTarget, depth: &ViewDepthTexture) -> bool {
+    srgb_single_sample(target, depth.texture.sample_count())
+        && target.main_texture().size() == depth.texture.size()
+}
+
+/// The part of [`compatible`] a queue system can decide before this frame's
+/// depth texture exists: the core 3D depth texture is created from the view's
+/// `Msaa` with its sample count, at the view target's physical size.
+pub(crate) fn srgb_single_sample(target: &ViewTarget, depth_samples: u32) -> bool {
     matches!(
         target.main_texture_format(),
         TextureFormat::Rgba8UnormSrgb | TextureFormat::Bgra8UnormSrgb
-    ) && depth.texture.sample_count() == 1
-        && target.main_texture().size() == depth.texture.size()
+    ) && depth_samples == 1
 }
 
 fn load_shader(mut shaders: ResMut<Assets<Shader>>) {
@@ -213,9 +223,14 @@ fn point_copy(
 /// The point-copy bind groups bind only the copy source view, which is one of
 /// the view target's two main textures or the encoded attachment, so they are
 /// cached by that view instead of being created for every span.
-#[derive(Default)]
 struct SourceTransparentNode {
-    bind_groups: std::sync::Mutex<BindGroupCache>,
+    bind_groups: SharedBindGroupCache,
+}
+
+impl FromWorld for SourceTransparentNode {
+    fn from_world(world: &mut World) -> Self {
+        Self { bind_groups: SharedBindGroupCache::from_world(world) }
+    }
 }
 impl ViewNode for SourceTransparentNode {
     type ViewQuery = (
@@ -242,8 +257,7 @@ impl ViewNode for SourceTransparentNode {
         };
         let cache = world.resource::<PipelineCache>();
         let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-        let mut groups = self.bind_groups.lock().unwrap();
-        groups.evict_idle(frame);
+        let mut groups = self.bind_groups.lock();
         let mut start = 0;
         while start < phase.items.len() {
             let encoded = world
@@ -355,18 +369,25 @@ impl ViewNode for SourceTransparentNode {
 pub(crate) struct SourceColorPlugin;
 impl Plugin for SourceColorPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_bind_group_caches(app);
         app.add_plugins(ExtractComponentPlugin::<EncodedColorOutput>::default())
             .add_systems(Startup, load_shader);
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        // After the core depth texture of this frame is inserted (the schedule
+        // applies its commands in between), so a resized view is compared with
+        // its resized depth instead of the previous frame's.
         render.init_resource::<ColorGpu>().add_systems(
             Render,
-            prepare_views.in_set(RenderSystems::PrepareResources),
+            prepare_views
+                .in_set(RenderSystems::PrepareResources)
+                .after(bevy::core_pipeline::core_3d::prepare_core_3d_depth_textures),
         );
         // Replace only the runner, retaining every incoming/outgoing graph edge
         // and the existing phase. add_node would discard the node's own edges.
-        let runner = ViewNodeRunner::new(SourceTransparentNode::default(), render.world_mut());
+        let node = SourceTransparentNode::from_world(render.world_mut());
+        let runner = ViewNodeRunner::new(node, render.world_mut());
         let mut graph = render.world_mut().resource_mut::<RenderGraph>();
         let state = graph
             .sub_graph_mut(Core3d)

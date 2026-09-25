@@ -63,7 +63,7 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 
 use crate::emoticon::EmoteDraw;
 use crate::env::SiteEnv;
-use crate::render::gpu::{BindGroupCache, Bound};
+use crate::render::gpu::{Bound, SharedBindGroupCache};
 use crate::fixture_material::WallLayoutShadowCasterOff;
 use crate::sky::SkyDome;
 use moly_assets::material_passes::SourceMaterialPasses;
@@ -214,7 +214,16 @@ struct ShadowDraw {
 struct ShadowDrawList {
     draws: Vec<ShadowDraw>,
     bounds: Option<(Vec3, Vec3)>,
+    /// Whether this extraction's draws differ from the previous one's in any
+    /// mesh, world matrix bit, winding flag or count. The object matrix pool
+    /// holds the previous draws' matrices, so it is rewritten only then.
+    changed: bool,
 }
+
+/// The world-space bounds corners of each draw in [`ShadowDrawList`], at the
+/// same index as the draw.
+#[derive(Default)]
+struct CasterCorners(Vec<[Vec3; 8]>);
 
 /// 阴影账目（模块注释「阴影账目」）：渲染图节点只拿 `&World`，计数走
 /// 内部可变性。锁的临界段都是几条赋值，渲染应用单线程，无重入。
@@ -272,6 +281,12 @@ struct DepthPipelines {
 
 /// Extract：抽本帧 caster（含预计算包围盒）。蒙皮/天空/表情/雨在查询里
 /// 排除（模块注释「Caster 集」）；包围盒按网格 id 缓存，首帧后零开销。
+/// The list is updated in place. A draw's corners depend only on its world
+/// matrix and its mesh's cached local bounds; when the previous extraction's
+/// draw at the same index had the same mesh and world matrix bits, and those
+/// bounds were not dropped since, its corners are taken as they are. The
+/// total bounds are folded over every caster's corners in query order, as
+/// before, so the list and the bounds come out bit for bit the same.
 ///
 /// 层级显隐与取景剔除是两件事：光源能照到的物体即使在主相机画外，
 /// 仍可能把影子投进画内。不能用 ViewVisibility 筛本名单，否则旋转相机
@@ -279,7 +294,7 @@ struct DepthPipelines {
 /// InheritedVisibility 保留显式隐藏和父级显隐，不把相机视锥变成光源视锥。
 #[allow(clippy::type_complexity)]
 fn extract_shadow_casters(
-    mut commands: Commands,
+    mut list: ResMut<ShadowDrawList>,
     casters: Extract<
         Query<
             (&Mesh3d, &GlobalTransform, &InheritedVisibility, Option<&SourceMaterialPasses>,
@@ -298,10 +313,24 @@ fn extract_shadow_casters(
     parent_visibility: Extract<Query<&InheritedVisibility>>,
     meshes: Extract<Res<Assets<Mesh>>>,
     mut local_bounds: Local<HashMap<AssetId<Mesh>, Aabb3d>>,
+    mut corners_of: Local<CasterCorners>,
     mut overflow_warned: Local<bool>,
 ) {
-    let mut draws: Vec<ShadowDraw> = Vec::new();
-    local_bounds.retain(|id, _| meshes.contains(*id));
+    let list = &mut *list;
+    let stored = &mut corners_of.0;
+    let previous = list.draws.len();
+    // Bounds of meshes that left the asset store are dropped; a draw of such
+    // a mesh is recomputed from the bounds its first sighting now caches.
+    let mut dropped: Vec<AssetId<Mesh>> = Vec::new();
+    local_bounds.retain(|id, _| {
+        let keep = meshes.contains(*id);
+        if !keep {
+            dropped.push(*id);
+        }
+        keep
+    });
+    let mut changed = false;
+    let mut count = 0usize;
     let mut bounds: Option<(Vec3, Vec3)> = None;
     for (mesh, transform, visibility, passes, renderer, parent) in &casters {
         if renderer.is_some_and(|renderer| !renderer.casts_shadows()) {
@@ -326,42 +355,87 @@ fn extract_shadow_casters(
             continue;
         }
         let id = mesh.0.id();
-        let local = local_bounds.entry(id).or_insert_with(|| {
-            meshes
-                .get(&mesh.0)
-                .and_then(|mesh| mesh.final_aabb)
-                .unwrap_or(Aabb3d::new(Vec3A::ZERO, Vec3A::ZERO))
-        });
+        let two_sided = renderer.is_some_and(|renderer|
+            renderer.shadow_casting() == Some(SourceShadowCastingMode::TwoSided));
         let world = transform.to_matrix();
-        // 8 个角换到世界系并入总包围盒：光源正交框从这里解出，不发明场地尺寸。
-        for sx in [local.min.x, local.max.x] {
-            for sy in [local.min.y, local.max.y] {
-                for sz in [local.min.z, local.max.z] {
-                    let corner = world.transform_point3(Vec3::new(sx, sy, sz));
-                    bounds = Some(match bounds {
-                        Some((min, max)) => (min.min(corner), max.max(corner)),
-                        None => (corner, corner),
-                    });
+        let slot = count;
+        count += 1;
+        let before = list.draws.get_mut(slot).filter(|_| slot < stored.len());
+        let same_world = before.as_ref().is_some_and(|draw| {
+            draw.world.to_cols_array().map(f32::to_bits) == world.to_cols_array().map(f32::to_bits)
+        });
+        let reused = same_world
+            && before.as_ref().is_some_and(|draw| draw.mesh == id)
+            && !dropped.contains(&id);
+        let corners = if reused {
+            let draw = before.expect("reused draw exists");
+            draw.pipeline = CachedRenderPipelineId::INVALID;
+            if draw.two_sided != two_sided {
+                draw.two_sided = two_sided;
+                changed = true;
+            }
+            stored[slot]
+        } else {
+            let local = local_bounds.entry(id).or_insert_with(|| {
+                meshes
+                    .get(&mesh.0)
+                    .and_then(|mesh| mesh.final_aabb)
+                    .unwrap_or(Aabb3d::new(Vec3A::ZERO, Vec3A::ZERO))
+            });
+            let mut corners = [Vec3::ZERO; 8];
+            let mut index = 0;
+            for sx in [local.min.x, local.max.x] {
+                for sy in [local.min.y, local.max.y] {
+                    for sz in [local.min.z, local.max.z] {
+                        corners[index] = world.transform_point3(Vec3::new(sx, sy, sz));
+                        index += 1;
+                    }
                 }
             }
+            if slot < OBJECT_CAPACITY {
+                let draw = ShadowDraw {
+                    mesh: id,
+                    world,
+                    pipeline: CachedRenderPipelineId::INVALID,
+                    two_sided,
+                };
+                match before {
+                    Some(old) => {
+                        changed |= !same_world || old.mesh != id || old.two_sided != two_sided;
+                        *old = draw;
+                        stored[slot] = corners;
+                    }
+                    None => {
+                        changed = true;
+                        list.draws.truncate(slot);
+                        stored.truncate(slot);
+                        list.draws.push(draw);
+                        stored.push(corners);
+                    }
+                }
+            }
+            corners
+        };
+        // 8 个角换到世界系并入总包围盒：光源正交框从这里解出，不发明场地尺寸。
+        for corner in corners {
+            bounds = Some(match bounds {
+                Some((min, max)) => (min.min(corner), max.max(corner)),
+                None => (corner, corner),
+            });
         }
-        draws.push(ShadowDraw {
-            mesh: id,
-            world,
-            pipeline: CachedRenderPipelineId::INVALID,
-            two_sided: renderer.is_some_and(|renderer|
-                renderer.shadow_casting() == Some(SourceShadowCastingMode::TwoSided)),
-        });
     }
-    let overflow = draws.len() > OBJECT_CAPACITY;
-    draws.truncate(OBJECT_CAPACITY);
-    if overflow && !*overflow_warned {
+    if count > OBJECT_CAPACITY && !*overflow_warned {
         *overflow_warned = true;
         warn!(
             "主光阴影 caster 超过容量上限 {OBJECT_CAPACITY}，超出部分不投影（仅告警一次）"
         );
     }
-    commands.insert_resource(ShadowDrawList { draws, bounds });
+    let kept = count.min(OBJECT_CAPACITY);
+    changed |= kept != previous;
+    list.draws.truncate(kept);
+    stored.truncate(kept);
+    list.bounds = bounds;
+    list.changed = changed;
 }
 
 /// 光源向正交的一对矩阵：深度 pass 用裁剪矩阵，消费侧用采样矩阵
@@ -427,6 +501,15 @@ fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> 
     })
 }
 
+/// What the three shadow buffers last received from `prepare_shadow_draws`.
+#[derive(Default)]
+struct ShadowUploads {
+    frame: Option<Vec<u8>>,
+    consumer: Option<Vec<u8>>,
+    /// The object pool holds the current draw list's matrices.
+    objects: bool,
+}
+
 /// PrepareResources：特化管线、解光源正交框、写三块 uniform。
 ///
 /// 挂 PrepareResources 而非 Prepare：与引擎的网格资产 prepare（Prepare 集）
@@ -442,18 +525,27 @@ fn prepare_shadow_draws(
     account: Res<ShadowAccount>,
     mut readiness_logged: Local<bool>,
     mut prepare_frames: Local<u64>,
+    mut uploaded: Local<ShadowUploads>,
 ) {
     // 矩阵池按 draw 序全量写（缺管线的 draw 也占位，动态 offset 才对得上）。
     // The dynamic binding reads at index * object_stride, not index * 64.
     // Pad every matrix, including unavailable meshes, to that same slot size.
     // Otherwise each draw after the first consumes another object's transform
     // (or unwritten/stale bytes) and casts a displaced or malformed silhouette.
+    // The pool is written once, never reallocated, and keeps what was last
+    // written; it is rewritten only when the draw list changed.
     let stride = gpu.object_stride as usize;
-    let mut object_bytes = Vec::with_capacity(draws.draws.len() * stride);
+    let write_objects = draws.changed || !uploaded.objects;
+    let mut object_bytes = Vec::new();
+    if write_objects {
+        object_bytes.reserve(draws.draws.len() * stride);
+        for item in &draws.draws {
+            let next_slot = object_bytes.len() + stride;
+            mat4_bytes(item.world, &mut object_bytes);
+            object_bytes.resize(next_slot, 0);
+        }
+    }
     for item in draws.draws.iter_mut() {
-        let next_slot = object_bytes.len() + stride;
-        mat4_bytes(item.world, &mut object_bytes);
-        object_bytes.resize(next_slot, 0);
         let Some(render_mesh) = meshes.get(item.mesh) else {
             continue;
         };
@@ -576,10 +668,22 @@ fn prepare_shadow_draws(
             }
         }
     }
-    render_queue.write_buffer(&gpu.frame_buffer, 0, &frame_bytes);
-    render_queue.write_buffer(&gpu.consumer_buffer, 0, &consumer.bytes());
-    if !object_bytes.is_empty() {
-        render_queue.write_buffer(&gpu.object_buffer, 0, &object_bytes);
+    // Both blocks keep their last contents; a write of the same bytes is
+    // skipped.
+    if uploaded.frame.as_deref() != Some(frame_bytes.as_slice()) {
+        render_queue.write_buffer(&gpu.frame_buffer, 0, &frame_bytes);
+        uploaded.frame = Some(frame_bytes);
+    }
+    let consumer_bytes = consumer.bytes();
+    if uploaded.consumer.as_deref() != Some(consumer_bytes.as_slice()) {
+        render_queue.write_buffer(&gpu.consumer_buffer, 0, &consumer_bytes);
+        uploaded.consumer = Some(consumer_bytes);
+    }
+    if write_objects {
+        if !object_bytes.is_empty() {
+            render_queue.write_buffer(&gpu.object_buffer, 0, &object_bytes);
+        }
+        uploaded.objects = true;
     }
     // 深度图生成行（一次）：出现即代表光源框解出、矩阵与逐实体矩阵池已
     // 入 GPU，节点将在主 pass 前成图；消费行由站点材质绑定 10/11/12 的
@@ -620,12 +724,12 @@ fn prepare_shadow_draws(
 /// Its one bind group binds the frame and object buffers, which are replaced
 /// only when they grow, so it is cached by those buffer ids.
 struct ShadowDepthNode {
-    bind_groups: Mutex<BindGroupCache>,
+    bind_groups: SharedBindGroupCache,
 }
 
 impl FromWorld for ShadowDepthNode {
-    fn from_world(_world: &mut World) -> Self {
-        Self { bind_groups: Mutex::default() }
+    fn from_world(world: &mut World) -> Self {
+        Self { bind_groups: SharedBindGroupCache::from_world(world) }
     }
 }
 
@@ -679,8 +783,7 @@ impl Node for ShadowDepthNode {
         // 帧块 + 矩阵池一个 bind group；逐 draw 用动态 offset 换窗。
         let bind_group = {
             let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-            let mut groups = self.bind_groups.lock().unwrap();
-            groups.evict_idle(frame);
+            let mut groups = self.bind_groups.lock();
             groups.get(
                 render_context.render_device(),
                 "site_shadow_depth_bind_group",
@@ -717,6 +820,12 @@ impl Node for ShadowDepthNode {
                 occlusion_query_set: None,
             });
 
+        // Pipeline, vertex buffer and index buffer stay bound across draws of
+        // one pass; a set that would bind the same object again is skipped, so
+        // every draw still runs with exactly the state it set before.
+        let mut bound_pipeline: Option<CachedRenderPipelineId> = None;
+        let mut bound_vertex: Option<BufferId> = None;
+        let mut bound_index: Option<(BufferId, IndexFormat)> = None;
         let mut drawn: usize = 0;
         for (index, item) in draws.draws.iter().enumerate() {
             let (Some(pipeline), Some(render_mesh)) =
@@ -727,9 +836,15 @@ impl Node for ShadowDepthNode {
             let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
                 continue;
             };
-            pass.set_pipeline(pipeline);
+            if bound_pipeline != Some(item.pipeline) {
+                pass.set_pipeline(pipeline);
+                bound_pipeline = Some(item.pipeline);
+            }
             pass.set_bind_group(0, &bind_group, &[(index as u32) * gpu.object_stride]);
-            pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+            if bound_vertex != Some(vertex_slice.buffer.id()) {
+                pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+                bound_vertex = Some(vertex_slice.buffer.id());
+            }
             match &render_mesh.buffer_info {
                 RenderMeshBufferInfo::Indexed {
                     index_format,
@@ -738,7 +853,10 @@ impl Node for ShadowDepthNode {
                     let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
                         continue;
                     };
-                    pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
+                    if bound_index != Some((index_slice.buffer.id(), *index_format)) {
+                        pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
+                        bound_index = Some((index_slice.buffer.id(), *index_format));
+                    }
                     pass.draw_indexed(
                         index_slice.range.start..(index_slice.range.start + *count),
                         vertex_slice.range.start as i32,
@@ -1054,6 +1172,7 @@ pub struct ShadowmapPlugin;
 
 impl Plugin for ShadowmapPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_bind_group_caches(app);
         app.add_systems(Startup, load);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

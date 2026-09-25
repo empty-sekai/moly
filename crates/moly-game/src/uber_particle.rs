@@ -515,6 +515,18 @@ pub(crate) fn plan(
             None => {}
         }
     }
+    // An environment site effect can live inside the site scene itself (the festival
+    // garden's `effect_root/fx_env_site_<phenomenon>`: its phenomenon has no unique
+    // environment bundle, so the environment loader never instantiates one). Name those
+    // rows so their admission is visible next to the family totals.
+    let embedded: Vec<&str> = doc.particles.iter().map(|s| s.node.as_str())
+        .filter(|node| node.contains("fx_env_site_")).collect();
+    if !embedded.is_empty() {
+        let admitted: Vec<&str> = plans.iter().map(|p: &Planned| p.node.as_str())
+            .filter(|node| node.contains("fx_env_site_")).collect();
+        info!("[uber-particle] {} scene-embedded environment effect rows {:?}; admitted {:?}",
+            active.scene, embedded, admitted);
+    }
     if tally.records == 0 {
         // 这个站点包里没有这一族的粒子系统：不留资源，也不每帧重扫。
         commands.insert_resource(UberParticlePlan {
@@ -1223,7 +1235,16 @@ pub(crate) fn plan_fixture_particles(
                 not_play_on_awake += 1;
                 continue;
             }
-            if let Some(plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path, &server, &mut tally) { plans.push(plan); }
+            if let Some(mut plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path, &server, &mut tally) {
+                // The fixture setup forces `_PhenomenaLightEnabled` to 1 on every
+                // fixture material (SetPhenomenaLighting(true); see the source
+                // adapter in weather_fx/fixture.rs). Both regions' exports put
+                // every fixture UberUnlit record on the source path, so this
+                // legacy arm keeps the same law for any summary-only record.
+                plan.params.scalars.w = 1.0;
+                if let Some(effect) = plan.effect.as_mut() { effect.params.scalars.w = 1.0; }
+                plans.push(plan);
+            }
         }
         // 家具这条路此前只报 `plans.len()` 与 `law_reject`，其余每一个桶都被
         // 计进 `tally` 然后丢掉——实测 304 条拒绝里 292 条不出现在任何日志

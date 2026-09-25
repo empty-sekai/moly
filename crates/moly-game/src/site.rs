@@ -240,6 +240,7 @@ impl SiteSelection {
         &mut self,
         sites: &Sites,
         layouts: &crate::fixture::layouts::SiteFixtureLayouts,
+        region: Option<NavMeshSourceRegion>,
     ) -> Result<u32, String> {
         let row = sites.row(&self.site);
         let level = if let Some(level) = self.levels.get(&self.site) {
@@ -269,6 +270,7 @@ impl SiteSelection {
             &self.site,
             sites.floor_grid(&self.site, level)?,
             self.content,
+            region,
         )?;
         self.levels.insert(self.site.clone(), level);
         Ok(level)
@@ -299,6 +301,8 @@ impl SiteSelection {
 struct SiteRow {
     id: u32,
     site_type: String,
+    /// The master row's display name, in the snapshot region's own language.
+    name: String,
     category: String,
     /// 场景目录名：主表行以它指向提取产物（glTF 主根与它同名）。
     scene: String,
@@ -433,12 +437,14 @@ impl Sites {
                 let id = field("id").as_u64().and_then(|id| u32::try_from(id).ok())
                     .filter(|id| *id != 0).unwrap_or_else(|| panic!("站点 {site_type} 缺有效 id"));
                 let scene = text("scene");
+                let name = text("name");
                 let asset_bundle = text("assetbundleName");
                 let position = [axis("x"), axis("y"), axis("z")];
                 SiteRow {
                     id,
                     category,
                     site_type,
+                    name,
                     scene,
                     asset_bundle,
                     position,
@@ -534,6 +540,15 @@ impl Sites {
         self.row_opt(site_type).map(|row| row.id)
     }
 
+    /// The sites a switch can reach, in master-row order, each with the
+    /// master's own display name. Only rows of the supported set are listed.
+    pub(crate) fn switchable(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.rows
+            .iter()
+            .filter(|row| is_supported(&row.site_type))
+            .map(|row| (row.site_type.as_str(), row.name.as_str()))
+    }
+
     /// 场景包站点的可行走面来源；authored 无烘档的场景返回 None。
     fn nav_face(&self, scene: &str) -> Option<&NavFace> {
         self.nav_faces.get(scene)
@@ -578,6 +593,16 @@ pub struct SiteActive {
     /// 场景包站点的可行走面账目名（锚行报它，面从哪来逐站可对账）；
     /// 房间站的寻路面账目在 [`RoomInfo`] 里，此列为 None。
     pub nav_face: Option<String>,
+}
+
+impl SiteActive {
+    /// The source's indoor predicate: `MysekaiSiteModel.IsIndoor` is
+    /// `SiteType - 1 < 3` (first, second and third floor), and the load path
+    /// tests the site name against the same three floors. The environment view
+    /// hides the weather effects and shows the plain background on it.
+    pub fn is_indoor(&self) -> bool {
+        is_room(&self.site_type)
+    }
 }
 
 /// 房间等级与寻路面来源（锚行报它：寻路面从哪来是可对账的）。
@@ -672,6 +697,10 @@ pub(crate) struct MasterHandles {
 
 /// Navigation uses the actual loaded snapshot's region, independently from the
 /// page locale, player-save region, fixture catalog, or shared-weather donor.
+/// The offline HOME starter layout reads the same identity: its mock rows must
+/// name packages of this snapshot's own fixture-model index. It is inserted
+/// together with [`Sites`], so every layout consumer that has the site catalog
+/// also has it; a missing or unknown value stops the load here, loudly.
 #[derive(Clone, Copy, Resource)]
 pub(crate) struct NavMeshSourceRegion(pub moly_law::carve::NavMeshRegion);
 
@@ -688,7 +717,7 @@ impl NavMeshSourceRegion {
             Some("cn") => Ok(Self(moly_law::carve::NavMeshRegion::Cn)),
             Some("jp") => Ok(Self(moly_law::carve::NavMeshRegion::Jp)),
             _ => Err(format!(
-                "source.json has unsupported navigation source region {region:?}"
+                "source.json has unsupported source region {region:?} (source.region must be cn or jp; navigation and the offline HOME starter layout are keyed by it)"
             )),
         }
     }
@@ -727,7 +756,7 @@ pub(crate) fn parse_masters(
         .unwrap_or_else(|reason| panic!("[site] 快照源身份 JSON 无效：{reason}"));
     commands.insert_resource(
         NavMeshSourceRegion::parse(&source)
-            .unwrap_or_else(|reason| panic!("[site] 导航区域身份无效：{reason}")),
+            .unwrap_or_else(|reason| panic!("[site] 快照源区域身份无效：{reason}")),
     );
     commands.insert_resource(Sites::parse(&sites.0, &navigation.0, &index.0));
     commands.remove_resource::<MasterHandles>();
@@ -745,6 +774,7 @@ pub(crate) fn plan(
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
     temporary: Option<Res<TemporarySiteActive>>,
     mut last_input_error: Local<Option<String>>,
+    source_region: Option<Res<NavMeshSourceRegion>>,
 ) {
     if assets.is_some() {
         return;
@@ -762,7 +792,7 @@ pub(crate) fn plan(
     let site_level = match if temporary.is_some() {
         selection.resolve_temporary_level(&sites)
     } else {
-        selection.resolve_level(&sites, &layouts)
+        selection.resolve_level(&sites, &layouts, source_region.as_deref().copied())
     } {
         Ok(level) => {
             *last_input_error = None;
@@ -785,7 +815,7 @@ pub(crate) fn plan(
         load_gltf(&server, AssetPath::from(format!(
             "moly://site/indoor/modules/lv_{:02}/lv_{:02}.glb",
             site_level, site_level
-        )), GltfResidency::GpuTextures)
+        )), GltfResidency::RoomModule)
     });
     let walkable = room
         .as_ref()
@@ -1076,7 +1106,8 @@ pub(crate) fn read_switch(
     selection: Res<SiteSelection>,
     roots: Query<Entity, With<SiteRoot>>,
     active: Option<Res<SiteActive>>,
-    sites: Option<Res<Sites>>,
+    // Paired in one parameter: this system is at the parameter-count limit.
+    (sites, source_region): (Option<Res<Sites>>, Option<Res<NavMeshSourceRegion>>),
     epoch: Option<Res<GroundEpoch>>,
     pending: Option<Res<SiteChangeRequest>>,
     preview: Option<Res<TemporarySiteChangeRequest>>,
@@ -1140,7 +1171,7 @@ pub(crate) fn read_switch(
     let resolved = if temporary {
         next.resolve_temporary_level(sites)
     } else {
-        next.resolve_level(sites, &layouts)
+        next.resolve_level(sites, &layouts, source_region.as_deref().copied())
     };
     if let Err(error) = resolved {
         warn!("[site] switch refused: {error}; current map and saved data were retained");
@@ -1289,6 +1320,11 @@ impl Default for Tour {
 
 fn is_room(site_type: &str) -> bool {
     ROOM_TYPES.contains(&site_type)
+}
+
+/// Whether a site type is one the loader can switch to.
+pub(crate) fn is_supported(site_type: &str) -> bool {
+    SUPPORTED.contains(&site_type)
 }
 
 /// Update（站点定案后的下一帧）：每站一条装载锚行。这里统计保留的

@@ -238,12 +238,12 @@ pub(crate) fn prepare_raw_depth(
     mut textures: ResMut<TextureCache>,
     gpu: Res<RawDepthGpu>,
     frame: Res<bevy::diagnostic::FrameCount>,
-    mut groups: Local<crate::render::gpu::BindGroupCache>,
+    groups: Local<crate::render::gpu::SharedBindGroupCache>,
     views: Query<(Entity, &ViewDepthTexture, Option<&WeatherDepthSnapshot>, Option<&WeatherCameraRole>)>,
 ) {
     use crate::render::gpu::Bound;
     let frame = frame.0;
-    groups.evict_idle(frame);
+    let mut groups = groups.lock();
     for (entity, main, requested, role) in &views {
         let compatible = requested.is_some()
             && effect_attachment_compatible(role.copied(), main.texture.sample_count())
@@ -333,6 +333,7 @@ fn route_raw_depth_particles(mut phases:ResMut<ViewSortedRenderPhases<Transparen
 
 pub(crate) fn install_raw_depth(app:&mut App) {
     use bevy::render::{Render,RenderApp,RenderStartup,RenderSystems};
+    crate::render::gpu::install_bind_group_caches(app);
     app.add_systems(Startup, load_depth_copy)
         .add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<WeatherDepthSnapshot>::default());
     let Some(render)=app.get_sub_app_mut(RenderApp) else {return;};

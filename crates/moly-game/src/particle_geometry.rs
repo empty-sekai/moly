@@ -2,7 +2,8 @@
 //! Unity's particle conventions; the rendering boundary performs the one X
 //! reflection used by moly-root's GLB producer. A Mesh particle never becomes a
 //! billboard. Numeric engine observations live in tests/data, independently of
-//! this implementation; current-native call-site receipts live in the lane.
+//! this implementation; the current-native call-site observations are replayed
+//! by opt-in tests that read them from outside the repository.
 use bevy::math::Affine3A;
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
@@ -52,6 +53,10 @@ pub(crate) struct Instance {
     pub colour: Vec4,
     pub custom1: Vec4,
     pub custom2: Vec4,
+    /// Particle random seed; mesh renderer flipping draws from its stream.
+    pub seed: u32,
+    /// Elapsed lifetime in percent; a mesh particle at 100 has zero size.
+    pub age_percent: f32,
 }
 
 pub(crate) fn reflect(v: Vec3) -> Vec3 { Vec3::new(-v.x, v.y, v.z) }
@@ -87,6 +92,26 @@ fn aligned_basis(alignment: Alignment, particle: &Instance, frame: &Frame) -> Ma
     }
 }
 
+/// Salt of the per-particle stream that decides renderer flipping.
+const FLIP_SALT: u32 = 0xee4f_2bc1;
+
+/// ParticleSystemRenderer flip for mesh particles (CalculateMeshParticleTransform):
+/// three successive draws of the particle seed's flip stream, one per axis in
+/// X, Y, Z order; an axis is mirrored when its authored proportion is strictly
+/// greater than its draw. A NaN proportion never mirrors.
+pub(crate) fn flip_signs(seed: u32, flip: Vec3) -> Vec3 {
+    let draws = moly_law::particle::random::ParticleRandom::sample3(seed, FLIP_SALT);
+    let sign = |proportion: f32, draw: f32| if proportion > draw { -1.0 } else { 1.0 };
+    Vec3::new(sign(flip.x, draws[0]), sign(flip.y, draws[1]), sign(flip.z, draws[2]))
+}
+
+/// Particle size as the mesh transform consumes it: mirrored per axis by the
+/// flip signs, then collapsed to zero once the age has reached 100 percent
+/// (the particle's vertices are still written).
+pub(crate) fn mesh_size(particle: &Instance, flip: Vec3) -> Vec3 {
+    if particle.age_percent >= 100.0 { Vec3::ZERO } else { particle.size * flip_signs(particle.seed, flip) }
+}
+
 /// Current CalculateMeshParticleTransform, verified against the independently
 /// measured combinations of all five alignments, both simulation spaces,
 /// nonuniform/negative scale, source XYZ rotation, mesh bounds, and pivot.
@@ -94,12 +119,16 @@ fn aligned_basis(alignment: Alignment, particle: &Instance, frame: &Frame) -> Ma
 /// Moving S past R is observably wrong for nonuniform source transforms.
 pub(crate) fn mesh_transform(
     particle: &Instance, frame: &Frame, alignment: Alignment,
-    bounds_size: Vec3, pivot: Vec3,
+    bounds_size: Vec3, pivot: Vec3, flip: Vec3,
 ) -> Affine3A {
+    // The flip signs multiply the particle size before the matrix product, so
+    // the pivot offset below moves with the mirrored columns. Triangle order is
+    // never changed for a mirrored particle.
+    let size = mesh_size(particle, flip);
     let linear = aligned_basis(alignment, particle, frame)
         * Mat3::from_diagonal(frame.scale)
         * euler(particle.rotation)
-        * Mat3::from_diagonal(particle.size);
+        * Mat3::from_diagonal(size);
     // The renderer's Z pivot has the opposite sign to its X/Y mesh offset.
     let offset = bounds_size * Vec3::new(pivot.x, pivot.y, -pivot.z);
     Affine3A::from_mat3_translation(linear, particle.position + linear * offset)
@@ -172,6 +201,8 @@ pub(crate) struct MeshDraw {
     pub scaling: Scaling,
     pub alignment: Alignment,
     pub pivot: Vec3,
+    /// Authored renderer flip proportion per axis.
+    pub flip: Vec3,
 }
 
 fn take_v3(mesh: &mut Mesh, attribute: bevy::mesh::MeshVertexAttribute) -> Vec<[f32; 3]> {
@@ -201,7 +232,7 @@ pub(crate) fn write_mesh(mesh: &mut Mesh, draw: &MeshDraw, particles: &[Instance
     custom1.reserve(count); custom2.reserve(count); uv.reserve(count);
     indices.reserve(source.indices.len().saturating_mul(particles.len()));
     for particle in particles {
-        let transform = mesh_transform(particle, frame, draw.alignment, source.bounds_size, draw.pivot);
+        let transform = mesh_transform(particle, frame, draw.alignment, source.bounds_size, draw.pivot, draw.flip);
         let linear: Mat3 = transform.matrix3.into();
         let normal_transform = if linear.determinant().abs() > 1e-30 { linear.inverse().transpose() } else { Mat3::ZERO };
         let base = positions.len() as u32;
@@ -250,12 +281,13 @@ mod tests {
             // translation fabricated by the measurement wrapper.
             if row["simulation"] == "Local" { position = rotation * (scale * position); velocity = rotation * (scale * velocity); }
             let instance = Instance { position, velocity, rotation: (vec(&row["particleRotation"]) * (std::f32::consts::PI / 180.0)),
-                size: vec(&row["particleSize"]), colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO };
+                size: vec(&row["particleSize"]), colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO,
+                seed: 0, age_percent: 0.0 };
             let alignment = match row["alignment"].as_str().unwrap() {
                 "View" => Alignment::View, "World" => Alignment::World, "Local" => Alignment::Local,
                 "Facing" => Alignment::Facing, "Velocity" => Alignment::Velocity, _ => panic!("unknown source alignment"),
             };
-            let transform = mesh_transform(&instance, &frame, alignment, Vec3::new(1.0,2.0,3.0), vec(&row["pivot"]));
+            let transform = mesh_transform(&instance, &frame, alignment, Vec3::new(1.0,2.0,3.0), vec(&row["pivot"]), Vec3::ZERO);
             for (i, expected) in row["vertices"].as_array().unwrap().iter().enumerate() {
                 let error = (transform.transform_point3(source[i]) - vec(expected)).abs().max_element();
                 maximum = maximum.max(error);
@@ -267,5 +299,57 @@ mod tests {
         }
         assert_eq!(cases,130,"the independent source corpus must remain complete");
         assert!(failures.is_empty(),"max error={maximum}, {}",failures.join("\n"));
+    }
+
+    /// Research instrument: replays native CalculateMeshParticleTransform
+    /// executions (all five render-space bodies) recorded with and without the
+    /// renderer flip for the same particle. The native per-column sign (or the
+    /// collapse to zero) is read from the two outputs; `mesh_size` of a unit
+    /// particle must reproduce it for every case. Point MOLY_MESH_FLIP_NATIVE at
+    /// the recorded native case file. The per-column sign is read the same way
+    /// whatever the particle rotation, since the sign multiplies the size, which
+    /// sits to the right of the rotation in the product.
+    #[test]
+    #[ignore = "needs MOLY_MESH_FLIP_NATIVE"]
+    fn mesh_flip_matches_native_calculate_mesh_particle_transform() {
+        let path = std::env::var("MOLY_MESH_FLIP_NATIVE").expect("MOLY_MESH_FLIP_NATIVE");
+        let data: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(data["sha256"], "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9",
+            "native cases must come from the current game engine library");
+        let words = |v: &Value| -> Vec<u32> { v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect() };
+        let (mut cases, mut mirrored, mut dead) = (0, 0, 0);
+        let mut failures = Vec::new();
+        for case in data["cases"].as_array().unwrap() {
+            let flipped = words(&case["runs"]["flip"]["affine"]);
+            let plain = words(&case["runs"]["noflip"]["affine"]);
+            let flip = words(&case["flip"]);
+            let flip = Vec3::new(f32::from_bits(flip[0]), f32::from_bits(flip[1]), f32::from_bits(flip[2]));
+            let seed = case["seed"].as_u64().unwrap() as u32;
+            let age = f32::from_bits(case["age"].as_u64().unwrap() as u32);
+            let zero = |c: usize, run: &[u32]| (0..3).all(|l| run[4 * c + l] & 0x7fff_ffff == 0);
+            let native_dead = (0..3).all(|c| zero(c, &flipped) && zero(c, &plain));
+            let unit = Instance { position: Vec3::ZERO, velocity: Vec3::ZERO, rotation: Vec3::ZERO, size: Vec3::ONE,
+                colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO, seed, age_percent: age };
+            let ours = mesh_size(&unit, flip).to_array();
+            let ours_dead = ours == [0.0; 3];
+            if native_dead != ours_dead {
+                failures.push(format!("{}: dead native={native_dead} ours={ours_dead}", case["index"]));
+            } else if !ours_dead {
+                // Signed zeros of the sums that follow the sign are not part of the law.
+                let equal = |a: u32, b: u32| a == b || (a & 0x7fff_ffff == 0 && b & 0x7fff_ffff == 0);
+                let native: Vec<f32> = (0..3).map(|c| {
+                    let same = (0..3).all(|l| equal(flipped[4 * c + l], plain[4 * c + l]));
+                    let negated = (0..3).all(|l| equal(flipped[4 * c + l], plain[4 * c + l] ^ 0x8000_0000));
+                    match (same, negated) { (true, false) => 1.0, (false, true) => -1.0, _ => f32::NAN }
+                }).collect();
+                if native.iter().zip(ours).any(|(n, o)| *n != o) {
+                    failures.push(format!("{} seed={seed:#x}: native={native:?} ours={ours:?}", case["index"]));
+                }
+                if ours.iter().any(|s| *s < 0.0) { mirrored += 1; }
+            } else { dead += 1; }
+            cases += 1;
+        }
+        assert!(cases > 0 && mirrored > 0 && dead > 0, "cases={cases} mirrored={mirrored} dead={dead}");
+        assert!(failures.is_empty(), "{} of {cases} mismatched:\n{}", failures.len(), failures.join("\n"));
     }
 }

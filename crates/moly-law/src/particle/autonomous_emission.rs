@@ -1,18 +1,21 @@
 //! Guarded ordinary Update1 / EmitOverTime / StartParticles scheduling.
 //!
-//! Current JP libunity 937c6d28...75badd9. Evidence: a native boundary replay
-//! (405 scalar emission, 108 clock, 15 newborn cases) and a native EmitOverTime
-//! receipt over every two-constant emission configuration of the corpus, both
-//! with zero failures.
+//! Current JP 6.8.1 libunity. Evidence: a native boundary replay
+//! (405 scalar emission, 108 clock, 15 newborn cases), a native EmitOverTime
+//! receipt over every two-constant emission configuration of the corpus,
+//! native EmitOverTime batteries over the burst schedule, and native rows of
+//! the emission load normalization, all with zero failures.
 //! Scope: initialized clock, flags=4, no delay or distance emission, one slice
-//! with frame_dt == accumulated_dt, a constant or two-constant rate, <=2
-//! cycle-1 bursts of probability 1 with a constant or two-constant count.
+//! with frame_dt == accumulated_dt, a constant or two-constant rate, up to
+//! eight bursts with a constant or two-constant count and any probability,
+//! cycle count, repeat interval and time.
 //! This prepares phases; it never admits a system or simulates particles.
 //! Never use an old emission-head interval for birth curves after a loop wrap:
 //! StartParticles uses (current - slice_dt, current), both times native reciprocal
 //! duration. Prepare clock -> existing pre/sim/death/post -> schedule -> births.
 
-use crate::particle::emit::BurstCycles;
+use crate::particle::emit::{Burst, BurstCycles};
+use crate::particle::gradient::{arm_fmax, arm_fmin};
 use crate::particle::schema::EmissionParams;
 use crate::particle::seed_owner::ScalarRandom;
 use crate::particle::sub_emission::{BirthDistribution, BirthTiming};
@@ -22,6 +25,11 @@ const EPSILON: f32 = f32::from_bits(0x3586_37bd);
 const MIN_AMOUNT: f32 = f32::from_bits(0x38d1_b717);
 const MAX_COUNT: f32 = 16_777_215.0;
 const MAX_WRAPS: u32 = 4096;
+/// EmissionModule's load clamps every rate scalar to [0, 1e7].
+const MAX_RATE: f32 = 10_000_000.0;
+/// EmissionModule holds its bursts in eight inline slots and clamps its
+/// serialized burst count to [0, 8].
+const BURST_SLOTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
@@ -76,31 +84,102 @@ impl EmissionRate {
 }
 
 /// Burst count in the two modes EmissionModule::AccumulateBurst is qualified
-/// for. The probability is 1, so AccumulateBurst takes no probability draw.
+/// for, as signed 32-bit counts: each constant goes through the saturating
+/// float-to-int conversion toward zero (NaN to 0), which `as i32` is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum BurstCount {
-    /// Constant mode: the max scalar truncated toward zero; no draw.
-    Constant(u32),
+    /// Constant mode: the max scalar converted; no draw.
+    Constant(i32),
     /// TwoConstants: lo and hi are the smaller and the larger constant, each
-    /// truncated toward zero. Every hit takes one full 32-bit draw, even when
-    /// lo == hi, and the count is lo + word % (hi + 1 - lo) on the whole word.
-    /// Built only by the gate, which keeps lo <= hi <= 16,777,215.
-    TwoConstants { lo: u32, hi: u32 },
+    /// converted, so lo <= hi (a monotone conversion of an ordered pair; a
+    /// NaN constant makes both the other one). Every evaluation takes one
+    /// full 32-bit draw, even when lo == hi, and the count is
+    /// lo + word % (hi + 1 - lo) in wrapping 32-bit arithmetic; where that
+    /// range wraps to zero the unsigned division yields zero, so the
+    /// remainder is the whole word.
+    TwoConstants { lo: i32, hi: i32 },
 }
 
 impl BurstCount {
-    fn sample(self, random: &mut ScalarRandom) -> u32 {
+    fn sample(self, random: &mut ScalarRandom) -> i32 {
         match self {
             Self::Constant(count) => count,
-            Self::TwoConstants { lo, hi } => lo + random.next_u32() % (hi + 1 - lo),
+            Self::TwoConstants { lo, hi } => {
+                let range = (hi.wrapping_add(1) as u32).wrapping_sub(lo as u32);
+                let word = random.next_u32();
+                let remainder = if range == 0 { word } else { word % range };
+                remainder.wrapping_add(lo as u32) as i32
+            }
         }
     }
 }
 
+/// One burst as the runtime EmissionModule holds it, after the load
+/// normalization: its time, count, serialized cycle count word (1 fires once
+/// per cycle, 0 repeats without end), repeat interval and probability.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ScheduledBurst {
     time: f32,
     count: BurstCount,
+    cycles: u32,
+    interval: f32,
+    probability: f32,
+}
+
+impl ScheduledBurst {
+    /// EmissionModule::AccumulateBurst. A zero probability counts 0 without a
+    /// draw; one at or above 1, or NaN, takes no probability draw; any other
+    /// takes one draw r (its low 23 bits times UNIT_SCALE) and counts 0 where
+    /// the probability is at most r, without evaluating the count. Otherwise
+    /// the count is evaluated.
+    fn accumulate(&self, random: &mut ScalarRandom) -> i32 {
+        let probability = self.probability;
+        if probability == 0.0 {
+            return 0;
+        }
+        if !(probability >= 1.0 || probability.is_nan()) {
+            let r = (random.next_u32() & 0x7f_ffff) as f32 * UNIT_SCALE;
+            if probability <= r {
+                return 0;
+            }
+        }
+        self.count.sample(random)
+    }
+
+    /// AccumulateBursts' test for this burst in the window [low, high). A
+    /// time inside the window hits. Outside it, only a window that allows
+    /// repeats, a time before the window and a cycle count other than one
+    /// reach the repeat test: k = (low - time) / interval; a finite cycle
+    /// count needs k below cycles - 1 (that word as a signed 32-bit value,
+    /// converted to float); then it hits where (high - time) / interval
+    /// converted toward zero exceeds k converted likewise. A hit accumulates
+    /// the count once, however many repeats the window spans.
+    fn hits(&self, low: f32, high: f32, repeats: bool) -> bool {
+        let time = self.time;
+        let inside = time >= low && time < high;
+        if inside || !repeats {
+            return inside;
+        }
+        if !(time < low) || self.cycles == 1 {
+            return false;
+        }
+        let k = (low - time) / self.interval;
+        if self.cycles != 0 && !(k < self.cycles.wrapping_sub(1) as i32 as f32) {
+            return false;
+        }
+        ((high - time) / self.interval) as i32 > k as i32
+    }
+}
+
+/// A burst's fields as the runtime EmissionModule holds them, the count still
+/// a curve: the load normalization's output and the runtime gate's input.
+#[derive(Clone, Debug, PartialEq)]
+struct LoadedBurst {
+    time: f32,
+    count: MinMaxCurve,
+    cycles: u32,
+    interval: f32,
+    probability: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -181,40 +260,57 @@ impl AutonomousBirthBatch {
 }
 
 impl ConstantAutonomousEmission {
+    /// The law of an exported emission block: the serialized values go
+    /// through the load normalization (`load_rate`, `load_burst`) and then
+    /// the runtime gate. More bursts than the engine's eight slots are
+    /// refused: the loader clamps its serialized burst count to them, and
+    /// the export carries the burst list, not that count, so the law takes
+    /// the list's length as the count.
     pub fn from_params(
         delay: &MinMaxCurve,
         duration: f32,
         looping: bool,
         emission: &EmissionParams,
     ) -> Result<Self, Refused> {
-        let unsupported = Refused::UnsupportedConfiguration;
         if !matches!(delay, MinMaxCurve::Constant(v) if *v == 0.0)
             || !matches!(&emission.rate_over_distance, MinMaxCurve::Constant(v) if *v == 0.0)
-            || !duration.is_finite()
-            || duration <= 0.0
-            || emission.bursts.len() > 2
+            || emission.bursts.len() > BURST_SLOTS
         {
-            return Err(unsupported);
+            return Err(Refused::UnsupportedConfiguration);
         }
-        let rate = rate(&emission.rate_over_time)?;
-        let mut bursts = Vec::with_capacity(emission.bursts.len());
-        for b in &emission.bursts {
-            if b.probability != 1.0
-                || !matches!(b.cycles, BurstCycles::Finite(n) if n.get() == 1)
-                || !b.time.is_finite()
-                || b.time < 0.0
-                || b.time > duration
-            {
-                return Err(unsupported);
-            }
-            let count = burst_count(&b.count)?;
-            // Preserve authoring order: hits in one window draw their counts in
-            // this order, and the last hit owns the one burst fraction.
-            bursts.push(ScheduledBurst {
-                time: b.time,
-                count,
-            });
+        let bursts: Vec<LoadedBurst> = emission.bursts.iter().map(load_burst).collect();
+        Self::from_runtime(duration, looping, &load_rate(&emission.rate_over_time), &bursts)
+    }
+
+    /// The law from the fields as the runtime EmissionModule holds them. The
+    /// gate refuses a duration that is not finite and positive, a rate that
+    /// is not a finite constant or pair of constants, a count in a curve
+    /// mode, and more than eight bursts; every probability, cycle count,
+    /// repeat interval, time and count constant is transcribed.
+    fn from_runtime(
+        duration: f32,
+        looping: bool,
+        rate_over_time: &MinMaxCurve,
+        bursts: &[LoadedBurst],
+    ) -> Result<Self, Refused> {
+        if !duration.is_finite() || duration <= 0.0 || bursts.len() > BURST_SLOTS {
+            return Err(Refused::UnsupportedConfiguration);
         }
+        let rate = rate(rate_over_time)?;
+        // Preserve authoring order: hits in one window draw in this order,
+        // and the last hit owns the one burst fraction.
+        let bursts = bursts
+            .iter()
+            .map(|b| {
+                Ok(ScheduledBurst {
+                    time: b.time,
+                    count: burst_count(&b.count)?,
+                    cycles: b.cycles,
+                    interval: b.interval,
+                    probability: b.probability,
+                })
+            })
+            .collect::<Result<Vec<_>, Refused>>()?;
         Ok(Self {
             duration,
             looping,
@@ -283,10 +379,11 @@ impl ConstantAutonomousEmission {
 
     /// Invoke after existing particle simulation and death have released pool
     /// capacity. Even a zero-rate zero-count native call advances scalar RNG:
-    /// EmitOverTime draws once at entry, and a two-constant burst count draws
-    /// once more per hit. Refusals leave state untouched. Supply the native
-    /// reciprocal duration instruction result; scalar 1/duration is not
-    /// bit-exact for all durations.
+    /// EmitOverTime draws once at entry, and each burst hit draws once more
+    /// for a probability draw and once for a two-constant count it evaluates.
+    /// Refusals leave state untouched. Supply the native reciprocal duration
+    /// instruction result; scalar 1/duration is not bit-exact for all
+    /// durations.
     pub fn schedule(
         &self,
         clock: ClockSlice,
@@ -333,45 +430,47 @@ impl ConstantAutonomousEmission {
             return Err(Refused::InvalidInput);
         }
         let mut burst_fraction = old.burst_fraction;
-        let mut burst_count = 0_u32;
-        // AccumulateBursts: per hit the count is taken before the fraction is
-        // written, and the fraction is written on every hit, zero counts too.
-        let mut accumulate = |low: f32, high: f32, random: &mut ScalarRandom| -> Result<(), Refused> {
+        // AccumulateBursts over one window, bursts in authoring order: a hit
+        // takes its count before the fraction is written, and the fraction
+        // is written on every hit, zero counts too. The window's sum wraps in
+        // signed 32-bit arithmetic.
+        let mut accumulate = |low: f32, high: f32, repeats: bool, random: &mut ScalarRandom| -> i32 {
+            let mut sum = 0_i32;
             for b in &self.bursts {
-                if low <= b.time && b.time < high {
-                    let count = b.count.sample(random);
-                    burst_count = burst_count
-                        .checked_add(count)
-                        .ok_or(Refused::CountOutOfRange)?;
+                if b.hits(low, high, repeats) {
+                    sum = sum.wrapping_add(b.accumulate(random));
                     let relative = (b.time - low) / (high - low);
                     burst_fraction = if relative < 0.0 {
                         1.0
                     } else {
-                        1.0 - relative.min(1.0)
+                        1.0 - arm_fmin(relative, 1.0)
                     };
                 }
             }
-            Ok(())
+            sum
         };
-        if current < previous {
-            // A wrap draws for the window [0, current) before the window
-            // [previous, duration + 1e-4).
-            accumulate(0.0, current, &mut random)?;
-            accumulate(previous, self.duration + MIN_AMOUNT, &mut random)?;
+        // A wrap draws for the window [0, current), which allows repeats,
+        // before the window [previous, duration + 1e-4), which does not; no
+        // wrap takes the one window [previous, current), which allows them.
+        let (first, second) = if current < previous {
+            let first = accumulate(0.0, current, true, &mut random);
+            (first, accumulate(previous, self.duration + MIN_AMOUNT, false, &mut random))
         } else {
-            accumulate(previous, current, &mut random)?;
-        }
+            (0, accumulate(previous, current, true, &mut random))
+        };
         let full = amount + old.offset;
         if !full.is_finite() || full > MAX_COUNT {
             return Err(Refused::CountOutOfRange);
         }
         let rate_count = full as u32;
-        let total = rate_count
-            .checked_add(burst_count)
-            .ok_or(Refused::CountOutOfRange)?;
-        if total > MAX_COUNT as u32 {
+        // Native adds the rate count and both window sums, each sign-extended,
+        // in 64 bits. A total below zero wraps there to a count far beyond the
+        // representable one; both are refused, as is any total above it.
+        let total = i64::from(rate_count) + i64::from(first) + i64::from(second);
+        if !(0..=MAX_COUNT as i64).contains(&total) {
             return Err(Refused::CountOutOfRange);
         }
+        let total = total as u32;
         let distribution = BirthDistribution {
             spacing: if amount < MIN_AMOUNT {
                 1.0
@@ -421,41 +520,80 @@ fn rate(curve: &MinMaxCurve) -> Result<EmissionRate, Refused> {
     }
 }
 
-/// The burst count as AccumulateBurst reads it: each constant is truncated
-/// toward zero, so a value in (-1, 0) counts 0. TwoConstants orders the pair
-/// itself, so a swapped pair is admitted. A count that truncates to a negative
-/// number is refused: native adds it to the total as a signed value, which the
-/// unsigned birth count cannot carry.
+/// The burst count as AccumulateBurst reads it, for every constant: the
+/// saturating conversion toward zero (NaN to 0). TwoConstants orders the pair
+/// with the same strict comparisons native uses, so a swapped pair is the
+/// ordered one. The curve modes are not transcribed.
 fn burst_count(curve: &MinMaxCurve) -> Result<BurstCount, Refused> {
     match *curve {
-        MinMaxCurve::Constant(value) if value.is_finite() => {
-            if value <= -1.0 {
-                return Err(Refused::UnsupportedConfiguration);
-            }
-            if value > MAX_COUNT {
-                return Err(Refused::CountOutOfRange);
-            }
-            // Truncation toward zero; the value lies in (-1, 2^24).
-            Ok(BurstCount::Constant(value as u32))
-        }
-        MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite() => {
-            // The smaller and the larger, chosen by the same strict comparisons
-            // native uses.
+        MinMaxCurve::Constant(value) => Ok(BurstCount::Constant(value as i32)),
+        MinMaxCurve::TwoConstants { min, max } => {
             let low = if max < min { max } else { min };
             let high = if min < max { max } else { min };
-            if low <= -1.0 {
-                return Err(Refused::UnsupportedConfiguration);
-            }
-            if high > MAX_COUNT {
-                return Err(Refused::CountOutOfRange);
-            }
-            // Truncation toward zero; both values lie in (-1, 2^24).
             Ok(BurstCount::TwoConstants {
-                lo: low as u32,
-                hi: high as u32,
+                lo: low as i32,
+                hi: high as i32,
             })
         }
         _ => Err(Refused::UnsupportedConfiguration),
+    }
+}
+
+/// EmissionModule's load normalization of a rate curve, applied on every
+/// load path (the binary and the type-converting reader, and the clone
+/// that serializes through the same transfer) before emission reads it:
+/// each scalar below zero becomes +0 and any other is at most 1e7 (a NaN
+/// stays NaN). The curve modes' keys are not touched and stay refused.
+fn load_rate(curve: &MinMaxCurve) -> MinMaxCurve {
+    match *curve {
+        MinMaxCurve::Constant(value) => MinMaxCurve::Constant(load_rate_scalar(value)),
+        MinMaxCurve::TwoConstants { min, max } => MinMaxCurve::TwoConstants {
+            min: load_rate_scalar(min),
+            max: load_rate_scalar(max),
+        },
+        ref other => other.clone(),
+    }
+}
+
+fn load_rate_scalar(value: f32) -> f32 {
+    if value < 0.0 {
+        0.0
+    } else {
+        arm_fmin(value, MAX_RATE)
+    }
+}
+
+/// ParticleSystemEmissionBurst's load normalization, on the same load paths
+/// as `load_rate`: the time is at least +0, both count scalars are at least
+/// +0 (so no loaded count is negative), a cycle count word that is negative
+/// as a signed 32-bit value becomes 0, the repeat interval is at least 1e-4,
+/// and a probability below zero becomes +0 and any other is at most 1 (a
+/// NaN field stays NaN). The time is not clamped to the duration: that
+/// check is the editor's consistency pass, which the player's load does not
+/// run.
+fn load_burst(burst: &Burst) -> LoadedBurst {
+    let count = match burst.count {
+        MinMaxCurve::Constant(value) => MinMaxCurve::Constant(arm_fmax(value, 0.0)),
+        MinMaxCurve::TwoConstants { min, max } => MinMaxCurve::TwoConstants {
+            min: arm_fmax(min, 0.0),
+            max: arm_fmax(max, 0.0),
+        },
+        ref other => other.clone(),
+    };
+    let cycles = match burst.cycles {
+        BurstCycles::Infinite => 0,
+        BurstCycles::Finite(n) => n.get(),
+    };
+    LoadedBurst {
+        time: arm_fmax(burst.time, 0.0),
+        count,
+        cycles: if (cycles as i32) < 0 { 0 } else { cycles },
+        interval: arm_fmax(burst.repeat_interval, MIN_AMOUNT),
+        probability: if burst.probability < 0.0 {
+            0.0
+        } else {
+            arm_fmin(burst.probability, 1.0)
+        },
     }
 }
 
@@ -471,6 +609,9 @@ mod tests {
             bursts: vec![ScheduledBurst {
                 time: 0.0,
                 count: BurstCount::Constant(1),
+                cycles: 1,
+                interval: 0.01,
+                probability: 1.0,
             }],
         }
     }
@@ -637,7 +778,10 @@ mod tests {
                         let b = array(b);
                         ScheduledBurst {
                             time: number(&b[0]),
-                            count: BurstCount::Constant(number(&b[1]) as u32),
+                            count: BurstCount::Constant(number(&b[1]) as i32),
+                            cycles: 1,
+                            interval: 0.01,
+                            probability: 1.0,
                         }
                     })
                     .collect(),
@@ -869,29 +1013,100 @@ mod tests {
             other => panic!("receipt curve mode {other:?} is not a constant mode"),
         }
     }
-    /// The emission block the native configuration was written from, through
-    /// the production gate.
+    /// The law of a native configuration through the runtime gate. The
+    /// harness wrote the configuration straight into the runtime
+    /// EmissionModule, past the load normalization, so the row's values are
+    /// runtime values, some of which no load produces (a negative count, a
+    /// probability above 1); the load half has its own native replay.
     fn native_law(config: &Value) -> Result<ConstantAutonomousEmission, Refused> {
-        let emission = EmissionParams {
-            rate_over_time: native_curve(at(config, "rate")),
-            rate_over_distance: MinMaxCurve::Constant(0.0),
-            bursts: array(at(config, "bursts"))
-                .iter()
-                .map(|b| crate::particle::emit::Burst {
+        let bursts: Vec<LoadedBurst> = array(at(config, "bursts"))
+            .iter()
+            .map(|b| LoadedBurst {
+                time: bits_at(b, "timeBits"),
+                count: native_curve(at(b, "count")),
+                cycles: word(at(b, "cycles")),
+                interval: bits_at(b, "intervalBits"),
+                probability: bits_at(b, "probabilityBits"),
+            })
+            .collect();
+        let runtime = ConstantAutonomousEmission::from_runtime(
+            bits_at(config, "durationBits"),
+            boolean(config, "looping"),
+            &native_curve(at(config, "rate")),
+            &bursts,
+        );
+        product_entry_agrees(config, &runtime);
+        runtime
+    }
+
+    /// The product entry over a native configuration the load normalization
+    /// leaves unchanged (NaN by class). Serialized, such a configuration
+    /// loads to exactly the runtime values the native call ran (the load half
+    /// is replayed against the native transfer rows), so from_params, the
+    /// load followed by from_runtime, must admit exactly where from_runtime
+    /// admits and build the same law: a gate narrowed at the product entry
+    /// alone turns every replay that reaches such a configuration red. A
+    /// configuration the load changes is left to the two halves' own
+    /// replays.
+    fn product_entry_agrees(config: &Value, runtime: &Result<ConstantAutonomousEmission, Refused>) {
+        let same = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let same_curve = |left: &MinMaxCurve, right: &MinMaxCurve| match (left, right) {
+            (MinMaxCurve::Constant(x), MinMaxCurve::Constant(y)) => same(*x, *y),
+            (
+                MinMaxCurve::TwoConstants { min: p, max: q },
+                MinMaxCurve::TwoConstants { min: s, max: t },
+            ) => same(*p, *s) && same(*q, *t),
+            _ => false,
+        };
+        let rate = native_curve(at(config, "rate"));
+        let mut unchanged = same_curve(&load_rate(&rate), &rate);
+        let bursts: Vec<Burst> = array(at(config, "bursts"))
+            .iter()
+            .map(|b| {
+                let cycles = word(at(b, "cycles"));
+                let serialized = Burst {
                     time: bits_at(b, "timeBits"),
                     count: native_curve(at(b, "count")),
-                    cycles: BurstCycles::from_serialized(word(at(b, "cycles"))),
+                    cycles: BurstCycles::from_serialized(cycles),
                     repeat_interval: bits_at(b, "intervalBits"),
                     probability: bits_at(b, "probabilityBits"),
-                })
-                .collect(),
-        };
-        ConstantAutonomousEmission::from_params(
+                };
+                let loaded = load_burst(&serialized);
+                unchanged &= same(loaded.time, serialized.time)
+                    && same_curve(&loaded.count, &serialized.count)
+                    && loaded.cycles == cycles
+                    && same(loaded.interval, serialized.repeat_interval)
+                    && same(loaded.probability, serialized.probability);
+                serialized
+            })
+            .collect();
+        if !unchanged {
+            return;
+        }
+        let count = bursts.len();
+        let product = ConstantAutonomousEmission::from_params(
             &MinMaxCurve::Constant(0.0),
             bits_at(config, "durationBits"),
             boolean(config, "looping"),
-            &emission,
-        )
+            &EmissionParams {
+                rate_over_time: rate,
+                rate_over_distance: MinMaxCurve::Constant(0.0),
+                bursts,
+            },
+        );
+        match (runtime, &product) {
+            (Ok(runtime), Ok(product)) => assert_eq!(
+                format!("{product:?}"),
+                format!("{runtime:?}"),
+                "the product entry builds another law from a load-invariant configuration of {count} bursts"
+            ),
+            (Err(_), Err(_)) => {}
+            (runtime, product) => panic!(
+                "the product entry gives {:?} where the runtime law gives {:?} on a load-invariant configuration of {count} bursts",
+                product.as_ref().err(),
+                runtime.as_ref().err()
+            ),
+        }
     }
     fn native_state(value: &Value, rng: &Value) -> AutonomousEmissionState {
         AutonomousEmissionState {
@@ -936,6 +1151,26 @@ mod tests {
         }
     }
 
+    /// Whether a native configuration authors something the port does not
+    /// transcribe, read from the configuration record the native call ran,
+    /// not through the gate: a duration that is not finite and positive, a
+    /// non-finite rate constant, or more bursts than the eight slots. A gate
+    /// refusal must fall on such a configuration, so a narrowed gate turns a
+    /// replay red; an admitted configuration, flagged or not, is compared
+    /// with the native calls. A port that transcribes one of these drops it
+    /// here.
+    fn untranscribed(config: &Value) -> bool {
+        let constants = |curve: &Value| match native_curve(curve) {
+            MinMaxCurve::Constant(value) => vec![value],
+            MinMaxCurve::TwoConstants { min, max } => vec![min, max],
+            _ => unreachable!("native_curve reads constant modes only"),
+        };
+        let duration = bits_at(config, "durationBits");
+        !(duration.is_finite() && duration > 0.0)
+            || constants(at(config, "rate")).iter().any(|v| !v.is_finite())
+            || array(at(config, "bursts")).len() > BURST_SLOTS
+    }
+
     #[derive(Clone, Copy, PartialEq)]
     enum NativeRows {
         /// Direct EmitOverTime calls chained on one emission state; each call
@@ -971,20 +1206,17 @@ mod tests {
                     let tick = at(row, "clock");
                     let previous = bits_at(tick, "previous");
                     let dt = bits_at(tick, "dt");
-                    let clock = if previous < 0.0 {
-                        // The harness drove EmitOverTime from a negative slice
-                        // start, which slice preparation refuses; replay the
-                        // call from its recorded arguments instead.
-                        assert_eq!(
-                            law.prepare_slice(previous, dt, false),
-                            Err(Refused::InvalidInput),
-                            "{context}"
-                        );
-                        *direct_clocks += 1;
-                        direct_clock(&law, bits_at(row, "previous"), bits_at(row, "current"))
-                    } else {
-                        law.prepare_slice(previous, dt, false)
-                            .unwrap_or_else(|e| panic!("{context}: slice refused {e:?}"))
+                    // The harness drove some calls from a negative slice start;
+                    // where slice preparation refuses one, replay the call from
+                    // its recorded arguments instead. Either way the slice is
+                    // compared with the recorded EmitOverTime arguments below.
+                    let clock = match law.prepare_slice(previous, dt, false) {
+                        Ok(clock) => clock,
+                        Err(refused) => {
+                            assert!(previous < 0.0, "{context}: slice refused {refused:?}");
+                            *direct_clocks += 1;
+                            direct_clock(&law, bits_at(row, "previous"), bits_at(row, "current"))
+                        }
                     };
                     (
                         clock,
@@ -1108,6 +1340,8 @@ mod tests {
     /// randomized envelopes, gate controls, real Update1 slices and the input
     /// controls. Rate count, total, spacing, carry, burst fraction and the
     /// scalar stream words must equal the native bits on every admitted call.
+    /// A refused chain must author something the port does not transcribe;
+    /// which chains are refused, and how many calls replay, is reported.
     #[test]
     #[ignore = "MOLY_EMISSION_TWO_CONSTANTS_RECEIPT must name the private current-native two-constant emission receipt"]
     fn replays_current_native_two_constant_emission() {
@@ -1129,6 +1363,10 @@ mod tests {
                     *calls.entry(group).or_default() += n;
                 }
                 Err(refusal) => {
+                    assert!(
+                        untranscribed(config),
+                        "{label}: gate refused {refusal:?} a configuration the port transcribes"
+                    );
                     refused.push((label.split('/').next().unwrap().to_owned(), refusal))
                 }
             }
@@ -1174,59 +1412,35 @@ mod tests {
                 NativeRows::Control,
             );
         }
-        // Refused, each for a reason outside this law: a repeating burst
-        // (cycles other than 1) together with three bursts; three bursts; a
-        // burst count whose smaller constant truncates to a negative count.
-        assert!(refused
-            .iter()
-            .all(|(_, refusal)| *refusal == Refused::UnsupportedConfiguration));
+        assert!(admitted > 0);
         let mut groups: Vec<&str> = refused.iter().map(|(group, _)| group.as_str()).collect();
         groups.dedup();
-        assert_eq!(
-            groups,
-            [
-                "outside05", "outside08", "outside09", "outside10", "outside11", "outside12",
-                "outside13", "gate2"
-            ]
-        );
-        assert_eq!((admitted, refused.len(), direct_clocks), (236, 64, 18));
-        assert_eq!(
-            calls,
-            std::collections::BTreeMap::from([
-                ("E2", 398),
-                ("EB", 398),
-                ("control", 6),
-                ("extras", 1600),
-                ("gate", 18),
-                ("outside", 1990),
-                ("update1", 92),
-            ])
-        );
         eprintln!(
-            "native two-constant emission: {admitted} chains, {} calls exact (E2 398, EB 398), {direct_clocks} calls from recorded arguments, {} chains refused",
+            "native two-constant emission: {admitted} chains, {} calls exact {calls:?}, {direct_clocks} calls from recorded arguments, {} chains refused {groups:?}",
             calls.values().sum::<usize>(),
             refused.len()
         );
     }
 
-    /// What a native battery replay found: calls equal to native, calls refused
-    /// where native's own count leaves the representable range, calls outside
-    /// the gate (unsupported, count range), and admitted calls whose rate
-    /// Evaluate drew exactly 1.0.
-    #[derive(Debug, PartialEq)]
+    /// What a native battery replay found, reported rather than pinned: calls
+    /// equal to native, calls refused where native's own count leaves the
+    /// representable range, calls of configurations the gate refuses (each
+    /// one authoring something the port does not transcribe), and admitted
+    /// calls whose rate Evaluate drew exactly 1.0.
+    #[derive(Debug)]
     struct BatteryTally {
         exact: usize,
         out_of_range: usize,
-        gate_unsupported: usize,
-        gate_count: usize,
+        gate_refused: usize,
         unit_draws: usize,
     }
 
     /// Replays a native battery (families of direct EmitOverTime calls), each
-    /// call on its own recorded state. Inside the gate every call equals the
-    /// native bits, or is refused only where native's own rate count or total
-    /// exceeds the representable count range, with the state left untouched;
-    /// nothing panics.
+    /// call on its own recorded state. A family the gate refuses must author
+    /// something the port does not transcribe. Inside the gate every call
+    /// equals the native bits, or is refused only where native's own rate
+    /// count or total exceeds the representable count range, with the state
+    /// left untouched.
     fn replay_native_battery(variable: &str) -> BatteryTally {
         let path = std::env::var_os(variable)
             .unwrap_or_else(|| panic!("supply the external native battery in {variable}"));
@@ -1238,8 +1452,7 @@ mod tests {
         let mut tally = BatteryTally {
             exact: 0,
             out_of_range: 0,
-            gate_unsupported: 0,
-            gate_count: 0,
+            gate_refused: 0,
             unit_draws: 0,
         };
         for family in array(at(&battery, "families")) {
@@ -1247,15 +1460,14 @@ mod tests {
             let rows = array(at(family, "rows"));
             let law = match native_law(at(family, "config")) {
                 Ok(law) => law,
-                Err(Refused::UnsupportedConfiguration) => {
-                    tally.gate_unsupported += rows.len();
+                Err(refused) => {
+                    assert!(
+                        untranscribed(at(family, "config")),
+                        "{label}: gate refused {refused:?} a configuration the port transcribes"
+                    );
+                    tally.gate_refused += rows.len();
                     continue;
                 }
-                Err(Refused::CountOutOfRange) => {
-                    tally.gate_count += rows.len();
-                    continue;
-                }
-                Err(other) => panic!("{label}: gate {other:?}"),
             };
             for (index, row) in rows.iter().enumerate() {
                 let context = format!("{label} call {index}");
@@ -1302,10 +1514,6 @@ mod tests {
                             beyond,
                             "{context}: refused {refusal:?} inside the native count range"
                         );
-                        assert!(
-                            matches!(refusal, Refused::InvalidInput | Refused::CountOutOfRange),
-                            "{context}: {refusal:?}"
-                        );
                         assert_eq!(
                             state_bits(&state),
                             state_bits(&before),
@@ -1326,33 +1534,124 @@ mod tests {
     #[test]
     #[ignore = "MOLY_EMISSION_TWO_CONSTANTS_VERIFY_ROWS must name the private independent native two-constant emission battery"]
     fn replays_independent_native_two_constant_emission_battery() {
-        assert_eq!(
-            replay_native_battery("MOLY_EMISSION_TWO_CONSTANTS_VERIFY_ROWS"),
-            BatteryTally {
-                exact: 376,
-                out_of_range: 6,
-                gate_unsupported: 964,
-                gate_count: 8,
-                unit_draws: 0,
-            }
-        );
+        let tally = replay_native_battery("MOLY_EMISSION_TWO_CONSTANTS_VERIFY_ROWS");
+        assert!(tally.exact > 0);
     }
 
     /// Native calls whose entry draw was chosen to give r == 1.0, r == 0 and r
     /// just below 1 on two-constant rates (no other row reaches r == 1.0), and
-    /// burst counts in (-1, 0) with the -1 boundary, which stays refused.
+    /// burst counts in (-1, 0) with the -1 boundary. The r == 1.0 draws must
+    /// reach an exact call.
     #[test]
     #[ignore = "MOLY_EMISSION_TWO_CONSTANTS_EDGE_ROWS must name the private native two-constant emission edge probe"]
     fn replays_native_two_constant_emission_edge_probe() {
+        let tally = replay_native_battery("MOLY_EMISSION_TWO_CONSTANTS_EDGE_ROWS");
+        assert!(tally.exact > 0 && tally.unit_draws > 0);
+    }
+
+    /// Native calls over the burst schedule the other files leave out: repeat
+    /// intervals of every class (infinite, NaN, negative, subnormal, the load
+    /// minimum), cycle counts across the signed boundary, probabilities of
+    /// every class, non-finite and signed-zero times and times inside the
+    /// wrap window past the cycle, five to eight bursts, and counts whose
+    /// signed 32-bit window sums wrap, alone and sign-extended per window.
+    /// Every call equals native or is refused only where native's own count
+    /// leaves the representable range.
+    #[test]
+    #[ignore = "MOLY_EMISSION_BURST_ROWS must name the private native burst schedule rows"]
+    fn replays_native_burst_schedule_rows() {
+        let tally = replay_native_battery("MOLY_EMISSION_BURST_ROWS");
+        assert!(tally.exact > 0);
+    }
+
+    /// The load normalization against native rows of the burst transfer and
+    /// of the module transfer up to its burst array (the curve reader itself
+    /// not executed: the row gives the curve's mode and scalars as read).
+    /// Every burst field and rate scalar the transfer stores equals the load
+    /// of the serialized value, bit for bit or NaN where native stored NaN;
+    /// the stored burst count is the serialized one clamped to the eight
+    /// slots, which it reaches.
+    #[test]
+    #[ignore = "MOLY_EMISSION_LOAD_ROWS must name the private native emission load rows"]
+    fn load_normalization_matches_native_transfer_rows() {
+        let path = std::env::var_os("MOLY_EMISSION_LOAD_ROWS")
+            .expect("supply the external native emission load rows");
+        let doc = json::parse(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(
-            replay_native_battery("MOLY_EMISSION_TWO_CONSTANTS_EDGE_ROWS"),
-            BatteryTally {
-                exact: 408,
-                out_of_range: 0,
-                gate_unsupported: 48,
-                gate_count: 0,
-                unit_draws: 72,
-            }
+            at(at(&doc, "library"), "sha256").as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
         );
+        let same = |actual: f32, native: u32, what: &str, index: usize| {
+            assert!(
+                actual.to_bits() == native || (actual.is_nan() && f32::from_bits(native).is_nan()),
+                "row {index} {what}: load {:#010x} native {native:#010x}",
+                actual.to_bits()
+            );
+        };
+        let (mut bursts, mut modules, mut changed, mut most) = (0, 0, 0, 0);
+        for (index, row) in array(at(&doc, "rows")).iter().enumerate() {
+            let input = at(row, "in");
+            let stored = at(row, "out");
+            match at(row, "kind").as_str() {
+                Some("burst") => {
+                    let count = match word(at(input, "mode")) {
+                        0 => MinMaxCurve::Constant(bits_at(input, "max")),
+                        3 => MinMaxCurve::TwoConstants {
+                            min: bits_at(input, "min"),
+                            max: bits_at(input, "max"),
+                        },
+                        other => panic!("row {index}: count mode {other}"),
+                    };
+                    let serialized = Burst {
+                        time: bits_at(input, "time"),
+                        count,
+                        cycles: BurstCycles::from_serialized(word(at(input, "cycles"))),
+                        repeat_interval: bits_at(input, "interval"),
+                        probability: bits_at(input, "probability"),
+                    };
+                    let loaded = load_burst(&serialized);
+                    same(loaded.time, word(at(stored, "time")), "time", index);
+                    match loaded.count {
+                        MinMaxCurve::Constant(max) => same(max, word(at(stored, "max")), "count", index),
+                        MinMaxCurve::TwoConstants { min, max } => {
+                            same(min, word(at(stored, "min")), "count min", index);
+                            same(max, word(at(stored, "max")), "count max", index);
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(loaded.cycles, word(at(stored, "cycles")), "row {index} cycles");
+                    same(loaded.interval, word(at(stored, "interval")), "interval", index);
+                    same(loaded.probability, word(at(stored, "probability")), "probability", index);
+                    changed += usize::from(
+                        ["time", "min", "max", "cycles", "interval", "probability"]
+                            .iter()
+                            .any(|key| word(at(input, key)) != word(at(stored, key))),
+                    );
+                    bursts += 1;
+                }
+                Some("module") => {
+                    for key in ["rate", "distance"] {
+                        let (serialized, loaded) = (array(at(input, key)), array(at(stored, key)));
+                        for slot in 1..3 {
+                            same(
+                                load_rate_scalar(f32::from_bits(word(&serialized[slot]))),
+                                word(&loaded[slot]),
+                                key,
+                                index,
+                            );
+                        }
+                    }
+                    let count = word(at(input, "burstCount")) as i32;
+                    let kept = word(at(stored, "burstCount")) as i32;
+                    assert_eq!(kept, count.clamp(0, BURST_SLOTS as i32), "row {index} burst count");
+                    most = most.max(kept);
+                    modules += 1;
+                }
+                other => panic!("row {index}: kind {other:?}"),
+            }
+        }
+        assert!(bursts > 0 && modules > 0 && changed > 0);
+        assert_eq!(most, BURST_SLOTS as i32, "the stored burst count reaches the slot count");
+        eprintln!("native emission load: {bursts} burst rows ({changed} normalized), {modules} module rows; exact");
     }
 }

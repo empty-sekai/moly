@@ -67,11 +67,12 @@ test("preflight checks exact immutable descriptor pair and bytes before engine a
 test("preflight resolves snapshots below the explicit S3 resource base", async () => {
   const documents = sourceDocuments(), { release, snapshot } = descriptors(documents);
   const root = "https://assets.pjsk.moe/sekai-extra-assets/";
-  snapshot.assets = `snapshots/${snapshot.id}/assets/`;
+  // The published descriptor keeps its logical path (release-artifact enforces it).
+  snapshot.assets = `/moly/snapshots/${snapshot.id}/assets/`;
   const calls = [];
   const options = {
     ...identity,
-    assets: root + snapshot.assets,
+    assets: root + `snapshots/${snapshot.id}/assets/`,
     resourceBase: root,
     snapshotId: snapshot.id,
     stageUrl: "https://host.test/moly/releases/new/stage.html",
