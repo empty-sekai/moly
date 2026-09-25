@@ -977,6 +977,11 @@ impl SitePreload {
         })
     }
 
+    /// The destination's scene document (the sidecar JSON).
+    pub(crate) fn scene_json(&self) -> Handle<JsonAsset> {
+        self.sidecar_json.clone()
+    }
+
     /// Ok(true) once every glTF of the family has loaded with its
     /// dependencies and the sidecar has loaded; a failure is named.
     pub(crate) fn ready(&self, server: &AssetServer) -> Result<bool, String> {
