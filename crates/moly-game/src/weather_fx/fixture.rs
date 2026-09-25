@@ -573,7 +573,7 @@ mod tests {
         let evidence = match &plan.geometry {
             PlannedGeometry::Billboard(draw) =>
                 crate::particle_runtime::ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false },
-            PlannedGeometry::Mesh { scaling, .. } =>
+            PlannedGeometry::Mesh { scaling, .. } | PlannedGeometry::EmptyMesh { scaling, .. } =>
                 crate::particle_runtime::ShapeEmitterEvidence { scaling: *scaling, mesh_renderer: true },
         };
         match crate::particle_runtime::native_birth_path(&plan.emitter, &plan.route, Some(evidence)) {
@@ -1122,6 +1122,8 @@ fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {
         PlannedGeometry::Mesh { source, alignment, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(
             crate::particle_geometry::MeshDraw { source: source.clone().expect("prepared source mesh"),
                 alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip, axis_body: *axis_body }),
+        PlannedGeometry::EmptyMesh { alignment, scaling, pivot } => crate::particle_runtime::Geometry::Mesh(
+            crate::particle_geometry::MeshDraw::empty(*alignment, *scaling, *pivot)),
     };
     Runtime {
         node: planned.node.clone(), effect: planned.effect.clone(), emitter: planned.emitter.clone(),

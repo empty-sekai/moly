@@ -92,6 +92,14 @@ enum PlannedGeometry {
         /// The admission's decision (`particle_runtime::mesh_rotation_admission`).
         axis_body: Option<crate::particle_geometry::AxisBody>,
     },
+    /// Mesh render mode with no drawable mesh in any slot: the renderer's
+    /// mesh cache is empty, so the geometry preparation takes a mesh count of
+    /// zero and draws nothing; the system still simulates.
+    EmptyMesh {
+        alignment: crate::particle_geometry::Alignment,
+        scaling: crate::particle_geometry::Scaling,
+        pivot: Vec3,
+    },
 }
 impl PlannedGeometry {
     /// The audit's view of the emitter state; admission builds the same
@@ -100,7 +108,8 @@ impl PlannedGeometry {
     fn shape_evidence(&self) -> crate::particle_runtime::ShapeEmitterEvidence {
         match self {
             Self::Billboard(draw) => crate::particle_runtime::ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false },
-            Self::Mesh { scaling, .. } => crate::particle_runtime::ShapeEmitterEvidence { scaling: *scaling, mesh_renderer: true },
+            Self::Mesh { scaling, .. } | Self::EmptyMesh { scaling, .. } =>
+                crate::particle_runtime::ShapeEmitterEvidence { scaling: *scaling, mesh_renderer: true },
         }
     }
     fn into_runtime(self) -> crate::particle_runtime::Geometry {
@@ -109,6 +118,8 @@ impl PlannedGeometry {
             Self::Mesh { alignment, source, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
                 source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot, flip, axis_body,
             }),
+            Self::EmptyMesh { alignment, scaling, pivot } => crate::particle_runtime::Geometry::Mesh(
+                crate::particle_geometry::MeshDraw::empty(alignment, scaling, pivot)),
         }
     }
 }
@@ -978,6 +989,7 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
             "ShapeModule" => "shape", "ColorModule" => "colorOverLifetime",
             "SizeModule" => "sizeOverLifetime", "RotationModule" => "rotationOverLifetime",
             "VelocityModule" => "velocityOverLifetime", "ClampVelocityModule" => "limitVelocity",
+            "RotationBySpeedModule" => "rotationBySpeed",
             "CustomDataModule" => "customData", "UVModule" => "textureSheet",
             "ForceModule" => "forceOverLifetime",
             // Noise is consumed only together with the native birth owner;
@@ -1822,7 +1834,15 @@ fn judge_in_host(
         tally.alignment.push(Alignment::render_space_name(alignment_id).to_owned());
         return None;
     }
-    let mesh_reference = if render_mode == "Mesh" {
+    // ParticleSystemRenderer caches, in slot order, its populated slots whose
+    // mesh is drawable; the geometry preparation counts the leading cached
+    // meshes. No populated slot (and so nothing resolved): the count is zero
+    // and nothing is drawn, while the system simulates as any other.
+    let empty_mesh = render_mode == "Mesh"
+        && renderer.get("meshes").and_then(Value::as_array).is_some_and(Vec::is_empty)
+        && renderer.get("meshSlots").and_then(Value::as_array).is_some_and(|slots| !slots.is_empty()
+            && slots.iter().all(|slot| slot.get("reference").and_then(|r| r.get("pathId")).and_then(Value::as_str) == Some("0")));
+    let mesh_reference = if render_mode == "Mesh" && !empty_mesh {
         let references = renderer.get("meshes").and_then(Value::as_array);
         let Some(references) = references.filter(|r| r.len() == 1) else {
             tally.render_mode.push("source Mesh requires one fully resolved mesh slot; multi-mesh selection not yet consumed".into());
@@ -2154,11 +2174,30 @@ fn judge_in_host(
     if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage)) {
         tally.law_reject.push(format!("{node}: {error}")); return None;
     }
-    if const_of(&emitter.start_delay) != Some(0.0) {
-        // Current source includes nonzero delays. Their emission clock and
-        // existing-particle simulation are separate native paths, still pending.
-        tally.start_delay += 1;
-        return None;
+    if crate::particle_runtime::has_start_delay(&emitter) {
+        // Play writes the start delay word and Update1Incremental counts it
+        // down on the native birth path (the frame head's distance births
+        // wait for it too). A random delay is evaluated with the system
+        // seed's hash, not transcribed; the Director's Simulate path and the
+        // legacy step carry no such word; a sub-emitter target is stopped
+        // every frame, so its word never counts down and holds its clock
+        // (its Tick is not called while the word is not below the slice),
+        // which the target install does not carry.
+        let reason = if crate::particle_runtime::play_start_delay(&emitter).is_none() {
+            Some("random start delay: Play's seed-hash evaluation is not transcribed".to_owned())
+        } else if !native_owner {
+            Some("start delay: the Director's Simulate path runs the legacy step, which has no start delay word".to_owned())
+        } else if child_parent.is_some() {
+            Some("start delay on a sub-emitter target: its uncounted word holds the target's clock, which the target install does not carry".to_owned())
+        } else {
+            crate::particle_runtime::native_birth_eligible(&emitter, &route).err()
+                .map(|reason| format!("start delay needs the native birth path: {reason}"))
+        };
+        if let Some(reason) = reason {
+            tally.start_delay += 1;
+            tally.law_reject.push(format!("{node}: {reason}"));
+            return None;
+        }
     }
     // An invalid module invalidates this emitter; it never becomes a different
     // simulation with rotation or velocity limiting silently removed.
@@ -2173,6 +2212,12 @@ fn judge_in_host(
         Ok(value) => value,
         Err(error) => { tally.limit_refused.push(format!("{node}: {error}")); return None; }
     };
+    // The runtime builds RotationBySpeed from the emitter block each update;
+    // a block its law does not take refuses the emitter here.
+    if let Some(Err(error)) = emitter.rotation_by_speed.as_ref()
+        .map(moly_law::particle::rotation_by_speed::RotationBySpeed::from_params) {
+        tally.rol_refused.push(format!("{node}: {error}")); return None;
+    }
 
     // Renderer-owned size limits, pivot, camera roll and vertex attributes are
     // mandatory source inputs. No visual minimum is substituted for zero size.
@@ -2182,7 +2227,7 @@ fn judge_in_host(
     if renderer.get("normalDirection").and_then(Value::as_f64) != Some(1.0) {
         tally.render_mode.push("source billboard normalDirection other than one is not yet verified".into()); return None;
     }
-    if mesh_reference.is_none() && renderer.get("flip").and_then(Value::as_array)
+    if render_mode != "Mesh" && renderer.get("flip").and_then(Value::as_array)
         .is_none_or(|v| v.len()!=3 || v.iter().any(|x| x.as_f64()!=Some(0.0))) {
         tally.render_mode.push("source billboard particle flip is not yet consumed".into()); return None;
     }
@@ -2253,7 +2298,7 @@ fn judge_in_host(
         Err(reason) => { tally.render_mode.push(reason); return None; }
     };
     if native_only_shape {
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
             tally.shape.push(format!("{node}: {shape_type} mode requires the native birth path: {reason}")); return None;
         }
@@ -2261,7 +2306,7 @@ fn judge_in_host(
     if emitter.noise.is_some() {
         // Noise runs only with the native birth owner; the emitter state the
         // native Shape boundary reads must qualify too, or Noise would drop.
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
             tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
         }
@@ -2286,7 +2331,7 @@ fn judge_in_host(
     // evaluates as the source does. A host with the native birth owner
     // installs it where `native_birth_path` allows it; the Director path
     // never installs it.
-    let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+    let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
     // A sub-emitter target never runs the legacy step (it takes no route).
     if child_parent.is_none()
         && (!native_owner || crate::particle_runtime::native_birth_path(&emitter, &route, Some(evidence)).is_err())
@@ -2301,7 +2346,7 @@ fn judge_in_host(
         }
     }
     if emitter.ring_buffer_mode != moly_law::particle::RingBufferMode::Disabled {
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
             tally.law_reject.push(format!("{node}: ring buffer requires the native birth path: {reason}")); return None;
         }
@@ -2312,14 +2357,14 @@ fn judge_in_host(
         lifecycle::Culling::Refused("the fixture host runs no culling pass".into())
     };
     if event_edges.is_some() {
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
             tally.law_reject.push(format!("{node}: sub-emitter events require the native birth path: {reason}"));
             return None;
         }
     }
     if !distance_zero && child_parent.is_none() {
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)) {
             tally.law_reject.push(format!("{node}: emission over distance requires the native birth path: {reason}"));
             return None;
@@ -2329,7 +2374,7 @@ fn judge_in_host(
     // points are in the native slices) and draws with the renderer's trail
     // material; a system is never admitted without its trail.
     let trail = if emitter.trails.is_some() {
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route)
             .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence)))
             .and_then(|()| crate::particle_runtime::trail_draw_eligible(&emitter, Some(evidence)).map_err(str::to_owned))
@@ -2383,7 +2428,7 @@ fn judge_in_host(
     // is never admitted to the legacy step without them. (A sub-emitter
     // target with a CollisionModule is refused by the child composition.)
     if emitter.collision.is_some() && child_parent.is_none() {
-        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
         if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route)
             .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence))) {
             tally.law_reject.push(format!("{node}: CollisionModule requires the native birth path: {reason}"));
@@ -2393,7 +2438,7 @@ fn judge_in_host(
     let child_owner = match &child_parent {
         None => None,
         Some(parent) => {
-            let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+            let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
                 .and_then(|()| child_owner_words(by_path, node, kind))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
@@ -2450,6 +2495,8 @@ fn judge_in_host(
         geometry: if let Some((reference, flip)) = mesh_reference {
             let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", reference.file))).with_source("moly"));
             PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip, axis_body }
+        } else if empty_mesh {
+            PlannedGeometry::EmptyMesh { alignment: mesh_alignment.expect("validated Mesh alignment"), scaling, pivot: Vec3::from_array(pivot) }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
                 mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },

@@ -36,6 +36,8 @@ pub mod step;
 pub mod buffer;
 pub mod schema;
 pub mod rotation;
+pub mod rotation_by_speed;
+pub mod mesh_selection;
 pub mod limit_velocity;
 pub mod velocity;
 pub mod random;
