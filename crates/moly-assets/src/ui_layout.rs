@@ -5,7 +5,7 @@ pub mod clipping;
 mod runtime;
 pub use runtime::UiInstance;
 
-use bevy::math::{Mat4, Quat, Vec2, Vec3};
+use bevy::math::{Mat4, Vec2, Vec4};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -372,6 +372,104 @@ pub(crate) fn rect_size(parent_size: Vec2, parent_pivot: Vec2, rect: &RectTransf
     Vec2::from_array(rect.size_delta) + (reference_max - reference_min)
 }
 
+/// The engine's local position of a RectTransform in its parent (the
+/// parent's pivot at the origin): `(refMin + anchoredPosition) +
+/// (refMax - refMin) * pivot`, with `refMin`/`refMax` the anchors placed on
+/// the parent rect (`parentPivot * -parentSize + parentSize * anchor`).
+pub(crate) fn local_position(parent_size: Vec2, parent_pivot: Vec2, rect: &RectTransform) -> Vec2 {
+    let corner = parent_pivot * -parent_size;
+    let reference_min = corner + parent_size * Vec2::from_array(rect.anchors_min);
+    let reference_max = corner + parent_size * Vec2::from_array(rect.anchors_max);
+    (reference_min + Vec2::from_array(rect.anchored_position))
+        + (reference_max - reference_min) * Vec2::from_array(rect.pivot)
+}
+
+/// One transform's local translation, rotation and scale as the engine
+/// stores them.
+#[derive(Clone, Copy)]
+struct LocalTrs {
+    position: [f32; 4],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+}
+
+type Lanes = [f32; 4];
+
+fn lanes_mul(a: Lanes, b: Lanes) -> Lanes {
+    [a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]]
+}
+
+fn lanes_add(a: Lanes, b: Lanes) -> Lanes {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+}
+
+fn lanes_scale(a: Lanes, s: f32) -> Lanes {
+    [a[0] * s, a[1] * s, a[2] * s, a[3] * s]
+}
+
+/// The engine's rotation-and-scale columns of one transform: the rotation
+/// matrix built from the quaternion with its vector constants and lane
+/// order, each column times the matching scale component.
+fn scaled_rotation_columns(trs: &LocalTrs) -> [Lanes; 3] {
+    const C0: Lanes = [-2., 2., -2., 0.];
+    const C1: Lanes = [-2., 2., 2., 0.];
+    const C3: Lanes = [-2., -2., 2., 0.];
+    const C5: Lanes = [2., -2., 2., 0.];
+    const C6: Lanes = [2., -2., -2., 0.];
+    const C18: Lanes = [2., 2., -2., 0.];
+    let q = trs.rotation;
+    let swapped = [q[1], q[0], q[3], q[2]];
+    let rotated = [q[2], q[3], q[0], q[1]];
+    let reversed = [q[3], q[2], q[1], q[0]];
+    let column0 = lanes_add(
+        lanes_add(lanes_mul(swapped, lanes_scale(C0, q[1])), lanes_mul(rotated, lanes_scale(C1, q[2]))),
+        [1., 0., 0., 0.],
+    );
+    let column1 = lanes_add(
+        lanes_add(lanes_mul(reversed, lanes_scale(C3, q[2])), lanes_mul(swapped, lanes_scale(C5, q[0]))),
+        [0., 1., 0., 0.],
+    );
+    let column2 = lanes_add(
+        lanes_add(lanes_mul(rotated, lanes_scale(C6, q[0])), lanes_mul(reversed, lanes_scale(C18, q[1]))),
+        [0., 0., 1., 0.],
+    );
+    [
+        lanes_scale(column0, trs.scale[0]),
+        lanes_scale(column1, trs.scale[1]),
+        lanes_scale(column2, trs.scale[2]),
+    ]
+}
+
+/// `Transform::GetLocalToWorldMatrix` over a chain of transforms from the
+/// node up to the top ancestor: the node's own columns and position, then
+/// each ancestor applied to them in turn, `column' = P0 * column.x +
+/// (P1 * column.y + P2 * column.z)` and `position' = parentPosition +
+/// (P0 * position.x + (P1 * position.y + P2 * position.z))`, with `P` the
+/// ancestor's rotation-and-scale columns. Positions therefore accumulate
+/// from the node outwards, which a parent-world times local product does
+/// not reproduce in float32.
+fn local_to_world(chain: impl Iterator<Item = LocalTrs>) -> Mat4 {
+    let mut chain = chain;
+    let own = chain.next().expect("a transform chain has its node");
+    let mut columns = scaled_rotation_columns(&own);
+    let mut position = own.position;
+    for ancestor in chain {
+        let [p0, p1, p2] = scaled_rotation_columns(&ancestor);
+        let apply = |v: Lanes| {
+            lanes_add(lanes_scale(p0, v[0]), lanes_add(lanes_scale(p1, v[1]), lanes_scale(p2, v[2])))
+        };
+        columns = [apply(columns[0]), apply(columns[1]), apply(columns[2])];
+        position = lanes_add(ancestor.position, apply(position));
+    }
+    let [c0, c1, c2] = columns;
+    Mat4::from_cols(
+        Vec4::new(c0[0], c0[1], c0[2], 0.),
+        Vec4::new(c1[0], c1[1], c1[2], 0.),
+        Vec4::new(c2[0], c2[1], c2[2], 0.),
+        Vec4::new(position[0], position[1], position[2], 1.),
+    )
+}
+
 impl UiPrefab {
     pub fn parse(bytes: &str) -> Result<Self, String> {
         serde_json::from_str(bytes).map_err(|e| e.to_string())
@@ -435,27 +533,31 @@ impl UiPrefab {
             active: true,
             clipping: clipping::UiClipping::default(),
         };
+        // The document root sits in a full-canvas transform with identity
+        // rotation and scale at the canvas centre; the frame is that
+        // transform's local space.
+        let top = LocalTrs { position: [0.; 4], rotation: [0., 0., 0., 1.], scale: [1.; 3] };
         let mut rects: Vec<UiRect> = Vec::with_capacity(self.nodes.len());
+        let mut locals: Vec<LocalTrs> = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter().enumerate() {
             let parent = self.indices.parents[i]
                 .map(|index| &rects[index])
                 .unwrap_or(&root);
             let r = rect_overrides.get(&i).unwrap_or(&node.rect);
-            let amin = Vec2::from_array(r.anchors_min);
-            let amax = Vec2::from_array(r.anchors_max);
             let pivot = Vec2::from_array(r.pivot);
             let size = rect_size(parent.size, parent.pivot, r);
-            let position = parent.size * (amin + (amax - amin) * pivot - parent.pivot)
-                + Vec2::from_array(r.anchored_position);
-            let local = Mat4::from_scale_rotation_translation(
-                Vec3::from_array(r.local_scale),
-                Quat::from_array(r.local_rotation),
-                position.extend(0.),
-            );
+            let position = local_position(parent.size, parent.pivot, r);
+            locals.push(LocalTrs {
+                position: [position.x, position.y, 0., 0.],
+                rotation: r.local_rotation,
+                scale: r.local_scale,
+            });
+            let ancestors = std::iter::successors(Some(i), |&j| self.indices.parents[j]);
+            let world = local_to_world(ancestors.map(|j| locals[j]).chain(std::iter::once(top)));
             rects.push(UiRect {
                 size,
                 pivot,
-                world: parent.world * local,
+                world,
                 active: parent.active && visible.get(&i).copied().unwrap_or(node.active),
                 clipping: clipping::UiClipping::default(),
             });
