@@ -142,6 +142,7 @@ pub(crate) struct AdmissionInputs<'w> {
     reservations: Option<Res<'w, FixtureActivityReservations>>,
     epoch: Option<Res<'w, GroundEpoch>>,
     supply: Option<Res<'w, FixtureSceneSupply>>,
+    walk: Option<Res<'w, crate::walk_face::WalkFace>>,
 }
 
 impl AdmissionInputs<'_> {
@@ -234,6 +235,29 @@ impl AdmissionInputs<'_> {
                 Availability::Unavailable
             },
         )
+    }
+
+    /// CanShowHouseEntryButton: GameState Normal (the scan runs only then)
+    /// and CanMoveDoorActionPoint, `MoveUtility.CanNavmeshMoveTargetPosition`
+    /// to the house's inside-door point: the static path query (both ends
+    /// mapped within its query box) succeeds and its last corner is within
+    /// `door_law::HOUSE_ENTRY_REACH` of the point horizontally.
+    pub(crate) fn house_entry(
+        &self,
+        player: Entity,
+        position: Vec3,
+        door: Vec3,
+    ) -> Result<bool, Deferred> {
+        self.navigation(player)?;
+        let walk = self
+            .walk
+            .as_deref()
+            .ok_or_else(|| Deferred::next_frame("walk field"))?;
+        Ok(walk.field.can_navmesh_move_target_position(
+            [position.x, position.z],
+            [door.x, door.z],
+            crate::site_move::door_law::HOUSE_ENTRY_REACH,
+        ))
     }
 
     /// IsCanActionFixture: a gimmick always can; a timeline fixture needs

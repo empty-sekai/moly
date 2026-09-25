@@ -756,7 +756,7 @@ impl CustomDataSlot {
 }
 
 impl SizeOverLifetimeParams {
-    fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
+    pub(crate) fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
         let obj = v.as_object().unwrap_or(&[]);
         let params = Self {
             separate_axes: bool_of(

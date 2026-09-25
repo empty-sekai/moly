@@ -106,6 +106,13 @@ fn parent_system(doc: &Value, source: &Value) -> (Runtime, Vec<BirthEdge>) {
 /// refuses is returned as that refusal.
 pub(super) fn parent_runtime(doc: &Value, source: &Value, edit: impl FnOnce(&mut Value))
     -> Result<(Runtime, EventEdges), String> {
+    parent_runtime_with(doc, source, edit, |_| {})
+}
+
+/// `parent_runtime` with `adjust` applied to the decoded emitter before the
+/// native path judges it (the admission's own emitter rewrites).
+pub(super) fn parent_runtime_with(doc: &Value, source: &Value, edit: impl FnOnce(&mut Value),
+    adjust: impl FnOnce(&mut moly_law::particle::EmitterParams)) -> Result<(Runtime, EventEdges), String> {
     let effect = source["effect"].as_str().unwrap();
     let node = source["node"].as_str().unwrap();
     let effect_doc = &doc["effects"][effect];
@@ -123,7 +130,8 @@ pub(super) fn parent_runtime(doc: &Value, source: &Value, edit: impl FnOnce(&mut
     let wrapped = json!({"effects": {effect: {"particles": [record]}}});
     let mut decoded = Effects::from_json_str(&serde_json::to_vec(&wrapped).unwrap()).unwrap();
     assert_eq!(decoded.emitters.len(), 1);
-    let emitter = decoded.emitters.remove(0);
+    let mut emitter = decoded.emitters.remove(0);
+    adjust(&mut emitter);
     let graph = crate::weather_fx::source_sub_emitter_owners(particles);
     let edges = crate::weather_fx::sub_emitter_edges(&emitter, &graph).expect("admission resolves the edges");
     let route = source_route(&record["system"]);
@@ -133,8 +141,8 @@ pub(super) fn parent_runtime(doc: &Value, source: &Value, edit: impl FnOnce(&mut
         .expect("native Shape emitter state");
     let mut system = test_support::runtime();
     // The simulation reads only the render mode and scaling of the geometry;
-    // an empty mesh stands in for the source GLB, and the flip (read by the
-    // mesh transform at draw time) is zero.
+    // an empty mesh stands in for the source GLB, and the flip and the axis
+    // body (read by the mesh transform at draw time) are zero and none.
     system.geometry = if mesh_renderer {
         let pivot: Vec<f32> = record["renderer"]["pivot"].as_array().unwrap().iter()
             .map(|v| v.as_f64().unwrap() as f32).collect();
@@ -146,6 +154,7 @@ pub(super) fn parent_runtime(doc: &Value, source: &Value, edit: impl FnOnce(&mut
                 .expect("source mesh alignment"),
             pivot: Vec3::new(pivot[0], pivot[1], pivot[2]),
             flip: Vec3::ZERO,
+            axis_body: None,
         })
     } else {
         test_support::source_billboard(scaling)
@@ -160,7 +169,7 @@ pub(super) fn parent_runtime(doc: &Value, source: &Value, edit: impl FnOnce(&mut
         RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve).unwrap());
     system.size_law = emitter.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).unwrap());
     system.color_law = emitter.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
-    system.custom_law = emitter.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).unwrap());
+    system.custom_law = emitter.custom_data.as_ref().map(|p| crate::particle_runtime::custom_data_law(p).unwrap());
     system.emitter = emitter;
     system.pool.clear();
     system.side.clear();

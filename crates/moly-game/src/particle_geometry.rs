@@ -19,6 +19,28 @@ impl Alignment {
     }
 }
 
+/// Render spaces whose source mesh kernel without 3D rotation is transcribed
+/// (`moly_law::particle::mesh_transform`): View, World and Local share one
+/// kernel body. The draw call passes that body a render-space angle: zero for
+/// World and Local, and for View while the renderer allows roll. View without
+/// roll passes a camera-derived angle, and Facing and Velocity have their own
+/// bodies; none of those is transcribed, so they have no variant here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AxisBody { View, World, Local }
+impl AxisBody {
+    pub(crate) fn of(alignment: Alignment, allow_roll: bool) -> Option<Self> {
+        match alignment {
+            Alignment::View if allow_roll => Some(Self::View),
+            Alignment::World => Some(Self::World),
+            Alignment::Local => Some(Self::Local),
+            Alignment::View | Alignment::Facing | Alignment::Velocity => None,
+        }
+    }
+    fn alignment(self) -> Alignment {
+        match self { Self::View => Alignment::View, Self::World => Alignment::World, Self::Local => Alignment::Local }
+    }
+}
+
 /// Authored MainModule scaling affects particle geometry, independently of
 /// simulation-space ownership. Local uses this emitter node, not its ancestors.
 /// `unit_chain` records whether the emitter node and every ancestor carry
@@ -57,6 +79,9 @@ pub(crate) struct Instance {
     pub seed: u32,
     /// Elapsed lifetime in percent; a mesh particle at 100 has zero size.
     pub age_percent: f32,
+    /// Axis of rotation (source basis) as the particle arrays carry it; read
+    /// only by a Mesh system whose arrays do not use 3D rotation.
+    pub axis: Vec3,
 }
 
 pub(crate) fn reflect(v: Vec3) -> Vec3 { Vec3::new(-v.x, v.y, v.z) }
@@ -112,7 +137,8 @@ pub(crate) fn mesh_size(particle: &Instance, flip: Vec3) -> Vec3 {
     if particle.age_percent >= 100.0 { Vec3::ZERO } else { particle.size * flip_signs(particle.seed, flip) }
 }
 
-/// Current CalculateMeshParticleTransform, verified against the independently
+/// Current CalculateMeshParticleTransform for particle arrays with 3D rotation
+/// (without it, `mesh_transform_about_axis`), verified against the independently
 /// measured combinations of all five alignments, both simulation spaces,
 /// nonuniform/negative scale, source XYZ rotation, mesh bounds, and pivot.
 /// Scale precedes the particle rotation in the matrix product: B * S * R * P.
@@ -138,6 +164,47 @@ pub(crate) fn mesh_transform(
     // which rounds differently once the columns are not axis aligned.
     let moved = linear.x_axis * offset.x + (linear.y_axis * offset.y + linear.z_axis * offset.z);
     Affine3A::from_mat3_translation(linear, particle.position + moved)
+}
+
+/// The law inputs of the source mesh kernel without 3D rotation for one
+/// particle: the aligned basis, the frame scale, the pivot offset and flip of
+/// `mesh_transform`, the render-space angle of an admitted body (zero), and
+/// the particle's Z rotation and axis of rotation. The particle position is
+/// already the world position, so the affine it goes through is the identity.
+pub(crate) fn axis_law_input(
+    particle: &Instance, frame: &Frame, body: AxisBody,
+    bounds_size: Vec3, pivot: Vec3, flip: Vec3,
+) -> (moly_law::particle::mesh_transform::MeshSpace, moly_law::particle::mesh_transform::AxisParticle) {
+    let basis = aligned_basis(body.alignment(), particle, frame);
+    let column = |c: Vec3| [c.x, c.y, c.z, 0.0];
+    let offset = bounds_size * Vec3::new(pivot.x, pivot.y, -pivot.z);
+    (moly_law::particle::mesh_transform::MeshSpace {
+        basis: [column(basis.x_axis), column(basis.y_axis), column(basis.z_axis)],
+        affine: Mat4::IDENTITY.to_cols_array(),
+        scale: frame.scale.to_array(),
+        offset: offset.to_array(),
+        flip: flip.to_array(),
+        angle: 0.0,
+    }, moly_law::particle::mesh_transform::AxisParticle {
+        position: particle.position.to_array(),
+        size: particle.size.to_array(),
+        age_percent: particle.age_percent,
+        seed: particle.seed,
+        rotation_z: particle.rotation.z,
+        axis: particle.axis.to_array(),
+    })
+}
+
+/// The source mesh transform of a particle whose arrays do not use 3D
+/// rotation: its Z rotation about its axis of rotation, composed with the
+/// render space as the source kernel does it (the law, word for word).
+pub(crate) fn mesh_transform_about_axis(
+    particle: &Instance, frame: &Frame, body: AxisBody,
+    bounds_size: Vec3, pivot: Vec3, flip: Vec3,
+) -> Affine3A {
+    let (space, input) = axis_law_input(particle, frame, body, bounds_size, pivot, flip);
+    let a = moly_law::particle::mesh_transform::about_axis(&space, &input).affine;
+    Affine3A::from_cols_array(&[a[0], a[1], a[2], a[4], a[5], a[6], a[8], a[9], a[10], a[12], a[13], a[14]])
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +276,10 @@ pub(crate) struct MeshDraw {
     pub pivot: Vec3,
     /// Authored renderer flip proportion per axis.
     pub flip: Vec3,
+    /// None when the particle arrays use 3D rotation (the Euler transform);
+    /// otherwise the transcribed render space of the transform about each
+    /// particle's axis of rotation, decided at admission.
+    pub axis_body: Option<AxisBody>,
 }
 
 fn take_v3(mesh: &mut Mesh, attribute: bevy::mesh::MeshVertexAttribute) -> Vec<[f32; 3]> {
@@ -238,7 +309,10 @@ pub(crate) fn write_mesh(mesh: &mut Mesh, draw: &MeshDraw, particles: &[Instance
     custom1.reserve(count); custom2.reserve(count); uv.reserve(count);
     indices.reserve(source.indices.len().saturating_mul(particles.len()));
     for particle in particles {
-        let transform = mesh_transform(particle, frame, draw.alignment, source.bounds_size, draw.pivot, draw.flip);
+        let transform = match draw.axis_body {
+            None => mesh_transform(particle, frame, draw.alignment, source.bounds_size, draw.pivot, draw.flip),
+            Some(body) => mesh_transform_about_axis(particle, frame, body, source.bounds_size, draw.pivot, draw.flip),
+        };
         let linear: Mat3 = transform.matrix3.into();
         let normal_transform = if linear.determinant().abs() > 1e-30 { linear.inverse().transpose() } else { Mat3::ZERO };
         let base = positions.len() as u32;
@@ -288,7 +362,7 @@ mod tests {
             if row["simulation"] == "Local" { position = rotation * (scale * position); velocity = rotation * (scale * velocity); }
             let instance = Instance { position, velocity, rotation: (vec(&row["particleRotation"]) * (std::f32::consts::PI / 180.0)),
                 size: vec(&row["particleSize"]), colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO,
-                seed: 0, age_percent: 0.0 };
+                seed: 0, age_percent: 0.0, axis: Vec3::Z };
             let alignment = match row["alignment"].as_str().unwrap() {
                 "View" => Alignment::View, "World" => Alignment::World, "Local" => Alignment::Local,
                 "Facing" => Alignment::Facing, "Velocity" => Alignment::Velocity, _ => panic!("unknown source alignment"),
@@ -357,7 +431,7 @@ mod tests {
             let zero = |c: usize, run: &[u32]| (0..3).all(|l| run[4 * c + l] & 0x7fff_ffff == 0);
             let native_dead = (0..3).all(|c| zero(c, &flipped) && zero(c, &plain));
             let unit = Instance { position: Vec3::ZERO, velocity: Vec3::ZERO, rotation: Vec3::ZERO, size: Vec3::ONE,
-                colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO, seed, age_percent: age };
+                colour: Vec4::ONE, custom1: Vec4::ZERO, custom2: Vec4::ZERO, seed, age_percent: age, axis: Vec3::Z };
             let ours = mesh_size(&unit, flip).to_array();
             let ours_dead = ours == [0.0; 3];
             // mesh_transform's own translation: the native unflipped columns as the basis, the base translation as

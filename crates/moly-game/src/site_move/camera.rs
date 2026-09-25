@@ -134,10 +134,20 @@ pub(crate) fn source_yaw(rotation: Quat) -> f32 {
 /// `OnExit` writes its transfer snapshot for the site being left; the
 /// PreSiteMoveAction hooks are empty.
 pub(crate) fn enter_pre_site_move(world: &mut World, site: &str) {
-    let Some(model) = world.get_resource::<FieldCameraModel>().cloned() else {
+    if !record_normal_exit(world, site) {
         warn!("[site-move] camera model not built: Normal exit snapshot skipped");
         world.resource_mut::<FieldCameraState>().0 = CameraStateType::PreSiteMoveAction;
         return;
+    }
+    world.resource_mut::<FieldCameraState>().0 = CameraStateType::PreSiteMoveAction;
+    info!("[site-move] camera Normal -> PreSiteMoveAction (Normal exit snapshot for {site})");
+}
+
+/// `NormalCameraState.OnExit`'s transfer snapshot for `site` (every Normal
+/// exit writes it, whichever state follows). False without a camera model.
+pub(crate) fn record_normal_exit(world: &mut World, site: &str) -> bool {
+    let Some(model) = world.get_resource::<FieldCameraModel>().cloned() else {
+        return false;
     };
     let snapshot = NormalCameraMemory {
         site: site.to_owned(),
@@ -152,8 +162,7 @@ pub(crate) fn enter_pre_site_move(world: &mut World, site: &str) {
         .get_resource_or_insert_with(CannonCameraTransfer::default)
         .0
         .insert(site.to_owned(), snapshot);
-    world.resource_mut::<FieldCameraState>().0 = CameraStateType::PreSiteMoveAction;
-    info!("[site-move] camera Normal -> PreSiteMoveAction (Normal exit snapshot for {site})");
+    true
 }
 
 /// `ChangeState(SiteMoveAction)`: `OnEnter` opens the pitch range (0, 360),

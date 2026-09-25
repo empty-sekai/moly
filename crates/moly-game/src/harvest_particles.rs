@@ -611,6 +611,7 @@ fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64)
         collision: None,
         rng: Rng(RNG_SEED ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false,
+        sub_emitter_max_lifetime: 0.0,
         cone_angle: None,
         rol: None,
         limit: None,

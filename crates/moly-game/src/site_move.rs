@@ -1,7 +1,17 @@
-//! The cannon site move between the home, harvest and delivery sites: the
-//! source's `SiteMoveActionExecutor` running `MoveSiteUseCannonActionState`
-//! (pre-action, the ordered Core timeline, the end action), with the game in
-//! `GameState.SiteMove` from admission until it returns to Normal.
+//! The site moves of the source's `SiteMoveActionExecutor`: `GetActionState`
+//! answers a switch with the cannon (`MoveSiteUseCannonActionState`, among
+//! the home, harvest and delivery sites) or one of the three door states
+//! (home and rooms, [`door`]); a room and a harvest or delivery site have no
+//! state (the source logs an error and returns null). Each move runs its
+//! pre-action, core and end action with the game in `GameState.SiteMove`
+//! from admission until it returns to Normal. A move can carry the next one:
+//! a room to an outdoor site is the source's nested `ChangeSiteEventData`
+//! (the door move home, then the cannon, in one `GameState.SiteMove`); an
+//! outdoor site to a room, which the source reaches only by two moves, is
+//! served as the cannon home then the home-to-room door move, named once as
+//! a product composition.
+//!
+//! The cannon:
 //!
 //! One site is loaded at a time. The source keeps every site at its master
 //! `SitePosition` in one world; here the loaded site is the origin. The Core
@@ -30,10 +40,15 @@
 mod arrival;
 pub(crate) mod camera;
 mod cannon;
+pub(crate) mod door;
+pub(crate) mod door_law;
+pub(crate) mod door_state;
 pub(crate) mod effects;
 pub(crate) mod products;
+pub(crate) mod room_door;
 mod speed_lines;
 pub(crate) mod timeline;
+pub(crate) mod wipe;
 
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::observer::On;
@@ -57,12 +72,45 @@ use timeline::{
     Step, TweenClock,
 };
 
-/// Queued by `site::read_switch` for a switch that `GetActionState` answers
-/// with the cannon state.
+/// Queued by `site::read_switch` for a switch between two different sites
+/// (`OnChangeSite`); the executor answers it with `GetActionState`.
 #[derive(Resource)]
 pub(crate) struct SiteMoveRequest {
     pub(crate) from: String,
     pub(crate) next: SiteSelection,
+    /// The move admitted when this one ends: the source's nested
+    /// `ChangeSiteEventData`, or the second leg of a product composition.
+    pub(crate) then: Option<SiteSelection>,
+    /// Names the product composition this chain serves (`None` for a source
+    /// move or the source's own nesting).
+    pub(crate) composition: Option<&'static str>,
+}
+
+/// `SiteMoveActionExecutor.GetActionState` over the two sites' kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionState {
+    Cannon,
+    Door(door_law::DoorKind),
+}
+
+fn action_state(from: &str, to: &str) -> Option<ActionState> {
+    use crate::weather_transition::SiteKind::{Delivery, Harvest, Home, Room};
+    use door_law::DoorKind;
+    let of = crate::weather_transition::SiteKind::of;
+    Some(match (of(from), of(to)) {
+        (Home, Room) => ActionState::Door(DoorKind::HomeToRoom),
+        (Room, Home) => ActionState::Door(DoorKind::RoomToHome),
+        (Room, Room) => ActionState::Door(DoorKind::RoomToRoom),
+        (Home | Harvest | Delivery, Home | Harvest | Delivery) => ActionState::Cannon,
+        (Room, Harvest | Delivery) | (Harvest | Delivery, Room) => return None,
+    })
+}
+
+/// A door move carried a nested move: its own Normal and `OnFinishEnterAsync`
+/// run after the nested move has returned.
+#[derive(Resource)]
+struct NestedOuter {
+    kind: door_law::DoorKind,
 }
 
 /// `GameState.SiteMove`: present from the move's admission until the
@@ -174,6 +222,9 @@ pub(crate) struct SiteMove {
     flying_started: bool,
     pending_segment: Option<PendingSegment>,
     records: Vec<StepRecord>,
+    /// The move admitted when this one ends (see [`SiteMoveRequest`]).
+    then: Option<SiteSelection>,
+    composition: Option<&'static str>,
     /// An exit state closed the intercept gate at the landing step.
     exit_gate_watch: bool,
     /// How the step being recorded became due (a delay's target, its
@@ -186,6 +237,25 @@ pub(crate) struct SiteMove {
 
 pub(crate) fn install(app: &mut App) {
     speed_lines::install(app);
+    wipe::install(app);
+    room_door::install(app);
+    app.add_systems(
+        Update,
+        (
+            room_door::ensure.before(advance),
+            (
+                room_door::advance,
+                wipe::advance,
+                (
+                    crate::player_state::update_house_states,
+                    door::after_states.run_if(resource_exists::<door::DoorMove>),
+                )
+                    .chain(),
+            )
+                .after(advance),
+            door::tag_house_entry,
+        ),
+    );
     app.add_systems(Startup, products::request);
     app.add_systems(Update, products::resolve.run_if(products::pending));
     app.add_observer(on_instance_ready)
@@ -195,7 +265,11 @@ pub(crate) fn install(app: &mut App) {
                 advance
                     .after(crate::site::read_switch)
                     .before(crate::site::plan)
-                    .run_if(resource_exists::<SiteMove>.or(resource_exists::<SiteMoveRequest>)),
+                    .run_if(
+                        resource_exists::<SiteMove>
+                            .or(resource_exists::<SiteMoveRequest>)
+                            .or(resource_exists::<door::DoorMove>),
+                    ),
                 advance_effects.run_if(resource_exists::<SiteMoveEffects>),
                 crate::player_state::update_site_exit_states.before(advance),
             ),
@@ -270,13 +344,56 @@ fn advance(world: &mut World) {
     let frame = u64::from(world.resource::<FrameCount>().0);
     let dt = world.resource::<Time>().delta_secs();
     if let Some(request) = world.remove_resource::<SiteMoveRequest>() {
-        if world.contains_resource::<SiteMove>() {
+        if world.contains_resource::<SiteMove>() || world.contains_resource::<door::DoorMove>() {
             warn!(
                 "[site-move] a move is already in progress; request for {} dropped",
                 request.next.site_type()
             );
         } else {
             admit(world, request, frame);
+        }
+    }
+    if world.contains_resource::<door::DoorMove>() {
+        let done = world.resource_scope(|world, mut session: Mut<door::DoorMove>| {
+            session.frame(world, frame, dt);
+            session.done()
+        });
+        if done {
+            let mut session = world
+                .remove_resource::<door::DoorMove>()
+                .expect("present above");
+            let from = session.to.clone();
+            match session.take_then() {
+                Some((next, composition)) => {
+                    // ChangeSiteCore: `NextEvent` runs its own OnChangeSite
+                    // before this move's Normal (the source's nesting), or
+                    // the product composition's second leg follows.
+                    let kind = session.kind;
+                    session.finish(world, composition.is_none());
+                    if composition.is_none() {
+                        world.insert_resource(NestedOuter { kind });
+                        info!(
+                            "[site-move] {}: ChangeSiteEventData.NextEvent: OnChangeSite({from} -> {}) nested, still in GameState SiteMove",
+                            kind.name(),
+                            next.site_type()
+                        );
+                    }
+                    admit(
+                        world,
+                        SiteMoveRequest {
+                            from,
+                            next,
+                            then: None,
+                            composition,
+                        },
+                        frame,
+                    );
+                }
+                None => {
+                    session.normal(world);
+                    session.finish(world, false);
+                }
+            }
         }
     }
     if !world.contains_resource::<SiteMove>() {
@@ -287,8 +404,29 @@ fn advance(world: &mut World) {
         matches!(session.stage, Stage::Done)
     });
     if done {
-        let session = world.remove_resource::<SiteMove>().expect("present above");
+        let mut session = world.remove_resource::<SiteMove>().expect("present above");
+        let then = session.then.take();
+        let composition = session.composition;
+        let from = session.to.clone();
         session.finish(world);
+        if let Some(outer) = world.remove_resource::<NestedOuter>() {
+            info!(
+                "[site-move] {} resumes after its nested move: GameState Normal (already Normal), OnFinishEnterAsync of {from} again (no product counterpart)",
+                outer.kind.name()
+            );
+        }
+        if let Some(next) = then {
+            admit(
+                world,
+                SiteMoveRequest {
+                    from,
+                    next,
+                    then: None,
+                    composition,
+                },
+                frame,
+            );
+        }
     }
 }
 
@@ -299,8 +437,33 @@ fn advance_effects(world: &mut World) {
 
 /// `OnChangeSite`: `GameState.SiteMove`, then `ChangeSiteProcessAsync`.
 fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
-    let SiteMoveRequest { from, next } = request;
+    let SiteMoveRequest {
+        from,
+        next,
+        then,
+        composition,
+    } = request;
     let to = next.site_type().to_owned();
+    if let Some(name) = composition {
+        info!(
+            "[site-move] product composition ({name}): {from} -> {to}{}",
+            then.as_ref().map_or(String::new(), |then| format!(
+                ", then -> {}",
+                then.site_type()
+            ))
+        );
+    }
+    match action_state(&from, &to) {
+        None => {
+            error!("[site-move] GetActionState({from}, {to}): the source has no move state for this pair and returns null; the request is dropped");
+            return;
+        }
+        Some(ActionState::Door(kind)) => {
+            door::admit(world, kind, from, next, then, composition, frame);
+            return;
+        }
+        Some(ActionState::Cannon) => {}
+    }
     let Some(sites) = world.get_resource::<crate::site::Sites>() else {
         error!("[site-move] site table missing at admission; switching immediately");
         immediate(world, next);
@@ -373,6 +536,8 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         flying_started: false,
         pending_segment: None,
         records: Vec::new(),
+        then,
+        composition,
         exit_gate_watch: false,
         due: None,
         fly_due: None,
@@ -1221,7 +1386,8 @@ enum SdStandIn {
 ///
 /// The stumble family (w or m) is the one of the player's idle and walk
 /// clips; the stumble loop segment is skipped because start plus end already
-/// exceed the source clip's 2.8 s.
+/// exceed the source clip's 2.8 s. The four house and room states of the
+/// door moves have their stand-ins in [`door_state`], chosen the same way.
 fn sd_stand_in(clip: SourceClip, clips: &PlayerVisualClips) -> Result<SdStandIn, String> {
     let family = |name: &str| name.get(4..6).map(str::to_owned);
     let (Some(idle_family), Some(walk_family)) = (family(&clips.idle), family(&clips.walk)) else {

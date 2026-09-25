@@ -70,9 +70,21 @@ pub enum PlayerActionState {
     Harvest,
     /// 10: the player's one-second fixture switch interval.
     SwitchGimmick,
-    /// 13: leaving the house on entry (`PlayerAvatarExitMoveHouseState`:
-    /// its Initialize closes the intercept gate; the entry's Finish opens it).
+    /// 11: walking into the house (`PlayerAvatarEnterMoveHouseState`, the
+    /// home-to-room move). Initialize closes the gate; at 2.0 s UpdateState
+    /// opens it, hides the avatar and goes Idle.
+    EnterMoveHouse,
+    /// 13: leaving the house (`PlayerAvatarExitMoveHouseState`, the entry and
+    /// the room-to-home move). Initialize closes the intercept gate; its
+    /// UpdateState only counts time; the move's Finish opens the gate.
     ExitMoveHouse,
+    /// 14: stepping into a room (`PlayerAvatarEnterMoveMyRoomState`).
+    /// Initialize closes the gate; at 1.0 s UpdateState opens it and goes Idle.
+    EnterMoveMyRoom,
+    /// 15: walking out of a room (`PlayerAvatarExitMoveMyRoomState`).
+    /// Initialize closes the gate; at 1.45 s UpdateState hides the avatar,
+    /// opens the gate and goes Idle.
+    ExitMoveMyRoom,
     /// 23：冲刺（`MoveTo` 的 dash 支；dash 位由替身键切换）。
     Dash,
     /// 28：演出家具（`ChangeStateUseTimelineFixture` 进）。家具会话
@@ -144,11 +156,60 @@ impl PlayerAvatarStates {
         self.state_elapsed = 0.0;
         if matches!(
             status,
-            PlayerActionState::ExitHarvestSite | PlayerActionState::ExitDeliverySite
+            PlayerActionState::ExitHarvestSite
+                | PlayerActionState::ExitDeliverySite
+                | PlayerActionState::EnterMoveHouse
+                | PlayerActionState::ExitMoveHouse
+                | PlayerActionState::EnterMoveMyRoom
+                | PlayerActionState::ExitMoveMyRoom
         ) {
             self.can_intercept = false;
         }
     }
+}
+
+/// Update, after the site-move executor (a state the move enters this frame
+/// counts this frame's delta, as the state machine's Update runs after the
+/// move's continuation): `UpdateState` of the four house and room states.
+/// The avatar is hidden through the player's visibility; the move shows it
+/// again.
+pub(crate) fn update_house_states(
+    time: Res<Time>,
+    mut states: ResMut<PlayerAvatarStates>,
+    mut players: Query<&mut Visibility, With<PlayerControlled>>,
+) {
+    use crate::site_move::door_law::{
+        state_timer, ENTER_MOVE_HOUSE_TIME, ENTER_MOVE_MY_ROOM_TIME, EXIT_MOVE_MY_ROOM_TIME,
+    };
+    let current = states.current;
+    let threshold = match current {
+        PlayerActionState::EnterMoveHouse => ENTER_MOVE_HOUSE_TIME,
+        PlayerActionState::EnterMoveMyRoom => ENTER_MOVE_MY_ROOM_TIME,
+        PlayerActionState::ExitMoveMyRoom => EXIT_MOVE_MY_ROOM_TIME,
+        // ExitMoveHouse only counts its time.
+        PlayerActionState::ExitMoveHouse => f32::INFINITY,
+        _ => return,
+    };
+    let (elapsed, act) = state_timer(states.state_elapsed, time.delta_secs(), threshold);
+    states.state_elapsed = elapsed;
+    if !act {
+        return;
+    }
+    let hide = matches!(
+        current,
+        PlayerActionState::EnterMoveHouse | PlayerActionState::ExitMoveMyRoom
+    );
+    if hide {
+        for mut visibility in &mut players {
+            *visibility = Visibility::Hidden;
+        }
+    }
+    states.can_intercept = true;
+    info!(
+        "[player-state] {current:?}: {elapsed:.4}s >= {threshold}: gate open{}, next state Idle",
+        if hide { ", avatar hidden" } else { "" }
+    );
+    states.change_status(PlayerActionState::Idle);
 }
 
 /// Update: `UpdateState` of the two site exit states. `ElapsedTime` grows by

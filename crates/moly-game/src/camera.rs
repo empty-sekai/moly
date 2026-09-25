@@ -1853,6 +1853,9 @@ pub(crate) fn follow_avatar(
         // DoTweenCameraSetting; the per-frame write is
         // `site_move::camera::update`, which runs right after this system.
         CameraStateType::SiteMoveAction | CameraStateType::PreSiteMoveAction => {}
+        // The door moves switch to None while the player walks out of a
+        // room: no state updates the camera, which stays where it is.
+        CameraStateType::None => {}
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，
