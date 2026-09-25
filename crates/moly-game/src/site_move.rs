@@ -325,7 +325,10 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         let region = world
             .get_resource::<crate::site::NavMeshSourceRegion>()
             .copied();
-        next.restored_layout(sites, layouts, region)
+        // The loader completes a home layout with the player's house, so the
+        // arrival reads the same completed layout.
+        let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+        next.restored_layout(sites, layouts, region, homes)
     });
     let arrival = arrival::Arrival::for_destination(&server, &to_place.category, layout);
     let delta = to_place.product_origin() - from_place.product_origin();
