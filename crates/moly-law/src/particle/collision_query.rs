@@ -18,6 +18,19 @@
 //! does not know those slots' contents returns `None` for them: the call is
 //! then exact only when no queried lane can reach any collider the mask can
 //! return, and refused otherwise.
+//!
+//! Several colliders: the selection takes the colliders in the order the
+//! overlap stored its touches. The nearest hit wins only on a strictly
+//! smaller travel, so a tie keeps the earlier collider; a touching start ends
+//! the lane with no hit and a penetrating one returns at once, so which of two
+//! such starts comes first decides the answer. A scene that cannot give the
+//! broadphase order says so ([`CollisionScene::order_known`]); every lane is
+//! then selected over all orders of the colliders that hit it. The answer is
+//! kept when every order gives the same hit point and normal (bit for bit),
+//! or, when the hits differ, when every order's hit gives the same written
+//! particle (position, velocity, age) and the same event record (the random
+//! advance follows the hit count, the events the written particle); the call
+//! is refused by name when two orders write differently.
 
 use crate::particle::armf as a;
 use crate::particle::collision_event::{record_emit, CollisionEmitEdge, EventParent, RecordedEmit};
@@ -75,7 +88,19 @@ pub enum Refused {
     PastEndLanes,
     /// The scene could not give the engine's answer to a query of this call.
     Scene(&'static str),
+    /// The scene could not give the broadphase order, and on `dependent`
+    /// lanes of the call two orders of the colliders that hit write the
+    /// particle differently (`order_free` other lanes had several hits whose
+    /// orders all agreed).
+    OrderDependent { dependent: usize, order_free: usize },
+    /// The scene could not give the broadphase order, and the order decides
+    /// more than the law evaluates: more touches than the shape limit keeps,
+    /// or more than six colliders hitting one lane.
+    OrderUnbounded,
 }
+
+/// The most colliders hitting one lane whose orders are all evaluated.
+const MAX_UNORDERED_HITS: usize = 6;
 
 /// The particle-state flags the module reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +208,12 @@ pub trait CollisionScene {
     fn refusal(&self) -> Option<&'static str> {
         None
     }
+    /// Whether the last overlap returned its colliders in the engine's
+    /// order. When not, the law selects over every order of the colliders
+    /// that hit a lane and refuses a lane the order decides.
+    fn order_known(&self) -> bool {
+        true
+    }
 }
 
 /// One selected hit, in simulation coordinates after the owner inverse.
@@ -193,8 +224,16 @@ pub struct HitRecord {
     pub direction: [f32; 3],
     pub normal: [f32; 3],
     pub point: [f32; 3],
+    /// With `order_free`, the hit of the scene's listed order: the engine's
+    /// order may pick another collider, with the same point and normal or
+    /// with a hit that writes the particle the same, and no output reads the
+    /// hit records' ids, points or normals while collision messages are
+    /// refused.
     pub collider_id: i32,
     pub body_id: i32,
+    /// Selected over every order of several colliders that hit the lane, all
+    /// giving this point and normal or writing the particle the same.
+    pub order_free: bool,
 }
 
 /// One particle the response wrote.
@@ -217,6 +256,9 @@ pub struct UpdateOutcome {
     /// Slots past the end were not known and no queried lane reached a
     /// collider, so the call made no sweep.
     pub past_end_unreached: bool,
+    /// Lanes selected over every order of several colliders that hit them
+    /// (the scene could not give the broadphase order), all orders agreeing.
+    pub order_free: usize,
 }
 
 /// One per-particle selection, in call order.
@@ -398,20 +440,39 @@ impl CollisionLaw {
         if let Some(trace) = trace.as_deref_mut() {
             trace.packs = packs.iter().map(pack_words).collect();
         }
-        let mut hits = self.find(&packs, input.dt, to, scene, trace.as_deref_mut());
+        let found = self.find(&packs, input.dt, to, scene, trace.as_deref_mut());
         if let Some(reason) = scene.refusal() {
             return Err(Refused::Scene(reason));
         }
-        if let Some(owner) = owner {
-            for hit in &mut hits {
-                let simulated = if arms::on("hostNormalize") {
-                    host_normalized(owner.world_to_local, hit.point, hit.normal)
-                } else {
-                    world_hit_to_simulation(owner.world_to_local, hit.index as usize, hit.point, hit.normal)
-                };
-                hit.point = simulated.point;
-                hit.normal = simulated.normal;
+        let Found { choices, mut order_free } = found?;
+        let mut hits = Vec::with_capacity(choices.len());
+        let mut dependent = 0;
+        for choice in choices {
+            match choice {
+                Choice::Hit(hit) => hits.push(hit),
+                Choice::Alternatives(answers) => {
+                    // What each order's answer writes: the particle and, from
+                    // it, the event record; a no-hit writes nothing and
+                    // changes the random advance.
+                    let written = answers.iter().map(|answer| answer.map(|hit| self.written_words(particles, owner, hit))
+                        .transpose().map(|words| (words, answer.filter(|_| arms::on("orderFreeComparesIds"))
+                            .map(|hit| hit.collider_id))))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if !arms::on("orderFreeComparesHits") && written.iter().all(|w| *w == written[0]) {
+                        order_free += 1;
+                        hits.extend(answers[0].map(|hit| HitRecord { order_free: true, ..hit }));
+                    } else {
+                        dependent += 1;
+                    }
+                }
             }
+        }
+        if dependent > 0 {
+            return Err(Refused::OrderDependent { dependent, order_free });
+        }
+        outcome.order_free = order_free;
+        for hit in &mut hits {
+            *hit = to_simulation(owner, *hit);
         }
         if !hits.is_empty() {
             outcome.draws = hits.len().div_ceil(4) * 3;
@@ -449,6 +510,26 @@ impl CollisionLaw {
         outcome.hits = hits;
         *state = next;
         Ok(outcome)
+    }
+
+    /// What the response writes for one hit (the world hit taken into
+    /// simulation space): the particle's position, velocity and age, the
+    /// normalized age and whether it records an event.
+    fn written_words(&self, particles: &dyn CollisionParticles, owner: Option<OwnerPair>, hit: HitRecord)
+        -> Result<[u32; 9], Refused> {
+        let hit = to_simulation(owner, hit);
+        let p = particles.lane(hit.index as usize).ok_or(Refused::MissingParticle)?;
+        let modifier = self.flags.speed_modifier.then_some(p.speed_modifier);
+        let out = self.response.respond(p.position, p.velocity, p.animated, modifier, p.age_percent, hit.point, hit.normal);
+        let mut words = [0u32; 9];
+        for k in 0..3 {
+            words[k] = out.position[k].to_bits();
+            words[3 + k] = out.velocity[k].to_bits();
+        }
+        words[6] = out.age_percent.to_bits();
+        words[7] = out.normalized_age.to_bits();
+        words[8] = u32::from(out.records_event);
+        Ok(words)
     }
 
     /// The query packs, with `None` for a lane whose slot is not known.
@@ -507,9 +588,10 @@ impl CollisionLaw {
     /// FindParticleIntersections: the batch box, one overlap, the collider
     /// boxes, the pack tests and the per-lane selections.
     fn find(&self, packs: &[[Lane; 4]], dt: [f32; 4], to: usize, scene: &mut dyn CollisionScene,
-        mut trace: Option<&mut Trace>) -> Vec<HitRecord> {
+        mut trace: Option<&mut Trace>) -> Result<Found, Refused> {
+        let mut found = Found::default();
         if self.max_shapes < 1 {
-            return Vec::new();
+            return Ok(found);
         }
         let mut lo = [f32::INFINITY; 3];
         let mut hi = [f32::NEG_INFINITY; 3];
@@ -534,15 +616,18 @@ impl CollisionLaw {
             trace.overlap = Some(query);
         }
         let mut candidates = scene.overlap(&query);
+        let ordered = scene.order_known() || arms::on("orderFreeTrustListed");
+        if !ordered && candidates.len() > self.max_shapes as usize {
+            return Err(Refused::OrderUnbounded);
+        }
         candidates.truncate(self.max_shapes as usize);
         if candidates.is_empty() {
-            return Vec::new();
+            return Ok(found);
         }
         if let Some(trace) = trace.as_deref_mut() {
             trace.bounds_calls = candidates.len();
         }
         let boxes: Vec<_> = candidates.iter().map(candidate_box).collect();
-        let mut hits = Vec::new();
         for pack in packs {
             let lanes: [([f32; 3], [f32; 3]); 4] = std::array::from_fn(|l| lane_box(&pack[l].query));
             let passes = boxes.iter().any(|(sc, se)| {
@@ -561,13 +646,25 @@ impl CollisionLaw {
                 if dt[l] < TINY || lane.index as usize >= to {
                     continue;
                 }
-                if let Some(hit) = self.intersect(lane, direction, lanes[l], length, &candidates, &boxes,
-                    scene, trace.as_deref_mut()) {
-                    hits.push(hit);
+                let selected = if ordered {
+                    Selected::Hit(self.intersect(lane, direction, lanes[l], length, &candidates, &boxes,
+                        scene, trace.as_deref_mut()))
+                } else {
+                    self.intersect_unordered(lane, direction, lanes[l], length, &candidates, &boxes,
+                        scene, trace.as_deref_mut())
+                };
+                match selected {
+                    Selected::Hit(hit) => found.choices.extend(hit.map(Choice::Hit)),
+                    Selected::OrderFree(hit) => {
+                        found.order_free += 1;
+                        found.choices.extend(hit.map(Choice::Hit));
+                    }
+                    Selected::Alternatives(answers) => found.choices.push(Choice::Alternatives(answers)),
+                    Selected::Unbounded => return Err(Refused::OrderUnbounded),
                 }
             }
         }
-        hits
+        Ok(found)
     }
 
     /// ParticleIntersect: the nearest hit over the candidates whose boxes
@@ -618,19 +715,24 @@ impl CollisionLaw {
                 normal = if span > REPAIR_MIN { v.map(|x| a::div(x, span)) } else { [0.0, 0.0, 1.0] };
             }
             let travel = a::sub(hit.distance, skin);
-            if !(travel < best) || candidate.is_trigger {
+            let nearer = if arms::on("tieTakesLater") { travel <= best } else { travel < best };
+            if !nearer || candidate.is_trigger {
                 continue;
             }
             let collider_id = candidate.collider_id;
             let body_id = candidate.body_id.unwrap_or(collider_id);
-            if hit.distance > 0.0 {
+            if hit.distance > 0.0 || (arms::on("penetrationRecorded") && hit.distance < 0.0) {
                 let point = std::array::from_fn(|k| a::add(a::mul(direction[k], travel), start[k]));
-                result = Some(HitRecord { index: lane.index, start, direction, normal, point, collider_id, body_id });
+                result = Some(HitRecord { index: lane.index, start, direction, normal, point, collider_id, body_id,
+                    order_free: false });
                 best = travel;
                 record.returned = Some(i);
                 continue;
             }
             if hit.distance == 0.0 {
+                if arms::on("touchContinues") {
+                    continue;
+                }
                 record.returned = None;
                 finish(record, sweeps, trace);
                 return None;
@@ -638,10 +740,206 @@ impl CollisionLaw {
             record.returned = Some(i);
             finish(record, sweeps, trace);
             let point = std::array::from_fn(|k| a::sub(start[k], a::mul(normal[k], travel)));
-            return Some(HitRecord { index: lane.index, start, direction, normal: normal.map(a::neg), point, collider_id, body_id });
+            return Some(HitRecord { index: lane.index, start, direction, normal: normal.map(a::neg), point, collider_id, body_id,
+                order_free: false });
         }
         finish(record, sweeps, trace);
         result
+    }
+
+    /// ParticleIntersect when the scene cannot give the broadphase order:
+    /// every candidate whose box meets the lane's is swept (the sweeps are
+    /// pure, so the ones the engine skips after an early return change
+    /// nothing), and the selection runs over every order of the non-trigger
+    /// colliders that hit (a miss or a trigger never changes the selection,
+    /// wherever it stands). With one such collider there is one answer;
+    /// with several, the answer is kept when every order gives the same hit
+    /// or the same no-hit, bit for bit in point and normal; otherwise every
+    /// distinct answer goes back for the comparison of what each writes.
+    #[allow(clippy::too_many_arguments)]
+    fn intersect_unordered(&self, lane: &Lane, direction: [f32; 3], (pc, pe): ([f32; 3], [f32; 3]), length: f32,
+        candidates: &[Candidate], boxes: &[([f32; 3], [f32; 3])], scene: &mut dyn CollisionScene,
+        trace: Option<&mut Trace>) -> Selected {
+        let start = lane.query.start;
+        let r = lane.query.radius;
+        let skin = if arms::on("noSkin") { 0.0 } else { a::mul(r, SKIN) };
+        let sphere_radius = a::max_nm(a::sub(r, skin), TINY);
+        let distance = a::add(skin, length);
+        let mut sweeps = Vec::new();
+        let mut hits: Vec<Swept> = Vec::new();
+        for (i, candidate) in candidates.iter().enumerate() {
+            let (sc, se) = boxes[i];
+            if !(0..3).all(|k| a::abs(a::sub(sc[k], pc[k])) <= a::add(pe[k], se[k])) {
+                continue;
+            }
+            let request = SweepRequest { shape: i, particle: lane.index, origin: start, direction, distance, sphere_radius };
+            sweeps.push(request);
+            let Some(hit) = scene.sweep_sphere(&request) else {
+                continue;
+            };
+            if candidate.is_trigger {
+                continue;
+            }
+            hits.push(Swept { shape: i, normal: repaired_normal(&hit, sc), distance: hit.distance,
+                travel: a::sub(hit.distance, skin) });
+        }
+        let answer = |order: &[usize]| -> Option<(usize, HitRecord)> {
+            let (k, penetrating) = select_in_order(order.iter().map(|&k| (k, &hits[k])))?;
+            let s = &hits[k];
+            let candidate = &candidates[s.shape];
+            let collider_id = candidate.collider_id;
+            let body_id = candidate.body_id.unwrap_or(collider_id);
+            let (normal, point) = if penetrating {
+                (s.normal.map(a::neg), std::array::from_fn(|c| a::sub(start[c], a::mul(s.normal[c], s.travel))))
+            } else {
+                (s.normal, std::array::from_fn(|c| a::add(a::mul(direction[c], s.travel), start[c])))
+            };
+            Some((s.shape, HitRecord { index: lane.index, start, direction, normal, point, collider_id, body_id,
+                order_free: hits.len() > 1 }))
+        };
+        let listed: Vec<usize> = (0..hits.len()).collect();
+        let first = answer(&listed);
+        let selected = if hits.len() > MAX_UNORDERED_HITS {
+            Selected::Unbounded
+        } else if hits.len() > 1 {
+            let key = |x: &Option<(usize, HitRecord)>| x.map(|(shape, h)| {
+                let id = if arms::on("orderFreeComparesIds") { shape } else { 0 };
+                (id, h.normal.map(f32::to_bits), h.point.map(f32::to_bits))
+            });
+            let expected = key(&first);
+            let mut answers: Vec<Option<HitRecord>> = vec![first.map(|(_, hit)| hit)];
+            let mut keys = vec![expected];
+            each_order(hits.len(), &mut |order| {
+                let this = answer(order);
+                let k = key(&this);
+                if !keys.contains(&k) {
+                    keys.push(k);
+                    answers.push(this.map(|(_, hit)| hit));
+                }
+            });
+            if answers.len() == 1 { Selected::OrderFree(answers[0]) } else { Selected::Alternatives(answers) }
+        } else {
+            Selected::Hit(first.map(|(_, hit)| hit))
+        };
+        if let Some(trace) = trace {
+            trace.intersects.push(IntersectRecord {
+                particle: lane.index,
+                start,
+                direction,
+                aabb: [pc[0], pc[1], pc[2], pe[0], pe[1], pe[2]],
+                length,
+                radius: r,
+                candidates: candidates.len(),
+                returned: first.map(|(shape, _)| shape),
+            });
+            trace.sweeps.extend(sweeps);
+        }
+        selected
+    }
+}
+
+/// What `find` selected over the call's lanes, in lane order.
+#[derive(Default)]
+struct Found {
+    choices: Vec<Choice>,
+    order_free: usize,
+}
+
+/// One lane's hit, or the distinct answers of the orders of its colliders.
+enum Choice {
+    Hit(HitRecord),
+    Alternatives(Vec<Option<HitRecord>>),
+}
+
+/// One lane's selection.
+enum Selected {
+    Hit(Option<HitRecord>),
+    /// Several colliders hit in an unknown order and every order agrees.
+    OrderFree(Option<HitRecord>),
+    /// Two orders of the colliders that hit give different hits: every
+    /// distinct answer, the scene's listed order's first.
+    Alternatives(Vec<Option<HitRecord>>),
+    /// More colliders hit than the orders evaluated.
+    Unbounded,
+}
+
+/// A world hit taken into simulation space by the owner inverse (the World
+/// space's hit is already there).
+fn to_simulation(owner: Option<OwnerPair>, mut hit: HitRecord) -> HitRecord {
+    if let Some(owner) = owner {
+        let simulated = if arms::on("hostNormalize") {
+            host_normalized(owner.world_to_local, hit.point, hit.normal)
+        } else {
+            world_hit_to_simulation(owner.world_to_local, hit.index as usize, hit.point, hit.normal)
+        };
+        hit.point = simulated.point;
+        hit.normal = simulated.normal;
+    }
+    hit
+}
+
+/// One non-trigger collider's hit, as the selection compares it.
+#[derive(Clone, Copy)]
+struct Swept {
+    shape: usize,
+    normal: [f32; 3],
+    distance: f32,
+    travel: f32,
+}
+
+/// A non-finite hit normal rebuilt as ParticleIntersect rebuilds it.
+fn repaired_normal(hit: &SweepHit, centre: [f32; 3]) -> [f32; 3] {
+    if hit.normal.iter().all(|v| v.is_finite()) {
+        return hit.normal;
+    }
+    let v: [f32; 3] = std::array::from_fn(|k| a::sub(hit.position[k], centre[k]));
+    let span = a::sqrt(a::add(a::add(a::mul(v[0], v[0]), a::mul(v[1], v[1])), a::mul(v[2], v[2])));
+    if span > REPAIR_MIN { v.map(|x| a::div(x, span)) } else { [0.0, 0.0, 1.0] }
+}
+
+/// ParticleIntersect's selection over hits in one order: the key of the
+/// selected hit and whether it is a penetrating start, or `None` for no hit
+/// or a touching start.
+fn select_in_order<'s>(order: impl Iterator<Item = (usize, &'s Swept)>) -> Option<(usize, bool)> {
+    let mut best = f32::INFINITY;
+    let mut result = None;
+    for (k, s) in order {
+        if !(s.travel < best) {
+            continue;
+        }
+        if s.distance > 0.0 {
+            result = Some((k, false));
+            best = s.travel;
+            continue;
+        }
+        if s.distance == 0.0 {
+            return None;
+        }
+        return Some((k, true));
+    }
+    result
+}
+
+/// Calls `visit` with every order of `0..n` (Heap's algorithm).
+fn each_order(n: usize, visit: &mut dyn FnMut(&[usize])) {
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut c = vec![0usize; n];
+    visit(&order);
+    let mut i = 0;
+    while i < n {
+        if c[i] < i {
+            if i % 2 == 0 {
+                order.swap(0, i);
+            } else {
+                order.swap(c[i], i);
+            }
+            visit(&order);
+            c[i] += 1;
+            i = 0;
+        } else {
+            c[i] = 0;
+            i += 1;
+        }
     }
 }
 

@@ -156,7 +156,7 @@ struct Planned {
     /// The trail draw of a system with a qualified TrailModule: the renderer's
     /// trail material and trail vertex streams, drawn after the particles.
     trail: Option<PlannedTrail>,
-    /// The effect's ground scene for a system with a CollisionModule; the
+    /// The installed effects' ground scene for a system with a CollisionModule; the
     /// native birth installer installs the module with it.
     collision_scene: Option<Arc<crate::particle_runtime::collision_scene::GroundScene>>,
 }
@@ -175,9 +175,22 @@ pub(crate) struct WeatherFxPlan {
     site_installed: bool,
     global_installed: bool,
     planned: Vec<Planned>,
+    /// The colliders each selected effect adds to the physics scene when it
+    /// is installed.
+    colliders: Vec<PlannedColliders>,
     tally: Tally,
     tier: String,
     env_site: String,
+}
+
+/// One selected effect's colliders, installed into the physics scene with
+/// the effect and removed when the stopped effect is destroyed.
+struct PlannedColliders {
+    kind: EffectKind,
+    effect: String,
+    scene: Arc<crate::particle_runtime::collision_scene::GroundScene>,
+    /// The effect's own delay from Stop to its destruction.
+    destroy_delay: f64,
 }
 
 /// 逐档盘点。**每一格都是「这一档有多少条被挡在外面」**——盘面上看得见
@@ -315,6 +328,10 @@ impl WeatherFxState {
                         "refusedCommands": target.refused,
                         "lastRefusal": target.last_refusal,
                     })),
+                    "collision": s.collision.as_ref().map(|collision| serde_json::json!({
+                        "calls": collision.calls, "hits": collision.hits, "draws": collision.draws,
+                        "unreached": collision.unreached, "orderFree": collision.order_free,
+                    })),
                     "trail": s.trail.as_ref().map(|trail| serde_json::json!({
                         "clock": trail.clock.time,
                         "rings": trail.rings.len(),
@@ -379,21 +396,61 @@ struct RetiringEmitter {
 #[derive(Resource, Default)]
 pub(crate) struct WeatherFxRetirements {
     live: Vec<RetiringEmitter>,
+    /// The site's physics scene the collision systems query: the colliders
+    /// of every installed effect, a stopped effect's until it is destroyed.
+    physics: crate::particle_runtime::collision_scene::SiteScene,
+    /// The installed effects' collider entries: kind, entry and the effect's
+    /// destroy delay.
+    installed_colliders: Vec<(EffectKind, u64, f64)>,
+    /// Stopped effects' collider entries and when their effect is destroyed.
+    retiring_colliders: Vec<(u64, f64)>,
 }
 
 impl WeatherFxRetirements {
     fn stop(&mut self, active: &mut WeatherFxState, now: f64) {
         self.stop_matching(active, now, |_| true);
     }
-    fn stop_matching(&mut self, active: &mut WeatherFxState, now: f64, predicate: impl Fn(&LiveWeatherEmitter)->bool) {
+    /// Stops every installed effect of the matching kinds: its systems stop
+    /// emitting and its colliders stay in the physics scene until the
+    /// effect's own destroy delay has run out.
+    fn stop_matching(&mut self, active: &mut WeatherFxState, now: f64, kinds: impl Fn(EffectKind)->bool) {
         let mut kept = Vec::new();
         for emitter in std::mem::take(&mut active.live) {
-            if predicate(&emitter) {
+            if kinds(emitter.kind) {
                 self.live.push(RetiringEmitter {destroy_at: now + emitter.lifecycle.time_until_destroy(), emitter});
             } else { kept.push(emitter); }
         }
         active.live = kept;
         active.admitted = active.live.len();
+        let (stopped, installed): (Vec<_>, Vec<_>) = std::mem::take(&mut self.installed_colliders).into_iter()
+            .partition(|(kind, _, _)| kinds(*kind));
+        self.installed_colliders = installed;
+        self.retiring_colliders.extend(stopped.into_iter().map(|(_, entry, delay)| (entry, now + delay)));
+    }
+    /// Installs the colliders of the plan's effects of the matching kinds.
+    fn install_colliders(&mut self, planned: &[PlannedColliders], kinds: impl Fn(EffectKind)->bool) {
+        for colliders in planned.iter().filter(|colliders| kinds(colliders.kind)) {
+            let entry = self.physics.install(colliders.scene.clone());
+            self.installed_colliders.push((colliders.kind, entry, colliders.destroy_delay));
+            if colliders.scene.collider_count() > 0 {
+                info!(effect=%colliders.effect, colliders=colliders.scene.collider_count(),
+                    "[weather-fx] effect colliders installed in the physics scene");
+            }
+        }
+    }
+    /// Removes the colliders of every stopped effect destroyed by `now`.
+    fn expire_colliders(&mut self, now: f64) {
+        let physics = self.physics.clone();
+        self.retiring_colliders.retain(|(entry, destroy_at)| {
+            if now < *destroy_at { return true; }
+            physics.remove(*entry);
+            false
+        });
+    }
+    fn clear_colliders(&mut self) {
+        self.physics.clear();
+        self.installed_colliders.clear();
+        self.retiring_colliders.clear();
     }
 }
 
@@ -410,6 +467,7 @@ pub(crate) fn expire_retirements(
         if let Some((trail, _)) = entry.emitter.trail_draw { commands.entity(trail).try_despawn(); }
         false
     });
+    retiring.expire_colliders(now);
 }
 
 /// Stage a new request. Keep old effects running until the replacement is ready.
@@ -535,39 +593,23 @@ pub(crate) fn plan(
     };
     let mut scenes = crate::particle_runtime::collision_scene::SceneBuilder::new(collision_document);
 
-    // ---- 选 effect：sky/camera 各一条（专属优先、全局回退），site 全装 ----
-    // 语料里每个 (档, 类) 至多一个匹配，挑选与对象序无关。
-    let unique = format!("unique__{}", doc.env_site);
-    let mut selected: Vec<(String, &Value)> = Vec::new();
-    for kind in ["sky", "camera"] {
-        let mut pick = None;
-        for (name, effect) in effects {
-            if effect_kind_of(effect) == Some(kind)
-                && effect_variant_of(effect) == Some(unique.as_str())
-            {
-                pick = Some((name.clone(), effect));
-                break;
-            }
-        }
-        if pick.is_none() {
-            for (name, effect) in effects {
-                if effect_kind_of(effect) == Some(kind)
-                    && effect_variant_of(effect) == Some("global")
-                {
-                    pick = Some((name.clone(), effect));
-                    break;
-                }
-            }
-        }
-        if let Some(pick) = pick {
-            selected.push(pick);
-        }
-    }
-    for (name, effect) in effects {
-        if effect_kind_of(effect) == Some("site")
-            && effect_variant_of(effect) == Some(unique.as_str())
-        {
-            selected.push((name.clone(), effect));
+    let selected = selected_effects(effects, &doc.env_site);
+    // Every collision system of the plan queries the colliders of all the
+    // effects it installs (and of the stopped ones still retiring).
+    let names: Vec<&str> = selected.iter().map(|(name, _)| name.as_str()).collect();
+    scenes.select(crate::particle_runtime::collision_scene::Installation::Together(&names));
+    let mut colliders = Vec::new();
+    for (name, effect) in &selected {
+        let kind = match effect_kind_of(effect) {
+            Some("sky") => EffectKind::Sky,
+            Some("camera") => EffectKind::Camera,
+            Some("site") => EffectKind::Site,
+            _ => continue,
+        };
+        let Ok(lifecycle) = WeatherEffectLifecycle::from_effect(effect) else { continue; };
+        if let Ok(scene) = scenes.effect_colliders(name) {
+            colliders.push(PlannedColliders { kind, effect: name.clone(), scene,
+                destroy_delay: lifecycle.time_until_destroy() });
         }
     }
 
@@ -682,11 +724,51 @@ pub(crate) fn plan(
     commands.insert_resource(WeatherFxPlan {
         selection: selection.clone(), request_serial:doc.request_serial, site_started_at:None, site_installed:false, global_installed:false,
         planned: plans,
+        colliders,
         tally,
         tier: doc.tier.clone(),
         env_site: doc.env_site.clone(),
     });
     commands.remove_resource::<WeatherFxDoc>();
+}
+
+/// ---- 选 effect：sky/camera 各一条（专属优先、全局回退），site 全装 ----
+/// 语料里每个 (档, 类) 至多一个匹配，挑选与对象序无关。
+pub(crate) fn selected_effects<'v>(effects: &'v serde_json::Map<String, Value>, env_site: &str) -> Vec<(String, &'v Value)> {
+    let unique = format!("unique__{env_site}");
+    let mut selected: Vec<(String, &Value)> = Vec::new();
+    for kind in ["sky", "camera"] {
+        let mut pick = None;
+        for (name, effect) in effects {
+            if effect_kind_of(effect) == Some(kind)
+                && effect_variant_of(effect) == Some(unique.as_str())
+            {
+                pick = Some((name.clone(), effect));
+                break;
+            }
+        }
+        if pick.is_none() {
+            for (name, effect) in effects {
+                if effect_kind_of(effect) == Some(kind)
+                    && effect_variant_of(effect) == Some("global")
+                {
+                    pick = Some((name.clone(), effect));
+                    break;
+                }
+            }
+        }
+        if let Some(pick) = pick {
+            selected.push(pick);
+        }
+    }
+    for (name, effect) in effects {
+        if effect_kind_of(effect) == Some("site")
+            && effect_variant_of(effect) == Some(unique.as_str())
+        {
+            selected.push((name.clone(), effect));
+        }
+    }
+    selected
 }
 
 /// Module capability is checked from the complete serialized inventory, not
@@ -1291,8 +1373,8 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: {error}")); return None;
         }
     }
-    // A CollisionModule runs only on the native birth path with a scene of
-    // the effect's ground collider. The module law (with its current-size
+    // A CollisionModule runs only on the native birth path with the physics
+    // scene of the installed effects. The module law (with its current-size
     // stream and its collision events) is checked here; the scene is bound
     // (or refused by name) after every other gate, below.
     if emitter.collision.is_some() {
@@ -1546,8 +1628,8 @@ fn judge_in_archive(
             }
         }
     };
-    // Every other gate passed: the scene of the effect's ground collider,
-    // bound here or refused by name.
+    // Every other gate passed: the ground scene of the effects the plan
+    // installs, bound here or refused by name.
     let collision_scene = match (emitter.collision.is_some(), ground) {
         (false, _) => None,
         (true, Ok(scene)) => Some(scene.clone()),
@@ -1886,11 +1968,11 @@ pub(crate) fn spawn_when_ready(
     let now = time.elapsed_secs_f64();
     let phase_started = plan.site_started_at.is_none();
     if phase_started {
-        retiring.stop_matching(state, now, |e| e.kind == EffectKind::Site);
+        retiring.stop_matching(state, now, |kind| kind == EffectKind::Site);
         if state.global_identity != Some(plan.selection.global_effect) {
             // StopSkyEffect runs before PrepareCrossFade. Camera FX deliberately
             // continue until RefreshGlobalEffect at the commit point.
-            retiring.stop_matching(state, now, |e| e.kind == EffectKind::Sky);
+            retiring.stop_matching(state, now, |kind| kind == EffectKind::Sky);
             state.sky_stopped = true;
         }
         state.tier = plan.tier.clone(); state.env_site = plan.env_site.clone();
@@ -1905,11 +1987,13 @@ pub(crate) fn spawn_when_ready(
     let install_site = !plan.site_installed && !phase_started && controller_ready;
     let site_timed_out = !plan.site_installed && !controller_ready && waited >= 5.0;
     if install_site || site_timed_out { plan.site_installed = true; }
+    if install_site { retiring.install_colliders(&plan.colliders, |kind| kind == EffectKind::Site); }
     if site_timed_out { warn!("[weather-fx] destination site controller unavailable after source 5s timeout: {}", plan.env_site); }
     let preserve_global = state.global_identity == Some(plan.selection.global_effect) && !state.sky_stopped;
     let install_global = !plan.global_installed && !preserve_global && phase.can_commit_global_fx(&plan.selection);
     if install_global {
-        retiring.stop_matching(state, now, |e| e.kind != EffectKind::Site);
+        retiring.stop_matching(state, now, |kind| kind != EffectKind::Site);
+        retiring.install_colliders(&plan.colliders, |kind| kind != EffectKind::Site);
         state.global_identity = Some(plan.selection.global_effect);
         state.sky_stopped = false;
     }
@@ -2025,8 +2109,11 @@ pub(crate) fn spawn_when_ready(
                 }
             } else {
                 let has_collision = live.runtime.emitter.collision.is_some();
-                let collision = collision_scene.map(|scene| crate::particle_runtime::CollisionInstall {
-                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
+                // The plan's verdict bound the scene; the module queries the
+                // host's live physics scene, which holds the installed and
+                // the retiring effects' colliders.
+                let collision = collision_scene.map(|_| crate::particle_runtime::CollisionInstall {
+                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
                     owner: collision_owner,
                 });
                 match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route, collision) {
@@ -2286,6 +2373,15 @@ pub(crate) fn advance(
 
 /// Update：周期状态行——逐系统的活粒子数与累计账，全部可从档案复算。
 pub(crate) fn report(state: Option<Res<WeatherFxState>>, retiring: Res<WeatherFxRetirements>) {
+    let collision: Vec<(&str, bool, u64, u64, u64)> = state.as_deref().into_iter().flat_map(|state| &state.live)
+        .map(|s| (s, true)).chain(retiring.live.iter().map(|entry| (&entry.emitter, false)))
+        .filter_map(|(s, emitting)| s.collision.as_ref()
+            .map(|collision| (s.node.as_str(), emitting, collision.calls, collision.hits, collision.order_free)))
+        .collect();
+    if !collision.is_empty() {
+        info!("[weather-fx] collision: physics scene ground colliders {} ({} installed effects, {} retiring); per system (node, emitting, calls, hits, order-free lanes) {:?}",
+            retiring.physics.collider_count(), retiring.installed_colliders.len(), retiring.retiring_colliders.len(), collision);
+    }
     if !retiring.live.is_empty() {
         info!("[weather-fx] retiring systems={}, live particles={}, active systems={}",
             retiring.live.len(), retiring.live.iter().map(|s| s.emitter.pool.len()).sum::<usize>(),
@@ -2345,7 +2441,7 @@ pub(crate) fn teardown(commands: &mut Commands) {
     commands.queue(|world: &mut World| {
         let entities: Vec<_> = world.query_filtered::<Entity, With<WeatherFxDraw>>().iter(world).collect();
         for entity in entities { world.despawn(entity); }
-        if let Some(mut retiring) = world.get_resource_mut::<WeatherFxRetirements>() { retiring.live.clear(); }
+        if let Some(mut retiring) = world.get_resource_mut::<WeatherFxRetirements>() { retiring.live.clear(); retiring.clear_colliders(); }
     });
     commands.remove_resource::<WeatherFxPlan>();
     commands.remove_resource::<WeatherFxState>();
@@ -2366,3 +2462,7 @@ mod retirement_tests;
 #[cfg(test)]
 #[path = "weather_sub_emitter_chain_tests.rs"]
 mod sub_emitter_chain_tests;
+
+#[cfg(test)]
+#[path = "weather_scene_reach.rs"]
+mod scene_reach;

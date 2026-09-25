@@ -49,6 +49,17 @@ fn current_corpus_admission() {
     let mut per_phenomenon = serde_json::Map::new();
     // Fixed entropy: the warm-cost measurement needs owners, not a live draw.
     let mut warm_seeds = crate::particle_runtime::seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
+    // The sites a plan can install at: every site a phenomenon names a
+    // site's own effect for.
+    let fx_path = |file: &str| overlay.as_ref().map(|root| root.join(file)).filter(|path| path.is_file())
+        .unwrap_or_else(|| root.join(file));
+    let sites: std::collections::BTreeSet<String> = index["phenomena"].as_object().expect("phenomena map").values()
+        .flat_map(|item| {
+            let doc = read(&fx_path(item["fx"]["file"].as_str().expect("fx file")));
+            doc["effects"].as_object().expect("effects map").values()
+                .filter_map(|effect| effect["variant"].as_str().and_then(|v| v.strip_prefix("unique__")).map(str::to_owned))
+                .collect::<Vec<_>>()
+        }).collect();
     for (name, item) in index["phenomena"].as_object().expect("phenomena map") {
         let source_path = |file: &str| overlay.as_ref().map(|root|root.join(file)).filter(|path|path.is_file()).unwrap_or_else(||root.join(file));
         let path = source_path(item["fx"]["file"].as_str().expect("fx file"));
@@ -58,6 +69,10 @@ fn current_corpus_admission() {
         let start = rows.len();
         let mut admitted = 0;
         let mut renderer_enabled = 0;
+        // The effects each site's plan installs for this phenomenon.
+        let selections: Vec<(String, Vec<String>)> = sites.iter().map(|site| (site.clone(),
+            selected_effects(doc["effects"].as_object().expect("effects map"), site).into_iter()
+                .map(|(effect, _)| effect).collect())).collect();
         for (effect_name, effect) in doc["effects"].as_object().expect("effects map") {
             let animation = crate::weather_animation::Contract::compile(effect,animation_doc.as_ref());
             let kind = match effect["kind"].as_str() {
@@ -71,6 +86,25 @@ fn current_corpus_admission() {
             };
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
+            // The scene its collision systems query: the colliders of the
+            // effects installed with it, at its site for a site's own effect
+            // and at every installing site for a global one (admission is
+            // judged at the first; every site's verdict is reported). A common
+            // template is installed only inside site effects.
+            let installing: Vec<&(String, Vec<String>)> = selections.iter()
+                .filter(|(_, selected)| selected.iter().any(|e| e == effect_name)).collect();
+            let installed_at: Vec<(String, crate::particle_runtime::collision_scene::SceneVerdict)> = installing.iter()
+                .map(|(site, selected)| {
+                    let names: Vec<&str> = selected.iter().map(String::as_str).collect();
+                    (site.clone(), scenes.for_installed(&names))
+                }).collect();
+            if effect["variant"].as_str() == Some("common") {
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Template);
+            } else {
+                let first: Vec<&str> = installing.first().map(|(_, selected)| selected.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Together(&first));
+            }
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
             let ground = scenes.for_effect(effect_name);
@@ -135,9 +169,17 @@ fn current_corpus_admission() {
                             .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))
                     }),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
-                    "collisionScene": particle["system"]["collision"].is_object().then(|| match &ground {
-                        Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
-                        Err(reason) => json!({"bound": false, "reason": reason}),
+                    "collisionScene": particle["system"]["collision"].is_object().then(|| {
+                        let verdict = |scene: &crate::particle_runtime::collision_scene::SceneVerdict| match scene {
+                            Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
+                            Err(reason) => json!({"bound": false, "reason": reason}),
+                        };
+                        let mut row = verdict(&ground);
+                        if effect["variant"].as_str() == Some("global") {
+                            row["installedAt"] = installed_at.iter().map(|(site, scene)| (site.clone(), verdict(scene)))
+                                .collect::<serde_json::Map<_, _>>().into();
+                        }
+                        row
                     }),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
