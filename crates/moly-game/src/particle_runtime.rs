@@ -60,6 +60,8 @@ mod child_emit_samples;
 mod collision_samples;
 #[cfg(test)]
 mod recursive_emit_samples;
+#[cfg(test)]
+mod custom_cache_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
@@ -986,7 +988,18 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
 fn simulate_existing(system: &mut Runtime, dt: f32, ctx: &Context, mut deaths: Option<&mut Vec<DeathParent>>) {
     simulate_range(system, 0, system.pool.len(), dt, None, None, ctx);
     let (mode, maximum) = (system.emitter.ring_buffer_mode, system.emitter.max_particles as usize);
+    // CustomDataModule's call over the live particles ends in the lanes of
+    // its last four-lane group past the count, and SimulateParticles advances
+    // their ages; the kill pass below then leaves the slots past the new
+    // count. A law that follows its curve objects' caches is told both.
+    let custom_storage = system.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage());
+    if let Some(custom) = system.custom_law.as_mut() {
+        custom.end_existing_call(system.pool.len(), dt, mode, system.emitter.ring_buffer_loop_range);
+    }
+    let before = custom_storage.then(|| system.pool.clone());
+    let mut removed = Vec::new();
     let mut on_death = |index: usize, particle: &Particle, side: &Side| {
+        removed.push(index);
         if let Some(deaths) = deaths.as_mut() {
             deaths.push(sub_events::dying(index, particle, side));
         }
@@ -1001,6 +1014,9 @@ fn simulate_existing(system: &mut Runtime, dt: f32, ctx: &Context, mut deaths: O
             compact_with_sides_indexed(&mut system.pool, &mut system.side, &mut none, mode, maximum, &mut on_death)
         }
     } as u64;
+    if let (Some(before), Some(custom)) = (before, system.custom_law.as_mut()) {
+        custom.kill(&before, &removed, &system.pool);
+    }
 }
 
 /// Run module math before packing. Birth lanes use times relative to their own
@@ -1034,6 +1050,9 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         // 寿限非正的按出生即死（律对非正寿限拒绝推进，会永生）。
         if !(start_lifetime > 0.0) {
             system.pool[index].age_percent = f32::from_bits(0x42c80001);
+            if let Some(custom) = system.custom_law.as_mut() {
+                custom.skipped_lane();
+            }
             continue;
         }
         // Loop protection belongs to the inner span; displaced particles in
@@ -1110,7 +1129,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             );
             system.pool[index].velocity = velocity;
         }
-        if let Some(custom) = &system.custom_law {
+        if let Some(custom) = system.custom_law.as_mut() {
             custom.update(side.seed, system.pool[index].age_percent, &mut system.side[index].custom_data);
         }
         if birth_dts.is_some() {
@@ -1373,15 +1392,34 @@ fn cycle_curve(curve: &moly_law::particle::MinMaxCurve, t: f32, random: f32) -> 
 /// before any law is installed; the installation sites rely on it. Force,
 /// rotation, limit velocity and Noise are built by the judge itself.
 pub(crate) fn curve_admission(emitter: &EmitterParams) -> Result<(), String> {
+    curve_admission_with(emitter, None)
+}
+
+/// [`curve_admission`] for a host that installs [`custom_data_law`]: a
+/// CustomData lane the history-independence certificate refuses is admitted
+/// when `storage` qualifies the system for the law that follows the engine's
+/// storage ([`custom_data_storage_eligible`] and the host's own conditions).
+pub(crate) fn curve_admission_with(emitter: &EmitterParams, storage: Option<&dyn Fn() -> Result<(), String>>)
+    -> Result<(), String> {
     use moly_law::particle::curve::{CurveSampler, CurveTime};
+    use moly_law::particle::custom_data::CustomData;
     use moly_law::particle::MinMaxCurve;
+    // The size curves keep the history certificate. This runtime evaluates
+    // the size law at each place it reads a size (LimitVelocity's drag, the
+    // geometry, the collision radius), so its evaluation sequence on a size
+    // curve is not the engine's and cannot carry the curve objects' caches.
     if let Some(params) = &emitter.size_over_lifetime {
         moly_law::particle::size::SizeOverLifetime::from_params(params)
             .map_err(|reason| format!("sizeOverLifetime: {reason}"))?;
     }
     if let Some(params) = &emitter.custom_data {
-        moly_law::particle::custom_data::CustomData::from_params(params)
-            .map_err(|reason| format!("customData: {reason}"))?;
+        if let Err(reason) = CustomData::from_params(params) {
+            let Some(qualify) = storage else { return Err(format!("customData: {reason}")); };
+            CustomData::with_storage(params, moly_law::particle::slot_tail::RESERVED_SLOTS)
+                .map_err(|reason| format!("customData: {reason}"))?;
+            qualify().map_err(|why| format!(
+                "customData: {reason}; the law that follows the engine's storage is refused: {why}"))?;
+        }
     }
     if let Some(params) = &emitter.velocity_over_lifetime {
         moly_law::particle::velocity::VelocityOverLifetime::from_params(params)
@@ -1407,6 +1445,51 @@ pub(crate) fn curve_admission(emitter: &EmitterParams) -> Result<(), String> {
             MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. })) {
             return Err("emission burst count curve: the time the engine evaluates it at is not transcribed".into());
         }
+    }
+    Ok(())
+}
+
+/// The CustomData law the weather host installs: without storage where the
+/// history-independence certificate admits every lane, otherwise the law that
+/// follows the engine's storage ([`moly_law::particle::custom_data::CustomData::with_storage`]),
+/// which [`curve_admission_with`] admitted only for a qualified system and
+/// which runs only with the native birth owner.
+pub(crate) fn custom_data_law(params: &moly_law::particle::schema::CustomDataParams)
+    -> Result<moly_law::particle::custom_data::CustomData, &'static str> {
+    use moly_law::particle::custom_data::CustomData;
+    CustomData::from_params(params)
+        .or_else(|_| CustomData::with_storage(params, moly_law::particle::slot_tail::RESERVED_SLOTS))
+}
+
+/// Whether a system's CustomData law can follow the engine's storage past the
+/// live count. It needs the native birth path (the engine's slot order and its
+/// newborn spans), the storage without a ring mode (whose packing is not
+/// modelled) and without a CollisionModule (whose calls also run over the lanes
+/// past the count), and every lane simulated (a positive start lifetime). The
+/// slots the model follows must lie in the storage Play reserved: with a
+/// positive maximum and a positive estimate (a positive largest start
+/// lifetime times a positive rate) its first 32 slots always do.
+pub(crate) fn custom_data_storage_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
+    use moly_law::particle::MinMaxCurve;
+    native_birth_eligible(emitter, route).map_err(|reason| format!("the native birth path is refused: {reason}"))?;
+    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
+        return Err("a ring buffer mode packs newborns in an order the slot model does not follow".into());
+    }
+    if emitter.collision.is_some() {
+        return Err("the CollisionModule's calls also run over the lanes past the live count, which the slot model does not follow".into());
+    }
+    let lifetime = match emitter.start.lifetime {
+        MinMaxCurve::Constant(value) => Some(value),
+        MinMaxCurve::TwoConstants { min, max } if min > 0.0 && max > 0.0 => Some(min.max(max)),
+        _ => None,
+    }.filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or("a start lifetime that is not one or two positive constants")?;
+    let rate = match emitter.emission.as_ref().map(|emission| &emission.rate_over_time) {
+        Some(MinMaxCurve::Constant(value)) if value.is_finite() && *value > 0.0 => *value,
+        _ => return Err("an emission rate that is not a positive constant: the storage reservation is not known".into()),
+    };
+    if emitter.max_particles == 0 || !(lifetime * rate > 0.0) {
+        return Err("no positive storage reservation".into());
     }
     Ok(())
 }

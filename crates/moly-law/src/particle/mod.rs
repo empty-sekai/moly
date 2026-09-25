@@ -45,6 +45,7 @@ pub mod size;
 pub mod gradient;
 pub mod color;
 pub mod custom_data;
+pub mod slot_tail;
 pub mod texture_sheet;
 pub mod force;
 pub mod gravity;
