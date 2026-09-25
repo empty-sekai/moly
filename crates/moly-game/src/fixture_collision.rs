@@ -1,11 +1,15 @@
 //! PhysicsCollider inputs for the single-surface navigation host.
 //!
 //! This consumes canonical source geometry, never logical occupancy boxes.
-//! Convex MeshColliders retain their source solid-hull semantics: their point
-//! clouds are convex-hulled in 3-D, then the world-space boundary triangles are
-//! supplied to the rasterizer as one filled solid. Non-convex meshes retain
-//! their authored triangles without filling between separate surfaces.
-//! This models mathematical convexity, not PhysX's exact cooking/simplification.
+//! A MeshCollider contributes its shared mesh's own triangles, as separate
+//! surfaces, whether or not it is marked convex. The engine's collider-to-
+//! navigation-source conversion reads only the collider's mesh reference and
+//! its transform (position, rotation, world scale) and emits a Mesh source; it
+//! never reads the convex flag, and the builder then rasterizes that Mesh's
+//! vertex and index data. The physics hull, cooked or mathematical, is not a
+//! navigation input: baking it would fill, for example, the space between a
+//! house's low porch steps and its eaves, and push the walkable edge out past
+//! the door action point.
 
 use bevy::{
     ecs::system::SystemParam,
@@ -102,7 +106,6 @@ struct Collider {
     kind: String,
     enabled: Option<bool>,
     is_trigger: Option<bool>,
-    convex: Option<bool>,
     geometry_id: Option<String>,
     gap: Option<String>,
     center: Option<[f32; 3]>,
@@ -440,19 +443,16 @@ fn collider_polygons(
             if mesh.positions.is_empty() || mesh.triangles.is_empty() {
                 return Err("empty collider geometry".into());
             }
-            if !matches!(collider.convex, Some(false) | Some(true)) {
-                return Err("MeshCollider convex state missing".into());
-            }
-            // Unity cooks convex=true from the whole point cloud. Source
-            // triangles can be concave or disconnected; passing them through
-            // as a non-convex surface would invent openings in a solid hull.
-            let solid = collider.convex == Some(true);
-            let (positions, triangles) = if solid {
-                convex_mesh(&mesh.positions)?
-            } else {
-                (mesh.positions.clone(), mesh.triangles.clone())
-            };
-            vec![project_mesh(&positions, &triangles, transform, solid)?]
+            // The navigation source is the shared mesh itself (see the module
+            // comment): the convex flag is a physics cooking option only, so
+            // it is neither required nor consulted here. An open or concave
+            // source mesh stays open, as the builder rasterizes it.
+            vec![project_mesh(
+                &mesh.positions,
+                &mesh.triangles,
+                transform,
+                false,
+            )?]
         }
         "BoxCollider" => {
             let center =
@@ -715,7 +715,9 @@ mod tests {
     }
 
     #[test]
-    fn convex_mesh_fills_disconnected_source_surfaces_as_one_solid() {
+    fn mesh_collider_source_is_its_own_triangles_whatever_the_convex_flag() {
+        // The engine's collider-to-source conversion never reads `convex`:
+        // both flags must give the same open surfaces, not a closed hull.
         let mesh = Geometry {
             geometry_id: "mesh".into(),
             positions: vec![
@@ -731,47 +733,32 @@ mod tests {
             // Two separate vertical walls: the source mesh itself is open.
             triangles: vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
         };
-        let mut collider = Collider {
-            kind: "MeshCollider".into(),
-            enabled: Some(true),
-            is_trigger: Some(false),
-            convex: Some(true),
-            geometry_id: Some("mesh".into()),
-            gap: None,
-            center: None,
-            size: None,
-            radius: None,
-            height: None,
-            direction: None,
-        };
-        let polygons = collider_polygons(
-            &collider,
-            &[mesh.clone()],
-            &GlobalTransform::IDENTITY,
-            Quat::IDENTITY,
-        )
-        .unwrap();
-        assert_eq!(polygons.len(), 1);
-        assert!(polygons[0].solid);
-        assert_eq!(
-            polygons[0].triangles.len(),
-            12,
-            "convex=true closes the box"
+        let pose = GlobalTransform::from(
+            Transform::from_xyz(2.0, 0.5, -1.0)
+                .with_rotation(Quat::from_rotation_y(0.7))
+                .with_scale(Vec3::new(1.5, 2.0, 0.5)),
         );
-        collider.convex = Some(false);
-        let polygons = collider_polygons(
-            &collider,
-            &[mesh],
-            &GlobalTransform::IDENTITY,
-            Quat::IDENTITY,
-        )
-        .unwrap();
-        assert!(!polygons[0].solid);
-        assert_eq!(
-            polygons[0].triangles.len(),
-            4,
-            "non-convex retains open surfaces"
-        );
+        let mut outputs = Vec::new();
+        for convex in [true, false] {
+            let collider: Collider = serde_json::from_value(serde_json::json!({
+                "kind": "MeshCollider", "enabled": true, "isTrigger": false,
+                "convex": convex, "geometryId": "mesh"
+            }))
+            .unwrap();
+            let polygons =
+                collider_polygons(&collider, &[mesh.clone()], &pose, Quat::IDENTITY).unwrap();
+            assert_eq!(polygons.len(), 1);
+            assert!(!polygons[0].solid, "convex={convex} stays open surfaces");
+            assert_eq!(polygons[0].triangles.len(), mesh.triangles.len());
+            for (tri, indices) in polygons[0].triangles.iter().zip(&mesh.triangles) {
+                for (point, index) in tri.iter().zip(indices) {
+                    let expected = pose.transform_point(Vec3::from(mesh.positions[*index]));
+                    assert!(Vec3::from(*point).distance(expected) < 1e-5);
+                }
+            }
+            outputs.push(polygons[0].triangles.clone());
+        }
+        assert_eq!(outputs[0], outputs[1]);
     }
 
     #[test]
@@ -789,72 +776,196 @@ mod tests {
         assert!(convex_mesh(&[[f32::NAN, 0.0, 0.0], [0.0; 3], [1.0; 3]]).is_err());
     }
 
+    /// Reads a fixture GLB's JSON chunk.
+    fn glb_json(path: &std::path::Path) -> serde_json::Value {
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(&bytes[..4], b"glTF", "{}", path.display());
+        let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        serde_json::from_slice(&bytes[20..20 + json_length]).unwrap()
+    }
+
+    /// Every collision document a GLB carries (root extras or a node's extras,
+    /// including the isolated metadata node).
+    fn glb_documents(gltf: &serde_json::Value) -> Vec<Document> {
+        let mut values = vec![gltf["extras"]["fixtureCollision"].clone()];
+        for node in gltf["nodes"].as_array().into_iter().flatten() {
+            values.push(node["extras"]["fixtureCollision"].clone());
+        }
+        values
+            .into_iter()
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value).unwrap())
+            .collect()
+    }
+
+    /// Source rows: the engine emits a MeshCollider as a Mesh source of its own
+    /// shared mesh, convex flag unread. Every MeshCollider in the corpus must
+    /// therefore come out as exactly its geometry's triangles, open.
     #[test]
     #[ignore = "requires source GLBs via MOLY_COLLISION_GLB_DIR"]
-    fn canonical_rug_tree_gazebo_convex_hulls() {
+    fn corpus_mesh_colliders_bake_their_own_triangles() {
         let directory = std::path::PathBuf::from(
             std::env::var("MOLY_COLLISION_GLB_DIR").expect("source fixture-models directory"),
         );
-        for name in [
-            "mysekai__fixture__mdl_env0001_rug_picnicsheet1.glb",
-            "mysekai__fixture__mdl_env0001_fixture_tree1.glb",
-            "mysekai__fixture__mdl_ext0020_fixture_gazebo1.glb",
-        ] {
-            let bytes = std::fs::read(directory.join(name)).unwrap();
-            assert_eq!(&bytes[..4], b"glTF");
-            let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-            let gltf: serde_json::Value =
-                serde_json::from_slice(&bytes[20..20 + json_length]).unwrap();
-            let document: Document =
-                serde_json::from_value(gltf["extras"]["fixtureCollision"].clone()).unwrap();
-            let mut count = 0;
-            for node in gltf["nodes"].as_array().unwrap() {
-                let Some(source) = node
-                    .get("extras")
-                    .and_then(|extras| extras.get("sourceCollision"))
+        let mut files: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "glb"))
+            .collect();
+        files.sort();
+        let (mut rows, mut convex_rows, mut mismatches) = (0usize, 0usize, 0usize);
+        for path in &files {
+            let gltf = glb_json(path);
+            let documents = glb_documents(&gltf);
+            for node in gltf["nodes"].as_array().into_iter().flatten() {
+                let Some(colliders) = node["extras"]["sourceCollision"]["colliders"].as_array()
                 else {
                     continue;
                 };
-                let node: Node = serde_json::from_value(source.clone()).unwrap();
-                for collider in node.colliders.iter().filter(|collider| {
-                    collider.kind == "MeshCollider" && collider.convex == Some(true)
-                }) {
-                    let start = std::time::Instant::now();
+                for raw in colliders {
+                    if raw["kind"] != "MeshCollider" || !raw["gap"].is_null() {
+                        continue;
+                    }
+                    let collider: Collider = serde_json::from_value(raw.clone()).unwrap();
+                    let id = collider.geometry_id.clone().unwrap();
+                    let Some(mesh) = documents
+                        .iter()
+                        .flat_map(|document| document.geometry.iter())
+                        .find(|mesh| mesh.geometry_id == id)
+                    else {
+                        continue;
+                    };
+                    rows += 1;
+                    convex_rows += usize::from(raw["convex"] == true);
                     let polygons = collider_polygons(
-                        collider,
-                        &document.geometry,
+                        &collider,
+                        std::slice::from_ref(mesh),
                         &GlobalTransform::IDENTITY,
                         Quat::IDENTITY,
                     )
                     .unwrap();
-                    assert_eq!(polygons.len(), 1);
-                    assert!(polygons[0].solid);
-                    assert!(!polygons[0].triangles.is_empty());
-                    eprintln!(
-                        "{name}: hull {} triangles in {:?}",
-                        polygons[0].triangles.len(),
-                        start.elapsed()
-                    );
-                    let surface = [
-                        [[-4.0, 0.0, -4.0], [4.0, 0.0, -4.0], [4.0, 0.0, 4.0]],
-                        [[-4.0, 0.0, -4.0], [4.0, 0.0, 4.0], [-4.0, 0.0, 4.0]],
-                    ];
-                    for voxel in [0.01, 0.05] {
-                        let start = std::time::Instant::now();
-                        let field =
-                            moly_law::carve::WalkField::bake_colliders(&surface, &polygons, voxel);
-                        eprintln!(
-                            "{name}: {}m raster {} cells / {} obstacle cells in {:?}",
-                            voxel,
-                            field.counts().cells,
-                            field.counts().obstacle_nulled,
-                            start.elapsed()
-                        );
+                    let expected: Vec<[[f32; 3]; 3]> = mesh
+                        .triangles
+                        .iter()
+                        .map(|tri| tri.map(|index| mesh.positions[index]))
+                        .collect();
+                    if polygons.len() != 1 || polygons[0].solid || polygons[0].triangles != expected
+                    {
+                        mismatches += 1;
+                        eprintln!("mismatch {} {id}", path.display());
                     }
-                    count += 1;
                 }
             }
-            assert!(count > 0, "{name} has a source convex collider");
+        }
+        eprintln!(
+            "mesh collider rows {rows} (convex {convex_rows}) over {} glbs: {mismatches} mismatches",
+            files.len()
+        );
+        assert!(
+            rows > 0 && convex_rows > 0,
+            "corpus must exercise convex colliders"
+        );
+        assert_eq!(mismatches, 0);
+    }
+
+    /// The house door: CanNavmeshMoveTargetPosition(loc_outside, loc_inside,
+    /// 0.03) over a flat ground carrying the house's source colliders and its
+    /// carving obstacle, at the offline layout's placement (world (2.5, 0,
+    /// -2.75), yaw 180). The hull arm is the former bake, kept to show that
+    /// the measured dimension is not trivially satisfied.
+    #[test]
+    #[ignore = "requires source GLBs via MOLY_COLLISION_GLB_DIR"]
+    fn house_inside_door_point_is_reachable_on_the_source_bake() {
+        let directory = std::path::PathBuf::from(
+            std::env::var("MOLY_COLLISION_GLB_DIR").expect("source fixture-models directory"),
+        );
+        let gltf = glb_json(&directory.join("mysekai__fixture__mdl_mis0001_house_house1.glb"));
+        let geometry: Vec<Geometry> = glb_documents(&gltf)
+            .iter()
+            .flat_map(|document| document.geometry.iter().cloned())
+            .collect();
+        let rotation = Quat::from_rotation_y(std::f32::consts::PI);
+        let placement =
+            GlobalTransform::from(Transform::from_xyz(2.5, 0.0, -2.75).with_rotation(rotation));
+        let mut source = Vec::new();
+        let mut hulls = Vec::new();
+        let mut locator = HashMap::new();
+        let nodes = gltf["nodes"].as_array().unwrap();
+        for (index, node) in nodes.iter().enumerate() {
+            let (local, local_rotation) = test_node_world_transform(nodes, index);
+            let transform = placement.mul_transform(local.compute_transform());
+            let world_rotation = rotation * local_rotation;
+            let name = node["name"].as_str().unwrap_or_default();
+            if name == "loc_inside" || name == "loc_outside" {
+                locator.insert(name.to_owned(), transform.translation());
+            }
+            let record = &node["extras"]["sourceCollision"];
+            if record.is_null() {
+                continue;
+            }
+            let record: Node = serde_json::from_value(record.clone()).unwrap();
+            for collider in &record.colliders {
+                if collider.kind != "MeshCollider" {
+                    continue;
+                }
+                source.extend(
+                    collider_polygons(collider, &geometry, &transform, world_rotation).unwrap(),
+                );
+                let mesh = geometry
+                    .iter()
+                    .find(|mesh| Some(&mesh.geometry_id) == collider.geometry_id.as_ref())
+                    .unwrap();
+                let (points, hull) = convex_mesh(&mesh.positions).unwrap();
+                hulls.push(project_mesh(&points, &hull, &transform, true).unwrap());
+            }
+            for obstacle in &record.nav_mesh_obstacles {
+                if obstacle.carve == Some(true) {
+                    let polygon = obstacle_polygon(obstacle, &transform, world_rotation).unwrap();
+                    source.push(polygon.clone());
+                    hulls.push(polygon);
+                }
+            }
+        }
+        assert!(!source.is_empty() && !hulls.is_empty());
+        let inside = locator["loc_inside"];
+        let outside = locator["loc_outside"];
+        let ground: Vec<[[f32; 3]; 3]> = vec![
+            [[-6.0, 0.0, -10.0], [10.0, 0.0, -10.0], [10.0, 0.0, 6.0]],
+            [[-6.0, 0.0, -10.0], [10.0, 0.0, 6.0], [-6.0, 0.0, 6.0]],
+        ];
+        let reach = |polygons: &[ColliderPolygon], voxel: f32| {
+            let field = moly_law::carve::WalkField::bake_colliders(&ground, polygons, voxel);
+            let path = field
+                .calculate_path(
+                    [outside.x, outside.z],
+                    [inside.x, inside.z],
+                    moly_law::carve::STATIC_QUERY_HALF_EXTENT,
+                )
+                .expect("static path query maps both ends");
+            let last = *path.corners.last().unwrap();
+            let distance = ((last[0] - inside.x).powi(2) + (last[1] - inside.z).powi(2)).sqrt();
+            let admitted = field.can_navmesh_move_target_position(
+                [outside.x, outside.z],
+                [inside.x, inside.z],
+                0.03,
+            );
+            (distance, admitted)
+        };
+        for voxel in [0.01, 0.05] {
+            let (after, admitted) = reach(&source, voxel);
+            let (before, hull_admitted) = reach(&hulls, voxel);
+            eprintln!(
+                "voxel {voxel}: inside door ({:.4}, {:.4}): path end distance hull {before:.4} -> source mesh {after:.4}",
+                inside.x, inside.z
+            );
+            assert!(
+                after < 0.03 && admitted,
+                "source bake reaches the door point"
+            );
+            assert!(
+                before >= 0.03 && !hull_admitted,
+                "hull arm reproduces the former gap"
+            );
         }
     }
 

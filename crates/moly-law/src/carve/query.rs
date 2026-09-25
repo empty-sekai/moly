@@ -150,7 +150,7 @@ pub(crate) fn path_exact(
     if !walkable_at(grid, start) || !walkable_at(grid, goal) {
         return None;
     }
-    polys.path(grid, regions, start, goal)
+    polys.path(grid, regions, start, goal, super::STATIC_QUERY_HALF_EXTENT)
 }
 
 /// 方盒内最近可走点（引擎 `FindNearestPoly` 的格面形态）：点所在格可走
@@ -214,7 +214,7 @@ pub(crate) fn calculate_path(
 ) -> Option<(Vec<[f32; 2]>, bool)> {
     let start = nearest_walkable_in_box(grid, source, half_extent)?;
     let goal = nearest_walkable_in_box(grid, target, half_extent)?;
-    polys.path_or_partial(grid, regions, start, goal)
+    polys.path_or_partial(grid, regions, start, goal, half_extent)
 }
 
 /// [`calculate_path`] 的布尔结果，不做搜索：两端映射成功后，完整与部分
@@ -229,7 +229,7 @@ pub(crate) fn calculate_path_succeeds(
 ) -> bool {
     let located = |p: [f32; 2]| {
         nearest_walkable_in_box(grid, p, half_extent)
-            .is_some_and(|mapped| polys.locates(grid, regions, mapped))
+            .is_some_and(|mapped| polys.locates(grid, regions, mapped, half_extent))
     };
     located(source) && located(target)
 }
