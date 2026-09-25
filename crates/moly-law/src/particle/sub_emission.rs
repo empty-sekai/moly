@@ -1020,9 +1020,47 @@ mod tests {
     #[test]
     #[ignore = "MOLY_SUBEMITTER_PARENT_RECEIPT must identify the current native parent-event receipt"]
     fn replays_current_native_parent_birth_events() {
+        parent_birth_events("MOLY_SUBEMITTER_PARENT_RECEIPT", |run| {
+            let (calls, newborn, records, commands, mismatched) = run(None);
+            println!("parent birth events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
+            assert_eq!((calls, newborn, records, commands, mismatched), (1426, 296, 13285, 800, 0));
+            // One-rule arms read against the same native rows must fail.
+            for arm in ["catchUpZero", "sliceDt", "burstLow", "burstHigh"] {
+                let wrong = run(Some(arm)).4;
+                println!("arm {arm}: {wrong} records differ");
+                assert!(wrong > 0, "{arm} arm matched every native record");
+            }
+        });
+    }
+
+    /// The same per-call replay against the native calls of the 016 bubble
+    /// parent (ConeVolume, World, rate one) whose two birth edges name
+    /// children with one burst of two, cycle count 0 (repeat without end)
+    /// and a 0.06 s interval: each event's window hits the burst whenever it
+    /// crosses a repeat, once however many repeats it spans. The arm that
+    /// turns repeats off must fail.
+    #[test]
+    #[ignore = "MOLY_SUBEMITTER_REPEAT_RECEIPT must identify the native repeating-burst parent-event receipt"]
+    fn replays_native_repeating_burst_parent_events() {
+        parent_birth_events("MOLY_SUBEMITTER_REPEAT_RECEIPT", |run| {
+            let (calls, newborn, records, commands, mismatched) = run(None);
+            println!("repeating-burst parent events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
+            assert_eq!(mismatched, 0);
+            assert!(calls > 0 && newborn > 0 && records > 0 && commands > 0);
+            let wrong = run(Some("noRepeats")).4;
+            println!("arm noRepeats: {wrong} records differ");
+            assert!(wrong > 0, "noRepeats arm matched every native record");
+        });
+    }
+
+    /// Every native SubModule call of a parent-event receipt through the law:
+    /// `verdict` gets the replay, which takes one arm and returns (calls,
+    /// newborn calls, records, commands, mismatched).
+    fn parent_birth_events(key: &str,
+        verdict: impl FnOnce(&dyn Fn(Option<&str>) -> (usize, usize, usize, usize, usize))) {
         use crate::particle::emit::Burst;
         use crate::particle::json::{parse, Value};
-        let path = std::env::var_os("MOLY_SUBEMITTER_PARENT_RECEIPT").expect("receipt path");
+        let path = std::env::var_os(key).expect("receipt path");
         let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(
             receipt.get("librarySha256").and_then(Value::as_str),
@@ -1063,6 +1101,7 @@ mod tests {
         // window-given replay below carries it.
         let run = |arm: Option<&str>| -> (usize, usize, usize, usize, usize) {
             let (mut calls, mut records, mut commands, mut mismatched, mut newborn) = (0, 0, 0, 0, 0);
+            super::set_no_repeats_arm(arm == Some("noRepeats"));
             for parent in array(at(&receipt, "parentEvents")) {
                 let sub = at(at(parent, "image"), "subEmitters");
                 let edges = array(at(sub, "edges"));
@@ -1200,17 +1239,10 @@ mod tests {
                     }
                 }
             }
+            super::set_no_repeats_arm(false);
             (calls, newborn, records, commands, mismatched)
         };
-        let (calls, newborn, records, commands, mismatched) = run(None);
-        println!("parent birth events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
-        assert_eq!((calls, newborn, records, commands, mismatched), (1426, 296, 13285, 800, 0));
-        // One-rule arms read against the same native rows must fail.
-        for arm in ["catchUpZero", "sliceDt", "burstLow", "burstHigh"] {
-            let wrong = run(Some(arm)).4;
-            println!("arm {arm}: {wrong} records differ");
-            assert!(wrong > 0, "{arm} arm matched every native record");
-        }
+        verdict(&run);
     }
 
     /// The recording from the native window on, against the sub-emitter
