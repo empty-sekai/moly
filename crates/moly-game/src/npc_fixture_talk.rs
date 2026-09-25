@@ -788,20 +788,7 @@ fn step_group(
                     turn.actor,
                     current.with_rotation(rotation),
                 );
-                if t < 1.0 {
-                    done = false;
-                    let angle = moly_law::path::turn_angle(
-                        moly_law::path::heading_yaw((from * Vec3::Z).to_array()),
-                        moly_law::path::heading_yaw((turn.to * Vec3::Z).to_array()),
-                    );
-                    world.entity_mut(turn.actor).insert(MotionPhase::Turning {
-                        motion: moly_law::path::turn_motion(angle),
-                        from,
-                        to: turn.to,
-                        duration: turn.duration,
-                        elapsed: turn.elapsed,
-                    });
-                }
+                done &= t >= 1.0;
             }
             if !done {
                 return Ok(false);
@@ -937,7 +924,10 @@ fn step_group(
 /// motion of the yaw difference. A row outside the action points is logged
 /// and skipped.
 ///
-/// Not carried, named: the tween's ease is the host's turn ease; a member
+/// Not carried, named: the rotate motion clip (the host's turn clip belongs
+/// to its navigation turn phase, which would also start the member's next
+/// waypoint), so a member turns in its current pose, yaw only; the tween's
+/// ease is the host's turn ease; a member
 /// still on its own fit walk keeps that walk and its last turn (to the same
 /// StartLoc rotation) while its OnArrive turn's time runs (in the source the
 /// later of the two rotation tweens kills the other); the frame on which a
@@ -1063,8 +1053,9 @@ fn after_arrive_some_character(
     Ok(false)
 }
 
-/// A turn's end: ChangeAnimation(idle) and the StartLoc world rotation (a
-/// member still on its own fit walk ends it on the same rotation).
+/// A turn's end: the StartLoc world rotation (a member still on its own fit
+/// walk ends it on the same rotation). The member's motion phase is left to
+/// its own route: the navigation's turn phase would start its next waypoint.
 fn finish_turn(world: &mut World, turn: &ArriveTurn) {
     if matches!(
         world.get::<MotionPhase>(turn.actor),
@@ -1080,9 +1071,6 @@ fn finish_turn(world: &mut World, turn: &ArriveTurn) {
             turn.actor,
             current.with_rotation(turn.to),
         );
-    }
-    if let Ok(mut entity) = world.get_entity_mut(turn.actor) {
-        entity.insert(MotionPhase::Dwelling { remaining: None });
     }
 }
 
