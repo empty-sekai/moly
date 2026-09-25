@@ -9,11 +9,16 @@
 //! `moly_law::particle::collision_query`; this file maps the pool into it in
 //! source axes and commits what it writes.
 //!
-//! The module's scene is the effect's ground MeshCollider (see
-//! `collision_scene`): admission binds it for an effect whose collider is
-//! cooked with the default options and refuses the others by name, the
-//! native birth installer installs the module with it, and a runtime without
-//! an installed scene refuses the slice.
+//! The module's scene is the site's physics scene (see `collision_scene`):
+//! the MeshColliders of every installed weather effect (a stopped effect's
+//! until it is destroyed), the site's own colliders and the placed fixtures'.
+//! The module's mask is the system's own, read from its data. Admission binds
+//! a system whose mask names only layers whose colliders are all ported and
+//! refuses the others by name, the native birth installer installs the
+//! module with the host's live scene, and a runtime without an installed
+//! scene refuses the slice. When the overlap returns several colliders the
+//! scene cannot give their order; the law then selects over every order, and
+//! a call the order decides is refused by name.
 //!
 //! With a SizeModule the query radius reads the current-size stream, which the
 //! engine writes at the same two points: after the post-simulation collision
@@ -30,19 +35,13 @@
 //! for the birth events), otherwise counted and dropped.
 use super::*;
 use moly_law::particle::collision_query::{
-    CollisionLaw, CollisionParticles, CollisionScene, CollisionState, OwnerPair, ParticleFlags, ParticleLane,
-    UpdateInput,
+    Candidate, CollisionLaw, CollisionParticles, CollisionScene, CollisionState, OverlapQuery, OwnerPair,
+    ParticleFlags, ParticleLane, Refused, SweepHit, SweepRequest, UpdateInput,
 };
 use moly_law::particle::collision_event::CollisionEmitEdge;
 use moly_law::particle::collision_response::CollisionRandom;
 use moly_law::particle::current_size::CurrentSizeLaw;
 use moly_law::particle::sub_emission::SubEmitterCommand;
-
-/// The only collision mask admitted: the ground layer. With it every effect
-/// ships at most one enabled collider, so the order of several broadphase
-/// touches never matters; the site collider rows carry no layer, so other
-/// masks cannot be resolved.
-const GROUND_LAYER_MASK: u32 = 1 << 3;
 
 pub(crate) struct CollisionRuntime {
     pub(crate) law: CollisionLaw,
@@ -62,6 +61,15 @@ pub(crate) struct CollisionRuntime {
     /// Newborn calls whose slots past the group end were unknown and whose
     /// lanes reached no collider (exact without a sweep).
     pub(crate) unreached: u64,
+    /// Lanes selected over every order of several colliders that hit them
+    /// (the scene gave no order), every order agreeing.
+    pub(crate) order_free: u64,
+    /// Measurement only, never set by the product: a call refused as order
+    /// dependent is counted in `order_dependent` and then run with the
+    /// colliders in the scene's listed order, which is not the engine's.
+    pub(crate) listed_order_fallback: bool,
+    /// Lanes of calls refused as order dependent (counted with the fallback).
+    pub(crate) order_dependent: u64,
     /// The SizeModule law that writes the current-size stream the query
     /// reads; `None` without a SizeModule.
     pub(crate) size: Option<CurrentSizeLaw>,
@@ -108,9 +116,10 @@ impl CollisionRuntime {
     }
 }
 
-/// The module law for an emitter, with the product's own limits: the ground
-/// layer only, a current-size stream only from a qualified SizeModule (no
-/// Noise size), no per-particle speed modifier and World or Local space.
+/// The module law for an emitter, with the product's own limits: a
+/// current-size stream only from a qualified SizeModule (no Noise size), no
+/// per-particle speed modifier and World or Local space. The mask is the
+/// system's own; the scene judges the layers it names.
 /// Collision sub-emitter edges are taken; their children are resolved by
 /// admission. The particle-state flags follow the module set: with a
 /// size-over-lifetime module the current-size stream is read, else the
@@ -122,9 +131,6 @@ pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, S
     let Some(params) = emitter.collision.as_ref() else {
         return Ok(None);
     };
-    if params.collides_with != GROUND_LAYER_MASK {
-        return Err(format!("collision mask {:#x}: only the ground layer is resolved", params.collides_with));
-    }
     if emitter.noise.is_some() {
         return Err("collision current-size stream: the Noise size condition at the collision points is not transcribed".into());
     }
@@ -155,8 +161,7 @@ fn current_size_law(emitter: &EmitterParams) -> Result<Option<CurrentSizeLaw>, S
 }
 
 /// The export's wrap modes of the size curves the current-size stream reads
-/// (the law's curve type does not carry them): only the clamp wraps are
-/// transcribed.
+/// (the law reads the keys only): only the clamp wraps are transcribed.
 pub(crate) fn current_size_source_gate(system: &serde_json::Value) -> Result<(), String> {
     let Some(size) = system.get("sizeOverLifetime").filter(|v| v.is_object()) else {
         return Ok(());
@@ -204,6 +209,9 @@ pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send
         hits: 0,
         draws: 0,
         unreached: 0,
+        order_free: 0,
+        listed_order_fallback: false,
+        order_dependent: 0,
         size: current_size_law(&system.emitter)?,
         edges: Vec::new(),
         pending: Vec::new(),
@@ -258,9 +266,18 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
         current_size: collision.law.reads_current_size() };
     let edges: Vec<CollisionEmitEdge> = collision.edges.iter().map(|slot| slot.law).collect();
     let input = UpdateInput { from, to, dt, owner: collision.owner, edges: &edges, emission_word, pending };
-    let outcome = collision.law
-        .update(&mut collision.state, collision.random.as_mut(), &view, &input, collision.scene.as_mut(), None)
-        .map_err(|refused| format!("collision {refused:?}"))?;
+    let law = collision.law;
+    let outcome = match law.update(&mut collision.state, collision.random.as_mut(), &view, &input,
+        collision.scene.as_mut(), None) {
+        Err(Refused::OrderDependent { dependent, order_free }) if collision.listed_order_fallback => {
+            collision.order_dependent += dependent as u64;
+            collision.order_free += order_free as u64;
+            law.update(&mut collision.state, collision.random.as_mut(), &view, &input,
+                &mut ListedOrder(collision.scene.as_mut()), None)
+        }
+        other => other,
+    }.map_err(|refused| format!("collision {refused:?}"))?;
+    collision.order_free += outcome.order_free as u64;
     for written in &outcome.written {
         let particle = &mut system.pool[written.index];
         particle.position = source(written.position);
@@ -283,6 +300,24 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
     collision.draws += outcome.draws as u64;
     collision.unreached += u64::from(outcome.past_end_unreached);
     Ok(())
+}
+
+/// Measurement only: a scene whose listed order is taken as the engine's.
+pub(crate) struct ListedOrder<'a>(pub(crate) &'a mut (dyn CollisionScene + Send + Sync));
+
+impl CollisionScene for ListedOrder<'_> {
+    fn overlap(&mut self, query: &OverlapQuery) -> Vec<Candidate> {
+        self.0.overlap(query)
+    }
+    fn reachable(&self, collides_with: u32) -> Vec<Candidate> {
+        self.0.reachable(collides_with)
+    }
+    fn sweep_sphere(&mut self, request: &SweepRequest) -> Option<SweepHit> {
+        self.0.sweep_sphere(request)
+    }
+    fn refusal(&self) -> Option<&'static str> {
+        self.0.refusal()
+    }
 }
 
 /// The SizeModule's current size of `[from, to)` at the particles' ages.

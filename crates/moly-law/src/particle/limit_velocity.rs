@@ -4,7 +4,7 @@
 //!
 //! 同一模块两段，按序都跑：
 //!
-//! 1. **钳制段**（门 `dampen > 0`，非数 dampen 跳过）：每帧一次
+//! 1. **钳制段**（门 `dampen > 0`，非数 dampen 跳过）：每条道一次（该道的 dt）
 //!    `k = 1.0 − powf(1.0−dampen, |dt|·30.0)`；每颗粒子
 //!    合速度 = 状态速度 + 叠加速度；`mag2 = x² + (y²+z²)`；
 //!    `newmag = (limit < |mag|) ? |mag| + (limit−|mag|)·k : |mag|`；
@@ -16,9 +16,15 @@
 //!    `newmag = mag − factor`（下钳 0），单位向量除以 mag。
 //!
 //! 具名偏差（逐值比对处报告量级）：
-//! - powf 是库函数（IFUNC，CPU/实现相关），k 的逐位一致按构造不可达；
-//! - 钳制段单位向量引擎走 rsqrtps + 两步牛顿（CPU 相关），此处按
-//!   **精确除法**；拖拽段两处一致走精确除法（转储证实 divps）。
+//! - powf 是库函数（经动态链接器调用），k 取宿主 powf，与设备 libm 的
+//!   逐位一致未证；arm64 构建每条道各调一次（`|dt[道]|·30`），调用方按
+//!   道给 dt；
+//! - 钳制段单位向量已按 arm64 构建逐指令同形：`合速度 · rsqrt(mag2)`，
+//!   rsqrt 为 FRSQRTE 加两步 FRSQRTS（`armf::rsqrt2`，mag2 为 0 时取
+//!   估计值），门 `1e-30 < mag2` 之外取 +0，newmag 乘 (0 < mag) 的
+//!   1.0/0.0。（旧记述「rsqrtps + 两步牛顿，此处精确除法」转录自 x86
+//!   构建，不适用于 arm64。）拖拽段仍按精确除法（arm64 未逐指令读，
+//!   语料拖拽全为 0，拖拽段不跑）。
 //!
 //! 随机数消耗：**每帧 0 次流抽取**——唯一的杂凑（双常数 limit）是
 //! 逐粒子种子的纯函数，终生恒定。
@@ -27,6 +33,7 @@
 //! separateAxis 轴ewise 族 · 幅值通用曲线（模式 1/2 非烘制）· 幅值
 //! 模式 2 烘制 · 拖拽非常数（模式 1/2/3）。
 
+use crate::particle::armf as a;
 use crate::particle::buffer::RingBufferMode;
 use crate::particle::curve::{curve_time_fmax, BakedCurve};
 use crate::particle::rotation::hash_mix;
@@ -257,14 +264,14 @@ fn clamp_body(velocity: &mut [f32; 3], anim: [f32; 3], limit: f32, k: f32) {
     } else {
         mag
     };
-    // 单位向量：引擎走 rsqrtps+两步牛顿（CPU 相关），此处精确除法
-    // （具名偏差）。门 1e-30 对 mag2。
-    let unit = if f32::from_bits(0x0da2_4260) < mag2 {
-        [total[0] / mag, total[1] / mag, total[2] / mag]
-    } else {
-        [0.0, 0.0, 0.0]
-    };
-    let newmag = if mag_positive { newmag } else { 0.0 };
+    // The unit vector as the arm64 build computes it: tot * FRSQRTE with two
+    // FRSQRTS refinements of mag2 (the estimate where mag2 is zero), masked
+    // to +0 unless 1e-30 < mag2; newmag is multiplied by the (0 < mag) mask
+    // as 1.0 or 0.0, then each axis is unit * newmag - animated.
+    let r = a::rsqrt2(mag2);
+    let keep = f32::from_bits(0x0da2_4260) < mag2;
+    let unit = total.map(|v| if keep { v * r } else { 0.0 });
+    let newmag = newmag * if mag_positive { 1.0 } else { 0.0 };
     velocity[0] = unit[0] * newmag - anim[0];
     velocity[1] = unit[1] * newmag - anim[1];
     velocity[2] = unit[2] * newmag - anim[2];

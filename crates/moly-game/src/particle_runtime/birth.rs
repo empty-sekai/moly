@@ -335,7 +335,7 @@ pub(super) fn run_incremental(
 fn run_plan(
     system: &mut Runtime,
     state: &mut NativeBirthState,
-    mut plan: moly_law::particle::prewarm::PrewarmPlan,
+    plan: moly_law::particle::prewarm::PrewarmPlan,
     stopped: bool,
     ctx: &Context,
     slice_start: &mut dyn FnMut(&Runtime),
@@ -345,10 +345,46 @@ fn run_plan(
     } else {
         [0.0; 3]
     };
+    run_slices(system, state, plan, stopped, emitter_velocity, ctx, slice_start)
+}
+
+/// The first-Play warm of an installed system: one ordinary update of the
+/// warm length, so every slice records its sub-emitter events (births,
+/// deaths, collisions) with the slice's pending time before its own
+/// decrement, the commands' catch-up. Play resets the emitter motion head, so
+/// the whole warm places its births with no emitter velocity. The rest below
+/// the loop threshold stays pending.
+pub(super) fn run_warm(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    plan: moly_law::particle::prewarm::PrewarmPlan,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    run_slices(system, state, plan, false, [0.0; 3], ctx, &mut |_| {})
+}
+
+fn run_slices(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    mut plan: moly_law::particle::prewarm::PrewarmPlan,
+    stopped: bool,
+    emitter_velocity: [f32; 3],
+    ctx: &Context,
+    slice_start: &mut dyn FnMut(&Runtime),
+) -> Result<(), BirthRefused> {
     for slice in plan.by_ref() {
         slice_start(system);
         let result = slice.map_err(|_| BirthRefused::InvalidTiming).and_then(|slice| {
-            step_slice(system, state, slice.duration, Some(slice.remaining_before), stopped,
+            let accumulated = if super::child::arms::on("catchUpIsStep") {
+                slice.duration
+            } else if super::child::arms::on("catchUpAfterDecrement") {
+                slice.remaining_before - slice.duration
+            } else if super::child::arms::on("catchUpZero") {
+                0.0
+            } else {
+                slice.remaining_before
+            };
+            step_slice(system, state, slice.duration, Some(accumulated), stopped,
                 Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity, pending: 0.0 }), ctx)
         });
         if let Err(error) = result {
@@ -392,6 +428,9 @@ fn step_slice(
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
     validate(system, &state.initial)?;
+    if let Some(reason) = system.custom_law.as_ref().and_then(|custom| custom.refused()) {
+        return Err(BirthRefused::Unsupported(reason));
+    }
     if has_real_sub_emitter_edges(&system.emitter) && state.events.is_none() {
         return Err(BirthRefused::Unsupported("sub-emitter event owner not installed"));
     }
@@ -457,6 +496,9 @@ fn step_slice(
     // the previous slice left. It does not test the stopped state either.
     let mut deaths = state.events.as_ref().filter(|events| events.records_deaths()).map(|_| Vec::new());
     simulate_existing(system, dt, ctx, deaths.as_mut());
+    if let Some(reason) = system.custom_law.as_ref().and_then(|custom| custom.refused()) {
+        return Err(BirthRefused::Unsupported(reason));
+    }
     if let (Some(events), Some(deaths), Some(accumulated)) = (state.events.as_mut(), deaths.as_ref(), accumulated) {
         let word = if super::child::arms::on("deathWordAfterDraws") { pending.random.words[0] }
             else { state.emission.random.words[0] };
@@ -629,8 +671,8 @@ pub(super) struct ShapeEmitterState {
 /// never reaches here (the source adapter refuses it). The particle arrays
 /// carry the axis-of-rotation channel when the renderer is in Mesh render mode,
 /// and the renderer reads it only when they do not use 3D rotation, so the
-/// Shape law computes it only for that case, which the admission refuses
-/// until the mesh transform about the axis is ported. The runtime runs the
+/// Shape law computes it only for that case, and the side data carries it to
+/// the mesh transform about the axis. The runtime runs the
 /// Initial module for every emitter; the admission decided the rule with the
 /// module's serialized state and refused every Mesh system for which the two
 /// decisions differ.
@@ -815,33 +857,27 @@ fn start_common(
                 timing[index].curve_time,
                 ParticleRandom::sample(lane.seed, 0x96aa_4de3),
             );
-            // The group's axis-of-rotation channel stops here: nothing below
-            // reads `shaped.axis_of_rotation`. The native mesh renderer reads
-            // that channel in two places only. CalculateMeshParticleTransform
-            // (every render alignment, in both the instanced and the
-            // CPU-vertex mesh job) loads it only when the particle arrays do
-            // not use 3D rotation, and then turns the mesh by its Z rotation
-            // about the normalised axis (about +Y unless the axis's squared
-            // length exceeds a tiny threshold); with 3D rotation it builds the
-            // rotation from the three Euler angles and never loads the axis.
-            // BuildCustomData copies it only for the
-            // MeshAxisOfRotation custom vertex stream. Besides the renderer,
-            // the engine reads it only in the sub-emitter record, when
-            // SubModule emits a child, and in the script particle API and
-            // managed particle jobs, which the weather objects do not call.
-            // ParticleSystem::AllocateParticleArrays, which Update1b
-            // runs before any birth or draw of the frame, turns 3D rotation on
-            // for the 3D start rotation of an enabled Initial module, an
-            // enabled Shape module's align to direction, or the separate axes
-            // of an enabled RotationOverLifetime or RotationBySpeed module. For
-            // a Mesh system with 3D rotation, without that vertex stream and
-            // without emitting sub-emitters, dropping the channel therefore
-            // equals the source. A Mesh system without 3D rotation is turned
-            // about this axis natively and would need it carried into the
-            // mesh instance transform, which this runtime does not do: the
-            // admission refuses such a system on either birth path
-            // (`MeshRotationRefused::AxisOfRotation`), and only for it would
-            // the Shape law compute the channel.
+            // The group's axis-of-rotation channel goes into the side data
+            // (below). The native mesh renderer reads that channel in two
+            // places only. CalculateMeshParticleTransform (every render
+            // alignment, in both the instanced and the CPU-vertex mesh job)
+            // loads it only when the particle arrays do not use 3D rotation,
+            // and then turns the mesh by its Z rotation about the normalised
+            // axis (about +Y unless the axis's squared length exceeds a tiny
+            // threshold); with 3D rotation it builds the rotation from the
+            // three Euler angles and never loads the axis. BuildCustomData
+            // copies it only for the MeshAxisOfRotation custom vertex stream.
+            // Besides the renderer, the engine reads it only in the
+            // sub-emitter record, when SubModule emits a child, and in the
+            // script particle API and managed particle jobs, which the weather
+            // objects do not call. ParticleSystem::AllocateParticleArrays,
+            // which Update1b runs before any birth or draw of the frame, turns
+            // 3D rotation on for the 3D start rotation of an enabled Initial
+            // module, an enabled Shape module's align to direction, or the
+            // separate axes of an enabled RotationOverLifetime or
+            // RotationBySpeed module. Without a Shape block the Initial
+            // module's +Z stands (it writes the axis from a cached vector the
+            // module's constructor and reset set to +Z).
             let (position, velocity) = if let Some(shaped) = &shaped {
                 let sample = &shaped.samples[index];
                 (
@@ -895,6 +931,10 @@ fn start_common(
                 emit_carry: [0.0; 2],
                 animated: [0.0; 3],
                 current_size: 0.0,
+                axis: shaped
+                    .as_ref()
+                    .and_then(|shaped| shaped.axis_of_rotation)
+                    .map_or([0.0, 0.0, 1.0], |axes| axes[index]),
             });
             // Elapsed time: dt * fraction, less the command's pending argument
             // (zero for the slices' time births, where it leaves the bits).
@@ -976,6 +1016,10 @@ fn start_common(
     // The newborn kill pass records its death events after every group's
     // call, with the same pending time and emission word.
     let mut deaths = events.as_ref().filter(|newborn| newborn.events.records_deaths()).map(|_| Vec::new());
+    // The newborn lanes as the death pass finds them, for a CustomData law
+    // that follows the slots past the live count.
+    let lanes = system.custom_law.as_ref().filter(|custom| custom.tracks_storage())
+        .map(|_| system.pool[old_count..].to_vec());
     let live_newborns = kill_newborns(system, old_count, accepted, deaths.as_mut());
     if let (Some(NewbornEvents { events, accumulated, emission_word }), Some(deaths)) = (events.as_mut(), deaths.as_ref()) {
         events.record_deaths(system, deaths, true, old_count, *accumulated, *emission_word, ctx);
@@ -999,6 +1043,12 @@ fn start_common(
             system.emitter.ring_buffer_mode, maximum, old_count, |_, _| replaced += 1),
     }
     system.died_total += replaced;
+    if let (Some(lanes), Some(custom)) = (lanes, system.custom_law.as_mut()) {
+        custom.birth(old_count, &lanes, live_newborns, &system.pool[old_count..]);
+        if let Some(reason) = custom.refused() {
+            return Err(BirthRefused::Unsupported(reason));
+        }
+    }
     *random = next;
     if let (Some(destination), Some(next)) = (shape_stream.as_mut(), next_shape) {
         **destination = next;

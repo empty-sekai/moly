@@ -65,11 +65,16 @@ fn current_corpus_admission() {
         let effects = doc["effects"].as_object().expect("effects map");
         // The loader's pick for every census site; a prefab has one kind whatever the site.
         let mut selected: HashMap<String, EffectKind> = HashMap::new();
+        // The effects each site's plan installs for this phenomenon.
+        let mut selections: Vec<(String, Vec<String>)> = Vec::new();
         for site in &sites {
+            let mut installed = Vec::new();
             for (prefab, _, kind) in source_environment_selection(effects, name, site) {
                 let previous = selected.insert(prefab.clone(), kind);
                 assert!(previous.is_none_or(|previous| previous == kind), "{name}/{prefab}: two kinds across sites");
+                installed.push(prefab);
             }
+            selections.push((site.clone(), installed));
         }
         for (effect_name, effect) in effects {
             let animation = crate::weather_animation::Contract::compile(effect,animation_doc.as_ref());
@@ -88,9 +93,33 @@ fn current_corpus_admission() {
             }
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
+            // The scene its collision systems query: the colliders of the
+            // effects installed with it and the site's own, at its site for a
+            // site's own effect and at every installing site for a global one
+            // (admission is judged at the first, with no placed fixtures;
+            // every site's verdict is reported, without and with placed
+            // fixtures). A common template is installed only inside site
+            // effects.
+            type Verdict = crate::particle_runtime::collision_scene::SceneVerdict;
+            let installing: Vec<&(String, Vec<String>)> = selections.iter()
+                .filter(|(_, selected)| selected.iter().any(|e| e == effect_name)).collect();
+            let installed_at: Vec<(String, Verdict, Verdict)> = installing.iter()
+                .map(|(site, selected)| {
+                    let names: Vec<&str> = selected.iter().map(String::as_str).collect();
+                    (site.clone(), scenes.for_installed(&names, Some(site), false), scenes.for_installed(&names, Some(site), true))
+                }).collect();
+            if effect["variant"].as_str() == Some("common") {
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Template);
+            } else {
+                let first: Vec<&str> = installing.first().map(|(_, selected)| selected.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Together {
+                    effects: &first, site: installing.first().map(|(site, _)| site.as_str()), fixtures: false });
+            }
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
             let ground = scenes.for_effect(effect_name);
+            let bodies = census_names_no_body(effect_name, effect, index.pointer("/summary/unsupported"));
             // Targets admitted by their own judgement and the birth edges of
             // every admitted parent of this effect: a target whose parent is
             // refused outside judge (its animation contract) is withdrawn below,
@@ -103,7 +132,7 @@ fn current_corpus_admission() {
                 if let Some(reason) = animation_refusal { tally.animation_refused.push(reason.into()); }
                 let planned = kind.filter(|_|animation_refusal.is_none()).and_then(|kind| judge(effect_name, particle, &by_path, &sub_emitter_owners, kind,
                     effect["effectiveRotation"].as_str() == Some("normal"),
-                    WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), &ground, server, &mut tally))
+                    WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), &ground, &bodies, server, &mut tally))
                     .and_then(|planned| admit_animated(&animation, planned, &mut tally));
                 let material = &particle["renderer"]["material"];
                 let source_member = material["lightModes"].as_array()
@@ -160,9 +189,30 @@ fn current_corpus_admission() {
                     }),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "culling": planned.as_ref().map(|p| p.culling.label()),
-                    "collisionScene": particle["system"]["collision"].is_object().then(|| match &ground {
-                        Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
-                        Err(reason) => json!({"bound": false, "reason": reason}),
+                    "collisionScene": particle["system"]["collision"].is_object().then(|| {
+                        // The system's own mask, as the export gives it.
+                        let mask = particle["system"]["collision"]["collidesWith"].as_u64()
+                            .and_then(|m| u32::try_from(m).ok());
+                        let verdict = |scene: &Verdict, colliders: bool| match (scene, mask) {
+                            (Ok(scene), Some(mask)) => {
+                                let refusal = scene.refusal_for(mask);
+                                let mut row = json!({"mask": mask, "bound": refusal.is_none(), "refusal": refusal,
+                                    "answeredOnMask": scene.colliders_named(mask)});
+                                if colliders { row["colliders"] = scene.describe(); }
+                                row
+                            }
+                            (Ok(_), None) => json!({"bound": false, "reason": "collision mask not exported"}),
+                            (Err(reason), _) => json!({"bound": false, "reason": reason}),
+                        };
+                        let mut row = verdict(&ground, true);
+                        if effect["variant"].as_str() == Some("global") {
+                            row["installedAt"] = installed_at.iter().map(|(site, scene, with_fixtures)| (site.clone(),
+                                json!({"withoutFixtures": verdict(scene, false), "withFixtures": verdict(with_fixtures, false)})))
+                                .collect::<serde_json::Map<_, _>>().into();
+                        } else if let Some((_, _, with_fixtures)) = installed_at.first() {
+                            row["withFixtures"] = verdict(with_fixtures, false);
+                        }
+                        row
                     }),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
@@ -413,6 +463,7 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
             let particles = effect["particles"].as_array().expect("particles");
             let owners = source_sub_emitter_owners(particles);
             let ground = scenes.for_effect(effect_name);
+            let bodies = census_names_no_body(effect_name, effect, index.pointer("/summary/unsupported"));
             // As in the admission, only an effect that is judged needs its lifecycle metadata.
             let lifecycle = kind.map(|_| WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"));
             let judged = |particle: &Value| {
@@ -420,7 +471,7 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
                 let node = particle["node"].as_str().expect("particle node");
                 let planned = kind.zip(lifecycle).filter(|_| animation.refusal(node).is_none()).and_then(|(kind, lifecycle)|
                     judge(effect_name, particle, &by_path, &owners, kind,
-                        effect["effectiveRotation"].as_str() == Some("normal"), lifecycle, &ground, server, &mut tally));
+                        effect["effectiveRotation"].as_str() == Some("normal"), lifecycle, &ground, &bodies, server, &mut tally));
                 (planned.is_some(), tally)
             };
             for particle in particles {
@@ -573,11 +624,11 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     // birth path reads; an empty mesh stands in for an unloaded source GLB.
     system.geometry = match &planned.geometry {
         PlannedGeometry::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw.clone()),
-        PlannedGeometry::Mesh { alignment, scaling, pivot, flip, .. } => crate::particle_runtime::Geometry::Mesh(
+        PlannedGeometry::Mesh { alignment, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(
             crate::particle_geometry::MeshDraw {
                 source: Arc::new(crate::particle_geometry::SourceMesh { positions: Vec::new(), normals: Vec::new(),
                     uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
-                alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip,
+                alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip, axis_body: *axis_body,
             }),
     };
     system.emitter = e.clone();
@@ -589,13 +640,25 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.gravity_law = moly_law::particle::gravity::Gravity::new(&e.start.gravity_modifier).expect("curves validated during admission");
     system.size_law = e.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
-    system.custom_law = e.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
+    system.custom_law = e.custom_data.as_ref().map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission"));
+    system.sub_emitter_max_lifetime = planned.sub_emitter_max_lifetime;
     let collision = planned.collision_scene.clone().map(|scene| crate::particle_runtime::CollisionInstall {
         scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
         owner: planned.collision_owner,
     });
     let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route, collision) {
-        Ok(crate::particle_runtime::BirthPath::Native) => "native",
+        Ok(crate::particle_runtime::BirthPath::Native) => {
+            // A sub-emitter parent warms with its event owner, as installed:
+            // its commands are counted, none is delivered here.
+            if let Some(edges) = planned.event_edges.clone() {
+                if let Some(collision) = system.collision.as_mut() {
+                    collision.attach_edges(edges.collisions.clone());
+                }
+                system.native_birth.as_mut().expect("native birth owner just installed").events =
+                    Some(crate::particle_runtime::BirthEvents::with_edges(edges));
+            }
+            "native"
+        }
         Ok(crate::particle_runtime::BirthPath::Legacy(_)) => "legacy",
         Err(error) => return Some(json!({"measured": false, "reason": error.to_string()})),
     };

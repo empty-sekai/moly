@@ -45,6 +45,7 @@ pub mod size;
 pub mod gradient;
 pub mod color;
 pub mod custom_data;
+pub mod slot_tail;
 pub mod texture_sheet;
 pub mod force;
 pub mod gravity;
@@ -52,6 +53,7 @@ pub mod sort;
 pub mod collision_response;
 pub mod collision_event;
 pub mod death_event;
+pub mod inherit;
 pub mod collision_query;
 pub mod current_size;
 pub mod collision_mesh;
@@ -68,6 +70,7 @@ pub mod culling;
 mod armf;
 pub mod trail;
 pub mod trail_geometry;
+pub mod mesh_transform;
 
 #[cfg(test)]
 mod corpus;

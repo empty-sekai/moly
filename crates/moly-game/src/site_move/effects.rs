@@ -25,20 +25,29 @@
 //! the root system, whose renderer the prefab ships off, is not selected.
 //!
 //! Pools: `EffectManager.Setup` (called from the field scene's setup, before
-//! any move) instantiates each effect type's copies and keeps them inactive;
-//! `Play` activates one and `Stop`/the end of the effect returns it. Here the
-//! pools are requested at startup and each type keeps one instantiated,
-//! inactive copy whose particles are prepared while inactive (their clocks
-//! do not run). An emit activates that copy at the emit pose, and a fresh
-//! copy is instantiated for the next emit.
+//! any move) instantiates each effect type's copies (the table's pool size)
+//! and keeps them inactive. A pool is a fixed ring: each emit takes the next
+//! copy in turn (`ResourcePool.GetResource` advances its index modulo the
+//! count and checks nothing) and plays it, even one still playing; no copy
+//! is ever returned. `SiteMoveEffect` and `FollowEffect` do not end
+//! themselves: after its systems stop a copy stays active and draws nothing
+//! (only `OnShotEffect`, which no pooled type uses, deactivates itself when
+//! its root system stops playing). Here the pools are requested at startup
+//! and each type keeps one instantiated, inactive copy whose particles are
+//! prepared while inactive (their clocks do not run). An emit activates that
+//! copy at the emit pose, and a fresh copy is instantiated for the next
+//! emit.
 //!
 //! Named differences:
 //! - `ManagedEffect.Stop` is `ParticleSystem.Stop()`, which stops emitting
 //!   and lets live particles finish. The fixture particle host has no
 //!   stop-emitting mode, so the flying effect's particles are cleared at its
 //!   stop (it is deactivated).
-//! - A played copy is not returned to its pool: the host cannot restart a
-//!   system that has run, so the copy is released and replaced by a new one.
+//! - A played copy is not reused: the host cannot restart a system that has
+//!   run, so each emit plays a fresh copy, and a copy is released once its
+//!   systems end (it draws nothing by then). Visible only when more emits of
+//!   one type overlap than its pool holds; the source then restarts the
+//!   oldest, the product plays them all.
 //! - An emitter the particle host refuses (the flying prefab's `pt_01`
 //!   emits by distance only, which the host does not run) is skipped with a
 //!   WARN; the prefab's other emitters play.
@@ -607,7 +616,7 @@ const UNINSTALLED_RELEASE_AGE: f32 = 10.0;
 
 /// Some(true) when every installed system under the instance is done;
 /// None when none is installed.
-fn systems_finished(world: &World, root: Entity) -> Option<bool> {
+pub(crate) fn systems_finished(world: &World, root: Entity) -> Option<bool> {
     let children = world.get::<Children>(root)?;
     let mut any = false;
     for child in children.iter() {

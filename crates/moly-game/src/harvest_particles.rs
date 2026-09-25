@@ -240,7 +240,7 @@ fn install_stay_particles(
                 many.len()
             ),
         };
-        let Some(handle) = docs.0.get(object.package) else {
+        let Some(handle) = docs.0.get(&object.package) else {
             panic!("harvest stay particles: no document handle for {}", object.package);
         };
         let Some(doc) = json.get(handle) else {
@@ -611,6 +611,7 @@ fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64)
         collision: None,
         rng: Rng(RNG_SEED ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false,
+        sub_emitter_max_lifetime: 0.0,
         cone_angle: None,
         rol: None,
         limit: None,

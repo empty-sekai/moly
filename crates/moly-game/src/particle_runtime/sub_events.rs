@@ -361,8 +361,9 @@ impl BirthEvents {
 }
 
 /// The dying particle as the death event reads it, before its slot is
-/// overwritten: its seed, position and persistent and animated velocity.
-/// Runtime X is the reflection of source X.
+/// overwritten: its seed, position and persistent and animated velocity, and
+/// its stored size, age and inverse lifetime (read by an edge that inherits
+/// the size). Runtime X is the reflection of source X.
 pub(super) fn dying(index: usize, particle: &Particle, side: &Side) -> DeathParent {
     let source = |v: [f32; 3]| [-v[0], v[1], v[2]];
     DeathParent {
@@ -371,6 +372,9 @@ pub(super) fn dying(index: usize, particle: &Particle, side: &Side) -> DeathPare
         position: source(particle.position),
         velocity: source(particle.velocity),
         animated: source(side.animated),
+        size: side.size,
+        age_percent: particle.age_percent,
+        inverse_lifetime: particle.inverse_lifetime,
     }
 }
 

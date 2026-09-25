@@ -42,8 +42,8 @@ use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
 
 use moly_law::action_button::{
-    character_box, fixture_box, ButtonStack, ButtonType, CollisionBox2D, FixtureType, TargetId,
-    ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
+    character_box, fixture_box, ButtonStack, ButtonType, CollisionBox2D, FixtureType,
+    PlayerActionType, TargetId, ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
 };
 
 use admission::{
@@ -439,6 +439,8 @@ struct Candidate<'a> {
     touching: bool,
     identity: Option<&'a FixtureActivityIdentity>,
     world: &'a GlobalTransform,
+    /// The house's inside-door point, for a HouseEntry candidate.
+    house_entry: Option<Vec3>,
 }
 
 /// A registered NPC, as the scan saw it this frame.
@@ -751,11 +753,13 @@ pub(crate) fn advance(
             &GlobalTransform,
             Option<&FixtureActivityIdentity>,
             Option<&ActionButtonFixture>,
+            Option<&crate::site_move::door::HouseEntryPoint>,
         ),
         With<FixtureRoot>,
     >,
     server: Res<AssetServer>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
+    homes: Option<Res<crate::entry::house::HomeFixtures>>,
 ) {
     let state = &mut *state;
     // A saved layout re-fires entry once the scan next runs.
@@ -822,7 +826,7 @@ pub(crate) fn advance(
     let mut with_button: Vec<(ButtonType, [f32; 3], String)> = Vec::new();
 
     let mut frame: Vec<Candidate> = Vec::new();
-    for (entity, transform, source, world, identity, cached) in &fixtures {
+    for (entity, transform, source, world, identity, cached, house) in &fixtures {
         placed += 1;
         let resolved;
         let facts_of = match cached {
@@ -851,7 +855,18 @@ pub(crate) fn advance(
             continue;
         };
         joined += 1;
-        let Some(button) = facts_of.button else {
+        // A home system fixture's view carries PlayerActionType Home: the
+        // house-entry button, once its inside-door point is known.
+        let house_entry = house
+            .and_then(|point| parents.get(point.0).ok())
+            .map(GlobalTransform::translation);
+        let home = || {
+            let package = &identity?.model_package;
+            let is_home = homes.as_deref()?.is_home(package).ok()?;
+            (is_home && row.fixture_type.can_action() && house_entry.is_some())
+                .then(|| ButtonType::from_action_type(PlayerActionType::Home, false))
+        };
+        let Some(button) = facts_of.button.or_else(home) else {
             continue;
         };
         if survey {
@@ -868,6 +883,7 @@ pub(crate) fn advance(
             touching: player_box.collides(&target_box),
             identity,
             world,
+            house_entry,
         });
     }
 
@@ -1114,7 +1130,20 @@ fn fixture_enter(
         world: candidate.world,
         kind: kind_of(candidate.button),
     };
-    match inputs.enter(&probe) {
+    let entered = match candidate.house_entry {
+        // IsActionButtonTypeAvailable of the house entry.
+        Some(door) if candidate.button == ButtonType::HouseEntry => {
+            inputs.house_entry(player, position, door).map(|shown| {
+                if shown {
+                    Enter::Push
+                } else {
+                    Enter::Skip("CanShowHouseEntryButton is false")
+                }
+            })
+        }
+        _ => inputs.enter(&probe),
+    };
+    match entered {
         Ok(Enter::Push) => {
             state.deferred.remove(&entity);
             state.colliding.join(joined);
@@ -1226,7 +1255,19 @@ fn remove_not_colliding(
             world: candidate.world,
             kind: kind_of(candidate.button),
         };
-        match inputs.availability(&probe) {
+        let available = match candidate.house_entry {
+            Some(door) if candidate.button == ButtonType::HouseEntry => {
+                inputs.house_entry(player, position, door).map(|shown| {
+                    if shown {
+                        Availability::Available
+                    } else {
+                        Availability::Unavailable
+                    }
+                })
+            }
+            _ => inputs.availability(&probe),
+        };
+        match available {
             Ok(Availability::Available) => {}
             Ok(Availability::Unavailable) => removed.push(key),
             Ok(Availability::Raises) => warn!(

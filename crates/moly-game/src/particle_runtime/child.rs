@@ -8,14 +8,24 @@
 //! alignment gap. The old particles of the pool are never touched.
 //!
 //! Qualified target composition: Initial with constant or two-constant
-//! lifetime, size, speed and rotation, a constant start colour source the
+//! lifetime, size (one axis or three), speed and rotation, a constant start colour source the
 //! Initial law takes, a constant gravity modifier, Shape through the target's
 //! own Shape law (or no Shape with zero speed), RotationOverLifetime with
-//! constant or two-constant axes, SizeOverLifetime and ColorOverLifetime
+//! constant or two-constant axes, VelocityOverLifetime (constant or
+//! two-constant linear axes of one mode, not in world space, a zero orbital
+//! block, the constant speed modifier one), ClampVelocity (one axis group, a
+//! constant limit, zero drag), SizeOverLifetime and ColorOverLifetime
 //! (render-time), CustomData, no ring buffer, simulation speed one. Any other
-//! module on the target refuses. The inherited block must be the neutral one
-//! (the parent inherits nothing); the parent particle's seed it ends with is
-//! not a child random word.
+//! module on the target, and any other configuration of those two, refuses.
+//! The newborn and catch-up pre-simulation modules run in the engine's
+//! order: gravity and the animated velocity cleared, RotationOverLifetime,
+//! Velocity, ClampVelocity, CustomData. The inherited block must be the neutral one
+//! or carry only the size (an edge that inherits the size): each stored start
+//! size axis is then the inherited axis times the target's own start size of
+//! that axis (the target's arrays store three axes when its start size is 3D
+//! or its SizeModule has separate axes, else x alone, which the runtime
+//! expands); any other inherited word refuses by name. The parent particle's seed the
+//! block ends with is not a child random word.
 //!
 //! The catch-up runs only when the parent's update flags enable it (bit 0 or
 //! bit 2); the per-frame update passes no such flag. Size is not stored: the
@@ -47,6 +57,7 @@ use moly_law::particle::{
     schema::ShapeMode,
     shape::ArcLoopClock,
     shape_birth::{ShapeBatch, ShapeBirthLaw, ShapeSample},
+    inherit::{self, ChildInherit},
     sub_emission::BirthDistribution,
     MinMaxCurve,
 };
@@ -196,28 +207,24 @@ impl ChildCommand {
         // Parent command seed is retained separately; it is not child RandN.
         // Native Math initialization supplies Vector3.forward, including the
         // +1 at command +0x44. Zero there came from an uninitialized probe VM.
-        let neutral = [
-            u32::MAX,
-            0x3f800000,
-            0x3f800000,
-            0x3f800000,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0x3f800000,
-            0x3f800000,
-            0x7f800000,
-        ];
-        if self.inherited_words[..12] != neutral {
-            return Err(Refused::Unsupported("non-neutral inherited context"));
-        }
+        inherited_size(&self.inherited_words)?;
         self.distribution
             .timing(0, self.rate_count as u32, self.dt, self.previous, self.current)
             .map_err(|_| Refused::InvalidCommand("birth distribution"))?;
         Ok(())
     }
+}
+
+/// The inherited size of a command's block, or the inherited word it carries
+/// that the child side does not transcribe, by name.
+fn inherited_size(words: &[u32; 13]) -> Result<ChildInherit, Refused> {
+    ChildInherit::from_words(words).map_err(|refused| Refused::Unsupported(match refused {
+        inherit::Refused::Block("color") => "inherited colour block",
+        inherit::Refused::Block("rotation") => "inherited rotation block",
+        inherit::Refused::Block("lifetime") => "inherited lifetime block",
+        inherit::Refused::Block("duration") => "inherited duration block",
+        _ => "inherited block outside the size inheritance",
+    }))
 }
 
 /// The target laws one command uses, read from the target's modules.
@@ -233,6 +240,12 @@ struct ChildLaws {
     /// RotationOverLifetime module).
     rotation_3d: bool,
     angular_speed: bool,
+    /// The particle arrays carry three size axes.
+    size_3d: bool,
+    /// VelocityOverLifetime's linear axes (the orbital block is zero).
+    velocity: Option<moly_law::particle::velocity::VelocityOverLifetime>,
+    /// ClampVelocity (one axis group, a constant limit, zero drag).
+    limit: Option<moly_law::particle::LimitVelocity>,
 }
 
 /// Whether the target's modules are within the qualified composition.
@@ -248,12 +261,7 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     if emitter.simulation_speed != 1.0 {
         return unsupported("target simulation speed other than one");
     }
-    if emitter.start.size3d {
-        return unsupported("target 3D start size");
-    }
-    if emitter.velocity_over_lifetime.is_some()
-        || emitter.force.is_some()
-        || emitter.limit_velocity.is_some()
+    if emitter.force.is_some()
         || emitter.inherit_velocity.is_some()
         || emitter.noise.is_some()
         || emitter.collision.is_some()
@@ -286,6 +294,8 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     };
     let upper_lifetime = match emitter.start.lifetime {
         MinMaxCurve::Constant(value) => value,
+        // The engine's gate reads the max field, not the ordered maximum.
+        MinMaxCurve::TwoConstants { min, max } if arms::on("gateUsesOrderedMax") => if max < min { min } else { max },
         MinMaxCurve::TwoConstants { max, .. } => max,
         _ => return unsupported("target start lifetime curve mode"),
     };
@@ -306,6 +316,14 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         (Some(true), Some(_)) => {}
         _ => return unsupported("missing target Shape enabled/configuration evidence"),
     }
+    let velocity = match &emitter.velocity_over_lifetime {
+        None => None,
+        Some(params) => Some(child_velocity(params)?),
+    };
+    let limit = match &emitter.limit_velocity {
+        None => None,
+        Some(params) => Some(child_limit(params)?),
+    };
     // The source admission fixes the rotation direction randomization at 0.
     let initial = InitialLaw::from_params(&emitter.start, 0.0).map_err(Refused::Initial)?;
     Ok(ChildLaws {
@@ -319,7 +337,59 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         rotation_3d: emitter.start.rotation3d
             || emitter.rotation_over_lifetime.as_ref().is_some_and(|rol| rol.separate_axes),
         angular_speed: emitter.rotation_over_lifetime.is_some(),
+        size_3d: moly_law::particle::death_event::size_3d(emitter),
+        velocity,
+        limit,
     })
+}
+
+/// A target's VelocityOverLifetime on the child path. VelocityModule::Update
+/// adds `M * linear` to the animated velocity, `M` the identity for a Local
+/// or Custom target and the owner's first three columns for a World one (the
+/// linear axes not in world space); a two-constant axis draws from the
+/// particle seed. Its orbital section runs for these blocks too, and an
+/// all-zero orbital block adds a signed zero (its angle rotates by exactly
+/// nothing and its radial step is zero), which is not composed. The speed
+/// modifier storage exists only for a modifier other than the constant one.
+fn child_velocity(params: &moly_law::particle::schema::VelocityOverLifetimeParams)
+    -> Result<moly_law::particle::velocity::VelocityOverLifetime, Refused> {
+    let unsupported = |reason| Err(Refused::Unsupported(reason));
+    if params.in_world_space {
+        return unsupported("target Velocity in world space");
+    }
+    if !matches!(params.speed_modifier, MinMaxCurve::Constant(v) if v == 1.0) {
+        return unsupported("target Velocity speed modifier other than the constant one");
+    }
+    let linear = [&params.x, &params.y, &params.z];
+    let constants = linear.iter().all(|c| matches!(c, MinMaxCurve::Constant(_)));
+    let two_constants = linear.iter().all(|c| matches!(c, MinMaxCurve::TwoConstants { .. }));
+    if !(constants || two_constants) {
+        return unsupported("target Velocity linear axes other than constants or two constants of one mode");
+    }
+    let zero = |c: &MinMaxCurve| matches!(c, MinMaxCurve::Constant(v) if *v == 0.0)
+        || matches!(c, MinMaxCurve::TwoConstants { min, max } if *min == 0.0 && *max == 0.0);
+    if !(params.orbital.iter().all(zero) && params.orbital_offset.iter().all(zero) && zero(&params.radial)) {
+        return unsupported("target Velocity orbital, offset or radial other than zero");
+    }
+    moly_law::particle::velocity::VelocityOverLifetime::from_params(params).map_err(Refused::Unsupported)
+}
+
+/// A target's ClampVelocity on the child path: one axis group, a constant
+/// limit and zero drag (the drag section is skipped).
+fn child_limit(params: &moly_law::particle::schema::LimitVelocityParams)
+    -> Result<moly_law::particle::LimitVelocity, Refused> {
+    if params.separate_axis {
+        return Err(Refused::Unsupported("target ClampVelocity with separate axes"));
+    }
+    if !matches!(params.magnitude, MinMaxCurve::Constant(_)) {
+        return Err(Refused::Unsupported("target ClampVelocity limit other than a constant"));
+    }
+    if !params.drag.as_ref().is_none_or(|drag| matches!(drag, MinMaxCurve::Constant(v) if *v == 0.0)) {
+        return Err(Refused::Unsupported("target ClampVelocity drag other than zero"));
+    }
+    moly_law::particle::LimitVelocity::from_parts(false, &params.magnitude, params.dampen, params.drag.as_ref(),
+        params.multiply_drag_by_size, params.multiply_drag_by_velocity)
+        .map_err(|_| Refused::Unsupported("target ClampVelocity outside the limit law"))
 }
 
 /// One newborn lane in source axes while the command runs.
@@ -330,7 +400,7 @@ struct Lane {
     animated: [f32; 3],
     rotation: [f32; 3],
     angular: [f32; 3],
-    size: f32,
+    size: [f32; 3],
     color: [u8; 4],
     seed: u32,
     age: f32,
@@ -405,6 +475,7 @@ pub(super) fn apply_command_with_events(
         return Ok(noop(None));
     }
     command.validate()?;
+    let inherit = inherited_size(&command.inherited_words)?;
     let laws = child_laws(&system.emitter)?;
     if system.emitter.shape.is_some() != shape.is_some() {
         return Err(Refused::Unsupported("Shape step does not match the target's Shape module"));
@@ -443,6 +514,12 @@ pub(super) fn apply_command_with_events(
     if events.is_some() && catch_up.runs {
         return Err(Refused::Unsupported("catch-up of a target with its own birth edges"));
     }
+    // A child's axis of rotation on this birth path (the Initial module's +Z
+    // or a record inherited from the parent) was not read, and the mesh
+    // renderer turns a child without 3D rotation about it.
+    if matches!(system.geometry, super::Geometry::Mesh(_)) && super::uses_rotation_3d(&system.emitter, true) != Some(true) {
+        return Err(Refused::Unsupported("child Mesh particle axis of rotation"));
+    }
     assert_eq!(system.pool.len(), system.side.len());
     let old = system.pool.len();
     let maximum = system.emitter.max_particles as usize;
@@ -473,7 +550,7 @@ pub(super) fn apply_command_with_events(
                 &mut next_initial,
                 InitialGroupInput {
                     active_lanes: (accepted - offset).min(4),
-                    storage_size_3d: false,
+                    storage_size_3d: laws.size_3d,
                     storage_rotation_3d: laws.rotation_3d,
                     birth_fraction: std::array::from_fn(|lane| timing[lane].fraction),
                     // The command's current normalized time, broadcast.
@@ -499,7 +576,7 @@ pub(super) fn apply_command_with_events(
                 animated: [0.0; 3],
                 rotation: initial_lane.rotation.map(|v| v.unwrap_or(0.0)),
                 angular: [0.0; 3],
-                size: initial_lane.size[0].unwrap_or(0.0),
+                size: start_size(&inherit, initial_lane.size, laws.size_3d),
                 color: initial_lane.color,
                 seed: initial_lane.seed,
                 age: 0.0,
@@ -518,8 +595,12 @@ pub(super) fn apply_command_with_events(
     // along the command velocity in the target's space.
     let back_scale = command.dt / system.emitter.simulation_speed;
     let gravity_space = (!world_space && !arms::on("gravityWorld")).then_some(&owner.world_to_local);
-    for lane in &mut lanes {
-        pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space);
+    let velocity_space = world_space.then_some(&owner.local_to_world);
+    let batch_seeds: Vec<u32> = (0..lanes.len()).map(|index| lanes[index & !3].seed).collect();
+    for (index, lane) in lanes.iter_mut().enumerate() {
+        let clamp_dt = if arms::on("clampCommandDt") { command.dt } else { lane.birth_dt };
+        let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt };
+        pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space, space);
     }
     for lane in &mut lanes {
         let dt = lane.birth_dt;
@@ -589,8 +670,10 @@ pub(super) fn apply_command_with_events(
             remaining -= dt;
             steps += 1;
             let covered = (4 * end.div_ceil(4)).min(lanes.len());
-            for lane in &mut lanes[..covered] {
-                pre_modules(system, &laws, lane, dt, update.gravity, gravity_space);
+            let batch_seeds: Vec<u32> = (0..covered).map(|index| lanes[index & !3].seed).collect();
+            for (index, lane) in lanes[..covered].iter_mut().enumerate() {
+                let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt };
+                pre_modules(system, &laws, lane, dt, update.gravity, gravity_space, space);
             }
             for lane in &mut lanes[..covered] {
                 let age = lane.age;
@@ -649,7 +732,7 @@ pub(super) fn apply_command_with_events(
                     rand: 0.0,
                     seed: lane.seed,
                     rot: lane.rotation,
-                    size: [lane.size; 3],
+                    size: lane.size,
                     gravity: 0.0,
                     colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
                     total_velocity: reflect(std::array::from_fn(|a| lane.velocity[a] + lane.animated[a])),
@@ -657,6 +740,9 @@ pub(super) fn apply_command_with_events(
                     emit_carry: lane.carry,
                     animated: reflect(lane.animated),
                     current_size: 0.0,
+                    // The Initial module's +Z (a Mesh child without 3D rotation,
+                    // the only draw that reads it, is refused above).
+                    axis: [0.0, 0.0, 1.0],
                 },
             )
         })
@@ -690,11 +776,41 @@ pub(super) fn apply_command_with_events(
     })
 }
 
-/// The pre-simulation modules of one lane over dt: gravity into the
-/// persistent velocity, animated velocity cleared, angular speed cleared and
-/// rebuilt by RotationOverLifetime, CustomData at the current age.
-fn pre_modules(system: &Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
-    gravity_space: Option<&[f32; 16]>) {
+/// The stored start size: InitialModule's inherited axis times its own start
+/// size of that axis, for each stored axis; with x alone stored, the runtime's
+/// y and z repeat x.
+fn start_size(inherit: &ChildInherit, own: [Option<f32>; 3], size_3d: bool) -> [f32; 3] {
+    let x = own[0].unwrap_or(0.0);
+    let own = if size_3d { own.map(|axis| axis.unwrap_or(x)) } else { [x; 3] };
+    let size = if arms::on("ignoreInheritedSize") {
+        own
+    } else if arms::on("addInheritedSize") {
+        let inherited = inherit.start_size([1.0; 3]);
+        std::array::from_fn(|axis| inherited[axis] + own[axis])
+    } else {
+        inherit.start_size(own)
+    };
+    if size_3d { size } else { [size[0]; 3] }
+}
+
+/// What the Velocity and ClampVelocity updates of one lane read besides the
+/// lane: the matrix of the linear velocity (None for the identity), the seed
+/// of the lane's four-lane group, and the lane's dt.
+#[derive(Clone, Copy)]
+struct ModuleSpace<'a> {
+    velocity: Option<&'a [f32; 16]>,
+    batch_seed: u32,
+    clamp_dt: f32,
+}
+
+/// The pre-simulation modules of one lane over dt, in the engine's order:
+/// gravity into the persistent velocity, animated velocity cleared, angular
+/// speed cleared and rebuilt by RotationOverLifetime, VelocityOverLifetime's
+/// linear velocity added to the animated velocity, ClampVelocity on the
+/// persistent velocity against persistent plus animated (its k from the
+/// lane's own dt), CustomData at the current age.
+fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
+    gravity_space: Option<&[f32; 16]>, space: ModuleSpace<'_>) {
     if !arms::on("noGravity") {
         if let Some(delta) = child_emit::gravity_delta(gravity, laws.gravity_modifier, dt, gravity_space) {
             lane.velocity = std::array::from_fn(|a| delta[a] + lane.velocity[a]);
@@ -706,8 +822,46 @@ fn pre_modules(system: &Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gra
         let speed = rol.angular_velocity(lane.seed, 0.0, lane.age);
         lane.angular = std::array::from_fn(|a| lane.angular[a] + speed[a]);
     }
-    if let Some(custom) = &system.custom_law {
+    if arms::on("clampBeforeVelocity") {
+        clamp_velocity(laws, lane, space.clamp_dt);
+    }
+    if !arms::on("noVelocity") {
+        if let Some(velocity) = &laws.velocity {
+            let linear = velocity.sample(lane.seed, space.batch_seed, lane.age).linear;
+            let added = linear_in_space(linear, space.velocity);
+            lane.animated = std::array::from_fn(|a| lane.animated[a] + added[a]);
+        }
+    }
+    if !arms::on("clampBeforeVelocity") && !arms::on("noClamp") {
+        clamp_velocity(laws, lane, space.clamp_dt);
+    }
+    if let Some(custom) = system.custom_law.as_mut() {
         custom.update(lane.seed, lane.age, &mut lane.custom);
+    }
+}
+
+/// `M * v` as VelocityOverLifetime adds it, axis a:
+/// `v.x * c0[a] + (v.y * c1[a] + v.z * c2[a])` with the columns of the
+/// owner's local-to-world matrix, or of the identity.
+fn linear_in_space(v: [f32; 3], matrix: Option<&[f32; 16]>) -> [f32; 3] {
+    const IDENTITY: [f32; 16] = moly_law::particle::shape_birth::IDENTITY;
+    let m = matrix.unwrap_or(&IDENTITY);
+    std::array::from_fn(|a| {
+        if arms::on("velocityGroupedAssociation") {
+            (v[0] * m[a] + v[1] * m[4 + a]) + v[2] * m[8 + a]
+        } else {
+            v[0] * m[a] + (v[1] * m[4 + a] + v[2] * m[8 + a])
+        }
+    })
+}
+
+/// ClampVelocity on one lane: the limit law's clamp segment with the lane's
+/// dt (the drag section is zero on the child path).
+fn clamp_velocity(laws: &ChildLaws, lane: &mut Lane, dt: f32) {
+    if let Some(limit) = &laws.limit {
+        let size = moly_law::particle::DragSize { components: lane.size, size3d: laws.size_3d };
+        // A finite dt: the command validation and the catch-up plan keep it finite.
+        let _ = limit.step(&mut lane.velocity, lane.animated, lane.seed, lane.age, dt, size);
     }
 }
 

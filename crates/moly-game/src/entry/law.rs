@@ -203,7 +203,7 @@ pub(crate) fn house_entry_yaw(euler_y: f32) -> f32 {
 /// `DoTweenCameraSetting(lookAt, (pitch, yaw), fov, distance, duration)`:
 /// every channel starts from the current value; the rotation starts from
 /// `ConvertAngle180` of the current angle and ends at `GetToRotation`.
-fn camera_setting_tween(
+pub(crate) fn camera_setting_tween(
     model: &FieldCameraModel,
     camera_fov: f32,
     look_at: Vec3,

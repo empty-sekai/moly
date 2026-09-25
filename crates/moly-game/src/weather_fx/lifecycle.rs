@@ -401,6 +401,9 @@ impl PlayState {
     /// `Clear` with emission stopped: the particles and the ring cursor go,
     /// the stop and cull times return to zero, and the play state ends.
     fn clear(&mut self, system: &mut Runtime) {
+        if let Some(custom) = system.custom_law.as_mut() {
+            custom.clear(&system.pool);
+        }
         system.pool.clear();
         system.side.clear();
         system.ring_cursor = 0;

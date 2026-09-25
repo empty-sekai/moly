@@ -984,6 +984,11 @@ impl SitePreload {
         })
     }
 
+    /// The destination's scene document (the sidecar JSON).
+    pub(crate) fn scene_json(&self) -> Handle<JsonAsset> {
+        self.sidecar_json.clone()
+    }
+
     /// Ok(true) once every glTF of the family has loaded with its
     /// dependencies and the sidecar has loaded; a failure is named.
     pub(crate) fn ready(&self, server: &AssetServer) -> Result<bool, String> {
@@ -1266,7 +1271,7 @@ pub(crate) fn read_switch(
     // another owner stays queued and is read once the move has ended.
     if site_move.is_some() {
         if (pending.is_some() || preview.is_some()) && !tour.deferred_logged {
-            info!("[site] switch request deferred: a cannon move is in progress");
+            info!("[site] switch request deferred: a site move is in progress");
             tour.deferred_logged = true;
         }
         return;
@@ -1342,25 +1347,91 @@ pub(crate) fn read_switch(
         // Do not change source identity until normal admission succeeds.
         commands.remove_resource::<TemporarySiteActive>();
     }
-    // SiteMoveActionExecutor.GetActionState: a move among the home, harvest
-    // and delivery sites is the cannon state. Previews, a library-owned
-    // return and every other kind keep the immediate transition.
+    // OnChangeSite: the site-move executor answers every switch between two
+    // sites (GetActionState: the cannon among the home, harvest and delivery
+    // sites, a door state between home and the rooms). Previews and a
+    // library-owned return keep the immediate transition.
     let library_owned = pending.is_some() && library.owns_scene();
-    if !temporary
-        && !library_owned
-        && crate::weather_transition::EnvironmentMove::between(&selection.site, &next.site)
-            == crate::weather_transition::EnvironmentMove::Cannon
-    {
-        info!("[site] {} -> {}: cannon move handed to the site-move executor", selection.site, next.site);
-        commands.insert_resource(crate::site_move::SiteMoveRequest {
-            from: selection.site.clone(),
-            next,
-        });
+    if !temporary && !library_owned {
+        use crate::weather_transition::EnvironmentMove;
+        let request = match EnvironmentMove::between(&selection.site, &next.site) {
+            EnvironmentMove::Cannon | EnvironmentMove::Door | EnvironmentMove::RoomToRoom => {
+                Some(crate::site_move::SiteMoveRequest {
+                    from: selection.site.clone(),
+                    next,
+                    then: None,
+                    composition: None,
+                })
+            }
+            // A room to an outdoor site: the site map's nested event, the
+            // door move home carrying the cannon to the destination.
+            EnvironmentMove::ProductShortcut {
+                last_leg_cannon: true,
+            } => via_home(&next, sites, &layouts, source_region.as_deref().copied()).map(
+                |(home, then)| crate::site_move::SiteMoveRequest {
+                    from: selection.site.clone(),
+                    next: home,
+                    then: Some(then),
+                    composition: None,
+                },
+            ),
+            // An outdoor site to a room: two source moves, the cannon home
+            // then the home-to-room door move (a product composition).
+            EnvironmentMove::ProductShortcut {
+                last_leg_cannon: false,
+            } => via_home(&next, sites, &layouts, source_region.as_deref().copied()).map(
+                |(home, then)| crate::site_move::SiteMoveRequest {
+                    from: selection.site.clone(),
+                    next: home,
+                    then: Some(then),
+                    composition: Some(
+                        "an outdoor site to a room: the cannon to home_site, then HomeToMyRoom",
+                    ),
+                },
+            ),
+            EnvironmentMove::SameSite | EnvironmentMove::Phenomenon => {
+                queue_transition(&mut commands, roots.iter().collect(), next);
+                tour.hops += 1;
+                return;
+            }
+        };
+        let Some(request) = request else {
+            return;
+        };
+        info!(
+            "[site] {} -> {}{}: handed to the site-move executor",
+            request.from,
+            request.next.site,
+            request
+                .then
+                .as_ref()
+                .map_or(String::new(), |then| format!(" -> {}", then.site))
+        );
+        commands.insert_resource(request);
         tour.hops += 1;
         return;
     }
     queue_transition(&mut commands, roots.iter().collect(), next);
     tour.hops += 1;
+}
+
+/// A switch that goes through home: the home selection (its level resolved)
+/// and the final one, which carries both levels.
+fn via_home(
+    next: &SiteSelection,
+    sites: &Sites,
+    layouts: &crate::fixture::layouts::SiteFixtureLayouts,
+    region: Option<NavMeshSourceRegion>,
+) -> Option<(SiteSelection, SiteSelection)> {
+    let mut home = next.clone();
+    home.site = "home_site".to_owned();
+    if let Err(error) = home.resolve_level(sites, layouts, region) {
+        warn!("[site] switch through home_site refused: {error}; current map and saved data were retained");
+        return None;
+    }
+    let mut then = home.clone();
+    then.site = next.site.clone();
+    Some((home, then))
 }
 
 /// Queue the shared scene teardown before publishing a new site selection.
@@ -1372,6 +1443,7 @@ pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next
     commands.queue(crate::fixture_gimmick::cancel_for_site_change);
     commands.queue(crate::fixture_scene_inputs::invalidate_for_site_change);
     commands.queue(crate::fixture::clear_for_site_change);
+    commands.queue(crate::harvest::clear_for_site_change);
     for root in roots {
         commands.entity(root).despawn();
     }
