@@ -300,37 +300,81 @@ impl PolyMesh {
     /// 点落在哪个单元里。先用分区把候选集缩到一个区，再逐个含点判定。
     ///
     /// ⚠ **含点判定失败不等于不可走。** 轮廓简化允许折线偏离真实边界最多
-    /// `MAX_SIMPLIFICATION_ERROR` 格，所以贴边的可走格可以落在多边形之外
-    /// ——这是原生也有的性质（Detour 的 navmesh 并不精确贴合体素场），
-    /// 原生查询侧用带容差的 `findNearestPoly` 兜底。这里同形：含点失败就
-    /// 退到「同区内单元心最近的那个」。可走性本身仍由格面裁定，不由这里裁定。
-    fn locate(&self, grid: &Grid, regions: &Regions, p: [f32; 2]) -> Option<u32> {
+    /// `MAX_SIMPLIFICATION_ERROR` 格，所以贴边的可走格可以落在多边形之外，
+    /// 一个区也可能一个单元都没有三角化出来。引擎在这里用的是
+    /// `NavMeshQuery.FindNearestPoly`：查询盒内**所有**单元里取最近点距离
+    /// 最小的那个，且最近点必须落在查询盒内；它不看分区。含点失败时照此
+    /// 取单元（`half_extent` 是查询盒的水平半宽）。可走性本身仍由格面裁定。
+    fn locate(&self, grid: &Grid, regions: &Regions, p: [f32; 2], half_extent: f32) -> Option<u32> {
         let (cx, cz) = grid.cell_of(p[0], p[1]);
         if !grid.walkable_cell(cx, cz) {
             return None;
         }
         let region = regions.ids[cz as usize * grid.cols + cx as usize];
-        let candidates = self.by_region.get(&region)?;
-        if let Some(hit) = candidates
-            .iter()
-            .copied()
-            .find(|index| self.contains(grid, *index, p))
-        {
+        if let Some(hit) = self.by_region.get(&region).and_then(|candidates| {
+            candidates
+                .iter()
+                .copied()
+                .find(|index| self.contains(grid, *index, p))
+        }) {
             return Some(hit);
         }
-        candidates
-            .iter()
-            .copied()
-            .min_by(|a, b| {
-                let da = distance2(self.centre(grid, *a), p);
-                let db = distance2(self.centre(grid, *b), p);
-                da.total_cmp(&db)
-            })
+        let mut best: Option<(u32, f32)> = None;
+        for index in 0..self.tris.len() as u32 {
+            let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+            let q = closest_on_triangle(p, corners);
+            if (q[0] - p[0]).abs() > half_extent || (q[1] - p[1]).abs() > half_extent {
+                continue;
+            }
+            let d = distance2(q, p);
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((index, d));
+            }
+        }
+        best.map(|(index, _)| index)
     }
 
     /// 点能否落进某个单元（[`Self::locate`] 成功与否）。
-    pub(crate) fn locates(&self, grid: &Grid, regions: &Regions, p: [f32; 2]) -> bool {
-        self.locate(grid, regions, p).is_some()
+    pub(crate) fn locates(
+        &self,
+        grid: &Grid,
+        regions: &Regions,
+        p: [f32; 2],
+        half_extent: f32,
+    ) -> bool {
+        self.locate(grid, regions, p, half_extent).is_some()
+    }
+
+    /// Diagnostics for [`Self::locate`]: the number of cells of `p`'s region,
+    /// whether one of them contains `p`, and the horizontal distance from `p`
+    /// to the nearest cell of any region.
+    pub(crate) fn locate_report(
+        &self,
+        grid: &Grid,
+        regions: &Regions,
+        p: [f32; 2],
+    ) -> (usize, bool, Option<f32>) {
+        let (cx, cz) = grid.cell_of(p[0], p[1]);
+        let (count, contained) = if grid.walkable_cell(cx, cz) {
+            let region = regions.ids[cz as usize * grid.cols + cx as usize];
+            let candidates = self.by_region.get(&region).map_or(&[][..], Vec::as_slice);
+            (
+                candidates.len(),
+                candidates
+                    .iter()
+                    .any(|index| self.contains(grid, *index, p)),
+            )
+        } else {
+            (0, false)
+        };
+        let nearest = (0..self.tris.len())
+            .map(|index| {
+                let corners = self.tris[index].map(|v| to_world(grid, self.verts[v as usize]));
+                distance2(closest_on_triangle(p, corners), p)
+            })
+            .min_by(f32::total_cmp)
+            .map(f32::sqrt);
+        (count, contained, nearest)
     }
 
     fn contains(&self, grid: &Grid, index: u32, p: [f32; 2]) -> bool {
@@ -453,9 +497,10 @@ impl PolyMesh {
         regions: &Regions,
         start: [f32; 2],
         goal: [f32; 2],
+        half_extent: f32,
     ) -> Option<Vec<[f32; 2]>> {
-        let from = self.locate(grid, regions, start)?;
-        let to = self.locate(grid, regions, goal)?;
+        let from = self.locate(grid, regions, start, half_extent)?;
+        let to = self.locate(grid, regions, goal, half_extent)?;
         let corridor = self.find_corridor(grid, from, to)?;
         self.straighten(grid, &corridor, start, goal)
     }
@@ -473,9 +518,10 @@ impl PolyMesh {
         regions: &Regions,
         start: [f32; 2],
         goal: [f32; 2],
+        half_extent: f32,
     ) -> Option<(Vec<[f32; 2]>, bool)> {
-        let from = self.locate(grid, regions, start)?;
-        let to = self.locate(grid, regions, goal)?;
+        let from = self.locate(grid, regions, start, half_extent)?;
+        let to = self.locate(grid, regions, goal, half_extent)?;
         if self.components[from as usize] == self.components[to as usize] {
             let corridor = self.find_corridor(grid, from, to)?;
             return Some((self.straighten(grid, &corridor, start, goal)?, true));
@@ -557,4 +603,66 @@ fn closest_on_triangle(p: [f32; 2], corners: [[f32; 2]; 3]) -> [f32; 2] {
     .into_iter()
     .min_by(|a, b| distance2(*a, p).total_cmp(&distance2(*b, p)))
     .expect("three candidate points")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::contour::{Contour, ContourVert};
+    use super::*;
+
+    fn square(region: u32, x0: i32, z0: i32, x1: i32, z1: i32) -> Contour {
+        let v = |x, z| ContourVert { x, z, neighbour: 0 };
+        Contour {
+            verts: vec![v(x0, z0), v(x1, z0), v(x1, z1), v(x0, z1)],
+            region,
+        }
+    }
+
+    /// A 20 x 10 grid, voxel 0.1: region 1 on cells x 0..10, region 2 on
+    /// x 10..20. Only region 1 has navigation cells; region 2 is walkable but
+    /// was not triangulated (a region can lose its cells to contour
+    /// simplification or a failed triangulation).
+    fn fixture() -> (Grid, Regions, PolyMesh) {
+        let (cols, rows) = (20usize, 10usize);
+        let grid = Grid {
+            origin: [0.0, 0.0],
+            voxel: 0.1,
+            cols,
+            rows,
+            walkable: vec![true; cols * rows],
+        };
+        let ids = (0..cols * rows)
+            .map(|i| if i % cols < 10 { 1 } else { 2 })
+            .collect();
+        let regions = Regions { ids, max: 3 };
+        let mut polys = build(&[square(1, 0, 0, 10, 10)]);
+        polys.cache_centres(&grid);
+        (grid, regions, polys)
+    }
+
+    /// Source rule (NavMeshQuery.FindNearestPoly): every polygon in the query
+    /// box competes by closest-point distance, regions play no part, and the
+    /// closest point must lie inside the box.
+    #[test]
+    fn locate_takes_the_nearest_cell_of_any_region_inside_the_query_box() {
+        let (grid, regions, polys) = fixture();
+        // Region 2 point 0.15 m from region 1's cells: a 0.24 box reaches them.
+        let near = [1.15, 0.5];
+        let hit = polys
+            .locate(&grid, &regions, near, 0.24)
+            .expect("nearest cell in the box");
+        let corners = polys.tris[hit as usize].map(|v| to_world(&grid, polys.verts[v as usize]));
+        let closest = closest_on_triangle(near, corners);
+        assert!((distance2(closest, near).sqrt() - 0.15).abs() < 1e-5);
+        // The same point with a box narrower than that distance: no cell.
+        assert!(polys.locate(&grid, &regions, near, 0.1).is_none());
+        // 0.45 m away: the static 0.5 box reaches, the agent 0.24 box does not.
+        let far = [1.45, 0.5];
+        assert!(polys.locate(&grid, &regions, far, 0.5).is_some());
+        assert!(polys.locate(&grid, &regions, far, 0.24).is_none());
+        // Containment in the own region is the fast path and wins.
+        let inside = [0.35, 0.45];
+        let own = polys.locate(&grid, &regions, inside, 0.0).unwrap();
+        assert!(polys.contains(&grid, own, inside));
+    }
 }

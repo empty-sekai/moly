@@ -464,6 +464,7 @@ pub fn install(app: &mut App) {
                     npc_objective::build_face.after(walk_face::build),
                     // 摆放保存后整场重烘挖洞：保存回执落台账 → 重烘 → 对账行。
                     walk_face::rebake_on_save.after(walk_face::build),
+                    walk_face::probe.after(walk_face::rebake_on_save),
                 ),
                 (
                     // 手势与摇杆链（0 层输入，先于相机与对话的消费）：
