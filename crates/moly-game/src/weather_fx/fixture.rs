@@ -859,7 +859,9 @@ pub(crate) fn spawn_when_ready(
             source.enabled = true;
             info!("[fixture-source] {}: installed ({}); fixture setup phenomena-lighting write {:?}",
                 planned.node, played.birth_path(), source.phenomena_lighting_written);
-            commands.entity(draw).insert((source, crate::uber_particle::FixtureParticleLive(runtime), played));
+            // The host (and the draw under it) can be despawned before these
+            // commands apply, e.g. a fixture destroyed during its move.
+            commands.entity(draw).try_insert((source, crate::uber_particle::FixtureParticleLive(runtime), played));
         }
         request.0 = pending;
         if request.0.is_empty() { commands.entity(root).remove::<Request>(); }
