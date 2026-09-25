@@ -375,10 +375,15 @@ impl ButtonType {
 
 /// 场上一个可交互目标的身份。源用一个复合唯一号，本仓用同一个整数
 /// 空间里的两族：角色按角色号、家具按摆放号。
+///
+/// `Sensor` is a player action sensor built without an id (the room
+/// door's): its stack entry carries the default id, and a site has at most
+/// one such sensor registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TargetId {
     Character(u32),
     Fixture(i32),
+    Sensor,
 }
 
 /// 按钮栈。源的模型持一列 `(按钮类型, 目标号)`，进入碰撞时压入、

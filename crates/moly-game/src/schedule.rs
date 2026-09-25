@@ -485,7 +485,7 @@ pub fn install(app: &mut App) {
                     joystick::smoke_autojoystick,
                     // 动作按钮的走位冒烟口也注在摇杆层推进之前：它写入的
                     // 触摸要被同一帧的摇杆层读到。
-                    action_button::smoke_autowalk,
+                    (action_button::smoke_autowalk, action_button::smoke_door_walk).chain(),
                     joystick::advance,
                     gesture::advance,
                     joystick::spawn_when_ready,

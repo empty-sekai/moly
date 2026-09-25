@@ -13,6 +13,11 @@
 //!   without awaiting them, so the close outlives the move.
 //! - `Animator.Play` switches state at once; the controller's `Open` and
 //!   `Close` states have no transitions and hold their last pose.
+//! - `SetupDoorSensor`, after `SetUpDoor`: the first active Transform under
+//!   the door wall named `gimmick_door` (ignoring case) becomes a
+//!   `PlayerActionSensor` of radius 1 with action type `Door`, without an
+//!   id. The room site's enter registers it with the collision manager and
+//!   its exit removes it; the action button reads it (the go-home button).
 //!
 //! The release root carries the prefab in `site/skins/<skin>/`: glb scene
 //! for the prefab asset, the controller's states and clips in the sidecar.
@@ -53,6 +58,10 @@ use super::{InstanceReady, PendingInstance};
 const DOOR_ANCHOR: &str = "Loc_door";
 /// `SetupEntrance`'s door action point.
 const INSIDE: &str = "loc_inside";
+/// `SetupDoorSensor`'s search, compared ignoring case.
+const SENSOR: &str = "gimmick_door";
+/// `new PlayerActionSensor(1f, transform)`.
+pub(crate) const DOOR_SENSOR_RADIUS: f32 = 1.0;
 const OPEN_STATE: &str = "Base Layer.Open";
 const CLOSE_STATE: &str = "Base Layer.Close";
 
@@ -114,6 +123,9 @@ pub(crate) struct RoomDoor {
     sidecar: Handle<JsonAsset>,
     anchor: Entity,
     inside: Entity,
+    /// The door sensor's attach point; `SetupDoorSensor` leaves the sensor
+    /// null when the wall has no such node.
+    sensor: Option<Entity>,
     pending: Option<Entity>,
     clips: Option<DoorPrefab>,
     instance: Option<Instance>,
@@ -154,6 +166,13 @@ pub(crate) fn inside_point(world: &World) -> Option<Entity> {
     current(world)
         .filter(|door| world.get_entity(door.inside).is_ok())
         .map(|door| door.inside)
+}
+
+/// The door sensor's attach point and the door action point of the current
+/// room, while the room site is the active one.
+pub(crate) fn sensor(door: Option<&RoomDoor>, epoch: Option<u64>) -> Option<(Entity, Entity)> {
+    let door = door.filter(|door| Some(door.epoch) == epoch)?;
+    Some((door.sensor?, door.inside))
 }
 
 /// The current room's door prefab stands and its animator is bound, or the
@@ -198,7 +217,7 @@ pub(crate) fn ensure(world: &mut World) {
     if !current {
         world.remove_resource::<RoomDoor>();
         let found = find_points(world);
-        let (anchor, inside) = match found {
+        let (anchor, inside, sensor) = match found {
             Ok(points) => points,
             Err(reason) => {
                 if world.resource::<RoomDoorRefusals>().0 != Some(epoch) {
@@ -220,6 +239,7 @@ pub(crate) fn ensure(world: &mut World) {
             skin,
             anchor,
             inside,
+            sensor: sensor.as_ref().ok().copied(),
             pending: None,
             clips: None,
             instance: None,
@@ -227,15 +247,26 @@ pub(crate) fn ensure(world: &mut World) {
             refused: None,
         });
         info!("[room-door] {site_type}: SetUpDoor under {DOOR_ANCHOR} {anchor:?}, door action point {INSIDE} {inside:?}");
+        match &sensor {
+            Ok(sensor) => info!(
+                "[room-door] {site_type}: SetupDoorSensor at {SENSOR} {sensor:?}, radius {DOOR_SENSOR_RADIUS}"
+            ),
+            Err(reason) => warn!(
+                "[room-door] {site_type}: SetupDoorSensor refused: {reason}; the room has no go-home button"
+            ),
+        }
     }
     world.resource_scope(|world, mut door: Mut<RoomDoor>| door.build(world));
 }
 
-/// `Loc_door` and `loc_inside` under the room's scene roots.
-fn find_points(world: &mut World) -> Result<(Entity, Entity), String> {
+/// `Loc_door`, `loc_inside` and `gimmick_door` under the room's scene
+/// roots. The room carries one door wall, so each is looked for once over
+/// all roots. The sensor is found or named missing on its own: a second
+/// `gimmick_door` is not chosen between, and it costs the sensor only.
+fn find_points(world: &mut World) -> Result<(Entity, Entity, Result<Entity, String>), String> {
     let mut roots = world.query_filtered::<Entity, With<crate::site::SiteRoot>>();
     let roots: Vec<Entity> = roots.iter(world).collect();
-    let (mut anchors, mut insides) = (Vec::new(), Vec::new());
+    let (mut anchors, mut insides, mut sensors) = (Vec::new(), Vec::new(), Vec::new());
     for root in roots {
         for entity in super::descendants(world, root) {
             let Some(name) = world.get::<Name>(entity) else {
@@ -245,11 +276,20 @@ fn find_points(world: &mut World) -> Result<(Entity, Entity), String> {
                 anchors.push(entity);
             } else if name.as_str().eq_ignore_ascii_case(INSIDE) {
                 insides.push(entity);
+            } else if name.as_str().eq_ignore_ascii_case(SENSOR) {
+                sensors.push(entity);
             }
         }
     }
+    let sensor = match sensors.as_slice() {
+        [sensor] => Ok(*sensor),
+        _ => Err(format!(
+            "the room has {} {SENSOR} nodes, not one",
+            sensors.len()
+        )),
+    };
     match (anchors.as_slice(), insides.as_slice()) {
-        ([anchor], [inside]) => Ok((*anchor, *inside)),
+        ([anchor], [inside]) => Ok((*anchor, *inside, sensor)),
         _ => Err(format!(
             "the room has {} {DOOR_ANCHOR} and {} {INSIDE} nodes, not one of each",
             anchors.len(),
