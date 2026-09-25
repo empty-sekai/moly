@@ -5,17 +5,22 @@
 //! bundle to its exported prefab and particle document, and plays an effect
 //! where the flow emits it.
 //!
-//! `Emit(type, position, key)` activates a pooled copy at the position and
-//! plays its root particle system with its children (`ManagedEffect.Play`);
-//! the copy returns to its pool when its systems end. Emit poses, read off
+//! `Emit(type, position, key)` takes the next copy of the type's pool ring
+//! (its size is the table's pool size), puts it at the position and plays
+//! its root particle system with its children (`ManagedEffect.Play`), even a
+//! copy still playing. `HarvestObjectEffect` does not end itself: its copy
+//! stays active after its systems stop and is only replayed by a later
+//! emit. Emit poses, read off
 //! the views: the tree and stone hit effects (normal and boost) are moved
 //! 0.2 m back toward the player and 0.35 m up and turned to face the player
 //! (`LookRotation(-0.2 * dir)`); every other harvest emit is at the view's
 //! position; 142 at the player's position.
 //!
-//! Named differences (as in the move's pooled effects): a played copy is
-//! released and a fresh one instantiated for the next emit instead of being
-//! returned to the pool; the pool size is recorded, not preallocated; an
+//! Named differences (as in the move's pooled effects): each emit plays a
+//! fresh copy, released once its systems end, instead of replaying the next
+//! copy of the ring (visible only when more emits of one type overlap than
+//! its pool holds: the source restarts the oldest); the pool size is
+//! recorded, not preallocated; an
 //! emitter the particle host refuses is skipped with a WARN and the others
 //! play; a missing prefab or document is one WARN and no effect.
 
