@@ -761,7 +761,9 @@ impl Plugin for HarvestPlugin {
                     arrival::bind_views,
                     prop_animator::bind,
                     airplane::advance,
-                    learn::advance,
+                    // The learn flow's dialog request is read the frame it
+                    // is written.
+                    learn::advance.before(crate::learn_phenomena_dialog::open),
                 )
                     .chain(),
             )
