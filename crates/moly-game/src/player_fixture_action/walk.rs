@@ -60,6 +60,8 @@ pub(crate) struct FixtureWalk {
     listed: bool,
     /// Taps sent to the timeline button on this generation.
     taps: u32,
+    /// The end push has moved its finger at least once.
+    pushed: bool,
     last_log: f32,
 }
 
@@ -193,8 +195,11 @@ pub(crate) fn smoke_fixture_walk(
         }
         Stage::Ending(since) => {
             let elapsed = now - since;
-            if walk.pressing && elapsed < 0.3 {
+            // At least one move reaches the joystick even when one slow frame
+            // spans the whole push.
+            if walk.pressing && (elapsed < 0.3 || !walk.pushed) {
                 touch(FINGER, TouchPhase::Moved, base + Vec2::new(0.0, -30.0));
+                walk.pushed = true;
             } else if walk.pressing {
                 release(walk, &mut touch);
             }
