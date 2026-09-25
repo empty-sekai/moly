@@ -19,7 +19,10 @@
 //! fixture source path plans them as authored. The flying prefab's systems
 //! are not play-on-awake: they run only through that explicit `Play`, which
 //! the source-particle control preparation expresses (every emitter selected,
-//! no Director clock, so they run from the frame they are installed).
+//! no Director clock, so they run from the frame they are installed). At that
+//! Play step each prepared flying system's renderer takes its emitter's
+//! authored `enabled` flag; a copy inactive in its pool keeps them off, and
+//! the root system, whose renderer the prefab ships off, is not selected.
 //!
 //! Pools: `EffectManager.Setup` (called from the field scene's setup, before
 //! any move) instantiates each effect type's copies and keeps them inactive;
@@ -50,11 +53,17 @@ use std::collections::HashMap;
 
 use super::{InstanceReady, PendingInstance, SiteMoveOwned};
 
+/// `EffectManager`'s `EffectType` values the product plays. The move's three
+/// come from the harvest action family, whose packages ship a prefab glb; the
+/// player's two foot effects (played by [`crate::footstep`]) come from the
+/// common action family, whose packages hold no mesh and so ship no glb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EffectType {
     SiteMoveEndPlayer = 4,
     SiteMoveFailedPlayer = 5,
+    Dash = 14,
     Flying = 16,
+    WalkWater = 17,
 }
 
 const TYPES: [EffectType; 3] = [
@@ -70,23 +79,47 @@ pub(crate) fn packages() -> impl Iterator<Item = String> {
 }
 
 impl EffectType {
+    /// The package's last name segment (`EffectResourceData` bundle names).
     fn leaf(self) -> &'static str {
         match self {
             Self::SiteMoveEndPlayer => "fx_act_user_landing",
             Self::SiteMoveFailedPlayer => "fx_act_user_landing_fail",
             Self::Flying => "fx_act_user_flying",
+            Self::Dash => "dash",
+            Self::WalkWater => "walk_water",
         }
     }
 
-    fn package(self) -> String {
-        format!("mysekai__effect__site__harvest__action__{}", self.leaf())
+    /// The prefab `EffectResourceData` names in the package; its root node.
+    pub(crate) fn prefab(self) -> &'static str {
+        match self {
+            Self::Dash => "fx_act_user_walking",
+            Self::WalkWater => "fx_act_user_walking_water",
+            other => other.leaf(),
+        }
     }
 
-    fn glb_path(self) -> String {
-        format!("moly://site-action-effects/{0}/{0}.glb", self.leaf())
+    pub(crate) fn package(self) -> String {
+        match self {
+            Self::Dash | Self::WalkWater => {
+                format!("mysekai__effect__site__common__action__{}", self.leaf())
+            }
+            _ => format!("mysekai__effect__site__harvest__action__{}", self.leaf()),
+        }
     }
 
-    fn doc_path(self) -> String {
+    /// The prefab glb, for the harvest action family only.
+    fn glb_path(self) -> Option<String> {
+        match self {
+            Self::Dash | Self::WalkWater => None,
+            _ => Some(format!(
+                "moly://site-action-effects/{0}/{0}.glb",
+                self.leaf()
+            )),
+        }
+    }
+
+    pub(crate) fn doc_path(self) -> String {
         format!("moly://fixture-particles-v2/{}.json", self.package())
     }
 }
@@ -110,6 +143,9 @@ struct Live {
     held: bool,
     /// Age at which it was played.
     played_at: Option<f32>,
+    /// Each prepared control draw with its emitter's authored
+    /// `renderer.enabled` (the flying effect's preparation).
+    draws: Vec<(Entity, bool)>,
 }
 
 pub(crate) struct Effects {
@@ -124,7 +160,10 @@ impl Effects {
             .into_iter()
             .map(|kind| Pool {
                 kind,
-                glb: server.load(kind.glb_path()),
+                glb: server.load(
+                    kind.glb_path()
+                        .expect("the move's effects ship a prefab glb"),
+                ),
                 doc: server.load(kind.doc_path()),
                 warned: false,
             })
@@ -196,6 +235,7 @@ impl Effects {
                 live.played_at = Some(live.age);
                 let held = std::mem::take(&mut live.held);
                 let (root, age) = (live.root, live.age);
+                let draws = live.draws.clone();
                 if let Some(mut transform) = world.get_mut::<Transform>(root) {
                     *transform = pose;
                 }
@@ -205,6 +245,7 @@ impl Effects {
                 if held {
                     set_source_nodes_active(world, root, true);
                 }
+                enable_renderers(world, kind, &draws);
                 let installed = installed_systems(world, root);
                 if installed > 0 {
                     info!("[site-move] effect {kind:?} played from its pool: {installed} systems prepared {age:.2}s before");
@@ -251,7 +292,7 @@ impl Effects {
                     "[site-move] effect {:?} ({}) prefab {} unavailable: not shown",
                     kind,
                     kind as u8,
-                    kind.glb_path()
+                    kind.glb_path().unwrap_or_default()
                 );
                 pool.warned = true;
             }
@@ -281,6 +322,7 @@ impl Effects {
             pooled,
             held: false,
             played_at: None,
+            draws: Vec::new(),
         });
         Some(root)
     }
@@ -310,6 +352,9 @@ impl Effects {
     /// Keep the pools filled, prepare the particles of new instances and
     /// release finished landing effects.
     pub(crate) fn advance(&mut self, world: &mut World, dt: f32) {
+        if let Some(root) = self.flying {
+            trace_draws(world, "Flying", root);
+        }
         self.fill_pools(world);
         for index in 0..self.live.len() {
             let (kind, root, planned) = {
@@ -374,41 +419,34 @@ impl Effects {
                 // refused one starts clean). The preparation readies its
                 // emitters one after another.
                 let mut selected = select_all(&doc, &paths);
-                loop {
-                    match crate::weather_fx::fixture::prepare_control(world, root, &doc, &selected)
-                    {
-                        Ok(Some(draws)) => {
-                            let live = &mut self.live[index];
-                            info!(
-                                "[site-move] effect Flying prepared: {} systems, {:.2}s after its copy was made ({})",
-                                draws.len(),
-                                live.age,
-                                if live.pooled { "inactive in its pool" } else { "playing" }
-                            );
-                            live.planned = true;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let refused = selected.iter().position(|&(_, ordinal)| {
-                                let node = &doc["emitters"][ordinal]["node"];
-                                error.starts_with(&format!(
-                                    "{node}: source particle control rejected"
-                                ))
-                            });
-                            match refused {
-                                Some(position) if selected.len() > 1 => {
-                                    warn!("[site-move] effect Flying emitter skipped: {error}");
-                                    selected.remove(position);
-                                    continue;
-                                }
-                                _ => {
-                                    warn!("[site-move] effect Flying particles refused: {error}");
-                                    self.live[index].planned = true;
-                                }
+                match prepare_skipping_refused(world, root, &doc, &mut selected, "Flying") {
+                    Prepared::Ready(draws) => {
+                        let authored = authored_renderers(world, &doc, &draws);
+                        let live = &mut self.live[index];
+                        info!(
+                            "[site-move] effect Flying prepared: {} systems, {:.2}s after its copy was made ({})",
+                            draws.len(),
+                            live.age,
+                            if live.pooled {
+                                "inactive in its pool"
+                            } else {
+                                "playing"
                             }
+                        );
+                        live.planned = true;
+                        live.draws = authored;
+                        if !live.pooled {
+                            // Played before its systems were prepared:
+                            // they start now, and so do their renderers.
+                            let draws = live.draws.clone();
+                            enable_renderers(world, kind, &draws);
                         }
                     }
-                    break;
+                    Prepared::Pending => {}
+                    Prepared::Refused(error) => {
+                        warn!("[site-move] effect Flying particles refused: {error}");
+                        self.live[index].planned = true;
+                    }
                 }
             } else {
                 let anchors: HashMap<String, Vec<Entity>> = paths
@@ -469,6 +507,100 @@ fn installed_systems(world: &World, root: Entity) -> usize {
         .unwrap_or(0)
 }
 
+/// Pair each prepared control draw with its emitter's authored
+/// `renderer.enabled`, found by the emitter node the draw's system runs.
+pub(crate) fn authored_renderers(
+    world: &World,
+    doc: &Value,
+    draws: &[Entity],
+) -> Vec<(Entity, bool)> {
+    let emitters = doc["emitters"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    draws
+        .iter()
+        .map(|&draw| {
+            let node = world
+                .get::<crate::uber_particle::FixtureParticleLive>(draw)
+                .map(|live| live.0.node.clone())
+                .unwrap_or_default();
+            let emitter = emitters.iter().find(|emitter| emitter["node"] == node.as_str());
+            let Some(emitter) = emitter else {
+                error!("[effects] prepared draw for {node:?} has no emitter in its document; its renderer stays off");
+                return (draw, false);
+            };
+            (draw, emitter["renderer"]["enabled"] == true)
+        })
+        .collect()
+}
+
+/// The Play step (`SetActive(true)` + `Play`): each prepared draw's renderer
+/// takes its emitter's authored `enabled` (a renderer the prefab ships off
+/// stays off; nothing turns renderers on or off afterwards).
+pub(crate) fn enable_renderers(world: &mut World, kind: EffectType, draws: &[(Entity, bool)]) {
+    if draws.is_empty() {
+        return;
+    }
+    let mut on = 0;
+    for &(draw, enabled) in draws {
+        if let Some(mut source) = world.get_mut::<crate::source_particle::SourceParticle>(draw) {
+            source.enabled = enabled;
+            on += usize::from(enabled);
+        }
+    }
+    info!(
+        "[effects] effect {kind:?} ({}) plays: {on} of {} prepared renderers on, as authored",
+        kind as u8,
+        draws.len()
+    );
+}
+
+/// Per-frame trace of an effect instance's draws (`MOLY_EFFECT_TRACE=1`,
+/// an instrument; off by default): the renderer's enabled flag, the draw's
+/// inherited visibility and the live particle count of its system after the
+/// last particle step.
+pub(crate) fn trace_draws(world: &World, label: &str, root: Entity) {
+    if !trace_enabled() {
+        return;
+    }
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    let Some(children) = world.get::<Children>(root) else {
+        info!("[effect-trace] frame {frame} {label}: no draws");
+        return;
+    };
+    for child in children.iter() {
+        let Some(live) = world.get::<crate::uber_particle::FixtureParticleLive>(child) else {
+            continue;
+        };
+        let enabled = world
+            .get::<crate::source_particle::SourceParticle>(child)
+            .map(|source| source.enabled);
+        let visible = world.get::<InheritedVisibility>(child).map(|v| v.get());
+        info!(
+            "[effect-trace] frame {frame} {label} draw {} enabled={} inherited_visible={} live={} head={:.3}",
+            live.0.node,
+            enabled.map_or("none".into(), |e| e.to_string()),
+            visible.map_or("none".into(), |v| v.to_string()),
+            live.0.pool.len(),
+            live.0.playback_head
+        );
+    }
+}
+
+pub(crate) fn trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| {
+        let on = std::env::var("MOLY_EFFECT_TRACE").is_ok_and(|value| value == "1");
+        if on {
+            warn!(
+                "[effect-trace] MOLY_EFFECT_TRACE=1: per-frame effect draw trace on (instrument)"
+            );
+        }
+        on
+    })
+}
+
 /// An instance whose particle systems never installed is released after
 /// this age (product housekeeping; nothing of it is drawn).
 const UNINSTALLED_RELEASE_AGE: f32 = 10.0;
@@ -494,7 +626,56 @@ fn systems_finished(world: &World, root: Entity) -> Option<bool> {
     any.then_some(true)
 }
 
-fn select_all(doc: &Value, paths: &HashMap<String, Vec<Entity>>) -> Vec<(Entity, usize)> {
+/// Outcome of a control preparation that skips refused emitters.
+pub(crate) enum Prepared {
+    /// Not ready yet; call again next frame (with the same root).
+    Pending,
+    /// Every remaining selected emitter has its draw and system.
+    Ready(Vec<Entity>),
+    /// The host refused the last remaining emitter (or the document).
+    Refused(String),
+}
+
+/// Explicit Play of a prefab's root system with its children: prepare the
+/// selected emitters as control-driven systems. An emitter the particle host
+/// refuses is skipped with a WARN and the others play, as the fixture path
+/// treats each refused emitter (the preparation judges every selected
+/// emitter before it builds anything, so a retry without the refused one
+/// starts clean). The preparation readies its emitters one after another.
+pub(crate) fn prepare_skipping_refused(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &mut Vec<(Entity, usize)>,
+    label: &str,
+) -> Prepared {
+    loop {
+        match crate::weather_fx::fixture::prepare_control(world, root, doc, selected) {
+            Ok(Some(draws)) => return Prepared::Ready(draws),
+            Ok(None) => return Prepared::Pending,
+            Err(error) => {
+                let refused = selected.iter().position(|&(_, ordinal)| {
+                    let node = &doc["emitters"][ordinal]["node"];
+                    error.starts_with(&format!("{node}: source particle control rejected"))
+                });
+                match refused {
+                    Some(position) if selected.len() > 1 => {
+                        warn!("[effects] effect {label} emitter skipped: {error}");
+                        selected.remove(position);
+                    }
+                    _ => return Prepared::Refused(error),
+                }
+            }
+        }
+    }
+}
+
+/// Every emitter of the document with a source-owned renderer whose node is
+/// among `paths`, as `(anchor, emitter ordinal)`.
+pub(crate) fn select_all(
+    doc: &Value,
+    paths: &HashMap<String, Vec<Entity>>,
+) -> Vec<(Entity, usize)> {
     let Some(emitters) = doc["emitters"].as_array() else {
         return Vec::new();
     };

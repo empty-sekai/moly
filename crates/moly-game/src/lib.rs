@@ -46,6 +46,7 @@ mod fixture_player_navigation;
 mod fixture_scene_inputs;
 pub mod fixture_talk;
 mod fixture_tiles;
+mod footstep;
 mod frame_capture;
 pub mod game_settings;
 pub mod gesture;
@@ -203,6 +204,7 @@ pub fn app(
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);
+    footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
     plain_background::install(&mut app);

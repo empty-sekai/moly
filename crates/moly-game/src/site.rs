@@ -215,6 +215,7 @@ impl SiteSelection {
         sites: &Sites,
         layouts: &crate::fixture::layouts::SiteFixtureLayouts,
         region: Option<NavMeshSourceRegion>,
+        homes: Option<&crate::entry::house::HomeFixtures>,
     ) -> Result<crate::fixture::FixturePlacements, String> {
         let level = self
             .levels
@@ -224,7 +225,7 @@ impl SiteSelection {
         let id = sites
             .site_id(&self.site)
             .ok_or_else(|| format!("site {} is not in the site table", self.site))?;
-        layouts.restore(id, &self.site, level, self.content, region)
+        layouts.restore(id, &self.site, level, self.content, region, homes)
     }
     pub(crate) fn content(&self) -> OfflineSceneContent {
         self.content

@@ -213,7 +213,12 @@ pub fn install(app: &mut App) {
             crate::entry::init,
             crate::entry::cover::spawn,
             crate::entry::indicator::request,
+            crate::entry::house::request,
         ),
+    )
+    .add_systems(
+        Update,
+        crate::entry::house::build.before(crate::fixture::FixtureLayoutSet),
     )
     .add_systems(
         Update,

@@ -30,8 +30,8 @@
 mod arrival;
 pub(crate) mod camera;
 mod cannon;
-mod effects;
-mod products;
+pub(crate) mod effects;
+pub(crate) mod products;
 mod speed_lines;
 pub(crate) mod timeline;
 
@@ -325,7 +325,10 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         let region = world
             .get_resource::<crate::site::NavMeshSourceRegion>()
             .copied();
-        next.restored_layout(sites, layouts, region)
+        // The loader completes a home layout with the player's house, so the
+        // arrival reads the same completed layout.
+        let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+        next.restored_layout(sites, layouts, region, homes)
     });
     let arrival = arrival::Arrival::for_destination(&server, &to_place.category, layout);
     let delta = to_place.product_origin() - from_place.product_origin();
@@ -340,8 +343,9 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
     }
     world.write_message(LayerCommand::Change(LayerId::MysekaiSiteMove));
     info!(
-        "[site-move] admitted {from} -> {to} (cannon): offset {delta:.1}, GameState SiteMove; pre-action: PlayerFootEffect stop (no product effect), CleanupCurrentSite, AddSite preload"
+        "[site-move] admitted {from} -> {to} (cannon): offset {delta:.1}, GameState SiteMove; pre-action: PlayerFootEffect stop, CleanupCurrentSite, AddSite preload"
     );
+    crate::footstep::stop_key(world, "cannon pre-action");
     world.insert_resource(SiteMove {
         source_clip: None,
         from,

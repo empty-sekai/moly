@@ -113,6 +113,8 @@ pub(crate) struct EditSelectionView {
     pub item: EditItemView,
     pub from_inventory: bool,
     pub is_new_mock: bool,
+    /// The store (return to inventory) action is offered.
+    pub can_clean_up: bool,
     pub put_status: PutStatus,
 }
 
@@ -153,6 +155,9 @@ enum SelectionOrigin {
 struct Selection {
     item: EditableFixture,
     origin: SelectionOrigin,
+    /// `FixtureController.CanCleanUp` of the selected fixture: not a gate and
+    /// not the player's house. Only a placed fixture offers the store action.
+    can_clean_up: bool,
 }
 
 #[derive(Resource, Default)]
@@ -316,9 +321,10 @@ fn begin(world: &mut World, session: &mut EditSession) {
         session.say("场地正在切换，暂时不能开始编辑。");
         return;
     }
+    let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
     let entry = world.get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "布局存档所有者尚未就绪".to_owned())
-        .and_then(|layouts| layouts.begin_edit(&layout));
+        .and_then(|layouts| layouts.begin_edit(&layout, homes));
     let (storage_baseline, inventory) = match entry {
         Ok(entry) => entry,
         Err(error) => {
@@ -361,7 +367,15 @@ fn select(
     // Selecting another item is an explicit Reset of an unfinished operation,
     // never an implicit Decide or an inventory debit.
     session.cancel_selection();
-    session.selected = Some(Selection { item, origin });
+    // A table that did not load answers false (no store action).
+    let can_clean_up = world
+        .get_resource::<crate::entry::house::HomeFixtures>()
+        .is_some_and(|homes| homes.can_clean_up(&item.package));
+    session.selected = Some(Selection {
+        item,
+        origin,
+        can_clean_up,
+    });
     session.phase = EditPhase::Placing;
     session.changed();
     play_se(world, "se_pick_furniture", "edit-pick");
@@ -425,6 +439,12 @@ fn return_item(session: &mut EditSession) {
     if selection.origin != SelectionOrigin::Placed {
         session.cancel_selection();
         session.say("已取消取出；库存没有减少，也没有复制新物品。");
+        return;
+    }
+    if !selection.can_clean_up {
+        // MysekaiFixtureUtility.CanCleanUp: the player's house and gates
+        // stay placed; they can still be moved and rotated.
+        session.say("玩家的家与大门不能收回库存，可以移动或旋转。");
         return;
     }
     let uid = selection.item.uid.clone();
@@ -774,6 +794,7 @@ fn publish_view(session: Res<EditSession>, mut view: ResMut<EditView>) {
             item: (&selection.item).into(),
             from_inventory: selection.origin == SelectionOrigin::Inventory,
             is_new_mock: selection.origin == SelectionOrigin::Mock,
+            can_clean_up: selection.can_clean_up,
             put_status: validation::put(&selection.item, &session.rows, floor),
         });
     let active = session.phase != EditPhase::Idle;
