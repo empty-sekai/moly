@@ -881,7 +881,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(srgb_format_decode(rgb), 1.0);
 #endif
 #ifdef SITE_OBJECT
-    // ---- Object 族（usage∈{8,12} 走 default 光照分支；2/11/14 在解析层
+    // ---- Object 族（usage∈{4,8,12} 走 default 光照分支；2/11/14 在解析层
     // 具名拒绝，此处不编译它们的支路）----
     // 法线 renorm + 视线选择（正交用 MatrixV 列 z）。
     let normal = normalize(in.world_normal);
@@ -924,7 +924,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     let selected = select(main.a, main.a * in.color.w, params.use_vertex_alpha_opacity.x > 0.0);
 
     // ndotl 先 clamp 后用（toon 的 half 用 clamp 副本；maskramp 的 r 在
-    // usage!=0 时被强制 1.0——本族 usage∈{8,12} 恒死，不编译）。
+    // usage!=0 时被强制 1.0——本族 usage∈{4,8,12} 恒死，不编译）。
     let ndotl_clamped = clamp(dot(env.light_vector.xyz, normal), 0.0, 1.0);
 
     // vc1：浮点 lerp、**原始未平方** vc.rgb（区别于 FO 的平方形）。

@@ -1532,7 +1532,7 @@ fn resolve_ground_birthday(
     })
 }
 
-/// Object 解析。值域门（未实现的分支具名拒）：usage 只在 {8, 12}
+/// Object 解析。值域门（未实现的分支具名拒）：usage 只在 {4, 8, 12}
 /// （2 = 墙 AO、11 = 道路、14 = 直通、其余未见过）、mapping 只在
 /// {0, 1, 2}（3 = uv2）、localMapping 只在 {0, 1}、_Cull 必须是 2
 /// （背面剔除——_BackFaceColor 路径因此恒死）、预览灯必须关。
@@ -1553,7 +1553,13 @@ pub(crate) fn resolve_object(
             .ok_or_else(|| format!("Object 材质 {} 缺浮点属性 {key}", slot.name))
     };
     let usage = get("_ObjectShaderUsage")?;
-    float_domain(slot, "Object", "_ObjectShaderUsage", usage, &[8.0, 12.0])?;
+    // The Base program reads the usage three times, in both keyword variants
+    // this gate admits: `== 11` (the road texture scale, alpha tiling and road
+    // shadow), `!= 0` (the shadow mask forced to 1) and a switch whose arms are
+    // 2 (wall AO), 14 (pass-through) and default (the toon ramp). Usage 4 (the
+    // item usage, e.g. the cannon's `mat_base`) takes the same three answers
+    // as 8 and 12, so it is the same program path; no other stage reads it.
+    float_domain(slot, "Object", "_ObjectShaderUsage", usage, &[4.0, 8.0, 12.0])?;
     let mapping = get("_BaseTextureMappingMode")?;
     float_domain(slot, "Object", "_BaseTextureMappingMode", mapping, &[0.0, 1.0, 2.0])?;
     let local_mapping = get("_MainTextureLocalMapping")?;
