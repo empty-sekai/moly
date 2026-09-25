@@ -571,7 +571,7 @@ fn compare_sweeps(row: &Value, ours: &[(SweepRequest, Option<SweepHit>, i32)], n
     }
     for (i, s) in native_sweeps.iter().enumerate() {
         if !used[i] {
-            *tally.entry("native sweeps not issued (box touches no triangle)").or_default() += 1;
+            *tally.entry("native sweeps the product does not issue").or_default() += 1;
             if words(&s["returned"])[0] != 0 {
                 differs.push("unissuedNativeHit");
             }
@@ -589,8 +589,8 @@ fn compare_sweeps(row: &Value, ours: &[(SweepRequest, Option<SweepHit>, i32)], n
 /// written arrays, random words, range words, hit records and queued
 /// commands must equal the engine's, and every sweep the scene answers must
 /// equal the logged native sweep of the same particle. The receipt's scene lookup
-/// listed the collider without the scene narrowphase, so a native sweep the
-/// product does not issue (its box touches no triangle) must be a miss.
+/// listed the collider whatever the box; a native sweep the product does not
+/// issue must be a miss.
 #[test]
 #[ignore = "needs MOLY_COLLISION_ROWS, MOLY_COLLISION_EXPORT and MOLY_COLLISION_SCENE_LABEL"]
 fn product_scene_calls_match_native_rows() {
@@ -675,15 +675,16 @@ fn product_scene_calls_match_native_rows() {
     assert!(mismatched.is_empty());
 }
 
-/// The product's site scene with two installed effects against the native
-/// two-collider rows (`MOLY_COLLISION_MULTI_ROWS`, with the collider export
+/// The product's site scene against the native multi-collider rows
+/// (`MOLY_COLLISION_MULTI_ROWS`, with the collider export
 /// `MOLY_COLLISION_EXPORT`): the scene is built by the admission path from
-/// each row's two site effects, installed in the row's collider order.
-/// First every row with that order taken as the engine's: the outcome words
-/// and every sweep (same particle, request and collider) equal to the
-/// engine's. Then every case as the product runs it, the order unknown: where
-/// the engine's two orders agree the product's outcome must equal them, and
-/// where they differ the call must be refused as order dependent.
+/// each row's colliders (a site effect's ground collider, or one of the
+/// site's own colliders), installed in the row's collider order. First every
+/// row with that order taken as the engine's: the outcome words and every
+/// sweep (same particle, request and collider) equal to the engine's. Then
+/// every case as the product runs it, the order unknown: where every order
+/// the engine ran agrees the product's outcome must equal them, and where
+/// they differ the call must be refused as order dependent.
 #[test]
 #[ignore = "needs MOLY_COLLISION_MULTI_ROWS and MOLY_COLLISION_EXPORT"]
 fn product_site_scene_matches_native_multi_rows() {
@@ -693,37 +694,49 @@ fn product_site_scene_matches_native_multi_rows() {
     };
     let doc = read("MOLY_COLLISION_MULTI_ROWS");
     let export = read("MOLY_COLLISION_EXPORT");
-    // The product's collider id of each site effect's ground collider: its
-    // ordinal in the export.
+    // The product's collider id of each row collider: its ordinal in the
+    // export (a site effect's ground collider by its effect, a site's own by
+    // site and node).
+    let key = |c: &Value| match c["effect"].as_str() {
+        Some(effect) => effect.to_owned(),
+        None => format!("{}/{}", c["site"].as_str().expect("collider site"), c["node"].as_str().expect("collider node")),
+    };
     let ordinal: std::collections::HashMap<String, i32> = export["colliders"].as_array().expect("colliders").iter().enumerate()
         .filter(|(_, c)| c["variant"].as_str() != Some("common"))
-        .map(|(i, c)| (c["effect"].as_str().unwrap().to_owned(), i as i32)).collect();
+        .map(|(i, c)| (key(c), i as i32)).collect();
     let mut builder = SceneBuilder::new(Ok(export));
     let mut site_for = |row: &Value| -> SiteScene {
         let site = SiteScene::default();
         for collider in row["colliders"].as_array().expect("row colliders") {
-            let effect = collider["effect"].as_str().expect("collider effect");
-            let scene = builder.effect_colliders(effect).expect("effect colliders");
-            assert_eq!(scene.collider_count(), 1, "{effect}: one ground collider");
+            let scene = match collider["effect"].as_str() {
+                Some(effect) => {
+                    let scene = builder.effect_colliders(effect).expect("effect colliders");
+                    assert_eq!(scene.collider_count(), 1, "{effect}: one ground collider");
+                    scene
+                }
+                None => {
+                    let (name, node) = (collider["site"].as_str().unwrap(), collider["node"].as_str().unwrap());
+                    builder.site_colliders(name).single(node).unwrap_or_else(|| panic!("site {name} collider {node}"))
+                }
+            };
             site.install(scene);
         }
         site
     };
     let mut tally = BTreeMap::<&str, usize>::new();
     let mut mismatched: Vec<String> = Vec::new();
-    let mut cases: BTreeMap<(u64, String, String), [Option<&Value>; 2]> = BTreeMap::new();
+    let mut cases: BTreeMap<(u64, String, String), Vec<&Value>> = BTreeMap::new();
     for row in doc["rows"].as_array().expect("rows") {
         let label = format!("pair {} {} {} {}", row["pair"], row["config"], row["scenario"], row["order"]);
-        let slot = cases.entry((row["pair"].as_u64().unwrap(), row["config"].as_str().unwrap().to_owned(),
-            row["scenario"].as_str().unwrap().to_owned())).or_default();
-        slot[usize::from(row["order"].as_str() == Some("BA"))] = Some(row);
+        cases.entry((row["pair"].as_u64().unwrap(), row["config"].as_str().unwrap().to_owned(),
+            row["scenario"].as_str().unwrap().to_owned())).or_default().push(row);
         if let Some(reason) = outside_product(row) {
             *tally.entry(reason).or_default() += 1;
             continue;
         }
         let log: SweepLog = Default::default();
         let site = site_for(row);
-        let natives: Vec<i32> = row["colliders"].as_array().unwrap().iter().map(|c| ordinal[c["effect"].as_str().unwrap()]).collect();
+        let natives: Vec<i32> = row["colliders"].as_array().unwrap().iter().map(|c| ordinal[&key(c)]).collect();
         // The product's world bounds of each collider against the engine's.
         let ours: Vec<Vec<u32>> = GroundQuery::live(site.clone()).reachable(u32::MAX).iter()
             .map(|c| c.bounds_min.iter().chain(&c.bounds_max).map(|x| x.to_bits()).collect()).collect();
@@ -760,17 +773,19 @@ fn product_site_scene_matches_native_multi_rows() {
             mismatched.push(format!("{label}: {differs:?} {details:?}"));
         }
     }
-    for ((pair, config, scenario), [ab, ba]) in &cases {
+    for ((pair, config, scenario), runs) in &cases {
         let label = format!("pair {pair} {config} {scenario} unordered");
-        let (Some(ab), Some(ba)) = (ab, ba) else {
-            mismatched.push(format!("{label}: one order missing"));
-            continue;
-        };
-        if outside_product(ab).is_some() {
+        let k = runs[0]["colliders"].as_array().unwrap().len();
+        if runs.len() != (1..=k).product::<usize>() {
+            mismatched.push(format!("{label}: {} runs of {k} colliders", runs.len()));
             continue;
         }
-        let agree = ab["after"] == ba["after"] && ab["log"]["emits"] == ba["log"]["emits"];
-        let call = product_call(ab, Box::new(GroundQuery::live(site_for(ab))));
+        let first = runs[0];
+        if outside_product(first).is_some() {
+            continue;
+        }
+        let agree = runs.iter().all(|r| r["after"] == first["after"] && r["log"]["emits"] == first["log"]["emits"]);
+        let call = product_call(first, Box::new(GroundQuery::live(site_for(first))));
         match (&call.result, agree) {
             (Err(reason), _) if reason.contains("PastEndLanes") => {
                 *tally.entry("unordered: refused, past-end lanes reach a collider").or_default() += 1;

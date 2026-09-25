@@ -94,23 +94,27 @@ fn current_corpus_admission() {
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             // The scene its collision systems query: the colliders of the
-            // effects installed with it, at its site for a site's own effect
-            // and at every installing site for a global one (admission is
-            // judged at the first; every site's verdict is reported). A common
-            // template is installed only inside site effects.
+            // effects installed with it and the site's own, at its site for a
+            // site's own effect and at every installing site for a global one
+            // (admission is judged at the first, with no placed fixtures;
+            // every site's verdict is reported, without and with placed
+            // fixtures). A common template is installed only inside site
+            // effects.
+            type Verdict = crate::particle_runtime::collision_scene::SceneVerdict;
             let installing: Vec<&(String, Vec<String>)> = selections.iter()
                 .filter(|(_, selected)| selected.iter().any(|e| e == effect_name)).collect();
-            let installed_at: Vec<(String, crate::particle_runtime::collision_scene::SceneVerdict)> = installing.iter()
+            let installed_at: Vec<(String, Verdict, Verdict)> = installing.iter()
                 .map(|(site, selected)| {
                     let names: Vec<&str> = selected.iter().map(String::as_str).collect();
-                    (site.clone(), scenes.for_installed(&names))
+                    (site.clone(), scenes.for_installed(&names, Some(site), false), scenes.for_installed(&names, Some(site), true))
                 }).collect();
             if effect["variant"].as_str() == Some("common") {
                 scenes.select(crate::particle_runtime::collision_scene::Installation::Template);
             } else {
                 let first: Vec<&str> = installing.first().map(|(_, selected)| selected.iter().map(String::as_str).collect())
                     .unwrap_or_default();
-                scenes.select(crate::particle_runtime::collision_scene::Installation::Together(&first));
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Together {
+                    effects: &first, site: installing.first().map(|(site, _)| site.as_str()), fixtures: false });
             }
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
@@ -186,14 +190,27 @@ fn current_corpus_admission() {
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "culling": planned.as_ref().map(|p| p.culling.label()),
                     "collisionScene": particle["system"]["collision"].is_object().then(|| {
-                        let verdict = |scene: &crate::particle_runtime::collision_scene::SceneVerdict| match scene {
-                            Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
-                            Err(reason) => json!({"bound": false, "reason": reason}),
+                        // The system's own mask, as the export gives it.
+                        let mask = particle["system"]["collision"]["collidesWith"].as_u64()
+                            .and_then(|m| u32::try_from(m).ok());
+                        let verdict = |scene: &Verdict, colliders: bool| match (scene, mask) {
+                            (Ok(scene), Some(mask)) => {
+                                let refusal = scene.refusal_for(mask);
+                                let mut row = json!({"mask": mask, "bound": refusal.is_none(), "refusal": refusal,
+                                    "answeredOnMask": scene.colliders_named(mask)});
+                                if colliders { row["colliders"] = scene.describe(); }
+                                row
+                            }
+                            (Ok(_), None) => json!({"bound": false, "reason": "collision mask not exported"}),
+                            (Err(reason), _) => json!({"bound": false, "reason": reason}),
                         };
-                        let mut row = verdict(&ground);
+                        let mut row = verdict(&ground, true);
                         if effect["variant"].as_str() == Some("global") {
-                            row["installedAt"] = installed_at.iter().map(|(site, scene)| (site.clone(), verdict(scene)))
+                            row["installedAt"] = installed_at.iter().map(|(site, scene, with_fixtures)| (site.clone(),
+                                json!({"withoutFixtures": verdict(scene, false), "withFixtures": verdict(with_fixtures, false)})))
                                 .collect::<serde_json::Map<_, _>>().into();
+                        } else if let Some((_, _, with_fixtures)) = installed_at.first() {
+                            row["withFixtures"] = verdict(with_fixtures, false);
                         }
                         row
                     }),

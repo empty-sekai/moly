@@ -441,9 +441,11 @@ fn hit_bits(hit: &Option<SweepHit>) -> Option<Vec<u32>> {
     hit.map(|h| h.position.iter().chain(&h.normal).chain([&h.distance]).map(|x| x.to_bits()).collect())
 }
 
-/// Whether a case's two native runs give the same outcome.
-fn orders_agree(ab: &Value, ba: &Value) -> bool {
-    field(ab, "after") == field(ba, "after") && field(field(ab, "log"), "emits") == field(field(ba, "log"), "emits")
+/// Whether a case's native runs (one per collider order) give the same
+/// outcome.
+fn orders_agree(runs: &[&Value]) -> bool {
+    runs.iter().all(|run| field(run, "after") == field(runs[0], "after")
+        && field(field(run, "log"), "emits") == field(field(runs[0], "log"), "emits"))
 }
 
 /// What the law made of one case in a scene that does not give the order.
@@ -453,20 +455,21 @@ struct UnorderedReplay {
     order_free: usize,
 }
 
-/// One case run natively in both orders (`ab` lists collider A first, `ba`
-/// collider B), through the law with a scene that does not give the order
-/// and answers each sweep with the native result of the same collider,
-/// particle and request (each collider is swept first in one of the two
-/// runs, so every sweep the law makes is recorded): where the two native
-/// runs agree the law must return their outcome bit for bit, and where they
-/// differ it must refuse the call as order dependent.
-fn replay_unordered(ab: &Value, ba: &Value) -> UnorderedReplay {
+/// One case run natively in every order of its colliders (each run lists
+/// them in one order), through the law with a scene that does not give the
+/// order and answers each sweep with the native result of the same collider,
+/// particle and request (each collider is swept first in some run, so every
+/// sweep the law makes is recorded): where the native runs agree the law
+/// must return their outcome bit for bit, and where they differ it must
+/// refuse the call as order dependent.
+fn replay_unordered(runs: &[&Value]) -> UnorderedReplay {
     let mut bad = Vec::new();
-    let Some(mut input) = row_inputs(ab) else {
+    let first = runs[0];
+    let Some(mut input) = row_inputs(first) else {
         return UnorderedReplay { bad: vec!["refused response"], refused: false, order_free: 0 };
     };
     let mut recorded: Vec<(i32, u32, Vec<u32>, Option<SweepHit>)> = Vec::new();
-    for row in [ab, ba] {
+    for &row in runs {
         let shapes: Vec<i32> = items(field(row, "shapes")).iter().map(|s| words(s)[7] as i32).collect();
         for s in items(field(field(row, "log"), "sweeps")) {
             let r = words(field(s, "returned"));
@@ -489,7 +492,7 @@ fn replay_unordered(ab: &Value, ba: &Value) -> UnorderedReplay {
             }
         }
     }
-    let arrays = Arrays { words: row_arrays(ab), current_size: words(field(ab, "flags"))[0] != 0 };
+    let arrays = Arrays { words: row_arrays(first), current_size: words(field(first, "flags"))[0] != 0 };
     let mut scene = Unordered { shapes: input.shapes.clone(), recorded, unrecorded: false };
     let update = UpdateInput {
         from: input.from, to: input.to, dt: input.dt, owner: input.owner, edges: &input.edges,
@@ -501,10 +504,10 @@ fn replay_unordered(ab: &Value, ba: &Value) -> UnorderedReplay {
     }
     let refused = matches!(result, Err(Refused::OrderDependent { .. }));
     let mut order_free = 0;
-    match (result, orders_agree(ab, ba)) {
+    match (result, orders_agree(runs)) {
         (Ok(outcome), true) => {
             order_free = outcome.order_free;
-            outcome_bad(ab, input.count, &arrays, &input.random, &input.state, &outcome, &mut bad);
+            outcome_bad(first, input.count, &arrays, &input.random, &input.state, &outcome, &mut bad);
         }
         (Ok(_), false) => bad.push("orderDependentNotRefused"),
         (Err(Refused::OrderDependent { .. }), true) => bad.push("refusedWhereOrdersAgree"),
@@ -517,16 +520,17 @@ fn replay_unordered(ab: &Value, ba: &Value) -> UnorderedReplay {
 const MULTI_ARMS: [&str; 3] = ["tieTakesLater", "touchContinues", "penetrationRecorded"];
 const UNORDERED_ARMS: [&str; 3] = ["orderFreeTrustListed", "orderFreeComparesIds", "orderFreeComparesHits"];
 
-/// The native two-collider rows (`MOLY_COLLISION_MULTI_ROWS`: every pair of
+/// The native multi-collider rows (`MOLY_COLLISION_MULTI_ROWS`: every pair of
 /// distinct ground colliders a site ships, and one identical pair per site,
-/// under the rain, snow and meteor systems, each case run with either
-/// collider first). Each row through the law with the colliders in the row's
+/// under the rain, snow and meteor systems, or a site's own colliders under
+/// the soap-bubble system, each case run in every order of its colliders).
+/// Each row through the law with the colliders in the row's
 /// order, bit for bit as the single-collider replay; the multi-collider
 /// selection variants (a tie taken by the later collider, a touching start
 /// that does not end the lane, a penetrating start recorded like a hit) must
 /// each differ on some row. Then each case through the law with a scene that
-/// does not give the order: the law must return the native outcome where the
-/// two orders agree and refuse where they differ, and trusting the listed
+/// does not give the order: the law must return the native outcome where
+/// every order agrees and refuse where they differ, and trusting the listed
 /// order, comparing the collider ids or refusing every lane whose orders hit
 /// differently must each break that on some case.
 /// (The single-collider arms are reported, not required, here.)
@@ -539,10 +543,11 @@ fn module_update_multi_rows_match_native_bits() {
     assert!(!rows.is_empty());
     let mut failures = Vec::new();
     let mut red: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut cases: BTreeMap<(i64, String, String), [Option<&Value>; 2]> = BTreeMap::new();
+    let mut cases: BTreeMap<(i64, String, String), Vec<&Value>> = BTreeMap::new();
     let (mut sweeps, mut hits) = (0usize, 0usize);
     for row in rows {
-        assert_eq!(items(field(row, "shapes")).len(), 2, "two colliders per row");
+        let shapes = items(field(row, "shapes")).len();
+        assert!(shapes >= 2 && shapes == items(field(row, "colliders")).len(), "one shape per listed collider, at least two");
         arms::set(None);
         let bad = replay(row);
         let label = format!("pair {} {} {} {}", int(field(row, "pair")), field(row, "config").as_str().unwrap(),
@@ -557,21 +562,24 @@ fn module_update_multi_rows_match_native_bits() {
             *red.entry(arm).or_default() += usize::from(!replay(row).is_empty());
         }
         arms::set(None);
-        let slot = cases.entry((int(field(row, "pair")), field(row, "config").as_str().unwrap().to_owned(),
-            field(row, "scenario").as_str().unwrap().to_owned())).or_default();
-        slot[usize::from(field(row, "order").as_str() == Some("BA"))] = Some(row);
+        cases.entry((int(field(row, "pair")), field(row, "config").as_str().unwrap().to_owned(),
+            field(row, "scenario").as_str().unwrap().to_owned())).or_default().push(row);
     }
     let (mut agree, mut refused, mut order_free_cases, mut order_free_lanes) = (0usize, 0usize, 0usize, 0usize);
     let mut unordered_failures = Vec::new();
-    for ((pair, config, scenario), [ab, ba]) in &cases {
-        let (Some(ab), Some(ba)) = (ab, ba) else {
-            unordered_failures.push(format!("pair {pair} {config} {scenario}: one order missing"));
+    for ((pair, config, scenario), runs) in &cases {
+        // Every order of the case's colliders, each once.
+        let k = items(field(runs[0], "shapes")).len();
+        let orders: std::collections::BTreeSet<&str> = runs.iter().filter_map(|r| field(r, "order").as_str()).collect();
+        if orders.len() != runs.len() || runs.len() != (1..=k).product::<usize>() {
+            unordered_failures.push(format!("pair {pair} {config} {scenario}: {} runs over {} orders of {k} colliders",
+                runs.len(), orders.len()));
             continue;
-        };
+        }
         arms::set(None);
-        let replayed = replay_unordered(ab, ba);
+        let replayed = replay_unordered(runs);
         refused += usize::from(replayed.refused);
-        agree += usize::from(orders_agree(ab, ba));
+        agree += usize::from(orders_agree(runs));
         order_free_cases += usize::from(replayed.order_free > 0);
         order_free_lanes += replayed.order_free;
         if !replayed.bad.is_empty() {
@@ -579,7 +587,7 @@ fn module_update_multi_rows_match_native_bits() {
         }
         for arm in UNORDERED_ARMS {
             arms::set(Some(arm));
-            *red.entry(arm).or_default() += usize::from(!replay_unordered(ab, ba).bad.is_empty());
+            *red.entry(arm).or_default() += usize::from(!replay_unordered(runs).bad.is_empty());
         }
         arms::set(None);
     }

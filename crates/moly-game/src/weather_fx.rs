@@ -199,6 +199,8 @@ pub(crate) struct WeatherFxPlan {
     /// The colliders each selected effect adds to the physics scene when it
     /// is installed.
     colliders: Vec<PlannedColliders>,
+    /// The site's own colliders, static for the whole visit.
+    site_colliders: Arc<crate::particle_runtime::collision_scene::GroundScene>,
     tally: Tally,
     tier: String,
     env_site: String,
@@ -456,6 +458,10 @@ pub(crate) struct WeatherFxRetirements {
     /// Colliders of stopped effects without an installed system (so without
     /// a stopped instance), and when they leave the scene.
     retiring_colliders: Vec<(u64, f64)>,
+    /// The installed site's collider entry, by site.
+    site_colliders: Option<(String, u64)>,
+    /// The placed fixtures' collider entry while the active site has any.
+    fixture_colliders: Option<u64>,
 }
 
 impl WeatherFxRetirements {
@@ -536,11 +542,57 @@ impl WeatherFxRetirements {
             false
         });
     }
+    /// Installs the site's own colliders (static, for the whole visit), in
+    /// place of another site's.
+    fn install_site(&mut self, site: &str, scene: &Arc<crate::particle_runtime::collision_scene::GroundScene>) {
+        if self.site_colliders.as_ref().is_some_and(|(installed, _)| installed == site) { return; }
+        if let Some((_, entry)) = self.site_colliders.take() { self.physics.remove(entry); }
+        let entry = self.physics.install(scene.clone());
+        self.site_colliders = Some((site.to_owned(), entry));
+        info!(site=%site, colliders=scene.collider_count(), scene=%scene.describe(),
+            "[weather-fx] site colliders installed in the physics scene");
+    }
+    /// Keeps the placed fixtures' colliders in the physics scene exactly
+    /// while the active site has placed fixtures.
+    fn sync_fixtures(&mut self, present: bool) {
+        match (present, self.fixture_colliders) {
+            (true, None) => {
+                self.fixture_colliders = Some(self.physics.install(crate::particle_runtime::collision_scene::fixture_colliders()));
+                info!("[weather-fx] placed fixtures' colliders in the physics scene: {}",
+                    crate::particle_runtime::collision_scene::FIXTURE_REFUSAL);
+            }
+            (false, Some(entry)) => {
+                self.physics.remove(entry);
+                self.fixture_colliders = None;
+            }
+            _ => {}
+        }
+    }
     fn clear_colliders(&mut self) {
         self.physics.clear();
         self.installed_colliders.clear();
         self.retiring_colliders.clear();
+        self.site_colliders = None;
+        self.fixture_colliders = None;
     }
+}
+
+/// Whether the active site has placed fixtures (their colliders are in the
+/// physics scene).
+fn fixtures_placed(placements: Option<&crate::fixture::FixturePlacements>, site: Option<&SiteActive>) -> bool {
+    match (placements, site) {
+        (Some(placements), Some(site)) => placements.site_id() == site.site_id && !placements.placed_rows().is_empty(),
+        _ => false,
+    }
+}
+
+/// The placed fixtures' colliders follow the active site's placements.
+pub(crate) fn sync_fixture_colliders(
+    placements: Option<Res<crate::fixture::FixturePlacements>>,
+    site: Option<Res<SiteActive>>,
+    mut retiring: ResMut<WeatherFxRetirements>,
+) {
+    retiring.sync_fixtures(fixtures_placed(placements.as_deref(), site.as_deref()));
 }
 
 /// `IsActiveParticle`: whether any child of the instance is playing.
@@ -682,6 +734,8 @@ pub(crate) fn plan(
     json: Res<Assets<JsonAsset>>,
     doc: Option<Res<WeatherFxDoc>>,
     planned: Option<Res<WeatherFxPlan>>,
+    site: Option<Res<SiteActive>>,
+    placements: Option<Res<crate::fixture::FixturePlacements>>,
  ) {
     if planned.is_some() {
         return;
@@ -729,7 +783,14 @@ pub(crate) fn plan(
     // Every collision system of the plan queries the colliders of all the
     // effects it installs (and of the stopped ones still retiring).
     let names: Vec<&str> = selected.iter().map(|(name, _, _)| name.as_str()).collect();
-    scenes.select(crate::particle_runtime::collision_scene::Installation::Together(&names));
+    // ... with the site's own colliders, and the placed fixtures' when the
+    // site has any at planning time.
+    let fixtures = fixtures_placed(placements.as_deref(), site.as_deref().filter(|site| site.env_site == doc.env_site));
+    scenes.select(crate::particle_runtime::collision_scene::Installation::Together {
+        effects: &names, site: Some(&doc.env_site), fixtures });
+    let site_colliders = scenes.site_colliders(&doc.env_site);
+    info!("[weather-fx] site {} colliders: {} answered against, placed fixtures {}; {}", doc.env_site,
+        site_colliders.collider_count(), fixtures, site_colliders.describe());
     let mut colliders = Vec::new();
     for &(ref name, effect, kind) in &selected {
         let Ok(lifecycle) = WeatherEffectLifecycle::from_effect(effect) else { continue; };
@@ -858,6 +919,7 @@ pub(crate) fn plan(
         animators,
         children,
         colliders,
+        site_colliders,
         tally,
         tier: doc.tier.clone(),
         env_site: doc.env_site.clone(),
@@ -2216,10 +2278,16 @@ fn judge_in_archive(
     };
     // Every other gate passed: the ground scene of the effects the plan
     // installs, bound here or refused by name.
-    let collision_scene = match (emitter.collision.is_some(), ground) {
-        (false, _) => None,
-        (true, Ok(scene)) => Some(scene.clone()),
-        (true, Err(reason)) => {
+    let collision_scene = match (emitter.collision.as_ref(), ground) {
+        (None, _) => None,
+        (Some(params), Ok(scene)) => match scene.refusal_for(params.collides_with) {
+            None => Some(scene.clone()),
+            Some(reason) => {
+                tally.law_reject.push(format!("{node}: CollisionModule mask {:#x}: {reason}", params.collides_with));
+                return None;
+            }
+        },
+        (Some(_), Err(reason)) => {
             tally.law_reject.push(format!("{node}: CollisionModule {reason}"));
             return None;
         }
@@ -2630,6 +2698,12 @@ pub(crate) fn spawn_when_ready(
     }
     for entity in retiring.despawn.drain(..) { commands.entity(entity).try_despawn(); }
     if preserve_global || install_global { plan.global_installed = true; }
+    // The site's own colliders are in the scene from the first install of
+    // this site's plan on (a global effect kept across the change included).
+    if install_site || install_global || preserve_global {
+        let (site, scene) = (plan.env_site.clone(), plan.site_colliders.clone());
+        retiring.install_site(&site, &scene);
+    }
     if plan.global_installed && phase.can_commit_global_fx(&plan.selection) {
         commands.insert_resource(crate::weather_transition::WeatherGlobalFxCommitted(plan.request_serial));
     }
@@ -3214,8 +3288,9 @@ pub(crate) fn report(state: Option<Res<WeatherFxState>>, retiring: Res<WeatherFx
             .map(|collision| (s.node.as_str(), emitting, collision.calls, collision.hits, collision.order_free)))
         .collect();
     if !collision.is_empty() {
-        info!("[weather-fx] collision: physics scene ground colliders {} ({} installed effects, {} retiring); per system (node, emitting, calls, hits, order-free lanes) {:?}",
-            retiring.physics.collider_count(), retiring.installed_colliders.len(), retiring.retiring_colliders.len(), collision);
+        info!("[weather-fx] collision: physics scene colliders {} ({} installed effects, {} retiring, site {:?}, placed fixtures {}); per system (node, emitting, calls, hits, order-free lanes) {:?}",
+            retiring.physics.collider_count(), retiring.installed_colliders.len(), retiring.retiring_colliders.len(),
+            retiring.site_colliders.as_ref().map(|(site, _)| site.as_str()), retiring.fixture_colliders.is_some(), collision);
     }
     if !retiring.live.is_empty() {
         info!("[weather-fx] retiring systems={}, live particles={}, active systems={}, destroy loops={:?}",
