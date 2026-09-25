@@ -105,7 +105,10 @@ pub(crate) fn spawn_when_ready(
         active_cover: identity("ActiveCover"),
         cover: identity("Cover"),
         cannot: {
-            let path = format!("{}/ButtonActionCannot", button_path.rsplit_once('/').expect("button parent").0);
+            let path = format!(
+                "{}/ButtonActionCannot",
+                button_path.rsplit_once('/').expect("button parent").0
+            );
             let node = doc
                 .nodes
                 .iter()
@@ -162,7 +165,8 @@ pub(crate) fn read_input(
     mut button: ResMut<HarvestButton>,
 ) {
     let events: Vec<GestureEvent> = gestures.read().copied().collect();
-    let visible = visible_now(&button, &stack, entry.as_deref(), site.as_deref()) && eligibility.field_input_open();
+    let visible = visible_now(&button, &stack, entry.as_deref(), site.as_deref())
+        && eligibility.field_input_open();
     if !visible {
         button.pointer = false;
         button.key = false;
@@ -175,7 +179,10 @@ pub(crate) fn read_input(
     let scale = canvas_scale(window.width(), window.height());
     let size = Vec2::new(window.width(), window.height()) / scale;
     let over_button = |position: Vec2| -> bool {
-        let canvas = Vec2::new(position.x - window.width() / 2.0, window.height() / 2.0 - position.y) / scale;
+        let canvas = Vec2::new(
+            position.x - window.width() / 2.0,
+            window.height() / 2.0 - position.y,
+        ) / scale;
         views.iter().any(|(marks, view)| {
             view.rect(&layouts, &marks.button, size)
                 .is_some_and(|rect| rect.active && rect.contains(canvas))
@@ -183,11 +190,16 @@ pub(crate) fn read_input(
     };
     for event in &events {
         match event.state {
-            GestureState::Began if event.kind == GestureKind::Tap && over_button(event.position) => {
+            GestureState::Began
+                if event.kind == GestureKind::Tap && over_button(event.position) =>
+            {
                 if button.interactable {
                     button.pointer = true;
                     button.presses += 1;
-                    info!("[harvest-ui] action button pressed at ({:.0},{:.0})", event.position.x, event.position.y);
+                    info!(
+                        "[harvest-ui] action button pressed at ({:.0},{:.0})",
+                        event.position.x, event.position.y
+                    );
                 }
             }
             GestureState::End if button.pointer => {
@@ -224,7 +236,12 @@ pub(crate) fn place(
         Option<Res<crate::entry::EntrySequence>>,
         Option<Res<crate::site::SiteActive>>,
     ),
-    mut views: Query<(&HarvestButtonView, &mut Visibility, &mut Transform, &mut UiPrefabView)>,
+    mut views: Query<(
+        &HarvestButtonView,
+        &mut Visibility,
+        &mut Transform,
+        &mut UiPrefabView,
+    )>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -232,7 +249,11 @@ pub(crate) fn place(
     let scale = canvas_scale(window.width(), window.height());
     let visible = visible_now(&button, &stack, entry.as_deref(), site.as_deref());
     for (marks, mut visibility, mut transform, mut view) in &mut views {
-        *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
+        *visibility = if visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         transform.scale = Vec3::splat(scale);
         view.set_visible(&marks.active_cover, button.is_press);
         view.set_visible(&marks.cover, button.cover);

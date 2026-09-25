@@ -18,8 +18,9 @@ use bevy::prelude::*;
 
 use super::law::{punch_points, PointTween, SegmentEase};
 use super::{
-    ActionInterface, DropBatch, EffectHook, HarvestDropBatches, HarvestEffectHooks, HarvestHitResults, HarvestHits,
-    HarvestObject, HarvestStats, HarvestViewNodes, HitResult, PendingDrop, STATUS_HARVESTED,
+    ActionInterface, DropBatch, EffectHook, HarvestDropBatches, HarvestEffectHooks,
+    HarvestHitResults, HarvestHits, HarvestObject, HarvestStats, HarvestViewNodes, HitResult,
+    PendingDrop, STATUS_HARVESTED,
 };
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::player::PlayerControlled;
@@ -46,8 +47,14 @@ pub(crate) struct HarvestPunches(Vec<PointTween>);
 /// A disappearance in progress (`ChangeAfterObject`).
 #[derive(Component)]
 pub(crate) enum HarvestAfterForm {
-    TreeFall { elapsed: f32, from: Option<Quat>, emitted: bool },
-    DelayedHide { remaining: f32 },
+    TreeFall {
+        elapsed: f32,
+        from: Option<Quat>,
+        emitted: bool,
+    },
+    DelayedHide {
+        remaining: f32,
+    },
 }
 
 pub(crate) fn push_se(se: &mut SeRequests, cue: &str, source: &'static str) {
@@ -82,7 +89,12 @@ pub(crate) fn on_damage(
     mut commands: Commands,
     mut hits: ResMut<HarvestHits>,
     mut results: ResMut<HarvestHitResults>,
-    mut objects: Query<(&mut HarvestObject, &mut Visibility, &Transform, Option<&HarvestViewNodes>)>,
+    mut objects: Query<(
+        &mut HarvestObject,
+        &mut Visibility,
+        &Transform,
+        Option<&HarvestViewNodes>,
+    )>,
     mut punches: Query<&mut HarvestPunches>,
     mut node_visibility: Query<&mut Visibility, Without<HarvestObject>>,
     players: Query<&Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
@@ -95,7 +107,8 @@ pub(crate) fn on_damage(
     let Some(configs) = configs else {
         return;
     };
-    let drop_delay_count = configs.int(crate::client_config::KEY_HARVEST_DROP_DELAY_ITEM_COUNT) as usize;
+    let drop_delay_count =
+        configs.int(crate::client_config::KEY_HARVEST_DROP_DELAY_ITEM_COUNT) as usize;
     let player = players.single().ok().map(|transform| transform.translation);
     for hit in std::mem::take(&mut hits.0) {
         let Ok((mut object, mut visibility, transform, nodes)) = objects.get_mut(hit.target) else {
@@ -126,7 +139,8 @@ pub(crate) fn on_damage(
         // The multi effects stand 0.2 m back toward the player and 0.35 m up.
         let effect_at = match player {
             Some(player) => {
-                let dir = Vec2::new(position.x - player.x, position.z - player.z).normalize_or_zero();
+                let dir =
+                    Vec2::new(position.x - player.x, position.z - player.z).normalize_or_zero();
                 position + Vec3::new(-0.2 * dir.x, 0.35, -0.2 * dir.y)
             }
             None => position + Vec3::Y * 0.35,
@@ -154,7 +168,12 @@ pub(crate) fn on_damage(
                     _ => {}
                 }
                 if hit.is_boost
-                    && matches!(object.class, "MysekaiAreaJunkView" | "MysekaiAreadDriftageView" | "MysekaiBirthdayPlantView")
+                    && matches!(
+                        object.class,
+                        "MysekaiAreaJunkView"
+                            | "MysekaiAreadDriftageView"
+                            | "MysekaiBirthdayPlantView"
+                    )
                 {
                     hooks.push(141);
                 }
@@ -162,7 +181,10 @@ pub(crate) fn on_damage(
             }
         }
         for kind in &hooks {
-            effects.pending.push(EffectHook { kind: *kind, position: effect_at });
+            effects.pending.push(EffectHook {
+                kind: *kind,
+                position: effect_at,
+            });
         }
         for cue in &cues {
             push_se(&mut se, cue, "harvest-hit");
@@ -175,17 +197,29 @@ pub(crate) fn on_damage(
         match punches.get_mut(hit.target) {
             Ok(mut list) => list.0.push(tween),
             Err(_) => {
-                commands.entity(hit.target).insert(HarvestPunches(vec![tween]));
+                commands
+                    .entity(hit.target)
+                    .insert(HarvestPunches(vec![tween]));
             }
         }
         // HandleResourceDrop: the last attack takes every remaining row
         // (row hp >= hp after); other hits the rows with hp < row hp <= prev.
-        assert!(object.fixture_type < 10, "fixture type {} is outside the drop gate", object.fixture_type);
+        assert!(
+            object.fixture_type < 10,
+            "fixture type {} is outside the drop gate",
+            object.fixture_type
+        );
         let (hp, prev_hp) = (object.hp, object.prev_hp);
         let admitted: Vec<PendingDrop> = object
             .pending_drops
             .iter()
-            .filter(|drop| if last { drop.row.hp >= hp } else { hp < drop.row.hp && drop.row.hp <= prev_hp })
+            .filter(|drop| {
+                if last {
+                    drop.row.hp >= hp
+                } else {
+                    hp < drop.row.hp && drop.row.hp <= prev_hp
+                }
+            })
             .cloned()
             .collect();
         let mut tail = String::new();
@@ -214,7 +248,16 @@ pub(crate) fn on_damage(
                 ActionInterface::Multi => stats.multi_final += 1,
                 ActionInterface::Single => stats.single_hits += 1,
             }
-            change_after_object(&mut commands, hit.target, &object, position, &mut visibility, nodes, &mut node_visibility, &mut effects);
+            change_after_object(
+                &mut commands,
+                hit.target,
+                &object,
+                position,
+                &mut visibility,
+                nodes,
+                &mut node_visibility,
+                &mut effects,
+            );
             object.collision = false;
             tail.push_str(" -> ChangeAfterObject + RemoveCollisionObject");
         } else {
@@ -244,7 +287,11 @@ pub(crate) fn on_damage(
     }
 }
 
-fn hide(entity: Option<Entity>, root_visibility: &mut Visibility, nodes: &mut Query<&mut Visibility, Without<HarvestObject>>) {
+fn hide(
+    entity: Option<Entity>,
+    root_visibility: &mut Visibility,
+    nodes: &mut Query<&mut Visibility, Without<HarvestObject>>,
+) {
     match entity.and_then(|entity| nodes.get_mut(entity).ok()) {
         Some(mut visibility) => *visibility = Visibility::Hidden,
         None => *root_visibility = Visibility::Hidden,
@@ -266,7 +313,10 @@ fn change_after_object(
     match object.class {
         "MysekaiAreaTreeView" => {
             let (Some(after), Some(nodes)) = (nodes.and_then(|n| n.after), nodes) else {
-                warn!("[harvest] {}#{}: tree after mesh unresolved; the whole tree hides", object.leaf, object.fixture_id);
+                warn!(
+                    "[harvest] {}#{}: tree after mesh unresolved; the whole tree hides",
+                    object.leaf, object.fixture_id
+                );
                 *root_visibility = Visibility::Hidden;
                 return;
             };
@@ -275,17 +325,29 @@ fn change_after_object(
             if let Ok(mut visibility) = node_visibility.get_mut(after) {
                 *visibility = Visibility::Inherited;
             }
-            if let Some(mut visibility) = nodes.under.and_then(|under| node_visibility.get_mut(under).ok()) {
+            if let Some(mut visibility) = nodes
+                .under
+                .and_then(|under| node_visibility.get_mut(under).ok())
+            {
                 *visibility = Visibility::Inherited;
             }
-            commands.entity(root).insert(HarvestAfterForm::TreeFall { elapsed: 0.0, from: None, emitted: false });
+            commands.entity(root).insert(HarvestAfterForm::TreeFall {
+                elapsed: 0.0,
+                from: None,
+                emitted: false,
+            });
         }
         "MysekaiAreaStoneView" => {
             hide(object_node, root_visibility, node_visibility);
-            effects.pending.push(EffectHook { kind: 131, position });
+            effects.pending.push(EffectHook {
+                kind: 131,
+                position,
+            });
         }
         "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView" => {
-            commands.entity(root).insert(HarvestAfterForm::DelayedHide { remaining: DELAYED_HIDE });
+            commands.entity(root).insert(HarvestAfterForm::DelayedHide {
+                remaining: DELAYED_HIDE,
+            });
         }
         _ => hide(object_node, root_visibility, node_visibility),
     }
@@ -317,14 +379,24 @@ pub(crate) fn advance_punches(
 pub(crate) fn advance_after_forms(
     time: Res<Time>,
     mut commands: Commands,
-    mut forms: Query<(Entity, &mut HarvestAfterForm, &HarvestObject, &HarvestViewNodes, &mut Visibility)>,
+    mut forms: Query<(
+        Entity,
+        &mut HarvestAfterForm,
+        &HarvestObject,
+        &HarvestViewNodes,
+        &mut Visibility,
+    )>,
     mut nodes: Query<(&mut Transform, &mut Visibility, &GlobalTransform), Without<HarvestObject>>,
     mut effects: ResMut<HarvestEffectHooks>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut form, object, view, mut root_visibility) in &mut forms {
         match &mut *form {
-            HarvestAfterForm::TreeFall { elapsed, from, emitted } => {
+            HarvestAfterForm::TreeFall {
+                elapsed,
+                from,
+                emitted,
+            } => {
                 let Some(after) = view.after else {
                     commands.entity(entity).remove::<HarvestAfterForm>();
                     continue;
@@ -334,7 +406,8 @@ pub(crate) fn advance_after_forms(
                     let start = *from.get_or_insert(transform.rotation);
                     let t = (*elapsed / FALL_DURATION).clamp(0.0, 1.0);
                     let eased = t * t * t * t;
-                    transform.rotation = start.slerp(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), eased);
+                    transform.rotation =
+                        start.slerp(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), eased);
                 }
                 if *elapsed >= FADE_DELAY && !*emitted {
                     *emitted = true;
@@ -343,7 +416,10 @@ pub(crate) fn advance_after_forms(
                         .and_then(|node| nodes.get(node).ok())
                         .map(|(_, _, global)| global.translation())
                         .unwrap_or_default();
-                    effects.pending.push(EffectHook { kind: 132, position });
+                    effects.pending.push(EffectHook {
+                        kind: 132,
+                        position,
+                    });
                     info!(
                         "[harvest] {}#{} fall: 2.0 s delay done, delete effect 132 at {position:.2}; dither fade not ported, the top hides after {FADE_DURATION} s",
                         object.leaf, object.fixture_id
@@ -367,7 +443,10 @@ pub(crate) fn advance_after_forms(
                         Some((_, mut visibility, _)) => *visibility = Visibility::Hidden,
                         None => *root_visibility = Visibility::Hidden,
                     }
-                    info!("[harvest] {}#{} off after the 1.0 s delay", object.leaf, object.fixture_id);
+                    info!(
+                        "[harvest] {}#{} off after the 1.0 s delay",
+                        object.leaf, object.fixture_id
+                    );
                     commands.entity(entity).remove::<HarvestAfterForm>();
                 }
             }

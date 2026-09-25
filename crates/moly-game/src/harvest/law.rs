@@ -115,7 +115,11 @@ pub(crate) struct ToolClock {
 /// `HarvestUtility.GetHarvestAnimationName`, lower case as the client builds
 /// it. Wood and mineral with a tool: `mov_u000_site_` + ax / pickax + the
 /// level in two digits + the state suffix; the other kinds name one clip.
-pub(crate) fn harvest_clip_name(fixture_type: i32, tool: Option<ToolClock>, state: ToolState) -> Option<String> {
+pub(crate) fn harvest_clip_name(
+    fixture_type: i32,
+    tool: Option<ToolClock>,
+    state: ToolState,
+) -> Option<String> {
     Some(match fixture_type {
         0 | 1 => {
             let tool = tool?;
@@ -140,7 +144,11 @@ pub(crate) fn harvest_clip_name(fixture_type: i32, tool: Option<ToolClock>, stat
 /// `HarvestUtility.GetHarvestActionTime`: with a tool in the Loop state the
 /// cool-down `coolTimeMicroSeconds / 1000` (a value not above zero logs and
 /// becomes 1.0); otherwise the length of the state's clip.
-pub(crate) fn harvest_action_time(tool: Option<ToolClock>, state: ToolState, clip_length: f32) -> f32 {
+pub(crate) fn harvest_action_time(
+    tool: Option<ToolClock>,
+    state: ToolState,
+    clip_length: f32,
+) -> f32 {
     match tool {
         Some(tool) if state == ToolState::Loop => {
             let value = tool.cool_time / 1000.0;
@@ -303,12 +311,17 @@ pub(crate) fn is_tool_required_for_harvest(fixture_type: i32) -> bool {
 /// `HarvestUtility.HasToolRequiredForHarvest`: a kind without a tool
 /// requirement always passes; wood needs a selected axe and mineral a
 /// selected pickaxe, each with durability above zero.
-pub(crate) fn has_tool_required_for_harvest(selected: Option<(ToolType, i32)>, fixture_type: i32) -> bool {
+pub(crate) fn has_tool_required_for_harvest(
+    selected: Option<(ToolType, i32)>,
+    fixture_type: i32,
+) -> bool {
     if !is_tool_required_for_harvest(fixture_type) {
         return true;
     }
     match (fixture_type, selected) {
-        (1, Some((ToolType::Pickaxe, durability))) | (0, Some((ToolType::Axe, durability))) => durability > 0,
+        (1, Some((ToolType::Pickaxe, durability))) | (0, Some((ToolType::Axe, durability))) => {
+            durability > 0
+        }
         _ => false,
     }
 }
@@ -347,10 +360,19 @@ pub(crate) fn has_stamina_available_for_harvest(
 /// negated and positive clamps of it to a strength that decays by
 /// `|direction| / n` per point, the last point zero. Points are relative to
 /// the start value.
-pub(crate) fn punch_points(direction: Vec3, duration: f32, vibrato: i32, elasticity: f32) -> (Vec<Vec3>, Vec<f32>) {
+pub(crate) fn punch_points(
+    direction: Vec3,
+    duration: f32,
+    vibrato: i32,
+    elasticity: f32,
+) -> (Vec<Vec3>, Vec<f32>) {
     let elasticity = elasticity.clamp(0.0, 1.0);
     let product = vibrato as f32 * duration;
-    let mut count = if product == f32::INFINITY { i32::MIN } else { product as i32 };
+    let mut count = if product == f32::INFINITY {
+        i32::MIN
+    } else {
+        product as i32
+    };
     if count < 3 {
         count = 2;
     }
@@ -407,7 +429,11 @@ pub(crate) fn shake_points(
             }
             // `DOTweenUtils.Vector3FromAngle`: degrees times `Mathf.Deg2Rad`.
             let radians = angle * 0.017_453_292;
-            points.push(Vec3::new(magnitude * radians.cos(), magnitude * radians.sin(), 0.0));
+            points.push(Vec3::new(
+                magnitude * radians.cos(),
+                magnitude * radians.sin(),
+                0.0,
+            ));
             if fade_out {
                 magnitude -= decay;
             }
@@ -501,7 +527,11 @@ impl PointTween {
                 from = to;
                 continue;
             }
-            let t = if *segment > 0.0 { ((elapsed - before) / segment).clamp(0.0, 1.0) } else { 1.0 };
+            let t = if *segment > 0.0 {
+                ((elapsed - before) / segment).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             let eased = match self.ease {
                 SegmentEase::OutQuad => -t * (t - 2.0),
                 SegmentEase::Linear => t,
@@ -545,7 +575,10 @@ mod value_checks {
         let player = Vec3::ZERO;
         let forward = Vec3::Z;
         // Straight ahead: angle 0.
-        assert_eq!(target_priority(player, forward, Vec3::new(0.0, 5.0, 2.0)), 0.0);
+        assert_eq!(
+            target_priority(player, forward, Vec3::new(0.0, 5.0, 2.0)),
+            0.0
+        );
         // At 90 degrees, 1 m away: 1 * 90.
         let side = target_priority(player, forward, Vec3::new(1.0, 0.0, 0.0));
         assert!((side - 90.0).abs() < 1e-3, "{side}");
@@ -576,23 +609,54 @@ mod value_checks {
     /// 1, 2, 4, 5 with cool times 1200, 1200, 1000, 500).
     #[test]
     fn cool_down_and_clip_schedule_per_tool() {
-        let tool = |tool_type, level, cool_time| ToolClock { tool_type, level, cool_time };
+        let tool = |tool_type, level, cool_time| ToolClock {
+            tool_type,
+            level,
+            cool_time,
+        };
         let ax1 = tool(ToolType::Axe, 1, 1200.0);
-        assert_eq!(harvest_clip_name(0, Some(ax1), ToolState::Loop).unwrap(), "mov_u000_site_ax01_l");
-        assert_eq!(harvest_clip_name(0, Some(ax1), ToolState::End).unwrap(), "mov_u000_site_ax01_e");
+        assert_eq!(
+            harvest_clip_name(0, Some(ax1), ToolState::Loop).unwrap(),
+            "mov_u000_site_ax01_l"
+        );
+        assert_eq!(
+            harvest_clip_name(0, Some(ax1), ToolState::End).unwrap(),
+            "mov_u000_site_ax01_e"
+        );
         let pick5 = tool(ToolType::Pickaxe, 5, 500.0);
-        assert_eq!(harvest_clip_name(1, Some(pick5), ToolState::Start).unwrap(), "mov_u000_site_pickax05_s");
-        assert_eq!(harvest_clip_name(2, None, ToolState::None).unwrap(), "mov_u000_site_pick001_o");
-        assert_eq!(harvest_clip_name(5, None, ToolState::None).unwrap(), "mov_u000_site_pick04_o");
-        assert_eq!(harvest_clip_name(8, None, ToolState::None).unwrap(), "mov_u000_site_barrel01_o");
+        assert_eq!(
+            harvest_clip_name(1, Some(pick5), ToolState::Start).unwrap(),
+            "mov_u000_site_pickax05_s"
+        );
+        assert_eq!(
+            harvest_clip_name(2, None, ToolState::None).unwrap(),
+            "mov_u000_site_pick001_o"
+        );
+        assert_eq!(
+            harvest_clip_name(5, None, ToolState::None).unwrap(),
+            "mov_u000_site_pick04_o"
+        );
+        assert_eq!(
+            harvest_clip_name(8, None, ToolState::None).unwrap(),
+            "mov_u000_site_barrel01_o"
+        );
         assert!(harvest_clip_name(0, None, ToolState::None).is_none());
         // Loop: the cool time; other states: the clip length.
         assert_eq!(harvest_action_time(Some(ax1), ToolState::Loop, 9.0), 1.2);
-        assert_eq!(harvest_action_time(Some(tool(ToolType::Axe, 4, 1000.0)), ToolState::Loop, 9.0), 1.0);
+        assert_eq!(
+            harvest_action_time(Some(tool(ToolType::Axe, 4, 1000.0)), ToolState::Loop, 9.0),
+            1.0
+        );
         assert_eq!(harvest_action_time(Some(pick5), ToolState::Loop, 9.0), 0.5);
-        assert_eq!(harvest_action_time(Some(ax1), ToolState::End, 0.466_666_7), 0.466_666_7);
+        assert_eq!(
+            harvest_action_time(Some(ax1), ToolState::End, 0.466_666_7),
+            0.466_666_7
+        );
         assert_eq!(harvest_action_time(None, ToolState::None, 1.25), 1.25);
-        assert_eq!(harvest_action_time(Some(tool(ToolType::Axe, 1, 0.0)), ToolState::Loop, 9.0), 1.0);
+        assert_eq!(
+            harvest_action_time(Some(tool(ToolType::Axe, 1, 0.0)), ToolState::Loop, 9.0),
+            1.0
+        );
         // The cool-down Delay divides by the speed, the animation wait not.
         assert_eq!(delay_seconds((1.2f32 / 1.5f32) as f64), 0.8);
         assert_eq!(delay_seconds(1.2f32 as f64), 1.2);
@@ -610,7 +674,13 @@ mod value_checks {
             (35, vec![35, 35, 20, 10]),
             (40, vec![40, 40, 10, 10]),
         ] {
-            let mut model = HpModel { hp: 90, prev_hp: 90, harvested: false, is_last_attack: false, last_attack_stamina: 10 };
+            let mut model = HpModel {
+                hp: 90,
+                prev_hp: 90,
+                harvested: false,
+                is_last_attack: false,
+                last_attack_stamina: 10,
+            };
             let mut returned = Vec::new();
             while !model.harvested {
                 returned.push(model.update_hp(power));
@@ -620,7 +690,13 @@ mod value_checks {
             assert_eq!(model.update_hp(power), 0, "a harvested model returns 0");
         }
         // hp 0 kinds: the first hit is the last attack.
-        let mut plant = HpModel { hp: 0, prev_hp: 0, harvested: false, is_last_attack: false, last_attack_stamina: 20 };
+        let mut plant = HpModel {
+            hp: 0,
+            prev_hp: 0,
+            harvested: false,
+            is_last_attack: false,
+            last_attack_stamina: 20,
+        };
         assert_eq!(plant.update_hp(1), 20);
         assert!(plant.harvested);
     }
@@ -640,44 +716,178 @@ mod value_checks {
             can_attack: true,
         };
         assert_eq!(can_continue_action(base), (true, false));
-        assert_eq!(can_continue_action(ContinueInputs { long_tap: false, ..base }), (false, false));
-        assert_eq!(can_continue_action(ContinueInputs { long_tap: false, sustain: true, ..base }), (true, false));
-        assert_eq!(can_continue_action(ContinueInputs { tool_quantity: None, sustain: true, ..base }), (false, false));
-        assert_eq!(can_continue_action(ContinueInputs { tool_quantity: Some(0), ..base }), (false, false));
-        assert_eq!(can_continue_action(ContinueInputs { target_harvested: true, ..base }), (false, false));
-        assert_eq!(can_continue_action(ContinueInputs { auto_changed_tool: true, ..base }), (false, false));
-        assert_eq!(can_continue_action(ContinueInputs { stamina_empty: true, ..base }), (false, false));
-        assert_eq!(can_continue_action(ContinueInputs { can_attack: false, ..base }), (false, false));
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                long_tap: false,
+                ..base
+            }),
+            (false, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                long_tap: false,
+                sustain: true,
+                ..base
+            }),
+            (true, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                tool_quantity: None,
+                sustain: true,
+                ..base
+            }),
+            (false, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                tool_quantity: Some(0),
+                ..base
+            }),
+            (false, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                target_harvested: true,
+                ..base
+            }),
+            (false, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                auto_changed_tool: true,
+                ..base
+            }),
+            (false, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                stamina_empty: true,
+                ..base
+            }),
+            (false, false)
+        );
+        assert_eq!(
+            can_continue_action(ContinueInputs {
+                can_attack: false,
+                ..base
+            }),
+            (false, false)
+        );
     }
 
     /// Stamina debit: boost first, then normal (enhance below one) or
     /// enhance.
     #[test]
     fn stamina_debit_and_gate() {
-        let mut s = Stamina { normal: 1000, enhance: 0, boost: 0 };
+        let mut s = Stamina {
+            normal: 1000,
+            enhance: 0,
+            boost: 0,
+        };
         s.decrease(20);
-        assert_eq!(s, Stamina { normal: 980, enhance: 0, boost: 0 });
-        let mut s = Stamina { normal: 100, enhance: 0, boost: 15 };
+        assert_eq!(
+            s,
+            Stamina {
+                normal: 980,
+                enhance: 0,
+                boost: 0
+            }
+        );
+        let mut s = Stamina {
+            normal: 100,
+            enhance: 0,
+            boost: 15,
+        };
         s.decrease(20);
-        assert_eq!(s, Stamina { normal: 95, enhance: 0, boost: 0 });
-        let mut s = Stamina { normal: 100, enhance: 50, boost: 30 };
+        assert_eq!(
+            s,
+            Stamina {
+                normal: 95,
+                enhance: 0,
+                boost: 0
+            }
+        );
+        let mut s = Stamina {
+            normal: 100,
+            enhance: 50,
+            boost: 30,
+        };
         s.decrease(20);
-        assert_eq!(s, Stamina { normal: 100, enhance: 50, boost: 10 });
-        let mut s = Stamina { normal: 100, enhance: 50, boost: 0 };
+        assert_eq!(
+            s,
+            Stamina {
+                normal: 100,
+                enhance: 50,
+                boost: 10
+            }
+        );
+        let mut s = Stamina {
+            normal: 100,
+            enhance: 50,
+            boost: 0,
+        };
         s.decrease(20);
-        assert_eq!(s, Stamina { normal: 100, enhance: 30, boost: 0 });
-        assert!(Stamina { normal: 0, enhance: 0, boost: 0 }.is_empty());
-        assert!(!Stamina { normal: 0, enhance: 1, boost: 0 }.is_empty());
+        assert_eq!(
+            s,
+            Stamina {
+                normal: 100,
+                enhance: 30,
+                boost: 0
+            }
+        );
+        assert!(Stamina {
+            normal: 0,
+            enhance: 0,
+            boost: 0
+        }
+        .is_empty());
+        assert!(!Stamina {
+            normal: 0,
+            enhance: 1,
+            boost: 0
+        }
+        .is_empty());
         // The gate: a 20-power axe on hp 90 needs 20 or 90; on hp 0 before
         // the last attack the last-attack stamina.
-        let low = Stamina { normal: 19, enhance: 0, boost: 0 };
+        let low = Stamina {
+            normal: 19,
+            enhance: 0,
+            boost: 0,
+        };
         assert!(!can_attack_remain_stamina(low, Some(20), false, 90, 10));
         assert!(can_attack_remain_stamina(low, Some(20), false, 15, 10));
         assert!(can_attack_remain_stamina(low, Some(20), false, 0, 10));
-        assert!(!can_attack_remain_stamina(Stamina { normal: 9, ..low }, Some(20), false, 0, 10));
+        assert!(!can_attack_remain_stamina(
+            Stamina { normal: 9, ..low },
+            Some(20),
+            false,
+            0,
+            10
+        ));
         assert!(can_attack_remain_stamina(low, None, false, 0, 19));
-        assert_eq!(animation_speed(Stamina { normal: 5, enhance: 0, boost: 1 }, 1.5), 1.5);
-        assert_eq!(animation_speed(Stamina { normal: 5, enhance: 0, boost: 0 }, 1.5), 1.0);
+        assert_eq!(
+            animation_speed(
+                Stamina {
+                    normal: 5,
+                    enhance: 0,
+                    boost: 1
+                },
+                1.5
+            ),
+            1.5
+        );
+        assert_eq!(
+            animation_speed(
+                Stamina {
+                    normal: 5,
+                    enhance: 0,
+                    boost: 0
+                },
+                1.5
+            ),
+            1.0
+        );
     }
 
     /// `DOPunchPosition((0.01, 0, 0), 0.7, 6, 1)`: 4 points, durations
@@ -723,7 +933,11 @@ mod value_checks {
         let a = 170f32.to_radians();
         let b = (-170f32).to_radians();
         let mid = fast_yaw(a, b, 0.5);
-        assert!((mid.to_degrees() - 180.0).abs() < 1e-3, "{}", mid.to_degrees());
+        assert!(
+            (mid.to_degrees() - 180.0).abs() < 1e-3,
+            "{}",
+            mid.to_degrees()
+        );
     }
     /// Button enable and cover rules on sampled inputs, read off the two
     /// methods' branches.
@@ -734,18 +948,54 @@ mod value_checks {
         assert!(!has_tool_required_for_harvest(None, 0));
         assert!(has_tool_required_for_harvest(Some((ToolType::Axe, 5)), 0));
         assert!(!has_tool_required_for_harvest(Some((ToolType::Axe, 0)), 0));
-        assert!(!has_tool_required_for_harvest(Some((ToolType::Pickaxe, 5)), 0));
-        assert!(has_tool_required_for_harvest(Some((ToolType::Pickaxe, 5)), 1));
-        let full = Stamina { normal: 30, enhance: 0, boost: 0 };
-        let low = Stamina { normal: 5, enhance: 0, boost: 0 };
+        assert!(!has_tool_required_for_harvest(
+            Some((ToolType::Pickaxe, 5)),
+            0
+        ));
+        assert!(has_tool_required_for_harvest(
+            Some((ToolType::Pickaxe, 5)),
+            1
+        ));
+        let full = Stamina {
+            normal: 30,
+            enhance: 0,
+            boost: 0,
+        };
+        let low = Stamina {
+            normal: 5,
+            enhance: 0,
+            boost: 0,
+        };
         // A plant at hp 0 costs its last-attack stamina.
-        assert!(has_stamina_available_for_harvest(full, 2, 0, false, 10, None));
-        assert!(!has_stamina_available_for_harvest(low, 2, 0, false, 10, None));
+        assert!(has_stamina_available_for_harvest(
+            full, 2, 0, false, 10, None
+        ));
+        assert!(!has_stamina_available_for_harvest(
+            low, 2, 0, false, 10, None
+        ));
         // A tree with hp left costs the tool power; without a tool: never.
-        assert!(has_stamina_available_for_harvest(full, 0, 90, false, 10, Some(20)));
-        assert!(!has_stamina_available_for_harvest(low, 0, 90, false, 10, Some(20)));
-        assert!(!has_stamina_available_for_harvest(full, 0, 90, false, 10, None));
+        assert!(has_stamina_available_for_harvest(
+            full,
+            0,
+            90,
+            false,
+            10,
+            Some(20)
+        ));
+        assert!(!has_stamina_available_for_harvest(
+            low,
+            0,
+            90,
+            false,
+            10,
+            Some(20)
+        ));
+        assert!(!has_stamina_available_for_harvest(
+            full, 0, 90, false, 10, None
+        ));
         // A harvested plant (hp 0, harvested) falls to the kind arm: never.
-        assert!(!has_stamina_available_for_harvest(full, 2, 0, true, 10, None));
+        assert!(!has_stamina_available_for_harvest(
+            full, 2, 0, true, 10, None
+        ));
     }
 }

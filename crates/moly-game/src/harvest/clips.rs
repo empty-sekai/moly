@@ -50,7 +50,9 @@ impl HarvestClips {
 pub(crate) struct HarvestClipsRequest(Handle<JsonAsset>);
 
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(HarvestClipsRequest(server.load(bevy::asset::AssetPath::from(MANIFEST.to_owned()))));
+    commands.insert_resource(HarvestClipsRequest(
+        server.load(bevy::asset::AssetPath::from(MANIFEST.to_owned())),
+    ));
 }
 
 pub(crate) fn parse(
@@ -74,11 +76,14 @@ pub(crate) fn parse(
     let Some(asset) = json.get(&request.0) else {
         return;
     };
-    let value: serde_json::Value =
-        serde_json::from_str(&asset.0).unwrap_or_else(|error| panic!("{MANIFEST}: not JSON: {error}"));
+    let value: serde_json::Value = serde_json::from_str(&asset.0)
+        .unwrap_or_else(|error| panic!("{MANIFEST}: not JSON: {error}"));
     let mut clips = HashMap::new();
     let mut harvest = 0usize;
-    for row in value["clips"].as_array().expect("motion manifest without clips") {
+    for row in value["clips"]
+        .as_array()
+        .expect("motion manifest without clips")
+    {
         let name = row["name"].as_str().expect("clip name").to_owned();
         let container = row["container"].as_str().expect("clip container");
         let stem = container

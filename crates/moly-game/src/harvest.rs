@@ -68,9 +68,12 @@ pub(crate) const RT_MYSEKAI_MUSIC_RECORD: i32 = 44;
 /// The fixture family's drop model is constant (GetDropItemPrefab's 39 arm
 /// only checks that the fixture exists); blueprints and items share one
 /// model, records another.
-const GLASSBALL_DROP_PACKAGE: &str = "mysekai__site__field__object__mdl_site_glassball_common_glassballdrop01";
-const BLUEPRINT_DROP_PACKAGE: &str = "mysekai__site__field__object__mdl_site_blueprint_common_blueprintdrop01";
-const RECORD_DROP_PACKAGE: &str = "mysekai__site__field__object__mdl_site_record_common_recorddrop01";
+const GLASSBALL_DROP_PACKAGE: &str =
+    "mysekai__site__field__object__mdl_site_glassball_common_glassballdrop01";
+const BLUEPRINT_DROP_PACKAGE: &str =
+    "mysekai__site__field__object__mdl_site_blueprint_common_blueprintdrop01";
+const RECORD_DROP_PACKAGE: &str =
+    "mysekai__site__field__object__mdl_site_record_common_recorddrop01";
 
 /// The closed set of view classes (`view[].class`).
 pub(crate) const VIEW_CLASSES: [&str; 9] = [
@@ -143,7 +146,11 @@ pub(crate) fn kind_cues(view_class: &str, is_rare: bool) -> KindCues {
             ..default()
         },
         "MysekaiAreaPlantView" => KindCues {
-            hit: Some(if is_rare { "se_pick_plant_rare" } else { "se_pick_plant" }),
+            hit: Some(if is_rare {
+                "se_pick_plant_rare"
+            } else {
+                "se_pick_plant"
+            }),
             ..default()
         },
         "MysekaiAreaJunkView" => KindCues {
@@ -286,9 +293,11 @@ pub(crate) fn drop_rarity_type(resource_type: i32, material_rarity: Option<i32>)
 /// `GetDropMinRange / GetDropMaxRange / GetDropHeight`: (min, max, height).
 pub(crate) fn drop_scatter_params(resource_type: i32, material_type: i32) -> (f32, f32, f32) {
     match resource_type {
-        RT_MATERIAL | RT_MYSEKAI_FIXTURE | RT_MYSEKAI_BLUEPRINT | RT_MYSEKAI_ITEM | RT_MYSEKAI_MUSIC_RECORD => {
-            (0.6, 1.0, 0.0)
-        }
+        RT_MATERIAL
+        | RT_MYSEKAI_FIXTURE
+        | RT_MYSEKAI_BLUEPRINT
+        | RT_MYSEKAI_ITEM
+        | RT_MYSEKAI_MUSIC_RECORD => (0.6, 1.0, 0.0),
         RT_MYSEKAI_MATERIAL => match material_type {
             0 | 1 => (0.7, 1.2, 0.2),
             6 => (0.0, 0.0, 1.0),
@@ -308,26 +317,48 @@ pub(crate) fn drop_model_package(catalog: &HarvestCatalog, drop: &UserDrop) -> O
 
 fn constant_prefab(ids: &std::collections::HashSet<i64>, id: i64, package: &str) -> DropPrefab {
     if ids.contains(&id) {
-        DropPrefab::Model { package: package.to_owned() }
+        DropPrefab::Model {
+            package: package.to_owned(),
+        }
     } else {
-        DropPrefab::Unresolved("the drop resource is not in its master (GetDropItemPrefab returns null)")
+        DropPrefab::Unresolved(
+            "the drop resource is not in its master (GetDropItemPrefab returns null)",
+        )
     }
 }
 
 fn drop_prefab(catalog: &HarvestCatalog, drop: &UserDrop) -> DropPrefab {
     match drop.resource_type {
-        RT_MYSEKAI_FIXTURE => constant_prefab(&catalog.fixture_ids, drop.resource_id, GLASSBALL_DROP_PACKAGE),
-        RT_MYSEKAI_BLUEPRINT => constant_prefab(&catalog.blueprint_ids, drop.resource_id, BLUEPRINT_DROP_PACKAGE),
-        RT_MYSEKAI_ITEM => constant_prefab(&catalog.item_ids, drop.resource_id, BLUEPRINT_DROP_PACKAGE),
-        RT_MYSEKAI_MUSIC_RECORD => constant_prefab(&catalog.music_record_ids, drop.resource_id, RECORD_DROP_PACKAGE),
+        RT_MYSEKAI_FIXTURE => constant_prefab(
+            &catalog.fixture_ids,
+            drop.resource_id,
+            GLASSBALL_DROP_PACKAGE,
+        ),
+        RT_MYSEKAI_BLUEPRINT => constant_prefab(
+            &catalog.blueprint_ids,
+            drop.resource_id,
+            BLUEPRINT_DROP_PACKAGE,
+        ),
+        RT_MYSEKAI_ITEM => {
+            constant_prefab(&catalog.item_ids, drop.resource_id, BLUEPRINT_DROP_PACKAGE)
+        }
+        RT_MYSEKAI_MUSIC_RECORD => constant_prefab(
+            &catalog.music_record_ids,
+            drop.resource_id,
+            RECORD_DROP_PACKAGE,
+        ),
         RT_MYSEKAI_MATERIAL => match catalog.materials.get(&drop.resource_id) {
             Some(material) => DropPrefab::Model {
                 package: material.package.clone(),
             },
             None => DropPrefab::Unresolved("the material has no drop model row"),
         },
-        RT_MYSEKAI_TOOL => DropPrefab::Unresolved("tool family: the source refuses it (LogError, null)"),
-        RT_MATERIAL => DropPrefab::Unresolved("plain material family: its model split is not supplied to this consumer"),
+        RT_MYSEKAI_TOOL => {
+            DropPrefab::Unresolved("tool family: the source refuses it (LogError, null)")
+        }
+        RT_MATERIAL => DropPrefab::Unresolved(
+            "plain material family: its model split is not supplied to this consumer",
+        ),
         _ => DropPrefab::Unresolved("resource type outside the drop families"),
     }
 }
@@ -489,10 +520,17 @@ pub(crate) fn ground_world_verts(
         let Some(mesh) = meshes.get(&mesh3d.0) else {
             continue;
         };
-        let Some(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|values| values.as_float3()) else {
+        let Some(positions) = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+        else {
             continue;
         };
-        verts.extend(positions.iter().map(|p| global.transform_point(Vec3::from(*p))));
+        verts.extend(
+            positions
+                .iter()
+                .map(|p| global.transform_point(Vec3::from(*p))),
+        );
     }
     verts
 }
@@ -516,17 +554,26 @@ pub(crate) fn surface_y(verts: &[Vec3], x: f32, z: f32, fallback: f32) -> f32 {
 /// and the prefab as two scenes of the same name; the default scene is not
 /// always the prefab).
 pub(crate) fn prefab_scene_index(document: &str, leaf: &str) -> usize {
-    let value: serde_json::Value =
-        serde_json::from_str(document).unwrap_or_else(|err| panic!("harvest document is not JSON ({leaf}): {err}"));
-    let roots = value["roots"].as_array().unwrap_or_else(|| panic!("harvest document has no roots ({leaf})"));
+    let value: serde_json::Value = serde_json::from_str(document)
+        .unwrap_or_else(|err| panic!("harvest document is not JSON ({leaf}): {err}"));
+    let roots = value["roots"]
+        .as_array()
+        .unwrap_or_else(|| panic!("harvest document has no roots ({leaf})"));
     let scenes: Vec<usize> = roots
         .iter()
         .filter(|root| {
-            root["assets"]
-                .as_array()
-                .is_some_and(|assets| assets.iter().any(|a| a.as_str().is_some_and(|s| s.ends_with(".prefab"))))
+            root["assets"].as_array().is_some_and(|assets| {
+                assets
+                    .iter()
+                    .any(|a| a.as_str().is_some_and(|s| s.ends_with(".prefab")))
+            })
         })
-        .map(|root| root["scene"].as_u64().unwrap_or_else(|| panic!("prefab root without scene ({leaf})")) as usize)
+        .map(|root| {
+            root["scene"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("prefab root without scene ({leaf})"))
+                as usize
+        })
         .collect();
     match scenes.as_slice() {
         [scene] => *scene,
@@ -550,7 +597,10 @@ fn on_scene_ready(
     }
     count.0 += 1;
     if !arrival.in_progress() && count.0 == spawned.0 {
-        info!("[harvest] every placed scene expanded: {}/{}", count.0, spawned.0);
+        info!(
+            "[harvest] every placed scene expanded: {}/{}",
+            count.0, spawned.0
+        );
         commands.insert_resource(HarvestScenesReady);
     }
 }
@@ -593,7 +643,10 @@ fn report(
     if total == 0 && stats.hits == 0 {
         return;
     }
-    let harvested = objects.iter().filter(|object| object.status == STATUS_HARVESTED).count();
+    let harvested = objects
+        .iter()
+        .filter(|object| object.status == STATUS_HARVESTED)
+        .count();
     info!(
         "[harvest] objects {total} (harvested {harvested}) · hits {} (multi {} / last {} / single {} / idle {}) · drop batches {} items {} refused {} on ground {} collected {} · effect hooks {} · stamina {:?}",
         stats.hits,
@@ -683,7 +736,9 @@ impl Plugin for HarvestPlugin {
             .add_systems(
                 Update,
                 (
-                    report.run_if(bevy::time::common_conditions::on_timer(std::time::Duration::from_secs(2))),
+                    report.run_if(bevy::time::common_conditions::on_timer(
+                        std::time::Duration::from_secs(2),
+                    )),
                     damage::drain_effect_hooks,
                 ),
             )

@@ -20,7 +20,9 @@ use super::law::ToolState;
 /// What to play for one source clip.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StandIn {
-    Clip { name: String },
+    Clip {
+        name: String,
+    },
     /// No SD clip fits: the player's SD idle (named).
     Idle,
 }
@@ -50,7 +52,9 @@ fn family_of(source: &str, state: ToolState) -> Option<String> {
     let rest = source.strip_prefix("mov_u000_site_")?;
     for tool in ["pickax", "ax"] {
         if let Some(level_and_suffix) = rest.strip_prefix(tool) {
-            if level_and_suffix.len() == 4 && level_and_suffix[..2].chars().all(|c| c.is_ascii_digit()) {
+            if level_and_suffix.len() == 4
+                && level_and_suffix[..2].chars().all(|c| c.is_ascii_digit())
+            {
                 let suffix = &level_and_suffix[3..];
                 return Some(format!("{tool}_{suffix}"));
             }
@@ -66,10 +70,15 @@ pub(crate) fn stand_in(source: &str, state: ToolState, sd_family: &str) -> Resul
         return Ok(StandIn::Idle);
     }
     let family = family_of(source, state).ok_or_else(|| format!("{source} is not a site clip"))?;
-    let (cw, cm) = family_row(&family).ok_or_else(|| format!("no SD stand-in row for the family {family} of {source}"))?;
+    let (cw, cm) = family_row(&family)
+        .ok_or_else(|| format!("no SD stand-in row for the family {family} of {source}"))?;
     match sd_family {
-        "cw" => Ok(StandIn::Clip { name: cw.to_owned() }),
-        "cm" => Ok(StandIn::Clip { name: cm.to_owned() }),
+        "cw" => Ok(StandIn::Clip {
+            name: cw.to_owned(),
+        }),
+        "cm" => Ok(StandIn::Clip {
+            name: cm.to_owned(),
+        }),
         other => Err(format!("SD motion family {other} has no stand-in column")),
     }
 }
@@ -84,18 +93,27 @@ mod value_checks {
             let loop_clip = format!("mov_u000_site_ax{level}_l");
             assert_eq!(
                 stand_in(&loop_clip, ToolState::Loop, "cw").unwrap(),
-                StandIn::Clip { name: "mov_cw_normal_stumble001_S".into() }
+                StandIn::Clip {
+                    name: "mov_cw_normal_stumble001_S".into()
+                }
             );
             let end = format!("mov_u000_site_pickax{level}_e");
             assert_eq!(
                 stand_in(&end, ToolState::End, "cm").unwrap(),
-                StandIn::Clip { name: "mov_cm_happy_talk001_E".into() }
+                StandIn::Clip {
+                    name: "mov_cm_happy_talk001_E".into()
+                }
             );
         }
-        assert_eq!(stand_in("mov_u000_site_ax05_s", ToolState::Start, "cw").unwrap(), StandIn::Idle);
+        assert_eq!(
+            stand_in("mov_u000_site_ax05_s", ToolState::Start, "cw").unwrap(),
+            StandIn::Idle
+        );
         assert_eq!(
             stand_in("mov_u000_site_pick04_o", ToolState::None, "cw").unwrap(),
-            StandIn::Clip { name: "mov_cw_happy_02joy001_S".into() }
+            StandIn::Clip {
+                name: "mov_cw_happy_02joy001_S".into()
+            }
         );
         assert!(stand_in("mov_u000_site_unknown_o", ToolState::None, "cw").is_err());
     }

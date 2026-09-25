@@ -32,11 +32,11 @@ use bevy::prelude::*;
 use bevy::scene::SceneRoot;
 use moly_assets::source_navigation::{SourceHarvestView, SourceObjectIdentity};
 
-use super::catalog::{FixtureDef, HarvestCatalog, HarvestUserData};
-use super::server_mock::{UserDrop, UserFixture, DROP_BEFORE, DROP_DROPPED};
+use super::catalog::{HarvestCatalog, HarvestUserData};
+use super::server_mock::{DROP_BEFORE, DROP_DROPPED, UserDrop, UserFixture};
 use super::{
-    kind_cues, DropBatch, HarvestDocs, HarvestDropBatches, HarvestGltfs, HarvestObject, HarvestRoot,
-    PendingDrop, STATUS_HARVESTED,
+    DropBatch, HarvestDocs, HarvestDropBatches, HarvestGltfs, HarvestObject, HarvestRoot,
+    PendingDrop, STATUS_HARVESTED, kind_cues,
 };
 use crate::walk_face::WalkFace;
 
@@ -69,7 +69,9 @@ impl HarvestArrival {
     /// Objects of the current arrival still to spawn (the scene-ready latch
     /// counts against the spawned total).
     pub(crate) fn in_progress(&self) -> bool {
-        self.run.as_ref().is_some_and(|run| run.next < run.fixtures.len() || !run.unclaimed)
+        self.run
+            .as_ref()
+            .is_some_and(|run| run.next < run.fixtures.len() || !run.unclaimed)
     }
 
     pub(crate) fn site_id(&self) -> Option<u32> {
@@ -185,7 +187,9 @@ pub(crate) fn place(
         let face_point = inputs
             .objective_face
             .as_deref()
-            .filter(|surface| surface.navigation_generation() == face.generation() && surface.is_fresh(epoch.0))
+            .filter(|surface| {
+                surface.navigation_generation() == face.generation() && surface.is_fresh(epoch.0)
+            })
             .and_then(|surface| surface.navigation_point_at([x, z]));
         match face_point {
             Some(point) => point[1],
@@ -215,7 +219,8 @@ pub(crate) fn place(
             }
             for row in &rows {
                 if let super::DropPrefab::Model { package } = &row.prefab {
-                    all_ready &= glbs.ready(&inputs.server, package) && docs.ready(&inputs.server, package);
+                    all_ready &=
+                        glbs.ready(&inputs.server, package) && docs.ready(&inputs.server, package);
                 }
             }
             queued += rows.len();
@@ -231,7 +236,9 @@ pub(crate) fn place(
         }
         if all_ready {
             if queued > 0 {
-                info!("[harvest] CreateUnclaimedDropItems: {queued} dropped rows re-created on the ground");
+                info!(
+                    "[harvest] CreateUnclaimedDropItems: {queued} dropped rows re-created on the ground"
+                );
             }
             batches.0.extend(pending_batches);
             run.unclaimed = true;
@@ -245,14 +252,21 @@ pub(crate) fn place(
         return;
     }
     let (Some(gltf), Some(doc)) = (
-        glbs.get(&def.package).and_then(|handle| inputs.gltfs.get(handle)),
-        docs.0.get(&def.package).and_then(|handle| inputs.json.get(handle)),
+        glbs.get(&def.package)
+            .and_then(|handle| inputs.gltfs.get(handle)),
+        docs.0
+            .get(&def.package)
+            .and_then(|handle| inputs.json.get(handle)),
     ) else {
         return;
     };
     let scene_index = super::prefab_scene_index(&doc.0, &def.leaf);
     let scene = gltf.scenes.get(scene_index).cloned().unwrap_or_else(|| {
-        panic!("{}: prefab scene {scene_index} is out of range ({})", def.leaf, gltf.scenes.len())
+        panic!(
+            "{}: prefab scene {scene_index} is out of range ({})",
+            def.leaf,
+            gltf.scenes.len()
+        )
     });
     // Site origin + (x, 0, z) in the source frame; reflected x in ours.
     let raw = Vec2::new(-(fixture.position_x as f32), fixture.position_z as f32);
@@ -330,7 +344,11 @@ pub(crate) fn place(
             Transform::from_translation(Vec3::new(snapped.x, y, snapped.y))
                 .with_rotation(Quat::from_rotation_y(yaw))
                 .with_scale(Vec3::splat(scale)),
-            if alive { Visibility::default() } else { Visibility::Hidden },
+            if alive {
+                Visibility::default()
+            } else {
+                Visibility::Hidden
+            },
         ))
         .id();
     info!(
@@ -352,13 +370,20 @@ pub(crate) fn place(
         def.radius * scale,
         fixture.hp,
         fixture.status,
-        if alive { "" } else { " (loaded as harvested: ForceChangeAfterObject, nothing remains)" },
+        if alive {
+            ""
+        } else {
+            " (loaded as harvested: ForceChangeAfterObject, nothing remains)"
+        },
     );
     run.next += 1;
     spawned.0 += 1;
     let finished = run.next == run.fixtures.len();
     if finished {
-        info!("[harvest] LoadFixtureParallelAsync done: {} rows on site {}", run.next, run.site_id);
+        info!(
+            "[harvest] LoadFixtureParallelAsync done: {} rows on site {}",
+            run.next, run.site_id
+        );
     }
     let total = run.fixtures.len() as u64;
     if finished {
@@ -405,7 +430,9 @@ impl HarvestGltfs {
         if let LoadState::Failed(error) = server.load_state(handle) {
             panic!("harvest glb {package} failed to load: {error:?}");
         }
-        if let RecursiveDependencyLoadState::Failed(error) = server.recursive_dependency_load_state(handle) {
+        if let RecursiveDependencyLoadState::Failed(error) =
+            server.recursive_dependency_load_state(handle)
+        {
             panic!("harvest glb {package} dependencies failed to load: {error:?}");
         }
         server.is_loaded_with_dependencies(handle)
@@ -418,7 +445,9 @@ impl HarvestDocs {
             return false;
         };
         match server.load_state(handle) {
-            LoadState::Failed(error) => panic!("harvest document {package} failed to load: {error:?}"),
+            LoadState::Failed(error) => {
+                panic!("harvest document {package} failed to load: {error:?}")
+            }
             LoadState::Loaded => true,
             _ => false,
         }
@@ -464,7 +493,10 @@ pub(crate) struct HarvestViewNodes {
 #[allow(clippy::type_complexity)]
 pub(crate) fn bind_views(
     mut commands: Commands,
-    roots: Query<(Entity, &HarvestObject, &Children), (With<HarvestRoot>, Without<HarvestViewNodes>)>,
+    roots: Query<
+        (Entity, &HarvestObject, &Children),
+        (With<HarvestRoot>, Without<HarvestViewNodes>),
+    >,
     children: Query<&Children>,
     views: Query<&SourceHarvestView>,
     identities: Query<&SourceObjectIdentity>,
@@ -486,24 +518,32 @@ pub(crate) fn bind_views(
         };
         let fields: serde_json::Value = serde_json::from_str(&view.fields_json)
             .unwrap_or_else(|error| panic!("{}: view fields are not JSON: {error}", object.leaf));
-        let id_of = |field: &str| fields.get(field).and_then(|value| value.get("pathId")).and_then(|v| v.as_i64());
+        let id_of = |field: &str| {
+            fields
+                .get(field)
+                .and_then(|value| value.get("pathId"))
+                .and_then(|v| v.as_i64())
+        };
         let by_game_object = |id: i64| {
-            nodes
-                .iter()
-                .copied()
-                .find(|entity| identities.get(*entity).is_ok_and(|identity| identity.game_object == id))
+            nodes.iter().copied().find(|entity| {
+                identities
+                    .get(*entity)
+                    .is_ok_and(|identity| identity.game_object == id)
+            })
         };
         let by_component = |id: i64| {
-            nodes
-                .iter()
-                .copied()
-                .find(|entity| identities.get(*entity).is_ok_and(|identity| identity.components.contains(&id)))
+            nodes.iter().copied().find(|entity| {
+                identities
+                    .get(*entity)
+                    .is_ok_and(|identity| identity.components.contains(&id))
+            })
         };
         let by_transform = |id: i64| {
-            nodes
-                .iter()
-                .copied()
-                .find(|entity| identities.get(*entity).is_ok_and(|identity| identity.transform == id))
+            nodes.iter().copied().find(|entity| {
+                identities
+                    .get(*entity)
+                    .is_ok_and(|identity| identity.transform == id)
+            })
         };
         let object_field = match object.class {
             "MysekaiAreaTreeView" => "woodBeforeObject",
@@ -544,12 +584,14 @@ pub(crate) fn bind_views(
         }
         info!(
             "[harvest] view bound {}#{} {}: object {:?} after {:?} under {:?} delete-position {:?}",
-            object.leaf, object.fixture_id, object.class, bound.object, bound.after, bound.under, bound.delete_at
+            object.leaf,
+            object.fixture_id,
+            object.class,
+            bound.object,
+            bound.after,
+            bound.under,
+            bound.delete_at
         );
         commands.entity(root).insert(bound);
     }
-}
-
-pub(crate) fn def_for<'a>(catalog: &'a HarvestCatalog, object: &HarvestObject) -> Option<&'a FixtureDef> {
-    catalog.fixtures.get(&object.fixture_id)
 }

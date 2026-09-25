@@ -53,19 +53,25 @@ use bevy::prelude::*;
 use super::catalog::{HarvestCatalog, ToolDef};
 use super::clips::{ClipEvent, HarvestClips};
 use super::law::{
-    self, animation_speed, can_attack_remain_stamina, can_continue_action, harvest_action_time, harvest_clip_name,
-    has_stamina_available_for_harvest, has_tool_required_for_harvest, inside_circle, is_sustainable_tool, target_priority,
-    tool_type_for, ContinueInputs, PointTween, SegmentEase, Stamina, ToolClock, ToolState, ToolType,
+    self, ContinueInputs, PointTween, SegmentEase, Stamina, ToolClock, ToolState, ToolType,
+    animation_speed, can_attack_remain_stamina, can_continue_action, harvest_action_time,
+    harvest_clip_name, has_stamina_available_for_harvest, has_tool_required_for_harvest,
+    inside_circle, is_sustainable_tool, target_priority, tool_type_for,
 };
 use super::queue::{HarvestLogQueue, HarvestStack, Stack};
 use super::server_mock::UserTool;
-use super::stand_in::{stand_in, StandIn};
+use super::stand_in::{StandIn, stand_in};
 use super::tool_model::{ToolModelRequest, ToolModelRequests};
 use super::ui::HarvestButton;
-use super::{EffectHook, HarvestEffectHooks, HarvestHit, HarvestHitResults, HarvestHits, HarvestObject, STATUS_HARVESTED};
+use super::{
+    EffectHook, HarvestEffectHooks, HarvestHit, HarvestHitResults, HarvestHits, HarvestObject,
+    STATUS_HARVESTED,
+};
 use crate::audio::SeRequests;
 use crate::player::{PlayerControlled, PlayerInput};
-use crate::player_avatar::{AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, PlayerVisualClips};
+use crate::player_avatar::{
+    AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, PlayerVisualClips,
+};
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 
 /// `PlayerAvatarView.PlayAnimation(name, 0.25, 1.0)` and the Idle state's
@@ -124,7 +130,11 @@ impl HarvestPlayerModel {
             self.tools
                 .iter()
                 .filter(|tool| tool.quantity > 0)
-                .find(|tool| catalog.tool(tool.tool_id).is_some_and(|def| def.tool_type == tool_type))
+                .find(|tool| {
+                    catalog
+                        .tool(tool.tool_id)
+                        .is_some_and(|def| def.tool_type == tool_type)
+                })
                 .map(|tool| tool.tool_id)
         });
         match choice {
@@ -158,11 +168,17 @@ pub(crate) struct HarvestTargeting {
 
 enum Phase {
     /// Step 6: the Start swing's cool-down.
-    Start { cooldown: crate::site_move::timeline::Delay },
+    Start {
+        cooldown: crate::site_move::timeline::Delay,
+    },
     /// Step 8: one loop iteration's cool-down.
-    Loop { cooldown: crate::site_move::timeline::Delay },
+    Loop {
+        cooldown: crate::site_move::timeline::Delay,
+    },
     /// Step 9: the End motion.
-    End { wait: crate::site_move::timeline::Delay },
+    End {
+        wait: crate::site_move::timeline::Delay,
+    },
 }
 
 /// The source clip clock of the current `PlayHarvestMotion`.
@@ -173,7 +189,6 @@ struct Swing {
     looping: bool,
     events: Vec<(f32, ClipEvent)>,
     fired: usize,
-    started: f64,
 }
 
 struct Facing {
@@ -266,7 +281,9 @@ fn update_harvest_ui(
         button.hide();
         return;
     }
-    let tool = model.selected.and_then(|id| Some((catalog.tool(id)?, model.tool(id)?)));
+    let tool = model
+        .selected
+        .and_then(|id| Some((catalog.tool(id)?, model.tool(id)?)));
     let has_tool = has_tool_required_for_harvest(
         tool.map(|(def, user)| (def.tool_type, user.durability)),
         object.fixture_type,
@@ -311,8 +328,20 @@ fn show_tool_model(
 
 #[derive(SystemParam)]
 pub(crate) struct Body<'w, 's> {
-    drivers: Query<'w, 's, (&'static mut AvatarDriver, &'static PlayerVisualClips), With<PlayerControlled>>,
-    animators: Query<'w, 's, (&'static mut AnimationPlayer, &'static mut AnimationTransitions)>,
+    drivers: Query<
+        'w,
+        's,
+        (&'static mut AvatarDriver, &'static PlayerVisualClips),
+        With<PlayerControlled>,
+    >,
+    animators: Query<
+        'w,
+        's,
+        (
+            &'static mut AnimationPlayer,
+            &'static mut AnimationTransitions,
+        ),
+    >,
     graphs: ResMut<'w, Assets<AnimationGraph>>,
     clips: Res<'w, Assets<AnimationClip>>,
 }
@@ -320,7 +349,15 @@ pub(crate) struct Body<'w, 's> {
 impl Body<'_, '_> {
     /// Play the stand-in of one source clip on the SD body, starting the
     /// harvest lease on the first call.
-    fn play(&mut self, token: &mut Option<PlayerActionToken>, source: &str, state: ToolState, source_length: f32, speed: f32, blocks: bool) {
+    fn play(
+        &mut self,
+        token: &mut Option<PlayerActionToken>,
+        source: &str,
+        state: ToolState,
+        source_length: f32,
+        speed: f32,
+        blocks: bool,
+    ) {
         let Ok((mut driver, visual)) = self.drivers.single_mut() else {
             return;
         };
@@ -329,7 +366,9 @@ impl Body<'_, '_> {
             Ok(StandIn::Clip { name }) => name,
             Ok(StandIn::Idle) => format!("{}_L", visual.idle),
             Err(reason) => {
-                warn!("[harvest] SD stand-in refused for {source}: {reason}; the SD body keeps its current motion");
+                warn!(
+                    "[harvest] SD stand-in refused for {source}: {reason}; the SD body keeps its current motion"
+                );
                 return;
             }
         };
@@ -350,9 +389,21 @@ impl Body<'_, '_> {
         };
         let result = match *token {
             Some(live) => driver
-                .play_owned_action(live, motion, &mut self.graphs, &mut animator, &mut transitions)
+                .play_owned_action(
+                    live,
+                    motion,
+                    &mut self.graphs,
+                    &mut animator,
+                    &mut transitions,
+                )
                 .map(|_| live),
-            None => driver.start_action(PlayerActionOwner::Harvest, motion, &mut self.graphs, &mut animator, &mut transitions),
+            None => driver.start_action(
+                PlayerActionOwner::Harvest,
+                motion,
+                &mut self.graphs,
+                &mut animator,
+                &mut transitions,
+            ),
         };
         match result {
             Ok(live) => {
@@ -381,7 +432,7 @@ impl Body<'_, '_> {
 }
 
 #[derive(SystemParam)]
-pub(crate) struct ActionWorld<'w, 's> {
+pub(crate) struct ActionWorld<'w> {
     frames: Res<'w, FrameCount>,
     time: Res<'w, Time>,
     configs: Option<Res<'w, crate::client_config::ClientConfigs>>,
@@ -424,14 +475,19 @@ pub(crate) fn update_targets(
     let forward = player.rotation * Vec3::Z;
     let contacts: Vec<Entity> = objects
         .iter()
-        .filter(|(_, transform, object)| object.collision && inside_circle(position, transform.translation, object.radius))
+        .filter(|(_, transform, object)| {
+            object.collision && inside_circle(position, transform.translation, object.radius)
+        })
         .map(|(entity, _, _)| entity)
         .collect();
     let had = !targeting.contacts.is_empty();
     for entity in &contacts {
         if !targeting.contacts.contains(entity) {
             if let Ok((_, _, object)) = objects.get(*entity) {
-                info!("[harvest] OnCollisionEnter {}#{} (radius {:.2})", object.leaf, object.fixture_id, object.radius);
+                info!(
+                    "[harvest] OnCollisionEnter {}#{} (radius {:.2})",
+                    object.leaf, object.fixture_id, object.radius
+                );
             }
         }
     }
@@ -449,7 +505,12 @@ pub(crate) fn update_targets(
         .contacts
         .iter()
         .filter_map(|entity| objects.get(*entity).ok())
-        .map(|(entity, transform, _)| (entity, target_priority(position, forward, transform.translation)))
+        .map(|(entity, transform, _)| {
+            (
+                entity,
+                target_priority(position, forward, transform.translation),
+            )
+        })
         .min_by(|a, b| a.1.partial_cmp(&b.1).expect("priority is finite"))
         .map(|(entity, _)| entity);
     if best == targeting.target {
@@ -464,7 +525,14 @@ pub(crate) fn update_targets(
     update_harvest_ui(&mut button, model, &catalog, object);
     info!(
         "[harvest] OnChangeTargetHarvestObject {}#{} ({}) at ({}, {}): tool {:?}; button interactable {} cover {}",
-        object.leaf, object.fixture_id, object.class, object.position_x, object.position_z, tool, button.interactable, button.cover
+        object.leaf,
+        object.fixture_id,
+        object.class,
+        object.position_x,
+        object.position_z,
+        tool,
+        button.interactable,
+        button.cover
     );
 }
 
@@ -482,13 +550,16 @@ pub(crate) fn advance(
     mut players: Query<&mut Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
     objects: Query<(&Transform, &HarvestObject)>,
 ) {
-    let (Some(configs), Some(catalog), Some(clips), Some(mut model)) =
-        (world.configs.take(), world.catalog.take(), world.clips.take(), world.model.take())
-    else {
+    let (Some(configs), Some(catalog), Some(clips), Some(mut model)) = (
+        world.configs.take(),
+        world.catalog.take(),
+        world.clips.take(),
+        world.model.take(),
+    ) else {
         world.button.presses = 0;
         return;
     };
-    let frame = world.frames.0;
+    let frame = u64::from(world.frames.0);
     let dt = world.time.delta_secs();
     let now = world.time.elapsed_secs_f64();
     let boost_speed = configs.float(crate::client_config::KEY_BOOST_STAMINA_ANIMATION_SPEED);
@@ -511,13 +582,24 @@ pub(crate) fn advance(
             previous.token
         });
         start_action(
-            &mut action, &mut world, &mut body, &mut model, &catalog, &clips, &mut commands, &mut players, &objects,
-            boost_speed, frame, now, carried, admitted,
+            &mut action,
+            &mut world,
+            &mut body,
+            &mut model,
+            &catalog,
+            &clips,
+            &mut commands,
+            &mut players,
+            &objects,
+            boost_speed,
+            frame,
+            now,
+            carried,
+            admitted,
         );
     }
 
     let Some(mut current) = action.current.take() else {
-        world.model = Some(model);
         return;
     };
 
@@ -553,7 +635,17 @@ pub(crate) fn advance(
         }
         let clip = swing.clip.clone();
         for (event_time, kind) in due {
-            on_animation_event(&mut action, &mut world, &model, &catalog, &objects, &current, kind, event_time, &clip);
+            on_animation_event(
+                &mut action,
+                &mut world,
+                &model,
+                &catalog,
+                &objects,
+                &current,
+                kind,
+                event_time,
+                &clip,
+            );
         }
     }
 
@@ -564,21 +656,41 @@ pub(crate) fn advance(
             if cooldown.tick(frame, dt) {
                 action.cooling = false;
                 current.state = ToolState::Loop;
-                begin_loop(&mut action, &mut world, &mut body, &mut model, &catalog, &clips, &mut players, &objects, &mut current, boost_speed, frame, now);
+                begin_loop(
+                    &mut action,
+                    &mut world,
+                    &mut body,
+                    &mut model,
+                    &catalog,
+                    &clips,
+                    &mut players,
+                    &objects,
+                    &mut current,
+                    boost_speed,
+                    frame,
+                    now,
+                );
             }
         }
         Phase::Loop { cooldown } => {
             if cooldown.tick(frame, dt) {
                 action.cooling = false;
-                let target = world.targeting.target.and_then(|entity| objects.get(entity).ok()).map(|(_, object)| object);
+                let target = world
+                    .targeting
+                    .target
+                    .and_then(|entity| objects.get(entity).ok())
+                    .map(|(_, object)| object);
                 let tool = current.tool.and_then(|id| catalog.tool(id));
                 let inputs = ContinueInputs {
                     long_tap: world.button.is_press,
                     sustain: action.sustain,
                     has_target: target.is_some(),
-                    target_harvested: target.is_some_and(|object| object.status == STATUS_HARVESTED),
+                    target_harvested: target
+                        .is_some_and(|object| object.status == STATUS_HARVESTED),
                     auto_changed_tool: model.auto_changed,
-                    tool_quantity: current.tool.map(|id| model.tool(id).map_or(0, |tool| tool.quantity)),
+                    tool_quantity: current
+                        .tool
+                        .map(|id| model.tool(id).map_or(0, |tool| tool.quantity)),
                     stamina_empty: model.stamina.is_empty(),
                     can_attack: target.is_some_and(|object| {
                         can_attack_remain_stamina(
@@ -603,7 +715,20 @@ pub(crate) fn advance(
                     model.stamina
                 );
                 if again {
-                    begin_loop(&mut action, &mut world, &mut body, &mut model, &catalog, &clips, &mut players, &objects, &mut current, boost_speed, frame, now);
+                    begin_loop(
+                        &mut action,
+                        &mut world,
+                        &mut body,
+                        &mut model,
+                        &catalog,
+                        &clips,
+                        &mut players,
+                        &objects,
+                        &mut current,
+                        boost_speed,
+                        frame,
+                        now,
+                    );
                 } else {
                     // Step 9.
                     world.states.can_intercept = true;
@@ -611,16 +736,32 @@ pub(crate) fn advance(
                         current.state = ToolState::End;
                         let tool = current.tool.and_then(|id| catalog.tool(id)).map(tool_clock);
                         let name = harvest_clip_name(current.fixture_type, tool, ToolState::End);
-                        let length = name.as_deref().and_then(|name| clips.get(name)).map_or(0.0, |clip| clip.length);
+                        let length = name
+                            .as_deref()
+                            .and_then(|name| clips.get(name))
+                            .map_or(0.0, |clip| clip.length);
                         let wait = harvest_action_time(tool, ToolState::End, length);
                         if let Some(name) = name.as_deref() {
-                            start_swing(&mut current, &clips, name, now);
-                            body.play(&mut current.token, name, ToolState::End, length, action.animator_speed, false);
+                            start_swing(&mut current, &clips, name);
+                            body.play(
+                                &mut current.token,
+                                name,
+                                ToolState::End,
+                                length,
+                                action.animator_speed,
+                                false,
+                            );
                         }
                         world.states.change_status(PlayerActionState::Harvest);
-                        info!("[harvest] End motion {:?}: wait {wait:.4} s (the End clip length), movement open", name);
+                        info!(
+                            "[harvest] End motion {:?}: wait {wait:.4} s (the End clip length), movement open",
+                            name
+                        );
                         current.phase = Phase::End {
-                            wait: crate::site_move::timeline::Delay::new(law::delay_seconds(wait as f64), frame),
+                            wait: crate::site_move::timeline::Delay::new(
+                                law::delay_seconds(wait as f64),
+                                frame,
+                            ),
                         };
                     } else {
                         finish = true;
@@ -631,7 +772,10 @@ pub(crate) fn advance(
         Phase::End { wait } => {
             let due = wait.tick(frame, dt);
             if world.states.current != PlayerActionState::Harvest {
-                info!("[harvest] End motion left early: player state {:?} (WaitWhile state == 7)", world.states.current);
+                info!(
+                    "[harvest] End motion left early: player state {:?} (WaitWhile state == 7)",
+                    world.states.current
+                );
                 finish = true;
             } else if due {
                 finish = true;
@@ -639,17 +783,28 @@ pub(crate) fn advance(
         }
     }
     if finish {
-        finish_action(&mut action, &mut world, &mut body, &mut model, &catalog, &mut commands, &objects, current, now);
+        finish_action(
+            &mut action,
+            &mut world,
+            &mut body,
+            &mut model,
+            &catalog,
+            &mut commands,
+            &objects,
+            current,
+            now,
+        );
     } else {
         action.current = Some(current);
     }
-    world.model = Some(model);
 }
 
-fn start_swing(current: &mut Action, clips: &HarvestClips, name: &str, now: f64) {
+fn start_swing(current: &mut Action, clips: &HarvestClips, name: &str) {
     let record = clips.get(name);
     if record.is_none() {
-        warn!("[harvest] source clip {name} has no record in the motion manifest: no events, length 0");
+        warn!(
+            "[harvest] source clip {name} has no record in the motion manifest: no events, length 0"
+        );
     }
     current.swing = Some(Swing {
         clip: name.to_owned(),
@@ -658,7 +813,6 @@ fn start_swing(current: &mut Action, clips: &HarvestClips, name: &str, now: f64)
         looping: record.is_some_and(|clip| clip.looping),
         events: record.map(|clip| clip.events.clone()).unwrap_or_default(),
         fired: 0,
-        started: now,
     });
 }
 
@@ -718,7 +872,11 @@ fn admit(
         Some(_) => ToolState::Loop,
         None => ToolState::None,
     };
-    Some(Admitted { target, tool, state })
+    Some(Admitted {
+        target,
+        tool,
+        state,
+    })
 }
 
 /// Steps 5 to 8 (the first loop iteration).
@@ -739,7 +897,11 @@ fn start_action(
     token: Option<PlayerActionToken>,
     admitted: Admitted,
 ) {
-    let Admitted { target, tool, state } = admitted;
+    let Admitted {
+        target,
+        tool,
+        state,
+    } = admitted;
     let Ok((_, object)) = objects.get(target) else {
         return;
     };
@@ -751,7 +913,13 @@ fn start_action(
     action.actions += 1;
     info!(
         "[harvest] PlayHarvestAction #{} on {}#{} (hp {}): tool {:?} state {:?}; GameState Harvest, player state {:?}, intercept closed",
-        action.actions, object.leaf, object.fixture_id, object.hp, tool, state, world.states.current
+        action.actions,
+        object.leaf,
+        object.fixture_id,
+        object.hp,
+        tool,
+        state,
+        world.states.current
     );
     let mut current = Action {
         fixture_type: object.fixture_type,
@@ -771,17 +939,49 @@ fn start_action(
         // 6: the Start swing at the animator speed PlayAnimation sets (1.0).
         let clock = def.map(tool_clock);
         let name = harvest_clip_name(object.fixture_type, clock, ToolState::Start);
-        let length = name.as_deref().and_then(|name| clips.get(name)).map_or(0.0, |clip| clip.length);
-        motion(action, world, body, players, objects, &mut current, clips, name.as_deref(), ToolState::Start, length, 1.0, now, target);
+        let length = name
+            .as_deref()
+            .and_then(|name| clips.get(name))
+            .map_or(0.0, |clip| clip.length);
+        motion(
+            action,
+            world,
+            body,
+            players,
+            objects,
+            &mut current,
+            clips,
+            name.as_deref(),
+            ToolState::Start,
+            length,
+            1.0,
+            target,
+        );
         let wait = harvest_action_time(clock, ToolState::Start, length) / current.speed;
         action.cooling = true;
         current.phase = Phase::Start {
-            cooldown: crate::site_move::timeline::Delay::new(law::delay_seconds(wait as f64), frame),
+            cooldown: crate::site_move::timeline::Delay::new(
+                law::delay_seconds(wait as f64),
+                frame,
+            ),
         };
         action.current = Some(current);
         return;
     }
-    begin_loop(action, world, body, model, catalog, clips, players, objects, &mut current, boost_speed, frame, now);
+    begin_loop(
+        action,
+        world,
+        body,
+        model,
+        catalog,
+        clips,
+        players,
+        objects,
+        &mut current,
+        boost_speed,
+        frame,
+        now,
+    );
     action.current = Some(current);
 }
 
@@ -799,14 +999,14 @@ fn motion(
     state: ToolState,
     length: f32,
     speed: f32,
-    now: f64,
     target: Entity,
 ) {
     world.states.change_status(PlayerActionState::Harvest);
     // Facing: the kinds of mask 0x3A7 outside End (tone and boxes are not
     // placed by the mock).
     if state != ToolState::End && matches!(current.fixture_type, 0 | 1 | 2 | 5 | 7 | 8 | 9) {
-        if let (Ok(transform), Ok((object_transform, _))) = (players.single(), objects.get(target)) {
+        if let (Ok(transform), Ok((object_transform, _))) = (players.single(), objects.get(target))
+        {
             let d = object_transform.translation - transform.translation;
             current.facing = Some(Facing {
                 from: yaw_of(transform.rotation),
@@ -816,10 +1016,13 @@ fn motion(
         }
     }
     let Some(name) = name else {
-        warn!("[harvest] no source clip for fixture type {} and state {state:?}", current.fixture_type);
+        warn!(
+            "[harvest] no source clip for fixture type {} and state {state:?}",
+            current.fixture_type
+        );
         return;
     };
-    start_swing(current, clips, name, now);
+    start_swing(current, clips, name);
     // PlayAnimation(name, 0.25, 1.0); a loop iteration sets the speed in the
     // same frame (`SetAnimationSpeed`), so the stand-in starts at it.
     action.animator_speed = speed;
@@ -853,22 +1056,47 @@ fn begin_loop(
     };
     let clock = current.tool.and_then(|id| catalog.tool(id)).map(tool_clock);
     let name = harvest_clip_name(current.fixture_type, clock, current.state);
-    let length = name.as_deref().and_then(|name| clips.get(name)).map_or(0.0, |clip| clip.length);
+    let length = name
+        .as_deref()
+        .and_then(|name| clips.get(name))
+        .map_or(0.0, |clip| clip.length);
     let speed = current.speed;
-    motion(action, world, body, players, objects, current, clips, name.as_deref(), current.state, length, speed, now, target);
+    motion(
+        action,
+        world,
+        body,
+        players,
+        objects,
+        current,
+        clips,
+        name.as_deref(),
+        current.state,
+        length,
+        speed,
+        target,
+    );
     current.swings += 1;
     // OnPlayerActionStart(speed).
     if let Ok((_, object)) = objects.get(target) {
         if let Some(cue) = object.cues.swing_start {
             super::damage::push_se(&mut world.se, cue, "harvest-swing");
         }
-        if matches!(object.class, "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView") {
-            info!("[harvest] {}#{}: the prop's animator clip (break / open) is not played", object.leaf, object.fixture_id);
+        if matches!(
+            object.class,
+            "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView"
+        ) {
+            info!(
+                "[harvest] {}#{}: the prop's animator clip (break / open) is not played",
+                object.leaf, object.fixture_id
+            );
         }
     }
     if model.stamina.has_boost_or_enhance() {
         if let Ok(transform) = players.single() {
-            world.effects.pending.push(EffectHook { kind: 142, position: transform.translation });
+            world.effects.pending.push(EffectHook {
+                kind: 142,
+                position: transform.translation,
+            });
         }
     }
     // PlayAnimationHarvestUI -> ClickHarvestButton.
@@ -907,7 +1135,10 @@ fn on_animation_event(
         ClipEvent::EffectOnly if in_state => ClipEvent::EffectOnly,
         ClipEvent::PostStartAction => ClipEvent::PostStartAction,
         other => {
-            info!("[harvest] {clip} event {other:?} at {event_time:.4} dropped: player state {:?}", world.states.current);
+            info!(
+                "[harvest] {clip} event {other:?} at {event_time:.4} dropped: player state {:?}",
+                world.states.current
+            );
             return;
         }
     };
@@ -951,7 +1182,10 @@ fn on_animation_event(
             }
         }
         ClipEvent::PostStartAction => {
-            info!("[harvest] {clip} PostStartAction at {event_time:.4} on {}#{}", object.leaf, object.fixture_id);
+            info!(
+                "[harvest] {clip} PostStartAction at {event_time:.4} on {}#{}",
+                object.leaf, object.fixture_id
+            );
         }
         ClipEvent::HitInHarvestState => unreachable!("mapped above"),
     }
@@ -960,13 +1194,24 @@ fn on_animation_event(
 /// `ShakeHarvestCamera(tool)`: range 0.015 for the sustainable tools, else
 /// 0.03.
 fn push_shake(shakes: &mut HarvestCameraShakes, tool_id: i64) {
-    let range = if is_sustainable_tool(tool_id) { 0.015 } else { 0.03 };
+    let range = if is_sustainable_tool(tool_id) {
+        0.015
+    } else {
+        0.03
+    };
     let mut rng = super::Rng(0x5348_414B_0000_0000 ^ shakes.rng);
     shakes.rng = shakes.rng.wrapping_add(1);
-    let points = law::shake_points(SHAKE_DURATION / SHAKE_VIBRATO as f32, range, SHAKE_VIBRATO, SHAKE_RANDOMNESS, true, |min, max| {
-        min + rng.next_f32() * (max - min)
-    });
-    shakes.running.push(PointTween::new(points, SegmentEase::Linear));
+    let points = law::shake_points(
+        SHAKE_DURATION / SHAKE_VIBRATO as f32,
+        range,
+        SHAKE_VIBRATO,
+        SHAKE_RANDOMNESS,
+        true,
+        |min, max| min + rng.next_f32() * (max - min),
+    );
+    shakes
+        .running
+        .push(PointTween::new(points, SegmentEase::Linear));
 }
 
 /// Steps 10 and 11.
@@ -983,7 +1228,10 @@ fn finish_action(
     now: f64,
 ) {
     // 10.
-    let target = world.targeting.target.and_then(|entity| objects.get(entity).ok());
+    let target = world
+        .targeting
+        .target
+        .and_then(|entity| objects.get(entity).ok());
     match target {
         Some((_, object)) if object.status != STATUS_HARVESTED => {
             update_harvest_ui(&mut world.button, model, catalog, object);
@@ -1046,7 +1294,11 @@ pub(crate) fn after_hits(
             continue;
         };
         let before = model.stamina;
-        let amount = if object.is_last_attack { object.last_attack_stamina } else { result.used };
+        let amount = if object.is_last_attack {
+            object.last_attack_stamina
+        } else {
+            result.used
+        };
         model.stamina.decrease(amount);
         let mut tool_log = None;
         if let Some(id) = result.tool {
@@ -1055,7 +1307,10 @@ pub(crate) fn after_hits(
                 Some(position) => {
                     let tool = &mut model.tools[position];
                     if tool.durability < 1 {
-                        error!("[harvest] DecreaseToolDurability: tool {id} durability {} is below one (the source throws)", tool.durability);
+                        error!(
+                            "[harvest] DecreaseToolDurability: tool {id} durability {} is below one (the source throws)",
+                            tool.durability
+                        );
                     } else {
                         tool.durability -= 1;
                         let mut broke = false;
@@ -1074,19 +1329,29 @@ pub(crate) fn after_hits(
                                 .tools
                                 .iter()
                                 .filter(|tool| tool.quantity > 0)
-                                .find(|tool| catalog.tool(tool.tool_id).map(|def| def.tool_type) == tool_type)
+                                .find(|tool| {
+                                    catalog.tool(tool.tool_id).map(|def| def.tool_type) == tool_type
+                                })
                                 .map(|tool| tool.tool_id);
                             model.selected = other;
                             if let (Some(other), Some(tool_type)) = (other, tool_type) {
                                 model.used.insert(tool_type, other);
                                 model.auto_changed = true;
-                                show_tool_model(&mut tool_models, model, &catalog, Some(other), object.fixture_type);
+                                show_tool_model(
+                                    &mut tool_models,
+                                    model,
+                                    &catalog,
+                                    Some(other),
+                                    object.fixture_type,
+                                );
                             }
                             info!("[harvest] tool {id} used up: TryChangeOtherTool -> {other:?}");
                         }
                     }
                 }
-                None => error!("[harvest] DecreaseToolDurability: tool {id} is not in the user tool list"),
+                None => error!(
+                    "[harvest] DecreaseToolDurability: tool {id} is not in the user tool list"
+                ),
             }
         }
         if !queue.destroyed.contains(&object.uid) {
@@ -1217,11 +1482,20 @@ pub(crate) fn autoplay_press(
             .split(',')
             .filter(|entry| !entry.trim().is_empty())
             .map(|entry| {
-                let (word, count) = entry.trim().split_once(':').map_or((entry.trim(), None), |(w, n)| (w, n.parse().ok()));
-                (kind_type(word).unwrap_or_else(|| panic!("MOLY_HARVEST_AUTOPLAY: unknown kind {word}")), count)
+                let (word, count) = entry
+                    .trim()
+                    .split_once(':')
+                    .map_or((entry.trim(), None), |(w, n)| (w, n.parse().ok()));
+                (
+                    kind_type(word)
+                        .unwrap_or_else(|| panic!("MOLY_HARVEST_AUTOPLAY: unknown kind {word}")),
+                    count,
+                )
             })
             .collect();
-        warn!("[harvest-auto] MOLY_HARVEST_AUTOPLAY instrument on: plan {plan:?} (walks and presses for the run log; off by default)");
+        warn!(
+            "[harvest-auto] MOLY_HARVEST_AUTOPLAY instrument on: plan {plan:?} (walks and presses for the run log; off by default)"
+        );
         auto.plan = Some(plan);
     }
     let plan = auto.plan.clone().unwrap_or_default();
@@ -1246,7 +1520,11 @@ pub(crate) fn autoplay_press(
         return;
     };
     let walk_to = |input: &mut PlayerInput, to: Vec3| {
-        let d = Vec3::new(to.x - player.translation.x, 0.0, to.z - player.translation.z);
+        let d = Vec3::new(
+            to.x - player.translation.x,
+            0.0,
+            to.z - player.translation.z,
+        );
         if d.length_squared() > 1e-6 {
             input.direction = d.normalize();
             input.active = true;
@@ -1256,7 +1534,11 @@ pub(crate) fn autoplay_press(
         AutoStage::Seek => {
             let nearest = objects
                 .iter()
-                .filter(|(_, _, object)| object.fixture_type == fixture_type && object.status != STATUS_HARVESTED && object.collision)
+                .filter(|(_, _, object)| {
+                    object.fixture_type == fixture_type
+                        && object.status != STATUS_HARVESTED
+                        && object.collision
+                })
                 .min_by(|a, b| {
                     a.1.translation
                         .distance_squared(player.translation)
@@ -1267,20 +1549,30 @@ pub(crate) fn autoplay_press(
                 Some((entity, transform, object)) => {
                     warn!(
                         "[harvest-auto] step {}: walk to {}#{} at ({:.2}, {:.2}) from ({:.2}, {:.2})",
-                        auto.step, object.leaf, object.fixture_id, transform.translation.x, transform.translation.z, player.translation.x, player.translation.z
+                        auto.step,
+                        object.leaf,
+                        object.fixture_id,
+                        transform.translation.x,
+                        transform.translation.z,
+                        player.translation.x,
+                        player.translation.z
                     );
                     auto.target = Some(entity);
                     auto.stage = AutoStage::Walk;
                     auto.started = now;
                 }
                 None => {
-                    warn!("[harvest-auto] step {}: no unharvested object of fixture type {fixture_type}; skipped", auto.step);
+                    warn!(
+                        "[harvest-auto] step {}: no unharvested object of fixture type {fixture_type}; skipped",
+                        auto.step
+                    );
                     auto.step += 1;
                 }
             }
         }
         AutoStage::Walk => {
-            let Some((_, transform, _)) = auto.target.and_then(|entity| objects.get(entity).ok()) else {
+            let Some((_, transform, _)) = auto.target.and_then(|entity| objects.get(entity).ok())
+            else {
                 auto.stage = AutoStage::Seek;
                 return;
             };
@@ -1288,9 +1580,16 @@ pub(crate) fn autoplay_press(
                 input.active = false;
                 input.direction = Vec3::ZERO;
                 auto.stage = AutoStage::Press;
-                warn!("[harvest-auto] step {}: in contact and targeted after {:.2} s", auto.step, now - auto.started);
+                warn!(
+                    "[harvest-auto] step {}: in contact and targeted after {:.2} s",
+                    auto.step,
+                    now - auto.started
+                );
             } else if now - auto.started > 30.0 {
-                warn!("[harvest-auto] step {}: could not reach the object in 30 s; skipped", auto.step);
+                warn!(
+                    "[harvest-auto] step {}: could not reach the object in 30 s; skipped",
+                    auto.step
+                );
                 input.active = false;
                 auto.step += 1;
                 auto.stage = AutoStage::Seek;
@@ -1310,7 +1609,10 @@ pub(crate) fn autoplay_press(
                 auto.started = now;
                 warn!("[harvest-auto] step {}: press and hold", auto.step);
             } else {
-                warn!("[harvest-auto] step {}: the button is not interactable; skipped", auto.step);
+                warn!(
+                    "[harvest-auto] step {}: the button is not interactable; skipped",
+                    auto.step
+                );
                 auto.step += 1;
                 auto.stage = AutoStage::Seek;
             }
@@ -1324,7 +1626,11 @@ pub(crate) fn autoplay_press(
             if harvested || enough {
                 button.is_press = false;
                 if !action.in_progress() {
-                    warn!("[harvest-auto] step {}: released after {} hits; collecting drops", auto.step, stats.hits - auto.hits_at_start);
+                    warn!(
+                        "[harvest-auto] step {}: released after {} hits; collecting drops",
+                        auto.step,
+                        stats.hits - auto.hits_at_start
+                    );
                     auto.stage = AutoStage::Collect;
                     auto.started = now;
                 }
@@ -1337,10 +1643,16 @@ pub(crate) fn autoplay_press(
             }
         }
         AutoStage::Collect => {
-            let origin = auto.target.and_then(|entity| objects.get(entity).ok()).map(|(_, transform, _)| transform.translation);
+            let origin = auto
+                .target
+                .and_then(|entity| objects.get(entity).ok())
+                .map(|(_, transform, _)| transform.translation);
             let nearest = drops
                 .iter()
-                .filter(|(transform, item)| item.radius > 0.0 && origin.is_none_or(|o| transform.translation.distance(o) < 6.0))
+                .filter(|(transform, item)| {
+                    item.radius > 0.0
+                        && origin.is_none_or(|o| transform.translation.distance(o) < 6.0)
+                })
                 .min_by(|a, b| {
                     a.0.translation
                         .distance_squared(player.translation)
@@ -1349,14 +1661,20 @@ pub(crate) fn autoplay_press(
                 });
             let pending = drops.iter().any(|(_, item)| item.radius == 0.0);
             match nearest {
-                Some((transform, _)) if now - auto.started < 20.0 => walk_to(&mut input, transform.translation),
+                Some((transform, _)) if now - auto.started < 20.0 => {
+                    walk_to(&mut input, transform.translation)
+                }
                 _ if pending && now - auto.started < 20.0 => {
                     input.active = false;
                 }
                 _ => {
                     input.active = false;
                     input.direction = Vec3::ZERO;
-                    warn!("[harvest-auto] step {}: drops done after {:.2} s", auto.step, now - auto.started);
+                    warn!(
+                        "[harvest-auto] step {}: drops done after {:.2} s",
+                        auto.step,
+                        now - auto.started
+                    );
                     auto.step += 1;
                     auto.stage = AutoStage::Seek;
                 }
@@ -1369,7 +1687,11 @@ pub(crate) fn autoplay_press(
 /// Queued by the site change: the action, the target and the button go with
 /// the site.
 pub(crate) fn cancel_for_site_change(world: &mut World) {
-    let token = world.resource_mut::<HarvestAction>().current.take().and_then(|current| current.token);
+    let token = world
+        .resource_mut::<HarvestAction>()
+        .current
+        .take()
+        .and_then(|current| current.token);
     {
         let mut action = world.resource_mut::<HarvestAction>();
         action.cooling = false;

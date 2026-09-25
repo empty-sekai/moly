@@ -18,7 +18,9 @@ use bevy::prelude::*;
 use super::action::HarvestPlayerModel;
 use super::catalog::{HarvestCatalog, HarvestUserData};
 use super::law::Stamina;
-use super::server_mock::{GatherRequest, HarvestRequest, HarvestServerMock, SuiteUserReply, UserDrop, DROP_BEFORE};
+use super::server_mock::{
+    GatherRequest, HarvestRequest, HarvestServerMock, SuiteUserReply, UserDrop, DROP_BEFORE,
+};
 use super::HarvestObject;
 use crate::site_move::timeline::Delay;
 
@@ -67,7 +69,11 @@ pub(crate) fn merge_harvest(stacks: &[HarvestStack]) -> Vec<HarvestRequest> {
                 && prev.tool.map(|t| t.0) == stack.tool.map(|t| t.0)
                 && !prev.tool.is_some_and(|t| t.2)
         });
-        let rests = [stack.stamina_after.normal, stack.stamina_after.enhance, stack.stamina_after.boost];
+        let rests = [
+            stack.stamina_after.normal,
+            stack.stamina_after.enhance,
+            stack.stamina_after.boost,
+        ];
         if same {
             let request = requests.last_mut().expect("merged into a request");
             request.hp = stack.hp;
@@ -107,9 +113,13 @@ pub(crate) fn advance(
     catalog: Option<Res<HarvestCatalog>>,
     mut objects: Query<&mut HarvestObject>,
 ) {
-    let (Some(configs), Some(server), Some(user), Some(model), Some(catalog)) =
-        (configs, server.as_deref_mut(), user.as_deref_mut(), model.as_deref_mut(), catalog)
-    else {
+    let (Some(configs), Some(server), Some(user), Some(model), Some(catalog)) = (
+        configs,
+        server.as_deref_mut(),
+        user.as_deref_mut(),
+        model.as_deref_mut(),
+        catalog,
+    ) else {
         return;
     };
     let Some(site_id) = arrival.site_id() else {
@@ -117,18 +127,24 @@ pub(crate) fn advance(
         return;
     };
     let interval = configs.float(crate::client_config::KEY_HARVEST_API_INTERVAL);
-    let frame = frames.0;
+    let frame = u64::from(frames.0);
     let due = match queue.timer.as_mut() {
         Some((site, delay)) if *site == site_id => delay.tick(frame, time.delta_secs()),
         _ => {
-            queue.timer = Some((site_id, Delay::new(super::law::delay_seconds(interval as f64), frame)));
+            queue.timer = Some((
+                site_id,
+                Delay::new(super::law::delay_seconds(interval as f64), frame),
+            ));
             false
         }
     };
     if !due {
         return;
     }
-    queue.timer = Some((site_id, Delay::new(super::law::delay_seconds(interval as f64), frame)));
+    queue.timer = Some((
+        site_id,
+        Delay::new(super::law::delay_seconds(interval as f64), frame),
+    ));
     if queue.stacks.is_empty() {
         return;
     }
@@ -174,7 +190,10 @@ pub(crate) fn advance(
             .map(|(_, drop)| drop.clone())
             .collect();
         index += drops.len();
-        let request = GatherRequest { site_id: site, drops };
+        let request = GatherRequest {
+            site_id: site,
+            drops,
+        };
         let reply = server.gather(&request);
         queue.gather_requests += 1;
         info!(
@@ -253,7 +272,11 @@ mod value_checks {
             hp,
             is_last_attack: hp == 0,
             tool,
-            stamina_after: Stamina { normal: 100 - hp, enhance: 0, boost: 0 },
+            stamina_after: Stamina {
+                normal: 100 - hp,
+                enhance: 0,
+                boost: 0,
+            },
         }
     }
 

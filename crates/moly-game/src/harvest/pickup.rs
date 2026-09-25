@@ -41,10 +41,21 @@ fn collect(
 ) {
     if item.resource_type == RT_MYSEKAI_MATERIAL {
         let rare = item.material_type == 6 || item.rarity >= 1;
-        super::damage::push_se(se, if rare { "se_get_rare_material" } else { "se_get_material" }, "harvest-pickup");
+        super::damage::push_se(
+            se,
+            if rare {
+                "se_get_rare_material"
+            } else {
+                "se_get_material"
+            },
+            "harvest-pickup",
+        );
     }
     super::damage::push_se(se, "se_pick_item", "harvest-pickup");
-    queue.stacks.push(Stack::Gather { site_id: item.site_id, drop: item.row.clone() });
+    queue.stacks.push(Stack::Gather {
+        site_id: item.site_id,
+        drop: item.row.clone(),
+    });
     stats.collected += 1;
     info!(
         "[harvest-pickup] collected uid {} ({reason}): resourceType {} id {} qty {} rarity {}",
@@ -73,7 +84,10 @@ pub(crate) fn advance(
     if !eligibility.collision_updates() {
         return;
     }
-    if !matches!(states.current, PlayerActionState::Move | PlayerActionState::Dash) {
+    if !matches!(
+        states.current,
+        PlayerActionState::Move | PlayerActionState::Dash
+    ) {
         return;
     }
     let Ok(player) = players.single() else {
@@ -95,10 +109,19 @@ pub(crate) fn advance(
         }
         if item.attracting {
             item.acceleration += dt;
-            transform.translation = move_towards(transform.translation, player, step + item.acceleration);
+            transform.translation =
+                move_towards(transform.translation, player, step + item.acceleration);
         }
         if queued {
-            collect(&mut commands, entity, &item, &mut se, &mut queue, &mut stats, "walked into it");
+            collect(
+                &mut commands,
+                entity,
+                &item,
+                &mut se,
+                &mut queue,
+                &mut stats,
+                "walked into it",
+            );
         }
     }
 }
@@ -139,7 +162,15 @@ pub(crate) fn collect_on_leave(
     let mut count = 0usize;
     for (entity, item, transform) in &drops {
         if item.radius > 0.0 && transform.translation.distance(player.translation) <= item.radius {
-            collect(&mut commands, entity, item, &mut se, &mut queue, &mut stats, "in contact at the cannon's leave");
+            collect(
+                &mut commands,
+                entity,
+                item,
+                &mut se,
+                &mut queue,
+                &mut stats,
+                "in contact at the cannon's leave",
+            );
             count += 1;
         }
     }

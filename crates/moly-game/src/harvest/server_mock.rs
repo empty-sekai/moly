@@ -112,7 +112,10 @@ pub(crate) struct MockSpot {
 
 impl MockSpot {
     fn contains(&self, x: i32, z: i32) -> bool {
-        self.start_x <= x && x < self.start_x + self.width && self.start_z - self.height < z && z <= self.start_z
+        self.start_x <= x
+            && x < self.start_x + self.width
+            && self.start_z - self.height < z
+            && z <= self.start_z
     }
 }
 
@@ -150,9 +153,18 @@ const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 6] = [
 ];
 /// Kinds left out of the mock map, and who places them.
 pub(crate) const MOCK_EXCLUDED: [(&str, &str); 4] = [
-    ("treasure_box_transport", "paper airplane and spawn API (later lane)"),
-    ("treasure_box_fixed", "treasure boxes need AutoMove and the box open (later lane)"),
-    ("tone", "HarvestTone camera 14 and the BGM fade (later lane)"),
+    (
+        "treasure_box_transport",
+        "paper airplane and spawn API (later lane)",
+    ),
+    (
+        "treasure_box_fixed",
+        "treasure boxes need AutoMove and the box open (later lane)",
+    ),
+    (
+        "tone",
+        "HarvestTone camera 14 and the BGM fade (later lane)",
+    ),
     ("birthday_plant", "birthday party calendar (event gated)"),
 ];
 
@@ -282,7 +294,10 @@ impl HarvestServerMock {
                 .iter()
                 .find(|row| row.id == tool_id)
                 .map(|row| row.max_durability);
-            if let (Some(index), Some(max)) = (self.tools.iter().position(|tool| tool.tool_id == tool_id), max) {
+            if let (Some(index), Some(max)) = (
+                self.tools.iter().position(|tool| tool.tool_id == tool_id),
+                max,
+            ) {
                 let tool = &mut self.tools[index];
                 tool.durability -= use_count;
                 while tool.durability <= 0 && tool.quantity > 0 {
@@ -378,7 +393,11 @@ impl HarvestServerMock {
 /// `HarvestMapMock` for one site (the mock's placement rule, see the module
 /// comment). Deterministic per site id.
 pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap {
-    let spots: Vec<&MockSpot> = inputs.spots.iter().filter(|spot| spot.site_id == site_id).collect();
+    let spots: Vec<&MockSpot> = inputs
+        .spots
+        .iter()
+        .filter(|spot| spot.site_id == site_id)
+        .collect();
     let mut map = UserHarvestMap {
         site_id,
         ..default()
@@ -390,7 +409,11 @@ pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap 
     let min_x = spots.iter().map(|s| s.start_x).min().unwrap();
     let max_x = spots.iter().map(|s| s.start_x + s.width - 1).max().unwrap();
     let max_z = spots.iter().map(|s| s.start_z).max().unwrap();
-    let min_z = spots.iter().map(|s| s.start_z - s.height + 1).min().unwrap();
+    let min_z = spots
+        .iter()
+        .map(|s| s.start_z - s.height + 1)
+        .min()
+        .unwrap();
     let mut free: Vec<(i32, i32)> = Vec::new();
     for x in min_x..=max_x {
         for z in min_z..=max_z {
@@ -422,8 +445,16 @@ pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap 
             info!("[harvest-mock] HarvestMapMock site {site_id}: no {word} (no blueprint row for its drop)");
             continue;
         }
-        let common: Vec<&MockFixtureRow> = inputs.fixtures.iter().filter(|row| row.kind == kind && !row.rare).collect();
-        let rare: Vec<&MockFixtureRow> = inputs.fixtures.iter().filter(|row| row.kind == kind && row.rare).collect();
+        let common: Vec<&MockFixtureRow> = inputs
+            .fixtures
+            .iter()
+            .filter(|row| row.kind == kind && !row.rare)
+            .collect();
+        let rare: Vec<&MockFixtureRow> = inputs
+            .fixtures
+            .iter()
+            .filter(|row| row.kind == kind && row.rare)
+            .collect();
         if common.is_empty() && rare.is_empty() {
             warn!("[harvest-mock] HarvestMapMock: no master row of kind {word}");
             continue;
@@ -462,7 +493,10 @@ pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap 
                 }
                 seq += 1;
                 let (resource_type, resource_id) = match material_type {
-                    Some(_) => (RT_MYSEKAI_MATERIAL, materials[rng.below(materials.len())].id),
+                    Some(_) => (
+                        RT_MYSEKAI_MATERIAL,
+                        materials[rng.below(materials.len())].id,
+                    ),
                     None => (
                         RT_MYSEKAI_BLUEPRINT,
                         inputs.toolbox_blueprint.expect("checked above"),
@@ -492,27 +526,98 @@ mod value_checks {
     fn inputs() -> MockInputs {
         MockInputs {
             fixtures: vec![
-                MockFixtureRow { id: 1002, kind: 0, hp: 90, rare: false },
-                MockFixtureRow { id: 2001, kind: 1, hp: 90, rare: false },
-                MockFixtureRow { id: 4009, kind: 2, hp: 0, rare: false },
-                MockFixtureRow { id: 5004, kind: 5, hp: 0, rare: false },
+                MockFixtureRow {
+                    id: 1002,
+                    kind: 0,
+                    hp: 90,
+                    rare: false,
+                },
+                MockFixtureRow {
+                    id: 2001,
+                    kind: 1,
+                    hp: 90,
+                    rare: false,
+                },
+                MockFixtureRow {
+                    id: 4009,
+                    kind: 2,
+                    hp: 0,
+                    rare: false,
+                },
+                MockFixtureRow {
+                    id: 5004,
+                    kind: 5,
+                    hp: 0,
+                    rare: false,
+                },
             ],
             materials: vec![
-                MockMaterialRow { id: 1, material_type: 0, site_ids: vec![5] },
-                MockMaterialRow { id: 6, material_type: 1, site_ids: vec![5] },
-                MockMaterialRow { id: 13, material_type: 3, site_ids: vec![5] },
+                MockMaterialRow {
+                    id: 1,
+                    material_type: 0,
+                    site_ids: vec![5],
+                },
+                MockMaterialRow {
+                    id: 6,
+                    material_type: 1,
+                    site_ids: vec![5],
+                },
+                MockMaterialRow {
+                    id: 13,
+                    material_type: 3,
+                    site_ids: vec![5],
+                },
             ],
             // The four site-5 frame strips.
             spots: vec![
-                MockSpot { site_id: 5, start_x: -30, start_z: 30, width: 60, height: 7 },
-                MockSpot { site_id: 5, start_x: 13, start_z: 23, width: 17, height: 53 },
-                MockSpot { site_id: 5, start_x: -30, start_z: -23, width: 43, height: 7 },
-                MockSpot { site_id: 5, start_x: -30, start_z: 23, width: 12, height: 46 },
+                MockSpot {
+                    site_id: 5,
+                    start_x: -30,
+                    start_z: 30,
+                    width: 60,
+                    height: 7,
+                },
+                MockSpot {
+                    site_id: 5,
+                    start_x: 13,
+                    start_z: 23,
+                    width: 17,
+                    height: 53,
+                },
+                MockSpot {
+                    site_id: 5,
+                    start_x: -30,
+                    start_z: -23,
+                    width: 43,
+                    height: 7,
+                },
+                MockSpot {
+                    site_id: 5,
+                    start_x: -30,
+                    start_z: 23,
+                    width: 12,
+                    height: 46,
+                },
             ],
             tools: vec![
-                MockToolRow { id: 1, tool_type: ToolType::Pickaxe, level: 1, max_durability: 30 },
-                MockToolRow { id: 6, tool_type: ToolType::Axe, level: 1, max_durability: 30 },
-                MockToolRow { id: 9, tool_type: ToolType::Axe, level: 4, max_durability: 150 },
+                MockToolRow {
+                    id: 1,
+                    tool_type: ToolType::Pickaxe,
+                    level: 1,
+                    max_durability: 30,
+                },
+                MockToolRow {
+                    id: 6,
+                    tool_type: ToolType::Axe,
+                    level: 1,
+                    max_durability: 30,
+                },
+                MockToolRow {
+                    id: 9,
+                    tool_type: ToolType::Axe,
+                    level: 4,
+                    max_durability: 150,
+                },
             ],
             max_normal_stamina: 1000,
             harvest_sites: vec![5],
@@ -534,14 +639,18 @@ mod value_checks {
         assert_eq!(kinds.iter().filter(|id| **id == 5004).count(), 4);
         for fixture in &map.fixtures {
             let (x, z) = (fixture.position_x, fixture.position_z);
-            assert!((-18..13).contains(&x) && (-22..=23).contains(&z), "({x}, {z})");
+            assert!(
+                (-18..13).contains(&x) && (-22..=23).contains(&z),
+                "({x}, {z})"
+            );
             assert!(!inputs.spots.iter().any(|s| s.contains(x, z)));
             assert!(x.abs() >= ARRIVAL_CLEARANCE || z.abs() >= ARRIVAL_CLEARANCE);
         }
         for (i, a) in map.fixtures.iter().enumerate() {
             for b in &map.fixtures[i + 1..] {
                 assert!(
-                    (a.position_x - b.position_x).abs() >= SPACING || (a.position_z - b.position_z).abs() >= SPACING
+                    (a.position_x - b.position_x).abs() >= SPACING
+                        || (a.position_z - b.position_z).abs() >= SPACING
                 );
             }
         }
@@ -565,8 +674,16 @@ mod value_checks {
         let mut mock = HarvestServerMock::new(&inputs());
         let (maps, tools, stamina) = mock.login();
         assert_eq!(stamina.normal, 1000);
-        assert_eq!(tools.iter().map(|t| t.tool_id).collect::<Vec<_>>(), vec![1, 6]);
-        let tree = maps[&5].fixtures.iter().find(|f| f.fixture_id == 1002).unwrap().clone();
+        assert_eq!(
+            tools.iter().map(|t| t.tool_id).collect::<Vec<_>>(),
+            vec![1, 6]
+        );
+        let tree = maps[&5]
+            .fixtures
+            .iter()
+            .find(|f| f.fixture_id == 1002)
+            .unwrap()
+            .clone();
         let reply = mock.harvest(&HarvestRequest {
             site_id: 5,
             position_x: tree.position_x,
@@ -578,14 +695,46 @@ mod value_checks {
             stamina_rests: [960, 0, 0],
         });
         assert_eq!(reply.stamina.normal, 960);
-        assert_eq!(reply.tools.iter().find(|t| t.tool_id == 6).unwrap().durability, 28);
+        assert_eq!(
+            reply
+                .tools
+                .iter()
+                .find(|t| t.tool_id == 6)
+                .unwrap()
+                .durability,
+            28
+        );
         let map = reply.map.unwrap();
         let at = |d: &&UserDrop| d.position_x == tree.position_x && d.position_z == tree.position_z;
-        let status: Vec<(i32, i32)> = map.drops.iter().filter(at).map(|d| (d.hp, d.status)).collect();
-        assert_eq!(status, vec![(60, DROP_DROPPED), (30, DROP_BEFORE), (0, DROP_BEFORE)]);
-        let dropped: Vec<UserDrop> = map.drops.iter().filter(at).filter(|d| d.status == DROP_DROPPED).cloned().collect();
-        let reply = mock.gather(&GatherRequest { site_id: 5, drops: dropped });
-        let left: Vec<i32> = reply.map.unwrap().drops.iter().filter(at).map(|d| d.hp).collect();
+        let status: Vec<(i32, i32)> = map
+            .drops
+            .iter()
+            .filter(at)
+            .map(|d| (d.hp, d.status))
+            .collect();
+        assert_eq!(
+            status,
+            vec![(60, DROP_DROPPED), (30, DROP_BEFORE), (0, DROP_BEFORE)]
+        );
+        let dropped: Vec<UserDrop> = map
+            .drops
+            .iter()
+            .filter(at)
+            .filter(|d| d.status == DROP_DROPPED)
+            .cloned()
+            .collect();
+        let reply = mock.gather(&GatherRequest {
+            site_id: 5,
+            drops: dropped,
+        });
+        let left: Vec<i32> = reply
+            .map
+            .unwrap()
+            .drops
+            .iter()
+            .filter(at)
+            .map(|d| d.hp)
+            .collect();
         assert_eq!(left, vec![30, 0]);
         assert_eq!(reply.materials.values().sum::<i64>(), 1);
     }

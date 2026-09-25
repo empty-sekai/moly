@@ -17,8 +17,9 @@ use bevy::prelude::*;
 use bevy::scene::SceneRoot;
 
 use super::{
-    drop_scatter_params, DropPrefab, HarvestDocs, HarvestDropBatches, HarvestDropItem, HarvestDropSeq, HarvestGltfs,
-    HarvestGroundVerts, HarvestObject, HarvestStats, PendingDrop, Rng,
+    drop_scatter_params, DropPrefab, HarvestDocs, HarvestDropBatches, HarvestDropItem,
+    HarvestDropSeq, HarvestGltfs, HarvestGroundVerts, HarvestObject, HarvestStats, PendingDrop,
+    Rng,
 };
 use crate::audio::SeRequests;
 
@@ -46,7 +47,9 @@ pub(crate) fn play_drop_item_se(fixture_type: i32, batch: &[PendingDrop], se: &m
     match batch.iter().map(|drop| drop.rarity).max() {
         Some(1 | 2) => super::damage::push_se(se, "se_drop_rare_material", "harvest-drop"),
         Some(0 | 3) | None => {}
-        Some(other) => panic!("drop batch rarity {other} is outside the SE arms (the source throws)"),
+        Some(other) => {
+            panic!("drop batch rarity {other} is outside the SE arms (the source throws)")
+        }
     }
 }
 
@@ -114,15 +117,14 @@ pub(crate) fn spawn(
             };
             let leaf = package.rsplit("__").next().unwrap_or(&package).to_owned();
             let scene_index = super::prefab_scene_index(&doc.0, &leaf);
-            let scene = gltf
-                .scenes
-                .get(scene_index)
-                .cloned()
-                .unwrap_or_else(|| panic!("drop model {leaf}: prefab scene {scene_index} out of range"));
+            let scene = gltf.scenes.get(scene_index).cloned().unwrap_or_else(|| {
+                panic!("drop model {leaf}: prefab scene {scene_index} out of range")
+            });
             seq.0 += 1;
             let uid = seq.0;
             let mut rng = Rng(0xD30D_0000_0000_0000u64.wrapping_add(uid));
-            let (min_range, max_range, height) = drop_scatter_params(item.row.resource_type, item.material_type);
+            let (min_range, max_range, height) =
+                drop_scatter_params(item.row.resource_type, item.material_type);
             let angle = rng.next_f32() * std::f32::consts::TAU;
             let range = min_range + rng.next_f32() * (max_range - min_range);
             let is_scatter = 0.0 < max_range;
@@ -137,8 +139,16 @@ pub(crate) fn spawn(
             let distance = spawn_pos.distance(landing);
             let d1 = distance.clamp(0.6, 1.0);
             let d2 = (1.0 - distance).clamp(0.3, 1.0);
-            let yaw_deg = if is_scatter { (rng.next_f32() * 360.0).floor() } else { 0.0 };
-            let r = if is_scatter { 0.6 + rng.next_f32() * 0.2 } else { 0.0 };
+            let yaw_deg = if is_scatter {
+                (rng.next_f32() * 360.0).floor()
+            } else {
+                0.0
+            };
+            let r = if is_scatter {
+                0.6 + rng.next_f32() * 0.2
+            } else {
+                0.0
+            };
             let entity = commands
                 .spawn((
                     SceneRoot(scene),
@@ -154,7 +164,8 @@ pub(crate) fn spawn(
                         acceleration: 0.0,
                         attracting: true,
                     },
-                    Transform::from_translation(spawn_pos).with_rotation(Quat::from_rotation_y(yaw_deg * 0.017_453_292)),
+                    Transform::from_translation(spawn_pos)
+                        .with_rotation(Quat::from_rotation_y(yaw_deg * 0.017_453_292)),
                     Visibility::default(),
                 ))
                 .id();
@@ -195,7 +206,11 @@ pub(crate) fn spawn(
 }
 
 /// `RemoveTargetBeforeDropItem` (a miss is a harmless no-op).
-fn remove_pending(origin: Option<Entity>, item: &PendingDrop, objects: &mut Query<&mut HarvestObject>) {
+fn remove_pending(
+    origin: Option<Entity>,
+    item: &PendingDrop,
+    objects: &mut Query<&mut HarvestObject>,
+) {
     let Some(mut object) = origin.and_then(|origin| objects.get_mut(origin).ok()) else {
         return;
     };
@@ -212,7 +227,12 @@ fn remove_pending(origin: Option<Entity>, item: &PendingDrop, objects: &mut Quer
 pub(crate) fn advance_animations(
     time: Res<Time>,
     mut commands: Commands,
-    mut drops: Query<(Entity, &mut HarvestDropAnimation, &mut Transform, &mut HarvestDropItem)>,
+    mut drops: Query<(
+        Entity,
+        &mut HarvestDropAnimation,
+        &mut Transform,
+        &mut HarvestDropItem,
+    )>,
 ) {
     for (entity, mut anim, mut transform, mut item) in &mut drops {
         anim.elapsed += time.delta_secs();
