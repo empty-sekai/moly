@@ -2375,6 +2375,8 @@ pub(crate) struct DoorWalk {
     pressing: bool,
     /// The site generation the door button was pressed on.
     tapped: Option<u64>,
+    /// When that tap was sent.
+    tap_at: Option<f32>,
     /// The site generation this walk runs on, and when it began.
     since: Option<(u64, f32)>,
     /// The walk stopped on this generation (reached or timed out).
@@ -2407,6 +2409,7 @@ pub(crate) fn smoke_door_walk(
     button_state: Res<ActionButtonState>,
     room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
     epoch: Option<Res<crate::site::GroundEpoch>>,
+    site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     time: Res<Time>,
     mut walk: Local<DoorWalk>,
 ) {
@@ -2444,14 +2447,12 @@ pub(crate) fn smoke_door_walk(
             walk.pressing = false;
         }
     };
-    // Hold the walk finger still at the pad's centre (direction zero) while
-    // standing: a free touch would be the joystick's next capture, and the
-    // tap finger must reach the gesture layer instead.
-    let hold = |walk: &mut DoorWalk, touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
-        if walk.pressing {
-            touch(FINGER, TouchPhase::Moved, base);
-        }
-    };
+    // Standing at the door the walk finger lets go. A finger resting on the
+    // pad keeps the stick's input on with a zero vector, and the move state
+    // writes the facing from that vector every frame (yaw 0), which turns
+    // the player's box away from the house. The tap finger goes only to the
+    // window stream, which the joystick does not read.
+    const TAP_MISS_SECS: f32 = 3.0;
     if now >= armed || now < env_secs("MOLY_DOOR_WALK_AFTER") || !joystick.enabled {
         release(walk, &mut touch);
         return;
@@ -2459,9 +2460,24 @@ pub(crate) fn smoke_door_walk(
     let Some(epoch) = epoch.map(|epoch| epoch.0) else {
         return;
     };
-    if walk.tapped == Some(epoch) || walk.stopped == Some(epoch) {
+    if walk.stopped == Some(epoch) {
         release(walk, &mut touch);
         return;
+    }
+    if walk.tapped == Some(epoch) {
+        release(walk, &mut touch);
+        // The click starts the site move; a tap that did not is a miss,
+        // named, and the walk tries again (the 40 s stop still holds).
+        if site_move.is_some() || walk.tap_at.is_none_or(|at| now - at <= TAP_MISS_SECS) {
+            return;
+        }
+        warn!(
+            "[door-walk] the tap did not start a site move within {TAP_MISS_SECS} s; head {:?}, house box touching {:?}; walking on",
+            button_state.current(),
+            button_state.house_touching
+        );
+        walk.tapped = None;
+        walk.tap_at = None;
     }
     let (Ok(player), Ok(camera)) = (players.single(), cameras.single()) else {
         return;
@@ -2519,13 +2535,14 @@ pub(crate) fn smoke_door_walk(
     if head.is_some_and(|(button, _)| button == expected)
         && now - walk.last_change >= ACTION_BUTTON_INPUT_INTERVAL + 0.05
     {
-        hold(walk, &mut touch);
+        release(walk, &mut touch);
         let Some(position) = screen.button_position(window, expected) else {
             return;
         };
         touch(TAP_FINGER, TouchPhase::Started, position);
         touch(TAP_FINGER, TouchPhase::Ended, position);
         walk.tapped = Some(epoch);
+        walk.tap_at = Some(now);
         info!(
             "[door-walk] head {head:?} at distance {distance:.2} m (3D {:.2} m); tapping its button at ({:.0},{:.0})",
             delta.length(),
@@ -2551,7 +2568,7 @@ pub(crate) fn smoke_door_walk(
         && now - walk.last_change >= 1.0
     {
         if let Some(position) = head.and_then(|(shown, _)| screen.change_position(window, shown)) {
-            hold(walk, &mut touch);
+            release(walk, &mut touch);
             // Down and up in one frame: a slow frame must not turn the tap
             // into a long touch (0.25 s).
             touch(TAP_FINGER, TouchPhase::Started, position);
@@ -2567,7 +2584,7 @@ pub(crate) fn smoke_door_walk(
     // At the door: stand and wait for the head (another entry that joined
     // first keeps it until its object leaves).
     if distance < 0.2 {
-        hold(walk, &mut touch);
+        release(walk, &mut touch);
         return;
     }
     // The joystick's inverse, as the action button walk writes it.
