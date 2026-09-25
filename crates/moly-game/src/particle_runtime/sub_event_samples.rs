@@ -141,8 +141,8 @@ pub(super) fn parent_runtime_with(doc: &Value, source: &Value, edit: impl FnOnce
         .expect("native Shape emitter state");
     let mut system = test_support::runtime();
     // The simulation reads only the render mode and scaling of the geometry;
-    // an empty mesh stands in for the source GLB, and the flip (read by the
-    // mesh transform at draw time) is zero.
+    // an empty mesh stands in for the source GLB, and the flip and the axis
+    // body (read by the mesh transform at draw time) are zero and none.
     system.geometry = if mesh_renderer {
         let pivot: Vec<f32> = record["renderer"]["pivot"].as_array().unwrap().iter()
             .map(|v| v.as_f64().unwrap() as f32).collect();
@@ -154,6 +154,7 @@ pub(super) fn parent_runtime_with(doc: &Value, source: &Value, edit: impl FnOnce
                 .expect("source mesh alignment"),
             pivot: Vec3::new(pivot[0], pivot[1], pivot[2]),
             flip: Vec3::ZERO,
+            axis_body: None,
         })
     } else {
         test_support::source_billboard(scaling)

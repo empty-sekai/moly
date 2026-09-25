@@ -539,6 +539,7 @@ fn warm_target(doc: &Value, seq: &Value, image: &Value) -> Result<Runtime, Strin
             pivot: Vec3::new(pivot[0], pivot[1], pivot[2]),
             // Read only by the mesh transform at draw time.
             flip: Vec3::ZERO,
+            axis_body: None,
         })
     } else {
         test_support::source_billboard(scaling)

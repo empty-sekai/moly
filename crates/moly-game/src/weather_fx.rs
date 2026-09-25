@@ -90,6 +90,8 @@ enum PlannedGeometry {
         scaling: crate::particle_geometry::Scaling,
         pivot: Vec3,
         flip: Vec3,
+        /// The admission's decision (`particle_runtime::mesh_rotation_admission`).
+        axis_body: Option<crate::particle_geometry::AxisBody>,
     },
 }
 impl PlannedGeometry {
@@ -105,8 +107,8 @@ impl PlannedGeometry {
     fn into_runtime(self) -> crate::particle_runtime::Geometry {
         match self {
             Self::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw),
-            Self::Mesh { alignment, source, scaling, pivot, flip, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
-                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot, flip,
+            Self::Mesh { alignment, source, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
+                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot, flip, axis_body,
             }),
         }
     }
@@ -2075,14 +2077,20 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
         }
     }
-    // The mesh geometry has no transform about the particle's axis of
-    // rotation, whichever birth path feeds it.
+    // Without 3D rotation the mesh geometry turns each particle about its
+    // axis of rotation, whichever birth path feeds it, in the render spaces
+    // whose kernel is transcribed.
+    let mut axis_body = None;
     if mesh_reference.is_some() {
         let initial_enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
             .is_some_and(|modules| modules.iter().any(|module| module.as_str() == Some("InitialModule")));
-        if let Err(refused) = crate::particle_runtime::mesh_rotation_admission(&emitter, initial_enabled) {
-            tally.render_mode.push(refused.reason().into());
-            return None;
+        match crate::particle_runtime::mesh_rotation_admission(&emitter, initial_enabled,
+            mesh_alignment.expect("validated Mesh alignment"), allow_roll) {
+            Ok(body) => axis_body = body,
+            Err(refused) => {
+                tally.render_mode.push(refused.reason().into());
+                return None;
+            }
         }
     }
     // A system that runs the legacy step must carry a start colour that step
@@ -2238,7 +2246,7 @@ fn judge_in_archive(
         draw: None,
         geometry: if let Some((reference, flip)) = mesh_reference {
             let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", reference.file))).with_source("moly"));
-            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip }
+            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip, axis_body }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
                 mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },

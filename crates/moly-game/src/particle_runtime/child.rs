@@ -445,6 +445,12 @@ pub(super) fn apply_command_with_events(
     if events.is_some() && catch_up.runs {
         return Err(Refused::Unsupported("catch-up of a target with its own birth edges"));
     }
+    // A child's axis of rotation on this birth path (the Initial module's +Z
+    // or a record inherited from the parent) was not read, and the mesh
+    // renderer turns a child without 3D rotation about it.
+    if matches!(system.geometry, super::Geometry::Mesh(_)) && super::uses_rotation_3d(&system.emitter, true) != Some(true) {
+        return Err(Refused::Unsupported("child Mesh particle axis of rotation"));
+    }
     assert_eq!(system.pool.len(), system.side.len());
     let old = system.pool.len();
     let maximum = system.emitter.max_particles as usize;
@@ -659,6 +665,9 @@ pub(super) fn apply_command_with_events(
                     emit_carry: lane.carry,
                     animated: reflect(lane.animated),
                     current_size: 0.0,
+                    // The Initial module's +Z (a Mesh child without 3D rotation,
+                    // the only draw that reads it, is refused above).
+                    axis: [0.0, 0.0, 1.0],
                 },
             )
         })

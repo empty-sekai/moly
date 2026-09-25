@@ -68,6 +68,7 @@ pub mod culling;
 mod armf;
 pub mod trail;
 pub mod trail_geometry;
+pub mod mesh_transform;
 
 #[cfg(test)]
 mod corpus;

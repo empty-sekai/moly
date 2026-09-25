@@ -665,8 +665,8 @@ pub(super) struct ShapeEmitterState {
 /// never reaches here (the source adapter refuses it). The particle arrays
 /// carry the axis-of-rotation channel when the renderer is in Mesh render mode,
 /// and the renderer reads it only when they do not use 3D rotation, so the
-/// Shape law computes it only for that case, which the admission refuses
-/// until the mesh transform about the axis is ported. The runtime runs the
+/// Shape law computes it only for that case, and the side data carries it to
+/// the mesh transform about the axis. The runtime runs the
 /// Initial module for every emitter; the admission decided the rule with the
 /// module's serialized state and refused every Mesh system for which the two
 /// decisions differ.
@@ -851,33 +851,27 @@ fn start_common(
                 timing[index].curve_time,
                 ParticleRandom::sample(lane.seed, 0x96aa_4de3),
             );
-            // The group's axis-of-rotation channel stops here: nothing below
-            // reads `shaped.axis_of_rotation`. The native mesh renderer reads
-            // that channel in two places only. CalculateMeshParticleTransform
-            // (every render alignment, in both the instanced and the
-            // CPU-vertex mesh job) loads it only when the particle arrays do
-            // not use 3D rotation, and then turns the mesh by its Z rotation
-            // about the normalised axis (about +Y unless the axis's squared
-            // length exceeds a tiny threshold); with 3D rotation it builds the
-            // rotation from the three Euler angles and never loads the axis.
-            // BuildCustomData copies it only for the
-            // MeshAxisOfRotation custom vertex stream. Besides the renderer,
-            // the engine reads it only in the sub-emitter record, when
-            // SubModule emits a child, and in the script particle API and
-            // managed particle jobs, which the weather objects do not call.
-            // ParticleSystem::AllocateParticleArrays, which Update1b
-            // runs before any birth or draw of the frame, turns 3D rotation on
-            // for the 3D start rotation of an enabled Initial module, an
-            // enabled Shape module's align to direction, or the separate axes
-            // of an enabled RotationOverLifetime or RotationBySpeed module. For
-            // a Mesh system with 3D rotation, without that vertex stream and
-            // without emitting sub-emitters, dropping the channel therefore
-            // equals the source. A Mesh system without 3D rotation is turned
-            // about this axis natively and would need it carried into the
-            // mesh instance transform, which this runtime does not do: the
-            // admission refuses such a system on either birth path
-            // (`MeshRotationRefused::AxisOfRotation`), and only for it would
-            // the Shape law compute the channel.
+            // The group's axis-of-rotation channel goes into the side data
+            // (below). The native mesh renderer reads that channel in two
+            // places only. CalculateMeshParticleTransform (every render
+            // alignment, in both the instanced and the CPU-vertex mesh job)
+            // loads it only when the particle arrays do not use 3D rotation,
+            // and then turns the mesh by its Z rotation about the normalised
+            // axis (about +Y unless the axis's squared length exceeds a tiny
+            // threshold); with 3D rotation it builds the rotation from the
+            // three Euler angles and never loads the axis. BuildCustomData
+            // copies it only for the MeshAxisOfRotation custom vertex stream.
+            // Besides the renderer, the engine reads it only in the
+            // sub-emitter record, when SubModule emits a child, and in the
+            // script particle API and managed particle jobs, which the weather
+            // objects do not call. ParticleSystem::AllocateParticleArrays,
+            // which Update1b runs before any birth or draw of the frame, turns
+            // 3D rotation on for the 3D start rotation of an enabled Initial
+            // module, an enabled Shape module's align to direction, or the
+            // separate axes of an enabled RotationOverLifetime or
+            // RotationBySpeed module. Without a Shape block the Initial
+            // module's +Z stands (it writes the axis from a cached vector the
+            // module's constructor and reset set to +Z).
             let (position, velocity) = if let Some(shaped) = &shaped {
                 let sample = &shaped.samples[index];
                 (
@@ -931,6 +925,10 @@ fn start_common(
                 emit_carry: [0.0; 2],
                 animated: [0.0; 3],
                 current_size: 0.0,
+                axis: shaped
+                    .as_ref()
+                    .and_then(|shaped| shaped.axis_of_rotation)
+                    .map_or([0.0, 0.0, 1.0], |axes| axes[index]),
             });
             // Elapsed time: dt * fraction, less the command's pending argument
             // (zero for the slices' time births, where it leaves the bits).

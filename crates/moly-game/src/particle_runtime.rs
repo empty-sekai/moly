@@ -62,6 +62,8 @@ mod collision_samples;
 mod recursive_emit_samples;
 #[cfg(test)]
 mod warm_samples;
+#[cfg(test)]
+mod mesh_axis_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
@@ -568,16 +570,21 @@ pub(crate) fn uses_rotation_3d(emitter: &EmitterParams, initial_enabled: bool) -
 }
 
 /// Why a Mesh render-mode system's particle rotation is refused.
+///
+/// Without 3D rotation the source mesh renderer turns each particle by its Z
+/// rotation about the particle's axis of rotation, composed with an angle the
+/// draw call passes for its render space (ParticleSystemRenderer's
+/// CalculateMeshParticleTransform). The transcribed kernel body is the one
+/// View, World and Local share (`particle_geometry::AxisBody`); the render
+/// spaces below are the ones it does not cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MeshRotationRefused {
-    /// Without 3D rotation the source mesh renderer turns each particle by its
-    /// Z rotation about the particle's axis of rotation (written at birth,
-    /// by the Shape module's store for a shaped system), composed with an
-    /// angle the draw call passes for its render space
-    /// (ParticleSystemRenderer's CalculateMeshParticleTransform). That
-    /// transform is not ported: the mesh geometry here applies the Euler
-    /// rotation, which for such a particle is a turn about +Z.
-    AxisOfRotation,
+    /// View without roll passes a camera-derived angle, not transcribed.
+    ViewWithoutRoll,
+    /// Facing has its own kernel body, not transcribed.
+    FacingKernel,
+    /// Velocity has its own kernel body, not transcribed.
+    VelocityKernel,
     /// The export does not decide the 3D-rotation rule.
     RotationRuleUndecided,
 }
@@ -585,22 +592,35 @@ pub(crate) enum MeshRotationRefused {
 impl MeshRotationRefused {
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Self::AxisOfRotation =>
-                "source Mesh particle rotation about the axis of rotation (no 3D rotation) is not consumed",
+            Self::ViewWithoutRoll =>
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the View angle without roll is not transcribed",
+            Self::FacingKernel =>
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the Facing kernel is not transcribed",
+            Self::VelocityKernel =>
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the Velocity kernel is not transcribed",
             Self::RotationRuleUndecided =>
                 "source Mesh particle 3D rotation is not decided by the export (Shape enabled state or align flag missing)",
         }
     }
 }
 
-/// A Mesh render-mode system is admitted only with 3D rotation, whichever
-/// birth path it would take: the legacy step and the native birth feed the
-/// one mesh geometry, which has no axis-of-rotation transform.
-pub(crate) fn mesh_rotation_admission(emitter: &EmitterParams, initial_enabled: bool)
-    -> Result<(), MeshRotationRefused> {
+/// A Mesh render-mode system is admitted with 3D rotation (the Euler mesh
+/// transform, `None`), or without it in a render space whose kernel about
+/// the axis of rotation is transcribed (that body). The legacy step and the
+/// native birth both carry the axis into the particle side data.
+pub(crate) fn mesh_rotation_admission(
+    emitter: &EmitterParams, initial_enabled: bool,
+    alignment: crate::particle_geometry::Alignment, allow_roll: bool,
+) -> Result<Option<crate::particle_geometry::AxisBody>, MeshRotationRefused> {
+    use crate::particle_geometry::{Alignment, AxisBody};
     match uses_rotation_3d(emitter, initial_enabled) {
-        Some(true) => Ok(()),
-        Some(false) => Err(MeshRotationRefused::AxisOfRotation),
+        Some(true) => Ok(None),
+        Some(false) => match (AxisBody::of(alignment, allow_roll), alignment) {
+            (Some(body), _) => Ok(Some(body)),
+            (None, Alignment::Facing) => Err(MeshRotationRefused::FacingKernel),
+            (None, Alignment::Velocity) => Err(MeshRotationRefused::VelocityKernel),
+            (None, _) => Err(MeshRotationRefused::ViewWithoutRoll),
+        },
         None => Err(MeshRotationRefused::RotationRuleUndecided),
     }
 }
@@ -756,6 +776,11 @@ pub(crate) struct Side {
     /// (only a CollisionModule system with the current-size stream writes and
     /// reads it); moved with the particle.
     pub(crate) current_size: f32,
+    /// Axis of rotation in the source basis, as the particle arrays carry it:
+    /// the Shape module's store writes it at birth; without an enabled Shape
+    /// module the Initial module writes +Z. The mesh renderer turns the
+    /// particle about it when the arrays do not use 3D rotation.
+    pub(crate) axis: [f32; 3],
 }
 
 /// 出生抽签的确定性随机：splitmix64（站点链同款流算法、不同种子）。
@@ -1423,7 +1448,7 @@ fn normalized_time(system: &Runtime, head: f32) -> f32 {
 }
 
 fn spawn_one(system: &mut Runtime, ctx: &Context) {
-    let (position, direction) = if let Some(shape) = system.emitter.shape.as_ref() {    // Current native RNG consumption: Circle/Cone 2, Sphere/Hemisphere 3,
+    let (position, direction, store_direction) = if let Some(shape) = system.emitter.shape.as_ref() {    // Current native RNG consumption: Circle/Cone 2, Sphere/Hemisphere 3,
     // SingleSidedEdge 1. A billboard's facing direction is not its birth velocity.
     let (local, raw_dir) = match shape.shape_type.as_str() {
         "Circle" => {
@@ -1505,6 +1530,11 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     ];
     // 出发方向：形状函数的方向经形状旋转后归一（锥形函数按引擎分工返回
     // 未归一向量，归一在调用方）。
+    // The Shape module's store turns the direction, normalised first (+Z
+    // when short), through the Shape affine and writes the axis of rotation
+    // from it (`store_axis_of_rotation`, below).
+    let unit = Vec3::from_array(raw_dir).try_normalize().unwrap_or(Vec3::Z).to_array();
+    let store_direction = euler_rotate_deg(shape.rotation, std::array::from_fn(|i| unit[i] * shape_scale[i]));
     let mut direction = euler_rotate_deg(shape.rotation, std::array::from_fn(|i| raw_dir[i] * shape_scale[i]));
     let length = (direction[0] * direction[0]
         + direction[1] * direction[1]
@@ -1520,10 +1550,10 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         direction = [0.0; 3];
     }
 
-    (position, direction)
+    (position, direction, Some(store_direction))
     } else {
         assert_eq!(system.emitter.shape_enabled, Some(false), "missing shape requires explicit disabled-module evidence");
-        ([0.0; 3], [0.0, 0.0, 1.0])
+        ([0.0; 3], [0.0, 0.0, 1.0], None)
     };
 
     // ---- 出生取值表（表情链转录：逐项各抽一次，速度与重力共用稳定
@@ -1580,9 +1610,10 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
     // 处理（具名记为未实现）。
     // Particle module coordinates are raw Unity coordinates; GLB and game
     // anchors use the producer's reflected-X basis. Convert once at this boundary.
+    let shape_point = position;
     let position = crate::particle_geometry::reflect(Vec3::from_array(position)).to_array();
     let direction = crate::particle_geometry::reflect(Vec3::from_array(direction)).to_array();
-    let (position, direction) = if system.emitter.simulation_space == SimulationSpace::World {
+    let (position, direction, world_owner) = if system.emitter.simulation_space == SimulationSpace::World {
         let anchor = match kind {
             EffectKind::Sky => ctx.sky,
             EffectKind::Camera => {
@@ -1607,10 +1638,19 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
             // normalizes the owner's Z column before StartVelocity.
             to_world.affine().transform_vector3(Vec3::from_array(direction)).normalize_or_zero()
         };
-        (position, dir.to_array())
+        (position, dir.to_array(), Some(to_world))
     } else {
-        (position, direction)
+        (position, direction, None)
     };
+    // The store's axis crosses +Z with the turned direction, or with the
+    // point the owner turned (before translation) when that cross is short;
+    // Local simulation has no owner turn. Without a Shape module the Initial
+    // module's +Z stands.
+    let axis = store_direction.map_or([0.0, 0.0, 1.0], |store| {
+        let turned = world_owner.map_or(shape_point, |owner| crate::particle_geometry::reflect(
+            owner.affine().transform_vector3(crate::particle_geometry::reflect(Vec3::from_array(shape_point)))).to_array());
+        moly_law::particle::shape_birth::store_axis_of_rotation(store, turned)
+    });
     let velocity = [
         direction[0] * speed,
         direction[1] * speed,
@@ -1629,6 +1669,7 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         emit_carry: [0.0; 2],
         animated: [0.0; 3],
         current_size: 0.0,
+        axis,
     };
     let particle = Particle::born(position, velocity, lifetime);
     system.pool.push(particle);
@@ -1637,6 +1678,27 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
 }
 
 
+
+/// The per-particle draw inputs of the source-geometry renderers, in the
+/// source basis: position, velocity, rotation, size, colour, custom data,
+/// seed, age and axis of rotation.
+pub(crate) fn geometry_instances(system: &Runtime, to_world: &GlobalTransform) -> Vec<crate::particle_geometry::Instance> {
+    let appearance = build_quads(system, to_world);
+    system.pool.iter().enumerate().map(|(index, particle)| {
+        let side = system.side[index];
+        let size = Vec3::from_array(motion::size_at_age_percent(system, &side, particle.age_percent));
+        let view = &appearance[index];
+        crate::particle_geometry::Instance {
+            position: crate::particle_geometry::reflect(view.centre),
+            velocity: crate::particle_geometry::reflect(to_world.affine().transform_vector3(Vec3::from_array(side.total_velocity))),
+            rotation: Vec3::from_array(side.rot), size,
+            colour: Vec4::from_array(view.colour),
+            custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),
+            seed: side.seed, age_percent: particle.age_percent,
+            axis: Vec3::from_array(side.axis),
+        }
+    }).collect()
+}
 
 pub(crate) fn write_geometry(
     mesh: &mut Mesh, system: &Runtime, to_world: &GlobalTransform,
@@ -1653,20 +1715,7 @@ pub(crate) fn write_geometry(
                 Geometry::SourceBillboard(draw) => draw.scaling.apply(base_frame),
                 _ => unreachable!(),
             };
-            let appearance = build_quads(system, to_world);
-            let instances: Vec<_> = system.pool.iter().enumerate().map(|(index, particle)| {
-                let side = system.side[index];
-                let size = Vec3::from_array(motion::size_at_age_percent(system, &side, particle.age_percent));
-                let view = &appearance[index];
-                crate::particle_geometry::Instance {
-                    position: crate::particle_geometry::reflect(view.centre),
-                    velocity: crate::particle_geometry::reflect(to_world.affine().transform_vector3(Vec3::from_array(side.total_velocity))),
-                    rotation: Vec3::from_array(side.rot), size,
-                    colour: Vec4::from_array(view.colour),
-                    custom1: Vec4::from_array(view.custom1), custom2: Vec4::from_array(view.custom2),
-                    seed: side.seed, age_percent: particle.age_percent,
-                }
-            }).collect();
+            let instances = geometry_instances(system, to_world);
             match &system.geometry {
                 Geometry::Mesh(draw) => crate::particle_geometry::write_mesh(mesh, draw, &instances, &frame),
                 Geometry::SourceBillboard(draw) => crate::source_billboard::write(mesh, draw, &instances, &frame,

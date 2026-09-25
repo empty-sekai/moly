@@ -172,6 +172,7 @@ fn load_pool(system: &mut Runtime, pool: &Value) {
             emit_carry: [0.0; 2],
             animated: [0.0; 3],
             current_size: 0.0,
+            axis: [0.0, 0.0, 1.0],
         });
     }
 }

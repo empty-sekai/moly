@@ -309,6 +309,7 @@ mod tests {
             let side: Vec<Side> = (0..n).map(|i| Side {
                 rand: 0.0, seed: seeds[i], rot: [0.0; 3], size: [1.0; 3], gravity: 0.0, colour: [1.0; 4],
                 total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2], emit_carry: [0.0; 2], animated: [0.0; 3], current_size: 0.0,
+                axis: [0.0, 0.0, 1.0],
             }).collect();
             let natives = row["native"].as_array().unwrap();
             for (k, call) in case["calls"].as_array().unwrap().iter().enumerate() {
