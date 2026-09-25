@@ -31,6 +31,8 @@ pub(crate) struct LibraryInput<'w, 's> {
     pub(super) audio_gate: ResMut<'w, crate::audio::AudioGate>,
     /// 宿主天气钮的写入端：请求一次目标档位，天气链在下一帧起淡化。
     pub(super) weather: MessageWriter<'w, crate::weather::WeatherRequest>,
+    /// 宿主地点选择的写入端：换站请求交给站点域的同一条拆站重装链。
+    pub(super) commands: Commands<'w, 's>,
     paste: Res<'w, PasteInbox>,
 }
 

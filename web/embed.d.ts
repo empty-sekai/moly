@@ -114,6 +114,17 @@ export interface MolySnapshot {
    * the locale the host asked for, so the host renders it verbatim.
    */
   weather?: MolyWeather;
+  /**
+   * The site dial: the site the scene is on (or switching to) and every site
+   * the runtime can switch to, in the source's own order, named by the
+   * snapshot's master table. `setSite` accepts only IDs from `options`, and
+   * the runtime refuses a switch while `status.canStop` is true.
+   */
+  site?: MolySite;
+}
+export interface MolySite {
+  id: string;
+  options: { id: string; name: string }[];
 }
 export interface MolyWeatherOption {
   id: number;
@@ -170,6 +181,8 @@ export interface MountOptions {
   theme?: MolyTheme;
   renderer?: "auto" | "webgpu" | "webgl2";
   sound?: boolean;
+  /** The site the scene opens on, as a site ID (`shore`, `first_floor`). */
+  site?: string;
   fixture?: number;
   tab?: MolyTab;
   content?: MolyKey;
@@ -195,6 +208,8 @@ export interface MolyMount {
   browse(filters: MolyFilters): void;
   /** Switch the phenomenon of the live scene. Unknown IDs are rejected by the runtime. */
   setWeather(phenomenon: number): void;
+  /** Move the live scene to another site. Unknown or busy switches are refused by the runtime. */
+  setSite(site: string): void;
   setSoundEnabled(enabled: boolean): void;
   select(key: MolyKey): void;
   play(key: MolyKey): void;

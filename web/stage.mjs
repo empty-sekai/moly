@@ -50,6 +50,22 @@ const weatherPicker = createWeatherPicker({
   },
   onFocus: (captured) => controller?.focus(captured),
 });
+// The last site block the runtime published, and whether a switch may be
+// asked for now: never while the scene is loading or an experience owns it.
+let site = null,
+  siteLocked = true;
+const siteSelect = $("site-select");
+siteSelect.addEventListener("change", () => {
+  const id = siteSelect.value;
+  if (!siteLocked && id !== site?.id && site?.options.some((option) => option.id === id))
+    controller?.dispatch("site", id);
+  else if (site) siteSelect.value = site.id;
+});
+// Keys pressed in the menu belong to it, not to the scene behind it.
+for (const type of ["keydown", "keyup"])
+  siteSelect.addEventListener(type, (event) => event.stopPropagation());
+siteSelect.addEventListener("focus", () => controller?.focus(true));
+siteSelect.addEventListener("blur", () => controller?.focus(false));
 const weatherIconUrls = new Map();
 const weatherIconRequests = new Set();
 function weatherPresentationOptions() {
@@ -168,6 +184,25 @@ function render() {
       : "";
   $("stage-hint").textContent = t.controls;
   renderWeather();
+  renderSite();
+}
+function renderSite() {
+  const field = $("stage-site");
+  if (!site) {
+    field.hidden = true;
+    return;
+  }
+  const names = JSON.stringify(site.options.map((option) => [option.id, option.name]));
+  if (siteSelect.dataset.options !== names) {
+    siteSelect.dataset.options = names;
+    siteSelect.replaceChildren(
+      ...site.options.map((option) => new Option(option.name, option.id)),
+    );
+  }
+  if (siteSelect.value !== site.id) siteSelect.value = site.id;
+  siteSelect.disabled = siteLocked;
+  siteSelect.setAttribute("aria-label", stageMessages(ui.locale).site);
+  field.hidden = false;
 }
 function renderWeather() {
   const button = $("stage-weather");
@@ -503,6 +538,11 @@ window.addEventListener("moly-ready", () => {
       if (state.weather) {
         weather = state.weather;
         renderWeather();
+      }
+      if (state.site) {
+        site = state.site;
+        siteLocked = !state.scene?.ready || state.status.canStop;
+        renderSite();
       }
       if (state.ready) mark("catalogReady");
       if (state.scene?.ready) {

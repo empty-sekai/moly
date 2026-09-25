@@ -139,7 +139,8 @@ published resource revision. UI locale is independent of source language.
 
 `embed.d.ts` describes the typed interface. Stage messages have
 `schemaVersion: 2`, an exact sender tag, and a bounded intention vocabulary:
-`browse`, `select`, `play`, `stop`, `restore`, `close`, and input-focus control.
+`browse`, `select`, `play`, `stop`, `restore`, `close`, the `weather` and
+`site` scene settings, sound, and input-focus control.
 No arbitrary gameplay command, script, entity ID or camera transform is accepted.
 The parent checks both the exact iframe window and the exact origin; the child
 checks the exact parent and origin. Rust library commands remain an internal
@@ -173,6 +174,17 @@ activation to the same-origin stage). Do not await before these calls or create
 another audio context. Theme, locale, selection and filters do not require
 remounting. A second shell or stage mount in the same host page is rejected
 until the existing one is disposed.
+
+The scene opens on `site` when the mount options name one (a site ID such as
+`shore` or `first_floor`), otherwise on the runtime's default. `snapshot.site`
+lists every site the runtime can switch to, in the source's order, with the
+display name from the snapshot's master table, and the site the scene is on.
+`setSite(id)` asks the runtime to move the live scene there. The runtime
+refuses IDs it did not list and refuses a switch while an experience owns the
+scene (`status.canStop` is true). The stage also shows this list as its own
+site menu, disabled while the scene is loading (`scene.ready` is false) or
+owned. Like the weather setting, the last chosen site is applied again after a
+reload of the iframe.
 
 A retry or WebGL fallback reloads the iframe realm, so two renderers/audio
 contexts are never initialized within one realm. The handshake distinguishes a
