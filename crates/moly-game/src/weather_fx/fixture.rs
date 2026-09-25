@@ -42,31 +42,11 @@ pub(crate) fn prepare_control(
             let by_path = nodes.iter().filter_map(|node|
                 Some((node["node"].as_str()?.to_owned(), node))).collect();
             let owners = source_sub_emitter_owners(particles);
+            let package = doc["name"].as_str().unwrap_or("fixture");
             let mut candidates = Vec::new();
             for &(anchor, ordinal) in selected {
                 let particle = &particles[ordinal];
-                if !is_source_particle(particle) {
-                    return Err(format!("{}: source-owned shader/material export required", particle["node"]));
-                }
-                let mut tally = Tally::default();
-                let mut plan = judge_in_archive(doc["name"].as_str().unwrap_or("fixture"), particle,
-                    &by_path, &owners, EffectKind::Site, false, None, "fixture-particles-v2",
-                    Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()),
-                    &Err("fixture particles carry no component census".to_owned()), &server, &mut tally)
-                    .ok_or_else(|| format!("{}: source particle control rejected {tally:?}", particle["node"]))?;
-                // Sub-emitter events run only with the native birth owner,
-                // which this fixture path does not install.
-                if plan.event_edges.is_some() {
-                    return Err(format!("{}: sub-emitter events need the native birth owner", particle["node"]));
-                }
-                // Trails likewise need the native birth owner and a trail draw.
-                if plan.trail.is_some() {
-                    return Err(format!("{}: trails need the native birth owner and a trail draw", particle["node"]));
-                }
-                // So does emission over distance (the native per-frame head).
-                if crate::particle_runtime::has_distance_emission(&plan.emitter) {
-                    return Err(format!("{}: emission over distance needs the native birth owner", particle["node"]));
-                }
+                let mut plan = admit(package, particle, &by_path, &owners, &server, Path::Control)?;
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
@@ -126,6 +106,68 @@ pub(crate) fn is_source_particle(particle: &Value) -> bool {
         || particle.pointer("/renderer/geometryError").is_some()
 }
 
+/// How a fixture-host system reaches this admission: `Autonomous` is a
+/// play-on-awake system of a placed prefab ([`plan`]); `Control` is a system
+/// prepared for an owner that plays it ([`prepare_control`]: a Director, the
+/// site move's explicit Play, the foot effects).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Path {
+    Autonomous,
+    Control,
+}
+
+/// The fixture host's admission of one source emitter: the shared source
+/// judgement, then the host's own gates. `Err` names the reason; on the
+/// control path a judgement refusal keeps the `<node>: source particle
+/// control rejected` prefix its callers skip single emitters by.
+fn admit(
+    package: &str,
+    particle: &Value,
+    by_path: &HashMap<String, &Value>,
+    owners: &SubEmitterGraph<'_>,
+    server: &AssetServer,
+    path: Path,
+) -> Result<Planned, String> {
+    if path == Path::Control && !is_source_particle(particle) {
+        return Err(format!("{}: source-owned shader/material export required", particle["node"]));
+    }
+    let mut tally = Tally::default();
+    let plan = judge_in_archive(package, particle, by_path, owners, EffectKind::Site, false,
+        None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY),
+        &Err("collision scene: fixture particles carry no collider export".to_owned()),
+        &Err("fixture particles carry no component census".to_owned()), server, &mut tally);
+    let Some(plan) = plan else {
+        return Err(match path {
+            Path::Control => format!("{}: source particle control rejected {tally:?}", particle["node"]),
+            Path::Autonomous => format!("rejected {tally:?}"),
+        });
+    };
+    let node = &particle["node"];
+    match path {
+        // Noise runs only with the native birth owner, which this fixture
+        // path does not install; refuse it rather than drop the module.
+        Path::Autonomous if plan.emitter.noise.is_some() =>
+            Err("Noise needs the native birth owner, which the fixture path does not install".into()),
+        Path::Autonomous if plan.event_edges.is_some() =>
+            Err("sub-emitter events need the native birth owner, which the fixture path does not install".into()),
+        Path::Autonomous if plan.trail.is_some() =>
+            Err("trails need the native birth owner and a trail draw, which the fixture path does not install".into()),
+        Path::Autonomous if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
+            Err("emission over distance needs the native birth owner, which the fixture path does not install".into()),
+        // Sub-emitter events run only with the native birth owner,
+        // which this fixture path does not install.
+        Path::Control if plan.event_edges.is_some() =>
+            Err(format!("{node}: sub-emitter events need the native birth owner")),
+        // Trails likewise need the native birth owner and a trail draw.
+        Path::Control if plan.trail.is_some() =>
+            Err(format!("{node}: trails need the native birth owner and a trail draw")),
+        // So does emission over distance (the native per-frame head).
+        Path::Control if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
+            Err(format!("{node}: emission over distance needs the native birth owner")),
+        _ => Ok(plan),
+    }
+}
+
 pub(crate) fn plan(
     commands: &mut Commands,
     root: Entity,
@@ -152,21 +194,9 @@ pub(crate) fn plan(
         let Some(anchor) = anchors.get(&format!("/{node}")).and_then(|list| list.first()).copied() else {
             warn!("[fixture-source] {package}/{node}: emitter instance missing"); continue;
         };
-        let mut tally = Tally::default();
-        match judge_in_archive(package, particle, &by_path, &owners, EffectKind::Site, false,
-            None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()),
-                    &Err("fixture particles carry no component census".to_owned()), server, &mut tally) {
-            // Noise runs only with the native birth owner, which this fixture
-            // path does not install; refuse it rather than drop the module.
-            Some(plan) if plan.emitter.noise.is_some() =>
-                warn!("[fixture-source] {package}/{node}: Noise needs the native birth owner, which the fixture path does not install"),
-            Some(plan) if plan.event_edges.is_some() =>
-                warn!("[fixture-source] {package}/{node}: sub-emitter events need the native birth owner, which the fixture path does not install"),
-            Some(plan) if plan.trail.is_some() =>
-                warn!("[fixture-source] {package}/{node}: trails need the native birth owner and a trail draw, which the fixture path does not install"),
-            Some(plan) if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
-                warn!("[fixture-source] {package}/{node}: emission over distance needs the native birth owner, which the fixture path does not install"),
-            Some(mut plan) => {
+        match admit(package, particle, &by_path, &owners, server, Path::Autonomous) {
+            Err(reason) => warn!("[fixture-source] {package}/{node}: {reason}"),
+            Ok(mut plan) => {
                 plan.ordinal = ordinal;
                 // FixtureController.Setup -> FixtureView.SetupRenderer calls
                 // SetPhenomenaLighting(true) on every material gathered by
@@ -178,7 +208,6 @@ pub(crate) fn plan(
                 plan.source.force_phenomena_lighting();
                 candidates.push(Candidate { anchor, plan });
             }
-            None => warn!("[fixture-source] {package}/{node}: rejected {tally:?}"),
         }
     }
     if !candidates.is_empty() {
@@ -272,6 +301,142 @@ mod tests {
             }
         }
         assert!(mesh_count > 0, "source fixture corpus did not contain any active Mesh emitters");
+    }
+
+    /// Coverage diagnostic, not a correctness test: every source emitter of
+    /// every package the fixture particle index lists, judged by the fixture
+    /// host's admission on the path its product owner reaches it by, with the
+    /// refusal reason, one line per emitter, then counts by host and reason.
+    /// The denominator is the release root's `fixture-particles-v2/index.json`
+    /// package list (each package's document once). Hosts: the site move's
+    /// pooled effects (Flying by explicit Play, the two landings play on
+    /// awake), the cannon prefab (play on awake), the foot effects (explicit
+    /// Play), and every other package as a placed fixture (play-on-awake
+    /// systems autonomous; the rest are reached only when a Director binds
+    /// them). Records without a source-owned renderer go to the legacy
+    /// summary path and are counted, not judged.
+    #[test]
+    #[ignore = "requires MOLY_FIXTURE_PARTICLE_AUDIT_ROOT containing a release root's fixture-particles-v2"]
+    fn fixture_host_refusal_census() {
+        use crate::site_move::effects::EffectType;
+        let root = std::path::PathBuf::from(std::env::var_os("MOLY_FIXTURE_PARTICLE_AUDIT_ROOT").expect("source directory"));
+        let index: Value = serde_json::from_slice(&std::fs::read(root.join("fixture-particles-v2/index.json")).unwrap()).unwrap();
+        let packages = index["packages"].as_object().expect("index packages");
+        let mut app = App::new();
+        moly_assets::install(&mut app, moly_assets::AssetSource::NativeDir { path: root.clone() });
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default(), bevy::image::ImagePlugin::default()));
+        moly_assets::source_shader::loader::register(&mut app);
+        app.init_asset::<Gltf>();
+        app.finish(); app.cleanup();
+        let server = app.world().resource::<AssetServer>();
+        let control: Vec<String> = [EffectType::Flying, EffectType::Dash, EffectType::WalkWater]
+            .into_iter().map(EffectType::package).collect();
+        let autonomous: Vec<String> = [EffectType::SiteMoveEndPlayer, EffectType::SiteMoveFailedPlayer]
+            .into_iter().map(EffectType::package)
+            .chain([crate::site_move::cannon::PARTICLE_PACKAGE.to_owned()]).collect();
+        let mut files: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (package, entry) in packages {
+            let Some(file) = entry["file"].as_str() else { continue; };
+            files.entry(file.to_owned()).or_default().push(package.clone());
+        }
+        let mut reasons: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        let (mut rows, mut legacy, mut admitted, mut unplayed) = (0usize, 0usize, 0usize, 0usize);
+        for (file, names) in &files {
+            let doc: Value = serde_json::from_slice(&std::fs::read(root.join("fixture-particles-v2").join(file)).unwrap()).unwrap();
+            let Some(particles) = doc["emitters"].as_array() else { continue; };
+            let Some(nodes) = doc["nodes"].as_array() else { continue; };
+            let by_path: HashMap<String, &Value> = nodes.iter()
+                .filter_map(|node| Some((node["node"].as_str()?.to_owned(), node))).collect();
+            let owners = source_sub_emitter_owners(particles);
+            let package = doc["name"].as_str().unwrap_or("fixture");
+            let host = if names.iter().any(|name| control.contains(name) || autonomous.contains(name)) {
+                names.iter().find(|name| control.contains(name) || autonomous.contains(name)).unwrap().clone()
+            } else {
+                "fixture".to_owned()
+            };
+            for particle in particles {
+                let node = particle["node"].as_str().unwrap_or("");
+                if !is_source_particle(particle) {
+                    legacy += 1;
+                    continue;
+                }
+                let played = particle["activeInHierarchy"] == true && particle["system"]["playOnAwake"] == true;
+                let path = if control.contains(&host) {
+                    Path::Control
+                } else if played {
+                    Path::Autonomous
+                } else if host == "fixture" {
+                    // Reached only through a Director's control binding.
+                    Path::Control
+                } else {
+                    // Neither played on awake nor by an explicit Play.
+                    unplayed += 1;
+                    println!("fixture-host-census | {host} | {file} | {node} | not played");
+                    continue;
+                };
+                rows += 1;
+                let verdict = admit(package, particle, &by_path, &owners, server, path);
+                let reason = match &verdict {
+                    Ok(_) => { admitted += 1; "admitted".to_owned() }
+                    Err(reason) => census_reason(reason, &particle["node"]),
+                };
+                println!("fixture-host-census | {host} | {file} | {node} | {path:?} | {reason}");
+                let label = if host == "fixture" { format!("fixture {path:?}") } else { host.clone() };
+                *reasons.entry((label, reason)).or_default() += 1;
+            }
+        }
+        for ((host, reason), count) in &reasons {
+            println!("fixture-host-census count {count} | {host} | {reason}");
+        }
+        println!("fixture-host-census documents {} packages {} judged {rows} admitted {admitted} legacy-summary {legacy} not-played {unplayed}",
+            files.len(), packages.len());
+        assert!(rows > 0, "the index lists no source emitter");
+    }
+
+    /// One refusal of the census, without its node and with the judgement's
+    /// tally reduced to the bucket that refused.
+    fn census_reason(reason: &str, node: &Value) -> String {
+        let reason = reason.strip_prefix(&format!("{node}: ")).unwrap_or(reason);
+        let Some(tally) = reason.strip_prefix("source particle control rejected ").or_else(|| reason.strip_prefix("rejected ")) else {
+            return reason.to_owned();
+        };
+        // `Tally { records: 1, .., bucket: value, .. }`: keep the one bucket
+        // that is not empty or zero.
+        let node = node.as_str().unwrap_or("");
+        let body = tally.trim_start_matches("Tally { ").trim_end_matches(" }");
+        let mut kept = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        let bytes = body.as_bytes();
+        let mut fields = Vec::new();
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'[' | b'{' | b'(' => depth += 1,
+                b']' | b'}' | b')' => depth -= 1,
+                b',' if depth == 0 => { fields.push(&body[start..i]); start = i + 1; }
+                _ => {}
+            }
+        }
+        fields.push(&body[start..]);
+        for field in fields {
+            let field = field.trim();
+            let Some((key, value)) = field.split_once(": ") else { continue; };
+            if key == "records" || value == "0" || value == "[]" { continue; }
+            let value = value.replace(&format!("\\\"{node}: "), "\\\"").replace(&format!("{node}: "), "");
+            kept.push(format!("{key}: {value}"));
+        }
+        if kept.is_empty() { "judgement refused, no bucket".to_owned() } else { kept.join("; ") }
+    }
+
+    #[test]
+    fn census_reason_keeps_the_refusing_bucket() {
+        let node = json!("a/b");
+        assert_eq!(census_reason("\"a/b\": source particle control rejected Tally { records: 1, no_renderer: 0, law_reject: [\"a/b: emission over distance requires the native birth path: x\"], admitted: 0 }", &node),
+            "law_reject: [\"emission over distance requires the native birth path: x\"]");
+        assert_eq!(census_reason("rejected Tally { records: 1, render_mode: [\"unsupported source render mode VerticalBillboard\"], admitted: 0 }", &node),
+            "render_mode: [\"unsupported source render mode VerticalBillboard\"]");
+        assert_eq!(census_reason("\"a/b\": emission over distance needs the native birth owner", &node),
+            "emission over distance needs the native birth owner");
     }
 
     /// Coverage diagnostic, not a correctness test: where every ring-buffer

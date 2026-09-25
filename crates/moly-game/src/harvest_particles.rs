@@ -666,3 +666,50 @@ impl Plugin for HarvestParticlePlugin {
             .add_systems(Update, (install_stay_particles, follow_anchor_visibility).chain());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Coverage diagnostic, not a correctness test: every particle row of the
+    /// release root's site prop documents drawn with the program this host
+    /// installs (Hidden/particle_circle), through this host's admission, with
+    /// the refusal reason, then counts by reason. The host installs only the
+    /// rows under a stone view's played systems; every circle row is judged
+    /// here, and the other shaders are counted, not judged. The denominator is
+    /// every `site/props` document that carries a `particles` list.
+    #[test]
+    #[ignore = "requires MOLY_FIXTURE_PARTICLE_AUDIT_ROOT containing a release root's site/props"]
+    fn harvest_host_refusal_census() {
+        let root = std::path::PathBuf::from(std::env::var_os("MOLY_FIXTURE_PARTICLE_AUDIT_ROOT").expect("source directory"));
+        let mut stack = vec![root.join("site/props")];
+        let mut files = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { stack.push(path); } else if path.extension().is_some_and(|e| e == "json") { files.push(path); }
+            }
+        }
+        files.sort();
+        let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+        let (mut documents, mut rows, mut circle, mut unscaled_exported) = (0usize, 0usize, 0usize, 0usize);
+        for path in files {
+            let Ok(doc) = serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()) else { continue; };
+            let Some(particles) = doc.get("particles").and_then(Value::as_array) else { continue; };
+            documents += 1;
+            for row in particles {
+                rows += 1;
+                if row.pointer("/system/useUnscaledTime").is_some() { unscaled_exported += 1; }
+                if row.pointer("/renderer/material/shader/name").and_then(Value::as_str) != Some(CIRCLE_SHADER) { continue; }
+                circle += 1;
+                let reason = match admit(row, Vec3::ONE) { Ok(_) => "admitted".to_owned(), Err(reason) => reason };
+                println!("harvest-host-census | {} | {} | {reason}", path.file_name().unwrap().to_string_lossy(),
+                    row["node"].as_str().unwrap_or(""));
+                *reasons.entry(reason).or_default() += 1;
+            }
+        }
+        for (reason, count) in &reasons { println!("harvest-host-census count {count} | {reason}"); }
+        println!("harvest-host-census documents {documents} rows {rows} circle-rows {circle} useUnscaledTime-exported {unscaled_exported}");
+        assert!(circle > 0, "no Hidden/particle_circle row in the supplied site props");
+    }
+}
