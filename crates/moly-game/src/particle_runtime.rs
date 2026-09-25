@@ -7,7 +7,8 @@ mod child;
 mod sub_events;
 mod trails;
 mod collision;
-pub(crate) use collision::{collision_eligible, current_size_source_gate, COLLISION_SCENE_NOT_PORTED};
+pub(crate) mod collision_scene;
+pub(crate) use collision::{collision_eligible, current_size_source_gate};
 pub(crate) use trails::{
     attach_owner as attach_trail_owner, draw_eligible as trail_draw_eligible, owner_ready as trail_owner_ready,
     write_mesh as write_trail_mesh, TrailState,
@@ -996,9 +997,21 @@ pub(crate) fn native_shape_state_eligible(emitter: &EmitterParams, evidence: Opt
 /// resets the system seeds (one shared-manager draw for an automatic owner)
 /// and expands the Initial, Shape and scalar emission streams. Noise reads the
 /// same owner seed and starts from the reset scroll, so it is installed from
-/// this event rather than drawing a second owner.
+/// this event rather than drawing a second owner. A CollisionModule is
+/// installed with `collision_scene` (its effect's ground scene) and the
+/// Collision stream of the same reset; without a scene the system is not
+/// installed on this path.
+/// What a CollisionModule system is installed with: the scene of its
+/// effect's ground collider and, in Local space, the owner words its query
+/// and hits read.
+pub(crate) struct CollisionInstall {
+    pub(crate) scene: Box<dyn moly_law::particle::collision_query::CollisionScene + Send + Sync>,
+    pub(crate) owner: Option<moly_law::particle::collision_query::OwnerPair>,
+}
+
 pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
-    route: &SourceRoute) -> Result<BirthPath, seed::SeedError> {
+    route: &SourceRoute, collision: Option<CollisionInstall>)
+    -> Result<BirthPath, seed::SeedError> {
     if system.native_birth.is_some() { return Ok(BirthPath::Native); }
     if let Err(reason) = native_birth_eligible(&system.emitter, route)
         .and_then(|()| native_shape_state_eligible(&system.emitter, system.geometry.shape_evidence())) {
@@ -1024,6 +1037,13 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
         Ok(law) => law,
         Err(reason) => return Ok(BirthPath::Legacy(reason.to_owned())),
     };
+    // The CollisionModule law was qualified with the composition; its scene
+    // comes from admission, before the owner draw.
+    let collision = match (system.emitter.collision.is_some(), collision) {
+        (false, _) => None,
+        (true, Some(install)) => Some(install),
+        (true, None) => return Ok(BirthPath::Legacy("CollisionModule without its ground scene".to_owned())),
+    };
     let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;
     system.native_birth = Some(birth::NativeBirthState {
         owner: Some(owner), initial: streams.initial, shape: streams.shape,
@@ -1044,6 +1064,15 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
     // empty (the first update's reset of all rings).
     if let Some(law) = trail_law {
         trails::install(system, law);
+    }
+    if let Some(install) = collision {
+        // A Local system without its owner words is refused inside.
+        if let Err(reason) = collision::install(system, install.scene, install.owner, streams.collision) {
+            system.native_birth = None;
+            system.noise = None;
+            system.trail = None;
+            return Ok(BirthPath::Legacy(reason));
+        }
     }
     Ok(BirthPath::Native)
 }

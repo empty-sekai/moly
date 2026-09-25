@@ -73,6 +73,8 @@ pub enum Refused {
     /// Slots past the end are read, their contents are not known, and a
     /// queried lane reaches a collider the mask can return.
     PastEndLanes,
+    /// The scene could not give the engine's answer to a query of this call.
+    Scene(&'static str),
 }
 
 /// The particle-state flags the module reads.
@@ -176,6 +178,11 @@ pub trait CollisionScene {
     fn reachable(&self, collides_with: u32) -> Vec<Candidate>;
     /// The sphere sweep against candidate `request.shape` of the last overlap.
     fn sweep_sphere(&mut self, request: &SweepRequest) -> Option<SweepHit>;
+    /// Why the scene could not answer a query it was given, if it could not;
+    /// the call then refuses and commits nothing.
+    fn refusal(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// One selected hit, in simulation coordinates after the owner inverse.
@@ -392,6 +399,9 @@ impl CollisionLaw {
             trace.packs = packs.iter().map(pack_words).collect();
         }
         let mut hits = self.find(&packs, input.dt, to, scene, trace.as_deref_mut());
+        if let Some(reason) = scene.refusal() {
+            return Err(Refused::Scene(reason));
+        }
         if let Some(owner) = owner {
             for hit in &mut hits {
                 let simulated = if arms::on("hostNormalize") {

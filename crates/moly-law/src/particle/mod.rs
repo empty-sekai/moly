@@ -53,6 +53,7 @@ pub mod collision_event;
 pub mod death_event;
 pub mod collision_query;
 pub mod current_size;
+pub mod collision_mesh;
 pub mod noise;
 pub mod seed_owner;
 pub mod initial;

@@ -96,7 +96,7 @@ fn native_install_draws_one_owner_for_birth_streams_and_noise() {
     let mut expected = ParticleSeedManager::from_entropy_words(ENTROPY);
     let seed = expected.next_system_seed();
     assert!(matches!(
-        install_native_birth(&mut system, &mut manager, &SourceRoute::Ordinary).unwrap(),
+        install_native_birth(&mut system, &mut manager, &SourceRoute::Ordinary, None).unwrap(),
         BirthPath::Native
     ));
     assert_eq!(manager.manager_words_for_test(), expected.words(), "exactly one shared draw");
@@ -118,7 +118,7 @@ fn native_install_draws_one_owner_for_birth_streams_and_noise() {
         refused.emitter.noise = Some(NoiseParams { octaves, ..params() });
         let mut manager = seed::SystemSeedManager::from_entropy_words(ENTROPY);
         assert!(matches!(
-            install_native_birth(&mut refused, &mut manager, &route).unwrap(),
+            install_native_birth(&mut refused, &mut manager, &route, None).unwrap(),
             BirthPath::Legacy(_)
         ));
         let mut one = ParticleSeedManager::from_entropy_words(ENTROPY);

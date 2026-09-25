@@ -89,7 +89,7 @@ fn harness_system_with(start: &Value, config: &Value, modules: Option<&Value>) -
 
 fn install(system: &mut Runtime, seeds: &Value) {
     let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
-    assert!(matches!(install_native_birth(system, &mut manager, &SourceRoute::Ordinary).unwrap(),
+    assert!(matches!(install_native_birth(system, &mut manager, &SourceRoute::Ordinary, None).unwrap(),
         BirthPath::Native));
     let state = system.native_birth.as_mut().unwrap();
     state.owner = None;

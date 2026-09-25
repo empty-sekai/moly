@@ -58,6 +58,9 @@ pub(crate) struct WeatherFxDoc {
     request_serial: u64,
     handle: Handle<JsonAsset>,
     animations: Option<Handle<JsonAsset>>,
+    /// The collider export the index names; `None` when the index names
+    /// none (every collision system is then refused by name).
+    collision: Option<Handle<JsonAsset>>,
     tier: String,
     env_site: String,
 }
@@ -142,7 +145,6 @@ struct Planned {
     child_owner: Option<moly_law::particle::child_emit::ChildOwner>,
     /// The owner words a Local collision system's query and hits read (its
     /// authored chain on the site anchor); `None` for every other system.
-    #[allow(dead_code)]
     collision_owner: Option<moly_law::particle::collision_query::OwnerPair>,
     /// The owner local-to-world words a Local system's trail job composes
     /// with the view (the same chain); `None` for every other system.
@@ -154,6 +156,9 @@ struct Planned {
     /// The trail draw of a system with a qualified TrailModule: the renderer's
     /// trail material and trail vertex streams, drawn after the particles.
     trail: Option<PlannedTrail>,
+    /// The effect's ground scene for a system with a CollisionModule; the
+    /// native birth installer installs the module with it.
+    collision_scene: Option<Arc<crate::particle_runtime::collision_scene::GroundScene>>,
 }
 
 struct PlannedTrail {
@@ -467,10 +472,13 @@ pub(crate) fn parse(
         server.load::<JsonAsset>(AssetPath::from(format!("moly://phenomena/{file}")));
     let animations = value.pointer(&format!("/phenomena/{}/animations/file", request.tier))
         .and_then(Value::as_str).map(|file| server.load::<JsonAsset>(AssetPath::from(format!("moly://phenomena/{file}"))));
+    let collision = value.pointer("/collision/file").and_then(Value::as_str)
+        .map(|file| server.load::<JsonAsset>(AssetPath::from(format!("moly://phenomena/{file}"))));
     commands.insert_resource(WeatherFxDoc {
         request_serial:request.request_serial,
         handle,
         animations,
+        collision,
         tier: request.tier.clone(),
         env_site: request.env_site.clone(),
     });
@@ -512,6 +520,20 @@ pub(crate) fn plan(
         let Some(asset) = json.get(handle) else { return; };
         Some(serde_json::from_str::<Value>(&asset.0).unwrap_or_else(|err| panic!("weather animation source JSON: {err}")))
     } else { None };
+    // The collider export: read once per plan, one ground scene per effect.
+    let collision_document = match &doc.collision {
+        None => Err("this asset root carries no collider export".to_owned()),
+        Some(handle) => {
+            if let LoadState::Failed(err) = server.load_state(handle) {
+                Err(format!("the collider export failed to load: {err:?}"))
+            } else if let Some(asset) = json.get(handle) {
+                serde_json::from_str::<Value>(&asset.0).map_err(|err| format!("the collider export is not JSON: {err}"))
+            } else {
+                return;
+            }
+        }
+    };
+    let mut scenes = crate::particle_runtime::collision_scene::SceneBuilder::new(collision_document);
 
     // ---- 选 effect：sky/camera 各一条（专属优先、全局回退），site 全装 ----
     // 语料里每个 (档, 类) 至多一个匹配，挑选与对象序无关。
@@ -578,6 +600,7 @@ pub(crate) fn plan(
             continue;
         };
         let sub_emitter_owners = source_sub_emitter_owners(particles);
+        let ground = scenes.for_effect(effect_name);
         let effect_start = plans.len();
         for particle in particles {
             if let Some(reason) = particle["node"].as_str().and_then(|node| animation.refusal(node)) {
@@ -593,6 +616,7 @@ pub(crate) fn plan(
                 kind,
                 camera_rotation,
                 lifecycle,
+                &ground,
                 &server,
                 &mut tally,
             ) {
@@ -715,8 +739,8 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
             // Trails likewise run only on the native birth path with their own
             // draw; judge() checks the qualified subset and the trail material.
             "TrailModule" => "trails",
-            // Collision likewise; judge() refuses it with the reason the
-            // native birth path gives (the module law, or the missing scene).
+            // Collision likewise; judge() checks the module law's subset and
+            // binds the effect's ground scene, or refuses by name.
             "CollisionModule" => "collision",
             _ => return Err(format!("enabled source module {module} has no runtime consumer")),
         };
@@ -1026,7 +1050,8 @@ fn owner_matrices(by_path: &HashMap<String, &Value>, path: &str)
 #[allow(clippy::too_many_arguments)]
 fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMap<String, &Value>,
     graph: &SubEmitterGraph<'_>, kind: EffectKind, camera_rotation: bool,
-    lifecycle: Option<WeatherEffectLifecycle>, asset_root: &str, server: &AssetServer) -> Result<(), String> {
+    lifecycle: Option<WeatherEffectLifecycle>, asset_root: &str,
+    ground: &crate::particle_runtime::collision_scene::SceneVerdict, server: &AssetServer) -> Result<(), String> {
     let records: Vec<&Value> = graph.records.get(parent).into_iter().flatten().copied()
         .filter(|record| record.pointer("/system/subEmitters").and_then(Value::as_array)
             .is_some_and(|edges| edges.iter().any(|edge| edge.get("emitter").and_then(Value::as_str) == Some(node))))
@@ -1036,7 +1061,7 @@ fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMa
     };
     let mut scratch = Tally::default();
     match judge_in_archive(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, asset_root,
-        None, server, &mut scratch) {
+        None, ground, server, &mut scratch) {
         Some(planned) if planned.event_edges.as_ref().is_some_and(|edges| edges.targets().any(|target| target == node)) =>
             Ok(()),
         Some(_) => Err(format!("parent {parent} admitted without an event edge to this target")),
@@ -1054,11 +1079,12 @@ fn judge(
     kind: EffectKind,
     camera_rotation: bool,
     lifecycle: WeatherEffectLifecycle,
+    ground: &crate::particle_runtime::collision_scene::SceneVerdict,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
     judge_in_archive(effect_name, particle, by_path, sub_emitter_owners, kind,
-        camera_rotation, Some(lifecycle), "phenomena", None, server, tally)
+        camera_rotation, Some(lifecycle), "phenomena", None, ground, server, tally)
 }
 
 fn judge_in_archive(
@@ -1071,6 +1097,7 @@ fn judge_in_archive(
     lifecycle: Option<WeatherEffectLifecycle>,
     asset_root: &str,
     instance_anchor: Option<GlobalTransform>,
+    ground: &crate::particle_runtime::collision_scene::SceneVerdict,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
@@ -1266,8 +1293,8 @@ fn judge_in_archive(
     }
     // A CollisionModule runs only on the native birth path with a scene of
     // the effect's ground collider. The module law (with its current-size
-    // stream and its collision events) is checked here; the scene is refused
-    // after every other gate, below.
+    // stream and its collision events) is checked here; the scene is bound
+    // (or refused by name) after every other gate, below.
     if emitter.collision.is_some() {
         if let Err(reason) = crate::particle_runtime::collision_eligible(&emitter)
             .and_then(|()| crate::particle_runtime::current_size_source_gate(system)) {
@@ -1491,6 +1518,17 @@ fn judge_in_archive(
         }
     });
     let trail_owner = local_owner.filter(|_| emitter.trails.is_some()).map(|owner| owner.local_to_world);
+    // The collision calls are in the native slices only; a collision system
+    // is never admitted to the legacy step without them. (A sub-emitter
+    // target with a CollisionModule is refused by the child composition.)
+    if emitter.collision.is_some() && child_parent.is_none() {
+        let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
+        if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route)
+            .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&emitter, Some(evidence))) {
+            tally.law_reject.push(format!("{node}: CollisionModule requires the native birth path: {reason}"));
+            return None;
+        }
+    }
     let child_owner = match &child_parent {
         None => None,
         Some(parent) => {
@@ -1498,7 +1536,7 @@ fn judge_in_archive(
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
                 .and_then(|()| child_owner_words(by_path, node))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
-                    camera_rotation, lifecycle, asset_root, server).map(|()| owner));
+                    camera_rotation, lifecycle, asset_root, ground, server).map(|()| owner));
             match owner {
                 Ok(owner) => Some(owner),
                 Err(reason) => {
@@ -1508,11 +1546,16 @@ fn judge_in_archive(
             }
         }
     };
-    // Every other gate passed: the scene is what a collision system lacks.
-    if emitter.collision.is_some() {
-        tally.law_reject.push(format!("{node}: CollisionModule {}", crate::particle_runtime::COLLISION_SCENE_NOT_PORTED));
-        return None;
-    }
+    // Every other gate passed: the scene of the effect's ground collider,
+    // bound here or refused by name.
+    let collision_scene = match (emitter.collision.is_some(), ground) {
+        (false, _) => None,
+        (true, Ok(scene)) => Some(scene.clone()),
+        (true, Err(reason)) => {
+            tally.law_reject.push(format!("{node}: CollisionModule {reason}"));
+            return None;
+        }
+    };
     Some(Planned {
         ordinal: 0,
         event_edges,
@@ -1545,6 +1588,7 @@ fn judge_in_archive(
         rol,
         limit,
         trail,
+        collision_scene,
     })
 }
 
@@ -1910,6 +1954,8 @@ pub(crate) fn spawn_when_ready(
         let event_edges = planned.event_edges;
         let child_owner = planned.child_owner;
         let trail_owner = planned.trail_owner;
+        let collision_scene = planned.collision_scene.clone();
+        let collision_owner = planned.collision_owner;
         state.live.push(LiveWeatherEmitter { draw, trail_draw, native_refusal: None, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
@@ -1978,7 +2024,16 @@ pub(crate) fn spawn_when_ready(
                     }
                 }
             } else {
-                match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route) {
+                let has_collision = live.runtime.emitter.collision.is_some();
+                let collision = collision_scene.map(|scene| crate::particle_runtime::CollisionInstall {
+                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
+                    owner: collision_owner,
+                });
+                match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route, collision) {
+                    Ok(crate::particle_runtime::BirthPath::Native) if has_collision && live.runtime.collision.is_none() => {
+                        error!(node=%live.node, "collision system installed without its collision state");
+                        failed = true;
+                    }
                     Ok(crate::particle_runtime::BirthPath::Native) => {
                         if let Some(edges) = event_edges {
                             // The collision edges' events are recorded by the
@@ -2000,7 +2055,7 @@ pub(crate) fn spawn_when_ready(
                             failed = true;
                         }
                         info!(node=%live.node, noise=live.noise.is_some(), trail=live.runtime.trail.is_some(),
-                            "weather native birth owner installed");
+                            collision=live.runtime.collision.is_some(), "weather native birth owner installed");
                     }
                     // Birth events run only on the native path; a parent with
                     // them is not left on the legacy step without its events.
@@ -2017,6 +2072,11 @@ pub(crate) fn spawn_when_ready(
                     // per-frame head takes.
                     Ok(crate::particle_runtime::BirthPath::Legacy(reason)) if has_distance => {
                         error!(%reason, node=%live.node, "distance-emitting system refused by the native birth installer");
+                        failed = true;
+                    }
+                    // Nor a collision system left moving through its ground.
+                    Ok(crate::particle_runtime::BirthPath::Legacy(reason)) if has_collision => {
+                        error!(%reason, node=%live.node, "collision system refused by the native birth installer");
                         failed = true;
                     }
                     Ok(crate::particle_runtime::BirthPath::Legacy(reason)) => live.native_refusal = Some(reason),

@@ -9,12 +9,11 @@
 //! `moly_law::particle::collision_query`; this file maps the pool into it in
 //! source axes and commits what it writes.
 //!
-//! The module's scene is the effect's ground MeshCollider. The sphere sweep
-//! against a cooked triangle mesh (the leaf test over the triangles, the
-//! midphase order and the depth of an initial overlap) is not ported, so no
-//! scene can be bound: admission refuses every collision system with
-//! [`COLLISION_SCENE_NOT_PORTED`], and a runtime without an installed scene
-//! refuses the slice.
+//! The module's scene is the effect's ground MeshCollider (see
+//! `collision_scene`): admission binds it for an effect whose collider is
+//! cooked with the default options and refuses the others by name, the
+//! native birth installer installs the module with it, and a runtime without
+//! an installed scene refuses the slice.
 //!
 //! With a SizeModule the query radius reads the current-size stream, which the
 //! engine writes at the same two points: after the post-simulation collision
@@ -38,10 +37,6 @@ use moly_law::particle::collision_event::CollisionEmitEdge;
 use moly_law::particle::collision_response::CollisionRandom;
 use moly_law::particle::current_size::CurrentSizeLaw;
 use moly_law::particle::sub_emission::SubEmitterCommand;
-
-/// Why no collision system is admitted.
-pub(crate) const COLLISION_SCENE_NOT_PORTED: &str = "collision scene: the sphere sweep against the ground \
-    MeshCollider (the triangle leaf test, the midphase and the initial-overlap depth) is not ported";
 
 /// The only collision mask admitted: the ground layer. With it every effect
 /// ships at most one enabled collider, so the order of several broadphase
@@ -193,7 +188,6 @@ pub(crate) fn collision_eligible(emitter: &EmitterParams) -> Result<(), String> 
 /// owner. A Local system needs its owner words; `random` is the Collision
 /// stream of the same seed reset that gave the owner its Initial and Shape
 /// streams.
-#[allow(dead_code)]
 pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send + Sync>, owner: Option<OwnerPair>,
     random: moly_law::particle::seed_owner::ModuleRandom) -> Result<(), String> {
     let law = qualify(&system.emitter)?.ok_or("no CollisionModule")?;
