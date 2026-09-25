@@ -64,8 +64,9 @@ fn disabled_shape_matches_engine_origin_and_forward_motion() {
 
 fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {
     let draw=world.spawn(WeatherFxDraw).id();
-    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0)),
-        effect_animator:None,animated_chain:None}],
+    (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,trail_draw:None,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0)),
+        effect_animator:None,animated_chain:None,frame_clock:crate::particle_runtime::FrameClock::Scaled,
+        play:lifecycle::PlayState::played(lifecycle::Culling::Never,false),children:Arc::new(Vec::new())}],
         tier:"old".into(),env_site:"home".into(),admitted:1,records:1 }, draw)
 }
 
@@ -131,11 +132,12 @@ fn stopped_nonconstant_gravity_uses_the_ticked_system_clock() {
             time,value:time,in_slope:1.0,out_slope:1.0,weighted_mode:0,
             in_weight:0.0,out_weight:0.0,
         }).to_vec(),
+        pre_wrap:Some(2),post_wrap:Some(2),
     }};
     let mut system=runtime();
     system.emitter.duration=1.0;
     system.emitter.start.gravity_modifier=gravity_curve.clone();
-    system.gravity_law=Gravity::new(&gravity_curve);
+    system.gravity_law=Gravity::new(&gravity_curve).unwrap();
     system.pool[0].velocity=[0.0;3];
     let ctx=Context {sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
     // g(t)=t, four quarter-second steps. Native Tick visits .25/.5/.75/0;
@@ -163,15 +165,15 @@ fn retirement_keeps_particles_past_the_sky_fade_but_destroys_on_the_authored_dea
     let (mut old,draw)=active(app.world_mut(),2.0);
     // The source deadline is not scaled by this emitter's simulation speed.
     old.live[0].emitter.simulation_speed=0.1;
-    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0);
+    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0,0.0);
     assert!(old.live.is_empty());
-    for delta in [0.25,1.749] {
-        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_secs_f64(delta));
+    for _ in 0..7 {
+        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(250));
         app.update();
         assert!(app.world().get_entity(draw).is_ok());
         assert_eq!(app.world().resource::<WeatherFxRetirements>().live.len(),1);
     }
-    app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(1));
+    app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(250));
     app.update();
     assert!(app.world().get_entity(draw).is_err());
     assert!(app.world().resource::<WeatherFxRetirements>().live.is_empty());
@@ -184,9 +186,9 @@ fn overlapping_retirements_keep_their_own_stop_instants() {
     let (mut first,_)=active(&mut world,2.0);
     let (mut second,_)=active(&mut world,3.75);
     let mut retiring=WeatherFxRetirements::default();
-    retiring.stop(&mut first,10.0);
-    retiring.stop(&mut second,10.5);
-    assert_eq!(retiring.live.iter().map(|r|r.destroy_at).collect::<Vec<_>>(),vec![12.0,14.25]);
+    retiring.stop(&mut first,10.0,0.0);
+    retiring.stop(&mut second,10.5,0.0);
+    assert_eq!(retiring.instances.iter().map(|i|i.destroy.report()["timeUntilDestroy"].as_f64().unwrap()).collect::<Vec<_>>(),vec![2.0,3.75]);
     assert_eq!(retiring.live.iter().map(|r|r.emitter.pool.len()).sum::<usize>(),2);
 }
 
@@ -196,7 +198,7 @@ fn session_disposal_clears_active_and_retired_draws() {
     app.init_resource::<WeatherFxRetirements>();
     let (mut old,old_draw)=active(app.world_mut(),2.0);
     let (new,new_draw)=active(app.world_mut(),2.0);
-    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0);
+    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0,0.0);
     app.insert_resource(new);
     app.add_systems(Update,|mut commands:Commands| teardown(&mut commands));
     app.update();
@@ -212,7 +214,7 @@ fn site_replacement_preserves_global_and_retiring_effects() {
     app.init_resource::<WeatherFxRetirements>().init_resource::<WeatherTransition>();
     let (mut old,old_draw)=active(app.world_mut(),2.0);
     let (new,new_draw)=active(app.world_mut(),2.0);
-    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0);
+    app.world_mut().resource_mut::<WeatherFxRetirements>().stop(&mut old,0.0,0.0);
     app.insert_resource(new);
     app.add_systems(Update,|mut commands:Commands| invalidate_site(&mut commands));
     app.update();
@@ -235,7 +237,7 @@ fn effect_instance_age_survives_stop_and_advances_without_a_camera() {
     let shared = old.live[0].effect_clock.clone();
     app.world_mut()
         .resource_mut::<WeatherFxRetirements>()
-        .stop(&mut old, 0.0);
+        .stop(&mut old, 0.0, 0.0);
     assert!(Arc::ptr_eq(
         &shared,
         &app.world().resource::<WeatherFxRetirements>().live[0]

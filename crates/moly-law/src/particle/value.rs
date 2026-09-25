@@ -11,7 +11,7 @@
 use crate::particle::value::MinMaxCurve::{Constant, TwoConstants, TwoCurves};
 
 /// 一根动画曲线键。加权位（`weighted_mode` 的 bit0=入权 · bit1=出权）
-/// 激活时，该键相邻段的求值走三次 Bezier 路（见 [`bezier_interpolate`]）；
+/// 激活时，该键相邻段的求值走三次 Bezier 路（见 `curve::bezier_interpolate`）；
 /// 未激活的权重位引擎在求值时代 1/3，存值不参与求值。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveKey {
@@ -39,56 +39,22 @@ pub struct Curve {
     /// 插值结果上——两处都乘且只乘一次，见 `MinMaxCurve::evaluate`。
     pub multiplier: f32,
     pub keys: Vec<CurveKey>,
+    /// The serialized AnimationCurve wrap before the first key
+    /// (`m_PreInfinity`: 0 ping-pong, 1 repeat, 2 clamp), `None` when the
+    /// export does not carry it. The engine evaluator reads it only for a lane
+    /// the reader leaves unoptimized; `particle::curve::EngineCurve` refuses a
+    /// missing one rather than assuming clamp.
+    pub pre_wrap: Option<u32>,
+    /// The serialized wrap past the last key (`m_PostInfinity`), as above.
+    pub post_wrap: Option<u32>,
 }
 
-// ---- 加权 Hermite（引擎原生逐指令） ----
+// ---- 加权段 ----
 
-/// 加权段求值：三次 Bezier 插值。档位：**引擎原生逐指令**——加权
-/// Hermite 没有文档语义可依（参考源只给枚举与字段，求值是原生实现），
-/// 本函数按原生体逐指令转录，常量按位钉死。
-///
-/// 段 `(lhs, rhs)` 加权 iff `lhs.weighted_mode & 2`（左键出权位）或
-/// `rhs.weighted_mode & 1`（右键入权位）；未激活的权重位原式用 `fcsel`
-/// 代 1/3（`0x3eaaaaab`），存值不参与。
-///
-/// 次序逐指令对齐：x = (t−lhs.time)/d；m0 = d·lhs.outT；m1 = d·rhs.inT；
-/// u = [`bezier_extract_u`](x, ow, 1−iw)；P1y = v0 + (ow·m0)；
-/// P2y = v1 − (iw·m1)；B0 = (1−u)·((1−u)·(1−u))；B1 = (u·3)·((1−u)·(1−u))；
-/// B2 = (1−u)·((u·u)·3)；B3 = u·(u·u)；
-/// 值 = v1·B3 + (P2y·B2 + (P1y·B1 + v0·B0))。
-///
-/// 原式在 Bezier 路之后还有一步 ±inf 切线覆写，见 step_value。
-/// d == 0 由各档调用处的退化分支先行接管（引擎原式给 v0）。
-pub fn bezier_interpolate(t: f32, k0: CurveKey, k1: CurveKey) -> f32 {
-    let third = f32::from_bits(0x3eaa_aaab);
-    let ow = if k0.weighted_mode & 2 == 0 { third } else { k0.out_weight };
-    let iw = if k1.weighted_mode & 1 == 0 { third } else { k1.in_weight };
-    let d = k1.time - k0.time;
-    // 原式 `fcmp d,#0.0; b.ne`：非数比较 Z 置位、b.ne 不跳，
-    // 与 d==0 同落「回左值」——位级等价形是 !(d < 0.0 || d > 0.0)
-    // （非数的 `d != 0.0` 在 Rust 里为真，用 `!=` 转录会漏非数）。
-    if !(d < 0.0 || d > 0.0) {
-        return k0.value;
-    }
-    let x = (t - k0.time) / d;
-    let m0 = d * k0.out_slope;
-    let m1 = d * k1.in_slope;
-    let u = bezier_extract_u(x, ow, 1.0 - iw);
-    let uu = u * u;
-    let omu = 1.0 - u;
-    let u3 = u * uu;
-    let omu2 = omu * omu;
-    let p1y = k0.value + (ow * m0);
-    let p2y = k1.value - (iw * m1);
-    let b0 = omu * omu2;
-    let b1 = (u * 3.0) * omu2;
-    let b2 = omu * (uu * 3.0);
-    let b3v1 = k1.value * u3;
-    let t0 = (k0.value * b0) + (p1y * b1);
-    let t1 = (p2y * b2) + t0;
-    step_value(k0, k1).unwrap_or(b3v1 + t1)
-}
-
+/// The step override `InterpolateKeyframe` applies after either branch: +inf on
+/// `k0`'s out tangent or `k1`'s in tangent gives `k0.value`; otherwise -inf on
+/// either gives `k1.value`. The weighted (Bezier) branch itself is
+/// `curve::interpolate_keyframe`, transcribed from the engine.
 pub(crate) fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
     // The positive-infinity branch returns before the negative check.
     if k0.out_slope == f32::INFINITY || k1.in_slope == f32::INFINITY {
@@ -100,129 +66,6 @@ pub(crate) fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
     }
 }
 
-/// x-Bezier 求逆：解 `c·u³ + b·u² + a·u − x = 0` 取 [0,1] 内的根，
-/// 其中 a = ow·3，b = 3(1−iw) + ow·(−6)，c = (ow·3 − 3(1−iw)) + 1
-/// （即横标 Bezier `3u(1−u)²·ow + 3u²(1−u)·(1−iw) + u³ = x` 的系数）。
-///
-/// 次序逐指令对齐，四条路按原式分支：
-///
-/// - `|c| ≤ 0.001`（`0x3a83126f`，比较是 `b.le`——非数也走此路，转录成
-///   `!(|c| > eps)`）：二次路 `b·u² + a·u − x = 0`，根
-///   `(−a−√(a²+4bx))/(b+b)` 与 `(√(a²+4bx)−a)/(b+b)` 依次取 [0,1] 内者；
-///   `|b| ≤ 0.001` 再退线性路 `|a| ≤ 0.001 ? 0 : x/a`（**不查** [0,1]）。
-/// - 否则 Cardano：s12 = −b/(3c)；q = (a·b + (3c)·x)/(c·(c·6))；
-///   p3 = a/(3c) − s12²；Δ = s12'² + p3³（s12' = s12³ + q）。
-///   Δ ≥ 0（`b.pl`：N==0 才跳实根路，**非数 N 置位、不跳**，落三角
-///   路——转录成 `Δ >= 0.0`）：实根
-///   s12 + (scbrt(s12'+√Δ) + scbrt(s12'−√Δ))；
-///   Δ < 0：φ = atan2f(√(−Δ), s12')；幅值 = 2·scbrt(√(−p3³))；
-///   三候选 s12 + 幅值·cosf(φ/3 + {0, +2π/3, −2π/3})
-///   （`0x40060a92` / `0xc0060a92`）。
-/// - 候选判 [0,1] 的原式是位级操作，且**逐候选取形不同**：二次根与前
-///   两个三角候选用 `b.lt`/`b.ls` 对——非数候选拿 `b.lt`（N≠V）不跳、
-///   `b.ls`（Z 置位）跳，**非数候选会被返回**（`!(c < 0.0 || c > 1.0)`）；
-///   末个三角候选用 `b.ge`（N==0）、实根候选用尾部 `fccmp+fcsel ge`——
-///   这两处非数落兜底（`c >= 0.0 && c <= 1.0`）。
-/// - 全部落空：x < 0.5 ? 0 : 1。
-///
-/// scbrt(z) = sign(z)·f32(exp_f64(f64(logf(|z|))/3.0))——logf 单精度、
-/// 除以 3 与 exp 在双精度、回单精度，负数的符号在 f64 exp 之后回填。
-/// 三角函数 atan2f/cosf 同为库调用。
-fn bezier_extract_u(x: f32, ow: f32, omiw: f32) -> f32 {
-    let a = ow * 3.0;
-    let t3_omiw = omiw * 3.0;
-    let c = (a - t3_omiw) + 1.0;
-    let b = t3_omiw + ow * (-6.0);
-    let eps = f32::from_bits(0x3a83_126f);
-    if !(c.abs() > eps) {
-        if !(b.abs() > eps) {
-            if !(a.abs() > eps) {
-                return 0.0;
-            }
-            return x / a;
-        }
-        let disc = (a * a) + ((b * 4.0) * x);
-        let sq = disc.sqrt();
-        let two_b = b + b;
-        let cand1 = (-a - sq) / two_b;
-        if !(cand1 < 0.0 || cand1 > 1.0) {
-            return cand1;
-        }
-        let cand2 = (sq - a) / two_b;
-        if !(cand2 < 0.0 || cand2 > 1.0) {
-            return cand2;
-        }
-        return fallback_u(x);
-    }
-    let three_c = c * 3.0;
-    let s12 = (-b) / three_c;
-    let ab = a * b;
-    let c3x = three_c * x;
-    let six_c2 = c * (c * 6.0);
-    let s12_sq = s12 * s12;
-    let q = (ab + c3x) / six_c2;
-    let s12p = (s12 * s12_sq) + q;
-    let p3 = (a / three_c) - s12_sq;
-    let delta = (s12p * s12p) + (p3 * (p3 * p3));
-    // 原式 b.pl：非数不跳（落三角路），与 Δ>=0 有序同形——
-    // !(Δ < 0) 会把非数错送实根路，故取 >= 0.0 字面形。
-    if delta >= 0.0 {
-        let sq = delta.sqrt();
-        let cand = s12 + (scbrt(s12p + sq) + scbrt(s12p - sq));
-        // 尾部 fccmp(≤1) + fcsel ge(≥0) 形：非数落兜底。
-        if cand >= 0.0 && cand <= 1.0 {
-            return cand;
-        }
-        return fallback_u(x);
-    }
-    let sqrt_nd = (-delta).sqrt();
-    let sqrt_np3 = ((s12p * s12p) - delta).sqrt();
-    let phi = sqrt_nd.atan2(s12p);
-    let amp = {
-        let v = scbrt(sqrt_np3);
-        v + v
-    };
-    let phi3 = phi / 3.0;
-    let two_pi_3 = f32::from_bits(0x4006_0a92);
-    let neg_two_pi_3 = f32::from_bits(0xc006_0a92);
-    let c1 = s12 + (amp * phi3.cos());
-    if !(c1 < 0.0 || c1 > 1.0) {
-        return c1;
-    }
-    let c2 = s12 + (amp * (phi3 + two_pi_3).cos());
-    if !(c2 < 0.0 || c2 > 1.0) {
-        return c2;
-    }
-    let c3 = s12 + (amp * (phi3 + neg_two_pi_3).cos());
-    // 末三角候选用 b.ge 形（非数落兜底，与前两个候选的 b.lt/b.ls 对不同）。
-    if c3 >= 0.0 && c3 <= 1.0 {
-        return c3;
-    }
-    fallback_u(x)
-}
-
-/// 候选全落空时的兜底（原式 `fcsel …, mi`：x < 0.5（含非数——
-/// 非数比较 N 置位，mi 成立）取 0，否则取 1）。
-fn fallback_u(x: f32) -> f32 {
-    if !(x >= 0.5) {
-        0.0
-    } else {
-        1.0
-    }
-}
-
-/// 带符号立方根：sign(z)·f32(exp_f64(f64(logf(|z|))/3.0))。
-/// 负数的路径是先取 −z 的 logf，符号在 f64 exp 之后回填再转回 f32。
-fn scbrt(z: f32) -> f32 {
-    if z < 0.0 {
-        let e = ((-z).ln() as f64 / 3.0).exp();
-        (-e) as f32
-    } else {
-        let e = (z.ln() as f64 / 3.0).exp();
-        e as f32
-    }
-}
-
 impl Curve {
     /// `AnimationCurve.Evaluate(time)` 的行为口径（未加权支）+ 引擎
     /// 原生逐指令（加权支）。
@@ -230,13 +73,19 @@ impl Curve {
     /// 未加权段：按文档语义实现——区间内三次 Hermite（切线 = 键斜率 ×
     /// 区间时长），首键前/末键后取端点值（钳位），单键恒返回该键值。
     ///
-    /// 加权段（左键出权位或右键入权位激活）：三次 Bezier 路，见
-    /// [`bezier_interpolate`]——加权 Hermite 无文档语义，只有引擎式。
+    /// 加权段（左键出权位或右键入权位激活）：引擎的 Bezier 路，见
+    /// [`crate::particle::curve::interpolate_keyframe`]——加权段无文档语义，只有引擎式。
     ///
     /// Editor 测量方案：`AnimationCurve` 键 (0,0,outSlope=0) 与 (1,1,
     /// inSlope=0) 在 t=0.25 处求值应为 smoothstep 值 5/32 = 0.15625
     /// （本模块测试已按此锚）；再用非对称斜率 (out=2,in=−1) 于
     /// t=0.5 采一点核对 Hermite 而非线性。
+    ///
+    /// This is the documented Hermite form, not what the engine computes: in
+    /// range `AnimationCurveTpl::Evaluate` evaluates the cached cubic of
+    /// `CalculateCacheData`, which rounds differently, and past the ends it
+    /// applies the wrap modes instead of always clamping. Particle modules evaluate
+    /// through `curve::CurveSampler`.
     pub fn evaluate(&self, time: f32) -> f32 {
         match self.keys.as_slice() {
             [] => 0.0,
@@ -261,8 +110,8 @@ impl Curve {
                     // 键时刻重合：区间宽度为 0，取右键值（左键已越过）。
                     return k1.value;
                 }
-                if k0.weighted_mode & 2 != 0 || k1.weighted_mode & 1 != 0 {
-                    return bezier_interpolate(time, k0, k1);
+                if crate::particle::curve::weighted_segment(k0, k1) {
+                    return crate::particle::curve::interpolate_keyframe(k0, k1, time);
                 }
                 let t = (time - k0.time) / dt;
                 let m0 = k0.out_slope * dt;
@@ -313,6 +162,9 @@ impl MinMaxCurve {
     /// `Lerp` 是 `Mathf.Lerp`：`a + (b-a) * Clamp01(t)`——钳位可读，
     /// 不是猜的。`lerpFactor` 是调用方给的显式随机（典型是 `Random.value`，
     /// 每粒子一次，见 `emit` 的 spawn 口径）。
+    ///
+    /// The lanes go through [`Curve::evaluate`], not the engine's curve
+    /// dispatch; particle modules use `curve::CurveSampler` instead.
     pub fn evaluate(&self, time: f32, lerp_factor: f32) -> f32 {
         match self {
             Constant(c) => *c,
@@ -394,6 +246,8 @@ mod tests {
                 CurveKey { time: 0.0, value: 0.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
                 CurveKey { time: 1.0, value: 1.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
             ],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         }
     }
 
@@ -420,6 +274,8 @@ mod tests {
                 CurveKey { time: 0.0, value: 0.0, in_slope: 0.0, out_slope: 2.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
                 CurveKey { time: 1.0, value: 1.0, in_slope: -1.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
             ],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         };
         assert!((c.evaluate(0.5) - 0.875).abs() < 1e-6);
     }
@@ -436,6 +292,8 @@ mod tests {
         let c = Curve {
             multiplier: 1.0,
             keys: vec![CurveKey { time: 0.0, value: 7.0, in_slope: 1.0, out_slope: 1.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 }],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         };
         assert_eq!(c.evaluate(0.0), 7.0);
         assert_eq!(c.evaluate(0.5), 7.0);
@@ -471,6 +329,8 @@ mod tests {
                 CurveKey { time: 0.0, value: 1.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
                 CurveKey { time: 1.0, value: 3.0, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0 },
             ],
+            pre_wrap: Some(2),
+            post_wrap: Some(2),
         }; // t=0.5 -> 2（端点切线 0，中点恰线性中值）
         let c = TwoCurves { multiplier: 10.0, min: lo, max: hi };
         // Lerp(0.5, 2.0, 0.25) = 0.875 * 10 = 8.75。

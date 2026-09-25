@@ -23,7 +23,7 @@ fn line(end: f32) -> MinMaxCurve {
         in_slope: end - 1.0, out_slope: end - 1.0,
         weighted_mode: 0, in_weight: 0.0, out_weight: 0.0,
     });
-    MinMaxCurve::Curve { multiplier: 1.0, max: Curve { keys: keys.to_vec(), multiplier: 1.0 } }
+    MinMaxCurve::Curve { multiplier: 1.0, max: Curve { keys: keys.to_vec(), multiplier: 1.0, pre_wrap: Some(2), post_wrap: Some(2) } }
 }
 
 fn from_observation(row: &Value) -> Runtime {
@@ -71,9 +71,9 @@ fn from_observation(row: &Value) -> Runtime {
         orbital, orbital_offset, radial: constant(number(row, "radial")),
     });
     system.size_law = system.emitter.size_over_lifetime.as_ref()
-        .map(moly_law::particle::size::SizeOverLifetime::from_params);
+        .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
     system.velocity_law = system.emitter.velocity_over_lifetime.as_ref()
-        .map(moly_law::particle::velocity::VelocityOverLifetime::from_params);
+        .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission"));
     if row["family"] == "drag" {
         system.limit = Some(LimitVelocity::from_parts(false, &constant(10000.0), 0.0,
             Some(&constant(number(row, "drag"))), Some(flag(row, "multiplySize")),

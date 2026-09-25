@@ -233,16 +233,277 @@ pub fn cone_base(
     arc: f32,
     radial: f32,
 ) -> ([f32; 3], [f32; 3]) {
+    cone_at(radius, thickness, angle_deg, (arc_deg * DEG_TO_RAD) * arc, radial, None)
+}
+
+/// The two extra draws of the cone's random direction: an angle draw and an
+/// area draw, blended in by the authored amount.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConeJitter {
+    pub amount: f32,
+    pub arc: f32,
+    pub area: f32,
+}
+
+/// StartCone lane body (all four arc modes share it) at a given arc
+/// angle in radians. The radial fraction is the square root of the clamped
+/// inner area max(1 - thickness, 0.001) times the draw plus the rest; the base
+/// position is radius times that fraction around the arc, in the XY plane.
+/// The direction leans out by the cone angle: its XY is the same fraction
+/// times the sine of the cone angle, its Z the cosine. The cone kernel owns
+/// the random direction itself (the Store then receives zero): with a
+/// positive amount two more draws give a point in the disk of the same inner
+/// area bound, and the base XY moves toward it by the amount before the
+/// cone-angle sine is applied. The position keeps the unblended base.
+pub fn cone_at(
+    radius: f32,
+    thickness: f32,
+    angle_deg: f32,
+    arc_radians: f32,
+    radial: f32,
+    jitter: Option<ConeJitter>,
+) -> ([f32; 3], [f32; 3]) {
     let inner = (1.0 - thickness).max(MIN_INNER);
     let fraction = (inner * radial + (1.0 - radial)).sqrt();
-    let (sin, cos) = engine_sincos((arc_deg * DEG_TO_RAD) * arc);
+    let (sin, cos) = engine_sincos(arc_radians);
     let x = fraction * cos;
     let y = fraction * sin;
+    let (dx, dy) = match jitter {
+        Some(j) if j.amount > 0.0 => {
+            let (jitter_sin, jitter_cos) = engine_sincos(j.arc * NATIVE_TAU);
+            let root = (j.area * MIN_INNER + (1.0 - j.area)).sqrt();
+            (
+                x + j.amount * (root * jitter_cos - x),
+                y + j.amount * (root * jitter_sin - y),
+            )
+        }
+        _ => (x, y),
+    };
     let (sin_angle, cos_angle) = engine_sincos(angle_deg * DEG_TO_RAD);
     (
         [radius * x, radius * y, 0.0],
-        [sin_angle * x, sin_angle * y, cos_angle],
+        [sin_angle * dx, sin_angle * dy, cos_angle],
     )
+}
+
+/// The arc clock ShapeModule::Update keeps for the Loop and PingPong arc
+/// modes, in binary64: each ordinary update slice the previous value takes the
+/// current one and the current one grows by the arc speed times the slice dt
+/// (that product in f32, then widened). A reset of the system seeds zeroes
+/// both.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ArcLoopClock {
+    pub current: f64,
+    pub previous: f64,
+}
+
+impl ArcLoopClock {
+    pub fn advance(&mut self, speed: f32, dt: f32) {
+        self.previous = self.current;
+        self.current += (dt * speed) as f64;
+    }
+}
+
+/// StartCone's Loop arc angle for one lane, in radians. The lane's fraction of
+/// the update slice is the emission spacing times its lane index, clamped to
+/// [0, 1] with the native maximum and minimum; the angle clock interpolates
+/// from the current value (fraction zero) to the previous one (fraction one),
+/// both doubled and scaled by pi as rounded to f32, all in binary64. A positive
+/// arc-spread step (arc in radians times spread, in f32) floors the clock to
+/// its multiple. The clock is then reduced modulo the arc in radians with the
+/// C remainder (fmod, exact), narrowed to f32, and a negative remainder is
+/// moved up by the arc; an arc of zero gives zero. The remainder keeps the
+/// sign of the time, so the arc's sign enters only through the step (a
+/// negative arc quantizes only with a negative spread, and a negative spread
+/// with a positive arc is no spread) and through that correction.
+pub fn loop_arc_angle(
+    clock: ArcLoopClock,
+    spacing: f32,
+    lane_index: f32,
+    arc_deg: f32,
+    arc_spread: f32,
+) -> f32 {
+    let arc = arc_deg * DEG_TO_RAD;
+    let time = arc_clock_time(clock, spacing, lane_index, arc * arc_spread);
+    let angle = if arc != 0.0 { (time % arc as f64) as f32 } else { 0.0 };
+    if angle >= 0.0 {
+        angle
+    } else {
+        arc + angle
+    }
+}
+
+/// The lane's arc clock time the Loop and PingPong arc modes share, in
+/// binary64: the lane's fraction of the slice (spacing times lane index,
+/// clamped to [0, 1] with the native maximum and minimum) interpolates from
+/// the current clock (fraction zero) to the previous one (fraction one), each
+/// doubled and scaled by pi as rounded to f32; a positive arc-spread step (in
+/// f32) floors the time to its multiple.
+fn arc_clock_time(clock: ArcLoopClock, spacing: f32, lane_index: f32, step: f32) -> f64 {
+    const PI_F32_WIDENED: f64 = std::f32::consts::PI as f64;
+    let fraction = arm_fmin(arm_fmax(spacing * lane_index, 0.0), 1.0) as f64;
+    let current = (clock.current + clock.current) * PI_F32_WIDENED;
+    let previous = (clock.previous + clock.previous) * PI_F32_WIDENED;
+    let time = previous * fraction + current * (1.0 - fraction);
+    if step > 0.0 {
+        let step = step as f64;
+        (time / step).floor() * step
+    } else {
+        time
+    }
+}
+
+/// StartCone's PingPong arc angle for one lane, in radians. Below an arc of
+/// 1e-6 radians in magnitude (the engine's own threshold; a NaN arc is not
+/// below it) every lane sits at +0 and the clock is not read. Otherwise the
+/// lane's arc clock time (shared with the Loop mode, spread step included) is
+/// scaled by the ARM reciprocal estimate of the arc in radians, refined twice,
+/// widened to binary64, and reduced modulo 2 with the C remainder (fmod,
+/// exact); the remainder is narrowed to f32 and taken in magnitude. A
+/// magnitude of one or more folds back as (2 - p) - 1e-6, then only the
+/// fractional part is kept (the whole part through the saturating
+/// conversion, one less where that overshoots), and the arc in radians scales
+/// it. So the angle sweeps up the arc and back down, the sign of the arc
+/// giving the side.
+pub fn pingpong_arc_angle(
+    clock: ArcLoopClock,
+    spacing: f32,
+    lane_index: f32,
+    arc_deg: f32,
+    arc_spread: f32,
+) -> f32 {
+    let arc = arc_deg * DEG_TO_RAD;
+    if arc.abs() < f32::from_bits(0x3586_37bd) {
+        return 0.0;
+    }
+    let time = arc_clock_time(clock, spacing, lane_index, arc * arc_spread);
+    let phase = ((time * arm_reciprocal(arc) as f64) % 2.0) as f32;
+    let mut phase = phase.abs();
+    if phase >= 1.0 {
+        phase = (2.0 - phase) + f32::from_bits(0xb586_37bd);
+    }
+    let whole = (phase as i32) as f32;
+    let whole = if whole > phase { whole - 1.0 } else { whole };
+    arc * (phase - whole)
+}
+
+/// The ARM reciprocal estimate (FRECPE, flush-to-zero off, round to nearest)
+/// refined by two FRECPS/FMUL steps, with the estimate kept for a zero input:
+/// the sequence the engine's shape kernels divide by. Defined for every f32:
+/// NaN gives NaN, an infinity a signed zero estimate, and a magnitude below
+/// 2^-128 (zero included) a signed infinite one.
+pub fn arm_reciprocal(value: f32) -> f32 {
+    let estimate = arm_frecpe(value);
+    if value == 0.0 {
+        return estimate;
+    }
+    let first = estimate * arm_frecps(value, estimate);
+    first * arm_frecps(value, first)
+}
+
+fn arm_frecpe(value: f32) -> f32 {
+    let bits = value.to_bits();
+    let sign = bits & 0x8000_0000;
+    let magnitude = bits & 0x7fff_ffff;
+    if value.is_nan() {
+        return f32::NAN;
+    }
+    if magnitude == 0x7f80_0000 {
+        return f32::from_bits(sign);
+    }
+    if magnitude < 0x0020_0000 {
+        return f32::from_bits(sign | 0x7f80_0000);
+    }
+    let mut exponent = (magnitude >> 23) as i32;
+    let mut fraction = magnitude & 0x007f_ffff;
+    if exponent == 0 {
+        // A subnormal input is normalized by one or two places first.
+        if fraction & 0x0040_0000 == 0 {
+            exponent = -1;
+            fraction = (fraction << 2) & 0x007f_ffff;
+        } else {
+            fraction = (fraction << 1) & 0x007f_ffff;
+        }
+    }
+    let index = 256 + (fraction >> 15);
+    // The 8-bit table of the architecture; integer divisions are floors.
+    let estimate = ((1_u32 << 19) / (2 * index + 1) + 1) / 2;
+    let mut result_exponent = 253 - exponent;
+    let mut result_fraction = (estimate & 0xff) << 15;
+    if result_exponent == 0 {
+        result_fraction = 0x0040_0000 | (result_fraction >> 1);
+    } else if result_exponent == -1 {
+        result_fraction = 0x0020_0000 | (result_fraction >> 2);
+        result_exponent = 0;
+    }
+    f32::from_bits(sign | ((result_exponent as u32) << 23) | result_fraction)
+}
+
+/// FRECPS: 2 - a * b with one rounding; an infinity times a zero gives 2, any
+/// other infinite product the infinity of the opposite sign.
+fn arm_frecps(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if (a.is_infinite() && b == 0.0) || (a == 0.0 && b.is_infinite()) {
+        return 2.0;
+    }
+    if a.is_infinite() || b.is_infinite() {
+        return if a.is_sign_negative() != b.is_sign_negative() {
+            f32::INFINITY
+        } else {
+            f32::NEG_INFINITY
+        };
+    }
+    // The product of two f32 values is exact in binary64. The subtraction is
+    // rounded to binary64 with its exact error kept (two-sum); an inexact
+    // result is moved to its odd neighbour toward the error (round to odd), so
+    // the single narrowing to f32 rounds as the fused operation does.
+    let product = a as f64 * b as f64;
+    let sum = 2.0 - product;
+    let virtual_b = sum - 2.0;
+    let error = (2.0 - (sum - virtual_b)) + (-product - virtual_b);
+    let sum = if error != 0.0 && sum.to_bits() & 1 == 0 {
+        let bits = sum.to_bits();
+        f64::from_bits(if (error > 0.0) == (sum > 0.0) { bits.wrapping_add(1) } else { bits.wrapping_sub(1) })
+    } else {
+        sum
+    };
+    sum as f32
+}
+
+/// ARM FMAX: NaN if either operand is NaN, +0 over -0.
+fn arm_fmax(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_positive() { a } else { b }
+    } else if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// ARM FMIN: NaN if either operand is NaN, -0 over +0.
+fn arm_fmin(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_negative() { a } else { b }
+    } else if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// Box (the volume shape): three draws give the point (x - 0.5, y - 0.5,
+/// z - 0.5) of the unit cube, emitted along local +Z. The kernel reads no
+/// other shape member (radius, arc, angle, thickness, box thickness and both
+/// modes are not loaded); the source affine does the sizing.
+pub fn box_volume(x: f32, y: f32, z: f32) -> ([f32; 3], [f32; 3]) {
+    ([x - 0.5, y - 0.5, z - 0.5], [0.0, 0.0, 1.0])
 }
 
 /// The Random mode's spread quantization of one draw over an extent (the arc
@@ -371,9 +632,26 @@ pub fn hemisphere_native(
     z_random: f32,
     radial: f32,
 ) -> ([f32; 3], [f32; 3]) {
-    let angle = random_arc(arc_deg, arc_spread, arc);
     let z = z_random * 0.5 + 0.5;
-    let z = (z + z) - 1.0;
+    sphere_lane(radius, shell, random_arc(arc_deg, arc_spread, arc), (z + z) - 1.0, radial)
+}
+
+/// StartSphere in its Random arc mode, one lane, native operation order: the
+/// Hemisphere lane with z = (draw + draw) - 1 over the whole sphere. Draws:
+/// arc, z, radial fraction.
+pub fn sphere_native(
+    radius: f32,
+    shell: Shell,
+    arc_deg: f32,
+    arc_spread: f32,
+    arc: f32,
+    z_random: f32,
+    radial: f32,
+) -> ([f32; 3], [f32; 3]) {
+    sphere_lane(radius, shell, random_arc(arc_deg, arc_spread, arc), (z_random + z_random) - 1.0, radial)
+}
+
+fn sphere_lane(radius: f32, shell: Shell, angle: f32, z: f32, radial: f32) -> ([f32; 3], [f32; 3]) {
     let (sin, cos) = engine_sincos(angle);
     let xy = (1.0 - z * z).sqrt();
     let direction = [cos * xy, sin * xy, z];
@@ -465,6 +743,91 @@ pub fn single_sided_edge(radius: f32, random: f32) -> ([f32; 3], [f32; 3]) {
 pub fn single_sided_edge_spread(radius: f32, spread: f32, random: f32) -> ([f32; 3], [f32; 3]) {
     let scaled = spread_quantized(radius, spread, random);
     ([(scaled + scaled) - radius, 0.0, 0.0], [0.0, 1.0, 0.0])
+}
+
+/// The BurstSpread divisor of StartSingleSidedEdge: the accepted batch count
+/// less one, or one when that is zero.
+pub fn edge_burst_divisor(accepted: std::num::NonZeroU32) -> std::num::NonZeroU32 {
+    std::num::NonZeroU32::new(accepted.get() - 1).unwrap_or(std::num::NonZeroU32::MIN)
+}
+
+/// The BurstSpread divisor of StartCircle and StartCone: the accepted batch
+/// count itself for an arc of exactly 360 degrees (the full circle, so the
+/// last lane does not land on the first), otherwise the count less one, or
+/// one when that is zero.
+pub fn circle_burst_divisor(arc_deg: f32, accepted: std::num::NonZeroU32) -> std::num::NonZeroU32 {
+    if arc_deg == 360.0 {
+        accepted
+    } else {
+        edge_burst_divisor(accepted)
+    }
+}
+
+/// The BurstSpread reciprocal of a divisor converted to f32: the ARM estimate
+/// refined twice (the same FRECPE/FRECPS pair as the Initial lifetime
+/// reciprocal). The divisor is at least one, so the estimate never meets
+/// zero, infinity or a subnormal.
+pub fn burst_spread_reciprocal(divisor: std::num::NonZeroU32) -> f32 {
+    super::initial::initial_reciprocal(divisor.get() as f32).unwrap_or(f32::NAN)
+}
+
+/// StartCircle in its BurstSpread arc mode, one lane, with the lane's radial
+/// draw: the arc angle is the arc in radians times (the batch reciprocal
+/// times the lane's native index); a positive step (arc in radians times
+/// spread) floors the angle to a multiple of the step with the saturating
+/// conversion. The radial sample is the radius times the square root of the
+/// squared inner radius (one less the thickness) plus the rest of the disk
+/// times the draw.
+pub fn circle_burst(
+    radius: f32,
+    thickness: f32,
+    arc_deg: f32,
+    arc_spread: f32,
+    reciprocal: f32,
+    lane_index: f32,
+    radial: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let angle = burst_spread_arc(arc_deg, arc_spread, reciprocal, lane_index);
+    let inner = 1.0 - thickness;
+    let inner_square = inner * inner;
+    let rest = 1.0 - inner_square;
+    let (sin, cos) = engine_sincos(angle);
+    let sample = radius * (inner_square + rest * radial).sqrt();
+    ([cos * sample, sample * sin, 0.0], [cos, sin, 0.0])
+}
+
+/// StartSingleSidedEdge in its BurstSpread radius mode, one lane, no draw: the
+/// lane's native index (0, 1, 2, 3 from the first newborn group, plus 4.0 per
+/// group, in f32) times the batch reciprocal, times the radius; a positive
+/// step (radius times spread) floors it to a multiple of the step with the
+/// saturating conversion; then doubled less the radius.
+pub fn single_sided_edge_burst(radius: f32, spread: f32, reciprocal: f32, lane_index: f32) -> ([f32; 3], [f32; 3]) {
+    let scaled = burst_spread_scaled(radius, spread, reciprocal, lane_index);
+    ([(scaled + scaled) - radius, 0.0, 0.0], [0.0, 1.0, 0.0])
+}
+
+/// The BurstSpread arc angle of StartCircle and StartCone, one lane, in
+/// radians: `burst_spread_scaled` over the arc in radians.
+pub fn burst_spread_arc(arc_deg: f32, arc_spread: f32, reciprocal: f32, lane_index: f32) -> f32 {
+    burst_spread_scaled(arc_deg * DEG_TO_RAD, arc_spread, reciprocal, lane_index)
+}
+
+/// The BurstSpread lane value the edge, circle and cone kernels share: the
+/// extent (the edge radius, or the arc in radians) times (the batch
+/// reciprocal times the lane's native index); a step (extent times spread)
+/// that compares greater than zero floors it to a multiple of the step with
+/// the saturating conversion, one less where the conversion overshoots. A
+/// step that is not positive, NaN included, leaves it continuous.
+fn burst_spread_scaled(extent: f32, spread: f32, reciprocal: f32, lane_index: f32) -> f32 {
+    let scaled = extent * (reciprocal * lane_index);
+    let step = extent * spread;
+    if step > 0.0 {
+        let steps = scaled / step;
+        let whole = (steps as i32) as f32;
+        step * if whole > steps { whole - 1.0 } else { whole }
+    } else {
+        scaled
+    }
 }
 
 #[cfg(test)]

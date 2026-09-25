@@ -514,6 +514,10 @@ fn admit(row: &Value, local_scale: Vec3) -> Result<Admitted, String> {
     if !matches!(emitter.simulation_space, SimulationSpace::Local | SimulationSpace::World) {
         return Err("simulation space".into());
     }
+    // Every curve the runtime evaluates goes through the engine's curve
+    // dispatch; a lane outside the transcribed evaluator refuses the system
+    // here, before any law is installed (the runtime below relies on it).
+    crate::particle_runtime::curve_admission(&emitter)?;
     Ok(Admitted {
         node,
         emitter,
@@ -599,9 +603,12 @@ fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64)
         emission: EmissionState::default(),
         playback_head: 0.0,
         previous_head: 0.0,
+        pending: 0.0,
         emission_started: false,
         native_birth: None,
         noise: None,
+        trail: None,
+        collision: None,
         rng: Rng(RNG_SEED ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false,
         cone_angle: None,
@@ -609,14 +616,15 @@ fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64)
         limit: None,
         velocity_law: None,
         force_law: None,
-        gravity_law: moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier),
+        gravity_law: moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier)
+            .expect("curves validated during admission"),
         custom_law: None,
         texture_sheet: None,
         sort_mode,
         size_law: emitter
             .size_over_lifetime
             .as_ref()
-            .map(moly_law::particle::size::SizeOverLifetime::from_params),
+            .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission")),
         color_law: emitter
             .color_over_lifetime
             .as_ref()

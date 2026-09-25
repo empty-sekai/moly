@@ -51,6 +51,9 @@ pub struct SourceParticle {
     /// What that write changed once applied (property and keyword names), for
     /// the owner's install report; `None` while no write was applied.
     pub(crate) phenomena_lighting_written: Option<Vec<&'static str>>,
+    /// A second draw of the same renderer (the trail material): it takes the
+    /// sort key of the draw entity named here and is drawn right after it.
+    pub follows: Option<Entity>,
 }
 #[derive(Clone, Debug, Default)]
 pub enum ParticleReadiness {
@@ -121,6 +124,7 @@ impl SourceParticle {
             sort_mode,
             phenomena_lighting_forced: false,
             phenomena_lighting_written: None,
+            follows: None,
         })
     }
 

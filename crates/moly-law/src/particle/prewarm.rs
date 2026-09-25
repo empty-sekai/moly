@@ -7,6 +7,11 @@
 //! the simulation speed.
 //! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
 //! constant/two-constant lifetime, looping prewarm and source flags=8 are qualified.
+//! Every later frame goes through the same Update1b head ([`FrameStep`]) and the
+//! same incremental slice loop, with flags 0 (BeginUpdate while the world plays).
+
+use super::frame_time::{IncrementalEntry, IncrementalSlices};
+pub use super::frame_time::Slice;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Lifetime {
@@ -14,10 +19,15 @@ pub enum Lifetime {
     TwoConstants { min: f32, max: f32 },
 }
 
+/// The player's serialized TimeManager. The game assembly calls only Time
+/// getters, so these values hold for the whole session; the time scale is 1
+/// and is therefore not carried.
 #[derive(Clone, Copy, Debug)]
 pub struct TimeManagerSnapshot {
     pub fixed_timestep: f32,
     pub maximum_particle_timestep: f32,
+    /// Serialized Maximum Allowed Timestep: Time.maximumDeltaTime.
+    pub maximum_delta_time: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,18 +46,49 @@ pub struct PlayState {
     pub duration: f32,
 }
 
+/// Update1b returns before the pending sum, the emission, the slices and the
+/// clock when GetTimeStep gives less than this (or NaN).
+pub const MIN_UPDATE_STEP: f32 = f32::from_bits(0x3727_c5ac);
+
+/// Head of Update1b on the non-fixed route, shared by first-Play prewarm and
+/// every later frame: the frame dt scaled by the simulation speed, then
+/// GetTimeStep's slice length. The arithmetic is `frame_time`'s (`fmax_zero`,
+/// `time_step`); this keeps the scaled dt, which the frame head's emission over
+/// distance reads.
 #[derive(Clone, Copy, Debug)]
-pub struct Slice {
-    pub remaining_before: f32,
-    pub duration: f32,
+pub struct FrameStep {
+    /// dt * FMAX(speed, +0): the system seconds this frame adds to the pending
+    /// time. FMAX keeps a NaN speed, so the frame then skips.
+    pub scaled_dt: f32,
+    /// GetTimeStep: the scaled dt up to the maximum particle timestep, else
+    /// scaled / ceil(scaled / maximum), each an f32 fdiv / frintp / fdiv.
+    pub step: f32,
+}
+
+impl FrameStep {
+    pub fn new(frame_dt: f32, simulation_speed: f32, time: TimeManagerSnapshot) -> Self {
+        let scaled_dt = frame_dt * super::frame_time::fmax_zero(simulation_speed);
+        Self { scaled_dt, step: super::frame_time::time_step(scaled_dt, time.maximum_particle_timestep) }
+    }
+
+    /// A skipped frame adds nothing to the pending time and runs no slice.
+    pub fn skips(self) -> bool {
+        !(self.step >= MIN_UPDATE_STEP)
+    }
+
+    /// Slices of an unskipped frame: this frame's scaled dt plus the pending
+    /// time earlier frames left below the loop threshold. The pending sum
+    /// adds the scaled dt, never the step.
+    pub fn plan(self, pending: f32, duration: f32) -> Result<PrewarmPlan, &'static str> {
+        if self.skips() {
+            return Err("skipped frame has no incremental update");
+        }
+        PrewarmPlan::from_incremental_input(self.scaled_dt + pending, self.step, IncrementalEntry::PerFrame, duration)
+    }
 }
 
 pub struct PrewarmPlan {
-    remaining: f32,
-    base_step: f32,
-    prior_step: f32,
-    duration: f32,
-    budget: usize,
+    slices: IncrementalSlices,
     /// ComputePrewarmStartParameters out value: the explicit dt Play hands to
     /// BeginUpdate. Update1b scales it by the simulation speed.
     compute_out: f32,
@@ -196,55 +237,39 @@ impl PrewarmPlan {
         };
         // Update1b skips the incremental update entirely
         // below this step.
-        if !(base_step.is_finite() && base_step >= f32::from_bits(0x3727_c5ac)) {
+        if !(base_step.is_finite() && base_step >= MIN_UPDATE_STEP) {
             return Err("unqualified nonfixed timestep");
         }
-        let mut plan = Self::from_incremental_input(remaining, base_step, 8, play.duration)?;
+        let mut plan =
+            Self::from_incremental_input(remaining, base_step, IncrementalEntry::ExplicitDt, play.duration)?;
         plan.compute_out = warm.compute_out;
         plan.initial_clock = warm.initial_clock;
         Ok(plan)
     }
 
-    /// Boundary after native Compute/GetTimeStep. Input step and flags must
+    /// Boundary after native Compute/GetTimeStep. Input step and entry must
     /// come from those source paths; the extra current-native matrix probes
     /// this function without pretending each step came from GetTimeStep.
+    /// Flags 8 is Play's explicit dt and 0 the per-frame BeginUpdate while the
+    /// world plays; the loop reads only bits 0 to 2, clear in both.
     pub fn from_incremental_input(
         total: f32,
         step: f32,
-        flags: u32,
+        entry: IncrementalEntry,
         duration: f32,
     ) -> Result<Self, &'static str> {
-        if flags != 8 {
-            return Err("unqualified incremental flags");
-        }
-        if !(total.is_finite()
-            && total > 0.0
-            && step.is_finite()
-            && step > 0.0
-            && duration.is_finite()
-            && duration > 0.0)
-        {
-            return Err("unqualified incremental input");
-        }
-        if !(total / step).is_finite() || total / step > 1_000_000.0 {
-            return Err("incremental slice budget outside bounded replay");
-        }
         Ok(Self {
-            remaining: total,
-            base_step: step,
-            prior_step: step,
-            duration,
-            budget: 1_000_256,
+            slices: IncrementalSlices::new(total, step, entry, duration)?,
             compute_out: total,
             initial_clock: 0.0,
         })
     }
 
     pub fn remaining(&self) -> f32 {
-        self.remaining
+        self.slices.remaining()
     }
     pub fn base_step(&self) -> f32 {
-        self.base_step
+        self.slices.base_step()
     }
     pub fn compute_out(&self) -> f32 {
         self.compute_out
@@ -254,47 +279,13 @@ impl PrewarmPlan {
     }
 }
 
+/// Update1Incremental's slices: the old selected slice is retained when it
+/// exceeds the 1 s / 0.2 s threshold, hence the observed seven 1 s calls
+/// (including backlog values 10..6), not merely two calls while remaining > 10.
 impl Iterator for PrewarmPlan {
     type Item = Result<Slice, &'static str>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining < f32::from_bits(0x3586_37bd) {
-            return None;
-        }
-        if self.budget == 0 {
-            self.remaining = 0.0;
-            return Some(Err("incremental budget exhausted"));
-        }
-        let before = self.remaining;
-        let mut step = before.min(self.base_step);
-        // Update1Incremental's slice choice, flags bit 2 clear:
-        // the old selected slice is retained when it exceeds the 1/.2
-        // threshold. Hence the observed seven 1s calls (including backlog
-        // values 10..6), not merely two calls while remaining >10.
-        if before > 10.0 {
-            step = if self.prior_step > 1.0 {
-                self.prior_step
-            } else {
-                self.duration.min(1.0)
-            };
-        } else if before > 5.0 {
-            step = if self.prior_step > 0.2 {
-                self.prior_step
-            } else {
-                self.duration.min(0.2)
-            };
-        }
-        if !(step.is_finite() && step > 0.0 && step <= before) || before - step == before {
-            self.budget = 0;
-            self.remaining = 0.0;
-            return Some(Err("incremental slice does not advance"));
-        }
-        self.prior_step = step;
-        self.remaining = before - step;
-        self.budget -= 1;
-        Some(Ok(Slice {
-            remaining_before: before,
-            duration: step,
-        }))
+        self.slices.next()
     }
 }
 
@@ -321,6 +312,7 @@ mod tests {
         TimeManagerSnapshot {
             fixed_timestep: 0.02,
             maximum_particle_timestep: 0.03,
+            maximum_delta_time: 1.0 / 3.0,
         }
     }
     fn read(key: &str) -> Value {
@@ -398,7 +390,7 @@ mod tests {
             let plan = PrewarmPlan::from_incremental_input(
                 number(case.get("total").unwrap()),
                 number(case.get("stepArgument").unwrap()),
-                8,
+                IncrementalEntry::ExplicitDt,
                 1.0,
             )
             .unwrap();
@@ -429,14 +421,14 @@ mod tests {
         let observed = number(timestep.get("result").unwrap());
         let source = receipt.get("sourceDerived130").unwrap();
         assert_eq!(observed.to_bits(), number(source.get("stepArgument").unwrap()).to_bits());
-        let plan = PrewarmPlan::from_incremental_input(130.0, observed, 8, 1.0).unwrap();
+        let plan = PrewarmPlan::from_incremental_input(130.0, observed, IncrementalEntry::ExplicitDt, 1.0).unwrap();
         compare(plan, source.get("slices").unwrap().as_array().unwrap(),
             source.get("remaining").unwrap(), true);
         for case in receipt.get("cases").unwrap().as_array().unwrap() {
             let plan = PrewarmPlan::from_incremental_input(
                 number(case.get("total").unwrap()),
                 number(case.get("stepArgument").unwrap()),
-                8,
+                IncrementalEntry::ExplicitDt,
                 1.0,
             ).unwrap();
             compare(plan, case.get("slices").unwrap().as_array().unwrap(),
@@ -490,6 +482,125 @@ mod tests {
         }
     }
 
+    fn bits(v: &Value) -> f32 {
+        f32::from_bits(v.as_f64().unwrap() as u32)
+    }
+
+    /// One frame of the per-frame head and slice loop, or of a one-rule arm.
+    /// Returns (step, entry pending, slices as (remaining, slice), births
+    /// ahead per slice, pending after); `None` for the entry of a skipped frame.
+    #[allow(clippy::type_complexity)]
+    fn frame_law(
+        dt: f32,
+        speed: f32,
+        pending: f32,
+        duration: f32,
+        arm: Option<&str>,
+    ) -> (f32, Option<f32>, Vec<(f32, f32)>, Vec<f32>, f32) {
+        let head = FrameStep::new(dt, speed, time());
+        if head.skips() {
+            return (head.step, None, Vec::new(), Vec::new(), pending);
+        }
+        let (total, mut plan) = match arm {
+            Some("accumulateStep") => (head.step + pending,
+                PrewarmPlan::from_incremental_input(head.step + pending, head.step, IncrementalEntry::PerFrame, duration).unwrap()),
+            Some("singleSlice") => (head.scaled_dt + pending, PrewarmPlan::from_incremental_input(
+                head.scaled_dt + pending, head.scaled_dt + pending, IncrementalEntry::PerFrame, duration).unwrap()),
+            _ => (head.scaled_dt + pending, head.plan(pending, duration).unwrap()),
+        };
+        let mut slices = Vec::new();
+        let mut ahead = Vec::new();
+        for slice in plan.by_ref() {
+            let slice = slice.unwrap();
+            slices.push((slice.remaining_before, slice.duration));
+            ahead.push(slice.births_ahead());
+        }
+        (head.step, Some(total), slices, ahead, plan.remaining())
+    }
+
+    /// Replays every frame of the native per-frame Update1b receipts through
+    /// the head and slice law; returns (frames, mismatched frames).
+    fn replay_frames(receipts: &[Value], arm: Option<&str>) -> (usize, usize) {
+        let (mut frames, mut mismatched) = (0, 0);
+        for receipt in receipts {
+            for group in ["s11Cases", "s1Cases", "controls"] {
+                let Some(cases) = receipt.get(group).and_then(Value::as_array) else { continue };
+                for case in cases {
+                    if case.get("patched").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    let config = case.get("config").unwrap();
+                    let speed = match config.get("speed").unwrap() {
+                        Value::Str(text) if text == "nan" => f32::NAN,
+                        value => number(value),
+                    };
+                    let duration = number(config.get("duration").unwrap());
+                    let mut pending = 0.0_f32;
+                    for frame in case.get("frames").unwrap().as_array().unwrap() {
+                        frames += 1;
+                        let input = frame.get("input").unwrap();
+                        let flags = number(input.get("flags").unwrap());
+                        assert!(flags == 0.0 || flags == 8.0);
+                        let dt = bits(input.get("dtBits").unwrap());
+                        let (step, entry, slices, ahead, after) = frame_law(dt, speed, pending, duration, arm);
+                        let mut same = step.to_bits() == bits(frame.get("stepBits").unwrap()).to_bits();
+                        match (entry, frame.get("incremental").unwrap()) {
+                            (None, Value::Null) => {}
+                            (Some(total), native) if !matches!(native, Value::Null) => {
+                                same &= total.to_bits() == bits(native.get("pendingBits").unwrap()).to_bits()
+                                    && step.to_bits() == bits(native.get("stepBits").unwrap()).to_bits();
+                            }
+                            _ => same = false,
+                        }
+                        let native_slices = frame.get("slices").unwrap().as_array().unwrap();
+                        same &= native_slices.len() == slices.len()
+                            && native_slices.iter().zip(&slices).all(|(pair, (remaining, slice))| {
+                                let pair = pair.as_array().unwrap();
+                                bits(&pair[0]).to_bits() == remaining.to_bits()
+                                    && bits(&pair[1]).to_bits() == slice.to_bits()
+                            });
+                        // The per-slice StartParticles rows carry the births-ahead argument.
+                        let per_slice: Vec<f32> = frame.get("starts").unwrap().as_array().unwrap().iter()
+                            .filter(|row| number(row.get("lr").unwrap()) == 14_200_180.0)
+                            .map(|row| bits(&row.get("argsBits").unwrap().as_array().unwrap()[2]))
+                            .collect();
+                        same &= per_slice.len() == ahead.len()
+                            && per_slice.iter().zip(&ahead).all(|(native, rust)| native.to_bits() == rust.to_bits());
+                        same &= after.to_bits()
+                            == bits(frame.get("after").unwrap().get("pendingBits").unwrap()).to_bits();
+                        if !same {
+                            mismatched += 1;
+                        }
+                        // Continue from the native state so one arm error is counted per frame.
+                        pending = bits(frame.get("after").unwrap().get("pendingBits").unwrap());
+                    }
+                }
+            }
+        }
+        (frames, mismatched)
+    }
+
+    #[test]
+    #[ignore = "MOLY_UPDATE1B_FRAMES and MOLY_UPDATE1B_FRAMES_EXTRA must identify the current JP per-frame Update1b receipts"]
+    fn current_native_per_frame_head_and_slices_match_bits() {
+        let receipts = [read("MOLY_UPDATE1B_FRAMES"), read("MOLY_UPDATE1B_FRAMES_EXTRA")];
+        for receipt in &receipts {
+            assert_eq!(
+                receipt.get("sourceSha256").unwrap().as_str(),
+                Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+            );
+        }
+        let (frames, mismatched) = replay_frames(&receipts, None);
+        assert_eq!(frames, 667);
+        assert_eq!(mismatched, 0);
+        // One-rule arms read against the same native rows must fail.
+        for arm in ["singleSlice", "accumulateStep"] {
+            let (_, wrong) = replay_frames(&receipts, Some(arm));
+            assert!(wrong > 0, "{arm} arm matched every native frame");
+            println!("arm {arm}: {wrong} of {frames} frames differ");
+        }
+    }
+
     #[test]
     fn uncovered_lifecycle_branches_are_refused() {
         let qualified = initial_play();
@@ -517,6 +628,5 @@ mod tests {
         ] {
             assert!(PrewarmPlan::from_source(Lifetime::Constant(12.0), time(), play).is_err());
         }
-        assert!(PrewarmPlan::from_incremental_input(12.0, 0.03, 4, 1.0).is_err());
     }
 }
