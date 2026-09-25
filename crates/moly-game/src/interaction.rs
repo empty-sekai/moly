@@ -60,6 +60,7 @@ pub(crate) struct InteractionEligibility<'w, 's> {
     player_talk: Option<Res<'w, PlayerTalkSession>>,
     pair_talk: Option<Res<'w, ActiveTalk>>,
     entry: Option<Res<'w, crate::entry::EntrySequence>>,
+    delivery: Option<Res<'w, crate::delivery::DeliveryGameState>>,
 }
 
 impl InteractionEligibility<'_, '_> {
@@ -96,11 +97,12 @@ impl InteractionEligibility<'_, '_> {
     }
 
     /// ObjectCollisionManager.IsCanUpdate holds in GameState Normal, Harvest
-    /// and Sketch. Of the other states Moly has Edit (the layout editor) and
-    /// Talk (a conversation with the player); a harvest, a gimmick switch, a
+    /// and Sketch. Of the other states Moly has Edit (the layout editor),
+    /// Talk (a conversation with the player) and Delivery (set by a delivery
+    /// press, until the next site move); a harvest, a gimmick switch, a
     /// timeline, a shell dialog or a pushed layer stay in Normal or Harvest.
     pub(crate) fn collision_updates(&self) -> bool {
-        !self.edits.is_active() && !self.player_in_talk()
+        !self.edits.is_active() && !self.player_in_talk() && self.delivery.is_none()
     }
 
     /// ScreenLayerMysekaiHome, which holds the action buttons, is the current

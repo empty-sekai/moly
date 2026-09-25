@@ -497,6 +497,7 @@ pub(crate) fn advance(
             Without<PlayerFixtureHeld>,
             Without<crate::entry::EntryHold>,
             Without<crate::harvest::HarvestAutoMoveHeld>,
+            Without<crate::delivery::DeliveryHold>,
         ),
     >,
     mut boundary: Local<Boundary>,
