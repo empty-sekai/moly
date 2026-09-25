@@ -1438,6 +1438,7 @@ pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next
     commands.queue(crate::fixture_gimmick::cancel_for_site_change);
     commands.queue(crate::fixture_scene_inputs::invalidate_for_site_change);
     commands.queue(crate::fixture::clear_for_site_change);
+    commands.queue(crate::harvest::clear_for_site_change);
     for root in roots {
         commands.entity(root).despawn();
     }
