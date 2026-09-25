@@ -252,7 +252,7 @@ fn install_stay_particles(
                 many.len()
             ),
         };
-        let Some(handle) = docs.0.get(object.package) else {
+        let Some(handle) = docs.0.get(&object.package) else {
             panic!("harvest stay particles: no document handle for {}", object.package);
         };
         let Some(doc) = json.get(handle) else {

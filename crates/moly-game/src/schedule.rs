@@ -480,14 +480,13 @@ pub fn install(app: &mut App) {
                     action_button::advance,
                     action_button::place_ui,
                     action_button::click,
-                    pick::smoke_autotap,
                     // NPC 臂冒烟口（MOLY_PICK_NPC_TAP_SECS）：名册成员的
                     // 世界位投影点按，走同一条拾取链过配对门。
                     pick::smoke_npc_autotap,
                     // 玩家对话冒烟口同拍注入（候选成员的世界位投影点按，
                     // 请求当帧被对话链消费）。
                     player_talk::smoke_autotap,
-                    pick::pick.before(harvest::on_damage),
+                    pick::pick,
                 )
                     .chain(),
                 (
@@ -723,23 +722,29 @@ pub fn install(app: &mut App) {
             )
                 .chain(),
         )
-        // 玩家 avatar 状态机三写者（真源 UpdateController 每帧分派的等价
-        // + 两个域写者）：采集段 → 对话会话 → 输入。单列而不进上面的大
-        // tuple——那个 tuple 的名册/玩家组已经顶到 Bevy 调度元组的 20 元
-        // 上限，再塞会整块失去 IntoScheduleConfigs（错误只在 .chain() 处
-        // 冒「not an iterator」）。采集段排在整个采集链之后（段信号是被击
-        // 队列与在飞击打演出的事后读数）；输入写者排在 read_input 之后——
-        // 与那对同款，PlayerInput 一写一读的冲突只保证串行不保证次序。
-        // 采集段放链首：同帧收场时先开门，输入写者当帧就能接上。
+        // 玩家 avatar 状态机的对话与输入写者（真源 UpdateController 每帧
+        // 分派的等价 + 对话域写者）。单列而不进上面的大 tuple——那个 tuple
+        // 的名册/玩家组已经顶到 Bevy 调度元组的 20 元上限，再塞会整块失去
+        // IntoScheduleConfigs（错误只在 .chain() 处冒「not an iterator」）。
+        // The harvest action (its own writer of states 7 / 0 and of the gate)
+        // runs between the input read and these writers: a gate it opens this
+        // frame is seen by the input writer this frame, and the harvest
+        // instrument's synthetic input reaches both. 输入写者排在 read_input
+        // 之后——与那对同款，PlayerInput 一写一读的冲突只保证串行不保证次序。
+        .configure_sets(
+            Update,
+            harvest::HarvestActionSet
+                .after(player::read_input)
+                .before(player::advance),
+        )
         .add_systems(
             Update,
             (
-                player_state::drive_from_harvest,
                 player_state::drive_from_talk,
                 player_state::drive_from_input,
             )
                 .chain()
-                .after(harvest::advance_punch)
+                .after(harvest::HarvestActionSet)
                 .after(player::read_input),
         )
         .add_systems(
@@ -826,7 +831,7 @@ pub fn install(app: &mut App) {
                 audio::advance_proximity.run_if(crate::audio_startup::can_prepare),
                 audio::advance_se
                     .in_set(audio::SeDrainSet::Drain)
-                    .after(harvest::on_damage)
+                    .after(harvest::HarvestActionSet)
                     .after(talk::advance_talk)
                     .after(talk_window::tick_window),
                 audio::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
