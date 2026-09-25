@@ -156,10 +156,25 @@ fn bind(doc: &UiPrefab) -> Bindings {
         // visibility shares that entry.
         back_path: format!("@{back_graphic}"),
         back_color,
-        icon: node_path(doc, pointer(&view["icon"], "view icon")),
-        background: node_path(doc, pointer(&view["background"], "view background")),
-        jp_name: node_path(doc, pointer(&view["JPName"], "view JPName")),
-        en_name: node_path(doc, pointer(&view["ENName"], "view ENName")),
+        icon: node_path(
+            doc,
+            pointer(&view["_siteMapPhenomenaIcon"], "_siteMapPhenomenaIcon"),
+        ),
+        background: node_path(
+            doc,
+            pointer(
+                &view["_siteMapPhenomenaBackground"],
+                "_siteMapPhenomenaBackground",
+            ),
+        ),
+        jp_name: node_path(
+            doc,
+            pointer(&view["_siteMapPhenomenaJPName"], "_siteMapPhenomenaJPName"),
+        ),
+        en_name: node_path(
+            doc,
+            pointer(&view["_siteMapPhenomenaENName"], "_siteMapPhenomenaENName"),
+        ),
     }
 }
 
