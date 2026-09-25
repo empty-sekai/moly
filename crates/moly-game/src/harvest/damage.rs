@@ -112,7 +112,13 @@ pub(crate) fn on_damage(
                 "[harvest] hit on {}#{} already harvested: UpdateHp returned {returned}, nothing shown",
                 object.leaf, object.fixture_id
             );
-            results.0.push(HitResult { target: hit.target, used: returned, is_last_attack: object.is_last_attack });
+            results.0.push(HitResult {
+                target: hit.target,
+                damage: hit.damage,
+                used: returned,
+                is_last_attack: object.is_last_attack,
+                tool: hit.tool,
+            });
             continue;
         }
         let last = object.is_last_attack;
@@ -228,7 +234,13 @@ pub(crate) fn on_damage(
             cues,
             hooks,
         );
-        results.0.push(HitResult { target: hit.target, used: returned, is_last_attack: last });
+        results.0.push(HitResult {
+            target: hit.target,
+            damage: hit.damage,
+            used: returned,
+            is_last_attack: last,
+            tool: hit.tool,
+        });
     }
 }
 

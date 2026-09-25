@@ -290,6 +290,57 @@ impl HpModel {
     }
 }
 
+/// `HarvestUtility.IsToolRequiredForHarvest`: wood and mineral need a tool,
+/// the other eight kinds do not; a type of ten or more throws.
+pub(crate) fn is_tool_required_for_harvest(fixture_type: i32) -> bool {
+    match fixture_type {
+        0 | 1 => true,
+        2..=9 => false,
+        other => panic!("fixture type {other} is outside IsToolRequiredForHarvest"),
+    }
+}
+
+/// `HarvestUtility.HasToolRequiredForHarvest`: a kind without a tool
+/// requirement always passes; wood needs a selected axe and mineral a
+/// selected pickaxe, each with durability above zero.
+pub(crate) fn has_tool_required_for_harvest(selected: Option<(ToolType, i32)>, fixture_type: i32) -> bool {
+    if !is_tool_required_for_harvest(fixture_type) {
+        return true;
+    }
+    match (fixture_type, selected) {
+        (1, Some((ToolType::Pickaxe, durability))) | (0, Some((ToolType::Axe, durability))) => durability > 0,
+        _ => false,
+    }
+}
+
+/// `HarvestPresenter.HasStaminaAvailableForHarvest` (the cover of the
+/// action button): an object at hp 0 that is not yet harvested costs its
+/// last-attack stamina; otherwise wood and mineral cost the selected tool's
+/// power (no tool: unavailable) and the other kinds are unavailable. The
+/// cost must not exceed the stamina sum.
+pub(crate) fn has_stamina_available_for_harvest(
+    stamina: Stamina,
+    fixture_type: i32,
+    hp: i32,
+    harvested: bool,
+    last_attack_stamina: i32,
+    attack_power: Option<i32>,
+) -> bool {
+    let cost = if hp == 0 && !harvested {
+        last_attack_stamina
+    } else {
+        match fixture_type {
+            0 | 1 => match attack_power {
+                Some(power) => power,
+                None => return false,
+            },
+            2..=9 => return false,
+            other => panic!("fixture type {other} is outside HasStaminaAvailableForHarvest"),
+        }
+    };
+    cost <= stamina.sum()
+}
+
 /// DOTween `Punch` point list: `(int)(vibrato * duration)` iterations (at
 /// least two); segment `i` lasts `duration * (i + 1) / n`, all scaled so they
 /// sum to the duration; the first point is the direction, then alternating
@@ -673,5 +724,28 @@ mod value_checks {
         let b = (-170f32).to_radians();
         let mid = fast_yaw(a, b, 0.5);
         assert!((mid.to_degrees() - 180.0).abs() < 1e-3, "{}", mid.to_degrees());
+    }
+    /// Button enable and cover rules on sampled inputs, read off the two
+    /// methods' branches.
+    #[test]
+    fn button_enable_and_cover_rules() {
+        assert!(has_tool_required_for_harvest(None, 2));
+        assert!(has_tool_required_for_harvest(None, 8));
+        assert!(!has_tool_required_for_harvest(None, 0));
+        assert!(has_tool_required_for_harvest(Some((ToolType::Axe, 5)), 0));
+        assert!(!has_tool_required_for_harvest(Some((ToolType::Axe, 0)), 0));
+        assert!(!has_tool_required_for_harvest(Some((ToolType::Pickaxe, 5)), 0));
+        assert!(has_tool_required_for_harvest(Some((ToolType::Pickaxe, 5)), 1));
+        let full = Stamina { normal: 30, enhance: 0, boost: 0 };
+        let low = Stamina { normal: 5, enhance: 0, boost: 0 };
+        // A plant at hp 0 costs its last-attack stamina.
+        assert!(has_stamina_available_for_harvest(full, 2, 0, false, 10, None));
+        assert!(!has_stamina_available_for_harvest(low, 2, 0, false, 10, None));
+        // A tree with hp left costs the tool power; without a tool: never.
+        assert!(has_stamina_available_for_harvest(full, 0, 90, false, 10, Some(20)));
+        assert!(!has_stamina_available_for_harvest(low, 0, 90, false, 10, Some(20)));
+        assert!(!has_stamina_available_for_harvest(full, 0, 90, false, 10, None));
+        // A harvested plant (hp 0, harvested) falls to the kind arm: never.
+        assert!(!has_stamina_available_for_harvest(full, 2, 0, true, 10, None));
     }
 }

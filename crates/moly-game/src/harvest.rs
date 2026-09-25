@@ -385,6 +385,8 @@ pub struct HarvestHit {
     pub damage: i32,
     pub tool_level: i32,
     pub is_boost: bool,
+    /// The tool the swing used (`None`: bare hands).
+    pub tool: Option<i64>,
 }
 
 /// Hits the action loop raises this frame; `damage::on_damage` drains them.
@@ -395,8 +397,10 @@ pub struct HarvestHits(pub Vec<HarvestHit>);
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HitResult {
     pub(crate) target: Entity,
+    pub(crate) damage: i32,
     pub(crate) used: i32,
     pub(crate) is_last_attack: bool,
+    pub(crate) tool: Option<i64>,
 }
 
 #[derive(Resource, Default)]
@@ -631,6 +635,14 @@ impl Plugin for HarvestPlugin {
             .init_resource::<HarvestDocs>()
             .init_resource::<HarvestEffectHooks>()
             .init_resource::<arrival::HarvestArrival>()
+            .init_resource::<action::HarvestAction>()
+            .init_resource::<action::HarvestTargeting>()
+            .init_resource::<action::HarvestCameraShakes>()
+            .init_resource::<action::HarvestAutoplay>()
+            .init_resource::<ui::HarvestButton>()
+            .init_resource::<tool_model::HarvestToolModels>()
+            .init_resource::<tool_model::ToolModelRequests>()
+            .init_resource::<queue::HarvestLogQueue>()
             .add_systems(Startup, (catalog::load, clips::load, tool_model::load))
             .add_observer(on_scene_ready)
             .add_systems(
@@ -658,7 +670,9 @@ impl Plugin for HarvestPlugin {
                     damage::advance_punches,
                     damage::advance_after_forms,
                     drops::advance_animations,
-                    tool_model::follow,
+                    pickup::collect_on_leave,
+                    pickup::advance,
+                    tool_model::apply,
                     ui::place,
                     queue::advance,
                 )
@@ -672,8 +686,10 @@ impl Plugin for HarvestPlugin {
                     report.run_if(bevy::time::common_conditions::on_timer(std::time::Duration::from_secs(2))),
                     damage::drain_effect_hooks,
                 ),
+            )
+            .add_systems(
+                PostUpdate,
+                action::advance_camera_shake.before(crate::camera::follow_avatar),
             );
-        pickup::install(app);
-        action::install(app);
     }
 }
