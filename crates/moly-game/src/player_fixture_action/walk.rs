@@ -60,6 +60,8 @@ pub(crate) struct FixtureWalk {
     tap_down: Option<f32>,
     /// The placed fixtures of this generation were logged.
     listed: bool,
+    /// Taps sent to the timeline button on this generation.
+    taps: u32,
     last_log: f32,
 }
 
@@ -114,8 +116,11 @@ pub(crate) fn smoke_fixture_walk(
         }
     };
     let walk = &mut *walk;
+    // The tap finger lifts on the next frame: a slow frame between the two
+    // events can still make the gesture a long touch, so an unanswered tap is
+    // tried again below.
     if let Some(down) = walk.tap_down {
-        if now - down >= 0.1 {
+        if now > down {
             touch(TAP_FINGER, TouchPhase::Ended, tap);
             walk.tap_down = None;
         }
@@ -160,9 +165,21 @@ pub(crate) fn smoke_fixture_walk(
             if session {
                 walk.stage = Stage::Playing(now);
                 info!("[fixture-walk] the tap started a player fixture session");
-            } else if now - at > 10.0 {
-                warn!("[fixture-walk] no session 10 s after the tap; head {head:?}");
+            } else if walk.taps >= 4 {
+                warn!(
+                    "[fixture-walk] no session after {} taps; head {head:?}",
+                    walk.taps
+                );
                 walk.stage = Stage::Done;
+            } else if now - at > 3.0
+                && walk.tap_down.is_none()
+                && head.is_some_and(|(button, _)| button == ButtonType::TimelineFixture)
+            {
+                touch(TAP_FINGER, TouchPhase::Started, tap);
+                walk.tap_down = Some(now);
+                walk.taps += 1;
+                walk.stage = Stage::Tapped(now);
+                info!("[fixture-walk] no session 3 s after the tap; tapping again");
             }
         }
         Stage::Playing(since) => {
@@ -268,6 +285,7 @@ pub(crate) fn smoke_fixture_walk(
                 release(walk, &mut touch);
                 touch(TAP_FINGER, TouchPhase::Started, tap);
                 walk.tap_down = Some(now);
+                walk.taps = 1;
                 walk.stage = Stage::Tapped(now);
                 info!(
                     "[fixture-walk] head {head:?}; tapping the button at ({:.0},{:.0})",
