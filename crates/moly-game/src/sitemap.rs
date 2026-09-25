@@ -2093,8 +2093,7 @@ fn dispatch(
                     );
                     return true;
                 }
-                // 非空：真源放行走换站。festival_garden 的站点装载链未
-                // 扩到，落到下方挂账支（同一条换站分派的门口）。
+                // 非空：真源放行走换站，落到下方同一条换站分派。
                 info!(
                     "sitemap: click unlocked site={} type=festival_garden → birthday party in session（{} 行：{}，now={}）→ ChangeSiteProcessAsync 放行",
                     site.id,
@@ -2103,11 +2102,8 @@ fn dispatch(
                     now
                 );
             }
-            let supported = matches!(
-                spot.site_type.as_str(),
-                "grassland" | "home_site" | "first_floor"
-            );
-            if supported {
+            // The loader's own admission list decides, as for every other entry.
+            if crate::site::is_supported(&spot.site_type) {
                 commands.insert_resource(crate::site::SiteChangeRequest(
                     spot.site_type.clone(),
                 ));
@@ -2117,7 +2113,7 @@ fn dispatch(
                 );
             } else {
                 info!(
-                    "sitemap: click unlocked site={} type={} → ChangeSite 请求挂账：站点装载链未扩到该站",
+                    "sitemap: click unlocked site={} type={} → ChangeSite refused: the site loader does not admit this site type",
                     site.id, spot.site_type
                 );
             }
