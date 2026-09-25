@@ -738,12 +738,12 @@ mod value_checks {
     #[test]
     fn airplane_curve_segments() {
         let curve = Curve(vec![
-            (0.5, [0.0, 0.0, 0.0, 1.0]),
+            (0.5, [0.0, 0.0, 0.0, 2.0]),
             (1.0, [1.0, -2.0, 0.5, 2.0]),
             (2.0, [0.0, 0.0, 0.0, 1.5]),
         ]);
-        assert_eq!(curve.eval(0.0), 1.0);
-        assert_eq!(curve.eval(0.75), 1.0);
+        assert_eq!(curve.eval(0.0), 2.0);
+        assert_eq!(curve.eval(0.75), 2.0);
         // s = 0.5: 0.125 - 0.5 + 0.25 + 2.0.
         assert_eq!(curve.eval(1.5), 1.875);
         // s = 1.0 would give 1.5: the segment meets the next one.
