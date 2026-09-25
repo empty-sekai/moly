@@ -4,7 +4,8 @@
 //! its `ColorFader`: a full-screen quad in the fader's colour is the source
 //! drawing. It sits on its own overlay camera above every field and UI
 //! camera, from the first rendered frame. The loading indicator
-//! (`LoadingContent`) and the start particle (`effectPrefab`) are not drawn.
+//! (`LoadingContent`) shares the camera ([`super::indicator`]); the start
+//! particle (`effectPrefab`) is not drawn.
 
 use bevy::{
     camera::visibility::RenderLayers,
@@ -59,9 +60,8 @@ pub(crate) fn spawn(mut commands: Commands) {
         EntryCover,
     ));
     warn!(
-        "[entry-cover] LiveTransitioner is drawn as its cover quad only (ColorUtility.WHITE_ALPHA_1): \
-         the loading indicator (LoadingContent, UIPartsLoadingCircleOutLine) and the start particle \
-         (effectPrefab fx_live_transition_v2_03_b) are not drawn"
+        "[entry-cover] LiveTransitioner's start particle (effectPrefab fx_live_transition_v2_03_b) \
+         is not drawn"
     );
 }
 

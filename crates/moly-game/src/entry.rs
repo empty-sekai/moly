@@ -15,13 +15,15 @@
 //! and no house, so it skips the join and lifts the cover at its own scene
 //! readiness, with input as the stage has it; a native first site other than
 //! `home_site` (an explicit choice the source never makes) does the same.
-//! Named gaps: the loading indicator and start particle of the cover, the
+//! Named gaps: the start particle of the cover, the
 //! `ScreenLayerMysekaiNotice` weather banner (INFO lines at its steps), the
 //! `MysekaiTransitioner` (no product counterpart), and the stamina-refresh
-//! branch (`isRefreshed` is a mock that is false).
+//! branch (`isRefreshed` is a mock that is false). The cover's loading
+//! indicator is drawn from the extracted prefab ([`indicator`]).
 
 pub(crate) mod cover;
 pub(crate) mod house;
+pub(crate) mod indicator;
 pub(crate) mod law;
 
 use std::time::Duration;
@@ -272,6 +274,7 @@ fn safe_finish(world: &mut World, seq: &mut EntrySequence, dt: f32) {
         return;
     }
     seq.since_finish = Some((0, 0.0));
+    indicator::hide(world);
     let (fade, written) = ColorFade::start(
         law::WHITE_ALPHA_1,
         law::WHITE_ALPHA_0,
@@ -287,7 +290,7 @@ fn safe_finish(world: &mut World, seq: &mut EntrySequence, dt: f32) {
         destroy: UniTaskDelay::new(law::COVER_DESTROY_DELAY),
     };
     step(seq, "LiveTransitioner.SafeFinish", Some(0.0));
-    info!("[entry] LiveTransitioner.Finish: loadingContent off (not drawn), start particle resume (not drawn), ColorFader.Play(WHITE_ALPHA_0, delay 1.0, duration 1.0)");
+    info!("[entry] LiveTransitioner.Finish: loadingContent off, start particle resume (not drawn), ColorFader.Play(WHITE_ALPHA_0, delay 1.0, duration 1.0)");
 }
 
 fn advance_cover(world: &mut World, seq: &mut EntrySequence, dt: f32) {
@@ -612,6 +615,10 @@ pub(crate) fn advance(world: &mut World) {
         seq.started_real = real;
         step(&seq, "cover opaque (first frame)", None);
     }
+    // The loading indicator runs while the cover is up (SafeFinish hides it).
+    if matches!(seq.cover, Cover::Opaque) {
+        indicator::advance(world, dt);
+    }
     // Later frames of an already lifted cover, then this frame's step.
     if let Some((frames, t)) = seq.since_finish.as_mut() {
         if !matches!(seq.cover, Cover::Opaque) {
@@ -632,6 +639,7 @@ pub(crate) fn advance(world: &mut World) {
             "[entry] LiveTransitioner destroyed by its {} s safety timeout without SafeFinish",
             law::COVER_SAFETY_TIMEOUT
         );
+        indicator::hide(world);
         cover::destroy(world);
         seq.cover = Cover::Gone;
     }
