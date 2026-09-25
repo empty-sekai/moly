@@ -409,6 +409,10 @@ pub(crate) struct ActionButtonState {
     surveyed: bool,
     /// The door sensor entry's last next-frame wait, named once per reason.
     sensor_wait: Option<String>,
+    /// The house-entry candidate's overlap and last next-frame wait, named
+    /// when they change.
+    house_touching: Option<bool>,
+    house_wait: Option<String>,
 }
 
 impl Default for ActionButtonState {
@@ -434,6 +438,8 @@ impl Default for ActionButtonState {
             reported: None,
             surveyed: false,
             sensor_wait: None,
+            house_touching: None,
+            house_wait: None,
         }
     }
 }
@@ -978,6 +984,19 @@ pub(crate) fn advance(
         });
     }
 
+    if let Some(house) = frame
+        .iter()
+        .find(|candidate| candidate.button == ButtonType::HouseEntry)
+    {
+        if state.house_touching != Some(house.touching) {
+            state.house_touching = Some(house.touching);
+            info!(
+                "[action_button] HouseEntry candidate {:?}: player box overlaps the house footprint = {}",
+                house.entity, house.touching
+            );
+        }
+    }
+
     if survey {
         state.surveyed = true;
         info!(
@@ -1304,7 +1323,17 @@ fn fixture_enter(
             );
         }
         Err(deferred) => match deferred.retry {
-            Retry::NextFrame => {}
+            Retry::NextFrame => {
+                if candidate.button == ButtonType::HouseEntry
+                    && state.house_wait.as_deref() != Some(deferred.reason.as_str())
+                {
+                    info!(
+                        "[action_button] HouseEntry {} entry waits for {}",
+                        target.uid, deferred.reason
+                    );
+                    state.house_wait = Some(deferred.reason);
+                }
+            }
             Retry::NewInputs(at) => {
                 if state.deferred.insert(entity, at) != Some(at) {
                     warn!(
@@ -1673,12 +1702,20 @@ pub(crate) fn click(
         Some((ButtonType::GimmickFixture, _)) => eligibility.field_input_open(),
         _ => eligibility.available(),
     };
-    if taps.is_empty()
-        || !open
-        || !roots
-            .iter()
-            .any(|visibility| *visibility != Visibility::Hidden)
-    {
+    let shown = roots
+        .iter()
+        .any(|visibility| *visibility != Visibility::Hidden);
+    if let (Some(&tap), Some((head, _))) = (taps.first(), state.current()) {
+        if head != ButtonType::Talk && (!open || !shown || !screen.hit(tap, window, head)) {
+            info!(
+                "[action_button] tap at ({:.0},{:.0}) not taken for {head:?}: field open {open}, button shown {shown}, on the button {}",
+                tap.x,
+                tap.y,
+                screen.hit(tap, window, head)
+            );
+        }
+    }
+    if taps.is_empty() || !open || !shown {
         return;
     }
     let Some((button, target)) = state.current() else {
@@ -2176,8 +2213,9 @@ pub(crate) struct DoorWalk {
 }
 
 /// Instrument (`MOLY_DOOR_WALK_SECS`, off by default; from
-/// `MOLY_DOOR_WALK_AFTER` seconds): on the home site walk the player to the
-/// house's inside-door point, in a room to the door sensor, through the
+/// `MOLY_DOOR_WALK_AFTER` seconds): on the home site walk the player past
+/// the house's inside-door point towards the house, in a room to the door
+/// sensor, through the
 /// joystick's touch stream; once the stack head is that door's button (the
 /// house entry, the go-home button) tap it on its screen position, through
 /// the gesture and click path. The press moves the site, and the walk
@@ -2187,10 +2225,11 @@ pub(crate) struct DoorWalk {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn smoke_door_walk(
     mut touches: MessageWriter<TouchInput>,
+    mut window_events: MessageWriter<bevy::window::WindowEvent>,
     screen: ActionButtonScreen,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     players: Query<&Transform, With<PlayerControlled>>,
-    houses: Query<&crate::site_move::door::HouseEntryPoint>,
+    houses: Query<(&crate::site_move::door::HouseEntryPoint, &GlobalTransform)>,
     points: Query<&GlobalTransform>,
     joystick: Res<JoystickState>,
     button_state: Res<ActionButtonState>,
@@ -2210,14 +2249,21 @@ pub(crate) fn smoke_door_walk(
     const FINGER: u64 = 99011;
     const TAP_FINGER: u64 = 99012;
     let base = Vec2::new(window.width() * 0.15, window.height() * 0.75);
+    // The joystick reads the touch messages; the gesture layer reads the
+    // window's event stream, so the tap finger goes there.
     let mut touch = |id: u64, phase: TouchPhase, position: Vec2| {
-        touches.write(TouchInput {
+        let input = TouchInput {
             phase,
             position,
             window: window_entity,
             force: None,
             id,
-        });
+        };
+        if id == TAP_FINGER {
+            window_events.write(bevy::window::WindowEvent::TouchInput(input));
+        } else {
+            touches.write(input);
+        }
     };
     let walk = &mut *walk;
     let release = |walk: &mut DoorWalk, touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
@@ -2237,6 +2283,14 @@ pub(crate) fn smoke_door_walk(
         }
         return;
     }
+    // Hold the walk finger still at the pad's centre (direction zero) while
+    // standing: a free touch would be the joystick's next capture, and the
+    // tap finger must reach the gesture layer instead.
+    let hold = |walk: &mut DoorWalk, touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
+        if walk.pressing {
+            touch(FINGER, TouchPhase::Moved, base);
+        }
+    };
     if now >= armed || now < env_secs("MOLY_DOOR_WALK_AFTER") || !joystick.enabled {
         release(walk, &mut touch);
         return;
@@ -2256,11 +2310,13 @@ pub(crate) fn smoke_door_walk(
             .get(sensor)
             .ok()
             .map(|at| (at.translation(), ButtonType::GoHomeSite)),
-        None => houses
-            .iter()
-            .next()
-            .and_then(|point| points.get(point.0).ok())
-            .map(|at| (at.translation(), ButtonType::HouseEntry)),
+        // The house: half a metre past the inside-door point towards the
+        // house, so the player arrives facing it (the player box is ahead).
+        None => houses.iter().next().and_then(|(point, house)| {
+            let at = points.get(point.0).ok()?.translation();
+            let inward = (house.translation() - at).with_y(0.0).normalize_or_zero();
+            Some((at + inward * 0.5, ButtonType::HouseEntry))
+        }),
     };
     let Some((target, expected)) = target else {
         return;
@@ -2298,7 +2354,7 @@ pub(crate) fn smoke_door_walk(
         );
     }
     if head.is_some_and(|(button, _)| button == expected) {
-        release(walk, &mut touch);
+        hold(walk, &mut touch);
         let Some(position) = screen.button_position(window, expected) else {
             return;
         };
@@ -2325,7 +2381,7 @@ pub(crate) fn smoke_door_walk(
     // At the door: stand and wait for the head (another entry that joined
     // first keeps it until its object leaves).
     if distance < 0.2 {
-        release(walk, &mut touch);
+        hold(walk, &mut touch);
         return;
     }
     // The joystick's inverse, as the action button walk writes it.
