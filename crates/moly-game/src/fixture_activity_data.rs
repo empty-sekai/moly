@@ -89,6 +89,58 @@ pub(crate) fn parse(
     commands.remove_resource::<ActivityTableRequests>();
 }
 
+/// The fixture together-communication table (id -> the action-point row its
+/// members use), read only by the fixture talk that waits with a
+/// communication. It loads on its own: an asset source without it keeps every
+/// other table, and that factory names the missing table when it is reached.
+#[derive(Resource)]
+pub(crate) struct TogetherCommunicationTable(pub(crate) Result<HashMap<i32, i32>, String>);
+
+#[derive(Resource)]
+pub(crate) struct TogetherCommunicationRequest(Handle<JsonAsset>);
+
+const TOGETHER_COMMUNICATIONS: &str = "moly://mysekai-character-talk-fixture-together-communications.json";
+
+pub(crate) fn load_together(mut commands: Commands, server: Res<AssetServer>) {
+    commands.insert_resource(TogetherCommunicationRequest(
+        server.load::<JsonAsset>(TOGETHER_COMMUNICATIONS),
+    ));
+}
+
+pub(crate) fn parse_together(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    jsons: Res<Assets<JsonAsset>>,
+    request: Option<Res<TogetherCommunicationRequest>>,
+) {
+    let Some(request) = request else {
+        return;
+    };
+    let table = if let LoadState::Failed(error) = server.load_state(&request.0) {
+        Err(format!(
+            "the fixture together-communication table is not in this asset source ({error:?})"
+        ))
+    } else {
+        let Some(asset) = jsons.get(&request.0) else {
+            return;
+        };
+        (|| {
+            let value: Value = serde_json::from_str(&asset.0).map_err(|error| error.to_string())?;
+            let table = ordered(&value, |row| {
+                Ok((int(row, "id")?, int(row, "mysekaiCharacterTalkActionPointId")?))
+            })?;
+            Ok(table.rows.into_iter().collect::<HashMap<_, _>>())
+        })()
+        .map_err(|error: String| format!("fixture together-communication table: {error}"))
+    };
+    match &table {
+        Ok(rows) => info!("[fixture-activity] together-communication table ready: {} rows", rows.len()),
+        Err(reason) => warn!("[fixture-activity] {reason}"),
+    }
+    commands.insert_resource(TogetherCommunicationTable(table));
+    commands.remove_resource::<TogetherCommunicationRequest>();
+}
+
 /// `rows` follows the document's rowOrder, never map iteration or numeric sort.
 struct OrderedTable<T> {
     rows: Vec<T>,
@@ -567,6 +619,18 @@ impl FixtureActivityTables {
     pub(crate) fn action_points_of(&self, definition: i32) -> Option<Vec<i32>> {
         let row = self.action_points.get(definition)?;
         Some(row.points.iter().flatten().copied().filter(|point| *point != 0).collect())
+    }
+
+    /// The member-slot columns of an action-point row (`gameCharacterUnitId{n}
+    /// ActionPoint`, n = 1..4; an absent column is `None`); `None` when the row
+    /// is absent. The source's fifth column is absent from every shipped row.
+    pub(crate) fn action_point_columns(&self, definition: i32) -> Option<[Option<i32>; 4]> {
+        self.action_points.get(definition).map(|row| row.points)
+    }
+
+    /// A fixture-timeline row by id.
+    pub(crate) fn timeline(&self, id: i32) -> Option<&ActivityTimeline> {
+        self.timelines.get(id)
     }
 
     pub(crate) fn fixture_master(&self, id: i32) -> Option<&ActivityFixtureMaster> {

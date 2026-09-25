@@ -221,6 +221,8 @@ pub(crate) fn try_greeting(
             fixtures: &[],
             weights,
             fixture_gates: None,
+            fixture_host: None,
+            together: None,
         };
         let (pick, record) = {
             let engine = std::cell::RefCell::new(&mut *rng);
@@ -284,6 +286,7 @@ pub(crate) fn try_greeting(
             main_character: unit,
             characters: vec![unit],
             pre_action: Some(pre_action),
+            locate: None,
             pending_factory: None,
         });
         mind.skip_next_rest = true;

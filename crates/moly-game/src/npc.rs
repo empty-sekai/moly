@@ -70,6 +70,11 @@ pub(crate) enum NpcAction {
     FixtureAction = 11,
     FixtureActionIdle = 12,
     ChangeSite = 14,
+    /// MainNPCAvatarSomeNpcFixtureActionState: the main of a
+    /// multiple-character fixture timeline.
+    MainSomeFixtureAction = 16,
+    /// NPCAvatarSomeNpcFixtureActionState: the other members of it.
+    SomeFixtureAction = 18,
     Communication = 20,
 }
 
@@ -368,18 +373,25 @@ pub(crate) fn enter_player_talk(commands: &mut Commands, entity: Entity, player:
 /// General/Set read the live Before state at their normal end. This is not an
 /// AI reset and does not write the shared previous-content slot.
 pub(crate) fn leave_player_talk(commands: &mut Commands, entity: Entity) {
+    leave_player_talk_to(commands, entity, None);
+}
+
+/// The end of a player talk: `Some(state)` changes to that state (the
+/// playing-fixture talk ends its first character in FixtureActionIdle),
+/// `None` is ChangeIdleState (Before 11 or 12 -> 12, else Idle).
+pub(crate) fn leave_player_talk_to(commands: &mut Commands, entity: Entity, state: Option<NpcAction>) {
     commands.queue(move |world: &mut World| {
         let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
         if let Ok((mut actions, mut rest)) = query.get_mut(world, entity) {
             if actions.current != NpcAction::Talk {
                 return;
             }
-            let next = match actions.before {
+            let next = state.unwrap_or(match actions.before {
                 NpcAction::FixtureAction | NpcAction::FixtureActionIdle => {
                     NpcAction::FixtureActionIdle
                 }
                 _ => NpcAction::Idle,
-            };
+            });
             actions.change(next, &mut rest);
             actions.talk_owner = None;
         }

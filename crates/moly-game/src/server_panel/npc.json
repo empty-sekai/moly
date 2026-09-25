@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Checked-in default of the server panel, NPC slice. Every value here is a named mock of server state. Visitors: one gate at level 1 with three single-unit groups (units 1, 2 and 3), each on its first visit. Housing layout: the home site's starter placements (chair, lamp, fridge, synthesizer, nenerobo, an 8 x 8 rug, and the home gate, which the visit block places on the home site); every package is in both the CN and the JP fixture catalogues. Talk list: built by the talk-list policy (all event stories read, every talk unread). Phenomena: three days of both refresh windows, all phenomenon 1, so every device offset from UTC-12 to UTC+14 selects phenomenon 1. Server clock: 2026-09-24 12:00 UTC+9. Controls: no automatic schedule advance.",
+  "about": "Checked-in default of the server panel, NPC slice. Every value here is a named mock of server state. Visitors: one gate at level 1 with three single-unit groups (units 1, 2 and 3), each on its first visit. Housing layout: the home site's starter placements (chair, lamp, fridge, synthesizer, nenerobo, the CN star rug, and the home gate, which the visit block places on the home site); a row whose piece the loaded snapshot's fixture master lacks (the star rug on a JP snapshot) takes the stand-in the product picks from that master by its stated rule, matching the row's authoredPiece traits. Talk list: built by the talk-list policy (all event stories read, every talk unread). Phenomena: three days of both refresh windows, all phenomenon 1, so every device offset from UTC-12 to UTC+14 selects phenomenon 1. Server clock: 2026-09-24 12:00 UTC+9. Controls: no automatic schedule advance.",
   "userMysekaiGamedata": {
     "refreshedAt": 1790218800000,
     "isMysekaiTutorialEnd": true
@@ -162,8 +162,8 @@
           "rotation": 0
         },
         {
-          "mysekaiFixtureId": 238,
-          "package": "mysekai__fixture__mdl_ext0008_rug_rug1",
+          "mysekaiFixtureId": 90005,
+          "package": "mysekai__fixture__mdl_cncollect_rug_star3",
           "textureId": 1,
           "minimum": {
             "x": -14,
@@ -177,7 +177,17 @@
           },
           "centerY": 0,
           "layoutType": 4,
-          "rotation": 0
+          "rotation": 0,
+          "authoredPiece": {
+            "gridWidth": 8,
+            "gridDepth": 8,
+            "gridHeight": 1,
+            "layoutType": "rug",
+            "putType": "none",
+            "fixtureType": "normal",
+            "handleType": "none",
+            "playerActionType": "no_action"
+          }
         },
         {
           "mysekaiFixtureId": 900002,

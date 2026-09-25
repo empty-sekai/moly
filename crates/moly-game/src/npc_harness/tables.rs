@@ -84,6 +84,8 @@ fn a04_general_pool() {
                 fixtures: &[],
                 weights: LotteryWeights { talk1: 40.0, talk2: 20.0, talk3: 20.0, talk4: 20.0 },
                 fixture_gates: None,
+                fixture_host: None,
+                together: None,
             };
             let seeker = NpcView {
                 unit: query["unit"].as_u64().unwrap() as u32,

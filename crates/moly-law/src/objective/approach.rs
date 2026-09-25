@@ -68,12 +68,13 @@ pub fn approach_target(
     move_offset: f32,
 ) -> Option<[f32; 3]> {
     let mut ordered: Vec<Cell> = cells.to_vec();
+    // The source key is the float32 distance, sqrt(dz*dz + (dx*dx + dy*dy)):
+    // two squared distances that round to one square root tie, and the
+    // stable sort keeps their construction order.
     ordered.sort_by(|a, b| {
-        let da = world_of(*a);
-        let db = world_of(*b);
-        let dda = distance_sq(from, da);
-        let ddb = distance_sq(from, db);
-        dda.partial_cmp(&ddb)
+        let da = distance(from, world_of(*a));
+        let db = distance(from, world_of(*b));
+        da.partial_cmp(&db)
             .expect("距离键不含 NaN（格角映射有限）")
     });
     for cell in ordered {
@@ -90,11 +91,11 @@ pub fn approach_target(
     None
 }
 
-fn distance_sq(a: [f32; 3], b: [f32; 3]) -> f32 {
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
-    dx * dx + dy * dy + dz * dz
+    (dz * dz + (dx * dx + dy * dy)).sqrt()
 }
 
 #[cfg(test)]

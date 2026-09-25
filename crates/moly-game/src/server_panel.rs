@@ -1046,7 +1046,32 @@ impl Plugin for ServerPanelPlugin {
             .init_resource::<crate::weather::PhenomenonCatalogue>()
             .init_resource::<crate::weather::CurrentPhenomenonId>()
             .init_resource::<TodayPhenomena>()
-            .add_systems(Startup, load)
+            .add_systems(
+                Startup,
+                (
+                    load,
+                    crate::fixture::region::load,
+                    crate::fixture_activity_data::load_together,
+                ),
+            )
+            .add_systems(
+                Update,
+                (
+                    crate::fixture::region::install,
+                    crate::fixture_activity_data::parse_together,
+                ),
+            )
+            // The group fixture talks (types 3 and 6) after the frame's
+            // decisions and before the presenter's per-frame calls.
+            .init_resource::<crate::npc_fixture_talk::FixtureTalkGroups>()
+            .add_systems(
+                Update,
+                crate::npc_fixture_talk::advance
+                    .after(crate::npc_objective::decide)
+                    .after(crate::npc_fixture_activity::advance)
+                    .before(crate::npc::sync_rest_lifecycle)
+                    .before(crate::npc_state::NpcPresenterSet),
+            )
             .add_systems(
                 Update,
                 (

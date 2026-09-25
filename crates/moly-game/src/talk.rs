@@ -634,6 +634,12 @@ impl ActiveTalk {
         &self.fixtures
     }
 
+    /// The dialogue has closed (PlayAsync returned); a joined furniture
+    /// Director may still be playing its tail.
+    pub(crate) fn is_closing(&self) -> bool {
+        self.ending
+    }
+
     pub(crate) fn talk_id(&self) -> i32 {
         self.talk_id
     }

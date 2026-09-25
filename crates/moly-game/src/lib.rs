@@ -67,6 +67,7 @@ mod native_graphics_diagnostics;
 pub mod npc;
 mod npc_clock;
 mod npc_fixture_activity;
+mod npc_fixture_talk;
 #[cfg(test)]
 mod npc_harness;
 pub mod npc_objective;

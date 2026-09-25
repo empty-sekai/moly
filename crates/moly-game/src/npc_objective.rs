@@ -87,7 +87,8 @@
 //! 重建；构建端带格桶索引，逐格最近点查询不扫全网格。
 
 use crate::client_config::{
-    ClientConfigs, KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME, KEY_CHARACTER_OVERLAP_DISTANCE,
+    ClientConfigs, KEY_CHARACTER_FIXTURE_MOVE_OFFSET, KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME,
+    KEY_CHARACTER_OVERLAP_DISTANCE,
     KEY_CHARACTER_OVERLAP_TIME,
     KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
     KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
@@ -341,6 +342,250 @@ impl SurfaceProbe for FaceProbe<'_> {
     }
 }
 
+/// A fixture talk the factories built and this host executes: its data, its
+/// loaded script, the fixture entity, and for a pre-action with a timeline
+/// the fixture session that runs its window and timeline.
+struct PreparedFixtureTalk {
+    data: npc_talk_lottery::FixtureTalkData,
+    resolved: crate::player_talk::ResolvedTalk,
+    /// The master reference with IsGeneralTalk read from its conditions.
+    content: TalkContent,
+    fixture: Entity,
+    timeline: Option<crate::npc_fixture_activity::Selection>,
+    /// The fixture's StartLoc names in action-point array order.
+    names: Vec<String>,
+    /// A group talk's other members as PassTalkDataToSubCharacters met them.
+    drafts: Vec<crate::npc_fixture_talk::MemberDraft>,
+}
+
+impl PreparedFixtureTalk {
+    fn is_group(&self) -> bool {
+        matches!(
+            self.data.kind,
+            TalkType::CommunicationWhileDoingWait | TalkType::MultipleCharacterFixture
+        )
+    }
+}
+
+/// One other member of a group talk at the main's decision.
+struct RawDraft {
+    entity: Entity,
+    unit: u32,
+    state: u8,
+    drafted: bool,
+    cancel: bool,
+    data: Option<npc_talk_lottery::FixtureTalkData>,
+    steps: Vec<serde_json::Value>,
+}
+
+/// PassTalkDataToSubCharacters' members, in the data's order, as the main's
+/// decision sees them: eligible when its state is a fixture-action state
+/// (11, 12, 17, 18, 19) or TryCancel on its current objective would report
+/// true while it is not talking. The data a while-doing-wait member would
+/// get (TryCreateWaitingWithCommunicationTalkData with itself as the
+/// character) draws nothing and is built for every member; the drafts land
+/// after the frame's decisions, where eligibility and the cancel are read
+/// again.
+///
+/// For the multiple-character talk only an eligible member is handed data,
+/// and building it draws one sequence pick (in the members' order, after the
+/// main's factory draws): the eligibility is the one the main's decision
+/// sees.
+fn member_drafts(
+    scene: &npc_talk_lottery::LotteryScene<'_>,
+    draws: &mut npc_talk_lottery::Draws<'_>,
+    snaps: &[MemberSnap],
+    views: &[npc_talk_lottery::NpcView],
+    main_unit: u32,
+    data: &npc_talk_lottery::FixtureTalkData,
+) -> Result<Vec<RawDraft>, npc_talk_lottery::Halt> {
+    let mut drafts = Vec::new();
+    for &member in data.members.iter().filter(|unit| **unit != main_unit) {
+        let Some(snap) = snaps.iter().find(|snap| snap.unit == member) else {
+            continue;
+        };
+        let fixture_state = matches!(snap.state, 11 | 12 | 17 | 18 | 19);
+        let cancellable = snap.state != 4 && snap.cancel_reports;
+        let drafted = fixture_state || cancellable;
+        let cancel = match data.kind {
+            TalkType::CommunicationWhileDoingWait => true,
+            _ => !fixture_state,
+        };
+        let (member_data, steps) = match views.iter().find(|view| view.unit == member) {
+            Some(view) if data.kind == TalkType::CommunicationWhileDoingWait => {
+                npc_talk_lottery::waiting_data_for_member(scene, view, data.talk_id, &data.fixture)?
+            }
+            Some(_) if data.kind == TalkType::MultipleCharacterFixture && drafted => {
+                let (member_data, steps) =
+                    npc_talk_lottery::some_character_data_for_member(scene, draws, member, data)?;
+                if member_data.is_none() {
+                    // The caller indexes the locate list at the member's
+                    // position before the factory runs (argument out of
+                    // range without a row); a missing presenter is a null
+                    // dereference; a null factory result goes to
+                    // SetAITalkData, which logs and builds the member general
+                    // data from one more general-talk lottery and the
+                    // general target chain, not evaluated here.
+                    let result = steps
+                        .iter()
+                        .rev()
+                        .find_map(|step| step.get("result").and_then(|value| value.as_str()))
+                        .unwrap_or("none");
+                    return Err(match result {
+                        "not_in_list" | "locate_short" => npc_talk_lottery::Halt::Fault(format!(
+                            "member {member}'s position in the character list has no locate row (argument out of range)"
+                        )),
+                        "no_presenter" => npc_talk_lottery::Halt::Fault(format!(
+                            "member {member} has no presenter (null dereference)"
+                        )),
+                        _ => npc_talk_lottery::Halt::Gap(format!(
+                            "member {member}'s data factory returned null ({result}); SetAITalkData(null) gives it general data from a general-talk lottery and the general target chain, which a member's hand-over does not evaluate"
+                        )),
+                    });
+                }
+                (member_data, steps)
+            }
+            _ => (None, Vec::new()),
+        };
+        drafts.push(RawDraft {
+            entity: snap.entity,
+            unit: member,
+            state: snap.state,
+            drafted,
+            cancel,
+            data: member_data,
+            steps,
+        });
+    }
+    Ok(drafts)
+}
+
+/// A face probe that counts its samples (GetLittleFarPosition's walk).
+struct CountingProbe<'a> {
+    face: &'a ObjectiveFace,
+    samples: usize,
+}
+
+impl SurfaceProbe for CountingProbe<'_> {
+    fn sample(&mut self, target: [f32; 3], tolerance: f32) -> Option<[f32; 3]> {
+        self.samples += 1;
+        self.face.sample(target, tolerance)
+    }
+
+    fn has_path(&mut self, source: [f32; 3], target: [f32; 3]) -> bool {
+        self.face.has_path(source, target)
+    }
+}
+
+type TalkGeometry = crate::npc_fixture_activity::TalkFixtureGeometry;
+
+/// The fixture-talk factories' host for one decision: the avatar list's
+/// live positions, each placed fixture's geometry (resolved once), the
+/// objective face and the configured fixture move offset (key 153). Every
+/// GetLittleFarPosition walk goes into `walks` for the decision record.
+struct TalkFixtureHost<'a> {
+    positions: Vec<(u32, [f32; 3])>,
+    geometry: &'a dyn Fn(&str) -> Result<TalkGeometry, String>,
+    resolved: std::cell::RefCell<HashMap<String, Result<std::rc::Rc<TalkGeometry>, String>>>,
+    face: &'a ObjectiveFace,
+    move_offset: f32,
+    walks: std::cell::RefCell<Vec<serde_json::Value>>,
+}
+
+impl TalkFixtureHost<'_> {
+    fn fixture(&self, uid: &str) -> Result<std::rc::Rc<TalkGeometry>, npc_talk_lottery::Halt> {
+        self.resolved
+            .borrow_mut()
+            .entry(uid.to_owned())
+            .or_insert_with(|| (self.geometry)(uid).map(std::rc::Rc::new))
+            .clone()
+            .map_err(|reason| npc_talk_lottery::Halt::Gap(format!("fixture {uid}: {reason}")))
+    }
+}
+
+impl npc_talk_lottery::FixtureTalkHost for TalkFixtureHost<'_> {
+    fn npc_position(&self, unit: u32) -> Option<[f32; 3]> {
+        self.positions
+            .iter()
+            .find(|(member, _)| *member == unit)
+            .map(|(_, position)| *position)
+    }
+
+    fn action_point_names(&self, fixture: &str) -> Result<Vec<String>, npc_talk_lottery::Halt> {
+        Ok(self
+            .fixture(fixture)?
+            .locators
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect())
+    }
+
+    fn start_loc(
+        &self,
+        fixture: &str,
+        index: usize,
+    ) -> Result<([f32; 3], [f32; 4]), npc_talk_lottery::Halt> {
+        let geometry = self.fixture(fixture)?;
+        let (_, pair) = geometry.locators.get(index).ok_or_else(|| {
+            npc_talk_lottery::Halt::Fault(format!(
+                "locator index {index} of {fixture} is outside its array (argument out of range)"
+            ))
+        })?;
+        Ok((pair.start.position, pair.start.rotation.to_array()))
+    }
+
+    fn site_height(&self, fixture: &str) -> Result<Option<f32>, npc_talk_lottery::Halt> {
+        Ok(Some(self.fixture(fixture)?.site_origin[1]))
+    }
+
+    fn little_far_position(
+        &self,
+        position: [f32; 3],
+        fixture: &str,
+    ) -> Result<Option<[f32; 3]>, npc_talk_lottery::Halt> {
+        let geometry = self.fixture(fixture)?;
+        let (box_min, box_max) = geometry.footprint;
+        let (grid_min, grid_max) = geometry.floor_bounds;
+        let cells = objective::approach_ring_cells(
+            box_min,
+            box_max,
+            objective::APPROACH_SEARCH_RANGE,
+            grid_min,
+            grid_max,
+        );
+        let origin = geometry.site_origin;
+        // TILE_SIZE * (x, 0, z) + the site origin.
+        let world_of = |cell: Cell| {
+            [
+                cell.0 as f32 * TILE_SCALE + origin[0],
+                origin[1],
+                cell.1 as f32 * TILE_SCALE + origin[2],
+            ]
+        };
+        let mut probe = CountingProbe {
+            face: self.face,
+            samples: 0,
+        };
+        let hit = objective::approach_target(&cells, position, world_of, &mut probe, self.move_offset);
+        self.walks.borrow_mut().push(serde_json::json!({
+            "fixture": fixture,
+            "from": position,
+            "footprint": [box_min, box_max],
+            "floor": [grid_min, grid_max],
+            "origin": origin,
+            "ring": cells.len(),
+            "samples": probe.samples,
+            "tolerance": self.move_offset,
+            "hit": hit,
+        }));
+        Ok(hit)
+    }
+
+    fn sample_hit(&self, point: [f32; 3], radius: f32) -> bool {
+        self.face.sample(point, radius).is_some()
+    }
+}
+
 /// 世界位 → 格坐标（格距换算，向下取整）。
 pub(crate) fn cell_of(x: f32, z: f32) -> Cell {
     (
@@ -529,6 +774,9 @@ pub(crate) struct AiTalkData {
     pub(crate) characters: Vec<u32>,
     /// The ordinary data product's pre-action projection, not a new Lua IR.
     pub(crate) pre_action: Option<moly_law::talk::TweetRef>,
+    /// FixtureNpcActionLocateDataList: the fixture-talk factories' list,
+    /// `None` for data without one.
+    pub(crate) locate: Option<Vec<crate::npc_talk_lottery::LocateRow>>,
     pub(crate) pending_factory: Option<&'static str>,
 }
 
@@ -543,6 +791,7 @@ impl AiTalkData {
             main_character: unit,
             characters: vec![unit],
             pre_action: None,
+            locate: None,
             pending_factory: Some("activity factory has not supplied its master and participants"),
         }
     }
@@ -680,6 +929,26 @@ pub struct ObjectiveMind {
     /// rethrows everything but cancellation and its own cannot-decide
     /// exception); no further decision is made.
     pub(crate) ai_stopped: Option<String>,
+    /// The current objective was cancelled (NPCObjectiveBase +0x28); a
+    /// later TryCancel on it reports true again. A new objective clears it.
+    pub(crate) cancelled: bool,
+}
+
+impl ObjectiveMind {
+    /// A new current objective (the AI model's _currentObjective write).
+    pub(crate) fn begin_objective(&mut self, objective: ObjectiveType) {
+        self.current = Some(objective);
+        self.cancelled = false;
+    }
+
+    /// What NPCObjectiveBase.TryCancel on the current objective reports:
+    /// no current objective, or one that completed (disposed), reports
+    /// false; one cancelled before reports true; a running one is cancelled
+    /// (true). CanCancel is 1 for every objective this host runs.
+    pub(crate) fn cancel_reports(&self) -> bool {
+        self.current.is_some()
+            && (self.cancelled || self.executing || self.rest.is_some() || self.body.is_some())
+    }
 }
 
 impl moly_law::path::WaypointDraw for MemberRng {
@@ -758,6 +1027,7 @@ impl ObjectiveMind {
             edit_rest_after: None,
             unmovable_fixtures: Vec::new(),
             ai_stopped: None,
+            cancelled: false,
         }
     }
 }
@@ -1075,6 +1345,8 @@ impl TalkFactory {
 enum DecisionRoute {
     Factory(TalkFactory),
     SameTalkData,
+    /// A drafted member's sub objective (9 or 18) on its existing data.
+    SubObjective(ObjectiveType),
     NoneTalk,
     /// The greeting objective on the greeting data the gate wrote.
     Greeting,
@@ -1085,6 +1357,7 @@ impl DecisionRoute {
         match self {
             DecisionRoute::Factory(factory) => factory.word(),
             DecisionRoute::SameTalkData => "talk:interrupt",
+            DecisionRoute::SubObjective(_) => "sub:interrupt",
             DecisionRoute::NoneTalk => "nonetalk",
             DecisionRoute::Greeting => "greeting",
         }
@@ -1149,6 +1422,10 @@ struct MemberSnap {
     /// A source Current may be a valid NoTalk record without a master story.
     /// Only a missing Current or our explicit unfinished factory is excluded.
     talk_target: Option<[f32; 3]>,
+    /// The action state value.
+    state: u8,
+    /// What TryCancel on its current objective would report.
+    cancel_reports: bool,
 }
 
 fn prepared_social_target(slot: &TalkSlot) -> Option<[f32; 3]> {
@@ -1190,14 +1467,16 @@ pub(crate) fn decide(
     epoch: Option<Res<GroundEpoch>>,
     selection: Option<Res<SiteSelection>>,
     placements: Res<FixturePlacements>,
-    (mut seeder, mut reported_gaps, mut last_placed): (
+    (mut seeder, mut reported_gaps, mut last_placed, mut groups): (
         ResMut<SequencePickSeeder>,
         Local<HashSet<String>>,
         Local<String>,
+        ResMut<crate::npc_fixture_talk::FixtureTalkGroups>,
     ),
-    (configs, talk_list): (
+    (configs, talk_list, together): (
         Option<Res<ClientConfigs>>,
         Option<Res<crate::server_panel::TalkDataStore>>,
+        Option<Res<crate::fixture_activity_data::TogetherCommunicationTable>>,
     ),
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
@@ -1273,6 +1552,11 @@ pub(crate) fn decide(
     if !catalog.ready() {
         return;
     }
+    // The together-communication table loads on its own; its loader always
+    // installs a result (the rows, or why this asset source lacks them).
+    let Some(together) = together.as_deref() else {
+        return;
+    };
     // No decision before the engine's frame clock runs (and none at all if
     // its settings were refused).
     if !clock.ready() {
@@ -1293,6 +1577,8 @@ pub(crate) fn decide(
                 unit: unit.0,
                 site_type: actions.site_type.clone(),
                 talk_target: prepared_social_target(slot),
+                state: actions.current as u8,
+                cancel_reports: mind.cancel_reports(),
                 position: state.0.position,
                 destination: if mind.executing {
                     target.0
@@ -1367,6 +1653,8 @@ pub(crate) fn decide(
                     snap.target_fixture = slot.current.as_ref().and_then(|data| data.target_fixture);
                     snap.site_type = actions.site_type.clone();
                     snap.talk_target = prepared_social_target(&slot);
+                    snap.state = actions.current as u8;
+                    snap.cancel_reports = mind.cancel_reports();
                     snap.position = state.0.position;
                     snap.destination = if mind.executing {
                         target.0
@@ -1429,6 +1717,11 @@ pub(crate) fn decide(
         // The activity owner consumes arrival and completion separately. A
         // route reaching its last corner must not skip the furniture body.
         if fixture_activities.owns_actor(entity) {
+            continue;
+        }
+        // A group talk (types 3 and 6) drives its main and the members'
+        // sub objectives.
+        if groups.owns(entity) {
             continue;
         }
         // IsTalking: the talk state's enter sets it and its exit clears it.
@@ -1613,6 +1906,8 @@ pub(crate) fn decide(
                     match objective::DelayPromise::from_milliseconds(milliseconds) {
                         Ok(delay) => {
                             mind.rest = Some(RestPhase::Delay { since: frame, delay });
+                            // RestAsync makes the Rest objective the current one.
+                            mind.begin_objective(ObjectiveType::Rest);
                             mind.rest_revision = mind.rest_revision.wrapping_add(1);
                             actions.begin_objective_rest(&mut rest, mind.rest_revision);
                             info!(
@@ -1727,6 +2022,20 @@ pub(crate) fn decide(
                 // The Talk interrupt: a new talk objective on the same data; the
                 // marker's interrupt flag is then cleared.
                 objective::Decision::Interrupt {
+                    dispatch:
+                        objective::InterruptDispatch::Direct(
+                            kind @ (ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub
+                            | ObjectiveType::SubCharacterFixtureAction),
+                        ),
+                } => {
+                    // A drafted member's sub objective on the data the main
+                    // gave it; the marker's interrupt flag is then cleared.
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                    DecisionRoute::SubObjective(kind)
+                }
+                objective::Decision::Interrupt {
                     dispatch: objective::InterruptDispatch::Direct(ObjectiveType::Talk),
                 } => {
                     if let Some(marker) = slot.interrupt.as_mut() {
@@ -1745,6 +2054,7 @@ pub(crate) fn decide(
             let objective_type = match decision_route {
                 DecisionRoute::NoneTalk => ObjectiveType::NoneTalk,
                 DecisionRoute::Greeting => ObjectiveType::Greeting,
+                DecisionRoute::SubObjective(kind) => kind,
                 _ => ObjectiveType::Talk,
             };
             record.set(
@@ -1752,6 +2062,10 @@ pub(crate) fn decide(
                 match objective_type {
                     ObjectiveType::NoneTalk => "none_talk",
                     ObjectiveType::Greeting => "greeting",
+                    ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub => {
+                        "sub_while_doing_wait"
+                    }
+                    ObjectiveType::SubCharacterFixtureAction => "sub_fixture_action",
                     _ => "talk",
                 },
             );
@@ -1769,7 +2083,7 @@ pub(crate) fn decide(
                 }
                 record.emit("greeting", calls);
                 fixture_activities.clear_pending(entity);
-                mind.current = Some(ObjectiveType::Greeting);
+                mind.begin_objective(ObjectiveType::Greeting);
                 mind.executing = true;
                 actions.change(crate::npc::NpcAction::Greeting, &mut rest);
                 mind.body = Some(BodyWait::FirstTalk { since: frame });
@@ -1782,6 +2096,7 @@ pub(crate) fn decide(
             // (this character's AI loop ends), or a host gap (reported by name;
             // the decision ends as empty data does).
             let mut general_talk: Option<crate::player_talk::ResolvedTalk> = None;
+            let mut fixture_talk: Option<PreparedFixtureTalk> = None;
             let mut null_talk: Option<String> = None;
             let mut halt: Option<npc_talk_lottery::Halt> = None;
             match decision_route {
@@ -1848,7 +2163,7 @@ pub(crate) fn decide(
                         fixtures
                     });
                     let admissions = std::cell::RefCell::new(Vec::new());
-                    let (result, factory_draws, lottery_rows) = {
+                    let (result, factory_draws, lottery_rows, fixture_walks, drafts) = {
                         let tables = fixture_activities
                             .tables()
                             .expect("the decision holds until the master tables are installed");
@@ -1883,6 +2198,24 @@ pub(crate) fn decide(
                             }));
                             result
                         };
+                        let geometry =
+                            |uid: &str| fixture_activities.talk_fixture_geometry(uid, &placements);
+                        let host = TalkFixtureHost {
+                            // FindNPC(unit).Position: the deciding character's own
+                            // live position, the others' as last read.
+                            positions: snaps
+                                .iter()
+                                .map(|snap| {
+                                    let own = snap.entity == entity;
+                                    (snap.unit, if own { position } else { snap.position })
+                                })
+                                .collect(),
+                            geometry: &geometry,
+                            resolved: Default::default(),
+                            face,
+                            move_offset: config.float(KEY_CHARACTER_FIXTURE_MOVE_OFFSET),
+                            walks: Default::default(),
+                        };
                         let scene = npc_talk_lottery::LotteryScene {
                             tables,
                             talk_list: talk_list.talk_list(),
@@ -1896,6 +2229,8 @@ pub(crate) fn decide(
                                     .int(KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME),
                                 admissible: &admissible,
                             }),
+                            fixture_host: Some(&host),
+                            together: Some(&together.0),
                         };
                         let engine = std::cell::RefCell::new(&mut trial);
                         let mut engine_int = |len: usize| {
@@ -1913,10 +2248,57 @@ pub(crate) fn decide(
                             sequence_pick: &mut sequence_pick,
                             record: Vec::new(),
                         };
-                        let result = factory.run(&scene, &seeker, &mut draws);
-                        (result, draws.record, npc_talk_lottery::list_counts(&scene))
+                        let mut result = factory.run(&scene, &seeker, &mut draws);
+                        // PassTalkDataToSubCharacters runs at the start of the
+                        // talk objective, before any other draw: the members'
+                        // data is built here, in the decision's draw order.
+                        let drafts = match &result {
+                            // A ForceUpdateObjective builds data only; no talk
+                            // objective runs.
+                            Ok(npc_talk_lottery::TalkPlan::Fixture(data))
+                                if !force_update
+                                    && matches!(
+                                        data.kind,
+                                        TalkType::CommunicationWhileDoingWait
+                                            | TalkType::MultipleCharacterFixture
+                                    ) =>
+                            {
+                                member_drafts(&scene, &mut draws, &snaps, &views, unit.0, data)
+                            }
+                            _ => Ok(Vec::new()),
+                        };
+                        let drafts = match drafts {
+                            Ok(drafts) => drafts,
+                            Err(stop) => {
+                                result = Err(stop);
+                                Vec::new()
+                            }
+                        };
+                        let counts = npc_talk_lottery::list_counts(&scene);
+                        (result, draws.record, counts, host.walks.into_inner(), drafts)
                     };
+                    if !drafts.is_empty() {
+                        record.set(
+                            "member_drafts",
+                            drafts
+                                .iter()
+                                .map(|draft| {
+                                    serde_json::json!({
+                                        "unit": draft.unit,
+                                        "state": draft.state,
+                                        "drafted": draft.drafted,
+                                        "cancel": draft.cancel,
+                                        "target": draft.data.as_ref().map(|data| data.target_position),
+                                        "steps": draft.steps,
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                    }
                     record.set("fixture_lottery_rows", lottery_rows);
+                    if !fixture_walks.is_empty() {
+                        record.set("fixture_walks", fixture_walks);
+                    }
                     record.set("fixture_admissible", admissions.into_inner());
                     record.extend_draws(factory_draws);
                     match result {
@@ -1942,6 +2324,123 @@ pub(crate) fn decide(
                             }
                             null_talk = Some(reason);
                         }
+                        Ok(npc_talk_lottery::TalkPlan::Fixture(data)) => {
+                            record.set("talk_id", data.talk_id);
+                            record.set(
+                                "fixture_talk",
+                                serde_json::json!({
+                                    "kind": data.kind as u8,
+                                    "fixture": data.fixture,
+                                    "timeline": data.timeline,
+                                    "target": data.target_position,
+                                    "target_found": data.target_found,
+                                    "rotation": data.rotation,
+                                    "members": data.members,
+                                }),
+                            );
+                            match data.kind {
+                                _ => match catalog.resolve(data.talk_id) {
+                                    Some(resolved) => {
+                                        let prepared = fixture_activities
+                                            .talk_fixture_geometry(&data.fixture, &placements)
+                                            .and_then(|geometry| {
+                                                let timeline = match data.timeline {
+                                                    Some(_) if data.kind == TalkType::SingleCharacterFixture => {
+                                                        let pre_action = fixture_activities
+                                                            .tables()
+                                                            .and_then(|tables| tables.pre_action_of(data.talk_id))
+                                                            .map(|pre| pre.id)
+                                                            .ok_or("the fixture talk has no pre-action row")?;
+                                                        Some(fixture_activities.talk_timeline_selection(
+                                                            entity,
+                                                            unit.0,
+                                                            epoch.0,
+                                                            &placements,
+                                                            &data,
+                                                            pre_action,
+                                                            resolved.pre_action(),
+                                                        )?)
+                                                    }
+                                                    _ => None,
+                                                };
+                                                let names = geometry
+                                                    .locators
+                                                    .into_iter()
+                                                    .map(|(name, _)| name)
+                                                    .collect::<Vec<_>>();
+                                                Ok((geometry.entity, timeline, names))
+                                            });
+                                        let prepared = prepared.and_then(|(fixture, timeline, names)| {
+                                            let tables = fixture_activities
+                                                .tables()
+                                                .ok_or("the talk tables are not installed")?;
+                                            let is_general = npc_talk_lottery::is_general_talk(tables, data.talk_id)?;
+                                            Ok((fixture, timeline, names, is_general))
+                                        });
+                                        match prepared {
+                                            Ok((fixture, timeline, names, is_general)) => {
+                                                let content = crate::npc_objective::TalkContent {
+                                                    is_general: Some(is_general),
+                                                    ..resolved.content()
+                                                };
+                                                // The members' data carries this
+                                                // master, fixture and pre-action.
+                                                let drafts = drafts
+                                                    .iter()
+                                                    .map(|draft| crate::npc_fixture_talk::MemberDraft {
+                                                        entity: draft.entity,
+                                                        unit: draft.unit,
+                                                        drafted: draft.drafted,
+                                                        cancel: draft.cancel,
+                                                        data: draft.data.as_ref().map(|member| AiTalkData {
+                                                            kind: member.kind,
+                                                            content: Some(content.clone()),
+                                                            target_fixture: Some(fixture),
+                                                            target_position: member.target_position,
+                                                            // A while-doing-wait member is its own
+                                                            // data's main; a multiple-character
+                                                            // member keeps the main.
+                                                            main_character: if member.kind
+                                                                == TalkType::CommunicationWhileDoingWait
+                                                            {
+                                                                draft.unit
+                                                            } else {
+                                                                unit.0
+                                                            },
+                                                            characters: member.members.clone(),
+                                                            pre_action: Some(resolved.pre_action()),
+                                                            locate: member.locate.clone(),
+                                                            pending_factory: None,
+                                                        }),
+                                                    })
+                                                    .collect();
+                                                fixture_talk = Some(PreparedFixtureTalk {
+                                                    data,
+                                                    resolved,
+                                                    content,
+                                                    fixture,
+                                                    timeline,
+                                                    names,
+                                                    drafts,
+                                                });
+                                            }
+                                            Err(reason) => {
+                                                halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                                    "fixture talk {}: {reason}",
+                                                    data.talk_id
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                            "fixture talk {} is not in the loaded talk scripts",
+                                            data.talk_id
+                                        )));
+                                    }
+                                },
+                            }
+                        }
                         Err(stop) => halt = Some(stop),
                     }
                 }
@@ -1959,6 +2458,12 @@ pub(crate) fn decide(
                                     .into(),
                             ));
                         }
+                    }
+                }
+                DecisionRoute::SubObjective(_) => {
+                    record.set("path", "sub_objective");
+                    if let Some(content) = slot.current.as_ref().and_then(|data| data.content.as_ref()) {
+                        record.set("talk_id", content.master_id);
                     }
                 }
                 DecisionRoute::NoneTalk => {}
@@ -2021,7 +2526,7 @@ pub(crate) fn decide(
                 record.set("reason", reason.as_str());
                 record.emit("empty_talk_data", calls);
                 fixture_activities.clear_pending(entity);
-                mind.current = Some(ObjectiveType::Talk);
+                mind.begin_objective(ObjectiveType::Talk);
                 finish_objective(unit.0, &mut mind, &mut slot, frame, true);
                 info!(
                     "[npc unit={}] 目标裁决：{draws_word} → {} 空数据（{reason}），对话目标即刻结束，进入停顿",
@@ -2043,169 +2548,188 @@ pub(crate) fn decide(
             let mut gate_fixture: Option<String> = None;
             let mut none_talk_null = false;
             let mut none_talk_gap = false;
-            let destination = match decision_route {
-                DecisionRoute::SameTalkData => {
-                    let data = slot
-                        .current
-                        .as_ref()
-                        .expect("the interrupt row re-runs existing talk data");
-                    detail = "同一对话数据".to_owned();
-                    Some(data.target_position)
-                }
-                DecisionRoute::Factory(_) => {
-                    // CreateGeneralTalkData: the spot near another character,
-                    // else a random floor position. Both chains start from the
-                    // character's own position, not from its navigation origin.
-                    let position = state.0.position;
-                    let near: Vec<(u32, objective::SocialCandidate)> = snaps
-                        .iter()
-                        .filter_map(|snap| {
-                            snap.social_candidate(unit.0, &actions.site_type)
-                                .map(|candidate| (snap.unit, candidate))
-                        })
-                        .collect();
-                    // The candidates as this decision read them, so a replay
-                    // can check them against the others' live state.
-                    record.set(
-                        "near_candidates",
-                        near.iter()
-                            .map(|(other, candidate)| {
-                                serde_json::json!({
-                                    "unit": other,
-                                    "position": candidate.position,
-                                    "destination": candidate.destination,
-                                    "talk_target": candidate.talk_target,
-                                })
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                    let candidates: Vec<objective::SocialCandidate> =
-                        near.into_iter().map(|(_, candidate)| candidate).collect();
-                    let npc_positions: Vec<[f32; 3]> =
-                        snaps.iter().map(|snap| snap.position).collect();
-                    let mut uniform = UniformSource::new(&mut trial);
-                    let social = objective::social_target(
-                        &candidates,
-                        position,
-                        &npc_positions,
-                        &mut probe,
-                        &mut uniform,
-                    );
-                    record.uniform("near_character_pick", DRAW_ENGINE_INT_RANGE, &uniform.draws);
-                    if let Some(spot) = social {
-                        detail = format!(
-                            "社交链 池抽 {}（候选 {} 员）",
-                            uniform.account(),
-                            candidates.len()
-                        );
-                        Some(spot)
-                    } else {
-                        // The move range follows the site type of this
-                        // character's own site.
-                        let in_room = catalog
-                            .site_type_value(&actions.site_type)
-                            .is_some_and(objective::uses_in_room_move_range);
-                        let (wander_min, wander_max) = if in_room {
-                            (
-                                config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE),
-                                config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE),
-                            )
-                        } else {
-                            (
-                                config.int(KEY_NPC_RANDOM_MOVE_MIN_DISTANCE),
-                                config.int(KEY_NPC_RANDOM_MOVE_MAX_DISTANCE),
-                            )
-                        };
-                        // The source stores the grid origin as signed bytes; the
-                        // ring filter wraps each axis difference to a signed byte,
-                        // so the unwrapped cell gives the same ring.
-                        let origin = cell_of(position[0], position[2]);
-                        let eligible: Vec<Cell> = face
-                            .walkable()
+            let destination = if let Some(data) = fixture_talk.as_ref().map(|prepared| &prepared.data) {
+                // MoveAsync goes to the data's target position; a talk data
+                // TargetFixture takes IfMoveTargetFixtureActionPosition.
+                detail = format!("fixture talk {} on {}", data.talk_id, data.fixture);
+                gate_fixture = Some(data.fixture.clone());
+                Some(data.target_position)
+            } else {
+                match decision_route {
+                    DecisionRoute::SameTalkData => {
+                        let data = slot
+                            .current
+                            .as_ref()
+                            .expect("the interrupt row re-runs existing talk data");
+                        detail = "同一对话数据".to_owned();
+                        Some(data.target_position)
+                    }
+                    DecisionRoute::SubObjective(_) => {
+                        let data = slot
+                            .current
+                            .as_ref()
+                            .expect("the interrupt row runs on existing talk data");
+                        detail = "sub objective to its data target".to_owned();
+                        gate_fixture = data
+                            .target_fixture
+                            .and_then(|fixture| fixture_activities.uid_of(fixture));
+                        Some(data.target_position)
+                    }
+                    DecisionRoute::Factory(_) => {
+                        // CreateGeneralTalkData: the spot near another character,
+                        // else a random floor position. Both chains start from the
+                        // character's own position, not from its navigation origin.
+                        let position = state.0.position;
+                        let near: Vec<(u32, objective::SocialCandidate)> = snaps
                             .iter()
-                            .copied()
-                            .filter(|cell| !occupied.contains(cell))
+                            .filter_map(|snap| {
+                                snap.social_candidate(unit.0, &actions.site_type)
+                                    .map(|candidate| (snap.unit, candidate))
+                            })
                             .collect();
-                        let mut permute = PermuteSource::new(&mut trial);
-                        let wander = objective::wander_target(
-                            origin,
-                            wander_min,
-                            wander_max,
-                            &eligible,
-                            world_of,
-                            &mut permute,
+                        // The candidates as this decision read them, so a replay
+                        // can check them against the others' live state.
+                        record.set(
+                            "near_candidates",
+                            near.iter()
+                                .map(|(other, candidate)| {
+                                    serde_json::json!({
+                                        "unit": other,
+                                        "position": candidate.position,
+                                        "destination": candidate.destination,
+                                        "talk_target": candidate.talk_target,
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                        let candidates: Vec<objective::SocialCandidate> =
+                            near.into_iter().map(|(_, candidate)| candidate).collect();
+                        let npc_positions: Vec<[f32; 3]> =
+                            snaps.iter().map(|snap| snap.position).collect();
+                        let mut uniform = UniformSource::new(&mut trial);
+                        let social = objective::social_target(
+                            &candidates,
+                            position,
+                            &npc_positions,
                             &mut probe,
+                            &mut uniform,
                         );
-                        record.keys("floor_position_order", permute.keys);
-                        detail = format!(
-                            "社交未命中→游走 环 {} 格（键 {}，档 {wander_min}..{wander_max}）",
-                            eligible.len(),
-                            permute.keys
-                        );
-                        wander
-                    }
-                }
-                DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
-                DecisionRoute::NoneTalk => {
-                    record.set("path", "none_talk_factory");
-                    let fixture_targets: Vec<(Entity, Option<Entity>)> = snaps
-                        .iter()
-                        .map(|snap| (snap.entity, snap.target_fixture))
-                        .collect();
-                    let mut none_talk_draws = crate::npc_fixture_activity::NoneTalkDraws::default();
-                    let selected = fixture_activities.select_none_talk(
-                        entity,
-                        unit.0,
-                        &actions.site_type,
-                        epoch.0,
-                        from,
-                        &placements,
-                        &fixture_targets,
-                        &mind.unmovable_fixtures,
-                        face,
-                        &mut trial,
-                        &mut none_talk_draws,
-                    );
-                    // CreateNoneTalkData: one fresh sort key per no-talk row
-                    // (OrderBy Guid), then on a hit one engine pick of the
-                    // timeline in its group.
-                    record.keys("none_talk_order", none_talk_draws.keys);
-                    if let Some((value, len)) = none_talk_draws.timeline_pick {
-                        record.uniform("none_talk_timeline_pick", DRAW_ENGINE_INT_RANGE, &[(value, len)]);
-                    }
-                    match selected {
-                        Ok(Some(selected)) => {
+                        record.uniform("near_character_pick", DRAW_ENGINE_INT_RANGE, &uniform.draws);
+                        if let Some(spot) = social {
                             detail = format!(
-                                "source no-talk action on {:?}/{}",
-                                selected.target.entity, selected.target.uid
+                                "社交链 池抽 {}（候选 {} 员）",
+                                uniform.account(),
+                                candidates.len()
                             );
-                            gate_fixture = Some(selected.target.uid.clone());
-                            let position = selected.position;
-                            fixture_selection = Some(selected);
-                            Some(position)
+                            Some(spot)
+                        } else {
+                            // The move range follows the site type of this
+                            // character's own site.
+                            let in_room = catalog
+                                .site_type_value(&actions.site_type)
+                                .is_some_and(objective::uses_in_room_move_range);
+                            let (wander_min, wander_max) = if in_room {
+                                (
+                                    config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE),
+                                    config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE),
+                                )
+                            } else {
+                                (
+                                    config.int(KEY_NPC_RANDOM_MOVE_MIN_DISTANCE),
+                                    config.int(KEY_NPC_RANDOM_MOVE_MAX_DISTANCE),
+                                )
+                            };
+                            // The source stores the grid origin as signed bytes; the
+                            // ring filter wraps each axis difference to a signed byte,
+                            // so the unwrapped cell gives the same ring.
+                            let origin = cell_of(position[0], position[2]);
+                            let eligible: Vec<Cell> = face
+                                .walkable()
+                                .iter()
+                                .copied()
+                                .filter(|cell| !occupied.contains(cell))
+                                .collect();
+                            let mut permute = PermuteSource::new(&mut trial);
+                            let wander = objective::wander_target(
+                                origin,
+                                wander_min,
+                                wander_max,
+                                &eligible,
+                                world_of,
+                                &mut permute,
+                                &mut probe,
+                            );
+                            record.keys("floor_position_order", permute.keys);
+                            detail = format!(
+                                "社交未命中→游走 环 {} 格（键 {}，档 {wander_min}..{wander_max}）",
+                                eligible.len(),
+                                permute.keys
+                            );
+                            wander
                         }
-                        Ok(None) => {
-                            detail = "no eligible source no-talk fixture action".into();
-                            none_talk_null = true;
-                            None
+                    }
+                    DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                    DecisionRoute::NoneTalk => {
+                        record.set("path", "none_talk_factory");
+                        let fixture_targets: Vec<(Entity, Option<Entity>)> = snaps
+                            .iter()
+                            .map(|snap| (snap.entity, snap.target_fixture))
+                            .collect();
+                        let mut none_talk_draws = crate::npc_fixture_activity::NoneTalkDraws::default();
+                        let selected = fixture_activities.select_none_talk(
+                            entity,
+                            unit.0,
+                            &actions.site_type,
+                            epoch.0,
+                            from,
+                            &placements,
+                            &fixture_targets,
+                            &mind.unmovable_fixtures,
+                            face,
+                            &mut trial,
+                            &mut none_talk_draws,
+                        );
+                        // CreateNoneTalkData: one fresh sort key per no-talk row
+                        // (OrderBy Guid), then on a hit one engine pick of the
+                        // timeline in its group.
+                        record.keys("none_talk_order", none_talk_draws.keys);
+                        if let Some((value, len)) = none_talk_draws.timeline_pick {
+                            record.uniform("none_talk_timeline_pick", DRAW_ENGINE_INT_RANGE, &[(value, len)]);
                         }
-                        Err(crate::npc_fixture_activity::FactoryIssue::Pending(reason)) => {
-                            // Inputs the loop waits for are not installed yet. Drop
-                            // the trial draws and retry the same decision later.
-                            fixture_activities.report_pending(entity, unit.0, reason);
-                            continue 'npc;
-                        }
-                        Err(crate::npc_fixture_activity::FactoryIssue::Gap(reason)) => {
-                            // Host data the factory reads is incomplete and a retry
-                            // cannot be relied on to change it; holding could stop
-                            // this NPC for good. The cycle ends as the factory's empty
-                            // result does; the gap itself is reported once.
-                            detail = "host data gap, factory not evaluated".into();
-                            record.set("path", "host_data_gap");
-                            fixture_activities.report_gap(unit.0, reason);
-                            none_talk_gap = true;
-                            none_talk_null = true;
-                            None
+                        match selected {
+                            Ok(Some(selected)) => {
+                                detail = format!(
+                                    "source no-talk action on {:?}/{}",
+                                    selected.target.entity, selected.target.uid
+                                );
+                                gate_fixture = Some(selected.target.uid.clone());
+                                let position = selected.position;
+                                fixture_selection = Some(selected);
+                                Some(position)
+                            }
+                            Ok(None) => {
+                                detail = "no eligible source no-talk fixture action".into();
+                                none_talk_null = true;
+                                None
+                            }
+                            Err(crate::npc_fixture_activity::FactoryIssue::Pending(reason)) => {
+                                // Inputs the loop waits for are not installed yet. Drop
+                                // the trial draws and retry the same decision later.
+                                fixture_activities.report_pending(entity, unit.0, reason);
+                                continue 'npc;
+                            }
+                            Err(crate::npc_fixture_activity::FactoryIssue::Gap(reason)) => {
+                                // Host data the factory reads is incomplete and a retry
+                                // cannot be relied on to change it; holding could stop
+                                // this NPC for good. The cycle ends as the factory's empty
+                                // result does; the gap itself is reported once.
+                                detail = "host data gap, factory not evaluated".into();
+                                record.set("path", "host_data_gap");
+                                fixture_activities.report_gap(unit.0, reason);
+                                none_talk_gap = true;
+                                none_talk_null = true;
+                                None
+                            }
                         }
                     }
                 }
@@ -2222,7 +2746,7 @@ pub(crate) fn decide(
                 // normally and the next decision takes the null-data arm. A host
                 // data gap takes the same path without evaluating the factory.
                 slot.reset_ai_talk_data();
-                mind.current = Some(ObjectiveType::Talk);
+                mind.begin_objective(ObjectiveType::Talk);
                 finish_objective(unit.0, &mut mind, &mut slot, frame, true);
                 let outcome_word = if none_talk_gap { "工厂未求值" } else { "工厂空" };
                 info!(
@@ -2233,7 +2757,7 @@ pub(crate) fn decide(
             }
 
             let target_position = destination.unwrap_or(state.0.position);
-            if general_talk.is_some() {
+            if general_talk.is_some() || fixture_talk.is_some() {
                 record.set("talk_target", serde_json::json!(target_position));
             }
             if let Some(selected) = &fixture_selection {
@@ -2253,6 +2777,24 @@ pub(crate) fn decide(
                     main_character: unit.0,
                     characters: vec![unit.0],
                     pre_action: Some(resolved.pre_action()),
+                    locate: None,
+                    pending_factory: None,
+                });
+            } else if let Some(prepared) = &fixture_talk {
+                // CreateCharacterTalkData, then SetAITalkData: the master, the
+                // fixture, the target position, the pre-action and the
+                // factory's character list; the tweet id is the talk's
+                // pre-action tweet.
+                actions.tweet_id = prepared.resolved.pre_action().id;
+                slot.set_current(AiTalkData {
+                    kind: prepared.data.kind,
+                    content: Some(prepared.content.clone()),
+                    target_fixture: Some(prepared.fixture),
+                    target_position,
+                    main_character: unit.0,
+                    characters: prepared.data.members.clone(),
+                    pre_action: Some(prepared.resolved.pre_action()),
+                    locate: prepared.data.locate.clone(),
                     pending_factory: None,
                 });
             }
@@ -2274,7 +2816,7 @@ pub(crate) fn decide(
                 mind.yield_since = Some(mind.force_update_end.max(frame));
                 continue 'npc;
             }
-            mind.current = Some(objective_type);
+            mind.begin_objective(objective_type);
             let source_word = match decision {
                 objective::Decision::RefuelAndTalk => "空槽补位",
                 objective::Decision::NoneTalk => "无对话槽",
@@ -2282,6 +2824,25 @@ pub(crate) fn decide(
                 _ => "梯末抽签",
             };
             let objective_word = decision_route.word();
+            // The group talk's drafts and claims run after this pass; its
+            // gathering runs whatever the main's own move does.
+            if let Some(prepared) = fixture_talk.as_mut().filter(|prepared| prepared.is_group()) {
+                let pre_action = prepared.resolved.pre_action();
+                groups.start(crate::npc_fixture_talk::GroupStart {
+                    main: entity,
+                    main_unit: unit.0,
+                    kind: prepared.data.kind,
+                    talk_id: prepared.data.talk_id,
+                    fixture: prepared.fixture,
+                    fixture_uid: prepared.data.fixture.clone(),
+                    members: prepared.data.members.clone(),
+                    locate: prepared.data.locate.clone().unwrap_or_default(),
+                    timeline: prepared.data.timeline,
+                    names: std::mem::take(&mut prepared.names),
+                    drafts: std::mem::take(&mut prepared.drafts),
+                    tweet: (pre_action.id != 0).then(|| (pre_action.id, pre_action.text.clone())),
+                });
+            }
             match destination {
                 Some(landing) => {
                     target.0 = landing;
@@ -2324,6 +2885,16 @@ pub(crate) fn decide(
                         if let Some(uid) = &unmovable {
                             mind.unmovable_fixtures.push(uid.clone());
                         }
+                        if groups.owns(entity) {
+                            // MoveAsync ends NoneRoute; the gathering still
+                            // runs to its end first.
+                            groups.main_departure_failed(entity);
+                            continue 'npc;
+                        }
+                        if let DecisionRoute::SubObjective(kind) = decision_route {
+                            sub_objective_move_failed(kind, &mut mind, &mut actions, &mut rest, frame);
+                            continue 'cascade;
+                        }
                         finish_objective(unit.0, &mut mind, &mut slot, frame, true);
                         info!(
                             "[npc unit={}] 目标裁决 {source_word}：{draws_word} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 出发门未过{}",
@@ -2355,7 +2926,13 @@ pub(crate) fn decide(
                         polyline,
                     ) {
                         Some(depart_phase) => {
-                            if let Some(selected) = fixture_selection.take() {
+                            // A fixture talk whose pre-action carries a timeline:
+                            // its move, window and timeline run as one fixture
+                            // session from here.
+                            let talk_timeline = fixture_talk
+                                .as_mut()
+                                .and_then(|prepared| prepared.timeline.take());
+                            if let Some(selected) = fixture_selection.take().or(talk_timeline) {
                                 if !fixture_activities.begin(selected, actions.enable_talk) {
                                     record.emit("activity_refused", calls);
                                     route.cancel();
@@ -2369,6 +2946,14 @@ pub(crate) fn decide(
                                 }
                             }
                             record.emit("departed", calls);
+                            if let DecisionRoute::SubObjective(kind) = decision_route {
+                                let members = slot
+                                    .current
+                                    .as_ref()
+                                    .map(|data| data.characters.clone())
+                                    .unwrap_or_default();
+                                groups.begin_sub(entity, unit.0, kind, members);
+                            }
                             *phase = depart_phase;
                             crate::npc::declare_navigation_action(
                                 &mut actions,
@@ -2391,6 +2976,18 @@ pub(crate) fn decide(
                                 landing[1],
                                 landing[2],
                             );
+                        }
+                        None if groups.owns(entity) => {
+                            record.emit("no_route", calls);
+                            groups.main_departure_failed(entity);
+                            continue 'npc;
+                        }
+                        None if matches!(decision_route, DecisionRoute::SubObjective(_)) => {
+                            record.emit("no_route", calls);
+                            if let DecisionRoute::SubObjective(kind) = decision_route {
+                                sub_objective_move_failed(kind, &mut mind, &mut actions, &mut rest, frame);
+                            }
+                            continue 'cascade;
                         }
                         None => {
                             record.emit("no_route", calls);
@@ -2477,6 +3074,42 @@ pub(crate) fn finish_objective(
         return;
     }
     mind.yield_since = Some(frame);
+}
+
+/// A member's sub objective whose move failed at its start: the sub
+/// objective 18 makes Model.ForceUpdateObjective and ends (no cancel); the
+/// sub objective 9's failed move throws its cancellation, whose OnCancel
+/// changes to Idle and makes one ForceUpdateObjective. Both calls are made on
+/// the same pass.
+fn sub_objective_move_failed(
+    kind: ObjectiveType,
+    mind: &mut ObjectiveMind,
+    actions: &mut crate::npc::NpcActions,
+    rest: &mut crate::npc::RestLifecycle,
+    frame: u32,
+) {
+    if kind == ObjectiveType::SubCharacterFixtureAction {
+        crate::npc_fixture_talk::model_force_update(mind, frame);
+    } else {
+        actions.change(crate::npc::NpcAction::Idle, rest);
+        owe_force_updates(mind, frame, 1);
+    }
+}
+
+/// presenter.ForceUpdateObjective's owed part on a character that is not
+/// talking: its current objective is cancelled here, and `count`
+/// ForceUpdateObjective calls (each a reset and a row-1 cascade) are made by
+/// its next decision pass; the objective ends on `end`, then the loop yields
+/// and runs TryRest (a reset clears the flag that would skip it).
+pub(crate) fn owe_force_updates(mind: &mut ObjectiveMind, end: u32, count: u8) {
+    mind.cancelled = true;
+    mind.executing = false;
+    mind.body = None;
+    mind.rest = None;
+    mind.yield_since = None;
+    mind.skip_next_rest = false;
+    mind.force_updates = mind.force_updates.saturating_add(count);
+    mind.force_update_end = end;
 }
 
 /// The talk objective after its move succeeded: OnArrive, the common-fixture

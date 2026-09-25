@@ -316,6 +316,8 @@ impl TalkCatalog<'_> {
                 talk4: 0.0,
             },
             fixture_gates: None,
+            fixture_host: None,
+            together: None,
         };
         let mut engine_int = |len: usize| draw(len);
         let mut engine_float = |_: f32| -> f32 { unreachable!("the general lottery draws no float") };
@@ -1146,6 +1148,9 @@ pub(crate) struct PlayerTalkSession {
     /// before the cast goes back to idle). General-state and library
     /// playback report nothing.
     read_report: Option<i32>,
+    /// The character's state at the end: `None` is ChangeIdleState; the
+    /// playing-fixture talk ends its first character in FixtureActionIdle.
+    end_state: Option<crate::npc::NpcAction>,
     /// 玩家位与朝向的会话内账：开场时快照（玩家参演期间位移推进被持
     /// 留跳过，位不变——快照即现值）；朝向只被本模块的转身件改写，
     /// 每次玩家转身把账同步到该步的目标朝向。
@@ -1288,15 +1293,39 @@ pub(crate) fn turn_player_to_point(
     });
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TalkRoute {
+    /// PlayGeneralTalk.
     General,
+    /// PlaySetTalk(presenter, true): the character's own current master.
     CurrentSet,
+    /// PlayPlayingFixtureTalk: the general lottery's talk (no Current
+    /// overwrite), then the first character in FixtureActionIdle.
+    PlayingFixture,
+    /// PlaySomeCharacterTalkFixture: the multiple-character timeline's talk
+    /// (its main's current master) with that talk's cast.
+    SomeCharacterFixture(Entity),
 }
 
+/// OnClickPlayerTalkAction's ladder, first row that holds:
+/// 1 tutorial talk (out of scope); 2 after-edit-layout talk and 3 random-walk
+/// talk -> the general talk; 4 IsCommunicationWhileDoingWait (type 6 and
+/// every member with a locate row within 0.1 of its own data target) -> the
+/// set talk; 5 IsPlayingSomeCharacterTalkFixture (a registered NPC timeline
+/// of this unit with more than one character) -> PlaySomeCharacterTalkFixture;
+/// 6 birthday wait; 7 state Idle, AutoMove, Walk or Rest -> the general talk;
+/// 8 state FixtureActionIdle -> the playing-fixture talk; 9 state Tweet -> the
+/// set talk; 10 anything else (FixtureAction, the multi-character states,
+/// SomeCharacterCommunication) -> the general talk. No talk data -> the
+/// general talk.
+///
+/// Row 5's timeline is the multiple-character fixture talk's (`some_main`,
+/// its main, while its controller is in the fixture timeline store).
 fn route_for(
     actions: &crate::npc::NpcActions,
     data: Option<&crate::npc_objective::AiTalkData>,
+    communication_arrived: impl Fn(&crate::npc_objective::AiTalkData) -> bool,
+    some_main: Option<Entity>,
 ) -> Result<TalkRoute, &'static str> {
     use crate::npc::NpcAction;
     use moly_law::objective::TalkType;
@@ -1312,60 +1341,63 @@ fn route_for(
     if matches!(data.kind, TalkType::AfterEditLayout | TalkType::RandomWalk) {
         return Ok(TalkRoute::General);
     }
-    if data.kind == TalkType::CommunicationWhileDoingWait {
-        return Err("while-doing participants and their arrival slots are not supplied");
+    if data.kind == TalkType::CommunicationWhileDoingWait && communication_arrived(data) {
+        if data.content.is_none() {
+            return Err("while-doing-wait talk: the current talk data has no master talk (the source raises)");
+        }
+        return Ok(TalkRoute::CurrentSet);
     }
-    // A running furniture action needs its activity's real timeline, actors
-    // and loop-restoration owner. It cannot borrow the ordinary route merely
-    // because its data factory is incomplete.
-    if matches!(
-        actions.current,
-        NpcAction::FixtureAction | NpcAction::FixtureActionIdle
-    ) {
-        return Err(
-            "playing-fixture talk needs the registered activity and its IK/loop restore owner",
-        );
+    if let Some(main) = some_main {
+        return Ok(TalkRoute::SomeCharacterFixture(main));
     }
     if data.kind == TalkType::BirthdayParty {
         return Err("birthday context and authored scenario are not supplied");
     }
-
-    // IsGeneralTalkState reads the *current action*: Idle, AutoMove, Walk or
-    // Rest. A CommonFixture/NoneTalk objective may still be a future intent
-    // while that action is ordinary. Its pending master is not a registered
-    // playing fixture and does not gate PlayGeneralTalk's independent lottery.
-    // IsPlayingSomeCharacterTalkFixture instead requires an actual timeline
-    // registration with multiple action presenters, not an AITalkType label.
-    if matches!(
-        actions.current,
-        NpcAction::Idle | NpcAction::AutoMove | NpcAction::Walk | NpcAction::Rest
-    ) {
-        return Ok(TalkRoute::General);
-    }
-    // The tweet window: the set-talk leaf replays the character's current
-    // master talk with its target fixture and reports it read. It reads the
-    // action state only, not the talk type, and nothing before it refuses a
-    // fixture target or an unfinished factory.
-    if actions.current == NpcAction::Tweet {
-        if data.content.is_none() {
-            // The leaf dereferences the current master talk.
-            return Err("tweet window: the current talk data has no master talk (the source raises)");
+    match actions.current {
+        NpcAction::Idle | NpcAction::AutoMove | NpcAction::Walk | NpcAction::Rest => {
+            Ok(TalkRoute::General)
         }
-        return Ok(TalkRoute::CurrentSet);
+        NpcAction::FixtureActionIdle => Ok(TalkRoute::PlayingFixture),
+        // The tweet window: the set-talk leaf replays the character's current
+        // master talk with its target fixture and reports it read.
+        NpcAction::Tweet => {
+            if data.content.is_none() {
+                // The leaf dereferences the current master talk.
+                return Err("tweet window: the current talk data has no master talk (the source raises)");
+            }
+            Ok(TalkRoute::CurrentSet)
+        }
+        _ => Ok(TalkRoute::General),
     }
-    if let Some(reason) = data.pending_factory {
-        return Err(reason);
-    }
-    if matches!(
-        data.kind,
-        TalkType::MultipleCharacterFixture
-            | TalkType::SingleCharacterFixture
-            | TalkType::CommonFixture
-    ) || data.target_fixture.is_some()
-    {
-        return Err("registered NPC fixture timeline and loop control are not supplied");
-    }
-    Ok(TalkRoute::General)
+}
+
+/// IsCommunicationWhileDoingWait's arrival count: every locate row's member
+/// whose own data target is within 0.1 (sqrt(dz*dz + (dx*dx + dy*dy)), d =
+/// target - position) counts; the count must equal the list's length.
+fn communication_arrived(
+    data: &crate::npc_objective::AiTalkData,
+    members: &[(u32, [f32; 3], Option<[f32; 3]>)],
+) -> bool {
+    let Some(locate) = data.locate.as_ref() else {
+        return false;
+    };
+    let arrived = locate
+        .iter()
+        .filter(|row| {
+            members.iter().any(|(unit, position, target)| {
+                *unit as i32 == row.unit
+                    && target.is_some_and(|target| {
+                        let (dx, dy, dz) = (
+                            target[0] - position[0],
+                            target[1] - position[1],
+                            target[2] - position[2],
+                        );
+                        (dz * dz + (dx * dx + dy * dy)).sqrt() < 0.1
+                    })
+            })
+        })
+        .count();
+    arrived == locate.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -1406,6 +1438,7 @@ pub(crate) fn consume_trigger(
     >,
     mut ledger: ResMut<PlayerTalkLedger>,
     mut window: ResMut<TalkWindowState>,
+    groups: Option<Res<crate::npc_fixture_talk::FixtureTalkGroups>>,
 ) {
     // 同帧多请求只发起第一个（资源插入是延迟命令，循环内读不到自己
     // 刚插的会话）。
@@ -1454,11 +1487,33 @@ pub(crate) fn consume_trigger(
             ledger.reject(request, "requested NPC entity/unit identity changed");
             continue;
         }
+        let members: Vec<(u32, [f32; 3], Option<[f32; 3]>)> = npcs
+            .iter()
+            .map(|(_, member, walk, _, _, slot)| {
+                (
+                    member.0,
+                    walk.0.position,
+                    slot.current.as_ref().map(|data| data.target_position),
+                )
+            })
+            .collect();
+        // The ladder's two inputs besides the state and the data type: row 4's
+        // arrival count and row 5's registered timeline (both logged with the
+        // route).
+        let arrived = binding
+            .current
+            .as_ref()
+            .is_some_and(|data| communication_arrived(data, &members));
+        let some_main = groups
+            .as_ref()
+            .and_then(|groups| groups.some_character_timeline(request.unit));
         let route = match request
             .exact
             .as_ref()
             .map(|_| Ok(TalkRoute::CurrentSet))
-            .unwrap_or_else(|| route_for(actions, binding.current.as_ref()))
+            .unwrap_or_else(|| {
+                route_for(actions, binding.current.as_ref(), |_| arrived, some_main)
+            })
         {
             Ok(route) => route,
             Err(reason) => {
@@ -1470,10 +1525,27 @@ pub(crate) fn consume_trigger(
                 continue;
             }
         };
+        // Row 5 plays its main's current data (the multiple-character talk).
+        let main_data = match route {
+            TalkRoute::SomeCharacterFixture(main) => {
+                match npcs.get(main).ok().and_then(|(_, _, _, _, _, slot)| slot.current.clone()) {
+                    Some(data) if data.content.is_some() => Some(data),
+                    _ => {
+                        ledger.reject(
+                            request,
+                            "multiple-character timeline: its main has no master talk (the source raises)",
+                        );
+                        continue;
+                    }
+                }
+            }
+            _ => None,
+        };
         info!(
-            "[player-talk] unit {} route={route:?} action={:?} ai_type={:?} future_factory_pending={}",
+            "[player-talk] unit {} route={route:?} action={:?} ai_type={:?} future_factory_pending={} arrived={arrived} timeline_main={}",
             request.unit, actions.current, binding.kind(),
             binding.current.as_ref().is_some_and(|data| data.pending_factory.is_some()),
+            some_main.is_some(),
         );
         let previous_id = binding.previous_id();
         let selection = if let Some(content) = request.exact.as_ref() {
@@ -1484,7 +1556,7 @@ pub(crate) fn consume_trigger(
             }
         } else {
             match route {
-                TalkRoute::General => {
+                TalkRoute::General | TalkRoute::PlayingFixture => {
                     let mut uniform = UniformSource {
                         rng: TalkRng(selection_seed(
                             request.unit,
@@ -1510,10 +1582,12 @@ pub(crate) fn consume_trigger(
                         }
                     };
                     let lottery_id = selected.master_id;
+                    // PlayPlayingFixtureTalk plays the lottery's talk as it is.
                     if let Some(current) = binding
                         .current
                         .as_ref()
                         .and_then(|data| data.content.as_ref())
+                        .filter(|_| route == TalkRoute::General)
                     {
                         match current.is_general {
                             Some(true) => selected.master_id = current.master_id,
@@ -1532,6 +1606,15 @@ pub(crate) fn consume_trigger(
                     request.unit, lottery_id, uniform.calls, selected.master_id, selected.pool_len);
                     selected
                 }
+                TalkRoute::SomeCharacterFixture(_) => GeneralSelection {
+                    master_id: main_data
+                        .as_ref()
+                        .and_then(|data| data.content.as_ref())
+                        .expect("route requires the main's content")
+                        .master_id,
+                    pool_len: 0,
+                    replayed: true,
+                },
                 TalkRoute::CurrentSet => GeneralSelection {
                     master_id: binding
                         .current
@@ -1552,7 +1635,10 @@ pub(crate) fn consume_trigger(
                     .current
                     .as_ref()
                     .and_then(|data| data.content.as_ref()),
-                TalkRoute::General => binding
+                TalkRoute::SomeCharacterFixture(_) => {
+                    main_data.as_ref().and_then(|data| data.content.as_ref())
+                }
+                TalkRoute::General | TalkRoute::PlayingFixture => binding
                     .current
                     .as_ref()
                     .and_then(|data| data.content.as_ref())
@@ -1633,10 +1719,15 @@ pub(crate) fn consume_trigger(
         } else {
             match route {
                 TalkRoute::General => None,
-                TalkRoute::CurrentSet => binding
+                // PlaySetTalk and PlayPlayingFixtureTalk pass the data's
+                // TargetFixture to PlayAsync.
+                TalkRoute::CurrentSet | TalkRoute::PlayingFixture => binding
                     .current
                     .as_ref()
                     .and_then(|data| data.target_fixture),
+                TalkRoute::SomeCharacterFixture(_) => {
+                    main_data.as_ref().and_then(|data| data.target_fixture)
+                }
             }
         };
         let fixture_bindings = match &resolved {
@@ -1677,8 +1768,24 @@ pub(crate) fn consume_trigger(
             crate::npc::enter_player_talk(&mut commands, actor.entity, player_entity);
         }
         session_started = true;
+        // SendAlreadyReadTalkAsync(the played talk): the set talk, the
+        // playing-fixture talk and the multiple-character timeline's talk
+        // always, the general talk when the clicked character has talk data.
+        let read_report = request.exact.is_none()
+            && match route {
+                TalkRoute::CurrentSet
+                | TalkRoute::PlayingFixture
+                | TalkRoute::SomeCharacterFixture(_) => true,
+                TalkRoute::General => binding.current.is_some(),
+            };
         let (final_unit, row) = match resolved {
             ResolvedTalk::Fixture(row) => {
+                if read_report {
+                    commands.insert_resource(PendingFixtureRead {
+                        talk_id: row.talk_id,
+                        seen: false,
+                    });
+                }
                 crate::talk::start_selected(
                     &mut commands,
                     &mut window,
@@ -1774,8 +1881,12 @@ pub(crate) fn consume_trigger(
             click_releases: 0,
             selected_from_pool: selection.pool_len,
             replayed,
-            read_report: (matches!(route, TalkRoute::CurrentSet) && request.exact.is_none())
-                .then_some(row.talk_id),
+            // SendAlreadyReadTalkAsync(the played talk): the set talk and the
+            // playing-fixture talk always, the general talk when the clicked
+            // character has talk data.
+            read_report: read_report.then_some(row.talk_id),
+            end_state: (request.exact.is_none() && route == TalkRoute::PlayingFixture)
+                .then_some(crate::npc::NpcAction::FixtureActionIdle),
             player_position,
             player_rotation,
             first_tick: true,
@@ -1791,6 +1902,43 @@ pub(crate) fn consume_trigger(
             row.talk_id
         );
         commands.insert_resource(session);
+    }
+}
+
+/// A fixture-backend player talk that reports itself read once its dialogue
+/// closes (the pair talk's PlayAsync returned); a talk that ends without
+/// closing (cancelled) reports nothing.
+#[derive(Resource)]
+pub(crate) struct PendingFixtureRead {
+    talk_id: i32,
+    seen: bool,
+}
+
+pub(crate) fn report_closed_fixture_talks(world: &mut World) {
+    let Some(mut pending) = world.remove_resource::<PendingFixtureRead>() else {
+        return;
+    };
+    let talk = world
+        .get_resource::<crate::talk::ActiveTalk>()
+        .filter(|talk| talk.talk_id() == pending.talk_id)
+        .map(|talk| talk.is_closing());
+    match talk {
+        Some(true) => {
+            world
+                .get_resource_mut::<crate::server_panel::ServerPanel>()
+                .expect("the server panel is installed before any NPC exists")
+                .report_talk_read(pending.talk_id);
+            info!("[player-talk] fixture talk {} closed; reported read", pending.talk_id);
+        }
+        Some(false) => {
+            pending.seen = true;
+            world.insert_resource(pending);
+        }
+        None if !pending.seen => world.insert_resource(pending),
+        None => info!(
+            "[player-talk] fixture talk {} ended without closing; not reported",
+            pending.talk_id
+        ),
     }
 }
 
@@ -2832,7 +2980,7 @@ fn finish_session(
     if let Ok(mut entity) = commands.get_entity(session.npc) {
         entity.remove::<TalkHold>().remove::<PlayerTalkRuntime>();
         drop(entity);
-        crate::npc::leave_player_talk(commands, session.npc);
+        crate::npc::leave_player_talk_to(commands, session.npc, session.end_state);
     }
     // 玩家：撤持留与转身件（相位已是驻留；朝向保持当前值——玩家域
     // 朝向直设，下一次移动自会重设朝向，无律状态要同步）。

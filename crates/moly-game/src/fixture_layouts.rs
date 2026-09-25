@@ -20,8 +20,11 @@ pub(crate) const SECTION: &str = "OfflineSiteLayouts";
 
 /// The home site's compact starter layout, from the server panel's housing
 /// layout block (the server decides placements; the panel document is the
-/// only source). Installed once, when the panel document is parsed.
-static HOME_STARTER: std::sync::OnceLock<Vec<PlacementMock<String>>> = std::sync::OnceLock::new();
+/// only source), each row with the authored piece's traits when the row
+/// states them. Installed once, when the panel document is parsed.
+static HOME_STARTER: std::sync::OnceLock<Vec<StarterRow>> = std::sync::OnceLock::new();
+
+type StarterRow = (PlacementMock<String>, Option<super::region::PieceTraits>);
 
 /// Decodes and installs the panel's home starter rows (once per process);
 /// returns the row count.
@@ -38,7 +41,7 @@ pub(crate) fn install_home_starter_records(records: &[Value]) -> Result<usize, S
     Ok(count)
 }
 
-fn install_home_starter(rows: Vec<PlacementMock<String>>) -> Result<(), String> {
+fn install_home_starter(rows: Vec<StarterRow>) -> Result<(), String> {
     match HOME_STARTER.get() {
         Some(installed) if *installed == rows => Ok(()),
         Some(_) => Err("a different home housing layout is already installed".into()),
@@ -56,9 +59,11 @@ pub(crate) fn home_starter_ready() -> bool {
 
 /// One starter row of the panel's housing layout block: package, master
 /// fixture id, texture, the footprint corners, centre height, layout type
-/// bits and rotation (0..3), in the offline layout record's field names. The
-/// footprint is checked with the same position rules as a saved record.
-fn decode_starter_row(record: &Value) -> Result<PlacementMock<String>, String> {
+/// bits and rotation (0..3), in the offline layout record's field names, and
+/// optionally `authoredPiece`, the authored piece's master traits (read only
+/// on a snapshot whose fixture master lacks the piece). The footprint is
+/// checked with the same position rules as a saved record.
+fn decode_starter_row(record: &Value) -> Result<StarterRow, String> {
     let name = record["package"]
         .as_str()
         .ok_or("housing layout row package is missing")?;
@@ -86,16 +91,23 @@ fn decode_starter_row(record: &Value) -> Result<PlacementMock<String>, String> {
     let (placed_min, placed_max) =
         moly_law::fixture::position::layout_footprint(center, size, direction, layout)?;
     moly_law::fixture::position::field_position(placed_min, placed_max, center_y, layout)?;
-    Ok(PlacementMock {
-        texture_id,
-        package,
-        min,
-        max,
-        center_y,
-        layout,
-        direction,
-        fixture_id,
-    })
+    let authored = match record.get("authoredPiece") {
+        None | Some(Value::Null) => None,
+        Some(traits) => Some(super::region::PieceTraits::from_record(traits)?),
+    };
+    Ok((
+        PlacementMock {
+            texture_id,
+            package,
+            min,
+            max,
+            center_y,
+            layout,
+            direction,
+            fixture_id,
+        },
+        authored,
+    ))
 }
 const VERSION: u64 = 1;
 
@@ -292,9 +304,10 @@ impl SiteFixtureLayouts {
         // This showcase is a HOME starter only. A room or harvest map without
         // a saved layout starts empty; it must never inherit outdoor rows.
         // The compact starter is the server panel's housing layout; the full
-        // showcase is still this module's table. The full table is
-        // region-keyed: without the snapshot's own region there is no table to
-        // pick, and no region is assumed.
+        // showcase is still this module's table. Both are resolved against the
+        // snapshot's own fixture master, whose region must be the snapshot's
+        // source region: without that region no row is installed, and no region
+        // is assumed.
         let mut rows: Vec<PlacementMock<String>> = Vec::new();
         if site_type == "home_site" {
             let region = region.ok_or(concat!(
@@ -302,16 +315,16 @@ impl SiteFixtureLayouts {
                 "(source.json source.region) is not available; the starter rows ",
                 "are region-keyed, so none were installed"
             ))?;
-            let mut showcase = match content {
+            let mut showcase = Vec::new();
+            match content {
                 OfflineSceneContent::Compact => {
-                    rows = HOME_STARTER
+                    let starter = HOME_STARTER
                         .get()
-                        .cloned()
                         .ok_or("the server panel's home housing layout is not installed yet")?;
-                    Vec::new()
+                    rows = super::region::resolve_rows(starter.clone(), region.0)?;
                 }
-                OfflineSceneContent::Full => super::full_starter_rows(region.0)?,
-            };
+                OfflineSceneContent::Full => rows = super::full_starter_rows(region.0)?,
+            }
             gallery::append_preview(&mut showcase);
             rows.extend(showcase.into_iter().map(PlacementMock::into_owned));
             if let Some(direction) = super::direction_override() {
