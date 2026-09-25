@@ -12,14 +12,19 @@
 //! Initial law takes, a constant gravity modifier, Shape through the target's
 //! own Shape law (or no Shape with zero speed), RotationOverLifetime with
 //! constant or two-constant axes, VelocityOverLifetime (constant or
-//! two-constant linear axes of one mode, not in world space, a zero orbital
-//! block, the constant speed modifier one), ClampVelocity (one axis group, a
-//! constant limit, zero drag), SizeOverLifetime and ColorOverLifetime
-//! (render-time), CustomData, no ring buffer, simulation speed one. Any other
-//! module on the target, and any other configuration of those two, refuses.
-//! The newborn and catch-up pre-simulation modules run in the engine's
-//! order: gravity and the animated velocity cleared, RotationOverLifetime,
-//! Velocity, ClampVelocity, CustomData. The inherited block must be the neutral one
+//! two-constant linear axes of one mode, not in world space, the constant
+//! speed modifier one; orbital, offset and radial constants or two constants,
+//! their orbital section only in a Local target), Noise (the qualified Noise
+//! law, with the target's installed owner seed and scroll), ClampVelocity (one
+//! axis group, a constant limit, zero drag), SizeOverLifetime and
+//! ColorOverLifetime (render-time), CustomData, no ring buffer, simulation
+//! speed one. Any other module on the target, and any other configuration of
+//! those, refuses. The newborn and catch-up pre-simulation modules run in the
+//! engine's order: gravity and the animated velocity cleared,
+//! RotationOverLifetime, Velocity (linear, then orbital), Noise,
+//! ClampVelocity, CustomData. The newborn call does not advance the Noise
+//! scroll; each catch-up step's call does, once, before the modules read it.
+//! The inherited block must be the neutral one
 //! or carry only the size (an edge that inherits the size): each stored start
 //! size axis is then the inherited axis times the target's own start size of
 //! that axis (the target's arrays store three axes when its start size is 3D
@@ -242,8 +247,11 @@ struct ChildLaws {
     angular_speed: bool,
     /// The particle arrays carry three size axes.
     size_3d: bool,
-    /// VelocityOverLifetime's linear axes (the orbital block is zero).
+    /// VelocityOverLifetime (linear axes, and the orbital blocks).
     velocity: Option<moly_law::particle::velocity::VelocityOverLifetime>,
+    /// The orbital section contributes (some orbital, offset or radial block
+    /// is not zero); the target is Local.
+    orbital: bool,
     /// ClampVelocity (one axis group, a constant limit, zero drag).
     limit: Option<moly_law::particle::LimitVelocity>,
 }
@@ -263,7 +271,6 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     }
     if emitter.force.is_some()
         || emitter.inherit_velocity.is_some()
-        || emitter.noise.is_some()
         || emitter.collision.is_some()
         || emitter.trails.is_some()
         || emitter.texture_sheet.is_some()
@@ -324,6 +331,20 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         None => None,
         Some(params) => Some(child_limit(params)?),
     };
+    // Noise runs the root path's law; its owner seed and scroll are the
+    // target's own, installed with its seed owner.
+    if let Some(params) = &emitter.noise {
+        moly_law::particle::noise::NoiseLaw::from_params(params).map_err(Refused::Unsupported)?;
+    }
+    let orbital = match &emitter.velocity_over_lifetime {
+        Some(params) => !zero_orbital(params),
+        None => false,
+    };
+    if orbital && emitter.simulation_space != SimulationSpace::Local {
+        // The orbital section converts the particle position through the
+        // owner's matrices outside Local space; that conversion was not read.
+        return unsupported("target orbital Velocity outside Local space");
+    }
     // The source admission fixes the rotation direction randomization at 0.
     let initial = InitialLaw::from_params(&emitter.start, 0.0).map_err(Refused::Initial)?;
     Ok(ChildLaws {
@@ -339,18 +360,30 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         angular_speed: emitter.rotation_over_lifetime.is_some(),
         size_3d: moly_law::particle::death_event::size_3d(emitter),
         velocity,
+        orbital,
         limit,
     })
+}
+
+/// Whether the orbital, offset and radial blocks are all zero: the engine's
+/// orbital section then adds a signed zero (its angle rotates by exactly
+/// nothing and its radial step is zero), which is not composed.
+fn zero_orbital(params: &moly_law::particle::schema::VelocityOverLifetimeParams) -> bool {
+    let zero = |c: &MinMaxCurve| matches!(c, MinMaxCurve::Constant(v) if *v == 0.0)
+        || matches!(c, MinMaxCurve::TwoConstants { min, max } if *min == 0.0 && *max == 0.0);
+    params.orbital.iter().all(zero) && params.orbital_offset.iter().all(zero) && zero(&params.radial)
 }
 
 /// A target's VelocityOverLifetime on the child path. VelocityModule::Update
 /// adds `M * linear` to the animated velocity, `M` the identity for a Local
 /// or Custom target and the owner's first three columns for a World one (the
 /// linear axes not in world space); a two-constant axis draws from the
-/// particle seed. Its orbital section runs for these blocks too, and an
-/// all-zero orbital block adds a signed zero (its angle rotates by exactly
-/// nothing and its radial step is zero), which is not composed. The speed
-/// modifier storage exists only for a modifier other than the constant one.
+/// particle seed. Its orbital section then adds the orbital velocity: the
+/// lane's position minus the offset, turned by angular speed times dt (Z, X,
+/// Y), moved along itself by radial speed times dt, less the unturned vector,
+/// over dt (the orbital law of the root path). An all-zero orbital block adds
+/// a signed zero, which is not composed. The speed modifier storage exists
+/// only for a modifier other than the constant one.
 fn child_velocity(params: &moly_law::particle::schema::VelocityOverLifetimeParams)
     -> Result<moly_law::particle::velocity::VelocityOverLifetime, Refused> {
     let unsupported = |reason| Err(Refused::Unsupported(reason));
@@ -366,10 +399,11 @@ fn child_velocity(params: &moly_law::particle::schema::VelocityOverLifetimeParam
     if !(constants || two_constants) {
         return unsupported("target Velocity linear axes other than constants or two constants of one mode");
     }
-    let zero = |c: &MinMaxCurve| matches!(c, MinMaxCurve::Constant(v) if *v == 0.0)
-        || matches!(c, MinMaxCurve::TwoConstants { min, max } if *min == 0.0 && *max == 0.0);
-    if !(params.orbital.iter().all(zero) && params.orbital_offset.iter().all(zero) && zero(&params.radial)) {
-        return unsupported("target Velocity orbital, offset or radial other than zero");
+    // The orbital section's curve-mode templates were not read; constants
+    // and two constants take the per-particle seed streams of the law.
+    let scalar = |c: &MinMaxCurve| matches!(c, MinMaxCurve::Constant(_) | MinMaxCurve::TwoConstants { .. });
+    if !(params.orbital.iter().all(scalar) && params.orbital_offset.iter().all(scalar) && scalar(&params.radial)) {
+        return unsupported("target Velocity orbital, offset or radial curve mode");
     }
     moly_law::particle::velocity::VelocityOverLifetime::from_params(params).map_err(Refused::Unsupported)
 }
@@ -477,6 +511,11 @@ pub(super) fn apply_command_with_events(
     command.validate()?;
     let inherit = inherited_size(&command.inherited_words)?;
     let laws = child_laws(&system.emitter)?;
+    if system.emitter.noise.is_some() != system.noise.is_some() {
+        return Err(Refused::Unsupported("target Noise without its installed owner seed and scroll"));
+    }
+    // The target's Noise scroll, staged: the catch-up steps advance it.
+    let mut scroll = system.noise.as_ref().map_or(0.0, |noise| noise.state.scroll);
     if system.emitter.shape.is_some() != shape.is_some() {
         return Err(Refused::Unsupported("Shape step does not match the target's Shape module"));
     }
@@ -599,7 +638,14 @@ pub(super) fn apply_command_with_events(
     let batch_seeds: Vec<u32> = (0..lanes.len()).map(|index| lanes[index & !3].seed).collect();
     for (index, lane) in lanes.iter_mut().enumerate() {
         let clamp_dt = if arms::on("clampCommandDt") { command.dt } else { lane.birth_dt };
-        let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt };
+        // StartModules' call passes no scroll update.
+        let newborn_scroll = if arms::on("noiseScrollOnNewborn") {
+            advanced_scroll(system, scroll, lane.birth_dt)
+        } else {
+            scroll
+        };
+        let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt,
+            noise_scroll: newborn_scroll };
         pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space, space);
     }
     for lane in &mut lanes {
@@ -671,8 +717,14 @@ pub(super) fn apply_command_with_events(
             steps += 1;
             let covered = (4 * end.div_ceil(4)).min(lanes.len());
             let batch_seeds: Vec<u32> = (0..covered).map(|index| lanes[index & !3].seed).collect();
+            // Emit's catch-up call passes the scroll update: Noise advances
+            // the system scroll once for the (nonempty) range, then reads it.
+            if !arms::on("noiseCatchUpScrollFrozen") {
+                scroll = advanced_scroll(system, scroll, dt);
+            }
             for (index, lane) in lanes[..covered].iter_mut().enumerate() {
-                let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt };
+                let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt,
+                    noise_scroll: scroll };
                 pre_modules(system, &laws, lane, dt, update.gravity, gravity_space, space);
             }
             for lane in &mut lanes[..covered] {
@@ -762,6 +814,9 @@ pub(super) fn apply_command_with_events(
     finish_births(&mut system.pool, &mut system.side, &mut system.ring_cursor, RingBufferMode::Disabled,
         maximum, old, |_, _| {});
     *initial = next_initial;
+    if let Some(noise) = system.noise.as_mut() {
+        noise.state.scroll = scroll;
+    }
     if let (Some(target), Some(recorded)) = (events, recorded) {
         *target.events = recorded;
     }
@@ -793,20 +848,48 @@ fn start_size(inherit: &ChildInherit, own: [Option<f32>; 3], size_3d: bool) -> [
     if size_3d { size } else { [size[0]; 3] }
 }
 
-/// What the Velocity and ClampVelocity updates of one lane read besides the
-/// lane: the matrix of the linear velocity (None for the identity), the seed
-/// of the lane's four-lane group, and the lane's dt.
+/// What the Velocity, Noise and ClampVelocity updates of one lane read
+/// besides the lane: the matrix of the linear velocity (None for the
+/// identity), the seed of the lane's four-lane group, the lane's dt and the
+/// target's Noise scroll at this call.
 #[derive(Clone, Copy)]
 struct ModuleSpace<'a> {
     velocity: Option<&'a [f32; 16]>,
     batch_seed: u32,
     clamp_dt: f32,
+    noise_scroll: f32,
+}
+
+/// The target's Noise scroll after one scroll update over `dt` (the scroll
+/// unchanged without Noise).
+fn advanced_scroll(system: &Runtime, scroll: f32, dt: f32) -> f32 {
+    match &system.noise {
+        Some(noise) => {
+            let mut state = moly_law::particle::noise::NoiseState { scroll };
+            noise.law.advance_scroll(&mut state, dt, true);
+            state.scroll
+        }
+        None => scroll,
+    }
+}
+
+/// Noise on one lane: the root path's Noise law at the lane's position (the
+/// target's space, source axes) and age before this call's age update, with
+/// the target's owner seed and the call's scroll, added to the animated
+/// velocity.
+fn add_noise(system: &Runtime, lane: &mut Lane, scroll: f32) {
+    if let Some(noise) = &system.noise {
+        let state = moly_law::particle::noise::NoiseState { scroll };
+        let value = noise.law.sample(state, lane.position, noise.owner_seed, lane.age);
+        lane.animated = std::array::from_fn(|a| lane.animated[a] + value[a]);
+    }
 }
 
 /// The pre-simulation modules of one lane over dt, in the engine's order:
 /// gravity into the persistent velocity, animated velocity cleared, angular
 /// speed cleared and rebuilt by RotationOverLifetime, VelocityOverLifetime's
-/// linear velocity added to the animated velocity, ClampVelocity on the
+/// linear velocity and then its orbital velocity added to the animated
+/// velocity, Noise added to the animated velocity, ClampVelocity on the
 /// persistent velocity against persistent plus animated (its k from the
 /// lane's own dt), CustomData at the current age.
 fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
@@ -827,10 +910,20 @@ fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32,
     }
     if !arms::on("noVelocity") {
         if let Some(velocity) = &laws.velocity {
-            let linear = velocity.sample(lane.seed, space.batch_seed, lane.age).linear;
-            let added = linear_in_space(linear, space.velocity);
+            let sample = velocity.sample(lane.seed, space.batch_seed, lane.age);
+            let added = linear_in_space(sample.linear, space.velocity);
             lane.animated = std::array::from_fn(|a| lane.animated[a] + added[a]);
+            if laws.orbital && !arms::on("noOrbital") {
+                // Local target: the position is already in the owner's space.
+                let modifier = sample.speed_modifier;
+                let delta = sample.orbital.displacement(lane.position, dt, modifier);
+                let orbital = moly_law::particle::velocity::animated_velocity(delta, dt, modifier);
+                lane.animated = std::array::from_fn(|a| lane.animated[a] + orbital[a]);
+            }
         }
+    }
+    if !arms::on("noNoise") {
+        add_noise(system, lane, space.noise_scroll);
     }
     if !arms::on("clampBeforeVelocity") && !arms::on("noClamp") {
         clamp_velocity(laws, lane, space.clamp_dt);
@@ -935,9 +1028,21 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
     }
     child_target_eligible(&system.emitter, system.geometry.shape_evidence())?;
     system.emitter = own_clock_emitter(&system.emitter);
+    // Qualified by child_target_eligible above; built before the owner draw.
+    let noise_law = system.emitter.noise.as_ref()
+        .map(|params| moly_law::particle::noise::NoiseLaw::from_params(params).map_err(str::to_owned))
+        .transpose()?;
     let (seed_owner, streams) = seeds
         .create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)
         .map_err(|error| format!("{error:?}"))?;
+    // Noise reads the target's owner seed and starts from the reset scroll,
+    // as a root system's first Play installs it.
+    system.noise = noise_law.map(|law| super::NoiseRuntime {
+        law,
+        state: moly_law::particle::noise::NoiseState { scroll: streams.noise_scroll },
+        owner_seed: seed_owner.seed,
+        owner: seed_owner,
+    });
     system.native_birth = Some(birth::NativeBirthState {
         owner: Some(seed_owner),
         initial: streams.initial,
