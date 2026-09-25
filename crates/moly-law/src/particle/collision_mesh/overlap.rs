@@ -2,8 +2,10 @@
 //! (`GeomOverlapCallback_BoxMesh` with unit mesh scale: the box in vertex
 //! space through the box midphase, `intersectTriangleBox` in its vector
 //! form, the first touching triangle ends the query) and the shape's world
-//! bounds (`Gu::computeBounds` of a triangle mesh at inflation one).
-use super::cook::CookedMesh;
+//! bounds (`Gu::computeBounds` of a triangle mesh at inflation one). The
+//! BV4 box query is in `bv4_query`; the triangle-box test is shared.
+use super::bv4_query;
+use super::cook::{CookedMesh, Midphase};
 use super::sweep::traverse_aabb;
 use super::vector::*;
 use super::{finite3, Pose, Refused};
@@ -35,7 +37,7 @@ fn class3(e: V3, v0: V3, v1: V3, v2: V3, ext: V3) -> bool {
 }
 
 /// `intersectTriangleBox` for a box at `center` with half extents `ext`.
-fn tri_box(center: V3, ext: V3, ta: V3, tb: V3, tc: V3) -> bool {
+pub(super) fn tri_box(center: V3, ext: V3, ta: V3, tb: V3, tc: V3) -> bool {
     let v0 = sub(ta, center);
     let v1 = sub(tb, center);
     let v2 = sub(tc, center);
@@ -73,8 +75,26 @@ fn tri_box(center: V3, ext: V3, ta: V3, tb: V3, tc: V3) -> bool {
 /// Whether the axis-aligned box (world centre, half extents) touches a
 /// triangle of the mesh at `pose`.
 pub fn overlap_box(mesh: &CookedMesh, pose: &Pose, center: [f32; 3], extents: [f32; 3]) -> Result<bool, Refused> {
-    if !finite3(center) || !finite3(extents) {
+    overlap_oriented_box(mesh, pose, center, extents, [0.0, 0.0, 0.0, 1.0], None)
+}
+
+/// The same for a box at a rotation (x, y, z, w; the BV4 query only takes
+/// one other than the identity). `tested` receives, for the BV4 query,
+/// every face a triangle-box test is made for, in call order.
+pub fn overlap_oriented_box(mesh: &CookedMesh, pose: &Pose, center: [f32; 3], extents: [f32; 3],
+    rotation: [f32; 4], mut tested: Option<&mut Vec<u32>>) -> Result<bool, Refused> {
+    if !finite3(center) || !finite3(extents) || !rotation.iter().all(|v| v.is_finite()) {
         return Err(Refused("a non-finite overlap box"));
+    }
+    if let Midphase::Bv4(tree) = &mesh.midphase {
+        return bv4_query::overlap_box(mesh, tree, pose, center, extents, rotation, &mut |face| {
+            if let Some(t) = tested.as_deref_mut() {
+                t.push(face);
+            }
+        });
+    }
+    if !pose.identity_rotation() || rotation[..3].iter().any(|&v| v != 0.0) || rotation[3] != 1.0 {
+        return Err(Refused("a rotated collider or query box on the BVH33 midphase is not transcribed"));
     }
     let m = inverse_matrix(pose.rotation(), pose.translation());
     let c2 = m.transform(center);

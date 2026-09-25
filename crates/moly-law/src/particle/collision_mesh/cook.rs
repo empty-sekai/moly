@@ -1,6 +1,8 @@
 //! Cooking of a non-convex mesh with the default options: the engine's
 //! weld, the RTree of the BVH33 midphase, the triangle remap, the local
-//! bounds and the active edge flags.
+//! bounds and the active edge flags. The options 30 cook (the BV4
+//! midphase) is in `bv4_cook`; the weld and the edge flags are shared.
+use super::bv4_cook::{self, Bv4Tree};
 use super::vector::*;
 use super::Refused;
 use crate::particle::armf as a;
@@ -36,15 +38,9 @@ pub(super) struct Page {
 /// The size of a page as the node words address it.
 pub(super) const PAGE_BYTES: u32 = 112;
 
-/// A cooked mesh: welded vertices, triangles in leaf order, the RTree and
-/// the per-triangle edge flags.
+/// The BVH33 RTree: its four-lane pages and header words.
 #[derive(Clone, Debug)]
-pub struct CookedMesh {
-    pub(super) vertices: Vec<V3>,
-    pub(super) triangles: Vec<[u32; 3]>,
-    /// For each cooked triangle its index in the welded input.
-    pub(super) source_index: Vec<u32>,
-    pub(super) extra: Vec<u8>,
+pub(super) struct RTree {
     pub(super) pages: Vec<Page>,
     // The RTree header words: no query reads them (one root page), the
     // replay compares them with the engine's cooked mesh.
@@ -56,6 +52,25 @@ pub struct CookedMesh {
     pub(super) tree_min: V3,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) tree_max: V3,
+}
+
+/// The midphase a mesh was cooked with.
+#[derive(Clone, Debug)]
+pub(super) enum Midphase {
+    Bvh33(RTree),
+    Bv4(Bv4Tree),
+}
+
+/// A cooked mesh: welded vertices, triangles in leaf order, the midphase
+/// tree and the per-triangle edge flags.
+#[derive(Clone, Debug)]
+pub struct CookedMesh {
+    pub(super) vertices: Vec<V3>,
+    pub(super) triangles: Vec<[u32; 3]>,
+    /// For each cooked triangle its index in the authored triangles.
+    pub(super) source_index: Vec<u32>,
+    pub(super) extra: Vec<u8>,
+    pub(super) midphase: Midphase,
     pub(super) center: V3,
     pub(super) extents: V3,
 }
@@ -79,12 +94,12 @@ impl CookedMesh {
 /// Cook the authored arrays (positions in vertex order, triangles in index
 /// order) with the given MeshCollider cooking options.
 pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Result<CookedMesh, Refused> {
-    if options & 16 != 0 {
-        return Err(Refused("the BV4 midphase (UseFastMidphase) is not ported"));
-    }
-    if options != 0 {
-        return Err(Refused("cooking options other than the default are not transcribed"));
-    }
+    let bv4 = match options {
+        0 => false,
+        30 => true,
+        o if o & 16 != 0 => return Err(Refused("fast-midphase cooking options other than 30 are not transcribed")),
+        _ => return Err(Refused("cooking options other than the default and 30 are not transcribed")),
+    };
     if positions.is_empty() || triangles.is_empty() {
         return Err(Refused("an empty collision mesh"));
     }
@@ -100,6 +115,21 @@ pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Res
     if triangles.iter().flatten().any(|&i| i as usize >= positions.len()) {
         return Err(Refused("a triangle corner past the vertex count"));
     }
+    if bv4 {
+        if triangles.len() >= 1 << 19 {
+            return Err(Refused("more triangles than the BV4 node words can address here"));
+        }
+        let c = bv4_cook::cook(positions, triangles)?;
+        return Ok(CookedMesh {
+            vertices: c.vertices,
+            triangles: c.triangles,
+            source_index: c.face_remap,
+            extra: c.extra,
+            midphase: Midphase::Bv4(c.tree),
+            center: c.center,
+            extents: c.extents,
+        });
+    }
     let flat: Vec<u32> = triangles.iter().flatten().copied().collect();
     let (vertices, index) = weld(positions, &flat);
     let welded: Vec<[u32; 3]> = index.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
@@ -114,7 +144,7 @@ pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Res
             mx[k] = a::max(mx[k], p[k]);
         }
     }
-    let extra = active_edge_flags(&vertices, &cooked)?;
+    let extra = active_edge_flags(&vertices, &cooked, false)?;
     Ok(CookedMesh {
         center: std::array::from_fn(|k| a::mul(a::add(mn[k], mx[k]), 0.5)),
         extents: std::array::from_fn(|k| a::mul(a::sub(mx[k], mn[k]), 0.5)),
@@ -122,11 +152,13 @@ pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Res
         triangles: cooked,
         source_index,
         extra,
-        pages: tree.pages,
-        num_levels: tree.num_levels,
-        total_nodes: tree.total_nodes,
-        tree_min: tree.bounds_min,
-        tree_max: tree.bounds_max,
+        midphase: Midphase::Bvh33(RTree {
+            pages: tree.pages,
+            num_levels: tree.num_levels,
+            total_nodes: tree.total_nodes,
+            tree_min: tree.bounds_min,
+            tree_max: tree.bounds_max,
+        }),
     })
 }
 
@@ -134,7 +166,7 @@ pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Res
 /// bits, the bucket chain walked from the most recently inserted vertex,
 /// equality by float compare, vertices kept in first-occurrence order and
 /// the indices remapped.
-fn weld(positions: &[V3], index: &[u32]) -> (Vec<V3>, Vec<u32>) {
+pub(super) fn weld(positions: &[V3], index: &[u32]) -> (Vec<V3>, Vec<u32>) {
     let n = positions.len();
     let mut x = (n as u32).wrapping_sub(1);
     for s in [1, 2, 4, 8, 16] {
@@ -371,8 +403,15 @@ impl RTreeBuild {
 /// boundary edge is active; an edge of two faces is active when the second
 /// face's plane has the first face's opposite corner behind it and the
 /// faces' angle passes 0.1, or, with the corner in front, when the faces
-/// fold back (normals' dot below -0.999).
-fn active_edge_flags(vertices: &[V3], tris: &[[u32; 3]]) -> Result<Vec<u8>, Refused> {
+/// fold back (normals' dot below -0.999). With `multi` (the options-30
+/// cook's reading of the builder) an edge of more than two faces takes the
+/// builder's third branch: the faces are compared with the first face by
+/// corner membership (and, once a second distinct face is found, with it),
+/// a face with the same corners and a normal folded back marks the pair
+/// double sided; one distinct face is active, two are the angle test when
+/// double sided or else the angle test behind the second face's plane,
+/// more are active. Without it such an edge refuses.
+pub(super) fn active_edge_flags(vertices: &[V3], tris: &[[u32; 3]], multi: bool) -> Result<Vec<u8>, Refused> {
     let mut keys: Vec<((u32, u32), usize, usize)> = Vec::with_capacity(tris.len() * 3);
     for (i, t) in tris.iter().enumerate() {
         for (j, (p, q)) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])].into_iter().enumerate() {
@@ -400,30 +439,65 @@ fn active_edge_flags(vertices: &[V3], tris: &[[u32; 3]]) -> Result<Vec<u8>, Refu
     }
     let corner = |i: u32| vertices[i as usize];
     let normal = |t: [u32; 3]| get_normalized(cross(sub(corner(t[1]), corner(t[0])), sub(corner(t[2]), corner(t[0]))));
+    let angle_gt = |n0: V3, n1: V3| -> Result<bool, Refused> {
+        let c = cross(n0, n1);
+        let s = a::sqrt(mag2(c));
+        let angle = (s as f64).atan2(dot(n0, n1) as f64);
+        if ((angle.abs()) - 0.1).abs() < ANGLE_MARGIN {
+            return Err(Refused("an edge angle too close to the convexity threshold for the host atan2"));
+        }
+        Ok((angle as f32).abs() > ACTIVE_ANGLE)
+    };
+    let behind = |t0: [u32; 3], t1: [u32; 3], r0: u32, r1: u32| -> Result<bool, Refused> {
+        let opposite = opposite_corner(t0, r0, r1).ok_or(Refused("an edge that its first face does not hold"))?;
+        Ok(plane_distance(corner(t1[0]), corner(t1[1]), corner(t1[2]), corner(opposite)) < 0.0)
+    };
+    let not_in = |v: u32, t: [u32; 3]| v != t[0] && v != t[1] && v != t[2];
+    let distinct = |t: [u32; 3], of: [u32; 3]| not_in(t[0], of) || not_in(t[1], of) || not_in(t[2], of);
     let mut active = vec![false; edges.len()];
     for (e, &(r0, r1)) in edges.iter().enumerate() {
         match faces[e].as_slice() {
             [_] => active[e] = true,
             &[f0, f1] => {
                 let (t0, t1) = (tris[f0], tris[f1]);
-                let opposite = opposite_corner(t0, r0, r1)
-                    .ok_or(Refused("a two-face edge that its first face does not hold"))?;
                 let (n0, n1) = (normal(t0), normal(t1));
-                if plane_distance(corner(t1[0]), corner(t1[1]), corner(t1[2]), corner(opposite)) < 0.0 {
-                    let c = cross(n0, n1);
-                    let s = a::sqrt(mag2(c));
-                    let angle = (s as f64).atan2(dot(n0, n1) as f64);
-                    if ((angle.abs()) - 0.1).abs() < ANGLE_MARGIN {
-                        return Err(Refused("an edge angle too close to the convexity threshold for the host atan2"));
-                    }
-                    if (angle as f32).abs() > ACTIVE_ANGLE {
-                        active[e] = true;
-                    }
+                if behind(t0, t1, r0, r1)? {
+                    active[e] = angle_gt(n0, n1)?;
                 } else if dot(n0, n1) < FOLDED_DOT {
                     active[e] = true;
                 }
             }
-            _ => return Err(Refused("an edge shared by more than two triangles")),
+            _ if !multi => return Err(Refused("an edge shared by more than two triangles")),
+            list => {
+                let t0 = tris[list[0]];
+                let mut t1 = [0u32; 3];
+                let mut unique = 1;
+                let (mut ds0, mut ds1) = (false, false);
+                for &f in &list[1..] {
+                    let t = tris[f];
+                    if distinct(t, t0) {
+                        if unique == 2 {
+                            if distinct(t, t1) {
+                                unique += 1;
+                                break;
+                            } else if dot(normal(t1), normal(t)) < FOLDED_DOT {
+                                ds1 = true;
+                            }
+                        } else {
+                            t1 = t;
+                            unique += 1;
+                        }
+                    } else if dot(normal(t0), normal(t)) < FOLDED_DOT {
+                        ds0 = true;
+                    }
+                }
+                active[e] = match unique {
+                    1 => true,
+                    2 if ds0 || ds1 => angle_gt(normal(t0), normal(t1))?,
+                    2 => behind(t0, t1, r0, r1)? && angle_gt(normal(t0), normal(t1))?,
+                    _ => true,
+                };
+            }
         }
     }
     Ok(links.iter().map(|l| {

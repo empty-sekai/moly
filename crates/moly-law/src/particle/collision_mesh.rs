@@ -1,6 +1,7 @@
 //! The physics scene side of the CollisionModule for a non-convex
-//! MeshCollider cooked with the default options (the BVH33 midphase), as the
-//! engine's PhysX 4.1 build executes it:
+//! MeshCollider cooked with the default options (the BVH33 midphase) or
+//! with the options 30 (the BV4 midphase: `bv4_cook` and `bv4_query`), as
+//! the engine's PhysX 4.1 build executes it. The BVH33 side:
 //!
 //! - cooking: the engine's vertex weld (a hash of the position bits, the chain
 //!   walked from the newest entry, float equality, first-occurrence order),
@@ -35,11 +36,19 @@
 //! propagation, FMIN/FMAX signed zeros, the reciprocal and reciprocal square
 //! root estimate tables and their fused step instructions).
 //!
-//! What is not covered refuses by name: other cooking options (the BV4
-//! midphase included), collider rotations other than the identity, a
+//! The BV4 side runs the same MTD body with its own box midphase; its
+//! sweep, box queries and cooking are described in those files.
+//!
+//! What is not covered refuses by name: other cooking options, a rotated
+//! collider on the BVH33 midphase (the BV4 queries take any rotation), a
 //! non-finite or negative query, and the few structural cases the cooked
-//! representation cannot hold.
+//! representation cannot hold. The queries here have no any-hit, double
+//! sided, inflated, scaled or two-point capsule form, and the options-30
+//! cook builds four triangles per leaf only: those engine paths cannot be
+//! asked for.
 
+mod bv4_cook;
+mod bv4_query;
 mod cook;
 mod mtd;
 mod overlap;
@@ -47,16 +56,18 @@ mod sweep;
 mod vector;
 
 pub use cook::{cook, CookedMesh};
-pub use overlap::{overlap_box, world_bounds};
-pub use sweep::{sweep_sphere, MeshSweepHit};
+pub use overlap::{overlap_box, overlap_oriented_box, world_bounds};
+pub use sweep::{sweep_sphere, MeshSweepHit, SweepTrace};
 
 /// Why the scene cannot give the engine's answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Refused(pub &'static str);
 
-/// A collider's world pose: the identity rotation (the zero vector part may
-/// carry either sign; the engine's quaternion arithmetic is still carried)
-/// and a finite translation.
+/// A collider's world pose: a rotation and a finite translation. `new`
+/// takes the identity rotation only (the zero vector part may carry either
+/// sign; the engine's quaternion arithmetic is still carried), `rotated`
+/// any finite rotation. The bits are the query's: the BV4 sweep and box
+/// query set up their world matrix from them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     rotation: [f32; 4],
@@ -73,6 +84,20 @@ impl Pose {
             return Err(Refused("non-finite collider translation"));
         }
         Ok(Self { rotation, translation })
+    }
+
+    /// Any finite rotation (x, y, z, w). Only the BV4 queries take a
+    /// rotation other than the identity; the BVH33 ones refuse it.
+    pub fn rotated(rotation: [f32; 4], translation: [f32; 3]) -> Result<Self, Refused> {
+        if rotation.iter().chain(&translation).any(|v| !v.is_finite()) {
+            return Err(Refused("a non-finite collider pose"));
+        }
+        Ok(Self { rotation, translation })
+    }
+
+    /// The identity rotation by value (zero parts of either sign).
+    pub(crate) fn identity_rotation(&self) -> bool {
+        self.rotation[..3].iter().all(|&v| v == 0.0) && self.rotation[3] == 1.0
     }
 
     pub fn rotation(&self) -> [f32; 4] {

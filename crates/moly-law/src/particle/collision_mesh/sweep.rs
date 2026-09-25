@@ -1,6 +1,9 @@
 //! The sphere sweep against a cooked mesh: `PxGeometryQuery::sweep` for a
-//! sphere with the hit flags normal and MTD and zero inflation.
-use super::cook::{CookedMesh, PAGE_BYTES};
+//! sphere with the hit flags normal and MTD and zero inflation. The BVH33
+//! cast is here; the BV4 cast is in `bv4_query`; the tail and the MTD are
+//! shared.
+use super::bv4_query;
+use super::cook::{CookedMesh, Midphase, RTree, PAGE_BYTES};
 use super::vector::*;
 use super::{arms, finite3, mtd, Pose, Refused};
 use crate::particle::armf as a;
@@ -56,21 +59,80 @@ struct LocalHit {
     tri_normal: V3,
 }
 
+/// What a sweep visited, for the comparison with the engine's traces.
+#[derive(Clone, Debug, Default)]
+pub struct SweepTrace {
+    /// BVH33: the triangles `processHit` saw; BV4: the triangles
+    /// `triSphereSweep` was called for; in order.
+    pub leaf_faces: Vec<u32>,
+    /// The faces the MTD midphase reported, step after step, in order.
+    pub mtd_faces: Vec<u32>,
+    /// BV4: the triangle-box tests of the MTD midphase.
+    pub mtd_box_tests: usize,
+}
+
 /// The engine's `PxGeometryQuery::sweep` of a sphere of `radius` at `center`
 /// along the unit or zero `direction` for `distance` against the mesh at
-/// `pose`. `faces` receives the triangles `processHit` saw, in order.
+/// `pose`, with the hit flags normal and MTD and zero inflation. `trace`
+/// receives what the sweep visited.
 pub fn sweep_sphere(mesh: &CookedMesh, pose: &Pose, center: [f32; 3], radius: f32, direction: [f32; 3],
-    distance: f32, faces: Option<&mut Vec<u32>>) -> Result<Option<MeshSweepHit>, Refused> {
+    distance: f32, mut trace: Option<&mut SweepTrace>) -> Result<Option<MeshSweepHit>, Refused> {
     if !finite3(center) || !finite3(direction) || !distance.is_finite() || !radius.is_finite() {
         return Err(Refused("a non-finite sweep"));
     }
     if !(distance >= 0.0) || !(radius > 0.0) {
         return Err(Refused("a negative sweep distance or a non-positive radius"));
     }
-    let (q, t) = (pose.rotation(), pose.translation());
     // Zero inflation.
     let r = a::add(radius, 0.0);
-    // sweepCapsule_MeshGeom_RTREE with both capsule ends at the centre.
+    let faces = trace.as_deref_mut().map(|t| &mut t.leaf_faces);
+    let found = match &mesh.midphase {
+        Midphase::Bvh33(rtree) => {
+            if !pose.identity_rotation() {
+                return Err(Refused("a rotated collider on the BVH33 midphase is not transcribed"));
+            }
+            bvh33_cast(mesh, rtree, pose, center, r, direction, distance, faces)?
+        }
+        Midphase::Bv4(tree) => bv4_query::sweep(mesh, tree, pose, center, r, direction, distance, faces)?,
+    };
+    // finalizeHit (the BV4 entry's own tail is the same).
+    let Some((mut hit, initial)) = found else {
+        return Ok(None);
+    };
+    let flags = if initial {
+        let resolved = if arms::on("skipMtd") {
+            false
+        } else {
+            mtd::capsule_mesh_mtd(mesh, pose, center, r, &mut hit, trace)?
+        };
+        if resolved {
+            if hit.distance == 0.0 {
+                hit.normal = neg(direction);
+            }
+            FLAG_FACE_INDEX | FLAG_NORMAL | FLAG_POSITION
+        } else {
+            hit.distance = 0.0;
+            hit.normal = neg(direction);
+            FLAG_FACE_INDEX | FLAG_NORMAL
+        }
+    } else {
+        FLAG_FACE_INDEX | FLAG_NORMAL | FLAG_POSITION
+    };
+    Ok(Some(MeshSweepHit {
+        flags,
+        face_index: hit.face,
+        distance: hit.distance,
+        normal: hit.normal,
+        position: if flags & FLAG_POSITION != 0 { Some(hit.position.unwrap_or([0.0; 3])) } else { None },
+    }))
+}
+
+/// `sweepCapsule_MeshGeom_RTREE` with both capsule ends at the centre: the
+/// hit and whether it is an initial overlap.
+#[allow(clippy::too_many_arguments)]
+fn bvh33_cast(mesh: &CookedMesh, rtree: &RTree, pose: &Pose, center: V3, r: f32, direction: V3, distance: f32,
+    faces: Option<&mut Vec<u32>>) -> Result<Option<(Hit, bool)>, Refused> {
+    let (q, t) = (pose.rotation(), pose.translation());
     let lp0 = transform_inv(q, t, center);
     let lp1 = transform_inv(q, t, center);
     let origin = scale(add(lp0, lp1), 0.5);
@@ -99,35 +161,9 @@ pub fn sweep_sphere(mesh: &CookedMesh, pose: &Pose, center: [f32; 3], radius: f3
             Ok(cb.process_hit(ti, corners, 0.0).0)
         })?;
     } else {
-        traverse_ray(mesh, origin, local_dir, extents, distance, &mut cb)?;
+        traverse_ray(mesh, rtree, origin, local_dir, extents, distance, &mut cb)?;
     }
-    // finalizeHit.
-    if !cb.status {
-        return Ok(None);
-    }
-    let mut hit = cb.hit;
-    let flags = if cb.initial {
-        let resolved = if arms::on("skipMtd") { false } else { mtd::capsule_mesh_mtd(mesh, pose, center, r, &mut hit)? };
-        if resolved {
-            if hit.distance == 0.0 {
-                hit.normal = neg(direction);
-            }
-            FLAG_FACE_INDEX | FLAG_NORMAL | FLAG_POSITION
-        } else {
-            hit.distance = 0.0;
-            hit.normal = neg(direction);
-            FLAG_FACE_INDEX | FLAG_NORMAL
-        }
-    } else {
-        FLAG_FACE_INDEX | FLAG_NORMAL | FLAG_POSITION
-    };
-    Ok(Some(MeshSweepHit {
-        flags,
-        face_index: hit.face,
-        distance: hit.distance,
-        normal: hit.normal,
-        position: if flags & FLAG_POSITION != 0 { Some(hit.position.unwrap_or([0.0; 3])) } else { None },
-    }))
+    Ok(cb.status.then_some((cb.hit, cb.initial)))
 }
 
 /// `SweepCapsuleMeshHitCallback` of the mesh sweep.
@@ -307,7 +343,7 @@ fn edge_or_vertex(p: V3, tri: &[V3; 3], cand: usize, a0: usize, a1: usize) -> Op
 }
 
 /// `sweepSphereVSTri`.
-fn sweep_sphere_vs_tri(tri: [V3; 3], normal: V3, center: V3, radius: f32, d: V3) -> Option<f32> {
+pub(super) fn sweep_sphere_vs_tri(tri: [V3; 3], normal: V3, center: V3, radius: f32, d: V3) -> Option<f32> {
     let e10 = sub(tri[1], tri[0]);
     let e20 = sub(tri[2], tri[0]);
     let mut rv = scale(normal, radius);
@@ -628,7 +664,8 @@ fn ray_leaf(mesh: &CookedMesh, triangles: impl Iterator<Item = u32>, origin: V3,
 /// reciprocal direction by FRECPE, one FRECPS step and one unfused Newton
 /// step, children pushed in lane order and popped in reverse, the ray
 /// length shortened after each leaf.
-fn traverse_ray(mesh: &CookedMesh, origin: V3, dir: V3, inflate: V3, max_t: f32, cb: &mut Callback<'_>)
+#[allow(clippy::too_many_arguments)]
+fn traverse_ray(mesh: &CookedMesh, rtree: &RTree, origin: V3, dir: V3, inflate: V3, max_t: f32, cb: &mut Callback<'_>)
     -> Result<(), Refused> {
     let mut mt = max_t;
     let mut callback_max_t = max_t;
@@ -666,7 +703,7 @@ fn traverse_ray(mesh: &CookedMesh, origin: V3, dir: V3, inflate: V3, max_t: f32,
             }
             continue;
         }
-        let page = mesh.pages.get((ptr / PAGE_BYTES) as usize).ok_or(Refused("a node word past the RTree pages"))?;
+        let page = rtree.pages.get((ptr / PAGE_BYTES) as usize).ok_or(Refused("a node word past the RTree pages"))?;
         for lane in 0..4 {
             let (mnx, mny, mnz) = (page.min[0][lane], page.min[1][lane], page.min[2][lane]);
             let (mxx, mxy, mxz) = (page.max[0][lane], page.max[1][lane], page.max[2][lane]);
@@ -704,9 +741,12 @@ pub(super) fn traverse_aabb(mesh: &CookedMesh, bmin: V3, bmax: V3, mut visit: im
         }
         return Ok(());
     }
+    let Midphase::Bvh33(rtree) = &mesh.midphase else {
+        return Err(Refused("the RTree box traversal on a mesh without an RTree"));
+    };
     let mut stack: Vec<u32> = vec![0];
     while let Some(top) = stack.pop() {
-        let page = mesh.pages.get((top / PAGE_BYTES) as usize).ok_or(Refused("a node word past the RTree pages"))?;
+        let page = rtree.pages.get((top / PAGE_BYTES) as usize).ok_or(Refused("a node word past the RTree pages"))?;
         for i in 0..4 {
             let (mnx, mny, mnz) = (page.min[0][i], page.min[1][i], page.min[2][i]);
             let (mxx, mxy, mxz) = (page.max[0][i], page.max[1][i], page.max[2][i]);

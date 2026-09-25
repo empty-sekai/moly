@@ -16,13 +16,18 @@
 //! - one collider per effect: the order of several broadphase touches is not
 //!   transcribed, and every shipped effect has one;
 //! - the chain must be identity rotations and unit scales; its translations
-//!   are summed root first. Only the sign of a zero component could differ
-//!   from the engine's own sum, and on the native scene rows flipping every
-//!   zero translation sign changes no returned bit;
-//! - the default cooking (the BVH33 midphase) is ported; a collider cooked
-//!   with other options (the BV4 midphase of the fast-midphase option
-//!   included) refuses its effect by name, as does a convex, trigger or
-//!   non-mesh collider.
+//!   are summed root first, and every zero part of the pose is +0. The
+//!   engine queries a collider that has no body at its static actor's pose
+//!   composed with the shape's local pose; such a collider never sets that
+//!   local pose, so it stays the shape's default identity, and composing an
+//!   identity-valued actor pose with it gives +0 for every zero part
+//!   whatever sign the actor pose carried (the effect packages hold no
+//!   body). The BV4 queries choose their world matrix by these bits, so
+//!   the signs are part of the answer there;
+//! - the default cooking (the BVH33 midphase) and the options 30 (mesh
+//!   cleaning, welding, faster simulation and the fast midphase: the BV4
+//!   midphase) are ported; a collider cooked with other options refuses its
+//!   effect by name, as does a convex, trigger or non-mesh collider.
 //!
 //! Colliders of other installed effects (another weather's effect still
 //! retiring, the site's own colliders on other layers) are not composed into
@@ -157,8 +162,10 @@ fn ground_collider(meshes: &mut MeshCache, document: &Value, ordinal: usize, c: 
             Some(t) => [t[0] + position[0], t[1] + position[1], t[2] + position[2]],
         });
     }
-    let pose = Pose::new([0.0, 0.0, 0.0, 1.0], translation.unwrap_or([0.0; 3]))
-        .map_err(|refused| named(refused.0))?;
+    // The composed query pose: a +0 rotation and every zero translation part
+    // +0 (see the module notes).
+    let translation = translation.unwrap_or([0.0; 3]).map(|v| if v == 0.0 { 0.0 } else { v });
+    let pose = Pose::new([0.0, 0.0, 0.0, 1.0], translation).map_err(|refused| named(refused.0))?;
     let geometry = c.get("geometry").and_then(Value::as_str).ok_or_else(|| named("no geometry"))?.to_owned();
     let mesh = match meshes.get(&(geometry.clone(), cooking)) {
         Some(mesh) => mesh.clone(),

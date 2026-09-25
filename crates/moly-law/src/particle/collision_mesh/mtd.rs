@@ -6,9 +6,12 @@
 //! the deepest contact per triangle and over the batch, and up to four
 //! depenetration steps. The vector forms are the NEON ones: `V3Dot` adds the
 //! zero fourth lanes, the square root is `a * rsqrt<4>(a)` and the
-//! reciprocal four refinement steps.
-use super::cook::CookedMesh;
-use super::sweep::{traverse_aabb, Hit};
+//! reciprocal four refinement steps. The midphase is the mesh's own: the
+//! RTree box traversal for BVH33, the vertex-space box through the BV4
+//! tree for BV4 (`bv4_query`).
+use super::bv4_query;
+use super::cook::{CookedMesh, Midphase};
+use super::sweep::{traverse_aabb, Hit, SweepTrace};
 use super::vector::*;
 use super::{Pose, Refused};
 use crate::particle::armf as a;
@@ -32,7 +35,10 @@ struct Contact {
 /// The triangles the midphase returns for a sphere at `center`: the box
 /// around it in vertex space (the inverse pose applied to the centre; the
 /// extents through the inverse rotation's absolute columns), aligned.
-fn midphase(mesh: &CookedMesh, pose: &Pose, center: V3, r: f32) -> Result<Vec<u32>, Refused> {
+fn midphase(mesh: &CookedMesh, pose: &Pose, center: V3, r: f32, box_tests: &mut usize) -> Result<Vec<u32>, Refused> {
+    if let Midphase::Bv4(tree) = &mesh.midphase {
+        return bv4_query::mtd_midphase(mesh, tree, pose, center, r, box_tests);
+    }
     let box_center = scale(add(center, center), 0.5);
     let m = inverse_matrix(pose.rotation(), pose.translation());
     let c2 = m.transform(box_center);
@@ -51,8 +57,8 @@ fn midphase(mesh: &CookedMesh, pose: &Pose, center: V3, r: f32) -> Result<Vec<u3
 /// The MTD of a sphere of `radius` at `center` that starts overlapping the
 /// mesh. Returns whether an initial overlap was found; the hit then carries
 /// the depth (negative), the contact point, the normal and the face.
-pub(super) fn capsule_mesh_mtd(mesh: &CookedMesh, pose: &Pose, center: V3, radius: f32, hit: &mut Hit)
-    -> Result<bool, Refused> {
+pub(super) fn capsule_mesh_mtd(mesh: &CookedMesh, pose: &Pose, center: V3, radius: f32, hit: &mut Hit,
+    mut trace: Option<&mut SweepTrace>) -> Result<bool, Refused> {
     let world = Matrix34::from_pose(pose.rotation(), pose.translation());
     let inflated = a::mul(radius, INFLATION);
     let (mut p0, mut p1) = (center, center);
@@ -63,7 +69,12 @@ pub(super) fn capsule_mesh_mtd(mesh: &CookedMesh, pose: &Pose, center: V3, radiu
     let mut tri_index: usize = 0x0fff_ffff;
     let mut translation = [0.0f32; 3];
     for iteration in 0..ITERATIONS {
-        let indices = midphase(mesh, pose, cc, radius)?;
+        let mut box_tests = 0;
+        let indices = midphase(mesh, pose, cc, radius, &mut box_tests)?;
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.mtd_faces.extend_from_slice(&indices);
+            trace.mtd_box_tests += box_tests;
+        }
         if indices.is_empty() {
             break;
         }
