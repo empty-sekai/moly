@@ -10,6 +10,7 @@
 
 mod rotation;
 pub(crate) mod catalog_stream;
+pub(crate) mod house_door;
 pub(crate) mod session;
 
 use std::{collections::HashMap, sync::Arc};
@@ -210,6 +211,7 @@ pub(crate) fn parse(
         "fixture controller metadata version"
     );
     let mut catalog = Catalog::default();
+    let mut houses = house_door::HouseCatalog::default();
     for package in document["packages"]
         .as_array()
         .expect("fixture controller packages")
@@ -217,6 +219,7 @@ pub(crate) fn parse(
         let name = package["name"]
             .as_str()
             .expect("fixture controller package name");
+        houses.insert(name, package);
         let definition = definition(package).map(Arc::new);
         if let Err(reason) = &definition {
             warn!("[fixture-gimmick] {name} preparation: {reason}");
@@ -228,6 +231,7 @@ pub(crate) fn parse(
     }
     info!("[fixture-gimmick] source controller catalog loaded");
     commands.insert_resource(catalog);
+    commands.insert_resource(houses);
     commands.remove_resource::<CatalogLoad>();
 }
 
@@ -902,6 +906,7 @@ pub(crate) fn advance(world: &mut World) {
         if player.elapsed >= SWITCH_END_TIME { finish(world, player); } else { runtime.player = Some(player); }
     });
     session::advance(world);
+    house_door::advance(world);
 }
 
 fn collect_events(program: &Program, elapsed: f64, next: &mut usize, events: &mut Vec<ClipEvent>) {

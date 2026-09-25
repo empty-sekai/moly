@@ -792,6 +792,111 @@ fn starter_rows(
     }
 }
 
+/// The home site always has the player's house (a system fixture the
+/// server always includes). A home site layout, starter or saved, whose rows
+/// hold no home package gets the entry's named mock house row
+/// ([`crate::entry::house`]) appended with its own UID. Its footprint must
+/// not overlap any ground row of the layout; an overlap (or a UID already in
+/// use) refuses the house with an error naming both, and never moves the
+/// user's fixture: the entry then takes the source's no-house branch.
+/// `log` is false for the edit baseline, which repeats the completion to
+/// compare the loaded layout with the saved record.
+fn complete_home_site(
+    layout: &mut FixturePlacements,
+    homes: &crate::entry::house::HomeFixtures,
+    origin: &str,
+    log: bool,
+) -> Result<(), String> {
+    for (row, uid) in layout.rows.iter().zip(&layout.instance_uids) {
+        if homes.is_home(&row.package)? {
+            if log {
+                info!(
+                    "[entry] home site {origin} layout already has the player's house: {} ({uid})",
+                    row.package
+                );
+            }
+            return Ok(());
+        }
+    }
+    let house = &crate::entry::house::STARTER_HOUSE;
+    let row = PlacementMock {
+        package: house.package,
+        texture_id: house.texture_id,
+        min: house.min,
+        max: house.max,
+        center_y: 0,
+        layout: layout_type::FLOOR,
+        direction: house.direction,
+        fixture_id: house.fixture_id,
+    };
+    let uid = crate::entry::house::mock_house_uid(layout.site_id);
+    let placed = row.placed();
+    let overlapping: Vec<String> = layout
+        .rows
+        .iter()
+        .zip(&layout.instance_uids)
+        .filter(|(other, _)| other.layout & WALL_LAYOUT_MASK == 0)
+        .filter(|(other, _)| {
+            let other = other.placed();
+            other.min.x <= placed.max.x
+                && other.max.x >= placed.min.x
+                && other.min.z <= placed.max.z
+                && other.max.z >= placed.min.z
+        })
+        .map(|(other, uid)| format!("{} ({uid})", other.package))
+        .collect();
+    if !overlapping.is_empty() || layout.instance_uids.contains(&uid) {
+        if log {
+            error!(
+                "[entry] home site {origin} layout has no house and the player's house mock {} ({uid}) was not placed: {}",
+                house.package,
+                if overlapping.is_empty() {
+                    format!("the UID {uid} is already in use")
+                } else {
+                    format!(
+                        "its footprint ({},{})..({},{}) overlaps {}; the user's fixtures are not moved",
+                        placed.min.x,
+                        placed.min.z,
+                        placed.max.x,
+                        placed.max.z,
+                        overlapping.join(", ")
+                    )
+                }
+            );
+        }
+        return Ok(());
+    }
+    if log {
+        info!(
+            "[entry] home site {origin} layout has no house: appended the player's house (named server-decided mock) {} master {} as {uid}, footprint ({},{})..({},{}) direction {:?} at ({:.3}, {:.3}, {:.3}); overlaps 0 of {} rows",
+            house.package,
+            house.fixture_id,
+            placed.min.x,
+            placed.min.z,
+            placed.max.x,
+            placed.max.z,
+            house.direction,
+            placed.position[0],
+            placed.position[1],
+            placed.position[2],
+            layout.rows.len()
+        );
+    }
+    layout.rows.push(row.into_owned());
+    layout.instance_uids.push(uid);
+    Ok(())
+}
+
+/// Every committed placement root has had its activity identity and its
+/// source view resolution attempted; the entry looks for the house after.
+pub(crate) fn placements_resolved(world: &mut World) -> bool {
+    let mut roots = world.query_filtered::<
+        (Has<FixtureIdentityResolved>, Has<FixtureViewResolved>),
+        (With<FixtureInstanceSeed>, With<FixtureRoot>),
+    >();
+    roots.iter(world).all(|(identity, view)| identity && view)
+}
+
 fn jp_row(mut row: PlacementMock) -> Result<PlacementMock, String> {
     let Some(stand_in) = JP_STAND_INS.iter().find(|s| s.replaces == row.package) else {
         return Ok(row);
@@ -1390,6 +1495,7 @@ fn restore_selected_layout(
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
     exploration: Option<Res<crate::player_data::TransientExploration>>,
     source_region: Option<Res<crate::site::NavMeshSourceRegion>>,
+    homes: Option<Res<crate::entry::house::HomeFixtures>>,
 ) {
     let Some(sites) = sites else {
         return;
@@ -1401,6 +1507,11 @@ fn restore_selected_layout(
         return;
     };
     if placements.site_id == site_id && placements.site_type == selection.site_type() {
+        return;
+    }
+    // The home site's layout is completed with the player's house, which
+    // needs the fixture tables.
+    if selection.site_type() == "home_site" && homes.is_none() {
         return;
     }
     // An embedded stage starts with no preset or persisted layout. The same
@@ -1428,6 +1539,7 @@ fn restore_selected_layout(
             floor.level,
             selection.content(),
             source_region.as_deref().copied(),
+            homes.as_deref(),
         )
     };
     match restored.and_then(|layout| {

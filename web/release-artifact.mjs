@@ -216,7 +216,15 @@ export function stripDebugNames(input) {
   return Buffer.concat(chunks);
 }
 
-export function splitCatalog(raw, snapshotId) {
+// Entry details live in a fixed number of content-addressed bundles shared by
+// every snapshot. An entry always falls in the same bundle (chosen from its
+// key), so a bundle keeps its address until one of its own entries changes.
+export const DETAIL_BUNDLES = 256;
+export const DETAIL_STORE = "/moly/catalog-store/";
+export function detailBundle(key) {
+  return parseInt(sha256(Buffer.from(key)).slice(0, 8), 16) % DETAIL_BUNDLES;
+}
+export function splitCatalog(raw, snapshotId, publishImage = (image) => image) {
   if (
     raw.schemaVersion !== 1 ||
     raw.ready !== true ||
@@ -230,6 +238,7 @@ export function splitCatalog(raw, snapshotId) {
     throw new Error("Invalid Rust catalog export");
   const keys = new Set(),
     files = new Map(),
+    bundles = Array.from({ length: DETAIL_BUNDLES }, () => new Map()),
     entries = [];
   for (const original of raw.entries) {
     const key = contentKey(original.key);
@@ -243,13 +252,18 @@ export function splitCatalog(raw, snapshotId) {
       !Array.isArray(original.characters)
     )
       throw new Error(`Invalid runtime projection: ${key}`);
-    const detail = `entries/${key.replaceAll(":", "-")}.json`;
-    files.set(
-      detail,
-      Buffer.from(
-        JSON.stringify({ schemaVersion: 1, snapshotId, entry: original }),
-      ),
-    );
+    // Card images are logical asset paths; the caller decides how each one
+    // is published.
+    const image = (value) =>
+      typeof value === "string" ? publishImage(value) : value;
+    const published = { ...original, image: image(original.image) };
+    if (Array.isArray(original.fixtures))
+      published.fixtures = original.fixtures.map((fixture) => ({
+        ...fixture,
+        image: image(fixture.image),
+      }));
+    const detail = detailBundle(key);
+    bundles[detail].set(key, published);
     // This is a transport projection, not an eligibility or playback rule.
     const {
       lines: _lines,
@@ -257,19 +271,36 @@ export function splitCatalog(raw, snapshotId) {
       fixtures: _fixtures,
       related: _related,
       ...card
-    } = original;
+    } = published;
     entries.push({ ...card, detail });
   }
+  // Bundle bytes depend only on their entries: keys are sorted and no
+  // snapshot identity is written into them.
+  const details = new Map(),
+    names = bundles.map((bundle) => {
+      const bytes = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 2,
+          entries: Object.fromEntries(
+            [...bundle].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          ),
+        }),
+      );
+      const name = `${sha256(bytes)}.json`;
+      details.set(name, bytes);
+      return DETAIL_STORE + name;
+    });
   const index = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     snapshotId,
     region: raw.region,
     version: raw.version,
     characters: raw.characters,
+    details: names,
     entries,
   };
   files.set("index.json", Buffer.from(JSON.stringify(index)));
-  return { files, index };
+  return { files, details, index };
 }
 
 function inside(parent, child) {
@@ -346,7 +377,7 @@ export async function publish({
       validateCoordinatePair(retained.release, descriptor);
       if (!isDeepStrictEqual(descriptor, snapshot)) throw new Error("Retained coordinate descriptor differs from manifest");
       const catalog = json(path.join(root, "catalog/index.json"));
-      if (catalog.schemaVersion !== 1 || catalog.snapshotId !== snapshot.id ||
+      if (![1, 2].includes(catalog.schemaVersion) || catalog.snapshotId !== snapshot.id ||
           catalog.region !== snapshot.region || catalog.version !== snapshot.version)
         throw new Error("Retained catalog source mismatch");
       if (!snapshot.packs) {
@@ -695,9 +726,23 @@ export async function publish({
       : "";
     const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
     const directory = path.join(output, "snapshots", id);
-    const { files: catalogFiles } = splitCatalog(catalog, id);
+    const { files: catalogFiles, details } = splitCatalog(
+      catalog,
+      id,
+      packed
+        ? (image) => {
+            // A store serves no logical URLs; name the image by content.
+            const entry = packed.entries.get(image);
+            if (entry?.codec !== "identity")
+              throw new Error(`Pinned pack cannot serve catalog image: ${image}`);
+            return `/moly/asset-store/blobs/${entry.blob}`;
+          }
+        : undefined,
+    );
     for (const [name, bytes] of catalogFiles)
       compressedPut(path.join(directory, "catalog", name), bytes);
+    for (const [name, bytes] of details)
+      compressedPut(path.join(output, "catalog-store", name), bytes);
     if (portraitBytes.length) {
       compressedPut(
         path.join(directory, "catalog/portraits/manifest.json"),

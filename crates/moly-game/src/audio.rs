@@ -1735,6 +1735,7 @@ pub(crate) fn advance_bgm(
     routing: Option<Res<Routing>>,
     mut channel: ResMut<BgmChannel>,
     mut sinks: Query<&mut AudioSink>,
+    bgm_hold: Option<Res<crate::site_move::BgmHold>>,
 ) {
     let Some(routing) = routing else {
         return; // 路由表未就绪
@@ -1825,6 +1826,11 @@ pub(crate) fn advance_bgm(
     let (Some(site), Some(configs)) = (site.as_deref(), configs.as_deref()) else {
         return;
     };
+    // A cannon move calls PlayBGMAsync for its destination at its
+    // ChangeEnvironment step; until then the current music keeps playing.
+    if bgm_hold.is_some() {
+        return;
+    }
     let key = (site.site_id, phenomenon.0.clone());
     // 唱片设定只在住宅类站点查（真源 TryPlayUserSettingBGM 的类别门）。
     let music_setting = matches!(

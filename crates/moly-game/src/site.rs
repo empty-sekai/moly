@@ -105,6 +105,8 @@ const HEIGHTMESH_SCENES: [&str; 1] = ["grasslands"];
 /// 冒烟巡游仪表的驻留秒数（环境变量 `MOLY_SITE_TOUR_SECS`，正数开启）。
 /// 宿主侧仪表，与 player/emoticon 域的 `MOLY_*` 同款。
 const TOUR_ENV: &str = "MOLY_SITE_TOUR_SECS";
+/// 巡游路线（可选）：逗号分隔的站点类型，按序逐跳；缺省走主表行序。
+const TOUR_ROUTE_ENV: &str = "MOLY_SITE_TOUR_ROUTE";
 
 /// 入口下发的站点选择（moly-app 解析 env / URL 参数的产物；缺省值在
 /// 那里定，这里不读第二遍——参数拒绝点全树只在入口一处）。
@@ -205,6 +207,26 @@ impl SiteSelection {
     pub(crate) fn site_type(&self) -> &str {
         &self.site
     }
+
+    /// The furniture layout the loader will restore for this (already
+    /// admitted) selection: the same `restore` call the fixture loader makes.
+    pub(crate) fn restored_layout(
+        &self,
+        sites: &Sites,
+        layouts: &crate::fixture::layouts::SiteFixtureLayouts,
+        region: Option<NavMeshSourceRegion>,
+        homes: Option<&crate::entry::house::HomeFixtures>,
+    ) -> Result<crate::fixture::FixturePlacements, String> {
+        let level = self
+            .levels
+            .get(&self.site)
+            .copied()
+            .ok_or_else(|| format!("site {} expansion stage is not resolved yet", self.site))?;
+        let id = sites
+            .site_id(&self.site)
+            .ok_or_else(|| format!("site {} is not in the site table", self.site))?;
+        layouts.restore(id, &self.site, level, self.content, region, homes)
+    }
     pub(crate) fn content(&self) -> OfflineSceneContent {
         self.content
     }
@@ -294,6 +316,24 @@ impl SiteSelection {
     /// 切采集档——步速换键、动画乘数换档（见 `player`）。
     pub(crate) fn is_grassland(&self) -> bool {
         self.site == GRASSLAND
+    }
+}
+
+/// A site's master identity, category and world offset (see [`Sites::placement`]).
+#[derive(Clone, Debug)]
+pub(crate) struct SitePlacement {
+    pub(crate) site_id: u32,
+    pub(crate) category: String,
+    /// Master `sitePosition` in the source frame.
+    pub(crate) position: [f32; 3],
+}
+
+impl SitePlacement {
+    /// `SitePosition` in the runtime frame: assets are imported by reflecting
+    /// the source x axis, so the offset is `(-x, y, z)`.
+    pub(crate) fn product_origin(&self) -> Vec3 {
+        let [x, y, z] = self.position;
+        Vec3::new(-x, y, z)
     }
 }
 
@@ -538,6 +578,17 @@ impl Sites {
 
     pub(crate) fn site_id(&self, site_type: &str) -> Option<u32> {
         self.row_opt(site_type).map(|row| row.id)
+    }
+
+    /// Master `category` and `sitePosition` of a site type. The position is
+    /// the master's own (source-frame) value; `SitePlacement::product_origin`
+    /// reflects it into the runtime frame.
+    pub(crate) fn placement(&self, site_type: &str) -> Option<SitePlacement> {
+        self.row_opt(site_type).map(|row| SitePlacement {
+            site_id: row.id,
+            category: row.category.clone(),
+            position: row.position,
+        })
     }
 
     /// The sites a switch can reach, in master-row order, each with the
@@ -799,13 +850,38 @@ pub(crate) fn plan(
             return;
         }
     };
-    let row = sites.row(&selection.site);
+    let planned = plan_family(&server, &sites, &selection.site, site_level);
+    let scene = planned.active.scene.clone();
+    commands.insert_resource(planned.active);
+    commands.insert_resource(planned.assets);
+    // 侧车（inactiveNodes 名单、材质表与 A 套声源表）跟着站点走：换站后
+    // 重新起请求。
+    inactive_nodes::request(&mut commands, &server, &scene);
+    site_material::request(&mut commands, &server, &scene);
+    site_sound::request(&mut commands, &server, &scene);
+}
+
+/// One destination's ledger row and asset family. The loader ([`plan`]) and a
+/// cannon move's pre-action preload ([`SitePreload`]) both call this, so the
+/// preloaded handles are exactly the ones the loader asks for at the swap.
+pub(crate) struct SitePlanned {
+    pub(crate) active: SiteActive,
+    pub(crate) assets: SiteAssets,
+}
+
+pub(crate) fn plan_family(
+    server: &AssetServer,
+    sites: &Sites,
+    site_type: &str,
+    site_level: u32,
+) -> SitePlanned {
+    let row = sites.row(site_type);
     let room = is_room(&row.site_type).then(|| RoomInfo {
         level: site_level,
         walkable_file: sites.walkable.get(&site_level).cloned().flatten(),
     });
     let module = room.as_ref().map(|_| {
-        load_gltf(&server, AssetPath::from(format!(
+        load_gltf(server, AssetPath::from(format!(
             "moly://site/indoor/modules/lv_{:02}/lv_{:02}.glb",
             site_level, site_level
         )), GltfResidency::RoomModule)
@@ -814,19 +890,19 @@ pub(crate) fn plan(
         .as_ref()
         .and_then(|room| room.walkable_file.as_ref())
         .map(|file| {
-            load_gltf(&server, AssetPath::from(format!(
+            load_gltf(server, AssetPath::from(format!(
                 "moly://site/indoor/navigation/navigation_mesh/{file}"
             )), GltfResidency::GpuTextures)
         });
     // 玩家可行走面来自清单中的显式导航输入（草原另用烘档高度网格）。
     // 有无离线瓦片不影响独立导航输入的装载；无独立面时才沿用地表。
     let navmesh = sites.nav_face(&row.scene).map(|face| match face {
-        NavFace::Heightmesh => load_gltf(&server, AssetPath::from(format!(
+        NavFace::Heightmesh => load_gltf(server, AssetPath::from(format!(
             "moly://site/scenes/{}/navmesh/heightmesh-0.glb",
             row.scene
         )), GltfResidency::GpuTextures),
         NavFace::BakeInput(file) => {
-            load_gltf(&server, AssetPath::from(format!("moly://site/{file}")), GltfResidency::GpuTextures)
+            load_gltf(server, AssetPath::from(format!("moly://site/{file}")), GltfResidency::GpuTextures)
         }
     });
     let nav_face_name = sites.nav_face(&row.scene).map(|face| match face {
@@ -841,7 +917,7 @@ pub(crate) fn plan(
             .map(|s| (*s).to_owned())
             .collect()
     };
-    commands.insert_resource(SiteActive {
+    let active = SiteActive {
         site_id: row.id,
         level: site_level,
         site_type: row.site_type.clone(),
@@ -851,9 +927,9 @@ pub(crate) fn plan(
         position: row.position,
         room,
         nav_face: nav_face_name,
-    });
-    commands.insert_resource(SiteAssets {
-        gltf: load_gltf(&server, moly_assets::site_scene(&row.scene), GltfResidency::GpuTextures),
+    };
+    let assets = SiteAssets {
+        gltf: load_gltf(server, moly_assets::site_scene(&row.scene), GltfResidency::GpuTextures),
         grounds,
         module,
         walkable,
@@ -867,12 +943,72 @@ pub(crate) fn plan(
         } else {
             Vec::new()
         },
-    });
-    // 侧车（inactiveNodes 名单、材质表与 A 套声源表）跟着站点走：换站后
-    // 重新起请求。
-    inactive_nodes::request(&mut commands, &server, &row.scene);
-    site_material::request(&mut commands, &server, &row.scene);
-    site_sound::request(&mut commands, &server, &row.scene);
+    };
+    SitePlanned { active, assets }
+}
+
+/// The destination of a cannon move, loaded ahead of the swap: the source's
+/// pre-action awaits `SiteManager.AddSite(nextType)` (load or reuse the site)
+/// before the Core starts. The strong handles here keep the scene family and
+/// its sidecar alive until the loader asks for the same paths at the swap.
+pub(crate) struct SitePreload {
+    pub(crate) scene: String,
+    assets: SiteAssets,
+    sidecar_json: Handle<JsonAsset>,
+    sidecar: Handle<moly_assets::sidecar::MolyJson>,
+}
+
+impl SitePreload {
+    pub(crate) fn request(
+        server: &AssetServer,
+        sites: &Sites,
+        next: &SiteSelection,
+    ) -> Result<Self, String> {
+        let level = next.levels.get(&next.site).copied().ok_or_else(|| {
+            format!("site {} expansion stage is not resolved for its preload", next.site)
+        })?;
+        let planned = plan_family(server, sites, &next.site, level);
+        let scene = planned.active.scene.clone();
+        Ok(Self {
+            sidecar_json: server.load::<JsonAsset>(moly_assets::site_scene_json(&scene)),
+            sidecar: server.load::<moly_assets::sidecar::MolyJson>(moly_assets::site_scene_json(&scene)),
+            scene,
+            assets: planned.assets,
+        })
+    }
+
+    /// Ok(true) once every glTF of the family has loaded with its
+    /// dependencies and the sidecar has loaded; a failure is named.
+    pub(crate) fn ready(&self, server: &AssetServer) -> Result<bool, String> {
+        let mut ready = true;
+        let gltfs = [
+            Some(&self.assets.gltf),
+            self.assets.module.as_ref(),
+            self.assets.walkable.as_ref(),
+            self.assets.navmesh.as_ref(),
+        ];
+        for handle in gltfs.into_iter().flatten() {
+            if let LoadState::Failed(error) = server.load_state(handle) {
+                return Err(format!("{} preload failed: {error:?}", self.scene));
+            }
+            if let RecursiveDependencyLoadState::Failed(error) =
+                server.recursive_dependency_load_state(handle)
+            {
+                return Err(format!("{} preload dependency failed: {error:?}", self.scene));
+            }
+            ready &= server.is_loaded_with_dependencies(handle);
+        }
+        for state in [server.load_state(&self.sidecar_json), server.load_state(&self.sidecar)] {
+            match state {
+                LoadState::Failed(error) => {
+                    return Err(format!("{} sidecar preload failed: {error:?}", self.scene))
+                }
+                LoadState::Loaded => {}
+                _ => ready = false,
+            }
+        }
+        Ok(ready)
+    }
 }
 
 /// Update：glTF 族及依赖到齐后展开 scene 并记下寻路面网格。到齐判据用
@@ -1105,12 +1241,35 @@ pub(crate) fn read_switch(
     pending: Option<Res<SiteChangeRequest>>,
     preview: Option<Res<TemporarySiteChangeRequest>>,
     mut exit: MessageWriter<AppExit>,
-    edit: Option<Res<crate::fixture_edit::EditSession>>,
+    // Paired for the same reason as `sites` above.
+    (edit, site_move): (
+        Option<Res<crate::fixture_edit::EditSession>>,
+        Option<Res<crate::site_move::SiteMoveActive>>,
+    ),
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
-    panel: Res<crate::game_settings::SettingsPanel>,
+    // Paired: this system is at the parameter-count limit.
+    (panel, entry): (
+        Res<crate::game_settings::SettingsPanel>,
+        Option<Res<crate::entry::EntrySequence>>,
+    ),
     library: Res<crate::content_library::ContentLibrary>,
 ) {
-    let manual_input = !panel.blocks_world_input() && !library.blocks_world_input();
+    // GameState SiteMove: the move owns the site until it returns to Normal.
+    // Its input lock covers the keys and the tour; a request queued by
+    // another owner stays queued and is read once the move has ended.
+    if site_move.is_some() {
+        if (pending.is_some() || preview.is_some()) && !tour.deferred_logged {
+            info!("[site] switch request deferred: a cannon move is in progress");
+            tour.deferred_logged = true;
+        }
+        return;
+    }
+    tour.deferred_logged = false;
+    // Site-change keys and the tour follow the back key, enabled once the
+    // entry's JoinMysekai returns.
+    let manual_input = !panel.blocks_world_input()
+        && !library.blocks_world_input()
+        && crate::entry::site_input_open(entry);
     let mut requested = manual_input
         .then(|| key_request(&keys, active.as_deref()))
         .flatten();
@@ -1175,6 +1334,23 @@ pub(crate) fn read_switch(
     } else {
         // Do not change source identity until normal admission succeeds.
         commands.remove_resource::<TemporarySiteActive>();
+    }
+    // SiteMoveActionExecutor.GetActionState: a move among the home, harvest
+    // and delivery sites is the cannon state. Previews, a library-owned
+    // return and every other kind keep the immediate transition.
+    let library_owned = pending.is_some() && library.owns_scene();
+    if !temporary
+        && !library_owned
+        && crate::weather_transition::EnvironmentMove::between(&selection.site, &next.site)
+            == crate::weather_transition::EnvironmentMove::Cannon
+    {
+        info!("[site] {} -> {}: cannon move handed to the site-move executor", selection.site, next.site);
+        commands.insert_resource(crate::site_move::SiteMoveRequest {
+            from: selection.site.clone(),
+            next,
+        });
+        tour.hops += 1;
+        return;
     }
     queue_transition(&mut commands, roots.iter().collect(), next);
     tour.hops += 1;
@@ -1269,6 +1445,19 @@ fn tour_request(
     if tour.elapsed < tour.period {
         return None;
     }
+    if let Some(route) = &tour.route {
+        // Named route instrument: hop n goes to route[n]; the hop after the
+        // last entry is a clean exit.
+        let Some(next) = route.get(tour.hops as usize) else {
+            if !tour.exiting {
+                info!("[site] tour route walked ({} hops), exiting", route.len());
+                exit.write(AppExit::Success);
+                tour.exiting = true;
+            }
+            return None;
+        };
+        return Some(next.clone());
+    }
     if tour.hops >= SUPPORTED.len() as u32 {
         if !tour.exiting {
             info!("[site] 巡游走满支持集（{} 站），退出", SUPPORTED.len());
@@ -1292,6 +1481,10 @@ pub(crate) struct Tour {
     epoch_seen: u64,
     hops: u32,
     exiting: bool,
+    /// `MOLY_SITE_TOUR_ROUTE`: an explicit comma-separated list of site
+    /// types to visit in order instead of the master-row cycle.
+    route: Option<Vec<String>>,
+    deferred_logged: bool,
 }
 
 impl Default for Tour {
@@ -1300,6 +1493,16 @@ impl Default for Tour {
             .ok()
             .and_then(|raw| raw.trim().parse::<f32>().ok())
             .filter(|secs| *secs > 0.0);
+        let route = std::env::var(TOUR_ROUTE_ENV).ok().map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|site| !site.is_empty())
+                .map(|site| {
+                    assert!(is_supported(site), "{TOUR_ROUTE_ENV}: {site} is not a supported site type");
+                    site.to_owned()
+                })
+                .collect::<Vec<_>>()
+        });
         Self {
             enabled: period.is_some(),
             period: period.unwrap_or(0.0),
@@ -1307,6 +1510,8 @@ impl Default for Tour {
             epoch_seen: 0,
             hops: 0,
             exiting: false,
+            route,
+            deferred_logged: false,
         }
     }
 }

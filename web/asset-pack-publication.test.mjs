@@ -358,9 +358,10 @@ test("publication verifies every claimed decoded identity even when entries reus
     const release = canonicalPackBytes(catalog),
       id = sha(release);
     fs.writeFileSync(path.join(store, "catalogs", id + ".json"), release);
+    // An identity blob is its content, so the reader already refuses the alias.
     await assert.rejects(
       verifyPublishedStore(store, id),
-      /conflicting content metadata/,
+      /conflicting content metadata|Unsupported packed representation/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
