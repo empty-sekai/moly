@@ -349,7 +349,7 @@ fn join_core(world: &mut World, seq: &mut EntrySequence, dt: f32) {
     let house = match lookup {
         HouseLookup::Found(house) => house,
         HouseLookup::Absent => {
-            return error_branch(world, seq, "no placed fixture carries a HouseView", dt)
+            return error_branch(world, seq, "no placed fixture is a home fixture", dt)
         }
         HouseLookup::Failed(reason) | HouseLookup::Pending(reason) => {
             return error_branch(world, seq, &reason, dt);

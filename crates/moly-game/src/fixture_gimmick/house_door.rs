@@ -89,7 +89,10 @@ pub(crate) struct HouseDefinition {
 }
 
 /// Packages that carry a `HouseView`, keyed by package name. A package whose
-/// controller is not the bounded shape keeps its refusal reason.
+/// controller is not the bounded shape keeps its refusal reason. Only the
+/// home fixture's record is ever read ([`find_house`]), so a refusal is
+/// reported there, not here: many packages carry a `HouseView` record that
+/// the source never reads.
 #[derive(Resource, Default)]
 pub(crate) struct HouseCatalog(HashMap<String, Result<Arc<HouseDefinition>, String>>);
 
@@ -99,9 +102,6 @@ impl HouseCatalog {
             return;
         }
         let definition = house_definition(package).map(Arc::new);
-        if let Err(reason) = &definition {
-            warn!("[house-door] {name} HouseView preparation: {reason}");
-        }
         self.0.insert(name.to_owned(), definition);
     }
 
@@ -392,7 +392,7 @@ pub(crate) struct HouseBinding {
 pub(crate) enum HouseLookup {
     /// A placed house package is still binding its scene or view.
     Pending(String),
-    /// No placed fixture carries a HouseView.
+    /// No placed fixture is a home fixture.
     Absent,
     Found(HouseBinding),
     /// A house is placed but cannot be driven; the reason names why.
@@ -408,24 +408,52 @@ pub(crate) fn find_house(world: &mut World) -> HouseLookup {
         .iter(world)
         .map(|(entity, identity)| (entity, identity.clone()))
         .collect();
-    let catalog = world.resource::<HouseCatalog>();
-    let houses: Vec<_> = placed
-        .into_iter()
-        .filter_map(|(entity, identity)| {
-            catalog
-                .get(&identity.model_package)
-                .map(|definition| (entity, identity, definition.clone()))
+    // `FixtureManager.GetHouseView`: the `HouseView` component of the view of
+    // `GetHomeFixture()`, the first fixture of the placed list whose master
+    // is a home system fixture (`MysekaiFixtureUtility.IsHomeFixture`). A
+    // `HouseView` record on any other fixture is never read.
+    let Some(homes) = world.get_resource::<crate::entry::house::HomeFixtures>() else {
+        return HouseLookup::Pending("home fixture tables are loading".into());
+    };
+    let order: HashMap<String, usize> = world
+        .get_resource::<crate::fixture::FixturePlacements>()
+        .map(|placements| {
+            placements
+                .placed_instances()
+                .iter()
+                .enumerate()
+                .map(|(index, placed)| (placed.uid.to_owned(), index))
+                .collect()
         })
-        .collect();
-    let [(root, identity, definition)] = houses.as_slice() else {
-        return if houses.is_empty() {
-            HouseLookup::Absent
-        } else {
-            HouseLookup::Failed(format!(
-                "{} placed fixtures carry a HouseView",
-                houses.len()
-            ))
-        };
+        .unwrap_or_default();
+    let mut home_rows = Vec::new();
+    for (entity, identity) in placed {
+        match homes.is_home(&identity.model_package) {
+            Ok(true) => home_rows.push((entity, identity)),
+            Ok(false) => {}
+            Err(reason) => return HouseLookup::Failed(format!("home fixture tables: {reason}")),
+        }
+    }
+    home_rows.sort_by_key(|(_, identity)| order.get(&identity.uid).copied().unwrap_or(usize::MAX));
+    let Some((root, identity)) = home_rows.first() else {
+        return HouseLookup::Absent;
+    };
+    if home_rows.len() > 1 {
+        info!(
+            "[house-door] {} home fixtures placed; the first in layout order is the house ({})",
+            home_rows.len(),
+            identity.uid
+        );
+    }
+    let Some(definition) = world
+        .resource::<HouseCatalog>()
+        .get(&identity.model_package)
+        .cloned()
+    else {
+        return HouseLookup::Failed(format!(
+            "{}: the home fixture carries no HouseView record",
+            identity.model_package
+        ));
     };
     let definition = match definition {
         Ok(definition) => definition.clone(),
