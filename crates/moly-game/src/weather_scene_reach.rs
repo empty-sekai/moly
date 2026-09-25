@@ -8,9 +8,12 @@
 //! ones) and installs the new ones; the stopped effects' systems keep
 //! simulating without emitting and their colliders stay in the physics scene
 //! until each effect's own destroy delay has run out. During that window
-//! every collision query can meet both phenomena's ground colliders. This
-//! runs, for every site and every ordered pair of phenomena whose window
-//! holds two ground colliders and at least one admitted collision system,
+//! every collision query can meet both phenomena's ground colliders, and the
+//! site's own colliders (static for the whole visit) are in the scene
+//! throughout; a query meets those only when its mask names their layers.
+//! This runs, for every site and every ordered pair of phenomena whose window
+//! holds two colliders some system's mask names and at least one admitted
+//! collision system,
 //! the old phenomenon's admitted collision systems to a steady state with
 //! its own scene, then the window with both scenes: the old systems stopped,
 //! the new ones installed (their first-Play warm included), at the product's
@@ -129,6 +132,8 @@ struct System {
 struct SitePlan {
     effects: Vec<String>,
     colliders: Vec<Arc<crate::particle_runtime::collision_scene::GroundScene>>,
+    /// The site's own colliders.
+    site: Arc<crate::particle_runtime::collision_scene::GroundScene>,
     systems: Vec<System>,
     /// Collision systems refused, with the reason.
     refused: Vec<String>,
@@ -232,9 +237,9 @@ fn transition_order_reach() {
             let effects = doc["effects"].as_object().expect("effects map");
             let selected = selected_effects(effects, site);
             let names: Vec<&str> = selected.iter().map(|(n, _)| n.as_str()).collect();
-            scenes.select(Installation::Together(&names));
+            scenes.select(Installation::Together { effects: &names, site: Some(site), fixtures: false });
             let mut plan = SitePlan { effects: names.iter().map(|n| (*n).to_owned()).collect(), colliders: Vec::new(),
-                systems: Vec::new(), refused: Vec::new(), unrun: Vec::new() };
+                site: scenes.site_colliders(site), systems: Vec::new(), refused: Vec::new(), unrun: Vec::new() };
             for (effect_name, effect) in &selected {
                 plan.colliders.push(scenes.effect_colliders(effect_name).expect("effect colliders"));
                 let kind = match effect["kind"].as_str() {
@@ -291,7 +296,12 @@ fn transition_order_reach() {
                 }
                 bump(&mut totals, "transitions", 1);
                 let (pa, pb) = (&plans[&(site.clone(), a.clone())], &plans[&(site.clone(), b.clone())]);
-                let colliders = pa.colliders.iter().chain(&pb.colliders).map(|c| c.collider_count()).sum::<usize>();
+                // The effects' colliders, and the site's own that some
+                // system's mask names.
+                let masks = pa.systems.iter().chain(&pb.systems)
+                    .filter_map(|s| s.planned.emitter.collision.as_ref().map(|c| c.collides_with)).fold(0u32, |a, b| a | b);
+                let site_named = pa.site.colliders_named(masks);
+                let colliders = pa.colliders.iter().chain(&pb.colliders).map(|c| c.collider_count()).sum::<usize>() + site_named;
                 if colliders < 2 {
                     bump(&mut totals, "oneColliderAtMost", 1);
                     continue;
@@ -301,8 +311,11 @@ fn transition_order_reach() {
                     continue;
                 }
                 bump(&mut totals, "simulated", 1);
-                // The old phenomenon at its steady state with its own scene.
+                // The old phenomenon at its steady state with its own scene
+                // (the site's colliders first: they were there before any
+                // weather effect).
                 let scene = SiteScene::default();
+                scene.install(pa.site.clone());
                 for c in &pa.colliders {
                     scene.install(c.clone());
                 }
@@ -392,7 +405,7 @@ fn transition_order_reach() {
                 bump(&mut totals, "orderFreeLanes", free);
                 bump(&mut totals, "orderDependentLanes", dependent);
                 rows.push(json!({
-                    "site": site, "from": a, "to": b, "groundColliders": colliders,
+                    "site": site, "from": a, "to": b, "groundColliders": colliders, "siteCollidersNamed": site_named,
                     "fromSystems": pa.systems.iter().map(|s| s.planned.node.clone()).collect::<Vec<_>>(),
                     "toSystems": pb.systems.iter().map(|s| s.planned.node.clone()).collect::<Vec<_>>(),
                     "windowSeconds": window, "steadySeconds": steady,
@@ -406,6 +419,9 @@ fn transition_order_reach() {
     let plan_rows: Vec<Value> = plans.iter().map(|((site, name), plan)| json!({
         "site": site, "phenomenon": name, "effects": plan.effects,
         "groundColliders": plan.colliders.iter().map(|c| c.collider_count()).sum::<usize>(),
+        "siteColliders": plan.site.collider_count(),
+        "siteCollidersNamed": plan.site.colliders_named(plan.systems.iter()
+            .filter_map(|s| s.planned.emitter.collision.as_ref().map(|c| c.collides_with)).fold(0u32, |a, b| a | b)),
         "collisionSystems": plan.systems.iter().map(|s| format!("{}/{}", s.planned.effect, s.planned.node)).collect::<Vec<_>>(),
         "refused": plan.refused, "unrun": plan.unrun,
     })).collect();

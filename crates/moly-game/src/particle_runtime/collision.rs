@@ -10,13 +10,15 @@
 //! source axes and commits what it writes.
 //!
 //! The module's scene is the site's physics scene (see `collision_scene`):
-//! the ground MeshColliders of every installed weather effect, a stopped
-//! effect's until it is destroyed. Admission binds a plan whose installed
-//! colliders are all ported and refuses the others by name, the native birth
-//! installer installs the module with the host's live scene, and a runtime
-//! without an installed scene refuses the slice. When the overlap returns
-//! several colliders the scene cannot give their order; the law then selects
-//! over every order, and a call the order decides is refused by name.
+//! the MeshColliders of every installed weather effect (a stopped effect's
+//! until it is destroyed), the site's own colliders and the placed fixtures'.
+//! The module's mask is the system's own, read from its data. Admission binds
+//! a system whose mask names only layers whose colliders are all ported and
+//! refuses the others by name, the native birth installer installs the
+//! module with the host's live scene, and a runtime without an installed
+//! scene refuses the slice. When the overlap returns several colliders the
+//! scene cannot give their order; the law then selects over every order, and
+//! a call the order decides is refused by name.
 //!
 //! With a SizeModule the query radius reads the current-size stream, which the
 //! engine writes at the same two points: after the post-simulation collision
@@ -40,33 +42,6 @@ use moly_law::particle::collision_event::CollisionEmitEdge;
 use moly_law::particle::collision_response::CollisionRandom;
 use moly_law::particle::current_size::CurrentSizeLaw;
 use moly_law::particle::sub_emission::SubEmitterCommand;
-
-/// The only collision mask admitted: the ground layer, which holds only the
-/// installed weather effects' colliders (the scene composes them; see
-/// `collision_scene`).
-const GROUND_LAYER_MASK: u32 = 1 << 3;
-
-/// Why a mask other than the ground layer is refused: what is missing to
-/// answer against the other layers it names that hold colliders (the package
-/// census puts colliders on layers 0, 3, 4 and 9 only).
-fn mask_refusal(mask: u32) -> String {
-    let mut missing = Vec::new();
-    if mask & 1 != 0 {
-        missing.push("layer 0: the site package's colliders are not in the collider export");
-    }
-    if mask & (1 << 4) != 0 {
-        missing.push("layer 4: the site package's water collider is not in the collider export");
-    }
-    if mask & (1 << 9) != 0 {
-        missing.push("layer 9: the site package's navigation colliders are not in the collider export, and the \
-            placed fixtures' box and convex-mesh colliders need their shapes, box and convex-mesh sweeps in the law \
-            and a named placement mock");
-    }
-    if missing.is_empty() {
-        missing.push("only the ground layer's mask is admitted");
-    }
-    format!("collision mask {mask:#x}: {}", missing.join("; "))
-}
 
 pub(crate) struct CollisionRuntime {
     pub(crate) law: CollisionLaw,
@@ -141,9 +116,10 @@ impl CollisionRuntime {
     }
 }
 
-/// The module law for an emitter, with the product's own limits: the ground
-/// layer only, a current-size stream only from a qualified SizeModule (no
-/// Noise size), no per-particle speed modifier and World or Local space.
+/// The module law for an emitter, with the product's own limits: a
+/// current-size stream only from a qualified SizeModule (no Noise size), no
+/// per-particle speed modifier and World or Local space. The mask is the
+/// system's own; the scene judges the layers it names.
 /// Collision sub-emitter edges are taken; their children are resolved by
 /// admission. The particle-state flags follow the module set: with a
 /// size-over-lifetime module the current-size stream is read, else the
@@ -155,9 +131,6 @@ pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, S
     let Some(params) = emitter.collision.as_ref() else {
         return Ok(None);
     };
-    if params.collides_with != GROUND_LAYER_MASK {
-        return Err(mask_refusal(params.collides_with));
-    }
     if emitter.noise.is_some() {
         return Err("collision current-size stream: the Noise size condition at the collision points is not transcribed".into());
     }

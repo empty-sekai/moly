@@ -753,6 +753,7 @@ pub fn install(app: &mut App) {
             Update,
             (
                 weather_fx::expire_retirements,
+                weather_fx::sync_fixture_colliders,
                 weather_fx::watch,
                 weather_fx::parse,
                 weather_fx::plan,
