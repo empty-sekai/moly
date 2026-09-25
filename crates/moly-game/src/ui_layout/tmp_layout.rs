@@ -23,6 +23,12 @@
 //! pairs, with the text's own FaceInfo for the vertical metrics. The open
 //! font always supplies the bitmap shapes. Preferred and draw layout consume
 //! the same metrics and retain their distinct break rules.
+//!
+//! The text is read as TMP reads it: its processing array first (escapes of
+//! the serialized text, the `<br>` / `<nbsp>` / `<zwsp>` replacements), then
+//! each '<' validated by TMP's tag scan and tag set, a rejected one drawn as a
+//! character. A tag's value is read by the shared tag parser; a value TMP
+//! would reject (and so draw as characters) is not recognised here.
 
 use bevy::math::Vec2;
 use moly_assets::ui_layout::{UiComponent, UiTextFace};
@@ -102,7 +108,6 @@ struct Settings {
     wrap: bool,
     kern: bool,
     rich: bool,
-    controls: bool,
     char_spacing: f32,
     word_spacing: f32,
     line_spacing: f32,
@@ -307,7 +312,6 @@ impl Settings {
             wrap: boolean(f, "m_enableWordWrapping")?,
             kern: boolean(f, "m_enableKerning")?,
             rich: boolean(f, "m_isRichText")?,
-            controls: boolean(f, "m_parseCtrlCharacters")?,
             char_spacing: number(f, "m_characterSpacing")?,
             word_spacing: number(f, "m_wordSpacing")?,
             line_spacing: number(f, "m_lineSpacing")?,
@@ -345,94 +349,329 @@ struct Prepared {
     segments: Vec<TextSegment>,
 }
 
-fn prepare(input: &str, settings: &Settings) -> Result<Prepared, String> {
-    let raw: Vec<char> = input.chars().collect();
-    let mut text = String::new();
-    let mut source = Vec::new();
-    let mut i = 0;
-    while i < raw.len() {
-        if settings.controls && raw[i] == '\\' && i + 1 < raw.len() {
-            let escaped = match raw[i + 1] {
-                'n' => Some('\n'),
-                'r' => Some('\r'),
-                't' => Some('\t'),
-                '\\' => Some('\\'),
+/// A reserved code point standing, in the text handed to the shared tag
+/// parser, for a '<' TMP draws as a character (that parser would take it for
+/// the start of a tag).
+const LITERAL_LESS_THAN: char = '\u{fdd0}';
+
+/// The name hashes `ValidateHtmlTag` switches on: its top-level tag cases,
+/// each tag's lower- and upper-case spelling. A tag whose name hashes to
+/// none of them, and is not a `#` colour of 3, 4, 6 or 8 digits, leaves its
+/// '<' an ordinary character.
+const MARKUP_TAG_HASHES: [i32; 161] = [
+    98, 66, 427, 395, 105, 73, 434, 402,
+    115, 83, 444, 412, 117, 85, 446, 414,
+    43045, 30245, 155892, 143092, 6552, 4728, 22673, 20849,
+    6566, 4742, 22687, 20863, -330774850, 2012149182, -1885698441, 457225591,
+    6380, 4556, 22501, 20677, 16034505, 11642281, 54741026, 50348802,
+    43991, 31191, 43969, 31169, 156816, 144016, 45545, 32745,
+    158392, 145592, 41311, 28511, 154158, 141358, 103415287, 72669687,
+    374360934, 343615334, 320078, 230446, 276254, 186622, 1750458, 426,
+    43066, 30266, 155913, 143113, 275917, 186285, 1065846, 976214,
+    327550, 237918, 1117479, 1027847, 281955, 192323, 100149144, 69403544,
+    371094791, 340349191, 1983971, 1356515, 7513474, 6886018, 2152041, 1524585,
+    7681544, 7054088, 280416, 1071884, 982252, 2068980, 1441524, 7598483,
+    6971027, 1109386397, -842656867, -445537194, 1897386838, 2246877, 1619421, 730022849,
+    514803617, -1668324918, -1883544150, 13526026, 9133802, 781906058, 566686826, 52232547,
+    47840323, -1616441709, -1831660941, 766244328, 551025096, -1632103439, -1847322671, 2109854,
+    1482398, 7639357, 7011901, 1100728678, -855002522, -884817987, -1690034531, 1109349752,
+    -842693512, -445573839, 1897350193, 15115642, 10723418, 1913798, 1286342, 7443301,
+    6815845, 315682, 226050, 1105611, 1015979, 2227963, 1600507, 7757466,
+    7130010, 317446, 227814, 1107375, 1017743, 926, 670, 3229,
+    2973, 916, 660, 3219, 2963, 912, 656, 3215,
+    2959,
+];
+/// `<noparse>` / `<NOPARSE>` and their closing tags.
+const NO_PARSE: [i32; 2] = [15115642, 10723418];
+const END_NO_PARSE: [i32; 2] = [53822163, 49429939];
+/// The tags this port places (the shared tag parser reads their values); a
+/// tag TMP accepts outside this set is refused.
+const PLACED_TAGS: [&str; 17] = [
+    "color", "size", "scale", "alpha", "voffset", "cspace", "line-height", "line-indent", "indent", "pos",
+    "mspace", "align", "space", "uppercase", "allcaps", "lowercase", "smallcaps",
+];
+/// `GetMarkupTagHashCode` values of the tags the processing array replaces
+/// before any tag is validated.
+const LINE_BREAK_TAG: i32 = 2256;
+const NO_BREAK_SPACE_TAG: i32 = 2869039;
+const ZERO_WIDTH_SPACE_TAG: i32 = 3288238;
+const STYLE_TAGS: [i32; 2] = [100252951, 1927738392];
+/// `ToUpperASCIIFast`'s table; a code point above 127 is kept as it is.
+const UPPER_ASCII: &[u8; 128] = b"-------------------------------- !-#$%&-()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[-]^_`ABCDEFGHIJKLMNOPQRSTUVWXYZ{|}~-";
+
+/// `HexToInt`: a character that is not a hex digit reads as 15.
+fn hex_digit(unit: u16) -> u32 {
+    match unit {
+        0x30..=0x39 => (unit - 0x30) as u32,
+        0x41..=0x46 => (unit - 0x41 + 10) as u32,
+        0x61..=0x66 => (unit - 0x61 + 10) as u32,
+        _ => 15,
+    }
+}
+
+/// `GetMarkupTagHashCode`: `((h << 5) + h) ^ upper(c)` over at most 16
+/// code units after a '<', up to a '>', '=' or ' '. Past the end of the text
+/// the backing array holds its terminator and then units of earlier texts,
+/// which this port does not know; they are read as the terminator.
+fn replacement_tag_hash(units: &[u16], start: usize) -> i32 {
+    let mut hash: i32 = 0;
+    for k in start..start + 16 {
+        let c = units.get(k).map_or(0u32, |&unit| unit as u32);
+        if c == '>' as u32 || c == '=' as u32 || c == ' ' as u32 {
+            return hash;
+        }
+        let upper = if c < 128 { UPPER_ASCII[c as usize] as u32 } else { c };
+        hash = hash.wrapping_shl(5).wrapping_add(hash) ^ upper as i32;
+    }
+    hash
+}
+
+/// TMP's text processing array (`PopulateTextProcessingArray`): each code
+/// point with the index of the input character it came from.
+///
+/// A text from the component's serialized text (TMP's text input box
+/// source, `input_box`) has its backslash escapes parsed; a text code
+/// assigned through the text setter does not. `\\` gives two code points,
+/// the backslash and the character after it (which so escapes nothing);
+/// `\n`, `\r`, `\t` and `\v` give LF, CR, tab and VT when control characters
+/// are parsed; `\uXXXX` and `\UXXXXXXXX` give the hex value whenever enough
+/// of the text follows. With rich text, `<br>`, `<nbsp>` and `<zwsp>` (the
+/// name read case-insensitively up to '>', '=' or ' ') become LF, U+00A0 and
+/// U+200B here, each skipping a fixed count of code units from its '<'. The
+/// array ends at its first U+0000. Lengths and indices are the source's
+/// UTF-16 code units.
+fn processing_array(input: &str, rich: bool, controls: bool, input_box: bool) -> Result<Vec<(char, usize)>, String> {
+    let units: Vec<u16> = input.encode_utf16().collect();
+    let mut character = Vec::with_capacity(units.len());
+    for (index, ch) in input.chars().enumerate() {
+        for _ in 0..ch.len_utf16() {
+            character.push(index);
+        }
+    }
+    let scalar = |value: u32| {
+        char::from_u32(value).ok_or_else(|| format!("TMP escape gives U+{value:04X}, which is not a Unicode scalar value"))
+    };
+    let n = units.len();
+    let mut array = Vec::with_capacity(n);
+    let mut r = 0;
+    while r < n {
+        let c = units[r];
+        if c == 0 {
+            break;
+        }
+        if input_box && c == 0x5c && r < n - 1 {
+            let escaped = match units[r + 1] {
+                0x5c if controls && n > r + 2 => {
+                    array.push(('\\', character[r]));
+                    array.push((scalar(units[r + 2] as u32)?, character[r]));
+                    r += 3;
+                    continue;
+                }
+                0x6e if controls => Some(('\n', 2)),
+                0x72 if controls => Some(('\r', 2)),
+                0x74 if controls => Some(('\t', 2)),
+                0x76 if controls => Some(('\u{b}', 2)),
+                0x75 if n > r + 5 => {
+                    let value = (0..4).fold(0u32, |v, k| v + (hex_digit(units[r + 2 + k]) << (12 - 4 * k)));
+                    Some((scalar(value)?, 6))
+                }
+                0x55 if n > r + 9 => {
+                    let value = (0..8).fold(0u32, |v, k| v.wrapping_add(hex_digit(units[r + 2 + k]) << (28 - 4 * k)));
+                    Some((scalar(value)?, 10))
+                }
                 _ => None,
             };
-            if let Some(ch) = escaped {
-                text.push(ch);
-                source.push(i);
-                i += 2;
+            if let Some((ch, length)) = escaped {
+                array.push((ch, character[r]));
+                r += length;
                 continue;
             }
         }
-        text.push(raw[i]);
-        source.push(i);
+        if (0xd800..0xdc00).contains(&c) && n > r + 1 && (0xdc00..0xe000).contains(&units[r + 1]) {
+            let value = 0x10000 + (((c as u32) - 0xd800) << 10) + (units[r + 1] as u32 - 0xdc00);
+            array.push((scalar(value)?, character[r]));
+            r += 2;
+            continue;
+        }
+        if c == 0x3c && rich {
+            let hash = replacement_tag_hash(&units, r + 1);
+            if STYLE_TAGS.contains(&hash) {
+                return Err("TMP <style> tags need the TMP style sheet, which the root does not carry".into());
+            }
+            let replaced = match hash {
+                LINE_BREAK_TAG => Some(('\n', 4)),
+                NO_BREAK_SPACE_TAG => Some(('\u{a0}', 6)),
+                ZERO_WIDTH_SPACE_TAG => Some(('\u{200b}', 6)),
+                _ => None,
+            };
+            if let Some((ch, length)) = replaced {
+                array.push((ch, character[r]));
+                r += length;
+                continue;
+            }
+        }
+        // A Rust string has no lone surrogate, so this is a scalar value.
+        array.push((scalar(c as u32)?, character[r]));
+        r += 1;
+    }
+    // An escaped U+0000 ends the array as a source one does.
+    if let Some(end) = array.iter().position(|(ch, _)| *ch == '\0') {
+        array.truncate(end);
+    }
+    Ok(array)
+}
+
+/// The code points of a text component's processing array (its tags still
+/// in it): the characters a layout of it can draw.
+pub(super) fn processing_characters(text: &str, component: &UiComponent, input_box: bool) -> Result<Vec<char>, String> {
+    let f = &component.fields;
+    let array = processing_array(text, boolean(f, "m_isRichText")?, boolean(f, "m_parseCtrlCharacters")?, input_box)?;
+    Ok(array.into_iter().map(|(ch, _)| ch).collect())
+}
+
+struct ScannedTag {
+    /// Index of the closing '>'.
+    end: usize,
+    /// The first attribute's name hash, `(h << 3) - h + c`.
+    name_hash: i32,
+    /// Code points between the brackets.
+    count: usize,
+}
+
+/// `ValidateHtmlTag`'s scan from the code point after a '<'. It finds no tag
+/// at a '<', a U+0000, the end of the text or 128 code points without a
+/// '>', and at a second space in the tag's names; attribute values follow
+/// its state machine (a number ends at 'p', 'e', '%' or a space, a '#'
+/// colour at a space, other text at a '"'). The source indexes a buffer of
+/// 8 attributes; a ninth is refused.
+fn scan_tag(array: &[(char, usize)], start: usize) -> Result<Option<ScannedTag>, String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Value {
+        None,
+        Number,
+        Colour,
+        Text,
+    }
+    let mut count = 0;
+    let mut attribute_flag = 0u8;
+    let mut value = Value::None;
+    let mut attribute = 0usize;
+    let mut name_hash: i32 = 0;
+    let mut tag_set = false;
+    let mut i = start;
+    while i < array.len() && array[i].0 != '\0' && count < 128 && array[i].0 != '<' {
+        let c = array[i].0;
+        if c == '>' {
+            return Ok(Some(ScannedTag { end: i, name_hash, count }));
+        }
+        count += 1;
+        let mut next_attribute = false;
+        if attribute_flag == 1 {
+            let value_ends = match value {
+                Value::None => false,
+                Value::Number => matches!(c, 'p' | 'e' | '%' | ' '),
+                Value::Colour => c == ' ',
+                Value::Text => c == '"',
+            };
+            if value == Value::None {
+                value = match c {
+                    '+' | '-' | '.' | '0'..='9' => Value::Number,
+                    '#' => Value::Colour,
+                    _ => Value::Text,
+                };
+            } else if value_ends {
+                attribute_flag = 2;
+                value = Value::None;
+                next_attribute = true;
+            }
+        }
+        if c == '=' {
+            attribute_flag = 1;
+        }
+        if attribute_flag == 0 && c == ' ' {
+            if tag_set {
+                return Ok(None);
+            }
+            tag_set = true;
+            attribute_flag = 2;
+            value = Value::None;
+            next_attribute = true;
+        }
+        if next_attribute {
+            attribute += 1;
+            if attribute >= 8 {
+                return Err("TMP rich-text tag has more attributes than the source's attribute buffer".into());
+            }
+        }
+        if attribute_flag == 0 && attribute == 0 {
+            name_hash = name_hash.wrapping_shl(3).wrapping_sub(name_hash).wrapping_add(c as i32);
+        }
+        if attribute_flag == 2 && c == ' ' {
+            attribute_flag = 0;
+        }
         i += 1;
     }
-    let chars: Vec<char> = text.chars().collect();
-    let mut mapped = Vec::new();
+    Ok(None)
+}
+
+/// The tokens and style segments of a processing array. Each '<' is
+/// validated as `ValidateHtmlTag` validates it: inside `<noparse>` only its
+/// closing tag is a tag (and that one is taken anywhere); a tag TMP does not
+/// accept is drawn as characters; a tag it accepts is refused unless this
+/// port places it.
+fn prepare(input: &str, array: &[(char, usize)], settings: &Settings) -> Result<Prepared, String> {
+    if input.contains(LITERAL_LESS_THAN) {
+        return Err(format!("TMP text carries U+{:04X}, which this port reserves", LITERAL_LESS_THAN as u32));
+    }
+    // The characters TMP lays out, and the text for the shared tag parser:
+    // each placed tag kept, each other '<' replaced by the reserved code point.
+    let mut mapped = Vec::with_capacity(array.len());
+    let mut parsed = String::with_capacity(input.len());
     let mut no_parse = false;
-    i = 0;
-    while i < chars.len() {
-        if settings.rich && chars[i] == '<' {
-            if let Some(relative) = chars[i..].iter().position(|ch| *ch == '>') {
-                let end = i + relative;
-                let tag: String = chars[i + 1..end].iter().collect::<String>().to_lowercase();
-                if !no_parse || tag == "/noparse" {
-                    if tag == "noparse" {
+    let mut i = 0;
+    while i < array.len() {
+        let (ch, source) = array[i];
+        if settings.rich && ch == '<' {
+            if let Some(tag) = scan_tag(array, i + 1)? {
+                if END_NO_PARSE.contains(&tag.name_hash) {
+                    no_parse = false;
+                    i = tag.end + 1;
+                    continue;
+                }
+                let colour = tag.count > 0 && array[i + 1].0 == '#' && matches!(tag.count, 4 | 5 | 7 | 9);
+                if !no_parse && (colour || MARKUP_TAG_HASHES.contains(&tag.name_hash)) {
+                    if NO_PARSE.contains(&tag.name_hash) {
                         no_parse = true;
-                    } else if tag == "/noparse" {
-                        no_parse = false;
-                    } else if tag == "br" || tag == "cr" {
-                        mapped.push(('\n', source[i]));
-                    } else if tag == "nbsp" {
-                        mapped.push(('\u{a0}', source[i]));
-                    } else {
-                        let name = tag
-                            .trim_start_matches('/')
-                            .split(['=', ' '])
-                            .next()
-                            .unwrap_or("");
-                        if !matches!(
-                            name,
-                            "color"
-                                | "size"
-                                | "scale"
-                                | "alpha"
-                                | "voffset"
-                                | "cspace"
-                                | "line-height"
-                                | "line-indent"
-                                | "indent"
-                                | "pos"
-                                | "mspace"
-                                | "align"
-                                | "space"
-                                | "uppercase"
-                                | "allcaps"
-                                | "lowercase"
-                                | "smallcaps"
-                        ) && !name.starts_with('#')
-                        {
-                            return Err(format!(
-                                "TMP rich-text tag <{tag}> has no implemented placement"
-                            ));
-                        }
+                        i = tag.end + 1;
+                        continue;
                     }
-                    i = end + 1;
+                    let body: String = array[i + 1..tag.end].iter().map(|(ch, _)| *ch).collect();
+                    let lower = body.to_lowercase();
+                    let name = lower.strip_prefix('/').unwrap_or(&lower).split(['=', ' ']).next().unwrap_or("");
+                    if !colour && !PLACED_TAGS.contains(&name) {
+                        return Err(format!("TMP rich-text tag <{body}> has no implemented placement"));
+                    }
+                    parsed.push('<');
+                    parsed.push_str(&body);
+                    parsed.push('>');
+                    i = tag.end + 1;
                     continue;
                 }
             }
+            mapped.push(('<', source));
+            parsed.push(LITERAL_LESS_THAN);
+            i += 1;
+            continue;
         }
-        mapped.push((chars[i], source[i]));
+        mapped.push((ch, source));
+        parsed.push(ch);
         i += 1;
     }
     let segments = if settings.rich {
-        parse_rich_segments(&text)
+        parse_rich_segments(&parsed)
     } else {
         let mut template = parse_rich_segments(" ").remove(0);
-        template.text = text;
+        template.text = parsed;
         vec![template]
     };
     let mut tokens = Vec::new();
@@ -475,6 +714,7 @@ fn prepare(input: &str, settings: &Settings) -> Result<Prepared, String> {
             });
         }
         for ch in style.text.chars() {
+            let ch = if ch == LITERAL_LESS_THAN { '<' } else { ch };
             let &(expected, origin) = mapped
                 .get(index)
                 .ok_or("TMP rich-text source map exhausted")?;
@@ -977,10 +1217,12 @@ struct Line {
     positions: Vec<Positioned>,
     width: f32,
     preferred_width: f32,
-    ascent: f32,
-    descent: f32,
-    offset: f32,
-    hard: bool,
+    /// `m_lineOffset` while the line's characters were placed.
+    offset_start: f32,
+    /// The baseline adjustment the line's end made (`AdjustLineOffset`:
+    /// the line's characters move down by it), 0 when the source's gate
+    /// made none.
+    adjust: f32,
     start: usize,
 }
 struct Pass {
@@ -989,52 +1231,87 @@ struct Pass {
     content: Vec2,
     /// `m_maxTextAscender`: the first line's maximum ascender.
     ascent: f32,
-    /// `maxVisibleDescender`: the last laid-out line's descender (signed,
-    /// line offset included).
+    /// `maxVisibleDescender`: `m_ElementDescender` at the last line's end
+    /// (signed, line offset included).
     descender: f32,
     resize: Option<Resize>,
 }
 #[derive(Clone, Copy)]
 enum Resize {
     Width { actual: f32, available: f32 },
-    Height { actual: f32, lines: usize },
+    /// A text taller than its rect: the height TMP tested, the line number
+    /// a line-spacing reduction divides by, whether that reduction may run
+    /// (the current line's offset is positive, or the test was a word
+    /// wrap's new line), and for a word wrap the width a character-width
+    /// reduction takes.
+    Height { actual: f32, lines: usize, may_space: bool, width: Option<(f32, f32)> },
+}
+
+/// The vertical state TMP saves with a break or last-valid state and
+/// restores with it: the line's maximum ascender and (signed) minimum
+/// descender, the text's maximum ascender and `m_ElementDescender`.
+#[derive(Clone, Copy)]
+struct Vertical {
+    line_ascender: f32,
+    line_descender: f32,
+    text_ascender: f32,
+    element_descender: f32,
+}
+
+/// A saved line break: where the next line starts, how many positions the
+/// line keeps, and the vertical state after the character it follows.
+#[derive(Clone, Copy)]
+struct Break {
+    end: usize,
+    count: usize,
+    vertical: Vertical,
+}
+
+/// How a line ends.
+#[derive(Clone, Copy)]
+enum Ending {
+    /// The last character of the text.
+    Last,
+    /// A line-breaking character at this token.
+    Hard(usize),
+    /// A word wrap tested at this token.
+    Wrap(usize),
+    /// Truncation: U+0003 at the tested character, whose baseline offset
+    /// this is, ends the text.
+    Truncated(f32),
+}
+
+/// A character's adjusted ascender and descender in line space (the
+/// descender signed): its element extents shifted by its baseline offset;
+/// with an offset (`<voffset>`) the unshifted extent, computed back from the
+/// shifted one, takes part (the larger ascender, the lower descender).
+fn adjusted_extents(ascent: f32, depth: f32, voffset: f32) -> (f32, f32) {
+    let element_ascender = ascent + voffset;
+    let element_descender = -depth + voffset;
+    if voffset != 0.0 {
+        (
+            ((element_ascender - voffset) / 1.0).max(element_ascender),
+            ((element_descender - voffset) / 1.0).min(element_descender),
+        )
+    } else {
+        (element_ascender, element_descender)
+    }
 }
 
 fn make_line(
     positions: Vec<Positioned>,
     start: usize,
-    hard: bool,
+    offset_start: f32,
+    adjust: f32,
     p: &Prepared,
     m: &[Measured],
 ) -> Line {
-    // m_maxLineAscender / m_maxLineDescender start at -32767 / 32767 (the
-    // descender is kept here as a depth below the baseline, so both start
-    // at -32767). Only the line's first character and non-whitespace
-    // characters raise them; with a baseline offset (<voffset>) a character
-    // offers the larger of its shifted and unshifted extents, the unshifted
-    // one computed back from the shifted value.
-    let mut ascent: f32 = -LARGE;
-    let mut descent: f32 = -LARGE;
     let mut width: f32 = 0.0;
     let mut preferred_width: f32 = 0.0;
     let mut before_carriage_return: f32 = 0.0;
-    for (k, pos) in positions.iter().enumerate() {
+    for pos in positions.iter() {
         let token = &p.tokens[pos.index];
         let metric = &m[pos.index];
-        if k == 0 || !token.ch.is_whitespace() {
-            let element_ascender = metric.ascent + metric.voffset;
-            let element_descender = -metric.descent + metric.voffset;
-            let (adjusted_ascender, adjusted_descender) = if metric.voffset != 0.0 {
-                (
-                    ((element_ascender - metric.voffset) / 1.0).max(element_ascender),
-                    ((element_descender - metric.voffset) / 1.0).min(element_descender),
-                )
-            } else {
-                (element_ascender, element_descender)
-            };
-            ascent = adjusted_ascender.max(ascent);
-            descent = (-adjusted_descender).max(descent);
-        }
         if token.ch == '\r' {
             before_carriage_return = before_carriage_return.max(pos.pen);
         }
@@ -1056,14 +1333,35 @@ fn make_line(
         positions,
         width,
         preferred_width: preferred_width.max(before_carriage_return),
-        ascent,
-        descent,
-        offset: 0.0,
-        hard,
+        offset_start,
+        adjust,
         start,
     }
 }
 
+/// One layout pass, with TMP's vertical bookkeeping as it goes:
+///
+/// - each character raises the line's maximum ascender and lowers its
+///   minimum descender (the line's first character and non-whitespace ones
+///   only) and records its adjusted extents, which a whitespace character
+///   takes from the line so far;
+/// - a render pass tests each visible character against the rect height
+///   (`m_maxTextAscender - (line descender - line offset)`, plus the
+///   ascender rise over the line's start ascender when the line offset is
+///   positive), and a word wrap's new line against it before wrapping; too
+///   tall asks for a resize, or with Truncate ends the text at the tested
+///   character (the line keeps the characters before it, and U+0003, whose
+///   element scale is 0, joins the line's extents with its baseline offset);
+/// - a line's end makes the baseline adjustment only when its maximum
+///   ascender differs from the ascender its offset assumed by more than
+///   0.01 and the offset is positive, and folds the line's descender into
+///   `m_ElementDescender`;
+/// - a new line's offset adds the line gap from the ended line's descender
+///   and the new line's start ascender: after a line-breaking character that
+///   character's recorded ascender (the line's maximum unless it was the
+///   line's first character), after a word wrap the recorded ascender of the
+///   new line's first character; `<line-height>` in force at that character
+///   replaces the gap.
 fn pass(
     p: &Prepared,
     cfg: &Settings,
@@ -1099,13 +1397,41 @@ fn pass(
             *array = vec!['\0'; length];
         }
     }
+    // A new line's spacing terms: the face's line gap with the automatic
+    // spacing delta, and the line spacing (plus the paragraph spacing after
+    // a line feed or paragraph separator) in em units of the pass's size.
+    let gap = cfg.face.gap(size, spacing_delta);
+    let spacing = |paragraph: f32| {
+        if cfg.face.asset.is_some() {
+            (cfg.line_spacing + paragraph) * (size * 0.01)
+        } else {
+            (cfg.line_spacing + paragraph) * size * 0.01
+        }
+    };
     let mut lines = Vec::new();
     let mut start = 0;
     let mut previous_hard = true;
     let mut resize = None;
     let mut truncated = false;
     let mut last_soft_used = None;
-    while start < p.tokens.len() && !truncated {
+    // m_lineOffset, m_startOfLineAscender, m_IsDrivenLineSpacing.
+    let mut line_offset: f32 = 0.0;
+    let mut start_ascender: f32 = 0.0;
+    let mut driven = false;
+    let mut vertical = Vertical {
+        line_ascender: -LARGE,
+        line_descender: LARGE,
+        text_ascender: 0.0,
+        element_descender: 0.0,
+    };
+    // Each character's adjusted ascender and descender as the pass last
+    // recorded them (characterInfo).
+    let mut recorded = vec![(0.0f32, 0.0f32); total];
+    while start < total && !truncated {
+        let line_number = lines.len();
+        let offset_start = line_offset;
+        vertical.line_ascender = -LARGE;
+        vertical.line_descender = LARGE;
         let first_style = &p.segments[p.tokens[start].segment];
         let mut pen = indent(&first_style.indent, size, percent_base);
         if previous_hard {
@@ -1116,14 +1442,15 @@ fn pass(
             };
         }
         let mut positions = Vec::new();
-        let mut saved: Option<(usize, usize)> = None;
-        let mut soft: Option<(usize, usize)> = None;
+        let mut saved: Option<Break> = None;
+        let mut soft: Option<Break> = None;
         let mut first_word = true;
         let mut last_cjk = false;
         let mut previous_position: Option<Indent> = None;
-        let mut next_start = p.tokens.len();
+        let mut next_start = total;
         let mut hard = false;
-        for i in start..p.tokens.len() {
+        let mut ending = Ending::Last;
+        for i in start..total {
             let token = &p.tokens[i];
             let m = &measured[i];
             let style = &p.segments[token.segment];
@@ -1141,6 +1468,21 @@ fn pass(
                 positions.push(Positioned { index: i, pen });
                 continue;
             }
+            // The last valid state: the state after the previous character.
+            let before = vertical;
+            if positions.is_empty() || !token.ch.is_whitespace() {
+                let (ascender, descender) = adjusted_extents(m.ascent, m.descent, m.voffset);
+                vertical.line_ascender = ascender.max(vertical.line_ascender);
+                vertical.line_descender = descender.min(vertical.line_descender);
+                recorded[i] = (ascender, descender);
+                vertical.element_descender = (-m.descent + m.voffset) - line_offset;
+                if line_number == 0 {
+                    vertical.text_ascender = vertical.line_ascender;
+                }
+            } else {
+                recorded[i] = (vertical.line_ascender, vertical.line_descender);
+                vertical.element_descender = vertical.line_descender - line_offset;
+            }
             let mut origin = pen;
             let mono = style
                 .monospace
@@ -1150,6 +1492,27 @@ fn pass(
                 origin += (mono - m.fit) * 0.5;
             }
             let fit = origin.abs() + m.fit;
+            if purpose == Purpose::Render && visible(token.ch) {
+                // The current line's vertical bounds.
+                let rise = if line_offset > 0.0 && !driven { vertical.line_ascender - start_ascender } else { 0.0 };
+                let text_height = (vertical.text_ascender - (vertical.line_descender - line_offset)) + rise;
+                if text_height > height + EPSILON {
+                    if resize_allowed {
+                        resize = Some(Resize::Height {
+                            actual: text_height,
+                            lines: line_number,
+                            may_space: line_offset > 0.0,
+                            width: None,
+                        });
+                        break;
+                    }
+                    if cfg.overflow == 3 {
+                        vertical = before;
+                        ending = Ending::Truncated(m.voffset);
+                        break;
+                    }
+                }
+            }
             if visible(token.ch) && fit > width + EPSILON {
                 let can_wrap = wrapping && i != start;
                 if resize_allowed
@@ -1168,18 +1531,59 @@ fn pass(
                     let take_soft = purpose == Purpose::Render
                         && first_word
                         && soft.is_some()
-                        && soft.map(|v| v.0) != last_soft_used;
-                    if let Some((end, count)) = if take_soft { soft } else { saved } {
-                        positions.truncate(count);
-                        next_start = end;
-                        if take_soft {
-                            last_soft_used = Some(end);
+                        && soft.map(|v| v.end) != last_soft_used;
+                    if let Some(point) = if take_soft { soft } else { saved } {
+                        if purpose == Purpose::Render {
+                            // The new line's height, from the word-wrap
+                            // state; taking the soft break below does not
+                            // recompute it.
+                            let state = saved.unwrap_or(point);
+                            let (ascender, descender) = recorded[state.end];
+                            let delta = match style.line_height {
+                                Some(line_height) => {
+                                    driven = true;
+                                    line_height + spacing(0.0)
+                                }
+                                None => {
+                                    let rise = if line_offset > 0.0 && !driven {
+                                        state.vertical.line_ascender - start_ascender
+                                    } else {
+                                        0.0
+                                    };
+                                    (((rise - state.vertical.line_descender) + ascender) + gap) + spacing(0.0)
+                                }
+                            };
+                            let new_text_height = ((state.vertical.text_ascender + delta) + line_offset) - descender;
+                            if new_text_height > height + EPSILON {
+                                if resize_allowed {
+                                    resize = Some(Resize::Height {
+                                        actual: new_text_height,
+                                        lines: line_number + 1,
+                                        may_space: true,
+                                        width: Some((fit, width + EPSILON)),
+                                    });
+                                    break;
+                                }
+                                if cfg.overflow == 3 {
+                                    vertical = before;
+                                    ending = Ending::Truncated(m.voffset);
+                                    break;
+                                }
+                            }
                         }
+                        positions.truncate(point.count);
+                        vertical = point.vertical;
+                        next_start = point.end;
+                        if take_soft {
+                            last_soft_used = Some(point.end);
+                        }
+                        ending = Ending::Wrap(i);
                         break;
                     }
                 }
                 if purpose == Purpose::Render && cfg.overflow == 3 {
-                    truncated = true;
+                    vertical = before;
+                    ending = Ending::Truncated(m.voffset);
                     break;
                 }
             }
@@ -1195,6 +1599,7 @@ fn pass(
             if hard_break(token.ch) {
                 next_start = i + 1;
                 hard = true;
+                ending = Ending::Hard(i);
                 break;
             }
             // A carriage return resets the pen and, being whitespace, then
@@ -1202,8 +1607,9 @@ fn pass(
             if token.ch == '\r' {
                 pen = indent(&style.indent, m.size, percent_base);
             }
+            let here = Break { end: i + 1, count: positions.len(), vertical };
             if break_space(token.ch) {
-                saved = Some((i + 1, positions.len()));
+                saved = Some(here);
                 soft = None;
                 first_word = false;
                 last_cjk = false;
@@ -1217,100 +1623,124 @@ fn pass(
                 let permitted = !leading || (purpose == Purpose::Preferred && first_word);
                 if permitted {
                     if !following {
-                        saved = Some((i + 1, positions.len()));
+                        saved = Some(here);
                         first_word = false;
                     }
                     if first_word {
                         if token.ch.is_whitespace() {
-                            soft = Some((i + 1, positions.len()));
+                            soft = Some(here);
                         }
-                        saved = Some((i + 1, positions.len()));
+                        saved = Some(here);
                     }
                 } else if first_word && i == start {
-                    saved = Some((i + 1, positions.len()));
+                    saved = Some(here);
                 }
                 last_cjk = true;
             } else if purpose == Purpose::Preferred && last_cjk {
                 if !rules.leading.contains(&token.ch) {
-                    saved = Some((i + 1, positions.len()));
+                    saved = Some(here);
                 }
                 last_cjk = false;
             } else if first_word {
                 if token.ch.is_whitespace() {
-                    soft = Some((i + 1, positions.len()));
+                    soft = Some(here);
                 }
-                saved = Some((i + 1, positions.len()));
+                saved = Some(here);
                 last_cjk = false;
             }
         }
         if resize.is_some() {
             break;
         }
-        lines.push(make_line(
-            positions, start, hard, p, &measured,
-        ));
-        if next_start <= start {
+        if let Ending::Truncated(voffset) = ending {
+            // U+0003 is not whitespace: its extents join the line's.
+            let (ascender, descender) = adjusted_extents(0.0, 0.0, voffset);
+            vertical.line_ascender = ascender.max(vertical.line_ascender);
+            vertical.line_descender = descender.min(vertical.line_descender);
+            vertical.element_descender = (-0.0 + voffset) - line_offset;
+            if line_number == 0 {
+                vertical.text_ascender = vertical.line_ascender;
+            }
+            truncated = true;
+        }
+        // The line's end.
+        let rise = vertical.line_ascender - start_ascender;
+        let mut adjust = 0.0;
+        if line_offset > 0.0 && rise.abs() > 0.01 && !driven {
+            vertical.element_descender -= rise;
+            line_offset += rise;
+            adjust = rise;
+        }
+        let line_descender = vertical.line_descender - line_offset;
+        if !(vertical.element_descender < line_descender) {
+            vertical.element_descender = line_descender;
+        }
+        lines.push(make_line(positions, start, offset_start, adjust, p, &measured));
+        match ending {
+            Ending::Hard(index) => {
+                let (ascender, _) = recorded[index];
+                let paragraph = if matches!(p.tokens[index].ch, '\n' | '\u{2029}') {
+                    cfg.paragraph_spacing
+                } else {
+                    0.0
+                };
+                match p.segments[p.tokens[index].segment].line_height {
+                    Some(line_height) => {
+                        line_offset += line_height + spacing(paragraph);
+                        driven = true;
+                    }
+                    None => {
+                        line_offset += (((0.0 - vertical.line_descender) + ascender) + gap) + spacing(paragraph);
+                        driven = false;
+                    }
+                }
+                start_ascender = ascender;
+            }
+            Ending::Wrap(tested) => {
+                let (ascender, _) = recorded[next_start];
+                match p.segments[p.tokens[tested].segment].line_height {
+                    Some(line_height) => {
+                        line_offset += line_height + spacing(0.0);
+                        driven = true;
+                    }
+                    None => {
+                        line_offset += (((0.0 - vertical.line_descender) + ascender) + gap) + spacing(0.0);
+                        // A render pass keeps the flag; the preferred pass clears it.
+                        if purpose == Purpose::Preferred {
+                            driven = false;
+                        }
+                        start_ascender = ascender;
+                    }
+                }
+                // The preferred pass takes the start ascender either way.
+                if purpose == Purpose::Preferred {
+                    start_ascender = ascender;
+                }
+            }
+            Ending::Last | Ending::Truncated(_) => {}
+        }
+        if !truncated && next_start <= start {
             return Err("TMP word-wrap failed to advance its source cursor".into());
         }
         start = next_start;
         previous_hard = hard;
     }
     let mut content = Vec2::ZERO;
-    let mut ascent: f32 = 0.0;
-    // m_ElementDescender at each line end: that line's descender (the
-    // text's height is the first line's ascender less the current line's
-    // descender, not a running minimum).
-    let mut lowest: f32 = 0.0;
-    for i in 0..lines.len() {
-        if i == 0 {
-            ascent = lines[i].ascent;
-        } else {
-            let previous = &lines[i - 1];
-            let style = &p.segments[p.tokens[lines[i].start].segment];
-            let paragraph =
-                if previous.hard && matches!(p.tokens[lines[i].start - 1].ch, '\n' | '\u{2029}') {
-                    cfg.paragraph_spacing
-                } else {
-                    0.0
-                };
-            let gap = style.line_height.unwrap_or(
-                previous.descent + lines[i].ascent + cfg.face.gap(size, spacing_delta),
-            );
-            lines[i].offset = if cfg.face.asset.is_some() {
-                // lineOffset += ... + (lineSpacing + paragraphSpacing) * currentEmScale
-                previous.offset + (gap + (cfg.line_spacing + paragraph) * (size * 0.01))
-            } else {
-                previous.offset + gap + (cfg.line_spacing + paragraph) * size * 0.01
-            };
-        }
-        lowest = -lines[i].descent - lines[i].offset;
+    for line in &lines {
         content.x = content.x.max(if purpose == Purpose::Preferred {
-            lines[i].preferred_width
+            line.preferred_width
         } else {
-            lines[i].width
+            line.width
         });
-        let extent = ascent - lowest;
-        if purpose == Purpose::Render && extent > height + EPSILON {
-            if resize_allowed {
-                resize = Some(Resize::Height {
-                    actual: extent,
-                    lines: i,
-                });
-                break;
-            }
-            if cfg.overflow == 3 {
-                lines.truncate(i);
-                break;
-            }
-        }
-        content.y = extent;
     }
+    // renderedHeight: the text's ascender less m_ElementDescender.
+    content.y = vertical.text_ascender - vertical.element_descender;
     Ok(Pass {
         lines,
         measured,
         content,
-        ascent,
-        descender: lowest,
+        ascent: vertical.text_ascender,
+        descender: vertical.element_descender,
         resize,
     })
 }
@@ -1404,8 +1834,8 @@ fn calculate(
                 search.reduce_char_width(actual, available, justified_or_flush, cfg.char_width_max_adj);
                 continue;
             }
-            Some(Resize::Height { actual, lines })
-                if can_resize && search.may_reduce_line_spacing(cfg.line_spacing_min, lines > 0) =>
+            Some(Resize::Height { actual, lines, may_space, .. })
+                if can_resize && search.may_reduce_line_spacing(cfg.line_spacing_min, may_space) =>
             {
                 search.reduce_line_spacing(
                     height,
@@ -1414,6 +1844,14 @@ fn calculate(
                     cfg.face.base_scale(size),
                     cfg.line_spacing_min,
                 );
+                continue;
+            }
+            // A word wrap's too-tall new line narrows the characters before
+            // it shrinks the point size.
+            Some(Resize::Height { width: Some((actual, available)), .. })
+                if can_resize && search.may_reduce_char_width(cfg.char_width_max_adj) =>
+            {
+                search.reduce_char_width(actual, available, justified_or_flush, cfg.char_width_max_adj);
                 continue;
             }
             Some(_) if can_resize && search.may_reduce_point_size(cfg.min) => {
@@ -1452,35 +1890,41 @@ fn calculate(
     Err("TMP automatic point size exceeded its source iteration bound".into())
 }
 
-/// TMP's early exit: with an empty text-processing array, or one whose first
-/// code point is U+0000, mesh generation clears the mesh and the preferred
-/// size is zero, before any font scale or layout setting is read.
-fn no_text(text: &str) -> bool {
-    text.chars().next().is_none_or(|first| first == '\0')
+/// A text component's processing array, and TMP's early exit: with an
+/// empty processing array (the array ends at its first U+0000) mesh
+/// generation clears the mesh and the preferred size is zero, before any
+/// font scale or layout setting is read.
+fn component_array(text: &str, component: &UiComponent, input_box: bool) -> Result<Option<Vec<(char, usize)>>, String> {
+    let f = &component.fields;
+    let array = processing_array(text, boolean(f, "m_isRichText")?, boolean(f, "m_parseCtrlCharacters")?, input_box)?;
+    Ok((!array.is_empty()).then_some(array))
 }
 
 /// The preferred width (axis 0) or height (axis 1) of a text component.
 ///
 /// `internal` is the component's own character array, which its preferred
 /// passes read and write (see [`pass`]); the caller keeps one per component
-/// for as long as the component lives, starting empty.
+/// for as long as the component lives, starting empty. `input_box`: the
+/// text is the component's serialized text (TMP parses its backslash
+/// escapes), not one code assigned.
 pub(super) fn preferred_axis(
     text: &str,
     component: &UiComponent,
     axis: usize,
     rect_size: Vec2,
     rules: &TextRules,
+    input_box: bool,
     internal: &mut Vec<char>,
 ) -> Result<f32, String> {
     if axis > 1 || !rect_size.is_finite() {
         return Err("TMP invalid layout axis or rect".into());
     }
-    if no_text(text) {
+    let Some(array) = component_array(text, component, input_box)? else {
         return Ok(0.0);
-    }
+    };
     // Alignment changes only the placement inside the rect, not preferred size.
     let config = Settings::read(component, None, rules.fonts.as_deref())?;
-    let prepared = prepare(text, &config)?;
+    let prepared = prepare(text, &array, &config)?;
     // A text of tags only still runs the pass (no characters, size 0) and
     // then the margins and the rounding below: 0.01 with zero margins.
     let (result, _, _) = calculate(
@@ -1502,6 +1946,8 @@ pub(super) fn preferred_axis(
     Ok(preferred_round(result.content[axis] + positive(leading) + positive(trailing)))
 }
 
+/// The render layout of a text component; `input_box` as for
+/// [`preferred_axis`].
 pub(super) fn layout(
     text: &str,
     component: &UiComponent,
@@ -1509,15 +1955,16 @@ pub(super) fn layout(
     pivot: Vec2,
     rules: &TextRules,
     alignment: Option<i64>,
+    input_box: bool,
 ) -> Result<TextLayout, String> {
     if !rect_size.is_finite() || !pivot.is_finite() {
         return Err("TMP non-finite render rect".into());
     }
-    if no_text(text) {
+    let Some(array) = component_array(text, component, input_box)? else {
         return Ok(TextLayout { glyphs: Vec::new() });
-    }
+    };
     let config = Settings::read(component, alignment, rules.fonts.as_deref())?;
-    let prepared = prepare(text, &config)?;
+    let prepared = prepare(text, &array, &config)?;
     if prepared.tokens.is_empty() {
         return Ok(TextLayout { glyphs: Vec::new() });
     }
@@ -1594,12 +2041,13 @@ pub(super) fn layout(
                 scale: m.scale,
                 width_scale: 1.0 - adjustment,
                 // origin += offset.x; baseLine (element baseline offset less
-                // the line offset, plus the <voffset> offset) += offset.y.
+                // the line offset it was placed at, plus the <voffset>
+                // offset, less the line's baseline adjustment) += offset.y.
                 // The pair placement is this port's pen shift for the glyph
                 // bitmap (0 without pair records).
                 pen: Vec2::new(
                     (placed.pen + offset.x) + m.pair_offset.x * (1.0 - adjustment),
-                    (((m.baseline - line.offset) + m.voffset) + offset.y) + m.pair_offset.y,
+                    ((((m.baseline - line.offset_start) + m.voffset) - line.adjust) + offset.y) + m.pair_offset.y,
                 ),
                 color,
             });

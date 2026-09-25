@@ -925,10 +925,10 @@ impl UiLayouts {
                     preferred = Some(-1.0);
                     continue;
                 }
-                let text = change
-                    .and_then(|v| v.text.as_deref())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| self.text(comp));
+                let (text, input_box) = match change.and_then(|v| v.text.as_deref()) {
+                    Some(text) => (text.to_owned(), false),
+                    None => self.text_source(comp),
+                };
                 let rules = self
                     .text_rules
                     .as_ref()
@@ -939,6 +939,7 @@ impl UiLayouts {
                     axis,
                     size,
                     rules,
+                    input_box,
                     internal.entry(comp.path_id).or_default(),
                 )?)
             } else if comp.fields.get("m_Type").is_some() {
@@ -1165,7 +1166,10 @@ impl UiLayouts {
     /// `m_text` (numeric fields keep it until their presenter supplies a
     /// value). All three fields are serialized by that class and its TMP
     /// base; a layout without one is refused, as is any other text class.
-    pub(crate) fn text(&self, component: &UiComponent) -> String {
+    /// The flag says whether the text is the component's serialized text:
+    /// TMP parses the backslash escapes of that one only (its text input
+    /// box source), not of a wording `Start` assigns through the text setter.
+    pub(crate) fn text_source(&self, component: &UiComponent) -> (String, bool) {
         assert_eq!(
             component.class, "Sekai.UI.CustomTextMesh",
             "UI text component {}: no text rule for this class", component.path_id
@@ -1182,12 +1186,13 @@ impl UiLayouts {
         let serialized = field("m_text").as_str()
             .unwrap_or_else(|| panic!("UI CustomTextMesh {}: m_text is not a string", component.path_id));
         if use_key && !key.is_empty() {
-            self.wordings
+            let wording = self.wordings
                 .get(key)
                 .unwrap_or_else(|| panic!("UI wording missing: {key}"))
-                .clone()
+                .clone();
+            (wording, false)
         } else {
-            serialized.to_owned()
+            (serialized.to_owned(), true)
         }
     }
     /// `CustomTextMesh.SetWordingText` on the CustomTextMesh at `path` of
@@ -1223,7 +1228,12 @@ impl UiLayouts {
             for n in &doc.nodes {
                 for c in &n.components {
                     if c.fields.get("m_fontSize").is_some() {
-                        chars.extend(self.text(c).chars());
+                        let (text, input_box) = self.text_source(c);
+                        chars.extend(text.chars());
+                        // An escape can draw a character the text does not spell.
+                        if let Ok(processed) = tmp_layout::processing_characters(&text, c, input_box) {
+                            chars.extend(processed);
+                        }
                     }
                 }
             }
@@ -1835,12 +1845,16 @@ fn rebuild_image_users(
                 }
             }
             if comp.fields.get("m_fontSize").is_some() {
-                let text = overrides
-                    .get(&index)
-                    .and_then(|v| v.text.clone())
-                    .unwrap_or_else(|| layouts.text(comp));
-                let pages: HashSet<_> = text
-                    .chars()
+                let (text, input_box) = match overrides.get(&index).and_then(|v| v.text.clone()) {
+                    Some(text) => (text, false),
+                    None => layouts.text_source(comp),
+                };
+                let mut drawn: Vec<char> = text.chars().collect();
+                if let Ok(processed) = tmp_layout::processing_characters(&text, comp, input_box) {
+                    drawn.extend(processed);
+                }
+                let pages: HashSet<_> = drawn
+                    .into_iter()
                     .filter(|ch| art.glyph_cell(*ch).is_some())
                     .map(|ch| art.glyph_image_for(ch).id())
                     .collect();
@@ -2238,14 +2252,16 @@ pub(crate) fn render(
                     commands.entity(node_contents).add_child(entity);
                 }
                 if f.get("m_fontSize").is_some() {
-                    let text = change
-                        .and_then(|v| v.text.clone())
-                        .unwrap_or_else(|| layouts.text(comp));
+                    let (text, input_box) = match change.and_then(|v| v.text.clone()) {
+                        Some(text) => (text, false),
+                        None => layouts.text_source(comp),
+                    };
                     spawn_text(
                         &mut commands,
                         node_contents,
                         &art,
                         &text,
+                        input_box,
                         comp,
                         change.and_then(|v| v.text_alignment),
                         rect,
@@ -2548,6 +2564,7 @@ fn spawn_text(
     parent: Entity,
     art: &BalloonArt,
     text: &str,
+    input_box: bool,
     component: &moly_assets::ui_layout::UiComponent,
     alignment: Option<i64>,
     rect: &UiRect,
@@ -2563,7 +2580,7 @@ fn spawn_text(
     clip_pixel_size: Vec2,
 ) {
     let fields = &component.fields;
-    let layout = tmp_layout::layout(text, component, rect.size, rect.pivot, rules, alignment)
+    let layout = tmp_layout::layout(text, component, rect.size, rect.pivot, rules, alignment, input_box)
         .unwrap_or_else(|error| panic!("UI TMP layout failed: {error}"));
     let base_color = serialized_rgba(fields, "m_fontColor");
     let (cell, pen_x, base_top) = art.cell_geometry();

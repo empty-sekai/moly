@@ -336,13 +336,16 @@ fn ui_values_for_source_comparison() {
                 continue;
             }
             let change = changes.get(&i).copied();
-            let text = change.and_then(|v| v.text.clone()).unwrap_or_else(|| layouts.text(c));
+            let (text, input_box) = match change.and_then(|v| v.text.clone()) {
+                Some(text) => (text, false),
+                None => layouts.text_source(c),
+            };
             let alignment = change.and_then(|v| v.text_alignment);
             let r = &oracle_rects[i];
             let oracle_size = Vec2::new(from_bits(&r[2]), from_bits(&r[3]));
             let run = |size: Vec2| -> Value {
                 // Pens are relative to the rect's pivot (the drawn rect's).
-                match tmp_layout::layout(&text, c, size, drawn[i].pivot, rules, alignment) {
+                match tmp_layout::layout(&text, c, size, drawn[i].pivot, rules, alignment, input_box) {
                     Ok(layout) => json!(layout.glyphs.iter().map(|g| json!({
                         "ch": g.ch.to_string(), "sourceIndex": g.source_index,
                         "fontSizeBits": bits(g.font_size), "scaleBits": bits(g.scale),
@@ -459,6 +462,80 @@ fn ui_values_for_source_comparison() {
     });
     std::fs::write(&output_path, serde_json::to_string(&report).expect("report json")).expect("write report");
     println!("UI source comparison values written: {output_path}");
+}
+
+/// Given texts laid out through this crate's TMP layout, each on a copy of a
+/// text component of the input layout with some serialized fields replaced:
+/// the render layout (glyph pens in the rect's pivot frame) or a preferred
+/// size. The host sources and TMP font assets are applied as in
+/// [`ui_values_for_source_comparison`]. It asserts nothing; it only reports.
+#[test]
+#[ignore = "research instrument: needs MOLY_TMP_COMPARE_IN and MOLY_TMP_COMPARE_OUT"]
+fn tmp_text_values_for_source_comparison() {
+    let input = read_json(&std::env::var("MOLY_TMP_COMPARE_IN").expect("MOLY_TMP_COMPARE_IN"));
+    let output_path = std::env::var("MOLY_TMP_COMPARE_OUT").expect("MOLY_TMP_COMPARE_OUT");
+    let doc_text = std::fs::read_to_string(input["doc"].as_str().expect("doc")).expect("doc bytes");
+    let source_doc = UiPrefab::parse(&doc_text).expect("doc parses");
+    let camera_fields = match input["hostCanvasRoot"].as_str() {
+        Some("region") => RootCameraFields::Required,
+        Some("shared") => RootCameraFields::SharedRootMayLack,
+        other => panic!("hostCanvasRoot must be region or shared, not {other:?}"),
+    };
+    let mut layouts = UiLayouts::default();
+    layouts.apply_host_sources(
+        &read_json(input["hostCanvas"].as_str().expect("hostCanvas")),
+        &read_json(input["textSettings"].as_str().expect("textSettings")),
+        &read_json(input["wordings"].as_str().expect("wordings")),
+        camera_fields,
+    );
+    if let Some(path) = input["tmpFontAssets"].as_str() {
+        let region = source_doc.source.region.as_deref().expect("region document");
+        let client = source_doc.source.client_version.as_deref().expect("region document client version");
+        let fonts = super::tmp_font::TmpFonts::parse(&read_json(path), region, client).expect("TMP font document");
+        layouts.set_tmp_fonts(Some(fonts));
+    }
+    let rules = layouts.text_rules.as_ref().expect("TMP line rules applied");
+    let mut cases = Vec::new();
+    for case in input["cases"].as_array().expect("cases") {
+        let template = case["templatePathId"].as_i64().expect("templatePathId");
+        let mut component = source_doc
+            .nodes
+            .iter()
+            .flat_map(|node| node.components.iter())
+            .find(|c| c.path_id == template)
+            .unwrap_or_else(|| panic!("no component @{template} in the input layout"))
+            .clone();
+        let fields = component.fields.as_object_mut().expect("component fields are an object");
+        for (key, value) in case["fields"].as_object().expect("case fields") {
+            fields.insert(key.clone(), value.clone());
+        }
+        let text = case["text"].as_str().expect("case text");
+        let input_box = case["inputBox"].as_bool().expect("case inputBox");
+        let size: [f32; 2] = numbers(&case["rect"], "case rect");
+        let pivot: [f32; 2] = numbers(&case["pivot"], "case pivot");
+        let result = match case["axis"].as_u64() {
+            Some(axis) => match tmp_layout::preferred_axis(
+                text, &component, axis as usize, Vec2::from_array(size), rules, input_box, &mut Vec::new(),
+            ) {
+                Ok(value) => json!({"preferredBits": bits(value)}),
+                Err(e) => json!({"error": e}),
+            },
+            None => match tmp_layout::layout(
+                text, &component, Vec2::from_array(size), Vec2::from_array(pivot), rules, None, input_box,
+            ) {
+                Ok(layout) => json!({"glyphs": layout.glyphs.iter().map(|g| json!({
+                    "ch": g.ch.to_string(), "sourceIndex": g.source_index,
+                    "fontSizeBits": bits(g.font_size),
+                    "penBits": [bits(g.pen.x), bits(g.pen.y)],
+                })).collect::<Vec<_>>()}),
+                Err(e) => json!({"error": e}),
+            },
+        };
+        cases.push(json!({"name": case["name"], "result": result}));
+    }
+    std::fs::write(&output_path, serde_json::to_string(&json!({"cases": cases})).expect("report json"))
+        .expect("write report");
+    println!("TMP text comparison values written: {output_path}");
 }
 
 /// The field camera's reset as the camera-reset button's click runs it.
