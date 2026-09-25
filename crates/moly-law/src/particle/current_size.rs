@@ -12,15 +12,31 @@
 //! Per lane: `t = fmax(age * 0.01, +0)` (a NaN age propagates), the size curve
 //! at `t` (a constant, two constants blended by the particle's size random,
 //! one curve times its multiplier, or two curves blended), and
-//! `current = start * fmax(v, +0)`. A keyed curve is evaluated as the engine's
-//! animation curve evaluation does with a fresh cache: the clamp wraps outside
-//! the key range, the segment found by the sampling search from index 0, its
-//! cubic coefficients and the nested polynomial. The engine replaces a curve
-//! of at most three keys that starts at 0 and ends at 1 (among other tests)
-//! by an optimised polynomial when the asset loads; that form is not
-//! transcribed here and such curves are refused, as are weighted keys,
-//! separate axes and the 3D size. The wrap modes are not in the law's curve
-//! type; the caller checks that the export's are the clamp.
+//! `current = start * fmax(v, +0)`.
+//!
+//! The asset reader decides once per curve whether the module reads it as an
+//! optimised polynomial ([`optimised`]; for two curves both must qualify, the
+//! maximum curve being tested first). Such a curve is read only through its
+//! two-segment polynomial ([`Polynomial`]): the multiplier is folded into the
+//! coefficients when the asset loads, the first segment is evaluated at `t`
+//! itself, the second at `t - switch`, and the second is taken where
+//! `fmin(t, 0.99999) >= switch`, so past the last key the cubic is extended,
+//! not clamped, and the wrap modes are never read. Every other keyed curve is
+//! evaluated as the engine's animation curve evaluation does: the clamp
+//! wraps outside the key range, the segment found by the sampling search,
+//! its cubic coefficients and the nested polynomial, then the multiplier.
+//! The module passes no cache, so the evaluation uses the one the curve
+//! object carries from lane to lane and call to call (the lanes past the end
+//! of the last four-lane group included). With key times strictly increasing
+//! that cache only ever answers a time with the segment the search from
+//! index 0 finds (a fresh cache), which is what this law computes; with keys
+//! out of order or sharing a time, a cached segment or the cached search hint
+//! can answer differently, so such curves are refused on this path, as are
+//! weighted keys, separate axes and the 3D size. The wrap modes are not in
+//! the law's curve type; the caller checks that the export's are the clamp.
+//!
+//! The size random (two constants, two curves) is one draw per lane, a pure
+//! function of the seed, read by the blend alone.
 //!
 //! The engine also writes the lanes of the last four-lane group past the end
 //! of the range; those slots hold no particle, so only the range is written.
@@ -39,6 +55,8 @@ const SIZE_SALT: u32 = 0x8d2c_8431;
 const WIDTH_FLOOR: f32 = f32::from_bits(0x38d1_b717);
 /// The value step below which the optimised-curve test skips its slope tests.
 const STEP_TOLERANCE: f32 = f32::from_bits(0x3089_705f);
+/// The time clamp of the optimised polynomial's segment choice (0.99999).
+const SWITCH_CLAMP: f32 = f32::from_bits(0x3f7f_ff58);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
@@ -46,10 +64,13 @@ pub enum Refused {
     SeparateAxes,
     /// The 3D start size: three current-size components.
     Size3d,
-    /// A curve the asset reader replaces by the optimised polynomial.
-    OptimisedCurve,
-    /// A weighted key: the weighted segment form is not transcribed.
+    /// A weighted key on a curve the module evaluates key by key: the
+    /// weighted segment form is not transcribed here.
     WeightedKey,
+    /// Key times not strictly increasing (or NaN) on a curve the module
+    /// evaluates key by key: the value then depends on the cache the curve
+    /// carries from earlier lanes and calls.
+    UnorderedKeys,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +79,84 @@ enum Size {
     TwoConstants { min: f32, max: f32 },
     Curve { scalar: f32, keys: Vec<CurveKey> },
     TwoCurves { scalar: f32, min: Vec<CurveKey>, max: Vec<CurveKey> },
+    Polynomial(Polynomial),
+    TwoPolynomials { min: Polynomial, max: Polynomial },
+}
+
+/// The optimised polynomial of one curve as the asset reader builds it:
+/// two segments of four coefficients, highest power first, the multiplier
+/// already applied, and the time where the second segment starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Polynomial {
+    a: [f32; 4],
+    b: [f32; 4],
+    switch: f32,
+}
+
+impl Polynomial {
+    /// Built from keys that pass [`optimised`]. No key: both segments +0 and
+    /// the switch 1.0, the multiplier not applied. One key: both segments
+    /// hold the value times the multiplier, the switch 1.0. Two keys: the
+    /// second segment repeats the first and the switch stays 1.0 (never
+    /// reached through the 0.99999 clamp), whatever the last key's time.
+    /// Three keys: the second segment from the middle key and the switch at
+    /// its time. Each segment takes the cubic coefficients of the key
+    /// evaluation (its step tangents and its width floor included), in their
+    /// operation order; then every coefficient is multiplied by the
+    /// multiplier.
+    fn build(keys: &[CurveKey], multiplier: f32) -> Self {
+        let scale = |c: [f32; 4]| c.map(|v| a::mul(v, multiplier));
+        let coefficients = |lhs: usize| {
+            if arms::on("reassociated") {
+                return reassociated(keys, lhs);
+            }
+            segment(keys, lhs, lhs + 1).c
+        };
+        match keys.len() {
+            0 => Self { a: [0.0; 4], b: [0.0; 4], switch: 1.0 },
+            1 => {
+                let a = [0.0, 0.0, 0.0, a::mul(keys[0].value, multiplier)];
+                Self { a, b: a, switch: 1.0 }
+            }
+            2 => {
+                let a = scale(coefficients(0));
+                Self { a, b: a, switch: 1.0 }
+            }
+            _ => Self { a: scale(coefficients(0)), b: scale(coefficients(1)), switch: keys[1].time },
+        }
+    }
+
+    /// Both segments are evaluated; the second is taken where
+    /// `fmin(t, 0.99999) >= switch` (a NaN time takes the first).
+    fn evaluate(&self, t: f32) -> f32 {
+        let horner = |c: [f32; 4], x: f32| {
+            let v = a::add(c[1], a::mul(x, c[0]));
+            let v = a::add(c[2], a::mul(x, v));
+            a::add(c[3], a::mul(x, v))
+        };
+        let first = horner(self.a, t);
+        let second = horner(self.b, a::sub(t, self.switch));
+        if a::min(t, SWITCH_CLAMP) >= self.switch { second } else { first }
+    }
+}
+
+/// The re-associated coefficients (the numerators combined, then divided by
+/// the width's square and cube): a named wrong form for the replay, reached
+/// only through its arm.
+fn reassociated(keys: &[CurveKey], lhs: usize) -> [f32; 4] {
+    let (l, r) = (&keys[lhs], &keys[lhs + 1]);
+    let mut c = segment(keys, lhs, lhs + 1).c;
+    if c[0] == 0.0 && c[1] == 0.0 && c[2] == 0.0 {
+        return c;
+    }
+    let dx = a::max(a::sub(r.time, l.time), WIDTH_FLOOR);
+    let dy = a::sub(r.value, l.value);
+    let (len1, len2) = (a::mul(l.out_slope, dx), a::mul(dx, r.in_slope));
+    let cubic = a::sub(a::sub(a::add(len1, len2), dy), dy);
+    let square = a::sub(a::sub(a::sub(a::add(dy, a::add(dy, dy)), len1), len1), len2);
+    c[0] = a::div(cubic, a::mul(a::mul(dx, dx), dx));
+    c[1] = a::div(square, a::mul(dx, dx));
+    c
 }
 
 /// The qualified size law of one system.
@@ -98,22 +197,31 @@ impl CurrentSizeLaw {
             if curve.keys.iter().any(|key| key.weighted_mode != 0) {
                 return Err(Refused::WeightedKey);
             }
+            if !curve.keys.windows(2).all(|pair| pair[0].time < pair[1].time) {
+                return Err(Refused::UnorderedKeys);
+            }
             Ok(curve.keys.clone())
         };
+        let polynomial = !arms::on("genericPath");
         let size = match &params.curve {
             MinMaxCurve::Constant(value) => Size::Constant(*value),
             MinMaxCurve::TwoConstants { min, max } => Size::TwoConstants { min: *min, max: *max },
-            MinMaxCurve::Curve { multiplier, max } => {
-                if optimised(&max.keys) {
-                    return Err(Refused::OptimisedCurve);
+            MinMaxCurve::Curve { multiplier, max } if polynomial && optimised(&max.keys) => {
+                Size::Polynomial(Polynomial::build(&max.keys, *multiplier))
+            }
+            MinMaxCurve::Curve { multiplier, max } => Size::Curve { scalar: *multiplier, keys: keyed(max)? },
+            // One decision for the pair: the minimum curve is built only
+            // after the maximum curve qualified, and the pair is read as
+            // polynomials only when both did.
+            MinMaxCurve::TwoCurves { multiplier, min, max }
+                if polynomial && optimised(&max.keys) && optimised(&min.keys) =>
+            {
+                Size::TwoPolynomials {
+                    min: Polynomial::build(&min.keys, *multiplier),
+                    max: Polynomial::build(&max.keys, *multiplier),
                 }
-                Size::Curve { scalar: *multiplier, keys: keyed(max)? }
             }
             MinMaxCurve::TwoCurves { multiplier, min, max } => {
-                // Both curves must build for the optimised form.
-                if optimised(&max.keys) && optimised(&min.keys) {
-                    return Err(Refused::OptimisedCurve);
-                }
                 Size::TwoCurves { scalar: *multiplier, min: keyed(min)?, max: keyed(max)? }
             }
         };
@@ -126,16 +234,29 @@ impl CurrentSizeLaw {
         let scaled = a::mul(age_percent, AGE_FACTOR);
         let t = a::max(scaled, 0.0);
         let salt = if arms::on("otherSalt") { SIZE_SALT.wrapping_add(1) } else { SIZE_SALT };
-        let random = || ParticleRandom::sample(seed, salt);
+        let random = || {
+            if arms::on("extraDraw") {
+                let mut stream = ParticleRandom::from_seed(seed.wrapping_add(salt));
+                stream.next_f32();
+                return stream.next_f32();
+            }
+            ParticleRandom::sample(seed, salt)
+        };
         let scalar = |value: f32, s: f32| if arms::on("noMultiplier") { value } else { a::mul(value, s) };
+        let blend = |low: f32, high: f32| a::add(low, a::mul(random(), a::sub(high, low)));
         let v = match &self.size {
             Size::Constant(value) => *value,
-            Size::TwoConstants { min, max } => a::add(*min, a::mul(random(), a::sub(*max, *min))),
+            Size::TwoConstants { min, max } => blend(*min, *max),
             Size::Curve { scalar: s, keys } => scalar(evaluate(keys, t), *s),
             Size::TwoCurves { scalar: s, min, max } => {
                 let low = scalar(evaluate(min, t), *s);
                 let high = scalar(evaluate(max, t), *s);
-                a::add(low, a::mul(random(), a::sub(high, low)))
+                blend(low, high)
+            }
+            Size::Polynomial(curve) => curve.evaluate(t),
+            Size::TwoPolynomials { min, max } => {
+                let (min, max) = if arms::on("swapMinMax") { (max, min) } else { (min, max) };
+                blend(min.evaluate(t), max.evaluate(t))
             }
         };
         a::mul(start, a::max(v, 0.0))
