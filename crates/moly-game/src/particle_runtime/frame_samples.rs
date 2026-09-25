@@ -91,6 +91,11 @@ fn install(system: &mut Runtime, seeds: &Value) {
     let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
     assert!(matches!(install_native_birth(system, &mut manager, &SourceRoute::Ordinary, None).unwrap(),
         BirthPath::Native));
+    replace_streams(system, seeds);
+}
+
+/// The probe RNG words replace the installed streams of the native owner.
+fn replace_streams(system: &mut Runtime, seeds: &Value) {
     let state = system.native_birth.as_mut().unwrap();
     state.owner = None;
     let initial = seeds["initialWords"].as_array().unwrap();
@@ -138,7 +143,15 @@ impl Tally {
 /// Compare the product state after one frame with the native row.
 /// `frame_state` false skips the fields only the per-frame driver keeps.
 fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, label: &str) {
-    let state = system.native_birth.as_ref().unwrap();
+    // A host that left the system without the native owner has none of the
+    // owner state to compare: the frame mismatches as a whole.
+    let Some(state) = system.native_birth.as_ref() else {
+        let mut ok = true;
+        tally.check("nativeOwner", false, &mut ok, label);
+        tally.frames += 1;
+        tally.mismatched_frames += 1;
+        return;
+    };
     let after = &row["after"];
     let mut ok = true;
     if frame_state {
@@ -377,4 +390,60 @@ fn nonfinite_and_degenerate_frame_inputs_complete() {
             assert!(system.pool.len() <= 200);
         }
     }
+}
+
+/// The per-frame native rows of this harness (the unpatched cases of the
+/// three Update1b receipts: the per-frame and distance cases, their extra
+/// World backtrack cases and the Velocity and CustomData module cases)
+/// through a host's own install (`install`, which must leave the native
+/// owner in place for the probe words to replace its streams; a host that
+/// does not is compared as a whole-frame mismatch) and its own frame entry
+/// (`step`, with the raw frame dt). Returns cases, frames, mismatched frames
+/// and the first mismatches.
+pub(crate) fn replay_through_host<H>(
+    install: &dyn Fn(&mut Runtime, &mut seed::SystemSeedManager) -> H,
+    step: &dyn Fn(&mut Runtime, &mut H, f32, &Context),
+) -> (usize, usize, usize, Vec<String>) {
+    let receipt = read("MOLY_UPDATE1B_FRAMES");
+    let extra = read("MOLY_UPDATE1B_FRAMES_EXTRA");
+    let modules = read("MOLY_UPDATE1B_FRAMES_MODULES");
+    for document in [&receipt, &extra, &modules] {
+        assert_eq!(document["sourceSha256"], SOURCE_SHA256);
+    }
+    let start = &receipt["source"]["system"]["start"];
+    let cases: Vec<&Value> = [&receipt, &extra, &modules].into_iter()
+        .flat_map(|d| ["s11Cases", "s1Cases", "controls"].into_iter().filter_map(move |group| d[group].as_array()))
+        .flatten()
+        .filter(|case| case["patched"] != true)
+        .collect();
+    let mut tally = Tally::default();
+    for case in &cases {
+        let block = (case["modules"] == true).then(|| &modules["moduleSource"]);
+        let mut system = harness_system_with(start, &case["config"], block);
+        let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
+        let mut host = install(&mut system, &mut manager);
+        if system.native_birth.is_some() {
+            replace_streams(&mut system, &case["seeds"]);
+        }
+        let name = case["name"].as_str().unwrap();
+        for (index, row) in case["frames"].as_array().unwrap().iter().enumerate() {
+            let input = &row["input"];
+            if input["reset"].as_bool().unwrap() {
+                if let Some(native) = system.native_birth.as_mut() {
+                    native.frame.reset_previous = true;
+                }
+            }
+            step(&mut system, &mut host, f(&input["dtBits"]), &frame_context(input));
+            compare(&system, row, true, &mut tally, &format!("{name}#{index}"));
+        }
+    }
+    (cases.len(), tally.frames, tally.mismatched_frames, tally.first)
+}
+
+/// Run `f` with one of the runtime's one-rule arms on (`None`: none).
+pub(crate) fn with_arm<T>(arm: Option<&'static str>, f: impl FnOnce() -> T) -> T {
+    child::arms::set(arm);
+    let result = f();
+    child::arms::set(None);
+    result
 }

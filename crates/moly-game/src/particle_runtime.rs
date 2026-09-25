@@ -49,7 +49,7 @@ mod noise_samples;
 #[cfg(test)]
 mod initial_colour_samples;
 #[cfg(test)]
-mod frame_samples;
+pub(crate) mod frame_samples;
 #[cfg(test)]
 mod sub_event_samples;
 #[cfg(test)]
@@ -462,6 +462,34 @@ fn later_play(system: &mut Runtime) {
     system.playback_head = 0.0;
     system.previous_head = 0.0;
     system.pending = 0.0;
+}
+
+/// `ParticleSystem.Play` on a system that still holds particles (a host's
+/// Play after Stop): as the later Play above, it keeps the seeds and does not
+/// warm; the clock, the pending time and the loop count return to zero, and
+/// the native frame head takes its next frame's translation as the previous
+/// one (Play's emitter reset).
+pub(crate) fn later_play_with_particles(system: &mut Runtime) {
+    later_play(system);
+    if let Some(native) = system.native_birth.as_mut() {
+        native.frame.reset_previous = true;
+    }
+}
+
+/// `ParticleSystem.Play` on a system that holds no particle: it plays as at
+/// its first Play. The birth owner goes (the host installs it again, with the
+/// seed reset), the clock, the pending time and the emission state return to
+/// zero and the first-Play warm runs again.
+pub(crate) fn reset_for_first_play(system: &mut Runtime) {
+    system.native_birth = None;
+    system.noise = None;
+    system.playback_head = 0.0;
+    system.previous_head = 0.0;
+    system.pending = 0.0;
+    system.emission_started = false;
+    system.emission = EmissionState::default();
+    system.ring_cursor = 0;
+    system.prewarmed = false;
 }
 
 /// The native first-Play slice schedule of an installed ordinary system.
