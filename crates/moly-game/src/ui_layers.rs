@@ -177,6 +177,10 @@ pub(crate) enum LayerId {
     MysekaiBgmSelect,
     /// 秘密商店（625）。
     MysekaiSecretShop,
+    /// Site move (653): `SiteMoveGameState.OnEnter` changes to it and the
+    /// move's end changes back to the field screen. The source layer is empty
+    /// (its presenter only boots), so its view is built by construction.
+    MysekaiSiteMove,
 }
 
 impl LayerId {
@@ -196,6 +200,7 @@ impl LayerId {
             LayerId::MysekaiConvert => "家具变换",
             LayerId::MysekaiBgmSelect => "选曲",
             LayerId::MysekaiSecretShop => "秘密商店",
+            LayerId::MysekaiSiteMove => "site move",
         }
     }
 
@@ -209,7 +214,13 @@ impl LayerId {
     /// 该层的视图是否已建。**唯一已建的是站点地图**；其余层槽压层请求
     /// 照走钩子梯、响亮记账「视图未建」。
     pub(crate) fn view_built(self) -> bool {
-        matches!(self, LayerId::MysekaiSiteMap | LayerId::MysekaiInfo | LayerId::MysekaiSiteEdit)
+        matches!(
+            self,
+            LayerId::MysekaiSiteMap
+                | LayerId::MysekaiInfo
+                | LayerId::MysekaiSiteEdit
+                | LayerId::MysekaiSiteMove
+        )
     }
 }
 
@@ -482,7 +493,7 @@ pub(crate) enum LayerCommand {
     Pop,
     /// ExitScene（发送方未建——场景退出域挂账，命令口先立）。
     ExitScene,
-    /// ChangeUIScreen（原地替换；本仓暂无发送方，口先立全）。
+    /// ChangeUIScreen（原地替换；发送方：站点移动的进出）。
     Change(LayerId),
 }
 

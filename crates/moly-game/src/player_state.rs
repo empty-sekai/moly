@@ -75,6 +75,18 @@ pub enum PlayerActionState {
     /// 28：演出家具（`ChangeStateUseTimelineFixture` 进）。家具会话
     /// 持有该态和截获门，离座或取消释放后才开门回 Idle。
     UseTimelineFixture,
+    /// 30: leaving a harvest site by cannon. `Initialize` closes the
+    /// intercept gate; `UpdateState` reopens it once 1.0 s has elapsed
+    /// (`ANIMATION_TIME`). The cannon's `OnMoveFinish` (0.817 s after entry
+    /// on a successful landing) is therefore dropped by the closed gate.
+    ExitHarvestSite,
+    /// 31: entering a harvest site by cannon. Its `Initialize` only shows the
+    /// warp effect for other players' avatars; `UpdateState` is empty.
+    EnterHarvestSite,
+    /// 32: leaving the delivery site; same body as 30.
+    ExitDeliverySite,
+    /// 33: entering the delivery site; same body as 31.
+    EnterDeliverySite,
     /// 34：无。真源 `PlayerAvatarStateBase.ClearNextState` 的哨兵值。
     None,
 }
@@ -90,6 +102,9 @@ pub struct PlayerAvatarStates {
     /// `ChangeStatus` 第③段）。默认开（真源由状态构造开成）。采集与
     /// 家具会话的独占流程分别在自己的进出场关闭、恢复这扇门。
     pub(crate) can_intercept: bool,
+    /// `PlayerAvatarStateBase.ElapsedTime` of the current state, for the
+    /// states whose `UpdateState` reads it (the site exit states).
+    pub(crate) state_elapsed: f32,
 }
 
 impl Default for PlayerAvatarStates {
@@ -97,6 +112,7 @@ impl Default for PlayerAvatarStates {
         Self {
             current: PlayerActionState::Idle,
             can_intercept: true,
+            state_elapsed: 0.0,
         }
     }
 }
@@ -121,6 +137,32 @@ impl PlayerAvatarStates {
             self.current, status
         );
         self.current = status;
+        // New state's Initialize.
+        self.state_elapsed = 0.0;
+        if matches!(
+            status,
+            PlayerActionState::ExitHarvestSite | PlayerActionState::ExitDeliverySite
+        ) {
+            self.can_intercept = false;
+        }
+    }
+}
+
+/// Update: `UpdateState` of the two site exit states. `ElapsedTime` grows by
+/// `Time.deltaTime`; once it is no longer below 1.0 (compared in double) a
+/// closed gate reopens.
+pub(crate) fn update_site_exit_states(time: Res<Time>, mut states: ResMut<PlayerAvatarStates>) {
+    if !matches!(
+        states.current,
+        PlayerActionState::ExitHarvestSite | PlayerActionState::ExitDeliverySite
+    ) {
+        return;
+    }
+    let elapsed = states.state_elapsed + time.delta_secs();
+    states.state_elapsed = elapsed;
+    if !((elapsed as f64) < 1.0) && !states.can_intercept {
+        states.can_intercept = true;
+        info!("[player-state] {:?}: intercept gate reopened after {elapsed:.3}s", states.current);
     }
 }
 

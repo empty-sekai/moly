@@ -755,6 +755,7 @@ pub(crate) fn advance(
         With<FixtureRoot>,
     >,
     server: Res<AssetServer>,
+    site_move: Option<Res<crate::site_move::SiteMoveActive>>,
 ) {
     let state = &mut *state;
     // A saved layout re-fires entry once the scan next runs.
@@ -778,7 +779,10 @@ pub(crate) fn advance(
     } else if state.arriving {
         state.arriving = false;
     }
-    let site_moving = scenes_ready.is_none() || state.awaiting_site || state.arriving;
+    let site_moving = scenes_ready.is_none()
+        || state.awaiting_site
+        || state.arriving
+        || site_move.is_some();
     // ScreenLayerMysekaiHome mounts again: OnBoot builds a new presenter,
     // and OnScreenStart's Initialize runs ForceUpdate.
     let mounted = eligibility.home_screen_current() && !site_moving;

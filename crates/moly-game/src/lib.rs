@@ -93,6 +93,7 @@ pub mod shadowmap;
 pub mod site;
 pub mod site_material;
 pub mod site_sound;
+pub(crate) mod site_move;
 pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
@@ -184,6 +185,7 @@ pub fn app(
     ui_layout::install(&mut app);
     app.add_plugins(site::SitePlugin(site));
     schedule::install(&mut app);
+    site_move::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
     plain_background::install(&mut app);

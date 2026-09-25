@@ -130,6 +130,7 @@ pub(crate) fn advance(
     settings_panel: Res<crate::game_settings::SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
+    site_move: Option<Res<crate::site_move::SiteMoveActive>>,
 ) {
     let Some(window) = windows.single().ok() else {
         return;
@@ -141,7 +142,9 @@ pub(crate) fn advance(
     state.enabled = !edits.is_active()
         && player_talk.is_none()
         && !settings_panel.blocks_world_input()
-        && !library.blocks_exploration_input();
+        && !library.blocks_exploration_input()
+        // GameState SiteMove: EnableGestureLayer(false).
+        && site_move.is_none();
     if !state.enabled {
         touches.clear();
         if state.captured.take().is_some() {

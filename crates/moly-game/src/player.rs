@@ -281,6 +281,7 @@ pub(crate) fn reseed(
     >,
     mut animators: Query<&mut AnimationPlayer>,
     mut ground_cache: Option<ResMut<PlayerGround>>,
+    site_move: Option<Res<crate::site_move::SiteMoveActive>>,
 ) {
     let Some(epoch) = epoch else {
         return;
@@ -300,6 +301,15 @@ pub(crate) fn reseed(
     let first = *last == 0;
     *last = epoch.0;
     if first {
+        return;
+    }
+    if site_move.is_some() {
+        // A cannon move carries the player onto the new site itself (its
+        // flight and re-origin); only the ground snapshot is renewed.
+        if let Some(cache) = &mut ground_cache {
+            **cache = PlayerGround(verts);
+        }
+        info!("[player] ground snapshot renewed during a cannon move; the move places the player");
         return;
     }
     let (center, center_y) = crate::npc::center_of(&verts);
@@ -357,12 +367,15 @@ pub(crate) fn read_input(
     joystick: Res<crate::joystick::JoystickState>,
     settings_panel: Res<crate::game_settings::SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
+    site_move: Option<Res<crate::site_move::SiteMoveActive>>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
+    // GameState SiteMove disables the gesture layer and taps as well.
     if edits.is_active()
         || settings_panel.blocks_world_input()
         || library.blocks_exploration_input()
+        || site_move.is_some()
     {
         for (mut input, _) in &mut players {
             input.active = false;

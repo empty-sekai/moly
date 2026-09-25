@@ -352,6 +352,10 @@ pub(super) fn apply_command(
                 reject(state, "请先停止当前体验并等待场景恢复，再切换地点");
                 return;
             }
+            if io.site_move.is_some() {
+                reject(state, "正在移动地点，请在到达后再切换");
+                return;
+            }
             io.commands
                 .insert_resource(crate::site::SiteChangeRequest(site));
         }

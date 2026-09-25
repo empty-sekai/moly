@@ -129,6 +129,14 @@ impl AvatarDriver {
         self.action.is_none()
     }
 
+    /// Length of one installed SD clip, if the library has it.
+    pub(crate) fn sd_clip_duration(&self, clip: &str, clips: &Assets<AnimationClip>) -> Option<f32> {
+        self.sd_clips
+            .get(clip)
+            .and_then(|handle| clips.get(handle))
+            .map(AnimationClip::duration)
+    }
+
     pub(crate) fn blocks_manual_movement(&self) -> bool {
         self.action
             .as_ref()
