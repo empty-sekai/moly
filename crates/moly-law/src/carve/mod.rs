@@ -449,7 +449,10 @@ impl WalkField {
             region_cells,
             contained,
             nearest_cell_distance,
-            locates: mapped.is_some_and(|q| self.polys.locates(&self.grid, &self.regions, q)),
+            locates: mapped.is_some_and(|q| {
+                self.polys
+                    .locates(&self.grid, &self.regions, q, half_extent)
+            }),
         }
     }
 

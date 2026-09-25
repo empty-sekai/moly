@@ -300,37 +300,49 @@ impl PolyMesh {
     /// 点落在哪个单元里。先用分区把候选集缩到一个区，再逐个含点判定。
     ///
     /// ⚠ **含点判定失败不等于不可走。** 轮廓简化允许折线偏离真实边界最多
-    /// `MAX_SIMPLIFICATION_ERROR` 格，所以贴边的可走格可以落在多边形之外
-    /// ——这是原生也有的性质（Detour 的 navmesh 并不精确贴合体素场），
-    /// 原生查询侧用带容差的 `findNearestPoly` 兜底。这里同形：含点失败就
-    /// 退到「同区内单元心最近的那个」。可走性本身仍由格面裁定，不由这里裁定。
-    fn locate(&self, grid: &Grid, regions: &Regions, p: [f32; 2]) -> Option<u32> {
+    /// `MAX_SIMPLIFICATION_ERROR` 格，所以贴边的可走格可以落在多边形之外，
+    /// 一个区也可能一个单元都没有三角化出来。引擎在这里用的是
+    /// `NavMeshQuery.FindNearestPoly`：查询盒内**所有**单元里取最近点距离
+    /// 最小的那个，且最近点必须落在查询盒内；它不看分区。含点失败时照此
+    /// 取单元（`half_extent` 是查询盒的水平半宽）。可走性本身仍由格面裁定。
+    fn locate(&self, grid: &Grid, regions: &Regions, p: [f32; 2], half_extent: f32) -> Option<u32> {
         let (cx, cz) = grid.cell_of(p[0], p[1]);
         if !grid.walkable_cell(cx, cz) {
             return None;
         }
         let region = regions.ids[cz as usize * grid.cols + cx as usize];
-        let candidates = self.by_region.get(&region)?;
-        if let Some(hit) = candidates
-            .iter()
-            .copied()
-            .find(|index| self.contains(grid, *index, p))
-        {
+        if let Some(hit) = self.by_region.get(&region).and_then(|candidates| {
+            candidates
+                .iter()
+                .copied()
+                .find(|index| self.contains(grid, *index, p))
+        }) {
             return Some(hit);
         }
-        candidates
-            .iter()
-            .copied()
-            .min_by(|a, b| {
-                let da = distance2(self.centre(grid, *a), p);
-                let db = distance2(self.centre(grid, *b), p);
-                da.total_cmp(&db)
-            })
+        let mut best: Option<(u32, f32)> = None;
+        for index in 0..self.tris.len() as u32 {
+            let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+            let q = closest_on_triangle(p, corners);
+            if (q[0] - p[0]).abs() > half_extent || (q[1] - p[1]).abs() > half_extent {
+                continue;
+            }
+            let d = distance2(q, p);
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((index, d));
+            }
+        }
+        best.map(|(index, _)| index)
     }
 
     /// 点能否落进某个单元（[`Self::locate`] 成功与否）。
-    pub(crate) fn locates(&self, grid: &Grid, regions: &Regions, p: [f32; 2]) -> bool {
-        self.locate(grid, regions, p).is_some()
+    pub(crate) fn locates(
+        &self,
+        grid: &Grid,
+        regions: &Regions,
+        p: [f32; 2],
+        half_extent: f32,
+    ) -> bool {
+        self.locate(grid, regions, p, half_extent).is_some()
     }
 
     /// Diagnostics for [`Self::locate`]: the number of cells of `p`'s region,
@@ -348,7 +360,9 @@ impl PolyMesh {
             let candidates = self.by_region.get(&region).map_or(&[][..], Vec::as_slice);
             (
                 candidates.len(),
-                candidates.iter().any(|index| self.contains(grid, *index, p)),
+                candidates
+                    .iter()
+                    .any(|index| self.contains(grid, *index, p)),
             )
         } else {
             (0, false)
@@ -483,9 +497,10 @@ impl PolyMesh {
         regions: &Regions,
         start: [f32; 2],
         goal: [f32; 2],
+        half_extent: f32,
     ) -> Option<Vec<[f32; 2]>> {
-        let from = self.locate(grid, regions, start)?;
-        let to = self.locate(grid, regions, goal)?;
+        let from = self.locate(grid, regions, start, half_extent)?;
+        let to = self.locate(grid, regions, goal, half_extent)?;
         let corridor = self.find_corridor(grid, from, to)?;
         self.straighten(grid, &corridor, start, goal)
     }
@@ -503,9 +518,10 @@ impl PolyMesh {
         regions: &Regions,
         start: [f32; 2],
         goal: [f32; 2],
+        half_extent: f32,
     ) -> Option<(Vec<[f32; 2]>, bool)> {
-        let from = self.locate(grid, regions, start)?;
-        let to = self.locate(grid, regions, goal)?;
+        let from = self.locate(grid, regions, start, half_extent)?;
+        let to = self.locate(grid, regions, goal, half_extent)?;
         if self.components[from as usize] == self.components[to as usize] {
             let corridor = self.find_corridor(grid, from, to)?;
             return Some((self.straighten(grid, &corridor, start, goal)?, true));
