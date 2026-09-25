@@ -704,7 +704,7 @@ pub(super) fn apply_command_with_events(
 /// The pre-simulation modules of one lane over dt: gravity into the
 /// persistent velocity, animated velocity cleared, angular speed cleared and
 /// rebuilt by RotationOverLifetime, CustomData at the current age.
-fn pre_modules(system: &Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
+fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
     gravity_space: Option<&[f32; 16]>) {
     if !arms::on("noGravity") {
         if let Some(delta) = child_emit::gravity_delta(gravity, laws.gravity_modifier, dt, gravity_space) {
@@ -717,7 +717,7 @@ fn pre_modules(system: &Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gra
         let speed = rol.angular_velocity(lane.seed, 0.0, lane.age);
         lane.angular = std::array::from_fn(|a| lane.angular[a] + speed[a]);
     }
-    if let Some(custom) = &system.custom_law {
+    if let Some(custom) = system.custom_law.as_mut() {
         custom.update(lane.seed, lane.age, &mut lane.custom);
     }
 }

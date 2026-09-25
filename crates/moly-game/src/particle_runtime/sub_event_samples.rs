@@ -169,7 +169,7 @@ pub(super) fn parent_runtime_with(doc: &Value, source: &Value, edit: impl FnOnce
         RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve).unwrap());
     system.size_law = emitter.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).unwrap());
     system.color_law = emitter.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
-    system.custom_law = emitter.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).unwrap());
+    system.custom_law = emitter.custom_data.as_ref().map(|p| crate::particle_runtime::custom_data_law(p).unwrap());
     system.emitter = emitter;
     system.pool.clear();
     system.side.clear();

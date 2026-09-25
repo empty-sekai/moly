@@ -171,7 +171,7 @@ fn runtime_for(planned: &Planned, seeds: &mut crate::particle_runtime::seed::Sys
     system.gravity_law = moly_law::particle::gravity::Gravity::new(&e.start.gravity_modifier).expect("validated during admission");
     system.size_law = e.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("validated during admission"));
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
-    system.custom_law = e.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("validated during admission"));
+    system.custom_law = e.custom_data.as_ref().map(|p| crate::particle_runtime::custom_data_law(p).expect("validated during admission"));
     let probe = Probe { inner: GroundQuery::live(site.clone()), reach: reach.clone(), counting: false, lanes: BTreeMap::new() };
     let collision = crate::particle_runtime::CollisionInstall { scene: Box::new(Counted(Mutex::new(probe))),
         owner: planned.collision_owner };

@@ -428,6 +428,9 @@ fn step_slice(
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
     validate(system, &state.initial)?;
+    if let Some(reason) = system.custom_law.as_ref().and_then(|custom| custom.refused()) {
+        return Err(BirthRefused::Unsupported(reason));
+    }
     if has_real_sub_emitter_edges(&system.emitter) && state.events.is_none() {
         return Err(BirthRefused::Unsupported("sub-emitter event owner not installed"));
     }
@@ -493,6 +496,9 @@ fn step_slice(
     // the previous slice left. It does not test the stopped state either.
     let mut deaths = state.events.as_ref().filter(|events| events.records_deaths()).map(|_| Vec::new());
     simulate_existing(system, dt, ctx, deaths.as_mut());
+    if let Some(reason) = system.custom_law.as_ref().and_then(|custom| custom.refused()) {
+        return Err(BirthRefused::Unsupported(reason));
+    }
     if let (Some(events), Some(deaths), Some(accumulated)) = (state.events.as_mut(), deaths.as_ref(), accumulated) {
         let word = if super::child::arms::on("deathWordAfterDraws") { pending.random.words[0] }
             else { state.emission.random.words[0] };
@@ -1010,6 +1016,10 @@ fn start_common(
     // The newborn kill pass records its death events after every group's
     // call, with the same pending time and emission word.
     let mut deaths = events.as_ref().filter(|newborn| newborn.events.records_deaths()).map(|_| Vec::new());
+    // The newborn lanes as the death pass finds them, for a CustomData law
+    // that follows the slots past the live count.
+    let lanes = system.custom_law.as_ref().filter(|custom| custom.tracks_storage())
+        .map(|_| system.pool[old_count..].to_vec());
     let live_newborns = kill_newborns(system, old_count, accepted, deaths.as_mut());
     if let (Some(NewbornEvents { events, accumulated, emission_word }), Some(deaths)) = (events.as_mut(), deaths.as_ref()) {
         events.record_deaths(system, deaths, true, old_count, *accumulated, *emission_word, ctx);
@@ -1033,6 +1043,12 @@ fn start_common(
             system.emitter.ring_buffer_mode, maximum, old_count, |_, _| replaced += 1),
     }
     system.died_total += replaced;
+    if let (Some(lanes), Some(custom)) = (lanes, system.custom_law.as_mut()) {
+        custom.birth(old_count, &lanes, live_newborns, &system.pool[old_count..]);
+        if let Some(reason) = custom.refused() {
+            return Err(BirthRefused::Unsupported(reason));
+        }
+    }
     *random = next;
     if let (Some(destination), Some(next)) = (shape_stream.as_mut(), next_shape) {
         **destination = next;

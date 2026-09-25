@@ -2024,7 +2024,20 @@ fn judge_in_archive(
         }
     }
     // Every other curve the runtime evaluates, through the engine's dispatch.
-    if let Err(error) = crate::particle_runtime::curve_admission(&emitter) {
+    // A CustomData lane whose value follows its curve objects' caches runs
+    // with the law that follows the engine's storage past the live count: it
+    // needs this host's native birth owner, and a sub-emitter target's births
+    // (its parents' commands) are not what that law follows.
+    let storage = || -> Result<(), String> {
+        if lifecycle.is_none() {
+            return Err("the fixture host does not install the native birth owner".into());
+        }
+        if child_parent.is_some() {
+            return Err("a sub-emitter target's storage follows its parents' commands, which the slot model does not".into());
+        }
+        crate::particle_runtime::custom_data_storage_eligible(&emitter, &route)
+    };
+    if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage)) {
         tally.law_reject.push(format!("{node}: {error}")); return None;
     }
     if const_of(&emitter.start_delay) != Some(0.0) {
@@ -2801,7 +2814,7 @@ pub(crate) fn spawn_when_ready(
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
             custom_law: planned.emitter.custom_data.as_ref()
-                .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission")),
+                .map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission")),
             texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
                 moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
             sort_mode,
@@ -2866,6 +2879,13 @@ pub(crate) fn spawn_when_ready(
                         }
                         info!(node=%live.node, noise=live.noise.is_some(), trail=live.runtime.trail.is_some(),
                             collision=live.runtime.collision.is_some(), "weather native birth owner installed");
+                    }
+                    // A CustomData law that follows the engine's storage runs
+                    // only in the native slices, which report it.
+                    Ok(crate::particle_runtime::BirthPath::Legacy(reason))
+                        if live.runtime.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage()) => {
+                        error!(%reason, node=%live.node, "CustomData curve-cache system refused by the native birth installer");
+                        failed = true;
                     }
                     // Birth events run only on the native path; a parent with
                     // them is not left on the legacy step without its events.
