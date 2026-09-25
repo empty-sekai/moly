@@ -442,11 +442,21 @@ pub fn plan_and_swap(
                 .insert(MeshMaterial3d(handle.clone()));
         }
         commands.entity(player).insert(AvatarToon);
+        let stored = materials
+            .get(&handle)
+            .expect("the material was added this frame")
+            .params;
         info!(
-            "[player] avatar 换肤：材质贴图引用 PBR（基础色贴图 {}） -> Mysekai/Avatar（_SkinTex {}，_SkinColor {}），{entity_count} 个网格实体",
+            "[player] avatar 换肤：材质贴图引用 PBR（基础色贴图 {}） -> Mysekai/Avatar（_SkinTex {}，_SkinColor {}），{entity_count} 个网格实体；材质值 _SkinColor {:?} _Alpha {} _DitherAlpha {} _EnablePenlightLighting {} _LeftPenlightActive {} _RightPenlightActive {}",
             if old_textured { "有" } else { "无" },
             wear.skin_bundle,
             wear.skin_color_code,
+            stored.skin_color,
+            stored.alpha_dither_gate[0],
+            stored.alpha_dither_gate[1],
+            stored.alpha_dither_gate[2],
+            stored.left_active[0],
+            stored.right_active[0],
         );
     }
 }

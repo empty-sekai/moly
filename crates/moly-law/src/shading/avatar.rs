@@ -53,22 +53,29 @@ pub struct AvatarGlobals {
     pub mip_bias: [f32; 2],
 }
 
-/// Avatar 槽的材质值（16 属性里 Base 片元消费的子集）。默认形象：四列
-/// null + penlight 不挂 ⇒ `_SkinColor=(1,1,1,1)`、`_AccessoryTex` 空、
-/// penlight 七个属性停默认（`_EnablePenlightLighting` 默认 0 < 1 ⇒
-/// penlight 叠加整支被门关掉）。
+/// Avatar 槽的材质值（16 属性里 Base 片元消费的子集）。玩家材质由运行时
+/// `new Material(Mysekai/Avatar)` 现建，这个程序声明的属性里构造路径只写
+/// `_SkinTex`、`_SkinColor`、`_AccessoryTex` 三个（它另写的 `_DitherTex` 与
+/// `_UseDither` 不是本程序声明的属性，程序读不到）⇒ 其余属性一律停在程序
+/// 自己的属性默认值上。默认形象：四列 null + penlight 不挂 ⇒
+/// `_SkinColor=(1,1,1,1)`、`_AccessoryTex` 空、penlight 七个属性停默认
+/// （`_EnablePenlightLighting` 默认 0 < 1 ⇒ penlight 叠加整支被门关掉）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AvatarMaterial {
     /// `_SkinColor`：身体调色（rgba）。默认 `(1,1,1,1)`。
     pub skin_color: [f32; 4],
-    /// `_Alpha`：alpha 增益项的底（`(-_Alpha)*_Alpha + 1`）。默认 0 ⇒ 增益 1。
+    /// `_Alpha`：alpha 增益项的底（`(-_Alpha)*_Alpha + 1`）。属性默认 1 ⇒
+    /// 增益 0 ⇒ 采样原值直通；取 0 时增益 1，三支整片提亮成白。
     pub alpha: f32,
-    /// `_DitherAlpha`：bayer discard 的阈值减数。默认形象不抖 ⇒ 取 0。
+    /// `_DitherAlpha`：bayer discard 的阈值减数。属性默认 1：bayer 最大阈值
+    /// 15*0.061875+0.01 = 0.938 < 1 ⇒ 一个片元都不丢；取 0 时每个片元的
+    /// 阈值都 ≥ 0.01 ⇒ 整个身体被丢光。
     pub dither_alpha: f32,
     /// `_EnablePenlightLighting`：penlight 叠加的总门（< 1 关）。默认 0。
     pub enable_penlight_lighting: f32,
-    // penlight 七属性停默认；默认形象 Mysekai 装配路径不挂荧光棒，
-    // `_LeftPenlightActive`/`_RightPenlightActive` 停 0，叠加权重恒 0。
+    // penlight 七属性停默认；默认形象 Mysekai 装配路径不挂荧光棒。
+    // `_LeftPenlightActive`/`_RightPenlightActive` 属性默认 1，但叠加整支
+    // 被 `_EnablePenlightLighting`（默认 0）的门关着。
     pub left_penlight_active: f32,
     pub right_penlight_active: f32,
     pub left_penlight_color: [f32; 4],
@@ -81,13 +88,16 @@ pub struct AvatarMaterial {
 /// 默认形象（`AvatarData.CreateDefaultAvatar`：四列 null + penlight id 1，
 /// 而 Mysekai 装配路径不挂荧光棒）的材质值。
 pub fn default_material() -> AvatarMaterial {
+    // 程序的属性默认值：`_SkinColor` (1,1,1,1)、`_Alpha` 1、`_DitherAlpha` 1、
+    // `_EnablePenlightLighting` 0、两个 `*PenlightActive` 1、两个
+    // `*PenlightColor` (1,1,1,1)、两个 `*PenlightParam` 0。
     AvatarMaterial {
         skin_color: [1.0, 1.0, 1.0, 1.0],
-        alpha: 0.0,
-        dither_alpha: 0.0,
+        alpha: 1.0,
+        dither_alpha: 1.0,
         enable_penlight_lighting: 0.0,
-        left_penlight_active: 0.0,
-        right_penlight_active: 0.0,
+        left_penlight_active: 1.0,
+        right_penlight_active: 1.0,
         left_penlight_color: [1.0, 1.0, 1.0, 1.0],
         right_penlight_color: [1.0, 1.0, 1.0, 1.0],
         left_penlight_param: [0.0, 0.0, 0.0, 0.0],
@@ -118,7 +128,7 @@ pub struct AvatarFragmentInputs {
 
 /// alpha 增益：源对 skin/accessory/penlight_body 三支同式——
 /// `albedo = (1-albedo) * ((-A)*A + 1) + albedo`，A=`_Alpha`。
-/// A=0 时增益 1、式退化为原值；A=1 时整片变白。
+/// A=1（属性默认）时增益 0、式退化为原值；A=0 时增益 1、整片变白。
 #[must_use]
 pub fn alpha_gain(albedo: [f32; 3], alpha: f32) -> [f32; 3] {
     let gain = (-alpha) * alpha + 1.0;
@@ -297,10 +307,8 @@ mod tests {
     #[test]
     fn skin_slot_blends_tex_toward_skin_color_by_alpha() {
         // skin 支：base = tex.a*(skin_color-tex.rgb)+tex.rgb，再过 alpha 增益
-        // （默认 _Alpha=0 ⇒ 增益 1 ⇒ 整支白）。tex.a=1 ⇒ base=skin_color=白，
-        // 增益后仍白——默认形象（skin_color=白、_Alpha=0）下整片恒白，是
-        // 真源这支的固有形态（身体基础色由 _SkinTex 供给，_SkinColor=白调色
-        // 不改动）。这里钉调色混合的中间值：令 _Alpha=1（增益 0）看清 base。
+        // （_Alpha=1 ⇒ 增益 0 ⇒ 输出即 base；_Alpha=0 才整支白）。这里钉调色
+        // 混合的中间值：令 _Alpha=1（增益 0）看清 base。
         let mut m = default_material();
         m.alpha = 1.0; // 增益 0 ⇒ 输出 = base（看清混合）
         let input = skin_input(SLOT_SKIN, [0.4, 0.2, 0.0, 0.5]);
