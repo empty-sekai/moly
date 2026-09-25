@@ -1167,6 +1167,13 @@ enum Speaker {
 }
 
 impl PlayerTalkSession {
+    /// PlayPlayingFixtureTalk on `npc`: the lottery talk plays with the
+    /// NPC's data target fixture while its fixture timeline goes on (the
+    /// view only pauses its loop clock during the talk).
+    pub(crate) fn keeps_fixture_timeline(&self, npc: Entity) -> bool {
+        self.npc == npc && self.end_state == Some(crate::npc::NpcAction::FixtureActionIdle)
+    }
+
     /// 会话的段 id（窗体日志的链名读取点用）。
     pub(crate) fn talk_id(&self) -> i32 {
         self.talk_id

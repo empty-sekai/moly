@@ -1285,11 +1285,16 @@ fn tick(
     {
         return Err("future fixture reservation was replaced".into());
     }
+    // The playing-fixture talk (the player's talk on this NPC in the fixture
+    // action idle state) plays with this data's target fixture and leaves
+    // the timeline running, as a talk joined on this fixture does.
     let joined_talk = matches!(session.phase, Phase::Playing | Phase::TalkHeld)
-        && world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| {
+        && (world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| {
             talk.participants().iter().any(|(_, entity)| *entity == actor)
                 && talk.fixture_instances().iter().any(|(_, entity)| *entity == selection.target.entity)
-        });
+        }) || world
+            .get_resource::<crate::player_talk::PlayerTalkSession>()
+            .is_some_and(|talk| talk.keeps_fixture_timeline(actor)));
 
     // In a fixture talk's window the player's talk on that same data is the
     // window's purpose: its waits hold for it.
