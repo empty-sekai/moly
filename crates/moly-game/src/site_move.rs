@@ -128,6 +128,26 @@ pub(crate) struct EnvironmentHold;
 #[derive(Resource)]
 pub(crate) struct BgmHold;
 
+/// The cannon move's writes to the source's environment root, for the sky
+/// host that keeps that root. At the fire the move keeps the root's height
+/// (`envDefaultPositionY`); on every update of the follow (`DOVirtual.Float`
+/// over the flight time) it sets the root to the player view's `Step`
+/// position; at the landing effect it sets the root's height back to the
+/// kept one. Points are in the source world frame. Present from the fire to
+/// the end of the move; door moves do not write the root. The product tweens
+/// the player's root, which the `Step` node sits on.
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct CannonEnvironmentWrite {
+    /// One value per move (its admission frame).
+    pub(crate) move_id: u64,
+    /// The destination's site type.
+    pub(crate) site_type: String,
+    /// The follow's last write; `None` before its first update.
+    pub(crate) point: Option<Vec3>,
+    /// The landing effect has set the kept height back.
+    pub(crate) height_restored: bool,
+}
+
 /// `SetRenderingEnabled(nextSite, false)` is in force.
 #[derive(Resource)]
 pub(crate) struct RevealHold;
@@ -202,6 +222,8 @@ pub(crate) struct SiteMove {
     from_category: String,
     to_category: String,
     delta: Vec3,
+    /// The site left's `SitePosition` in the source frame.
+    from_source_origin: Vec3,
     next: Option<SiteSelection>,
     preload: Option<SitePreload>,
     cannon_assets: cannon::CannonAssets,
@@ -493,7 +515,8 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
         next.restored_layout(sites, layouts, region, homes)
     });
-    let arrival = arrival::Arrival::for_destination(&server, &to_place.category, layout);
+    let arrival =
+        arrival::Arrival::for_destination(&server, &to_place.category, layout, preload.scene_json());
     let delta = to_place.product_origin() - from_place.product_origin();
     world.insert_resource(SiteMoveActive);
     world.insert_resource(EnvironmentHold);
@@ -516,6 +539,7 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         from_category: from_place.category,
         to_category: to_place.category,
         delta,
+        from_source_origin: Vec3::from_array(from_place.position),
         next: Some(next),
         preload: Some(preload),
         cannon_assets: cannon::CannonAssets::request(&server),
@@ -888,6 +912,12 @@ impl SiteMove {
         // envDefaultPositionY = environmentRoot.position.y; DOVirtual.Float
         // over the same 0.4 s drags the environment root along with Step.
         self.environment_follow = Some(TweenClock::new(move_time()));
+        world.insert_resource(CannonEnvironmentWrite {
+            move_id: self.admitted_frame,
+            site_type: self.to.clone(),
+            point: None,
+            height_restored: false,
+        });
         push_se(world, "se_move_site_firing");
         speed_lines::set_active(world, true);
         info!(
@@ -954,7 +984,17 @@ impl SiteMove {
     /// Returns the landing clip's source length for the last wait.
     fn landing_effect(&mut self, world: &mut World, frame: u64) -> f32 {
         self.record(Step::LandingEffect, frame);
-        info!("[site-move] environment root y restored: no product environment root (logged only)");
+        match world.get_resource_mut::<CannonEnvironmentWrite>() {
+            Some(mut write) if !write.height_restored => {
+                write.height_restored = true;
+                info!(
+                    "[site-move] environment root y restored to the height kept at the fire (move {} to {}, last follow point {:?})",
+                    write.move_id, write.site_type, write.point
+                );
+            }
+            Some(_) => error!("[site-move] environment root y restored twice in one move"),
+            None => warn!("[site-move] environment root y restore: no cannon write this move"),
+        }
         let outcome = self.landing.expect("drawn at the reveal");
         let position = player_entity(world)
             .and_then(|player| world.get::<GlobalTransform>(player).copied())
@@ -1028,6 +1068,7 @@ impl SiteMove {
     }
 
     fn finish(self, world: &mut World) {
+        world.remove_resource::<CannonEnvironmentWrite>();
         world.remove_resource::<SiteMoveActive>();
         world.remove_resource::<EnvironmentHold>();
         world.remove_resource::<BgmHold>();
@@ -1072,6 +1113,14 @@ impl SiteMove {
             let e = tween.clock.advance(dt);
             let position = tween.from.lerp(tween.to, out_sine(e));
             let done = tween.clock.done();
+            if self.environment_follow.is_some() {
+                // The follow's update: the environment root takes the player
+                // view's point (old-site frame here), in the source world.
+                let point = self.from_source_origin + crate::particle_geometry::reflect(position);
+                if let Some(mut write) = world.get_resource_mut::<CannonEnvironmentWrite>() {
+                    write.point = Some(point);
+                }
+            }
             if let Some(player) = player_entity(world) {
                 if let Some(mut transform) = world.get_mut::<Transform>(player) {
                     transform.translation = position;
