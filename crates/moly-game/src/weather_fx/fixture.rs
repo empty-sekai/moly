@@ -1,6 +1,23 @@
 //! Fixture adapter for the same source-owned geometry, materials and admission
 //! used by weather. A GLB emitter entity owns the already-converted transform;
 //! never recompose or reflect its exported node TRS a second time.
+//!
+//! A system reached by `ParticleSystem.Play` (a placed prefab's play-on-awake
+//! systems, and the explicit Play of the site move and the foot effects) runs
+//! as the weather host runs its systems: its Play installs the native birth
+//! owner where the route and modules qualify (seed reset, Noise, birth
+//! events), and every frame steps the engine's per-frame update (the frame
+//! head with the emitter velocity and the emission over distance, then the
+//! incremental slices) on the clock its useUnscaledTime selects, under the
+//! engine play state (Stop with StopEmitting, the non-looping end, the end of
+//! play). A Director's ControlPlayable drives its systems by
+//! `ParticleSystem.Simulate` on the legacy step, without the owner, and keeps
+//! the refusals of what only the owner runs.
+//!
+//! Named differences from the weather host: no culling pass (a system is
+//! never culled), no trail draw (a TrailModule system is refused), and no
+//! sub-emitter target (a target's owner words are composed only for a site
+//! effect on its authored chain), so a parent's commands are dropped, counted.
 use super::*;
 
 struct Candidate {
@@ -27,11 +44,37 @@ pub(crate) fn discard_abandoned_controls(world: &mut World, now: f64) {
     }
 }
 
+/// Prepare the selected emitters of an instance for an owner that plays them
+/// with `ParticleSystem.Play` (the site move, the foot effects): each system
+/// is installed with the native birth owner and steps its own per-frame
+/// update (see [`Played`]). `Ok(None)` while geometry or GPU preparation is
+/// pending; call again with the same root.
 pub(crate) fn prepare_control(
     world: &mut World,
     root: Entity,
     doc: &Value,
     selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::Played)
+}
+
+/// The same for a Director's ControlPlayable: the systems wait for its paused
+/// clock and step by its `ParticleSystem.Simulate` time, on the legacy step.
+pub(crate) fn prepare_director_control(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::Director)
+}
+
+fn prepare(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+    stepping: Stepping,
 ) -> Result<Option<Vec<Entity>>, String> {
     let server = world.resource::<AssetServer>().clone();
     let mut preparation = match world.entity_mut(root).take::<ControlPreparation>() {
@@ -46,7 +89,7 @@ pub(crate) fn prepare_control(
             let mut candidates = Vec::new();
             for &(anchor, ordinal) in selected {
                 let particle = &particles[ordinal];
-                let mut plan = admit(package, particle, &by_path, &owners, &server, Path::Control)?;
+                let mut plan = admit(package, particle, &by_path, &owners, &server, Path::Control, stepping)?;
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
@@ -82,9 +125,20 @@ pub(crate) fn prepare_control(
         let mut draws = Vec::new();
         for candidate in &preparation.0 {
             let (draw, mesh) = candidate.plan.draw.clone().expect("prepared control draw");
-            // No playOnAwake here. The owning Director installs a paused clock.
-            world.entity_mut(draw).insert(crate::uber_particle::FixtureParticleLive(
-                runtime(&candidate.plan, candidate.anchor, mesh)));
+            let mut system = runtime(&candidate.plan, candidate.anchor, mesh);
+            match stepping {
+                // No playOnAwake here. The owning Director installs a paused clock.
+                Stepping::Director => {
+                    world.entity_mut(draw).insert(crate::uber_particle::FixtureParticleLive(system));
+                }
+                Stepping::Played => {
+                    let played = world.resource_scope(|_, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>|
+                        install(&mut system, &candidate.plan, &mut seeds))
+                        .map_err(|reason| format!("{}: source particle control rejected {reason}",
+                            doc["emitters"][candidate.plan.ordinal]["node"]))?;
+                    world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system), played));
+                }
+            }
             draws.push(draw);
         }
         Ok(Some(draws))
@@ -108,18 +162,53 @@ pub(crate) fn is_source_particle(particle: &Value) -> bool {
 
 /// How a fixture-host system reaches this admission: `Autonomous` is a
 /// play-on-awake system of a placed prefab ([`plan`]); `Control` is a system
-/// prepared for an owner that plays it ([`prepare_control`]: a Director, the
-/// site move's explicit Play, the foot effects).
+/// prepared for an owner that plays it ([`prepare_control`]: the site move's
+/// explicit Play, the foot effects; [`prepare_director_control`]: a Director).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Path {
     Autonomous,
     Control,
 }
 
+/// Who steps an admitted system. `Played`: its own per-frame update after a
+/// `ParticleSystem.Play` (play on awake or explicit), which this host runs as
+/// the weather host does, with the native birth owner. `Director`:
+/// `ParticleSystem.Simulate` from a ControlPlayable, which runs the legacy
+/// step and installs no birth owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stepping {
+    Played,
+    Director,
+}
+
+/// emitterVelocityMode 1 reads a Rigidbody on the system's GameObject or a
+/// Transform ancestor (see [`resolve_velocity_mode`]). A fixture document
+/// carries every node's declared component inventory (`componentClasses`,
+/// the GameObject's component list; a list the export could not resolve is
+/// absent), so a document whose every node has an inventory without a
+/// Rigidbody or Rigidbody2D rules one out on the prefab. Its run-time
+/// ancestors outside the prefab are this runtime's anchors, which carry none
+/// (the same boundary as the weather host's census).
+pub(crate) fn census_names_no_body(by_path: &HashMap<String, &Value>) -> Result<(), String> {
+    for (path, node) in by_path {
+        let Some(classes) = node.get("componentClasses").and_then(Value::as_array) else {
+            return Err(format!("{path}: component inventory not exported"));
+        };
+        for class in classes {
+            match class.as_str() {
+                Some(class) if class.starts_with("Rigidbody") => return Err(format!("{class} on {path}")),
+                Some(_) => {}
+                None => return Err(format!("{path}: a component of unread kind")),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The fixture host's admission of one source emitter: the shared source
 /// judgement, then the host's own gates. `Err` names the reason; on the
-/// control path a judgement refusal keeps the `<node>: source particle
-/// control rejected` prefix its callers skip single emitters by.
+/// control path every refusal carries the `<node>: source particle control
+/// rejected` prefix its callers skip single emitters by.
 fn admit(
     package: &str,
     particle: &Value,
@@ -127,45 +216,53 @@ fn admit(
     owners: &SubEmitterGraph<'_>,
     server: &AssetServer,
     path: Path,
+    stepping: Stepping,
 ) -> Result<Planned, String> {
+    let node = &particle["node"];
     if path == Path::Control && !is_source_particle(particle) {
-        return Err(format!("{}: source-owned shader/material export required", particle["node"]));
+        return Err(format!("{node}: source-owned shader/material export required"));
     }
+    let refuse = |reason: String| match path {
+        Path::Control => format!("{node}: source particle control rejected {reason}"),
+        Path::Autonomous => reason,
+    };
     let mut tally = Tally::default();
-    let plan = judge_in_archive(package, particle, by_path, owners, EffectKind::Site, false,
-        None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY),
+    let native_owner = stepping == Stepping::Played;
+    let plan = judge_in_host(package, particle, by_path, owners, EffectKind::Site, false,
+        None, native_owner, "fixture-particles-v2", Some(GlobalTransform::IDENTITY),
         &Err("collision scene: fixture particles carry no collider export".to_owned()),
-        &Err("fixture particles carry no component census".to_owned()), server, &mut tally);
+        &census_names_no_body(by_path), server, &mut tally);
     let Some(plan) = plan else {
         return Err(match path {
-            Path::Control => format!("{}: source particle control rejected {tally:?}", particle["node"]),
+            Path::Control => format!("{node}: source particle control rejected {tally:?}"),
             Path::Autonomous => format!("rejected {tally:?}"),
         });
     };
-    let node = &particle["node"];
-    match path {
-        // Noise runs only with the native birth owner, which this fixture
-        // path does not install; refuse it rather than drop the module.
-        Path::Autonomous if plan.emitter.noise.is_some() =>
-            Err("Noise needs the native birth owner, which the fixture path does not install".into()),
-        Path::Autonomous if plan.event_edges.is_some() =>
-            Err("sub-emitter events need the native birth owner, which the fixture path does not install".into()),
-        Path::Autonomous if plan.trail.is_some() =>
-            Err("trails need the native birth owner and a trail draw, which the fixture path does not install".into()),
-        Path::Autonomous if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
-            Err("emission over distance needs the native birth owner, which the fixture path does not install".into()),
-        // Sub-emitter events run only with the native birth owner,
-        // which this fixture path does not install.
-        Path::Control if plan.event_edges.is_some() =>
-            Err(format!("{node}: sub-emitter events need the native birth owner")),
-        // Trails likewise need the native birth owner and a trail draw.
-        Path::Control if plan.trail.is_some() =>
-            Err(format!("{node}: trails need the native birth owner and a trail draw")),
-        // So does emission over distance (the native per-frame head).
-        Path::Control if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
-            Err(format!("{node}: emission over distance needs the native birth owner")),
-        _ => Ok(plan),
+    // A TrailModule draws with the renderer's trail material in a second
+    // draw, which this host does not spawn.
+    if plan.trail.is_some() {
+        return Err(refuse("trails need a trail draw, which the fixture host does not spawn".into()));
     }
+    if stepping == Stepping::Played {
+        // Noise, sub-emitter events and emission over distance run with the
+        // native birth owner this host installs (a sub-emitter target is
+        // refused by the judgement: its owner words exist only for a site
+        // effect on its authored chain, so a parent's commands find no
+        // installed target and are dropped, counted).
+        return Ok(plan);
+    }
+    // The Director path runs the legacy step without the native birth owner:
+    // refuse what only that owner runs rather than drop it.
+    if plan.emitter.noise.is_some() {
+        return Err(refuse("Noise needs the native birth owner, which the Director's Simulate path does not install".into()));
+    }
+    if plan.event_edges.is_some() {
+        return Err(refuse("sub-emitter events need the native birth owner, which the Director's Simulate path does not install".into()));
+    }
+    if crate::particle_runtime::has_distance_emission(&plan.emitter) {
+        return Err(refuse("emission over distance needs the native birth owner, which the Director's Simulate path does not install".into()));
+    }
+    Ok(plan)
 }
 
 pub(crate) fn plan(
@@ -194,7 +291,7 @@ pub(crate) fn plan(
         let Some(anchor) = anchors.get(&format!("/{node}")).and_then(|list| list.first()).copied() else {
             warn!("[fixture-source] {package}/{node}: emitter instance missing"); continue;
         };
-        match admit(package, particle, &by_path, &owners, server, Path::Autonomous) {
+        match admit(package, particle, &by_path, &owners, server, Path::Autonomous, Stepping::Played) {
             Err(reason) => warn!("[fixture-source] {package}/{node}: {reason}"),
             Ok(mut plan) => {
                 plan.ordinal = ordinal;
@@ -303,6 +400,74 @@ mod tests {
         assert!(mesh_count > 0, "source fixture corpus did not contain any active Mesh emitters");
     }
 
+    /// The fixture host's played systems against the native per-frame
+    /// Update1b rows of the distance-emission (S11) and per-frame (S1)
+    /// receipts: each case's system is installed by this host's installer
+    /// (the native birth owner at its Play) and stepped by this host's frame
+    /// entry (`step_played`: the play state, the frame clock and the frame
+    /// head with the emission over distance, then the slices). The product
+    /// must match every native frame; each mutant must differ somewhere on the
+    /// same rows: the host without the birth owner (the base fixture host),
+    /// the foot effect's own one-slice step (`step_frame` of the scaled dt),
+    /// a system stopped at its Play, and the runtime's two distance arms.
+    #[test]
+    #[ignore = "MOLY_UPDATE1B_FRAMES, MOLY_UPDATE1B_FRAMES_EXTRA and MOLY_UPDATE1B_FRAMES_MODULES must identify the current JP per-frame Update1b receipts"]
+    fn fixture_host_distance_emission_matches_native_update1b_rows() {
+        use crate::particle_runtime::frame_samples::{replay_through_host, with_arm};
+        use crate::particle_runtime::SourceRoute;
+        let clocks = |dt: f32| FrameClocks { scaled: dt, unscaled: Some(dt), now: 0.0 };
+        let install_host = |system: &mut Runtime, seeds: &mut crate::particle_runtime::seed::SystemSeedManager| {
+            let played = install_played(system, &SourceRoute::Ordinary, seeds).expect("fixture host install");
+            assert!(played.legacy.is_none(), "the fixture host left a harness system on the legacy step");
+            played
+        };
+        let step_host = |system: &mut Runtime, played: &mut Played, dt: f32, ctx: &Context| {
+            step_played(system, played, &clocks(dt), ctx).expect("fixture host step");
+        };
+        let product = replay_through_host(&install_host, &step_host);
+        // The base fixture host: no birth owner (the installer's legacy step).
+        let no_owner = replay_through_host(
+            &|_, _| Played {
+                play: lifecycle::PlayState::played(lifecycle::Culling::Refused("mutant".into()), false),
+                culling: lifecycle::Culling::Refused("mutant".into()), procedural_warm: false, emitting: true,
+                route: SourceRoute::Ordinary, event_edges: None, legacy: Some("mutant: no birth owner".into()), dropped: 0,
+            },
+            &|system, played, dt, ctx| { let _ = step_played(system, played, &clocks(dt), ctx); });
+        // The foot effect's own step: one explicit slice of the scaled dt.
+        let one_slice = replay_through_host(&install_host, &|system, _, dt, ctx| {
+            let step = dt * system.emitter.simulation_speed;
+            if step > 0.0 { let _ = crate::particle_runtime::step_frame(system, step, ctx, true); }
+        });
+        // Stop at Play: the system never emits.
+        let stopped = replay_through_host(
+            &|system, seeds| { let mut played = install_host(system, seeds); played.emitting = false; played },
+            &step_host);
+        let late = with_arm(Some("distanceAfterSlices"), || replay_through_host(&install_host,
+            &|system, played, dt, ctx| { let _ = step_played(system, played, &clocks(dt), ctx); }));
+        let unpending = with_arm(Some("elapsedWithoutPending"), || replay_through_host(&install_host,
+            &|system, played, dt, ctx| { let _ = step_played(system, played, &clocks(dt), ctx); }));
+        let report = json!({
+            "cases": product.0, "frames": product.1, "mismatchedFrames": product.2, "firstMismatches": product.3,
+            "mutants": {
+                "noBirthOwner": [no_owner.1, no_owner.2, no_owner.3],
+                "footOneSliceStep": [one_slice.1, one_slice.2, one_slice.3],
+                "stoppedAtPlay": [stopped.1, stopped.2, stopped.3],
+                "distanceAfterSlices": [late.1, late.2, late.3],
+                "elapsedWithoutPending": [unpending.1, unpending.2, unpending.3],
+            },
+        });
+        println!("{report}");
+        if let Some(path) = std::env::var_os("MOLY_FIXTURE_HOST_REPLAY_REPORT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        assert_eq!((product.0, product.1), (24, 847), "{report}");
+        assert_eq!(product.2, 0, "{report}");
+        for mutant in [&no_owner, &one_slice, &stopped, &late, &unpending] {
+            assert_eq!(mutant.1, product.1, "{report}");
+            assert!(mutant.2 > 0, "{report}");
+        }
+    }
+
     /// Coverage diagnostic, not a correctness test: every source emitter of
     /// every package the fixture particle index lists, judged by the fixture
     /// host's admission on the path its product owner reaches it by, with the
@@ -363,13 +528,13 @@ mod tests {
                     continue;
                 }
                 let played = particle["activeInHierarchy"] == true && particle["system"]["playOnAwake"] == true;
-                let path = if control.contains(&host) {
-                    Path::Control
+                let (path, stepping) = if control.contains(&host) {
+                    (Path::Control, Stepping::Played)
                 } else if played {
-                    Path::Autonomous
+                    (Path::Autonomous, Stepping::Played)
                 } else if host == "fixture" {
                     // Reached only through a Director's control binding.
-                    Path::Control
+                    (Path::Control, Stepping::Director)
                 } else {
                     // Neither played on awake nor by an explicit Play.
                     unplayed += 1;
@@ -377,10 +542,10 @@ mod tests {
                     continue;
                 };
                 rows += 1;
-                let verdict = admit(package, particle, &by_path, &owners, server, path);
-                let reason = match &verdict {
-                    Ok(_) => { admitted += 1; "admitted".to_owned() }
-                    Err(reason) => census_reason(reason, &particle["node"]),
+                let verdict = census_admit(package, particle, &by_path, &owners, server, path, stepping);
+                let reason = match verdict {
+                    Ok(label) => { admitted += 1; label }
+                    Err(reason) => census_reason(&reason, &particle["node"]),
                 };
                 println!("fixture-host-census | {host} | {file} | {node} | {path:?} | {reason}");
                 let label = if host == "fixture" { format!("fixture {path:?}") } else { host.clone() };
@@ -393,6 +558,27 @@ mod tests {
         println!("fixture-host-census documents {} packages {} judged {rows} admitted {admitted} legacy-summary {legacy} not-played {unplayed}",
             files.len(), packages.len());
         assert!(rows > 0, "the index lists no source emitter");
+    }
+
+    /// The census verdict: the admission and, for a played system, the birth
+    /// owner's install decision on a scratch copy (no seed manager of the
+    /// product is touched; the words are the harness entropy).
+    fn census_admit(package: &str, particle: &Value, by_path: &HashMap<String, &Value>, owners: &SubEmitterGraph<'_>,
+        server: &AssetServer, path: Path, stepping: Stepping) -> Result<String, String> {
+        let plan = admit(package, particle, by_path, owners, server, path, stepping)?;
+        if stepping == Stepping::Played {
+            let mut system = crate::particle_runtime::test_support::runtime();
+            system.emitter = plan.emitter.clone();
+            system.custom_law = plan.emitter.custom_data.as_ref()
+                .map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission"));
+            let mut seeds = crate::particle_runtime::seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
+            let played = install(&mut system, &plan, &mut seeds)?;
+            return Ok(match played.legacy {
+                None => "admitted, native birth owner".to_owned(),
+                Some(_) => "admitted, legacy step".to_owned(),
+            });
+        }
+        Ok("admitted, Director legacy step".to_owned())
     }
 
     /// One refusal of the census, without its node and with the judgement's
@@ -604,9 +790,11 @@ fn prepare_geometry(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_when_ready(
     mut commands: Commands,
     mut requests: Query<(Entity, &mut Request)>,
+    mut seeds: ResMut<crate::particle_runtime::seed::SystemSeedManager>,
     server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     catalogues: Res<Assets<SourceShaderCatalogue>>,
@@ -647,16 +835,272 @@ pub(crate) fn spawn_when_ready(
             }
             let Candidate { anchor, plan: planned } = candidate;
             let (draw, mesh) = planned.draw.clone().expect("prepared source draw");
-            let runtime = runtime(&planned, anchor, mesh);
+            let mut runtime = runtime(&planned, anchor, mesh);
+            // Play on awake: the first Play installs the birth owner.
+            let played = match install(&mut runtime, &planned, &mut seeds) {
+                Ok(played) => played,
+                Err(reason) => {
+                    error!("[fixture-source] {}: {reason}; not installed", planned.node);
+                    commands.entity(draw).try_despawn();
+                    continue;
+                }
+            };
             let mut source = planned.source;
             source.enabled = true;
-            info!("[fixture-source] {}: installed; fixture setup phenomena-lighting write {:?}",
-                planned.node, source.phenomena_lighting_written);
-            commands.entity(draw).insert((source, crate::uber_particle::FixtureParticleLive(runtime)));
+            info!("[fixture-source] {}: installed ({}); fixture setup phenomena-lighting write {:?}",
+                planned.node, played.birth_path(), source.phenomena_lighting_written);
+            commands.entity(draw).insert((source, crate::uber_particle::FixtureParticleLive(runtime), played));
         }
         request.0 = pending;
         if request.0.is_empty() { commands.entity(root).remove::<Request>(); }
     }
+}
+
+/// A system this host plays with `ParticleSystem.Play` (play on awake or an
+/// explicit Play): the engine play state the weather host keeps
+/// ([`lifecycle::PlayState`]: Stop(StopEmitting), the non-looping end, and the
+/// end of play once emission has stopped and no particle is left), whether it
+/// emits, and the birth owner installed at its Play. Stepped by
+/// [`step_played`]; stopped and played again by [`stop_emitting`] and
+/// [`play`]. A system without it is Director-driven or on the legacy summary
+/// path.
+#[derive(Component)]
+pub(crate) struct Played {
+    play: lifecycle::PlayState,
+    culling: lifecycle::Culling,
+    procedural_warm: bool,
+    emitting: bool,
+    route: crate::particle_runtime::SourceRoute,
+    event_edges: Option<crate::particle_runtime::EventEdges>,
+    /// Why the installer left the system on the legacy step (`None` on the
+    /// native birth path).
+    legacy: Option<String>,
+    /// Sub-emitter commands with no installed target (this host installs no
+    /// target), dropped.
+    dropped: u64,
+}
+
+impl Played {
+    pub(crate) fn birth_path(&self) -> String {
+        match &self.legacy {
+            None => "native birth owner".to_owned(),
+            Some(reason) => format!("legacy step: {reason}"),
+        }
+    }
+
+    /// `ParticleSystem.isPlaying` of the system (default culling: this host
+    /// runs no culling pass, so the system is never culled).
+    pub(crate) fn playing(&self, system: &Runtime, now: f64) -> bool {
+        self.play.is_playing(system, now)
+    }
+}
+
+/// Why a system the native birth installer left on the legacy step cannot
+/// run there: the weather host's installer refuses the same set (a CustomData
+/// law that follows the engine's storage, birth events, emission over
+/// distance, a collision module and a shape only the native owner samples).
+fn legacy_refusal(system: &Runtime, events: bool) -> Option<&'static str> {
+    if system.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage()) {
+        Some("CustomData curve-cache system refused by the native birth installer")
+    } else if events {
+        Some("sub-emitter parent refused by the native birth installer")
+    } else if crate::particle_runtime::has_distance_emission(&system.emitter) {
+        Some("distance-emitting system refused by the native birth installer")
+    } else if system.emitter.collision.is_some() {
+        Some("collision system refused by the native birth installer")
+    } else if system.emitter.shape.as_ref().is_some_and(shape_needs_native_birth) {
+        Some("native-only shape without its native birth owner")
+    } else {
+        None
+    }
+}
+
+/// The `ParticleSystem.Play` of an admitted system: the seed reset of every
+/// system (an automatic owner takes the next word of the shared seed
+/// manager), and the native birth owner where the route and modules qualify,
+/// with its birth events. A pooled copy draws its seed when the host prepares
+/// it, which is earlier in the shared manager's order than the source's Play;
+/// the words of an automatic owner are the manager's, so which system takes
+/// which word is the only difference.
+fn install(system: &mut Runtime, planned: &Planned,
+    seeds: &mut crate::particle_runtime::seed::SystemSeedManager) -> Result<Played, String> {
+    install_with(system, &planned.route, planned.event_edges.clone(), planned.culling.clone(), seeds)
+}
+
+/// [`install`] for another host's admitted system (the harvest stay
+/// particles), which carries no birth events and runs no culling pass.
+pub(crate) fn install_played(system: &mut Runtime, route: &crate::particle_runtime::SourceRoute,
+    seeds: &mut crate::particle_runtime::seed::SystemSeedManager) -> Result<Played, String> {
+    install_with(system, route, None, lifecycle::Culling::Refused("the host runs no culling pass".into()), seeds)
+}
+
+fn install_with(system: &mut Runtime, route: &crate::particle_runtime::SourceRoute,
+    events: Option<crate::particle_runtime::EventEdges>, culling: lifecycle::Culling,
+    seeds: &mut crate::particle_runtime::seed::SystemSeedManager) -> Result<Played, String> {
+    if system.emitter.random_seed.is_none() || system.emitter.auto_random_seed.is_none() {
+        return Err("source seed ownership is unknown".into());
+    }
+    if system.emitter.auto_random_seed == Some(true) {
+        seeds.try_init().map_err(|error| format!("seed entropy preparation failed: {error}"))?;
+    }
+    let legacy = match crate::particle_runtime::install_native_birth(system, seeds, route, None) {
+        Ok(crate::particle_runtime::BirthPath::Native) => {
+            if let Some(edges) = events.clone() {
+                system.native_birth.as_mut().expect("native birth owner just installed").events =
+                    Some(crate::particle_runtime::BirthEvents::with_edges(edges));
+            }
+            None
+        }
+        Ok(crate::particle_runtime::BirthPath::Legacy(reason)) => {
+            if let Some(refusal) = legacy_refusal(system, events.is_some()) {
+                return Err(format!("{refusal}: {reason}"));
+            }
+            Some(reason)
+        }
+        Err(error) => return Err(format!("source seed owner unavailable: {error}")),
+    };
+    let procedural_warm = system.emitter.prewarm && system.emitter.looping
+        && *route == crate::particle_runtime::SourceRoute::Procedural;
+    Ok(Played {
+        play: lifecycle::PlayState::played(culling.clone(), procedural_warm),
+        culling,
+        procedural_warm,
+        emitting: true,
+        route: route.clone(),
+        event_edges: events,
+        legacy,
+        dropped: 0,
+    })
+}
+
+/// One frame's clocks: `Time.deltaTime`, `Time.unscaledDeltaTime` when the
+/// player keeps it, and the frame's time for the play state.
+pub(crate) struct FrameClocks {
+    pub(crate) scaled: f32,
+    pub(crate) unscaled: Option<f32>,
+    pub(crate) now: f64,
+}
+
+/// One frame of a played system, as the weather host steps its systems: the
+/// first Play's warm before its first frame (a looping prewarm system), then,
+/// while the play state keeps it in the manager, the per-frame update on the
+/// clock its useUnscaledTime selects (`advance_frame`: the frame head with
+/// the emitter velocity and the emission over distance, then the incremental
+/// slices), emitting until Stop. Birth-event commands find no installed
+/// target in this host and are dropped, counted. `Err` names a refused step;
+/// the caller retires the system, which draws nothing more.
+pub(crate) fn step_played(system: &mut Runtime, played: &mut Played, clocks: &FrameClocks, ctx: &Context)
+    -> Result<(), String> {
+    if !system.prewarmed {
+        system.prewarmed = true;
+        if system.emitter.prewarm && system.emitter.looping && played.emitting {
+            if let Err(error) = crate::particle_runtime::prewarm_first_play(system, ctx) {
+                error!(%error, effect=%system.effect, node=%system.node, "fixture prewarm refused");
+            }
+        }
+    }
+    if played.play.managed() {
+        let dt = match system.emitter.use_unscaled_time {
+            Some(true) => clocks.unscaled,
+            _ => Some(clocks.scaled),
+        };
+        let Some(dt) = dt else {
+            system.refused_total += 1;
+            return Err("useUnscaledTime system has no unscaled clock this frame".into());
+        };
+        let now = clocks.now;
+        let play = &mut played.play;
+        crate::particle_runtime::advance_frame(system, dt, played.emitting, ctx, |s| play.slice_start(s, now))?;
+        play.end_update(system, now, dt != 0.0);
+    }
+    let dropped = system.native_birth.as_mut().and_then(|birth| birth.events.as_mut())
+        .map_or(0, |events| events.take_commands().len() as u64);
+    if dropped > 0 {
+        if played.dropped == 0 {
+            warn!(effect=%system.effect, node=%system.node,
+                "sub-emitter commands dropped: this host installs no sub-emitter target");
+        }
+        played.dropped += dropped;
+    }
+    Ok(())
+}
+
+/// `ParticleSystem.Stop()` on the root system of an instance, which the
+/// effect components call (`ManagedEffect.Stop`): `Stop(withChildren: true,
+/// StopEmitting)`, so every played system under `root` stops emitting and its
+/// live particles finish their lifetimes; a system holding no particle is
+/// cleared and ends its play (see [`lifecycle::PlayState`]). Returns how many
+/// systems stopped.
+pub(crate) fn stop_emitting(world: &mut World, root: Entity) -> usize {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    let draws = played_draws(world, root);
+    for &draw in &draws {
+        let mut entity = world.entity_mut(draw);
+        let mut played = match entity.take::<Played>() { Some(played) => played, None => continue };
+        played.emitting = false;
+        if let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() {
+            if let Some(reason) = played.play.stop(&mut live.0, now) {
+                warn!("[fixture-source] {reason}");
+            }
+        }
+        entity.insert(played);
+    }
+    draws.len()
+}
+
+/// `ParticleSystem.Play()` again on the root system of an instance (children
+/// included). A system that still holds particles keeps its seeds and warm
+/// and restarts its clock (`later_play`); one that holds none plays as at its
+/// first Play: its seeds are reset (an automatic owner takes a new word) and a
+/// looping prewarm system warms again.
+pub(crate) fn play(world: &mut World, root: Entity) -> Result<usize, String> {
+    let draws = played_draws(world, root);
+    world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
+        for &draw in &draws {
+            let mut entity = world.entity_mut(draw);
+            let mut played = match entity.take::<Played>() { Some(played) => played, None => continue };
+            let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() else {
+                entity.insert(played);
+                continue;
+            };
+            let system = &mut live.0;
+            played.emitting = true;
+            played.play = lifecycle::PlayState::played(played.culling.clone(), played.procedural_warm);
+            if system.pool.is_empty() {
+                crate::particle_runtime::reset_for_first_play(system);
+                if let Err(error) = crate::particle_runtime::install_native_birth(system, &mut seeds, &played.route, None) {
+                    return Err(format!("{}: source seed owner unavailable: {error}", system.node));
+                }
+                if let (Some(edges), Some(birth)) = (played.event_edges.clone(), system.native_birth.as_mut()) {
+                    birth.events = Some(crate::particle_runtime::BirthEvents::with_edges(edges));
+                }
+            } else {
+                crate::particle_runtime::later_play_with_particles(system);
+            }
+            entity.insert(played);
+        }
+        Ok(draws.len())
+    })
+}
+
+/// Whether any played system under `root` is playing (`None` when it has
+/// none): what `OnShotEffect.Update` reads to finish an effect.
+pub(crate) fn instance_playing(world: &World, root: Entity) -> Option<bool> {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    let mut any = None;
+    for draw in played_draws(world, root) {
+        let (Some(live), Some(played)) = (world.get::<crate::uber_particle::FixtureParticleLive>(draw),
+            world.get::<Played>(draw)) else { continue; };
+        let playing = played.playing(&live.0, now);
+        any = Some(any.unwrap_or(false) || playing);
+    }
+    any
+}
+
+/// The played draws of an instance: its children that carry [`Played`].
+fn played_draws(world: &World, root: Entity) -> Vec<Entity> {
+    world.get::<Children>(root).map(|children| children.iter()
+        .filter(|child| world.get::<Played>(*child).is_some()).collect()).unwrap_or_default()
 }
 
 fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {

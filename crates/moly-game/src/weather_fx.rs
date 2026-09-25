@@ -1649,6 +1649,7 @@ fn judge(
         camera_rotation, Some(lifecycle), "phenomena", None, ground, bodies, server, tally)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn judge_in_archive(
     effect_name: &str,
     particle: &Value,
@@ -1662,6 +1663,32 @@ fn judge_in_archive(
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
     // Whether the effect's component census rules out a Rigidbody on its
     // nodes ([`census_names_no_body`]).
+    bodies: &Result<(), String>,
+    server: &AssetServer,
+    tally: &mut Tally,
+) -> Option<Planned> {
+    // The weather host (a lifecycle) installs the native birth owner.
+    judge_in_host(effect_name, particle, by_path, sub_emitter_owners, kind, camera_rotation, lifecycle,
+        lifecycle.is_some(), asset_root, instance_anchor, ground, bodies, server, tally)
+}
+
+/// [`judge_in_archive`] for a host that says whether it installs the native
+/// birth owner and keeps both frame clocks: the weather host and the fixture
+/// host's played systems do; the fixture host's Director-driven systems
+/// (`ParticleSystem.Simulate` from a ControlPlayable) run the legacy step.
+#[allow(clippy::too_many_arguments)]
+fn judge_in_host(
+    effect_name: &str,
+    particle: &Value,
+    by_path: &HashMap<String, &Value>,
+    sub_emitter_owners: &SubEmitterGraph<'_>,
+    kind: EffectKind,
+    camera_rotation: bool,
+    lifecycle: Option<WeatherEffectLifecycle>,
+    native_owner: bool,
+    asset_root: &str,
+    instance_anchor: Option<GlobalTransform>,
+    ground: &crate::particle_runtime::collision_scene::SceneVerdict,
     bodies: &Result<(), String>,
     server: &AssetServer,
     tally: &mut Tally,
@@ -1874,17 +1901,17 @@ fn judge_in_archive(
     // ParticleSystem::BeginUpdate hands a system with useUnscaledTime the
     // unscaled delta, which Time.maximumDeltaTime does not clamp, and any other
     // system Time.deltaTime. A block that does not carry the flag is refused
-    // in either host rather than read as either clock. The fixture host steps
-    // its systems on the scaled frame delta or on the Director's Simulate time
-    // and keeps no unscaled clock, so a fixture system with the flag set is
-    // refused.
-    match (emitter.use_unscaled_time, lifecycle.is_some()) {
+    // in either host rather than read as either clock. A host with the native
+    // birth owner keeps both clocks; the Director path steps by the Director's
+    // Simulate time and keeps no unscaled clock, so a Director-driven system
+    // with the flag set is refused.
+    match (emitter.use_unscaled_time, native_owner) {
         (None, _) => {
             tally.law_reject.push(format!("{node}: useUnscaledTime not exported; re-extract"));
             return None;
         }
         (Some(true), false) => {
-            tally.law_reject.push(format!("{node}: useUnscaledTime needs the unscaled clock, which the fixture host does not keep"));
+            tally.law_reject.push(format!("{node}: useUnscaledTime needs the unscaled clock, which the Director's Simulate path does not keep"));
             return None;
         }
         _ => {}
@@ -1947,11 +1974,10 @@ fn judge_in_archive(
     if native_only_shape {
         // The legacy step has no batch count, lane index or arc clock and no
         // Box sampler; these shapes run only with the native birth owner.
-        if lifecycle.is_none() {
-            // The fixture host runs its systems on the legacy step, its
-            // autonomous emitters and the Director's ParticleSystem.Simulate
-            // steps alike, and never installs the native birth owner.
-            tally.shape.push(format!("{node}: {shape_type} mode needs the native birth owner, which the fixture host does not install"));
+        if !native_owner {
+            // The Director's ParticleSystem.Simulate steps run the legacy
+            // step and never install the native birth owner.
+            tally.shape.push(format!("{node}: {shape_type} mode needs the native birth owner, which the Director's Simulate path does not install"));
             return None;
         }
         // A sub-emitter target takes no route: its births come from its
@@ -2007,10 +2033,10 @@ fn judge_in_archive(
         // The ring laws are the ordinary incremental order: simulate and kill the
         // existing particles, then emit, start and pack the newborns at the ring
         // cursor. The legacy step emits first and draws another stream.
-        if lifecycle.is_none() {
-            // The fixture host steps its systems on the legacy step, also under
-            // the Director's Simulate, and never installs the native birth owner.
-            tally.law_reject.push(format!("{node}: ring buffer needs the native birth owner, which the fixture host does not install"));
+        if !native_owner {
+            // The Director's Simulate steps run the legacy step and never
+            // install the native birth owner.
+            tally.law_reject.push(format!("{node}: ring buffer needs the native birth owner, which the Director's Simulate path does not install"));
             return None;
         }
         if let Err(reason) = crate::particle_runtime::native_birth_eligible(&emitter, &route) {
@@ -2028,8 +2054,8 @@ fn judge_in_archive(
     // needs this host's native birth owner, and a sub-emitter target's births
     // (its parents' commands) are not what that law follows.
     let storage = || -> Result<(), String> {
-        if lifecycle.is_none() {
-            return Err("the fixture host does not install the native birth owner".into());
+        if !native_owner {
+            return Err("the Director's Simulate path does not install the native birth owner".into());
         }
         if child_parent.is_some() {
             return Err("a sub-emitter target's storage follows its parents' commands, which the slot model does not".into());
@@ -2168,13 +2194,13 @@ fn judge_in_archive(
         }
     }
     // A system that runs the legacy step must carry a start colour that step
-    // evaluates as the source does. The weather host installs the native
-    // birth owner where `native_birth_path` allows it; the fixture host (no
-    // lifecycle) never installs it.
+    // evaluates as the source does. A host with the native birth owner
+    // installs it where `native_birth_path` allows it; the Director path
+    // never installs it.
     let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
     // A sub-emitter target never runs the legacy step (it takes no route).
     if child_parent.is_none()
-        && (lifecycle.is_none() || crate::particle_runtime::native_birth_path(&emitter, &route, Some(evidence)).is_err())
+        && (!native_owner || crate::particle_runtime::native_birth_path(&emitter, &route, Some(evidence)).is_err())
     {
         if let Err(refused) = crate::particle_runtime::legacy_start_colour(&emitter.start.color) {
             tally.law_reject.push(format!("{node}: {}", refused.reason()));

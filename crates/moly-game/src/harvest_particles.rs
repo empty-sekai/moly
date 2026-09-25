@@ -28,6 +28,13 @@
 //! `rainbow`), because the prop document carries no program catalogue for
 //! them; rows without a material are system roots that draw nothing.
 //!
+//! Each installed system is played as the fixture host plays its systems
+//! (`weather_fx::fixture::Played`): the Play installs the birth owner where
+//! the route and modules qualify, and each frame reads the clock its
+//! useUnscaledTime selects. A row that does not carry that flag is refused by
+//! name rather than read as either clock (site prop documents exported before
+//! the extractor wrote it carry none).
+//!
 //! The draw follows the anchor's visibility: a harvested stone is hidden
 //! with its whole hierarchy, and so is its glow.
 //!
@@ -178,6 +185,9 @@ struct HarvestStayDraw {
 struct Admitted {
     node: String,
     emitter: EmitterParams,
+    /// The exported system block: its route decision ([`source_route`]) and,
+    /// with it, whether the native birth owner is installable.
+    system: Value,
     draw: crate::source_billboard::Draw,
     sort_mode: moly_law::particle::sort::ParticleSort,
     use_phenomena_lighting: f32,
@@ -185,6 +195,7 @@ struct Admitted {
 
 /// Update: after every harvest scene is spawned, resolve each stone view's
 /// played particle systems once and install the particle_circle rows.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn install_stay_particles(
     mut commands: Commands,
@@ -198,6 +209,7 @@ fn install_stay_particles(
     transforms: Query<&Transform>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut circles: ResMut<Assets<ParticleCircleMaterial>>,
+    mut seeds: ResMut<crate::particle_runtime::seed::SystemSeedManager>,
     mut ordinal: Local<u64>,
 ) {
     if ready.is_none() {
@@ -325,8 +337,20 @@ fn install_stay_particles(
             let material = circles.add(ParticleCircleMaterial {
                 use_phenomena_lighting: admitted.use_phenomena_lighting,
             });
-            let runtime = runtime(admitted, anchor, mesh.clone(), *ordinal);
+            let route = route_of(&admitted);
+            let mut runtime = runtime(admitted, anchor, mesh.clone(), *ordinal);
             *ordinal += 1;
+            // `Setup` plays `_objectParticle` (and `RefreshParticle` the rare
+            // one): `ParticleSystem.Play()` on the prefab's root system with
+            // its children, which installs the birth owner of every system it
+            // plays.
+            let played = match crate::weather_fx::fixture::install_played(&mut runtime, &route, &mut seeds) {
+                Ok(played) => played,
+                Err(reason) => {
+                    refused.push(format!("{}: {reason}", runtime.node));
+                    continue;
+                }
+            };
             commands.spawn((
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
@@ -335,6 +359,7 @@ fn install_stay_particles(
                 NoFrustumCulling,
                 crate::shadowmap::NoShadowCast,
                 FixtureParticleLive(runtime),
+                played,
                 HarvestStayDraw { anchor },
             ));
         }
@@ -518,9 +543,17 @@ fn admit(row: &Value, local_scale: Vec3) -> Result<Admitted, String> {
     // dispatch; a lane outside the transcribed evaluator refuses the system
     // here, before any law is installed (the runtime below relies on it).
     crate::particle_runtime::curve_admission(&emitter)?;
+    // ParticleSystem::BeginUpdate reads Time.unscaledDeltaTime for a system
+    // with useUnscaledTime and Time.deltaTime otherwise; a row that does not
+    // carry the flag is refused rather than read as either clock, as in the
+    // weather and fixture hosts.
+    if emitter.use_unscaled_time.is_none() {
+        return Err("useUnscaledTime not exported; re-extract".into());
+    }
     Ok(Admitted {
         node,
         emitter,
+        system: system.clone(),
         draw: crate::source_billboard::Draw {
             mode,
             alignment,
@@ -586,7 +619,7 @@ fn triple(value: &Value) -> Option<[f32; 3]> {
 }
 
 fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64) -> Runtime {
-    let Admitted { node, emitter, draw, sort_mode, .. } = admitted;
+    let Admitted { node, emitter, draw, sort_mode, system, .. } = admitted;
     Runtime {
         node,
         effect: STONE_VIEW.to_owned(),
@@ -636,6 +669,11 @@ fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64)
         full_total: 0,
         refused_total: 0,
     }
+}
+
+/// The exported system block of one admitted row, for its route decision.
+fn route_of(admitted: &Admitted) -> crate::particle_runtime::SourceRoute {
+    crate::particle_runtime::source_route(&admitted.system)
 }
 
 /// Update: a draw is visible exactly when its anchor node is (a harvested
