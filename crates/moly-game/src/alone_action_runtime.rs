@@ -20,6 +20,7 @@ use bevy::prelude::*;
 
 use moly_assets::json::JsonAsset;
 use moly_law::alone_action as law;
+use moly_law::blink::EyePattern;
 use moly_law::facial::LipPattern;
 
 use crate::character::{MotionDriver, MotionKind, MotionLibrary, SEGMENT_BLEND};
@@ -80,6 +81,11 @@ impl FacialTables {
     /// 眼表查键：pattern → open 格值（缺键 None——消费侧响亮失败用）。
     /// 对话步的眼图样与待机动作共用同一张眼表（键即 `PatternName`）。
     pub(crate) fn eye_open(&self, pattern: &str) -> Option<i32> {
+        self.eye.get(pattern).map(|row| row.open)
+    }
+
+    /// The whole eye row (open, close, blink) of a pattern name.
+    pub(crate) fn eye_pattern(&self, pattern: &str) -> Option<EyePattern> {
         self.eye.get(pattern).copied()
     }
 
@@ -98,7 +104,7 @@ impl FacialTables {
 /// preserve the full lip row for the separately owned speech continuation.
 #[derive(Resource)]
 pub(crate) struct FacialTables {
-    eye: HashMap<String, i32>,
+    eye: HashMap<String, EyePattern>,
     lip: HashMap<String, LipPattern>,
     defaults: HashMap<u32, (String, String)>,
 }
@@ -462,7 +468,22 @@ fn parse_facial(text: &str) -> FacialTables {
             .get("OpenEyeIndex")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("眼表行 {name} 缺 OpenEyeIndex"));
-        eye.insert(name.to_owned(), open as i32);
+        let close = row
+            .get("CloseEyeIndex")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| panic!("眼表行 {name} 缺 CloseEyeIndex"));
+        let blink = row
+            .get("BlinkEnabled")
+            .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(i64::from)))
+            .unwrap_or_else(|| panic!("眼表行 {name} 缺 BlinkEnabled"));
+        eye.insert(
+            name.to_owned(),
+            EyePattern {
+                open: open as i32,
+                close: close as i32,
+                blink_enabled: blink != 0,
+            },
+        );
     }
     let mut lip = HashMap::new();
     for row in value
@@ -674,7 +695,7 @@ pub(crate) fn attach(
             .defaults
             .get(&unit.0)
             .unwrap_or_else(|| panic!("facial 默认脸表没有 unit {}", unit.0));
-        apply_eye(&mut materials, &eye_handle, tables.eye.get(eye_name));
+        apply_eye_pattern(&mut materials, &eye_handle, tables.eye_pattern(eye_name));
         apply_mouth_pattern(
             &mut materials,
             &mouth_handle,
@@ -707,7 +728,7 @@ pub(crate) fn attach(
 /// 动作库里。缺什么报什么（键名/段名与单位 id——不带资产内容）。
 fn verify_step(
     step: &law::Step,
-    eye: &HashMap<String, i32>,
+    eye: &HashMap<String, EyePattern>,
     lip: &HashMap<String, LipPattern>,
     lib: &Gltf,
     unit: u32,
@@ -767,6 +788,20 @@ pub(crate) fn apply_eye(
         material.params.main_tex_st = st;
     }
     (col, row)
+}
+
+/// `ChangeEyePattern`: the view's pattern becomes the row (`FindBy`'s
+/// zero-valued row when the name is absent) and its open cell is written.
+pub(crate) fn apply_eye_pattern(
+    materials: &mut Assets<CharacterMaterial>,
+    handle: &Handle<CharacterMaterial>,
+    pattern: Option<EyePattern>,
+) -> (i32, i32) {
+    let pattern = crate::npc_view::pattern_or_zero(pattern);
+    if let Some(material) = materials.get_mut(handle) {
+        material.eye_pattern = Some(pattern);
+    }
+    apply_eye(materials, handle, Some(&pattern.open))
 }
 
 /// Write one mouth atlas index. Speech continuations use this same material
@@ -899,7 +934,7 @@ pub(crate) fn advance(
             rt.steps_fired += 1;
             match step {
                 law::Step::ChangeEye { pattern, .. } => {
-                    apply_eye(&mut materials, &rt.eye_handle, tables.eye.get(&pattern));
+                    apply_eye_pattern(&mut materials, &rt.eye_handle, tables.eye_pattern(&pattern));
                     rt.eye_pattern = pattern;
                 }
                 law::Step::ChangeMouth { pattern, .. } => {

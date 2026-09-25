@@ -10,6 +10,42 @@ pub fn has_group_talk(current: Option<ObjectiveType>, slot: Option<TalkType>) ->
             || matches!(slot, Some(TalkType::MultipleCharacterFixture | TalkType::CommunicationWhileDoingWait)))
 }
 
+/// The action states in which the overlap cancel may run: the bits of
+/// 0x100083 = {Idle 0, AutoMove 1, Rest 7, SomeCharacterCommunication 20}.
+pub const OVERLAP_CANCEL_STATE_MASK: u32 = 0x0010_0083;
+
+/// One frame of the timer before the cancel attempt. Reset to 0 and
+/// false on group talk data or no overlap; while the timer read before this
+/// frame's add is below `limit`, add `dt` and false; at or past it, reset
+/// and false in a state outside the mask (a state above 20 included), and
+/// true (attempt the cancel, timer untouched) in a state inside it. The
+/// caller resets the timer only when the cancel reports true: a refused
+/// cancel keeps the timer at or past the limit, so the next frame tries
+/// again.
+pub fn overlap_frame(
+    elapsed: &mut f32,
+    dt: f32,
+    limit: f32,
+    overlaps: bool,
+    group_talk: bool,
+    state_type: u32,
+) -> bool {
+    if group_talk || !overlaps {
+        *elapsed = 0.0;
+        return false;
+    }
+    // One ordered compare, `b.pl` when not below (a NaN timer included).
+    if *elapsed < limit {
+        *elapsed += dt;
+        return false;
+    }
+    if state_type > 20 || OVERLAP_CANCEL_STATE_MASK & (1 << state_type) == 0 {
+        *elapsed = 0.0;
+        return false;
+    }
+    true
+}
+
 /// `state_type` 是 NPCActionStateType：Idle=0、AutoMove=1、Rest=7、
 /// SomeCharacterCommunication=20；其他状态达到时限后清零而不取消。
 pub fn should_cancel(
@@ -58,3 +94,7 @@ pub fn npc_dither_alpha(talking: bool, photo: bool, fixture_action: bool, others
 
 /// SetDitherAlpha 同时切换关键字/数值门；只写 alpha 不会启用透明。
 pub fn use_dither(alpha: f32) -> bool { alpha <= 0.999 }
+
+#[cfg(test)]
+#[path = "overlap_source_cases.rs"]
+mod source_cases;

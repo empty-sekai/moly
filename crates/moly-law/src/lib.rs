@@ -21,3 +21,4 @@ pub mod tweet;
 pub mod weather;
 pub mod action_button;
 pub mod animator;
+pub mod blink;

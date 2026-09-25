@@ -308,3 +308,156 @@ pub(crate) fn try_greeting(
         );
     }
 }
+
+/// The presenter update's guard, read by every per-frame call: the
+/// presenter is initialized (this host's ready actions) and its model is
+/// visible (the character body is shown). A disposed presenter is not in
+/// this host (its NPC entity is removed).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct PresenterGate<'w, 's> {
+    visible: Query<
+        'w,
+        's,
+        (&'static CharacterUnitId, &'static InheritedVisibility),
+        With<crate::character::MotionDriver>,
+    >,
+    npcs: Query<'w, 's, (&'static CharacterUnitId, &'static NpcActions)>,
+}
+
+impl PresenterGate<'_, '_> {
+    pub(crate) fn runs(&self, entity: Entity) -> bool {
+        let Ok((unit, actions)) = self.npcs.get(entity) else {
+            return false;
+        };
+        actions.ready()
+            && self
+                .visible
+                .iter()
+                .any(|(id, visibility)| id.0 == unit.0 && visibility.get())
+    }
+}
+
+/// Presenter call 4: `NavMeshAgent.obstacleAvoidanceType = 0`
+/// (NoObstacleAvoidance), every frame, on every NPC. This host's agent has no
+/// obstacle avoidance to switch; the write leaves it as it is.
+pub(crate) fn write_avoidance() {}
+
+/// Presenter call 6: `UpdateIK` (the free look-on timers and the IK target
+/// choice). Not in this host yet; until then no IK target is chosen.
+pub(crate) fn update_ik() {}
+
+/// Presenter call 7: `TryResetNavMesh`. When the agent's destination x is
+/// infinite (an agent that is not bound to the navigation mesh, which is the
+/// case while its local fit has it disabled) it calls the view's
+/// `SetNavMeshAgentActive(false)` then `(true)`: angular speed 0 then 256,
+/// acceleration 0 then 12, and a stop and restart that act only on an agent
+/// on the mesh. It never enables, warps or re-places the agent. This host's
+/// agent has neither angular speed nor acceleration, so the call changes
+/// nothing observable here.
+pub(crate) fn try_reset_navmesh() {}
+
+/// Presenter call 9: `TrySomeCharacterCommunication`. Not in this host; until
+/// then it never starts a communication (the source's result 1 would end the
+/// update before the greeting gate).
+pub(crate) fn try_some_character_communication() {}
+
+/// Presenter call 8: `TryCancelIfCharacterOverlap`, per NPC in the avatar
+/// list order. The timer rule is [`moly_law::objective::overlap::overlap_frame`];
+/// the overlap is another NPC's position within the character overlap
+/// distance (3-D, strict); the cancel is the presenter's
+/// `TryCancelCurrentObjective` (refused while talking and without a running
+/// objective), and a cancel that reports true sets the flag that skips the
+/// next Rest and resets the timer. A true result ends this NPC's update
+/// before calls 9 and 10. The cancelled objective ends on the next frame and
+/// the loop yields one more before its TryRest.
+pub(crate) fn try_cancel_if_overlap(world: &mut World) {
+    use crate::client_config::{KEY_CHARACTER_OVERLAP_DISTANCE, KEY_CHARACTER_OVERLAP_TIME};
+    let frame = world.resource::<FrameCount>().0;
+    let dt = world.resource::<crate::npc_clock::NpcClock>().delta();
+    let Some((limit, reach)) = world.get_resource::<ClientConfigs>().map(|configs| {
+        (
+            configs.float(KEY_CHARACTER_OVERLAP_TIME),
+            configs.float(KEY_CHARACTER_OVERLAP_DISTANCE),
+        )
+    }) else {
+        return;
+    };
+    let shown: Vec<u32> = world
+        .query_filtered::<(&CharacterUnitId, &InheritedVisibility), With<crate::character::MotionDriver>>()
+        .iter(world)
+        .filter(|(_, visibility)| visibility.get())
+        .map(|(unit, _)| unit.0)
+        .collect();
+    let snaps: Vec<(Entity, u32, Vec3)> = world
+        .query_filtered::<(Entity, &CharacterUnitId, &Transform), (
+            With<ObjectiveMind>,
+            Without<crate::player::PlayerControlled>,
+        )>()
+        .iter(world)
+        .map(|(entity, unit, transform)| (entity, unit.0, transform.translation))
+        .collect();
+    for &(entity, unit, position) in &snaps {
+        let Some(actions) = world.get::<NpcActions>(entity) else {
+            continue;
+        };
+        if !actions.ready() || !shown.contains(&unit) {
+            continue;
+        }
+        let state = actions.current as u32;
+        let Some(mind) = world.get::<ObjectiveMind>(entity) else {
+            continue;
+        };
+        if mind.ai_stopped.is_some() {
+            continue;
+        }
+        let current = mind.current;
+        let kind = world.get::<TalkSlot>(entity).and_then(|slot| slot.kind());
+        let group_talk = moly_law::objective::overlap::has_group_talk(current, kind);
+        let overlaps = snaps.iter().any(|&(other, _, other_position)| {
+            other != entity && position.distance(other_position) < reach
+        });
+        let mut elapsed = mind.overlap_seconds;
+        let attempt = moly_law::objective::overlap::overlap_frame(
+            &mut elapsed,
+            dt,
+            limit,
+            overlaps,
+            group_talk,
+            state,
+        );
+        if let Some(mut mind) = world.get_mut::<ObjectiveMind>(entity) {
+            mind.overlap_seconds = elapsed;
+        }
+        if !attempt {
+            continue;
+        }
+        let mut groups = world
+            .remove_resource::<crate::npc_fixture_talk::FixtureTalkGroups>()
+            .unwrap_or_default();
+        let (cancelled, owed) =
+            crate::npc_fixture_talk::try_cancel_current(world, &mut groups, entity, frame);
+        world.insert_resource(groups);
+        if !cancelled {
+            // The timer stays at or past the limit; the next frame tries again.
+            continue;
+        }
+        let Some(mut mind) = world.get_mut::<ObjectiveMind>(entity) else {
+            continue;
+        };
+        if owed > 0 {
+            crate::npc_objective::owe_force_updates(&mut mind, frame.wrapping_add(1), owed);
+        } else {
+            mind.yield_since = Some(frame.wrapping_add(1));
+        }
+        // SetImmediatelyExecuteNextObjective(true), after the cancel.
+        mind.skip_next_rest = true;
+        mind.overlap_seconds = 0.0;
+        mind.overlap_cancel_frame = Some(frame);
+        info!(
+            "[npc unit={unit}] 角色重叠超过源时限，取消目标并立即重选 (frame {frame}, {owed} calls owed)"
+        );
+    }
+}
+
+/// Presenter call 5: `UpdateNpcDither` (see [`crate::npc_dither`]).
+pub(crate) use crate::npc_dither::update_dither;
