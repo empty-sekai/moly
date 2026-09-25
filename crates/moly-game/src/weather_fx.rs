@@ -2680,7 +2680,11 @@ pub(crate) fn spawn_when_ready(
     time: Res<Time>,
     site: Option<Res<SiteActive>>,
     site_ready: Option<Res<crate::site::SiteScenesReady>>,
-    (mut environment_root, frame): (ResMut<EnvironmentRoot>, Res<bevy::diagnostic::FrameCount>),
+    (mut environment_root, frame, cannon): (
+        ResMut<EnvironmentRoot>,
+        Res<bevy::diagnostic::FrameCount>,
+        Option<Res<crate::site_move::CannonEnvironmentWrite>>,
+    ),
     (gltfs, gltf_nodes, gltf_meshes): (Res<Assets<Gltf>>, Res<Assets<GltfNode>>, Res<Assets<GltfMesh>>),
 ) {
     let Some(mut plan) = plan else { return; };
@@ -2866,6 +2870,7 @@ pub(crate) fn spawn_when_ready(
         commands.insert_resource(crate::weather_transition::WeatherGlobalFxCommitted(plan.request_serial));
     }
     let mut waiting = Vec::new();
+    environment_root.follow_cannon(cannon.as_deref());
     let owner_anchor = match site.as_deref() {
         Some(active) => {
             environment_root.enter(active);
@@ -3306,12 +3311,15 @@ fn direct_targets(system: &Runtime) -> Vec<String> {
 ///
 /// Arrival points: a harvest site's is its site position. A delivery site's
 /// is its site position plus an offset authored on the site view, and home's
-/// is the house's inside-door point, which follows the player's layout.
-/// This host supplies neither of those two, and says so when it stands in:
-/// on a delivery site the root lands on the site origin, and on the way home
-/// it returns to where the session started it, home's origin. The source has
-/// no direct move between a room and a harvest or delivery site; its route
-/// runs through home, and this host applies that route.
+/// is the house's inside-door point, which follows the player's layout. The
+/// cannon move publishes its writes (`site_move::CannonEnvironmentWrite`):
+/// the root keeps its height at the fire, takes each follow point, and gets
+/// the kept height back at the landing effect. Without those writes for the
+/// entered site this host stands in, and says so: on a delivery site the root
+/// lands on the site origin, and on the way home it returns to where the
+/// session started it, home's origin. The source has no direct move between a
+/// room and a harvest or delivery site; its route runs through home, and this
+/// host applies that route.
 ///
 /// The camera effects are children of the rendering camera's own transform.
 /// The site-unique effects are children of the site view, the field prefab's
@@ -3331,6 +3339,18 @@ pub(crate) struct EnvironmentRoot {
     /// (the missing value and the stand-in); `None` while the root stands
     /// where the source puts it.
     stand_in: Option<(&'static str, &'static str)>,
+    /// The cannon move whose writes the root follows.
+    cannon: Option<CannonFollow>,
+}
+
+struct CannonFollow {
+    move_id: u64,
+    /// The destination's site type.
+    site_type: String,
+    /// `envDefaultPositionY`: the root's height at the fire.
+    kept_y: f32,
+    /// The kept height is back (logged once).
+    landed: bool,
 }
 
 impl EnvironmentRoot {
@@ -3375,6 +3395,11 @@ impl EnvironmentRoot {
             Some((_, category)) => category,
             None => HOME.to_owned(),
         };
+        // A cannon move into this site writes the root itself: it lands where
+        // the source puts it.
+        if self.cannon.as_ref().is_some_and(|cannon| cannon.site_type == active.site_type) {
+            return Some(None);
+        }
         let from_cannon_site = matches!(from.as_str(), HARVEST | DELIVERY);
         let site = Vec3::from_array(active.position);
         match active.category.as_str() {
@@ -3391,6 +3416,40 @@ impl EnvironmentRoot {
                 Some(Some(("the house's inside-door point", "the starting point")))
             }
             _ => None,
+        }
+    }
+
+    /// Follow the cannon move's writes: keep the height at the fire, take
+    /// each follow point, and set the kept height back at the landing effect.
+    /// Idempotent within a frame, so both readers of the root may call it.
+    fn follow_cannon(&mut self, write: Option<&crate::site_move::CannonEnvironmentWrite>) {
+        let Some(write) = write else {
+            self.cannon = None;
+            return;
+        };
+        if self.cannon.as_ref().is_none_or(|cannon| cannon.move_id != write.move_id) {
+            self.cannon = Some(CannonFollow {
+                move_id: write.move_id,
+                site_type: write.site_type.clone(),
+                kept_y: self.world.y,
+                landed: false,
+            });
+        }
+        let cannon = self.cannon.as_mut().expect("set above");
+        let Some(point) = write.point else {
+            return;
+        };
+        if write.height_restored {
+            self.world = Vec3::new(point.x, cannon.kept_y, point.z);
+            if !cannon.landed {
+                cannon.landed = true;
+                info!(
+                    "[weather-fx] environment root follows the cannon move to {}: lands at {:.3}",
+                    cannon.site_type, self.world
+                );
+            }
+        } else {
+            self.world = point;
         }
     }
 
@@ -3456,9 +3515,11 @@ pub(crate) fn advance(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     site: Option<Res<SiteActive>>,
     mut environment_root: ResMut<EnvironmentRoot>,
+    cannon: Option<Res<crate::site_move::CannonEnvironmentWrite>>,
 ) {
     // Follow every site change, also on frames that draw nothing, so the root
     // sees each move the source would make.
+    environment_root.follow_cannon(cannon.as_deref());
     if let Some(active) = site.as_deref() {
         environment_root.enter(active);
     }
