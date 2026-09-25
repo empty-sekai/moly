@@ -3199,7 +3199,9 @@ pub(crate) fn smoke_autotap(
 /// in seconds, with the action-button autowalk bringing the player to each
 /// character): while the action stack's head is the Talk button of a
 /// character and no talk plays, the request the Talk button's dispatch
-/// writes for that character is written, at most every 2 s. It stands in for
+/// writes for that character is written, at most every 15 s (so the
+/// characters get back to their own activities between taps, and the taps
+/// land in their different states). It stands in for
 /// the press itself, which a headless run at a few frames per second cannot
 /// make (the injected release lands a frame later, past the long-press
 /// threshold, so the gesture layer reports no tap). The request then takes
@@ -3237,7 +3239,7 @@ pub(crate) fn probe_stack_taps(
         exact: None,
         target_fixture: None,
     });
-    *next_at = now + 2.0;
+    *next_at = now + 15.0;
     info!("[player-talk-smoke] stack tap: the Talk button's request for unit {unit} at {now:.1}s");
 }
 
