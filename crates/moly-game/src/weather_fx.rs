@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use moly_assets::weather_effect::WeatherEffectLifecycle;
 
 use crate::billboard::{self, Alignment};
-use crate::character::AvatarRoot;
 use crate::site::SiteActive;
 use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
@@ -62,6 +61,9 @@ pub(crate) struct WeatherFxDoc {
     /// The collider export the index names; `None` when the index names
     /// none (every collision system is then refused by name).
     collision: Option<Handle<JsonAsset>>,
+    /// The index's records of components the extraction does not model, with
+    /// their effect; `None` when the index carries no such census.
+    unsupported: Option<Value>,
     tier: String,
     env_site: String,
 }
@@ -87,6 +89,8 @@ enum PlannedGeometry {
         scaling: crate::particle_geometry::Scaling,
         pivot: Vec3,
         flip: Vec3,
+        /// The admission's decision (`particle_runtime::mesh_rotation_admission`).
+        axis_body: Option<crate::particle_geometry::AxisBody>,
     },
 }
 impl PlannedGeometry {
@@ -102,8 +106,8 @@ impl PlannedGeometry {
     fn into_runtime(self) -> crate::particle_runtime::Geometry {
         match self {
             Self::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw),
-            Self::Mesh { alignment, source, scaling, pivot, flip, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
-                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot, flip,
+            Self::Mesh { alignment, source, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(crate::particle_geometry::MeshDraw {
+                source: source.expect("source mesh readiness must precede weather commit"), alignment, scaling, pivot, flip, axis_body,
             }),
         }
     }
@@ -165,9 +169,12 @@ struct Planned {
     /// The trail draw of a system with a qualified TrailModule: the renderer's
     /// trail material and trail vertex streams, drawn after the particles.
     trail: Option<PlannedTrail>,
-    /// The effect's ground scene for a system with a CollisionModule; the
+    /// The installed effects' ground scene for a system with a CollisionModule; the
     /// native birth installer installs the module with it.
     collision_scene: Option<Arc<crate::particle_runtime::collision_scene::GroundScene>>,
+    /// The sub-emitter term of the first-Play warm length (0 for a system
+    /// that does not warm or reaches no live child).
+    sub_emitter_max_lifetime: f32,
 }
 
 struct PlannedTrail {
@@ -188,9 +195,24 @@ pub(crate) struct WeatherFxPlan {
     animators: HashMap<String, Vec<crate::weather_animation::AnimatedNode>>,
     /// The effector's child set per selected effect.
     children: HashMap<String, Arc<Vec<lifecycle::EffectChild>>>,
+    /// The colliders each selected effect adds to the physics scene when it
+    /// is installed.
+    colliders: Vec<PlannedColliders>,
+    /// The site's own colliders, static for the whole visit.
+    site_colliders: Arc<crate::particle_runtime::collision_scene::GroundScene>,
     tally: Tally,
     tier: String,
     env_site: String,
+}
+
+/// One selected effect's colliders, installed into the physics scene with
+/// the effect and removed when the stopped effect is destroyed.
+struct PlannedColliders {
+    kind: EffectKind,
+    effect: String,
+    scene: Arc<crate::particle_runtime::collision_scene::GroundScene>,
+    /// The effect's own delay from Stop to its destruction.
+    destroy_delay: f64,
 }
 
 /// 逐档盘点。**每一格都是「这一档有多少条被挡在外面」**——盘面上看得见
@@ -331,6 +353,10 @@ impl WeatherFxState {
                         "refusedCommands": target.refused,
                         "lastRefusal": target.last_refusal,
                     })),
+                    "collision": s.collision.as_ref().map(|collision| serde_json::json!({
+                        "calls": collision.calls, "hits": collision.hits, "draws": collision.draws,
+                        "unreached": collision.unreached, "orderFree": collision.order_free,
+                    })),
                     "trail": s.trail.as_ref().map(|trail| serde_json::json!({
                         "clock": trail.clock.time,
                         "rings": trail.rings.len(),
@@ -412,6 +438,8 @@ struct RetiringInstance {
     clock: Arc<crate::weather_animation::EffectClock>,
     destroy: lifecycle::DestroyOnTime,
     unheld: Vec<String>,
+    /// The effect's entries in the physics scene, removed with the instance.
+    colliders: Vec<u64>,
 }
 
 #[derive(Resource, Default)]
@@ -420,6 +448,19 @@ pub(crate) struct WeatherFxRetirements {
     instances: Vec<RetiringInstance>,
     /// Draws of instances destroyed inside a Stop call, for the caller's commands.
     despawn: Vec<Entity>,
+    /// The site's physics scene the collision systems query: the colliders
+    /// of every installed effect, a stopped effect's until it is destroyed.
+    physics: crate::particle_runtime::collision_scene::SiteScene,
+    /// The installed effects' collider entries: kind, effect, entry and the
+    /// effect's destroy delay.
+    installed_colliders: Vec<(EffectKind, String, u64, f64)>,
+    /// Colliders of stopped effects without an installed system (so without
+    /// a stopped instance), and when they leave the scene.
+    retiring_colliders: Vec<(u64, f64)>,
+    /// The installed site's collider entry, by site.
+    site_colliders: Option<(String, u64)>,
+    /// The placed fixtures' collider entry while the active site has any.
+    fixture_colliders: Option<u64>,
 }
 
 impl WeatherFxRetirements {
@@ -429,14 +470,18 @@ impl WeatherFxRetirements {
     /// SiteEnvironmentEffector.Stop for every instance holding a matching
     /// system: `Stop(StopEmitting)` on each system, then the first check of
     /// `DestroyOnTime` inside the same call with this frame's delta.
-    fn stop_matching(&mut self, active: &mut WeatherFxState, now: f64, delta: f32, predicate: impl Fn(&LiveWeatherEmitter)->bool) {
+    /// The instance's colliders leave the physics scene when it is destroyed.
+    fn stop_matching(&mut self, active: &mut WeatherFxState, now: f64, delta: f32, kinds: impl Fn(EffectKind)->bool) {
         let mut kept = Vec::new();
         let mut stopped: Vec<LiveWeatherEmitter> = Vec::new();
         for emitter in std::mem::take(&mut active.live) {
-            if predicate(&emitter) { stopped.push(emitter); } else { kept.push(emitter); }
+            if kinds(emitter.kind) { stopped.push(emitter); } else { kept.push(emitter); }
         }
         active.live = kept;
         active.admitted = active.live.len();
+        let (mut stopped_colliders, installed): (Vec<_>, Vec<_>) = std::mem::take(&mut self.installed_colliders).into_iter()
+            .partition(|(kind, _, _, _)| kinds(*kind));
+        self.installed_colliders = installed;
         let mut clocks: Vec<Arc<crate::weather_animation::EffectClock>> = Vec::new();
         for emitter in &stopped {
             if !clocks.iter().any(|clock| Arc::ptr_eq(clock, &emitter.effect_clock)) { clocks.push(emitter.effect_clock.clone()); }
@@ -455,17 +500,98 @@ impl WeatherFxRetirements {
                 .map(|child| format!("{}: not installed, so its play state is not held", child.node)).collect();
             let mut instance = RetiringInstance {
                 clock, destroy: lifecycle::DestroyOnTime::new(members[0].lifecycle.time_until_destroy()), unheld,
+                colliders: Vec::new(),
             };
+            // The effect's colliders belong to this instance.
+            let (own, rest): (Vec<_>, Vec<_>) = stopped_colliders.into_iter().partition(|(_, effect, _, _)| *effect == members[0].effect);
+            stopped_colliders = rest;
+            instance.colliders = own.into_iter().map(|(_, _, entry, _)| entry).collect();
             let playing = instance_playing(members.iter(), &instance.unheld, undecided, now);
             let destroyed = instance.destroy.check(playing, delta);
             if destroyed {
                 self.despawn.extend(members.iter().map(|m| m.draw));
+                for entry in &instance.colliders { self.physics.remove(*entry); }
             } else {
                 self.live.extend(members.into_iter().map(|emitter| RetiringEmitter { emitter }));
                 self.instances.push(instance);
             }
         }
+        // An effect none of whose systems is installed has no instance: its
+        // colliders leave after its own destroy delay from Stop.
+        self.retiring_colliders.extend(stopped_colliders.into_iter().map(|(_, _, entry, delay)| (entry, now + delay)));
     }
+    /// Installs the colliders of the plan's effects of the matching kinds.
+    fn install_colliders(&mut self, planned: &[PlannedColliders], kinds: impl Fn(EffectKind)->bool) {
+        for colliders in planned.iter().filter(|colliders| kinds(colliders.kind)) {
+            let entry = self.physics.install(colliders.scene.clone());
+            self.installed_colliders.push((colliders.kind, colliders.effect.clone(), entry, colliders.destroy_delay));
+            if colliders.scene.collider_count() > 0 {
+                info!(effect=%colliders.effect, colliders=colliders.scene.collider_count(),
+                    "[weather-fx] effect colliders installed in the physics scene");
+            }
+        }
+    }
+    /// Removes the colliders of stopped effects without an instance whose
+    /// delay has run out by `now`.
+    fn expire_colliders(&mut self, now: f64) {
+        let physics = self.physics.clone();
+        self.retiring_colliders.retain(|(entry, destroy_at)| {
+            if now < *destroy_at { return true; }
+            physics.remove(*entry);
+            false
+        });
+    }
+    /// Installs the site's own colliders (static, for the whole visit), in
+    /// place of another site's.
+    fn install_site(&mut self, site: &str, scene: &Arc<crate::particle_runtime::collision_scene::GroundScene>) {
+        if self.site_colliders.as_ref().is_some_and(|(installed, _)| installed == site) { return; }
+        if let Some((_, entry)) = self.site_colliders.take() { self.physics.remove(entry); }
+        let entry = self.physics.install(scene.clone());
+        self.site_colliders = Some((site.to_owned(), entry));
+        info!(site=%site, colliders=scene.collider_count(), scene=%scene.describe(),
+            "[weather-fx] site colliders installed in the physics scene");
+    }
+    /// Keeps the placed fixtures' colliders in the physics scene exactly
+    /// while the active site has placed fixtures.
+    fn sync_fixtures(&mut self, present: bool) {
+        match (present, self.fixture_colliders) {
+            (true, None) => {
+                self.fixture_colliders = Some(self.physics.install(crate::particle_runtime::collision_scene::fixture_colliders()));
+                info!("[weather-fx] placed fixtures' colliders in the physics scene: {}",
+                    crate::particle_runtime::collision_scene::FIXTURE_REFUSAL);
+            }
+            (false, Some(entry)) => {
+                self.physics.remove(entry);
+                self.fixture_colliders = None;
+            }
+            _ => {}
+        }
+    }
+    fn clear_colliders(&mut self) {
+        self.physics.clear();
+        self.installed_colliders.clear();
+        self.retiring_colliders.clear();
+        self.site_colliders = None;
+        self.fixture_colliders = None;
+    }
+}
+
+/// Whether the active site has placed fixtures (their colliders are in the
+/// physics scene).
+fn fixtures_placed(placements: Option<&crate::fixture::FixturePlacements>, site: Option<&SiteActive>) -> bool {
+    match (placements, site) {
+        (Some(placements), Some(site)) => placements.site_id() == site.site_id && !placements.placed_rows().is_empty(),
+        _ => false,
+    }
+}
+
+/// The placed fixtures' colliders follow the active site's placements.
+pub(crate) fn sync_fixture_colliders(
+    placements: Option<Res<crate::fixture::FixturePlacements>>,
+    site: Option<Res<SiteActive>>,
+    mut retiring: ResMut<WeatherFxRetirements>,
+) {
+    retiring.sync_fixtures(fixtures_placed(placements.as_deref(), site.as_deref()));
 }
 
 /// `IsActiveParticle`: whether any child of the instance is playing.
@@ -488,7 +614,7 @@ pub(crate) fn expire_retirements(
 ) {
     let now = time.elapsed_secs_f64();
     let delta = crate::particle_runtime::source_delta_time(time.delta());
-    let WeatherFxRetirements { live, instances, despawn } = &mut *retiring;
+    let WeatherFxRetirements { live, instances, despawn, physics, .. } = &mut *retiring;
     for entity in despawn.drain(..) { commands.entity(entity).try_despawn(); }
     let mut destroyed: Vec<Arc<crate::weather_animation::EffectClock>> = Vec::new();
     instances.retain_mut(|instance| {
@@ -496,6 +622,7 @@ pub(crate) fn expire_retirements(
         let playing = instance_playing(members, &instance.unheld, Vec::new(), now);
         if instance.destroy.check(playing, delta) {
             destroyed.push(instance.clock.clone());
+            for entry in &instance.colliders { physics.remove(*entry); }
             return false;
         }
         true
@@ -506,6 +633,7 @@ pub(crate) fn expire_retirements(
         if let Some((trail, _)) = entry.emitter.trail_draw { commands.entity(trail).try_despawn(); }
         false
     });
+    retiring.expire_colliders(now);
 }
 
 /// `RendererScene::NotifyInvisible` (EarlyUpdate): renderers visible in the
@@ -590,6 +718,7 @@ pub(crate) fn parse(
         handle,
         animations,
         collision,
+        unsupported: value.pointer("/summary/unsupported").cloned(),
         tier: request.tier.clone(),
         env_site: request.env_site.clone(),
     });
@@ -604,6 +733,8 @@ pub(crate) fn plan(
     json: Res<Assets<JsonAsset>>,
     doc: Option<Res<WeatherFxDoc>>,
     planned: Option<Res<WeatherFxPlan>>,
+    site: Option<Res<SiteActive>>,
+    placements: Option<Res<crate::fixture::FixturePlacements>>,
  ) {
     if planned.is_some() {
         return;
@@ -648,6 +779,25 @@ pub(crate) fn plan(
 
     // ---- 选 effect：只取源环境装载器按名字构造的三份预制件（见 source_environment_selection）----
     let selected = source_environment_selection(effects, &doc.tier, &doc.env_site);
+    // Every collision system of the plan queries the colliders of all the
+    // effects it installs (and of the stopped ones still retiring).
+    let names: Vec<&str> = selected.iter().map(|(name, _, _)| name.as_str()).collect();
+    // ... with the site's own colliders, and the placed fixtures' when the
+    // site has any at planning time.
+    let fixtures = fixtures_placed(placements.as_deref(), site.as_deref().filter(|site| site.env_site == doc.env_site));
+    scenes.select(crate::particle_runtime::collision_scene::Installation::Together {
+        effects: &names, site: Some(&doc.env_site), fixtures });
+    let site_colliders = scenes.site_colliders(&doc.env_site);
+    info!("[weather-fx] site {} colliders: {} answered against, placed fixtures {}; {}", doc.env_site,
+        site_colliders.collider_count(), fixtures, site_colliders.describe());
+    let mut colliders = Vec::new();
+    for &(ref name, effect, kind) in &selected {
+        let Ok(lifecycle) = WeatherEffectLifecycle::from_effect(effect) else { continue; };
+        if let Ok(scene) = scenes.effect_colliders(name) {
+            colliders.push(PlannedColliders { kind, effect: name.clone(), scene,
+                destroy_delay: lifecycle.time_until_destroy() });
+        }
+    }
 
     let mut tally = Tally::default();
     let mut plans = Vec::new();
@@ -679,6 +829,7 @@ pub(crate) fn plan(
         let sub_emitter_owners = source_sub_emitter_owners(particles);
         children.insert(effect_name.clone(), lifecycle::effect_children(particles, &by_path, &sub_emitter_owners));
         let ground = scenes.for_effect(effect_name);
+        let bodies = census_names_no_body(effect_name, effect, doc.unsupported.as_ref());
         let effect_start = plans.len();
         for particle in particles {
             if let Some(reason) = particle["node"].as_str().and_then(|node| animation.refusal(node)) {
@@ -695,6 +846,7 @@ pub(crate) fn plan(
                 camera_rotation,
                 lifecycle,
                 &ground,
+                &bodies,
                 &server,
                 &mut tally,
             ) {
@@ -765,6 +917,8 @@ pub(crate) fn plan(
         planned: plans,
         animators,
         children,
+        colliders,
+        site_colliders,
         tally,
         tier: doc.tier.clone(),
         env_site: doc.env_site.clone(),
@@ -1154,7 +1308,7 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
                 edges.births.push(crate::particle_runtime::BirthEdge { target: target.to_owned(), law });
             }
             SubEmitterTrigger::Death => {
-                let law = moly_law::particle::death_event::DeathEmitEdge::from_source(edge, &child)
+                let law = moly_law::particle::death_event::DeathEmitEdge::from_source(edge, emitter, &child)
                     .map_err(|refused| format!("{target}: death edge outside the death event law ({refused:?})"))?;
                 edges.deaths.push(crate::particle_runtime::DeathEdge { target: target.to_owned(), law });
             }
@@ -1167,6 +1321,117 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
         }
     }
     Ok(edges)
+}
+
+/// Whether the effect's extracted component census rules out a Rigidbody or
+/// Rigidbody2D on its nodes: the effect's omitted and collider records, and
+/// the index's records of the components the extraction does not model,
+/// which name their effect. A census that is not exported rules out nothing,
+/// and neither does a component whose kind the export could not read.
+pub(crate) fn census_names_no_body(effect_name: &str, effect: &Value, unsupported: Option<&Value>)
+    -> Result<(), String> {
+    for (list, name) in [(effect.get("omitted"), "omitted"), (effect.get("colliders"), "collider"),
+        (unsupported, "unsupported")] {
+        let Some(list) = list.and_then(Value::as_array) else {
+            return Err(format!("the export carries no {name} component census"));
+        };
+        for entry in list {
+            if name == "unsupported" && entry.get("effect").and_then(Value::as_str) != Some(effect_name) {
+                continue;
+            }
+            let node = entry.get("node").and_then(Value::as_str).unwrap_or("");
+            match entry.get("component") {
+                Some(Value::Null) => return Err(format!("a component of unread kind on {node}")),
+                Some(Value::String(component)) if component.starts_with("Rigidbody") =>
+                    return Err(format!("{component} on {node}")),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// emitterVelocityMode 1 reads the velocity of a Rigidbody or Rigidbody2D on
+/// the system's GameObject or a Transform ancestor. With none, or with a
+/// kinematic one, the engine caches that no body was found and takes the
+/// Transform delta, which is mode 0 bit for bit in every consumer (emission
+/// over distance, the World birth placement, Initial and InheritVelocity
+/// inheritance). When the effect's census names no body (`bodies`), and the
+/// run-time ancestors are this runtime's anchors, which carry none, the system
+/// takes the Transform mode. Without that proof mode 1 stays, and the native
+/// path refuses it.
+pub(crate) fn resolve_velocity_mode(emitter: &mut EmitterParams, bodies: &Result<(), String>) {
+    if emitter.emitter_velocity_mode == Some(1) && bodies.is_ok() {
+        emitter.emitter_velocity_mode = Some(0);
+    }
+}
+
+/// An exported constant or two-constant start lifetime; `None` for any other
+/// mode.
+fn source_lifetime(curve: &Value) -> Option<moly_law::particle::prewarm::Lifetime> {
+    use moly_law::particle::prewarm::Lifetime;
+    let number = |value: &Value| value.as_f64().map(|n| n as f32).or_else(|| match value.as_str() {
+        Some("Infinity") => Some(f32::INFINITY),
+        Some("-Infinity") => Some(f32::NEG_INFINITY),
+        _ => None,
+    });
+    match curve.get("mode").and_then(Value::as_str)? {
+        "constant" => Some(Lifetime::Constant(number(curve.get("value")?)?)),
+        "twoConstants" => Some(Lifetime::TwoConstants { min: number(curve.get("min")?)?, max: number(curve.get("max")?)? }),
+        _ => None,
+    }
+}
+
+/// The sub-emitter term of the first-Play warm length of `record`, read from
+/// the authored graph: every system its edges reach, each edge's child
+/// resolved as admission resolves it (the record at the edge's node whose
+/// system object id is the pointer's) and a null pointer as no child, over
+/// every edge whatever its trigger and whatever admission later makes of it.
+/// A system whose SubModule is disabled hands out no child. A curve-mode
+/// start lifetime of the system itself is refused by the warm before the
+/// term is read, so the term is 0 there.
+pub(crate) fn warm_child_term(record: &Value, emitter: &EmitterParams, graph: &SubEmitterGraph<'_>) -> Result<f32, String> {
+    use moly_law::particle::prewarm::{sub_emitter_maximum_lifetime, Lifetime, SubEmitterNode};
+    let own = match emitter.start.lifetime {
+        MinMaxCurve::Constant(v) => Lifetime::Constant(v),
+        MinMaxCurve::TwoConstants { min, max } => Lifetime::TwoConstants { min, max },
+        _ => return Ok(0.0),
+    };
+    let mut records: Vec<&Value> = vec![record];
+    let mut nodes = Vec::new();
+    while nodes.len() < records.len() {
+        let system = &records[nodes.len()]["system"];
+        let enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
+            .is_some_and(|modules| modules.iter().any(|module| module.as_str() == Some("SubModule")));
+        let mut children = Vec::new();
+        if enabled {
+            for edge in system.get("subEmitters").and_then(Value::as_array).into_iter().flatten() {
+                let pointer = (edge.pointer("/sourcePointer/fileId").and_then(Value::as_i64),
+                    edge.pointer("/sourcePointer/pathId").and_then(Value::as_str));
+                match pointer {
+                    (Some(0), Some("0")) => children.push(None),
+                    (Some(0), Some(path_id)) => {
+                        let target = edge.get("emitter").and_then(Value::as_str)
+                            .ok_or("an edge with a pointer names no child")?;
+                        let child = graph.child(target, path_id)
+                            .ok_or_else(|| format!("{target}: child system {path_id} not resolved to one record"))?;
+                        let index = match records.iter().position(|known| std::ptr::eq(*known, child)) {
+                            Some(index) => index,
+                            None => {
+                                records.push(child);
+                                records.len() - 1
+                            }
+                        };
+                        children.push(Some(index));
+                    }
+                    _ => return Err("a sub-emitter pointer that is not an object of this file".into()),
+                }
+            }
+        }
+        nodes.push(SubEmitterNode { sub_module_enabled: enabled, children,
+            lifetime: source_lifetime(&system["start"]["lifetime"]) });
+    }
+    sub_emitter_maximum_lifetime(&nodes, 0, own.first_play_upper(emitter.duration)).map_err(str::to_owned)
 }
 
 /// Removes, from the plans of one effect (`start..`), every sub-emitter
@@ -1290,7 +1555,8 @@ fn owner_matrices(by_path: &HashMap<String, &Value>, path: &str)
 fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMap<String, &Value>,
     graph: &SubEmitterGraph<'_>, kind: EffectKind, camera_rotation: bool,
     lifecycle: Option<WeatherEffectLifecycle>, asset_root: &str,
-    ground: &crate::particle_runtime::collision_scene::SceneVerdict, server: &AssetServer) -> Result<(), String> {
+    ground: &crate::particle_runtime::collision_scene::SceneVerdict, bodies: &Result<(), String>,
+    server: &AssetServer) -> Result<(), String> {
     let records: Vec<&Value> = graph.records.get(parent).into_iter().flatten().copied()
         .filter(|record| record.pointer("/system/subEmitters").and_then(Value::as_array)
             .is_some_and(|edges| edges.iter().any(|edge| edge.get("emitter").and_then(Value::as_str) == Some(node))))
@@ -1300,7 +1566,7 @@ fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMa
     };
     let mut scratch = Tally::default();
     match judge_in_archive(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, asset_root,
-        None, ground, server, &mut scratch) {
+        None, ground, bodies, server, &mut scratch) {
         Some(planned) if planned.event_edges.as_ref().is_some_and(|edges| edges.targets().any(|target| target == node)) =>
             Ok(()),
         Some(_) => Err(format!("parent {parent} admitted without an event edge to this target")),
@@ -1375,11 +1641,12 @@ fn judge(
     camera_rotation: bool,
     lifecycle: WeatherEffectLifecycle,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
+    bodies: &Result<(), String>,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
     judge_in_archive(effect_name, particle, by_path, sub_emitter_owners, kind,
-        camera_rotation, Some(lifecycle), "phenomena", None, ground, server, tally)
+        camera_rotation, Some(lifecycle), "phenomena", None, ground, bodies, server, tally)
 }
 
 fn judge_in_archive(
@@ -1393,6 +1660,9 @@ fn judge_in_archive(
     asset_root: &str,
     instance_anchor: Option<GlobalTransform>,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
+    // Whether the effect's component census rules out a Rigidbody on its
+    // nodes ([`census_names_no_body`]).
+    bodies: &Result<(), String>,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
@@ -1586,7 +1856,7 @@ fn judge_in_archive(
         }
     });
     let archive_bytes = archive.to_string();
-    let emitter = match Effects::from_json_str(archive_bytes.as_bytes()) {
+    let mut emitter = match Effects::from_json_str(archive_bytes.as_bytes()) {
         Ok(mut effects) if effects.emitters.len() == 1 => effects.emitters.remove(0),
         Ok(effects) => {
             // 一条进、一条出是构造就保证的；不符说明律的入口改了形状。
@@ -1619,6 +1889,21 @@ fn judge_in_archive(
         }
         _ => {}
     }
+    resolve_velocity_mode(&mut emitter, bodies);
+    // The first-Play warm length adds the sub-emitter term: the longest chain
+    // of child lifetimes the authored graph reaches. Only a looping prewarm
+    // system warms.
+    let sub_emitter_max_lifetime = if emitter.prewarm && emitter.looping {
+        match warm_child_term(particle, &emitter, sub_emitter_owners) {
+            Ok(term) => term,
+            Err(reason) => {
+                tally.law_reject.push(format!("{node}: first-Play warm length: {reason}"));
+                return None;
+            }
+        }
+    } else {
+        0.0
+    };
     // The Start* samplers read so far take an ApplyTexture step for each
     // birth group when ShapeModule holds a texture. That step is not
     // transcribed, so a texture is refused for every shape type and either
@@ -1646,8 +1931,8 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: {error}")); return None;
         }
     }
-    // A CollisionModule runs only on the native birth path with a scene of
-    // the effect's ground collider. The module law (with its current-size
+    // A CollisionModule runs only on the native birth path with the physics
+    // scene of the installed effects. The module law (with its current-size
     // stream and its collision events) is checked here; the scene is bound
     // (or refused by name) after every other gate, below.
     if emitter.collision.is_some() {
@@ -1695,11 +1980,6 @@ fn judge_in_archive(
         None
     };
     if event_edges.is_some() {
-        if emitter.prewarm && emitter.looping {
-            tally.law_reject.push(format!(
-                "{node}: SubModule parent with a first-Play warm: the warm's sub-emitter events are not transcribed"));
-            return None;
-        }
         // A target takes no route; its composition is judged below.
         if let Err(reason) = child_parent.as_ref().map_or_else(
             || crate::particle_runtime::native_birth_eligible(&emitter, &route), |_| Ok(())) {
@@ -1743,7 +2023,20 @@ fn judge_in_archive(
         }
     }
     // Every other curve the runtime evaluates, through the engine's dispatch.
-    if let Err(error) = crate::particle_runtime::curve_admission(&emitter) {
+    // A CustomData lane whose value follows its curve objects' caches runs
+    // with the law that follows the engine's storage past the live count: it
+    // needs this host's native birth owner, and a sub-emitter target's births
+    // (its parents' commands) are not what that law follows.
+    let storage = || -> Result<(), String> {
+        if lifecycle.is_none() {
+            return Err("the fixture host does not install the native birth owner".into());
+        }
+        if child_parent.is_some() {
+            return Err("a sub-emitter target's storage follows its parents' commands, which the slot model does not".into());
+        }
+        crate::particle_runtime::custom_data_storage_eligible(&emitter, &route)
+    };
+    if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage)) {
         tally.law_reject.push(format!("{node}: {error}")); return None;
     }
     if const_of(&emitter.start_delay) != Some(0.0) {
@@ -1858,14 +2151,20 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: Noise requires the native birth path: {reason}")); return None;
         }
     }
-    // The mesh geometry has no transform about the particle's axis of
-    // rotation, whichever birth path feeds it.
+    // Without 3D rotation the mesh geometry turns each particle about its
+    // axis of rotation, whichever birth path feeds it, in the render spaces
+    // whose kernel is transcribed.
+    let mut axis_body = None;
     if mesh_reference.is_some() {
         let initial_enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
             .is_some_and(|modules| modules.iter().any(|module| module.as_str() == Some("InitialModule")));
-        if let Err(refused) = crate::particle_runtime::mesh_rotation_admission(&emitter, initial_enabled) {
-            tally.render_mode.push(refused.reason().into());
-            return None;
+        match crate::particle_runtime::mesh_rotation_admission(&emitter, initial_enabled,
+            mesh_alignment.expect("validated Mesh alignment"), allow_roll) {
+            Ok(body) => axis_body = body,
+            Err(refused) => {
+                tally.render_mode.push(refused.reason().into());
+                return None;
+            }
         }
     }
     // A system that runs the legacy step must carry a start colour that step
@@ -1979,7 +2278,7 @@ fn judge_in_archive(
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
                 .and_then(|()| child_owner_words(by_path, node))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
-                    camera_rotation, lifecycle, asset_root, ground, server).map(|()| owner));
+                    camera_rotation, lifecycle, asset_root, ground, bodies, server).map(|()| owner));
             match owner {
                 Ok(owner) => Some(owner),
                 Err(reason) => {
@@ -1989,12 +2288,18 @@ fn judge_in_archive(
             }
         }
     };
-    // Every other gate passed: the scene of the effect's ground collider,
-    // bound here or refused by name.
-    let collision_scene = match (emitter.collision.is_some(), ground) {
-        (false, _) => None,
-        (true, Ok(scene)) => Some(scene.clone()),
-        (true, Err(reason)) => {
+    // Every other gate passed: the ground scene of the effects the plan
+    // installs, bound here or refused by name.
+    let collision_scene = match (emitter.collision.as_ref(), ground) {
+        (None, _) => None,
+        (Some(params), Ok(scene)) => match scene.refusal_for(params.collides_with) {
+            None => Some(scene.clone()),
+            Some(reason) => {
+                tally.law_reject.push(format!("{node}: CollisionModule mask {:#x}: {reason}", params.collides_with));
+                return None;
+            }
+        },
+        (Some(_), Err(reason)) => {
             tally.law_reject.push(format!("{node}: CollisionModule {reason}"));
             return None;
         }
@@ -2021,7 +2326,7 @@ fn judge_in_archive(
         draw: None,
         geometry: if let Some((reference, flip)) = mesh_reference {
             let glb = server.load(AssetPath::from_path_buf(std::path::PathBuf::from(format!("{asset_root}/{}", reference.file))).with_source("moly"));
-            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip }
+            PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip, axis_body }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
                 mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },
@@ -2035,6 +2340,7 @@ fn judge_in_archive(
         limit,
         trail,
         collision_scene,
+        sub_emitter_max_lifetime,
     })
 }
 
@@ -2373,11 +2679,11 @@ pub(crate) fn spawn_when_ready(
     let delta = crate::particle_runtime::source_delta_time(time.delta());
     let phase_started = plan.site_started_at.is_none();
     if phase_started {
-        retiring.stop_matching(state, now, delta, |e| e.kind == EffectKind::Site);
+        retiring.stop_matching(state, now, delta, |kind| kind == EffectKind::Site);
         if state.global_identity != Some(plan.selection.global_effect) {
             // StopSkyEffect runs before PrepareCrossFade. Camera FX deliberately
             // continue until RefreshGlobalEffect at the commit point.
-            retiring.stop_matching(state, now, delta, |e| e.kind == EffectKind::Sky);
+            retiring.stop_matching(state, now, delta, |kind| kind == EffectKind::Sky);
             state.sky_stopped = true;
         }
         state.tier = plan.tier.clone(); state.env_site = plan.env_site.clone();
@@ -2392,16 +2698,24 @@ pub(crate) fn spawn_when_ready(
     let install_site = !plan.site_installed && !phase_started && controller_ready;
     let site_timed_out = !plan.site_installed && !controller_ready && waited >= 5.0;
     if install_site || site_timed_out { plan.site_installed = true; }
+    if install_site { retiring.install_colliders(&plan.colliders, |kind| kind == EffectKind::Site); }
     if site_timed_out { warn!("[weather-fx] destination site controller unavailable after source 5s timeout: {}", plan.env_site); }
     let preserve_global = state.global_identity == Some(plan.selection.global_effect) && !state.sky_stopped;
     let install_global = !plan.global_installed && !preserve_global && phase.can_commit_global_fx(&plan.selection);
     if install_global {
-        retiring.stop_matching(state, now, delta, |e| e.kind != EffectKind::Site);
+        retiring.stop_matching(state, now, delta, |kind| kind != EffectKind::Site);
+        retiring.install_colliders(&plan.colliders, |kind| kind != EffectKind::Site);
         state.global_identity = Some(plan.selection.global_effect);
         state.sky_stopped = false;
     }
     for entity in retiring.despawn.drain(..) { commands.entity(entity).try_despawn(); }
     if preserve_global || install_global { plan.global_installed = true; }
+    // The site's own colliders are in the scene from the first install of
+    // this site's plan on (a global effect kept across the change included).
+    if install_site || install_global || preserve_global {
+        let (site, scene) = (plan.env_site.clone(), plan.site_colliders.clone());
+        retiring.install_site(&site, &scene);
+    }
     if plan.global_installed && phase.can_commit_global_fx(&plan.selection) {
         commands.insert_resource(crate::weather_transition::WeatherGlobalFxCommitted(plan.request_serial));
     }
@@ -2485,6 +2799,7 @@ pub(crate) fn spawn_when_ready(
             rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             prewarmed: false,
             pending: 0.0,
+            sub_emitter_max_lifetime: planned.sub_emitter_max_lifetime,
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),
@@ -2498,7 +2813,7 @@ pub(crate) fn spawn_when_ready(
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
             custom_law: planned.emitter.custom_data.as_ref()
-                .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission")),
+                .map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission")),
             texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
                 moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
             sort_mode,
@@ -2529,8 +2844,11 @@ pub(crate) fn spawn_when_ready(
                 }
             } else {
                 let has_collision = live.runtime.emitter.collision.is_some();
-                let collision = collision_scene.map(|scene| crate::particle_runtime::CollisionInstall {
-                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
+                // The plan's verdict bound the scene; the module queries the
+                // host's live physics scene, which holds the installed and
+                // the retiring effects' colliders.
+                let collision = collision_scene.map(|_| crate::particle_runtime::CollisionInstall {
+                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
                     owner: collision_owner,
                 });
                 match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route, collision) {
@@ -2560,6 +2878,13 @@ pub(crate) fn spawn_when_ready(
                         }
                         info!(node=%live.node, noise=live.noise.is_some(), trail=live.runtime.trail.is_some(),
                             collision=live.runtime.collision.is_some(), "weather native birth owner installed");
+                    }
+                    // A CustomData law that follows the engine's storage runs
+                    // only in the native slices, which report it.
+                    Ok(crate::particle_runtime::BirthPath::Legacy(reason))
+                        if live.runtime.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage()) => {
+                        error!(%reason, node=%live.node, "CustomData curve-cache system refused by the native birth installer");
+                        failed = true;
                     }
                     // Birth events run only on the native path; a parent with
                     // them is not left on the legacy step without its events.
@@ -2729,6 +3054,146 @@ fn deliver_round(systems: &mut [(&mut LiveWeatherEmitter, bool)], frame_dt: f32)
     delivered
 }
 
+/// The first Play of looping prewarm system `parent`, which the engine runs
+/// inside Play as one frame before any ordinary one. The parent's
+/// sub-emitter targets are not played; the warm frame gathers them: each
+/// direct target of the same effect instance first runs its own update of
+/// the warm's length (stopped, with its own speed and duration, so its clock
+/// and pending time move and nothing is emitted), then the parent's warm,
+/// whose slices record their sub-emitter events, then those events'
+/// commands, handed to the targets in the order recorded. A command whose
+/// catch-up has reached the target's lifetime does nothing, so only the last
+/// slices' commands give particles, and those are first simulated by the
+/// target's first ordinary frame. A target of a target takes no time in the
+/// warm frame.
+fn first_play_warm(systems: &mut [(&mut LiveWeatherEmitter, bool)], parent: usize, ctx: &Context,
+    refused: &mut Vec<Entity>) {
+    let warm_dt = crate::particle_runtime::first_play_plan(&systems[parent].0.runtime).map(|plan| plan.compute_out());
+    if let Ok(warm_dt) = warm_dt {
+        let clock = systems[parent].0.effect_clock.clone();
+        let targets = direct_targets(&systems[parent].0.runtime);
+        for (live, emitting) in systems.iter_mut() {
+            if Arc::ptr_eq(&live.effect_clock, &clock) && targets.iter().any(|target| *target == live.node)
+                && live.native_birth.as_ref().is_some_and(|birth| birth.target.is_some()) {
+                if let Err(reason) = crate::particle_runtime::advance_frame(&mut live.runtime, warm_dt, *emitting, ctx, |_| {}) {
+                    error!(%reason, effect=%live.effect, node=%live.node,
+                        "native particle step refused in its parent's warm: the system is retired and draws nothing");
+                    refused.push(live.draw);
+                }
+            }
+        }
+    }
+    let system = &mut systems[parent].0.runtime;
+    if let Err(error) = crate::particle_runtime::prewarm_first_play(system, ctx) {
+        error!(%error, effect=%system.effect, node=%system.node, "weather prewarm refused");
+    }
+    if let Ok(warm_dt) = warm_dt {
+        deliver_sub_emitter_commands(systems, warm_dt);
+    }
+}
+
+/// Every child a system's edges name: its birth and death edges and its
+/// CollisionModule's.
+fn direct_targets(system: &Runtime) -> Vec<String> {
+    let mut targets: Vec<String> = system.native_birth.as_ref().and_then(|birth| birth.events.as_ref())
+        .map(|events| events.slots().iter().map(|slot| slot.edge.target.clone())
+            .chain(events.death_slots().iter().map(|slot| slot.edge.target.clone())).collect())
+        .unwrap_or_default();
+    if let Some(collision) = system.collision.as_ref() {
+        targets.extend(collision.edges.iter().map(|slot| slot.target.clone()));
+    }
+    targets
+}
+
+/// The source's environment root, tracked in the source world across site
+/// changes. The global sky effects hang from it.
+///
+/// The source instantiates the sky prefab under `Sky/EffectRoot` below the
+/// environment view controller, a child of the site root. The whole chain is
+/// authored at the identity, and the site root is instantiated without a
+/// parent. While the player walks, nothing writes that chain: the sky view
+/// moves only `SkyRenderer`, the effect root's sibling, to the player's view,
+/// and the effect's own component rewrites only its rotation, to cancel its
+/// parent's, which changes something only under the camera. So the global
+/// effects do not follow a walking player.
+///
+/// One writer moves the controller: the cannon site move. For the flight's
+/// duration it sets the controller's position to the player view's step
+/// point every tween update. The player view is tweened onto the next site's
+/// arrival point over the same duration, and the move then restores the
+/// height the controller had before the flight. The controller ends at the
+/// arrival point's x and z, and at its old height. Door moves (home to a room,
+/// a room to home or to another room) do not touch the controller. The session
+/// starts at home, with the controller at the site root's origin.
+///
+/// Arrival points: a harvest site's is its site position. A delivery site's
+/// is its site position plus an offset authored on the site view, and home's
+/// is the house's inside-door point, which follows the player's layout.
+/// This host supplies neither of those two, and says so when it stands in:
+/// on a delivery site the root lands on the site origin, and on the way home
+/// it returns to where the session started it, home's origin. The source has
+/// no direct move between a room and a harvest or delivery site; its route
+/// runs through home, and this host applies that route.
+///
+/// The camera effects are children of the rendering camera's own transform.
+/// The site-unique effects are children of the site view, the field prefab's
+/// root at the site origin. Their anchors are the camera and the identity.
+#[derive(Default)]
+pub(crate) struct EnvironmentRoot {
+    /// Source-world position.
+    world: Vec3,
+    /// Site type and category of the site the root was last seen from; `None`
+    /// before the first site of the session.
+    seen: Option<(String, String)>,
+}
+
+impl EnvironmentRoot {
+    /// Apply the source's move from the last seen site to `active`. When this
+    /// host stands in for an arrival point, returns the missing value and the
+    /// stand-in.
+    fn enter(&mut self, active: &SiteActive) -> Option<(&'static str, &'static str)> {
+        const HOME: &str = "housing_home";
+        const ROOM: &str = "housing_room";
+        const HARVEST: &str = "harvest";
+        const DELIVERY: &str = "delivery";
+        let seen = (active.site_type.clone(), active.category.clone());
+        let from = match self.seen.replace(seen) {
+            Some((site, _)) if site == active.site_type => return None,
+            Some((_, category)) => category,
+            None => HOME.to_owned(),
+        };
+        let from_cannon_site = matches!(from.as_str(), HARVEST | DELIVERY);
+        let site = Vec3::from_array(active.position);
+        match active.category.as_str() {
+            HARVEST => {
+                self.land(site);
+                None
+            }
+            DELIVERY => {
+                self.land(site);
+                Some(("the delivery site's arrival offset", "the site origin"))
+            }
+            HOME | ROOM if from_cannon_site => {
+                self.land(Vec3::ZERO);
+                Some(("the house's inside-door point", "the starting point"))
+            }
+            _ => None,
+        }
+    }
+
+    /// The end of a cannon move: the arrival point's x and z, the old height.
+    fn land(&mut self, arrival: Vec3) {
+        self.world = Vec3::new(arrival.x, self.world.y, arrival.z);
+    }
+
+    /// The sky anchor in this host's frame: the root seen from the active
+    /// site, which this host draws at its own origin, in the reflected-X basis
+    /// that every scene anchor uses.
+    fn anchor(&self, active: &SiteActive) -> Vec3 {
+        crate::particle_geometry::reflect(self.world - Vec3::from_array(active.position))
+    }
+}
+
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。
 ///
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
@@ -2742,9 +3207,19 @@ pub(crate) fn advance(
     unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
     frame: Res<bevy::diagnostic::FrameCount>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
-    avatars: Query<&GlobalTransform, With<AvatarRoot>>,
     site: Option<Res<SiteActive>>,
+    mut environment_root: Local<EnvironmentRoot>,
 ) {
+    // Follow every site change, also on frames that draw nothing, so the root
+    // sees each move the source would make.
+    if let Some(active) = site.as_deref() {
+        if let Some((missing, stand_in)) = environment_root.enter(active) {
+            warn!(
+                "[weather-fx] sky anchor on {}: {missing} is not supplied; the environment root lands on {stand_in} instead",
+                active.site_type
+            );
+        }
+    }
     // Observe instance age even when no camera can produce a particle draw.
     // The effect Animators evaluate here too, once per frame with the frame's
     // delta time: before the frame's particle update, and whether or not a
@@ -2779,13 +3254,12 @@ pub(crate) fn advance(
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
     );
-    // 天空锚：随玩家平移、不随旋转。玩家不在时落原点（穹顶锚不到人，
-    // 粒子仍画，位在原点）。
-    let sky = avatars
-        .iter()
-        .next()
-        .map(|transform| GlobalTransform::from_translation(transform.translation()))
-        .unwrap_or(GlobalTransform::IDENTITY);
+    // Without an active site the frame the anchors are expressed in does not
+    // exist (a site switch is in progress); skip the frame like a missing camera.
+    let Some(active_site) = site.as_deref() else {
+        return;
+    };
+    let sky = GlobalTransform::from_translation(environment_root.anchor(active_site));
     let ctx = Context {
         sky,
         camera: *camera_transform,
@@ -2802,21 +3276,34 @@ pub(crate) fn advance(
         .collect();
     // Systems whose native step was refused this frame; see step_frame.
     let mut refused = Vec::new();
+    // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
+    // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
+    // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
+    // 暖机（非循环 prewarm 原生不暖机，不是缺口）。Every warm, with its
+    // targets' updates and its commands, lands before any system's first
+    // ordinary frame.
+    for index in 0..systems.len() {
+        let warms = {
+            let (live, emitting) = &mut systems[index];
+            let system = &mut live.runtime;
+            if !*emitting || system.prewarmed {
+                continue;
+            }
+            system.prewarmed = true;
+            system.emitter.prewarm && system.emitter.looping
+        };
+        if warms {
+            first_play_warm(&mut systems, index, &ctx, &mut refused);
+        }
+    }
     for (live, emitting) in systems.iter_mut() {
         let emitting = *emitting;
         let LiveWeatherEmitter { draw, runtime: system, effect_animator, animated_chain, frame_clock, play, .. } = &mut **live;
         let draw = *draw;
-        // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
-        // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
-        // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
-        // 暖机（非循环 prewarm 原生不暖机，不是缺口）。
-        if emitting && !system.prewarmed {
-            system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping {
-                if let Err(error) = crate::particle_runtime::prewarm_first_play(system, &ctx) {
-                    error!(%error, effect=%system.effect, node=%system.node, "weather prewarm refused");
-                }
-            }
+        // A target refused in a parent's warm is retired below; it is not
+        // stepped again.
+        if refused.contains(&draw) {
+            continue;
         }
         // The first Play warms inside the instantiating call, before any
         // Animator write, so the prewarm above saw the serialized chain. The
@@ -2912,6 +3399,16 @@ pub(crate) fn advance(
 
 /// Update：周期状态行——逐系统的活粒子数与累计账，全部可从档案复算。
 pub(crate) fn report(state: Option<Res<WeatherFxState>>, retiring: Res<WeatherFxRetirements>) {
+    let collision: Vec<(&str, bool, u64, u64, u64)> = state.as_deref().into_iter().flat_map(|state| &state.live)
+        .map(|s| (s, true)).chain(retiring.live.iter().map(|entry| (&entry.emitter, false)))
+        .filter_map(|(s, emitting)| s.collision.as_ref()
+            .map(|collision| (s.node.as_str(), emitting, collision.calls, collision.hits, collision.order_free)))
+        .collect();
+    if !collision.is_empty() {
+        info!("[weather-fx] collision: physics scene colliders {} ({} installed effects, {} retiring, site {:?}, placed fixtures {}); per system (node, emitting, calls, hits, order-free lanes) {:?}",
+            retiring.physics.collider_count(), retiring.installed_colliders.len(), retiring.retiring_colliders.len(),
+            retiring.site_colliders.as_ref().map(|(site, _)| site.as_str()), retiring.fixture_colliders.is_some(), collision);
+    }
     if !retiring.live.is_empty() {
         info!("[weather-fx] retiring systems={}, live particles={}, active systems={}, destroy loops={:?}",
             retiring.live.len(), retiring.live.iter().map(|s| s.emitter.pool.len()).sum::<usize>(),
@@ -2976,6 +3473,7 @@ pub(crate) fn teardown(commands: &mut Commands) {
             retiring.live.clear();
             retiring.instances.clear();
             retiring.despawn.clear();
+            retiring.clear_colliders();
         }
     });
     commands.remove_resource::<WeatherFxPlan>();
@@ -2997,3 +3495,7 @@ mod retirement_tests;
 #[cfg(test)]
 #[path = "weather_sub_emitter_chain_tests.rs"]
 mod sub_emitter_chain_tests;
+
+#[cfg(test)]
+#[path = "weather_scene_reach.rs"]
+mod scene_reach;

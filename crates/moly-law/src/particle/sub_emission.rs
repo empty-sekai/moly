@@ -27,6 +27,9 @@ pub enum Refused {
     UnsupportedConfiguration,
     InvalidInput,
     CountOutOfRange,
+    /// A birth edge that inherits properties: the inherited block is
+    /// transcribed only for death edges ([`crate::particle::inherit`]).
+    InheritedProperties,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -521,8 +524,10 @@ impl BirthEdgeLaw {
         emission: &EmissionParams,
     ) -> Result<Self, Refused> {
         let unsupported = Refused::UnsupportedConfiguration;
+        if edge.trigger == SubEmitterTrigger::Birth && edge.properties != 0 {
+            return Err(Refused::InheritedProperties);
+        }
         if edge.trigger != SubEmitterTrigger::Birth
-            || edge.properties != 0
             || edge.probability != 1.0
             || edge.emitter.as_ref().is_none_or(|s| s.is_empty())
             || !(1..=2).contains(&cached_birth_edges)

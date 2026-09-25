@@ -11,16 +11,19 @@
 //! count it decrements is still nonzero). The ring buffer's replaced particles
 //! record the same event through RecordParticleDeath.
 //!
-//! The event reads no age: its times are 0, 0, 1, 1, 0. It starts from three
-//! zero scalars and four words seeded from the particle seed plus the parent's
-//! emission word; the edge probability hash, then the child's first burst (its
-//! own probability draw and its constant or two-constant count) are all it
-//! draws. The child's rates, its other bursts, its start delay and its
-//! duration are not read. Child births, the child's own gates and the order of
-//! the child's own update are not here.
+//! The event's times are 0, 0, 1, 1, 0. It starts from three zero scalars and
+//! four words seeded from the particle seed plus the parent's emission word;
+//! the edge probability hash, then the child's first burst (its own
+//! probability draw and its constant or two-constant count) are all it draws.
+//! The child's rates, its other bursts, its start delay and its duration are
+//! not read. An edge that inherits the size reads the particle's size, age
+//! and inverse lifetime at the event, once per edge and only when the event
+//! issues its commands ([`crate::particle::inherit`]). Child births, the
+//! child's own gates and the order of the child's own update are not here.
 
 use crate::particle::armf as a;
 use crate::particle::collision_event::{edge_emits, EdgeBurst};
+use crate::particle::inherit::{InheritParent, InheritSize};
 use crate::particle::schema::{SubEmitterParams, SubEmitterTrigger};
 use crate::particle::seed_owner::ScalarRandom;
 use crate::particle::sub_emission::{neutral_inherited, BirthDistribution, EventOwner, SubEmitterCommand};
@@ -30,9 +33,11 @@ use crate::particle::{EmitterParams, MinMaxCurve};
 pub enum Refused {
     /// Not a Death edge.
     Trigger,
-    /// Inherited properties are not transcribed for this trigger (the
-    /// inherited size meets the parent's size modules, which no replay covers).
+    /// Inherited properties are not transcribed for this trigger.
     Properties,
+    /// An inherit bit, or a parent size configuration, the inherited block
+    /// does not transcribe, by name.
+    Inherit(crate::particle::inherit::Refused),
     /// A probability outside [0, 1] or not finite.
     Probability,
     /// The child's first burst count is neither a non-negative constant nor
@@ -60,10 +65,13 @@ impl From<crate::particle::collision_event::Refused> for Refused {
 pub const DEATH_TIMES: [f32; 5] = [0.0, 0.0, 1.0, 1.0, 0.0];
 
 /// One death sub-emitter edge as RecordEmit reads it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DeathEmitEdge {
     probability: f32,
     burst: Option<EdgeBurst>,
+    /// The size bit of the edge's properties word, with the parent's size
+    /// module; `None` for an edge that inherits nothing.
+    inherit: Option<InheritSize>,
 }
 
 impl DeathEmitEdge {
@@ -73,19 +81,23 @@ impl DeathEmitEdge {
         if !(0.0..=1.0).contains(&probability) {
             return Err(Refused::Probability);
         }
-        Ok(Self { probability, burst: first_burst })
+        Ok(Self { probability, burst: first_burst, inherit: None })
     }
 
-    /// The edge and its child from the export: a Death edge that inherits
-    /// nothing, with the child's first burst count a constant or two
-    /// constants.
-    pub fn from_source(edge: &SubEmitterParams, target: &EmitterParams) -> Result<Self, Refused> {
+    /// The same edge inheriting the size through `inherit`.
+    pub fn with_inherit(self, inherit: Option<InheritSize>) -> Self {
+        Self { inherit, ..self }
+    }
+
+    /// The edge, its parent and its child from the export: a Death edge that
+    /// inherits nothing or only the size, with the child's first burst count
+    /// a constant or two constants.
+    pub fn from_source(edge: &SubEmitterParams, parent: &EmitterParams, target: &EmitterParams) -> Result<Self, Refused> {
         if edge.trigger != SubEmitterTrigger::Death {
             return Err(Refused::Trigger);
         }
-        if edge.properties != 0 {
-            return Err(Refused::Properties);
-        }
+        let inherit = InheritSize::from_parent(edge.properties, parent.size_over_lifetime.as_ref(), size_3d(parent))
+            .map_err(Refused::Inherit)?;
         let emission = target.emission.as_ref().ok_or(Refused::MissingEmission)?;
         let burst = match emission.bursts.first() {
             None => None,
@@ -95,13 +107,21 @@ impl DeathEmitEdge {
                 _ => return Err(Refused::BurstCount),
             }),
         };
-        Self::new(edge.probability, burst)
+        Ok(Self::new(edge.probability, burst)?.with_inherit(inherit))
     }
 }
 
+/// Whether a system's particle arrays store three size axes: its start size
+/// is 3D, or its SizeModule has separate axes (the SizeBySpeed module, the
+/// third writer, has no consumer here).
+pub fn size_3d(system: &EmitterParams) -> bool {
+    system.start.size3d || system.size_over_lifetime.as_ref().is_some_and(|size| size.separate_axes)
+}
+
 /// The dying particle as KillParticle hands it to RecordEmit, in simulation
-/// coordinates (source axes): the slot it dies in, its seed, its position and
-/// its persistent and animated velocity.
+/// coordinates (source axes): the slot it dies in, its seed, its position,
+/// its persistent and animated velocity, and the size, age percent and
+/// inverse lifetime an edge that inherits the size reads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeathParent {
     pub index: usize,
@@ -109,6 +129,10 @@ pub struct DeathParent {
     pub position: [f32; 3],
     pub velocity: [f32; 3],
     pub animated: [f32; 3],
+    /// The stored size (x on every axis when one axis is stored).
+    pub size: [f32; 3],
+    pub age_percent: f32,
+    pub inverse_lifetime: f32,
 }
 
 /// One RecordEmit call of the Death trigger.
@@ -175,10 +199,16 @@ pub fn record_death(edge: &DeathEmitEdge, edge_index: usize, parent: &DeathParen
         return recorded;
     }
     let [_, t1, t2, t3, _] = DEATH_TIMES;
+    // The block is written only now that the event issues its commands.
+    let inherited = match &edge.inherit {
+        None => neutral_inherited(parent.seed),
+        Some(inherit) => inherit.block(&InheritParent { size: parent.size, age_percent: parent.age_percent,
+            inverse_lifetime: parent.inverse_lifetime }, parent.seed),
+    };
     let command = |count: i32| SubEmitterCommand {
         position,
         velocity,
-        inherited: neutral_inherited(parent.seed),
+        inherited,
         // The gate keeps the count non-negative.
         count: count as u32 as u64,
         rate_count: 0,

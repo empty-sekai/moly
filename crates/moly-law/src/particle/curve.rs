@@ -527,6 +527,36 @@ pub enum CurveTime {
 /// The upper end of [`CurveTime::Normalized`]: 1 + 2 ulps.
 const NORMALIZED_TIME_MAX: u32 = 0x3f80_0002;
 
+/// `AnimationCurveTpl::Cache`: the key index `FindIndexForSampling` starts
+/// from, the segment window `[time, time_end)` the evaluator last wrote, and
+/// that window's cubic `[c0, c1, c2, c3]`.
+///
+/// A caller that passes no cache to `Evaluate` gets the one the curve object
+/// carries, which lives as long as the object: the asset reader resets it once
+/// (`InvalidateCache` at the end of the curve's read), a copy of the curve
+/// copies it, and every evaluation after that reads and may rewrite it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurveCache {
+    pub index: i32,
+    pub time: f32,
+    pub time_end: f32,
+    pub coefficients: [f32; 4],
+}
+
+impl CurveCache {
+    /// What `InvalidateCache` leaves: index 0 and time +inf, a window no time
+    /// can hit (a hit needs `time <= t < time_end`). It writes neither the end
+    /// nor the cubic; both stay unread until a window is written, and are +0
+    /// here.
+    pub const INVALID: Self = Self { index: 0, time: f32::INFINITY, time_end: 0.0, coefficients: [0.0; 4] };
+
+    /// The seven words in the engine's layout: index, time, end, c0..c3.
+    pub fn words(&self) -> [u32; 7] {
+        let c = self.coefficients.map(f32::to_bits);
+        [self.index as u32, self.time.to_bits(), self.time_end.to_bits(), c[0], c[1], c[2], c[3]]
+    }
+}
+
 /// One curve lane the reader leaves unoptimized, as
 /// `AnimationCurveTpl::Evaluate` computes it from an empty cache.
 ///
@@ -550,13 +580,15 @@ const NORMALIZED_TIME_MAX: u32 = 0x3f80_0002;
 /// under repeat, with no offset). Every other segment is the cubic of
 /// [`cache_coefficients`].
 ///
-/// The evaluator keeps a one-segment cache (the job-local cache of
-/// `EvaluateThreaded`, shared by the four lanes of a call, or the curve object's
-/// own cache); a later time inside the cached window reuses it. A cubic segment
-/// writes its window; a weighted one writes none and leaves the cache
-/// unmatchable (its start set to +inf) until the next cubic. This type evaluates
-/// as from an empty cache; [`EngineCurve::new`] admits a lane only where the
-/// cache history cannot change a result on the consumer's clock.
+/// The evaluator keeps a one-segment cache ([`CurveCache`]: the job-local cache
+/// of `EvaluateThreaded`, shared by the four lanes of a call, or the curve
+/// object's own cache); a later time inside the cached window reuses it. A cubic
+/// segment writes its window; a weighted one writes none and leaves the cache
+/// unmatchable (its start set to +inf) until the next cubic.
+/// [`EngineCurve::evaluate_cached`] carries that cache as the engine does;
+/// [`EngineCurve::evaluate`] evaluates as from a reset cache, and
+/// [`EngineCurve::new`] admits a lane for it only where the cache history cannot
+/// change a result on the consumer's clock.
 #[derive(Clone, Debug)]
 pub struct EngineCurve {
     keys: Vec<CurveKey>,
@@ -582,7 +614,11 @@ impl EngineCurve {
     /// straddle a wrapped knot or a period boundary. It is admitted on the
     /// normalized clock only when every such window is consistent by value
     /// ([`EngineCurve::post_repeat_certificate`]), and refused on an unbounded
-    /// clock.
+    /// clock. This admission is for a consumer that evaluates as from a reset
+    /// cache ([`EngineCurve::evaluate`]); a consumer that carries each curve
+    /// object's cache through its evaluations in the engine's order
+    /// ([`EngineCurve::evaluate_cached`]) reproduces the history instead and
+    /// needs only the arithmetic domain.
     pub fn new(curve: &Curve, time: CurveTime) -> Result<Self, &'static str> {
         let engine = Self::fresh(curve)?;
         if engine.post_repeat {
@@ -671,37 +707,155 @@ impl EngineCurve {
         tw
     }
 
-    /// The value from an empty cache.
+    /// The value from a reset cache ([`CurveCache::INVALID`]).
     pub fn evaluate(&self, t: f32) -> f32 {
+        let mut cache = CurveCache::INVALID;
+        self.evaluate_cached(t, &mut cache)
+    }
+
+    /// `AnimationCurveTpl::Evaluate(t, cache)`, branch for branch, reading and
+    /// writing `cache` as the engine does.
+    ///
+    /// One key returns its value before the cache is read. Then the hit test:
+    /// `cache.time <= t` and `cache.time_end > t` (both ordered, so a NaN time
+    /// never hits) returns the cached cubic at `t - cache.time`, before the
+    /// zero-key and key-time checks. No key, or a first or last key time with an
+    /// all-ones exponent, returns +0 without a write. Otherwise, with `first` and
+    /// `last` the end key times:
+    /// - `last <= t`: the post wrap. Clamp writes `{n - 1, last, +inf, (0, 0, 0,
+    ///   last value)}`; repeat searches the wrapped time and writes that segment
+    ///   (see below) with its start moved by `t - wrapped`;
+    /// - `first > t`: the pre wrap. Clamp writes `{0, t + -1000, first, (0, 0, 0,
+    ///   first value)}`; repeat as above, without the two clamps of the wrapped
+    ///   time;
+    /// - otherwise (a NaN t included): the segment found for t, at offset +0.
+    ///
+    /// The segment is `FindIndexForSampling`'s ([`EngineCurve::find_index`],
+    /// started from `cache.index`). A weighted one is [`interpolate_keyframe`] at
+    /// the searched time and writes only `index = lhs, time = +inf`; any other
+    /// writes `CalculateCacheData`'s window `[time[lhs] + offset, time[rhs] +
+    /// offset)` and cubic, and returns that cubic at `t - window start`. The
+    /// written window is then the one a later call reads. A search that ends
+    /// below the first key (the engine then reads before the key array) gives
+    /// NaN and writes nothing; only a pre-repeat time below the first key can
+    /// reach it.
+    pub fn evaluate_cached(&self, t: f32, cache: &mut CurveCache) -> f32 {
         let n = self.keys.len();
-        match n {
-            0 => return 0.0,
-            1 => return self.keys[0].value,
-            _ => {}
+        if n == 1 {
+            return self.keys[0].value;
+        }
+        if cache.time <= t && cache.time_end > t {
+            return cubic(cache.coefficients, t - cache.time);
+        }
+        if n == 0 {
+            return 0.0;
         }
         let (first, last) = (self.keys[0], self.keys[n - 1]);
+        if !first.time.is_finite() || !last.time.is_finite() {
+            return 0.0;
+        }
         if last.time <= t {
             if !self.post_repeat {
-                return cubic([0.0, 0.0, 0.0, last.value], t - last.time);
+                *cache = CurveCache { index: (n - 1) as i32, time: last.time, time_end: f32::INFINITY,
+                    coefficients: [0.0, 0.0, 0.0, last.value] };
+                return cubic(cache.coefficients, t - cache.time);
             }
             let tw = self.repeat_time(t, true);
-            return match self.left_key(tw) {
-                Some(lhs) => self.segment_value(lhs, tw, t, t - tw),
-                None => f32::NAN,
-            };
+            return self.search_and_write(tw, t, t - tw, cache);
         }
-        if t < first.time {
+        if first.time > t {
             if !self.pre_repeat {
-                return cubic([0.0, 0.0, 0.0, first.value], t - (t + -1000.0));
+                *cache = CurveCache { index: 0, time: t + -1000.0, time_end: first.time,
+                    coefficients: [0.0, 0.0, 0.0, first.value] };
+                return cubic(cache.coefficients, t - cache.time);
             }
             let tw = self.repeat_time(t, false);
-            return match self.left_key(tw) {
-                Some(lhs) => self.segment_value(lhs, tw, t, t - tw),
-                None => f32::NAN,
-            };
+            return self.search_and_write(tw, t, t - tw, cache);
         }
-        let lhs = self.left_key(t).unwrap_or(0);
-        self.segment_value(lhs, t, t, 0.0)
+        self.search_and_write(t, t, 0.0, cache)
+    }
+
+    /// The segment search at `x` from `cache.index`, then the weighted branch or
+    /// `CalculateCacheData(cache, lhs, rhs, offset)` and the cubic at `t`.
+    fn search_and_write(&self, x: f32, t: f32, offset: f32, cache: &mut CurveCache) -> f32 {
+        let (lhs, rhs) = self.find_index(cache.index, x);
+        if lhs < 0 {
+            return f32::NAN;
+        }
+        let (l, r) = (self.keys[lhs as usize], self.keys[rhs as usize]);
+        if weighted_segment(l, r) {
+            let value = interpolate_keyframe(l, r, x);
+            cache.index = lhs;
+            cache.time = f32::INFINITY;
+            return value;
+        }
+        *cache = CurveCache {
+            index: lhs,
+            time: l.time + offset,
+            time_end: r.time + offset,
+            coefficients: self.segments[lhs as usize],
+        };
+        cubic(cache.coefficients, t - cache.time)
+    }
+
+    /// `FindIndexForSampling(cache, x)`: `(lhs, rhs)` with `rhs = min(lhs + 1,
+    /// n - 1)`, started from the cache's index `hint`.
+    ///
+    /// A hint of -1 goes to the binary search. Where `time[hint] < x`, the lhs is
+    /// hint, hint + 1 or hint + 2 when the next key time above x is one, two or
+    /// three keys on; where `time[hint] >= x` (or unordered), it is hint when
+    /// `time[hint] <= x`, else hint - 1 or hint - 2 when that key time is not
+    /// above x. Every other case is the binary search for the first key time
+    /// above x (a NaN x moves right at every step), whose lhs is one before it.
+    /// Every comparison reads the flags as the engine's branches do: a NaN x
+    /// fails every hint test and ends at `(n - 1, n - 1)`.
+    pub fn find_index(&self, hint: i32, x: f32) -> (i32, i32) {
+        let n = self.keys.len() as i64;
+        let time = |i: i64| self.keys[i as usize].time;
+        let rhs_of = |lhs: i64| if lhs + 1 < n { lhs + 1 } else { n - 1 };
+        let binary = || {
+            let (mut lo, mut count) = (0_i64, n);
+            while count > 0 {
+                let half = count >> 1;
+                let mid = lo + half;
+                if time(mid) > x { count = half; } else { lo = mid + 1; count -= half + 1; }
+            }
+            (lo - 1, if lo < n - 1 { lo } else { n - 1 })
+        };
+        let i = hint as i64;
+        if hint == -1 || i >= n {
+            let (l, r) = binary();
+            return (l as i32, r as i32);
+        }
+        let found = if i >= 0 && time(i) < x {
+            // b.pl not taken: the key is below x.
+            if i + 1 < n && time(i + 1) > x {
+                Some(i)
+            } else if i + 2 < n && time(i + 2) > x {
+                Some(i + 1)
+            } else if i + 3 < n && time(i + 3) > x {
+                Some(i + 2)
+            } else {
+                None
+            }
+        } else if i < 0 {
+            None
+        } else if time(i) <= x {
+            Some(i)
+        } else if i <= 0 {
+            None
+        } else if time(i - 1) <= x {
+            Some(i - 1)
+        } else if i - 2 < 0 || !(time(i - 2) <= x) {
+            None
+        } else {
+            Some(i - 2)
+        };
+        let (l, r) = match found {
+            Some(lhs) => (lhs, rhs_of(lhs)),
+            None => binary(),
+        };
+        (l as i32, r as i32)
     }
 
     /// The post-repeat evaluation at the time whose bits are `word`, which
@@ -739,7 +893,8 @@ impl EngineCurve {
     /// single runs. Each window is then checked against every other run it
     /// covers, by value; beyond a few thousand such times it refuses.
     fn post_repeat_certificate(&self) -> Result<(), &'static str> {
-        const REFUSED: &str = "curve repeat wrap past the last key: the evaluator cache history can change the result";
+        const REFUSED: &str =
+            "curve repeat wrap past the last key: the evaluator cache history can change the result for a consumer that evaluates as from a reset cache";
         const TOO_MANY: &str = "curve repeat wrap past the last key: evaluator cache windows beyond the certified subset";
         let n = self.keys.len();
         let first = self.keys[0].time;

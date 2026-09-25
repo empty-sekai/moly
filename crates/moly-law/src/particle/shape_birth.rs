@@ -902,6 +902,12 @@ fn axis_of_rotation(direction: [f32; 3], rotated: [f32; 3]) -> [f32; 3] {
     let r = native_rsqrt(length);
     axis.map(|v| v * r)
 }
+/// The store's axis of rotation for a caller that holds the direction after
+/// the Shape affine (normalised before it) and the owner-turned point before
+/// translation: the legacy step, which samples its own Shape draws.
+pub fn store_axis_of_rotation(affine_direction: [f32; 3], rotated: [f32; 3]) -> [f32; 3] {
+    axis_of_rotation(masked(affine_direction), rotated)
+}
 fn vector(matrix: &[f32; 16], v: [f32; 3]) -> [f32; 3] {
     std::array::from_fn(|a| matrix[a] * v[0] + (matrix[4 + a] * v[1] + matrix[8 + a] * v[2]))
 }
