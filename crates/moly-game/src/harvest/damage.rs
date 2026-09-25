@@ -16,7 +16,11 @@
 
 use bevy::prelude::*;
 
-use super::law::{punch_points, PointTween, SegmentEase};
+use bevy::diagnostic::FrameCount;
+use bevy::ecs::system::SystemParam;
+use moly_assets::source_navigation::SourceObjectIdentity;
+
+use super::law::{dither_variant_on, fade_step, punch_points, FadeStep, PointTween, SegmentEase};
 use super::{
     ActionInterface, DropBatch, EffectHook, HarvestDropBatches, HarvestEffectHooks,
     HarvestHitResults, HarvestHits, HarvestObject, HarvestStats, HarvestViewNodes, HitResult,
@@ -24,6 +28,8 @@ use super::{
 };
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::player::PlayerControlled;
+use crate::site_material::SiteMaterial;
+use crate::site_move::timeline::Delay;
 
 /// `DamageAnimation`'s punch in the product frame (source (0.01, 0, 0)).
 const PUNCH: Vec3 = Vec3::new(-0.01, 0.0, 0.0);
@@ -32,8 +38,10 @@ const PUNCH_VIBRATO: i32 = 6;
 const PUNCH_ELASTICITY: f32 = 1.0;
 
 /// The tree fall: the top rotates to local Euler (90, 0, 0) over 2.0 s with
-/// InQuart; `PlayFadeAsync` waits 2.0 s, emits 132 at the delete position and
-/// fades the top over 0.5 s, then turns it off.
+/// InQuart; `PlayFadeAsync` waits 2.0 s (`UniTask.Delay`), emits 132 at the
+/// delete position and runs `PlayFadeAnimation(material, 0.5)` on the top's
+/// own material: the dither value falls from 1 to 0 over 0.5 s, then the top
+/// turns off.
 const FALL_DURATION: f32 = 2.0;
 const FADE_DELAY: f32 = 2.0;
 const FADE_DURATION: f32 = 0.5;
@@ -50,7 +58,13 @@ pub(crate) enum HarvestAfterForm {
     TreeFall {
         elapsed: f32,
         from: Option<Quat>,
-        emitted: bool,
+        /// `PlayFadeAsync`'s `Delay(2.0 s)`, created with the fall.
+        delay: Delay,
+        /// `PlayFadeAnimation`'s time once the delay is due.
+        fade: Option<f32>,
+        /// The top's own material copies (`renderer.material`), made when
+        /// the fade starts.
+        materials: Vec<Handle<SiteMaterial>>,
     },
     DelayedHide {
         remaining: f32,
@@ -103,6 +117,7 @@ pub(crate) fn on_damage(
     mut se: ResMut<SeRequests>,
     mut effects: ResMut<HarvestEffectHooks>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
+    frames: Res<FrameCount>,
 ) {
     let Some(configs) = configs else {
         return;
@@ -282,6 +297,7 @@ pub(crate) fn on_damage(
                 nodes,
                 &mut node_visibility,
                 &mut effects,
+                u64::from(frames.0),
             );
             object.collision = false;
             tail.push_str(" -> ChangeAfterObject + RemoveCollisionObject");
@@ -333,6 +349,7 @@ fn change_after_object(
     nodes: Option<&HarvestViewNodes>,
     node_visibility: &mut Query<&mut Visibility, Without<HarvestObject>>,
     effects: &mut HarvestEffectHooks,
+    frame: u64,
 ) {
     let object_node = nodes.and_then(|nodes| nodes.object);
     match object.class {
@@ -359,7 +376,9 @@ fn change_after_object(
             commands.entity(root).insert(HarvestAfterForm::TreeFall {
                 elapsed: 0.0,
                 from: None,
-                emitted: false,
+                delay: Delay::new(FADE_DELAY, frame),
+                fade: None,
+                materials: Vec::new(),
             });
         }
         "MysekaiAreaStoneView" => {
@@ -396,10 +415,64 @@ pub(crate) fn advance_punches(
     }
 }
 
+/// The top's material handles: the site material on the after node and on
+/// its own mesh primitives (the node's children without a source identity).
+#[derive(SystemParam)]
+pub(crate) struct TopMaterials<'w, 's> {
+    materials: ResMut<'w, Assets<SiteMaterial>>,
+    handles: Query<'w, 's, &'static MeshMaterial3d<SiteMaterial>>,
+    children: Query<'w, 's, &'static Children>,
+    identities: Query<'w, 's, (), With<SourceObjectIdentity>>,
+}
+
+impl TopMaterials<'_, '_> {
+    fn primitives(&self, node: Entity) -> Vec<Entity> {
+        let mut out = vec![node];
+        if let Ok(kids) = self.children.get(node) {
+            out.extend(kids.iter().filter(|kid| self.identities.get(*kid).is_err()));
+        }
+        out
+    }
+
+    /// `renderer.material`: one copy of each primitive's material, so only
+    /// this tree's top changes.
+    fn instance(&mut self, commands: &mut Commands, node: Entity) -> Vec<Handle<SiteMaterial>> {
+        let mut copies = Vec::new();
+        for entity in self.primitives(node) {
+            let Ok(handle) = self.handles.get(entity) else {
+                continue;
+            };
+            let Some(material) = self.materials.get(&handle.0).cloned() else {
+                continue;
+            };
+            let copy = self.materials.add(material);
+            commands.entity(entity).insert(MeshMaterial3d(copy.clone()));
+            copies.push(copy);
+        }
+        copies
+    }
+
+    /// `SetDitherAlpha(value)` on the copies; returns what the first copy
+    /// now holds (its pipeline key's dither flag and `_DitherAlpha`).
+    fn set_dither(&mut self, copies: &[Handle<SiteMaterial>], value: f32) -> Option<(bool, f32)> {
+        for handle in copies {
+            if let Some(material) = self.materials.get_mut(handle) {
+                material.key.tree_dither = dither_variant_on(value);
+                material.params.dither_alpha = value;
+            }
+        }
+        copies
+            .first()
+            .and_then(|handle| self.materials.get(handle))
+            .map(|material| (material.key.tree_dither, material.params.dither_alpha))
+    }
+}
+
 /// Update: the tree fall and the delayed disappearances.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn advance_after_forms(
     time: Res<Time>,
+    frames: Res<FrameCount>,
     mut commands: Commands,
     mut forms: Query<(
         Entity,
@@ -410,14 +483,18 @@ pub(crate) fn advance_after_forms(
     )>,
     mut nodes: Query<(&mut Transform, &mut Visibility, &GlobalTransform), Without<HarvestObject>>,
     mut effects: ResMut<HarvestEffectHooks>,
+    mut tops: TopMaterials,
 ) {
     let dt = time.delta_secs();
+    let frame = u64::from(frames.0);
     for (entity, mut form, object, view, mut root_visibility) in &mut forms {
         match &mut *form {
             HarvestAfterForm::TreeFall {
                 elapsed,
                 from,
-                emitted,
+                delay,
+                fade,
+                materials,
             } => {
                 let Some(after) = view.after else {
                     commands.entity(entity).remove::<HarvestAfterForm>();
@@ -431,28 +508,53 @@ pub(crate) fn advance_after_forms(
                     transform.rotation =
                         start.slerp(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), eased);
                 }
-                if *elapsed >= FADE_DELAY && !*emitted {
-                    *emitted = true;
+                if fade.is_none() && delay.tick(frame, dt) {
                     let position = view
                         .delete_at
                         .and_then(|node| nodes.get(node).ok())
                         .map(|(_, _, global)| global.translation())
                         .unwrap_or_default();
                     effects.pending.push(EffectHook::at(132, position));
-                    info!(
-                        "[harvest] {}#{} fall: 2.0 s delay done, delete effect 132 at {position:.2}; dither fade not ported, the top hides after {FADE_DURATION} s",
-                        object.leaf, object.fixture_id
-                    );
-                }
-                if *elapsed >= FADE_DELAY + FADE_DURATION {
-                    if let Ok((_, mut visibility, _)) = nodes.get_mut(after) {
-                        *visibility = Visibility::Hidden;
+                    *materials = tops.instance(&mut commands, after);
+                    *fade = Some(0.0);
+                    if materials.is_empty() {
+                        warn!(
+                            "[harvest] {}#{} fall: delay done at {:.3} s, delete effect 132 at {position:.2}; the top has no site material to dither (material swap not applied), it hides when the fade ends",
+                            object.leaf, object.fixture_id, elapsed
+                        );
+                    } else {
+                        info!(
+                            "[harvest] {}#{} fall: delay done at {:.3} s, delete effect 132 at {position:.2}; PlayFadeAnimation on {} copied top materials",
+                            object.leaf,
+                            object.fixture_id,
+                            elapsed,
+                            materials.len()
+                        );
                     }
-                    info!(
-                        "[harvest] {}#{} fall done at {:.3} s: top off, the under part stays until the next load",
-                        object.leaf, object.fixture_id, elapsed
-                    );
-                    commands.entity(entity).remove::<HarvestAfterForm>();
+                }
+                let Some(fade_time) = fade.as_mut() else {
+                    continue;
+                };
+                let before = *fade_time;
+                match fade_step(fade_time, FADE_DURATION, dt) {
+                    FadeStep::Set(value) => {
+                        let held = tops.set_dither(materials, value);
+                        info!(
+                            "[harvest-fade] {}#{} SetDitherAlpha({value:.4}) at fade time {before:.4}: the top material holds (tree_dither, _DitherAlpha) = {held:?}",
+                            object.leaf, object.fixture_id
+                        );
+                    }
+                    FadeStep::Finish => {
+                        tops.set_dither(materials, 0.0);
+                        if let Ok((_, mut visibility, _)) = nodes.get_mut(after) {
+                            *visibility = Visibility::Hidden;
+                        }
+                        info!(
+                            "[harvest] {}#{} fall done at {:.3} s (fade time {before:.4}): SetDitherAlpha(0), top off, the under part stays until the next load",
+                            object.leaf, object.fixture_id, elapsed
+                        );
+                        commands.entity(entity).remove::<HarvestAfterForm>();
+                    }
                 }
             }
             HarvestAfterForm::DelayedHide { remaining } => {

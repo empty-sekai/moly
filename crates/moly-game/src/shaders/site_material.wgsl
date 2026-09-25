@@ -35,6 +35,8 @@
 //   SITE_GROUND_HEIGHT_FADE   _USE_HEIGHT_FADE：Ground 高度淡出（雾后）。
 //   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变。
 //   SITE_BIRTHDAY_DITHER  !_DISABLE_DITHER：Birthday 抖动（0.125）。
+//   SITE_TREE_DITHER      !_DISABLE_DITHER on a Tree material: Bayer dither
+//                         (0.125) right after the constant alpha clip.
 //   SITE_TREASUREBOX      TreasureBox family: selected vertex colour (squared)
 //                         and alpha, phenomena light and shade always on,
 //                         mask-ramped drop shadow, treasure shadows, fog.
@@ -776,6 +778,13 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
 #ifdef SITE_CONST_ALPHA_CLIP
     // clip 仅在 _USE_ALPHA_CLIP 编译进来；阈值是编译期常量 0.5。
     if base.a - 0.5 < 0.0 {
+        discard;
+    }
+#endif
+#ifdef SITE_TREE_DITHER
+    // The Tree program without _DISABLE_DITHER: Bayer dither at quantization
+    // 0.125 after the clip (_DitherAlpha - threshold < 0 discards).
+    if params.dither_alpha.x - bayer_value(bayer_pixel(in.position), 0.125) < 0.0 {
         discard;
     }
 #endif

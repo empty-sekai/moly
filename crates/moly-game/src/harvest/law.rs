@@ -564,6 +564,36 @@ pub(crate) fn fast_yaw(from: f32, to: f32, t: f32) -> f32 {
     from + change * t.clamp(0.0, 1.0)
 }
 
+/// `MysekaiMaterialExtension.SetDitherAlpha(value)`: above 0.999 the
+/// material keeps `_DISABLE_DITHER` (no dither); at or below it the keyword
+/// goes off and the Bayer dither reads `_DitherAlpha`.
+pub(crate) fn dither_variant_on(value: f32) -> bool {
+    !(value > 0.999)
+}
+
+/// One frame of `MysekaiAreaTreeView.PlayFadeAnimation(material, duration)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum FadeStep {
+    /// `SetDitherAlpha(1 - time / duration)`, then `time += deltaTime` and
+    /// one frame's wait.
+    Set(f32),
+    /// The loop left (`time >= duration`): `SetDitherAlpha(0)` and the after
+    /// mesh's GameObject inactive, in the same frame.
+    Finish,
+}
+
+/// The loop checks `time < duration` at the top of every frame, sets the
+/// value from the time before this frame's delta, then adds the delta.
+pub(crate) fn fade_step(time: &mut f32, duration: f32, dt: f32) -> FadeStep {
+    if *time < duration {
+        let value = 1.0 - *time / duration;
+        *time += dt;
+        FadeStep::Set(value)
+    } else {
+        FadeStep::Finish
+    }
+}
+
 #[cfg(test)]
 mod value_checks {
     use super::*;
@@ -997,5 +1027,37 @@ mod value_checks {
         assert!(!has_stamina_available_for_harvest(
             full, 2, 0, true, 10, None
         ));
+    }
+
+    /// The tree top's fade on a fixed 0.125 s frame: values 1, 0.75, 0.5,
+    /// 0.25 on the four frames whose starting time is below 0.5, then the
+    /// finish (value 0, top off); the first value keeps `_DISABLE_DITHER`
+    /// (1.0 > 0.999), every later one turns the dither variant on.
+    #[test]
+    fn tree_top_dither_fade_schedule() {
+        let mut time = 0.0;
+        let mut steps = Vec::new();
+        loop {
+            let step = fade_step(&mut time, 0.5, 0.125);
+            steps.push(step);
+            if step == FadeStep::Finish {
+                break;
+            }
+        }
+        assert_eq!(
+            steps,
+            vec![
+                FadeStep::Set(1.0),
+                FadeStep::Set(0.75),
+                FadeStep::Set(0.5),
+                FadeStep::Set(0.25),
+                FadeStep::Finish
+            ]
+        );
+        assert!(!dither_variant_on(1.0));
+        assert!(!dither_variant_on(0.9995));
+        assert!(dither_variant_on(0.999));
+        assert!(dither_variant_on(0.75));
+        assert!(dither_variant_on(0.0));
     }
 }

@@ -404,6 +404,13 @@ pub struct SiteMaterialKey {
     /// `!_DISABLE_DITHER`：Birthday 的抖动（量化 0.125；FO 恒抖动不
     /// 走这个键，Tree 全带 _DD 无抖动）。
     pub birthday_dither: bool,
+    /// `!_DISABLE_DITHER` on a Tree material: the same Bayer dither at
+    /// quantization 0.125, right after the constant alpha clip (the Tree
+    /// program without `_DISABLE_DITHER`). Every serialized Tree material
+    /// carries `_DISABLE_DITHER`, so resolution always gives false; a view
+    /// that fades a tree part (`SetDitherAlpha` below 0.999 turns the keyword
+    /// off) sets it on its own copy of the material.
+    pub tree_dither: bool,
 }
 
 /// 站点族的材质资产。
@@ -736,6 +743,9 @@ impl Material for SiteMaterial {
         if key.birthday_dither {
             defs.push("SITE_BIRTHDAY_DITHER");
         }
+        if key.tree_dither {
+            defs.push("SITE_TREE_DITHER");
+        }
         for def in defs {
             descriptor.vertex.shader_defs.push(def.into());
             if let Some(ref mut fragment) = descriptor.fragment {
@@ -969,6 +979,7 @@ pub(crate) fn resolve_fieldobject(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex: load_texture(uri),
@@ -1155,6 +1166,7 @@ fn resolve_ground(
                 ground_height_fade: height_fade,
                 tree_height_fade: false,
                 birthday_dither: false,
+                tree_dither: false,
             },
             texture,
             None,
@@ -1185,6 +1197,7 @@ fn resolve_ground(
                 ground_height_fade: height_fade,
                 tree_height_fade: false,
                 birthday_dither: false,
+                tree_dither: false,
             },
             None,
             texture,
@@ -1208,6 +1221,7 @@ fn resolve_ground(
             ground_height_fade: height_fade,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         None,
         None,
@@ -1356,6 +1370,7 @@ pub(crate) fn resolve_tree_textures(
             ground_height_fade: false,
             tree_height_fade: height_fade,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1430,6 +1445,7 @@ fn resolve_water(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         overlay_tex,
         overlay2nd_tex,
@@ -1506,6 +1522,7 @@ fn resolve_ground_birthday(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: dither,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1589,6 +1606,7 @@ pub(crate) fn resolve_object(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1635,6 +1653,7 @@ fn resolve_dropitem(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1738,6 +1757,7 @@ pub(crate) fn resolve_treasurebox(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1786,6 +1806,7 @@ fn resolve_ui_uber(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,

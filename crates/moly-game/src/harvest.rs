@@ -14,7 +14,7 @@
 //!   durability, the SD stand-in motion and the tool in hand.
 //! - `damage`: `HarvestObjectPresenter.OnDamage`: `UpdateHp`, the multi /
 //!   single dispatch, SEs, the punch, `HandleResourceDrop`, the per-kind
-//!   disappearance (the tree fall).
+//!   disappearance (the tree fall and the top's dither fade).
 //! - `drops`: `CreateDropItem`: SE, pacing, scatter, the drop hop.
 //! - `pickup`: drops approach the moving player and are collected.
 //! - `queue`: the 1.0 s harvest log loop, request merging, the mock replies
@@ -23,9 +23,8 @@
 //! - `effects`: the harvest effects (101-143) from the effect table.
 //!
 //! Named gaps: the prop animator clips (barrel break, toolbox open)
-//! are not played; the tree top's dither fade is not ported (the top hides
-//! when the fade would end); harvest objects do not carve the walk field
-//! (the source's NavMeshObstacle); drop models keep their glb materials.
+//! are not played; harvest objects do not carve the walk field (the
+//! source's NavMeshObstacle); drop models keep their glb materials.
 
 pub(crate) mod action;
 mod arrival;
