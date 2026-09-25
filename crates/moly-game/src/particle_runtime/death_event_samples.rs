@@ -19,17 +19,20 @@
 //! velocities and the owner compare by value (the X-axis reflection can flip
 //! a zero's sign); everything else by bits.
 use super::*;
-use super::sub_event_samples::{event_state, f, hex, parent_runtime, read, same_value, word, words};
+use super::sub_event_samples::{call_site, event_state, f, hex, parent_runtime, read, same_value, word, words};
 use moly_law::particle::seed_owner::{ModuleRandom, ScalarRandom};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
-/// Return addresses: the newborn sub-emitter call, the newborn kill pass's
+/// The return addresses the receipt names for the calls its rows are
+/// recorded from: the newborn sub-emitter call, the newborn kill pass's
 /// KillParticle call, and RecordEmit's return inside KillParticle.
-const NEWBORN_CALL: &str = "0xd81240";
-const NEWBORN_KILL: &str = "0xd8129c";
-const KILL_RETURN: &str = "0xd6fe78";
+struct CallSites<'a> {
+    newborn_call: &'a str,
+    newborn_kill: &'a str,
+    kill_return: &'a str,
+}
 const AGE_KILLED: u32 = 0x42c8_0001;
 
 #[derive(Default)]
@@ -112,7 +115,7 @@ const BIRTH_COMMAND: [&str; 4] = ["birthCommandPositionVelocity", "birthCommandI
 const DEATH_COMMAND: [&str; 4] = ["deathCommandPositionVelocity", "deathCommandInherited", "deathCommandCountTimes",
     "deathCommandEmission"];
 
-fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
+fn run_parent(doc: &Value, parent: &Value, sites: &CallSites, arm: Arm, tally: &mut Tally) {
     let label = parent["label"].as_str().unwrap();
     let image = &parent["image"];
     let overrides = &parent["overrides"];
@@ -217,7 +220,7 @@ fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
         tally.check("callCount", trace.len() == native_calls.len(), &at);
         for (call, native) in trace.iter().zip(native_calls) {
             tally.calls += 1;
-            let newborn = native["lr"].as_str() == Some(NEWBORN_CALL);
+            let newborn = native["lr"].as_str() == Some(sites.newborn_call);
             tally.check("callKind", call.newborn == newborn, &at);
             let shift = if call.newborn { call.first.next_multiple_of(4) - call.first } else { 0 };
             tally.check("callRange", word(&native["start"]) as usize == call.start + shift
@@ -268,7 +271,7 @@ fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
         for ((call, dying, shift, record), native) in ours_deaths.iter().zip(&native_deaths) {
             tally.death_records += 1;
             let at = format!("{at} death record {}/{}", record.edge, dying.index);
-            tally.check("deathRecordPath", native["returnTo"].as_str() == Some(KILL_RETURN)
+            tally.check("deathRecordPath", native["returnTo"].as_str() == Some(sites.kill_return)
                 && words(&native["timesBits"]) == moly_law::particle::death_event::DEATH_TIMES.map(f32::to_bits), &at);
             tally.check("deathRecordSlotIndex", word(&native["slot"]) as usize == record.edge
                 && word(&native["index"]) as usize == dying.index + shift, &at);
@@ -296,8 +299,8 @@ fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
         }
         // ---- the kills of each pass, recording or not
         let frame_kills = &kills[span("kills")];
-        let native_newborn = frame_kills.iter().filter(|k| k["lr"].as_str() == Some(NEWBORN_KILL)).count();
-        let recorded = |newborn: bool| frame_kills.iter().filter(|k| (k["lr"].as_str() == Some(NEWBORN_KILL)) == newborn
+        let native_newborn = frame_kills.iter().filter(|k| k["lr"].as_str() == Some(sites.newborn_kill)).count();
+        let recorded = |newborn: bool| frame_kills.iter().filter(|k| (k["lr"].as_str() == Some(sites.newborn_kill)) == newborn
             && k["record"].as_u64() == Some(1)).count();
         let ours = |newborn: bool| death_trace.iter().filter(|c| c.newborn == newborn).map(|c| c.deaths.len()).sum::<usize>();
         tally.kills += frame_kills.len();
@@ -343,10 +346,15 @@ fn product_parent_death_events_match_current_native() {
     assert_eq!(receipt["librarySha256"], SOURCE_SHA256);
     let doc = read("MOLY_SUBEMITTER_PARENT_EFFECTS");
     let parents = receipt["parentEvents"].as_array().unwrap();
+    let sites = CallSites {
+        newborn_call: call_site(&receipt, "newbornCall"),
+        newborn_kill: call_site(&receipt, "newbornKill"),
+        kill_return: call_site(&receipt, "killReturn"),
+    };
     let run = |arm: Arm| {
         let mut tally = Tally::default();
         for parent in parents {
-            run_parent(&doc, parent, arm, &mut tally);
+            run_parent(&doc, parent, &sites, arm, &mut tally);
         }
         tally
     };

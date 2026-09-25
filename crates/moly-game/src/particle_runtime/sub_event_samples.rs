@@ -23,7 +23,6 @@ use moly_law::particle::{schema::Effects, MinMaxCurve};
 use serde_json::{json, Value};
 
 const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
-const NEWBORN_CALL: &str = "0xd81240";
 
 pub(super) fn word(value: &Value) -> u32 {
     value.as_u64().expect("native word") as u32
@@ -35,6 +34,14 @@ pub(super) fn f(value: &Value) -> f32 {
 
 pub(super) fn words(value: &Value) -> Vec<u32> {
     value.as_array().expect("native array").iter().map(word).collect()
+}
+
+/// The return address the receipt names for one of its call sites (its
+/// callSites block): the rows are classified by the calls they were
+/// recorded from, and a receipt that does not name the site is refused.
+pub(super) fn call_site<'a>(receipt: &'a Value, name: &str) -> &'a str {
+    receipt["callSites"][name].as_str()
+        .unwrap_or_else(|| panic!("the receipt names no callSites.{name}: it cannot classify its rows"))
 }
 
 pub(super) fn read(key: &str) -> Value {
@@ -210,7 +217,7 @@ pub(super) fn event_state(emission: &EventEmission) -> Vec<u32> {
     out
 }
 
-fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
+fn run_parent(doc: &Value, parent: &Value, newborn_call: &str, arm: Arm, tally: &mut Tally) {
     let label = parent["label"].as_str().unwrap();
     let image = &parent["image"];
     let (mut system, edges) = parent_system(doc, &parent["source"]);
@@ -281,7 +288,7 @@ fn run_parent(doc: &Value, parent: &Value, arm: Arm, tally: &mut Tally) {
             let index = range[0] as usize + offset;
             let at = format!("{at} call {index}");
             tally.calls += 1;
-            let newborn = native["lr"].as_str() == Some(NEWBORN_CALL);
+            let newborn = native["lr"].as_str() == Some(newborn_call);
             tally.newborn += usize::from(newborn);
             tally.check("callKind", call.newborn == newborn, &at);
             // Native appends newborns at the next four-aligned index.
@@ -398,10 +405,12 @@ fn product_parent_birth_events_match_current_native() {
     assert_eq!(receipt["librarySha256"], SOURCE_SHA256);
     let doc = read("MOLY_SUBEMITTER_PARENT_EFFECTS");
     let parents = receipt["parentEvents"].as_array().unwrap();
+    // The newborn sub-emitter call.
+    let newborn_call = call_site(&receipt, "newbornCall");
     let run = |arm: Arm| {
         let mut tally = Tally::default();
         for parent in parents {
-            run_parent(&doc, parent, arm, &mut tally);
+            run_parent(&doc, parent, newborn_call, arm, &mut tally);
         }
         tally
     };

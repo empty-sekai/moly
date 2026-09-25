@@ -1089,6 +1089,10 @@ mod tests {
                 mode => panic!("curve mode {mode} is not in this receipt"),
             }
         };
+        // The newborn sub-emitter call's return address, as the receipt names it
+        // (its callSites block); a receipt that does not name it is refused.
+        let newborn_call = receipt.get("callSites").and_then(|sites| sites.get("newbornCall")).and_then(Value::as_str)
+            .expect("the receipt names no callSites.newbornCall: it cannot classify its calls");
         // arm: None = the law; "catchUpZero", "sliceDt", "burstLow", "burstHigh" one rule each. The
         // carry has no signal here: both children have zero rate and distance, so it stays zero; the
         // window-given replay below carries it.
@@ -1146,7 +1150,7 @@ mod tests {
                 }
                 for (index, call) in subcalls.iter().enumerate() {
                     calls += 1;
-                    newborn += usize::from(at(call, "lr").as_str() == Some("0xd81240"));
+                    newborn += usize::from(at(call, "lr").as_str() == Some(newborn_call));
                     let start = word(at(call, "start")) as usize;
                     let end = word(at(call, "end")) as usize;
                     let dt4: Vec<f32> = if arm == Some("sliceDt") {
