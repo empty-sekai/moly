@@ -115,6 +115,32 @@ pub fn local_scaling_owner(chain: &[SourceTrs]) -> Result<OwnerMatrices, OwnerRe
     Ok(out)
 }
 
+/// The world rotation of the chain's last node (root first) as the engine's
+/// transform rotation getter returns it: the node's own rotation, then each
+/// ancestor, nearest first, multiplied in with the child's scale sign flips,
+/// in the same association as the owner update; not normalized.
+pub fn global_rotation(chain: &[SourceTrs]) -> Result<[f32; 4], OwnerRefusal> {
+    let (leaf, ancestors) = chain.split_last().ok_or(OwnerRefusal::EmptyChain)?;
+    if chain.iter().any(|node| node.q.iter().chain(&node.s).any(|v| !v.is_finite())) {
+        return Err(OwnerRefusal::NonfiniteInput);
+    }
+    let mut rotation = leaf.q;
+    for parent in ancestors.iter().rev() {
+        rotation = quat_mul(parent.q, sign_flip(rotation, parent.s));
+    }
+    Ok(rotation)
+}
+
+/// The local rotation a rotation-cancelling effector writes on its node every
+/// update: the inverse of its parent's world rotation (x, y and z negated, no
+/// normalization), stored through the local-rotation setter, which normalizes
+/// with the same sum as the owner update and falls back to the identity at or
+/// below the threshold. `parent_chain` ends at the parent.
+pub fn cancel_rotation(parent_chain: &[SourceTrs]) -> Result<[f32; 4], OwnerRefusal> {
+    let [x, y, z, w] = global_rotation(parent_chain)?;
+    Ok(normalize([-x, -y, -z, w]))
+}
+
 /// The engine's general 3D inverse of a column-major matrix whose fourth row
 /// is not read. Below the determinant threshold every word is +0.0 and the
 /// flag is false; a NaN determinant takes the compute path.

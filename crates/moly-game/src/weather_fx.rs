@@ -160,6 +160,12 @@ struct Planned {
     /// The owner local-to-world words a Local system's trail job composes
     /// with the view (the same chain); `None` for every other system.
     trail_owner: Option<[f32; 16]>,
+    /// A sky system with owner words (child, collision or trail): its authored
+    /// chain from the prefab root down, which the environment root's chain
+    /// carries. The words above are composed with the root at the site
+    /// origin; the installer and every frame recompose them from the tracked
+    /// root.
+    sky_owner_chain: Option<Arc<[moly_law::particle::owner::SourceTrs]>>,
     /// Cone 的半顶角（shape 块的 `angle` 键；律的 `ShapeParams` 不带它）。
     cone_angle: Option<f32>,
     rol: Option<RotationOverLifetime>,
@@ -419,6 +425,15 @@ struct LiveWeatherEmitter {
     play: lifecycle::PlayState,
     /// The effector's child set of this system's effect instance.
     children: Arc<Vec<lifecycle::EffectChild>>,
+    /// A sky system's owner words follow the tracked environment root.
+    sky_owner: Option<SkyOwner>,
+}
+
+/// The chain a sky system's owner words are composed from and the root
+/// position they were last composed with (see [`refresh_sky_owner`]).
+struct SkyOwner {
+    chain: Arc<[moly_law::particle::owner::SourceTrs]>,
+    anchor: [u32; 3],
 }
 impl std::ops::Deref for LiveWeatherEmitter {
     type Target = Runtime;
@@ -1457,8 +1472,9 @@ fn drop_orphan_targets(plans: &mut Vec<Planned>, start: usize) -> Vec<String> {
 
 /// The gates of a sub-emitter target that read only the export: one parent
 /// (with two, the order of their commands is not in the export), a chain of
-/// parents that does not come back to a node, a site effect on its authored
-/// chain (the owner words exist only there), the scaled clock, no warm and
+/// parents that does not come back to a node, an authored chain of a site or
+/// sky effect (the owner words are composed there, see `chain_owner`), the
+/// scaled clock, no warm and
 /// the Local scaling mode (the only owner update transcribed). Returns the
 /// parent.
 fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitterGraph<'_>, kind: EffectKind,
@@ -1487,8 +1503,11 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
             _ => break,
         }
     }
-    if kind != EffectKind::Site || instance_anchor.is_some() {
+    if instance_anchor.is_some() {
         return Err("owner words are composed only for a site effect on its authored chain".into());
+    }
+    if kind == EffectKind::Camera {
+        return Err(format!("owner words: {CAMERA_OWNER_REFUSAL}"));
     }
     let system = particle.get("system");
     match system.and_then(|s| s.get("useUnscaledTime")).and_then(Value::as_bool) {
@@ -1506,20 +1525,93 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
     Ok(parent.clone())
 }
 
-/// The target's owner words from its authored chain, root first (the chain
-/// the node composition walks; the site anchor adds no element). A matrix
-/// below the inverse's determinant threshold is refused: the engine keeps
-/// using the zero inverse, which this runtime's own transforms cannot follow.
-fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str)
-    -> Result<moly_law::particle::child_emit::ChildOwner, String> {
-    Ok(moly_law::particle::child_emit::ChildOwner::local_scaling(&owner_matrices(by_path, path)?))
+/// The target's owner words from its effect's chain, root first (see
+/// [`chain_owner`]). A matrix below the inverse's determinant threshold is
+/// refused: the engine keeps using the zero inverse, which this runtime's own
+/// transforms cannot follow.
+fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str, kind: EffectKind)
+    -> Result<(moly_law::particle::child_emit::ChildOwner, Option<Arc<[moly_law::particle::owner::SourceTrs]>>), String> {
+    let (owner, sky_chain) = chain_owner(by_path, path, kind)?;
+    Ok((moly_law::particle::child_emit::ChildOwner::local_scaling(&owner), sky_chain))
 }
 
-/// The owner matrices of the node's authored chain (Local scaling), refused
-/// below the inverse's determinant threshold.
-fn owner_matrices(by_path: &HashMap<String, &Value>, path: &str)
+/// Why a camera effect's owner words are not composed. The effect's root is
+/// a child of the rendering camera, and a "fix" effect's effector cancels
+/// the camera's rotation in its Update; both compose exactly
+/// ([`environment_owner`] with the cancel). But the camera moves in its
+/// LateUpdate, after the frame's particle update, so the owner update reads
+/// the camera pose of the previous frame (and the cancel written in this
+/// frame's Update from that pose), which this host does not keep. No camera
+/// effect of the corpus has a system that reads owner words.
+const CAMERA_OWNER_REFUSAL: &str =
+    "a camera effect's owner update reads the previous frame's camera pose (the camera moves in LateUpdate, after the particle update), which this host does not keep";
+
+/// The owner words of a Local system on its effect's chain, with the chain
+/// the words follow at run time.
+///
+/// A site effect's prefab is instantiated under the site view, the field
+/// prefab's root at the site origin; this host draws the active site at its
+/// origin, and the site colliders sit in the same frame, so the words are the
+/// authored chain's alone.
+///
+/// A sky effect's prefab is instantiated under `SiteRoot/SiteEnvironment-
+/// ViewController/Sky/EffectRoot` (see [`EnvironmentRoot`]). The four nodes
+/// take part in the engine's owner update, so they are composed with the
+/// prefab chain ([`environment_owner`]); a sky effect's effector never
+/// cancels a rotation (the loader passes rotation type 0 and every sky
+/// effector serializes the normal type). The words returned here have the
+/// root at the active site's origin; the installer and the frame recompose
+/// them from the tracked root, and the returned chain is what they compose.
+fn chain_owner(by_path: &HashMap<String, &Value>, path: &str, kind: EffectKind)
+    -> Result<(moly_law::particle::owner::OwnerMatrices, Option<Arc<[moly_law::particle::owner::SourceTrs]>>), String> {
+    let prefab = authored_trs(by_path, path)?;
+    match kind {
+        EffectKind::Site => Ok((environment_owner(&[], &prefab, false)?, None)),
+        EffectKind::Sky => {
+            let owner = environment_owner(&sky_prefix([0.0; 3]), &prefab, false)?;
+            Ok((owner, Some(prefab.into())))
+        }
+        EffectKind::Camera => Err(CAMERA_OWNER_REFUSAL.into()),
+    }
+}
+
+/// The nodes above a sky prefab's root, root first: the site root, the
+/// environment view controller, the sky view and its effect root. The source
+/// authors all four at the identity, and the only writer of any of them is
+/// the cannon move, which translates the controller; `anchor` is the
+/// controller's position (source axes) seen from the active site.
+pub(crate) fn sky_prefix(anchor: [f32; 3]) -> [moly_law::particle::owner::SourceTrs; 4] {
+    let identity = moly_law::particle::owner::SourceTrs { t: [0.0; 3], q: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] };
+    [identity, moly_law::particle::owner::SourceTrs { t: anchor, ..identity }, identity, identity]
+}
+
+/// The owner words (Local scaling) of the last node of `prefab`, a prefab
+/// chain from its root down, instantiated below `prefix` (root first;
+/// the instantiation keeps the prefab root's local TRS). With `cancel`, the
+/// prefab root carries the rotation a rotation-type-1 effector writes on it,
+/// the inverse of its parent's world rotation through the local-rotation
+/// setter. Refused below the inverse's determinant threshold.
+pub(crate) fn environment_owner(prefix: &[moly_law::particle::owner::SourceTrs],
+    prefab: &[moly_law::particle::owner::SourceTrs], cancel: bool)
     -> Result<moly_law::particle::owner::OwnerMatrices, String> {
-    use moly_law::particle::owner::{local_scaling_owner, SourceTrs};
+    use moly_law::particle::owner::{cancel_rotation, local_scaling_owner, SourceTrs};
+    let mut chain: Vec<SourceTrs> = prefix.iter().chain(prefab).copied().collect();
+    if cancel {
+        let root = prefab.first().ok_or("owner chain lacks the prefab root")?;
+        let q = cancel_rotation(prefix).map_err(|refused| format!("rotation cancel {refused:?}"))?;
+        chain[prefix.len()] = SourceTrs { q, ..*root };
+    }
+    let owner = local_scaling_owner(&chain).map_err(|refused| format!("owner words {refused:?}"))?;
+    if !owner.invert_ok {
+        return Err("owner matrix below the inverse's determinant threshold".into());
+    }
+    Ok(owner)
+}
+
+/// The node's authored chain in source TRS words, the prefab root first.
+fn authored_trs(by_path: &HashMap<String, &Value>, path: &str)
+    -> Result<Vec<moly_law::particle::owner::SourceTrs>, String> {
+    use moly_law::particle::owner::SourceTrs;
     fn words<const N: usize>(node: &Value, key: &str) -> Option<[f32; N]> {
         let list = node.get(key)?.as_array().filter(|list| list.len() == N)?;
         let mut out = [0.0f32; N];
@@ -1538,15 +1630,10 @@ fn owner_matrices(by_path: &HashMap<String, &Value>, path: &str)
         }
         current = parent;
     }
-    let trs = chain.iter().rev()
+    chain.iter().rev()
         .map(|node| Some(SourceTrs { t: words(node, "position")?, q: words(node, "rotation")?, s: words(node, "scale")? }))
         .collect::<Option<Vec<_>>>()
-        .ok_or("owner chain lacks an authored TRS")?;
-    let owner = local_scaling_owner(&trs).map_err(|refused| format!("owner words {refused:?}"))?;
-    if !owner.invert_ok {
-        return Err("owner matrix below the inverse's determinant threshold".into());
-    }
-    Ok(owner)
+        .ok_or_else(|| "owner chain lacks an authored TRS".to_owned())
 }
 
 /// Whether the target's parent is admitted with a birth or death edge to it:
@@ -1623,6 +1710,8 @@ fn admit_animated(animation: &crate::weather_animation::Contract, mut planned: P
         "an animated emitter's chain carries more than two translations; that owner matrix was not evaluated"
     } else if planned.kind == EffectKind::Camera && planned.camera_rotation {
         "an animated emitter under the rotating camera anchor; that owner matrix was not evaluated"
+    } else if planned.collision_owner.is_some() || planned.trail_owner.is_some() || planned.child_owner.is_some() {
+        "an animated emitter's owner words: they are composed from the authored rotations, not the Animator's"
     } else {
         planned.animated = true;
         return Some(planned);
@@ -2233,17 +2322,21 @@ fn judge_in_archive(
     // The owner words of a Local system whose CollisionModule or TrailModule
     // reads them (the collision query and hits go through the local-to-world
     // and its inverse, the trail job composes the view with the
-    // local-to-world): the engine's owner update of the authored chain, which
-    // exists only for a site effect on that chain.
+    // local-to-world): the engine's owner update of the effect's chain (see
+    // `chain_owner`), on an authored chain only.
+    let mut sky_owner_chain = None;
     let local_owner = match emitter.simulation_space {
         moly_law::particle::schema::SimulationSpace::Local if emitter.collision.is_some() || emitter.trails.is_some() => {
-            if kind != EffectKind::Site || instance_anchor.is_some() {
+            if instance_anchor.is_some() {
                 tally.law_reject.push(format!(
                     "{node}: owner words of a Local collision or trail are composed only for a site effect on its authored chain"));
                 return None;
             }
-            match owner_matrices(by_path, node) {
-                Ok(owner) => Some(owner),
+            match chain_owner(by_path, node, kind) {
+                Ok((owner, chain)) => {
+                    sky_owner_chain = chain;
+                    Some(owner)
+                }
                 Err(reason) => {
                     tally.law_reject.push(format!("{node}: owner words of a Local collision or trail: {reason}"));
                     return None;
@@ -2276,11 +2369,14 @@ fn judge_in_archive(
         Some(parent) => {
             let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: mesh_reference.is_some() };
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
-                .and_then(|()| child_owner_words(by_path, node))
+                .and_then(|()| child_owner_words(by_path, node, kind))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
                     camera_rotation, lifecycle, asset_root, ground, bodies, server).map(|()| owner));
             match owner {
-                Ok(owner) => Some(owner),
+                Ok((owner, chain)) => {
+                    sky_owner_chain = sky_owner_chain.or(chain);
+                    Some(owner)
+                }
                 Err(reason) => {
                     tally.law_reject.push(format!("sub-emitter target {node}: {reason}"));
                     return None;
@@ -2311,6 +2407,7 @@ fn judge_in_archive(
         child_owner,
         collision_owner,
         trail_owner,
+        sky_owner_chain,
         emission_surface,
         node: node.to_owned(),
         effect: effect_name.to_owned(),
@@ -2557,9 +2654,8 @@ pub(crate) fn spawn_when_ready(
     time: Res<Time>,
     site: Option<Res<SiteActive>>,
     site_ready: Option<Res<crate::site::SiteScenesReady>>,
-    gltfs: Res<Assets<Gltf>>,
-    gltf_nodes: Res<Assets<GltfNode>>,
-    gltf_meshes: Res<Assets<GltfMesh>>,
+    (mut environment_root, frame): (ResMut<EnvironmentRoot>, Res<bevy::diagnostic::FrameCount>),
+    (gltfs, gltf_nodes, gltf_meshes): (Res<Assets<Gltf>>, Res<Assets<GltfNode>>, Res<Assets<GltfMesh>>),
 ) {
     let Some(mut plan) = plan else { return; };
     if !anchor.as_ref().is_some_and(|a| a.tier == plan.tier && a.env_site == plan.env_site)
@@ -2678,7 +2774,18 @@ pub(crate) fn spawn_when_ready(
     let now = time.elapsed_secs_f64();
     let delta = crate::particle_runtime::source_delta_time(time.delta());
     let phase_started = plan.site_started_at.is_none();
+    // Which source path installs the new effects. At load (the session's
+    // first environment: no environment to fade from) the environment view's
+    // creation installs the sky effect, then the camera effect, then the site
+    // effect in one synchronous run, with the site view passed in. Any later
+    // change cross-fades: the site effect's task yields at least once and then
+    // waits for the next site's view (up to 5 s), while the fade loop yields
+    // at least once when its duration is positive (none when it is zero)
+    // before the sky and camera effects are installed.
+    let at_load = phase.movement.is_none();
     if phase_started {
+        info!("[weather-fx] {} @ {} install path {} (movement {:?}, fade {}s) started frame={}", plan.tier, plan.env_site,
+            if at_load { "load" } else { "cross-fade" }, phase.movement, phase.fade_seconds, frame.0);
         retiring.stop_matching(state, now, delta, |kind| kind == EffectKind::Site);
         if state.global_identity != Some(plan.selection.global_effect) {
             // StopSkyEffect runs before PrepareCrossFade. Camera FX deliberately
@@ -2695,13 +2802,19 @@ pub(crate) fn spawn_when_ready(
     let waited = now - plan.site_started_at.unwrap();
     let controller_ready = site_ready.is_some() && site.as_ref().is_some_and(|site|
         site.site_id == plan.selection.site_id && site.env_site == plan.selection.environment_site);
-    let install_site = !plan.site_installed && !phase_started && controller_ready;
+    let install_site = !plan.site_installed && controller_ready && (at_load || !phase_started);
     let site_timed_out = !plan.site_installed && !controller_ready && waited >= 5.0;
     if install_site || site_timed_out { plan.site_installed = true; }
     if install_site { retiring.install_colliders(&plan.colliders, |kind| kind == EffectKind::Site); }
     if site_timed_out { warn!("[weather-fx] destination site controller unavailable after source 5s timeout: {}", plan.env_site); }
     let preserve_global = state.global_identity == Some(plan.selection.global_effect) && !state.sky_stopped;
-    let install_global = !plan.global_installed && !preserve_global && phase.can_commit_global_fx(&plan.selection);
+    let install_global = !plan.global_installed && !preserve_global && phase.can_commit_global_fx(&plan.selection)
+        && if at_load { plan.site_installed } else { !(phase_started && phase.fade_seconds > 0.0) };
+    if install_global && !plan.site_installed {
+        info!("[weather-fx] {} @ {} global effects before the site effect frame={}: site scenes ready {}, site matches {}",
+            plan.tier, plan.env_site, frame.0, site_ready.is_some(), site.as_ref().is_some_and(|site|
+                site.site_id == plan.selection.site_id && site.env_site == plan.selection.environment_site));
+    }
     if install_global {
         retiring.stop_matching(state, now, delta, |kind| kind != EffectKind::Site);
         retiring.install_colliders(&plan.colliders, |kind| kind != EffectKind::Site);
@@ -2720,6 +2833,13 @@ pub(crate) fn spawn_when_ready(
         commands.insert_resource(crate::weather_transition::WeatherGlobalFxCommitted(plan.request_serial));
     }
     let mut waiting = Vec::new();
+    let owner_anchor = match site.as_deref() {
+        Some(active) => {
+            environment_root.enter(active);
+            environment_root.owner_anchor(active)
+        }
+        None => Err("owner words on the sky chain: no active site".to_owned()),
+    };
     // Clocks belong to instantiated effects. They are shared by their emitters,
     // preserved with unchanged global instances, and move intact into retirement.
     let mut effect_clocks: HashMap<String, Arc<crate::weather_animation::EffectClock>> = HashMap::new();
@@ -2734,6 +2854,30 @@ pub(crate) fn spawn_when_ready(
         if (is_global && !install_global) || (!is_global && !install_site) {
             waiting.push(planned); continue;
         }
+        // A sky system's owner words from the root this frame stands at.
+        let mut planned = planned;
+        let sky_owner = match planned.sky_owner_chain.clone() {
+            None => None,
+            Some(chain) => match owner_anchor.clone()
+                .and_then(|anchor| environment_owner(&sky_prefix(anchor), &chain, false).map(|owner| (anchor, owner))) {
+                Ok((anchor, owner)) => {
+                    use moly_law::particle::collision_response::QueryAffine;
+                    planned.child_owner = planned.child_owner.map(|_| moly_law::particle::child_emit::ChildOwner::local_scaling(&owner));
+                    planned.collision_owner = planned.collision_owner.map(|_| moly_law::particle::collision_query::OwnerPair {
+                        local_to_world: QueryAffine::from_columns(&owner.local_to_world),
+                        world_to_local: QueryAffine::from_columns(&owner.world_to_local),
+                    });
+                    planned.trail_owner = planned.trail_owner.map(|_| owner.local_to_world);
+                    Some(SkyOwner { chain, anchor: anchor.map(f32::to_bits) })
+                }
+                Err(reason) => {
+                    error!(%reason, node=%planned.node, "sky owner words refused: the system is not installed");
+                    if let Some((draw, _)) = planned.draw { commands.entity(draw).try_despawn(); }
+                    if let Some((draw, _)) = planned.trail.and_then(|trail| trail.draw) { commands.entity(draw).try_despawn(); }
+                    continue;
+                }
+            },
+        };
         let (draw, mesh) = planned.draw.expect("GPU preflight must precede installation");
         let mut source = planned.source;
         let sort_mode = source.sort_mode;
@@ -2773,7 +2917,7 @@ pub(crate) fn spawn_when_ready(
         let collision_scene = planned.collision_scene.clone();
         let collision_owner = planned.collision_owner;
         state.live.push(LiveWeatherEmitter { draw, trail_draw, native_refusal: None, lifecycle: planned.lifecycle.expect("weather plans own a source lifecycle"), effect_clock,
-            effect_animator, animated_chain, frame_clock, play, children, runtime: Runtime {
+            effect_animator, animated_chain, frame_clock, play, children, sky_owner, runtime: Runtime {
             node: planned.node.clone(),
             effect: planned.effect.clone(),
             emitter: planned.emitter.clone(),
@@ -2936,7 +3080,8 @@ pub(crate) fn spawn_when_ready(
     link_sub_emitter_targets(&mut state.live);
     state.admitted = state.live.len();
     if install_site || install_global {
-        info!("[weather-fx] {} @ {} phase site={} global={} active={} retiring={}",state.tier,state.env_site,install_site,install_global,state.live.len(),retiring.live.len());
+        info!("[weather-fx] {} @ {} phase site={} global={} active={} retiring={} frame={} path={}",state.tier,state.env_site,install_site,install_global,state.live.len(),retiring.live.len(),
+            frame.0, if at_load { "load" } else { "cross-fade" });
     }
     if plan.site_installed && plan.global_installed { state.selection = Some(plan.selection.clone()); }
     if create_state { commands.insert_resource(created); }
@@ -3138,20 +3283,55 @@ fn direct_targets(system: &Runtime) -> Vec<String> {
 /// The camera effects are children of the rendering camera's own transform.
 /// The site-unique effects are children of the site view, the field prefab's
 /// root at the site origin. Their anchors are the camera and the identity.
-#[derive(Default)]
+///
+/// The weather host's installer and frame both read it; whichever sees a
+/// site first applies the move ([`EnvironmentRoot::enter`] is idempotent for
+/// a site already seen).
+#[derive(Resource, Default)]
 pub(crate) struct EnvironmentRoot {
     /// Source-world position.
     world: Vec3,
     /// Site type and category of the site the root was last seen from; `None`
     /// before the first site of the session.
     seen: Option<(String, String)>,
+    /// The arrival point this host stood in for at the root's last landing
+    /// (the missing value and the stand-in); `None` while the root stands
+    /// where the source puts it.
+    stand_in: Option<(&'static str, &'static str)>,
 }
 
 impl EnvironmentRoot {
-    /// Apply the source's move from the last seen site to `active`. When this
-    /// host stands in for an arrival point, returns the missing value and the
-    /// stand-in.
-    fn enter(&mut self, active: &SiteActive) -> Option<(&'static str, &'static str)> {
+    /// Apply the source's move from the last seen site to `active`, logging
+    /// where this host stands in for an arrival point.
+    fn enter(&mut self, active: &SiteActive) {
+        let landed = self.enter_move(active);
+        if let Some(landed) = landed {
+            self.stand_in = landed;
+            if let Some((missing, stand_in)) = landed {
+                warn!(
+                    "[weather-fx] sky anchor on {}: {missing} is not supplied; the environment root lands on {stand_in} instead",
+                    active.site_type
+                );
+            }
+        }
+    }
+
+    /// The owner-word position of the root: the controller's position in
+    /// source axes seen from the active site (the frame this host draws the
+    /// active site and its colliders in). Refused while the root stands in
+    /// for an arrival point.
+    fn owner_anchor(&self, active: &SiteActive) -> Result<[f32; 3], String> {
+        if let Some((missing, stand_in)) = self.stand_in {
+            return Err(format!("owner words on the sky chain: {missing} is not supplied (the environment root stands on {stand_in})"));
+        }
+        Ok((self.world - Vec3::from_array(active.position)).to_array())
+    }
+
+    /// The source's move from the last seen site to `active`: `None` when the
+    /// root does not land (the same site, a door move, the session's first
+    /// site); otherwise the landing, with the missing value and the stand-in
+    /// when this host stands in for the arrival point.
+    fn enter_move(&mut self, active: &SiteActive) -> Option<Option<(&'static str, &'static str)>> {
         const HOME: &str = "housing_home";
         const ROOM: &str = "housing_room";
         const HARVEST: &str = "harvest";
@@ -3167,15 +3347,15 @@ impl EnvironmentRoot {
         match active.category.as_str() {
             HARVEST => {
                 self.land(site);
-                None
+                Some(None)
             }
             DELIVERY => {
                 self.land(site);
-                Some(("the delivery site's arrival offset", "the site origin"))
+                Some(Some(("the delivery site's arrival offset", "the site origin")))
             }
             HOME | ROOM if from_cannon_site => {
                 self.land(Vec3::ZERO);
-                Some(("the house's inside-door point", "the starting point"))
+                Some(Some(("the house's inside-door point", "the starting point")))
             }
             _ => None,
         }
@@ -3194,6 +3374,40 @@ impl EnvironmentRoot {
     }
 }
 
+/// A sky system's owner words at the root `anchor` stands at: recomposed when
+/// the root moved since they were last composed, and written where the
+/// system reads them (the collision query, the trail job, a target's child
+/// owner). Systems without sky owner words are left alone.
+fn refresh_sky_owner(live: &mut LiveWeatherEmitter, anchor: &Result<[f32; 3], String>) -> Result<(), String> {
+    let Some(sky) = live.sky_owner.as_mut() else { return Ok(()); };
+    let anchor = anchor.clone()?;
+    let bits = anchor.map(f32::to_bits);
+    if sky.anchor == bits {
+        return Ok(());
+    }
+    let owner = environment_owner(&sky_prefix(anchor), &sky.chain, false)?;
+    sky.anchor = bits;
+    write_owner_words(&mut live.runtime, &owner)
+}
+
+/// Write owner words into every consumer the installed system has.
+fn write_owner_words(runtime: &mut Runtime, owner: &moly_law::particle::owner::OwnerMatrices) -> Result<(), String> {
+    use moly_law::particle::collision_response::QueryAffine;
+    if let Some(collision) = runtime.collision.as_mut().filter(|collision| collision.owner.is_some()) {
+        collision.owner = Some(moly_law::particle::collision_query::OwnerPair {
+            local_to_world: QueryAffine::from_columns(&owner.local_to_world),
+            world_to_local: QueryAffine::from_columns(&owner.world_to_local),
+        });
+    }
+    if runtime.trail.as_ref().is_some_and(|trail| trail.owner.is_some()) {
+        crate::particle_runtime::attach_trail_owner(runtime, owner.local_to_world).map_err(str::to_owned)?;
+    }
+    if let Some(target) = runtime.native_birth.as_mut().and_then(|native| native.target.as_mut()) {
+        target.owner = moly_law::particle::child_emit::ChildOwner::local_scaling(owner);
+    }
+    Ok(())
+}
+
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。
 ///
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
@@ -3208,17 +3422,12 @@ pub(crate) fn advance(
     frame: Res<bevy::diagnostic::FrameCount>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     site: Option<Res<SiteActive>>,
-    mut environment_root: Local<EnvironmentRoot>,
+    mut environment_root: ResMut<EnvironmentRoot>,
 ) {
     // Follow every site change, also on frames that draw nothing, so the root
     // sees each move the source would make.
     if let Some(active) = site.as_deref() {
-        if let Some((missing, stand_in)) = environment_root.enter(active) {
-            warn!(
-                "[weather-fx] sky anchor on {}: {missing} is not supplied; the environment root lands on {stand_in} instead",
-                active.site_type
-            );
-        }
+        environment_root.enter(active);
     }
     // Observe instance age even when no camera can produce a particle draw.
     // The effect Animators evaluate here too, once per frame with the frame's
@@ -3266,6 +3475,20 @@ pub(crate) fn advance(
         site: GlobalTransform::IDENTITY,
     };
     let pass = lifecycle::CameraPass::new(camera_transform, camera, perspective.near, perspective.far);
+    // The engine recomputes a system's owner words before the frame's first
+    // particle update whenever its transform changed: a sky system's follow
+    // the root this frame stands at. A root this host stands in for refuses
+    // them.
+    let owner_anchor = environment_root.owner_anchor(active_site);
+    let mut owner_refused = Vec::new();
+    for live in state.as_deref_mut().into_iter().flat_map(|state| state.live.iter_mut())
+        .chain(retiring.live.iter_mut().map(|entry| &mut entry.emitter)) {
+        if let Err(reason) = refresh_sky_owner(live, &owner_anchor) {
+            error!(%reason, effect=%live.runtime.effect, node=%live.runtime.node,
+                "sky owner words refused: the system is retired and draws nothing");
+            owner_refused.push(live.draw);
+        }
+    }
 
     // Indoors the three effect owners are inactive (see refresh_effect_visible).
     let live_active = !site.as_deref().is_some_and(SiteActive::is_indoor);
@@ -3275,7 +3498,7 @@ pub(crate) fn advance(
         .chain(retiring.live.iter_mut().map(|s| (&mut s.emitter, false)))
         .collect();
     // Systems whose native step was refused this frame; see step_frame.
-    let mut refused = Vec::new();
+    let mut refused = owner_refused;
     // 惰性 prewarm：首个推进帧快进原版首次 Play 的暖机窗口（只动仿真
     // 状态不喂渲染，快进里的世界空间出生锚在首帧锚点上）。窗口长度与
     // 起始时钟取原生 Compute/Update1b 的值；Play 只在 prewarm 且循环时
@@ -3499,3 +3722,7 @@ mod sub_emitter_chain_tests;
 #[cfg(test)]
 #[path = "weather_scene_reach.rs"]
 mod scene_reach;
+
+#[cfg(test)]
+#[path = "weather_sky_owner_receipt.rs"]
+mod sky_owner_receipt;

@@ -328,6 +328,7 @@ pub fn install(app: &mut App) {
         // 同款故事；native 上与天气插件的 init 幂等重合）。
         .init_resource::<weather::CurrentPhenomenonId>()
         .init_resource::<weather_fx::WeatherFxRetirements>()
+        .init_resource::<weather_fx::EnvironmentRoot>()
         .init_resource::<crate::particle_runtime::seed::SystemSeedManager>()
         // The player's Time.unscaledDeltaTime holder: advanced once per frame
         // from the real clock, right after the app's clocks update.
