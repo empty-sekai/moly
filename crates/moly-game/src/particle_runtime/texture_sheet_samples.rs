@@ -12,7 +12,7 @@ fn texture_sheet_matches_native_in_shared_geometry() {
     let identity = GlobalTransform::IDENTITY;
     let camera = GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 10.0));
     let basis = crate::billboard::CameraBasis { position: camera.translation(), forward: -Vec3::Z,
-        right: Vec3::X, up: Vec3::Y, fov_y: 1.0, aspect: 1.0 };
+        right: Vec3::X, up: Vec3::Y, fov_y: 1.0, aspect: 1.0, near: 0.3 };
     let mut system = test_support::runtime();
     system.geometry = Geometry::SourceBillboard(crate::source_billboard::Draw {
         mode: crate::source_billboard::Mode::Billboard,

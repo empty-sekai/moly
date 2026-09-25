@@ -2,9 +2,11 @@
 //! the emitting node, its general 3D inverse, the normalized global rotation,
 //! the node's own rotation as a 3x3 and the emitter scale, computed from the
 //! node TRS words exactly as the engine's per-frame owner update does for the
-//! Local scaling mode with the default transform (no mesh-renderer shape, not
-//! Custom simulation space). Hierarchy and Shape scaling, Custom space and
-//! mesh-renderer shapes take other branches and are not transcribed.
+//! Local and Hierarchy scaling modes with the default transform (no
+//! mesh-renderer shape, not Custom simulation space). The two modes differ
+//! only in the local-to-world matrix and the emitter scale; the rotation, the
+//! inverse and the local 3x3 are the same tail. Shape scaling, Custom space
+//! and mesh-renderer shapes take other branches and are not transcribed.
 //!
 //! Every step is one f32 operation in the engine's association; no fused
 //! multiply-add, no f64 (except the determinant threshold test, which the
@@ -39,9 +41,20 @@ pub struct OwnerMatrices {
     pub rotation: [f32; 4],
     /// Column-major 3x3 of the node's own normalized rotation.
     pub local_rotation: [f32; 9],
-    /// Local scaling: the node's own local scale. The shape scale the same
-    /// update stores next to it is (1, 1, 1) in this mode.
+    /// Local scaling: the node's own local scale. Hierarchy scaling: the
+    /// lossy global scale ([`owner_matrices`]). The shape scale the same
+    /// update stores next to it is (1, 1, 1) in both modes.
     pub emitter_scale: [f32; 3],
+}
+
+/// The MainModule scaling mode, which picks the owner update's branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerScaling {
+    /// Mode 0: the node's full transform, scales of every node included.
+    Hierarchy,
+    /// Mode 1: the node's position and rotation through the chain, scaled by
+    /// the node's own scale only.
+    Local,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,12 +74,34 @@ const TINY: f32 = f32::from_bits(0x0da2_4260);
 const INVERT_LIMIT: f64 = f64::from_bits(0x3abe_f2d0_f5da_7dd9);
 
 /// Owner matrices for Local scaling from the chain, root first, the emitting
-/// node last. Starting from the node's own translation and rotation, each
-/// ancestor, nearest first, scales the position component-wise by its scale,
-/// rotates it and adds its translation, and multiplies the rotation by its
-/// own (with the scale sign flips). Only the emitting node's scale scales the
-/// matrix columns.
+/// node last ([`owner_matrices`]).
 pub fn local_scaling_owner(chain: &[SourceTrs]) -> Result<OwnerMatrices, OwnerRefusal> {
+    owner_matrices(chain, OwnerScaling::Local)
+}
+
+/// Owner matrices from the chain, root first, the emitting node last, in the
+/// branch of `scaling`.
+///
+/// Local: starting from the node's own translation, each ancestor, nearest
+/// first, scales the position component-wise by its scale, rotates it and
+/// adds its translation. The matrix is the global rotation's, only the
+/// emitting node's scale scales its columns, and the emitter scale is that
+/// scale.
+///
+/// Hierarchy: the node's matrix is its rotation matrix with each column
+/// times its scale, and its translation; each ancestor, nearest first,
+/// multiplies it from the left by its own such matrix, column by column as
+/// `p0 * c.x + (p1 * c.y + p2 * c.z)` and the translation as
+/// `p.t + (p0 * t.x + (p1 * t.y + p2 * t.z))`, from each node's unnormalized
+/// rotation. The fourth lane of the first three columns is +0. The emitter
+/// scale is the lossy global scale: the diagonal of the conjugate global
+/// rotation's matrix times the product's 3x3, lane `i` as
+/// `r0[i] * m_i.x + (r1[i] * m_i.y + r2[i] * m_i.z)` over column `i` of the
+/// product, with the unnormalized global rotation.
+///
+/// Both then store the normalized global rotation ([`global_rotation`]), the
+/// general 3D inverse and the 3x3 of the node's normalized own rotation.
+pub fn owner_matrices(chain: &[SourceTrs], scaling: OwnerScaling) -> Result<OwnerMatrices, OwnerRefusal> {
     let (leaf, ancestors) = chain.split_last().ok_or(OwnerRefusal::EmptyChain)?;
     if chain
         .iter()
@@ -74,23 +109,40 @@ pub fn local_scaling_owner(chain: &[SourceTrs]) -> Result<OwnerMatrices, OwnerRe
     {
         return Err(OwnerRefusal::NonfiniteInput);
     }
-    let mut position = leaf.t;
-    let mut rotation = leaf.q;
-    for parent in ancestors.iter().rev() {
-        let scaled = std::array::from_fn(|k| position[k] * parent.s[k]);
-        let rotated = rotate(parent.q, scaled);
-        position = std::array::from_fn(|k| parent.t[k] + rotated[k]);
-        rotation = quat_mul(parent.q, sign_flip(rotation, parent.s));
-    }
-    let columns = rotation_matrix(rotation);
+    let rotation = global_rotation(chain)?;
     let mut local_to_world = [0.0; 16];
-    for c in 0..3 {
-        for r in 0..3 {
-            local_to_world[4 * c + r] = leaf.s[c] * columns[c][r];
+    let emitter_scale = match scaling {
+        OwnerScaling::Local => {
+            let mut position = leaf.t;
+            for parent in ancestors.iter().rev() {
+                let scaled = std::array::from_fn(|k| position[k] * parent.s[k]);
+                let rotated = rotate(parent.q, scaled);
+                position = std::array::from_fn(|k| parent.t[k] + rotated[k]);
+            }
+            let columns = rotation_matrix(rotation);
+            for c in 0..3 {
+                for r in 0..3 {
+                    local_to_world[4 * c + r] = leaf.s[c] * columns[c][r];
+                }
+                local_to_world[4 * c + 3] = leaf.s[c] * 0.0;
+            }
+            local_to_world[12..15].copy_from_slice(&position);
+            leaf.s
         }
-        local_to_world[4 * c + 3] = leaf.s[c] * 0.0;
-    }
-    local_to_world[12..15].copy_from_slice(&position);
+        OwnerScaling::Hierarchy => {
+            let (columns, position) = hierarchy_product(chain);
+            for c in 0..3 {
+                local_to_world[4 * c..4 * c + 3].copy_from_slice(&columns[c]);
+            }
+            local_to_world[12..15].copy_from_slice(&position);
+            let [x, y, z, w] = rotation;
+            let inverse = rotation_matrix([-x, -y, -z, w]);
+            std::array::from_fn(|i| {
+                let m = columns[i];
+                inverse[0][i] * m[0] + (inverse[1][i] * m[1] + inverse[2][i] * m[2])
+            })
+        }
+    };
     local_to_world[15] = 1.0;
     let (world_to_local, invert_ok) = invert_general_3d(&local_to_world);
     let out = OwnerMatrices {
@@ -99,7 +151,7 @@ pub fn local_scaling_owner(chain: &[SourceTrs]) -> Result<OwnerMatrices, OwnerRe
         invert_ok,
         rotation: normalize(rotation),
         local_rotation: quat_to_matrix3(normalize(leaf.q)),
-        emitter_scale: leaf.s,
+        emitter_scale,
     };
     let finite = out
         .local_to_world
@@ -113,6 +165,28 @@ pub fn local_scaling_owner(chain: &[SourceTrs]) -> Result<OwnerMatrices, OwnerRe
         return Err(OwnerRefusal::NonfiniteOutput);
     }
     Ok(out)
+}
+
+/// The Hierarchy branch's product over the chain (root first, nonempty): the
+/// 3x3 columns and the translation.
+fn hierarchy_product(chain: &[SourceTrs]) -> ([[f32; 3]; 3], [f32; 3]) {
+    let node = |n: &SourceTrs| -> [[f32; 3]; 3] {
+        let r = rotation_matrix(n.q);
+        std::array::from_fn(|c| std::array::from_fn(|k| r[c][k] * n.s[c]))
+    };
+    let (leaf, ancestors) = chain.split_last().expect("a nonempty chain");
+    let mut columns = node(leaf);
+    let mut position = leaf.t;
+    for parent in ancestors.iter().rev() {
+        let p = node(parent);
+        let apply = |v: [f32; 3]| -> [f32; 3] {
+            std::array::from_fn(|k| p[0][k] * v[0] + (p[1][k] * v[1] + p[2][k] * v[2]))
+        };
+        columns = columns.map(apply);
+        let moved = apply(position);
+        position = std::array::from_fn(|k| parent.t[k] + moved[k]);
+    }
+    (columns, position)
 }
 
 /// The world rotation of the chain's last node (root first) as the engine's
@@ -415,6 +489,108 @@ mod tests {
         assert_eq!(compared + refused, producer.len());
         assert!(compared > 0 && inverted > 0);
         assert!(arms.iter().all(|&n| n > 0), "every negative arm must differ from native somewhere: {arms:?}");
+    }
+
+    /// Native rows of the owner update in the Hierarchy scaling mode (path by
+    /// environment variable): random chains with rotations and every kind of
+    /// scale, edges, and the exported chains of the sub-emitter targets that
+    /// use this mode (the sky ones under the environment chain). Every output
+    /// word is compared bit for bit; the shape scale is (1, 1, 1).
+    #[test]
+    #[ignore = "needs MOLY_HIER_OWNER_ROWS (native Hierarchy owner-update rows)"]
+    fn hierarchy_owner_matches_native_rows() {
+        let path = std::env::var_os("MOLY_HIER_OWNER_ROWS").expect("MOLY_HIER_OWNER_ROWS");
+        let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(receipt.get("sha256").and_then(Value::as_str),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9"));
+        let node = |v: &Value| SourceTrs {
+            t: floats(v.get("t").unwrap()), q: floats(v.get("q").unwrap()), s: floats(v.get("s").unwrap()) };
+        let rows = receipt.get("rows").and_then(Value::as_array).unwrap();
+        let fields = ["localToWorld", "worldToLocal", "rotation", "localRotation3x3", "emitterScale", "copy"];
+        let words_of = |out: &OwnerMatrices| [bits(&out.local_to_world), bits(&out.world_to_local), bits(&out.rotation),
+            bits(&out.local_rotation), bits(&out.emitter_scale), bits(&out.local_to_world)];
+        let (mut compared, mut local_native) = (0usize, 0usize);
+        // Mutants: the Local branch; the node's own scale for the emitter
+        // scale; the translation and columns summed left to right; each node's
+        // rotation normalized before its matrix.
+        let mut arms = [0usize; 4];
+        for (index, row) in rows.iter().enumerate() {
+            let chain: Vec<SourceTrs> = ["prefix", "prefab"].iter()
+                .flat_map(|key| row.get(key).and_then(Value::as_array).unwrap().iter().map(node)).collect();
+            let native = row.get("native").unwrap();
+            let native_words: Vec<Vec<u32>> = fields.iter().map(|f| words(native.get(f).unwrap())).collect();
+            assert_eq!(words(native.get("shapeScale").unwrap()), bits(&[1.0; 3]), "row {index} shape scale");
+            let out = owner_matrices(&chain, OwnerScaling::Hierarchy)
+                .unwrap_or_else(|e| panic!("row {index}: refused {e:?}"));
+            for (field, (a, b)) in fields.iter().zip(words_of(&out).iter().zip(&native_words)) {
+                assert_eq!(a, b, "row {index} {field}");
+            }
+            compared += 1;
+            // The native Local branch on the same chain equals this law's Local
+            // words (the existing branch, run on these chains too).
+            let local = owner_matrices(&chain, OwnerScaling::Local).unwrap();
+            let native_local = row.get("nativeLocal").unwrap();
+            if fields.iter().zip(words_of(&local).iter()).all(|(f, a)| *a == words(native_local.get(f).unwrap())) {
+                local_native += 1;
+            }
+            if words_of(&local) != native_words.as_slice() {
+                arms[0] += 1;
+            }
+            if bits(&chain[chain.len() - 1].s) != native_words[4] {
+                arms[1] += 1;
+            }
+            let (columns, position) = mutant_product(&chain, false, true);
+            let (normalized, _) = mutant_product(&chain, true, false);
+            let flat = |c: [[f32; 3]; 3], t: Option<[f32; 3]>| {
+                let mut m = bits(&out.local_to_world);
+                for k in 0..3 {
+                    for r in 0..3 {
+                        m[4 * k + r] = c[k][r].to_bits();
+                    }
+                }
+                if let Some(t) = t {
+                    for r in 0..3 {
+                        m[12 + r] = t[r].to_bits();
+                    }
+                }
+                m
+            };
+            if flat(columns, Some(position)) != native_words[0] {
+                arms[2] += 1;
+            }
+            if flat(normalized, None) != native_words[0] {
+                arms[3] += 1;
+            }
+        }
+        eprintln!("hierarchy owner replay: rows {}, compared {compared}, mismatched 0; native Local rows equal to \
+            the Local branch {local_native}; mutants red: localBranch {} leafScale {} leftToRight {} normalizedNodes {}",
+            rows.len(), arms[0], arms[1], arms[2], arms[3]);
+        assert_eq!(compared, rows.len());
+        assert_eq!(local_native, rows.len());
+        assert!(arms.iter().all(|&n| n > 0), "every mutant must be red somewhere: {arms:?}");
+    }
+
+    /// Mutant arm only: the Hierarchy product with each node's rotation
+    /// normalized first, or with the sums taken left to right.
+    fn mutant_product(chain: &[SourceTrs], normalized: bool, left_to_right: bool) -> ([[f32; 3]; 3], [f32; 3]) {
+        let node = |n: &SourceTrs| -> [[f32; 3]; 3] {
+            let r = rotation_matrix(if normalized { normalize(n.q) } else { n.q });
+            std::array::from_fn(|c| std::array::from_fn(|k| r[c][k] * n.s[c]))
+        };
+        let (leaf, ancestors) = chain.split_last().unwrap();
+        let mut columns = node(leaf);
+        let mut position = leaf.t;
+        for parent in ancestors.iter().rev() {
+            let p = node(parent);
+            let apply = |v: [f32; 3]| -> [f32; 3] {
+                std::array::from_fn(|k| if left_to_right { (p[0][k] * v[0] + p[1][k] * v[1]) + p[2][k] * v[2] }
+                    else { p[0][k] * v[0] + (p[1][k] * v[1] + p[2][k] * v[2]) })
+            };
+            columns = columns.map(apply);
+            let moved = apply(position);
+            position = std::array::from_fn(|k| parent.t[k] + moved[k]);
+        }
+        (columns, position)
     }
 
     /// Negative arm only: a double-precision inverse rounded to f32.

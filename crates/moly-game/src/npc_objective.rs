@@ -88,8 +88,6 @@
 
 use crate::client_config::{
     ClientConfigs, KEY_CHARACTER_FIXTURE_MOVE_OFFSET, KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME,
-    KEY_CHARACTER_OVERLAP_DISTANCE,
-    KEY_CHARACTER_OVERLAP_TIME,
     KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
     KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
     KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT, KEY_NPC_LOTTERY_TALK1_WIGHT,
@@ -916,7 +914,8 @@ pub struct ObjectiveMind {
     pub(crate) greeting_halt: Option<String>,
     /// Identifies each newly armed objective Rest interval, not each frame.
     pub(crate) rest_revision: u64,
-    overlap_seconds: f32,
+    /// TryCancelIfCharacterOverlap's timer (presenter call 8).
+    pub(crate) overlap_seconds: f32,
     /// A cancelled ordinary target completes its coroutine, then the AI loop
     /// enters its next TryRest after Show. Cancelling a running Rest instead
     /// continues past that Rest. Neither operation resets talk data.
@@ -1481,10 +1480,6 @@ pub(crate) fn decide(
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
-    initialized: Query<
-        (&CharacterUnitId, &InheritedVisibility),
-        With<crate::character::MotionDriver>,
-    >,
     catalog: crate::player_talk::TalkCatalog,
     mut fixture_activities: crate::npc_fixture_activity::Factory,
     mut npcs: Query<(
@@ -1791,7 +1786,6 @@ pub(crate) fn decide(
             }
         }
         if talk_hold.is_some() || talking {
-            mind.overlap_seconds = 0.0;
             continue;
         }
         if let Some(cancelled) = mind.edit_rest_after.take() {
@@ -1801,48 +1795,8 @@ pub(crate) fn decide(
                 finish_objective(unit.0, &mut mind, &mut slot, frame, false);
             }
         }
-        let overlaps = snaps.iter().any(|other| {
-            other.unit != unit.0
-                && dist3(state.0.position, other.position)
-                    < config.float(KEY_CHARACTER_OVERLAP_DISTANCE)
-        });
-        // 当前移动执行器运行于 AutoMove；转体相位在源是 Rotate。
-        // 本域未承载 FixtureAction/PhotoShot/通信状态，不能把它们猜成常态。
-        let state_type = actions.current as u8;
-        let group_talk = objective::overlap::has_group_talk(mind.current, slot.kind());
-        let cancellable = mind.executing || mind.resting();
-        let visible = initialized
-            .iter()
-            .any(|(id, visibility)| id.0 == unit.0 && visibility.get());
-        if visible
-            && objective::overlap::should_cancel(
-                &mut mind.overlap_seconds,
-                dt,
-                config.float(KEY_CHARACTER_OVERLAP_TIME),
-                overlaps,
-                group_talk,
-                state_type,
-                cancellable,
-            )
-        {
-            mind.executing = false;
-            mind.current = None;
-            mind.body = None;
-            mind.rest = None;
-            mind.yield_since = None;
-            mind.skip_next_rest = true;
-            mind.overlap_cancel_frame = Some(frame);
-            slot.reset_ai_talk_data();
-            route.cancel();
-            path.0 = moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
-            state.0.next_corner = 0;
-            *phase = MotionPhase::Dwelling { remaining: None };
-            actions.change(crate::npc::NpcAction::Idle, &mut rest);
-            info!(
-                "[npc unit={}] 角色重叠超过源时限，取消目标并立即重选",
-                unit.0
-            );
-        }
+        // TryCancelIfCharacterOverlap is the presenter's call 8
+        // (npc_presenter::try_cancel_if_overlap), after this loop.
         // 执行中且路线已尽（推进系统末站驻留尽的收场位）：目标收场。路点
         // 中途的驻留（Some）不收场——目标还没走完，不换乘。
         let outcome = if mind.executing && mind.body.is_none() {

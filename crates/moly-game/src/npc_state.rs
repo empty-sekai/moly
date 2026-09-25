@@ -140,6 +140,38 @@ impl Plugin for NpcStatePlugin {
                 crate::npc_clock::advance.after(bevy::time::TimeSystems),
             )
             .add_systems(Update, crate::npc_tweet::parse);
+        // The presenter's other per-frame calls, in the source order around
+        // the state machine update (call 3) and the greeting gate (call 10)
+        // that the schedule chains in this set: 1, 2 before call 3; 4 to 9
+        // after it and before call 10. Each call runs for every NPC before
+        // the next call (the source runs the ten calls per NPC; no call here
+        // reads what a later call writes for another NPC in the same frame).
+        app.init_resource::<crate::npc_view::BlinkRandom>()
+            .add_systems(
+                Update,
+                (
+                    crate::npc_view::update_collision_box,
+                    crate::npc_view::update_view,
+                )
+                    .chain()
+                    .in_set(NpcPresenterSet)
+                    .before(on_update),
+            )
+            .add_systems(
+                Update,
+                (
+                    crate::npc_presenter::write_avoidance,
+                    crate::npc_presenter::update_dither,
+                    crate::npc_presenter::update_ik,
+                    crate::npc_presenter::try_reset_navmesh,
+                    crate::npc_presenter::try_cancel_if_overlap,
+                    crate::npc_presenter::try_some_character_communication,
+                )
+                    .chain()
+                    .in_set(NpcPresenterSet)
+                    .after(on_update)
+                    .before(crate::npc_presenter::try_greeting),
+            );
     }
 }
 
@@ -150,10 +182,21 @@ fn stop_ai(mind: &mut ObjectiveMind, unit: u32, reason: String) {
     mind.ai_stopped = Some(reason);
 }
 
+/// The face a state's SetExpressions writes: the view's eye and mouth
+/// materials and the facial tables.
+struct Face<'a> {
+    tables: &'a crate::alone_action_runtime::FacialTables,
+    materials: &'a mut Assets<crate::character_material::CharacterMaterial>,
+    toon: &'a crate::character_material::ToonMaterials,
+}
+
 /// Eye and mouth of a tweet row: an empty name is logged and leaves the
 /// pattern as it is; an empty eye still lets the mouth apply, an empty mouth
-/// ends the call.
-fn set_expressions(unit: u32, row: &TweetRow) {
+/// ends the call. The eye is ChangeEyePattern (the view's pattern and its
+/// open cell), the mouth ChangeLipSyncPattern (the view's lip pattern and
+/// its close cell); a name absent from the tables is FindBy's zero-valued
+/// row.
+fn set_expressions(unit: u32, row: &TweetRow, mut face: Option<&mut Face>) {
     if row.eye_name.is_empty() {
         error!("[npc-state] unit={unit} tweet={} has no eye pattern", row.id);
     } else {
@@ -161,6 +204,15 @@ fn set_expressions(unit: u32, row: &TweetRow) {
             "[npc-state] unit={unit} call=ChangeEyePattern eye={}",
             crate::balloon::ascii_or(&row.eye_name)
         );
+        if let Some(face) = face.as_deref_mut() {
+            if let Some(eye) = face.toon.slot_handle("eye") {
+                crate::alone_action_runtime::apply_eye_pattern(
+                    face.materials,
+                    eye,
+                    face.tables.eye_pattern(&row.eye_name),
+                );
+            }
+        }
     }
     if row.mouth_name.is_empty() {
         error!("[npc-state] unit={unit} tweet={} has no mouth pattern", row.id);
@@ -170,6 +222,15 @@ fn set_expressions(unit: u32, row: &TweetRow) {
         "[npc-state] unit={unit} call=ChangeLipSyncPattern mouth={}",
         crate::balloon::ascii_or(&row.mouth_name)
     );
+    if let Some(face) = face {
+        if let Some(mouth) = face.toon.slot_handle("mouth") {
+            crate::alone_action_runtime::apply_mouth_pattern(
+                face.materials,
+                mouth,
+                face.tables.lip_pattern(&row.mouth_name).unwrap_or_default(),
+            );
+        }
+    }
 }
 
 /// The motion start of the tweet and greeting states' first update.
@@ -288,6 +349,10 @@ pub(crate) fn on_update(
     ),
     mut seeder: ResMut<SequencePickSeeder>,
     mut hud: MessageWriter<TweetHudEvent>,
+    facial: (
+        Option<Res<crate::alone_action_runtime::FacialTables>>,
+        ResMut<Assets<crate::character_material::CharacterMaterial>>,
+    ),
     visible: Query<
         (&CharacterUnitId, &InheritedVisibility),
         With<crate::character::MotionDriver>,
@@ -304,17 +369,27 @@ pub(crate) fn on_update(
             &mut PathSlot,
             &mut WalkState,
             &mut MotionPhase,
+            Option<&crate::character_material::ToonMaterials>,
         ),
         Without<crate::player::PlayerControlled>,
     >,
 ) {
+    let (facial_tables, mut materials) = facial;
     let dt = clock.delta();
     let frame = frame.0;
     let global_site = global_site_type(selection.as_deref(), &catalog);
     let player = players.single().ok().map(|transform| transform.translation);
-    for (entity, unit, transform, mut actions, mut mind, mut route, mut path, mut walk, mut phase) in
+    for (entity, unit, transform, mut actions, mut mind, mut route, mut path, mut walk, mut phase, toon) in
         &mut npcs
     {
+        let mut face = match (facial_tables.as_deref(), toon) {
+            (Some(tables), Some(toon)) => Some(Face {
+                tables,
+                materials: &mut materials,
+                toon,
+            }),
+            _ => None,
+        };
         let unit = unit.0;
         let own_site = catalog.site_type_value(&actions.site_type);
         // Queued enter and exit work, in the order the changes ran.
@@ -340,7 +415,7 @@ pub(crate) fn on_update(
                         );
                         continue;
                     };
-                    set_expressions(unit, &row);
+                    set_expressions(unit, &row, face.as_mut());
                     info!(
                         "[npc-state] unit={unit} frame={frame} tweet enter: tweet={id} state=InProgress show",
                     );
@@ -415,7 +490,7 @@ pub(crate) fn on_update(
                         error!("[npc-state] unit={unit} greeting tweet {tweet_id} has no master row");
                         continue;
                     };
-                    set_expressions(unit, &row);
+                    set_expressions(unit, &row, face.as_mut());
                     hud.write(TweetHudEvent::Show {
                         npc: entity,
                         unit,

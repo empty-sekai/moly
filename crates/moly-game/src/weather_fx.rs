@@ -176,7 +176,7 @@ struct Planned {
     /// carries. The words above are composed with the root at the site
     /// origin; the installer and every frame recompose them from the tracked
     /// root.
-    sky_owner_chain: Option<Arc<[moly_law::particle::owner::SourceTrs]>>,
+    sky_owner_chain: Option<SkyChain>,
     /// Cone 的半顶角（shape 块的 `angle` 键；律的 `ShapeParams` 不带它）。
     cone_angle: Option<f32>,
     rol: Option<RotationOverLifetime>,
@@ -315,6 +315,7 @@ impl WeatherFxState {
                     crate::particle_runtime::Geometry::SourceBillboard(draw) => match draw.mode {
                         crate::source_billboard::Mode::Billboard => "source_billboard",
                         crate::source_billboard::Mode::Horizontal => "source_horizontal_billboard",
+                        crate::source_billboard::Mode::Vertical => "source_vertical_billboard",
                     },
                     crate::particle_runtime::Geometry::Mesh(_) => "source_mesh",
                     crate::particle_runtime::Geometry::Billboard { .. } => "legacy_billboard",
@@ -443,7 +444,7 @@ struct LiveWeatherEmitter {
 /// The chain a sky system's owner words are composed from and the root
 /// position they were last composed with (see [`refresh_sky_owner`]).
 struct SkyOwner {
-    chain: Arc<[moly_law::particle::owner::SourceTrs]>,
+    chain: SkyChain,
     anchor: [u32; 3],
 }
 impl std::ops::Deref for LiveWeatherEmitter {
@@ -1487,8 +1488,8 @@ fn drop_orphan_targets(plans: &mut Vec<Planned>, start: usize) -> Vec<String> {
 /// parents that does not come back to a node, an authored chain of a site or
 /// sky effect (the owner words are composed there, see `chain_owner`), the
 /// scaled clock, no warm and
-/// the Local scaling mode (the only owner update transcribed). Returns the
-/// parent.
+/// the Local or Hierarchy scaling mode (the owner updates transcribed).
+/// Returns the parent.
 fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitterGraph<'_>, kind: EffectKind,
     instance_anchor: Option<GlobalTransform>) -> Result<String, String> {
     let [parent] = owners else {
@@ -1531,8 +1532,8 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
         return Err("warm of a sub-emitter target is not transcribed".into());
     }
     match system.and_then(|s| s.get("scalingMode")).and_then(Value::as_u64) {
-        Some(1) => {}
-        mode => return Err(format!("scaling mode {mode:?}: only the Local owner update is transcribed")),
+        Some(0 | 1) => {}
+        mode => return Err(format!("scaling mode {mode:?}: only the Local and Hierarchy owner updates are transcribed")),
     }
     Ok(parent.clone())
 }
@@ -1541,10 +1542,27 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
 /// [`chain_owner`]). A matrix below the inverse's determinant threshold is
 /// refused: the engine keeps using the zero inverse, which this runtime's own
 /// transforms cannot follow.
-fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str, kind: EffectKind)
-    -> Result<(moly_law::particle::child_emit::ChildOwner, Option<Arc<[moly_law::particle::owner::SourceTrs]>>), String> {
-    let (owner, sky_chain) = chain_owner(by_path, path, kind)?;
-    Ok((moly_law::particle::child_emit::ChildOwner::local_scaling(&owner), sky_chain))
+fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str, kind: EffectKind,
+    scaling: moly_law::particle::owner::OwnerScaling)
+    -> Result<(moly_law::particle::child_emit::ChildOwner, Option<SkyChain>), String> {
+    let (owner, sky_chain) = chain_owner(by_path, path, kind, scaling)?;
+    Ok((moly_law::particle::child_emit::ChildOwner::from_owner(&owner), sky_chain))
+}
+
+/// The owner update's branch for an admitted scaling mode.
+fn owner_scaling(scaling: crate::particle_geometry::Scaling) -> moly_law::particle::owner::OwnerScaling {
+    match scaling {
+        crate::particle_geometry::Scaling::Hierarchy => moly_law::particle::owner::OwnerScaling::Hierarchy,
+        crate::particle_geometry::Scaling::Local { .. } => moly_law::particle::owner::OwnerScaling::Local,
+    }
+}
+
+/// A sky system's authored chain from the prefab root down and the scaling
+/// mode its owner words are composed in.
+#[derive(Clone)]
+struct SkyChain {
+    chain: Arc<[moly_law::particle::owner::SourceTrs]>,
+    scaling: moly_law::particle::owner::OwnerScaling,
 }
 
 /// Why a camera effect's owner words are not composed. The effect's root is
@@ -1558,8 +1576,8 @@ fn child_owner_words(by_path: &HashMap<String, &Value>, path: &str, kind: Effect
 const CAMERA_OWNER_REFUSAL: &str =
     "a camera effect's owner update reads the previous frame's camera pose (the camera moves in LateUpdate, after the particle update), which this host does not keep";
 
-/// The owner words of a Local system on its effect's chain, with the chain
-/// the words follow at run time.
+/// The owner words of a system on its effect's chain in its scaling mode,
+/// with the chain the words follow at run time.
 ///
 /// A site effect's prefab is instantiated under the site view, the field
 /// prefab's root at the site origin; this host draws the active site at its
@@ -1574,14 +1592,15 @@ const CAMERA_OWNER_REFUSAL: &str =
 /// effector serializes the normal type). The words returned here have the
 /// root at the active site's origin; the installer and the frame recompose
 /// them from the tracked root, and the returned chain is what they compose.
-fn chain_owner(by_path: &HashMap<String, &Value>, path: &str, kind: EffectKind)
-    -> Result<(moly_law::particle::owner::OwnerMatrices, Option<Arc<[moly_law::particle::owner::SourceTrs]>>), String> {
+fn chain_owner(by_path: &HashMap<String, &Value>, path: &str, kind: EffectKind,
+    scaling: moly_law::particle::owner::OwnerScaling)
+    -> Result<(moly_law::particle::owner::OwnerMatrices, Option<SkyChain>), String> {
     let prefab = authored_trs(by_path, path)?;
     match kind {
-        EffectKind::Site => Ok((environment_owner(&[], &prefab, false)?, None)),
+        EffectKind::Site => Ok((environment_owner(&[], &prefab, false, scaling)?, None)),
         EffectKind::Sky => {
-            let owner = environment_owner(&sky_prefix([0.0; 3]), &prefab, false)?;
-            Ok((owner, Some(prefab.into())))
+            let owner = environment_owner(&sky_prefix([0.0; 3]), &prefab, false, scaling)?;
+            Ok((owner, Some(SkyChain { chain: prefab.into(), scaling })))
         }
         EffectKind::Camera => Err(CAMERA_OWNER_REFUSAL.into()),
     }
@@ -1597,23 +1616,23 @@ pub(crate) fn sky_prefix(anchor: [f32; 3]) -> [moly_law::particle::owner::Source
     [identity, moly_law::particle::owner::SourceTrs { t: anchor, ..identity }, identity, identity]
 }
 
-/// The owner words (Local scaling) of the last node of `prefab`, a prefab
+/// The owner words in `scaling` of the last node of `prefab`, a prefab
 /// chain from its root down, instantiated below `prefix` (root first;
 /// the instantiation keeps the prefab root's local TRS). With `cancel`, the
 /// prefab root carries the rotation a rotation-type-1 effector writes on it,
 /// the inverse of its parent's world rotation through the local-rotation
 /// setter. Refused below the inverse's determinant threshold.
 pub(crate) fn environment_owner(prefix: &[moly_law::particle::owner::SourceTrs],
-    prefab: &[moly_law::particle::owner::SourceTrs], cancel: bool)
+    prefab: &[moly_law::particle::owner::SourceTrs], cancel: bool, scaling: moly_law::particle::owner::OwnerScaling)
     -> Result<moly_law::particle::owner::OwnerMatrices, String> {
-    use moly_law::particle::owner::{cancel_rotation, local_scaling_owner, SourceTrs};
+    use moly_law::particle::owner::{cancel_rotation, owner_matrices, SourceTrs};
     let mut chain: Vec<SourceTrs> = prefix.iter().chain(prefab).copied().collect();
     if cancel {
         let root = prefab.first().ok_or("owner chain lacks the prefab root")?;
         let q = cancel_rotation(prefix).map_err(|refused| format!("rotation cancel {refused:?}"))?;
         chain[prefix.len()] = SourceTrs { q, ..*root };
     }
-    let owner = local_scaling_owner(&chain).map_err(|refused| format!("owner words {refused:?}"))?;
+    let owner = owner_matrices(&chain, scaling).map_err(|refused| format!("owner words {refused:?}"))?;
     if !owner.invert_ok {
         return Err("owner matrix below the inverse's determinant threshold".into());
     }
@@ -1824,13 +1843,13 @@ fn judge_in_host(
         },
     };
     let render_mode = renderer.get("renderMode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "Mesh") {
+    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "VerticalBillboard" | "Mesh") {
         tally.render_mode.push(format!("unsupported source render mode {render_mode}"));
         return None;
     }
     let alignment_id = renderer.get("alignment").and_then(Value::as_i64).unwrap_or(-1);
     let mesh_alignment = crate::particle_geometry::Alignment::from_source(alignment_id);
-    if mesh_alignment.is_none() || (render_mode == "Billboard" && alignment_id == 4) {
+    if mesh_alignment.is_none() {
         tally.alignment.push(Alignment::render_space_name(alignment_id).to_owned());
         return None;
     }
@@ -2171,7 +2190,18 @@ fn judge_in_host(
         }
         crate::particle_runtime::custom_data_storage_eligible(&emitter, &route)
     };
-    if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage)) {
+    // A size lane whose value follows its curve objects' caches runs with the
+    // law that follows the engine's SizeModule calls, on the same conditions.
+    let size_storage = || -> Result<(), String> {
+        if !native_owner {
+            return Err("the Director's Simulate path does not install the native birth owner".into());
+        }
+        if child_parent.is_some() {
+            return Err("a sub-emitter target's module calls include its parents' Emit calls, which are not ported".into());
+        }
+        crate::particle_runtime::size_storage_eligible(&emitter, &route)
+    };
+    if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage), Some(&size_storage)) {
         tally.law_reject.push(format!("{node}: {error}")); return None;
     }
     if crate::particle_runtime::has_start_delay(&emitter) {
@@ -2403,7 +2433,7 @@ fn judge_in_host(
                     "{node}: owner words of a Local collision or trail are composed only for a site effect on its authored chain"));
                 return None;
             }
-            match chain_owner(by_path, node, kind) {
+            match chain_owner(by_path, node, kind, owner_scaling(scaling)) {
                 Ok((owner, chain)) => {
                     sky_owner_chain = chain;
                     Some(owner)
@@ -2440,7 +2470,7 @@ fn judge_in_host(
         Some(parent) => {
             let evidence = crate::particle_runtime::ShapeEmitterEvidence { scaling, mesh_renderer: render_mode == "Mesh" };
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
-                .and_then(|()| child_owner_words(by_path, node, kind))
+                .and_then(|()| child_owner_words(by_path, node, kind, owner_scaling(scaling)))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
                     camera_rotation, lifecycle, asset_root, ground, bodies, server).map(|()| owner));
             match owner {
@@ -2499,7 +2529,11 @@ fn judge_in_host(
             PlannedGeometry::EmptyMesh { alignment: mesh_alignment.expect("validated Mesh alignment"), scaling, pivot: Vec3::from_array(pivot) }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
-                mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },
+                mode: match render_mode {
+                    "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
+                    "VerticalBillboard" => crate::source_billboard::Mode::Vertical,
+                    _ => crate::source_billboard::Mode::Billboard,
+                },
                 alignment: mesh_alignment.expect("validated source Billboard alignment"),
                 screen_size: Vec2::new(min_particle_size as f32, max_particle_size as f32),
                 allow_roll, scaling, pivot: Vec3::from_array(pivot),
@@ -2944,10 +2978,11 @@ pub(crate) fn spawn_when_ready(
         let sky_owner = match planned.sky_owner_chain.clone() {
             None => None,
             Some(chain) => match owner_anchor.clone()
-                .and_then(|anchor| environment_owner(&sky_prefix(anchor), &chain, false).map(|owner| (anchor, owner))) {
+                .and_then(|anchor| environment_owner(&sky_prefix(anchor), &chain.chain, false, chain.scaling)
+                    .map(|owner| (anchor, owner))) {
                 Ok((anchor, owner)) => {
                     use moly_law::particle::collision_response::QueryAffine;
-                    planned.child_owner = planned.child_owner.map(|_| moly_law::particle::child_emit::ChildOwner::local_scaling(&owner));
+                    planned.child_owner = planned.child_owner.map(|_| moly_law::particle::child_emit::ChildOwner::from_owner(&owner));
                     planned.collision_owner = planned.collision_owner.map(|_| moly_law::particle::collision_query::OwnerPair {
                         local_to_world: QueryAffine::from_columns(&owner.local_to_world),
                         world_to_local: QueryAffine::from_columns(&owner.world_to_local),
@@ -3037,8 +3072,8 @@ pub(crate) fn spawn_when_ready(
             force_law: planned.emitter.force.as_ref().map(|p|
                 moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
             gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier).expect("curves validated during admission"),
-            size_law: planned.emitter.size_over_lifetime.as_ref()
-                .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission")),
+            size_law: crate::particle_runtime::size_over_lifetime_law(&planned.emitter)
+                .map(|law| law.expect("curves validated during admission")),
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
             custom_law: planned.emitter.custom_data.as_ref()
@@ -3113,6 +3148,12 @@ pub(crate) fn spawn_when_ready(
                     Ok(crate::particle_runtime::BirthPath::Legacy(reason))
                         if live.runtime.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage()) => {
                         error!(%reason, node=%live.node, "CustomData curve-cache system refused by the native birth installer");
+                        failed = true;
+                    }
+                    // So does a size law that follows the engine's calls.
+                    Ok(crate::particle_runtime::BirthPath::Legacy(reason))
+                        if live.runtime.size_law.as_ref().is_some_and(|size| size.calls().is_some()) => {
+                        error!(%reason, node=%live.node, "size curve-cache system refused by the native birth installer");
                         failed = true;
                     }
                     // Birth events run only on the native path; a parent with
@@ -3524,7 +3565,7 @@ fn refresh_sky_owner(live: &mut LiveWeatherEmitter, anchor: &Result<[f32; 3], St
     if sky.anchor == bits {
         return Ok(());
     }
-    let owner = environment_owner(&sky_prefix(anchor), &sky.chain, false)?;
+    let owner = environment_owner(&sky_prefix(anchor), &sky.chain.chain, false, sky.chain.scaling)?;
     sky.anchor = bits;
     write_owner_words(&mut live.runtime, &owner)
 }
@@ -3542,7 +3583,7 @@ fn write_owner_words(runtime: &mut Runtime, owner: &moly_law::particle::owner::O
         crate::particle_runtime::attach_trail_owner(runtime, owner.local_to_world).map_err(str::to_owned)?;
     }
     if let Some(target) = runtime.native_birth.as_mut().and_then(|native| native.target.as_mut()) {
-        target.owner = moly_law::particle::child_emit::ChildOwner::local_scaling(owner);
+        target.owner = moly_law::particle::child_emit::ChildOwner::from_owner(owner);
     }
     Ok(())
 }
@@ -3603,6 +3644,7 @@ pub(crate) fn advance(
         camera_transform.translation(),
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
+        perspective.near,
     );
     // Without an active site the frame the anchors are expressed in does not
     // exist (a site switch is in progress); skip the frame like a missing camera.

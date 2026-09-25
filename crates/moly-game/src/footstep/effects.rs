@@ -585,6 +585,7 @@ pub(crate) fn step(
         camera_transform.translation(),
         projection.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
+        projection.near,
     );
     let trace = shared::trace_enabled();
     for instance in &effects.instances {

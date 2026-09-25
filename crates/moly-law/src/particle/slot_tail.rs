@@ -79,6 +79,11 @@ impl SlotTail {
         self.slots.get(k)
     }
 
+    /// The live count the operations left.
+    pub fn live(&self) -> usize {
+        self.live
+    }
+
     /// The lanes the last four-lane group of a call over `[0, count)` reads past
     /// `count`: none when `count` is a multiple of four (zero included: the
     /// engine skips an empty range).

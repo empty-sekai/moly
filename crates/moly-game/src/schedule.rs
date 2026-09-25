@@ -498,6 +498,7 @@ pub fn install(app: &mut App) {
                     action_button::spawn_when_ready,
                     action_button::advance,
                     action_button::place_ui,
+                    action_button::place_change_ui,
                     action_button::click,
                     // NPC 臂冒烟口（MOLY_PICK_NPC_TAP_SECS）：名册成员的
                     // 世界位投影点按，走同一条拾取链过配对门。
