@@ -36,8 +36,9 @@
 //!
 //! Named gaps: the effect groups' particles are not drawn (their switches are
 //! logged); the flying notice's icon and text; the airplane keeps its glb
-//! materials; the raycast is the harvest placement's ground height (the
-//! highest ground vertex within 2 m), not a physics raycast; a switch counts
+//! materials; the raycast is the harvest placement's height rule (the walk
+//! field's navigation point, else the highest ground vertex within 2 m), not
+//! a physics raycast; a switch counts
 //! as on above 0.5 (the document's values are 0 and 1); the frame that starts
 //! the clip shows time 0 and each later frame adds its time.
 
@@ -296,6 +297,8 @@ pub(crate) struct AirplaneInputs<'w> {
     mock: Option<ResMut<'w, HarvestServerMock>>,
     arrival: ResMut<'w, super::arrival::HarvestArrival>,
     ground: Res<'w, super::HarvestGroundVerts>,
+    face: Option<Res<'w, crate::walk_face::WalkFace>>,
+    objective_face: Option<Res<'w, crate::npc_objective::ObjectiveFace>>,
     se: ResMut<'w, SeRequests>,
 }
 
@@ -330,6 +333,8 @@ pub(crate) fn advance(
         mut mock,
         mut arrival,
         ground,
+        face,
+        objective_face,
         mut se,
     } = inputs;
     let AirplaneScene {
@@ -513,9 +518,28 @@ pub(crate) fn advance(
                 run.box_position = (row.position_x, row.position_z);
                 // Raycast straight down from 50 m above the box position.
                 let (px, pz) = (-(row.position_x as f32), row.position_z as f32);
-                let hit = verts
-                    .as_deref()
-                    .map(|verts| super::surface_y(verts, px, pz, f32::NEG_INFINITY))
+                // The placement's height rule: the walk field's navigation
+                // point, else the highest ground vertex within 2 m (plus the
+                // walk field's height offset); neither is a miss.
+                let navigation = face.as_deref().and_then(|face| {
+                    objective_face
+                        .as_deref()
+                        .filter(|surface| {
+                            surface.navigation_generation() == face.generation()
+                                && surface.is_fresh(epoch.0)
+                        })
+                        .and_then(|surface| surface.navigation_point_at([px, pz]))
+                        .map(|point| point[1])
+                });
+                let hit = navigation
+                    .or_else(|| {
+                        verts.as_deref().map(|verts| {
+                            super::surface_y(verts, px, pz, f32::NEG_INFINITY)
+                                + face
+                                    .as_deref()
+                                    .map_or(0.0, |face| face.height_offset([px, pz]))
+                        })
+                    })
                     .filter(|y| y.is_finite() && *y <= RAY_HEIGHT);
                 let Some(y) = hit else {
                     error!(
