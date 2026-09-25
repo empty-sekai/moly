@@ -19,7 +19,10 @@
 //! fixture source path plans them as authored. The flying prefab's systems
 //! are not play-on-awake: they run only through that explicit `Play`, which
 //! the source-particle control preparation expresses (every emitter selected,
-//! no Director clock, so they run from the frame they are installed).
+//! no Director clock, so they run from the frame they are installed). At that
+//! Play step each prepared flying system's renderer takes its emitter's
+//! authored `enabled` flag; a copy inactive in its pool keeps them off, and
+//! the root system, whose renderer the prefab ships off, is not selected.
 //!
 //! Pools: `EffectManager.Setup` (called from the field scene's setup, before
 //! any move) instantiates each effect type's copies and keeps them inactive;
@@ -110,6 +113,9 @@ struct Live {
     held: bool,
     /// Age at which it was played.
     played_at: Option<f32>,
+    /// Each prepared control draw with its emitter's authored
+    /// `renderer.enabled` (the flying effect's preparation).
+    draws: Vec<(Entity, bool)>,
 }
 
 pub(crate) struct Effects {
@@ -196,6 +202,7 @@ impl Effects {
                 live.played_at = Some(live.age);
                 let held = std::mem::take(&mut live.held);
                 let (root, age) = (live.root, live.age);
+                let draws = live.draws.clone();
                 if let Some(mut transform) = world.get_mut::<Transform>(root) {
                     *transform = pose;
                 }
@@ -205,6 +212,7 @@ impl Effects {
                 if held {
                     set_source_nodes_active(world, root, true);
                 }
+                enable_renderers(world, kind, &draws);
                 let installed = installed_systems(world, root);
                 if installed > 0 {
                     info!("[site-move] effect {kind:?} played from its pool: {installed} systems prepared {age:.2}s before");
@@ -281,6 +289,7 @@ impl Effects {
             pooled,
             held: false,
             played_at: None,
+            draws: Vec::new(),
         });
         Some(root)
     }
@@ -310,6 +319,9 @@ impl Effects {
     /// Keep the pools filled, prepare the particles of new instances and
     /// release finished landing effects.
     pub(crate) fn advance(&mut self, world: &mut World, dt: f32) {
+        if let Some(root) = self.flying {
+            trace_draws(world, "Flying", root);
+        }
         self.fill_pools(world);
         for index in 0..self.live.len() {
             let (kind, root, planned) = {
@@ -378,6 +390,7 @@ impl Effects {
                     match crate::weather_fx::fixture::prepare_control(world, root, &doc, &selected)
                     {
                         Ok(Some(draws)) => {
+                            let authored = authored_renderers(world, &doc, &draws);
                             let live = &mut self.live[index];
                             info!(
                                 "[site-move] effect Flying prepared: {} systems, {:.2}s after its copy was made ({})",
@@ -386,6 +399,13 @@ impl Effects {
                                 if live.pooled { "inactive in its pool" } else { "playing" }
                             );
                             live.planned = true;
+                            live.draws = authored;
+                            if !live.pooled {
+                                // Played before its systems were prepared:
+                                // they start now, and so do their renderers.
+                                let draws = live.draws.clone();
+                                enable_renderers(world, kind, &draws);
+                            }
                         }
                         Ok(None) => {}
                         Err(error) => {
@@ -467,6 +487,100 @@ fn installed_systems(world: &World, root: Entity) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// Pair each prepared control draw with its emitter's authored
+/// `renderer.enabled`, found by the emitter node the draw's system runs.
+pub(crate) fn authored_renderers(
+    world: &World,
+    doc: &Value,
+    draws: &[Entity],
+) -> Vec<(Entity, bool)> {
+    let emitters = doc["emitters"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    draws
+        .iter()
+        .map(|&draw| {
+            let node = world
+                .get::<crate::uber_particle::FixtureParticleLive>(draw)
+                .map(|live| live.0.node.clone())
+                .unwrap_or_default();
+            let emitter = emitters.iter().find(|emitter| emitter["node"] == node.as_str());
+            let Some(emitter) = emitter else {
+                error!("[effects] prepared draw for {node:?} has no emitter in its document; its renderer stays off");
+                return (draw, false);
+            };
+            (draw, emitter["renderer"]["enabled"] == true)
+        })
+        .collect()
+}
+
+/// The Play step (`SetActive(true)` + `Play`): each prepared draw's renderer
+/// takes its emitter's authored `enabled` (a renderer the prefab ships off
+/// stays off; nothing turns renderers on or off afterwards).
+pub(crate) fn enable_renderers(world: &mut World, kind: EffectType, draws: &[(Entity, bool)]) {
+    if draws.is_empty() {
+        return;
+    }
+    let mut on = 0;
+    for &(draw, enabled) in draws {
+        if let Some(mut source) = world.get_mut::<crate::source_particle::SourceParticle>(draw) {
+            source.enabled = enabled;
+            on += usize::from(enabled);
+        }
+    }
+    info!(
+        "[effects] effect {kind:?} ({}) plays: {on} of {} prepared renderers on, as authored",
+        kind as u8,
+        draws.len()
+    );
+}
+
+/// Per-frame trace of an effect instance's draws (`MOLY_EFFECT_TRACE=1`,
+/// an instrument; off by default): the renderer's enabled flag, the draw's
+/// inherited visibility and the live particle count of its system after the
+/// last particle step.
+pub(crate) fn trace_draws(world: &World, label: &str, root: Entity) {
+    if !trace_enabled() {
+        return;
+    }
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    let Some(children) = world.get::<Children>(root) else {
+        info!("[effect-trace] frame {frame} {label}: no draws");
+        return;
+    };
+    for child in children.iter() {
+        let Some(live) = world.get::<crate::uber_particle::FixtureParticleLive>(child) else {
+            continue;
+        };
+        let enabled = world
+            .get::<crate::source_particle::SourceParticle>(child)
+            .map(|source| source.enabled);
+        let visible = world.get::<InheritedVisibility>(child).map(|v| v.get());
+        info!(
+            "[effect-trace] frame {frame} {label} draw {} enabled={} inherited_visible={} live={} head={:.3}",
+            live.0.node,
+            enabled.map_or("none".into(), |e| e.to_string()),
+            visible.map_or("none".into(), |v| v.to_string()),
+            live.0.pool.len(),
+            live.0.playback_head
+        );
+    }
+}
+
+fn trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| {
+        let on = std::env::var("MOLY_EFFECT_TRACE").is_ok_and(|value| value == "1");
+        if on {
+            warn!(
+                "[effect-trace] MOLY_EFFECT_TRACE=1: per-frame effect draw trace on (instrument)"
+            );
+        }
+        on
+    })
 }
 
 /// An instance whose particle systems never installed is released after
