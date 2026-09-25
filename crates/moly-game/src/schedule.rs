@@ -343,6 +343,8 @@ pub fn install(app: &mut App) {
                     // 大表没到齐之前它们就该落定。
                     client_config::load,
                     birthday::load,
+                    // The master rank table the rank gauges read.
+                    crate::mysekai_rank::load,
                     uber_particle::load,
                     // 家具挂点档案（attach-points）的装载请求：动作点
                     // 世界位的数据面，与摆放表（fixture 域）在同一批
@@ -389,6 +391,7 @@ pub fn install(app: &mut App) {
                     // 域，单独成链放最前）。装载失败在这里响亮 panic。
                     client_config::parse,
                     birthday::parse,
+                    crate::mysekai_rank::parse,
                 ),
                 (
                     // 站点域：主表解析 → 换站入口（拆站重选）→ 装载计划

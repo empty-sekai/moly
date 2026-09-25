@@ -100,10 +100,15 @@
 //!   下载——**下载是服务端功能，响亮具名未接**；容量文字走面板下发
 //!   （真源从组包清单累计字节数换 MB，清单不在提取管线）。
 //! - **访问许可现值**：面板下发 mock（档名用真源枚举名）。
+//! - **排名页的等级与等级量表**：`TryMoveScreenLayerMysekaiInfo` 以
+//!   `new MysekaiRankModel()`（用户总经验，与菜单共读的同一份 mock，见
+//!   [`crate::mysekai_rank::UserTotalExp`]）建 `MysekaiRankGaugeViewDataModel`
+//!   作排名页模型；量表走菜单同一条 `UIPartsMysekaiRankGauge.Setup`。排名页类
+//!   未解码，量表按文档里唯一的 `UIPartsMysekaiRankGauge` 组件取（区域布局
+//!   上它的引用都已解码）；排名页自己的等级文字仍是路径字面量（具名缺口）。
 //!
 //! 环境变量：`MOLY_INFO_MOCK_ACCESS_PERMISSION`（all/friend_only/reject/
-//! review）· `MOLY_INFO_MOCK_RANK_LEVEL` · `MOLY_INFO_MOCK_RANK_GAUGE`
-//! （0..=1）· `MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT` ·
+//! review）· `MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT` ·
 //! `MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT` ·
 //! `MOLY_INFO_MOCK_VOICE_BUNDLE_MB`。
 //!
@@ -355,8 +360,6 @@ impl Default for InfoSettings {
 #[derive(Resource)]
 pub(crate) struct InfoMock {
     access_permission: AccessPermission,
-    rank_level: u32,
-    rank_gauge: f32,
     fixture_put_limit: u32,
     fixture_joint_put_limit: u32,
     voice_bundle_mb: f32,
@@ -388,12 +391,6 @@ fn env_f32_range(name: &str, default: f32, lo: f32, hi: f32) -> f32 {
     }
 }
 
-impl InfoMock {
-    pub(crate) fn set_player_rank(&mut self, rank: Option<u32>) {
-        self.rank_level = rank.unwrap_or_else(|| env_u32("MOLY_INFO_MOCK_RANK_LEVEL", 1));
-    }
-}
-
 impl Default for InfoMock {
     fn default() -> Self {
         let access_permission = match std::env::var("MOLY_INFO_MOCK_ACCESS_PERMISSION") {
@@ -411,8 +408,6 @@ impl Default for InfoMock {
         };
         InfoMock {
             access_permission,
-            rank_level: crate::player_data::saved_rank().unwrap_or_else(|| env_u32("MOLY_INFO_MOCK_RANK_LEVEL", 1)),
-            rank_gauge: env_f32_range("MOLY_INFO_MOCK_RANK_GAUGE", 0.0, 0.0, 1.0),
             fixture_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT", 20),
             fixture_joint_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT", 10),
             voice_bundle_mb: env_f32_range("MOLY_INFO_MOCK_VOICE_BUNDLE_MB", 0.0, 0.0, 9999.0),
@@ -486,9 +481,9 @@ pub(crate) enum InfoItem {
 
 impl InfoItem {
     /// 两种真实对话框 MessageBody 使用的动态文案。
-    fn current_label(self, mock: &InfoMock) -> Option<String> {
+    fn current_label(self, mock: &InfoMock, rank: i32) -> Option<String> {
         Some(match self {
-            InfoItem::RankLevelText => format!("等级 {}", mock.rank_level),
+            InfoItem::RankLevelText => format!("等级 {}", rank),
             InfoItem::FixturePutText => format!("家具摆放上限 {}", mock.fixture_put_limit),
             InfoItem::FixtureJointText => format!("连接家具上限 {}", mock.fixture_joint_put_limit),
             InfoItem::VoiceDialogMessage => "下载语音数据?".to_owned(),
@@ -760,15 +755,19 @@ fn page_label(page: usize) -> &'static str {
 
 /// 进层钩子串（层栈的挂载梯日志之外，层侧内容在这里；无动画 ⇒ 等待点
 /// 当帧通过）。
-fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageState) {
+fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageState,
+    rank: &moly_law::ui::mysekai_rank::MysekaiRankModel) {
     // OnBoot：bootData = 排名页模型（服务端用户态 ⇒ 面板下发）；访问许可
     // 现值重读（真源 OnBoot 读 UserDataManager）。
     settings.access = mock.access_permission;
     info!(
-        "[info] OnBoot：bootData=排名页模型（面板下发：等级 {} · 量表 {:.2} · 家具摆放上限 {} · \
-         连接家具上限 {}）；访问许可现值={}（面板下发）",
-        mock.rank_level,
-        mock.rank_gauge,
+        "[info] OnBoot：bootData=排名页模型（总经验 {}（mock）查 master 等级表：rank {} / max {} · \
+         本级累计 {} · 下级累计 {}；面板下发：家具摆放上限 {} · 连接家具上限 {}）；访问许可现值={}（面板下发）",
+        rank.total_exp,
+        rank.mysekai_rank,
+        rank.max_mysekai_rank,
+        rank.total_exp_to_current_rank,
+        rank.total_exp_to_next_rank,
         mock.fixture_put_limit,
         mock.fixture_joint_put_limit,
         settings.access.true_name()
@@ -833,6 +832,30 @@ fn selected_option(group: ToggleGroup, settings: &InfoSettings) -> usize {
 /// Update：摆位与逐帧状态。每帧——
 /// 1. 层开关沿（进层/退层钩子串各一串，与层栈梯日志同帧互补）；
 /// 2. 根可见性 = 层栈当前层是否情报层；根缩放 = canvas 缩放；
+/// The info screen's rank gauge targets. The rank page class is not decoded,
+/// so on a region layout the gauge is the document's single
+/// `UIPartsMysekaiRankGauge` component and its decoded references; the
+/// shared root's layouts leave the gauge classes undecoded, so there the
+/// three nodes are addressed by path, a named gap of that root.
+fn info_rank_gauge_targets(doc: &moly_assets::ui_layout::UiPrefab) -> crate::menu_dialog::RankGaugeTargets {
+    if doc.source.region.is_none() {
+        let gauge = "UIPartsMySekaiRankGauge";
+        return crate::menu_dialog::RankGaugeTargets {
+            rank_text: format!("{gauge}/CustomTextMesh (2)"),
+            rest_text: format!("{gauge}/CustomTextMesh (3)"),
+            fill_image: format!("{gauge}/UIPartsGauge/GaugeBase/Mask"),
+        };
+    }
+    let gauges: Vec<i64> = doc.nodes.iter().flat_map(|node| node.components.iter())
+        .filter(|c| c.class == "Sekai.Mysekai.UIPartsMysekaiRankGauge")
+        .map(|c| c.path_id)
+        .collect();
+    let [gauge] = gauges[..] else {
+        panic!("{}: {} UIPartsMysekaiRankGauge components, the rank page binds one", doc.prefab, gauges.len());
+    };
+    crate::menu_dialog::rank_gauge_references(doc, gauge)
+}
+
 /// 3. 源页节点按当前页显隐，对话框根按对话框态显隐；
 /// 4. UiPrefabView 覆写单选勾选、箭头、量表与动态文案。
 #[allow(clippy::type_complexity)]
@@ -844,10 +867,20 @@ pub(crate) fn place(
     mut was_open:Local<bool>,
     time: Res<Time>, mut presentation: Option<ResMut<InfoPresentation>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
+    total_exp: Res<crate::mysekai_rank::UserTotalExp>,
+    layouts: Res<crate::ui_layout::UiLayouts>,
+    mut rank: Local<Option<moly_law::ui::mysekai_rank::MysekaiRankModel>>,
 ) {
     let open=stack.current()==LayerId::MysekaiInfo;
     let opening = open && !*was_open;
-    match (*was_open,open) {(false,true)=>on_open(&mut settings,&mock,&page_state),(true,false)=>on_close(&settings,&page_state),_=>{}}
+    if opening {
+        // TryMoveScreenLayerMysekaiInfo: a new rank model per open.
+        *rank = Some(ranks.as_deref()
+            .unwrap_or_else(|| panic!("rank model: the master rank table has not resolved when the info screen opens"))
+            .model(total_exp.0));
+    }
+    match (*was_open,open) {(false,true)=>on_open(&mut settings,&mock,&page_state,rank.as_ref().expect("rank model built on open")),(true,false)=>on_close(&settings,&page_state),_=>{}}
     *was_open=open;
     let Some(presentation) = presentation.as_deref_mut() else { return; };
     if !open || opening { presentation.elapsed = 0.; }
@@ -872,9 +905,11 @@ pub(crate) fn place(
             view.set_visible(&tab.off_image, page != index);
         }
         view.set_visible(&bindings.arrow_prev,page>0);view.set_visible(&bindings.arrow_next,page+1<PAGE_COUNT);
-        view.set_text("RankPage/Right/Rank/CustomTextMesh (2)",mock.rank_level.to_string());
-        view.set_text("UIPartsMySekaiRankGauge/CustomTextMesh (2)",mock.rank_level.to_string());
-        view.set_fill("GaugeBase/Mask/GaugeFill",mock.rank_gauge);
+        if let Some(rank) = rank.as_ref() {
+            view.set_text("RankPage/Right/Rank/CustomTextMesh (2)", rank.mysekai_rank.to_string());
+            let doc = layouts.document(view.key).expect("info layout is loaded");
+            crate::menu_dialog::apply_rank_gauge(&mut view, &layouts, &info_rank_gauge_targets(doc), rank);
+        }
         if let Some([count, joint]) = &bindings.put_limit_counts {
             view.set_text(count, mock.fixture_put_limit.to_string());
             view.set_text(joint, mock.fixture_joint_put_limit.to_string());
@@ -900,9 +935,9 @@ pub(crate) fn place(
         match root.which {
             InfoDialog::RankList=>{view.set_text("Content/MessageBody",format!("{}
 {}
-{}",InfoItem::RankLevelText.current_label(&mock).unwrap(),InfoItem::FixturePutText.current_label(&mock).unwrap(),InfoItem::FixtureJointText.current_label(&mock).unwrap()));}
+{}",InfoItem::RankLevelText.current_label(&mock, rank.as_ref().map_or(0, |r| r.mysekai_rank)).unwrap(),InfoItem::FixturePutText.current_label(&mock, 0).unwrap(),InfoItem::FixtureJointText.current_label(&mock, 0).unwrap()));}
             InfoDialog::VoiceConfirm=>{view.set_text("Content/MessageBody",format!("{}
-{}",InfoItem::VoiceDialogMessage.current_label(&mock).unwrap(),InfoItem::VoiceDialogSize.current_label(&mock).unwrap()));}
+{}",InfoItem::VoiceDialogMessage.current_label(&mock, 0).unwrap(),InfoItem::VoiceDialogSize.current_label(&mock, 0).unwrap()));}
         }
     }
 }

@@ -47,14 +47,19 @@
 //!   尚未接入）。体力空 ⇒ `_recoverStaminaLabel` 亮（`IsEmptyStamina`
 //!   = normal ≤ 0 且 boost ≤ 0 且 enhance < 1）。
 //! - **等级格**：`MysekaiRankModel` 读 `UserMysekaiGamedata.totalExp`
-//!   （**服务端用户态**）→ 查 `MasterMysekaiRank` 表（**master 镜像不在
-//!   提取管线**）得等级与距下一级经验，进 `UIPartsMysekaiRankGauge`。
+//!   （**服务端用户态**，mock 面板下发）→ 查 master 等级表（运行时根的
+//!   `mysekai-ranks.json`，移植见 `moly_law::ui::mysekai_rank`）得等级、
+//!   本级与下级累计经验，进 `UIPartsMysekaiRankGauge`。
 //!   `UIPartsMysekaiRankGauge.Setup` 把等级经 `_rankText.SetText` 写成数字，
 //!   再调 `_gaugeExp.Setup(等级, 最高等级, 总经验, 本级累计, 下级累计,
 //!   "MSG_REST_VALUE")`：未到最高等级时剩余文字走
 //!   `SetWordingText("MSG_REST_VALUE", [下级累计 - 总经验])`，到最高等级时走
 //!   `SetWordingText("WORD_MAX")`；写进的是 `restTextMesh`（`restText` 为空
-//!   时）。两区的客户端都是这两个键。
+//!   时）。两区的客户端都是这两个键。量表 `UIPartsGauge.Setup(总经验 -
+//!   本级累计, 下级累计 - 本级累计)`（到最高等级时 `(0, 1)`）把比值写进
+//!   `fillImage` 的 fillAmount。⚠ 那张图是一个 stencil Mask 的图形，量表
+//!   条是它的子节点；本仓不画 stencil 裁切，所以填充量写进去了、画面上的
+//!   量表条仍是整条（具名缺口）。
 //! - ⚠ **普查的「宝石余额」一格在真源里不存在**：字段表穷举无 jewel
 //!   字段、原生树本文件 `grep -ic jewel` = 0 ⇒ 三格修正为两格。宝石是
 //!   恢复对话框的消耗货币，不在本对话框的显示面。
@@ -92,13 +97,12 @@
 //! ## 服务端域与 mock 面板（照音频/情报面板的形：具名资源 + 默认 +
 //! 环境变量覆写，非法值响亮告警回默认）
 //!
-//! 体力三值 · 体力量表上限（master）· 等级 · 距下一级经验（master 派生）
-//! · 是否已到最高等级（master 派生）· 访客态（使能输入）· 拍照许可 ·
-//! 水晶商店许可 · 写生可用 ⇒ 全部具名 mock。环境变量：
+//! 体力三值 · 体力量表上限（master）· 总经验（`UserMysekaiGamedata.totalExp`，
+//! 服务端用户态；等级与剩余经验由它查 master 等级表现算）· 访客态（使能
+//! 输入）· 拍照许可 · 水晶商店许可 · 写生可用 ⇒ 全部具名 mock。环境变量：
 //! `MOLY_MENU_MOCK_STAMINA_NORMAL` ·
 //! `MOLY_MENU_MOCK_STAMINA_ENHANCE` · `MOLY_MENU_MOCK_STAMINA_BOOST` ·
-//! `MOLY_MENU_MOCK_STAMINA_MAX` · `MOLY_MENU_MOCK_RANK_LEVEL` ·
-//! `MOLY_MENU_MOCK_RANK_EXP_NEXT` · `MOLY_MENU_MOCK_RANK_AT_MAX` ·
+//! `MOLY_MENU_MOCK_STAMINA_MAX` · `MOLY_MENU_MOCK_TOTAL_EXP` ·
 //! `MOLY_MENU_MOCK_VISITING` ·
 //! `MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED` · `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`
 //! · `MOLY_MENU_MOCK_SKETCH_AVAILABLE`。
@@ -293,10 +297,11 @@ pub(crate) const FIXED_TEXTS: &[&str] = &[
 // mock 面板（服务端态，具名「mock 值」；照情报层面板的形）
 // ---------------------------------------------------------------------------
 
-/// 菜单对话框的具名 mock 服务端状态（体力三值 + 量表上限 + 等级两值 +
-/// 四个使能输入）。真值分别住在 `UserMysekaiStamina` /
-/// `UserMysekaiGamedata.totalExp`（服务端用户态）与 master 镜像（不在
-/// 提取管线）里，本仓读不到 ⇒ 面板下发；默认值全部是我方选值。
+/// 菜单对话框的具名 mock 服务端状态（体力三值 + 量表上限 + 四个使能
+/// 输入）。真值住在 `UserMysekaiStamina`（服务端用户态）里，本仓读不到
+/// ⇒ 面板下发；默认值全部是我方选值。总经验
+/// （`UserMysekaiGamedata.totalExp`）是菜单与情报层共读的同一份用户态，
+/// 见 [`crate::mysekai_rank::UserTotalExp`]；等级表是 master 数据，从运行时根读。
 #[derive(Resource)]
 pub(crate) struct MenuMock {
     /// `UserMysekaiStamina.normalStamina`（服务端）。
@@ -307,13 +312,6 @@ pub(crate) struct MenuMock {
     stamina_boost: i32,
     /// 体力量表上限（`MasterMysekaiStaminas`，master 镜像不在管线）。
     stamina_max: u32,
-    /// 等级（`totalExp` 查 `MasterMysekaiRank` 的派生值，master 不在管线
-    /// ⇒ 直接 mock 派生结果）。
-    rank_level: u32,
-    /// 距下一级经验（同上，派生结果）：`TotalExpToNextRank - TotalExp`。
-    rank_exp_next: u32,
-    /// 等级是否等于 `MaxMysekaiRank`（master 最高等级，同上，派生结果）。
-    rank_at_max: bool,
     /// `MysekaiMultiplayController.IsVisiting()`——多人访客态（使能输入；
     /// 本仓无多人域，默认 false）。
     visiting: bool,
@@ -375,12 +373,6 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
-impl MenuMock {
-    pub(crate) fn set_player_rank(&mut self, rank: Option<u32>) {
-        self.rank_level = rank.unwrap_or_else(|| env_u32("MOLY_MENU_MOCK_RANK_LEVEL", 3));
-    }
-}
-
 impl Default for MenuMock {
     fn default() -> Self {
         MenuMock {
@@ -388,9 +380,6 @@ impl Default for MenuMock {
             stamina_enhance: env_i32("MOLY_MENU_MOCK_STAMINA_ENHANCE", 0),
             stamina_boost: env_i32("MOLY_MENU_MOCK_STAMINA_BOOST", 0),
             stamina_max: env_u32("MOLY_MENU_MOCK_STAMINA_MAX", 240),
-            rank_level: crate::player_data::saved_rank().unwrap_or_else(|| env_u32("MOLY_MENU_MOCK_RANK_LEVEL", 3)),
-            rank_exp_next: env_u32("MOLY_MENU_MOCK_RANK_EXP_NEXT", 450),
-            rank_at_max: env_bool("MOLY_MENU_MOCK_RANK_AT_MAX", false),
             visiting: env_bool("MOLY_MENU_MOCK_VISITING", false),
             photo_shot_allowed: env_bool("MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED", true),
             crystal_shop_allowed: env_bool("MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED", true),
@@ -533,7 +522,7 @@ pub(crate) fn spawn_when_ready(
 
 /// 开框沿（Setup 装配序的日志同形：八钮 Setup → exit 置亮 → 图标/等级/
 /// 体力三读数 → 三监听）。逐钮报源使能与目标已建两层门——不合成一个数。
-fn on_open(mock: &MenuMock) {
+fn on_open(mock: &MenuMock, rank: &moly_law::ui::mysekai_rank::MysekaiRankModel) {
     info!(
         "[menu_dialog] 开框：DialogUtility.ShowMysekaiMenu → TryGetActiveDialog(菜单对话框) 未开 \
          ⇒ InstantiateDialog(309, Dialog 槽) → Initialize(allowCloseExternal=true) → Setup(ViewData)"
@@ -559,33 +548,56 @@ fn on_open(mock: &MenuMock) {
     info!(
         "[menu_dialog] Setup·两格读值（服务端态，mock 面板下发）：体力格 \
          UserMysekaiStamina{{normal={}, enhance={}, boost={}}} 合计 {}/{}（量表上限为 master 派生 \
-         mock）· 恢复提示={}（IsEmptyStamina 律）· 等级格 UserMysekaiGamedata.totalExp 派生 \
-         等级 {} 距下一级 {}exp（master 表 mock 派生）——普查记的「宝石余额」一格在真源字段表 \
-         里不存在（具名修正，见模块头）",
+         mock）· 恢复提示={}（IsEmptyStamina 律）· 等级格 UserMysekaiGamedata.totalExp={}（mock）\
+         查 master 等级表：rank {} / max {} · 本级累计 {} · 下级累计 {} · 距下一级 {}exp——普查记的\
+         「宝石余额」一格在真源字段表里不存在（具名修正，见模块头）",
         mock.stamina_normal,
         mock.stamina_enhance,
         mock.stamina_boost,
         mock.stamina_sum(),
         mock.stamina_max,
         mock.stamina_empty(),
-        mock.rank_level,
-        mock.rank_exp_next
+        rank.total_exp,
+        rank.mysekai_rank,
+        rank.max_mysekai_rank,
+        rank.total_exp_to_current_rank,
+        rank.total_exp_to_next_rank,
+        rank.exp_to_next_rank
     );
 }
 
 /// The wording keys `UIPartsGaugeExp.Setup` writes into the rank gauge's
 /// rest text; the shell's glyph set takes their text.
-pub(crate) const RANK_GAUGE_WORDINGS: [&str; 2] = ["MSG_REST_VALUE", "WORD_MAX"];
+pub(crate) const RANK_GAUGE_WORDINGS: [&str; 2] =
+    [moly_law::ui::mysekai_rank::RANK_GAUGE_REST_WORDING_KEY, "WORD_MAX"];
 
-/// `UIPartsGaugeExp.Setup`'s rest-text call for the rank gauge:
-/// `SetWordingText("WORD_MAX")` (no arguments) at the highest rank,
-/// otherwise `SetWordingText("MSG_REST_VALUE", [experience left])`, the
-/// argument boxed from the int and so formatted as its decimal digits.
-fn rank_rest_wording(mock: &MenuMock) -> (&'static str, Option<Vec<String>>) {
-    if mock.rank_at_max {
-        (RANK_GAUGE_WORDINGS[1], None)
-    } else {
-        (RANK_GAUGE_WORDINGS[0], Some(vec![mock.rank_exp_next.to_string()]))
+/// `UIPartsGaugeExp.Setup`'s rest-text call as a wording key and its
+/// arguments: `SetWordingText("WORD_MAX")` (no arguments) at the highest
+/// rank, otherwise `SetWordingText(restWordingKey, [value])`, the argument
+/// boxed from the int and so formatted as its decimal digits.
+fn rest_wording(rest: &moly_law::ui::mysekai_rank::RestText) -> (&str, Option<Vec<String>>) {
+    match rest {
+        moly_law::ui::mysekai_rank::RestText::Max => (RANK_GAUGE_WORDINGS[1], None),
+        moly_law::ui::mysekai_rank::RestText::Rest { key, value } => (key.as_str(), Some(vec![value.to_string()])),
+    }
+}
+
+/// `UIPartsMysekaiRankGauge.Setup(new MysekaiRankGaugeViewDataModel(model))`
+/// on a view: the rank text, the rest text and the gauge's fill image.
+pub(crate) fn apply_rank_gauge(
+    view: &mut UiPrefabView,
+    layouts: &UiLayouts,
+    gauge: &RankGaugeTargets,
+    model: &moly_law::ui::mysekai_rank::MysekaiRankModel,
+) {
+    let (rank_text, setup) = moly_law::ui::mysekai_rank::rank_gauge_setup(model);
+    view.set_text(&gauge.rank_text, moly_law::text::custom_text_mesh::set_text(&rank_text, false));
+    let (key, args) = rest_wording(&setup.rest);
+    if let Some(text) = layouts.set_wording_text(view.key, &gauge.rest_text, key, args.as_deref()) {
+        view.set_text(&gauge.rest_text, text);
+    }
+    if let Some(fill) = moly_law::ui::mysekai_rank::gauge_fill_amount(setup.gauge_now, setup.gauge_max) {
+        view.set_fill(&gauge.fill_image, fill);
     }
 }
 
@@ -607,6 +619,8 @@ pub(crate) fn place(
     layouts: Res<UiLayouts>, time: Res<Time>,
     mut roots: Query<(&mut MenuDialogRoot, &mut Visibility, &mut Transform, &mut UiPrefabView)>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
+    total_exp: Res<crate::mysekai_rank::UserTotalExp>,
 ) {
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let size = Vec2::new(window.width(), window.height());
@@ -620,7 +634,6 @@ pub(crate) fn place(
             root.requested_open = open;
             root.elapsed = 0.;
             root.phase = if open {
-                on_open(&mock);
                 dialog.menu_closing = false;
                 MenuSlidePhase::Opening
             } else {
@@ -669,54 +682,78 @@ pub(crate) fn place(
         }
         view.set_visible("MenuRoot/TitleCell",false);
         view.set_visible("MenuHeader/bg/info",mock.stamina_empty());
-        // UIPartsMysekaiRankGauge.Setup: the rank through `_rankText`, the
-        // remaining experience through `_gaugeExp`'s rest text.
-        let doc = layouts.document(view.key).expect("menu dialog layout is loaded");
-        let (rank_text, rest) = rank_gauge_texts(doc);
-        view.set_text(&rank_text,
-            moly_law::text::custom_text_mesh::set_text(&mock.rank_level.to_string(), false));
-        let (key, args) = rank_rest_wording(&mock);
-        if let Some(text) = layouts.set_wording_text(view.key, &rest, key, args.as_deref()) {
-            view.set_text(&rest, text);
+        // SetupMysekaiRankGauge: the rank model from the user's total
+        // experience, through the gauge the dialog references.
+        if changed && open {
+            let doc = layouts.document(view.key).expect("menu dialog layout is loaded");
+            let model = ranks.as_deref()
+                .unwrap_or_else(|| panic!("rank model: the master rank table has not resolved when the menu opens"))
+                .model(total_exp.0);
+            on_open(&mock, &model);
+            apply_rank_gauge(&mut view, &layouts, &rank_gauge_targets(doc), &model);
         }
     }
 }
 
-/// The rank gauge's two texts as view selectors: `MysekaiMenuDialog.
-/// _mysekaiRankGauge` -> `UIPartsMysekaiRankGauge._rankText`, and its
-/// `_gaugeExp` -> `UIPartsGaugeExp`'s rest text (`restText` when set, else
-/// `restTextMesh`, as `UIPartsGaugeExp.Setup` chooses). A region layout
-/// carries these references; the shared root's layouts leave both gauge
-/// classes undecoded, so there the two nodes those references name in the
-/// prefab are addressed by path, a named gap of that root.
-fn rank_gauge_texts(doc: &moly_assets::ui_layout::UiPrefab) -> (String, String) {
+/// A rank gauge's three targets as view selectors.
+pub(crate) struct RankGaugeTargets {
+    /// `UIPartsMysekaiRankGauge._rankText`.
+    pub(crate) rank_text: String,
+    /// `UIPartsGaugeExp`'s rest text (`restText` when set, else
+    /// `restTextMesh`, as `UIPartsGaugeExp.Setup` chooses).
+    pub(crate) rest_text: String,
+    /// `UIPartsGaugeExp.gauge` -> `UIPartsGauge.fillImage`.
+    pub(crate) fill_image: String,
+}
+
+/// The menu dialog's rank gauge targets: `MysekaiMenuDialog.
+/// _mysekaiRankGauge` and the references under it. A region layout carries
+/// these references; the shared root's layouts leave the gauge classes
+/// undecoded, so there the three nodes those references name in the prefab
+/// are addressed by path, a named gap of that root.
+fn rank_gauge_targets(doc: &moly_assets::ui_layout::UiPrefab) -> RankGaugeTargets {
     if doc.source.region.is_none() {
         let rank = "MenuHeader/bg/UIPartsMySekaiRankGauge";
-        return (format!("{rank}/CustomTextMesh (2)"), format!("{rank}/CustomTextMesh (3)"));
+        return RankGaugeTargets {
+            rank_text: format!("{rank}/CustomTextMesh (2)"),
+            rest_text: format!("{rank}/CustomTextMesh (3)"),
+            fill_image: format!("{rank}/UIPartsGauge/GaugeBase/Mask"),
+        };
     }
+    let dialog = doc.nodes.iter().flat_map(|node| node.components.iter())
+        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuDialog")
+        .unwrap_or_else(|| panic!("{}: no MysekaiMenuDialog component", doc.prefab));
+    rank_gauge_references(doc, reference(doc, &dialog.fields, "_mysekaiRankGauge"))
+}
+
+/// A serialized reference inside the layout file: its path id.
+fn reference(doc: &moly_assets::ui_layout::UiPrefab, fields: &serde_json::Value, name: &str) -> i64 {
+    let pointer = fields[name].as_array().filter(|p| p.len() == 2)
+        .unwrap_or_else(|| panic!("{}: {name} is not a reference", doc.prefab));
+    assert_eq!(pointer[0].as_i64(), Some(0), "{}: {name} points outside the layout file", doc.prefab);
+    pointer[1].as_i64().unwrap_or_else(|| panic!("{}: {name} has no path id", doc.prefab))
+}
+
+/// The targets under one `UIPartsMysekaiRankGauge` component of a region
+/// layout.
+pub(crate) fn rank_gauge_references(doc: &moly_assets::ui_layout::UiPrefab, gauge_id: i64) -> RankGaugeTargets {
     let component = |id: i64, class: &str| {
         doc.nodes.iter().flat_map(|node| node.components.iter())
             .find(|c| c.path_id == id)
             .filter(|c| c.class == class)
             .unwrap_or_else(|| panic!("{}: component {id} is not a {class}", doc.prefab))
     };
-    let reference = |fields: &serde_json::Value, name: &str| -> i64 {
-        let pointer = fields[name].as_array().filter(|p| p.len() == 2)
-            .unwrap_or_else(|| panic!("{}: {name} is not a reference", doc.prefab));
-        assert_eq!(pointer[0].as_i64(), Some(0), "{}: {name} points outside the layout file", doc.prefab);
-        pointer[1].as_i64().unwrap_or_else(|| panic!("{}: {name} has no path id", doc.prefab))
-    };
-    let dialog = doc.nodes.iter().flat_map(|node| node.components.iter())
-        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuDialog")
-        .unwrap_or_else(|| panic!("{}: no MysekaiMenuDialog component", doc.prefab));
-    let gauge = component(reference(&dialog.fields, "_mysekaiRankGauge"), "Sekai.Mysekai.UIPartsMysekaiRankGauge");
-    let rank_text = reference(&gauge.fields, "_rankText");
-    let exp = component(reference(&gauge.fields, "_gaugeExp"), "Sekai.UIPartsGaugeExp");
-    let rest = match reference(&exp.fields, "restText") {
-        0 => reference(&exp.fields, "restTextMesh"),
+    let gauge = component(gauge_id, "Sekai.Mysekai.UIPartsMysekaiRankGauge");
+    let rank_text = reference(doc, &gauge.fields, "_rankText");
+    let exp = component(reference(doc, &gauge.fields, "_gaugeExp"), "Sekai.UIPartsGaugeExp");
+    let rest = match reference(doc, &exp.fields, "restText") {
+        0 => reference(doc, &exp.fields, "restTextMesh"),
         custom_text => panic!("{}: rank gauge rest text {custom_text} is a CustomText, which is not drawn", doc.prefab),
     };
-    (format!("@{rank_text}"), format!("@{rest}"))
+    let bar = component(reference(doc, &exp.fields, "gauge"), "Sekai.UIPartsGauge");
+    let fill = reference(doc, &bar.fields, "fillImage");
+    component(fill, "Sekai.UI.CustomImage");
+    RankGaugeTargets { rank_text: format!("@{rank_text}"), rest_text: format!("@{rest}"), fill_image: format!("@{fill}") }
 }
 
 // ---------------------------------------------------------------------------
