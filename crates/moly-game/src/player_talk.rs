@@ -3195,6 +3195,52 @@ pub(crate) fn smoke_autotap(
     );
 }
 
+/// Host probe of the tap ladder (`MOLY_PLAYER_TALK_STACK_TAP_SECS`, a window
+/// in seconds, with the action-button autowalk bringing the player to each
+/// character): while the action stack's head is the Talk button of a
+/// character and no talk plays, the request the Talk button's dispatch
+/// writes for that character is written, at most every 2 s. It stands in for
+/// the press itself, which a headless run at a few frames per second cannot
+/// make (the injected release lands a frame later, past the long-press
+/// threshold, so the gesture layer reports no tap). The request then takes
+/// the dispatcher's own path: the stack check, the ladder, the session.
+pub(crate) fn probe_stack_taps(
+    button_state: Res<crate::action_button::ActionButtonState>,
+    npcs: Query<(Entity, &CharacterUnitId), Without<PlayerControlled>>,
+    session: Option<Res<PlayerTalkSession>>,
+    active_talk: Option<Res<crate::talk::ActiveTalk>>,
+    time: Res<Time>,
+    mut requests: MessageWriter<PlayerTalkRequest>,
+    mut next_at: Local<f32>,
+) {
+    let armed = env_secs("MOLY_PLAYER_TALK_STACK_TAP_SECS");
+    let now = time.elapsed_secs();
+    if armed <= 0.0 || now >= armed || now < *next_at {
+        return;
+    }
+    if session.is_some() || active_talk.is_some() {
+        return;
+    }
+    let Some((
+        moly_law::action_button::ButtonType::Talk,
+        moly_law::action_button::TargetId::Character(unit),
+    )) = button_state.current()
+    else {
+        return;
+    };
+    let Some((entity, _)) = npcs.iter().find(|(_, id)| id.0 == unit) else {
+        return;
+    };
+    requests.write(PlayerTalkRequest {
+        entity,
+        unit,
+        exact: None,
+        target_fixture: None,
+    });
+    *next_at = now + 2.0;
+    info!("[player-talk-smoke] stack tap: the Talk button's request for unit {unit} at {now:.1}s");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
