@@ -401,8 +401,8 @@ mod tests {
     }
 
     /// The fixture host's played systems against the native per-frame
-    /// Update1b rows of the distance-emission (S11) and per-frame (S1)
-    /// receipts: each case's system is installed by this host's installer
+    /// Update1b rows of the distance-emission and per-frame receipts: each
+    /// case's system is installed by this host's installer
     /// (the native birth owner at its Play) and stepped by this host's frame
     /// entry (`step_played`: the play state, the frame clock and the frame
     /// head with the emission over distance, then the slices). The product
