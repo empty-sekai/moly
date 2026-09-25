@@ -333,6 +333,36 @@ impl PolyMesh {
         self.locate(grid, regions, p).is_some()
     }
 
+    /// Diagnostics for [`Self::locate`]: the number of cells of `p`'s region,
+    /// whether one of them contains `p`, and the horizontal distance from `p`
+    /// to the nearest cell of any region.
+    pub(crate) fn locate_report(
+        &self,
+        grid: &Grid,
+        regions: &Regions,
+        p: [f32; 2],
+    ) -> (usize, bool, Option<f32>) {
+        let (cx, cz) = grid.cell_of(p[0], p[1]);
+        let (count, contained) = if grid.walkable_cell(cx, cz) {
+            let region = regions.ids[cz as usize * grid.cols + cx as usize];
+            let candidates = self.by_region.get(&region).map_or(&[][..], Vec::as_slice);
+            (
+                candidates.len(),
+                candidates.iter().any(|index| self.contains(grid, *index, p)),
+            )
+        } else {
+            (0, false)
+        };
+        let nearest = (0..self.tris.len())
+            .map(|index| {
+                let corners = self.tris[index].map(|v| to_world(grid, self.verts[v as usize]));
+                distance2(closest_on_triangle(p, corners), p)
+            })
+            .min_by(f32::total_cmp)
+            .map(f32::sqrt);
+        (count, contained, nearest)
+    }
+
     fn contains(&self, grid: &Grid, index: u32, p: [f32; 2]) -> bool {
         let triangle = self.tris[index as usize];
         let corners = triangle.map(|v| to_world(grid, self.verts[v as usize]));

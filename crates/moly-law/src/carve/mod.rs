@@ -131,6 +131,24 @@ pub struct NavPath {
     pub complete: bool,
 }
 
+/// [`WalkField::endpoint_report`]: one query endpoint as the field sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EndpointReport {
+    /// The point's own cell is walkable.
+    pub walkable: bool,
+    /// The walkable point the query box maps it to.
+    pub mapped: Option<[f32; 2]>,
+    /// Navigation cells of the mapped point's region.
+    pub region_cells: usize,
+    /// One of them contains the mapped point.
+    pub contained: bool,
+    /// Horizontal distance from the mapped point to the nearest navigation
+    /// cell of any region.
+    pub nearest_cell_distance: Option<f32>,
+    /// The mapped point locates onto a navigation cell (the query succeeds).
+    pub locates: bool,
+}
+
 /// 引擎 `Mathf.Approximately`：`|b−a| < max(1e-6·max(|a|,|b|), 8·ε)`，ε 取
 /// float 最小非零值；米级坐标上比较完全由相对项决定。
 fn approximately(a: f32, b: f32) -> bool {
@@ -414,6 +432,25 @@ impl WalkField {
     /// a complete or a partial result exists, so success is exactly that.
     pub fn can_calculate_path(&self, source: [f32; 2], target: [f32; 2], half_extent: f32) -> bool {
         query::calculate_path_succeeds(&self.grid, &self.polys, &self.regions, source, target, half_extent)
+    }
+
+    /// Diagnostics for one query endpoint (QA probes): how the grid maps it in
+    /// a query box of `half_extent`, and how the navigation cells see the
+    /// mapped point. Changes nothing.
+    pub fn endpoint_report(&self, p: [f32; 2], half_extent: f32) -> EndpointReport {
+        let mapped = query::nearest_walkable_in_box(&self.grid, p, half_extent);
+        let (region_cells, contained, nearest_cell_distance) = match mapped {
+            Some(q) => self.polys.locate_report(&self.grid, &self.regions, q),
+            None => (0, false, None),
+        };
+        EndpointReport {
+            walkable: self.walkable_at(p),
+            mapped,
+            region_cells,
+            contained,
+            nearest_cell_distance,
+            locates: mapped.is_some_and(|q| self.polys.locates(&self.grid, &self.regions, q)),
+        }
     }
 
     /// `MoveUtility.CanNavmeshMoveTargetPosition`：静态路径查询成功，且末

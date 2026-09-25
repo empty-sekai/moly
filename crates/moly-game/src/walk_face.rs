@@ -364,6 +364,14 @@ pub(crate) fn probe(
             corners.len(),
             end_distance(*from, *to),
         );
+        info!(
+            "[walk-probe] {} generation {}: ({:.3}, {:.3}) agent-box endpoint {:?}",
+            site.site_type,
+            face.generation,
+            from[0],
+            from[1],
+            field.endpoint_report(*from, carve::AGENT_QUERY_HALF_EXTENT),
+        );
     }
     state.reported = Some(key);
 }
