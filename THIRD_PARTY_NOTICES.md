@@ -41,3 +41,54 @@ Adobe 的保留字体名（Reserved Font Name "Source"）。
 
 本文件是第三方内容索引，不替代各依赖的版权声明和许可全文；这些文件随对应
 crates.io 源码包提供。分发构建产物时，应一并保留适用的第三方声明和许可文件。
+
+## Arm Optimized Routines（logf、exp、cosf 移植）
+
+`crates/moly-law/src/particle/device_libm.rs` 中的 `logf`、`exp`、`cosf`
+是 Arm Optimized Routines（`math/logf.c`、`math/logf_data.c`、`math/exp.c`、
+`math/exp_data.c`、`math/cosf.c`、`math/sincosf.h`、`math/sincosf_data.c`）
+的 Rust 移植，逐位复现 Android 10 起系统 libm 所用的那份实现（加权曲线段的
+Bezier 时间解调用它们）。上游按 MIT 许可证授权，许可全文如下：
+
+```text
+MIT License
+
+Copyright (c) 1999-2019, Arm Limited.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## FreeBSD msun（atan2f、atanf 移植）
+
+`crates/moly-law/src/particle/device_libm.rs` 中的 `atan2f` 与 `atanf` 是
+FreeBSD msun（`e_atan2f.c`、`s_atanf.c`，bionic libm 沿用）的 Rust 移植。
+上游声明如下：
+
+```text
+Conversion to float by Ian Lance Taylor, Cygnus Support, ian@cygnus.com.
+
+====================================================
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunPro, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+====================================================
+```

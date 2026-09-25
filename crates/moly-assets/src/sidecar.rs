@@ -18,9 +18,9 @@ use serde_json::Value;
 ///
 /// 仿真参数**不在此层解析**——`system` 整块原样存进 [`ParticleSystem::system`]，
 /// 由消费侧对**实际要跑**的那条单独调粒子律。不能在此层全量解析：律对
-/// 带权曲线模式（`weightedMode: 2`，只见于 Mesh 绘制模式的系统）具名拒绝，
+/// 求值不了的曲线形状（缺导出的 wrap 模式、ping-pong wrap 等）具名拒绝，
 /// 在装载层全量解析会让一条永远不被放行的记录拖垮整个包。消费侧的门
-/// （绘制模式 / 对齐档）先把那批挡掉，进到律解析的只剩律认得的形状。
+/// （绘制模式 / 对齐档）先挡掉不画的记录，律只解析实际要跑的那条。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParticleSystem {
     /// 发射节点路径，相对承载它的那个 prefab 根、不含根自身——与
