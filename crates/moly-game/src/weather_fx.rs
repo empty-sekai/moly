@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use moly_assets::weather_effect::WeatherEffectLifecycle;
 
 use crate::billboard::{self, Alignment};
-use crate::character::AvatarRoot;
 use crate::site::SiteActive;
 use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
@@ -3106,6 +3105,95 @@ fn direct_targets(system: &Runtime) -> Vec<String> {
     targets
 }
 
+/// The source's environment root, tracked in the source world across site
+/// changes. The global sky effects hang from it.
+///
+/// The source instantiates the sky prefab under `Sky/EffectRoot` below the
+/// environment view controller, a child of the site root. The whole chain is
+/// authored at the identity, and the site root is instantiated without a
+/// parent. While the player walks, nothing writes that chain: the sky view
+/// moves only `SkyRenderer`, the effect root's sibling, to the player's view,
+/// and the effect's own component rewrites only its rotation, to cancel its
+/// parent's, which changes something only under the camera. So the global
+/// effects do not follow a walking player.
+///
+/// One writer moves the controller: the cannon site move. For the flight's
+/// duration it sets the controller's position to the player view's step
+/// point every tween update. The player view is tweened onto the next site's
+/// arrival point over the same duration, and the move then restores the
+/// height the controller had before the flight. The controller ends at the
+/// arrival point's x and z, and at its old height. Door moves (home to a room,
+/// a room to home or to another room) do not touch the controller. The session
+/// starts at home, with the controller at the site root's origin.
+///
+/// Arrival points: a harvest site's is its site position. A delivery site's
+/// is its site position plus an offset authored on the site view, and home's
+/// is the house's inside-door point, which follows the player's layout.
+/// This host supplies neither of those two, and says so when it stands in:
+/// on a delivery site the root lands on the site origin, and on the way home
+/// it returns to where the session started it, home's origin. The source has
+/// no direct move between a room and a harvest or delivery site; its route
+/// runs through home, and this host applies that route.
+///
+/// The camera effects are children of the rendering camera's own transform.
+/// The site-unique effects are children of the site view, the field prefab's
+/// root at the site origin. Their anchors are the camera and the identity.
+#[derive(Default)]
+pub(crate) struct EnvironmentRoot {
+    /// Source-world position.
+    world: Vec3,
+    /// Site type and category of the site the root was last seen from; `None`
+    /// before the first site of the session.
+    seen: Option<(String, String)>,
+}
+
+impl EnvironmentRoot {
+    /// Apply the source's move from the last seen site to `active`. When this
+    /// host stands in for an arrival point, returns the missing value and the
+    /// stand-in.
+    fn enter(&mut self, active: &SiteActive) -> Option<(&'static str, &'static str)> {
+        const HOME: &str = "housing_home";
+        const ROOM: &str = "housing_room";
+        const HARVEST: &str = "harvest";
+        const DELIVERY: &str = "delivery";
+        let seen = (active.site_type.clone(), active.category.clone());
+        let from = match self.seen.replace(seen) {
+            Some((site, _)) if site == active.site_type => return None,
+            Some((_, category)) => category,
+            None => HOME.to_owned(),
+        };
+        let from_cannon_site = matches!(from.as_str(), HARVEST | DELIVERY);
+        let site = Vec3::from_array(active.position);
+        match active.category.as_str() {
+            HARVEST => {
+                self.land(site);
+                None
+            }
+            DELIVERY => {
+                self.land(site);
+                Some(("the delivery site's arrival offset", "the site origin"))
+            }
+            HOME | ROOM if from_cannon_site => {
+                self.land(Vec3::ZERO);
+                Some(("the house's inside-door point", "the starting point"))
+            }
+            _ => None,
+        }
+    }
+
+    /// The end of a cannon move: the arrival point's x and z, the old height.
+    fn land(&mut self, arrival: Vec3) {
+        self.world = Vec3::new(arrival.x, self.world.y, arrival.z);
+    }
+
+    /// The sky anchor in this host's frame: the root seen from the active
+    /// site, which this host draws at its own origin, in the reflected-X basis
+    /// that every scene anchor uses.
+    fn anchor(&self, active: &SiteActive) -> Vec3 {
+        crate::particle_geometry::reflect(self.world - Vec3::from_array(active.position))
+    }
+}
+
 /// PostUpdate（变换传播之后）：推进仿真并重建属性池。
 ///
 /// 排在传播之后是因为**局部空间仿真**要读锚点的当帧世界变换；排在相机
@@ -3119,9 +3207,19 @@ pub(crate) fn advance(
     unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
     frame: Res<bevy::diagnostic::FrameCount>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
-    avatars: Query<&GlobalTransform, With<AvatarRoot>>,
     site: Option<Res<SiteActive>>,
+    mut environment_root: Local<EnvironmentRoot>,
 ) {
+    // Follow every site change, also on frames that draw nothing, so the root
+    // sees each move the source would make.
+    if let Some(active) = site.as_deref() {
+        if let Some((missing, stand_in)) = environment_root.enter(active) {
+            warn!(
+                "[weather-fx] sky anchor on {}: {missing} is not supplied; the environment root lands on {stand_in} instead",
+                active.site_type
+            );
+        }
+    }
     // Observe instance age even when no camera can produce a particle draw.
     // The effect Animators evaluate here too, once per frame with the frame's
     // delta time: before the frame's particle update, and whether or not a
@@ -3156,13 +3254,12 @@ pub(crate) fn advance(
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
     );
-    // 天空锚：随玩家平移、不随旋转。玩家不在时落原点（穹顶锚不到人，
-    // 粒子仍画，位在原点）。
-    let sky = avatars
-        .iter()
-        .next()
-        .map(|transform| GlobalTransform::from_translation(transform.translation()))
-        .unwrap_or(GlobalTransform::IDENTITY);
+    // Without an active site the frame the anchors are expressed in does not
+    // exist (a site switch is in progress); skip the frame like a missing camera.
+    let Some(active_site) = site.as_deref() else {
+        return;
+    };
+    let sky = GlobalTransform::from_translation(environment_root.anchor(active_site));
     let ctx = Context {
         sky,
         camera: *camera_transform,
