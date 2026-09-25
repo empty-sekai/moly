@@ -78,9 +78,10 @@ impl HarvestArrival {
         self.run.as_ref().map(|run| run.site_id)
     }
 
+    /// The site goes; the last seen epoch stays (it is monotonic across
+    /// transitions, and the next site starts only on a newer one).
     pub(crate) fn clear(&mut self) {
         self.run = None;
-        self.placed_epoch = None;
     }
 }
 
@@ -92,7 +93,6 @@ pub(crate) struct ArrivalInputs<'w, 's> {
     catalog: Option<Res<'w, HarvestCatalog>>,
     user: Option<Res<'w, HarvestUserData>>,
     site: Option<Res<'w, crate::site::SiteActive>>,
-    settled: Option<Res<'w, crate::inactive_nodes::SiteSettled>>,
     epoch: Option<Res<'w, crate::site::GroundEpoch>>,
     face: Option<Res<'w, WalkFace>>,
     objective_face: Option<Res<'w, crate::npc_objective::ObjectiveFace>>,
@@ -114,20 +114,24 @@ pub(crate) fn place(
     mut ground_verts: ResMut<super::HarvestGroundVerts>,
     mut spawned: ResMut<super::HarvestSpawnedCount>,
 ) {
-    let (Some(catalog), Some(user), Some(site), Some(_), Some(epoch)) = (
+    let (Some(catalog), Some(user), Some(site), Some(epoch)) = (
         inputs.catalog.as_deref(),
         inputs.user.as_deref(),
         inputs.site.as_deref(),
-        inputs.settled.as_deref(),
         inputs.epoch.as_deref(),
     ) else {
         return;
     };
-    if site.category != "harvest" {
-        return;
-    }
+    // The site's content settles when GroundEpoch advances (the settle
+    // marker itself lives only between the scene spawn and the camera
+    // framing of one frame). Every epoch is recorded, harvest site or not,
+    // so a new site's SiteActive seen before its own settle (still at the
+    // previous site's epoch) does not start an arrival on stale ground.
     if arrival.run.is_none() && arrival.placed_epoch != Some(epoch.0) {
         arrival.placed_epoch = Some(epoch.0);
+        if site.category != "harvest" {
+            return;
+        }
         let Some(map) = user.maps.get(&site.site_id) else {
             warn!(
                 "[harvest] HarvestSiteController.Initialize site {}: the user data has no harvest map for it (userMysekaiHarvestMap is null)",
@@ -518,11 +522,18 @@ pub(crate) fn bind_views(
         };
         let fields: serde_json::Value = serde_json::from_str(&view.fields_json)
             .unwrap_or_else(|error| panic!("{}: view fields are not JSON: {error}", object.leaf));
+        // A reference in the view's exported fields is `{file, id}` with the
+        // signed path id as a decimal string; id 0 is a null reference, and a
+        // reference into another file names no node of this scene.
         let id_of = |field: &str| {
-            fields
-                .get(field)
-                .and_then(|value| value.get("pathId"))
-                .and_then(|v| v.as_i64())
+            let reference = fields.get(field)?;
+            if reference["file"].as_i64() != Some(0) {
+                return None;
+            }
+            reference["id"]
+                .as_str()
+                .and_then(|id| id.parse::<i64>().ok())
+                .filter(|id| *id != 0)
         };
         let by_game_object = |id: i64| {
             nodes.iter().copied().find(|entity| {

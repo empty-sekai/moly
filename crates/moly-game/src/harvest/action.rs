@@ -1434,6 +1434,10 @@ pub(crate) struct HarvestAutoplay {
     started: f64,
     hits_at_start: usize,
     warned: bool,
+    /// The walk field's path to the target, next waypoint first.
+    waypoints: Vec<Vec2>,
+    last_position: Vec2,
+    stuck_frames: u32,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -1472,6 +1476,7 @@ pub(crate) fn autoplay_press(
     mut players: Query<(&Transform, &mut PlayerInput), With<PlayerControlled>>,
     objects: Query<(Entity, &Transform, &HarvestObject)>,
     drops: Query<(&Transform, &super::HarvestDropItem)>,
+    face: Option<Res<crate::walk_face::WalkFace>>,
 ) {
     if auto.plan.is_none() {
         let Ok(raw) = std::env::var("MOLY_HARVEST_AUTOPLAY") else {
@@ -1560,6 +1565,14 @@ pub(crate) fn autoplay_press(
                     auto.target = Some(entity);
                     auto.stage = AutoStage::Walk;
                     auto.started = now;
+                    let from = [player.translation.x, player.translation.z];
+                    let to = [transform.translation.x, transform.translation.z];
+                    auto.waypoints = face
+                        .as_deref()
+                        .and_then(|face| face.path(from, to))
+                        .map(|path| path.into_iter().map(Vec2::from_array).collect())
+                        .unwrap_or_default();
+                    warn!("[harvest-auto] step {}: walk field path of {} waypoints", auto.step, auto.waypoints.len());
                 }
                 None => {
                     warn!(
@@ -1594,7 +1607,28 @@ pub(crate) fn autoplay_press(
                 auto.step += 1;
                 auto.stage = AutoStage::Seek;
             } else {
-                walk_to(&mut input, transform.translation);
+                // Follow the walk field's path; the last leg goes to the object.
+                let here = Vec2::new(player.translation.x, player.translation.z);
+                // A path corner inside the walk field's edge band holds the
+                // player short of it: after a few frames without progress the
+                // next waypoint is taken.
+                if here.distance(auto.last_position) < 0.005 {
+                    auto.stuck_frames += 1;
+                } else {
+                    auto.stuck_frames = 0;
+                }
+                auto.last_position = here;
+                if auto.stuck_frames > 5 && !auto.waypoints.is_empty() {
+                    auto.waypoints.remove(0);
+                    auto.stuck_frames = 0;
+                }
+                while auto.waypoints.first().is_some_and(|point| point.distance(here) < 0.3) {
+                    auto.waypoints.remove(0);
+                }
+                match auto.waypoints.first() {
+                    Some(point) => walk_to(&mut input, Vec3::new(point.x, 0.0, point.y)),
+                    None => walk_to(&mut input, transform.translation),
+                }
             }
         }
         AutoStage::Press => {

@@ -73,7 +73,11 @@ pub(crate) fn advance(
     states: Res<PlayerAvatarStates>,
     eligibility: crate::interaction::InteractionEligibility,
     players: Query<&Transform, (With<PlayerControlled>, Without<HarvestDropItem>)>,
-    mut drops: Query<(Entity, &mut HarvestDropItem, &mut Transform), Without<PlayerControlled>>,
+    // Disjoint from the eligibility's NPC query (drops carry no unit id).
+    mut drops: Query<
+        (Entity, &mut HarvestDropItem, &mut Transform),
+        (Without<PlayerControlled>, Without<crate::npc::CharacterUnitId>),
+    >,
     mut se: ResMut<SeRequests>,
     mut queue: ResMut<HarvestLogQueue>,
     mut stats: ResMut<HarvestStats>,
