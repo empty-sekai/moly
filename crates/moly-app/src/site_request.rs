@@ -4,7 +4,11 @@
 
 use moly_game::site::{OfflineSceneContent, SiteRequest};
 
-const DEFAULT_SITE: &str = "grassland";
+/// The source always enters MySekai on the home site: the join executor's
+/// `ChangeSiteCore` changes to `home_site` before the join action, and no
+/// remembered site is read. The saved preferred site that `resolve` consults
+/// first is a product feature the source does not have.
+const DEFAULT_SITE: &str = "home_site";
 #[cfg(any(target_arch = "wasm32", test))]
 const INDEPENDENT_BROWSER_SITE: &str = "home_site";
 

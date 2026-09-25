@@ -34,6 +34,8 @@ pub(crate) struct LibraryInput<'w, 's> {
     /// 宿主地点选择的写入端：换站请求交给站点域的同一条拆站重装链。
     pub(super) commands: Commands<'w, 's>,
     paste: Res<'w, PasteInbox>,
+    /// GameState SiteMove: site commands wait for the move to end.
+    pub(super) site_move: Option<Res<'w, crate::site_move::SiteMoveActive>>,
 }
 
 pub(crate) fn input(

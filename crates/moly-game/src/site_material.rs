@@ -1519,7 +1519,7 @@ fn resolve_ground_birthday(
 /// （2 = 墙 AO、11 = 道路、14 = 直通、其余未见过）、mapping 只在
 /// {0, 1, 2}（3 = uv2）、localMapping 只在 {0, 1}、_Cull 必须是 2
 /// （背面剔除——_BackFaceColor 路径因此恒死）、预览灯必须关。
-fn resolve_object(
+pub(crate) fn resolve_object(
     sidecar: &SiteSidecar,
     slot: &MaterialSlot,
     load_texture: impl Fn(&str) -> Handle<Image>,
