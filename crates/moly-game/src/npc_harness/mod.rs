@@ -337,7 +337,7 @@ mod rest {
             .iter()
             .map(|row| {
                 let cap = match row["cap"].as_str().unwrap() {
-                    "X15 1/3 s" => f32::from_bits(0x3eaa_aaab),
+                    "time-manager 1/3 s" => f32::from_bits(0x3eaa_aaab),
                     "unclamped 10 s" => 10.0,
                     "Bevy default 0.25 s" => 0.25,
                     other => panic!("cap {other}"),
