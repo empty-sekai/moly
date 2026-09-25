@@ -20,7 +20,19 @@ use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use serde_json::Value;
 
-const INDEX: &str = "moly://fixture-particles-v2/index.json";
+pub(crate) const INDEX: &str = "moly://fixture-particles-v2/index.json";
+
+/// The packages of `packages` the fixture-particles-v2 index does not list
+/// with a file (or lists as missing).
+pub(crate) fn unlisted(index: &Value, packages: impl IntoIterator<Item = String>) -> Vec<String> {
+    packages
+        .into_iter()
+        .filter(|package| {
+            let entry = &index["packages"][package.as_str()];
+            !(entry["file"].is_string() && entry["missing"] != true)
+        })
+        .collect()
+}
 
 #[derive(Resource)]
 pub(crate) enum SiteMoveProducts {
@@ -76,13 +88,7 @@ pub(crate) fn resolve(world: &mut World) {
             return;
         };
         let index: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        packages()
-            .into_iter()
-            .filter(|package| {
-                let entry = &index["packages"][package.as_str()];
-                !(entry["file"].is_string() && entry["missing"] != true)
-            })
-            .collect()
+        unlisted(&index, packages())
     };
     if missing.is_empty() {
         info!("[site-move] the release root lists the site-move effect products {:?}; requesting them", packages());

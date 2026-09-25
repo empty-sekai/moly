@@ -129,6 +129,23 @@ impl AvatarDriver {
         self.action.is_none()
     }
 
+    /// The walk or run locomotion clip locomotion is playing (not idle, not
+    /// while a business action owns the animator): whether it is the run
+    /// clip, its graph node and its clip name.
+    pub(crate) fn gait_clip(&self) -> Option<(bool, AnimationNodeIndex, &str)> {
+        if self.action.is_some() {
+            return None;
+        }
+        let motion = self.playing?;
+        let run = match motion {
+            AvatarMotion::Walk => false,
+            AvatarMotion::Run => true,
+            AvatarMotion::Idle => return None,
+        };
+        let slot = Self::slot(motion);
+        Some((run, self.locomotion[slot], self.clip_names[slot].as_str()))
+    }
+
     /// Length of one installed SD clip, if the library has it.
     pub(crate) fn sd_clip_duration(&self, clip: &str, clips: &Assets<AnimationClip>) -> Option<f32> {
         self.sd_clips
