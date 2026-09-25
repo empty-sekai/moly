@@ -11,9 +11,31 @@
 //! - `HarvestMapMock`: the user harvest map of each harvest site (fixture rows
 //!   and their drop rows), generated once per session by the mock's placement
 //!   rule below.
-//! - The tools and stamina mock: the user tool rows and the stamina triple.
+//! - The tools and stamina mock: the user tool rows and the stamina triple
+//!   (`StaminaMock`: the normal pool at its master maximum, enhance 0, and
+//!   the boost pool of one boost recovery, the recovery master's
+//!   `recoveryBoostStamina`; boost is spent first, so the first swings of a
+//!   session run boosted, at the boost speed and with the boost effects).
 //! - `HarvestApiMock` and `GatherApiMock`: echo replies to the harvest and
 //!   gather requests.
+//! - `TreasureBoxListMock`: the user treasure box rows. The mock's choice:
+//!   one `once_a_day` box (seq 1, the first harvest site), status
+//!   before_spawned, `transportSeconds` = [`TRANSPORT_SECONDS`] (the server
+//!   value is not on disk). The client sets up an airplane for every
+//!   unspawned box on whichever harvest site loads, and the spawn request
+//!   carries that site.
+//! - `TreasureBoxSpawnMock`: the reply to the spawn request. The mock's
+//!   placement rule: the box (by seq) becomes spawned on the sent site at the
+//!   sent player position (the server's rule is not on disk); the site's map
+//!   gains a `treasure_box_transport`
+//!   fixture row there (hp 0, spawned) with one drop row of a type-3
+//!   material listing the site.
+//! - `ReleaseApiMock`: the user phenomena rows. The mock's choices: the list
+//!   is empty at login (a user who has learned no phenomenon, so the first
+//!   harvest arrival learns today's); the reply to the release request
+//!   appends today's phenomenon once (`obtainedAt` 0: no client reader in
+//!   this flow). The client's today stands in for the server's (the weather
+//!   chain's current phenomenon id on the harvest site).
 //!
 //! The placement rule is **the mock's own, not the source's** (the source
 //! places on the server from spawn zones that are not on disk). It picks
@@ -21,8 +43,10 @@
 //! from every unavailable rectangle, 3 m clear of the arrival point and 3 m
 //! apart; the kinds and counts per site are the mock's choice, and a kind
 //! appears only on a site where a material of its type lists that site.
-//! Treasure boxes (paper airplane lane), tone (camera lane) and birthday
-//! plants (event calendar) are left out and named.
+//! The fixed treasure box is placed once per site with one drop row of a
+//! material of type 3, a tone once per site where a tone material lists the
+//! site (the mock's choices); the transported box (paper airplane) and
+//! birthday plants (event calendar) are left out of the map and named.
 
 use std::collections::BTreeMap;
 
@@ -61,6 +85,24 @@ pub(crate) struct UserDrop {
     pub(crate) status: i32,
     pub(crate) quantity: i32,
     pub(crate) group_id: i32,
+}
+
+/// `UserMysekaiTreasureBoxStatus`.
+pub(crate) const BOX_BEFORE_SPAWNED: i32 = 0;
+pub(crate) const BOX_SPAWNED: i32 = 1;
+/// `TreasureBoxListMock`'s `transportSeconds` (the mock's constant).
+pub(crate) const TRANSPORT_SECONDS: i32 = 10;
+
+/// One `UserMysekaiTreasureBox` row.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UserTreasureBox {
+    pub(crate) refresh_type: &'static str,
+    pub(crate) seq: i32,
+    pub(crate) transport_seconds: i32,
+    pub(crate) status: i32,
+    pub(crate) site_id: u32,
+    pub(crate) position_x: i32,
+    pub(crate) position_z: i32,
 }
 
 /// `UserMysekaiHarvestMap`.
@@ -135,6 +177,8 @@ pub(crate) struct MockInputs {
     pub(crate) tools: Vec<MockToolRow>,
     /// Master `maxStamina` of the normal pool.
     pub(crate) max_normal_stamina: i32,
+    /// `recoveryBoostStamina` of one boost recovery.
+    pub(crate) boost_grant: i32,
     /// The harvest sites (master category harvest).
     pub(crate) harvest_sites: Vec<u32>,
     /// A blueprint id for the toolbox's drop row (mock choice: the lowest).
@@ -143,27 +187,21 @@ pub(crate) struct MockInputs {
 
 /// Kinds the map mock places, with the mock's per-site count and the material
 /// type its drop rows come from.
-const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 6] = [
+const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 8] = [
     (0, "wood", 6, Some(0)),
     (1, "mineral", 5, Some(1)),
     (2, "plant", 5, Some(2)),
     (5, "other", 4, Some(3)),
     (8, "driftage", 1, Some(3)),
     (7, "toolbox", 1, None),
+    (4, "treasure_box_fixed", 1, Some(3)),
+    (6, "tone", 1, Some(6)),
 ];
 /// Kinds left out of the mock map, and who places them.
-pub(crate) const MOCK_EXCLUDED: [(&str, &str); 4] = [
+pub(crate) const MOCK_EXCLUDED: [(&str, &str); 2] = [
     (
         "treasure_box_transport",
-        "paper airplane and spawn API (later lane)",
-    ),
-    (
-        "treasure_box_fixed",
-        "treasure boxes need AutoMove and the box open (later lane)",
-    ),
-    (
-        "tone",
-        "HarvestTone camera 14 and the BGM fade (later lane)",
+        "delivered by the paper airplane (TreasureBoxSpawnMock)",
     ),
     ("birthday_plant", "birthday party calendar (event gated)"),
 ];
@@ -181,11 +219,18 @@ pub(crate) const RT_MYSEKAI_MATERIAL: i32 = 41;
 #[derive(Resource)]
 pub(crate) struct HarvestServerMock {
     maps: BTreeMap<u32, UserHarvestMap>,
+    boxes: Vec<UserTreasureBox>,
+    /// The `treasure_box_transport` master row (lowest id).
+    transport_fixture: Option<i32>,
+    /// Type-3 material rows (the transported box's drop row).
+    box_materials: Vec<MockMaterialRow>,
     tools: Vec<UserTool>,
     tool_rows: Vec<MockToolRow>,
     stamina: Stamina,
     materials: BTreeMap<i64, i64>,
     others: BTreeMap<(i32, i64), i64>,
+    /// `userMysekaiPhenomena` (ReleaseApiMock).
+    phenomena: Vec<super::learn::UserPhenomenon>,
 }
 
 /// A request of `PostUserMysekaiHarvestApi` (one merged run of stacks).
@@ -258,23 +303,132 @@ impl HarvestServerMock {
                 durability: row.max_durability,
             })
             .collect::<Vec<_>>();
+        // TreasureBoxListMock (the mock's choice).
+        let boxes = inputs
+            .harvest_sites
+            .first()
+            .map(|&site_id| UserTreasureBox {
+                refresh_type: "once_a_day",
+                seq: 1,
+                transport_seconds: TRANSPORT_SECONDS,
+                status: BOX_BEFORE_SPAWNED,
+                site_id,
+                position_x: 0,
+                position_z: 0,
+            })
+            .into_iter()
+            .collect();
         Self {
             maps,
+            boxes,
+            transport_fixture: inputs
+                .fixtures
+                .iter()
+                .filter(|row| row.kind == 3)
+                .map(|row| row.id)
+                .min(),
+            box_materials: inputs
+                .materials
+                .iter()
+                .filter(|row| row.material_type == 3)
+                .cloned()
+                .collect(),
             tools,
             tool_rows: inputs.tools.clone(),
+            // StaminaMock (the mock's choice: the user has used one boost
+            // recovery; the user's pools are server data).
             stamina: Stamina {
                 normal: inputs.max_normal_stamina,
                 enhance: 0,
-                boost: 0,
+                boost: inputs.boost_grant,
             },
             materials: BTreeMap::new(),
             others: BTreeMap::new(),
+            phenomena: Vec::new(),
         }
     }
 
     /// The login fetch: the user lists as the client first receives them.
     pub(crate) fn login(&self) -> (BTreeMap<u32, UserHarvestMap>, Vec<UserTool>, Stamina) {
         (self.maps.clone(), self.tools.clone(), self.stamina)
+    }
+
+    /// The user phenomena rows at login.
+    pub(crate) fn phenomena(&self) -> Vec<super::learn::UserPhenomenon> {
+        self.phenomena.clone()
+    }
+
+    /// `ReleaseApiMock` (`PostUserMysekaiReleaseApi(userId, mysekaiSiteId)`):
+    /// today's phenomenon is recorded once; the reply carries the whole list.
+    /// The site does not enter the row (the rows have no site field).
+    pub(crate) fn release(
+        &mut self,
+        _site_id: u32,
+        today: i32,
+    ) -> Vec<super::learn::UserPhenomenon> {
+        if !self.phenomena.iter().any(|row| row.phenomena_id == today) {
+            self.phenomena.push(super::learn::UserPhenomenon {
+                phenomena_id: today,
+                obtained_at: 0,
+            });
+        }
+        self.phenomena.clone()
+    }
+
+    /// `TreasureBoxListMock`: the user treasure box rows at login.
+    pub(crate) fn treasure_boxes(&self) -> Vec<UserTreasureBox> {
+        self.boxes.clone()
+    }
+
+    /// `TreasureBoxSpawnMock` (`PatchUserMysekaiSpawnApi`): the box row of
+    /// (site, seq) becomes spawned at the sent position; the site's map gains
+    /// the transported box's fixture row and one drop row there. `None` when
+    /// the mock cannot serve it (the client then ends the airplane, as on a
+    /// failed reply).
+    pub(crate) fn spawn_treasure_box(
+        &mut self,
+        site_id: u32,
+        seq: i32,
+        position_x: i32,
+        position_z: i32,
+    ) -> Option<(Vec<UserTreasureBox>, UserHarvestMap)> {
+        let fixture_id = self.transport_fixture?;
+        let material = self
+            .box_materials
+            .iter()
+            .filter(|row| row.site_ids.contains(&site_id))
+            .map(|row| row.id)
+            .min()?;
+        let row = self
+            .boxes
+            .iter_mut()
+            .find(|row| row.seq == seq && row.status == BOX_BEFORE_SPAWNED)?;
+        row.status = BOX_SPAWNED;
+        row.site_id = site_id;
+        row.position_x = position_x;
+        row.position_z = position_z;
+        let map = self.maps.get_mut(&site_id)?;
+        map.fixtures.push(UserFixture {
+            fixture_id,
+            position_x,
+            position_z,
+            hp: 0,
+            status: FIXTURE_SPAWNED,
+            group_id: 0,
+        });
+        let seq = map.drops.iter().map(|drop| drop.seq).max().unwrap_or(0) + 1;
+        map.drops.push(UserDrop {
+            resource_type: RT_MYSEKAI_MATERIAL,
+            resource_id: material,
+            position_x,
+            position_z,
+            hp: 0,
+            seq,
+            status: DROP_BEFORE,
+            quantity: 1,
+            group_id: 0,
+        });
+        Some((self.boxes.clone(), map.clone()))
     }
 
     /// `HarvestApiMock`: echo. Stamina := each type's sent rest; the tool's
@@ -626,6 +780,7 @@ mod value_checks {
                 },
             ],
             max_normal_stamina: 1000,
+            boost_grant: 100,
             harvest_sites: vec![5],
             toolbox_blueprint: None,
         }
@@ -680,6 +835,7 @@ mod value_checks {
         let mut mock = HarvestServerMock::new(&inputs());
         let (maps, tools, stamina) = mock.login();
         assert_eq!(stamina.normal, 1000);
+        assert_eq!(stamina.boost, 100);
         assert_eq!(
             tools.iter().map(|t| t.tool_id).collect::<Vec<_>>(),
             vec![1, 6]

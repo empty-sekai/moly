@@ -14,7 +14,7 @@
 //!   durability, the player's source clip and the tool in hand.
 //! - `damage`: `HarvestObjectPresenter.OnDamage`: `UpdateHp`, the multi /
 //!   single dispatch, SEs, the punch, `HandleResourceDrop`, the per-kind
-//!   disappearance (the tree fall).
+//!   disappearance (the tree fall and the top's dither fade).
 //! - `drops`: `CreateDropItem`: SE, pacing, scatter, the drop hop.
 //! - `pickup`: drops approach the moving player and are collected.
 //! - `queue`: the 1.0 s harvest log loop, request merging, the mock replies
@@ -22,12 +22,21 @@
 //!
 //! - `effects`: the harvest effects (101-143) from the effect table.
 //!
-//! Named gaps: the prop animator clips (barrel break, toolbox open)
-//! are not played; the tree top's dither fade is not ported (the top hides
-//! when the fade would end); harvest objects do not carve the walk field
-//! (the source's NavMeshObstacle); drop models keep their glb materials.
+//! - `prop_animator`: the Animator of the barrel, the toolbox and the
+//!   treasure boxes, run from the controller in the package document.
+//! - `airplane`: the paper airplane that delivers the transported treasure
+//!   box (`TreasureBoxListMock` / `TreasureBoxSpawnMock` in the mock panel).
+//! - `tone`: the HarvestTone camera (state 14) and the tone view's SE.
+//! - `learn`: learning today's phenomenon on arrival (GameState 6, camera
+//!   state 17, `ReleaseApiMock`).
+//!
+//! Named gaps: harvest objects do not carve the walk field (the source's
+//! NavMeshObstacle, also the ones the driftage and treasure views switch);
+//! the particle systems the driftage, toolbox and treasure views play and
+//! stop are not drawn; drop models keep their glb materials.
 
 pub(crate) mod action;
+mod airplane;
 mod arrival;
 pub(crate) mod catalog;
 mod clips;
@@ -36,8 +45,11 @@ mod drops;
 mod effects;
 pub(crate) mod law;
 mod pickup;
+mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
+mod learn;
+mod tone;
 mod tool_model;
 mod ui;
 
@@ -52,6 +64,8 @@ use crate::site::GroundMeshes;
 use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
+pub(crate) use action::HarvestAutoMoveHeld;
+pub(crate) use learn::LearnSiteEnvironmentActive;
 pub(crate) use arrival::HarvestViewNodes;
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
@@ -641,6 +655,13 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     world.resource_mut::<HarvestScenesReadyCount>().0 = 0;
     world.resource_mut::<HarvestSpawnedCount>().0 = 0;
     world.resource_mut::<HarvestDropBatches>().0.clear();
+    world.resource_mut::<damage::HarvestStartHides>().0.clear();
+    world.resource_mut::<damage::HarvestEffectOnly>().0.clear();
+    world.resource_mut::<damage::HarvestTurnRequests>().0.clear();
+    world
+        .resource_mut::<prop_animator::PropAnimatorCalls>()
+        .0
+        .clear();
     world.resource_mut::<HarvestGroundVerts>().0 = None;
     world.resource_mut::<arrival::HarvestArrival>().clear();
     if count > 0 {
@@ -714,6 +735,13 @@ impl Plugin for HarvestPlugin {
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
             .init_resource::<effects::HarvestEffects>()
+            .init_resource::<prop_animator::PropAnimatorCalls>()
+            .init_resource::<damage::HarvestStartHides>()
+            .init_resource::<damage::HarvestEffectOnly>()
+            .init_resource::<damage::HarvestTurnRequests>()
+            .init_resource::<airplane::PaperAirplanes>()
+            .init_resource::<tone::HarvestToneCamera>()
+            .init_resource::<learn::LearnEnvironment>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),
@@ -727,6 +755,9 @@ impl Plugin for HarvestPlugin {
                     tool_model::parse,
                     arrival::place,
                     arrival::bind_views,
+                    prop_animator::bind,
+                    airplane::advance,
+                    learn::advance,
                 )
                     .chain(),
             )
@@ -737,12 +768,16 @@ impl Plugin for HarvestPlugin {
                     ui::read_input,
                     action::autoplay_press,
                     action::update_targets,
-                    action::advance,
+                    (action::advance, action::hold_for_auto_move).chain(),
+                    damage::on_effect_only,
                     damage::on_damage,
                     action::after_hits,
                     drops::spawn,
                     damage::advance_punches,
                     damage::advance_after_forms,
+                    damage::advance_start_hides,
+                    damage::advance_turns,
+                    prop_animator::advance,
                     drops::advance_animations,
                     pickup::collect_on_leave,
                     pickup::advance,
@@ -765,7 +800,11 @@ impl Plugin for HarvestPlugin {
             )
             .add_systems(
                 PostUpdate,
-                action::advance_camera_shake.before(crate::camera::follow_avatar),
+                (
+                    action::advance_camera_shake.before(crate::camera::follow_avatar),
+                    tone::advance_tone_camera.after(crate::camera::follow_avatar),
+                    learn::advance_learn_camera.after(crate::camera::follow_avatar),
+                ),
             );
     }
 }
