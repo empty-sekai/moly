@@ -63,6 +63,9 @@ struct ArrivalRun {
     next: usize,
     unclaimed: bool,
     rng: super::Rng,
+    /// `SetPosition(end)` after the ordinary placement, by fixture index
+    /// (the paper airplane's box).
+    forced: std::collections::HashMap<usize, Vec3>,
 }
 
 impl HarvestArrival {
@@ -76,6 +79,26 @@ impl HarvestArrival {
 
     pub(crate) fn site_id(&self) -> Option<u32> {
         self.run.as_ref().map(|run| run.site_id)
+    }
+
+    /// `CreateTreasureBox`: the transported box's fixture row (and its drop
+    /// rows) go through the ordinary placement (`presenter.Setup`: the snap
+    /// and one yaw draw), then `SetPosition(end)`. False without a run on
+    /// that site.
+    pub(crate) fn append_transported(
+        &mut self,
+        site_id: u32,
+        fixture: UserFixture,
+        drops: Vec<UserDrop>,
+        end: Vec3,
+    ) -> bool {
+        let Some(run) = self.run.as_mut().filter(|run| run.site_id == site_id) else {
+            return false;
+        };
+        run.forced.insert(run.fixtures.len(), end);
+        run.fixtures.push(fixture);
+        run.drops.extend(drops);
+        true
     }
 
     /// The site goes; the last seen epoch stays (it is monotonic across
@@ -113,6 +136,7 @@ pub(crate) fn place(
     mut batches: ResMut<HarvestDropBatches>,
     mut ground_verts: ResMut<super::HarvestGroundVerts>,
     mut spawned: ResMut<super::HarvestSpawnedCount>,
+    mut animator_calls: ResMut<super::prop_animator::PropAnimatorCalls>,
 ) {
     let (Some(catalog), Some(user), Some(site), Some(epoch)) = (
         inputs.catalog.as_deref(),
@@ -166,6 +190,7 @@ pub(crate) fn place(
             next: 0,
             unclaimed: false,
             rng: super::Rng(0x4152_5249_0000_0000 ^ ((site.site_id as u64) << 32) ^ epoch.0),
+            forced: Default::default(),
         });
         spawned.0 = 0;
     }
@@ -252,6 +277,9 @@ pub(crate) fn place(
         return;
     };
     let def = catalog.fixtures[&fixture.fixture_id].clone();
+    // A row appended after the arrival (the paper airplane's box) requests
+    // its package here; the arrival's own rows were requested at its start.
+    request(&inputs.server, catalog, &def.package, &mut glbs, &mut docs);
     if !glbs.ready(&inputs.server, &def.package) || !docs.ready(&inputs.server, &def.package) {
         return;
     }
@@ -315,6 +343,13 @@ pub(crate) fn place(
     let pending = pending_drops.len();
     let uid = next_uid + run.next as u64 + 1;
     let cues = kind_cues(def.class, def.is_rare);
+    let forced = run.forced.remove(&run.next);
+    if let Some(end) = forced {
+        info!(
+            "[harvest] {}#{} SetPosition({:.3}, {:.3}, {:.3}): the placed position gives way to the airplane's landing point",
+            def.leaf, def.id, end.x, end.y, end.z
+        );
+    }
     let entity = commands
         .spawn((
             SceneRoot(scene),
@@ -345,16 +380,24 @@ pub(crate) fn place(
                 pending_drops,
                 hits_taken: 0,
             },
-            Transform::from_translation(Vec3::new(snapped.x, y, snapped.y))
+            Transform::from_translation(forced.unwrap_or(Vec3::new(snapped.x, y, snapped.y)))
                 .with_rotation(Quat::from_rotation_y(yaw))
                 .with_scale(Vec3::splat(scale)),
-            if alive {
+            if alive || def.class == "MysekaiAreaTreasureBoxView" {
                 Visibility::default()
             } else {
                 Visibility::Hidden
             },
         ))
         .id();
+    // ForceChangeAfterObject of a box loaded as harvested: SetBool("opened")
+    // (and its lid obstacle): the open box stays.
+    if !alive && def.class == "MysekaiAreaTreasureBoxView" {
+        animator_calls.0.push((
+            entity,
+            super::prop_animator::PropCall::SetBool("opened", true),
+        ));
+    }
     info!(
         "[harvest] placed {}#{} ({} {}) map (x, z) = ({}, {}) -> product ({:.2}, {:.2}) snapped ({:.2}, {:.2}, {:.2}) shift {:.2} m in {tries} tries, yaw {:.1} deg, scale {:.3}, radius {:.3}, hp {}, status {}{}, {pending} pending drop rows, entity {entity:?}",
         def.leaf,
@@ -377,7 +420,11 @@ pub(crate) fn place(
         if alive {
             ""
         } else {
-            " (loaded as harvested: ForceChangeAfterObject, nothing remains)"
+            if def.class == "MysekaiAreaTreasureBoxView" {
+                " (loaded as harvested: ForceChangeAfterObject, the box stays open)"
+            } else {
+                " (loaded as harvested: ForceChangeAfterObject, nothing remains)"
+            }
         },
     );
     run.next += 1;

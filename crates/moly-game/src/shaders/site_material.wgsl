@@ -35,6 +35,8 @@
 //   SITE_GROUND_HEIGHT_FADE   _USE_HEIGHT_FADE：Ground 高度淡出（雾后）。
 //   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变。
 //   SITE_BIRTHDAY_DITHER  !_DISABLE_DITHER：Birthday 抖动（0.125）。
+//   SITE_TREE_DITHER      !_DISABLE_DITHER on a Tree material: Bayer dither
+//                         (0.125) right after the constant alpha clip.
 //   SITE_TREASUREBOX      TreasureBox family: selected vertex colour (squared)
 //                         and alpha, phenomena light and shade always on,
 //                         mask-ramped drop shadow, treasure shadows, fog.
@@ -779,6 +781,13 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 #endif
+#ifdef SITE_TREE_DITHER
+    // The Tree program without _DISABLE_DITHER: Bayer dither at quantization
+    // 0.125 after the clip (_DitherAlpha - threshold < 0 discards).
+    if params.dither_alpha.x - bayer_value(bayer_pixel(in.position), 0.125) < 0.0 {
+        discard;
+    }
+#endif
 
     // 顶点色是原始色的布尔选择（区别于 FO 的平方/浮点 lerp）：源门取
     // 「use < 0.5 为真选原色」，select 语义相反故取反写。
@@ -872,7 +881,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(srgb_format_decode(rgb), 1.0);
 #endif
 #ifdef SITE_OBJECT
-    // ---- Object 族（usage∈{8,12} 走 default 光照分支；2/11/14 在解析层
+    // ---- Object 族（usage∈{4,8,12} 走 default 光照分支；2/11/14 在解析层
     // 具名拒绝，此处不编译它们的支路）----
     // 法线 renorm + 视线选择（正交用 MatrixV 列 z）。
     let normal = normalize(in.world_normal);
@@ -915,7 +924,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     let selected = select(main.a, main.a * in.color.w, params.use_vertex_alpha_opacity.x > 0.0);
 
     // ndotl 先 clamp 后用（toon 的 half 用 clamp 副本；maskramp 的 r 在
-    // usage!=0 时被强制 1.0——本族 usage∈{8,12} 恒死，不编译）。
+    // usage!=0 时被强制 1.0——本族 usage∈{4,8,12} 恒死，不编译）。
     let ndotl_clamped = clamp(dot(env.light_vector.xyz, normal), 0.0, 1.0);
 
     // vc1：浮点 lerp、**原始未平方** vc.rgb（区别于 FO 的平方形）。
