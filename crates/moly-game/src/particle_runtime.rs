@@ -169,9 +169,11 @@ pub(crate) fn advance_frame(system: &mut Runtime, dt: f32, emitting: bool, ctx: 
         let stopped = !emitting || native.target.is_some();
         let result = birth::advance_frame(system, &mut native, dt, stopped, ctx, &mut slice_start);
         system.native_birth = Some(native);
+        let result = result.map_err(|error| format!("{error:?}"))
+            .and_then(|ran| if ran { end_of_update_size(system).map(|()| ran) } else { Ok(ran) });
         return result.map_err(|error| {
             system.refused_total += 1;
-            format!("{error:?}")
+            error
         });
     }
     use moly_law::particle::frame_time::{frame_step, FrameStep};
@@ -534,6 +536,58 @@ fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx
         system.refused_total += 1;
         error!(?error, effect=%system.effect, node=%system.node, "native prewarm slice refused");
         return Err("native prewarm slice refused");
+    }
+    if let Err(reason) = end_of_update_size(system) {
+        system.refused_total += 1;
+        error!(%reason, effect=%system.effect, node=%system.node, "native prewarm size call refused");
+        return Err("native prewarm size call refused");
+    }
+    Ok(())
+}
+
+/// The end of `ParticleSystem::Update1Incremental` for a size law that
+/// follows the engine's calls: after the slice loop, one `SizeModule::Update`
+/// over the whole live storage `[0, count)`. The engine takes this call only
+/// when no module read the size during the slices (drag by size, collision,
+/// lights by size, trails, trigger); such a system does not get this law
+/// ([`size_storage_eligible`]). The renderer reads what it stores.
+fn end_of_update_size(system: &mut Runtime) -> Result<(), String> {
+    let Some(calls) = system.size_law.as_mut().and_then(|law| law.calls_mut()) else { return Ok(()); };
+    let lanes: Vec<moly_law::particle::size::SizeLane> = system.pool.iter().zip(&system.side)
+        .map(|(particle, side)| moly_law::particle::size::SizeLane {
+            age_percent: particle.age_percent, seed: side.seed, start: side.size })
+        .collect();
+    calls.pass(&lanes, 0, lanes.len());
+    match calls.refused() {
+        Some(reason) => Err(reason.to_owned()),
+        None => Ok(()),
+    }
+}
+
+/// Whether a law of this system follows the engine's storage past the live
+/// count (a CustomData or size law), so that a birth reports its lanes.
+pub(super) fn follows_storage(system: &Runtime) -> bool {
+    system.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage())
+        || system.size_law.as_ref().is_some_and(|size| size.calls().is_some())
+}
+
+/// A birth's storage operation, told to every law that follows the storage:
+/// `lanes` are the newborn lanes after old live particles `old` as the
+/// newborn death pass finds them, `live` the survivors; the runtime's pool
+/// holds them packed. Returns the first law's refusal.
+pub(super) fn storage_birth(system: &mut Runtime, old: usize, lanes: &[Particle], live: usize)
+    -> Result<(), &'static str> {
+    if let Some(custom) = system.custom_law.as_mut().filter(|custom| custom.tracks_storage()) {
+        custom.birth(old, lanes, live, &system.pool[old..]);
+        if let Some(reason) = custom.refused() {
+            return Err(reason);
+        }
+    }
+    if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+        calls.birth(old, lanes, live, &system.pool[old..]);
+        if let Some(reason) = calls.refused() {
+            return Err(reason);
+        }
     }
     Ok(())
 }
@@ -906,7 +960,7 @@ pub(crate) fn build_quads(system: &Runtime, to_world: &GlobalTransform) -> Vec<Q
         // 归一化年龄：律的倒计时折算。
         let age = particle.normalized_age();
         let scale = system.node_affine.to_scale_rotation_translation().0.x;
-        let evaluated_size = motion::size_at_age_percent(system, &side, particle.age_percent);
+        let evaluated_size = motion::current_size(system, index, particle.age_percent);
         let size = [evaluated_size[0] * scale, evaluated_size[1] * scale];
         // The source render path multiplies byte colour into immutable birth
         // colour. Keep that operation separate from raw gradient evaluation.
@@ -970,9 +1024,10 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
         let stopped = !emitting || native.target.is_some();
         let result = birth::step_explicit(system, &mut native, dt, stopped, ctx);
         system.native_birth = Some(native);
+        let result = result.map_err(|error| format!("{error:?}")).and_then(|()| end_of_update_size(system));
         return result.map_err(|error| {
             system.refused_total += 1;
-            format!("{error:?}")
+            error
         });
     }
     // The legacy step has no start delay word: a system whose Play leaves one
@@ -1078,9 +1133,14 @@ fn simulate_existing(system: &mut Runtime, dt: f32, ctx: &Context, mut deaths: O
     // its last four-lane group past the count, and SimulateParticles advances
     // their ages; the kill pass below then leaves the slots past the new
     // count. A law that follows its curve objects' caches is told both.
-    let custom_storage = system.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage());
+    let custom_storage = follows_storage(system);
     if let Some(custom) = system.custom_law.as_mut() {
         custom.end_existing_call(system.pool.len(), dt, mode, system.emitter.ring_buffer_loop_range);
+    }
+    // A size law that follows the engine's calls evaluates nothing here (the
+    // module runs after the slices), but its slots past the count age too.
+    if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+        calls.end_existing_call(system.pool.len(), dt, mode, system.emitter.ring_buffer_loop_range);
     }
     let before = custom_storage.then(|| system.pool.clone());
     let mut removed = Vec::new();
@@ -1100,8 +1160,13 @@ fn simulate_existing(system: &mut Runtime, dt: f32, ctx: &Context, mut deaths: O
             compact_with_sides_indexed(&mut system.pool, &mut system.side, &mut none, mode, maximum, &mut on_death)
         }
     } as u64;
-    if let (Some(before), Some(custom)) = (before, system.custom_law.as_mut()) {
-        custom.kill(&before, &removed, &system.pool);
+    if let Some(before) = before {
+        if let Some(custom) = system.custom_law.as_mut() {
+            custom.kill(&before, &removed, &system.pool);
+        }
+        if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+            calls.kill(&before, &removed, &system.pool);
+        }
     }
 }
 
@@ -1504,25 +1569,34 @@ fn cycle_curve(curve: &moly_law::particle::MinMaxCurve, t: f32, random: f32) -> 
 /// before any law is installed; the installation sites rely on it. Force,
 /// rotation, limit velocity and Noise are built by the judge itself.
 pub(crate) fn curve_admission(emitter: &EmitterParams) -> Result<(), String> {
-    curve_admission_with(emitter, None)
+    curve_admission_with(emitter, None, None)
 }
 
-/// [`curve_admission`] for a host that installs [`custom_data_law`]: a
-/// CustomData lane the history-independence certificate refuses is admitted
-/// when `storage` qualifies the system for the law that follows the engine's
-/// storage ([`custom_data_storage_eligible`] and the host's own conditions).
-pub(crate) fn curve_admission_with(emitter: &EmitterParams, storage: Option<&dyn Fn() -> Result<(), String>>)
-    -> Result<(), String> {
+/// [`curve_admission`] for a host that installs [`custom_data_law`] and
+/// [`size_over_lifetime_law`]: a CustomData lane the history-independence
+/// certificate refuses is admitted when `storage` qualifies the system for the
+/// law that follows the engine's storage ([`custom_data_storage_eligible`]
+/// and the host's own conditions), and a size lane when `size_storage`
+/// qualifies it for the size law that follows the engine's calls
+/// ([`size_storage_eligible`] and the host's own conditions).
+pub(crate) fn curve_admission_with(emitter: &EmitterParams, storage: Option<&dyn Fn() -> Result<(), String>>,
+    size_storage: Option<&dyn Fn() -> Result<(), String>>) -> Result<(), String> {
     use moly_law::particle::curve::{CurveSampler, CurveTime};
     use moly_law::particle::custom_data::CustomData;
     use moly_law::particle::MinMaxCurve;
-    // The size curves keep the history certificate. This runtime evaluates
-    // the size law at each place it reads a size (LimitVelocity's drag, the
-    // geometry, the collision radius), so its evaluation sequence on a size
-    // curve is not the engine's and cannot carry the curve objects' caches.
+    use moly_law::particle::size::SizeOverLifetime;
+    // A size curve whose value can follow its cache history is admitted only
+    // with the law that follows the engine's calls: the other form evaluates
+    // where a consumer asks (LimitVelocity's drag, the geometry, the collision
+    // radius), which is not the engine's sequence on the curve objects.
     if let Some(params) = &emitter.size_over_lifetime {
-        moly_law::particle::size::SizeOverLifetime::from_params(params)
-            .map_err(|reason| format!("sizeOverLifetime: {reason}"))?;
+        if let Err(reason) = SizeOverLifetime::from_params(params) {
+            let Some(qualify) = size_storage else { return Err(format!("sizeOverLifetime: {reason}")); };
+            SizeOverLifetime::with_storage(params, size_3d(emitter), moly_law::particle::slot_tail::RESERVED_SLOTS)
+                .map_err(|reason| format!("sizeOverLifetime: {reason}"))?;
+            qualify().map_err(|why| format!(
+                "sizeOverLifetime: {reason}; the law that follows the engine's calls is refused: {why}"))?;
+        }
     }
     if let Some(params) = &emitter.custom_data {
         if let Err(reason) = CustomData::from_params(params) {
@@ -1571,6 +1645,88 @@ pub(crate) fn custom_data_law(params: &moly_law::particle::schema::CustomDataPar
     use moly_law::particle::custom_data::CustomData;
     CustomData::from_params(params)
         .or_else(|_| CustomData::with_storage(params, moly_law::particle::slot_tail::RESERVED_SLOTS))
+}
+
+/// The size law the weather host installs: the form that evaluates where a
+/// consumer asks, where the history-independence certificate admits every
+/// lane, otherwise the form that follows the engine's SizeModule calls,
+/// which [`curve_admission_with`] admitted only for a qualified system and
+/// which runs only with the native birth owner.
+pub(crate) fn size_over_lifetime_law(emitter: &EmitterParams)
+    -> Option<Result<moly_law::particle::size::SizeOverLifetime, &'static str>> {
+    use moly_law::particle::size::SizeOverLifetime;
+    let params = emitter.size_over_lifetime.as_ref()?;
+    Some(SizeOverLifetime::from_params(params).or_else(|_|
+        SizeOverLifetime::with_storage(params, size_3d(emitter), moly_law::particle::slot_tail::RESERVED_SLOTS)))
+}
+
+/// Whether the particle arrays carry three sizes: `AllocateParticleArrays`
+/// sets it for the Initial module's 3D start size and for an enabled
+/// SizeModule with separate axes (SizeBySpeed has no consumer here).
+fn size_3d(emitter: &EmitterParams) -> bool {
+    emitter.start.size3d || emitter.size_over_lifetime.as_ref().is_some_and(|size| size.separate_axes)
+}
+
+/// Whether a system's size law can follow the engine's SizeModule calls.
+///
+/// The engine calls the module per slice after the simulation, and in each
+/// newborn block, when a module reads the size during the slices (drag by
+/// size, collision, lights with size affecting range, a trail flag, trigger);
+/// otherwise once after the slices over the whole live storage, which this
+/// runtime reproduces. So this law needs: none of those modules (Lights and
+/// Trigger have no consumer here; any trail is refused, its flag not
+/// identified), no Noise size amount (whose size update after the module is
+/// not ported), the native birth path and every storage condition the slot
+/// model has: no ring mode, every lane simulated (a positive start lifetime),
+/// and the reserved storage known to hold the slots it follows. Play reserves
+/// the smaller of the authored maximum and `CalculateMaxActiveParticles`,
+/// which adds the ceiling of the largest lifetime times the largest rate to
+/// the largest summed count of the bursts within one lifetime of a burst
+/// (each count truncated); with a positive maximum and a positive estimate
+/// the first 32 slots lie in it.
+pub(crate) fn size_storage_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
+    use moly_law::particle::MinMaxCurve;
+    native_birth_eligible(emitter, route).map_err(|reason| format!("the native birth path is refused: {reason}"))?;
+    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
+        return Err("a ring buffer mode packs newborns in an order the slot model does not follow".into());
+    }
+    if emitter.collision.is_some() {
+        return Err("the CollisionModule reads the size during the slices, where the module then runs".into());
+    }
+    if emitter.limit_velocity.as_ref().is_some_and(|limit| limit.multiply_drag_by_size != Some(false)
+        && limit.drag.as_ref().is_some_and(|drag| *drag != MinMaxCurve::Constant(0.0))) {
+        return Err("drag by size reads the size during the slices, where the module then runs".into());
+    }
+    if emitter.trails.is_some() {
+        return Err("a trail's size flag moves the module into the slices; which trail field it is was not read".into());
+    }
+    if emitter.noise.as_ref().is_some_and(|noise| noise.size_amount != MinMaxCurve::Constant(0.0)) {
+        return Err("the Noise size update after the module is not ported".into());
+    }
+    let lifetime = match emitter.start.lifetime {
+        MinMaxCurve::Constant(value) => Some(value),
+        MinMaxCurve::TwoConstants { min, max } if min > 0.0 && max > 0.0 => Some(min.max(max)),
+        _ => None,
+    }.filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or("a start lifetime that is not one or two positive constants")?;
+    let emission = emitter.emission.as_ref().ok_or("no emission block: the storage reservation is not known")?;
+    let upper = |curve: &MinMaxCurve| match curve {
+        MinMaxCurve::Constant(value) => Some(*value),
+        MinMaxCurve::TwoConstants { min, max } => Some(min.max(*max)),
+        _ => None,
+    };
+    let rate = upper(&emission.rate_over_time).zip(upper(&emission.rate_over_distance))
+        .map(|(time, distance)| time + distance)
+        .ok_or("an emission rate curve: the storage reservation is not known")?;
+    let burst = emission.bursts.iter().any(|burst| match burst.count {
+        MinMaxCurve::Constant(value) => value >= 1.0,
+        MinMaxCurve::TwoConstants { max, .. } => max >= 1.0,
+        _ => false,
+    });
+    if emitter.max_particles == 0 || !(lifetime * rate > 0.0 || burst) {
+        return Err("no positive storage reservation".into());
+    }
+    Ok(())
 }
 
 /// Whether a system's CustomData law can follow the engine's storage past the
@@ -1853,7 +2009,7 @@ pub(crate) fn geometry_instances(system: &Runtime, to_world: &GlobalTransform) -
     let appearance = build_quads(system, to_world);
     system.pool.iter().enumerate().map(|(index, particle)| {
         let side = system.side[index];
-        let size = Vec3::from_array(motion::size_at_age_percent(system, &side, particle.age_percent));
+        let size = Vec3::from_array(motion::current_size(system, index, particle.age_percent));
         let view = &appearance[index];
         crate::particle_geometry::Instance {
             position: crate::particle_geometry::reflect(view.centre),
