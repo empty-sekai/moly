@@ -40,8 +40,9 @@ pub struct ChildOwner {
 }
 
 impl ChildOwner {
-    /// The Local scaling owner stores the shape scale (1, 1, 1).
-    pub fn local_scaling(owner: &OwnerMatrices) -> Self {
+    /// The Local and Hierarchy scaling owners both store the shape scale
+    /// (1, 1, 1).
+    pub fn from_owner(owner: &OwnerMatrices) -> Self {
         Self {
             local_to_world: owner.local_to_world,
             world_to_local: owner.world_to_local,
