@@ -11,7 +11,11 @@
 //! - `HarvestMapMock`: the user harvest map of each harvest site (fixture rows
 //!   and their drop rows), generated once per session by the mock's placement
 //!   rule below.
-//! - The tools and stamina mock: the user tool rows and the stamina triple.
+//! - The tools and stamina mock: the user tool rows and the stamina triple
+//!   (`StaminaMock`: the normal pool at its master maximum, enhance 0, and
+//!   the boost pool of one boost recovery, the recovery master's
+//!   `recoveryBoostStamina`; boost is spent first, so the first swings of a
+//!   session run boosted, at the boost speed and with the boost effects).
 //! - `HarvestApiMock` and `GatherApiMock`: echo replies to the harvest and
 //!   gather requests.
 //!
@@ -135,6 +139,8 @@ pub(crate) struct MockInputs {
     pub(crate) tools: Vec<MockToolRow>,
     /// Master `maxStamina` of the normal pool.
     pub(crate) max_normal_stamina: i32,
+    /// `recoveryBoostStamina` of one boost recovery.
+    pub(crate) boost_grant: i32,
     /// The harvest sites (master category harvest).
     pub(crate) harvest_sites: Vec<u32>,
     /// A blueprint id for the toolbox's drop row (mock choice: the lowest).
@@ -262,10 +268,12 @@ impl HarvestServerMock {
             maps,
             tools,
             tool_rows: inputs.tools.clone(),
+            // StaminaMock (the mock's choice: the user has used one boost
+            // recovery; the user's pools are server data).
             stamina: Stamina {
                 normal: inputs.max_normal_stamina,
                 enhance: 0,
-                boost: 0,
+                boost: inputs.boost_grant,
             },
             materials: BTreeMap::new(),
             others: BTreeMap::new(),
@@ -626,6 +634,7 @@ mod value_checks {
                 },
             ],
             max_normal_stamina: 1000,
+            boost_grant: 100,
             harvest_sites: vec![5],
             toolbox_blueprint: None,
         }
@@ -680,6 +689,7 @@ mod value_checks {
         let mut mock = HarvestServerMock::new(&inputs());
         let (maps, tools, stamina) = mock.login();
         assert_eq!(stamina.normal, 1000);
+        assert_eq!(stamina.boost, 100);
         assert_eq!(
             tools.iter().map(|t| t.tool_id).collect::<Vec<_>>(),
             vec![1, 6]
