@@ -561,24 +561,34 @@ mod tests {
     }
 
     /// The census verdict: the admission and, for a played system, the birth
-    /// owner's install decision on a scratch copy (no seed manager of the
-    /// product is touched; the words are the harness entropy).
+    /// owner's install decision (the installer's route and emitter-state test
+    /// on the plan's geometry evidence, and its refusal of what the legacy
+    /// step cannot run); no seed is drawn.
     fn census_admit(package: &str, particle: &Value, by_path: &HashMap<String, &Value>, owners: &SubEmitterGraph<'_>,
         server: &AssetServer, path: Path, stepping: Stepping) -> Result<String, String> {
         let plan = admit(package, particle, by_path, owners, server, path, stepping)?;
-        if stepping == Stepping::Played {
-            let mut system = crate::particle_runtime::test_support::runtime();
-            system.emitter = plan.emitter.clone();
-            system.custom_law = plan.emitter.custom_data.as_ref()
-                .map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission"));
-            let mut seeds = crate::particle_runtime::seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
-            let played = install(&mut system, &plan, &mut seeds)?;
-            return Ok(match played.legacy {
-                None => "admitted, native birth owner".to_owned(),
-                Some(_) => "admitted, legacy step".to_owned(),
-            });
+        if stepping == Stepping::Director {
+            return Ok("admitted, Director legacy step".to_owned());
         }
-        Ok("admitted, Director legacy step".to_owned())
+        let evidence = match &plan.geometry {
+            PlannedGeometry::Billboard(draw) =>
+                crate::particle_runtime::ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false },
+            PlannedGeometry::Mesh { scaling, .. } =>
+                crate::particle_runtime::ShapeEmitterEvidence { scaling: *scaling, mesh_renderer: true },
+        };
+        match crate::particle_runtime::native_birth_path(&plan.emitter, &plan.route, Some(evidence)) {
+            Ok(()) => Ok("admitted, native birth owner".to_owned()),
+            Err(reason) => {
+                let mut system = crate::particle_runtime::test_support::runtime();
+                system.emitter = plan.emitter.clone();
+                system.custom_law = plan.emitter.custom_data.as_ref()
+                    .map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission"));
+                match legacy_refusal(&system, plan.event_edges.is_some()) {
+                    Some(refusal) => Err(format!("{refusal}: {reason}")),
+                    None => Ok(format!("admitted, legacy step: {reason}")),
+                }
+            }
+        }
     }
 
     /// One refusal of the census, without its node and with the judgement's
