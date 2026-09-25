@@ -3199,25 +3199,29 @@ pub(crate) fn smoke_autotap(
 /// in seconds, with the action-button autowalk bringing the player to each
 /// character): while the action stack's head is the Talk button of a
 /// character and no talk plays, the request the Talk button's dispatch
-/// writes for that character is written, at most every 15 s (so the
-/// characters get back to their own activities between taps, and the taps
-/// land in their different states). It stands in for
+/// writes for that character is written: at most every 15 s (so the
+/// characters get back to their own activities between taps), and at once
+/// (2 s after the last tap at the earliest) when the character has entered
+/// a fixture-activity state it was not tapped in (the tweet, the fixture
+/// action idle, the multiple-character timeline states, the communication
+/// wait), so the taps land in the states whose ladder rows differ. It stands in for
 /// the press itself, which a headless run at a few frames per second cannot
 /// make (the injected release lands a frame later, past the long-press
 /// threshold, so the gesture layer reports no tap). The request then takes
 /// the dispatcher's own path: the stack check, the ladder, the session.
 pub(crate) fn probe_stack_taps(
     button_state: Res<crate::action_button::ActionButtonState>,
-    npcs: Query<(Entity, &CharacterUnitId), Without<PlayerControlled>>,
+    npcs: Query<(Entity, &CharacterUnitId, &crate::npc::NpcActions), Without<PlayerControlled>>,
     session: Option<Res<PlayerTalkSession>>,
     active_talk: Option<Res<crate::talk::ActiveTalk>>,
     time: Res<Time>,
     mut requests: MessageWriter<PlayerTalkRequest>,
-    mut next_at: Local<f32>,
+    mut last: Local<Option<(f32, u32, crate::npc::NpcAction)>>,
 ) {
+    use crate::npc::NpcAction;
     let armed = env_secs("MOLY_PLAYER_TALK_STACK_TAP_SECS");
     let now = time.elapsed_secs();
-    if armed <= 0.0 || now >= armed || now < *next_at {
+    if armed <= 0.0 || now >= armed {
         return;
     }
     if session.is_some() || active_talk.is_some() {
@@ -3230,17 +3234,38 @@ pub(crate) fn probe_stack_taps(
     else {
         return;
     };
-    let Some((entity, _)) = npcs.iter().find(|(_, id)| id.0 == unit) else {
+    let Some((entity, _, actions)) = npcs.iter().find(|(_, id, _)| id.0 == unit) else {
         return;
     };
+    let action = actions.current;
+    let activity = matches!(
+        action,
+        NpcAction::Tweet
+            | NpcAction::FixtureActionIdle
+            | NpcAction::MainSomeFixtureAction
+            | NpcAction::SomeFixtureAction
+            | NpcAction::Communication
+    );
+    let due = match *last {
+        None => true,
+        Some((at, last_unit, last_action)) => {
+            now >= at + 15.0
+                || (now >= at + 2.0 && activity && (last_unit, last_action) != (unit, action))
+        }
+    };
+    if !due {
+        return;
+    }
     requests.write(PlayerTalkRequest {
         entity,
         unit,
         exact: None,
         target_fixture: None,
     });
-    *next_at = now + 15.0;
-    info!("[player-talk-smoke] stack tap: the Talk button's request for unit {unit} at {now:.1}s");
+    *last = Some((now, unit, action));
+    info!(
+        "[player-talk-smoke] stack tap: the Talk button's request for unit {unit} at {now:.1}s (state {action:?})"
+    );
 }
 
 #[cfg(test)]
