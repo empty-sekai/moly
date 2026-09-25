@@ -333,7 +333,9 @@ mod tests {
             .into_iter().map(EffectType::package).collect();
         let autonomous: Vec<String> = [EffectType::SiteMoveEndPlayer, EffectType::SiteMoveFailedPlayer]
             .into_iter().map(EffectType::package)
-            .chain([crate::site_move::cannon::PARTICLE_PACKAGE.to_owned()]).collect();
+            // The cannon prefab's particle package (the site move's private
+            // `cannon::PARTICLE_PACKAGE`).
+            .chain(["mysekai__site__move__cannon".to_owned()]).collect();
         let mut files: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         for (package, entry) in packages {
             let Some(file) = entry["file"].as_str() else { continue; };
