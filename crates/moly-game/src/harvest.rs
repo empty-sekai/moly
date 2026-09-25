@@ -65,7 +65,9 @@ use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
 pub(crate) use action::HarvestAutoMoveHeld;
-pub(crate) use learn::LearnSiteEnvironmentActive;
+pub(crate) use learn::{
+    LearnPhenomenaDialogClosed, LearnPhenomenaDialogRequest, LearnSiteEnvironmentActive,
+};
 pub(crate) use arrival::HarvestViewNodes;
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
@@ -742,6 +744,8 @@ impl Plugin for HarvestPlugin {
             .init_resource::<airplane::PaperAirplanes>()
             .init_resource::<tone::HarvestToneCamera>()
             .init_resource::<learn::LearnEnvironment>()
+            .add_message::<learn::LearnPhenomenaDialogRequest>()
+            .add_message::<learn::LearnPhenomenaDialogClosed>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),

@@ -444,11 +444,11 @@ fn exit_house(world: &mut World, seq: &mut EntrySequence, house: HouseBinding, p
     let phenomenon = world
         .get_resource::<crate::weather::CurrentPhenomenonId>()
         .map_or(0, |id| id.0);
-    info!(
-        "[entry] ScreenLayerMysekaiNotice.ShowSiteEnvironmentInfo(delay {}, duration {}) phenomenon {phenomenon}: named gap, the banner is not drawn",
-        law::BANNER_SHOW_DELAY,
-        law::BANNER_SHOW_DURATION
-    );
+    world.write_message(crate::notice_banner::SiteEnvironmentInfo::Show {
+        phenomenon,
+        delay: law::BANNER_SHOW_DELAY,
+        duration: law::BANNER_SHOW_DURATION,
+    });
     if let Err(reason) = house_door::set_trigger_player_off(world, &house) {
         error!("[entry] HouseView.SetAnimationTrigger(PlayerOff) refused: {reason}");
     }
@@ -600,10 +600,10 @@ pub(crate) fn advance(world: &mut World) {
     if let Some(delay) = seq.banner_hide.as_mut() {
         if delay.advance(dt) {
             seq.banner_hide = None;
-            info!(
-                "[entry] HideSiteEnvironment: HideSiteEnvironmentInfo(0, {}) named gap, the banner is not drawn",
-                law::BANNER_HIDE_DURATION
-            );
+            world.write_message(crate::notice_banner::SiteEnvironmentInfo::Hide {
+                delay: 0.0,
+                duration: law::BANNER_HIDE_DURATION,
+            });
             let source_t = seq.end_source_t.map(|t| t + law::BANNER_HIDE_CALL_DELAY);
             step(&seq, "banner hide", source_t);
         }

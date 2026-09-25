@@ -46,8 +46,11 @@
 //! today's phenomenon); the tutorial is out of scope, so its branches are
 //! never taken.
 //!
-//! Named gaps: the dialog is the UI lane's (a seam patch describes it); the
-//! product logs where it would open and closes it at once; the release reply
+//! The dialog is the UI lane's: this module sends
+//! [`LearnPhenomenaDialogRequest`] where `ShowLearnPhenomenaDialog` opens it
+//! and waits for [`LearnPhenomenaDialogClosed`] (its onClose).
+//!
+//! Named gaps: the release reply
 //! lands in the same frame (the source's API call is asynchronous); the
 //! harvest button during GameState 6 is not gated (the harvest screen is the
 //! UI lane's).
@@ -78,6 +81,25 @@ const RETURN_SECONDS: f32 = 0.3;
 /// thumbnail bundle prefix (`AssetBundleNames.GetMysekaiPhenomenaThumbnail`).
 const DIALOG_TYPE: i32 = 381;
 const THUMBNAIL_PREFIX: &str = "mysekai/thumbnail/phenomena/";
+
+/// `HarvestUtility.ShowLearnPhenomenaDialog(master, onClose)`: open a
+/// `LearnPhenomenaSubWindowDialog` (dialog type 381, the dialog slot,
+/// `allowCloseExternal`) and `Setup(name, thumbnail)`: the message body is
+/// the wording `MSG_LEARN_PHENOMENA` formatted with the name, the image is
+/// the thumbnail, the button opens the common balloon with the name, and the
+/// open plays `se_get_blueprint`.
+#[derive(Message, Clone, Debug)]
+pub(crate) struct LearnPhenomenaDialogRequest {
+    /// The phenomenon master row id (`sitemap_phenomena::PHENOMENA_ROWS`:
+    /// its `jp` column is the master `name`).
+    pub(crate) phenomena_id: i32,
+    /// `mysekai/thumbnail/phenomena/` + `iconAssetbundleName`.
+    pub(crate) thumbnail: String,
+}
+
+/// The dialog's onClose: the flag the effect player's `WaitUntil` reads.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct LearnPhenomenaDialogClosed;
 
 /// One `UserMysekaiPhenomena` row.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,7 +138,9 @@ struct LearnRun {
 enum Stage {
     /// `Delay(1.3 s)` after the camera change.
     Delay(Delay),
-    /// The dialog closed at once; the `WaitUntil` sees it the next frame.
+    /// The dialog is open until its onClose.
+    Open,
+    /// The dialog closed; the `WaitUntil` sees it the next frame.
     WaitClose { closed_frame: u64 },
 }
 
@@ -270,8 +294,13 @@ pub(crate) fn advance(
     phenomenon: Option<Res<crate::weather::CurrentPhenomenonId>>,
     mut user: Option<ResMut<super::catalog::HarvestUserData>>,
     mut mock: Option<ResMut<super::server_mock::HarvestServerMock>>,
+    (mut dialog_open, mut dialog_closed): (
+        MessageWriter<LearnPhenomenaDialogRequest>,
+        MessageReader<LearnPhenomenaDialogClosed>,
+    ),
 ) {
     let frame = u64::from(frames.0);
+    let closed_now = dialog_closed.read().count() > 0;
     let moving = site_move.is_some();
     let finished_enter = learn.was_moving && !moving;
     learn.was_moving = moving;
@@ -351,15 +380,26 @@ pub(crate) fn advance(
                     .iter()
                     .find(|row| row.id == run.phenomena_id)
                 {
-                    Some(row) => info!(
-                        "[harvest-learn] Delay({:.1}s) done after {:.4}s: HarvestUtility.ShowLearnPhenomenaDialog would open here: ScreenManager.ShowSubWindowDialog<LearnPhenomenaSubWindowDialog>(dialog type {DIALOG_TYPE}, allowCloseExternal), Setup(the name of phenomenon {} ({}), thumbnail {THUMBNAIL_PREFIX}{}); the dialog is the UI lane's, closed at once here",
-                        DIALOG_DELAY_SECONDS, delay.elapsed, row.id, row.en, row.icon
-                    ),
+                    Some(row) => {
+                        info!(
+                            "[harvest-learn] Delay({:.1}s) done after {:.4}s: HarvestUtility.ShowLearnPhenomenaDialog: LearnPhenomenaSubWindowDialog (dialog type {DIALOG_TYPE}) requested for phenomenon {} ({}), thumbnail {THUMBNAIL_PREFIX}{}",
+                            DIALOG_DELAY_SECONDS, delay.elapsed, row.id, row.en, row.icon
+                        );
+                        dialog_open.write(LearnPhenomenaDialogRequest {
+                            phenomena_id: row.id,
+                            thumbnail: format!("{THUMBNAIL_PREFIX}{}", row.icon),
+                        });
+                    }
                     None => error!(
                         "[harvest-learn] Delay done: ShowLearnPhenomenaDialog has no master row {}; the dialog point is passed",
                         run.phenomena_id
                     ),
                 }
+                run.stage = Stage::Open;
+            }
+        }
+        Stage::Open => {
+            if closed_now {
                 run.stage = Stage::WaitClose {
                     closed_frame: frame,
                 };
