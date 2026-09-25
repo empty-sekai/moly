@@ -118,6 +118,7 @@ mod weather_animation;
 mod weather_animation_replay;
 pub mod talk;
 pub mod talk_camera;
+mod zoom_player_camera;
 mod talk_ingest;
 pub mod talk_window;
 pub mod uber_particle;
