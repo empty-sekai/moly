@@ -1390,7 +1390,7 @@ fn build_emitter(
         size_over_lifetime,
         size_over_lifetime_y,
         // 自旋：构造拒绝（separateAxes 开而 x/y 键缺 = 提取面缺键，或曲线道
-        // 在引擎曲线分派之外，如缺导出的 wrap 模式、带权键）时整个发射器被拒，
+        // 在引擎曲线分派之外，如缺导出的 wrap 模式、ping-pong wrap）时整个发射器被拒，
         // 不把自旋冻结在出生角照画。
         rotation_over_lifetime: system.get("rotationOverLifetime").and_then(|r| {
             let curve = r.get("curve").map(parse_min_max_curve)?;
