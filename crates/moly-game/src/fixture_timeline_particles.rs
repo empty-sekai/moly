@@ -202,31 +202,149 @@ fn collect(world: &World, entity: Entity, prefix: &str, output: &mut Vec<(Entity
     }
 }
 
-fn within(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|tail| tail.starts_with('/'))
+/// The source GameObject a spawned fixture GLB node stands for. Sibling
+/// GameObjects may share a name (four `sekai` emitters under one effect), so
+/// a node path does not name one object; every fixture GLB node carries its
+/// GameObject identity, and so does every archive node and emitter.
+fn instance_identity(world: &World, entity: Entity) -> Option<i64> {
+    let extras = world.get::<bevy::gltf::GltfExtras>(entity)?;
+    serde_json::from_str::<Value>(&extras.value).ok()?["gameObjectId"].as_i64()
 }
 
-fn inventory(doc: &Value, root: &str, settings: &ControlSettings) -> Result<(), TimelineFailure> {
+fn identity(record: &Value, what: &str) -> Result<i64, TimelineFailure> {
+    record["gameObjectId"].as_i64().ok_or_else(|| {
+        invalid(format!(
+            "{}: source {what} identity is missing",
+            record["node"].as_str().unwrap_or("?")
+        ))
+    })
+}
+
+/// Each archive node's parent GameObject (0 above a prefab root).
+fn parents(nodes: &[Value]) -> Result<HashMap<i64, i64>, TimelineFailure> {
+    nodes
+        .iter()
+        .map(|node| {
+            let parent = node["parentGameObjectId"].as_i64().ok_or_else(|| {
+                invalid(format!(
+                    "{}: source parent identity is missing",
+                    node["node"].as_str().unwrap_or("?")
+                ))
+            })?;
+            Ok((identity(node, "node")?, parent))
+        })
+        .collect()
+}
+
+/// Whether archive node `id` is `root` or lies under it.
+fn descends(parents: &HashMap<i64, i64>, mut id: i64, root: i64) -> bool {
+    for _ in 0..=parents.len() {
+        if id == root {
+            return true;
+        }
+        match parents.get(&id) {
+            Some(&parent) => id = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Whether spawned `entity` is `root` or lies under it.
+fn instance_descends(world: &World, mut entity: Entity, root: Entity) -> bool {
+    loop {
+        if entity == root {
+            return true;
+        }
+        match world.get::<ChildOf>(entity) {
+            Some(parent) => entity = parent.parent(),
+            None => return false,
+        }
+    }
+}
+
+/// The fixture particle host these emitters are handed to looks an emitter's
+/// node record up by path, so with same-named siblings it may read a
+/// sibling's record. That is harmless while the siblings agree on what it
+/// reads there (activity, and scale for a Local-scaled system) and refused
+/// otherwise. It composes a sub-emitter target's owner from the authored
+/// transform found the same way, so an archive with sub-emitters admits no
+/// shared path.
+fn shared_path_reads_agree(
+    particles: &[Value],
+    nodes: &[Value],
+    particle: &Value,
+) -> Result<(), TimelineFailure> {
+    let path = particle["node"]
+        .as_str()
+        .ok_or_else(|| invalid("source particle path is missing"))?;
+    let shared: Vec<&Value> = nodes
+        .iter()
+        .filter(|node| node["node"].as_str() == Some(path))
+        .collect();
+    if shared.len() < 2 {
+        return Ok(());
+    }
+    let id = identity(particle, "particle")?;
+    let own = shared
+        .iter()
+        .find(|node| node["gameObjectId"].as_i64() == Some(id))
+        .ok_or_else(|| invalid(format!("{path}: source particle has no node record")))?;
+    for field in ["active", "scale"] {
+        if shared.iter().any(|node| node[field] != own[field]) {
+            return Err(invalid(format!(
+                "{path}: same-named source siblings differ in {field}, which the fixture particle host reads by path"
+            )));
+        }
+    }
+    for other in particles {
+        // Only the enabled module names: another emitter's own unconsumed
+        // evidence is its own refusal, when it is selected.
+        let enabled = other["system"]["sourceModules"]["enabled"]
+            .as_array()
+            .ok_or_else(|| {
+                invalid(format!(
+                    "{}: missing source module inventory; re-extract",
+                    other["node"].as_str().unwrap_or("?")
+                ))
+            })?;
+        if enabled
+            .iter()
+            .any(|name| name.as_str() == Some("SubModule"))
+            || other["system"]["subEmitters"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+        {
+            return Err(invalid(format!(
+                "{path}: a same-named source sibling in an archive with sub-emitters needs the host to look node records up by identity"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn inventory(doc: &Value, root: i64, settings: &ControlSettings) -> Result<(), TimelineFailure> {
     let nodes = doc["nodes"]
         .as_array()
         .ok_or_else(|| invalid("source node inventory is missing"))?;
-    if !nodes.iter().any(|node| node["node"].as_str() == Some(root)) {
+    if !nodes
+        .iter()
+        .any(|node| node["gameObjectId"].as_i64() == Some(root))
+    {
         return Err(invalid(
             "bound particle root has no source component inventory",
         ));
     }
+    let parents = parents(nodes)?;
     for node in nodes {
         let path = node["node"]
             .as_str()
             .ok_or_else(|| invalid("source node path is missing"))?;
-        if !within(path, root) {
+        let id = identity(node, "node")?;
+        if !descends(&parents, id, root) {
             continue;
         }
-        let check_director =
-            settings.update_director && (settings.search_hierarchy || path == root);
+        let check_director = settings.update_director && (settings.search_hierarchy || id == root);
         // GetControlableScripts always searches descendants, independent of the
         // searchHierarchy switch used by GetComponent<PlayableDirector>.
         if !check_director && !settings.update_itime_control {
@@ -244,11 +362,11 @@ fn inventory(doc: &Value, root: &str, settings: &ControlSettings) -> Result<(), 
                     "{path}: nested Director control is not implemented"
                 )));
             }
-            if settings.update_itime_control && class == "MonoBehaviour" {
-                return Err(invalid(format!(
-                    "{path}: ITimeControl script capability is unresolved"
-                )));
-            }
+            // GetControlableScripts yields only the MonoBehaviours that
+            // implement ITimeControl, and no type in the client implements
+            // it: its declarations name the interface only in the Timeline
+            // runtime's own time-control playable. A script under the root
+            // (the car's SiteMoveEffect, a ManagedEffect) gets no playable.
         }
     }
     Ok(())
@@ -267,37 +385,49 @@ pub(crate) fn prepare(
     let particles = doc["emitters"]
         .as_array()
         .ok_or_else(|| invalid("source emitter inventory is missing"))?;
-    let mut by_path = HashMap::new();
+    let nodes = doc["nodes"]
+        .as_array()
+        .ok_or_else(|| invalid("source node inventory is missing"))?;
+    let mut by_id = HashMap::new();
     for (index, particle) in particles.iter().enumerate() {
-        let path = particle["node"]
-            .as_str()
-            .ok_or_else(|| invalid("source particle path is missing"))?;
-        if by_path.insert(path, index).is_some() {
+        if by_id
+            .insert(identity(particle, "particle")?, index)
+            .is_some()
+        {
             return Err(invalid(format!(
-                "ambiguous source particle path requires exact object identity: {path}"
+                "{}: source particle identity is duplicated",
+                particle["node"].as_str().unwrap_or("?")
             )));
         }
     }
     let mut paths = Vec::new();
     collect(world, fixture, "", &mut paths);
-    let mut instance_paths = HashSet::new();
-    for (_, path) in &paths {
-        if by_path.contains_key(path.as_str()) && !instance_paths.insert(path) {
-            return Err(invalid(format!(
-                "ambiguous particle instance path requires exact object identity: {path}"
-            )));
+    // Each spawned node with the emitter it instantiates.
+    let mut instances = Vec::with_capacity(paths.len());
+    let mut placed = HashSet::new();
+    for (entity, path) in paths {
+        let ordinal = instance_identity(world, entity).and_then(|id| by_id.get(&id).copied());
+        if let Some(ordinal) = ordinal {
+            if !placed.insert(ordinal) {
+                return Err(invalid(format!(
+                    "{path}: one source particle has two spawned instances"
+                )));
+            }
         }
+        instances.push((entity, path, ordinal));
     }
     // Game BindEffect uses the first source-order ParticleSystem name inside
     // this fixture instance. A renderer or another fixture is not a candidate.
-    let (root, root_path) = paths
+    let (root, root_ordinal) = instances
         .iter()
-        .find(|(_, path)| {
-            path.rsplit('/').next() == Some(bind_name) && by_path.contains_key(path.as_str())
+        .find_map(|(entity, path, ordinal)| {
+            ordinal
+                .filter(|_| path.rsplit('/').next() == Some(bind_name))
+                .map(|ordinal| (*entity, ordinal))
         })
-        .cloned()
         .ok_or_else(|| invalid(format!("fixture particle binding not found: {bind_name}")))?;
-    inventory(&doc, &root_path, settings)?;
+    let root_id = identity(&particles[root_ordinal], "particle")?;
+    inventory(&doc, root_id, settings)?;
     if !settings.update_particle {
         return Ok(ParticleControlBinding {
             root,
@@ -315,20 +445,22 @@ pub(crate) fn prepare(
     if let Some(expired) = world.entity_mut(root).take::<Prepared>() {
         discard(world, expired);
     }
-    for node in doc["nodes"].as_array().expect("validated node inventory") {
-        let Some(path) = node["node"]
-            .as_str()
-            .filter(|path| within(path, &root_path))
-        else {
+    let parents = parents(nodes)?;
+    for node in nodes {
+        let id = identity(node, "node")?;
+        if !descends(&parents, id, root_id) {
             continue;
-        };
+        }
+        let path = node["node"].as_str().unwrap_or("?");
         let classes = node["componentClasses"]
             .as_array()
             .ok_or_else(|| invalid(format!("{path}: controlled component inventory is missing")))?;
         if classes
             .iter()
             .any(|class| class.as_str() == Some("ParticleSystem"))
-            && (!by_path.contains_key(path) || !paths.iter().any(|(_, p)| p == path))
+            && by_id
+                .get(&id)
+                .is_none_or(|ordinal| !placed.contains(ordinal))
         {
             return Err(invalid(format!(
                 "{path}: source particle system/archive instance is incomplete"
@@ -351,15 +483,19 @@ pub(crate) fn prepare(
     }
     let mut selected = Vec::new();
     let mut seeds = HashMap::new();
-    for (anchor, path) in paths.iter().filter(|(_, path)| within(path, &root_path)) {
-        let Some(&ordinal) = by_path.get(path.as_str()) else {
+    for (anchor, path, ordinal) in &instances {
+        let Some(ordinal) = *ordinal else {
             continue;
         };
+        if !instance_descends(world, *anchor, root) {
+            continue;
+        }
         let particle = &particles[ordinal];
         if let Some(error) = particle["systemError"].as_str() {
             return Err(invalid(format!("{path}: {error}")));
         }
-        let modules = ParticleSourceModules::from_system(&particle["system"]).map_err(invalid)?;
+        let modules = ParticleSourceModules::from_system(&particle["system"])
+            .map_err(|error| invalid(format!("{path}: {error}")))?;
         if modules.enabled.iter().any(|name| name == "SubModule")
             || particle["system"]["subEmitters"]
                 .as_array()
@@ -374,6 +510,7 @@ pub(crate) fn prepare(
         if !modules.enabled.iter().any(|name| name == "EmissionModule") {
             continue;
         }
+        shared_path_reads_agree(particles, nodes, particle)?;
         let auto_seed = particle["system"]["autoRandomSeed"]
             .as_bool()
             .ok_or_else(|| invalid(format!("{path}: source autoRandomSeed is missing")))?;
@@ -707,19 +844,21 @@ mod tests {
     #[test]
     fn capability_no_op_needs_complete_source_inventory() {
         let mut doc = json!({"nodes":[
-            {"node":"fx", "componentClasses":["CanvasRenderer","ParticleSystem","ParticleSystemRenderer"]},
-            {"node":"fx/root/steam", "componentClasses":["ParticleSystem","ParticleSystemRenderer"]}]});
-        assert!(inventory(&doc, "fx", &settings()).is_ok());
-        assert!(inventory(&doc, "absent", &settings()).is_err());
+            {"node":"fx", "gameObjectId":1, "parentGameObjectId":0,
+             "componentClasses":["CanvasRenderer","ParticleSystem","ParticleSystemRenderer"]},
+            {"node":"fx/root/steam", "gameObjectId":3, "parentGameObjectId":1,
+             "componentClasses":["ParticleSystem","ParticleSystemRenderer"]}]});
+        assert!(inventory(&doc, 1, &settings()).is_ok());
+        assert!(inventory(&doc, 9, &settings()).is_err());
         doc["nodes"][1]["componentClasses"] = Value::Null;
-        assert!(inventory(&doc, "fx", &settings()).is_err());
+        assert!(inventory(&doc, 1, &settings()).is_err());
         doc["nodes"][1]["componentClasses"] = json!(["MonoBehaviour"]);
-        assert!(inventory(&doc, "fx", &settings()).is_err());
+        assert!(inventory(&doc, 1, &settings()).is_ok());
         doc["nodes"][1]["componentClasses"] = json!(["PlayableDirector"]);
-        assert!(inventory(&doc, "fx", &settings()).is_ok());
+        assert!(inventory(&doc, 1, &settings()).is_ok());
         let mut hierarchy = settings();
         hierarchy.search_hierarchy = true;
-        assert!(inventory(&doc, "fx", &hierarchy).is_err());
+        assert!(inventory(&doc, 1, &hierarchy).is_err());
     }
 
     #[test]
@@ -841,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_traversal_and_path_boundaries_do_not_cross_fixtures() {
+    fn instance_traversal_and_identity_subtrees_do_not_cross_fixtures() {
         let mut world = World::new();
         let first = world.spawn_empty().id();
         let second = world.spawn_empty().id();
@@ -854,7 +993,12 @@ mod tests {
             paths,
             vec![(local, "model".into()), (expected, "model/fx".into())]
         );
-        assert!(within("model/fx/root", "model/fx"));
-        assert!(!within("model/fx-other", "model/fx"));
+        assert!(instance_descends(&world, expected, local));
+        assert!(!instance_descends(&world, local, expected));
+        let parents = HashMap::from([(1, 0), (2, 1), (3, 2), (4, 1)]);
+        assert!(descends(&parents, 3, 2));
+        assert!(descends(&parents, 2, 2));
+        assert!(!descends(&parents, 4, 2));
+        assert!(!descends(&parents, 1, 2));
     }
 }
