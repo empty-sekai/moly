@@ -113,6 +113,7 @@ pub(crate) fn place(
     mut batches: ResMut<HarvestDropBatches>,
     mut ground_verts: ResMut<super::HarvestGroundVerts>,
     mut spawned: ResMut<super::HarvestSpawnedCount>,
+    mut animator_calls: ResMut<super::prop_animator::PropAnimatorCalls>,
 ) {
     let (Some(catalog), Some(user), Some(site), Some(epoch)) = (
         inputs.catalog.as_deref(),
@@ -348,13 +349,21 @@ pub(crate) fn place(
             Transform::from_translation(Vec3::new(snapped.x, y, snapped.y))
                 .with_rotation(Quat::from_rotation_y(yaw))
                 .with_scale(Vec3::splat(scale)),
-            if alive {
+            if alive || def.class == "MysekaiAreaTreasureBoxView" {
                 Visibility::default()
             } else {
                 Visibility::Hidden
             },
         ))
         .id();
+    // ForceChangeAfterObject of a box loaded as harvested: SetBool("opened")
+    // (and its lid obstacle): the open box stays.
+    if !alive && def.class == "MysekaiAreaTreasureBoxView" {
+        animator_calls.0.push((
+            entity,
+            super::prop_animator::PropCall::SetBool("opened", true),
+        ));
+    }
     info!(
         "[harvest] placed {}#{} ({} {}) map (x, z) = ({}, {}) -> product ({:.2}, {:.2}) snapped ({:.2}, {:.2}, {:.2}) shift {:.2} m in {tries} tries, yaw {:.1} deg, scale {:.3}, radius {:.3}, hp {}, status {}{}, {pending} pending drop rows, entity {entity:?}",
         def.leaf,
@@ -377,7 +386,11 @@ pub(crate) fn place(
         if alive {
             ""
         } else {
-            " (loaded as harvested: ForceChangeAfterObject, nothing remains)"
+            if def.class == "MysekaiAreaTreasureBoxView" {
+                " (loaded as harvested: ForceChangeAfterObject, the box stays open)"
+            } else {
+                " (loaded as harvested: ForceChangeAfterObject, nothing remains)"
+            }
         },
     );
     run.next += 1;

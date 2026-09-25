@@ -21,6 +21,7 @@ use bevy::ecs::system::SystemParam;
 use moly_assets::source_navigation::SourceObjectIdentity;
 
 use super::law::{dither_variant_on, fade_step, punch_points, FadeStep, PointTween, SegmentEase};
+use super::prop_animator::{PropAnimatorCalls, PropCall};
 use super::{
     ActionInterface, DropBatch, EffectHook, HarvestDropBatches, HarvestEffectHooks,
     HarvestHitResults, HarvestHits, HarvestObject, HarvestStats, HarvestViewNodes, HitResult,
@@ -48,6 +49,12 @@ const FADE_DURATION: f32 = 0.5;
 /// Driftage and toolbox disappear after `UniTask.Delay(1.0 s)`.
 const DELAYED_HIDE: f32 = 1.0;
 
+/// The toolbox's `OnPlayerActionStart` also waits `Delay(1.0 s)` and then
+/// turns its box off (and stops its cut particle): the earlier of this and
+/// its `ChangeAfterObject` delay hides it.
+#[derive(Resource, Default)]
+pub(crate) struct HarvestStartHides(pub(crate) Vec<(Entity, Delay)>);
+
 /// Running punches of one object, in creation order.
 #[derive(Component, Default)]
 pub(crate) struct HarvestPunches(Vec<PointTween>);
@@ -67,7 +74,7 @@ pub(crate) enum HarvestAfterForm {
         materials: Vec<Handle<SiteMaterial>>,
     },
     DelayedHide {
-        remaining: f32,
+        delay: Delay,
     },
 }
 
@@ -118,6 +125,7 @@ pub(crate) fn on_damage(
     mut effects: ResMut<HarvestEffectHooks>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     frames: Res<FrameCount>,
+    mut animator_calls: ResMut<PropAnimatorCalls>,
 ) {
     let Some(configs) = configs else {
         return;
@@ -193,6 +201,11 @@ pub(crate) fn on_damage(
                 match object.class {
                     "MysekaiAreaPlantView" => hooks.push(101),
                     "MysekaiAreadDriftageView" => hooks.push(133),
+                    // PlayDamageEffect: the cut particle plays (not drawn)
+                    // and the Animator opens.
+                    "MysekaiAreaTreasureBoxView" => animator_calls
+                        .0
+                        .push((hit.target, PropCall::SetBool("open", true))),
                     _ => {}
                 }
                 if hit.is_boost
@@ -387,8 +400,16 @@ fn change_after_object(
         }
         "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView" => {
             commands.entity(root).insert(HarvestAfterForm::DelayedHide {
-                remaining: DELAYED_HIDE,
+                delay: Delay::new(DELAYED_HIDE, frame),
             });
+        }
+        // The treasure box's ChangeAfterObject turns its lid obstacle on,
+        // waits 2.0 s and stops the cut particle: the opened box stays.
+        "MysekaiAreaTreasureBoxView" => {
+            info!(
+                "[harvest] {}#{} ChangeAfterObject: the opened box stays (lid obstacle and cut particle not modelled)",
+                object.leaf, object.fixture_id
+            );
         }
         _ => hide(object_node, root_visibility, node_visibility),
     }
@@ -557,9 +578,8 @@ pub(crate) fn advance_after_forms(
                     }
                 }
             }
-            HarvestAfterForm::DelayedHide { remaining } => {
-                *remaining -= dt;
-                if *remaining <= 0.0 {
+            HarvestAfterForm::DelayedHide { delay } => {
+                if delay.tick(frame, dt) {
                     match view.object.and_then(|node| nodes.get_mut(node).ok()) {
                         Some((_, mut visibility, _)) => *visibility = Visibility::Hidden,
                         None => *root_visibility = Visibility::Hidden,
@@ -573,4 +593,33 @@ pub(crate) fn advance_after_forms(
             }
         }
     }
+}
+
+/// Update: the toolbox's swing-start hide.
+pub(crate) fn advance_start_hides(
+    time: Res<Time>,
+    frames: Res<FrameCount>,
+    mut hides: ResMut<HarvestStartHides>,
+    mut objects: Query<(&HarvestObject, Option<&HarvestViewNodes>, &mut Visibility)>,
+    mut nodes: Query<&mut Visibility, Without<HarvestObject>>,
+) {
+    let dt = time.delta_secs();
+    let frame = u64::from(frames.0);
+    hides.0.retain_mut(|(entity, delay)| {
+        if !delay.tick(frame, dt) {
+            return true;
+        }
+        if let Ok((object, view, mut root_visibility)) = objects.get_mut(*entity) {
+            hide(
+                view.and_then(|v| v.object),
+                &mut root_visibility,
+                &mut nodes,
+            );
+            info!(
+                "[harvest] {}#{} off 1.0 s after the swing start (OnPlayerActionStart's delay)",
+                object.leaf, object.fixture_id
+            );
+        }
+        false
+    });
 }

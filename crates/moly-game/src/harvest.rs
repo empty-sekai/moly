@@ -22,9 +22,13 @@
 //!
 //! - `effects`: the harvest effects (101-143) from the effect table.
 //!
-//! Named gaps: the prop animator clips (barrel break, toolbox open)
-//! are not played; harvest objects do not carve the walk field (the
-//! source's NavMeshObstacle); drop models keep their glb materials.
+//! - `prop_animator`: the Animator of the barrel, the toolbox and the
+//!   treasure boxes, run from the controller in the package document.
+//!
+//! Named gaps: harvest objects do not carve the walk field (the source's
+//! NavMeshObstacle, also the ones the driftage and treasure views switch);
+//! the particle systems the driftage, toolbox and treasure views play and
+//! stop are not drawn; drop models keep their glb materials.
 
 pub(crate) mod action;
 mod arrival;
@@ -35,6 +39,7 @@ mod drops;
 mod effects;
 pub(crate) mod law;
 mod pickup;
+mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod stand_in;
@@ -641,6 +646,11 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     world.resource_mut::<HarvestScenesReadyCount>().0 = 0;
     world.resource_mut::<HarvestSpawnedCount>().0 = 0;
     world.resource_mut::<HarvestDropBatches>().0.clear();
+    world.resource_mut::<damage::HarvestStartHides>().0.clear();
+    world
+        .resource_mut::<prop_animator::PropAnimatorCalls>()
+        .0
+        .clear();
     world.resource_mut::<HarvestGroundVerts>().0 = None;
     world.resource_mut::<arrival::HarvestArrival>().clear();
     if count > 0 {
@@ -714,6 +724,8 @@ impl Plugin for HarvestPlugin {
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
             .init_resource::<effects::HarvestEffects>()
+            .init_resource::<prop_animator::PropAnimatorCalls>()
+            .init_resource::<damage::HarvestStartHides>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),
@@ -727,6 +739,7 @@ impl Plugin for HarvestPlugin {
                     tool_model::parse,
                     arrival::place,
                     arrival::bind_views,
+                    prop_animator::bind,
                 )
                     .chain(),
             )
@@ -743,6 +756,8 @@ impl Plugin for HarvestPlugin {
                     drops::spawn,
                     damage::advance_punches,
                     damage::advance_after_forms,
+                    damage::advance_start_hides,
+                    prop_animator::advance,
                     drops::advance_animations,
                     pickup::collect_on_leave,
                     pickup::advance,

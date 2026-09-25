@@ -58,6 +58,7 @@ use super::law::{
     inside_circle, is_sustainable_tool, target_priority, tool_type_for, ContinueInputs, PointTween,
     SegmentEase, Stamina, ToolClock, ToolState, ToolType,
 };
+use super::prop_animator::{PropAnimatorCalls, PropCall};
 use super::queue::{HarvestLogQueue, HarvestStack, Stack};
 use super::server_mock::UserTool;
 use super::stand_in::{stand_in, StandIn};
@@ -447,6 +448,8 @@ pub(crate) struct ActionWorld<'w> {
     se: ResMut<'w, SeRequests>,
     effects: ResMut<'w, HarvestEffectHooks>,
     shakes: ResMut<'w, HarvestCameraShakes>,
+    animator_calls: ResMut<'w, PropAnimatorCalls>,
+    start_hides: ResMut<'w, super::damage::HarvestStartHides>,
 }
 
 /// Update: contacts and the target (`OnCollisionEnter/Exit`, `OnUpdate`,
@@ -1076,19 +1079,31 @@ fn begin_loop(
         target,
     );
     current.swings += 1;
-    // OnPlayerActionStart(speed).
+    // OnPlayerActionStart(speed) (fire and forget): the swing-start SE and,
+    // on the three views with an Animator, its speed and parameter.
     if let Ok((_, object)) = objects.get(target) {
         if let Some(cue) = object.cues.swing_start {
             super::damage::push_se(&mut world.se, cue, "harvest-swing");
         }
-        if matches!(
-            object.class,
-            "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView"
-        ) {
-            info!(
-                "[harvest] {}#{}: the prop's animator clip (break / open) is not played",
-                object.leaf, object.fixture_id
-            );
+        let calls = &mut world.animator_calls.0;
+        match object.class {
+            "MysekaiAreadDriftageView" => {
+                calls.push((target, PropCall::Speed(current.speed)));
+                calls.push((target, PropCall::SetBool("IsBreak", true)));
+            }
+            "MysekaiAreaToolBoxView" => {
+                calls.push((target, PropCall::Speed(current.speed)));
+                calls.push((target, PropCall::SetBool("IsOpen", true)));
+                // Then its own Delay(1.0 s): the box and its cut particle off.
+                world
+                    .start_hides
+                    .0
+                    .push((target, crate::site_move::timeline::Delay::new(1.0, frame)));
+            }
+            "MysekaiAreaTreasureBoxView" => {
+                calls.push((target, PropCall::Speed(current.speed)));
+            }
+            _ => {}
         }
     }
     if model.stamina.has_boost_or_enhance() {
