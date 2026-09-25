@@ -168,7 +168,7 @@ struct Planned {
     /// The trail draw of a system with a qualified TrailModule: the renderer's
     /// trail material and trail vertex streams, drawn after the particles.
     trail: Option<PlannedTrail>,
-    /// The effect's ground scene for a system with a CollisionModule; the
+    /// The installed effects' ground scene for a system with a CollisionModule; the
     /// native birth installer installs the module with it.
     collision_scene: Option<Arc<crate::particle_runtime::collision_scene::GroundScene>>,
     /// The sub-emitter term of the first-Play warm length (0 for a system
@@ -194,9 +194,22 @@ pub(crate) struct WeatherFxPlan {
     animators: HashMap<String, Vec<crate::weather_animation::AnimatedNode>>,
     /// The effector's child set per selected effect.
     children: HashMap<String, Arc<Vec<lifecycle::EffectChild>>>,
+    /// The colliders each selected effect adds to the physics scene when it
+    /// is installed.
+    colliders: Vec<PlannedColliders>,
     tally: Tally,
     tier: String,
     env_site: String,
+}
+
+/// One selected effect's colliders, installed into the physics scene with
+/// the effect and removed when the stopped effect is destroyed.
+struct PlannedColliders {
+    kind: EffectKind,
+    effect: String,
+    scene: Arc<crate::particle_runtime::collision_scene::GroundScene>,
+    /// The effect's own delay from Stop to its destruction.
+    destroy_delay: f64,
 }
 
 /// 逐档盘点。**每一格都是「这一档有多少条被挡在外面」**——盘面上看得见
@@ -337,6 +350,10 @@ impl WeatherFxState {
                         "refusedCommands": target.refused,
                         "lastRefusal": target.last_refusal,
                     })),
+                    "collision": s.collision.as_ref().map(|collision| serde_json::json!({
+                        "calls": collision.calls, "hits": collision.hits, "draws": collision.draws,
+                        "unreached": collision.unreached, "orderFree": collision.order_free,
+                    })),
                     "trail": s.trail.as_ref().map(|trail| serde_json::json!({
                         "clock": trail.clock.time,
                         "rings": trail.rings.len(),
@@ -418,6 +435,8 @@ struct RetiringInstance {
     clock: Arc<crate::weather_animation::EffectClock>,
     destroy: lifecycle::DestroyOnTime,
     unheld: Vec<String>,
+    /// The effect's entries in the physics scene, removed with the instance.
+    colliders: Vec<u64>,
 }
 
 #[derive(Resource, Default)]
@@ -426,6 +445,15 @@ pub(crate) struct WeatherFxRetirements {
     instances: Vec<RetiringInstance>,
     /// Draws of instances destroyed inside a Stop call, for the caller's commands.
     despawn: Vec<Entity>,
+    /// The site's physics scene the collision systems query: the colliders
+    /// of every installed effect, a stopped effect's until it is destroyed.
+    physics: crate::particle_runtime::collision_scene::SiteScene,
+    /// The installed effects' collider entries: kind, effect, entry and the
+    /// effect's destroy delay.
+    installed_colliders: Vec<(EffectKind, String, u64, f64)>,
+    /// Colliders of stopped effects without an installed system (so without
+    /// a stopped instance), and when they leave the scene.
+    retiring_colliders: Vec<(u64, f64)>,
 }
 
 impl WeatherFxRetirements {
@@ -435,14 +463,18 @@ impl WeatherFxRetirements {
     /// SiteEnvironmentEffector.Stop for every instance holding a matching
     /// system: `Stop(StopEmitting)` on each system, then the first check of
     /// `DestroyOnTime` inside the same call with this frame's delta.
-    fn stop_matching(&mut self, active: &mut WeatherFxState, now: f64, delta: f32, predicate: impl Fn(&LiveWeatherEmitter)->bool) {
+    /// The instance's colliders leave the physics scene when it is destroyed.
+    fn stop_matching(&mut self, active: &mut WeatherFxState, now: f64, delta: f32, kinds: impl Fn(EffectKind)->bool) {
         let mut kept = Vec::new();
         let mut stopped: Vec<LiveWeatherEmitter> = Vec::new();
         for emitter in std::mem::take(&mut active.live) {
-            if predicate(&emitter) { stopped.push(emitter); } else { kept.push(emitter); }
+            if kinds(emitter.kind) { stopped.push(emitter); } else { kept.push(emitter); }
         }
         active.live = kept;
         active.admitted = active.live.len();
+        let (mut stopped_colliders, installed): (Vec<_>, Vec<_>) = std::mem::take(&mut self.installed_colliders).into_iter()
+            .partition(|(kind, _, _, _)| kinds(*kind));
+        self.installed_colliders = installed;
         let mut clocks: Vec<Arc<crate::weather_animation::EffectClock>> = Vec::new();
         for emitter in &stopped {
             if !clocks.iter().any(|clock| Arc::ptr_eq(clock, &emitter.effect_clock)) { clocks.push(emitter.effect_clock.clone()); }
@@ -461,16 +493,51 @@ impl WeatherFxRetirements {
                 .map(|child| format!("{}: not installed, so its play state is not held", child.node)).collect();
             let mut instance = RetiringInstance {
                 clock, destroy: lifecycle::DestroyOnTime::new(members[0].lifecycle.time_until_destroy()), unheld,
+                colliders: Vec::new(),
             };
+            // The effect's colliders belong to this instance.
+            let (own, rest): (Vec<_>, Vec<_>) = stopped_colliders.into_iter().partition(|(_, effect, _, _)| *effect == members[0].effect);
+            stopped_colliders = rest;
+            instance.colliders = own.into_iter().map(|(_, _, entry, _)| entry).collect();
             let playing = instance_playing(members.iter(), &instance.unheld, undecided, now);
             let destroyed = instance.destroy.check(playing, delta);
             if destroyed {
                 self.despawn.extend(members.iter().map(|m| m.draw));
+                for entry in &instance.colliders { self.physics.remove(*entry); }
             } else {
                 self.live.extend(members.into_iter().map(|emitter| RetiringEmitter { emitter }));
                 self.instances.push(instance);
             }
         }
+        // An effect none of whose systems is installed has no instance: its
+        // colliders leave after its own destroy delay from Stop.
+        self.retiring_colliders.extend(stopped_colliders.into_iter().map(|(_, _, entry, delay)| (entry, now + delay)));
+    }
+    /// Installs the colliders of the plan's effects of the matching kinds.
+    fn install_colliders(&mut self, planned: &[PlannedColliders], kinds: impl Fn(EffectKind)->bool) {
+        for colliders in planned.iter().filter(|colliders| kinds(colliders.kind)) {
+            let entry = self.physics.install(colliders.scene.clone());
+            self.installed_colliders.push((colliders.kind, colliders.effect.clone(), entry, colliders.destroy_delay));
+            if colliders.scene.collider_count() > 0 {
+                info!(effect=%colliders.effect, colliders=colliders.scene.collider_count(),
+                    "[weather-fx] effect colliders installed in the physics scene");
+            }
+        }
+    }
+    /// Removes the colliders of stopped effects without an instance whose
+    /// delay has run out by `now`.
+    fn expire_colliders(&mut self, now: f64) {
+        let physics = self.physics.clone();
+        self.retiring_colliders.retain(|(entry, destroy_at)| {
+            if now < *destroy_at { return true; }
+            physics.remove(*entry);
+            false
+        });
+    }
+    fn clear_colliders(&mut self) {
+        self.physics.clear();
+        self.installed_colliders.clear();
+        self.retiring_colliders.clear();
     }
 }
 
@@ -494,7 +561,7 @@ pub(crate) fn expire_retirements(
 ) {
     let now = time.elapsed_secs_f64();
     let delta = crate::particle_runtime::source_delta_time(time.delta());
-    let WeatherFxRetirements { live, instances, despawn } = &mut *retiring;
+    let WeatherFxRetirements { live, instances, despawn, physics, .. } = &mut *retiring;
     for entity in despawn.drain(..) { commands.entity(entity).try_despawn(); }
     let mut destroyed: Vec<Arc<crate::weather_animation::EffectClock>> = Vec::new();
     instances.retain_mut(|instance| {
@@ -502,6 +569,7 @@ pub(crate) fn expire_retirements(
         let playing = instance_playing(members, &instance.unheld, Vec::new(), now);
         if instance.destroy.check(playing, delta) {
             destroyed.push(instance.clock.clone());
+            for entry in &instance.colliders { physics.remove(*entry); }
             return false;
         }
         true
@@ -512,6 +580,7 @@ pub(crate) fn expire_retirements(
         if let Some((trail, _)) = entry.emitter.trail_draw { commands.entity(trail).try_despawn(); }
         false
     });
+    retiring.expire_colliders(now);
 }
 
 /// `RendererScene::NotifyInvisible` (EarlyUpdate): renderers visible in the
@@ -655,6 +724,18 @@ pub(crate) fn plan(
 
     // ---- 选 effect：只取源环境装载器按名字构造的三份预制件（见 source_environment_selection）----
     let selected = source_environment_selection(effects, &doc.tier, &doc.env_site);
+    // Every collision system of the plan queries the colliders of all the
+    // effects it installs (and of the stopped ones still retiring).
+    let names: Vec<&str> = selected.iter().map(|(name, _, _)| name.as_str()).collect();
+    scenes.select(crate::particle_runtime::collision_scene::Installation::Together(&names));
+    let mut colliders = Vec::new();
+    for &(ref name, effect, kind) in &selected {
+        let Ok(lifecycle) = WeatherEffectLifecycle::from_effect(effect) else { continue; };
+        if let Ok(scene) = scenes.effect_colliders(name) {
+            colliders.push(PlannedColliders { kind, effect: name.clone(), scene,
+                destroy_delay: lifecycle.time_until_destroy() });
+        }
+    }
 
     let mut tally = Tally::default();
     let mut plans = Vec::new();
@@ -774,6 +855,7 @@ pub(crate) fn plan(
         planned: plans,
         animators,
         children,
+        colliders,
         tally,
         tier: doc.tier.clone(),
         env_site: doc.env_site.clone(),
@@ -1786,8 +1868,8 @@ fn judge_in_archive(
             tally.law_reject.push(format!("{node}: {error}")); return None;
         }
     }
-    // A CollisionModule runs only on the native birth path with a scene of
-    // the effect's ground collider. The module law (with its current-size
+    // A CollisionModule runs only on the native birth path with the physics
+    // scene of the installed effects. The module law (with its current-size
     // stream and its collision events) is checked here; the scene is bound
     // (or refused by name) after every other gate, below.
     if emitter.collision.is_some() {
@@ -2124,8 +2206,8 @@ fn judge_in_archive(
             }
         }
     };
-    // Every other gate passed: the scene of the effect's ground collider,
-    // bound here or refused by name.
+    // Every other gate passed: the ground scene of the effects the plan
+    // installs, bound here or refused by name.
     let collision_scene = match (emitter.collision.is_some(), ground) {
         (false, _) => None,
         (true, Ok(scene)) => Some(scene.clone()),
@@ -2509,11 +2591,11 @@ pub(crate) fn spawn_when_ready(
     let delta = crate::particle_runtime::source_delta_time(time.delta());
     let phase_started = plan.site_started_at.is_none();
     if phase_started {
-        retiring.stop_matching(state, now, delta, |e| e.kind == EffectKind::Site);
+        retiring.stop_matching(state, now, delta, |kind| kind == EffectKind::Site);
         if state.global_identity != Some(plan.selection.global_effect) {
             // StopSkyEffect runs before PrepareCrossFade. Camera FX deliberately
             // continue until RefreshGlobalEffect at the commit point.
-            retiring.stop_matching(state, now, delta, |e| e.kind == EffectKind::Sky);
+            retiring.stop_matching(state, now, delta, |kind| kind == EffectKind::Sky);
             state.sky_stopped = true;
         }
         state.tier = plan.tier.clone(); state.env_site = plan.env_site.clone();
@@ -2528,11 +2610,13 @@ pub(crate) fn spawn_when_ready(
     let install_site = !plan.site_installed && !phase_started && controller_ready;
     let site_timed_out = !plan.site_installed && !controller_ready && waited >= 5.0;
     if install_site || site_timed_out { plan.site_installed = true; }
+    if install_site { retiring.install_colliders(&plan.colliders, |kind| kind == EffectKind::Site); }
     if site_timed_out { warn!("[weather-fx] destination site controller unavailable after source 5s timeout: {}", plan.env_site); }
     let preserve_global = state.global_identity == Some(plan.selection.global_effect) && !state.sky_stopped;
     let install_global = !plan.global_installed && !preserve_global && phase.can_commit_global_fx(&plan.selection);
     if install_global {
-        retiring.stop_matching(state, now, delta, |e| e.kind != EffectKind::Site);
+        retiring.stop_matching(state, now, delta, |kind| kind != EffectKind::Site);
+        retiring.install_colliders(&plan.colliders, |kind| kind != EffectKind::Site);
         state.global_identity = Some(plan.selection.global_effect);
         state.sky_stopped = false;
     }
@@ -2666,8 +2750,11 @@ pub(crate) fn spawn_when_ready(
                 }
             } else {
                 let has_collision = live.runtime.emitter.collision.is_some();
-                let collision = collision_scene.map(|scene| crate::particle_runtime::CollisionInstall {
-                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
+                // The plan's verdict bound the scene; the module queries the
+                // host's live physics scene, which holds the installed and
+                // the retiring effects' colliders.
+                let collision = collision_scene.map(|_| crate::particle_runtime::CollisionInstall {
+                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
                     owner: collision_owner,
                 });
                 match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route, collision) {
@@ -3113,6 +3200,15 @@ pub(crate) fn advance(
 
 /// Update：周期状态行——逐系统的活粒子数与累计账，全部可从档案复算。
 pub(crate) fn report(state: Option<Res<WeatherFxState>>, retiring: Res<WeatherFxRetirements>) {
+    let collision: Vec<(&str, bool, u64, u64, u64)> = state.as_deref().into_iter().flat_map(|state| &state.live)
+        .map(|s| (s, true)).chain(retiring.live.iter().map(|entry| (&entry.emitter, false)))
+        .filter_map(|(s, emitting)| s.collision.as_ref()
+            .map(|collision| (s.node.as_str(), emitting, collision.calls, collision.hits, collision.order_free)))
+        .collect();
+    if !collision.is_empty() {
+        info!("[weather-fx] collision: physics scene ground colliders {} ({} installed effects, {} retiring); per system (node, emitting, calls, hits, order-free lanes) {:?}",
+            retiring.physics.collider_count(), retiring.installed_colliders.len(), retiring.retiring_colliders.len(), collision);
+    }
     if !retiring.live.is_empty() {
         info!("[weather-fx] retiring systems={}, live particles={}, active systems={}, destroy loops={:?}",
             retiring.live.len(), retiring.live.iter().map(|s| s.emitter.pool.len()).sum::<usize>(),
@@ -3177,6 +3273,7 @@ pub(crate) fn teardown(commands: &mut Commands) {
             retiring.live.clear();
             retiring.instances.clear();
             retiring.despawn.clear();
+            retiring.clear_colliders();
         }
     });
     commands.remove_resource::<WeatherFxPlan>();
@@ -3198,3 +3295,7 @@ mod retirement_tests;
 #[cfg(test)]
 #[path = "weather_sub_emitter_chain_tests.rs"]
 mod sub_emitter_chain_tests;
+
+#[cfg(test)]
+#[path = "weather_scene_reach.rs"]
+mod scene_reach;

@@ -65,11 +65,16 @@ fn current_corpus_admission() {
         let effects = doc["effects"].as_object().expect("effects map");
         // The loader's pick for every census site; a prefab has one kind whatever the site.
         let mut selected: HashMap<String, EffectKind> = HashMap::new();
+        // The effects each site's plan installs for this phenomenon.
+        let mut selections: Vec<(String, Vec<String>)> = Vec::new();
         for site in &sites {
+            let mut installed = Vec::new();
             for (prefab, _, kind) in source_environment_selection(effects, name, site) {
                 let previous = selected.insert(prefab.clone(), kind);
                 assert!(previous.is_none_or(|previous| previous == kind), "{name}/{prefab}: two kinds across sites");
+                installed.push(prefab);
             }
+            selections.push((site.clone(), installed));
         }
         for (effect_name, effect) in effects {
             let animation = crate::weather_animation::Contract::compile(effect,animation_doc.as_ref());
@@ -88,6 +93,25 @@ fn current_corpus_admission() {
             }
             let by_path: HashMap<String, &Value> = effect["nodes"].as_array().expect("nodes")
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
+            // The scene its collision systems query: the colliders of the
+            // effects installed with it, at its site for a site's own effect
+            // and at every installing site for a global one (admission is
+            // judged at the first; every site's verdict is reported). A common
+            // template is installed only inside site effects.
+            let installing: Vec<&(String, Vec<String>)> = selections.iter()
+                .filter(|(_, selected)| selected.iter().any(|e| e == effect_name)).collect();
+            let installed_at: Vec<(String, crate::particle_runtime::collision_scene::SceneVerdict)> = installing.iter()
+                .map(|(site, selected)| {
+                    let names: Vec<&str> = selected.iter().map(String::as_str).collect();
+                    (site.clone(), scenes.for_installed(&names))
+                }).collect();
+            if effect["variant"].as_str() == Some("common") {
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Template);
+            } else {
+                let first: Vec<&str> = installing.first().map(|(_, selected)| selected.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                scenes.select(crate::particle_runtime::collision_scene::Installation::Together(&first));
+            }
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
             let ground = scenes.for_effect(effect_name);
@@ -161,9 +185,17 @@ fn current_corpus_admission() {
                     }),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "culling": planned.as_ref().map(|p| p.culling.label()),
-                    "collisionScene": particle["system"]["collision"].is_object().then(|| match &ground {
-                        Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
-                        Err(reason) => json!({"bound": false, "reason": reason}),
+                    "collisionScene": particle["system"]["collision"].is_object().then(|| {
+                        let verdict = |scene: &crate::particle_runtime::collision_scene::SceneVerdict| match scene {
+                            Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
+                            Err(reason) => json!({"bound": false, "reason": reason}),
+                        };
+                        let mut row = verdict(&ground);
+                        if effect["variant"].as_str() == Some("global") {
+                            row["installedAt"] = installed_at.iter().map(|(site, scene)| (site.clone(), verdict(scene)))
+                                .collect::<serde_json::Map<_, _>>().into();
+                        }
+                        row
                     }),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
