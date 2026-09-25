@@ -33,7 +33,7 @@ pub(crate) fn runtime() -> Runtime {
             emission:Some(EmissionParams { rate_over_time:MinMaxCurve::Constant(100.0),
                 rate_over_distance:zero,bursts:Vec::new() }),
             shape:None,shape_enabled:Some(false),velocity_over_lifetime:None,color_over_lifetime:None,
-            size_over_lifetime:None,rotation_over_lifetime:None,limit_velocity:None,
+            size_over_lifetime:None,rotation_over_lifetime:None,rotation_by_speed:None,limit_velocity:None,
             custom_data:None,sub_emitters:Vec::new(),collision:None,trails:None,force:None,inherit_velocity:None,texture_sheet:None,unmapped:Vec::new(),
         },
         kind:EffectKind::Camera,camera_rotation:false,node_affine:GlobalTransform::IDENTITY,

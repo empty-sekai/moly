@@ -164,6 +164,9 @@ fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, 
             && (1..3).all(|a| same(state.frame.velocity[a], &velocity[a])), &mut ok, label);
     }
     tally.check("clock", same(system.playback_head, &after["clockBits"]), &mut ok, label);
+    if let Some(bits) = after.get("delayBits") {
+        tally.check("startDelay", state.frame.start_delay.to_bits() == word(bits), &mut ok, label);
+    }
     let distribution = state.emission.distribution;
     let carry = &after["emission"]["f"];
     tally.check("emissionCarry", same(distribution.spacing, &carry[0]) && same(distribution.offset, &carry[1])
@@ -446,4 +449,177 @@ pub(crate) fn with_arm<T>(arm: Option<&'static str>, f: impl FnOnce() -> T) -> T
     let result = f();
     child::arms::set(None);
     result
+}
+
+/// The harness emitter of a case that carries its own start block, module
+/// blocks (any of Velocity, CustomData, ClampVelocity, RotationOverLifetime,
+/// RotationBySpeed, in the export's shape) and emission bursts and looping in
+/// its config.
+fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Runtime {
+    let mut runtime = harness_system(start, config);
+    let space = if config["space"].as_u64() == Some(0) { "Local" } else { "World" };
+    let mut enabled = vec!["EmissionModule", "InitialModule"];
+    let mut system = json!({
+        "duration": config["duration"], "looping": config["looping"], "prewarm": false,
+        "playOnAwake": true, "simulationSpeed": 1.0, "simulationSpace": space,
+        "randomSeed": 0, "autoRandomSeed": true, "emitterVelocityMode": config["velocity_mode"],
+        "startDelay": {"mode": "constant", "value": config.get("start_delay").cloned().unwrap_or(json!(0.0))},
+        "ringBufferMode": 0, "ringBufferLoopRange": [0.0, 1.0],
+        "maxParticles": config["maximum"], "start": start.clone(),
+        "emission": {"rateOverTime": {"mode": "constant", "value": config["rate_time"]},
+            "rateOverDistance": {"mode": "constant", "value": config["rate_distance"]},
+            "bursts": config.get("bursts").cloned().unwrap_or(json!([]))},
+        "shapeEnabled": false,
+    });
+    for (key, module) in [("velocityOverLifetime", "VelocityModule"), ("customData", "CustomDataModule"),
+        ("limitVelocity", "ClampVelocityModule"), ("rotationOverLifetime", "RotationModule"),
+        ("rotationBySpeed", "RotationBySpeedModule")] {
+        if let Some(block) = modules.get(key).filter(|b| b.is_object()) {
+            system[key] = block.clone();
+            enabled.push(module);
+        }
+    }
+    enabled.sort_unstable();
+    system["sourceModules"] = json!({"version": 1, "enabled": enabled, "unsupported": []});
+    let document = json!({"effects": {"harness": {"particles": [{"node": "root/harness", "system": system}]}}});
+    let mut decoded = moly_law::particle::schema::Effects::from_json_str(
+        &serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut emitter = decoded.emitters.remove(0);
+    emitter.simulation_speed = runtime.emitter.simulation_speed;
+    runtime.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier).unwrap();
+    runtime.velocity_law = emitter.velocity_over_lifetime.as_ref()
+        .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).unwrap());
+    runtime.custom_law = emitter.custom_data.as_ref()
+        .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).unwrap());
+    runtime.limit = emitter.limit_velocity.as_ref().map(|p| LimitVelocity::from_parts(p.separate_axis,
+        &p.magnitude, p.dampen, p.drag.as_ref(), p.multiply_drag_by_size, p.multiply_drag_by_velocity).unwrap());
+    runtime.rol = emitter.rotation_over_lifetime.as_ref().map(|p|
+        RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve).unwrap());
+    runtime.emitter = emitter;
+    runtime
+}
+
+/// One case of the distance module receipt through the product frame entry;
+/// also compares the rotation lanes the receipt records.
+fn run_module_case(receipt: &Value, case: &Value, tally: &mut Tally, rotation: &mut (usize, usize)) {
+    let start = case.get("start").unwrap_or(&receipt["source"]["system"]["start"]);
+    let modules = case.get("moduleSource").unwrap_or(&receipt["moduleSource"]);
+    let modules = if case["modules"] == false { &Value::Null } else { modules };
+    let mut system = harness_system_modules(start, &case["config"], modules);
+    install(&mut system, &case["seeds"]);
+    let name = case["name"].as_str().unwrap();
+    for (index, row) in case["frames"].as_array().unwrap().iter().enumerate() {
+        let input = &row["input"];
+        if input["reset"].as_bool().unwrap() {
+            system.native_birth.as_mut().unwrap().frame.reset_previous = true;
+        }
+        // The native stop byte before the frame (the non-looping end sets it
+        // inside the incremental update); the host's play state stands in.
+        let stopped = row.get("stoppedBefore").is_some_and(|v| v == true || v == 1);
+        let _ = advance_frame(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {});
+        let label = format!("{name}#{index}");
+        compare(&system, row, true, tally, &label);
+        let particles = &row["particles"];
+        if let Some(rot) = particles.get("rot").filter(|r| r.is_array()) {
+            if system.pool.len() == particles["count"].as_u64().unwrap() as usize {
+                let ok = (0..system.pool.len()).all(|i| (0..3).all(|a| same(system.side[i].rot[a], &rot[a][i])));
+                rotation.0 += 1;
+                if !ok {
+                    rotation.1 += 1;
+                    if tally.first.len() < 12 {
+                        let (i, a) = (0..system.pool.len()).flat_map(|i| (0..3).map(move |a| (i, a)))
+                            .find(|&(i, a)| !same(system.side[i].rot[a], &rot[a][i])).unwrap();
+                        tally.first.push(format!("{label} rotation particle {i} axis {a}: {:08x} native {:08x} age {:08x} seed {:08x}",
+                            system.side[i].rot[a].to_bits(), f(&rot[a][i]).to_bits(),
+                            system.pool[i].age_percent.to_bits(), system.side[i].seed));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn replay_modules(receipt: &Value, arm: Option<&'static str>) -> (usize, Tally, (usize, usize)) {
+    assert_eq!(receipt["sourceSha256"], SOURCE_SHA256);
+    let cases: Vec<&Value> = ["s11Cases", "controls"].into_iter()
+        .filter_map(|group| receipt[group].as_array()).flatten()
+        .filter(|case| case["patched"] != true).collect();
+    child::arms::set(arm);
+    let mut tally = Tally::default();
+    let mut rotation = (0, 0);
+    for case in &cases {
+        run_module_case(receipt, case, &mut tally, &mut rotation);
+    }
+    child::arms::set(None);
+    (cases.len(), tally, rotation)
+}
+
+/// Distance births (and time births) through ClampVelocity and
+/// RotationOverLifetime with the walk-in-water blocks, bursts sharing the
+/// emission step with a distance rate, and a non-looping distance rate past
+/// the end: every native frame of the receipt through the product frame
+/// entry, the rotation lanes included. The one-rule arms (rotation or
+/// ClampVelocity skipped at a negative elapsed time) must each mismatch.
+#[test]
+#[ignore = "MOLY_PLAW_DISTANCE_MODULES must identify the JP distance module receipt"]
+fn distance_births_through_clamp_and_rotation_match_native_rows() {
+    let receipt = read("MOLY_PLAW_DISTANCE_MODULES");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "rotationFrames": rotation.0, "rotationMismatched": rotation.1,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_PLAW_DISTANCE_MODULES_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0 && rotation.0 > 0, "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    // The newborns reach both modules at their negative elapsed time.
+    for arm in ["rotationSkipsNegativeElapsed", "clampSkipsNegativeElapsed"] {
+        let (_, tally, rotation) = replay_modules(&receipt, Some(arm));
+        println!("arm {arm}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "arm {arm} must mismatch");
+    }
+}
+
+/// Systems with a start delay, played and then stepped by the product frame
+/// entry over the native Update1b rows: the delay word per frame, the clock
+/// held at zero while the word is not below the slice, the births of the
+/// slice where the word runs out (its overshoot, none when it lands on zero
+/// exactly), the frame head's distance births held back while the word is
+/// not zero, and a looping delayed system. Every one-rule arm must mismatch.
+#[test]
+#[ignore = "MOLY_PLAW_START_DELAY must identify the JP start delay receipt"]
+fn start_delay_matches_native_rows() {
+    let receipt = read("MOLY_PLAW_START_DELAY");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "rotationFrames": rotation.0, "rotationMismatched": rotation.1,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_PLAW_START_DELAY_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0 && product.fields.get("startDelay").is_some_and(|f| f.0 > 0), "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    for arm in ["delayTicksWholeSlice", "delayBirthsWholeSlice", "distanceDuringDelay"] {
+        let (_, tally, rotation) = replay_modules(&receipt, Some(arm));
+        println!("arm {arm}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "arm {arm} must mismatch");
+    }
+}
+
+/// A control copy of the receipt with mutated native words must mismatch.
+#[test]
+#[ignore = "MOLY_PLAW_DISTANCE_MODULES_CONTROLS identifies mutated copies of the distance module receipt"]
+fn distance_module_controls_fail() {
+    let paths = std::env::var("MOLY_PLAW_DISTANCE_MODULES_CONTROLS").expect("controls");
+    for path in paths.split(';').filter(|p| !p.is_empty()) {
+        let receipt: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let (_, product, rotation) = replay_modules(&receipt, None);
+        println!("control {path}: {} mismatched frames, {} rotation", product.mismatched_frames, rotation.1);
+        assert!(product.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
+    }
 }

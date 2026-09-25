@@ -256,6 +256,19 @@ pub struct RotationOverLifetimeParams {
     pub y: Option<MinMaxCurve>,
 }
 
+/// rotationBySpeed block (RotationBySpeedModule). As in rotationOverLifetime,
+/// `curve` is the z axis and `x`/`y` are exported only with separate axes;
+/// `range` is the speed range the module remaps to [0, 1]. The export carries
+/// the block only for an enabled module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotationBySpeedParams {
+    pub separate_axes: bool,
+    pub curve: MinMaxCurve,
+    pub x: Option<MinMaxCurve>,
+    pub y: Option<MinMaxCurve>,
+    pub range: [f32; 2],
+}
+
 /// limitVelocity 模块。`drag` 为 null（提取面在拖拽曲线为空时写 null）
 /// 是「拖拽段跳过」的规范形态；乘法标志提取面暂不导出（None = 未知，
 /// 非零拖拽时会在律构造处拒——缺一个会左右结果的键不是当 false）；
@@ -306,6 +319,7 @@ pub struct EmitterParams {
     pub color_over_lifetime: Option<MinMaxGradient>,
     pub size_over_lifetime: Option<SizeOverLifetimeParams>,
     pub rotation_over_lifetime: Option<RotationOverLifetimeParams>,
+    pub rotation_by_speed: Option<RotationBySpeedParams>,
     pub limit_velocity: Option<LimitVelocityParams>,
     /// 逐粒子自定义流。两个槽都缺席或 `disabled` 时为 None。
     pub custom_data: Option<CustomDataParams>,
@@ -323,11 +337,11 @@ pub struct EmitterParams {
 /// system 层已映射进参数的键——之外的键全部进 `unmapped`。
 /// 「识别但具名不迁」的 scalingMode **不在**此列：它落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 31] = [
+const MAPPED_SYSTEM_KEYS: [&str; 32] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed", "useUnscaledTime",
     "simulationSpace", "emitterVelocityMode", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
-    "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
+    "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime", "rotationBySpeed",
     "limitVelocity", "customData", "shapeEnabled", "subEmitters", "collision",
     "trails", "forceOverLifetime", "inheritVelocity", "textureSheet",
     "noise", "randomSeed", "autoRandomSeed",
@@ -420,6 +434,12 @@ impl EmitterParams {
             }
             _ => None,
         };
+        let rotation_by_speed = match system_get(system, "rotationBySpeed") {
+            Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
+                Some(RotationBySpeedParams::from_value(v, &ctx)?)
+            }
+            _ => None,
+        };
         let limit_velocity = match system_get(system, "limitVelocity") {
             Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
                 Some(LimitVelocityParams::from_value(v, &ctx)?)
@@ -477,6 +497,7 @@ impl EmitterParams {
             size_over_lifetime,
             custom_data,
             rotation_over_lifetime,
+            rotation_by_speed,
             limit_velocity,
             sub_emitters: system_get(system, "subEmitters")
                 .map(|v| events::sub_emitters(v, &ctx)).transpose()?.unwrap_or_default(),
@@ -811,6 +832,20 @@ impl RotationOverLifetimeParams {
             y: obj_get(obj, "y")
                 .map(|v| min_max_curve(Some(v), &m("y")))
                 .transpose()?,
+        })
+    }
+}
+
+impl RotationBySpeedParams {
+    pub(crate) fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        let obj = v.as_object().unwrap_or(&[]);
+        let m = |k: &str| format!("{ctx}.rotationBySpeed.{k}");
+        Ok(Self {
+            separate_axes: bool_of(obj_get(obj, "separateAxes"), &m("separateAxes"))?,
+            curve: min_max_curve(obj_get(obj, "curve"), &m("curve"))?,
+            x: obj_get(obj, "x").map(|v| min_max_curve(Some(v), &m("x"))).transpose()?,
+            y: obj_get(obj, "y").map(|v| min_max_curve(Some(v), &m("y"))).transpose()?,
+            range: vec2_of(obj_get(obj, "range"), &m("range"))?,
         })
     }
 }

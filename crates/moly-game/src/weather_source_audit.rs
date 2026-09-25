@@ -630,6 +630,8 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
                     uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
                 alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip, axis_body: *axis_body,
             }),
+        PlannedGeometry::EmptyMesh { alignment, scaling, pivot } => crate::particle_runtime::Geometry::Mesh(
+            crate::particle_geometry::MeshDraw::empty(*alignment, *scaling, *pivot)),
     };
     system.emitter = e.clone();
     system.cone_angle = planned.cone_angle;

@@ -47,11 +47,17 @@ pub(crate) struct FrameState {
     /// Set at construction and by Play: the next frame takes its own
     /// translation as the previous one.
     pub reset_previous: bool,
+    /// The system state's start delay word: zero at construction; Play with
+    /// prewarm off writes the start delay's value (see
+    /// [`super::play_start_delay`]). While it is not zero the frame head runs
+    /// no emission over distance; every slice with the clock at zero on the
+    /// update's entry counts it down (see `step_slice`).
+    pub start_delay: f32,
 }
 
 impl Default for FrameState {
     fn default() -> Self {
-        Self { previous_position: [0.0; 3], velocity: [0.0; 3], reset_previous: true }
+        Self { previous_position: [0.0; 3], velocity: [0.0; 3], reset_previous: true, start_delay: 0.0 }
     }
 }
 
@@ -135,10 +141,16 @@ fn qualify(emitter: &EmitterParams, frame_head: bool) -> Result<(), BirthRefused
 /// Emission over distance, as executed: the Transform-mode emitter velocity,
 /// no first-Play warm (the warm's own update would take the branch), and
 /// newborns whose negative elapsed time runs only through Initial gravity
-/// with a constant modifier, CustomData and a Local VelocityModule with
+/// with a constant modifier, RotationOverLifetime, a Local VelocityModule with
 /// constant or two-constant linear terms, zero orbital and radial terms and a
-/// constant unit speed modifier. Every other module that reads the elapsed
-/// time, the position or the newborn range is refused with it.
+/// constant unit speed modifier, ClampVelocity, RotationBySpeed and
+/// CustomData. A distance birth takes the same pre-simulation chain as every
+/// other birth, in the same order (Initial, the rotation-over-lifetime rate,
+/// Velocity, ClampVelocity with its damping from the lane's |elapsed|, the
+/// rotation-by-speed rate, CustomData), then the backtrack, the position
+/// integration and one rotation integration with the summed rate over the
+/// negative elapsed time. Every other module that reads the elapsed time, the
+/// position or the newborn range is refused with it.
 fn qualify_distance_composition(emitter: &EmitterParams) -> Result<(), BirthRefused> {
     use moly_law::particle::MinMaxCurve;
     let refuse = |reason| Err(BirthRefused::Unsupported(reason));
@@ -149,8 +161,7 @@ fn qualify_distance_composition(emitter: &EmitterParams) -> Result<(), BirthRefu
         return refuse("emission over distance with a first-Play warm: the warm update's distance call is not transcribed");
     }
     if has_real_sub_emitter_edges(emitter) || emitter.collision.is_some() || emitter.trails.is_some()
-        || emitter.noise.is_some() || emitter.force.is_some() || emitter.limit_velocity.is_some()
-        || emitter.rotation_over_lifetime.is_some() || emitter.inherit_velocity.is_some()
+        || emitter.noise.is_some() || emitter.force.is_some() || emitter.inherit_velocity.is_some()
     {
         return refuse("emission over distance: a module outside the executed newborn composition");
     }
@@ -229,10 +240,13 @@ pub(super) fn advance_frame(
             Ok(plan) => {
                 let pending = plan.remaining();
                 let late = super::child::arms::on("distanceAfterSlices");
-                let distance = if stopped || late { Ok(()) } else { emit_over_distance(system, state, head.scaled_dt,
+                // Update1b runs the head's emission over distance only while
+                // the start delay word is zero.
+                let delayed = state.frame.start_delay != 0.0 && !super::child::arms::on("distanceDuringDelay");
+                let distance = if stopped || late || delayed { Ok(()) } else { emit_over_distance(system, state, head.scaled_dt,
                     pending, ctx) };
                 let result = distance.and_then(|()| run_plan(system, state, plan, stopped, ctx, slice_start));
-                let result = if late && !stopped && result.is_ok() {
+                let result = if late && !stopped && !delayed && result.is_ok() {
                     emit_over_distance(system, state, head.scaled_dt, pending, ctx)
                 } else {
                     result
@@ -372,6 +386,9 @@ fn run_slices(
     ctx: &Context,
     slice_start: &mut dyn FnMut(&Runtime),
 ) -> Result<(), BirthRefused> {
+    // Update1Incremental reads the clock once on entry; the start delay word
+    // counts down only in an update entered with the clock at zero.
+    let entry_clock = system.playback_head;
     for slice in plan.by_ref() {
         slice_start(system);
         let result = slice.map_err(|_| BirthRefused::InvalidTiming).and_then(|slice| {
@@ -385,7 +402,7 @@ fn run_slices(
                 slice.remaining_before
             };
             step_slice(system, state, slice.duration, Some(accumulated), stopped,
-                Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity, pending: 0.0 }), ctx)
+                Some(BirthBacktrack { births_ahead: slice.births_ahead(), emitter_velocity, pending: 0.0 }), entry_clock, ctx)
         });
         if let Err(error) = result {
             // A refused slice ends the frame; the rest of its time is
@@ -413,7 +430,8 @@ pub(super) fn step_explicit(
     stopped: bool,
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
-    step_slice(system, state, dt, None, stopped, None, ctx)
+    let entry_clock = system.playback_head;
+    step_slice(system, state, dt, None, stopped, None, entry_clock, ctx)
 }
 
 /// `accumulated` is the system time still to simulate when the slice starts
@@ -425,6 +443,7 @@ fn step_slice(
     accumulated: Option<f32>,
     stopped: bool,
     backtrack: Option<BirthBacktrack>,
+    entry_clock: f32,
     ctx: &Context,
 ) -> Result<(), BirthRefused> {
     validate(system, &state.initial)?;
@@ -459,8 +478,31 @@ fn step_slice(
     if distance.is_some() && backtrack.is_none() {
         return Err(BirthRefused::Unsupported("emission over distance runs only from the per-frame update"));
     }
+    // The start delay word, as Update1Incremental reads it per slice: Tick
+    // takes the slice minus the word, and only while the word is below the
+    // slice; the existing particles take the whole slice either way. After
+    // them, and only when emission is not stopped, an update entered with the
+    // clock at zero counts a positive word down by the slice (floored at
+    // zero): while it has not run out nothing is emitted, and in the slice
+    // where it runs out the births take its overshoot (none when it lands on
+    // zero exactly).
+    let delay = state.frame.start_delay;
+    let tick = if delay < dt || super::child::arms::on("delayTicksWholeSlice") {
+        Some(if super::child::arms::on("delayTicksWholeSlice") { dt } else { dt - delay })
+    } else {
+        None
+    };
+    let (birth_dt, next_delay) = if entry_clock == 0.0 && delay > 0.0 {
+        let left = delay - dt;
+        let overshoot = if super::child::arms::on("delayBirthsWholeSlice") { dt } else { -left };
+        // FMAX with zero; the word and the slice are finite, and a difference
+        // of equal values is +0, so the floor is exact.
+        (Some(overshoot).filter(|b| left <= 0.0 && *b > 0.0), if left > 0.0 { left } else { 0.0 })
+    } else {
+        (Some(dt), delay)
+    };
     let clock = law
-        .prepare_slice(system.playback_head, dt, stopped)
+        .prepare_slice_parts(system.playback_head, dt, tick, birth_dt, stopped)
         .map_err(BirthRefused::Emission)?;
     // Schedule into a copy: this validates arithmetic without advancing live
     // emission state ahead of the old-particle post/death barrier.
@@ -477,6 +519,9 @@ fn step_slice(
     }
     system.previous_head = clock.previous;
     system.playback_head = clock.current;
+    if !clock.stopped_after {
+        state.frame.start_delay = next_delay;
+    }
     // ParticleSystem::Update1Incremental runs the pre-simulation module
     // update, ShapeModule::Update among it, before the slice's births: the
     // arc clock moves by the slice dt times the arc speed. Only the Loop and

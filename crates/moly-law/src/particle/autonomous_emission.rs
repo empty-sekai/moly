@@ -5,7 +5,7 @@
 //! receipt over every two-constant emission configuration of the corpus,
 //! native EmitOverTime batteries over the burst schedule, and native rows of
 //! the emission load normalization, all with zero failures.
-//! Scope: initialized clock, no delay, one incremental slice per call (the
+//! Scope: initialized clock, one incremental slice per call (the
 //! per-frame head supplies the slices; their births-ahead argument is applied
 //! by the birth placement, not here), a constant or two-constant rate, up to
 //! eight bursts with a constant or two-constant count and any probability,
@@ -303,7 +303,12 @@ impl ConstantAutonomousEmission {
         looping: bool,
         emission: &EmissionParams,
     ) -> Result<Self, Refused> {
-        if !matches!(delay, MinMaxCurve::Constant(v) if *v == 0.0)
+        // The start delay is not part of this law: Play writes its value into
+        // the system state's delay word, which the caller counts down per
+        // slice (`prepare_slice_parts`). Only a finite, non-negative constant
+        // is taken; a random delay is evaluated by Play with the system
+        // seed's hash, which is not transcribed.
+        if !matches!(delay, MinMaxCurve::Constant(v) if v.is_finite() && *v >= 0.0)
             || emission.bursts.len() > BURST_SLOTS
         {
             return Err(Refused::UnsupportedConfiguration);
@@ -359,19 +364,42 @@ impl ConstantAutonomousEmission {
         dt: f32,
         stopped: bool,
     ) -> Result<ClockSlice, Refused> {
+        self.prepare_slice_parts(previous, dt, Some(dt), Some(dt), stopped)
+    }
+
+    /// One Update1Incremental slice with the parts the system state's start
+    /// delay word decides, as the caller reads them from that word: `tick` is
+    /// ParticleSystemState::Tick's argument (the slice minus the word, called
+    /// only while the word is below the slice; `None` when Tick is not
+    /// called), and `birth_dt` the dt EmitOverTime's births take (the slice,
+    /// or the word's overshoot in the slice where it runs out; `None` while
+    /// the word holds the emission back). The existing particles take the
+    /// whole slice either way, and EmitOverTime's previous time is the clock
+    /// before Tick with the slice's own epsilon rule. With no delay both
+    /// parts are the slice (`prepare_slice`).
+    pub fn prepare_slice_parts(
+        &self,
+        previous: f32,
+        dt: f32,
+        tick: Option<f32>,
+        birth_dt: Option<f32>,
+        stopped: bool,
+    ) -> Result<ClockSlice, Refused> {
         if !previous.is_finite()
             || previous < 0.0
             || previous > self.duration
             || !dt.is_finite()
             || dt < 0.0
             || (self.looping && previous >= self.duration)
+            || tick.is_some_and(|t| !t.is_finite() || t < 0.0)
+            || birth_dt.is_some_and(|b| !b.is_finite() || b < 0.0)
         {
             return Err(Refused::InvalidInput);
         }
         let active = dt >= EPSILON;
         let mut current = previous;
         let mut loops = 0;
-        if active {
+        if let Some(dt) = tick.filter(|_| active) {
             current += dt;
             if !current.is_finite() {
                 return Err(Refused::UnverifiedClockRange);
@@ -398,11 +426,11 @@ impl ConstantAutonomousEmission {
             current,
             emission_previous: previous.min(self.duration)
                 + if dt >= self.duration { EPSILON } else { 0.0 },
-            dt,
+            dt: birth_dt.unwrap_or(dt),
             loop_count_increment: loops,
             stopped_after,
             simulate: active,
-            emit: active && !stopped_after,
+            emit: active && !stopped_after && birth_dt.is_some(),
             duration: self.duration,
             looping: self.looping,
         })
@@ -544,14 +572,21 @@ impl ConstantAutonomousEmission {
 /// with EmitOverTime, which later draws once per slice and rewrites the
 /// spacing.
 ///
-/// Qualified subset, as executed: a finite constant rate above zero, a
-/// looping system with no start delay and no bursts, and a constant rate over
-/// time. A rate of exactly zero is no law at all (the caller's rate test fails
-/// before any draw); a negative, curve or two-constant rate is refused.
+/// Qualified subset, as executed: a finite constant rate above zero, no start
+/// delay, and a constant rate over time. EmitOverDistance reads neither the
+/// bursts nor the rate over time (only its own rate curve, the emission
+/// state's spacing, offset and scalar stream, the emitter velocity and the
+/// frame dt), so bursts ride on the per-slice EmitOverTime as without a
+/// distance rate. The command time depends on looping: the frame head passes
+/// `fmod(pending + clock, duration)` for a looping system and
+/// `min(duration, pending + clock)` (the duration when it is below the sum)
+/// otherwise. A rate of exactly zero is no law at all (the caller's rate test
+/// fails before any draw); a negative, curve or two-constant rate is refused.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConstantDistanceEmission {
     rate: f32,
     duration: f32,
+    looping: bool,
 }
 
 /// One EmitOverDistance call and the StartParticles command it issues: the
@@ -580,10 +615,10 @@ impl ConstantDistanceEmission {
             MinMaxCurve::Constant(value) if value.is_finite() && value > 0.0 => value,
             _ => return Err(Refused::UnsupportedConfiguration),
         };
-        if !law.looping || !law.bursts.is_empty() || !matches!(law.rate, EmissionRate::Constant(_)) {
+        if !matches!(law.rate, EmissionRate::Constant(_)) {
             return Err(Refused::UnsupportedConfiguration);
         }
-        Ok(Some(Self { rate, duration: law.duration }))
+        Ok(Some(Self { rate, duration: law.duration, looping: law.looping }))
     }
 
     /// `velocity` is the emitter velocity the frame head holds (translation
@@ -631,8 +666,16 @@ impl ConstantDistanceEmission {
             offset: full - count as f32,
             burst_fraction: old.burst_fraction,
         };
-        // Looping only (the qualified subset): Rust `%` on f32 is fmodf.
-        let current = (pending + clock) % self.duration;
+        // Rust `%` on f32 is fmodf. Without looping the frame head takes the
+        // duration when it compares below the sum (a NaN sum stays).
+        let sum = pending + clock;
+        let current = if self.looping {
+            sum % self.duration
+        } else if self.duration < sum {
+            self.duration
+        } else {
+            sum
+        };
         let inverse = reciprocal(self.duration)
             .filter(|v| v.is_finite() && *v > 0.0)
             .ok_or(Refused::ReciprocalUnavailable)?;

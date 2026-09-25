@@ -471,9 +471,34 @@ fn later_play(system: &mut Runtime) {
 /// one (Play's emitter reset).
 pub(crate) fn later_play_with_particles(system: &mut Runtime) {
     later_play(system);
+    let delay = play_start_delay(&system.emitter);
     if let Some(native) = system.native_birth.as_mut() {
         native.frame.reset_previous = true;
+        // The same Play writes the start delay word again.
+        if let Some(delay) = delay {
+            native.frame.start_delay = delay;
+        }
     }
+}
+
+/// The start delay word ParticleSystem::Play writes when it restarts a
+/// stopped system: with prewarm on it writes nothing (the word keeps its
+/// construction zero), otherwise the start delay curve evaluated at time zero
+/// with a random factor from the system seed's hash, which for a constant is
+/// its scalar. `None` for a random delay (the seed hash is not transcribed).
+pub(crate) fn play_start_delay(emitter: &EmitterParams) -> Option<f32> {
+    if emitter.prewarm {
+        return Some(0.0);
+    }
+    match emitter.start_delay {
+        moly_law::particle::MinMaxCurve::Constant(value) if value.is_finite() && value >= 0.0 => Some(value),
+        _ => None,
+    }
+}
+
+/// Whether the system's Play leaves a start delay word other than zero.
+pub(crate) fn has_start_delay(emitter: &EmitterParams) -> bool {
+    play_start_delay(emitter) != Some(0.0)
 }
 
 /// `ParticleSystem.Play` on a system that holds no particle: it plays as at
@@ -582,15 +607,14 @@ impl Geometry {
 /// rotation, an enabled Shape module's align to direction, or the separate
 /// axes of an enabled RotationOverLifetime or RotationBySpeed module. The
 /// emitter carries the Shape and RotationOverLifetime terms (its
-/// rotation-over-lifetime block exists only for an enabled module);
-/// `initial_enabled` is the Initial module's serialized state. RotationBySpeed
-/// has no consumer here and the module admission refuses an enabled one, so
-/// its term is false for every admitted system. None when a Shape term is not
-/// decided by the export (its enabled state or align flag missing) and no
-/// other term holds.
+/// rotation-over-lifetime and rotation-by-speed blocks exist only for an
+/// enabled module); `initial_enabled` is the Initial module's serialized
+/// state. None when a Shape term is not decided by the export (its enabled
+/// state or align flag missing) and no other term holds.
 pub(crate) fn uses_rotation_3d(emitter: &EmitterParams, initial_enabled: bool) -> Option<bool> {
     let known = (initial_enabled && emitter.start.rotation3d)
-        || emitter.rotation_over_lifetime.as_ref().is_some_and(|module| module.separate_axes);
+        || emitter.rotation_over_lifetime.as_ref().is_some_and(|module| module.separate_axes)
+        || emitter.rotation_by_speed.as_ref().is_some_and(|module| module.separate_axes);
     let align = emitter.shape.as_ref().and_then(|shape| shape.controls.align_to_direction);
     match (emitter.shape_enabled, align) {
         (Some(false), _) | (_, Some(false)) => Some(known),
@@ -951,6 +975,12 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
             format!("{error:?}")
         });
     }
+    // The legacy step has no start delay word: a system whose Play leaves one
+    // is refused here rather than emitting from its first frame.
+    if has_start_delay(&system.emitter) {
+        system.refused_total += 1;
+        return Err("start delay: the legacy step does not count the start delay word down".into());
+    }
     // Current Update1 calls ParticleSystemState::Tick before the stopped gate
     // and before pre-simulation modules. Only zero delay is admitted here:
     // nonzero authored delay cannot substitute for the native remaining wait
@@ -1096,6 +1126,15 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
     }
     let owner = compose_to_world(system, ctx);
     let velocity_over_lifetime = system.velocity_law.as_ref();
+    // RotationBySpeed is built from the emitter block (admission refused a
+    // block its law does not take). Both rotation modules add into one
+    // angular-velocity lane per axis that Initial clears for the range, and
+    // the rotation is integrated once with the sum after the module chain,
+    // on all three axes when the particle arrays use 3D rotation.
+    let by_speed = system.emitter.rotation_by_speed.as_ref()
+        .and_then(|params| moly_law::particle::rotation_by_speed::RotationBySpeed::from_params(params).ok());
+    let rotates = system.rol.is_some() || by_speed.is_some();
+    let rotation_3d = uses_rotation_3d(&system.emitter, true).unwrap_or(system.emitter.start.rotation3d);
     for index in start..end {
         let dt = birth_dts.map_or(dt, |times| times[index - start]);
         let side = system.side[index];
@@ -1126,17 +1165,13 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         let gravity = if system.emitter.simulation_space == SimulationSpace::World { gravity }
             else { owner.affine().inverse().transform_vector3(gravity) };
         for axis in 0..3 { system.pool[index].velocity[axis] += gravity[axis]; }
+        let mut angular = [0.0_f32; 3];
         if let Some(rol) = &system.rol {
-            let mut rot = system.side[index].rot;
-            let _ = rol.advance_rotation(
-                &mut rot,
-                side.seed,
-                0.0,
-                age_pre * 100.0,
-                system.emitter.start.rotation3d,
-                dt,
-            );
-            system.side[index].rot = rot;
+            // The stored age-percent word before this update's advance: the
+            // module's curve time is `max(age * 0.01, 0)` of that word, and
+            // `normalized_age() * 100` does not give the word back.
+            let w = rol.angular_velocity(side.seed, 0.0, system.pool[index].age_percent);
+            for axis in 0..3 { angular[axis] += w[axis]; }
         }
         let batch_seed = system.side[start + ((index - start) & !3)].seed;
         let (velocity_anim, modifier) = match velocity_over_lifetime {
@@ -1169,7 +1204,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
                 system.pool[index].velocity[axis] += acceleration[axis] * dt;
             }
         }
-        if let Some(law) = &system.limit {
+        if let Some(law) = system.limit.as_ref().filter(|_| !(dt < 0.0 && child::arms::on("clampSkipsNegativeElapsed"))) {
             let mut velocity = system.pool[index].velocity;
             let _ = law.step(
                 &mut velocity,
@@ -1184,6 +1219,11 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
                 },
             );
             system.pool[index].velocity = velocity;
+        }
+        // RotationBySpeed runs after ClampVelocity and reads the speed the
+        // chain leaves (persistent plus animated velocity).
+        if let Some(by_speed) = &by_speed {
+            by_speed.add(&mut angular, side.seed, 0.0, system.pool[index].velocity, anim);
         }
         if let Some(custom) = system.custom_law.as_mut() {
             custom.update(side.seed, system.pool[index].age_percent, &mut system.side[index].custom_data);
@@ -1224,6 +1264,17 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             system.refused_total += 1;
         }
         system.pool[index].velocity = state_velocity;
+        // One integration of the summed rate, `angular * dt + rotation`,
+        // after the position (births) or the kill pass (updates; a dying
+        // particle's rotation is read by no death consumer).
+        if rotates && !(dt < 0.0 && child::arms::on("rotationSkipsNegativeElapsed")) {
+            let rot = &mut system.side[index].rot;
+            if rotation_3d {
+                for axis in 0..3 { rot[axis] = angular[axis] * dt + rot[axis]; }
+            } else {
+                rot[2] = angular[2] * dt + rot[2];
+            }
+        }
     }
  }
 
@@ -1370,11 +1421,16 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
         (true, None) => return Ok(BirthPath::Legacy("CollisionModule without its ground scene".to_owned())),
     };
     let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;
+    // The first Play writes the start delay word after the seed reset.
+    let Some(start_delay) = play_start_delay(&system.emitter) else {
+        system.rng = Rng(u64::from(owner.seed) | (u64::from(owner.seed) << 32));
+        return Ok(BirthPath::Legacy("random start delay: Play's seed-hash evaluation is not transcribed".to_owned()));
+    };
     system.native_birth = Some(birth::NativeBirthState {
         owner: Some(owner), initial: streams.initial, shape: streams.shape,
         shape_clock: moly_law::particle::shape::ArcLoopClock::default(),
         emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(streams.scalar_birth),
-        frame: birth::FrameState::default(),
+        frame: birth::FrameState { start_delay, ..birth::FrameState::default() },
         events: None,
         target: None,
     });
@@ -1835,11 +1891,12 @@ pub(crate) fn write_geometry(
             }
         }
     }
-    if let Some(sheet) = system.texture_sheet {
-        let vertices_per_particle = match &system.geometry {
-            Geometry::Mesh(draw) => draw.source.positions.len(),
-            Geometry::Billboard { .. } | Geometry::SourceBillboard(_) => 4,
-        };
+    let vertices_per_particle = match &system.geometry {
+        Geometry::Mesh(draw) => draw.source.positions.len(),
+        Geometry::Billboard { .. } | Geometry::SourceBillboard(_) => 4,
+    };
+    // An empty mesh cache wrote no vertex, so there is no corner to retile.
+    if let Some(sheet) = system.texture_sheet.filter(|_| vertices_per_particle > 0) {
         let Some(bevy::mesh::VertexAttributeValues::Float32x2(uv)) = mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0) else {
             unreachable!("shared particle geometry always writes UV0");
         };
