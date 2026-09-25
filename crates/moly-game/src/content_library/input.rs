@@ -29,8 +29,8 @@ pub(crate) struct LibraryInput<'w, 's> {
     fixtures: MessageWriter<'w, PlayerFixtureRequest>,
     pub(super) settings: MessageWriter<'w, crate::game_settings::SettingsPanelRequest>,
     pub(super) audio_gate: ResMut<'w, crate::audio::AudioGate>,
-    /// 宿主天气钮的写入端：请求一次目标档位，天气链在下一帧起淡化。
-    pub(super) weather: MessageWriter<'w, crate::weather::WeatherRequest>,
+    /// 宿主天气钮的写入端：改服务端面板的当前日程行，面板再写出档位请求。
+    pub(super) weather: MessageWriter<'w, crate::server_panel::PhenomenaScheduleEdit>,
     paste: Res<'w, PasteInbox>,
 }
 

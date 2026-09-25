@@ -19,8 +19,6 @@
 //! Center.Y · LayoutType 位 · Direction），值是我方选择、逐条具名——
 //! 与巡逻环替身同一裁决形态。位置不写死，全部经律现算。
 
-#[path = "fixture_compact.rs"]
-mod compact;
 #[path = "fence.rs"]
 mod fence;
 #[path = "fixture_gallery.rs"]
@@ -695,7 +693,7 @@ const PLACEMENTS: [PlacementMock; 38] = [
 ];
 
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PlacementMock<P = &'static str> {
     package: P,
     texture_id: u32,
@@ -1261,6 +1259,17 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(FixturePlacements::default());
 }
 
+/// Whether a restore of this site would read the panel's home starter before
+/// the panel document has installed it.
+pub(crate) fn waits_for_panel_layout(
+    site_type: &str,
+    content: crate::site::OfflineSceneContent,
+) -> bool {
+    site_type == "home_site"
+        && content == crate::site::OfflineSceneContent::Compact
+        && !layouts::home_starter_ready()
+}
+
 fn restore_selected_layout(
     mut commands: Commands,
     selection: Res<crate::site::SiteSelection>,
@@ -1304,6 +1313,11 @@ fn restore_selected_layout(
             ..Default::default()
         })
     } else {
+        // The home starter is the server panel's housing layout: hold, without
+        // an error, until the panel document has installed it.
+        if waits_for_panel_layout(selection.site_type(), selection.content()) {
+            return;
+        }
         saved.restore(
             site_id,
             selection.site_type(),

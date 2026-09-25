@@ -41,10 +41,12 @@ pub fn build_waypoints(
     let mut path = Vec::with_capacity(corners.len() + 1);
     path.push(start);
     path.extend_from_slice(corners);
-    let lengths: Vec<f32> = path.windows(2).map(|pair| distance(pair[0], pair[1])).collect();
-    let total: f32 = lengths.iter().sum();
+    // The division count reads the planar route length (height ignored);
+    // the division itself spaces the points along the full 3-D length.
+    let planar = planar_length(&path);
+    let (lengths, total) = segment_lengths(&path);
     let spacing = (3 + draw.index(2)) as f32;
-    let divisions = (total / spacing).round_ties_even() as i32;
+    let divisions = (planar / spacing).round_ties_even() as i32;
     let divided = divide_path(&path, &lengths, total, divisions);
     let directions = [
         rotate_y(forward, -core::f32::consts::FRAC_PI_4),
@@ -92,6 +94,21 @@ pub fn build_waypoints(
     waypoints
 }
 
+/// The route length the division count reads: the planar distance of each
+/// segment, summed in list order from zero.
+fn planar_length(path: &[[f32; 3]]) -> f32 {
+    path.windows(2)
+        .fold(0.0, |sum, pair| sum + planar_distance(pair[0], pair[1]))
+}
+
+/// The segment lengths the division walks (full 3-D) and their sum in list
+/// order from zero.
+fn segment_lengths(path: &[[f32; 3]]) -> (Vec<f32>, f32) {
+    let lengths: Vec<f32> = path.windows(2).map(|pair| distance(pair[0], pair[1])).collect();
+    let total = lengths.iter().fold(0.0, |sum, length| sum + length);
+    (lengths, total)
+}
+
 fn divide_path(path: &[[f32; 3]], lengths: &[f32], total: f32, divisions: i32) -> Vec<[f32; 3]> {
     let mut points = Vec::new();
     for division in 1..divisions {
@@ -122,6 +139,14 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     (x * x + y * y + z * z).sqrt()
 }
 
+/// The distance of two points with both heights set to zero: the height
+/// term is a literal zero added before the depth term.
+fn planar_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let x = a[0] - b[0];
+    let z = a[2] - b[2];
+    ((x * x + 0.0) + z * z).sqrt()
+}
+
 fn rotate_y(vector: [f32; 3], angle: f32) -> [f32; 3] {
     let (y, w) = (angle * 0.5).sin_cos();
     let twice_y = y * 2.0;
@@ -133,3 +158,7 @@ fn rotate_y(vector: [f32; 3], angle: f32) -> [f32; 3] {
         -wy * vector[0] + (1.0 - yy) * vector[2],
     ]
 }
+
+#[cfg(test)]
+#[path = "waypoint_source_cases.rs"]
+mod source_cases;

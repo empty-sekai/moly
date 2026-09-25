@@ -23,10 +23,10 @@ use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use moly_law::path::{angle_between, facing_direction, turn_motion, TurnMotion};
 use moly_law::talk::{
-    advance, condition_group_matches, condition_type_discriminant, effective_animation_speed,
-    is_finished, ConditionContext, FaceSlot, StepOp, StreamState, TalkRow, TalkStep, TweetRef,
-    UniformDraw, CONDITION_AFTER_SET_FIXTURE, CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT,
-    CONDITION_MYSEKAI_PHENOMENA_ID, CONDITION_READ_EVENT_STORY_EPISODE_ID,
+    advance, condition_type_discriminant, effective_animation_speed, is_finished, FaceSlot,
+    StepOp, StreamState, TalkRow, TalkStep, TweetRef, UniformDraw,
+    CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT, CONDITION_MYSEKAI_PHENOMENA_ID,
+    CONDITION_READ_EVENT_STORY_EPISODE_ID,
 };
 
 use crate::alone_action_runtime::{
@@ -52,16 +52,6 @@ const PLAYER_TALK_DATA: &str = "moly://talks.json";
 /// 站点主表的资产路径：站点门要 `siteType → 站点 id` 的对照，主表行
 /// 自带 id 列，装载期建表（不硬编码对照表）。
 const SITES_DATA: &str = "moly://site/sites.json";
-
-/// 站点组 → 站点 id 集合：服务端主表 `mysekaiSiteGroups` 的具名 mock
-/// （值由服务端下发，按范围通则做成可改参数）。产物当前只引用组 1
-/// 与 4，四组全录——组表是主表事实，不是本域的选取结果。
-const SITE_GROUP_SITES: [(i32, &[i32]); 4] = [
-    (1, &[1]),
-    (2, &[2, 3, 4]),
-    (3, &[5, 6, 7, 8]),
-    (4, &[1, 2, 3, 4]),
-];
 
 /// 冒烟合成的点按节奏（秒）。
 const SMOKE_TAP_INTERVAL: f32 = 0.8;
@@ -162,6 +152,9 @@ pub(crate) struct TalkCatalog<'w> {
     fixtures: Option<Res<'w, crate::talk::TalkStore>>,
     sites: Option<Res<'w, PlayerTalkSites>>,
     phenomena: Res<'w, crate::weather::CurrentPhenomenonId>,
+    today: Res<'w, crate::server_panel::TodayPhenomena>,
+    tables: Option<Res<'w, crate::fixture_activity_data::FixtureActivityTables>>,
+    talk_list: Option<Res<'w, crate::server_panel::TalkDataStore>>,
 }
 
 pub(crate) struct GeneralSelection {
@@ -184,8 +177,31 @@ pub(crate) fn is_general_row(row: &TalkRow) -> bool {
 }
 
 impl TalkCatalog<'_> {
+    /// The talk content, the site table and the phenomenon of the day are
+    /// in: the panel's first schedule write has run, so no talk condition
+    /// reads a phenomenon from before it.
     pub(crate) fn ready(&self) -> bool {
-        self.store.is_some() && self.sites.is_some()
+        self.store.is_some() && self.sites.is_some() && self.today.written()
+    }
+
+    /// The site type value of a site type name.
+    pub(crate) fn site_type_value(&self, site_type: &str) -> Option<i32> {
+        self.sites.as_deref()?.type_value_of_name(site_type)
+    }
+
+    /// The site type value of a master site id.
+    pub(crate) fn site_type_of_site(&self, site_id: i32) -> Option<i32> {
+        self.sites.as_deref()?.type_value_of_site(site_id)
+    }
+
+    /// Today's phenomenon id, as the talk conditions compare it.
+    /// The phenomenon talk conditions compare with: the one the schedule
+    /// write selected (the environment manager's current id, which the
+    /// schedule alone writes). Before any row was selected (an empty
+    /// schedule, or a clock outside every window) the manager keeps the
+    /// weather's current phenomenon.
+    pub(crate) fn phenomena_id(&self) -> i32 {
+        self.today.phenomena_id().unwrap_or(self.phenomena.0)
     }
 
     fn site_id(&self, site_type: &str) -> Option<i32> {
@@ -253,95 +269,82 @@ impl TalkCatalog<'_> {
             .unwrap_or_default()
     }
 
-    /// The source lottery runs even if PlayGeneralTalk subsequently overwrites
-    /// the result with CurrentGeneral. Previous fallback bypasses every filter.
+    /// `LotteryGeneralTalkId` over the client talk list, the one general
+    /// lottery (see `npc_talk_lottery`). The source lottery runs even if
+    /// PlayGeneralTalk subsequently overwrites the result with
+    /// CurrentGeneral. With no talk kept the character's previous talk id
+    /// comes back with no draw; without one the source raises.
     pub(crate) fn lottery(
         &self,
         unit: u32,
         site_type: &str,
         previous: Option<i32>,
         mut draw: impl FnMut(usize) -> usize,
-    ) -> Result<GeneralSelection, &'static str> {
-        let store = self
-            .store
+    ) -> Result<GeneralSelection, String> {
+        use crate::npc_talk_lottery as lottery;
+        let tables = self
+            .tables
             .as_deref()
-            .ok_or("ordinary talk data is not loaded")?;
-        let sites = self.sites.as_deref().ok_or("site data is not loaded")?;
-        let site_id = sites
-            .by_type
-            .iter()
-            .find(|(kind, _)| kind == site_type)
-            .map(|(_, id)| *id)
-            .ok_or("NPC site is absent from the loaded site table")?;
-        let rows = store
-            .units
-            .iter()
-            .find(|(member, _)| *member == unit)
-            .map(|(_, rows)| rows.as_slice())
-            .unwrap_or(&[]);
-        let matches_site = |row: &TalkRow| {
-            SITE_GROUP_SITES
-                .iter()
-                .find(|(group, _)| *group == row.site_group_id)
-                .is_some_and(|(_, sites)| sites.contains(&site_id))
+            .ok_or("talk master tables are not loaded")?;
+        let talk_list = self
+            .talk_list
+            .as_deref()
+            .ok_or("the client talk list is not set")?;
+        let seeker = lottery::NpcView {
+            unit,
+            site_type: self.site_type_value(site_type),
+            previous_talk_id: previous.unwrap_or(0),
+            talk_type: None,
+            objective: None,
+            state: 0,
+            // Read only by a fixture gate; the general lottery reaches none.
+            since_initialized: 0.0,
         };
-        let pool: Vec<_> = rows
-            .iter()
-            .filter(|row| {
-                if !is_general_row(row) || previous == Some(row.talk_id) {
-                    return false;
-                }
-                // Preserve the existing ordinary product's supported condition
-                // surface. A fixture predicate needs its own actual activity data.
-                if row.conditions.iter().any(|condition| {
-                    !matches!(
-                        condition_type_discriminant(condition),
-                        Some(
-                            CONDITION_READ_EVENT_STORY_EPISODE_ID
-                                | CONDITION_MYSEKAI_PHENOMENA_ID
-                                | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT
-                                | CONDITION_AFTER_SET_FIXTURE
-                        )
-                    )
-                }) {
-                    return false;
-                }
-                condition_group_matches(
-                    row.conditions
-                        .iter()
-                        .zip(&row.condition_values)
-                        .filter_map(|(kind, value)| value.map(|value| (kind.as_str(), value))),
-                    &ConditionContext {
-                        current_phenomena_id: self.phenomena.0,
-                        ..Default::default()
-                    },
-                ) && matches_site(row)
-            })
-            .collect();
-        if pool.is_empty() {
-            let general_rows = rows.iter().filter(|row| is_general_row(row)).count();
-            let general_site_rows = rows
-                .iter()
-                .filter(|row| is_general_row(row) && matches_site(row))
-                .count();
-            trace!(
-                "[player-talk-pool] unit={unit} site_type={site_type} site_id={site_id} phenomena={} rows={} general_rows={general_rows} general_after_site={general_site_rows} candidates={} previous={previous:?} previous_has_master={}",
-                self.phenomena.0, rows.len(), pool.len(), previous.is_some_and(|id| id != 0),
-            );
-            return previous
-                .filter(|id| *id != 0)
-                .map(|master_id| GeneralSelection {
-                    master_id,
-                    pool_len: 0,
-                    replayed: true,
-                })
-                .ok_or("ordinary pool is empty and shared Previous has no master");
-        }
-        let index = draw(pool.len());
-        Ok(GeneralSelection {
-            master_id: pool[index].talk_id,
-            pool_len: pool.len(),
-            replayed: false,
+        let site_type_of_site = |site: i32| self.site_type_of_site(site);
+        let scene = lottery::LotteryScene {
+            tables,
+            talk_list: talk_list.talk_list(),
+            phenomena_id: self.phenomena.0,
+            site_type_of_site: &site_type_of_site,
+            npcs: &[],
+            fixtures: &[],
+            // The general lottery reads no member-count weight.
+            weights: moly_law::talk::select::LotteryWeights {
+                talk1: 0.0,
+                talk2: 0.0,
+                talk3: 0.0,
+                talk4: 0.0,
+            },
+            fixture_gates: None,
+        };
+        let mut engine_int = |len: usize| draw(len);
+        let mut engine_float = |_: f32| -> f32 { unreachable!("the general lottery draws no float") };
+        let mut sequence_pick =
+            |_: usize| -> Option<usize> { unreachable!("the general lottery picks from no sequence") };
+        let mut draws = lottery::Draws {
+            engine_int: &mut engine_int,
+            engine_float: &mut engine_float,
+            sequence_pick: &mut sequence_pick,
+            record: Vec::new(),
+        };
+        let pick = lottery::lottery_general_talk_id(&scene, &seeker, &mut draws, "general_talk_pick")
+            .map_err(|halt| match halt {
+                lottery::Halt::Fault(reason) => format!("source exception: {reason}"),
+                lottery::Halt::Gap(reason) => format!("host gap: {reason}"),
+            })?;
+        Ok(match pick {
+            moly_law::talk::GeneralPick::Drawn {
+                talk_id, pool_len, ..
+            } => GeneralSelection {
+                master_id: talk_id,
+                pool_len,
+                replayed: false,
+            },
+            moly_law::talk::GeneralPick::Previous { talk_id } => GeneralSelection {
+                master_id: talk_id,
+                pool_len: 0,
+                replayed: true,
+            },
         })
     }
 }
@@ -360,6 +363,28 @@ pub(crate) struct PlayerTalkCharset {
 #[derive(Resource)]
 pub(crate) struct PlayerTalkSites {
     by_type: Vec<(String, i32)>,
+    /// (site id, site type value) of every master site row.
+    type_values: Vec<(i32, i32)>,
+}
+
+impl PlayerTalkSites {
+    /// The site type value of a site type name.
+    pub(crate) fn type_value_of_name(&self, site_type: &str) -> Option<i32> {
+        let id = self
+            .by_type
+            .iter()
+            .find(|(kind, _)| kind == site_type)
+            .map(|(_, id)| *id)?;
+        self.type_value_of_site(id)
+    }
+
+    /// The site type value of a master site id.
+    pub(crate) fn type_value_of_site(&self, site_id: i32) -> Option<i32> {
+        self.type_values
+            .iter()
+            .find(|(id, _)| *id == site_id)
+            .map(|(_, value)| *value)
+    }
 }
 
 /// 名册就绪后筛出的候选段：unit 桶全在名册（单角色条件门的静态半边
@@ -433,6 +458,7 @@ pub(crate) fn parse(
             commands.insert_resource(PlayerTalkCharset { chars: Vec::new() });
             commands.insert_resource(PlayerTalkSites {
                 by_type: Vec::new(),
+                type_values: Vec::new(),
             });
             commands.remove_resource::<PlayerTalkDataHandle>();
             return;
@@ -451,6 +477,7 @@ pub(crate) fn parse(
             warn!("[talk-ingest] site lookup unavailable: {reason}");
             PlayerTalkSites {
                 by_type: Vec::new(),
+                type_values: Vec::new(),
             }
         }
     };
@@ -860,6 +887,7 @@ fn parse_sites(text: &str) -> Result<PlayerTalkSites, String> {
         .and_then(|v| v.as_array())
         .ok_or("site document has no sites array")?;
     let mut by_type = Vec::with_capacity(rows.len());
+    let mut type_values = Vec::with_capacity(rows.len());
     for row in rows {
         let site_type = row
             .get("siteType")
@@ -870,9 +898,15 @@ fn parse_sites(text: &str) -> Result<PlayerTalkSites, String> {
             .and_then(|v| v.as_i64())
             .and_then(|value| i32::try_from(value).ok())
             .ok_or_else(|| format!("site {site_type:?} has no i32 id"))?;
+        let type_value = row
+            .get("siteTypeValue")
+            .and_then(|v| v.as_i64())
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or_else(|| format!("site {site_type:?} has no i32 siteTypeValue"))?;
         by_type.push((site_type.to_owned(), id));
+        type_values.push((id, type_value));
     }
-    Ok(PlayerTalkSites { by_type })
+    Ok(PlayerTalkSites { by_type, type_values })
 }
 
 fn collect_chars(text: &str, chars: &mut Vec<char>) {
@@ -1107,6 +1141,11 @@ pub(crate) struct PlayerTalkSession {
     /// 选取记账：池形（重播路径也记池空时的形）。
     selected_from_pool: usize,
     replayed: bool,
+    /// The talk the set-talk leaf reports as read once the talk plays to its
+    /// end (the source sends the report after the engine door returns and
+    /// before the cast goes back to idle). General-state and library
+    /// playback report nothing.
+    read_report: Option<i32>,
     /// 玩家位与朝向的会话内账：开场时快照（玩家参演期间位移推进被持
     /// 留跳过，位不变——快照即现值）；朝向只被本模块的转身件改写，
     /// 每次玩家转身把账同步到该步的目标朝向。
@@ -1303,6 +1342,17 @@ fn route_for(
     ) {
         return Ok(TalkRoute::General);
     }
+    // The tweet window: the set-talk leaf replays the character's current
+    // master talk with its target fixture and reports it read. It reads the
+    // action state only, not the talk type, and nothing before it refuses a
+    // fixture target or an unfinished factory.
+    if actions.current == NpcAction::Tweet {
+        if data.content.is_none() {
+            // The leaf dereferences the current master talk.
+            return Err("tweet window: the current talk data has no master talk (the source raises)");
+        }
+        return Ok(TalkRoute::CurrentSet);
+    }
     if let Some(reason) = data.pending_factory {
         return Err(reason);
     }
@@ -1314,12 +1364,6 @@ fn route_for(
     ) || data.target_fixture.is_some()
     {
         return Err("registered NPC fixture timeline and loop control are not supplied");
-    }
-    if actions.current == NpcAction::Tweet {
-        if data.content.is_none() {
-            return Err("waiting talk has no prepared current master");
-        }
-        return Ok(TalkRoute::CurrentSet);
     }
     Ok(TalkRoute::General)
 }
@@ -1460,8 +1504,8 @@ pub(crate) fn consume_trigger(
                     ) {
                         Ok(selected) => selected,
                         Err(reason) => {
-                            ledger.reject(request, reason);
                             warn!("[player-talk] unit {}: {reason}", request.unit);
+                            ledger.reject(request, reason);
                             continue;
                         }
                     };
@@ -1730,6 +1774,8 @@ pub(crate) fn consume_trigger(
             click_releases: 0,
             selected_from_pool: selection.pool_len,
             replayed,
+            read_report: (matches!(route, TalkRoute::CurrentSet) && request.exact.is_none())
+                .then_some(row.talk_id),
             player_position,
             player_rotation,
             first_tick: true,
@@ -2166,6 +2212,14 @@ pub(crate) fn advance_session(
                 &runtime.eye_handle,
                 &runtime.mouth_handle,
             );
+        }
+        if let Some(talk_id) = session.read_report {
+            commands.queue(move |world: &mut World| {
+                world
+                    .get_resource_mut::<crate::server_panel::ServerPanel>()
+                    .expect("the server panel is installed before any NPC exists")
+                    .report_talk_read(talk_id);
+            });
         }
         finish_session(
             &mut commands,

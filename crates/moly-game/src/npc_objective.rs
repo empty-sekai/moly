@@ -7,20 +7,31 @@
 //!   trunc(角色表 pauseSeconds 列)，对话态保持续停；「立即可执行下一
 //!   目标」旗一次性跳过整轮停顿。**AI 起动时装配（SetUp）先立这面旗**
 //!   ——首判不落 15 秒停顿，出生即决策。
-//! - 决策梯是一列谓词短路。产品可触发的档只有三档：槽位空（补数据立
-//!   对话目标）、槽位无对话（立无对话目标）、全部落空（目标层百分比
-//!   抽签）。其余档要产品没有的输入（摆拍、打断标记、换站/过场保持、
-//!   问候、摆放后反应），按构造不可达，快照里按恒假带入。
+//! - 决策梯是一列谓词短路。产品可触发的档有四档：槽位空（两次复位后
+//!   建对话数据立对话目标）、槽位无对话（立无对话目标）、对话打断标记
+//!   （同一对话数据重立对话目标，随后清可打断位）、全部落空（目标层
+//!   百分比抽签，四条对话道各走自己的工厂）。其余档要产品没有的输入
+//!   （摆拍、换站/过场保持、问候、摆放后反应），按构造不可达，快照里
+//!   按恒假带入。
 //! - 目标层抽签：一张 [0,100) 抽签分三窗（家具道 / 已读窗 / 通用对话）；
 //!   家具道内第二张分无对话行为与家具对话，家具对话再分第三张（常设 /
 //!   已读重温）。
-//! - 无对话目标的**收场补位**（源无对话目标执行完的 ForceUpdateObjective）
+//! - 无对话目标的**收场补位**（ForceUpdateObjective：复位 + 空槽档的建数）
 //!   是断环器：无对话槽位不补位，下一轮梯子又立无对话目标、永不换道。
-//! - **家具目标动作点优先**：无对话道与家具对话道的目标解算先走动作点
-//!   （座位表 → 挂点条目 → 挂点 x/z 上 0.3 可行走面门，[`fixture_target`]），
-//!   落空回落环带（GetLittleFarPosition 同形）；落点交给执行层前过一遍
-//!   身份判定（落点与挂点比 x/z），命中先导航到接近点，再执行局部
-//!   FitTurning/FitWalking。
+//!   时间轴放完时补两次（取消仍在等待的目标补一次、时间轴自己再补一次），
+//!   目标本身在下一帧见到取消才结束；移动失败补一次、当帧结束。补位都在
+//!   同一帧做完，两次复位都清掉「立即执行下一目标」旗，所以其后是完整
+//!   停顿，停顿后的决策读最后一次补位的数据（通常落到梯末抽签）。
+//! - **对话内容来自对话列表**：空槽补位与四条对话道各调源的对话工厂
+//!   （`npc_talk_lottery`），抽签读客户端对话列表，不读 master 目录。
+//!   通用对话的目标位先走社交链、未命中走游走链，两链都从角色自己的
+//!   位置出发，游走档按角色自己所在站点的类型切室内档。落点交给执行层
+//!   前过一遍身份判定（落点与挂点比 x/z），命中先导航到接近点，再执行
+//!   局部 FitTurning/FitWalking。
+//! - **其它角色读现值**：成员按名册序逐个决策，每名成员轮完后从它的组件
+//!   回读社交链候选（位置、导航目的地、对话目标位）与家具对话门的视图
+//!   （对话类型、当前目标、动作状态、上一条对话），同帧后决策的成员读到
+//!   先决策者的新数据。
 //! - 普通对话社交池只含同站、不同角色且有真实 Current TalkData 的成员。
 //!   导航 destination 与 Current.TargetPosition 是独立输入；后者用于
 //!   最终 0.7m 排斥，不能拿前者代替。未完成工厂的占位不算真实 Current。
@@ -40,20 +51,22 @@
 //!   数据为空，返回的对话目标即刻结束，照常停顿，下一轮走空槽档补位。
 //!
 //! 替身，具名：
-//! * **内容绑定**：普通工厂保存所选master、既有preAction投影、目标位
-//!   与self成员。其它尚缺完整工厂的道保留pending绑定，而非空Current。
-//!   Previous只在AI Reset沿迁移；玩家窗口结束不更新它。
-//! * **道可得性**：补位级联（未读 → 已读 → 通用，上游有货才落下一级）
-//!   的「有货」替身 = 站点有锚定对话家具（配对语料锚在摆放表非 0 的
-//!   fixtureId 上）。锚定表非空 ⇒ 未读道恒可得，级联首档即中。
-//! * **目标家具抽签**：三个家具 Talk 道仍在锚定摆放表上均匀抽，是真源
-//!   合格对话集的替身；NoTalk 已通过独立工厂消费角色/家具/站点源行。
-//! * **对话道动作点座位表**：三个家具 Talk 道仍消费 `TALK_SEATS` 常量；
-//!   已有真实 master 镜像与 qualify_single/prepare_single，尚未接入这些道。
+//! * **内容绑定**：通用对话数据保存所选 master、既有 preAction 投影、
+//!   目标位与 self 成员。Previous 只在 AI Reset 沿迁移；玩家窗口结束
+//!   不更新它。
+//! * **未移植的工厂**：家具对话的三个建数工厂（带 timeline 组、带等待
+//!   通信、带目标家具）、家具可用性一对谓词、家具标签条件、角色初始化
+//!   以来的时长与常设家具对话表不在宿主里；抽签走到它们时按具名缺口
+//!   收场（对话数据为空，进停顿），不静默换道。源异常（抽签池空且无
+//!   上一条、成员数桶空、行类型越界、缺 master 的解引用）让该角色的
+//!   AI 循环终止。
+//! * **抽签引擎**：整数档与浮点档都在成员引擎上抽（整数 `[0,n)`、浮点
+//!   `[0,总和]` 两端可达），引擎序列本身不在律内。序列上的抽取每次新建
+//!   一个运行时随机数生成器，种子取线程种子器的下一个值；种子器由进程级
+//!   生成器播种，那个种子来自操作系统随机数，没有回放能复现，宿主取一个
+//!   固定根。
 //! * **无对话道座位查表**：当前 NoTalk 工厂从真实角色行为行及 timeline
-//!   组读取动作点；下方 NOTALK 常量是遗留路径，不代表当前工厂的筛选。
-//! * **对话道先行入座选行**：同一 (角色, 家具) 的多行入座，产品取语料
-//!   序首行（选行归抽签域，首行是具名替身）。
+//!   组读取动作点。
 //! * **贴合身份判定（b__1）**：源比 AITalkData.TargetPosition 与挂点
 //!   StartLoc 的 x/z；产品的落点面是全部已摆放实例的组合挂点世界位
 //!   （`fixture_attach`，含未锚定摆放）——环带落点恰好撞上挂点坐标也
@@ -74,25 +87,29 @@
 //! 重建；构建端带格桶索引，逐格最近点查询不扫全网格。
 
 use crate::client_config::{
-    ClientConfigs, KEY_CHARACTER_FIXTURE_MOVE_OFFSET, KEY_CHARACTER_OVERLAP_DISTANCE,
-    KEY_CHARACTER_OVERLAP_TIME, KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
+    ClientConfigs, KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME, KEY_CHARACTER_OVERLAP_DISTANCE,
+    KEY_CHARACTER_OVERLAP_TIME,
+    KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
     KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
-    KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT, KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE,
-    KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE, KEY_NPC_RANDOM_MOVE_MAX_DISTANCE,
-    KEY_NPC_RANDOM_MOVE_MIN_DISTANCE,
+    KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT, KEY_NPC_LOTTERY_TALK1_WIGHT,
+    KEY_NPC_LOTTERY_TALK2_WIGHT, KEY_NPC_LOTTERY_TALK3_WIGHT, KEY_NPC_LOTTERY_TALK4_WIGHT,
+    KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE, KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE,
+    KEY_NPC_RANDOM_MOVE_MAX_DISTANCE, KEY_NPC_RANDOM_MOVE_MIN_DISTANCE,
 };
 use crate::fixture::FixturePlacements;
 use crate::npc::{
     depart_along, CharacterUnitId, FitCandidate, MotionPhase, MoveTarget, PathSlot, PauseSeconds,
     RouteStops, WalkState,
 };
+use crate::npc_talk_lottery;
 use crate::site::{GroundEpoch, SiteSelection, WalkFaceMeshes};
 use bevy::prelude::*;
-use moly_law::objective::{
-    self, Cell, ObjectiveType, SurfaceProbe, TalkType, APPROACH_SEARCH_RANGE, TILE_SCALE,
+use moly_law::objective::{self, Cell, ObjectiveType, SurfaceProbe, TalkType, TILE_SCALE};
+use moly_law::talk::select::{
+    self, LotteryPercents, LotteryWeights, PercentDraw, TalkLane, UniformDraw,
 };
-use moly_law::talk::select::{self, LotteryPercents, PercentDraw, TalkLane, UniformDraw};
-use std::collections::HashMap;
+use moly_law::talk::{EnumerablePick, NetThreadSeeder};
+use std::collections::{HashMap, HashSet};
 
 /// 目标面的格桶外扩余量（米）：三角按 XZ 包围盒外扩这一段后登记进格桶，
 /// 采样查询只查落点所在格的桶。必须 ≥ 全部采样容差的上界（游走容差 =
@@ -516,6 +533,7 @@ pub(crate) struct AiTalkData {
 }
 
 impl AiTalkData {
+    #[cfg(test)]
     fn pending(kind: TalkType, unit: u32, position: [f32; 3]) -> Self {
         Self {
             kind,
@@ -536,6 +554,10 @@ impl AiTalkData {
 pub struct TalkSlot {
     pub(crate) current: Option<AiTalkData>,
     pub(crate) previous: Option<AiTalkData>,
+    /// The AI model's interrupt marker. The general and fixture-common
+    /// factories raise the Talk marker; the ladder's interrupt row clears its
+    /// interrupt flag; a reset clears the marker.
+    pub(crate) interrupt: Option<objective::InterruptMarker>,
 }
 
 impl TalkSlot {
@@ -558,6 +580,7 @@ impl TalkSlot {
     /// Call only at an AI reset/release edge, never when a player window ends.
     pub(crate) fn reset_ai_talk_data(&mut self) {
         self.previous = self.current.take();
+        self.interrupt = None;
     }
 }
 
@@ -565,20 +588,50 @@ impl TalkSlot {
 /// 引擎序列不在律内）。种子按 unit id 定推，逐成员可复算、不受查询序
 /// 影响。
 #[derive(Component, Clone)]
-pub struct MemberRng(u64);
+pub struct MemberRng {
+    state: u64,
+    /// Generator calls so far; a decision record reports its own share.
+    calls: u64,
+}
+
+/// Eight bytes from the platform's random source. The source's generators
+/// are seeded from operating-system randomness and the clock, so every launch
+/// draws a different sequence; a platform without a random source is refused.
+pub(crate) fn platform_seed() -> u64 {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes)
+        .unwrap_or_else(|error| panic!("the platform random source seeds the NPC generators: {error}"));
+    u64::from_le_bytes(bytes)
+}
 
 impl MemberRng {
+    /// A spawned NPC's generator, seeded from the platform (see [`platform_seed`]).
+    pub(crate) fn from_platform() -> Self {
+        Self {
+            state: platform_seed(),
+            calls: 0,
+        }
+    }
+
     /// 种子：unit id 经两轮固定扰动（不与任何面板值混源）。
     pub(crate) fn seeded(unit: u32) -> Self {
-        Self(0x9E37_79B9_7F4A_7C15_u64 ^ (unit as u64).wrapping_mul(0x2545_F491_4F6C_DD1D))
+        Self {
+            state: 0x9E37_79B9_7F4A_7C15_u64 ^ (unit as u64).wrapping_mul(0x2545_F491_4F6C_DD1D),
+            calls: 0,
+        }
     }
 
     pub(crate) fn next(&mut self) -> u64 {
-        self.0 = self
-            .0
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        self.0
+        self.calls += 1;
+        self.state
+    }
+
+    pub(crate) fn calls(&self) -> u64 {
+        self.calls
     }
 }
 
@@ -590,10 +643,28 @@ pub struct ObjectiveMind {
     /// 当前目标类型；`None` = 尚未有过目标（出生态）。
     pub current: Option<ObjectiveType>,
     /// 「立即可执行下一目标」旗（一次性）：跳过下一轮停顿。出生时由
-    /// 起动装配立起（源 SetUp 同形），此后只由无对话目标的收场补位立。
+    /// 起动装配立起（源 SetUp 同形）；问候的执行也立它。
     pub skip_next_rest: bool,
-    /// 停顿剩余秒数（0 = 停完待判）。
-    pub rest_remaining: f32,
+    /// The objective body's current wait, once the body is past its move.
+    pub(crate) body: Option<BodyWait>,
+    /// The loop's Yield: the objective ended (or was cancelled) on this
+    /// frame, and the next iteration (TryRest) runs on a later frame.
+    pub(crate) yield_since: Option<u32>,
+    /// The Rest objective: its delay, then its wait while talking.
+    pub(crate) rest: Option<RestPhase>,
+    /// ForceUpdateObjective calls a no-talk objective's end still owes, each
+    /// a reset and a row-1 cascade, made before the next TryRest.
+    pub(crate) force_updates: u8,
+    /// The frame on which that no-talk objective itself ends: the frame of a
+    /// failed move, or the frame after its timeline ended (its wait sees the
+    /// cancel on its next poll).
+    pub(crate) force_update_end: u32,
+    /// The frame on which the overlap cancel (presenter call 8) fired; the
+    /// greeting gate does not run on that frame.
+    pub(crate) overlap_cancel_frame: Option<u32>,
+    /// A named greeting failure (a source exception in the gate frame): no
+    /// further greeting is attempted for this character.
+    pub(crate) greeting_halt: Option<String>,
     /// Identifies each newly armed objective Rest interval, not each frame.
     pub(crate) rest_revision: u64,
     overlap_seconds: f32,
@@ -605,6 +676,10 @@ pub struct ObjectiveMind {
     /// Both fixture lanes skip them until a saved layout or a new site
     /// setup clears the list.
     pub(crate) unmovable_fixtures: Vec<String>,
+    /// Set when a source exception ended this character's AI loop (the loop
+    /// rethrows everything but cancellation and its own cannot-decide
+    /// exception); no further decision is made.
+    pub(crate) ai_stopped: Option<String>,
 }
 
 impl moly_law::path::WaypointDraw for MemberRng {
@@ -613,18 +688,76 @@ impl moly_law::path::WaypointDraw for MemberRng {
     }
 }
 
+/// A wait inside an objective body (each created on `since` and first
+/// tested on a later frame, as the source's WaitUntil and Delay are).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum BodyWait {
+    /// The talk objective's tweet: until the tweet state is Done.
+    TweetDone { since: u32, step: TweetStep },
+    /// The talk objective's tweet: until the character is not talking.
+    NotTalking { since: u32, step: TweetStep },
+    /// The greeting objective: until the first talk is complete.
+    FirstTalk { since: u32 },
+    /// A Stacked move: the scaled 1.0 s delay before the move fails.
+    Stacked {
+        since: u32,
+        delay: objective::DelayPromise,
+    },
+}
+
+/// Which tweet of the talk objective a wait belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TweetStep {
+    /// The common-fixture tweet (type 5); the pre-action follows it.
+    CommonFixture,
+    /// The pre-action tweet; the pre-action's timeline follows it.
+    PreAction,
+}
+
+/// The Rest objective's two waits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RestPhase {
+    Delay {
+        since: u32,
+        delay: objective::DelayPromise,
+    },
+    /// WaitWhile(Talk) after the delay.
+    WaitTalk { since: u32 },
+}
+
 impl ObjectiveMind {
+    /// Whether the Rest objective (or the loop's Yield before TryRest) holds
+    /// the character.
+    pub(crate) fn resting(&self) -> bool {
+        self.rest.is_some()
+    }
+
+    /// Seconds of the Rest delay still to run (0 outside the delay).
+    pub(crate) fn rest_seconds_left(&self) -> f32 {
+        match self.rest {
+            Some(RestPhase::Delay { delay, .. }) => (delay.delay() - delay.elapsed()).max(0.0),
+            _ => 0.0,
+        }
+    }
+
     /// 出生态：起动旗立起（首判立即执行），停顿零，无当前目标。
     pub(crate) fn at_spawn() -> Self {
         Self {
             executing: false,
             current: None,
             skip_next_rest: true,
-            rest_remaining: 0.0,
+            body: None,
+            yield_since: None,
+            rest: None,
+            force_updates: 0,
+            force_update_end: 0,
+            overlap_cancel_frame: None,
+            greeting_halt: None,
             rest_revision: 0,
             overlap_seconds: 0.0,
             edit_rest_after: None,
             unmovable_fixtures: Vec::new(),
+            ai_stopped: None,
         }
     }
 }
@@ -643,7 +776,7 @@ pub(crate) fn cancel_ordinary_for_layout_edit(world: &mut World, actor: Entity) 
         return false;
     }
     let resting = !mind.executing
-        && (mind.rest_remaining > 0.0 || actions.current == crate::npc::NpcAction::Rest);
+        && (mind.resting() || actions.current == crate::npc::NpcAction::Rest);
     let ordinary = mind.executing
         && matches!(
             mind.current,
@@ -654,7 +787,8 @@ pub(crate) fn cancel_ordinary_for_layout_edit(world: &mut World, actor: Entity) 
     }
     mind.edit_rest_after = if ordinary { mind.current } else { None };
     mind.executing = false;
-    mind.rest_remaining = 0.0;
+    mind.body = None;
+    mind.rest = None;
     mind.overlap_seconds = 0.0;
     true
 }
@@ -745,339 +879,263 @@ impl objective::Permute for PermuteSource<'_> {
     }
 }
 
-/// 锚定目标家具：fixtureId、摆放包与摆放盒（包围盒格界）的联结——
-/// 靠近家具链的环带按盒算，抽签按 fixtureId 记账，动作点支按包取
-/// 挂点条目。
-struct AnchoredFixture {
-    uid: String,
-    fixture_id: i32,
-    package: String,
-    min: Cell,
-    max: Cell,
+/// One committed decision as one machine-readable log line,
+/// `[npc-decision] {json}`, so a replay can recompute it from its inputs:
+/// the ladder row taken, every draw with the source draw it stands for
+/// (overload and generator), the four objective percents as passed to the
+/// ladder, the unread input as passed together with the talk list's own
+/// answer and digest, the path the talk data took, the chosen talk and the
+/// outcome. `rng_calls` counts every product generator call the decision
+/// made, including the ones inside the no-talk factory, which draws through
+/// the same generator but is not itemised here. A retry that discards its
+/// draws while inputs are still loading is not a decision and has no line.
+struct DecisionRecord {
+    fields: serde_json::Map<String, serde_json::Value>,
+    draws: Vec<serde_json::Value>,
 }
 
-/// Rebuild only when the placement owner changes its rows. This cache does
-/// not include moving NPC positions, eligibility, RNG results, or paths.
-#[derive(Default)]
-pub(crate) struct AnchoredFixtureCache {
-    rows: Option<Vec<AnchoredFixture>>,
-}
+/// Decision lines written so far; a character whose turn wrote one has its
+/// live view logged before the next character's turn.
+static DECISIONS_EMITTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Preserve each placed instance's footprint, including repeated furniture IDs.
-fn anchored_fixtures(placements: &FixturePlacements) -> Vec<AnchoredFixture> {
-    placements
-        .occupancy_rows()
-        .into_iter()
-        .zip(placements.fixture_ids())
-        .filter(|(_, id)| *id != 0)
-        .map(|(row, fixture_id)| AnchoredFixture {
-            uid: row.uid,
-            fixture_id,
-            package: row.package,
-            min: (row.min.x as i32, row.min.z as i32),
-            max: (row.max.x as i32, row.max.z as i32),
-        })
-        .collect()
-}
+/// The source's integer engine range, max exclusive.
+const DRAW_ENGINE_INT_RANGE: &str = "UnityEngine.Random.Range(int,int)";
+/// A fresh sort key per element (a uniform permutation).
+const DRAW_GUID_KEYS: &str = "Guid.NewGuid";
 
-/// 道别 → 槽位类型（替身映射，见模块注释）。
-fn slot_type_of(lane: TalkLane) -> TalkType {
-    match lane {
-        TalkLane::GeneralTalk => TalkType::Common,
-        TalkLane::YetUnreadFixtureTalk
-        | TalkLane::FixtureCommonTalk
-        | TalkLane::AlreadyReadTalkFixtureTalk => TalkType::CommonFixture,
+impl DecisionRecord {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        unit: u32,
+        site_type: &str,
+        seconds: f64,
+        row: &str,
+        percents: &LotteryPercents,
+        weights: &LotteryWeights,
+        unread_passed: bool,
+        talk_list: &crate::server_panel::TalkDataStore,
+        percent_draws: &[u32],
+    ) -> Self {
+        let (rows, unread, digest) = talk_list.digest();
+        let mut fields = serde_json::Map::new();
+        fields.insert("v".into(), 1.into());
+        fields.insert("unit".into(), unit.into());
+        fields.insert("site".into(), site_type.into());
+        fields.insert("t".into(), seconds.into());
+        fields.insert("row".into(), row.into());
+        fields.insert(
+            "percents".into(),
+            serde_json::json!({
+                KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT.to_string(): percents.fixture_talk,
+                KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT.to_string(): percents.already_read_fixture_talk,
+                KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT.to_string(): percents.none_talk_fixture_action,
+                KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ.to_string(): percents.already_read_when_has_not_read,
+            }),
+        );
+        fields.insert(
+            "weights".into(),
+            serde_json::json!({
+                KEY_NPC_LOTTERY_TALK1_WIGHT.to_string(): weights.talk1,
+                KEY_NPC_LOTTERY_TALK2_WIGHT.to_string(): weights.talk2,
+                KEY_NPC_LOTTERY_TALK3_WIGHT.to_string(): weights.talk3,
+                KEY_NPC_LOTTERY_TALK4_WIGHT.to_string(): weights.talk4,
+            }),
+        );
+        fields.insert(
+            "unread".into(),
+            serde_json::json!({
+                "passed": unread_passed,
+                "passed_from": "talk list: any unread row",
+                "talk_list_any_unread": talk_list.any_unread(),
+            }),
+        );
+        fields.insert(
+            "talk_list".into(),
+            serde_json::json!({
+                "rows": rows,
+                "unread": unread,
+                "digest": format!("{digest:016x}"),
+                "revision": talk_list.revision(),
+            }),
+        );
+        let mut record = Self {
+            fields,
+            draws: Vec::new(),
+        };
+        for (index, value) in percent_draws.iter().enumerate() {
+            record.draws.push(serde_json::json!({
+                "use": if index == 0 { "select_objective" } else { "select_fixture_talk" },
+                "value": value,
+                "range": [0, 100],
+                "source": DRAW_ENGINE_INT_RANGE,
+            }));
+        }
+        record
+    }
+
+    fn set(&mut self, key: &str, value: impl Into<serde_json::Value>) {
+        self.fields.insert(key.into(), value.into());
+    }
+
+    fn uniform(&mut self, use_word: &str, source: &str, draws: &[(usize, usize)]) {
+        for (index, len) in draws {
+            self.draws.push(serde_json::json!({
+                "use": use_word,
+                "value": index,
+                "range": [0, len],
+                "source": source,
+            }));
+        }
+    }
+
+    fn extend_draws(&mut self, draws: Vec<serde_json::Value>) {
+        self.draws.extend(draws);
+    }
+
+    fn keys(&mut self, use_word: &str, keys: usize) {
+        if keys > 0 {
+            self.draws.push(serde_json::json!({
+                "use": use_word,
+                "keys": keys,
+                "source": DRAW_GUID_KEYS,
+            }));
+        }
+    }
+
+    fn emit(mut self, outcome: &str, rng_calls: u64) {
+        DECISIONS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.fields.insert("outcome".into(), outcome.into());
+        self.fields.insert("rng_calls".into(), rng_calls.into());
+        self.fields
+            .insert("draws".into(), serde_json::Value::Array(self.draws));
+        info!("[npc-decision] {}", serde_json::Value::Object(self.fields));
     }
 }
 
-/// 无对话道的座位表（行为表「(角色, 家具) 行 → 座位 id」的烘入切片）：
-/// 座位对家具恒常（64 件带行的家具里 63 件如此），例外按角色覆写
-/// （[`NOTALK_OVERRIDES`]）。座位 id 是挂点条目名里的数字——决策侧
-/// 拿它取挂点条目。抽签面替身：真源在合格动作表上随机取，产品在
-/// 锚定摆放表上均匀抽（见模块注释「目标家具抽签」），表按家具查即
-/// 与抽签面同形。
-const NOTALK_ASSIGNMENTS: &[(i32, i32)] = &[
-    (8, 13),
-    (10, 13),
-    (23, 13),
-    (25, 13),
-    (38, 13),
-    (40, 13),
-    (53, 13),
-    (55, 13),
-    (68, 13),
-    (70, 13),
-    (83, 13),
-    (85, 13),
-    (143, 13),
-    (147, 13),
-    (148, 13),
-    (150, 13),
-    (151, 13),
-    (163, 13),
-    (164, 13),
-    (175, 13),
-    (177, 13),
-    (178, 13),
-    (184, 13),
-    (189, 13),
-    (202, 13),
-    (219, 13),
-    (227, 13),
-    (236, 13),
-    (243, 11),
-    (255, 13),
-    (259, 13),
-    (269, 13),
-    (272, 13),
-    (286, 13),
-    (294, 13),
-    (303, 13),
-    (307, 13),
-    (309, 13),
-    (311, 13),
-    (321, 13),
-    (323, 13),
-    (327, 13),
-    (337, 13),
-    (339, 13),
-    (460, 13),
-    (462, 13),
-    (470, 13),
-    (524, 13),
-    (531, 13),
-    (532, 13),
-    (586, 13),
-    (587, 13),
-    (588, 13),
-    (660, 13),
-    (661, 13),
-    (747, 13),
-    (749, 23),
-    (760, 13),
-    (805, 14),
-    (814, 13),
-    (984, 13),
-    (986, 13),
-    (988, 13),
-    (1025, 13),
-];
-
-/// 无对话道的按角色覆写行（家具 227 的例外：角色 18 的座位不是该家具
-/// 的恒常值）。
-const NOTALK_OVERRIDES: &[(u32, i32, i32)] = &[(18, 227, 43)];
-
-/// 对话道的座位表（先行动作表的烘入切片）：(家具, 角色) → 座位。
-/// 对话道的入座不走对话主表——对话先查先行动作行，行带 timeline 组
-/// 才进时间轴拿座位槽（配对道没有这条链，照环带走）。产品已摆放的
-/// 家具里带座位行的三家：227（15 员）、243（1 员）、695（30 员）；
-/// 其余家具的对话道环带（对话无先行入座行）。选取替身：同 (角色,
-/// 家具) 多行取语料序首行——真源在合格动作表上随机取，随机面归
-/// 抽签域，这里按首行具名。
-const TALK_SEATS: &[(i32, u32, i32)] = &[
-    (227, 2, 13),
-    (227, 5, 13),
-    (227, 7, 13),
-    (227, 9, 13),
-    (227, 10, 13),
-    (227, 12, 13),
-    (227, 13, 13),
-    (227, 14, 13),
-    (227, 16, 43),
-    (227, 18, 23),
-    (227, 20, 13),
-    (227, 30, 13),
-    (227, 31, 43),
-    (227, 39, 13),
-    (227, 55, 13),
-    (243, 12, 13),
-    (695, 1, 33),
-    (695, 2, 43),
-    (695, 3, 33),
-    (695, 4, 43),
-    (695, 5, 33),
-    (695, 6, 43),
-    (695, 7, 33),
-    (695, 8, 33),
-    (695, 9, 33),
-    (695, 10, 43),
-    (695, 11, 53),
-    (695, 12, 53),
-    (695, 13, 53),
-    (695, 14, 33),
-    (695, 15, 33),
-    (695, 16, 43),
-    (695, 17, 33),
-    (695, 18, 43),
-    (695, 19, 33),
-    (695, 20, 33),
-    (695, 27, 33),
-    (695, 28, 43),
-    (695, 29, 33),
-    (695, 30, 33),
-    (695, 31, 43),
-    (695, 33, 33),
-    (695, 39, 53),
-    (695, 42, 33),
-    (695, 49, 53),
-    (695, 55, 33),
-];
-
-/// 无对话道座位：覆写行优先，其次家具恒常行；无行 [`None`]。
-fn notalk_seat(fixture_id: i32, unit: u32) -> Option<i32> {
-    if let Some(&(_, _, seat)) = NOTALK_OVERRIDES
-        .iter()
-        .find(|&&(u, f, _)| u == unit && f == fixture_id)
-    {
-        return Some(seat);
-    }
-    NOTALK_ASSIGNMENTS
-        .iter()
-        .find(|&&(f, _)| f == fixture_id)
-        .map(|&(_, seat)| seat)
+/// The talk factory a decision row calls (see `npc_talk_lottery`).
+#[derive(Debug, Clone, Copy)]
+enum TalkFactory {
+    /// Row 1: ForceUpdateObjective's CreateAITalkData.
+    CreateAiTalkData,
+    YetUnreadFixtureTalk,
+    GeneralTalk,
+    AlreadyReadFixtureTalk,
+    FixtureCommonTalk,
 }
 
-/// 对话道座位（先行动作表切片）：(家具, 角色) 直查。
-fn talk_seat(fixture_id: i32, unit: u32) -> Option<i32> {
-    TALK_SEATS
-        .iter()
-        .find(|&&(f, u, _)| f == fixture_id && u == unit)
-        .map(|&(_, _, seat)| seat)
+impl TalkFactory {
+    fn of_lane(lane: TalkLane) -> Self {
+        match lane {
+            TalkLane::YetUnreadFixtureTalk => TalkFactory::YetUnreadFixtureTalk,
+            TalkLane::GeneralTalk => TalkFactory::GeneralTalk,
+            TalkLane::AlreadyReadTalkFixtureTalk => TalkFactory::AlreadyReadFixtureTalk,
+            TalkLane::FixtureCommonTalk => TalkFactory::FixtureCommonTalk,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            TalkFactory::CreateAiTalkData => "talk:create",
+            TalkFactory::YetUnreadFixtureTalk => "talk:unread",
+            TalkFactory::GeneralTalk => "talk:general",
+            TalkFactory::AlreadyReadFixtureTalk => "talk:read",
+            TalkFactory::FixtureCommonTalk => "talk:common",
+        }
+    }
+
+    fn run(
+        self,
+        scene: &npc_talk_lottery::LotteryScene<'_>,
+        seeker: &npc_talk_lottery::NpcView,
+        draws: &mut npc_talk_lottery::Draws<'_>,
+    ) -> Result<npc_talk_lottery::TalkPlan, npc_talk_lottery::Halt> {
+        match self {
+            TalkFactory::CreateAiTalkData => {
+                npc_talk_lottery::create_ai_talk_data(scene, seeker, draws)
+            }
+            TalkFactory::YetUnreadFixtureTalk => {
+                npc_talk_lottery::force_update_yet_read_talk_fixture_talk(scene, seeker, draws)
+            }
+            TalkFactory::GeneralTalk => {
+                npc_talk_lottery::force_update_general_talk_objective(scene, seeker, draws)
+            }
+            TalkFactory::AlreadyReadFixtureTalk => {
+                npc_talk_lottery::force_update_already_read_talk_fixture_talk(scene, seeker, draws)
+            }
+            TalkFactory::FixtureCommonTalk => {
+                npc_talk_lottery::change_fixture_common_talk_objective(scene, seeker, draws)
+            }
+        }
+    }
+}
+
+/// What a decision builds: talk data from a factory, the same talk data
+/// again (the Talk interrupt), or a no-talk objective.
+#[derive(Debug, Clone, Copy)]
+enum DecisionRoute {
+    Factory(TalkFactory),
+    SameTalkData,
+    NoneTalk,
+    /// The greeting objective on the greeting data the gate wrote.
+    Greeting,
+}
+
+impl DecisionRoute {
+    fn word(self) -> &'static str {
+        match self {
+            DecisionRoute::Factory(factory) => factory.word(),
+            DecisionRoute::SameTalkData => "talk:interrupt",
+            DecisionRoute::NoneTalk => "nonetalk",
+            DecisionRoute::Greeting => "greeting",
+        }
+    }
+}
+
+/// The Talk interrupt marker the general and fixture-common factories raise.
+const TALK_INTERRUPT: objective::InterruptMarker = objective::InterruptMarker {
+    marker_type: 4,
+    can_interrupt: true,
+};
+
+/// The main thread's seeder of parameterless System.Random generators, which
+/// every sequence pick of the decisions and the greeting pick builds from.
+#[derive(Resource, Default, Clone)]
+pub(crate) struct SequencePickSeeder(Option<NetThreadSeeder>);
+
+impl SequencePickSeeder {
+    fn seeder(&mut self) -> &mut NetThreadSeeder {
+        self.0
+            // The source seeds this seeder from the process-wide generator,
+            // whose seed comes from operating-system random bytes.
+            .get_or_insert_with(|| NetThreadSeeder::from_root(platform_seed() as i32))
+    }
+
+    /// A pick over a sequence of `count` elements (see [`EnumerablePick`]).
+    pub(crate) fn pick(&mut self, count: usize) -> Option<usize> {
+        self.seeder().pick(count)
+    }
+
+    /// `new Random()` alone (a pick that raises after building it).
+    pub(crate) fn fresh(&mut self) {
+        self.seeder().fresh();
+    }
+}
+
+/// The engine integer range `[0, len)` on the member generator.
+pub(crate) fn engine_int_draw(rng: &mut MemberRng, len: usize) -> usize {
+    ((rng.next() >> 33) as usize) % len.max(1)
+}
+
+/// The engine float range `[0, total]` on the member generator, both ends
+/// reachable: 23 bits scaled onto the range.
+fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
+    let bits = (rng.next() >> 41) as u32;
+    bits as f32 / 8_388_607.0 * total
 }
 
 /// 动作点支的面采样门容差（米）：挂点 x/z 上的可行走面采样半径
 /// （源动作点门里采样调用的同值）。
 pub(crate) const SAMPLE_GATE_TOLERANCE: f32 = 0.3;
-
-/// 家具目标解算结果：动作点支命中 / 环带兜底命中（带落空理由词）/
-/// 全未命中（理由词串）。命中两支都带目标家具的摆放 UID：对话道的
-/// 对话数据带目标家具，出发门走家具分支。
-enum FixtureOutcome {
-    /// 动作点支命中：落点 = 挂点 x/z + 面 0.3 门采到的 y。
-    ActionPoint {
-        uid: String,
-        fixture_id: i32,
-        seat: i32,
-        package: String,
-        landing: [f32; 3],
-    },
-    /// 环带兜底命中：`reason` 是动作点支落空的理由（无行 / 挂点条目
-    /// 缺 / 面门未中）。
-    Ring {
-        uid: String,
-        fixture_id: i32,
-        ring: usize,
-        landing: [f32; 3],
-        reason: &'static str,
-    },
-    /// 动作点支与环带都未命中。
-    Missed { reason: String },
-}
-
-/// 家具目标解算（动作点优先、环带兜底）：座位查表 → 挂点条目取件 →
-/// 挂点 x/z 上 0.3 可行走面门 → 命中即动作点落点；任一环落空回落环带
-/// （靠近家具链同形），环带也未命中按未命中站定。落空各档的理由词
-/// 具名——「走了环带」在目标裁决行里必须读得出为什么。
-///
-/// 抽签池先滤掉本成员不可达表里的摆放（CanActionableFixture 读
-/// UnmovableFixtureList）。选取不查路：可达性只由出发门对选中的目标
-/// 判一次。
-fn fixture_target(
-    anchored: &[AnchoredFixture],
-    unmovable: &[String],
-    face: &ObjectiveFace,
-    attach: &crate::fixture_attach::AttachWorlds,
-    from: [f32; 3],
-    world_of: impl Fn(Cell) -> [f32; 3] + Copy,
-    probe: &mut FaceProbe<'_>,
-    uniform: &mut UniformSource<'_>,
-    move_offset: f32,
-    seat_of: impl Fn(i32) -> Option<i32> + Copy,
-    seat_miss_word: &'static str,
-) -> FixtureOutcome {
-    if anchored.is_empty() {
-        return FixtureOutcome::Missed {
-            reason: "无锚定家具".to_owned(),
-        };
-    }
-    let pool: Vec<&AnchoredFixture> = anchored
-        .iter()
-        .filter(|fixture| !unmovable.contains(&fixture.uid))
-        .collect();
-    if pool.is_empty() {
-        return FixtureOutcome::Missed {
-            reason: "锚定家具全在不可达表".to_owned(),
-        };
-    }
-    let fixture = pool[uniform.draw(pool.len())];
-    // —— 动作点支：座位查表 → 挂点条目 → 面 0.3 门；命中即返回，任一
-    // 环落空回落环带（理由词具名，随环带行报出）。
-    let fallback_reason: &'static str = match seat_of(fixture.fixture_id) {
-        Some(seat) => match attach.entry(&fixture.uid, seat) {
-            Some(world) => {
-                // 面采样门：查询点 = 挂点 x/z + 参考高度，容差 0.3；命中
-                // 取采样 y（挂点 local 的 y 恒零，落点高度走面——同全部
-                // 落点的形状）。
-                let query = [world.position[0], face.ref_y, world.position[2]];
-                match face.sample(query, SAMPLE_GATE_TOLERANCE) {
-                    Some(landed) => {
-                        return FixtureOutcome::ActionPoint {
-                            uid: fixture.uid.clone(),
-                            fixture_id: fixture.fixture_id,
-                            seat,
-                            package: fixture.package.clone(),
-                            landing: [world.position[0], landed[1], world.position[2]],
-                        };
-                    }
-                    None => "面 0.3 门未中",
-                }
-            }
-            None => "挂点条目缺",
-        },
-        None => seat_miss_word,
-    };
-    // —— 环带兜底 ——
-    let (grid_min, grid_max) = face.grid_bounds();
-    let cells = objective::approach_ring_cells(
-        fixture.min,
-        fixture.max,
-        APPROACH_SEARCH_RANGE,
-        grid_min,
-        grid_max,
-    );
-    match objective::approach_target(&cells, from, world_of, probe, move_offset) {
-        Some(landing) => FixtureOutcome::Ring {
-            uid: fixture.uid.clone(),
-            fixture_id: fixture.fixture_id,
-            ring: cells.len(),
-            landing,
-            reason: fallback_reason,
-        },
-        None => FixtureOutcome::Missed {
-            reason: format!("{fallback_reason}，环带未命中"),
-        },
-    }
-}
-
-/// 动作点支命中的冒烟行（独立一行，方便对账）：家具、包尾名、座位与
-/// 落点 x/z——「目标动作点」从这行直接读出。
-fn action_point_line(unit: u32, fixture_id: i32, seat: i32, package: &str, landing: [f32; 3]) {
-    let tail = package.rsplit("__").next().unwrap_or(package);
-    info!(
-        "[npc unit={unit}] 目标动作点 = 家具 {fixture_id}（{tail}）的座 {seat} @ ({:.2},{:.2})",
-        landing[0], landing[2]
-    );
-}
-
-/// 道别的账目词。
-fn lane_word(lane: TalkLane) -> &'static str {
-    match lane {
-        TalkLane::YetUnreadFixtureTalk => "talk:unread",
-        TalkLane::GeneralTalk => "talk:general",
-        TalkLane::FixtureCommonTalk => "talk:common",
-        TalkLane::AlreadyReadTalkFixtureTalk => "talk:read",
-    }
-}
 
 /// 成员快照（社交链的候选输入与游走链的占格都按它算）。
 struct MemberSnap {
@@ -1121,15 +1179,26 @@ impl MemberSnap {
 /// 坐标——「每员目标选取可从日志复算」。
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn decide(
-    time: Res<Time>,
+    (time, frame_count, clock): (
+        Res<Time>,
+        Res<bevy::diagnostic::FrameCount>,
+        Res<crate::npc_clock::NpcClock>,
+    ),
     editor: Res<crate::fixture_edit::EditSessionActive>,
     mut saved_layouts: MessageReader<crate::fixture_edit::LayoutSaved>,
     face: Option<Res<ObjectiveFace>>,
     epoch: Option<Res<GroundEpoch>>,
     selection: Option<Res<SiteSelection>>,
     placements: Res<FixturePlacements>,
-    mut anchored_cache: Local<AnchoredFixtureCache>,
-    configs: Option<Res<ClientConfigs>>,
+    (mut seeder, mut reported_gaps, mut last_placed): (
+        ResMut<SequencePickSeeder>,
+        Local<HashSet<String>>,
+        Local<String>,
+    ),
+    (configs, talk_list): (
+        Option<Res<ClientConfigs>>,
+        Option<Res<crate::server_panel::TalkDataStore>>,
+    ),
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
@@ -1156,11 +1225,6 @@ pub(crate) fn decide(
         &mut crate::npc::RestLifecycle,
     )>,
 ) {
-    // Invalidate before readiness returns so a placement change cannot be
-    // missed while another input (catalog/geometry) is temporarily absent.
-    if placements.is_changed() {
-        anchored_cache.rows = None;
-    }
     // The site controllers clear every NPC's UnmovableFixtureList when a
     // layout edit is saved. Read before the editor return below: the save is
     // written while the editor still owns the actors.
@@ -1178,6 +1242,10 @@ pub(crate) fn decide(
         return;
     };
     let Some(config) = configs.as_deref() else {
+        return;
+    };
+    // The talk list is set before any NPC exists; hold without it.
+    let Some(talk_list) = talk_list.as_deref() else {
         return;
     };
     // 代数资源在场才算「面已定案」：首站定案（inactiveNodes 清扫）之前
@@ -1205,11 +1273,18 @@ pub(crate) fn decide(
     if !catalog.ready() {
         return;
     }
-    let dt = time.delta_secs();
+    // No decision before the engine's frame clock runs (and none at all if
+    // its settings were refused).
+    if !clock.ready() {
+        return;
+    }
+    let dt = clock.delta();
+    let frame = frame_count.0;
 
-    // 成员快照：社交链的候选（位置 + 导航目的地）与游走链的占格都从
-    // 同一帧的全员位置算。
-    let snaps: Vec<MemberSnap> = npcs
+    // 成员快照：社交链的候选（位置 + 导航目的地 + 对话目标位）与游走链的
+    // 占格都从全员位置算。每名成员决策后按它的现值刷新自己那一格，后决策
+    // 的成员读到的是先决策者的新数据（源逐个续跑各成员的 AI、读现值）。
+    let mut snaps: Vec<MemberSnap> = npcs
         .iter()
         .map(
             |(entity, unit, _, _, slot, mind, _, _, state, target, _, _, actions, _)| MemberSnap {
@@ -1227,10 +1302,6 @@ pub(crate) fn decide(
             },
         )
         .collect();
-    let fixture_targets: Vec<_> = snaps
-        .iter()
-        .map(|snap| (snap.entity, snap.target_fixture))
-        .collect();
     let mut occupied: std::collections::HashSet<Cell> = snaps
         .iter()
         .map(|snap| cell_of(snap.position[0], snap.position[2]))
@@ -1240,7 +1311,7 @@ pub(crate) fn decide(
         occupied.insert(cell_of(translation.x, translation.z));
     }
 
-    // 面板占比与游走距离档（房间类站点切室内档）。
+    // 面板占比与成员数权重。
     let percents = LotteryPercents {
         fixture_talk: config.float(KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT),
         already_read_fixture_talk: config.float(KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT),
@@ -1248,47 +1319,111 @@ pub(crate) fn decide(
         already_read_when_has_not_read: config
             .float(KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ),
     };
-    let is_room = selection.as_deref().is_some_and(|site| site.is_room());
-    let (wander_min, wander_max) = if is_room {
-        (
-            config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE),
-            config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE),
-        )
-    } else {
-        (
-            config.int(KEY_NPC_RANDOM_MOVE_MIN_DISTANCE),
-            config.int(KEY_NPC_RANDOM_MOVE_MAX_DISTANCE),
-        )
+    let weights = LotteryWeights {
+        talk1: config.float(KEY_NPC_LOTTERY_TALK1_WIGHT),
+        talk2: config.float(KEY_NPC_LOTTERY_TALK2_WIGHT),
+        talk3: config.float(KEY_NPC_LOTTERY_TALK3_WIGHT),
+        talk4: config.float(KEY_NPC_LOTTERY_TALK4_WIGHT),
     };
-    let move_offset = config.float(KEY_CHARACTER_FIXTURE_MOVE_OFFSET);
-    let anchored = anchored_cache
-        .rows
-        .get_or_insert_with(|| anchored_fixtures(&placements))
-        .as_slice();
-    if !anchored.is_empty() && attach.is_none() {
+    // The landing identity test reads the attachment table: wait for it
+    // while anchored fixtures stand, so a table still loading never reads as
+    // a fixture without action points.
+    if attach.is_none() && placements.fixture_ids().iter().any(|id| *id != 0) {
         return;
     }
-    // 道可得性替身：锚定对话家具在 ⇒ 未读道可得（级联首档即中）。
-    let yet_unread_available = !anchored.is_empty();
+    // Branch A's input: any unread row in the whole client talk list.
+    let yet_unread_available = talk_list.any_unread();
+    // The avatar store's NPC list as the talk lotteries read it.
+    let mut views: Vec<npc_talk_lottery::NpcView> = npcs
+        .iter()
+        .map(
+            |(_, unit, _, _, slot, mind, _, _, _, _, _, _, actions, _)| npc_talk_lottery::NpcView {
+                unit: unit.0,
+                site_type: catalog.site_type_value(&actions.site_type),
+                previous_talk_id: slot.previous_id().unwrap_or(0),
+                talk_type: slot.kind(),
+                objective: mind.current,
+                state: actions.current as u8,
+                since_initialized: actions.since_initialized,
+            },
+        )
+        .collect();
+    // The placed fixtures, built at the first talk factory of the frame.
+    let mut placed: Option<Vec<npc_talk_lottery::PlacedFixture>> = None;
 
-    for (
-        entity,
-        unit,
-        pause_seconds,
-        talk_hold,
-        mut slot,
-        mut mind,
-        mut rng,
-        mut path,
-        mut state,
-        mut target,
-        mut route,
-        mut phase,
-        mut actions,
-        mut rest,
-    ) in &mut npcs
-    {
+    // The avatar list's order; each character, once past its turn, is read
+    // back from its live components before the next one runs.
+    let order: Vec<Entity> = snaps.iter().map(|snap| snap.entity).collect();
+    let mut passed: Option<Entity> = None;
+    let mut emitted_before_turn = 0u64;
+    'npc: for &entity in &order {
+        if let Some(previous) = passed.take() {
+            let decided = DECISIONS_EMITTED.load(std::sync::atomic::Ordering::Relaxed)
+                != emitted_before_turn;
+            if let Ok((_, unit, _, _, slot, mind, _, _, state, target, _, _, actions, _)) =
+                npcs.get(previous)
+            {
+                if let Some(snap) = snaps.iter_mut().find(|snap| snap.entity == previous) {
+                    snap.target_fixture = slot.current.as_ref().and_then(|data| data.target_fixture);
+                    snap.site_type = actions.site_type.clone();
+                    snap.talk_target = prepared_social_target(&slot);
+                    snap.position = state.0.position;
+                    snap.destination = if mind.executing {
+                        target.0
+                    } else {
+                        state.0.position
+                    };
+                }
+                if let Some(view) = views.iter_mut().find(|view| view.unit == unit.0) {
+                    view.site_type = catalog.site_type_value(&actions.site_type);
+                    view.previous_talk_id = slot.previous_id().unwrap_or(0);
+                    view.talk_type = slot.kind();
+                    view.objective = mind.current;
+                    view.state = actions.current as u8;
+                    view.since_initialized = actions.since_initialized;
+                }
+                if decided {
+                    info!(
+                        "[npc-member-view] {}",
+                        serde_json::json!({
+                            "v": 1,
+                            "unit": unit.0,
+                            "t": time.elapsed_secs_f64(),
+                            "site": actions.site_type,
+                            "talk_target": prepared_social_target(&slot),
+                            "executing": mind.executing,
+                            "position": state.0.position,
+                            "destination": if mind.executing { target.0 } else { state.0.position },
+                        })
+                    );
+                }
+            }
+        }
+        passed = Some(entity);
+        emitted_before_turn = DECISIONS_EMITTED.load(std::sync::atomic::Ordering::Relaxed);
+        let Ok((
+            _,
+            unit,
+            pause_seconds,
+            talk_hold,
+            mut slot,
+            mut mind,
+            mut rng,
+            mut path,
+            mut state,
+            mut target,
+            mut route,
+            mut phase,
+            mut actions,
+            mut rest,
+        )) = npcs.get_mut(entity)
+        else {
+            continue;
+        };
         if !actions.ready() {
+            continue;
+        }
+        if mind.ai_stopped.is_some() {
             continue;
         }
         // The activity owner consumes arrival and completion separately. A
@@ -1296,12 +1431,73 @@ pub(crate) fn decide(
         if fixture_activities.owns_actor(entity) {
             continue;
         }
-        if talk_hold.is_some() || actions.current == crate::npc::NpcAction::Talk {
-            // RestObjective's delay runs before its WaitWhile(Talk). Ending
-            // the Rest action disposes its script, not this independent delay.
-            if !mind.executing && mind.rest_remaining > 0.0 {
-                mind.rest_remaining = (mind.rest_remaining - dt).max(0.0);
+        // IsTalking: the talk state's enter sets it and its exit clears it.
+        let talking = actions.current == crate::npc::NpcAction::Talk;
+        // The objective body's waits are polled on every frame after the one
+        // that created them, talking or not.
+        if let Some(wait) = mind.body {
+            match wait {
+                BodyWait::TweetDone { since, step } => {
+                    if frame != since && actions.tweet_state == crate::npc_state::TweetState::Done
+                    {
+                        mind.body = Some(BodyWait::NotTalking { since: frame, step });
+                    }
+                }
+                BodyWait::NotTalking { since, step } => {
+                    if frame != since && !talking {
+                        mind.body = None;
+                        info!(
+                            "[npc unit={}] frame={frame} tweet wait ended; call=TryRotateBeforeRotation",
+                            unit.0
+                        );
+                        let tweeting = step == TweetStep::CommonFixture
+                            && run_pre_action(unit.0, frame, &slot, &mut mind, &mut actions, &mut rest);
+                        if !tweeting {
+                            // The pre-action's timeline: data from the general
+                            // factory carries no fixture timeline.
+                            finish_objective(unit.0, &mut mind, &mut slot, frame, false);
+                        }
+                    }
+                }
+                BodyWait::FirstTalk { since } => {
+                    if frame != since && actions.first_talk_complete {
+                        info!(
+                            "[npc unit={}] frame={frame} greeting objective ended: first talk complete",
+                            unit.0
+                        );
+                        finish_objective(unit.0, &mut mind, &mut slot, frame, false);
+                    }
+                }
+                BodyWait::Stacked { since, mut delay } => {
+                    if frame != since {
+                        if delay.advance(dt) {
+                            // The move fails: the sub members (none for the
+                            // single-character talks) stop and the objective
+                            // ends, keeping its talk data.
+                            info!(
+                                "[npc unit={}] frame={frame} stacked move: 1.0 s delay done, objective ends without arrival",
+                                unit.0
+                            );
+                            finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                        } else {
+                            mind.body = Some(BodyWait::Stacked { since, delay });
+                        }
+                    }
+                }
             }
+        }
+        // RestObjective's delay runs before its WaitWhile(Talk): talking
+        // does not hold the delay.
+        if let Some(RestPhase::Delay { since, mut delay }) = mind.rest {
+            if frame != since {
+                mind.rest = Some(if delay.advance(dt) {
+                    RestPhase::WaitTalk { since: frame }
+                } else {
+                    RestPhase::Delay { since, delay }
+                });
+            }
+        }
+        if talk_hold.is_some() || talking {
             mind.overlap_seconds = 0.0;
             continue;
         }
@@ -1309,18 +1505,7 @@ pub(crate) fn decide(
             // Respect a later owner that installed another objective during
             // the hidden interval. The Talk/hold guards above also still apply.
             if !mind.executing && mind.current == Some(cancelled) {
-                finish_objective(
-                    unit.0,
-                    &mut mind,
-                    &mut slot,
-                    pause_seconds.0,
-                    false,
-                    &mut actions,
-                    &mut rest,
-                );
-                if mind.rest_remaining > 0.0 {
-                    continue;
-                }
+                finish_objective(unit.0, &mut mind, &mut slot, frame, false);
             }
         }
         let overlaps = snaps.iter().any(|other| {
@@ -1332,7 +1517,7 @@ pub(crate) fn decide(
         // 本域未承载 FixtureAction/PhotoShot/通信状态，不能把它们猜成常态。
         let state_type = actions.current as u8;
         let group_talk = objective::overlap::has_group_talk(mind.current, slot.kind());
-        let cancellable = mind.executing || mind.rest_remaining > 0.0;
+        let cancellable = mind.executing || mind.resting();
         let visible = initialized
             .iter()
             .any(|(id, visibility)| id.0 == unit.0 && visibility.get());
@@ -1349,8 +1534,11 @@ pub(crate) fn decide(
         {
             mind.executing = false;
             mind.current = None;
-            mind.rest_remaining = 0.0;
+            mind.body = None;
+            mind.rest = None;
+            mind.yield_since = None;
             mind.skip_next_rest = true;
+            mind.overlap_cancel_frame = Some(frame);
             slot.reset_ai_talk_data();
             route.cancel();
             path.0 = moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
@@ -1364,54 +1552,98 @@ pub(crate) fn decide(
         }
         // 执行中且路线已尽（推进系统末站驻留尽的收场位）：目标收场。路点
         // 中途的驻留（Some）不收场——目标还没走完，不换乘。
-        let outcome = if mind.executing {
+        let outcome = if mind.executing && mind.body.is_none() {
             route.outcome.take()
         } else {
             None
         };
         if outcome == Some(crate::npc::RouteOutcome::Stopped) {
             if route.take_stalled() {
-                // Source Stacked: the objective's MoveAsync failed. A talk
-                // objective raises no ImmediatelyExecuteNextObjective, so the
-                // next TryRest runs in full.
-                finish_objective(
-                    unit.0,
-                    &mut mind,
-                    &mut slot,
-                    pause_seconds.0,
-                    true,
-                    &mut actions,
-                    &mut rest,
-                );
+                // Source Stacked: the main character stops, then a scaled
+                // 1.0 s delay, then the move fails. A talk objective raises
+                // no ImmediatelyExecuteNextObjective, so the next TryRest
+                // runs in full.
+                let delay = objective::DelayPromise::from_milliseconds(1000)
+                    .expect("one second is a valid delay");
+                mind.body = Some(BodyWait::Stacked { since: frame, delay });
                 info!(
-                    "[npc unit={}] 移动按卡住结束（路线末端距目标超出完成容差），目标失败，进入停顿",
+                    "[npc unit={}] frame={frame} 移动按卡住结束（路线末端距目标超出完成容差）：停下，1.0s 延迟后目标失败",
                     unit.0
                 );
                 continue;
             }
-            // The movement task ended without OnArrive. Do not invent arrival,
-            // release the AI content, or resume an interrupted Rest timer.
-            mind.executing = false;
-            mind.rest_remaining = 0.0;
+            // Every other stop is the move's failure: MoveAsync returns false
+            // (a missing route and a fixture in use stop the character first;
+            // the other statuses return without a stop) and the objective
+            // completes without OnArrive. The loop then yields and runs
+            // TryRest: a talk objective raises no
+            // ImmediatelyExecuteNextObjective, so the Rest runs in full; a
+            // no-talk objective's failed move owes its one
+            // ForceUpdateObjective first. The AI content is kept.
+            info!(
+                "[npc unit={}] frame={frame} move failed without arrival: objective {:?} ends, then Yield and TryRest",
+                unit.0, mind.current
+            );
+            mind.rest = None;
+            finish_objective(unit.0, &mut mind, &mut slot, frame, true);
             continue;
         }
-        let completed_now = outcome == Some(crate::npc::RouteOutcome::Arrived);
-        if completed_now {
-            let grounded = false;
-            finish_objective(
-                unit.0,
-                &mut mind,
-                &mut slot,
-                pause_seconds.0,
-                grounded,
-                &mut actions,
-                &mut rest,
-            );
-        }
-        if !mind.executing && mind.rest_remaining > 0.0 {
-            if !completed_now {
-                mind.rest_remaining = (mind.rest_remaining - dt).max(0.0);
+        if outcome == Some(crate::npc::RouteOutcome::Arrived) {
+            if mind.current == Some(ObjectiveType::Talk) {
+                on_talk_arrived(unit.0, frame, &mut slot, &mut mind, &mut actions, &mut rest);
+            } else {
+                finish_objective(unit.0, &mut mind, &mut slot, frame, false);
             }
+        }
+        // The AI loop: after an objective ends, one Yield frame, then
+        // TryRest. The flag skips the Rest once; otherwise the Rest objective
+        // runs its delay and then waits while the character talks. The
+        // ForceUpdateObjective calls a no-talk end owes come first.
+        if mind.force_updates == 0 {
+            if let Some(since) = mind.yield_since {
+                if frame == since {
+                    continue;
+                }
+                mind.yield_since = None;
+                if mind.skip_next_rest {
+                    mind.skip_next_rest = false;
+                    info!("[npc unit={}] frame={frame} TryRest: flag set, rest skipped", unit.0);
+                } else {
+                    let milliseconds = objective::rest_objective_milliseconds(pause_seconds.0);
+                    match objective::DelayPromise::from_milliseconds(milliseconds) {
+                        Ok(delay) => {
+                            mind.rest = Some(RestPhase::Delay { since: frame, delay });
+                            mind.rest_revision = mind.rest_revision.wrapping_add(1);
+                            actions.begin_objective_rest(&mut rest, mind.rest_revision);
+                            info!(
+                                "[npc unit={}] frame={frame} rest: {milliseconds} ms (delay {:#x})",
+                                unit.0,
+                                delay.delay().to_bits()
+                            );
+                        }
+                        Err(milliseconds) => {
+                            let reason = format!(
+                                "rest delay of {milliseconds} ms is out of range (the delay raises)"
+                            );
+                            error!("[npc unit={}] {reason}; this character's AI loop ends", unit.0);
+                            mind.ai_stopped = Some(reason);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(RestPhase::WaitTalk { since }) = mind.rest {
+            if frame != since {
+                // The Rest objective's end: Idle, then CompleteRest; TryRest
+                // clears the flag after it.
+                mind.rest = None;
+                mind.skip_next_rest = false;
+                actions.change(crate::npc::NpcAction::Idle, &mut rest);
+                info!("[npc unit={}] frame={frame} rest ended", unit.0);
+            }
+        }
+        if mind.rest.is_some() || mind.yield_since.is_some() {
             continue;
         }
         if mind.executing {
@@ -1426,146 +1658,440 @@ pub(crate) fn decide(
             fixture_activities.report_pending(entity, unit.0, reason);
             continue;
         }
-        // 停顿门已过（源 TryRest 的产品面）：能走到这里的成员要么停顿计
-        // 完（收场时 arm、逐帧倒数到零），要么带旗——出生装配的旗在这
-        // 里一次性消费（出生没有收场帧，旗由首判自取）；无对话收场的
-        // 旗在收场帧已当帧消费。到此带旗只剩出生后首判一种形态。
+        // The start-up flag (the AI's set-up raises it before its first
+        // TryRest) is consumed here on the first decision; after an objective
+        // the Yield step above has already consumed it.
         mind.skip_next_rest = false;
-        actions.change(crate::npc::NpcAction::Idle, &mut rest);
+        'cascade: loop {
+            // A no-talk end owes ForceUpdateObjective calls: each is a reset and
+            // UpdateObjective's reset and row-1 cascade, with no ladder draw and no
+            // departure. All of them are made on this pass; the loop's Yield
+            // before TryRest follows the objective's own end.
+            let force_update = mind.force_updates > 0;
 
-        // —— 决策梯 ——
-        // One decision draws on a copy of the member RNG. The copy replaces
-        // the member RNG only when the decision commits; a factory that
-        // cannot evaluate yet leaves the sequence untouched, so the retry
-        // makes exactly the draws the source makes once per DecideObjective.
-        let mut trial = (*rng).clone();
-        let view = objective::LadderView {
-            talk_type: slot.kind(),
-            photo_shot: false,
-            interrupt: None,
-            current: mind.current,
-            first_talk_complete: false,
-        };
-        let mut percent = PercentSource::new(&mut trial);
-        let decision = objective::decide(&view, &percents, yet_unread_available, &mut percent);
-        // 账目串在这取走（借用就地结束）：后面的目的地链还要借 rng。
-        let draws_word = percent.account();
-        let (objective_type, lane): (ObjectiveType, Option<TalkLane>) = match decision {
-            objective::Decision::RefuelAndTalk => {
-                // 补位级联：未读可得即取未读道（替身语义，见模块注释）。
-                let lane = if yet_unread_available {
-                    TalkLane::YetUnreadFixtureTalk
-                } else {
-                    TalkLane::GeneralTalk
-                };
-                (ObjectiveType::Talk, Some(lane))
-            }
-            objective::Decision::NoneTalk => (ObjectiveType::NoneTalk, None),
-            objective::Decision::Select(select::Objective::Talk(lane)) => {
-                (ObjectiveType::Talk, Some(lane))
-            }
-            objective::Decision::Select(select::Objective::NoneTalk) => {
-                // 无对话道立无对话目标，槽位同步立无对话（源 ForceUpdate
-                // NoneTalkObjective 的补位侧）。
-                (ObjectiveType::NoneTalk, None)
-            }
-            other => unreachable!(
-                "决策梯落到了产品不可达的档（{other:?}）：快照里摆拍/打断/\
-                 保持档的输入按构造恒假，槽位与当前目标的值域里没有它们"
-            ),
-        };
-
-        // The ordinary factory selects its master before calculating a target.
-        // Keep the same member RNG and do not defer this selection until a click.
-        // ForceUpdateGeneralTalkObjective leaves AITalkData null when no master
-        // is found; the TalkObjective it still returns completes at once.
-        let mut null_talk: Option<String> = None;
-        let ordinary = if lane == Some(TalkLane::GeneralTalk) {
-            // ForceUpdateGeneralTalkObjective resets its old binding before
-            // LotteryGeneralTalkId. This is an AI factory edge, not window end.
-            slot.reset_ai_talk_data();
-            let mut uniform = UniformSource::new(&mut trial);
-            match catalog.lottery(unit.0, &actions.site_type, slot.previous_id(), |len| {
-                uniform.draw(len)
-            }) {
-                Ok(selection) => match if selection.replayed {
-                    slot.previous
-                        .as_ref()
-                        .and_then(|data| data.content.as_ref())
-                        .and_then(|content| catalog.resolve_content(content))
-                } else {
-                    catalog.resolve(selection.master_id)
-                } {
-                    Some(content) => Some(content),
-                    None => {
-                        null_talk = Some(format!(
-                            "selected master {} is not loaded",
-                            selection.master_id
-                        ));
-                        None
-                    }
-                },
-                Err(reason) => {
-                    null_talk = Some(format!("ordinary factory: {reason}"));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        if let Some(reason) = null_talk {
-            *rng = trial;
-            fixture_activities.clear_pending(entity);
-            mind.current = Some(ObjectiveType::Talk);
-            finish_objective(
+            // —— 决策梯 ——
+            // One decision draws on copies of the member RNG and of the
+            // sequence-pick seeder. The copies replace the originals only when
+            // the decision commits; a factory that cannot evaluate yet leaves
+            // both sequences untouched, so the retry makes exactly the draws the
+            // source makes once per DecideObjective.
+            let mut trial = (*rng).clone();
+            let mut trial_seeder = seeder.seeder().clone();
+            let calls_before = rng.calls();
+            let view = objective::LadderView {
+                talk_type: slot.kind(),
+                photo_shot: false,
+                interrupt: slot.interrupt,
+                current: mind.current,
+                first_talk_complete: actions.first_talk_complete,
+            };
+            let mut percent = PercentSource::new(&mut trial);
+            let decision = if force_update {
+                objective::Decision::RefuelAndTalk
+            } else {
+                objective::decide(&view, &percents, yet_unread_available, &mut percent)
+            };
+            // 账目串在这取走（借用就地结束）：后面的目的地链还要借 rng。
+            let draws_word = percent.account();
+            let mut record = DecisionRecord::new(
                 unit.0,
-                &mut mind,
-                &mut slot,
-                pause_seconds.0,
-                true,
-                &mut actions,
-                &mut rest,
+                &actions.site_type,
+                time.elapsed_secs_f64(),
+                match decision {
+                    _ if force_update => "force_update_objective",
+                    objective::Decision::RefuelAndTalk => "empty_talk_data",
+                    objective::Decision::Greeting => "greeting",
+                    objective::Decision::NoneTalk => "none_talk_data",
+                    objective::Decision::Interrupt { .. } => "interrupt",
+                    _ => "select_objective",
+                },
+                &percents,
+                &weights,
+                yet_unread_available,
+                talk_list,
+                &percent.draws,
             );
-            info!(
-                "[npc unit={}] 目标裁决：{draws_word} → talk:general 空数据（{reason}），对话目标即刻结束，进入停顿",
-                unit.0
+            let decision_route = match decision {
+                // Row 1: ForceUpdateObjective resets, then UpdateObjective resets
+                // again before it builds the data, so Previous ends empty.
+                objective::Decision::RefuelAndTalk => {
+                    slot.reset_ai_talk_data();
+                    slot.reset_ai_talk_data();
+                    DecisionRoute::Factory(TalkFactory::CreateAiTalkData)
+                }
+                objective::Decision::Select(select::Objective::Talk(lane)) => {
+                    // Each of the four talk factories resets before its lottery.
+                    slot.reset_ai_talk_data();
+                    DecisionRoute::Factory(TalkFactory::of_lane(lane))
+                }
+                // The Talk interrupt: a new talk objective on the same data; the
+                // marker's interrupt flag is then cleared.
+                objective::Decision::Interrupt {
+                    dispatch: objective::InterruptDispatch::Direct(ObjectiveType::Talk),
+                } => {
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                    DecisionRoute::SameTalkData
+                }
+                objective::Decision::NoneTalk
+                | objective::Decision::Select(select::Objective::NoneTalk) => DecisionRoute::NoneTalk,
+                objective::Decision::Greeting => DecisionRoute::Greeting,
+                other => unreachable!(
+                    "决策梯落到了产品不可达的档（{other:?}）：快照里摆拍/保持档的输入按构造恒假，\
+                     打断标记只写对话一种，槽位与当前目标的值域里没有它们"
+                ),
+            };
+            let objective_type = match decision_route {
+                DecisionRoute::NoneTalk => ObjectiveType::NoneTalk,
+                DecisionRoute::Greeting => ObjectiveType::Greeting,
+                _ => ObjectiveType::Talk,
+            };
+            record.set(
+                "objective",
+                match objective_type {
+                    ObjectiveType::NoneTalk => "none_talk",
+                    ObjectiveType::Greeting => "greeting",
+                    _ => "talk",
+                },
             );
-            continue;
-        }
+            record.set("lane", decision_route.word());
+            record.set("phenomenon", catalog.phenomena_id());
+            if let DecisionRoute::Greeting = decision_route {
+                // The greeting objective: the greeting state, then a wait until
+                // the first talk is complete. It draws nothing.
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("path", "greeting_objective");
+                if let Some(content) = slot.current.as_ref().and_then(|data| data.content.as_ref()) {
+                    record.set("talk_id", content.master_id);
+                }
+                record.emit("greeting", calls);
+                fixture_activities.clear_pending(entity);
+                mind.current = Some(ObjectiveType::Greeting);
+                mind.executing = true;
+                actions.change(crate::npc::NpcAction::Greeting, &mut rest);
+                mind.body = Some(BodyWait::FirstTalk { since: frame });
+                info!("[npc unit={}] frame={frame} greeting objective: change to Greeting", unit.0);
+                continue 'npc;
+            }
 
-        // —— 目的地解算 ——
-        let mut probe = FaceProbe { face };
-        let world_of = |cell: Cell| face.world_of(cell);
-        let from = route.navigation_origin(state.0.position, walk_face);
-        let detail;
-        let mut fixture_selection = None;
-        // Placement UID of the talk data's TargetFixture: MoveAsync gates such
-        // a target with IfMoveTargetFixtureActionPosition, others with
-        // IfMoveTargetPosition.
-        let mut gate_fixture: Option<String> = None;
-        let mut none_talk_null = false;
-        let mut none_talk_gap = false;
-        let destination = if let Some(lane) = lane {
-            match lane {
-                TalkLane::GeneralTalk => {
-                    // CN Factory.GetNearOtherCharacterPosition filters other
-                    // unit + non-null TalkData + same site before sampling.
-                    // 未命中回退游走链（源补位级联里
-                    // 「就近他人未命中 → 随机位」的同形级联）。
-                    let candidates: Vec<objective::SocialCandidate> = snaps
+            // The talk factory. It leaves a general talk to build, or empty data
+            // (the talk objective then completes at once), or a source exception
+            // (this character's AI loop ends), or a host gap (reported by name;
+            // the decision ends as empty data does).
+            let mut general_talk: Option<crate::player_talk::ResolvedTalk> = None;
+            let mut null_talk: Option<String> = None;
+            let mut halt: Option<npc_talk_lottery::Halt> = None;
+            match decision_route {
+                DecisionRoute::Factory(factory) => {
+                    record.set("path", "talk_factory");
+                    let own = views
                         .iter()
-                        .filter_map(|snap| snap.social_candidate(unit.0, &actions.site_type))
+                        .position(|view| view.unit == unit.0)
+                        .expect("every deciding NPC is in the avatar list");
+                    views[own].previous_talk_id = slot.previous_id().unwrap_or(0);
+                    views[own].talk_type = slot.kind();
+                    views[own].objective = mind.current;
+                    views[own].since_initialized = actions.since_initialized;
+                    let seeker = views[own].clone();
+                    // The avatar list as the lotteries read it (enum values as
+                    // numbers), so a replay evaluates the member gates.
+                    record.set(
+                        "npc_views",
+                        views
+                            .iter()
+                            .map(|view| {
+                                serde_json::json!({
+                                    "unit": view.unit,
+                                    "site_type": view.site_type,
+                                    "previous_talk_id": view.previous_talk_id,
+                                    "talk_type": view.talk_type.map(|kind| kind as u8),
+                                    "objective": view.objective.map(|kind| kind as u8),
+                                    "state": view.state,
+                                    "since_initialized": view.since_initialized,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    let fixtures: &[npc_talk_lottery::PlacedFixture] = placed.get_or_insert_with(|| {
+                        let fixtures = fixture_activities.talk_lottery_fixtures(
+                            &placements,
+                            selection
+                                .as_deref()
+                                .and_then(|site| catalog.site_type_value(site.site_type())),
+                        );
+                        // The placed fixtures the talk gates read, logged when
+                        // they change, so a replay evaluates the same gates.
+                        let line = serde_json::json!({
+                            "v": 1,
+                            "fixtures": fixtures
+                                .iter()
+                                .map(|fixture| serde_json::json!({
+                                    "uid": fixture.uid,
+                                    "fixture_id": fixture.fixture_id,
+                                    "site_type": fixture.located_site_type,
+                                    "is_gate": fixture.is_gate,
+                                    "motion_overlap": match &fixture.motion_overlap {
+                                        Ok(overlap) => serde_json::json!(overlap),
+                                        Err(reason) => serde_json::json!({ "error": reason }),
+                                    },
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                        .to_string();
+                        if *last_placed != line {
+                            info!("[npc-placed] {line}");
+                            *last_placed = line;
+                        }
+                        fixtures
+                    });
+                    let admissions = std::cell::RefCell::new(Vec::new());
+                    let (result, factory_draws, lottery_rows) = {
+                        let tables = fixture_activities
+                            .tables()
+                            .expect("the decision holds until the master tables are installed");
+                        let site_type_of_site = |site: i32| catalog.site_type_of_site(site);
+                        // The playable-fixture gate's admissibility pair for this
+                        // character, through the host's fixture admission; every
+                        // evaluation goes into the record.
+                        let other_targets: Vec<(Entity, Option<Entity>)> = snaps
+                            .iter()
+                            .map(|snap| (snap.entity, snap.target_fixture))
+                            .collect();
+                        let position = state.0.position;
+                        let unmovable: &[String] = &mind.unmovable_fixtures;
+                        let admissible = |talk: i32, fixture: &npc_talk_lottery::PlacedFixture| {
+                            let result = fixture_activities.talk_fixture_admissible(
+                                entity,
+                                position,
+                                talk,
+                                &fixture.uid,
+                                &placements,
+                                &other_targets,
+                                unmovable,
+                                face,
+                            );
+                            admissions.borrow_mut().push(serde_json::json!({
+                                "talk_id": talk,
+                                "uid": fixture.uid,
+                                "result": match &result {
+                                    Ok(value) => serde_json::json!(value),
+                                    Err(reason) => serde_json::json!({ "gap": reason }),
+                                },
+                            }));
+                            result
+                        };
+                        let scene = npc_talk_lottery::LotteryScene {
+                            tables,
+                            talk_list: talk_list.talk_list(),
+                            phenomena_id: catalog.phenomena_id(),
+                            site_type_of_site: &site_type_of_site,
+                            npcs: &views,
+                            fixtures,
+                            weights,
+                            fixture_gates: Some(npc_talk_lottery::FixtureGateInputs {
+                                gate_action_elapsed_seconds: config
+                                    .int(KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME),
+                                admissible: &admissible,
+                            }),
+                        };
+                        let engine = std::cell::RefCell::new(&mut trial);
+                        let mut engine_int = |len: usize| {
+                            let mut guard = engine.borrow_mut();
+                            engine_int_draw(&mut **guard, len)
+                        };
+                        let mut engine_float = |total: f32| {
+                            let mut guard = engine.borrow_mut();
+                            engine_float_draw(&mut **guard, total)
+                        };
+                        let mut sequence_pick = |count: usize| trial_seeder.pick(count);
+                        let mut draws = npc_talk_lottery::Draws {
+                            engine_int: &mut engine_int,
+                            engine_float: &mut engine_float,
+                            sequence_pick: &mut sequence_pick,
+                            record: Vec::new(),
+                        };
+                        let result = factory.run(&scene, &seeker, &mut draws);
+                        (result, draws.record, npc_talk_lottery::list_counts(&scene))
+                    };
+                    record.set("fixture_lottery_rows", lottery_rows);
+                    record.set("fixture_admissible", admissions.into_inner());
+                    record.extend_draws(factory_draws);
+                    match result {
+                        Ok(npc_talk_lottery::TalkPlan::General { talk_id, interrupt }) => {
+                            record.set("talk_id", talk_id);
+                            match catalog.resolve(talk_id) {
+                                Some(resolved) => {
+                                    if interrupt {
+                                        slot.interrupt = Some(TALK_INTERRUPT);
+                                    }
+                                    general_talk = Some(resolved);
+                                }
+                                None => {
+                                    halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                        "general talk {talk_id} is not in the loaded talk scripts"
+                                    )));
+                                }
+                            }
+                        }
+                        Ok(npc_talk_lottery::TalkPlan::Null { reason, interrupt }) => {
+                            if interrupt {
+                                slot.interrupt = Some(TALK_INTERRUPT);
+                            }
+                            null_talk = Some(reason);
+                        }
+                        Err(stop) => halt = Some(stop),
+                    }
+                }
+                DecisionRoute::SameTalkData => {
+                    record.set("path", "same_talk_data");
+                    match slot.current.as_ref() {
+                        Some(data) if data.target_fixture.is_none() => {
+                            if let Some(content) = &data.content {
+                                record.set("talk_id", content.master_id);
+                            }
+                        }
+                        _ => {
+                            halt = Some(npc_talk_lottery::Halt::Gap(
+                                "the talk interrupt re-runs fixture-targeted data this host does not build"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+                DecisionRoute::NoneTalk => {}
+                DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+            }
+            match halt {
+                Some(npc_talk_lottery::Halt::Fault(reason)) => {
+                    // The source's AI loop catches only cancellation and its own
+                    // cannot-decide exception; any other exception ends this
+                    // character's AI.
+                    let calls = trial.calls() - calls_before;
+                    *rng = trial;
+                    *seeder.seeder() = trial_seeder;
+                    record.set("path", "source_exception");
+                    record.set("reason", reason.as_str());
+                    record.emit("ai_stopped", calls);
+                    fixture_activities.clear_pending(entity);
+                    error!(
+                        "[npc unit={}] 目标裁决：{draws_word} → 源异常，该角色 AI 循环终止：{reason}",
+                        unit.0
+                    );
+                    mind.ai_stopped = Some(reason);
+                    continue 'npc;
+                }
+                Some(npc_talk_lottery::Halt::Gap(reason)) => {
+                    record.set("path", "host_data_gap");
+                    if reported_gaps.insert(reason.clone()) {
+                        warn!(
+                            "[npc-talk] talk factory not evaluated (first met by unit={}): {reason}",
+                            unit.0
+                        );
+                    }
+                    null_talk = Some(format!("host gap: {reason}"));
+                }
+                None => {}
+            }
+            if let (Some(reason), true) = (null_talk.as_ref(), force_update) {
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("reason", reason.as_str());
+                record.emit("empty_talk_data", calls);
+                fixture_activities.clear_pending(entity);
+                mind.force_updates -= 1;
+                info!(
+                    "[npc unit={}] frame={frame} ForceUpdateObjective: {} empty ({reason})",
+                    unit.0,
+                    decision_route.word()
+                );
+                if mind.force_updates > 0 {
+                    continue 'cascade;
+                }
+                mind.yield_since = Some(mind.force_update_end.max(frame));
+                continue 'npc;
+            }
+            if let Some(reason) = null_talk {
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("reason", reason.as_str());
+                record.emit("empty_talk_data", calls);
+                fixture_activities.clear_pending(entity);
+                mind.current = Some(ObjectiveType::Talk);
+                finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                info!(
+                    "[npc unit={}] 目标裁决：{draws_word} → {} 空数据（{reason}），对话目标即刻结束，进入停顿",
+                    unit.0,
+                    decision_route.word()
+                );
+                continue 'npc;
+            }
+
+            // —— 目的地解算 ——
+            let mut probe = FaceProbe { face };
+            let world_of = |cell: Cell| face.world_of(cell);
+            let from = route.navigation_origin(state.0.position, walk_face);
+            let detail;
+            let mut fixture_selection = None;
+            // Placement UID of the talk data's TargetFixture: MoveAsync gates such
+            // a target with IfMoveTargetFixtureActionPosition, others with
+            // IfMoveTargetPosition.
+            let mut gate_fixture: Option<String> = None;
+            let mut none_talk_null = false;
+            let mut none_talk_gap = false;
+            let destination = match decision_route {
+                DecisionRoute::SameTalkData => {
+                    let data = slot
+                        .current
+                        .as_ref()
+                        .expect("the interrupt row re-runs existing talk data");
+                    detail = "同一对话数据".to_owned();
+                    Some(data.target_position)
+                }
+                DecisionRoute::Factory(_) => {
+                    // CreateGeneralTalkData: the spot near another character,
+                    // else a random floor position. Both chains start from the
+                    // character's own position, not from its navigation origin.
+                    let position = state.0.position;
+                    let near: Vec<(u32, objective::SocialCandidate)> = snaps
+                        .iter()
+                        .filter_map(|snap| {
+                            snap.social_candidate(unit.0, &actions.site_type)
+                                .map(|candidate| (snap.unit, candidate))
+                        })
                         .collect();
+                    // The candidates as this decision read them, so a replay
+                    // can check them against the others' live state.
+                    record.set(
+                        "near_candidates",
+                        near.iter()
+                            .map(|(other, candidate)| {
+                                serde_json::json!({
+                                    "unit": other,
+                                    "position": candidate.position,
+                                    "destination": candidate.destination,
+                                    "talk_target": candidate.talk_target,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    let candidates: Vec<objective::SocialCandidate> =
+                        near.into_iter().map(|(_, candidate)| candidate).collect();
                     let npc_positions: Vec<[f32; 3]> =
                         snaps.iter().map(|snap| snap.position).collect();
                     let mut uniform = UniformSource::new(&mut trial);
                     let social = objective::social_target(
                         &candidates,
-                        from,
+                        position,
                         &npc_positions,
                         &mut probe,
                         &mut uniform,
                     );
+                    record.uniform("near_character_pick", DRAW_ENGINE_INT_RANGE, &uniform.draws);
                     if let Some(spot) = social {
                         detail = format!(
                             "社交链 池抽 {}（候选 {} 员）",
@@ -1574,7 +2100,26 @@ pub(crate) fn decide(
                         );
                         Some(spot)
                     } else {
-                        let origin = cell_of(from[0], from[2]);
+                        // The move range follows the site type of this
+                        // character's own site.
+                        let in_room = catalog
+                            .site_type_value(&actions.site_type)
+                            .is_some_and(objective::uses_in_room_move_range);
+                        let (wander_min, wander_max) = if in_room {
+                            (
+                                config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE),
+                                config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE),
+                            )
+                        } else {
+                            (
+                                config.int(KEY_NPC_RANDOM_MOVE_MIN_DISTANCE),
+                                config.int(KEY_NPC_RANDOM_MOVE_MAX_DISTANCE),
+                            )
+                        };
+                        // The source stores the grid origin as signed bytes; the
+                        // ring filter wraps each axis difference to a signed byte,
+                        // so the unwrapped cell gives the same ring.
+                        let origin = cell_of(position[0], position[2]);
                         let eligible: Vec<Cell> = face
                             .walkable()
                             .iter()
@@ -1591,400 +2136,440 @@ pub(crate) fn decide(
                             &mut permute,
                             &mut probe,
                         );
+                        record.keys("floor_position_order", permute.keys);
                         detail = format!(
-                            "社交未命中→游走 环 {} 格（键 {}）",
+                            "社交未命中→游走 环 {} 格（键 {}，档 {wander_min}..{wander_max}）",
                             eligible.len(),
                             permute.keys
                         );
                         wander
                     }
                 }
-                TalkLane::YetUnreadFixtureTalk
-                | TalkLane::FixtureCommonTalk
-                | TalkLane::AlreadyReadTalkFixtureTalk => {
-                    // 家具道：均匀抽目标家具（源 RandomPick 的替身）；目
-                    // 标解算动作点优先（对话道经先行动作行入座），环带兜
-                    // 底。座位查对话道切片（先行动作表）。
-                    let mut uniform = UniformSource::new(&mut trial);
-                    match fixture_target(
-                        anchored,
+                DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                DecisionRoute::NoneTalk => {
+                    record.set("path", "none_talk_factory");
+                    let fixture_targets: Vec<(Entity, Option<Entity>)> = snaps
+                        .iter()
+                        .map(|snap| (snap.entity, snap.target_fixture))
+                        .collect();
+                    let mut none_talk_draws = crate::npc_fixture_activity::NoneTalkDraws::default();
+                    let selected = fixture_activities.select_none_talk(
+                        entity,
+                        unit.0,
+                        &actions.site_type,
+                        epoch.0,
+                        from,
+                        &placements,
+                        &fixture_targets,
                         &mind.unmovable_fixtures,
                         face,
-                        attach.expect("fixture destinations wait for attachment data"),
-                        from,
-                        world_of,
-                        &mut probe,
-                        &mut uniform,
-                        move_offset,
-                        |fixture_id| talk_seat(fixture_id, unit.0),
-                        "对话无先行入座行",
-                    ) {
-                        FixtureOutcome::ActionPoint {
-                            uid,
-                            fixture_id,
-                            seat,
-                            package,
-                            landing,
-                        } => {
-                            gate_fixture = Some(uid);
-                            action_point_line(unit.0, fixture_id, seat, &package, landing);
+                        &mut trial,
+                        &mut none_talk_draws,
+                    );
+                    // CreateNoneTalkData: one fresh sort key per no-talk row
+                    // (OrderBy Guid), then on a hit one engine pick of the
+                    // timeline in its group.
+                    record.keys("none_talk_order", none_talk_draws.keys);
+                    if let Some((value, len)) = none_talk_draws.timeline_pick {
+                        record.uniform("none_talk_timeline_pick", DRAW_ENGINE_INT_RANGE, &[(value, len)]);
+                    }
+                    match selected {
+                        Ok(Some(selected)) => {
                             detail = format!(
-                                "动作点 家具 {fixture_id} 座 {seat} 池抽 {}",
-                                uniform.account()
+                                "source no-talk action on {:?}/{}",
+                                selected.target.entity, selected.target.uid
                             );
-                            Some(landing)
+                            gate_fixture = Some(selected.target.uid.clone());
+                            let position = selected.position;
+                            fixture_selection = Some(selected);
+                            Some(position)
                         }
-                        FixtureOutcome::Ring {
-                            uid,
-                            fixture_id,
-                            ring,
-                            landing,
-                            reason,
-                        } => {
-                            gate_fixture = Some(uid);
-                            detail = format!(
-                                "家具 {fixture_id} 环 {ring} 格（{reason}）池抽 {}",
-                                uniform.account()
-                            );
-                            Some(landing)
+                        Ok(None) => {
+                            detail = "no eligible source no-talk fixture action".into();
+                            none_talk_null = true;
+                            None
                         }
-                        FixtureOutcome::Missed { reason } => {
-                            detail = format!("{reason} 池抽 {}", uniform.account());
+                        Err(crate::npc_fixture_activity::FactoryIssue::Pending(reason)) => {
+                            // Inputs the loop waits for are not installed yet. Drop
+                            // the trial draws and retry the same decision later.
+                            fixture_activities.report_pending(entity, unit.0, reason);
+                            continue 'npc;
+                        }
+                        Err(crate::npc_fixture_activity::FactoryIssue::Gap(reason)) => {
+                            // Host data the factory reads is incomplete and a retry
+                            // cannot be relied on to change it; holding could stop
+                            // this NPC for good. The cycle ends as the factory's empty
+                            // result does; the gap itself is reported once.
+                            detail = "host data gap, factory not evaluated".into();
+                            record.set("path", "host_data_gap");
+                            fixture_activities.report_gap(unit.0, reason);
+                            none_talk_gap = true;
+                            none_talk_null = true;
                             None
                         }
                     }
                 }
-            }
-        } else {
-            match fixture_activities.select_none_talk(
-                entity,
-                unit.0,
-                &actions.site_type,
-                epoch.0,
-                from,
-                &placements,
-                &fixture_targets,
-                &mind.unmovable_fixtures,
-                face,
-                &mut trial,
-            ) {
-                Ok(Some(selected)) => {
-                    detail = format!(
-                        "source no-talk action on {:?}/{}",
-                        selected.target.entity, selected.target.uid
-                    );
-                    gate_fixture = Some(selected.target.uid.clone());
-                    let position = selected.position;
-                    fixture_selection = Some(selected);
-                    Some(position)
-                }
-                Ok(None) => {
-                    detail = "no eligible source no-talk fixture action".into();
-                    none_talk_null = true;
-                    None
-                }
-                Err(crate::npc_fixture_activity::FactoryIssue::Pending(reason)) => {
-                    // Inputs the loop waits for are not installed yet. Drop
-                    // the trial draws and retry the same decision later.
-                    fixture_activities.report_pending(entity, unit.0, reason);
-                    continue;
-                }
-                Err(crate::npc_fixture_activity::FactoryIssue::Gap(reason)) => {
-                    // Host data the factory reads is incomplete and a retry
-                    // cannot be relied on to change it; holding could stop
-                    // this NPC for good. The cycle ends as the factory's empty
-                    // result does; the gap itself is reported once.
-                    detail = "host data gap, factory not evaluated".into();
-                    fixture_activities.report_gap(unit.0, reason);
-                    none_talk_gap = true;
-                    none_talk_null = true;
-                    None
-                }
-            }
-        };
-        *rng = trial;
-        fixture_activities.clear_pending(entity);
-        if none_talk_null {
-            // ForceUpdateNoneTalkObjective resets the AI talk data before
-            // CreateNoneTalkData returns null; SelectFixtureTalk then returns a
-            // TalkObjective whose null data completes at once. TryRest runs
-            // normally and the next decision takes the null-data arm. A host
-            // data gap takes the same path without evaluating the factory.
-            slot.reset_ai_talk_data();
-            mind.current = Some(ObjectiveType::Talk);
-            finish_objective(
-                unit.0,
-                &mut mind,
-                &mut slot,
-                pause_seconds.0,
-                true,
-                &mut actions,
-                &mut rest,
-            );
-            let outcome_word = if none_talk_gap { "工厂未求值" } else { "工厂空" };
-            info!(
-                "[npc unit={}] 目标裁决：{draws_word} → nonetalk {outcome_word}（{detail}），对话目标即刻结束，进入停顿",
-                unit.0
-            );
-            continue;
-        }
-
-        let target_position = destination.unwrap_or(state.0.position);
-        if let Some(selected) = &fixture_selection {
-            // ForceUpdateNoneTalkObjective: Reset, then SetAITalkData.
-            slot.reset_ai_talk_data();
-            slot.set_current(selected.ai_data());
-        } else if let Some(ordinary) = ordinary {
-            slot.set_current(AiTalkData {
-                kind: TalkType::Common,
-                content: Some(ordinary.content()),
-                target_fixture: None,
-                target_position,
-                main_character: unit.0,
-                characters: vec![unit.0],
-                pre_action: Some(ordinary.pre_action()),
-                pending_factory: None,
-            });
-        } else {
-            slot.set_current(AiTalkData::pending(
-                lane.map(slot_type_of).unwrap_or(TalkType::NoneTalk),
-                unit.0,
-                target_position,
-            ));
-        }
-        mind.current = Some(objective_type);
-        let source_word = match decision {
-            objective::Decision::RefuelAndTalk => "空槽补位",
-            objective::Decision::NoneTalk => "无对话槽",
-            _ => "梯末抽签",
-        };
-        let objective_word = match lane {
-            Some(lane) => lane_word(lane),
-            None => "nonetalk",
-        };
-        match destination {
-            Some(landing) => {
-                target.0 = landing;
-                mind.executing = true;
-                // 身份判定过滤器（b__1）：落点与全表挂点比 x/z 两维
-                // （引擎逐分量近似式，见 `fixture_attach`）。命中即贴合
-                // 支——目标位 + 挂点朝向交执行层。纯位置比对，不看落点
-                // 从哪条链来：动作点落点按构造命中自己的挂点，环带落点
-                // 撞上挂点坐标的同样命中。
-                let fit = if let Some(selected) = &fixture_selection {
-                    Some(FitCandidate {
-                        position: selected.position,
-                        rotation: selected.rotation,
-                    })
-                } else {
-                    attach
-                        .and_then(|attach| attach.matching(landing))
-                        .map(|world| FitCandidate {
-                            position: landing,
-                            rotation: world.rotation,
-                        })
-                };
-                // MoveAsync's gate, once, for the chosen target only. A talk
-                // data TargetFixture takes IfMoveTargetFixtureActionPosition
-                // and a failure enters that placement into this NPC's
-                // UnmovableFixtureList (TryAddUnmovableFixture); any other
-                // target takes IfMoveTargetPosition. Either failure ends the
-                // move as NoneRoute: the objective fails and TryRest runs.
-                let field = &walk_face.field;
-                let from_xz = [from[0], from[2]];
-                let landing_xz = [landing[0], landing[2]];
-                let gate_open = if gate_fixture.is_some() {
-                    field.if_move_target_fixture_action_position(from_xz, landing_xz)
-                } else {
-                    field.if_move_target_position(from_xz, landing_xz)
-                };
-                if !gate_open {
-                    let unmovable = gate_fixture.filter(|uid| !mind.unmovable_fixtures.contains(uid));
-                    if let Some(uid) = &unmovable {
-                        mind.unmovable_fixtures.push(uid.clone());
-                    }
-                    finish_objective(
-                        unit.0,
-                        &mut mind,
-                        &mut slot,
-                        pause_seconds.0,
-                        true,
-                        &mut actions,
-                        &mut rest,
-                    );
-                    info!(
-                        "[npc unit={}] 目标裁决 {source_word}：{draws_word} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 出发门未过{}",
-                        unit.0,
-                        landing[0],
-                        landing[1],
-                        landing[2],
-                        unmovable
-                            .map(|uid| format!("，{uid} 记入不可达表"))
-                            .unwrap_or_default(),
-                    );
-                    continue;
-                }
-                // GeneratePath: the agent's own query, with its sampled retry.
-                let polyline = field.generate_path(from_xz, landing_xz);
-                match depart_along(
-                    unit,
-                    &mut state.0,
-                    &mut path.0,
-                    &mut route,
-                    walk_face,
-                    face,
-                    landing,
-                    fit,
-                    &mut *rng,
-                    polyline,
-                ) {
-                    Some(depart_phase) => {
-                        if let Some(selected) = fixture_selection.take() {
-                            if !fixture_activities.begin(selected, actions.enable_talk) {
-                                route.cancel();
-                                path.0 = moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
-                                *phase = MotionPhase::Dwelling { remaining: None };
-                                finish_objective(
-                                    unit.0,
-                                    &mut mind,
-                                    &mut slot,
-                                    pause_seconds.0,
-                                    true,
-                                    &mut actions,
-                                    &mut rest,
-                                );
-                                continue;
-                            }
-                        }
-                        *phase = depart_phase;
-                        crate::npc::declare_navigation_action(
-                            &mut actions,
-                            &mut rest,
-                            &phase,
-                            &route,
-                        );
-                        info!(
-                            "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2})",
-                            unit.0,
-                            KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
-                            percents.fixture_talk,
-                            KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
-                            percents.already_read_fixture_talk,
-                            KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
-                            percents.none_talk_fixture_action,
-                            KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
-                            percents.already_read_when_has_not_read,
-                            landing[0],
-                            landing[1],
-                            landing[2],
-                        );
-                    }
-                    None => {
-                        // GeneratePath 两次查询都没给出拐点（TryGeneratePath
-                        // 失败 ⇒ NoneRoute）：移动失败收场，进停顿等下一轮。
-                        let grounded = true;
-                        finish_objective(
-                            unit.0,
-                            &mut mind,
-                            &mut slot,
-                            pause_seconds.0,
-                            grounded,
-                            &mut actions,
-                            &mut rest,
-                        );
-                        info!(
-                            "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) GeneratePath 无拐点，移动失败",
-                            unit.0,
-                            KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
-                            percents.fixture_talk,
-                            KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
-                            percents.already_read_fixture_talk,
-                            KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
-                            percents.none_talk_fixture_action,
-                            KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
-                            percents.already_read_when_has_not_read,
-                            landing[0],
-                            landing[1],
-                            landing[2],
-                        );
-                    }
-                }
-            }
-            None => {
-                // 三条链全未命中：站定收场（无对话目标照常补位断环，但不
-                // 立跳过旗——见模块注释），进停顿等下一轮。
-                let grounded = true;
-                finish_objective(
-                    unit.0,
-                    &mut mind,
-                    &mut slot,
-                    pause_seconds.0,
-                    grounded,
-                    &mut actions,
-                    &mut rest,
-                );
+            };
+            let calls = trial.calls() - calls_before;
+            *rng = trial;
+            *seeder.seeder() = trial_seeder;
+            fixture_activities.clear_pending(entity);
+            if none_talk_null {
+                record.emit("empty_talk_data", calls);
+                // ForceUpdateNoneTalkObjective resets the AI talk data before
+                // CreateNoneTalkData returns null; SelectFixtureTalk then returns a
+                // TalkObjective whose null data completes at once. TryRest runs
+                // normally and the next decision takes the null-data arm. A host
+                // data gap takes the same path without evaluating the factory.
+                slot.reset_ai_talk_data();
+                mind.current = Some(ObjectiveType::Talk);
+                finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                let outcome_word = if none_talk_gap { "工厂未求值" } else { "工厂空" };
                 info!(
-                    "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 未命中，站定",
-                    unit.0,
-                    KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
-                    percents.fixture_talk,
-                    KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
-                    percents.already_read_fixture_talk,
-                    KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
-                    percents.none_talk_fixture_action,
-                    KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
-                    percents.already_read_when_has_not_read,
+                    "[npc unit={}] 目标裁决：{draws_word} → nonetalk {outcome_word}（{detail}），对话目标即刻结束，进入停顿",
+                    unit.0
                 );
+                continue 'npc;
             }
+
+            let target_position = destination.unwrap_or(state.0.position);
+            if general_talk.is_some() {
+                record.set("talk_target", serde_json::json!(target_position));
+            }
+            if let Some(selected) = &fixture_selection {
+                // ForceUpdateNoneTalkObjective: Reset, then SetAITalkData.
+                slot.reset_ai_talk_data();
+                slot.set_current(selected.ai_data());
+            } else if let Some(resolved) = &general_talk {
+                // CreateCharacterGeneralTalkData: the master, the target
+                // position, the pre-action, the main character and the
+                // one-member list; the tweet id is the talk's pre-action tweet.
+                actions.tweet_id = resolved.pre_action().id;
+                slot.set_current(AiTalkData {
+                    kind: TalkType::Common,
+                    content: Some(resolved.content()),
+                    target_fixture: None,
+                    target_position,
+                    main_character: unit.0,
+                    characters: vec![unit.0],
+                    pre_action: Some(resolved.pre_action()),
+                    pending_factory: None,
+                });
+            }
+            if force_update {
+                record.emit("force_update_objective", calls);
+                mind.force_updates -= 1;
+                info!(
+                    "[npc unit={}] frame={frame} ForceUpdateObjective: {} -> data kept ({} left)",
+                    unit.0,
+                    decision_route.word(),
+                    mind.force_updates
+                );
+                if mind.force_updates > 0 {
+                    continue 'cascade;
+                }
+                // The objective's end: on this frame after a failed move, on
+                // the next one after its timeline (its wait sees the cancel
+                // then). The loop yields after it.
+                mind.yield_since = Some(mind.force_update_end.max(frame));
+                continue 'npc;
+            }
+            mind.current = Some(objective_type);
+            let source_word = match decision {
+                objective::Decision::RefuelAndTalk => "空槽补位",
+                objective::Decision::NoneTalk => "无对话槽",
+                objective::Decision::Interrupt { .. } => "对话打断",
+                _ => "梯末抽签",
+            };
+            let objective_word = decision_route.word();
+            match destination {
+                Some(landing) => {
+                    target.0 = landing;
+                    mind.executing = true;
+                    // 身份判定过滤器（b__1）：落点与全表挂点比 x/z 两维
+                    // （引擎逐分量近似式，见 `fixture_attach`）。命中即贴合
+                    // 支——目标位 + 挂点朝向交执行层。纯位置比对，不看落点
+                    // 从哪条链来：动作点落点按构造命中自己的挂点，环带落点
+                    // 撞上挂点坐标的同样命中。
+                    let fit = if let Some(selected) = &fixture_selection {
+                        Some(FitCandidate {
+                            position: selected.position,
+                            rotation: selected.rotation,
+                        })
+                    } else {
+                        attach
+                            .and_then(|attach| attach.matching(landing))
+                            .map(|world| FitCandidate {
+                                position: landing,
+                                rotation: world.rotation,
+                            })
+                    };
+                    // MoveAsync's gate, once, for the chosen target only. A talk
+                    // data TargetFixture takes IfMoveTargetFixtureActionPosition
+                    // and a failure enters that placement into this NPC's
+                    // UnmovableFixtureList (TryAddUnmovableFixture); any other
+                    // target takes IfMoveTargetPosition. Either failure ends the
+                    // move as NoneRoute: the objective fails and TryRest runs.
+                    let field = &walk_face.field;
+                    let from_xz = [from[0], from[2]];
+                    let landing_xz = [landing[0], landing[2]];
+                    let gate_open = if gate_fixture.is_some() {
+                        field.if_move_target_fixture_action_position(from_xz, landing_xz)
+                    } else {
+                        field.if_move_target_position(from_xz, landing_xz)
+                    };
+                    if !gate_open {
+                        record.emit("move_gate_closed", calls);
+                        let unmovable = gate_fixture.filter(|uid| !mind.unmovable_fixtures.contains(uid));
+                        if let Some(uid) = &unmovable {
+                            mind.unmovable_fixtures.push(uid.clone());
+                        }
+                        finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                        info!(
+                            "[npc unit={}] 目标裁决 {source_word}：{draws_word} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 出发门未过{}",
+                            unit.0,
+                            landing[0],
+                            landing[1],
+                            landing[2],
+                            unmovable
+                                .map(|uid| format!("，{uid} 记入不可达表"))
+                                .unwrap_or_default(),
+                        );
+                        if mind.force_updates > 0 {
+                            continue 'cascade;
+                        }
+                        continue 'npc;
+                    }
+                    // GeneratePath: the agent's own query, with its sampled retry.
+                    let polyline = field.generate_path(from_xz, landing_xz);
+                    match depart_along(
+                        unit,
+                        &mut state.0,
+                        &mut path.0,
+                        &mut route,
+                        walk_face,
+                        face,
+                        landing,
+                        fit,
+                        &mut *rng,
+                        polyline,
+                    ) {
+                        Some(depart_phase) => {
+                            if let Some(selected) = fixture_selection.take() {
+                                if !fixture_activities.begin(selected, actions.enable_talk) {
+                                    record.emit("activity_refused", calls);
+                                    route.cancel();
+                                    path.0 = moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
+                                    *phase = MotionPhase::Dwelling { remaining: None };
+                                    finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                                    if mind.force_updates > 0 {
+                                        continue 'cascade;
+                                    }
+                                    continue 'npc;
+                                }
+                            }
+                            record.emit("departed", calls);
+                            *phase = depart_phase;
+                            crate::npc::declare_navigation_action(
+                                &mut actions,
+                                &mut rest,
+                                &phase,
+                                &route,
+                            );
+                            info!(
+                                "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2})",
+                                unit.0,
+                                KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
+                                percents.fixture_talk,
+                                KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
+                                percents.already_read_fixture_talk,
+                                KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
+                                percents.none_talk_fixture_action,
+                                KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
+                                percents.already_read_when_has_not_read,
+                                landing[0],
+                                landing[1],
+                                landing[2],
+                            );
+                        }
+                        None => {
+                            record.emit("no_route", calls);
+                            // GeneratePath 两次查询都没给出拐点（TryGeneratePath
+                            // 失败 ⇒ NoneRoute）：移动失败收场，进停顿等下一轮。
+                            finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                            info!(
+                                "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) GeneratePath 无拐点，移动失败",
+                                unit.0,
+                                KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
+                                percents.fixture_talk,
+                                KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
+                                percents.already_read_fixture_talk,
+                                KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
+                                percents.none_talk_fixture_action,
+                                KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
+                                percents.already_read_when_has_not_read,
+                                landing[0],
+                                landing[1],
+                                landing[2],
+                            );
+                        }
+                    }
+                }
+                None => {
+                    record.emit("no_destination", calls);
+                    // 三条链全未命中：站定收场（无对话目标照常补位断环，但不
+                    // 立跳过旗——见模块注释），进停顿等下一轮。
+                    finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                    info!(
+                        "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 未命中，站定",
+                        unit.0,
+                        KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
+                        percents.fixture_talk,
+                        KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
+                        percents.already_read_fixture_talk,
+                        KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
+                        percents.none_talk_fixture_action,
+                        KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ,
+                        percents.already_read_when_has_not_read,
+                    );
+                }
+            }
+            // A no-talk objective whose move failed on this pass owes its
+            // ForceUpdateObjective on this same frame.
+            if mind.force_updates > 0 {
+                continue 'cascade;
+            }
+            break 'cascade;
         }
     }
 }
 
-/// 目标收场：无对话目标补位断环（跳过旗只对执行完成的收场立——移动失败
-/// 的收场不立，见模块注释），然后过停顿门（旗立起即跳过整轮停顿、当帧可
-/// 再判；旗未立进入停顿，时长走停顿律）。
+/// The objective ended on `frame` (`failed`: it ended without its body, for
+/// example a failed move). The AI loop yields one frame before its next
+/// TryRest.
+///
+/// A no-talk objective's end owes ForceUpdateObjective calls instead, all
+/// made by the next decision pass: the end of its fixture timeline makes two
+/// (the cancel of the waiting objective runs one, then the timeline runs one
+/// more) and the objective itself ends on the following frame, when its wait
+/// sees the cancel; a failed move makes one and ends the objective on its own
+/// frame. Each call resets the AI model, so the flag is clear and the Rest
+/// after the Yield runs in full; the decision after the Rest reads the last
+/// call's data.
 pub(crate) fn finish_objective(
     unit: u32,
     mind: &mut ObjectiveMind,
+    slot: &TalkSlot,
+    frame: u32,
+    failed: bool,
+) {
+    mind.executing = false;
+    mind.body = None;
+    if mind.current == Some(ObjectiveType::NoneTalk) && slot.kind() == Some(TalkType::NoneTalk) {
+        mind.force_updates = if failed { 1 } else { 2 };
+        mind.force_update_end = if failed { frame } else { frame.wrapping_add(1) };
+        mind.skip_next_rest = false;
+        info!(
+            "[npc unit={unit}] frame={frame} 无对话目标收场（{}）：{} 次 ForceUpdateObjective，随后完整停顿",
+            if failed { "移动失败" } else { "时间轴结束" },
+            mind.force_updates
+        );
+        return;
+    }
+    mind.yield_since = Some(frame);
+}
+
+/// The talk objective after its move succeeded: OnArrive, the common-fixture
+/// tweet, then the pre-action (its tweet, then its timeline). A tweet leaves
+/// the body waiting; otherwise the objective ends on this frame.
+fn on_talk_arrived(
+    unit: u32,
+    frame: u32,
     slot: &mut TalkSlot,
-    pause_seconds: f32,
-    grounded: bool,
+    mind: &mut ObjectiveMind,
     actions: &mut crate::npc::NpcActions,
     rest: &mut crate::npc::RestLifecycle,
 ) {
-    mind.executing = false;
-    if mind.current == Some(ObjectiveType::NoneTalk) {
-        // 断环补位：未读道可得即取未读道（与空槽补位同一条级联替身）。
-        let position = slot
-            .current
-            .as_ref()
-            .expect("NoneTalk goal retains its factory record")
-            .target_position;
-        slot.set_current(AiTalkData::pending(
-            slot_type_of(TalkLane::YetUnreadFixtureTalk),
-            unit,
-            position,
-        ));
-        if !grounded {
-            mind.skip_next_rest = true;
-            info!("[npc unit={unit}] 无对话目标收场：补位 → talk:unread，跳过下一轮停顿");
-        } else {
-            info!("[npc unit={unit}] 无对话目标未完成收场：补位 → talk:unread，进入停顿");
+    let Some((kind, has_fixture)) = slot
+        .current
+        .as_ref()
+        .map(|data| (data.kind, data.target_fixture.is_some()))
+    else {
+        finish_objective(unit, mind, slot, frame, false);
+        return;
+    };
+    // OnArrive: a member waiting with a communication skips it; without a
+    // target fixture there is nothing to look at.
+    if kind != TalkType::CommunicationWhileDoingWait && has_fixture {
+        info!("[npc unit={unit}] frame={frame} OnArrive: call=DoLookAt(fixture)");
+    }
+    // The common-fixture tweet reads the AI model's tweet id.
+    if kind == TalkType::CommonFixture {
+        let id = actions.tweet_id;
+        if try_play_tweet(unit, frame, kind, id, TweetStep::CommonFixture, mind, actions, rest) {
+            return;
         }
     }
-    if objective::try_rest_gate(mind.skip_next_rest) == objective::RestGateOutcome::Skipped {
-        mind.skip_next_rest = false;
-        mind.rest_remaining = 0.0;
-        actions.change(crate::npc::NpcAction::Idle, rest);
-    } else {
-        mind.skip_next_rest = false;
-        let milliseconds = objective::rest_delay_milliseconds(pause_seconds).unwrap_or_else(|| {
-            panic!("角色 {unit} 的 pauseSeconds 列产不出停顿时长：{pause_seconds}")
-        });
-        mind.rest_remaining = milliseconds as f32 / 1000.0;
-        mind.rest_revision = mind.rest_revision.wrapping_add(1);
-        actions.begin_objective_rest(rest, mind.rest_revision);
+    if !run_pre_action(unit, frame, slot, mind, actions, rest) {
+        // The pre-action's timeline: data from the general factory carries
+        // no fixture timeline.
+        finish_objective(unit, mind, slot, frame, false);
     }
+}
+
+/// The pre-action: without one, nothing; its wait with a communication needs
+/// a together-communication id, which no general talk carries and this
+/// host's pre-action projection does not hold; then its tweet. Returns
+/// whether a tweet wait started.
+fn run_pre_action(
+    unit: u32,
+    frame: u32,
+    slot: &TalkSlot,
+    mind: &mut ObjectiveMind,
+    actions: &mut crate::npc::NpcActions,
+    rest: &mut crate::npc::RestLifecycle,
+) -> bool {
+    let Some(data) = slot.current.as_ref() else {
+        return false;
+    };
+    let Some(pre_action) = data.pre_action.as_ref() else {
+        return false;
+    };
+    try_play_tweet(
+        unit,
+        frame,
+        data.kind,
+        pre_action.id,
+        TweetStep::PreAction,
+        mind,
+        actions,
+        rest,
+    )
+}
+
+/// TryPlayTweetAsync: skipped for a multiple-character fixture talk or a
+/// zero id; otherwise the tweet id, the tweet state Pending and the change to
+/// the tweet state, then the wait for Done.
+#[allow(clippy::too_many_arguments)]
+fn try_play_tweet(
+    unit: u32,
+    frame: u32,
+    kind: TalkType,
+    tweet_id: i32,
+    step: TweetStep,
+    mind: &mut ObjectiveMind,
+    actions: &mut crate::npc::NpcActions,
+    rest: &mut crate::npc::RestLifecycle,
+) -> bool {
+    if kind == TalkType::MultipleCharacterFixture || tweet_id == 0 {
+        return false;
+    }
+    actions.tweet_id = tweet_id;
+    actions.tweet_state = crate::npc_state::TweetState::Pending;
+    actions.change(crate::npc::NpcAction::Tweet, rest);
+    mind.body = Some(BodyWait::TweetDone { since: frame, step });
+    info!("[npc unit={unit}] frame={frame} tweet {tweet_id}: Pending, change to Tweet");
+    true
 }
 
 /// 出生/重播种落位：可行走格集上按名册位次等距取格（`index × 总格数 /

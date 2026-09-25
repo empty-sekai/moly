@@ -752,6 +752,13 @@ pub(crate) fn plan(
     let (Some(sites), Some(mut selection)) = (sites, selection) else {
         return;
     };
+    // Resolving the level checks the layout the site will restore; the home
+    // starter comes from the server panel, so hold until it is installed.
+    if temporary.is_none()
+        && crate::fixture::waits_for_panel_layout(selection.site_type(), selection.content())
+    {
+        return;
+    }
     let site_level = match if temporary.is_some() {
         selection.resolve_temporary_level(&sites)
     } else {

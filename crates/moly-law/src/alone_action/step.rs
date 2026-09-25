@@ -54,17 +54,18 @@ pub fn effective_speed(speed: f32) -> f32 {
     }
 }
 
-/// 等待时长的毫秒化：源取 `(int)(time * 1000)`——向零截断；
-/// 非有限值（含无穷与 NaN）落到 `i32::MIN`（与源平台转换的
-/// 「不确定值」一致）。
+/// 等待时长的毫秒化，照宿主等待方法的机器码：单精度乘积 `time * 1000`
+/// 按 32 位向零截断（越界饱和、NaN 得 0），乘积为正无穷时另取
+/// `int.MinValue`。负无穷由截断饱和到同一值。
 ///
 /// 手算锚：`0.1 -> 100`、`3.0 -> 3000`、`8.0 -> 8000`。
 pub fn wait_milliseconds(seconds: f32) -> i32 {
-    if seconds.is_finite() {
-        (seconds * 1000.0) as i32
-    } else {
-        i32::MIN
+    let product = seconds * 1000.0;
+    if product == f32::INFINITY {
+        return i32::MIN;
     }
+    // Rust 的 `as i32` 与 32 位 fcvtzs 同形：NaN → 0，越界饱和。
+    product as i32
 }
 
 /// 一张待触发的时刻表项：步与其（拼接后）触发时刻。
@@ -332,15 +333,15 @@ mod tests {
     }
 
     #[test]
-    fn wait_milliseconds_truncates_and_non_finite_is_int_min() {
+    fn wait_milliseconds_truncates_like_the_host_conversion() {
         // 手算锚（源 (int)(time*1000)）：整秒直乘；0.1s 的 f32 乘积
         // 微高于 100 仍截断为 100
         assert_eq!(wait_milliseconds(0.1), 100);
         assert_eq!(wait_milliseconds(3.0), 3000);
         assert_eq!(wait_milliseconds(8.0), 8000);
-        // 非有限（无穷与 NaN）-> i32::MIN（源平台转换的不确定值）
+        // 正无穷另取 int.MinValue；NaN 经截断得 0（宿主机器码）
         assert_eq!(wait_milliseconds(f32::INFINITY), i32::MIN);
-        assert_eq!(wait_milliseconds(f32::NAN), i32::MIN);
+        assert_eq!(wait_milliseconds(f32::NAN), 0);
     }
 
     #[test]

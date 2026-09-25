@@ -328,11 +328,13 @@ pub(super) fn apply_command(
         BrowserCommand::Sound(enabled) => {
             io.audio_gate.enabled = enabled;
         }
-        // Weather owns no catalogue state: the dial is queued for the weather
-        // chain, which validates the档 and starts the same cross-fade as the
+        // Weather owns no catalogue state: the dial edits the server panel's
+        // current schedule row, and the panel asks the weather chain for that
+        // phenomenon, which validates it and starts the same cross-fade as the
         // native key. A stale ID is refused there with a log line.
         BrowserCommand::Weather(id) => {
-            io.weather.write(crate::weather::WeatherRequest(id));
+            io.weather
+                .write(crate::server_panel::PhenomenaScheduleEdit::Set(id));
         }
         BrowserCommand::Focus(value) => {
             state.external_input_capture = value;
@@ -945,7 +947,7 @@ mod tests {
         world.init_resource::<Messages<TalkCancelRequest>>();
         world.init_resource::<Messages<PlayerFixtureRequest>>();
         world.init_resource::<Messages<crate::game_settings::SettingsPanelRequest>>();
-        world.init_resource::<Messages<crate::weather::WeatherRequest>>();
+        world.init_resource::<Messages<crate::server_panel::PhenomenaScheduleEdit>>();
         world.init_resource::<input::PasteInbox>();
         // 声音闸是 `LibraryInput` 的一个 `ResMut`，缺席时取参会 panic。
         // 它随声音开关那条改动进入 `LibraryInput`，而这个最小 World 没跟着

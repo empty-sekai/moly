@@ -61,8 +61,15 @@ pub mod menu_shell;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
 pub mod npc;
+mod npc_clock;
 mod npc_fixture_activity;
+#[cfg(test)]
+mod npc_harness;
 pub mod npc_objective;
+mod npc_presenter;
+mod npc_state;
+mod npc_talk_lottery;
+mod npc_tweet;
 pub mod option_dialog;
 mod particle_runtime;
 mod particle_geometry;
@@ -82,6 +89,7 @@ pub mod player_talk;
 mod render;
 mod room_appearance;
 pub mod schedule;
+mod server_panel;
 mod settings_store;
 pub mod shadowmap;
 pub mod site;
@@ -174,6 +182,8 @@ pub fn app(
     ui_layout::install(&mut app);
     app.add_plugins(site::SitePlugin(site));
     schedule::install(&mut app);
+    app.add_plugins(server_panel::ServerPanelPlugin);
+    app.add_plugins(npc_state::NpcStatePlugin);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);

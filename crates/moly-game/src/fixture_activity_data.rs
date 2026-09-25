@@ -183,6 +183,8 @@ pub(crate) struct ActivityFixtureMaster {
     pub put_type: PutType,
     pub player_action_type: String,
     pub handle_type: String,
+    /// The master's fixture type is the gate type.
+    pub is_gate: bool,
 }
 
 #[derive(Resource)]
@@ -199,6 +201,8 @@ pub(crate) struct FixtureActivityTables {
     pre_action_by_talk: HashMap<i32, usize>,
     fixtures: HashMap<i32, ActivityFixtureMaster>,
     site_groups: HashMap<i32, Vec<i32>>,
+    /// Condition ids of each condition group, in the group table's row order.
+    conditions_by_group: HashMap<i32, Vec<i32>>,
 }
 
 /// Preparation errors are not candidate-pool emptiness. A caller must not turn
@@ -324,7 +328,143 @@ pub(crate) enum TargetRequest {
     },
 }
 
+/// One master talk as the server panel's talk-list policy reads it. The
+/// policy is a named mock of a server algorithm; these are client master
+/// facts only, in the talk table's row order.
+pub(crate) struct TalkListFacts<'a> {
+    pub id: i32,
+    /// The speaker group expanded the way the client expands it.
+    pub units: Vec<u32>,
+    /// Site ids of the talk's site group; `None` when the group is absent.
+    pub sites: Option<&'a [i32]>,
+    /// (condition type, condition value) of every row in the condition group.
+    pub conditions: Vec<(&'a str, i32)>,
+}
+
 impl FixtureActivityTables {
+    /// The client's group expansion: the five unit fields in slot order,
+    /// zero fields skipped. A group missing from the table is the source's
+    /// null dereference, so it is an error, never an empty cast.
+    pub(crate) fn unit_ids_of_group(&self, group_id: i32) -> Result<Vec<u32>, String> {
+        let group = self
+            .units
+            .get(group_id)
+            .ok_or_else(|| format!("unit group {group_id} is not in the unit-group table"))?;
+        group
+            .units
+            .iter()
+            .filter_map(|unit| unit.filter(|unit| *unit != 0))
+            .map(|unit| {
+                u32::try_from(unit).map_err(|_| format!("unit group {group_id} holds unit {unit}"))
+            })
+            .collect()
+    }
+
+    /// Whether a talk id names a row of the loaded talk table.
+    pub(crate) fn has_talk(&self, talk_id: i32) -> bool {
+        self.talks.get(talk_id).is_some()
+    }
+
+    /// The master talk row of an id.
+    pub(crate) fn talk_master(&self, talk_id: i32) -> Option<&ActivityMaster> {
+        self.talks.get(talk_id)
+    }
+
+    /// The five unit fields of a unit group, in slot order; `None` when the
+    /// group is not in the table.
+    pub(crate) fn unit_group_slots(&self, group_id: i32) -> Option<[Option<i32>; 5]> {
+        self.units.get(group_id).map(|group| group.units)
+    }
+
+    /// (condition type, value) of every condition of a talk's condition
+    /// group, in the group table's row order. A group or condition the
+    /// talk names and the tables lack is an error.
+    pub(crate) fn talk_conditions(&self, talk_id: i32) -> Result<Vec<(&str, i32)>, String> {
+        let master = self
+            .talks
+            .get(talk_id)
+            .ok_or_else(|| format!("talk {talk_id} is not in the talk table"))?;
+        let ids = self
+            .conditions_by_group
+            .get(&master.condition_group_id)
+            .ok_or_else(|| {
+                format!(
+                    "talk {talk_id} names absent condition group {}",
+                    master.condition_group_id
+                )
+            })?;
+        ids.iter()
+            .map(|id| {
+                self.conditions
+                    .get(*id)
+                    .map(|condition| (condition.kind.as_str(), condition.value))
+                    .ok_or_else(|| format!("talk {talk_id}: condition {id} is absent"))
+            })
+            .collect()
+    }
+
+    /// The pre-action row of a talk, if the talk has one.
+    pub(crate) fn pre_action_of(&self, talk_id: i32) -> Option<&ActivityPreAction> {
+        self.pre_action_by_talk
+            .get(&talk_id)
+            .map(|index| &self.pre_actions[*index])
+    }
+
+    /// Site ids of a site group; `None` when the group is absent.
+    pub(crate) fn site_group_sites(&self, group_id: i32) -> Option<&[i32]> {
+        self.site_groups.get(&group_id).map(Vec::as_slice)
+    }
+
+    /// Every master talk in row order, with the facts the talk-list policy
+    /// filters on. A condition group or condition that a talk names and the
+    /// tables do not hold is an error: the policy must not silently drop or
+    /// keep such a talk. Groups no talk names are not resolved (shipped
+    /// tables carry such groups whose conditions are absent).
+    pub(crate) fn talk_list_facts(&self) -> Result<Vec<TalkListFacts<'_>>, String> {
+        let mut by_group: HashMap<i32, Vec<i32>> = HashMap::new();
+        for entry in &self.condition_groups.rows {
+            by_group
+                .entry(entry.group_id)
+                .or_default()
+                .push(entry.condition_id);
+        }
+        self.talks
+            .rows
+            .iter()
+            .map(|master| {
+                let condition_ids = by_group.get(&master.condition_group_id).ok_or_else(|| {
+                    format!(
+                        "talk {} names absent condition group {}",
+                        master.id, master.condition_group_id
+                    )
+                })?;
+                let conditions = condition_ids
+                    .iter()
+                    .map(|id| {
+                        self.conditions
+                            .get(*id)
+                            .map(|condition| (condition.kind.as_str(), condition.value))
+                            .ok_or_else(|| {
+                                format!(
+                                    "talk {} names condition group {} whose condition {id} is absent",
+                                    master.id, master.condition_group_id
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(TalkListFacts {
+                    id: master.id,
+                    units: self.unit_ids_of_group(master.unit_group_id)?,
+                    sites: self
+                        .site_groups
+                        .get(&master.site_group_id)
+                        .map(Vec::as_slice),
+                    conditions,
+                })
+            })
+            .collect()
+    }
+
     /// Iterate the existing parsed script rows in original master order. This
     /// is not an eligible pool: the caller retains its existing candidate view
     /// and must call qualify_single with the live source gates for every entry.
@@ -418,6 +558,15 @@ impl FixtureActivityTables {
         row.points.get(unit_slot).copied().ok_or_else(|| {
             PrepareError::InvalidData("action point unit slot exceeds source definition".into())
         })
+    }
+
+    /// The non-zero action points of an action-point row in member-slot
+    /// order, as the source's action-point dictionary enumerates them; `None`
+    /// when the row is absent. The fifth member slot is not carried: it is 0
+    /// on every shipped row.
+    pub(crate) fn action_points_of(&self, definition: i32) -> Option<Vec<i32>> {
+        let row = self.action_points.get(definition)?;
+        Some(row.points.iter().flatten().copied().filter(|point| *point != 0).collect())
     }
 
     pub(crate) fn fixture_master(&self, id: i32) -> Option<&ActivityFixtureMaster> {
@@ -879,6 +1028,7 @@ impl FixtureActivityTables {
                         put_type,
                         player_action_type: string(row, "playerActionType")?,
                         handle_type: string(row, "handleType")?,
+                        is_gate: string(row, "fixtureType")? == "gate",
                     },
                 )
                 .is_some()
@@ -906,11 +1056,19 @@ impl FixtureActivityTables {
                 timeline_group_id: int(row, "mysekaiCharacterTalkFixtureTimelineGroupId")?,
             })
         })?;
+        let mut conditions_by_group: HashMap<i32, Vec<i32>> = HashMap::new();
+        for entry in &condition_groups.rows {
+            conditions_by_group
+                .entry(entry.group_id)
+                .or_default()
+                .push(entry.condition_id);
+        }
         Ok(Self {
             talks,
             units,
             conditions,
             condition_groups,
+            conditions_by_group,
             timelines,
             action_points,
             player_timelines,
@@ -1041,3 +1199,7 @@ pub(crate) fn timeline_asset(
     };
     Ok((timeline_package(logical)?, prefab))
 }
+
+#[cfg(test)]
+#[path = "npc_harness/tables.rs"]
+mod harness;

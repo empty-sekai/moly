@@ -127,6 +127,21 @@ pub fn install(app: &mut App) {
                 .after(player_talk::advance_session)
                 .after(crate::fixture_activity_timeline::advance),
         );
+    // The presenter's per-frame calls in source order, after the AI loop:
+    // the state machine update (call 3), then the greeting gate (call 10).
+    app.configure_sets(
+        Update,
+        crate::npc_state::NpcPresenterSet.after(npc_objective::decide),
+    )
+    .add_systems(
+        Update,
+        (
+            crate::npc_state::on_update,
+            crate::npc_presenter::try_greeting,
+        )
+            .chain()
+            .in_set(crate::npc_state::NpcPresenterSet),
+    );
     app.init_resource::<crate::npc_fixture_activity::NpcFixtureActivities>()
         .init_resource::<crate::npc_fixture_activity::NpcFixtureAreas>()
         .add_systems(
@@ -461,12 +476,16 @@ pub fn install(app: &mut App) {
                             .after(npc::parse)
                             .after(fixture_attach::parse),
                         npc::reseed.after(npc::spawn_when_ready),
-                        // 目标机决策（停顿计时、决策梯、抽签、目的地解算、出发——
-                        // 写路径槽与相位）。决策先于推进：当帧决策当帧起步。
+                        // Frame order of one NPC frame: the agent step, then the
+                        // AI loop (the objective machine: rest, ladder, draws,
+                        // destinations, departure, the objective bodies), then
+                        // the presenter's per-frame calls (NpcPresenterSet). A
+                        // destination chosen on a frame is first stepped on the
+                        // next one.
+                        npc::advance.after(npc::reseed),
                         npc_objective::decide
-                            .after(npc::reseed)
-                            .before(npc::advance),
-                        npc::advance,
+                            .after(npc::advance)
+                            .before(npc::sync_rest_lifecycle),
                         npc::report
                             .after(npc::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),

@@ -15,7 +15,8 @@
 //! 原地预转；独立转身与家具局部贴合保留各自相位。
 //!
 //! 常规路线按源调用选步行，速度来自角色表的 walkSpeedMetersPerSecond。
-//! 出生名册/分布仍为离线点名与面内等距散布的具名替身；家具 Fit 的
+//! 名册来自服务端面板的访客行（见 `server_panel`）；出生分布仍为面内
+//! 等距散布的具名替身；家具 Fit 的
 //! 局部移动遵循先位移后转向；导航再附着仍非原生代理，不能当作完整还原。
 //! 换站保留实体/装配，由 reseed 在新面定案后重置落位与目标机。
 
@@ -30,41 +31,6 @@ use moly_law::path::{
     turn_motion, NpcPathWalkSlot, TurnMotion, WalkVerdict, Waypoint, WaypointKind,
     ARRIVAL_DISTANCE, FORWARD_FALLBACK, WAYPOINT_SAMPLE_DISTANCE,
 };
-
-/// 离线名册点名（native `MOLY_ROSTER_UNITS` / web `roster_units`）。
-/// Compact 默认只生成三名NPC；Full 或显式 `all` 保留全角色清单。
-/// 只减少实例，不缩减角色资产目录，也不改变成员自己的模拟。名册覆盖到谁会翻转
-/// 下游分支（如 tweet after-edit 池为空的角色静默跳过），验收要能点名
-/// 铺到那一行。只做形状解析；点名是否在清单里由消费点连同清单一起校验。
-fn roster_units(content: crate::site::OfflineSceneContent) -> Option<Vec<u32>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    let raw = std::env::var("MOLY_ROSTER_UNITS").ok();
-    #[cfg(target_arch = "wasm32")]
-    let raw = web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
-        .and_then(|params| params.get("roster_units"));
-    let Some(raw) = raw else {
-        return (content == crate::site::OfflineSceneContent::Compact).then(|| vec![1, 5, 13]);
-    };
-    if raw.trim() == "all" {
-        return None;
-    }
-    let ids: Vec<u32> = raw
-        .split(',')
-        .map(|token| token.trim())
-        .filter(|token| !token.is_empty())
-        .map(|token| {
-            token
-                .parse::<u32>()
-                .unwrap_or_else(|_| panic!("MOLY_ROSTER_UNITS 的项不是 unit id：{token:?}"))
-        })
-        .collect();
-    if ids.is_empty() {
-        panic!("MOLY_ROSTER_UNITS 是空的：要么删掉它走默认名册，要么点名至少一名");
-    }
-    Some(ids)
-}
 
 /// 名册成员身位距站点中心的半径，替身值（真源出生点的来源未接）。
 /// 只喂玩家出生环（`player` 域与 [`ring_scale`]）；名册成员的落位走
@@ -100,12 +66,19 @@ pub(crate) enum NpcAction {
     Rest = 7,
     None = 8,
     Tweet = 9,
+    Greeting = 10,
     FixtureAction = 11,
     FixtureActionIdle = 12,
     ChangeSite = 14,
     Communication = 20,
 }
 
+/// The action state machine of one NPC, with the few model fields its states
+/// write while the state changes (the tweet state and id, the first-talk
+/// flag). Every change goes through [`NpcActions::change`], which keeps the
+/// source's refusals and runs the old state's exit and the new state's enter;
+/// the parts of those that need other resources are queued in `effects` and
+/// run by `npc_state::on_update` in the same frame's presenter pass.
 #[derive(Component)]
 pub(crate) struct NpcActions {
     pub(crate) current: NpcAction,
@@ -116,6 +89,20 @@ pub(crate) struct NpcActions {
     pub(crate) site_type: String,
     registered: bool,
     scene: u64,
+    /// Seconds in the current state (the state's own clock, zeroed as the
+    /// state is entered and advanced by the per-frame update).
+    pub(crate) elapsed: f32,
+    /// The AI model's tweet state. The tweet and greeting states write it on
+    /// enter, update and exit; the talk objective waits on it.
+    pub(crate) tweet_state: crate::npc_state::TweetState,
+    /// The AI model's tweet id, read by the tweet state's enter.
+    pub(crate) tweet_id: i32,
+    /// The model's one-shot first-talk flag, set when a greeting completes.
+    pub(crate) first_talk_complete: bool,
+    /// Seconds the presenter has updated since it was initialized.
+    pub(crate) since_initialized: f32,
+    pub(crate) locals: crate::npc_state::StateLocals,
+    pub(crate) effects: Vec<crate::npc_state::StateEffect>,
 }
 
 impl Default for NpcActions {
@@ -129,6 +116,13 @@ impl Default for NpcActions {
             site_type: String::new(),
             registered: false,
             scene: 0,
+            elapsed: 0.0,
+            tweet_state: crate::npc_state::TweetState::Valid,
+            tweet_id: 0,
+            first_talk_complete: false,
+            since_initialized: 0.0,
+            locals: Default::default(),
+            effects: Vec::new(),
         }
     }
 }
@@ -138,15 +132,93 @@ impl NpcActions {
         self.registered
     }
 
+    /// The state machine's change. It refuses a change to the current state
+    /// and any change while the current state is None, the unregistered sink
+    /// a spawned NPC starts in (registration leaves it through
+    /// [`Self::initialize_status`]). Otherwise the old state exits, the
+    /// before state is written, the new state's clock is zeroed and the new
+    /// state enters. None itself has no registered state; changing into it is
+    /// a named failure.
+    ///
+    /// The source's guard also refuses a change once the model is disposed.
+    /// Here a disposed model has no component to change: a temporary cast
+    /// member's entity is despawned, and a site change replaces the whole
+    /// model with a fresh one that starts in None (so the same refusal
+    /// applies until it registers). The guard therefore holds by
+    /// construction and has no flag of its own.
     pub(crate) fn change(&mut self, next: NpcAction, rest: &mut RestLifecycle) {
-        if self.current == next {
+        if self.current == next || self.current == NpcAction::None {
             return;
         }
-        if self.current == NpcAction::Rest {
-            rest.leave();
+        if next == NpcAction::None {
+            error!(
+                "[npc-state] change {:?} -> None refused: None has no registered state",
+                self.current
+            );
+            return;
         }
+        self.exit_current(rest);
         self.before = self.current;
         self.current = next;
+        self.elapsed = 0.0;
+        self.enter_current();
+    }
+
+    /// Registration: Idle directly, without the change's refusals (the
+    /// source's initial status write).
+    fn initialize_status(&mut self) {
+        self.current = NpcAction::Idle;
+        self.elapsed = 0.0;
+    }
+
+    fn exit_current(&mut self, rest: &mut RestLifecycle) {
+        use crate::npc_state::{StateEffect, TweetState};
+        match self.current {
+            NpcAction::Rest => rest.leave(),
+            // Tweet exit: the hide event and the emoticon hide, then Done.
+            NpcAction::Tweet => {
+                self.effects.push(StateEffect::TweetExit);
+                self.tweet_state = TweetState::Done;
+            }
+            // Greeting exit: the hide event, facial reset, emoticon hide and
+            // look-at release, then Done and the greeting's completion.
+            NpcAction::Greeting => {
+                self.effects.push(StateEffect::GreetingExit);
+                self.tweet_state = TweetState::Done;
+                self.complete_greeting();
+            }
+            _ => {}
+        }
+    }
+
+    fn enter_current(&mut self) {
+        use crate::npc_state::{StateEffect, TweetState};
+        match self.current {
+            // Tweet enter (the room owner's branch): in progress now; the
+            // row, the stop, the expressions and the show event follow.
+            NpcAction::Tweet => {
+                self.locals.tweet.animation_started = false;
+                self.tweet_state = TweetState::InProgress;
+                self.effects.push(StateEffect::TweetEnter);
+            }
+            // Greeting enter: pending, then in progress; the greeting pick,
+            // the stop, the look-at, the row and the show event follow.
+            NpcAction::Greeting => {
+                self.locals.greeting.animation_started = false;
+                self.tweet_state = TweetState::Pending;
+                self.tweet_state = TweetState::InProgress;
+                self.effects.push(StateEffect::GreetingEnter);
+            }
+            _ => {}
+        }
+    }
+
+    /// The greeting state's completion: Done, the model's first talk
+    /// complete, and the state's own already-greeted latch.
+    pub(crate) fn complete_greeting(&mut self) {
+        self.tweet_state = crate::npc_state::TweetState::Done;
+        self.first_talk_complete = true;
+        self.locals.greeting.already_greeted = true;
     }
 
     pub(crate) fn begin_objective_rest(&mut self, rest: &mut RestLifecycle, revision: u64) {
@@ -237,12 +309,30 @@ pub(crate) fn sync_rest_lifecycle(
             actions.scene = scene;
             actions.site_type = site.as_ref().unwrap().site_type.clone();
             actions.enable_talk = true;
-            actions.change(NpcAction::Idle, &mut rest);
+            actions.initialize_status();
         }
         if actions.current != NpcAction::Rest || talk.is_some() || reaction.is_some() {
             rest.leave();
         }
     }
+}
+
+/// The presenter's Stop: the agent stops where it stands. It writes no route
+/// outcome, so an objective waiting in its body is not ended by it, and it
+/// keeps the route's navigation generation, so the agent step does not take
+/// the stop for a rebuilt navigation field and replan.
+pub(crate) fn stop_agent(
+    route: &mut RouteStops,
+    path: &mut PathSlot,
+    walk: &mut WalkState,
+    phase: &mut MotionPhase,
+) {
+    let generation = route.generation;
+    route.cancel();
+    route.generation = generation;
+    path.0 = NpcPathWalkSlot::from_corners(Vec::new());
+    walk.0.next_corner = 0;
+    *phase = MotionPhase::Dwelling { remaining: None };
 }
 
 /// Applied before the Rest/script hand-off. Stop movement, not the AI content
@@ -257,15 +347,20 @@ pub(crate) fn enter_player_talk(commands: &mut Commands, entity: Entity, player:
             &mut WalkState,
             &mut MotionPhase,
         )>();
+        let mut queued_before = None;
         if let Ok((mut actions, mut rest, mut route, mut path, mut walk, mut phase)) =
             query.get_mut(world, entity)
         {
+            queued_before = Some(actions.effects.len());
             actions.change(NpcAction::Talk, &mut rest);
             actions.talk_owner = Some(player);
             route.stop();
             path.0 = NpcPathWalkSlot::from_corners(Vec::new());
             walk.0.next_corner = 0;
             *phase = MotionPhase::Dwelling { remaining: None };
+        }
+        if let Some(queued_before) = queued_before {
+            crate::npc_state::publish_exits_now(world, entity, queued_before);
         }
     });
 }
@@ -760,8 +855,9 @@ pub(crate) fn parse(
 /// Update：清单与目标面都定案后，铺一次名册。内部形参带私有资源，
 /// 故 pub(crate)。
 ///
-/// 名册是具名离线输入（真源由站点管理按进度下发）。默认Compact只点名
-/// 少量成员，Full保留全员；成员落位走目标面的可行走格等距散布（构造上
+/// 名册是服务端面板的访客行展开后的 unit（行序、去重；真源在建 NPC 之前
+/// 先设对话列表，所以这里等对话列表就位）。Full 是产品自有的全员展示，
+/// 不是访客状态，保留全目录。成员落位走目标面的可行走格等距散布（构造上
 /// 不在家具脚印内、在面上）。目标机以出生态插入——起动旗立起（源起动
 /// 装配的同形），首判在名册铺开的当帧由目标机执行：出生即决策、即出发。
 pub(crate) fn spawn_when_ready(
@@ -774,10 +870,20 @@ pub(crate) fn spawn_when_ready(
     spawned: Option<Res<Spawned>>,
     selection: Res<crate::site::SiteSelection>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    panel: (
+        Option<Res<crate::server_panel::ServerPanel>>,
+        Option<Res<crate::server_panel::VisitingCharacters>>,
+        Option<Res<crate::server_panel::TalkDataStore>>,
+    ),
 ) {
     if spawned.is_some() {
         return;
     }
+    let (Some(server), Some(visitors), Some(_talk_list)) =
+        (panel.0.as_deref(), panel.1.as_deref(), panel.2.as_deref())
+    else {
+        return;
+    };
     let Some(catalog) = catalog else {
         return;
     };
@@ -797,34 +903,28 @@ pub(crate) fn spawn_when_ready(
         return;
     };
 
-    // 名册行：按离线预设或显式点名集过滤（保持清单序，落位
-    // 随人数摊）。点名不在清单里即响亮失败——静默丢一名会让冒烟覆盖
-    // 悄悄变短。
+    // 名册行：访客 unit 按展开序逐个取角色清单行（落位随人数摊）。访客
+    // 不在清单里即响亮失败——静默丢一名会让名册悄悄变短。
     // No demonstration cast in the embedded stage: independent playback must
-    // obtain every required member through spawn_temporary_units. Standalone
-    // continues to use its explicit offline roster unchanged.
-    let requested = if stage.is_some() {
-        Some(Vec::new())
+    // obtain every required member through spawn_temporary_units.
+    let requested: Option<&[u32]> = if stage.is_some() {
+        Some(&[])
+    } else if selection.content() == crate::site::OfflineSceneContent::Full {
+        None
     } else {
-        roster_units(selection.content())
+        Some(visitors.units())
     };
     let roster: Vec<&(u32, f32, f32, String, String)> = match requested {
-        Some(ids) => {
-            let set: std::collections::HashSet<u32> = ids.iter().copied().collect();
-            if set.len() != ids.len() {
-                panic!("MOLY_ROSTER_UNITS 有重复点名：{ids:?}");
-            }
-            for id in &ids {
-                if !catalog.0.iter().any(|(unit_id, ..)| unit_id == id) {
-                    panic!("MOLY_ROSTER_UNITS 点名的 unit {id} 不在角色清单里");
-                }
-            }
-            catalog
-                .0
-                .iter()
-                .filter(|(unit_id, ..)| set.contains(unit_id))
-                .collect()
-        }
+        Some(ids) => ids
+            .iter()
+            .map(|id| {
+                catalog
+                    .0
+                    .iter()
+                    .find(|(unit_id, ..)| unit_id == id)
+                    .unwrap_or_else(|| panic!("服务端面板访客 unit {id} 不在角色清单里"))
+            })
+            .collect(),
         None => catalog.0.iter().collect(),
     };
     let count = roster.len();
@@ -860,7 +960,7 @@ pub(crate) fn spawn_when_ready(
             // 出生态：起动旗立起（源起动装配「立即可执行下一目标」的同
             // 形），首判不等停顿。
             crate::npc_objective::ObjectiveMind::at_spawn(),
-            crate::npc_objective::MemberRng::seeded(*unit_id),
+            crate::npc_objective::MemberRng::from_platform(),
             MotionPhase::Dwelling { remaining: None },
         ));
         ids.push(*unit_id);
@@ -874,6 +974,16 @@ pub(crate) fn spawn_when_ready(
         KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
         KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
     };
+    let roster_word = if requested.is_none() {
+        "Full 全员展示，非访客状态".to_owned()
+    } else {
+        format!(
+            "服务端面板访客，到访次数 {:?}",
+            ids.iter()
+                .map(|unit| crate::server_panel::visit_count_of(server, visitors, *unit))
+                .collect::<Vec<_>>()
+        )
+    };
     let pause_word = if count == 0 {
         "none".to_owned()
     } else if pause_min == pause_max {
@@ -882,7 +992,7 @@ pub(crate) fn spawn_when_ready(
         format!("{pause_min:.1}-{pause_max:.1}s/员")
     };
     info!(
-        "npc 名册就绪：{count} 名（unit {ids:?}），目标驱动：目标层抽签门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0}（面板 FloatConfigs），停顿 {pause_word}，锚定对话家具 {} 件，可行走 {} 格，出生即首判",
+        "npc 名册就绪：{count} 名（unit {ids:?}，{roster_word}），目标驱动：目标层抽签门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0}（面板 FloatConfigs），停顿 {pause_word}，锚定对话家具 {} 件，可行走 {} 格，出生即首判",
         KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
         config.float(KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT),
         KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
@@ -967,7 +1077,7 @@ pub(crate) fn spawn_temporary_units(
                 MotionClips { idle, walk },
                 crate::npc_objective::TalkSlot::default(),
                 crate::npc_objective::ObjectiveMind::at_spawn(),
-                crate::npc_objective::MemberRng::seeded(unit_id),
+                crate::npc_objective::MemberRng::from_platform(),
                 MotionPhase::Dwelling { remaining: None },
             ))
             .id();
@@ -1073,7 +1183,11 @@ pub(crate) fn reseed(
         *phase = MotionPhase::Dwelling { remaining: None };
         talk_slot.reset_ai_talk_data();
         rest.leave();
+        let retire = matches!(actions.current, NpcAction::Tweet | NpcAction::Greeting);
         *actions = NpcActions::default();
+        if retire {
+            actions.effects.push(crate::npc_state::StateEffect::Retire);
+        }
         // 目标机复位到出生态：换站对成员是新一次起动（旗再立、停顿清零、
         // 槽位清空）。抽签引擎不复位——成员自己的跨站连续性没有真源
         // 依据可断，保留序列比假装重抽更诚实。
@@ -1650,6 +1764,7 @@ pub(crate) fn declare_navigation_action(
 #[allow(clippy::type_complexity)]
 pub fn advance(
     time: Res<Time>,
+    clock: Res<crate::npc_clock::NpcClock>,
     editor: Res<crate::fixture_edit::EditSessionActive>,
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
@@ -1676,7 +1791,9 @@ pub fn advance(
     if editor.is_active() {
         return;
     }
-    let dt = time.delta_secs();
+    // The agent steps with the engine frame's delta time; the stuck
+    // watchdog keeps this host's elapsed seconds.
+    let dt = clock.delta();
     let now = time.elapsed_secs();
     for (
         unit,
@@ -1950,9 +2067,13 @@ pub fn advance(
                             stuck.0 = Some((state.0.position, now));
                         } else if now - since > STUCK_SECONDS {
                             stuck.0 = None;
-                            // Terminate only this movement; the objective owns
-                            // its next decision and the shared AI content.
+                            // Source IsPositionStacked while walking: the move
+                            // status poll reports Stacked, so the objective
+                            // stops, waits its scaled 1.0 s and fails. The
+                            // objective owns its next decision and the shared
+                            // AI content.
                             route.stop();
+                            route.stalled = true;
                             slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
                             state.0.next_corner = 0;
                             *phase = MotionPhase::Dwelling { remaining: None };
@@ -2216,7 +2337,7 @@ pub fn report(
             p[2],
             yaw,
             speed.0,
-            mind.rest_remaining,
+            mind.rest_seconds_left(),
             target.0[0],
             target.0[2],
         );

@@ -29,6 +29,7 @@
 
 use std::collections::HashSet;
 
+use super::net_random::EnumerablePick;
 use super::row::{ConditionRow, condition_type_discriminant, CONDITION_AFTER_SET_FIXTURE,
     CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT, CONDITION_MYSEKAI_FIXTURE_ID,
     CONDITION_MYSEKAI_FIXTURE_TAG_ID, CONDITION_MYSEKAI_PHENOMENA_ID,
@@ -186,8 +187,9 @@ pub fn get_enable_talk_counts(member_counts: &[i32]) -> Vec<i32> {
     counts
 }
 
-/// 一次权重抽签：按总权重标定一个落点。源以引擎浮点随机在
-/// `[0, total)` 取值；分布与求值次数是本律的一部分，引擎序列不是。
+/// One weighted draw: the engine's float range over `[0, total]`, both ends
+/// included. Its distribution and draw count belong to the law; the engine
+/// sequence does not.
 pub trait WeightedDraw {
     fn draw_weight(&mut self, total: f32) -> f32;
 }
@@ -208,17 +210,19 @@ pub struct LotteryWeights {
     pub talk4: f32,
 }
 
-/// 成员数档权重抽签：候选 `(1, w1)..(4, w4)` 先按启用表过滤，再对
-/// 权重和**恰做一次**权重抽，线性扫描取首个累计和严格大于落点的档。
-///
-/// - 全零权重：源照样抽一次（落点 0 无档命中）后返回 0——本律消耗
-///   恰一次抽签并返回 `None`；
-/// - 权重和以 f32 累加，扫描序即档序 1→4。
+/// Member-count lottery. The candidates `(1, w1)..(4, w4)`, in that order,
+/// are filtered by the enabled counts; their weights are summed in double
+/// precision and cast to single precision once; exactly one engine float
+/// draw in `[0, sum]` (both ends included) is taken; a single-precision
+/// running sum is scanned and the first count whose running sum is strictly
+/// greater than the draw wins. A draw no bucket takes (a draw equal to the
+/// sum when the running sum ends at or below it, or all weights zero)
+/// returns member count 0; the pick that follows then has no candidate.
 pub fn lottery_member_count(
     enable_counts: &[i32],
     weights: &LotteryWeights,
     rand: &mut impl WeightedDraw,
-) -> Option<i32> {
+) -> i32 {
     let enabled: HashSet<i32> = enable_counts.iter().copied().collect();
     let candidates = [
         (1, weights.talk1),
@@ -230,60 +234,145 @@ pub fn lottery_member_count(
         .into_iter()
         .filter(|(count, _)| enabled.contains(count))
         .collect();
-    let total: f32 = filtered.iter().map(|(_, w)| *w).sum();
+    // The runtime's float Sum accumulates in double from +0.0 (an empty
+    // sequence sums to +0.0), then narrows once.
+    let total = filtered
+        .iter()
+        .fold(0.0_f64, |sum, (_, w)| sum + f64::from(*w)) as f32;
     let drawn = rand.draw_weight(total);
     let mut acc = 0.0f32;
     for (count, weight) in filtered {
         acc += weight;
         if drawn < acc {
-            return Some(count);
+            return count;
         }
     }
-    None
+    0
 }
 
-/// 成员数档内恰一次均匀抽：过滤出该档候选后按表序抽一。
-/// 档内为空时源在抽签处抛异常；本律不抽并返回 `None`。
+/// The source exceptions the talk-id lotteries raise. Each one ends the
+/// character's AI loop in the source (the loop catches only cancellation and
+/// its own "cannot decide" exception), so a caller must surface it, never
+/// turn it into "no talk".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LotteryFault {
+    /// The general lottery kept no talk and the character has no previous
+    /// talk id: an index into an empty array (after an engine range over an
+    /// empty span).
+    GeneralPoolEmpty,
+    /// The member-count bucket holds no talk (member count 0 after a draw no
+    /// bucket took, or a count no talk has): the sequence pick raises after
+    /// building its generator.
+    EmptyMemberCountPick { member_count: i32 },
+}
+
+/// The pick inside one member-count bucket: the pool's talks whose member
+/// count equals `member_count`, in pool order, then one sequence pick (a
+/// fresh `System.Random`, see [`super::net_random`]). An empty bucket is the
+/// source's raise.
 pub fn pick_talk_by_member_count<'a>(
     candidates: &'a [Candidate],
     member_count: i32,
-    rand: &mut impl UniformDraw,
-) -> Option<&'a Candidate> {
+    pick: &mut impl EnumerablePick,
+) -> Result<&'a Candidate, LotteryFault> {
     let matched: Vec<&Candidate> = candidates
         .iter()
         .filter(|c| c.member_count == member_count)
         .collect();
-    if matched.is_empty() {
-        return None;
-    }
-    Some(matched[rand.draw(matched.len())])
+    let index = pick
+        .pick(matched.len())
+        .ok_or(LotteryFault::EmptyMemberCountPick { member_count })?;
+    Ok(matched[index])
 }
 
-/// 通用对话抽签全链：八门筛池 → 空池零抽签返回空 → 成员数启用表 →
-/// 恰一次权重抽 → 档内恰一次均匀抽。
+/// What one talk-id lottery over a talk sequence produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LotteryTalkOutcome {
+    /// The talk id; 0 when no talk passed the gates (then nothing was drawn).
+    pub talk_id: i32,
+    /// The member count the weighted draw chose; `None` when nothing was drawn.
+    pub member_count: Option<i32>,
+}
+
+/// The talk-id lottery over a talk sequence (fixture lotteries): the eight
+/// gates keep the pool in sequence order; an empty pool returns talk id 0
+/// with no draw; otherwise the member counts present, one weighted draw
+/// ([`lottery_member_count`]) and one sequence pick inside the chosen bucket
+/// ([`pick_talk_by_member_count`]).
 ///
-/// 求值次数（与源逐一对应）：
-/// - 门筛后空池：0 次抽签；
-/// - 权重档抽不中（全零权重等）：恰 1 次权重抽，无均匀抽；
-/// - 正常：恰 1 次权重抽 + 恰 1 次均匀抽。
+/// After the pick the source may record the pick's fixture in a per-character
+/// cache; that cache is read only by the guard of its own write, so it
+/// changes no result and is not modelled.
 pub fn lottery_talk_id(
     candidates: &[Candidate],
     weights: &LotteryWeights,
     weighted: &mut impl WeightedDraw,
-    uniform: &mut impl UniformDraw,
-) -> Option<i32> {
+    pick: &mut impl EnumerablePick,
+) -> Result<LotteryTalkOutcome, LotteryFault> {
     let pool: Vec<Candidate> = candidates
         .iter()
         .copied()
         .filter(|c| c.passes_gates)
         .collect();
     if pool.is_empty() {
-        return None;
+        return Ok(LotteryTalkOutcome {
+            talk_id: 0,
+            member_count: None,
+        });
     }
     let member_counts: Vec<i32> = pool.iter().map(|c| c.member_count).collect();
     let enable_counts = get_enable_talk_counts(&member_counts);
-    let member_count = lottery_member_count(&enable_counts, weights, weighted)?;
-    pick_talk_by_member_count(&pool, member_count, uniform).map(|c| c.talk_id)
+    let member_count = lottery_member_count(&enable_counts, weights, weighted);
+    let picked = pick_talk_by_member_count(&pool, member_count, pick)?;
+    Ok(LotteryTalkOutcome {
+        talk_id: picked.talk_id,
+        member_count: Some(member_count),
+    })
+}
+
+/// What the general lottery returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneralPick {
+    /// One engine integer range over the kept talks: `index` of `pool_len`.
+    Drawn {
+        talk_id: i32,
+        index: usize,
+        pool_len: usize,
+    },
+    /// No talk was kept: the character's own previous talk id, no draw.
+    Previous { talk_id: i32 },
+}
+
+impl GeneralPick {
+    pub fn talk_id(&self) -> i32 {
+        match *self {
+            GeneralPick::Drawn { talk_id, .. } | GeneralPick::Previous { talk_id } => talk_id,
+        }
+    }
+}
+
+/// The general-talk lottery's last step. `pool` is the talk list's ids that
+/// passed the six filters, in list order; `previous` is the character's own
+/// previous talk id (0 when it has none). A non-empty pool takes exactly one
+/// engine integer range `[0, len)`; an empty pool returns the previous id
+/// with no draw, and without one it is the source's index error.
+pub fn lottery_general_talk_id(
+    pool: &[i32],
+    previous: i32,
+    rand: &mut impl UniformDraw,
+) -> Result<GeneralPick, LotteryFault> {
+    if pool.is_empty() {
+        if previous != 0 {
+            return Ok(GeneralPick::Previous { talk_id: previous });
+        }
+        return Err(LotteryFault::GeneralPoolEmpty);
+    }
+    let index = rand.draw(pool.len());
+    Ok(GeneralPick::Drawn {
+        talk_id: pool[index],
+        index,
+        pool_len: pool.len(),
+    })
 }
 
 /// `NPCLottery*` 百分比族（服务端下发，mock 可改）。
@@ -402,14 +491,14 @@ mod tests {
         }
     }
 
-    /// 均匀抽签替身：固定索引并数调用。
-    struct CountingDraw {
+    /// Sequence-pick stand-in: a fixed index, counting generator builds.
+    struct CountingPick {
         index: usize,
         calls: usize,
         last_len: usize,
     }
 
-    impl CountingDraw {
+    impl CountingPick {
         fn at(index: usize) -> Self {
             Self {
                 index,
@@ -419,11 +508,11 @@ mod tests {
         }
     }
 
-    impl UniformDraw for CountingDraw {
-        fn draw(&mut self, len: usize) -> usize {
+    impl EnumerablePick for CountingPick {
+        fn pick(&mut self, count: usize) -> Option<usize> {
             self.calls += 1;
-            self.last_len = len;
-            self.index
+            self.last_len = count;
+            (count > 0).then_some(self.index)
         }
     }
 
@@ -642,7 +731,7 @@ mod tests {
         let w = weights(10.0, 30.0, 0.0, 0.0);
         let mut rand = FixedWeighted::at(0.0);
         let picked = lottery_member_count(&[1, 2], &w, &mut rand);
-        assert_eq!(picked, Some(1));
+        assert_eq!(picked, 1);
         assert_eq!(rand.calls, 1, "恰一次权重抽");
         // 分母只含启用的档：talk3/talk4 关着，总权重 = 40
         assert_eq!(rand.last_total, 40.0);
@@ -654,13 +743,13 @@ mod tests {
         // 比例 0.25 → 落点恰 10.0：10 < 10 为假 → 落第二档（源严格小于）
         let w = weights(10.0, 30.0, 0.0, 0.0);
         let mut at_boundary = FixedWeighted::at(0.25);
-        assert_eq!(lottery_member_count(&[1, 2], &w, &mut at_boundary), Some(2));
+        assert_eq!(lottery_member_count(&[1, 2], &w, &mut at_boundary), 2);
         // 比例 0.24 → 落点 9.6 < 10 → 第一档
         let mut below = FixedWeighted::at(0.24);
-        assert_eq!(lottery_member_count(&[1, 2], &w, &mut below), Some(1));
+        assert_eq!(lottery_member_count(&[1, 2], &w, &mut below), 1);
         // 比例 0.99 → 落点 39.6：10 < 39.6 过一档、40 < 39.6 假 → 第二档
         let mut high = FixedWeighted::at(0.99);
-        assert_eq!(lottery_member_count(&[1, 2], &w, &mut high), Some(2));
+        assert_eq!(lottery_member_count(&[1, 2], &w, &mut high), 2);
     }
 
     #[test]
@@ -668,7 +757,7 @@ mod tests {
         // 全零权重：源照样抽（落点 0 无档命中）后返 0
         let w = weights(0.0, 0.0, 0.0, 0.0);
         let mut rand = FixedWeighted::at(0.0);
-        assert_eq!(lottery_member_count(&[1, 2], &w, &mut rand), None);
+        assert_eq!(lottery_member_count(&[1, 2], &w, &mut rand), 0);
         assert_eq!(rand.calls, 1, "权重抽已消费");
         assert_eq!(rand.last_total, 0.0);
     }
@@ -677,7 +766,7 @@ mod tests {
     fn member_count_lottery_empty_enable_table_draws_once_and_misses() {
         let w = weights(10.0, 10.0, 10.0, 10.0);
         let mut rand = FixedWeighted::at(0.0);
-        assert_eq!(lottery_member_count(&[], &w, &mut rand), None);
+        assert_eq!(lottery_member_count(&[], &w, &mut rand), 0);
         assert_eq!(rand.calls, 1, "空启用表：源对零和抽一次后空手");
         assert_eq!(rand.last_total, 0.0);
     }
@@ -687,7 +776,7 @@ mod tests {
         // 启用表只有 {2}：总权重 = talk2 单档
         let w = weights(10.0, 30.0, 0.0, 0.0);
         let mut rand = FixedWeighted::at(0.99);
-        assert_eq!(lottery_member_count(&[2], &w, &mut rand), Some(2));
+        assert_eq!(lottery_member_count(&[2], &w, &mut rand), 2);
         assert_eq!(rand.last_total, 30.0, "未启用档不进分母");
     }
 
@@ -708,15 +797,18 @@ mod tests {
             candidate(201, 2, true),
             candidate(202, 2, true),
         ];
-        let mut rand = CountingDraw::at(1);
+        let mut rand = CountingPick::at(1);
         let picked = pick_talk_by_member_count(&pool, 2, &mut rand);
-        assert_eq!(picked.map(|c| c.talk_id), Some(202));
+        assert_eq!(picked.map(|c| c.talk_id), Ok(202));
         assert_eq!(rand.calls, 1, "恰一次均匀抽");
         assert_eq!(rand.last_len, 2, "分母 = 该档候选数");
 
-        let mut empty = CountingDraw::at(0);
-        assert_eq!(pick_talk_by_member_count(&pool, 3, &mut empty), None);
-        assert_eq!(empty.calls, 0, "空档不抽签");
+        let mut empty = CountingPick::at(0);
+        assert_eq!(
+            pick_talk_by_member_count(&pool, 3, &mut empty).map(|c| c.talk_id),
+            Err(LotteryFault::EmptyMemberCountPick { member_count: 3 })
+        );
+        assert_eq!(empty.calls, 1, "an empty bucket still builds its generator, then raises");
     }
 
     // ---- 全链 ----
@@ -730,9 +822,9 @@ mod tests {
         ];
         let w = weights(0.0, 50.0, 0.0, 0.0);
         let mut weighted = FixedWeighted::at(0.5); // 落点 25 < 50 → 档 2
-        let mut uniform = CountingDraw::at(0); // 档 2 只有 201
+        let mut uniform = CountingPick::at(0); // 档 2 只有 201
         let picked = lottery_talk_id(&pool, &w, &mut weighted, &mut uniform);
-        assert_eq!(picked, Some(201));
+        assert_eq!(picked.map(|o| o.talk_id), Ok(201));
         assert_eq!(weighted.calls, 1);
         assert_eq!(uniform.calls, 1);
         assert_eq!(uniform.last_len, 1, "八门未过的候选不进分母");
@@ -743,8 +835,8 @@ mod tests {
         let pool = vec![candidate(101, 1, false)];
         let w = weights(10.0, 0.0, 0.0, 0.0);
         let mut weighted = FixedWeighted::at(0.0);
-        let mut uniform = CountingDraw::at(0);
-        assert_eq!(lottery_talk_id(&pool, &w, &mut weighted, &mut uniform), None);
+        let mut uniform = CountingPick::at(0);
+        assert_eq!(lottery_talk_id(&pool, &w, &mut weighted, &mut uniform).map(|o| o.talk_id), Ok(0));
         assert_eq!(weighted.calls, 0, "空池零抽签");
         assert_eq!(uniform.calls, 0);
     }
@@ -754,10 +846,13 @@ mod tests {
         let pool = vec![candidate(101, 1, true)];
         let w = weights(0.0, 0.0, 0.0, 0.0);
         let mut weighted = FixedWeighted::at(0.0);
-        let mut uniform = CountingDraw::at(0);
-        assert_eq!(lottery_talk_id(&pool, &w, &mut weighted, &mut uniform), None);
+        let mut uniform = CountingPick::at(0);
+        assert_eq!(
+            lottery_talk_id(&pool, &w, &mut weighted, &mut uniform),
+            Err(LotteryFault::EmptyMemberCountPick { member_count: 0 })
+        );
         assert_eq!(weighted.calls, 1, "权重抽已消费");
-        assert_eq!(uniform.calls, 0, "档抽不中时不进均匀抽");
+        assert_eq!(uniform.calls, 1, "member count 0 reaches the pick, which raises on its empty bucket");
     }
 
     // ---- 目标层百分比梯 ----

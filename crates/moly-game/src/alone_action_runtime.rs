@@ -520,8 +520,9 @@ fn parse_facial(text: &str) -> FacialTables {
 
 // ---- 随机源 ----
 
-/// 跨帧线性同余抽签（整数 0..99）：状态随调用前进、种子含 unitId，
-/// 跨帧连续——律只约束分布与掷点次数，引擎序列不在律内。
+/// 跨帧线性同余抽签：状态随调用前进、种子含 unitId，跨帧连续——律只
+/// 约束分布与掷点次数，引擎序列不在律内。脚本的整数抽签走脚本虚拟机
+/// 自己的映射（[`Lcg::percent`]）；`below` 是别的调用方的均匀区间。
 pub(crate) struct Lcg(u64);
 
 impl Lcg {
@@ -530,8 +531,16 @@ impl Lcg {
         Self(((unit_id as u64) << 32) | 0x00a10e_u64)
     }
 
+    /// One script `math.random(0, 99)`: one 31-bit value stands for the one
+    /// `rand()` of the script VM, mapped by the VM's own conversion (see
+    /// [`law::lua_math_random`]), not by an exact uniform 0..99.
     fn percent(&mut self) -> u32 {
-        self.below(100)
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let x = (self.0 >> 33) as u32;
+        law::lua_math_random(x, 0, 99) as u32
     }
 
     fn below(&mut self, upper: u32) -> u32 {
@@ -810,7 +819,7 @@ pub(crate) fn apply_mouth_pattern(
 /// activity owners keep their existing animation and presentation channels.
 #[allow(clippy::type_complexity)]
 pub(crate) fn advance(
-    time: Res<Time>,
+    clock: Res<crate::npc_clock::NpcClock>,
     gate: Res<AloneExecutionGate>,
     tables: Option<Res<FacialTables>>,
     library: Res<MotionLibrary>,
@@ -834,7 +843,7 @@ pub(crate) fn advance(
         return;
     };
     let wall = wall_second();
-    let now = time.elapsed_secs_f64();
+    let delta_time = clock.delta();
     for (npc, unit, rest, mut runtime, mut driver, talk) in &mut npcs {
         let rt = &mut *runtime;
         let driver = &mut *driver;
@@ -867,10 +876,16 @@ pub(crate) fn advance(
             values: Vec::new(),
         };
         let events: Vec<_> = script
-            .advance(program, &rt.scenarios, &rt.tail, wall, now, &mut draw)
+            .advance(program, &rt.scenarios, &rt.tail, wall, delta_time, &mut draw)
             .into_iter()
             .cloned()
             .collect();
+        if let Some(milliseconds) = script.failed_wait() {
+            error_once!(
+                "[alone] unit={} script wait of {milliseconds} ms is negative: the host delay raises, the script makes no further step",
+                unit.0
+            );
+        }
         if !draw.values.is_empty() {
             trace!("[alone] unit={} 整数掷点 {:?}", unit.0, draw.values);
         }
@@ -1079,3 +1094,7 @@ pub(crate) fn report(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "npc_harness/alone.rs"]
+mod harness;
