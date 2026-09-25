@@ -248,6 +248,9 @@ struct Session {
     preview_ticket: Option<u64>,
     waiting_seconds: f32,
     tweet_issued: bool,
+    /// The shared timeline's talk flag as last seen: the loop clip with the
+    /// talk flag is entered on its rising edge.
+    talk_clip: bool,
 }
 
 /// One placed fixture as the fixture-talk factories read it (see
@@ -1180,6 +1183,7 @@ impl Factory<'_, '_> {
                 preview_ticket: None,
                 waiting_seconds: 0.,
                 tweet_issued: false,
+                talk_clip: false,
             },
         );
         true
@@ -1476,8 +1480,29 @@ fn tick(
                 // recompose against this same instance's live locator.
                 let poses = live_poses(world, &session.selection)?;
                 set_pose(world, actor, poses.0)?;
-                if let Some(mut actions) = world.get_mut::<NpcActions>(actor) {
+                // The loop clip with the talk flag (LoopFlagBehaviour): its
+                // play enables talking and, unless the NPC is talking, changes
+                // it to the fixture action idle state, so the player's talk
+                // takes the playing-fixture row; its pause disables talking
+                // and changes no state back.
+                let entered = enable_talk && !session.talk_clip;
+                session.talk_clip = enable_talk;
+                let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
+                if let Ok((mut actions, mut rest)) = query.get_mut(world, actor) {
                     actions.enable_talk = enable_talk;
+                    if entered
+                        && !matches!(
+                            actions.current,
+                            NpcAction::Talk | NpcAction::FixtureActionIdle
+                        )
+                    {
+                        actions.change(NpcAction::FixtureActionIdle, &mut rest);
+                        info!(
+                            "[npc-fixture] unit={} action={} the loop clip enables talking; change to FixtureActionIdle",
+                            session.selection.unit,
+                            session.selection.source.source_id()
+                        );
+                    }
                 }
                 return Ok(false);
             }
@@ -1561,17 +1586,15 @@ fn try_play_tweet(
 
 /// TryPlayTimelineAsync of a single-character fixture talk: the fixture
 /// action state, then the timeline (the same playback as a no-talk action).
+/// The controller's SetupAsync disables talking before it loads the asset,
+/// as on the no-talk path.
 fn start_talk_timeline(
     world: &mut World,
     actor: Entity,
     selection: &Selection,
     frame: u32,
 ) -> Result<Phase, String> {
-    let enable_talk = world
-        .get::<NpcActions>(actor)
-        .map(|actions| actions.enable_talk)
-        .ok_or("NPC action owner disappeared")?;
-    change_action(world, actor, NpcAction::FixtureAction, enable_talk)?;
+    change_action(world, actor, NpcAction::FixtureAction, false)?;
     info!(
         "[npc unit={}] frame={frame} TryPlayTimelineAsync: change to FixtureAction, timeline {}",
         selection.unit, selection.timeline.id
