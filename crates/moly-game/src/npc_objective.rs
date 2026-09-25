@@ -3308,6 +3308,7 @@ mod social_candidate_tests {
             entity: Entity::PLACEHOLDER, target_fixture: None, unit: 11,
             site_type: "garden".into(), position: [1., 0., 2.],
             destination: [9., 0., 8.], talk_target: Some([3., 0., 4.]),
+            state: 0, cancel_reports: false,
         };
         assert!(snap.social_candidate(11, "garden").is_none());
         assert!(snap.social_candidate(12, "myroom").is_none());
