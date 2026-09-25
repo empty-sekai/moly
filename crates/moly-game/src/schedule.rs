@@ -127,6 +127,21 @@ pub fn install(app: &mut App) {
                 .after(player_talk::advance_session)
                 .after(crate::fixture_activity_timeline::advance),
         );
+    // The presenter's per-frame calls in source order, after the AI loop:
+    // the state machine update (call 3), then the greeting gate (call 10).
+    app.configure_sets(
+        Update,
+        crate::npc_state::NpcPresenterSet.after(npc_objective::decide),
+    )
+    .add_systems(
+        Update,
+        (
+            crate::npc_state::on_update,
+            crate::npc_presenter::try_greeting,
+        )
+            .chain()
+            .in_set(crate::npc_state::NpcPresenterSet),
+    );
     app.init_resource::<crate::npc_fixture_activity::NpcFixtureActivities>()
         .init_resource::<crate::npc_fixture_activity::NpcFixtureAreas>()
         .add_systems(
@@ -504,12 +519,16 @@ pub fn install(app: &mut App) {
                             .after(npc::parse)
                             .after(fixture_attach::parse),
                         npc::reseed.after(npc::spawn_when_ready),
-                        // 目标机决策（停顿计时、决策梯、抽签、目的地解算、出发——
-                        // 写路径槽与相位）。决策先于推进：当帧决策当帧起步。
+                        // Frame order of one NPC frame: the agent step, then the
+                        // AI loop (the objective machine: rest, ladder, draws,
+                        // destinations, departure, the objective bodies), then
+                        // the presenter's per-frame calls (NpcPresenterSet). A
+                        // destination chosen on a frame is first stepped on the
+                        // next one.
+                        npc::advance.after(npc::reseed),
                         npc_objective::decide
-                            .after(npc::reseed)
-                            .before(npc::advance),
-                        npc::advance,
+                            .after(npc::advance)
+                            .before(npc::sync_rest_lifecycle),
                         npc::report
                             .after(npc::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),
@@ -575,9 +594,9 @@ pub fn install(app: &mut App) {
                     (
                         // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
                         // 之后：换段以缺省速率起新段，玩家域同帧把速率压回
-                        // 真源式。其后气泡链：解析主表
-                        // → 烘图集 → 驻留沿触发（读 npc 推进写好的相位）→ 存活
-                        // 计时与淡坡。读相位所以排推进之后。
+                        // 真源式。其后气泡链：烘图集（tweet 行归 NPC 侧解析）
+                        // → HUD 事件消费（NPC 状态机本帧发的事件，排在呈现
+                        // 调用集之后）→ 存活计时与淡坡。
                         player_avatar::drive
                             .after(player::advance)
                             .after(character::wire_when_ready),
@@ -587,20 +606,19 @@ pub fn install(app: &mut App) {
                         player::report
                             .after(player::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                        balloon::parse_master,
                         balloon::bake_atlas
-                            .after(balloon::parse_master)
+                            .after(crate::npc_tweet::parse)
                             .after(player_talk::parse),
-                        // 问候触发 → 显式同步点 → after-edit 反应：同一根
+                        // HUD 事件消费 → 显式同步点 → after-edit 反应：同一根
                         // objective 槽位的两条写入沿。链式定序 + 同步点让
-                        // 反应的让位门看得见问候触发本帧铺的气泡——不定序
+                        // 反应的让位门看得见 HUD 事件本帧铺的气泡——不定序
                         // 时两系统并发（命令式写入不构成访问冲突），让位门
                         // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
                         // （真源单状态字段，构造上不允许两只并存）。
                         (
-                            balloon::trigger
+                            balloon::hud_event
                                 .after(balloon::bake_atlas)
-                                .after(npc::advance),
+                                .after(crate::npc_state::NpcPresenterSet),
                             ApplyDeferred,
                             // after-edit 反应链：保存回执 → 池选取
                             // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源

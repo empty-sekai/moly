@@ -11,7 +11,7 @@ pub mod step;
 
 pub use row::{Program, ProgramBlock, ProgramKind};
 pub use row::{RandomBranchTrigger, Scenario, SegmentSuffix, Step, TimeGatedTrigger, Trigger};
-pub use select::{PercentDraw, ScriptState};
+pub use select::{lua_math_random, PercentDraw, ScriptState};
 pub use step::{
     advance, effective_speed, is_finished, op_executable, schedule, span, wait_milliseconds,
     Rejection, ScheduledStep, SequenceState, StepEvent, EXCLUDED_GAME_STATE_TYPE,

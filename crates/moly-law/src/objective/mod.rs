@@ -46,12 +46,18 @@ pub mod wander;
 
 pub use approach::{APPROACH_HALF_TILE_OFFSET, APPROACH_SEARCH_RANGE, approach_ring_cells, approach_target};
 pub use ladder::{Decision, InterruptDispatch, InterruptMarker, LadderView, decide, interrupt_dispatch};
-pub use rest::{TALK_HOLD_STATE_TYPE, RestGateOutcome, rest_delay_milliseconds, rest_holds, try_rest_gate};
+pub use rest::{
+    DelayPromise, RestGateOutcome, TALK_HOLD_STATE_TYPE, rest_delay_milliseconds, rest_holds,
+    rest_objective_milliseconds, try_rest_gate,
+};
 pub use social::{
     DESTINATION_OVERLAP, NPC_SPOT_DIRECTIONS, SPOT_CLEARANCE, SPOT_SCALES, SocialCandidate,
     destination_overlaps, is_navigable, nearby_spots, social_target, spot_clear_of_candidates,
 };
-pub use wander::{TILE_SCALE, WANDER_TAKE, Permute, ring_filter, wander_target};
+pub use wander::{
+    TILE_SCALE, WANDER_TAKE, Permute, ring_filter, uses_in_room_move_range,
+    wander_target,
+};
 
 /// 格坐标 `(x, z)`：站点网格的整数格位（高度轴不在格坐标里）。
 pub type Cell = (i32, i32);

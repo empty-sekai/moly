@@ -7,6 +7,7 @@ pub mod alone_action;
 pub mod carve;
 pub mod cloth;
 pub mod fixture;
+pub mod frame_time;
 pub mod facial;
 pub mod material;
 pub mod objective;
