@@ -174,6 +174,67 @@ impl ScheduledBurst {
     }
 }
 
+/// AccumulateBursts over one window, bursts in authoring order: a hit takes
+/// its count before the fraction is written, and the fraction is written on
+/// every hit, zero counts too. The window's sum wraps in signed 32-bit
+/// arithmetic.
+fn accumulate_window(bursts: &[ScheduledBurst], low: f32, high: f32, repeats: bool,
+    random: &mut ScalarRandom, burst_fraction: &mut f32) -> i32 {
+    let mut sum = 0_i32;
+    for b in bursts {
+        if b.hits(low, high, repeats) {
+            sum = sum.wrapping_add(b.accumulate(random));
+            let relative = (b.time - low) / (high - low);
+            *burst_fraction = if relative < 0.0 {
+                1.0
+            } else {
+                1.0 - arm_fmin(relative, 1.0)
+            };
+        }
+    }
+    sum
+}
+
+/// The bursts of an exported emission block as EmitOverTime reads them: the
+/// load normalization, then the runtime gate (at most eight slots, a
+/// constant or two-constant count), every time, cycle count, repeat interval
+/// and probability transcribed. For a caller that runs its own windows: the
+/// sub-emitter birth event's call of EmitOverTime.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BurstSchedule {
+    bursts: Vec<ScheduledBurst>,
+}
+
+impl BurstSchedule {
+    pub(crate) fn from_params(bursts: &[Burst]) -> Result<Self, Refused> {
+        if bursts.len() > BURST_SLOTS {
+            return Err(Refused::UnsupportedConfiguration);
+        }
+        let bursts = bursts
+            .iter()
+            .map(|b| {
+                let b = load_burst(b);
+                Ok(ScheduledBurst {
+                    time: b.time,
+                    count: burst_count(&b.count)?,
+                    cycles: b.cycles,
+                    interval: b.interval,
+                    probability: b.probability,
+                })
+            })
+            .collect::<Result<Vec<_>, Refused>>()?;
+        Ok(Self { bursts })
+    }
+
+    /// One AccumulateBursts window [low, high): the wrapping sum of the hit
+    /// counts, the fraction written on each hit, the draws taken from
+    /// `random` in authoring order.
+    pub(crate) fn accumulate(&self, low: f32, high: f32, repeats: bool, random: &mut ScalarRandom,
+        burst_fraction: &mut f32) -> i32 {
+        accumulate_window(&self.bursts, low, high, repeats, random, burst_fraction)
+    }
+}
+
 /// A burst's fields as the runtime EmissionModule holds them, the count still
 /// a curve: the load normalization's output and the runtime gate's input.
 #[derive(Clone, Debug, PartialEq)]
@@ -461,24 +522,8 @@ impl ConstantAutonomousEmission {
             return Err(Refused::InvalidInput);
         }
         let mut burst_fraction = old.burst_fraction;
-        // AccumulateBursts over one window, bursts in authoring order: a hit
-        // takes its count before the fraction is written, and the fraction
-        // is written on every hit, zero counts too. The window's sum wraps in
-        // signed 32-bit arithmetic.
         let mut accumulate = |low: f32, high: f32, repeats: bool, random: &mut ScalarRandom| -> i32 {
-            let mut sum = 0_i32;
-            for b in &self.bursts {
-                if b.hits(low, high, repeats) {
-                    sum = sum.wrapping_add(b.accumulate(random));
-                    let relative = (b.time - low) / (high - low);
-                    burst_fraction = if relative < 0.0 {
-                        1.0
-                    } else {
-                        1.0 - arm_fmin(relative, 1.0)
-                    };
-                }
-            }
-            sum
+            accumulate_window(&self.bursts, low, high, repeats, random, &mut burst_fraction)
         };
         // A wrap draws for the window [0, current), which allows repeats,
         // before the window [previous, duration + 1e-4), which does not; no
