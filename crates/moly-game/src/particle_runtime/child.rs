@@ -191,6 +191,12 @@ pub(super) fn apply_command(
     {
         return Err(Refused::Unsupported("child module/owner composition"));
     }
+    // A child's axis of rotation on this birth path (the Initial module's +Z
+    // or a record inherited from the parent) was not read, and the mesh
+    // renderer turns a child without 3D rotation about it.
+    if matches!(system.geometry, super::Geometry::Mesh(_)) && super::uses_rotation_3d(emitter, true) != Some(true) {
+        return Err(Refused::Unsupported("child Mesh particle axis of rotation"));
+    }
     assert_eq!(system.pool.len(), system.side.len());
     let old_count = system.pool.len();
     let requested = command.count as usize;
@@ -272,6 +278,7 @@ pub(super) fn apply_command(
                 colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
                 total_velocity: [0.0; 3],
                 custom_data: [[0.0; 4]; 2],
+                axis: [0.0, 0.0, 1.0],
             });
             partial_dts.push(timing[i].dt);
         }

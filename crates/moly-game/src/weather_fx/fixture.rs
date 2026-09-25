@@ -469,9 +469,9 @@ pub(crate) fn spawn_when_ready(
 fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {
     let geometry = match &planned.geometry {
         PlannedGeometry::Billboard(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw.clone()),
-        PlannedGeometry::Mesh { source, alignment, scaling, pivot, flip, .. } => crate::particle_runtime::Geometry::Mesh(
+        PlannedGeometry::Mesh { source, alignment, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(
             crate::particle_geometry::MeshDraw { source: source.clone().expect("prepared source mesh"),
-                alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip }),
+                alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip, axis_body: *axis_body }),
     };
     Runtime {
         node: planned.node.clone(), effect: planned.effect.clone(), emitter: planned.emitter.clone(),

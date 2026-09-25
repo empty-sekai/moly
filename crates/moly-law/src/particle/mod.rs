@@ -59,6 +59,7 @@ pub mod sub_emission;
 pub mod prewarm;
 pub mod frame_time;
 pub mod culling;
+pub mod mesh_transform;
 
 #[cfg(test)]
 mod corpus;
