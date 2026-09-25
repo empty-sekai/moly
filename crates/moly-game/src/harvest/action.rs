@@ -1438,6 +1438,10 @@ pub(crate) struct HarvestAutoplay {
     waypoints: Vec<Vec2>,
     last_position: Vec2,
     stuck_frames: u32,
+    /// Seconds left of a sideways step around a corner that holds the player.
+    detour: f32,
+    detour_side: f32,
+    detours: u32,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -1565,6 +1569,8 @@ pub(crate) fn autoplay_press(
                     auto.target = Some(entity);
                     auto.stage = AutoStage::Walk;
                     auto.started = now;
+                    auto.detours = 0;
+                    auto.detour = 0.0;
                     let from = [player.translation.x, player.translation.z];
                     let to = [transform.translation.x, transform.translation.z];
                     auto.waypoints = face
@@ -1613,34 +1619,26 @@ pub(crate) fn autoplay_press(
             } else {
                 // Follow the walk field's path; the last leg goes to the object.
                 let here = Vec2::new(player.translation.x, player.translation.z);
-                // A path corner inside the walk field's edge band holds the
+                // A path corner inside the walk field's edge band can hold the
                 // player short of it: after a few frames without progress the
-                // next waypoint is taken.
+                // instrument steps sideways for 0.6 s (alternating sides).
                 if here.distance(auto.last_position) < 0.005 {
                     auto.stuck_frames += 1;
                 } else {
                     auto.stuck_frames = 0;
                 }
                 auto.last_position = here;
-                if auto.stuck_frames > 5 {
-                    // The path itself led into a corner: take it again from
-                    // where the player actually stands.
-                    auto.waypoints = face
-                        .as_deref()
-                        .and_then(|face| face.path([here.x, here.y], [transform.translation.x, transform.translation.z]))
-                        .map(|path| path.into_iter().map(Vec2::from_array).collect())
-                        .unwrap_or_default();
-                    if auto.waypoints.is_empty() {
-                        auto.waypoints.push(Vec2::new(transform.translation.x, transform.translation.z));
-                    }
+                if auto.stuck_frames > 5 && auto.detour <= 0.0 {
+                    auto.detour = 0.6;
+                    auto.detour_side = if auto.detour_side > 0.0 { -1.0 } else { 1.0 };
                     auto.stuck_frames = 0;
-                    warn!(
-                        "[harvest-auto] step {}: stuck at ({:.2}, {:.2}); re-planned {} waypoints",
-                        auto.step,
-                        here.x,
-                        here.y,
-                        auto.waypoints.len()
-                    );
+                    auto.detours += 1;
+                    if auto.detours == 1 {
+                        warn!(
+                            "[harvest-auto] step {}: held at ({:.2}, {:.2}); stepping sideways",
+                            auto.step, here.x, here.y
+                        );
+                    }
                 }
                 while auto
                     .waypoints
@@ -1649,9 +1647,19 @@ pub(crate) fn autoplay_press(
                 {
                     auto.waypoints.remove(0);
                 }
-                match auto.waypoints.first() {
-                    Some(point) => walk_to(&mut input, Vec3::new(point.x, 0.0, point.y)),
-                    None => walk_to(&mut input, transform.translation),
+                let goal = auto
+                    .waypoints
+                    .first()
+                    .map_or(transform.translation, |point| {
+                        Vec3::new(point.x, 0.0, point.y)
+                    });
+                if auto.detour > 0.0 {
+                    auto.detour -= time.delta_secs();
+                    let d = Vec2::new(goal.x - here.x, goal.z - here.y).normalize_or_zero();
+                    let side = Vec2::new(-d.y, d.x) * auto.detour_side;
+                    walk_to(&mut input, Vec3::new(here.x + side.x, 0.0, here.y + side.y));
+                } else {
+                    walk_to(&mut input, goal);
                 }
             }
         }
