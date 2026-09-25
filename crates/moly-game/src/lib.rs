@@ -55,6 +55,7 @@ pub mod get_resource;
 mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
+mod home_action;
 mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
@@ -229,6 +230,7 @@ pub fn app(
         harvest_material::HarvestMaterialPlugin,
         harvest_particles::HarvestParticlePlugin,
     ));
+    home_action::install(&mut app);
     app
 }
 

@@ -475,6 +475,11 @@ impl EffectHook {
 pub(crate) struct HarvestEffectHooks {
     pub(crate) pending: Vec<EffectHook>,
     pub(crate) total: usize,
+    /// Emits whose copy the caller keeps (`ManagedEffect` held by its
+    /// emitter), by the caller's ticket.
+    pub(crate) kept: Vec<(u64, EffectHook)>,
+    /// `ManagedEffect.Stop` on a kept copy, by ticket.
+    pub(crate) stops: Vec<u64>,
 }
 
 /// Counters for the periodic status line (control flow only).
@@ -795,7 +800,9 @@ impl Plugin for HarvestPlugin {
                     report.run_if(bevy::time::common_conditions::on_timer(
                         std::time::Duration::from_secs(2),
                     )),
-                    effects::advance.after(HarvestActionSet),
+                    effects::advance
+                        .after(HarvestActionSet)
+                        .after(crate::home_action::HomeActionSet),
                 ),
             )
             .add_systems(
