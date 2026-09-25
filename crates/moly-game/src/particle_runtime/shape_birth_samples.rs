@@ -110,7 +110,7 @@ fn initial_shape_and_start_velocity_match_native_in_shared_pool() {
     let mut state=super::birth::NativeBirthState {owner:None,
         initial:ModuleRandom::from_owner_seed(1729),shape:ModuleRandom::from_owner_seed(1729),shape_clock:Default::default(),
         emission:moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(
-            moly_law::particle::seed_owner::ScalarRandom::from_seed(1729))};
+            moly_law::particle::seed_owner::ScalarRandom::from_seed(1729)),frame:Default::default(),events:None,target:None};
     let state_before=state.clone();let age_before=guarded.pool[0].age_percent;
     let context=Context{sky:GlobalTransform::IDENTITY,camera:GlobalTransform::IDENTITY,site:GlobalTransform::IDENTITY};
     assert_eq!(guarded.pool.len(),1);assert_eq!(guarded.pool[0].age_percent,age_before);

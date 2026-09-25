@@ -74,7 +74,8 @@ mod tests {
 
     fn side() -> Side {
         Side { rand: 0.5, seed: 17, rot: [0.0; 3], size: [1.0; 3], gravity: 0.0,
-            colour: [1.0; 4], total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2] }
+            colour: [1.0; 4], total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2],
+            emit_carry: [0.0; 2], animated: [0.0; 3], current_size: 0.0 }
     }
 
     #[test]

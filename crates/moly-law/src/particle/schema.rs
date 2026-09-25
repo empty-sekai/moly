@@ -9,7 +9,7 @@
 //! 「接没接线分不清」。
 //!
 //! 识别但**未映射**的键不丢弃也不报错——收进 `unmapped` 具名清单
-//! （scalingMode、emitterVelocityMode、renderer、以及 shape
+//! （scalingMode、renderer、以及 shape
 //! 的非圆参数族），消费侧可见「这条数据在，但律没管它」。
 
 use std::fmt;
@@ -286,6 +286,10 @@ pub struct EmitterParams {
     /// instead of Time.deltaTime. Missing/null stays unknown, never false.
     pub use_unscaled_time: Option<bool>,
     pub simulation_space: SimulationSpace,
+    /// MainModule emitterVelocityMode as exported (0 Transform, 1 Rigidbody,
+    /// 2 Custom). None when the key is absent or not a non-negative integer;
+    /// the consumer refuses what it cannot read rather than assume Transform.
+    pub emitter_velocity_mode: Option<u32>,
     /// Missing/null source ownership remains unknown; zero/false are authored values.
     pub random_seed: Option<u32>,
     pub auto_random_seed: Option<bool>,
@@ -317,11 +321,11 @@ pub struct EmitterParams {
 }
 
 /// system 层已映射进参数的键——之外的键全部进 `unmapped`。
-/// 「识别但具名不迁」的 scalingMode、emitterVelocityMode **不在**此列：它们落
+/// 「识别但具名不迁」的 scalingMode **不在**此列：它落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 30] = [
+const MAPPED_SYSTEM_KEYS: [&str; 31] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed", "useUnscaledTime",
-    "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
+    "simulationSpace", "emitterVelocityMode", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
     "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
     "limitVelocity", "customData", "shapeEnabled", "subEmitters", "collision",
@@ -443,6 +447,10 @@ impl EmitterParams {
                 )?;
                 SimulationSpace::from_str(&name, &ctx)?
             },
+            emitter_velocity_mode: system_get(system, "emitterVelocityMode")
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= u32::MAX as f64)
+                .map(|n| n as u32),
             start_delay: min_max_curve(
                 system_get(system, "startDelay"),
                 &format!("{ctx}.startDelay"),
@@ -1336,9 +1344,8 @@ mod tests {
         // Typed seed ownership preserves explicit zero/true without starting RNG.
         assert_eq!(e.random_seed, Some(0));
         assert_eq!(e.auto_random_seed, Some(true));
-        // 未映射键可见：system 层 2 个 + renderer。
+        // 未映射键可见：system 层 scalingMode + renderer。
         assert!(e.unmapped.contains(&"scalingMode".to_string()));
-        assert!(e.unmapped.contains(&"emitterVelocityMode".to_string()));
         assert!(!e.unmapped.contains(&"randomSeed".to_string()));
         assert!(!e.unmapped.contains(&"autoRandomSeed".to_string()));
         assert_eq!(e.shape.as_ref().unwrap().controls.angle, Some(25.0));

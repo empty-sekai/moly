@@ -143,7 +143,7 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
     );
     let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
     assert!(matches!(
-        install_native_birth(&mut system, &mut manager, &route).unwrap(),
+        install_native_birth(&mut system, &mut manager, &route, None).unwrap(),
         BirthPath::Native
     ));
     let state = system
@@ -288,7 +288,7 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
     let other_route = source_route(&source_system(&root, &other["source"]));
     assert_eq!(other_route, SourceRoute::Procedural);
     let words_before = manager.manager_words_for_test();
-    let other_reason = match install_native_birth(&mut other_system, &mut manager, &other_route).unwrap() {
+    let other_reason = match install_native_birth(&mut other_system, &mut manager, &other_route, None).unwrap() {
         BirthPath::Legacy(reason) => reason,
         BirthPath::Native => panic!("procedural source route installed a native owner"),
     };

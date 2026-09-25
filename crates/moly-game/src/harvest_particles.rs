@@ -607,6 +607,8 @@ fn runtime(admitted: Admitted, anchor: Entity, mesh: Handle<Mesh>, ordinal: u64)
         emission_started: false,
         native_birth: None,
         noise: None,
+        trail: None,
+        collision: None,
         rng: Rng(RNG_SEED ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false,
         cone_angle: None,

@@ -110,7 +110,10 @@ pub fn fmax_zero(speed: f32) -> f32 {
 /// other value, a NaN included, is returned as it is.
 pub fn time_step(scaled: f32, maximum_particle_timestep: f32) -> f32 {
     if maximum_particle_timestep < scaled {
-        scaled / (scaled / maximum_particle_timestep).ceil()
+        let step = scaled / (scaled / maximum_particle_timestep).ceil();
+        // An infinite dt divides infinity by infinity: the ARM result is the
+        // default NaN (positive quiet), not the host's.
+        if step.is_nan() { f32::from_bits(0x7fc0_0000) } else { step }
     } else {
         scaled
     }
@@ -130,6 +133,16 @@ pub enum IncrementalEntry {
 pub struct Slice {
     pub remaining_before: f32,
     pub duration: f32,
+}
+
+impl Slice {
+    /// StartParticles' backtrack argument for the time births of this slice:
+    /// FMAXNM((remaining / slice) + -1, 0), the slices still to come in the
+    /// frame (fractional when a remainder below the loop threshold is carried).
+    pub fn births_ahead(self) -> f32 {
+        // f32::max returns the non-NaN operand, as FMAXNM does.
+        ((self.remaining_before / self.duration) + -1.0).max(0.0)
+    }
 }
 
 /// ParticleSystem::Update1Incremental's slice loop over the pending time.

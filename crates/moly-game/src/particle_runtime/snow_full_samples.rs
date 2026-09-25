@@ -422,6 +422,9 @@ fn source_snow_full_prewarm_matches_current_native() {
         shape: module(&initial["shapeWords"]),
         shape_clock: Default::default(),
         emission: AutonomousEmissionState::initialized(scalar(&initial["scalarEmissionWords"])),
+        frame: Default::default(),
+        events: None,
+        target: None,
     };
     state.emission.distribution.spacing = f(&initial["carry"][0]);
     state.emission.distribution.offset = f(&initial["carry"][1]);

@@ -34,6 +34,19 @@ fn current_corpus_admission() {
         .collect();
     assert!(!sites.is_empty(), "the census names no site");
     let mut naming_role_differs = Vec::new();
+    // The collider export: the one the caller names, else the one the index
+    // names; without either every collision system is refused by name.
+    let collision_path = std::env::var_os("MOLY_WEATHER_AUDIT_COLLISION").map(std::path::PathBuf::from)
+        .or_else(|| index.pointer("/collision/file").and_then(Value::as_str).map(|file| root.join(file)));
+    let collision_document = match &collision_path {
+        Some(path) => Ok(read(path)),
+        None => Err("this asset root carries no collider export".to_owned()),
+    };
+    let collision_source = collision_path.as_ref().map(|path| {
+        let bytes = std::fs::read(path).expect("read collider export");
+        json!({"bytes": bytes.len()})
+    });
+    let mut scenes = crate::particle_runtime::collision_scene::SceneBuilder::new(collision_document);
     let app = corpus_app(root);
     let server = app.world().resource::<AssetServer>();
     let mut rows = Vec::new();
@@ -77,13 +90,20 @@ fn current_corpus_admission() {
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             let particles = effect["particles"].as_array().expect("particles");
             let sub_emitter_owners = source_sub_emitter_owners(particles);
+            let ground = scenes.for_effect(effect_name);
+            // Targets admitted by their own judgement and the birth edges of
+            // every admitted parent of this effect: a target whose parent is
+            // refused outside judge (its animation contract) is withdrawn below,
+            // as the plan withdraws it.
+            let mut target_rows: Vec<(usize, String)> = Vec::new();
+            let mut delivered = std::collections::HashSet::<String>::new();
             for particle in particles {
                 let mut tally = Tally::default();
                 let animation_refusal = particle["node"].as_str().and_then(|node|animation.refusal(node));
                 if let Some(reason) = animation_refusal { tally.animation_refused.push(reason.into()); }
                 let planned = kind.filter(|_|animation_refusal.is_none()).and_then(|kind| judge(effect_name, particle, &by_path, &sub_emitter_owners, kind,
                     effect["effectiveRotation"].as_str() == Some("normal"),
-                    WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), server, &mut tally))
+                    WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"), &ground, server, &mut tally))
                     .and_then(|planned| admit_animated(&animation, planned, &mut tally));
                 let material = &particle["renderer"]["material"];
                 let source_member = material["lightModes"].as_array()
@@ -110,6 +130,12 @@ fn current_corpus_admission() {
                     // subemitters, animation and timeline can trigger emission.
                     "runtime_admission_rejected"
                 };
+                if let Some(plan) = &planned {
+                    if plan.child_owner.is_some() {
+                        target_rows.push((rows.len(), node.to_owned()));
+                    }
+                    delivered.extend(plan.event_edges.iter().flat_map(|edges| edges.targets().map(str::to_owned)));
+                }
                 let warm = planned.as_ref().and_then(|p| first_play_warm_cost(p, &mut warm_seeds));
                 admitted += usize::from(planned.is_some());
                 renderer_enabled += usize::from(particle["renderer"]["enabled"].as_bool() == Some(true));
@@ -125,15 +151,32 @@ fn current_corpus_admission() {
                     "sourceInstantiation": kind.map(|k| format!("{k:?}")),
                     "sourceRoute": format!("{:?}", crate::particle_runtime::source_route(&particle["system"])),
                     "firstPlayWarm": warm,
-                    "nativeBirth": planned.as_ref().map(|p| crate::particle_runtime::native_birth_eligible(&p.emitter, &p.route)
-                        .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&p.emitter, Some(p.geometry.shape_evidence())))
-                        .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))),
+                    "nativeBirth": planned.as_ref().map(|p| if p.child_owner.is_some() {
+                        json!({"path":"subEmitterTarget"})
+                    } else {
+                        crate::particle_runtime::native_birth_eligible(&p.emitter, &p.route)
+                            .and_then(|()| crate::particle_runtime::native_shape_state_eligible(&p.emitter, Some(p.geometry.shape_evidence())))
+                            .map_or_else(|reason| json!({"path":"legacy","reason":reason}), |()| json!({"path":"native"}))
+                    }),
                     "gpuVerification": "not_run", "gates": format!("{tally:?}"),
                     "culling": planned.as_ref().map(|p| p.culling.label()),
+                    "collisionScene": particle["system"]["collision"].is_object().then(|| match &ground {
+                        Ok(scene) => json!({"bound": true, "colliders": scene.describe()}),
+                        Err(reason) => json!({"bound": false, "reason": reason}),
+                    }),
                     "animationRefusal":animation_refusal,"animationContract":animation.report,
                     "softKeyword": material["keywords"].as_array().is_some_and(|v|
                         v.iter().any(|k| k.as_str() == Some("_SOFT_PARTICLES_ENABLED"))),
                 }));
+            }
+            for (row, node) in target_rows {
+                if !delivered.contains(&node) {
+                    admitted -= 1;
+                    rows[row]["admitted"] = json!(false);
+                    rows[row]["classification"] = json!("runtime_admission_rejected");
+                    rows[row]["nativeBirth"] = Value::Null;
+                    rows[row]["gates"] = json!(format!("sub-emitter target {node}: its parent is not admitted in this effect"));
+                }
             }
         }
         let total = rows.len() - start;
@@ -152,6 +195,7 @@ fn current_corpus_admission() {
         "admitted": rows.iter().filter(|r| r["admitted"] == true).count(),
         "cullingExposed": rows.iter().filter(|r| r["culling"]["culled"] == "source").count(),
         "cullingPorted": rows.iter().filter(|r| r["culling"]["port"] == "cullable").count(),
+        "collisionExport": collision_source,
         "gpuVerification": "not_run",
         "rows": rows,
     });
@@ -334,6 +378,11 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
         .map(|site| site.as_str().unwrap_or_else(|| panic!("census site is not a string: {site}")).to_owned())
         .collect();
     assert!(!sites.is_empty(), "the census names no site");
+    // The collider export, resolved as the corpus admission resolves it.
+    let collision_document = std::env::var_os("MOLY_WEATHER_AUDIT_COLLISION").map(std::path::PathBuf::from)
+        .or_else(|| index.pointer("/collision/file").and_then(Value::as_str).map(|file| root.join(file)))
+        .map(|path| read(&path)).ok_or_else(|| "this asset root carries no collider export".to_owned());
+    let mut scenes = crate::particle_runtime::collision_scene::SceneBuilder::new(collision_document);
     let app = corpus_app(root);
     let server = app.world().resource::<AssetServer>();
     let (mut silent, mut found, mut unjudged, mut records) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), 0usize);
@@ -363,6 +412,7 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
                 .iter().map(|n| (n["path"].as_str().expect("node path").to_owned(), n)).collect();
             let particles = effect["particles"].as_array().expect("particles");
             let owners = source_sub_emitter_owners(particles);
+            let ground = scenes.for_effect(effect_name);
             // As in the admission, only an effect that is judged needs its lifecycle metadata.
             let lifecycle = kind.map(|_| WeatherEffectLifecycle::from_effect(effect).expect("source lifecycle metadata"));
             let judged = |particle: &Value| {
@@ -370,7 +420,7 @@ fn emission_disabled_weather_systems_follow_the_native_update() {
                 let node = particle["node"].as_str().expect("particle node");
                 let planned = kind.zip(lifecycle).filter(|_| animation.refusal(node).is_none()).and_then(|(kind, lifecycle)|
                     judge(effect_name, particle, &by_path, &owners, kind,
-                        effect["effectiveRotation"].as_str() == Some("normal"), lifecycle, server, &mut tally));
+                        effect["effectiveRotation"].as_str() == Some("normal"), lifecycle, &ground, server, &mut tally));
                 (planned.is_some(), tally)
             };
             for particle in particles {
@@ -540,7 +590,11 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.size_law = e.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
     system.custom_law = e.custom_data.as_ref().map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission"));
-    let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route) {
+    let collision = planned.collision_scene.clone().map(|scene| crate::particle_runtime::CollisionInstall {
+        scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
+        owner: planned.collision_owner,
+    });
+    let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route, collision) {
         Ok(crate::particle_runtime::BirthPath::Native) => "native",
         Ok(crate::particle_runtime::BirthPath::Legacy(_)) => "legacy",
         Err(error) => return Some(json!({"measured": false, "reason": error.to_string()})),

@@ -51,8 +51,21 @@ pub(crate) fn prepare_control(
                 let mut tally = Tally::default();
                 let mut plan = judge_in_archive(doc["name"].as_str().unwrap_or("fixture"), particle,
                     &by_path, &owners, EffectKind::Site, false, None, "fixture-particles-v2",
-                    Some(GlobalTransform::IDENTITY), &server, &mut tally)
+                    Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()), &server, &mut tally)
                     .ok_or_else(|| format!("{}: source particle control rejected {tally:?}", particle["node"]))?;
+                // Sub-emitter events run only with the native birth owner,
+                // which this fixture path does not install.
+                if plan.event_edges.is_some() {
+                    return Err(format!("{}: sub-emitter events need the native birth owner", particle["node"]));
+                }
+                // Trails likewise need the native birth owner and a trail draw.
+                if plan.trail.is_some() {
+                    return Err(format!("{}: trails need the native birth owner and a trail draw", particle["node"]));
+                }
+                // So does emission over distance (the native per-frame head).
+                if crate::particle_runtime::has_distance_emission(&plan.emitter) {
+                    return Err(format!("{}: emission over distance needs the native birth owner", particle["node"]));
+                }
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
@@ -140,11 +153,17 @@ pub(crate) fn plan(
         };
         let mut tally = Tally::default();
         match judge_in_archive(package, particle, &by_path, &owners, EffectKind::Site, false,
-            None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally) {
+            None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()), server, &mut tally) {
             // Noise runs only with the native birth owner, which this fixture
             // path does not install; refuse it rather than drop the module.
             Some(plan) if plan.emitter.noise.is_some() =>
                 warn!("[fixture-source] {package}/{node}: Noise needs the native birth owner, which the fixture path does not install"),
+            Some(plan) if plan.event_edges.is_some() =>
+                warn!("[fixture-source] {package}/{node}: sub-emitter events need the native birth owner, which the fixture path does not install"),
+            Some(plan) if plan.trail.is_some() =>
+                warn!("[fixture-source] {package}/{node}: trails need the native birth owner and a trail draw, which the fixture path does not install"),
+            Some(plan) if crate::particle_runtime::has_distance_emission(&plan.emitter) =>
+                warn!("[fixture-source] {package}/{node}: emission over distance needs the native birth owner, which the fixture path does not install"),
             Some(mut plan) => {
                 plan.ordinal = ordinal;
                 // FixtureController.Setup -> FixtureView.SetupRenderer calls
@@ -219,7 +238,7 @@ mod tests {
                 let node = particle["node"].as_str().unwrap();
                 let mut tally = Tally::default();
                 let planned = judge_in_archive("fixture", particle, &by_path, &owners, EffectKind::Site, false,
-                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally);
+                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), &Err("collision scene: fixture particles carry no collider export".to_owned()), server, &mut tally);
                 assert!(planned.is_some(), "{node}: {tally:?}");
                 let planned = planned.unwrap();
                 assert!(planned.source.catalogue.path().unwrap().path().starts_with("fixture-particles-v2"));
@@ -279,7 +298,8 @@ mod tests {
                 if particle["system"]["ringBufferMode"].as_u64().is_none_or(|mode| mode == 0) { continue; }
                 let mut tally = Tally::default();
                 let planned = judge_in_archive("fixture", particle, &by_path, &owners, EffectKind::Site, false,
-                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally);
+                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY),
+                    &Err("collision scene: fixture particles carry no collider export".to_owned()), server, &mut tally);
                 println!("ring {} {}: admitted={} {tally:?}", path.file_name().unwrap().to_string_lossy(),
                     particle["node"].as_str().unwrap_or(""), planned.is_some());
                 rows += 1;
@@ -338,7 +358,8 @@ mod tests {
                 let node = particle["node"].as_str().unwrap_or("");
                 let mut tally = Tally::default();
                 let planned = judge_in_archive("fixture", particle, &by_path, &owners, EffectKind::Site, false,
-                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), server, &mut tally);
+                    None, "fixture-particles-v2", Some(GlobalTransform::IDENTITY),
+                    &Err("collision scene: fixture particles carry no collider export".to_owned()), server, &mut tally);
                 let reason = tally.shape.first().or(tally.law_reject.first()).cloned()
                     .map(|text| text.strip_prefix(node).map(str::to_owned).unwrap_or(text))
                     .unwrap_or_else(|| if planned.is_some() { "admitted".into() }
@@ -480,7 +501,7 @@ fn runtime(planned: &Planned, anchor: Entity, mesh: Handle<Mesh>) -> Runtime {
         emission_surface: planned.emission_surface.as_ref().map(|surface| surface.source.clone().expect("prepared source surface")),
         ring_cursor: 0, pool: Vec::new(), side: Vec::new(), emission: EmissionState::default(),
         playback_head: 0.0, previous_head: 0.0, emission_started: false,
-        native_birth: None, noise: None,
+        native_birth: None, noise: None, trail: None, collision: None,
         rng: Rng(RNG_SEED ^ (planned.ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
         prewarmed: false, pending: 0.0, cone_angle: planned.cone_angle, rol: planned.rol.clone(), limit: planned.limit.clone(),
         velocity_law: planned.emitter.velocity_over_lifetime.as_ref().map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission")),
