@@ -551,9 +551,9 @@ pub fn install(app: &mut App) {
                     (
                         // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
                         // 之后：换段以缺省速率起新段，玩家域同帧把速率压回
-                        // 真源式。其后气泡链：解析主表
-                        // → 烘图集 → 驻留沿触发（读 npc 推进写好的相位）→ 存活
-                        // 计时与淡坡。读相位所以排推进之后。
+                        // 真源式。其后气泡链：烘图集（tweet 行归 NPC 侧解析）
+                        // → HUD 事件消费（NPC 状态机本帧发的事件，排在呈现
+                        // 调用集之后）→ 存活计时与淡坡。
                         player_avatar::drive
                             .after(player::advance)
                             .after(character::wire_when_ready),
@@ -563,20 +563,19 @@ pub fn install(app: &mut App) {
                         player::report
                             .after(player::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                        balloon::parse_master,
                         balloon::bake_atlas
-                            .after(balloon::parse_master)
+                            .after(crate::npc_tweet::parse)
                             .after(player_talk::parse),
-                        // 问候触发 → 显式同步点 → after-edit 反应：同一根
+                        // HUD 事件消费 → 显式同步点 → after-edit 反应：同一根
                         // objective 槽位的两条写入沿。链式定序 + 同步点让
-                        // 反应的让位门看得见问候触发本帧铺的气泡——不定序
+                        // 反应的让位门看得见 HUD 事件本帧铺的气泡——不定序
                         // 时两系统并发（命令式写入不构成访问冲突），让位门
                         // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
                         // （真源单状态字段，构造上不允许两只并存）。
                         (
-                            balloon::trigger
+                            balloon::hud_event
                                 .after(balloon::bake_atlas)
-                                .after(npc::advance),
+                                .after(crate::npc_state::NpcPresenterSet),
                             ApplyDeferred,
                             // after-edit 反应链：保存回执 → 池选取
                             // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源
