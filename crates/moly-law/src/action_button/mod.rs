@@ -412,6 +412,17 @@ impl ButtonStack {
         }
     }
 
+    /// OnChangeActionTarget: with two or more entries the head moves to the
+    /// back. Returns whether it moved.
+    pub fn rotate(&mut self) -> bool {
+        if self.entries.len() < 2 {
+            return false;
+        }
+        let first = self.entries.remove(0);
+        self.entries.push(first);
+        true
+    }
+
     /// 按目标号移出。源在离开碰撞时按同一对键移除。
     pub fn remove(&mut self, target: TargetId) {
         self.entries.retain(|(_, t)| *t != target);
@@ -429,6 +440,11 @@ impl ButtonStack {
     /// 栈首。空栈时源给出的是一对默认值，等价于「没有按钮」。
     pub fn first(&self) -> Option<(ButtonType, TargetId)> {
         self.entries.first().copied()
+    }
+
+    /// The stacked button types, head first.
+    pub fn buttons(&self) -> impl Iterator<Item = ButtonType> + '_ {
+        self.entries.iter().map(|(button, _)| *button)
     }
 
     pub fn len(&self) -> usize {

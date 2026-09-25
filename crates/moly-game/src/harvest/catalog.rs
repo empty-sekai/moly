@@ -35,7 +35,7 @@ pub(crate) struct HarvestInputs(Vec<InputDoc>);
 #[derive(Resource)]
 pub(crate) struct HarvestInputsAbsent(pub(crate) Vec<String>);
 
-const INPUTS: [(&str, &str); 9] = [
+const INPUTS: [(&str, &str); 10] = [
     (
         "site/harvest.json",
         "harvest object packages and their master rows",
@@ -62,6 +62,10 @@ const INPUTS: [(&str, &str); 9] = [
     (
         "mysekai-site-harvest-unavailable-spots.json",
         "the unavailable rectangles HarvestMapMock places around",
+    ),
+    (
+        "mysekai-stamina-recovery.json",
+        "the boost grant of the stamina mock (one boost recovery)",
     ),
 ];
 
@@ -154,6 +158,10 @@ pub(crate) struct HarvestUserData {
     pub(crate) tools: Vec<UserTool>,
     pub(crate) stamina: Stamina,
     pub(crate) materials: std::collections::BTreeMap<i64, i64>,
+    /// `userMysekaiTreasureBoxes`.
+    pub(crate) boxes: Vec<super::server_mock::UserTreasureBox>,
+    /// `userMysekaiPhenomena`.
+    pub(crate) phenomena: Vec<super::learn::UserPhenomenon>,
 }
 
 fn parse(asset: &JsonAsset, path: &str) -> serde_json::Value {
@@ -291,7 +299,8 @@ pub(crate) fn build(
         staminas,
         materials,
         spots,
-    ]: [serde_json::Value; 9] = values.try_into().expect("nine inputs");
+        recovery,
+    ]: [serde_json::Value; 10] = values.try_into().expect("ten inputs");
 
     let fixture_ids: HashSet<i64> = fixtures["fixtures"]
         .as_array()
@@ -446,6 +455,17 @@ pub(crate) fn build(
         .find(|row| row["mysekaiStaminaType"].as_str() == Some("normal"))
         .and_then(|row| row["maxStamina"].as_i64())
         .expect("no normal stamina row") as i32;
+    // One boost recovery (the lowest-id row): boostQuantity items grant
+    // recoveryBoostStamina.
+    let boost_grant = keyed_rows(&recovery, "mysekaiStaminaRecovery")
+        .into_iter()
+        .next()
+        .map(|row| {
+            row["recoveryBoostStamina"]
+                .as_i64()
+                .expect("recoveryBoostStamina") as i32
+        })
+        .expect("no stamina recovery row");
     let mock_materials: Vec<MockMaterialRow> = keyed_rows(&materials, "mysekaiMaterials")
         .into_iter()
         .map(|row| MockMaterialRow {
@@ -503,6 +523,7 @@ pub(crate) fn build(
             })
             .collect(),
         max_normal_stamina,
+        boost_grant,
         harvest_sites: harvest_sites.clone(),
         toolbox_blueprint: blueprint_ids.iter().copied().min(),
     };
@@ -557,6 +578,8 @@ pub(crate) fn build(
         tools: user_tools,
         stamina,
         materials: Default::default(),
+        boxes: mock.treasure_boxes(),
+        phenomena: mock.phenomena(),
     });
     commands.insert_resource(mock);
     commands.insert_resource(HarvestCatalog {

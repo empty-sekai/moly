@@ -564,6 +564,91 @@ pub(crate) fn fast_yaw(from: f32, to: f32, t: f32) -> f32 {
     from + change * t.clamp(0.0, 1.0)
 }
 
+/// `MysekaiMaterialExtension.SetDitherAlpha(value)`: above 0.999 the
+/// material keeps `_DISABLE_DITHER` (no dither); at or below it the keyword
+/// goes off and the Bayer dither reads `_DitherAlpha`.
+pub(crate) fn dither_variant_on(value: f32) -> bool {
+    !(value > 0.999)
+}
+
+/// One frame of `MysekaiAreaTreeView.PlayFadeAnimation(material, duration)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum FadeStep {
+    /// `SetDitherAlpha(1 - time / duration)`, then `time += deltaTime` and
+    /// one frame's wait.
+    Set(f32),
+    /// The loop left (`time >= duration`): `SetDitherAlpha(0)` and the after
+    /// mesh's GameObject inactive, in the same frame.
+    Finish,
+}
+
+/// The loop checks `time < duration` at the top of every frame, sets the
+/// value from the time before this frame's delta, then adds the delta.
+pub(crate) fn fade_step(time: &mut f32, duration: f32, dt: f32) -> FadeStep {
+    if *time < duration {
+        let value = 1.0 - *time / duration;
+        *time += dt;
+        FadeStep::Set(value)
+    } else {
+        FadeStep::Finish
+    }
+}
+
+/// `PrePlayerHarvestMotion` (the two treasure kinds): the AutoMove target
+/// `box + n * 0.6`, `n` the unit vector from the box to the player (3D; the
+/// zero vector when the length is not above 1e-5).
+pub(crate) const TREASURE_STAND_OFF: f32 = 0.6;
+/// Its `AutoMoveForTargetPosition` destination threshold.
+pub(crate) const TREASURE_AUTO_MOVE_THRESHOLD: f32 = 0.3;
+
+pub(crate) fn treasure_stand_off(box_position: Vec3, player: Vec3) -> Vec3 {
+    let d = player - box_position;
+    let length = d.length();
+    let n = if length > 1e-5 {
+        d / length
+    } else {
+        Vec3::ZERO
+    };
+    box_position + n * TREASURE_STAND_OFF
+}
+
+/// One `PlayerAvatarAutoMoveState.UpdateState`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum AutoMoveStep {
+    /// `SetInterceptFlag(true)` and the next state Idle.
+    Arrived,
+    /// The agent velocity this frame; `LookAt` faces it.
+    Move(Vec3),
+}
+
+/// The velocity is the unit vector toward the agent's steering target (zero
+/// when the length is not above 1e-5) times the agent speed. The state ends
+/// when the squared velocity is not above 0.01 (the agent stands on its
+/// steering target) and the distance from the player to the target is below
+/// the threshold (strict); otherwise `LookAt`. The velocity read back from
+/// the agent is taken as the value just written.
+pub(crate) fn auto_move_step(
+    position: Vec3,
+    steering: Vec3,
+    target: Vec3,
+    speed: f32,
+    threshold: f32,
+) -> AutoMoveStep {
+    let delta = steering - position;
+    let length = delta.length();
+    let normal = if length > 1e-5 {
+        delta / length
+    } else {
+        Vec3::ZERO
+    };
+    let velocity = normal * speed;
+    if !(velocity.length_squared() > 0.01) && (target - position).length() < threshold {
+        AutoMoveStep::Arrived
+    } else {
+        AutoMoveStep::Move(velocity)
+    }
+}
+
 #[cfg(test)]
 mod value_checks {
     use super::*;
@@ -997,5 +1082,81 @@ mod value_checks {
         assert!(!has_stamina_available_for_harvest(
             full, 2, 0, true, 10, None
         ));
+    }
+
+    /// The tree top's fade on a fixed 0.125 s frame: values 1, 0.75, 0.5,
+    /// 0.25 on the four frames whose starting time is below 0.5, then the
+    /// finish (value 0, top off); the first value keeps `_DISABLE_DITHER`
+    /// (1.0 > 0.999), every later one turns the dither variant on.
+    #[test]
+    fn tree_top_dither_fade_schedule() {
+        let mut time = 0.0;
+        let mut steps = Vec::new();
+        loop {
+            let step = fade_step(&mut time, 0.5, 0.125);
+            steps.push(step);
+            if step == FadeStep::Finish {
+                break;
+            }
+        }
+        assert_eq!(
+            steps,
+            vec![
+                FadeStep::Set(1.0),
+                FadeStep::Set(0.75),
+                FadeStep::Set(0.5),
+                FadeStep::Set(0.25),
+                FadeStep::Finish
+            ]
+        );
+        assert!(!dither_variant_on(1.0));
+        assert!(!dither_variant_on(0.9995));
+        assert!(dither_variant_on(0.999));
+        assert!(dither_variant_on(0.75));
+        assert!(dither_variant_on(0.0));
+    }
+
+    /// The treasure AutoMove on sampled poses (the rule as read: stand-off
+    /// `box + n * 0.6`; arrival only with the squared velocity at most 0.01
+    /// and the distance to the target below 0.3, strict). Values by hand.
+    #[test]
+    fn treasure_auto_move_threshold_rule() {
+        let box_position = Vec3::new(1.0, 0.0, 1.0);
+        assert_eq!(
+            treasure_stand_off(box_position, Vec3::new(3.0, 0.0, 1.0)),
+            Vec3::new(1.6, 0.0, 1.0)
+        );
+        assert_eq!(treasure_stand_off(box_position, box_position), box_position);
+        let target = Vec3::new(1.6, 0.0, 1.0);
+        let t = TREASURE_AUTO_MOVE_THRESHOLD;
+        // Standing on the steering target: 0.25 from the target arrives,
+        // 0.5 from it holds with a zero velocity (no timeout).
+        let at = Vec3::new(1.6, 0.0, 1.25);
+        assert_eq!(
+            auto_move_step(at, at, target, 2.5, t),
+            AutoMoveStep::Arrived
+        );
+        let far = Vec3::new(1.6, 0.0, 1.5);
+        assert_eq!(
+            auto_move_step(far, far, target, 2.5, t),
+            AutoMoveStep::Move(Vec3::ZERO)
+        );
+        // Exactly at the threshold does not arrive (the test is strict).
+        let edge = Vec3::new(1.6, 0.0, 1.5);
+        assert_eq!(
+            auto_move_step(edge, edge, target, 2.5, 0.5),
+            AutoMoveStep::Move(Vec3::ZERO)
+        );
+        // Inside the threshold but still steering: moves at the agent speed.
+        let near = Vec3::new(1.6, 0.0, 1.125);
+        assert_eq!(
+            auto_move_step(near, target, target, 2.5, t),
+            AutoMoveStep::Move(Vec3::new(0.0, 0.0, -2.5))
+        );
+        // A crawl speed of 0.05 (squared 0.0025) already counts as standing.
+        assert_eq!(
+            auto_move_step(near, target, target, 0.05, t),
+            AutoMoveStep::Arrived
+        );
     }
 }
