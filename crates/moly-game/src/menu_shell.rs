@@ -383,6 +383,7 @@ pub(crate) fn place(
     stack: Res<UiLayerStack>,
     ui: Res<ShellUiState>,
     dialog: Res<ShellDialogState>,
+    entry: Option<Res<crate::entry::EntrySequence>>,
     mut roots: Query<(&mut MenuShellRoot, &mut Visibility, &mut Transform, &mut UiPrefabView), Without<ShellDialogRoot>>,
     mut dialogs: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<ShellDialogRoot>, Without<MenuShellRoot>)>,
 ) {
@@ -390,7 +391,10 @@ pub(crate) fn place(
     let scale = canvas_scale(window.width(), window.height());
     let host = active.as_deref().map(ShellHost::for_site);
     for (mut root, mut visibility, mut transform, mut view) in &mut roots {
-        let visible = stack.on_field() && host == Some(root.host);
+        // The home HUD appears in the entry's OnFinishEnterAsync.
+        let visible = crate::entry::hud_open(entry.as_deref())
+            && stack.on_field()
+            && host == Some(root.host);
         *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
         transform.scale = Vec3::splat(scale);
         if !visible { continue; }
@@ -472,7 +476,8 @@ pub(crate) fn click(
     mut dialog: ResMut<ShellDialogState>,
     mut layer_commands: MessageWriter<LayerCommand>,
     requests: (MessageWriter<CaptureFrame>, MessageWriter<crate::fixture_edit::EditCommand>),
-    stack: Res<UiLayerStack>,
+    // Paired in one parameter: this system is at the parameter-count limit.
+    (stack, entry): (Res<UiLayerStack>, Option<Res<crate::entry::EntrySequence>>),
     active: Option<Res<SiteActive>>,
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
     dialogs: Query<&UiPrefabView, With<ShellDialogRoot>>,
@@ -511,7 +516,7 @@ pub(crate) fn click(
         }
         return;
     }
-    if !stack.on_field() { return; }
+    if !stack.on_field() || !crate::entry::hud_open(entry.as_deref()) { return; }
     let Some(active) = active else { return; };
     let host = ShellHost::for_site(&active);
     let Some((root, view)) = roots.iter().find(|(root, _)| root.host == host) else { return; };

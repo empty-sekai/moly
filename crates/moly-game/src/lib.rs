@@ -25,6 +25,7 @@ pub mod cloth_runtime;
 mod content_library;
 mod delayed_faces;
 pub mod emoticon;
+mod entry;
 pub mod env;
 pub mod fixture;
 mod fixture_collision;

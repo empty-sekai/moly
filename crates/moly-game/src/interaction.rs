@@ -59,11 +59,13 @@ pub(crate) struct InteractionEligibility<'w, 's> {
     settings_panel: Res<'w, crate::game_settings::SettingsPanel>,
     player_talk: Option<Res<'w, PlayerTalkSession>>,
     pair_talk: Option<Res<'w, ActiveTalk>>,
+    entry: Option<Res<'w, crate::entry::EntrySequence>>,
 }
 
 impl InteractionEligibility<'_, '_> {
     pub(crate) fn available(&self) -> bool {
-        self.layers.on_field()
+        crate::entry::control_open(self.entry.as_deref())
+            && self.layers.on_field()
             && !self.settings_panel.blocks_world_input()
             && !self.edits.is_active()
             && !self.dialogs.blocks_field_input()
@@ -76,7 +78,8 @@ impl InteractionEligibility<'_, '_> {
     /// own state. A conversation between NPCs does not close it; one with
     /// the player does.
     pub(crate) fn field_input_open(&self) -> bool {
-        self.layers.on_field()
+        crate::entry::control_open(self.entry.as_deref())
+            && self.layers.on_field()
             && !self.settings_panel.blocks_world_input()
             && !self.edits.is_active()
             && !self.dialogs.blocks_field_input()
@@ -106,7 +109,11 @@ impl InteractionEligibility<'_, '_> {
     /// PushUIScreen, whose PushUIScreenCore exits the current screen first.
     /// Dialogs are not screens and leave it current.
     pub(crate) fn home_screen_current(&self) -> bool {
-        self.layers.on_field() && !self.edits.is_active() && !self.player_in_talk()
+        // The home screen becomes current in the entry's OnFinishEnterAsync.
+        crate::entry::hud_open(self.entry.as_deref())
+            && self.layers.on_field()
+            && !self.edits.is_active()
+            && !self.player_in_talk()
     }
 
     /// The NPC is a registered collision object: its avatar is set up.

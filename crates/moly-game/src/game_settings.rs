@@ -263,8 +263,12 @@ pub(crate) fn scene_input_enabled(
 pub(crate) fn camera_input_enabled(
     panel: Res<SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
+    entry: Option<Res<crate::entry::EntrySequence>>,
 ) -> bool {
-    !panel.blocks_world_input() && !library.blocks_camera_input()
+    // Camera drag belongs to the gesture layer the entry enables in Finish.
+    !panel.blocks_world_input()
+        && !library.blocks_camera_input()
+        && crate::entry::control_open(entry.as_deref())
 }
 
 pub(crate) fn talk_input_enabled(

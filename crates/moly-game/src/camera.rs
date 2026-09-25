@@ -1369,7 +1369,7 @@ pub(crate) fn to_rotation(from: f32, to: f32) -> f32 {
 }
 
 /// OutQuad 缓动（源 `EASE_BASIC = 6`，DG.Tweening.Ease 位序：OutQuad）。
-fn out_quad(t: f32) -> f32 {
+pub(crate) fn out_quad(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
 
@@ -1838,6 +1838,17 @@ pub(crate) fn follow_avatar(
     };
     let player = avatar.translation();
     match state.0 {
+        CameraStateType::HouseEntry => {
+            // HouseEntryCameraState.OnUpdate: LookAt = the player's view
+            // position, UpdatePosition, view.LookAt(LookAt + Offset). The
+            // entry owns entering and leaving this state.
+            models.look_at = player;
+            let pivot = models.look_at + models.offset;
+            let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
+            if let Ok((mut camera, _)) = cameras.single_mut() {
+                *camera = Transform::from_translation(eye).looking_at(pivot, Vec3::Y);
+            }
+        }
         // The cannon move's camera states: the tween above is their
         // DoTweenCameraSetting; the per-frame write is
         // `site_move::camera::update`, which runs right after this system.

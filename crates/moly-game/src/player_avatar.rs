@@ -317,6 +317,41 @@ impl AvatarDriver {
         true
     }
 
+    /// `PlayAnimation(idle, crossfade)` at the end of a business action:
+    /// ownership returns to locomotion and its idle node takes over through
+    /// the given crossfade instead of a hard stop. Without a live token only
+    /// the idle crossfade is played.
+    pub(crate) fn play_idle(
+        &mut self,
+        token: Option<PlayerActionToken>,
+        blend: Duration,
+        animator: &mut AnimationPlayer,
+        transitions: &mut AnimationTransitions,
+    ) {
+        if let Some(token) = token {
+            if self
+                .action
+                .as_ref()
+                .is_some_and(|action| action.token == token)
+            {
+                self.action = None;
+            }
+        }
+        if self.action.is_some() {
+            return;
+        }
+        let slot = Self::slot(AvatarMotion::Idle);
+        transitions
+            .play(animator, self.locomotion[slot], blend)
+            .repeat();
+        self.playing = Some(AvatarMotion::Idle);
+        info!(
+            "[player] SD motion Idle: {} (crossfade {:.2}s)",
+            self.clip_names[slot],
+            blend.as_secs_f32()
+        );
+    }
+
     pub(crate) fn cancel_action(
         &mut self,
         token: PlayerActionToken,
