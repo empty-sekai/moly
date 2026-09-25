@@ -1,7 +1,6 @@
 //! The source player's harvest clips as data: length, loop flag and
-//! AnimationEvents (`MysekaiAnimationCommand`). The clips themselves are
-//! never played on the SD body; their events and lengths drive the hit clock
-//! and the waits.
+//! AnimationEvents (`MysekaiAnimationCommand`). The player's body plays these
+//! clips by name; their events and lengths drive the hit clock and the waits.
 //!
 //! The client builds lower-case names (`..._l`, `..._o`); the export keeps
 //! the asset's file name, which is the lower-case name, in `container`. The

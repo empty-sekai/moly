@@ -40,28 +40,19 @@
 //! 相机契约：玩家实体持 [`AvatarRoot`]（本模块接管，名册侧不再插），
 //! 相机域读它逐帧取景——玩家装配完成帧起相机追玩家。
 //!
-//! 模型与动作按产品选择使用 SD 角色；逻辑玩家仍独立于 NPC 名册。
-//! 当前沿已有清单第 4 行选择外观，读该角色的 idle/walk/run 原动作，
-//! 不复制角色的 NPC 速度、驻留或自主决策。角色装配与材质共用现有
-//! 管线，播放器所有权归 [`crate::player_avatar`]，不会另外挂观众身体。
+//! 身体是玩家 avatar 自己的模型与动作组（[`crate::player_avatar::body`]：
+//! 观众模型、它自己的骨架、它自己的 172 段剪辑），不借名册成员的外观。
+//! 播放器所有权归 [`crate::player_avatar`]。
 //! * 移动边界：约束面与裁决语义在 [`crate::walk_face`]（真源引擎原生
 //!   层不可读）；推进帧与 NPC 共用侵蚀场，整段位移受约束。
 
 use crate::character::AvatarRoot;
-use crate::npc::{CharacterUnitId, MotionPhase};
+use crate::npc::MotionPhase;
 use crate::player_fixture_action::PlayerFixtureHeld;
 use crate::site::GroundMeshes;
 use crate::walk_face;
-use bevy::asset::LoadState;
 use bevy::prelude::*;
-use moly_assets::json::JsonAsset;
 use moly_law::path::heading_yaw;
-
-/// 玩家取角色清单第 4 行的身份与SD外观；行选择沿现有占位（挂账）。
-/// 名册铺全量后这一行同时是一名名册成员（同
-/// unitId 两处出现不冲突——名册域的查询按 `PlayerControlled` 或 NPC
-/// 独占组件过滤，见 npc.rs 的名册铺装；要换行先动那一处的成员序）。
-const PLAYER_ROW: usize = 3;
 
 /// 出生点：站点中心外环、名册首名的对侧。真源出生点来自存档数据，
 /// 未提取——位置是替身。
@@ -106,17 +97,11 @@ pub struct PlayerInput {
     pub active: bool,
 }
 
-/// 装载请求：角色清单（player 块与替身行都在同一份文件里）。
-#[derive(Resource)]
-pub(crate) struct PlayerListHandle(Handle<JsonAsset>);
-
-/// 解析完成的玩家身份与外观动作规格；spawn 消费后即撤。位移速度不在
-/// 这儿：速度是 ClientConfig 面板三键的逐帧取值（见 [`move_speed`]），
-/// 不随装配算定。只借角色模型与动作名，不借NPC逻辑。
+/// 玩家的身体输入；spawn 消费后即撤。位移速度不在这儿：速度是
+/// ClientConfig 面板三键的逐帧取值（见 [`move_speed`]），不随装配算定。
 #[derive(Resource)]
 pub(crate) struct PlayerSpecs {
-    unit_id: u32,
-    visual_clips: crate::player_avatar::PlayerVisualClips,
+    body: crate::player_avatar::body::PlayerBody,
 }
 
 /// 玩家出生时缓存的地表世界顶点（推进帧的脚下高度采样用）。
@@ -127,72 +112,16 @@ pub(crate) struct PlayerGround(Vec<Vec3>);
 #[derive(Resource)]
 pub(crate) struct PlayerSpawned;
 
-/// Startup：请求装载角色清单（与 npc 域同一份；装载器按路径去重，
-/// 各自持句柄不重复装）。
-pub fn load(mut commands: Commands, server: Res<AssetServer>) {
-    let handle = server.load::<JsonAsset>(moly_assets::character_registry());
-    commands.insert_resource(PlayerListHandle(handle));
-}
-
-/// Update：清单装载完成后解析一次。player 块缺列或替身行缺列即响亮
-/// panic（资产边界的一次性拒绝），未到齐静默等下一帧。
-pub(crate) fn parse(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    lists: Res<Assets<JsonAsset>>,
-    handle: Option<Res<PlayerListHandle>>,
-) {
-    let Some(handle) = handle else {
-        return; // 未请求，或已解析并撤下
-    };
-    if let LoadState::Failed(err) = server.load_state(&handle.0) {
-        panic!("角色清单装载失败：{err:?}");
-    }
-    let Some(list) = lists.get(&handle.0) else {
-        return; // 还在装
-    };
-    let value: serde_json::Value =
-        serde_json::from_str(&list.0).unwrap_or_else(|err| panic!("角色清单不是合法 JSON：{err}"));
-    let characters = value
-        .get("characters")
-        .and_then(|v| v.as_object())
-        .unwrap_or_else(|| panic!("角色清单缺 characters 对象"));
-    let row = characters
-        .values()
-        .nth(PLAYER_ROW)
-        .unwrap_or_else(|| panic!("角色清单不足 {} 行：没有玩家替身行", PLAYER_ROW + 1));
-    let unit_id = row
-        .get("unitId")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_else(|| panic!("玩家替身行缺 unitId")) as u32;
-    // 速度不读清单：真源 UpdateState 逐帧调 ClientConfig getter，本仓
-    // 在推进帧从面板取值（见 [`move_speed`]）。
-    let locomotion = row
-        .get("locomotion")
-        .and_then(|v| v.as_object())
-        .unwrap_or_else(|| panic!("玩家外观 unit {unit_id} 缺 locomotion 动作名"));
-    let motion = |key: &str| {
-        locomotion
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| panic!("玩家外观 unit {unit_id} 缺 {key}"))
-            .to_owned()
-    };
+/// Startup：玩家的身体输入就位（avatar 模型与动作组；装载由
+/// [`crate::player_avatar::body`] 在玩家铺下后发起）。
+pub fn load(mut commands: Commands) {
     commands.insert_resource(PlayerSpecs {
-        unit_id,
-        visual_clips: crate::player_avatar::PlayerVisualClips {
-            idle: motion("idleMotion"),
-            walk: motion("walkMotion"),
-            run: motion("runMotion"),
-        },
+        body: crate::player_avatar::body::PlayerBody::avatar(),
     });
-    commands.remove_resource::<PlayerListHandle>();
 }
 
-/// Update：规格、面板与站点地表都就绪后，铺一次玩家。实体形状：身份
-/// （日志对账用）、移动相位、角色外观动作名（共享装配接玩家专属驱动，
-/// 不加入NPC名册），另加玩家专属件：[`AvatarRoot`]
+/// Update：规格、面板与站点地表都就绪后，铺一次玩家。实体形状：移动
+/// 相位、身体输入（avatar 模型与动作组），另加玩家专属件：[`AvatarRoot`]
 /// （相机自此追玩家）、dash 模式、输入。面板门与名册铺装同款：速度律
 /// 的键要读它，面板未立不铺玩家。
 /// 出生相位是待机——真源 `InitializeStatus` 起手就是 Idle。
@@ -230,27 +159,24 @@ pub(crate) fn spawn_when_ready(
     let offset = face.as_deref().map_or(0.0, |face| face.height_offset([seed_x, seed_z]));
     let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, offset), seed_z];
     commands.spawn((
-        CharacterUnitId(specs.unit_id),
         Transform::from_translation(Vec3::from(seed)),
         // 玩家是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
         Visibility::default(),
-        // 相机跟随契约：玩家实体持 AvatarRoot（接管自名册首行——真源
-        // 站点相机追的就是玩家 avatar 的视变换）。模型与动画段由
-        // SD几何/目标绑定复用角色管线，玩家独占AvatarDriver而非NPC驱动。
+        // 相机跟随契约：玩家实体持 AvatarRoot（真源站点相机追的就是
+        // 玩家 avatar 的视变换）。身体与动作组由 player_avatar::body 装上。
         AvatarRoot,
         PlayerControlled,
         DashMode(false),
         PlayerInput::default(),
         MotionPhase::Dwelling { remaining: None },
-        specs.visual_clips.clone(),
+        specs.body.clone(),
     ));
     commands.insert_resource(PlayerGround(verts));
     commands.insert_resource(PlayerSpawned);
     commands.remove_resource::<PlayerSpecs>();
     info!(
-        "[player] 玩家就位：unit {}（名册外替身行 {}），步速键 {}={:.3} · 采集档 {}={:.3} · 冲刺率 {}={:.3}（逐帧取值），AvatarRoot 移交相机",
-        specs.unit_id,
-        PLAYER_ROW + 1,
+        "[player] 玩家就位：身体 {}，步速键 {}={:.3} · 采集档 {}={:.3} · 冲刺率 {}={:.3}（逐帧取值），AvatarRoot 移交相机",
+        specs.body.model,
         crate::client_config::KEY_MYSEKAI_NORMAL_MOVE_SCALE,
         configs.float(crate::client_config::KEY_MYSEKAI_NORMAL_MOVE_SCALE),
         crate::client_config::KEY_MYSEKAI_HARVEST_MOVE_SCALE,
@@ -719,18 +645,12 @@ pub fn report(
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     site: Option<Res<crate::site::SiteSelection>>,
     camera_state: Res<crate::camera::FieldCameraState>,
-    players: Query<(
-        &CharacterUnitId,
-        &Transform,
-        &MotionPhase,
-        &DashMode,
-        &PlayerInput,
-    )>,
+    players: Query<(&Transform, &MotionPhase, &DashMode, &PlayerInput), With<PlayerControlled>>,
 ) {
     let Some((configs, site)) = configs.as_deref().zip(site.as_deref()) else {
         return; // 面板或站点选择未立：速度律没有取值面，跳过本行
     };
-    for (unit, transform, phase, dash, input) in &players {
+    for (transform, phase, dash, input) in &players {
         let forward = transform.rotation * Vec3::Z;
         let yaw = heading_yaw([forward.x, forward.y, forward.z]);
         let phase_word = if matches!(phase, MotionPhase::Walking) {
@@ -746,8 +666,7 @@ pub fn report(
             Some(_) => "外",
         };
         info!(
-            "[player] unit={} t={:.1} pos=({:.3},{:.3},{:.3}) yaw={:.1} phase={} dash={} 输入=({:.2},{:.2}) 速度档 {:.3} m/s 界={}",
-            unit.0,
+            "[player] t={:.1} pos=({:.3},{:.3},{:.3}) yaw={:.1} phase={} dash={} 输入=({:.2},{:.2}) 速度档 {:.3} m/s 界={}",
             time.elapsed_secs(),
             p.x,
             p.y,

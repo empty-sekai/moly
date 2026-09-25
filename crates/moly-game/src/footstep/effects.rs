@@ -613,10 +613,10 @@ pub(crate) fn step(
                     }
                 }
             }
-            let dt = time.delta_secs() * system.emitter.simulation_speed;
+            let dt = crate::particle_runtime::source_delta_time(time.delta());
             if dt > 0.0 {
                 if let Err(reason) =
-                    crate::particle_runtime::step_frame(system, dt, &ctx, instance.emitting)
+                    crate::particle_runtime::advance_frame(system, dt, instance.emitting, &ctx, |_| {})
                 {
                     // The step must not run again on this system.
                     error!(

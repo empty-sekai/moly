@@ -15,7 +15,8 @@
 //!
 //! Buttons follow the collision manager's edges, not the current overlap.
 //! One ordered colliding list (collideObjList) holds the fixtures and NPCs
-//! the player's box overlaps, apart from the button stack: an object joining
+//! the player's box overlaps, and the room door's sensor while the player
+//! stands inside its sphere, apart from the button stack: an object joining
 //! it runs AddShowButtonStack once, an object leaving it runs
 //! RemoveShowButtonStack, and nothing is re-tested while the player stays
 //! inside. The scan stops in Edit and in a conversation with the player
@@ -42,8 +43,9 @@ use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
 
 use moly_law::action_button::{
-    character_box, fixture_box, ButtonStack, ButtonType, CollisionBox2D, FixtureType,
-    PlayerActionType, TargetId, ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
+    character_box, fixture_box, inside_circle, ButtonStack, ButtonType, CollisionBox2D,
+    FixtureType, PlayerActionType, TargetId, ACTION_BUTTON_INPUT_INTERVAL,
+    PLAYER_ADDITIONAL_HALF_EXTEND,
 };
 
 use admission::{
@@ -70,6 +72,12 @@ use crate::ui_layout::{UiLayouts, UiPrefabView};
 const SKIN_LAYOUT: &str = "ShellHome";
 const BUTTON_NODE: &str = "ActionButtonController/TalkActionButton";
 const ICON_NODE: &str = "ActionButtonController/TalkActionButton/Icon";
+// The go-home button is its own view on the room screen (MyRoomSiteSelector
+// on GoHomeButton): the prefab carries both its circle and its home icon,
+// so it takes no icon from the button-type table.
+const GO_HOME_LAYOUT: &str = "ShellMyRoom";
+const GO_HOME_NODE: &str = "ActionButtonController/GoHomeButton";
+const GO_HOME_ICON_NODE: &str = "ActionButtonController/GoHomeButton/CustomImage";
 
 /// 按钮根（图标件的父，可见性随栈首）。
 #[derive(Component)]
@@ -88,20 +96,44 @@ pub(crate) struct ActionButtonBackground;
 pub(crate) struct ActionButtonArt {
     icons: HashMap<&'static str, Handle<Image>>,
     skin: Option<ActionButtonSkin>,
+    go_home: Option<ActionButtonSkin>,
+}
+
+impl ActionButtonArt {
+    /// The view that shows this button: the go-home selector for its
+    /// type, the shared talk and fixture button for the others.
+    fn skin_for(&self, button: ButtonType) -> Option<&ActionButtonSkin> {
+        if button == ButtonType::GoHomeSite {
+            self.go_home.as_ref()
+        } else {
+            self.skin.as_ref()
+        }
+    }
 }
 
 struct ActionButtonSkin {
     background: Handle<Image>,
     background_color: Color,
+    /// The icon the prefab itself carries, for a view whose icon is not
+    /// chosen by button type.
+    icon: Option<Handle<Image>>,
     icon_color: Color,
     geometry: UiPrefabView,
+    button_node: &'static str,
+    icon_node: &'static str,
 }
 
 impl ActionButtonSkin {
-    fn from_layouts(layouts: &UiLayouts, server: &AssetServer) -> Option<Self> {
-        let doc = layouts.document(SKIN_LAYOUT)?;
-        let background_node = &doc.nodes[doc.find(BUTTON_NODE).expect("source action button")];
-        let icon_node = &doc.nodes[doc.find(ICON_NODE).expect("source action icon")];
+    fn from_layouts(
+        layouts: &UiLayouts,
+        server: &AssetServer,
+        layout: &'static str,
+        button_node: &'static str,
+        icon_node: &'static str,
+    ) -> Option<Self> {
+        let doc = layouts.document(layout)?;
+        let background_node = &doc.nodes[doc.find(button_node).expect("source action button")];
+        let icon_node_data = &doc.nodes[doc.find(icon_node).expect("source action icon")];
         let background = background_node
             .components
             .iter()
@@ -111,16 +143,25 @@ impl ActionButtonSkin {
                     && component.sprite.is_some()
             })
             .expect("source action button Image");
-        let icon = icon_node
+        // The shared button's icon is a RawImage whose texture the view sets
+        // by button type; the go-home icon is an Image with its own sprite.
+        let icon = icon_node_data
             .components
             .iter()
-            .find(|component| component.enabled && component.class.ends_with("RawImage"))
-            .expect("source action icon RawImage");
+            .find(|component| component.enabled && component.class.ends_with("Image"))
+            .expect("source action icon image");
         let image = background
             .sprite
             .as_ref()
             .and_then(|sprite| sprite["image"].as_str())
             .expect("source action button Sprite image");
+        let icon_image = icon
+            .sprite
+            .as_ref()
+            .and_then(|sprite| sprite["image"].as_str())
+            .map(|image| {
+                moly_assets::residency::load_image(server, crate::ui_layout::image_asset_path(image))
+            });
         let color = |component: &moly_assets::ui_layout::UiComponent| {
             let values = component.fields["m_Color"]
                 .as_array()
@@ -131,8 +172,8 @@ impl ActionButtonSkin {
         // The root Image is the always-present button background. The separate
         // Cover is a press/disabled overlay: MysekaiActionInternalButton.OnEnable
         // calls HideCover, so it must not be mistaken for the normal gray base.
-        let mut geometry = UiPrefabView::new(SKIN_LAYOUT, BALLOON_LAYER);
-        geometry.set_visible(BUTTON_NODE, true);
+        let mut geometry = UiPrefabView::new(layout, BALLOON_LAYER);
+        geometry.set_visible(button_node, true);
         Some(Self {
             // The prefab UI loads its images through the same asset path for
             // the GPU only; the first request's settings win, so this one agrees.
@@ -141,8 +182,11 @@ impl ActionButtonSkin {
                 crate::ui_layout::image_asset_path(image),
             ),
             background_color: color(background),
+            icon: icon_image,
             icon_color: color(icon),
             geometry,
+            button_node,
+            icon_node,
         })
     }
 }
@@ -166,27 +210,29 @@ impl ActionButtonScreen<'_, '_> {
     fn rects(
         &self,
         window: &Window,
+        shown: ButtonType,
     ) -> Option<(
         moly_assets::ui_layout::UiRect,
         moly_assets::ui_layout::UiRect,
     )> {
-        let skin = self.art.as_deref()?.skin.as_ref()?;
+        let skin = self.art.as_deref()?.skin_for(shown)?;
         let layouts = self.layouts.as_deref()?;
         let canvas = self.root.as_deref()?.size(window);
         Some((
-            skin.geometry.rect(layouts, BUTTON_NODE, canvas)?,
-            skin.geometry.rect(layouts, ICON_NODE, canvas)?,
+            skin.geometry.rect(layouts, skin.button_node, canvas)?,
+            skin.geometry.rect(layouts, skin.icon_node, canvas)?,
         ))
     }
 
-    fn button_position(&self, window: &Window) -> Option<Vec2> {
-        let (button, _) = self.rects(window)?;
+    fn button_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
+        let (button, _) = self.rects(window, shown)?;
         let center = button.center() * self.scale(window)?;
         Some(Vec2::new(window.width() * 0.5 + center.x, window.height() * 0.5 - center.y))
     }
 
-    fn hit(&self, position: Vec2, window: &Window) -> bool {
-        let (Some((button, _)), Some(scale)) = (self.rects(window), self.scale(window)) else {
+    fn hit(&self, position: Vec2, window: &Window, shown: ButtonType) -> bool {
+        let (Some((button, _)), Some(scale)) = (self.rects(window, shown), self.scale(window))
+        else {
             return false;
         };
         let canvas_point = Vec2::new(position.x - window.width() * 0.5, window.height() * 0.5 - position.y)
@@ -258,12 +304,16 @@ enum Collider {
     Fixture(Entity, String),
     /// An NPC, by instance and character.
     Character(Entity, u32),
+    /// The room door's sensor, by its attach point.
+    Sensor(Entity),
 }
 
 impl Collider {
     fn entity(&self) -> Entity {
         match self {
-            Collider::Fixture(entity, _) | Collider::Character(entity, _) => *entity,
+            Collider::Fixture(entity, _)
+            | Collider::Character(entity, _)
+            | Collider::Sensor(entity) => *entity,
         }
     }
 }
@@ -357,6 +407,12 @@ pub(crate) struct ActionButtonState {
     reported: Option<(ButtonType, TargetId)>,
     /// 场上家具的一次性对账是否已报。
     surveyed: bool,
+    /// The door sensor entry's last next-frame wait, named once per reason.
+    sensor_wait: Option<String>,
+    /// The house-entry candidate's overlap and last next-frame wait, named
+    /// when they change.
+    house_touching: Option<bool>,
+    house_wait: Option<String>,
 }
 
 impl Default for ActionButtonState {
@@ -381,6 +437,9 @@ impl Default for ActionButtonState {
             last_input: f32::NEG_INFINITY,
             reported: None,
             surveyed: false,
+            sensor_wait: None,
+            house_touching: None,
+            house_wait: None,
         }
     }
 }
@@ -460,10 +519,22 @@ struct NpcCandidate {
     touching: bool,
 }
 
+/// The room door's sensor, as the scan saw it this frame.
+struct SensorCandidate {
+    /// The attach point (`gimmick_door`).
+    entity: Entity,
+    /// IsInSideCircle: the player within the sensor's own radius, in 3D.
+    touching: bool,
+    /// The room's door action point, which the go-home button's
+    /// availability reaches for.
+    door: Vec3,
+}
+
 /// One object of this frame's scan, in the order its enter edge runs.
 #[derive(Clone, Copy)]
 enum Slot {
     Fixture(usize),
+    Sensor,
     Npc(usize),
 }
 
@@ -677,17 +748,32 @@ pub(crate) fn spawn_when_ready(
         return;
     };
     if art.skin.is_none() {
-        art.skin = ActionButtonSkin::from_layouts(&layouts, &server);
+        art.skin =
+            ActionButtonSkin::from_layouts(&layouts, &server, SKIN_LAYOUT, BUTTON_NODE, ICON_NODE);
     }
-    let Some(skin) = art.skin.as_ref() else {
+    if art.go_home.is_none() {
+        art.go_home = ActionButtonSkin::from_layouts(
+            &layouts,
+            &server,
+            GO_HOME_LAYOUT,
+            GO_HOME_NODE,
+            GO_HOME_ICON_NODE,
+        );
+    }
+    let (Some(skin), Some(go_home)) = (art.skin.as_ref(), art.go_home.as_ref()) else {
         return;
     };
-    match server.load_state(&skin.background) {
-        LoadState::Loaded => {}
-        LoadState::Failed(err) => {
-            panic!("[action_button] source button background failed: {err:?}")
+    for image in [Some(&skin.background), Some(&go_home.background), go_home.icon.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        match server.load_state(image) {
+            LoadState::Loaded => {}
+            LoadState::Failed(err) => {
+                panic!("[action_button] source button image failed: {err:?}")
+            }
+            _ => return,
         }
-        _ => return,
     }
     // 对话与机关两张是当前接得出的两种按钮，等它们到齐即可铺件；
     // 其余图标晚到不挡这一步（换按钮类型时按句柄取当帧那张）。
@@ -770,6 +856,7 @@ pub(crate) fn advance(
     server: Res<AssetServer>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     homes: Option<Res<crate::entry::house::HomeFixtures>>,
+    room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
 ) {
     let state = &mut *state;
     // A saved layout re-fires entry once the scan next runs.
@@ -897,6 +984,19 @@ pub(crate) fn advance(
         });
     }
 
+    if let Some(house) = frame
+        .iter()
+        .find(|candidate| candidate.button == ButtonType::HouseEntry)
+    {
+        if state.house_touching != Some(house.touching) {
+            state.house_touching = Some(house.touching);
+            info!(
+                "[action_button] HouseEntry candidate {:?}: player box overlaps the house footprint = {}",
+                house.entity, house.touching
+            );
+        }
+    }
+
     if survey {
         state.surveyed = true;
         info!(
@@ -922,6 +1022,25 @@ pub(crate) fn advance(
         })
         .collect();
 
+    // The room site's enter registers the door sensor and its exit removes
+    // it: it is a collision object while its room is the active site.
+    let sensor_frame: Option<SensorCandidate> =
+        crate::site_move::room_door::sensor(room_door.as_deref(), inputs.site_epoch()).and_then(
+            |(sensor, inside)| {
+                let at = parents.get(sensor).ok()?.translation();
+                Some(SensorCandidate {
+                    entity: sensor,
+                    touching: inside_circle(
+                        position.to_array(),
+                        at.to_array(),
+                        crate::site_move::room_door::DOOR_SENSOR_RADIUS,
+                    ),
+                    door: parents.get(inside).ok()?.translation(),
+                })
+            },
+        );
+    let is_sensor = |entity: Entity| sensor_frame.as_ref().is_some_and(|s| s.entity == entity);
+
     // An object that left the scene, whose identity changed, or an NPC no
     // longer registered, leaves the colliding list and the stack.
     let index: HashMap<Entity, usize> = frame
@@ -945,8 +1064,11 @@ pub(crate) fn advance(
         Collider::Character(entity, unit) => npc_index
             .get(entity)
             .is_some_and(|&i| npc_frame[i].unit == *unit),
+        Collider::Sensor(entity) => is_sensor(*entity),
     });
-    state.deferred.retain(|entity, _| index.contains_key(entity));
+    state
+        .deferred
+        .retain(|entity, _| index.contains_key(entity) || is_sensor(*entity));
     let stale: Vec<i32> = state
         .fixture_targets
         .iter()
@@ -957,12 +1079,15 @@ pub(crate) fn advance(
         state.stack.remove(TargetId::Fixture(key));
         state.fixture_targets.remove(&key);
     }
+    if sensor_frame.is_none() {
+        state.stack.remove(TargetId::Sensor);
+    }
     // For an NPC, RemoveCollisionObject runs RemoveShowButtonStack, which
     // returns at once while the stack is locked.
     if !state.locked {
         state.stack.retain_targets(&|target| match target {
             TargetId::Character(unit) => npc_frame.iter().any(|npc| npc.unit == unit),
-            TargetId::Fixture(_) => true,
+            TargetId::Fixture(_) | TargetId::Sensor => true,
         });
     }
 
@@ -982,6 +1107,7 @@ pub(crate) fn advance(
                     position,
                     &frame,
                     &index,
+                    sensor_frame.as_ref(),
                 );
                 state.locked = false;
                 info!("[action_button] player timeline ended; stack pruned and unlocked");
@@ -1002,6 +1128,7 @@ pub(crate) fn advance(
             position,
             &frame,
             &index,
+            sensor_frame.as_ref(),
         );
     }
 
@@ -1022,13 +1149,20 @@ pub(crate) fn advance(
                 .as_ref()
                 .is_none_or(|previous| !previous.iter().any(|collider| collider.entity() == entity))
         };
-        // Moly has no registration order across fixtures and NPCs; the scan
-        // takes fixtures, then NPCs, each in query order.
+        // Moly has no registration order across fixtures, the door sensor
+        // and NPCs; the scan takes fixtures, then the sensor, then NPCs, each
+        // in query order.
         let mut order: Vec<Slot> = frame
             .iter()
             .enumerate()
             .filter(|(_, candidate)| candidate.touching && fresh(candidate.entity))
             .map(|(i, _)| Slot::Fixture(i))
+            .chain(
+                sensor_frame
+                    .as_ref()
+                    .filter(|sensor| sensor.touching && fresh(sensor.entity))
+                    .map(|_| Slot::Sensor),
+            )
             .chain(
                 npc_frame
                     .iter()
@@ -1047,6 +1181,10 @@ pub(crate) fn advance(
                     .get(entity)
                     .filter(|&&i| npc_frame[i].touching)
                     .map(|&i| Slot::Npc(i)),
+                Collider::Sensor(entity) => sensor_frame
+                    .as_ref()
+                    .filter(|sensor| sensor.entity == *entity && sensor.touching)
+                    .map(|_| Slot::Sensor),
             };
             order.extend(slot);
         }
@@ -1057,11 +1195,19 @@ pub(crate) fn advance(
                 Slot::Fixture(i) => {
                     fixture_enter(state, &inputs, player_entity, position, &frame[i], revision)
                 }
+                Slot::Sensor => {
+                    if let Some(sensor) = sensor_frame.as_ref() {
+                        sensor_enter(state, &inputs, player_entity, position, sensor, revision);
+                    }
+                }
                 Slot::Npc(i) => npc_enter(state, &eligibility, &npc_frame[i]),
             }
         }
         for candidate in frame.iter().filter(|candidate| !candidate.touching) {
             fixture_exit(state, candidate.entity);
+        }
+        if let Some(sensor) = sensor_frame.as_ref().filter(|sensor| !sensor.touching) {
+            sensor_exit(state, sensor.entity);
         }
         for npc in npc_frame.iter().filter(|npc| !npc.touching) {
             npc_exit(state, npc.entity, npc.unit);
@@ -1177,7 +1323,17 @@ fn fixture_enter(
             );
         }
         Err(deferred) => match deferred.retry {
-            Retry::NextFrame => {}
+            Retry::NextFrame => {
+                if candidate.button == ButtonType::HouseEntry
+                    && state.house_wait.as_deref() != Some(deferred.reason.as_str())
+                {
+                    info!(
+                        "[action_button] HouseEntry {} entry waits for {}",
+                        target.uid, deferred.reason
+                    );
+                    state.house_wait = Some(deferred.reason);
+                }
+            }
             Retry::NewInputs(at) => {
                 if state.deferred.insert(entity, at) != Some(at) {
                     warn!(
@@ -1195,6 +1351,86 @@ fn fixture_enter(
                 );
             }
         },
+    }
+}
+
+/// CheckEnterCollide for the door sensor: TryAddObjToCollideList, then
+/// AddShowButtonStack. The sensor's action type Door maps to the go-home
+/// button, whose IsActionButtonTypeAvailable is CanShowHouseEntryButton on
+/// the room's door action point. A sensor is neither a fixture view nor an
+/// NPC, so IsCanActionFixture and IsCanActionNPC pass it; the entry is
+/// appended, not a priority one.
+fn sensor_enter(
+    state: &mut ActionButtonState,
+    inputs: &AdmissionInputs,
+    player: Entity,
+    position: Vec3,
+    sensor: &SensorCandidate,
+    revision: Option<InputRevision>,
+) {
+    let entity = sensor.entity;
+    if state.colliding.contains(entity) {
+        return;
+    }
+    if revision.is_some() && state.deferred.get(&entity) == revision.as_ref() {
+        return;
+    }
+    let joined = Collider::Sensor(entity);
+    if state.locked {
+        state.colliding.join(joined);
+        return;
+    }
+    let button = ButtonType::from_action_type(PlayerActionType::Door, false);
+    match inputs.house_entry(player, position, sensor.door) {
+        Ok(shown) => {
+            state.deferred.remove(&entity);
+            state.colliding.join(joined);
+            if shown {
+                state.stack.push(button, TargetId::Sensor, false);
+                info!(
+                    "[action_button] {button:?} door sensor entered; stacked (stack depth {})",
+                    state.stack.len()
+                );
+            } else {
+                info!("[action_button] {button:?} door sensor entered; CanShowHouseEntryButton is false, not stacked");
+            }
+        }
+        Err(deferred) => match deferred.retry {
+            Retry::NextFrame => {
+                if state.sensor_wait.as_deref() != Some(deferred.reason.as_str()) {
+                    info!(
+                        "[action_button] {button:?} door sensor entry waits for {}",
+                        deferred.reason
+                    );
+                    state.sensor_wait = Some(deferred.reason);
+                }
+            }
+            Retry::NewInputs(at) => {
+                if state.deferred.insert(entity, at) != Some(at) {
+                    warn!(
+                        "[action_button] {button:?} door sensor entry undecided with this navigation snapshot: {}",
+                        deferred.reason
+                    );
+                }
+            }
+            Retry::Never => {
+                state.deferred.remove(&entity);
+                state.colliding.join(joined);
+                warn!(
+                    "[action_button] {button:?} door sensor entered without a button: {}",
+                    deferred.reason
+                );
+            }
+        },
+    }
+}
+
+/// CheckExitCollide for the door sensor: RemoveShowButtonStack, which
+/// returns at once while the stack is locked.
+fn sensor_exit(state: &mut ActionButtonState, entity: Entity) {
+    state.deferred.remove(&entity);
+    if state.colliding.leave(entity).is_some() && !state.locked {
+        state.stack.remove(TargetId::Sensor);
     }
 }
 
@@ -1243,6 +1479,7 @@ fn remove_not_colliding(
     position: Vec3,
     frame: &[Candidate],
     index: &HashMap<Entity, usize>,
+    sensor: Option<&SensorCandidate>,
 ) {
     let mut removed = Vec::new();
     for (&key, target) in &state.fixture_targets {
@@ -1294,11 +1531,26 @@ fn remove_not_colliding(
         state.stack.remove(TargetId::Fixture(key));
         state.fixture_targets.remove(&key);
     }
+    // The door sensor's entry: the sensor left the colliding list, or
+    // CanShowHouseEntryButton is false.
+    let keep_sensor = sensor
+        .filter(|sensor| state.colliding.contains(sensor.entity))
+        .is_some_and(|sensor| match inputs.house_entry(player, position, sensor.door) {
+            Ok(shown) => shown,
+            Err(deferred) => {
+                info!(
+                    "[action_button] door sensor availability undecided while pruning ({}); kept",
+                    deferred.reason
+                );
+                true
+            }
+        });
     // A Talk entry: its NPC left the colliding list, or CheckTargetSite or
     // CanShowTalkActionButton is false. Without an active site it is kept.
     let colliding = &state.colliding;
     state.stack.retain_targets(&|target| match target {
         TargetId::Fixture(_) => true,
+        TargetId::Sensor => keep_sensor,
         TargetId::Character(unit) => colliding
             .character(unit)
             .is_some_and(|entity| eligibility.talk_available(entity) != Some(false)),
@@ -1343,7 +1595,7 @@ pub(crate) fn place_ui(
     };
     let head = state.current();
     let scale = screen.scale(window);
-    let rects = screen.rects(window);
+    let rects = head.and_then(|(button, _)| screen.rects(window, button));
     for (mut visibility, mut transform) in &mut roots {
         // TimelineFixtureProcess hides the action buttons view until the
         // timeline's finish shows it again. They are part of the home
@@ -1365,6 +1617,9 @@ pub(crate) fn place_ui(
     let (Some(art), Some((background_rect, icon_rect))) = (screen.art.as_deref(), rects) else {
         return;
     };
+    let Some(skin) = art.skin_for(button) else {
+        return;
+    };
     for (mut transform, mut sprite, icon) in &mut parts {
         let rect = if icon.is_some() {
             &icon_rect
@@ -1378,13 +1633,25 @@ pub(crate) fn place_ui(
             scale: local_scale,
         };
         sprite.custom_size = Some(rect.size);
-        if let Some(name) = button.icon_file_name().filter(|_| icon.is_some()) {
-            if let Some(handle) = art.icons.get(name) {
-                if sprite.image != *handle {
-                    sprite.image = handle.clone();
-                }
+        let image = if icon.is_some() {
+            skin.icon.as_ref().or_else(|| {
+                button
+                    .icon_file_name()
+                    .and_then(|name| art.icons.get(name))
+            })
+        } else {
+            Some(&skin.background)
+        };
+        if let Some(handle) = image {
+            if sprite.image != *handle {
+                sprite.image = handle.clone();
             }
         }
+        sprite.color = if icon.is_some() {
+            skin.icon_color
+        } else {
+            skin.background_color
+        };
     }
 }
 
@@ -1435,12 +1702,20 @@ pub(crate) fn click(
         Some((ButtonType::GimmickFixture, _)) => eligibility.field_input_open(),
         _ => eligibility.available(),
     };
-    if taps.is_empty()
-        || !open
-        || !roots
-            .iter()
-            .any(|visibility| *visibility != Visibility::Hidden)
-    {
+    let shown = roots
+        .iter()
+        .any(|visibility| *visibility != Visibility::Hidden);
+    if let (Some(&tap), Some((head, _))) = (taps.first(), state.current()) {
+        if head != ButtonType::Talk && (!open || !shown || !screen.hit(tap, window, head)) {
+            info!(
+                "[action_button] tap at ({:.0},{:.0}) not taken for {head:?}: field open {open}, button shown {shown}, on the button {}",
+                tap.x,
+                tap.y,
+                screen.hit(tap, window, head)
+            );
+        }
+    }
+    if taps.is_empty() || !open || !shown {
         return;
     }
     let Some((button, target)) = state.current() else {
@@ -1448,10 +1723,10 @@ pub(crate) fn click(
     };
     let fixture_target = match target {
         TargetId::Fixture(key) => state.fixture_target(key),
-        TargetId::Character(_) => None,
+        TargetId::Character(_) | TargetId::Sensor => None,
     };
     for position in taps {
-        if !screen.hit(position, window) {
+        if !screen.hit(position, window, button) {
             continue;
         }
         let now = time.elapsed_secs();
@@ -1734,7 +2009,12 @@ pub(crate) fn smoke_autowalk(
         });
     };
     // 按钮的屏位（顶原点）：与摆件同一式——覆盖相机世界心翻回屏坐标。
-    let Some(button_pos) = screen.button_position(window) else {
+    // With an empty stack the tap arm has nothing to press; the walk still
+    // needs a position, the shared button's.
+    let shown = button_state
+        .current()
+        .map_or(ButtonType::Talk, |(button, _)| button);
+    let Some(button_pos) = screen.button_position(window, shown) else {
         return;
     };
     // 收尾：armed 窗口一过两根指都松（走指若还按着，摇杆会拖着最后
@@ -1915,6 +2195,214 @@ pub(crate) fn smoke_autowalk(
         write(&mut touches, TouchPhase::Moved, position);
         return;
     }
+}
+
+/// The door walk's progress on the current site.
+#[derive(Default)]
+pub(crate) struct DoorWalk {
+    pressing: bool,
+    /// The tap finger went down at this time.
+    tap_at: Option<f32>,
+    /// The site generation the door button was pressed on.
+    tapped: Option<u64>,
+    /// The site generation this walk runs on, and when it began.
+    since: Option<(u64, f32)>,
+    /// The walk stopped on this generation (reached or timed out).
+    stopped: Option<u64>,
+    last_log: f32,
+}
+
+/// Instrument (`MOLY_DOOR_WALK_SECS`, off by default; from
+/// `MOLY_DOOR_WALK_AFTER` seconds): on the home site walk the player past
+/// the house's inside-door point towards the house, in a room to the door
+/// sensor, through the
+/// joystick's touch stream; once the stack head is that door's button (the
+/// house entry, the go-home button) tap it on its screen position, through
+/// the gesture and click path. The press moves the site, and the walk
+/// starts again on the next one. `MOLY_DOOR_WALK_OFFSET=x,z` shifts the
+/// walk's goal by that many metres (to come at the sensor from another
+/// side; the button still waits for the sensor's own sphere).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn smoke_door_walk(
+    mut touches: MessageWriter<TouchInput>,
+    mut window_events: MessageWriter<bevy::window::WindowEvent>,
+    screen: ActionButtonScreen,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    players: Query<&Transform, With<PlayerControlled>>,
+    houses: Query<(&crate::site_move::door::HouseEntryPoint, &GlobalTransform)>,
+    points: Query<&GlobalTransform>,
+    joystick: Res<JoystickState>,
+    button_state: Res<ActionButtonState>,
+    room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
+    epoch: Option<Res<crate::site::GroundEpoch>>,
+    time: Res<Time>,
+    mut walk: Local<DoorWalk>,
+) {
+    let armed = env_secs("MOLY_DOOR_WALK_SECS");
+    if armed <= 0.0 {
+        return;
+    }
+    let now = time.elapsed_secs();
+    let Ok((window_entity, window)) = screen.windows.single() else {
+        return;
+    };
+    const FINGER: u64 = 99011;
+    const TAP_FINGER: u64 = 99012;
+    let base = Vec2::new(window.width() * 0.15, window.height() * 0.75);
+    // The joystick reads the touch messages; the gesture layer reads the
+    // window's event stream, so the tap finger goes there.
+    let mut touch = |id: u64, phase: TouchPhase, position: Vec2| {
+        let input = TouchInput {
+            phase,
+            position,
+            window: window_entity,
+            force: None,
+            id,
+        };
+        if id == TAP_FINGER {
+            window_events.write(bevy::window::WindowEvent::TouchInput(input));
+        } else {
+            touches.write(input);
+        }
+    };
+    let walk = &mut *walk;
+    let release = |walk: &mut DoorWalk, touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
+        if walk.pressing {
+            touch(FINGER, TouchPhase::Ended, base);
+            walk.pressing = false;
+        }
+    };
+    if let Some(at) = walk.tap_at {
+        if now - at >= 0.1 {
+            let shown = button_state
+                .current()
+                .map_or(ButtonType::Talk, |(button, _)| button);
+            let position = screen.button_position(window, shown).unwrap_or(base);
+            touch(TAP_FINGER, TouchPhase::Ended, position);
+            walk.tap_at = None;
+        }
+        return;
+    }
+    // Hold the walk finger still at the pad's centre (direction zero) while
+    // standing: a free touch would be the joystick's next capture, and the
+    // tap finger must reach the gesture layer instead.
+    let hold = |walk: &mut DoorWalk, touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
+        if walk.pressing {
+            touch(FINGER, TouchPhase::Moved, base);
+        }
+    };
+    if now >= armed || now < env_secs("MOLY_DOOR_WALK_AFTER") || !joystick.enabled {
+        release(walk, &mut touch);
+        return;
+    }
+    let Some(epoch) = epoch.map(|epoch| epoch.0) else {
+        return;
+    };
+    if walk.tapped == Some(epoch) || walk.stopped == Some(epoch) {
+        release(walk, &mut touch);
+        return;
+    }
+    let (Ok(player), Ok(camera)) = (players.single(), cameras.single()) else {
+        return;
+    };
+    let target = match crate::site_move::room_door::sensor(room_door.as_deref(), Some(epoch)) {
+        Some((sensor, _)) => points
+            .get(sensor)
+            .ok()
+            .map(|at| (at.translation(), ButtonType::GoHomeSite)),
+        // The house: half a metre past the inside-door point towards the
+        // house, so the player arrives facing it (the player box is ahead).
+        None => houses.iter().next().and_then(|(point, house)| {
+            let at = points.get(point.0).ok()?.translation();
+            let inward = (house.translation() - at).with_y(0.0).normalize_or_zero();
+            Some((at + inward * 0.5, ButtonType::HouseEntry))
+        }),
+    };
+    let Some((target, expected)) = target else {
+        return;
+    };
+    let offset = std::env::var("MOLY_DOOR_WALK_OFFSET")
+        .ok()
+        .and_then(|raw| {
+            let (x, z) = raw.split_once(',')?;
+            Some(Vec3::new(x.trim().parse().ok()?, 0.0, z.trim().parse().ok()?))
+        })
+        .unwrap_or(Vec3::ZERO);
+    let target = target + offset;
+    let since = match walk.since {
+        Some((generation, since)) if generation == epoch => since,
+        _ => {
+            walk.since = Some((epoch, now));
+            info!(
+                "[door-walk] site generation {epoch}: walking to the {expected:?} door at ({:.2},{:.2},{:.2})",
+                target.x, target.y, target.z
+            );
+            now
+        }
+    };
+    let delta = target - player.translation;
+    let distance = Vec2::new(delta.x, delta.z).length();
+    let head = button_state.current();
+    if now - walk.last_log >= 1.0 {
+        walk.last_log = now;
+        info!(
+            "[door-walk] player ({:.2},{:.2},{:.2}) distance {distance:.2} m, 3D {:.2} m, head {head:?}",
+            player.translation.x,
+            player.translation.y,
+            player.translation.z,
+            delta.length()
+        );
+    }
+    if head.is_some_and(|(button, _)| button == expected) {
+        hold(walk, &mut touch);
+        let Some(position) = screen.button_position(window, expected) else {
+            return;
+        };
+        touch(TAP_FINGER, TouchPhase::Started, position);
+        walk.tap_at = Some(now);
+        walk.tapped = Some(epoch);
+        info!(
+            "[door-walk] head {head:?} at distance {distance:.2} m (3D {:.2} m); tapping its button at ({:.0},{:.0})",
+            delta.length(),
+            position.x,
+            position.y
+        );
+        return;
+    }
+    if now - since > 40.0 {
+        release(walk, &mut touch);
+        walk.stopped = Some(epoch);
+        warn!(
+            "[door-walk] stopped at distance {distance:.2} m after {:.1} s without the {expected:?} button; head {head:?}",
+            now - since
+        );
+        return;
+    }
+    // At the door: stand and wait for the head (another entry that joined
+    // first keeps it until its object leaves).
+    if distance < 0.2 {
+        hold(walk, &mut touch);
+        return;
+    }
+    // The joystick's inverse, as the action button walk writes it.
+    let dir_world = Vec2::new(delta.x, delta.z).normalize_or(Vec2::X);
+    let forward = camera.forward();
+    let forward_flat = Vec2::new(forward.x, forward.z).normalize_or_zero();
+    let right = camera.right();
+    let joy = Vec2::new(
+        dir_world.dot(Vec2::new(right.x, right.z)),
+        dir_world.dot(forward_flat),
+    );
+    let Some(scale) = screen.scale(window) else {
+        return;
+    };
+    let position = base + Vec2::new(joy.x, -joy.y) * HANDLE_SIZE * scale;
+    if !walk.pressing {
+        touch(FINGER, TouchPhase::Started, base);
+        walk.pressing = true;
+        return;
+    }
+    touch(FINGER, TouchPhase::Moved, position);
 }
 
 /// 环境变量秒数（缺省 0）：与各域冒烟钩子同款读法。
