@@ -282,6 +282,18 @@ pub(crate) struct MeshDraw {
     pub axis_body: Option<AxisBody>,
 }
 
+impl MeshDraw {
+    /// A Mesh render-mode renderer whose mesh cache is empty: no vertex is
+    /// written for any particle.
+    pub(crate) fn empty(alignment: Alignment, scaling: Scaling, pivot: Vec3) -> Self {
+        Self {
+            source: Arc::new(SourceMesh { positions: Vec::new(), normals: Vec::new(), uv: Vec::new(),
+                colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
+            scaling, alignment, pivot, flip: Vec3::ZERO, axis_body: None,
+        }
+    }
+}
+
 fn take_v3(mesh: &mut Mesh, attribute: bevy::mesh::MeshVertexAttribute) -> Vec<[f32; 3]> {
     match mesh.remove_attribute(attribute) { Some(VertexAttributeValues::Float32x3(mut v)) => { v.clear(); v }, _ => Vec::new() }
 }
@@ -304,6 +316,8 @@ pub(crate) fn write_mesh(mesh: &mut Mesh, draw: &MeshDraw, particles: &[Instance
         Some(Indices::U32(mut v)) => { v.clear(); v }, _ => Vec::new(),
     };
     let source = &draw.source;
+    // An empty mesh cache draws nothing for any particle.
+    let particles = if source.positions.is_empty() { &[][..] } else { particles };
     let count = source.positions.len().saturating_mul(particles.len());
     positions.reserve(count); normals.reserve(count); colours.reserve(count);
     custom1.reserve(count); custom2.reserve(count); uv.reserve(count);

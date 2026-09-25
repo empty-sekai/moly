@@ -1316,13 +1316,16 @@ pub(crate) fn spawn_fixture_particles(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_fixture_particles(
     mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
         Option<&mut crate::fixture_timeline_particles::DirectorClock>,
-        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>)>,
+        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
+        Option<&mut crate::weather_fx::fixture::Played>)>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
-    time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>,
+    time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
@@ -1331,7 +1334,15 @@ pub(crate) fn advance_fixture_particles(
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
     };
     let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32);
-    for (entity, mut particle, mut clock, stopped) in &mut live {
+    // Time.deltaTime (clamped at Time.maximumDeltaTime, floored at 1e-5 s,
+    // rounded once to float) and Time.unscaledDeltaTime, as the weather host
+    // reads them.
+    let clocks = crate::weather_fx::fixture::FrameClocks {
+        scaled: crate::particle_runtime::source_delta_time(time.delta()),
+        unscaled: unscaled.as_deref().map(|clock| clock.delta()),
+        now: time.elapsed_secs_f64(),
+    };
+    for (entity, mut particle, mut clock, stopped, played) in &mut live {
         let system = &mut particle.0;
         let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
         if let Some(mut stopped) = stopped {
@@ -1361,6 +1372,18 @@ pub(crate) fn advance_fixture_particles(
         let ctx = Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera_transform };
         if let Some(mut clock) = clock {
             crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant);
+        } else if let Some(mut played) = played {
+            // Played (play on awake or an explicit Play): the weather host's
+            // per-frame update with the birth owner installed at its Play.
+            if let Err(reason) = crate::weather_fx::fixture::step_played(system, &mut played, &clocks, &ctx) {
+                error!(%reason, effect=%system.effect, node=%system.node,
+                    "native particle step refused: the system is retired and draws nothing");
+                system.pool.clear();
+                system.side.clear();
+                if let Some(mesh) = meshes.get_mut(&system.mesh) { *mesh = billboard::empty_mesh(); }
+                commands.entity(entity).remove::<(FixtureParticleLive, crate::weather_fx::fixture::Played)>();
+                continue;
+            }
         } else {
             if !system.prewarmed {
                 system.prewarmed = true;

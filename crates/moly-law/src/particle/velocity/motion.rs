@@ -17,6 +17,11 @@ pub struct OrbitalMotion {
 impl OrbitalMotion {
     /// Displacement in emitter-local coordinates. The speed modifier changes
     /// the angle and radial step before the displacement is calculated.
+    /// The radial step moves the turned vector along its unit vector, which
+    /// ApplyOrbitalAndRadialVelocity takes as the vector times the ARM
+    /// reciprocal square root of its squared length (estimate and two
+    /// refinements, the estimate kept at zero), masked to zero where the
+    /// squared length is at most 0x0da24260; the step is added on every axis.
     pub fn displacement(self, position: [f32; 3], dt: f32, speed_modifier: f32) -> [f32; 3] {
         let step = dt * speed_modifier;
         let p = std::array::from_fn(|axis| position[axis] - self.offset[axis]);
@@ -24,12 +29,12 @@ impl OrbitalMotion {
         let mut rotated = rotate_zxy(p, angle);
         let length_squared = rotated[0] * rotated[0]
             + (rotated[1] * rotated[1] + rotated[2] * rotated[2]);
-        if length_squared > f32::from_bits(0x0da2_4260) {
-            let inverse_length = 1.0 / length_squared.sqrt();
-            let distance = step * self.radial;
-            for value in &mut rotated {
-                *value += (*value * inverse_length) * distance;
-            }
+        let inverse_length = crate::particle::armf::rsqrt2(length_squared);
+        let lengthened = length_squared > f32::from_bits(0x0da2_4260);
+        let distance = step * self.radial;
+        for value in &mut rotated {
+            let unit = if lengthened { *value * inverse_length } else { 0.0 };
+            *value += unit * distance;
         }
         std::array::from_fn(|axis| rotated[axis] - p[axis])
     }

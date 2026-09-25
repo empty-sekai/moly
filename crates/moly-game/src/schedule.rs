@@ -344,6 +344,7 @@ pub fn install(app: &mut App) {
         // 同款故事；native 上与天气插件的 init 幂等重合）。
         .init_resource::<weather::CurrentPhenomenonId>()
         .init_resource::<weather_fx::WeatherFxRetirements>()
+        .init_resource::<weather_fx::EnvironmentRoot>()
         .init_resource::<crate::particle_runtime::seed::SystemSeedManager>()
         // The player's Time.unscaledDeltaTime holder: advanced once per frame
         // from the real clock, right after the app's clocks update.
@@ -486,7 +487,7 @@ pub fn install(app: &mut App) {
                     joystick::smoke_autojoystick,
                     // 动作按钮的走位冒烟口也注在摇杆层推进之前：它写入的
                     // 触摸要被同一帧的摇杆层读到。
-                    action_button::smoke_autowalk,
+                    (action_button::smoke_autowalk, action_button::smoke_door_walk).chain(),
                     joystick::advance,
                     gesture::advance,
                     joystick::spawn_when_ready,
