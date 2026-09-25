@@ -5,11 +5,9 @@
 //! zero and a wood or mineral target: it hides every cached tool model, then
 //! shows the cached one of that tool id or creates it
 //! (`mysekai/tool/<assetbundleName>`) under `PlayerAvatarView.RightArm`
-//! (the u000 body's `Penlight_R`). `HideToolModel` hides them all.
-//!
-//! Adaptation (named): the SD body has no `Penlight_R`; the model is created
-//! under the SD rig's `RightHandItem` node, the hand's item mount. The tool
-//! keeps its glTF materials (its source shader is not ported).
+//! (`FindDeep(avatarRoot, "Penlight_R")`, the avatar body's right hand).
+//! `HideToolModel` hides them all. The tool keeps its glTF materials (its
+//! source shader is not ported).
 
 use std::collections::HashMap;
 
@@ -23,7 +21,7 @@ use crate::player::PlayerControlled;
 use crate::player_avatar::AvatarDriver;
 
 const INDEX: &str = "moly://avatar/tools/index.json";
-const MOUNT: &str = "RightHandItem";
+const MOUNT: &str = "Penlight_R";
 
 /// A request from the harvest presenter to the avatar's tool view.
 #[derive(Debug, Clone)]
@@ -221,7 +219,7 @@ pub(crate) fn apply(
     models.instances.insert(tool_id, entity);
     models.pending_show = false;
     info!(
-        "[harvest] tool model {assetbundle} (tool {tool_id}) created under the SD {MOUNT} mount (adaptation of the source RightArm mount)"
+        "[harvest] tool model {assetbundle} (tool {tool_id}) created under {MOUNT} (PlayerAvatarView.RightArm)"
     );
 }
 

@@ -1,14 +1,12 @@
 //! When a footstep falls: the player avatar's `PublishFootSE` animation
-//! events, carried onto the SD locomotion clip the product plays.
+//! events on the clip the player is playing.
 //!
-//! In the source the events live on the player avatar's own site clips: the
-//! Move state plays the walk clip and the Dash state the run clip, each with
-//! two `PublishFootSE` events. The product's player body is an SD character
-//! whose walk and run clips have no events (the SD motion library carries
-//! none), so each event is placed at the same fraction of the SD clip that
-//! is playing: event time divided by the avatar clip's length, read at run
-//! time from the avatar motion manifest (never typed in). That placement is
-//! a product adaptation, named as such.
+//! The events live on the player avatar's own site clips: the Move state
+//! plays the walk clip and the Dash state the run clip, each with two
+//! `PublishFootSE` events. The body plays those clips, so an event falls
+//! when the playing clip's own time reaches it: event time divided by the
+//! clip's length, read at run time from the avatar motion manifest (never
+//! typed in), against the animator's cycle position of that clip.
 
 use serde_json::Value;
 
