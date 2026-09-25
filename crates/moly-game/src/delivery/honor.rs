@@ -6,7 +6,7 @@
 //! honor) and the rest. The rest show in the get-resource dialog, awaited.
 //! With an honor: a 500 ms wait, player state 9
 //! (`PlayerAvatarDeliveryHonorRewardState`), the intercept gate closed, a
-//! wait of `HonorRewardEffectWaitTime` (FloatConfigs 173) truncated to whole
+//! wait of `DeliveryHonorRewardDialogShowTime` (FloatConfigs 173) truncated to whole
 //! milliseconds, the honor reward dialog chain, awaited; then state Idle
 //! (published), the gate open and player state Idle. Without an honor,
 //! state Idle (published) after the dialog.
@@ -33,8 +33,8 @@ use crate::player::PlayerControlled;
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 use crate::site_move::timeline::Delay;
 
-/// `HonorRewardEffectWaitTime` (FloatConfigs 173).
-pub(crate) const KEY_HONOR_REWARD_WAIT: i32 = 173;
+/// `DeliveryHonorRewardDialogShowTime` (FloatConfigs 173).
+pub(crate) const KEY_HONOR_DIALOG_SHOW_TIME: i32 = 173;
 /// The honor state's step item.
 const PETAL_TIMELINE: &str = "tl_site_prop_common_petal1";
 
@@ -180,7 +180,7 @@ pub(crate) fn advance(
                     states.can_intercept = false;
                     let wait_ms = configs
                         .as_deref()
-                        .map_or(0, |c| (c.float(KEY_HONOR_REWARD_WAIT) * 1000.0) as i32);
+                        .map_or(0, |c| (c.float(KEY_HONOR_DIALOG_SHOW_TIME) * 1000.0) as i32);
                     if let (Ok((entity, transform)), Ok(camera)) =
                         (players.single(), cameras.single())
                     {
