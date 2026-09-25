@@ -1106,6 +1106,7 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             },
             ring_cursor: 0,
             prewarmed: false,
+            sub_emitter_max_lifetime: 0.0,
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),

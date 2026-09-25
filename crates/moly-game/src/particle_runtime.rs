@@ -58,6 +58,8 @@ mod child_emit_samples;
 mod collision_samples;
 #[cfg(test)]
 mod recursive_emit_samples;
+#[cfg(test)]
+mod warm_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
@@ -346,18 +348,17 @@ pub(crate) fn first_play_plan(system: &Runtime) -> Result<PrewarmPlan, &'static 
 
 fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx: &Context)
     -> Result<(), &'static str> {
-    let mut plan = first_play_plan(system)?;
+    let plan = first_play_plan(system)?;
     system.playback_head = plan.initial_clock();
-    for slice in plan.by_ref() {
-        let slice = slice?;
-        if birth::step_explicit(system, state, slice.duration, false, ctx).is_err() {
-            system.refused_total += 1;
-            return Err("native prewarm slice refused");
-        }
+    // One ordinary update of the warm length: its slices record the
+    // sub-emitter events with their pending time. The rest below the loop
+    // threshold stays pending. The emitter reset set by Play is left for the
+    // first frame, which takes its own translation.
+    if let Err(error) = birth::run_warm(system, state, plan, ctx) {
+        system.refused_total += 1;
+        error!(?error, effect=%system.effect, node=%system.node, "native prewarm slice refused");
+        return Err("native prewarm slice refused");
     }
-    // The rest below the loop threshold stays pending. The emitter reset set
-    // by Play is left for the first frame, which takes its own translation.
-    state.frame.pending = plan.remaining();
     Ok(())
 }
 
@@ -382,7 +383,7 @@ fn first_play_state(system: &Runtime) -> PlayState {
         // Only an installed ordinary system reaches the native slice plan;
         // the shared Compute/Update1b arithmetic does not read this flag.
         ordinary_incremental: true,
-        no_real_subemitters: e.sub_emitters.iter().all(|edge| edge.source_pointer.is_authored_null()),
+        sub_emitter_max_lifetime: system.sub_emitter_max_lifetime,
         prewarm: e.prewarm,
         looping: e.looping,
         simulation_speed: e.simulation_speed,
@@ -461,6 +462,9 @@ pub(crate) struct Runtime {
     pub(crate) collision: Option<collision::CollisionRuntime>,
     /// 惰性 prewarm 的闸：首个推进帧快进一个周期。
     pub(crate) prewarmed: bool,
+    /// The sub-emitter term of the first-Play warm length, read from the
+    /// authored graph at admission; 0 without a live child.
+    pub(crate) sub_emitter_max_lifetime: f32,
     pub(crate) cone_angle: Option<f32>,
     pub(crate) rol: Option<RotationOverLifetime>,
     pub(crate) limit: Option<LimitVelocity>,

@@ -3,8 +3,9 @@
 //! (GetTimeStep 0xd80a9c, Update1Incremental 0xd8aa00). First Play runs
 //! ComputePrewarmStartParameters 0xd8316c, then BeginUpdate(dt=out) and
 //! Update1b 0xd7e108, which scales that dt by the simulation speed.
-//! Only first Play at elapsed zero, ordinary nonprocedural, no real child,
-//! constant/two-constant lifetime, looping prewarm and source flags=8 are qualified.
+//! Only first Play at elapsed zero, ordinary nonprocedural, constant/two-constant
+//! lifetime, looping prewarm and source flags=8 are qualified. The warm length
+//! adds the sub-emitter child term ([`sub_emitter_maximum_lifetime`]).
 //! Every later frame goes through the same Update1b head ([`FrameStep`]) and the
 //! same incremental slice loop, with flags 0 (BeginUpdate while the world plays).
 
@@ -12,6 +13,131 @@
 pub enum Lifetime {
     Constant(f32),
     TwoConstants { min: f32, max: f32 },
+}
+
+impl Lifetime {
+    /// The upper lane of the lifetime range, as both the warm length and its
+    /// sub-emitter term read it: constant mode stores (0, v) only for v > 0,
+    /// else (v, 0); two constants are ordered by one `max > min` compare
+    /// (unordered keeps the min field in the upper lane).
+    pub fn upper(self) -> f32 {
+        match self {
+            Lifetime::Constant(v) => {
+                if v > 0.0 {
+                    v
+                } else {
+                    0.0
+                }
+            }
+            Lifetime::TwoConstants { min, max } => {
+                if max > min {
+                    max
+                } else {
+                    min
+                }
+            }
+        }
+    }
+
+    /// The system's own term of the first-Play warm length: the upper lane,
+    /// an upper lane of exactly +Infinity replaced by the main-module
+    /// duration before any warm arithmetic. The sub-emitter term is computed
+    /// from this value too.
+    pub fn first_play_upper(self, duration: f32) -> f32 {
+        let upper = self.upper();
+        if upper == f32::INFINITY {
+            duration
+        } else {
+            upper
+        }
+    }
+}
+
+/// One system of an authored sub-emitter graph, as the warm length's child
+/// term reads it.
+#[derive(Clone, Debug)]
+pub struct SubEmitterNode {
+    /// Whether the system's SubModule is enabled. A disabled module hands out
+    /// no child, so its edges are not read.
+    pub sub_module_enabled: bool,
+    /// The child of every edge, in authored order, of every trigger type
+    /// (birth, collision, death, trigger and manual alike), as an index into
+    /// the graph; `None` for a null pointer.
+    pub children: Vec<Option<usize>>,
+    /// The start lifetime; `None` for a curve-mode lifetime, whose range
+    /// (CalculateCurveRangesValue) is not transcribed.
+    pub lifetime: Option<Lifetime>,
+}
+
+#[cfg(test)]
+pub(crate) mod arms {
+    use std::cell::Cell;
+    thread_local! { static ARM: Cell<Option<&'static str>> = const { Cell::new(None) }; }
+    pub fn set(arm: Option<&'static str>) {
+        ARM.with(|a| a.set(arm));
+    }
+    pub fn on(name: &str) -> bool {
+        ARM.with(|a| a.get() == Some(name))
+    }
+}
+#[cfg(not(test))]
+pub(crate) mod arms {
+    #[inline(always)]
+    pub fn on(_: &str) -> bool {
+        false
+    }
+}
+
+/// CalculateSubEmitterMaximumLifeTime of `node` with `life`, the
+/// time the chain has taken so far: 0 when the node's SubModule is disabled;
+/// otherwise, for each edge in authored order whose child is neither null nor
+/// the node itself, the child's upper lifetime plus `life` (one f32 add; the
+/// child's simulation speed is not read), then the child's own term from
+/// that sum, each kept only when the running best is ordered less than it.
+/// The int argument the engine passes down unchanged is read nowhere, so the
+/// recursion has no depth bound: a chain that comes back to a system it is
+/// still inside would not end, and is refused here.
+pub fn sub_emitter_maximum_lifetime(nodes: &[SubEmitterNode], node: usize, life: f32) -> Result<f32, &'static str> {
+    let mut path = vec![node];
+    maximum_lifetime(nodes, node, life, &mut path)
+}
+
+fn maximum_lifetime(nodes: &[SubEmitterNode], node: usize, life: f32, path: &mut Vec<usize>)
+    -> Result<f32, &'static str> {
+    let this = nodes.get(node).ok_or("sub-emitter graph index outside the graph")?;
+    if !this.sub_module_enabled {
+        return Ok(0.0);
+    }
+    let mut best = 0.0_f32;
+    for &child in &this.children {
+        let Some(child) = child else { continue };
+        if child == node {
+            continue;
+        }
+        if path.contains(&child) {
+            return Err("sub-emitter chain revisits a system: the maximum-lifetime recursion does not end");
+        }
+        let upper = nodes
+            .get(child)
+            .ok_or("sub-emitter graph index outside the graph")?
+            .lifetime
+            .ok_or("curve-mode child lifetime: its range is not transcribed")?
+            .upper();
+        let sum = if arms::on("maxInsteadOfSum") { upper } else { upper + life };
+        if best < sum {
+            best = sum;
+        }
+        if arms::on("noRecursion") {
+            continue;
+        }
+        path.push(child);
+        let deeper = maximum_lifetime(nodes, child, sum, path)?;
+        path.pop();
+        if best < deeper {
+            best = deeper;
+        }
+    }
+    Ok(best)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -29,7 +155,11 @@ pub struct PlayState {
     pub native_play_bool_argument: bool,
     pub world_playing: bool,
     pub ordinary_incremental: bool,
-    pub no_real_subemitters: bool,
+    /// The sub-emitter term of the warm length
+    /// ([`sub_emitter_maximum_lifetime`] of the system with its
+    /// [`Lifetime::first_play_upper`]); 0 when the SubModule is off or no
+    /// edge has a live child.
+    pub sub_emitter_max_lifetime: f32,
     pub prewarm: bool,
     pub looping: bool,
     pub simulation_speed: f32,
@@ -144,7 +274,6 @@ impl FirstPlayWarm {
         // the unreplayed Play/Compute branches.
         if !play.native_play_bool_argument
             || !play.world_playing
-            || !play.no_real_subemitters
             || !play.prewarm
             || !play.looping
             || play.live_count != 0
@@ -166,37 +295,14 @@ impl FirstPlayWarm {
         {
             return Err("unqualified TimeManager snapshot");
         }
-        // ComputePrewarmStartParameters 0xd831a8..0xd83228: the lifetime range
-        // upper lane. Constant mode stores (0, v) only for v > 0, else (v, 0);
-        // two constants are ordered by one `max > min` compare (unordered keeps
-        // the min field in the upper lane).
-        let upper = match lifetime {
-            Lifetime::Constant(v) => {
-                if v > 0.0 {
-                    v
-                } else {
-                    0.0
-                }
-            }
-            Lifetime::TwoConstants { min, max } => {
-                if max > min {
-                    max
-                } else {
-                    min
-                }
-            }
-        };
-        // 0xd8323c..0xd83240: an upper lane of exactly +Infinity is replaced by
-        // the main-module duration before any warm arithmetic.
-        let upper = if upper == f32::INFINITY {
-            play.duration
-        } else {
-            upper
-        };
-        // No real child: CalculateSubEmitterMaximumLifeTime is not consulted
-        // (disabled module) or resolves no live child, so the sub maximum is 0
-        // and 0xd83284..0xd83288 keeps `upper` only when 0 < upper.
-        let lifetime = if 0.0 < upper { upper } else { 0.0 };
+        // ComputePrewarmStartParameters: the lifetime range upper lane, an
+        // upper lane of exactly +Infinity replaced by the main-module duration.
+        let upper = lifetime.first_play_upper(play.duration);
+        // Then the sub-emitter term (0 with the SubModule off or no live
+        // child), kept by one ordered less-than. An infinite term fails the
+        // window check below, which is the engine's no-warm path.
+        let sub = play.sub_emitter_max_lifetime;
+        let lifetime = if sub < upper { upper } else { sub };
         // 0xd8328c..0xd832f0, prewarm set: out = (fmod(elapsed, fixed) + L) /
         // max(speed, 0.001); start = elapsed - L - fmod(elapsed, fixed).
         let phase = play.elapsed % time.fixed_timestep;
@@ -374,7 +480,7 @@ mod tests {
             native_play_bool_argument: true,
             world_playing: true,
             ordinary_incremental: true,
-            no_real_subemitters: true,
+            sub_emitter_max_lifetime: 0.0,
             prewarm: true,
             looping: true,
             simulation_speed: 1.0,
@@ -681,8 +787,10 @@ mod tests {
                 elapsed: 0.35,
                 ..qualified
             },
+            // An infinite sub-emitter term leaves the Compute window without
+            // a fixed step: the engine logs and Play does no warm.
             PlayState {
-                no_real_subemitters: false,
+                sub_emitter_max_lifetime: f32::INFINITY,
                 ..qualified
             },
             PlayState {
@@ -701,5 +809,180 @@ mod tests {
             assert!(PrewarmPlan::from_source(Lifetime::Constant(12.0), time(), play).is_err());
         }
         assert!(PrewarmPlan::from_incremental_input(12.0, 0.03, 4, 1.0).is_err());
+    }
+
+    /// One native Compute case as the normalized rows hold it: the system's
+    /// warm inputs, its sub-emitter graph (node 0 the system itself, each
+    /// edge's trigger kept for the one-rule arms) and the native outcome.
+    struct WarmLengthCase {
+        name: String,
+        lifetime: Option<Lifetime>,
+        duration: f32,
+        speed: f32,
+        elapsed: f32,
+        looping: bool,
+        prewarm: bool,
+        nodes: Vec<SubEmitterNode>,
+        triggers: Vec<Vec<u32>>,
+        speeds: Vec<f32>,
+        valid: bool,
+        out: u32,
+        clock: u32,
+        compare_clock: bool,
+    }
+
+    fn row_lifetime(value: &Value) -> Option<Lifetime> {
+        match value.get("mode").and_then(Value::as_str) {
+            Some("constant") => Some(Lifetime::Constant(bits(value.get("bits").unwrap()))),
+            Some("twoConstants") => Some(Lifetime::TwoConstants {
+                min: bits(value.get("minBits").unwrap()),
+                max: bits(value.get("maxBits").unwrap()),
+            }),
+            _ => None,
+        }
+    }
+
+    fn warm_length_cases(receipt: &Value) -> Vec<WarmLengthCase> {
+        receipt.get("rows").unwrap().as_array().unwrap().iter().map(|row| {
+            let parent = row.get("parent").unwrap();
+            let native = row.get("native").unwrap();
+            let rows = row.get("nodes").unwrap().as_array().unwrap();
+            let edges = |node: &Value| node.get("children").unwrap().as_array().unwrap().to_vec();
+            WarmLengthCase {
+                name: row.get("name").unwrap().as_str().unwrap().to_owned(),
+                lifetime: row_lifetime(parent.get("lifetime").unwrap()),
+                duration: bits(parent.get("durationBits").unwrap()),
+                speed: bits(parent.get("speedBits").unwrap()),
+                elapsed: bits(parent.get("elapsedBits").unwrap()),
+                looping: parent.get("looping").unwrap().as_bool().unwrap(),
+                prewarm: parent.get("prewarm").unwrap().as_bool().unwrap(),
+                nodes: rows.iter().map(|node| SubEmitterNode {
+                    sub_module_enabled: node.get("sub").unwrap().as_bool().unwrap(),
+                    children: edges(node).iter().map(|edge| {
+                        let pair = edge.as_array().unwrap();
+                        pair[1].as_f64().map(|index| index as usize)
+                    }).collect(),
+                    lifetime: node.get("lifetime").and_then(row_lifetime),
+                }).collect(),
+                triggers: rows.iter().map(|node| edges(node).iter()
+                    .map(|edge| number(&edge.as_array().unwrap()[0]) as u32).collect()).collect(),
+                speeds: rows.iter().map(|node| bits(node.get("speedBits").unwrap())).collect(),
+                valid: number(native.get("valid").unwrap()) == 1.0,
+                out: native.get("outBits").unwrap().as_f64().unwrap() as u32,
+                clock: native.get("clockBits").unwrap().as_f64().unwrap() as u32,
+                compare_clock: native.get("compareClock").unwrap().as_bool().unwrap(),
+            }
+        }).collect()
+    }
+
+    /// The case under one arm: the law's own arms, or the named input change.
+    fn arm_inputs(case: &WarmLengthCase, arm: Option<&str>) -> (Option<Lifetime>, Vec<SubEmitterNode>, bool) {
+        let mut lifetime = case.lifetime;
+        let mut nodes = case.nodes.clone();
+        // The max field in place of the ordered maximum, wherever an upper
+        // lane is read: a two-constant pair below every finite value keeps it.
+        let max_field = |lifetime: Lifetime| match lifetime {
+            Lifetime::TwoConstants { max, .. } => Lifetime::TwoConstants { min: f32::NEG_INFINITY, max },
+            other => other,
+        };
+        match arm {
+            Some("birthOnly") => for (node, triggers) in nodes.iter_mut().zip(&case.triggers) {
+                node.children = node.children.iter().zip(triggers).filter(|(_, t)| **t == 0).map(|(c, _)| *c).collect();
+            },
+            Some("childSpeedDivides") => for (node, speed) in nodes.iter_mut().zip(&case.speeds).skip(1) {
+                node.lifetime = node.lifetime.map(|l| Lifetime::TwoConstants { min: f32::NEG_INFINITY, max: l.upper() / *speed });
+            },
+            Some("scalarFieldNotOrderedMax") => {
+                lifetime = lifetime.map(max_field);
+                for node in &mut nodes {
+                    node.lifetime = node.lifetime.map(max_field);
+                }
+            }
+            Some("ignoreParentSubEnabled") => nodes[0].sub_module_enabled = true,
+            Some("ignoreChildSubEnabled") => for node in nodes.iter_mut().skip(1) { node.sub_module_enabled = true },
+            _ => {}
+        }
+        (lifetime, nodes, arm == Some("noChildTerm"))
+    }
+
+    enum WarmLengthOutcome {
+        /// valid, then out and clock bits of a valid window.
+        Compared(bool, Option<(u32, u32)>),
+        /// A refusal by name: the law does not transcribe the input.
+        Refused(&'static str),
+    }
+
+    fn warm_length(case: &WarmLengthCase, fixed: f32, arm: Option<&'static str>) -> WarmLengthOutcome {
+        let (lifetime, nodes, no_child_term) = arm_inputs(case, arm);
+        let Some(lifetime) = lifetime else {
+            return WarmLengthOutcome::Refused("curve start lifetime");
+        };
+        arms::set(arm);
+        let sub = sub_emitter_maximum_lifetime(&nodes, 0, lifetime.first_play_upper(case.duration));
+        arms::set(None);
+        let sub = match sub {
+            Ok(sub) => if no_child_term { 0.0 } else { sub },
+            Err(reason) => return WarmLengthOutcome::Refused(reason),
+        };
+        let time = TimeManagerSnapshot { fixed_timestep: fixed, maximum_particle_timestep: 0.03 };
+        let play = PlayState { elapsed: case.elapsed, simulation_speed: case.speed, duration: case.duration,
+            looping: case.looping, prewarm: case.prewarm, sub_emitter_max_lifetime: sub, ..initial_play() };
+        match FirstPlayWarm::from_source(lifetime, time, play) {
+            Ok(warm) => WarmLengthOutcome::Compared(true, Some((warm.compute_out.to_bits(), warm.initial_clock.to_bits()))),
+            Err("Compute prewarm window does not advance by the fixed step") => WarmLengthOutcome::Compared(false, None),
+            Err(reason) => WarmLengthOutcome::Refused(reason),
+        }
+    }
+
+    /// Compared cases, mismatched fields (valid, out, clock), the mismatched
+    /// cases and the refused ones by name, under one arm.
+    fn replay_warm_lengths(cases: &[WarmLengthCase], fixed: f32, arm: Option<&'static str>)
+        -> (usize, usize, Vec<String>, Vec<String>) {
+        let (mut compared, mut fields) = (0, 0);
+        let (mut mismatched, mut refused) = (Vec::new(), Vec::new());
+        for case in cases {
+            match warm_length(case, fixed, arm) {
+                WarmLengthOutcome::Refused(reason) => refused.push(format!("{}: {reason}", case.name)),
+                WarmLengthOutcome::Compared(valid, window) => {
+                    compared += 1;
+                    let mut bad = usize::from(valid != case.valid);
+                    if let (Some((out, clock)), true) = (window, case.valid) {
+                        bad += usize::from(out != case.out);
+                        bad += usize::from(case.compare_clock && clock != case.clock);
+                    }
+                    fields += bad;
+                    if bad > 0 {
+                        mismatched.push(case.name.clone());
+                    }
+                }
+            }
+        }
+        (compared, fields, mismatched, refused)
+    }
+
+    #[test]
+    #[ignore = "MOLY_WARM_LENGTH_ROWS must identify the normalized rows of the current JP native Compute receipt"]
+    fn warm_length_with_the_sub_emitter_term_matches_native_bits() {
+        let receipt = read("MOLY_WARM_LENGTH_ROWS");
+        assert_eq!(receipt.get("sourceSha256").unwrap().as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9"));
+        let fixed = bits(receipt.get("fixedBits").unwrap());
+        let cases = warm_length_cases(&receipt);
+        assert_eq!(cases.len(), 45);
+        let (compared, fields, mismatched, refused) = replay_warm_lengths(&cases, fixed, None);
+        println!("warm length: {} cases, {compared} compared, {fields} mismatched fields {mismatched:?}; refused {refused:?}",
+            cases.len());
+        assert_eq!(fields, 0, "mismatched cases {mismatched:?}");
+        // The law's own refusal is the curve-mode child; the rest are the
+        // warm's admission requirements (Play warms a looping prewarm system
+        // with a positive speed only).
+        assert!(refused.iter().any(|r| r.contains("curve-mode child lifetime")));
+        for arm in ["noChildTerm", "maxInsteadOfSum", "noRecursion", "birthOnly", "childSpeedDivides",
+            "scalarFieldNotOrderedMax", "ignoreParentSubEnabled", "ignoreChildSubEnabled"] {
+            let (_, wrong, cases, _) = replay_warm_lengths(&cases, fixed, Some(arm));
+            println!("arm {arm}: {wrong} mismatched fields over {} cases {:?}", cases.len(),
+                cases.iter().take(4).collect::<Vec<_>>());
+            assert!(wrong > 0, "{arm} arm matched every native case");
+        }
     }
 }
