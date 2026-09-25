@@ -37,7 +37,7 @@
 //! millisecond-rounded delays that skip their creation frame; tweens and
 //! animation clocks advance from the frame they start.
 
-mod arrival;
+pub(crate) mod arrival;
 pub(crate) mod camera;
 mod cannon;
 pub(crate) mod door;

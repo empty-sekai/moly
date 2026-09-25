@@ -65,6 +65,9 @@ use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
 pub(crate) use action::HarvestAutoMoveHeld;
+pub(crate) use arrival::snap_from;
+pub(crate) use drops::HarvestDropAnimation;
+pub(crate) use pickup::move_towards;
 pub(crate) use learn::LearnSiteEnvironmentActive;
 pub(crate) use arrival::HarvestViewNodes;
 
