@@ -26,6 +26,7 @@
 //!   treasure boxes, run from the controller in the package document.
 //! - `airplane`: the paper airplane that delivers the transported treasure
 //!   box (`TreasureBoxListMock` / `TreasureBoxSpawnMock` in the mock panel).
+//! - `tone`: the HarvestTone camera (state 14) and the tone view's SE.
 //!
 //! Named gaps: harvest objects do not carve the walk field (the source's
 //! NavMeshObstacle, also the ones the driftage and treasure views switch);
@@ -46,6 +47,7 @@ mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod stand_in;
+mod tone;
 mod tool_model;
 mod ui;
 
@@ -735,6 +737,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<damage::HarvestEffectOnly>()
             .init_resource::<damage::HarvestTurnRequests>()
             .init_resource::<airplane::PaperAirplanes>()
+            .init_resource::<tone::HarvestToneCamera>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),
@@ -792,7 +795,10 @@ impl Plugin for HarvestPlugin {
             )
             .add_systems(
                 PostUpdate,
-                action::advance_camera_shake.before(crate::camera::follow_avatar),
+                (
+                    action::advance_camera_shake.before(crate::camera::follow_avatar),
+                    tone::advance_tone_camera.after(crate::camera::follow_avatar),
+                ),
             );
     }
 }

@@ -91,6 +91,8 @@ use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 const CROSSFADE: Duration = Duration::from_millis(250);
 /// `RotatePlayerForTargetObject`: `DORotate(..., 0.2, Linear)`.
 const FACING_DURATION: f32 = 0.2;
+/// `RotatePlayerForCamera`: `DORotate(..., 0.6)`, default ease.
+const TONE_FACING_DURATION: f32 = 0.6;
 /// `ShakeHarvestCamera`: range by tool, then duration 0.2, vibrato 3.
 const SHAKE_DURATION: f32 = 0.2;
 const SHAKE_VIBRATO: i32 = 3;
@@ -235,6 +237,8 @@ struct Facing {
     from: f32,
     to: f32,
     clock: crate::site_move::timeline::TweenClock,
+    /// DOTween's default ease (OutQuad) instead of Linear.
+    out_quad: bool,
 }
 
 struct Action {
@@ -270,6 +274,8 @@ pub(crate) struct HarvestAction {
     animator_speed: f32,
     hit_timing: Vec<HitTiming>,
     pub(crate) actions: u32,
+    /// The field camera view's position this frame (tone facing).
+    camera: Option<Vec3>,
 }
 
 impl Default for HarvestAction {
@@ -281,6 +287,7 @@ impl Default for HarvestAction {
             animator_speed: 1.0,
             hit_timing: Vec::new(),
             actions: 0,
+            camera: None,
         }
     }
 }
@@ -497,6 +504,7 @@ pub(crate) struct ActionWorld<'w> {
     animator_calls: ResMut<'w, PropAnimatorCalls>,
     start_hides: ResMut<'w, super::damage::HarvestStartHides>,
     effect_only: ResMut<'w, super::damage::HarvestEffectOnly>,
+    camera_state: ResMut<'w, crate::camera::FieldCameraState>,
     turns: ResMut<'w, super::damage::HarvestTurnRequests>,
     navigation: Option<Res<'w, PlayerFixtureNavigation>>,
 }
@@ -601,7 +609,9 @@ pub(crate) fn advance(
     mut commands: Commands,
     mut players: Query<&mut Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
     objects: Query<(&Transform, &HarvestObject)>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
 ) {
+    action.camera = cameras.single().ok().map(GlobalTransform::translation);
     let (Some(configs), Some(catalog), Some(clips), Some(mut model)) = (
         world.configs.take(),
         world.catalog.take(),
@@ -658,6 +668,11 @@ pub(crate) fn advance(
     // Facing tween (fire and forget).
     if let Some(facing) = current.facing.as_mut() {
         let t = facing.clock.advance(dt);
+        let t = if facing.out_quad {
+            crate::camera::out_quad(t)
+        } else {
+            t
+        };
         if let Ok(mut transform) = players.single_mut() {
             transform.rotation = Quat::from_rotation_y(law::fast_yaw(facing.from, facing.to, t));
         }
@@ -999,6 +1014,15 @@ fn start_action(
     commands.insert_resource(HarvestGameState);
     world.states.change_status(PlayerActionState::Harvest);
     world.states.can_intercept = false;
+    // ChangeCameraModeFromFixtureType: tone -> HarvestTone, the rest Normal.
+    change_camera_mode(
+        &mut world.camera_state,
+        if object.fixture_type == 6 {
+            crate::camera::CameraStateType::HarvestTone
+        } else {
+            crate::camera::CameraStateType::Normal
+        },
+    );
     action.actions += 1;
     info!(
         "[harvest] PlayHarvestAction #{} on {}#{} (hp {}): tool {:?} state {:?}; GameState Harvest, player state {:?}, intercept closed",
@@ -1101,6 +1125,20 @@ fn motion(
                 from: yaw_of(transform.rotation),
                 to: law::facing_yaw(Vec2::new(d.x, d.z)),
                 clock: crate::site_move::timeline::TweenClock::new(FACING_DURATION),
+                out_quad: false,
+            });
+        }
+    }
+    // RotatePlayerForCamera (tone): the yaw toward the camera view's position
+    // (atan2 of the x/z offset), DORotate 0.6 s with the default ease.
+    if state != ToolState::End && current.fixture_type == 6 {
+        if let (Ok(transform), Some(camera)) = (players.single(), action.camera) {
+            let d = camera - transform.translation;
+            current.facing = Some(Facing {
+                from: yaw_of(transform.rotation),
+                to: law::facing_yaw(Vec2::new(d.x, d.z)),
+                clock: crate::site_move::timeline::TweenClock::new(TONE_FACING_DURATION),
+                out_quad: true,
             });
         }
     }
@@ -1195,6 +1233,7 @@ fn start_pre_motion(
         from,
         to,
         clock: crate::site_move::timeline::TweenClock::new(FACING_DURATION),
+        out_quad: false,
     });
     // AutoMoveForTargetPosition: record the state, gate open,
     // ChangeStateAutoMove(target, 0.3), gate closed; the state's Initialize
@@ -1414,6 +1453,21 @@ fn swing(
             "MysekaiAreaTreasureBoxView" => {
                 calls.push((target, PropCall::Speed(current.speed)));
             }
+            // The tone's SE, scoped to the tone so ChangeAfterObject can
+            // stop it.
+            "MysekaiAreaToneView" => {
+                let cue = format!("se_{}", object.assetbundle);
+                info!(
+                    "[harvest-tone] {}#{} OnPlayerActionStart: PlayEnvironmentSE({cue}, 0, 1, 6)",
+                    object.leaf, object.fixture_id
+                );
+                world.se.0.push(crate::audio::SeRequest {
+                    owner: Some(target),
+                    cue,
+                    class: crate::audio::SeClass::Ingame,
+                    source: "harvest-tone",
+                });
+            }
             _ => {}
         }
     }
@@ -1576,6 +1630,21 @@ fn push_shake(shakes: &mut HarvestCameraShakes, tool_id: i64) {
         .push(PointTween::new(points, SegmentEase::Linear));
 }
 
+/// `HarvestPlayerPresenter.ChangeCameraMode(state)` between Normal and
+/// HarvestTone. Another camera state (FPS and the rest) keeps its own exit
+/// path: the harvest press does not switch it here.
+fn change_camera_mode(
+    state: &mut crate::camera::FieldCameraState,
+    to: crate::camera::CameraStateType,
+) {
+    use crate::camera::CameraStateType::{HarvestTone, Normal};
+    if state.0 == to || !matches!(state.0, Normal | HarvestTone) {
+        return;
+    }
+    info!("[harvest] ChangeCameraMode {:?} -> {to:?}", state.0);
+    state.0 = to;
+}
+
 /// Steps 10 and 11.
 #[allow(clippy::too_many_arguments)]
 fn finish_action(
@@ -1607,6 +1676,10 @@ fn finish_action(
     world.states.can_intercept = true;
     world.states.change_status(PlayerActionState::Idle);
     commands.remove_resource::<HarvestGameState>();
+    change_camera_mode(
+        &mut world.camera_state,
+        crate::camera::CameraStateType::Normal,
+    );
     action.sustain = false;
     action.animator_speed = 1.0;
     action.cooling = false;
@@ -1825,6 +1898,7 @@ fn kind_type(word: &str) -> Option<i32> {
         // Both treasure packages' views carry type 3 (the fixed box's master
         // row says 4).
         "treasure" => 3,
+        "tone" => 6,
         "other" => 5,
         "toolbox" => 7,
         "driftage" => 8,

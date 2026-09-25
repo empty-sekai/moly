@@ -38,9 +38,9 @@
 //! apart; the kinds and counts per site are the mock's choice, and a kind
 //! appears only on a site where a material of its type lists that site.
 //! The fixed treasure box is placed once per site with one drop row of a
-//! material of type 3 (the mock's choice); the transported box (paper
-//! airplane), tone and birthday plants (event calendar) are left out and
-//! named.
+//! material of type 3, a tone once per site where a tone material lists the
+//! site (the mock's choices); the transported box (paper airplane) and
+//! birthday plants (event calendar) are left out of the map and named.
 
 use std::collections::BTreeMap;
 
@@ -181,7 +181,7 @@ pub(crate) struct MockInputs {
 
 /// Kinds the map mock places, with the mock's per-site count and the material
 /// type its drop rows come from.
-const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 7] = [
+const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 8] = [
     (0, "wood", 6, Some(0)),
     (1, "mineral", 5, Some(1)),
     (2, "plant", 5, Some(2)),
@@ -189,16 +189,13 @@ const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 7] = [
     (8, "driftage", 1, Some(3)),
     (7, "toolbox", 1, None),
     (4, "treasure_box_fixed", 1, Some(3)),
+    (6, "tone", 1, Some(6)),
 ];
 /// Kinds left out of the mock map, and who places them.
-pub(crate) const MOCK_EXCLUDED: [(&str, &str); 3] = [
+pub(crate) const MOCK_EXCLUDED: [(&str, &str); 2] = [
     (
         "treasure_box_transport",
-        "paper airplane and spawn API (later lane)",
-    ),
-    (
-        "tone",
-        "HarvestTone camera 14 and the BGM fade (later lane)",
+        "delivered by the paper airplane (TreasureBoxSpawnMock)",
     ),
     ("birthday_plant", "birthday party calendar (event gated)"),
 ];

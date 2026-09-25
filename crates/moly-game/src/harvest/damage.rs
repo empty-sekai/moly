@@ -100,6 +100,11 @@ pub(crate) enum HarvestAfterForm {
     DelayedHide {
         delay: Delay,
     },
+    /// The tone's ChangeAfterObject: the listen clip's length, then its SE
+    /// stops (the field effect stopped at the hit).
+    ToneStop {
+        delay: Delay,
+    },
 }
 
 pub(crate) fn push_se(se: &mut SeRequests, cue: &str, source: &'static str) {
@@ -150,6 +155,7 @@ pub(crate) fn on_damage(
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     frames: Res<FrameCount>,
     mut animator_calls: ResMut<PropAnimatorCalls>,
+    clips: Option<Res<super::clips::HarvestClips>>,
 ) {
     let Some(configs) = configs else {
         return;
@@ -261,6 +267,11 @@ pub(crate) fn on_damage(
                 &mut node_visibility,
                 &mut effects,
                 u64::from(frames.0),
+                // GetHarvestActionTime(null, tone): the listen clip's length.
+                clips
+                    .as_deref()
+                    .and_then(|clips| clips.get("mov_u000_site_listen01_o"))
+                    .map_or(0.0, |clip| clip.length),
             );
             object.collision = false;
             tail.push_str(" -> ChangeAfterObject + RemoveCollisionObject");
@@ -313,6 +324,7 @@ fn change_after_object(
     node_visibility: &mut Query<&mut Visibility, Without<HarvestObject>>,
     effects: &mut HarvestEffectHooks,
     frame: u64,
+    listen_length: f32,
 ) {
     let object_node = nodes.and_then(|nodes| nodes.object);
     match object.class {
@@ -355,6 +367,15 @@ fn change_after_object(
         }
         // The treasure box's ChangeAfterObject turns its lid obstacle on,
         // waits 2.0 s and stops the cut particle: the opened box stays.
+        // PlayDamageEffect stopped the field effect (its node hides here);
+        // ChangeAfterObject waits the listen clip's length, then stops the
+        // SE and fades the BGM back (the fade is not ported).
+        "MysekaiAreaToneView" => {
+            hide(object_node, root_visibility, node_visibility);
+            commands.entity(root).insert(HarvestAfterForm::ToneStop {
+                delay: Delay::new(listen_length, frame),
+            });
+        }
         "MysekaiAreaTreasureBoxView" => {
             info!(
                 "[harvest] {}#{} ChangeAfterObject: the opened box stays (lid obstacle and cut particle not modelled)",
@@ -526,6 +547,19 @@ pub(crate) fn advance_after_forms(
                         );
                         commands.entity(entity).remove::<HarvestAfterForm>();
                     }
+                }
+            }
+            HarvestAfterForm::ToneStop { delay } => {
+                if delay.tick(frame, dt) {
+                    let owner = entity;
+                    commands.queue(move |world: &mut World| {
+                        crate::audio::dispose_scoped_se(world, owner);
+                    });
+                    info!(
+                        "[harvest-tone] {}#{} ChangeAfterObject: the listen time passed; the tone SE stopped (the BGM fade back is not ported)",
+                        object.leaf, object.fixture_id
+                    );
+                    commands.entity(entity).remove::<HarvestAfterForm>();
                 }
             }
             HarvestAfterForm::DelayedHide { delay } => {

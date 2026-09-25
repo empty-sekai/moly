@@ -1856,6 +1856,9 @@ pub(crate) fn follow_avatar(
         // The door moves switch to None while the player walks out of a
         // room: no state updates the camera, which stays where it is.
         CameraStateType::None => {}
+        // HarvestToneCameraState: its OnUpdate is `harvest::tone`, which
+        // runs right after this system.
+        CameraStateType::HarvestTone => {}
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，
