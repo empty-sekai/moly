@@ -56,8 +56,6 @@ pub(crate) struct FixtureWalk {
     via: Vec<Vec3>,
     since: f32,
     pressing: bool,
-    /// The tap finger went down at this time and is still down.
-    tap_down: Option<f32>,
     /// The placed fixtures of this generation were logged.
     listed: bool,
     /// Taps sent to the timeline button on this generation.
@@ -116,15 +114,13 @@ pub(crate) fn smoke_fixture_walk(
         }
     };
     let walk = &mut *walk;
-    // The tap finger lifts on the next frame: a slow frame between the two
-    // events can still make the gesture a long touch, so an unanswered tap is
-    // tried again below.
-    if let Some(down) = walk.tap_down {
-        if now > down {
-            touch(TAP_FINGER, TouchPhase::Ended, tap);
-            walk.tap_down = None;
-        }
-    }
+    // The tap finger goes down and up in one frame's events: the gesture layer
+    // adds each frame's delta to a held press, so a slow frame between the two
+    // would make it a long touch. An unanswered tap is still tried again.
+    let press = |touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
+        touch(TAP_FINGER, TouchPhase::Started, tap);
+        touch(TAP_FINGER, TouchPhase::Ended, tap);
+    };
     let release = |walk: &mut FixtureWalk, touch: &mut dyn FnMut(u64, TouchPhase, Vec2)| {
         if walk.pressing {
             touch(FINGER, TouchPhase::Ended, base);
@@ -143,7 +139,6 @@ pub(crate) fn smoke_fixture_walk(
         *walk = FixtureWalk {
             epoch: Some(epoch),
             since: now,
-            tap_down: walk.tap_down,
             ..Default::default()
         };
     }
@@ -172,11 +167,9 @@ pub(crate) fn smoke_fixture_walk(
                 );
                 walk.stage = Stage::Done;
             } else if now - at > 3.0
-                && walk.tap_down.is_none()
                 && head.is_some_and(|(button, _)| button == ButtonType::TimelineFixture)
             {
-                touch(TAP_FINGER, TouchPhase::Started, tap);
-                walk.tap_down = Some(now);
+                press(&mut touch);
                 walk.taps += 1;
                 walk.stage = Stage::Tapped(now);
                 info!("[fixture-walk] no session 3 s after the tap; tapping again");
@@ -192,8 +185,7 @@ pub(crate) fn smoke_fixture_walk(
                     walk.pressing = true;
                     info!("[fixture-walk] joystick push to end the session");
                 } else {
-                    touch(TAP_FINGER, TouchPhase::Started, tap);
-                    walk.tap_down = Some(now);
+                    press(&mut touch);
                     info!("[fixture-walk] joystick disabled; tapping to end the session");
                 }
                 walk.stage = Stage::Ending(now);
@@ -283,8 +275,7 @@ pub(crate) fn smoke_fixture_walk(
             }
             if head.is_some_and(|(button, _)| button == ButtonType::TimelineFixture) {
                 release(walk, &mut touch);
-                touch(TAP_FINGER, TouchPhase::Started, tap);
-                walk.tap_down = Some(now);
+                press(&mut touch);
                 walk.taps = 1;
                 walk.stage = Stage::Tapped(now);
                 info!(
