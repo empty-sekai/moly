@@ -2023,6 +2023,26 @@ pub(crate) fn geometry_instances(system: &Runtime, to_world: &GlobalTransform) -
     }).collect()
 }
 
+/// A bevy-basis matrix in the source basis (the X mirror on both sides):
+/// every element in exactly one of the X row and the X column changes sign.
+fn source_matrix(m: Mat4) -> [f32; 16] {
+    let mut a = m.to_cols_array();
+    for c in 0..4 {
+        for r in 0..4 {
+            if (r == 0) != (c == 0) { a[4 * c + r] = -a[4 * c + r]; }
+        }
+    }
+    a
+}
+
+/// The camera's world to camera matrix for a source-basis world: the bevy
+/// view with its X column negated.
+fn source_view(camera: &GlobalTransform) -> [f32; 16] {
+    let mut a = Mat4::from(camera.affine().inverse()).to_cols_array();
+    for r in 0..4 { a[r] = -a[r]; }
+    a
+}
+
 pub(crate) fn write_geometry(
     mesh: &mut Mesh, system: &Runtime, to_world: &GlobalTransform,
     owner: &GlobalTransform, camera: &GlobalTransform, basis: crate::billboard::CameraBasis,
@@ -2038,11 +2058,33 @@ pub(crate) fn write_geometry(
                 Geometry::SourceBillboard(draw) => draw.scaling.apply(base_frame),
                 _ => unreachable!(),
             };
-            let instances = geometry_instances(system, to_world);
+            let mut instances = geometry_instances(system, to_world);
             match &system.geometry {
                 Geometry::Mesh(draw) => crate::particle_geometry::write_mesh(mesh, draw, &instances, &frame),
-                Geometry::SourceBillboard(draw) => crate::source_billboard::write(mesh, draw, &instances, &frame,
-                    system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect),
+                Geometry::SourceBillboard(draw) => {
+                    // The Velocity basis reads the velocity in the simulation
+                    // space and that space's rotation to world (source basis:
+                    // the X mirror on both sides). Its composition is read for
+                    // unit-scale owners only; a scaled one draws zero-area
+                    // quads (the vertex and index cardinality the sheet and
+                    // sort rely on stays), loudly.
+                    let m = to_world.affine().matrix3;
+                    let reflect = crate::particle_geometry::reflect;
+                    let simulation = Mat3::from_cols(-reflect(Vec3::from(m.x_axis)), reflect(Vec3::from(m.y_axis)), reflect(Vec3::from(m.z_axis)));
+                    let unit = |s: Vec3| (s - Vec3::ONE).abs().max_element() <= 1.0e-5;
+                    if draw.alignment == crate::particle_geometry::Alignment::Velocity {
+                        for (instance, side) in instances.iter_mut().zip(&system.side) {
+                            instance.velocity = reflect(Vec3::from_array(side.total_velocity));
+                        }
+                        if !(unit(frame.scale) && unit(to_world.to_scale_rotation_translation().0)) {
+                            warn_once!(effect = %system.effect, node = %system.node,
+                                "Velocity billboard over a non-unit owner scale: the scaled basis composition is not read; drawn empty");
+                            for instance in &mut instances { instance.size = Vec3::ZERO; }
+                        }
+                    }
+                    crate::source_billboard::write(mesh, draw, &instances, &frame,
+                        system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect, simulation)
+                }
                 _ => unreachable!(),
             }
         }
@@ -2065,12 +2107,24 @@ pub(crate) fn write_geometry(
     // Reorder draw indices, preserving pool order and its particle-local random
     // streams. Attributes and atlas coordinates still belong to the same seed.
     if system.sort_mode != moly_law::particle::sort::ParticleSort::None && !system.pool.is_empty() {
-        let camera_local = to_world.affine().inverse().transform_point3(camera.translation());
+        // The sort runs in the source basis: positions and both matrices are
+        // mirrored in X (exact sign changes), the view being the camera's world
+        // to camera matrix, whose view space is the same in both bases.
         let particles: Vec<_> = system.pool.iter().map(|p| moly_law::particle::sort::SortParticle {
-            position: p.position, age_percent: p.age_percent,
+            position: [-p.position[0], p.position[1], p.position[2]], age_percent: p.age_percent,
             inverse_lifetime: p.inverse_lifetime,
         }).collect();
-        let order = system.sort_mode.indices(&particles, camera_local.to_array());
+        let sort_camera = moly_law::particle::sort::SortCamera {
+            view: source_view(camera), owner: source_matrix(Mat4::from(to_world.affine())),
+            near: basis.near, orthographic: false,
+        };
+        let order = match system.sort_mode.indices(&particles, &sort_camera) {
+            Ok(order) => order,
+            Err(refused) => {
+                warn_once!(?refused, "particle sort refused: the pool order is drawn");
+                (0..particles.len()).collect()
+            }
+        };
         let per_particle = match &system.geometry {
             Geometry::Mesh(draw) => draw.source.indices.len(),
             Geometry::Billboard { .. } | Geometry::SourceBillboard(_) => 6,

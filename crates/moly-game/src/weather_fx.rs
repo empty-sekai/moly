@@ -315,6 +315,7 @@ impl WeatherFxState {
                     crate::particle_runtime::Geometry::SourceBillboard(draw) => match draw.mode {
                         crate::source_billboard::Mode::Billboard => "source_billboard",
                         crate::source_billboard::Mode::Horizontal => "source_horizontal_billboard",
+                        crate::source_billboard::Mode::Vertical => "source_vertical_billboard",
                     },
                     crate::particle_runtime::Geometry::Mesh(_) => "source_mesh",
                     crate::particle_runtime::Geometry::Billboard { .. } => "legacy_billboard",
@@ -1842,13 +1843,13 @@ fn judge_in_host(
         },
     };
     let render_mode = renderer.get("renderMode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "Mesh") {
+    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "VerticalBillboard" | "Mesh") {
         tally.render_mode.push(format!("unsupported source render mode {render_mode}"));
         return None;
     }
     let alignment_id = renderer.get("alignment").and_then(Value::as_i64).unwrap_or(-1);
     let mesh_alignment = crate::particle_geometry::Alignment::from_source(alignment_id);
-    if mesh_alignment.is_none() || (render_mode == "Billboard" && alignment_id == 4) {
+    if mesh_alignment.is_none() {
         tally.alignment.push(Alignment::render_space_name(alignment_id).to_owned());
         return None;
     }
@@ -2528,7 +2529,11 @@ fn judge_in_host(
             PlannedGeometry::EmptyMesh { alignment: mesh_alignment.expect("validated Mesh alignment"), scaling, pivot: Vec3::from_array(pivot) }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
-                mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },
+                mode: match render_mode {
+                    "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
+                    "VerticalBillboard" => crate::source_billboard::Mode::Vertical,
+                    _ => crate::source_billboard::Mode::Billboard,
+                },
                 alignment: mesh_alignment.expect("validated source Billboard alignment"),
                 screen_size: Vec2::new(min_particle_size as f32, max_particle_size as f32),
                 allow_roll, scaling, pivot: Vec3::from_array(pivot),
@@ -3639,6 +3644,7 @@ pub(crate) fn advance(
         camera_transform.translation(),
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
+        perspective.near,
     );
     // Without an active site the frame the anchors are expressed in does not
     // exist (a site switch is in progress); skip the frame like a missing camera.

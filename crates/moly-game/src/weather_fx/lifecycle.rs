@@ -189,6 +189,7 @@ pub(super) fn source_culling(system: &Value, renderer: &Value, emitter: &Emitter
     let render_mode = match renderer.get("renderMode").and_then(Value::as_str) {
         Some("Billboard") => BoundsRenderMode::Billboard,
         Some("HorizontalBillboard") => BoundsRenderMode::HorizontalBillboard,
+        Some("VerticalBillboard") => BoundsRenderMode::VerticalBillboard,
         Some("Mesh") => BoundsRenderMode::Mesh,
         _ => return refused("render mode outside the bounds law's executed domain"),
     };

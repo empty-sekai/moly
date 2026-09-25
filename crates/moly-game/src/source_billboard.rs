@@ -15,6 +15,7 @@ use bevy::{
 pub(crate) enum Mode {
     Billboard,
     Horizontal,
+    Vertical,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +31,33 @@ pub(crate) struct Draw {
 fn euler(v: Vec3) -> Mat3 {
     Mat3::from_quat(Quat::from_euler(EulerRot::YXZ, v.y, v.x, v.z))
 }
+/// The renderer's Velocity billboard basis. `velocity` is the particle's
+/// velocity in the simulation space and `simulation` that space's rotation to
+/// world. The direction is normalized in the simulation space (+Z where the
+/// squared speed is at or below 1e-30), and both it and its cross with the
+/// simulation +Z (+Z x direction) are rotated into world before each is
+/// normalized; a rotated direction at or below 1e-30 squared takes world +Z,
+/// a rotated cross world +X. Z is the direction, X the cross and Y = Z x X,
+/// unnormalized on the fallback.
+fn velocity_basis(velocity: Vec3, simulation: Mat3) -> Mat3 {
+    let n = if velocity.length_squared() > 1.0e-30 { velocity.normalize() } else { Vec3::Z };
+    let z = simulation * n;
+    let z = if z.length_squared() > 1.0e-30 { z.normalize() } else { Vec3::Z };
+    let x = simulation * Vec3::new(-n.y, n.x, 0.0);
+    let x = if x.length_squared() > 1.0e-30 { x.normalize() } else { Vec3::X };
+    Mat3::from_cols(x, z.cross(x), z)
+}
+
+/// The VerticalBillboard side span: world +Y crossed with the camera's
+/// world-to-camera image of world +Z, normalized, and zero where its square is
+/// at or below 1e-30. With the camera rotation's columns right, up and
+/// forward, and the world-to-camera matrix flipping the camera Z, that image
+/// is (right.z, up.z, -forward.z), so the cross is (-forward.z, 0, -right.z).
+fn vertical_side(camera_rotation: Mat3) -> Vec3 {
+    let side = Vec3::new(-camera_rotation.z_axis.z, 0.0, -camera_rotation.x_axis.z);
+    if side.length_squared() > 1.0e-30 { side.normalize() } else { Vec3::ZERO }
+}
+
 fn facing(direction: Vec3, up: Vec3) -> Mat3 {
     let z = direction.normalize_or_zero();
     let x = up.cross(z).normalize_or_zero();
@@ -49,7 +77,7 @@ pub(crate) fn vertices(
     draw: &Draw,
     local_simulation: bool,
 ) -> ([Vec3; 4], Vec3) {
-    vertices_sized(p, frame, draw, local_simulation, p.size)
+    vertices_sized(p, frame, draw, local_simulation, p.size, Mat3::IDENTITY)
 }
 
 fn vertices_sized(
@@ -58,6 +86,7 @@ fn vertices_sized(
     draw: &Draw,
     local_simulation: bool,
     size: Vec3,
+    simulation: Mat3,
 ) -> ([Vec3; 4], Vec3) {
     // The native pivot uses the UNCLAMPED authored size; screen limits affect
     // corner extents, not the pivot offset. Keep the two inputs separate.
@@ -84,7 +113,7 @@ fn vertices_sized(
                     p.position - frame.camera_position,
                     frame.camera_rotation.y_axis,
                 ),
-                Alignment::Velocity => unreachable!("velocity billboard geometry is not admitted"),
+                Alignment::Velocity => velocity_basis(p.velocity, simulation),
             };
             let matrix = if draw.alignment == Alignment::View
                 || (draw.alignment == Alignment::Local && !local_simulation)
@@ -110,21 +139,22 @@ fn vertices_sized(
                 .cross(offsets[1].normalize_or_zero());
             (offsets, normal)
         }
-        Mode::Horizontal => {
+        Mode::Horizontal | Mode::Vertical => {
+            // One geometry body serves both modes; they differ only in the
+            // two world spans the quad is laid on.
+            let (side, up) = match draw.mode {
+                Mode::Horizontal => (Vec3::NEG_X, Vec3::Z),
+                _ => (vertical_side(frame.camera_rotation), Vec3::Y),
+            };
             let (sin, cos) = (p.rotation.z + std::f32::consts::FRAC_PI_4).sin_cos();
-            let x = size.x * scale.x * 0.5;
-            let z = size.y * scale.z * 0.5;
-            let corners = [
-                Vec3::new(-cos * x, 0.0, sin * z),
-                Vec3::new(sin * x, 0.0, cos * z),
-                Vec3::new(cos * x, 0.0, -sin * z),
-                Vec3::new(-sin * x, 0.0, -cos * z),
-            ];
-            let pivot = Vec3::new(
-                p.size.x * scale.x * draw.pivot.x * cos,
-                p.size.x * scale.y * draw.pivot.z,
-                p.size.y * scale.z * draw.pivot.y * sin,
-            );
+            let (x, y) = (size.x * 0.5, size.y * 0.5);
+            let across = [cos * x, -sin * x, -cos * x, sin * x];
+            let along = [sin * y, cos * y, -sin * y, -cos * y];
+            let corners: [Vec3; 4] = std::array::from_fn(|k| (side * across[k] + up * along[k]) * scale);
+            let pivot = (-side * (p.size.x * draw.pivot.x * cos)
+                + up * (p.size.y * draw.pivot.y * sin)
+                + side.cross(up) * (p.size.x * draw.pivot.z))
+                * scale;
             let normal = corners[0]
                 .normalize_or_zero()
                 .cross(corners[1].normalize_or_zero());
@@ -161,6 +191,8 @@ pub(crate) fn screen_limited(size: Vec3, minimum: f32, maximum: f32) -> Vec3 {
 
 /// Preserve source UVs and custom streams. Geometry is stored in the shared
 /// reflected world space; the source-program upload restores source coordinates.
+/// `simulation` is the simulation space's rotation to world; with the Velocity
+/// alignment each instance's velocity is read in the simulation space.
 pub(crate) fn write(
     mesh: &mut Mesh,
     draw: &Draw,
@@ -169,6 +201,7 @@ pub(crate) fn write(
     local_simulation: bool,
     fov_y: f32,
     aspect: f32,
+    simulation: Mat3,
 ) {
     let mut positions = Vec::with_capacity(particles.len() * 4);
     let mut normals = Vec::with_capacity(particles.len() * 4);
@@ -191,7 +224,7 @@ pub(crate) fn write(
             draw.screen_size.x * width,
             draw.screen_size.y * width,
         );
-        let (corners, normal) = vertices_sized(p, frame, draw, local_simulation, size);
+        let (corners, normal) = vertices_sized(p, frame, draw, local_simulation, size, simulation);
         positions.extend(corners.map(|v| reflect(v).to_array()));
         normals.extend([reflect(normal).to_array(); 4]);
         uv.extend([[0.0f32, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);

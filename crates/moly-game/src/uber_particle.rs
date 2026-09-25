@@ -1039,6 +1039,7 @@ pub(crate) fn advance(
         camera_transform.translation(),
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
+        perspective.near,
     );
 
     // Time.deltaTime: the frame clamped at Time.maximumDeltaTime and floored at
@@ -1333,7 +1334,7 @@ pub(crate) fn advance_fixture_particles(
     let Some(viewport) = camera.physical_viewport_size() else {
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
     };
-    let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32);
+    let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32, projection.near);
     // Time.deltaTime (clamped at Time.maximumDeltaTime, floored at 1e-5 s,
     // rounded once to float) and Time.unscaledDeltaTime, as the weather host
     // reads them.
