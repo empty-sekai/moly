@@ -1961,7 +1961,7 @@ enum WalkTarget {
 /// 一圈之后到锚定家具处驻足 15 秒再换。40 秒到不了就放弃换下一个。
 /// armed 窗口收尾与让位门落下时两根指都松——不留按着的幽灵方向。
 pub(crate) fn smoke_autowalk(
-    mut touches: MessageWriter<TouchInput>,
+    mut touches: InjectedTouches,
     screen: ActionButtonScreen,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     fixtures: Query<(&FixturePlacement, &GlobalTransform), With<FixtureRoot>>,
@@ -1990,8 +1990,8 @@ pub(crate) fn smoke_autowalk(
     const FINGER: u64 = 99007;
     const TAP_FINGER: u64 = 99008;
     let base = Vec2::new(width * 0.15, height * 0.75);
-    let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
-        touches.write(TouchInput {
+    let write = |touches: &mut InjectedTouches, phase: TouchPhase, position: Vec2| {
+        touches.touches.write(TouchInput {
             phase,
             position,
             window: window_entity,
@@ -1999,14 +1999,18 @@ pub(crate) fn smoke_autowalk(
             id: FINGER,
         });
     };
-    let write_tap = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
-        touches.write(TouchInput {
-            phase,
-            position,
-            window: window_entity,
-            force: None,
-            id: TAP_FINGER,
-        });
+    // The joystick reads the touch messages; the gesture layer reads the
+    // window's event stream, so the tap finger goes there.
+    let write_tap = |touches: &mut InjectedTouches, phase: TouchPhase, position: Vec2| {
+        touches
+            .window_events
+            .write(bevy::window::WindowEvent::TouchInput(TouchInput {
+                phase,
+                position,
+                window: window_entity,
+                force: None,
+                id: TAP_FINGER,
+            }));
     };
     // 按钮的屏位（顶原点）：与摆件同一式——覆盖相机世界心翻回屏坐标。
     // With an empty stack the tap arm has nothing to press; the walk still
@@ -2195,6 +2199,14 @@ pub(crate) fn smoke_autowalk(
         write(&mut touches, TouchPhase::Moved, position);
         return;
     }
+}
+
+/// The two streams an instrument writes: the walk finger's touch messages
+/// (the joystick) and the tap finger's window events (the gesture layer).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct InjectedTouches<'w> {
+    touches: MessageWriter<'w, TouchInput>,
+    window_events: MessageWriter<'w, bevy::window::WindowEvent>,
 }
 
 /// The door walk's progress on the current site.
