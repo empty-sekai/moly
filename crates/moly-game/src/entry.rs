@@ -36,7 +36,7 @@ use crate::{
     },
     fixture_gimmick::house_door::{self, HouseBinding, HouseLookup},
     player::PlayerControlled,
-    player_avatar::{AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken},
+    player_avatar::{AvatarDriver, PlayerActionToken},
     player_state::{PlayerActionState, PlayerAvatarStates},
 };
 use law::{ColorFade, FadeStage, NormalPrivate, UniTaskDelay};
@@ -45,14 +45,6 @@ use law::{ColorFade, FadeStage, NormalPrivate, UniTaskDelay};
 /// StaminaRefresh topic): a named mock, not refreshed. The refresh branch
 /// (`c_000_other_house1_003` and the 53-frame stamina view) is not ported.
 const IS_REFRESHED: bool = false;
-
-/// Product adaptation of `act_u000_hou_house_open_011_o` (a u000 avatar clip,
-/// 1.75 s) onto the SD body, chosen by root motion: the source's Hips come
-/// forward from 1.56 m behind the locator to it; of the SD house clips only
-/// `mov_cw_all_house_in_outside_O` (1.83 s) also ends on the locator, moving
-/// from 0.64 m behind; `open_011_O` is still 1.09 m behind at the 1.5 s
-/// Finish, `open_013_O` and `out_inside_O` move away. No retargeting.
-const EXIT_HOUSE_SD_CLIP: &str = "mov_cw_all_house_in_outside_O";
 
 /// Movement hold of the join (`NavMeshAgent.enabled = false`,
 /// `updatePosition = false` in `MoveToEntrance`, undone in `Finish`).
@@ -474,13 +466,14 @@ fn exit_house(world: &mut World, seq: &mut EntrySequence, house: HouseBinding, p
         Some(law::EXIT_HOME_ANIMATION_DELAY_TIME),
     );
     // ChangeState(ExitMoveHouse): ChangeStatus, then the state's Initialize
-    // closes the intercept gate and plays the exit clip without crossfade.
-    {
-        let mut states = world.resource_mut::<PlayerAvatarStates>();
-        states.change_status(PlayerActionState::ExitMoveHouse);
-        states.can_intercept = false;
-    }
-    let token = start_exit_clip(world, player);
+    // closes the intercept gate and plays the exit clip with the presenter's
+    // 0.25 s crossfade (the state and its SD stand-in are shared with the
+    // room-to-home door move).
+    let token = crate::site_move::door_state::change_state(
+        world,
+        crate::site_move::door_state::HouseState::ExitMoveHouse,
+        None,
+    );
     step(
         seq,
         "player.ChangeState(ExitMoveHouse)",
@@ -491,46 +484,6 @@ fn exit_house(world: &mut World, seq: &mut EntrySequence, house: HouseBinding, p
         player,
         token,
     };
-}
-
-fn start_exit_clip(world: &mut World, player: Entity) -> Option<PlayerActionToken> {
-    let mut params = bevy::ecs::system::SystemState::<(
-        ResMut<Assets<AnimationGraph>>,
-        Query<&mut AvatarDriver>,
-        Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
-    )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
-    let Ok(mut driver) = drivers.get_mut(player) else {
-        error!("[entry] ExitMoveHouse: the player's avatar driver disappeared");
-        return None;
-    };
-    let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) else {
-        error!("[entry] ExitMoveHouse: the player's animator is not installed");
-        return None;
-    };
-    let motion = PlayerActionMotion {
-        clip: EXIT_HOUSE_SD_CLIP,
-        looping: false,
-        speed: 1.0,
-        blend: Duration::ZERO,
-        blocks_manual_movement: true,
-    };
-    match driver.start_action(
-        PlayerActionOwner::Door,
-        motion,
-        &mut graphs,
-        &mut animator,
-        &mut transitions,
-    ) {
-        Ok(token) => {
-            info!("[entry] ExitMoveHouse plays {EXIT_HOUSE_SD_CLIP} (product adaptation of act_u000_hou_house_open_011_o), crossfade 0");
-            Some(token)
-        }
-        Err(error) => {
-            error!("[entry] ExitMoveHouse clip {EXIT_HOUSE_SD_CLIP} could not start: {error:?}");
-            None
-        }
-    }
 }
 
 /// `JoinMysekaiActionState.Finish(player)`.

@@ -567,6 +567,13 @@ fn apply(
     );
 }
 
+impl RoomAppearanceState {
+    /// The appearance of the room loaded for `epoch` is applied, or refused.
+    pub(crate) fn settled_for(&self, epoch: u64) -> bool {
+        self.key.as_ref().is_some_and(|key| key.0 == epoch) && (self.ready || self.error.is_some())
+    }
+}
+
 pub(crate) fn install(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/room_shell.wgsl");
     crate::gpu_image_release::prepare_after_images::<RoomShellMaterial>(app);
