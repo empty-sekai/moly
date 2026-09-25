@@ -2377,6 +2377,9 @@ pub(crate) struct DoorWalk {
     tapped: Option<u64>,
     /// When that tap was sent.
     tap_at: Option<f32>,
+    /// The door's button was at the head when the finger lifted: tap on a
+    /// later frame if it still is.
+    lifted_at: Option<f32>,
     /// The site generation this walk runs on, and when it began.
     since: Option<(u64, f32)>,
     /// The walk stopped on this generation (reached or timed out).
@@ -2486,16 +2489,19 @@ pub(crate) fn smoke_door_walk(
         Some((sensor, _)) => points
             .get(sensor)
             .ok()
-            .map(|at| (at.translation(), ButtonType::GoHomeSite)),
+            .map(|at| (at.translation(), ButtonType::GoHomeSite, None)),
         // The house: half a metre past the inside-door point towards the
         // house, so the player arrives facing it (the player box is ahead).
+        // That point is past the walls, so near it the finger pushes
+        // straight at the house, as a player would, instead of steering at
+        // the point while the walk slides along the wall.
         None => houses.iter().next().and_then(|(point, house)| {
             let at = points.get(point.0).ok()?.translation();
             let inward = (house.translation() - at).with_y(0.0).normalize_or_zero();
-            Some((at + inward * 0.5, ButtonType::HouseEntry))
+            Some((at + inward * 0.5, ButtonType::HouseEntry, Some(inward)))
         }),
     };
-    let Some((target, expected)) = target else {
+    let Some((target, expected, push)) = target else {
         return;
     };
     let offset = std::env::var("MOLY_DOOR_WALK_OFFSET")
@@ -2535,7 +2541,14 @@ pub(crate) fn smoke_door_walk(
     if head.is_some_and(|(button, _)| button == expected)
         && now - walk.last_change >= ACTION_BUTTON_INPUT_INTERVAL + 0.05
     {
-        release(walk, &mut touch);
+        // Lift the finger first and tap on a later frame, if the button
+        // is still there once the player stands.
+        if walk.pressing || walk.lifted_at.is_none() {
+            release(walk, &mut touch);
+            walk.lifted_at = Some(now);
+            return;
+        }
+        walk.lifted_at = None;
         let Some(position) = screen.button_position(window, expected) else {
             return;
         };
@@ -2581,6 +2594,9 @@ pub(crate) fn smoke_door_walk(
             return;
         }
     }
+    if walk.lifted_at.take().is_some() {
+        info!("[door-walk] the {expected:?} button left the head when the finger lifted; head {head:?}; walking on");
+    }
     // At the door: stand and wait for the head (another entry that joined
     // first keeps it until its object leaves).
     if distance < 0.2 {
@@ -2588,7 +2604,10 @@ pub(crate) fn smoke_door_walk(
         return;
     }
     // The joystick's inverse, as the action button walk writes it.
-    let dir_world = Vec2::new(delta.x, delta.z).normalize_or(Vec2::X);
+    let dir_world = match push {
+        Some(inward) if distance < 1.0 => Vec2::new(inward.x, inward.z).normalize_or(Vec2::X),
+        _ => Vec2::new(delta.x, delta.z).normalize_or(Vec2::X),
+    };
     let forward = camera.forward();
     let forward_flat = Vec2::new(forward.x, forward.z).normalize_or_zero();
     let right = camera.right();
