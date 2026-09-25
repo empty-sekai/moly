@@ -195,7 +195,11 @@ pub(crate) fn spawn(
                 landing.z,
                 angle.to_degrees(),
                 range,
-                if is_scatter { format!(" hop d1 {d1:.3} d2 {d2:.3} r {r:.3}") } else { " (no scatter: radius 1.0 at once)".into() },
+                if is_scatter {
+                    format!(" hop d1 {d1:.3} d2 {d2:.3} r {r:.3}")
+                } else {
+                    " (no scatter: radius 1.0 at once)".into()
+                },
             );
             remove_pending(batch.origin, &item, &mut objects);
             batch.remaining.remove(0);

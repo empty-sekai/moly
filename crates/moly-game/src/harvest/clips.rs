@@ -66,7 +66,9 @@ pub(crate) fn parse(
     };
     match server.load_state(&request.0) {
         LoadState::Failed(error) => {
-            warn!("[harvest] input absent, the harvest action stays off: {MANIFEST} (the source swing clips' lengths and AnimationEvents): {error}");
+            warn!(
+                "[harvest] input absent, the harvest action stays off: {MANIFEST} (the source swing clips' lengths and AnimationEvents): {error}"
+            );
             commands.remove_resource::<HarvestClipsRequest>();
             return;
         }
@@ -117,7 +119,10 @@ pub(crate) fn parse(
             },
         );
     }
-    info!("[harvest] source clip records: {} clips ({harvest} harvest family) from the motion manifest", clips.len());
+    info!(
+        "[harvest] source clip records: {} clips ({harvest} harvest family) from the motion manifest",
+        clips.len()
+    );
     commands.insert_resource(HarvestClips(clips));
     commands.remove_resource::<HarvestClipsRequest>();
 }

@@ -20,8 +20,9 @@
 //! - `queue`: the 1.0 s harvest log loop, request merging, the mock replies
 //!   and the event 30 / 31 refresh.
 //!
-//! Named gaps: effects 101-143 are recorded as hook requests only (the
-//! effect-pool step); the prop animator clips (barrel break, toolbox open)
+//! - `effects`: the harvest effects (101-143) from the effect table.
+//!
+//! Named gaps: the prop animator clips (barrel break, toolbox open)
 //! are not played; the tree top's dither fade is not ported (the top hides
 //! when the fade would end); harvest objects do not carve the walk field
 //! (the source's NavMeshObstacle); drop models keep their glb materials.
@@ -32,6 +33,7 @@ pub(crate) mod catalog;
 mod clips;
 mod damage;
 mod drops;
+mod effects;
 pub(crate) mod law;
 mod pickup;
 mod queue;
@@ -437,12 +439,23 @@ pub(crate) struct HitResult {
 #[derive(Resource, Default)]
 pub(crate) struct HarvestHitResults(pub(crate) Vec<HitResult>);
 
-/// An `EffectManager.Emit` the flow asks for (effects 101-143 are the
-/// effect-pool step; these requests are counted and named, not drawn).
+/// An `EffectManager.Emit` the flow asks for; `effects` draws it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EffectHook {
     pub(crate) kind: u16,
     pub(crate) position: Vec3,
+    pub(crate) rotation: Quat,
+}
+
+impl EffectHook {
+    /// `Emit(type, position, key)`: the prefab's own rotation.
+    pub(crate) fn at(kind: u16, position: Vec3) -> Self {
+        Self {
+            kind,
+            position,
+            rotation: Quat::IDENTITY,
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -609,7 +622,11 @@ fn on_scene_ready(
 /// the target and the button go with the site; the next arrival rebuilds.
 pub(crate) fn clear_for_site_change(world: &mut World) {
     let roots: Vec<Entity> = world
-        .query_filtered::<Entity, Or<(With<HarvestRoot>, With<HarvestDropItem>)>>()
+        .query_filtered::<Entity, Or<(
+            With<HarvestRoot>,
+            With<HarvestDropItem>,
+            With<effects::HarvestEffectRoot>,
+        )>>()
         .iter(world)
         .collect();
     let count = roots.len();
@@ -619,6 +636,7 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
         }
     }
     action::cancel_for_site_change(world);
+    effects::clear_for_site_change(world);
     world.remove_resource::<HarvestScenesReady>();
     world.remove_resource::<crate::harvest_material::HarvestMaterialsSwapped>();
     world.resource_mut::<HarvestScenesReadyCount>().0 = 0;
@@ -696,7 +714,11 @@ impl Plugin for HarvestPlugin {
             .init_resource::<tool_model::HarvestToolModels>()
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
-            .add_systems(Startup, (catalog::load, clips::load, tool_model::load))
+            .init_resource::<effects::HarvestEffects>()
+            .add_systems(
+                Startup,
+                (catalog::load, clips::load, tool_model::load, effects::load),
+            )
             .add_observer(on_scene_ready)
             .add_systems(
                 Update,
@@ -739,7 +761,7 @@ impl Plugin for HarvestPlugin {
                     report.run_if(bevy::time::common_conditions::on_timer(
                         std::time::Duration::from_secs(2),
                     )),
-                    damage::drain_effect_hooks,
+                    effects::advance.after(HarvestActionSet),
                 ),
             )
             .add_systems(

@@ -53,14 +53,14 @@ use bevy::prelude::*;
 use super::catalog::{HarvestCatalog, ToolDef};
 use super::clips::{ClipEvent, HarvestClips};
 use super::law::{
-    self, ContinueInputs, PointTween, SegmentEase, Stamina, ToolClock, ToolState, ToolType,
-    animation_speed, can_attack_remain_stamina, can_continue_action, harvest_action_time,
+    self, animation_speed, can_attack_remain_stamina, can_continue_action, harvest_action_time,
     harvest_clip_name, has_stamina_available_for_harvest, has_tool_required_for_harvest,
-    inside_circle, is_sustainable_tool, target_priority, tool_type_for,
+    inside_circle, is_sustainable_tool, target_priority, tool_type_for, ContinueInputs, PointTween,
+    SegmentEase, Stamina, ToolClock, ToolState, ToolType,
 };
 use super::queue::{HarvestLogQueue, HarvestStack, Stack};
 use super::server_mock::UserTool;
-use super::stand_in::{StandIn, stand_in};
+use super::stand_in::{stand_in, StandIn};
 use super::tool_model::{ToolModelRequest, ToolModelRequests};
 use super::ui::HarvestButton;
 use super::{
@@ -1093,10 +1093,10 @@ fn begin_loop(
     }
     if model.stamina.has_boost_or_enhance() {
         if let Ok(transform) = players.single() {
-            world.effects.pending.push(EffectHook {
-                kind: 142,
-                position: transform.translation,
-            });
+            world
+                .effects
+                .pending
+                .push(EffectHook::at(142, transform.translation));
         }
     }
     // PlayAnimationHarvestUI -> ClickHarvestButton.
@@ -1572,7 +1572,11 @@ pub(crate) fn autoplay_press(
                         .and_then(|face| face.path(from, to))
                         .map(|path| path.into_iter().map(Vec2::from_array).collect())
                         .unwrap_or_default();
-                    warn!("[harvest-auto] step {}: walk field path of {} waypoints", auto.step, auto.waypoints.len());
+                    warn!(
+                        "[harvest-auto] step {}: walk field path of {} waypoints",
+                        auto.step,
+                        auto.waypoints.len()
+                    );
                 }
                 None => {
                     warn!(
@@ -1618,11 +1622,31 @@ pub(crate) fn autoplay_press(
                     auto.stuck_frames = 0;
                 }
                 auto.last_position = here;
-                if auto.stuck_frames > 5 && !auto.waypoints.is_empty() {
-                    auto.waypoints.remove(0);
+                if auto.stuck_frames > 5 {
+                    // The path itself led into a corner: take it again from
+                    // where the player actually stands.
+                    auto.waypoints = face
+                        .as_deref()
+                        .and_then(|face| face.path([here.x, here.y], [transform.translation.x, transform.translation.z]))
+                        .map(|path| path.into_iter().map(Vec2::from_array).collect())
+                        .unwrap_or_default();
+                    if auto.waypoints.is_empty() {
+                        auto.waypoints.push(Vec2::new(transform.translation.x, transform.translation.z));
+                    }
                     auto.stuck_frames = 0;
+                    warn!(
+                        "[harvest-auto] step {}: stuck at ({:.2}, {:.2}); re-planned {} waypoints",
+                        auto.step,
+                        here.x,
+                        here.y,
+                        auto.waypoints.len()
+                    );
                 }
-                while auto.waypoints.first().is_some_and(|point| point.distance(here) < 0.3) {
+                while auto
+                    .waypoints
+                    .first()
+                    .is_some_and(|point| point.distance(here) < 0.3)
+                {
                     auto.waypoints.remove(0);
                 }
                 match auto.waypoints.first() {

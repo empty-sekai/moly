@@ -33,10 +33,10 @@ use bevy::scene::SceneRoot;
 use moly_assets::source_navigation::{SourceHarvestView, SourceObjectIdentity};
 
 use super::catalog::{HarvestCatalog, HarvestUserData};
-use super::server_mock::{DROP_BEFORE, DROP_DROPPED, UserDrop, UserFixture};
+use super::server_mock::{UserDrop, UserFixture, DROP_BEFORE, DROP_DROPPED};
 use super::{
-    DropBatch, HarvestDocs, HarvestDropBatches, HarvestGltfs, HarvestObject, HarvestRoot,
-    PendingDrop, STATUS_HARVESTED, kind_cues,
+    kind_cues, DropBatch, HarvestDocs, HarvestDropBatches, HarvestGltfs, HarvestObject,
+    HarvestRoot, PendingDrop, STATUS_HARVESTED,
 };
 use crate::walk_face::WalkFace;
 

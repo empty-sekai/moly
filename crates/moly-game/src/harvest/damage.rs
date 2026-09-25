@@ -145,6 +145,19 @@ pub(crate) fn on_damage(
             }
             None => position + Vec3::Y * 0.35,
         };
+        // ... and turn to face the player (`LookRotation(-0.2 * dir)`; in the
+        // product frame the yaw of that direction).
+        let facing = match player {
+            Some(player) => {
+                let back = Vec2::new(player.x - position.x, player.z - position.z);
+                if back.length_squared() > 0.0 {
+                    Quat::from_rotation_y(back.x.atan2(back.y))
+                } else {
+                    Quat::IDENTITY
+                }
+            }
+            None => Quat::IDENTITY,
+        };
         let mut cues: Vec<&'static str> = Vec::new();
         let mut hooks: Vec<u16> = Vec::new();
         match object.interface {
@@ -180,10 +193,15 @@ pub(crate) fn on_damage(
                 cues.extend(object.cues.hit);
             }
         }
+        // The single-action views emit at their own position.
         for kind in &hooks {
-            effects.pending.push(EffectHook {
-                kind: *kind,
-                position: effect_at,
+            effects.pending.push(match object.interface {
+                ActionInterface::Multi => EffectHook {
+                    kind: *kind,
+                    position: effect_at,
+                    rotation: facing,
+                },
+                ActionInterface::Single => EffectHook::at(*kind, position),
             });
         }
         for cue in &cues {
@@ -238,7 +256,14 @@ pub(crate) fn on_damage(
             stats.drop_batches += 1;
             tail = format!(
                 " -> drop batch of {count} (thresholds {:?}; {} with HarvestDropDelayItemCount {drop_delay_count})",
-                batches.0.last().expect("pushed").remaining.iter().map(|d| d.row.hp).collect::<Vec<_>>(),
+                batches
+                    .0
+                    .last()
+                    .expect("pushed")
+                    .remaining
+                    .iter()
+                    .map(|d| d.row.hp)
+                    .collect::<Vec<_>>(),
                 if delay { "one a frame" } else { "same frame" }
             );
         }
@@ -339,10 +364,7 @@ fn change_after_object(
         }
         "MysekaiAreaStoneView" => {
             hide(object_node, root_visibility, node_visibility);
-            effects.pending.push(EffectHook {
-                kind: 131,
-                position,
-            });
+            effects.pending.push(EffectHook::at(131, position));
         }
         "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView" => {
             commands.entity(root).insert(HarvestAfterForm::DelayedHide {
@@ -416,10 +438,7 @@ pub(crate) fn advance_after_forms(
                         .and_then(|node| nodes.get(node).ok())
                         .map(|(_, _, global)| global.translation())
                         .unwrap_or_default();
-                    effects.pending.push(EffectHook {
-                        kind: 132,
-                        position,
-                    });
+                    effects.pending.push(EffectHook::at(132, position));
                     info!(
                         "[harvest] {}#{} fall: 2.0 s delay done, delete effect 132 at {position:.2}; dither fade not ported, the top hides after {FADE_DURATION} s",
                         object.leaf, object.fixture_id
@@ -452,17 +471,4 @@ pub(crate) fn advance_after_forms(
             }
         }
     }
-}
-
-/// Update: count and name the effect requests (the effect-pool step draws
-/// them).
-pub(crate) fn drain_effect_hooks(mut hooks: ResMut<HarvestEffectHooks>) {
-    let pending = std::mem::take(&mut hooks.pending);
-    for hook in &pending {
-        info!(
-            "[harvest-effect] EffectManager.Emit({}) at ({:.2}, {:.2}, {:.2}) requested; effects 101-143 are not drawn yet (effect pool step)",
-            hook.kind, hook.position.x, hook.position.y, hook.position.z
-        );
-    }
-    hooks.total += pending.len();
 }

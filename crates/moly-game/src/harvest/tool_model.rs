@@ -165,7 +165,9 @@ pub(crate) fn apply(
         return;
     };
     let Some(files) = index.get(&assetbundle) else {
-        warn!("[harvest] tool {tool_id}: no model {assetbundle} in the tool index; the hand stays empty");
+        warn!(
+            "[harvest] tool {tool_id}: no model {assetbundle} in the tool index; the hand stays empty"
+        );
         models.pending_show = false;
         return;
     };
@@ -218,7 +220,9 @@ pub(crate) fn apply(
         .id();
     models.instances.insert(tool_id, entity);
     models.pending_show = false;
-    info!("[harvest] tool model {assetbundle} (tool {tool_id}) created under the SD {MOUNT} mount (adaptation of the source RightArm mount)");
+    info!(
+        "[harvest] tool model {assetbundle} (tool {tool_id}) created under the SD {MOUNT} mount (adaptation of the source RightArm mount)"
+    );
 }
 
 /// Queued by the site change: the models stay cached on the body, hidden.

@@ -281,8 +281,17 @@ pub(crate) fn build(
         };
         values.push(parse(asset, doc.path));
     }
-    let [index, fixtures, blueprints, items, music, tools, staminas, materials, spots]: [serde_json::Value; 9] =
-        values.try_into().expect("nine inputs");
+    let [
+        index,
+        fixtures,
+        blueprints,
+        items,
+        music,
+        tools,
+        staminas,
+        materials,
+        spots,
+    ]: [serde_json::Value; 9] = values.try_into().expect("nine inputs");
 
     let fixture_ids: HashSet<i64> = fixtures["fixtures"]
         .as_array()

@@ -76,7 +76,10 @@ pub(crate) fn advance(
     // Disjoint from the eligibility's NPC query (drops carry no unit id).
     mut drops: Query<
         (Entity, &mut HarvestDropItem, &mut Transform),
-        (Without<PlayerControlled>, Without<crate::npc::CharacterUnitId>),
+        (
+            Without<PlayerControlled>,
+            Without<crate::npc::CharacterUnitId>,
+        ),
     >,
     mut se: ResMut<SeRequests>,
     mut queue: ResMut<HarvestLogQueue>,
@@ -178,7 +181,9 @@ pub(crate) fn collect_on_leave(
             count += 1;
         }
     }
-    info!("[harvest-pickup] AllCollectCollisionDropItemAsync at the cannon's leave: {count} drops in contact collected");
+    info!(
+        "[harvest-pickup] AllCollectCollisionDropItemAsync at the cannon's leave: {count} drops in contact collected"
+    );
 }
 
 #[cfg(test)]

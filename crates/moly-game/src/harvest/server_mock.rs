@@ -403,7 +403,9 @@ pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap 
         ..default()
     };
     if spots.is_empty() {
-        warn!("[harvest-mock] HarvestMapMock: site {site_id} has no unavailable-spot rows; the mock places nothing there");
+        warn!(
+            "[harvest-mock] HarvestMapMock: site {site_id} has no unavailable-spot rows; the mock places nothing there"
+        );
         return map;
     }
     let min_x = spots.iter().map(|s| s.start_x).min().unwrap();
@@ -438,11 +440,15 @@ pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap 
             None => Vec::new(),
         };
         if material_type.is_some() && materials.is_empty() {
-            info!("[harvest-mock] HarvestMapMock site {site_id}: no {word} (no material of its type lists this site)");
+            info!(
+                "[harvest-mock] HarvestMapMock site {site_id}: no {word} (no material of its type lists this site)"
+            );
             continue;
         }
         if material_type.is_none() && inputs.toolbox_blueprint.is_none() {
-            info!("[harvest-mock] HarvestMapMock site {site_id}: no {word} (no blueprint row for its drop)");
+            info!(
+                "[harvest-mock] HarvestMapMock site {site_id}: no {word} (no blueprint row for its drop)"
+            );
             continue;
         }
         let common: Vec<&MockFixtureRow> = inputs
