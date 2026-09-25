@@ -760,6 +760,69 @@ fn full_starter_rows(
     region::resolve_rows(rows, source_region)
 }
 
+/// Appends the entry's house row ([`crate::entry::house`]), a named
+/// server-decided mock, after the HOME starter. Its footprint must not
+/// overlap any ground row actually loaded; an overlap refuses the house
+/// (the entry then takes the source's no-house branch) instead of moving it.
+fn append_entry_house(rows: &mut Vec<PlacementMock<String>>) {
+    let house = &crate::entry::house::STARTER_HOUSE;
+    let row = PlacementMock {
+        package: house.package,
+        texture_id: house.texture_id,
+        min: house.min,
+        max: house.max,
+        center_y: 0,
+        layout: layout_type::FLOOR,
+        direction: house.direction,
+        fixture_id: house.fixture_id,
+    };
+    let placed = row.placed();
+    let overlapping: Vec<&str> = rows
+        .iter()
+        .filter(|other| other.layout & WALL_LAYOUT_MASK == 0)
+        .filter(|other| {
+            let other = other.placed();
+            other.min.x <= placed.max.x
+                && other.max.x >= placed.min.x
+                && other.min.z <= placed.max.z
+                && other.max.z >= placed.min.z
+        })
+        .map(|other| other.package.as_str())
+        .collect();
+    if !overlapping.is_empty() {
+        error!(
+            "[entry] player's house mock {} was not placed: its footprint overlaps {overlapping:?}",
+            house.package
+        );
+        return;
+    }
+    info!(
+        "[entry] player's house (named server-decided mock): {} master {} footprint ({},{})..({},{})          direction {:?} at ({:.3}, {:.3}, {:.3}); overlaps 0 of {} starter rows",
+        house.package,
+        house.fixture_id,
+        placed.min.x,
+        placed.min.z,
+        placed.max.x,
+        placed.max.z,
+        house.direction,
+        placed.position[0],
+        placed.position[1],
+        placed.position[2],
+        rows.len()
+    );
+    rows.push(row.into_owned());
+}
+
+/// Every committed placement root has had its activity identity and its
+/// source view resolution attempted; the entry looks for the house after.
+pub(crate) fn placements_resolved(world: &mut World) -> bool {
+    let mut roots = world.query_filtered::<
+        (Has<FixtureIdentityResolved>, Has<FixtureViewResolved>),
+        (With<FixtureInstanceSeed>, With<FixtureRoot>),
+    >();
+    roots.iter(world).all(|(identity, view)| identity && view)
+}
+
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
 #[derive(Clone, Copy, PartialEq)]
 struct PlacementMock<P = &'static str> {

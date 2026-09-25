@@ -25,6 +25,7 @@ pub mod cloth_runtime;
 mod content_library;
 mod delayed_faces;
 pub mod emoticon;
+mod entry;
 pub mod env;
 pub mod fixture;
 mod fixture_collision;
@@ -102,6 +103,7 @@ pub mod shadowmap;
 pub mod site;
 pub mod site_material;
 pub mod site_sound;
+pub(crate) mod site_move;
 pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
@@ -175,6 +177,11 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    // Every Time reader sees the engine's Time.maximumDeltaTime as the longest
+    // frame, not the virtual clock's own 250 ms default.
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(particle_runtime::PLAYER_MAXIMUM_DELTA);
     app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
     gpu_image_release::install(&mut app);
@@ -195,6 +202,7 @@ pub fn app(
     schedule::install(&mut app);
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);
+    site_move::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
     plain_background::install(&mut app);

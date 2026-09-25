@@ -40,6 +40,7 @@ pub mod limit_velocity;
 pub mod velocity;
 pub mod random;
 pub mod curve;
+pub mod device_libm;
 pub mod size;
 pub mod gradient;
 pub mod color;
@@ -50,17 +51,31 @@ pub mod gravity;
 pub mod sort;
 pub mod collision_response;
 pub mod collision_event;
+pub mod death_event;
+pub mod collision_query;
+pub mod current_size;
+pub mod collision_mesh;
 pub mod noise;
 pub mod seed_owner;
 pub mod initial;
 pub mod autonomous_emission;
 pub mod sub_emission;
+pub mod owner;
+pub mod child_emit;
 pub mod prewarm;
+pub mod frame_time;
+pub mod culling;
+mod armf;
+pub mod trail;
+pub mod trail_geometry;
 
 #[cfg(test)]
 mod corpus;
+#[cfg(test)]
+mod ring_lifecycle_samples;
 
-pub use buffer::{birth_capacity, compact, compact_with_side, finish_births, RingBufferMode};
+pub use buffer::{birth_capacity, compact, compact_with_side, compact_with_sides, compact_with_sides_indexed,
+    finish_births, finish_births_with, RingBufferMode};
 pub use emit::{accumulate_rate, burst_check, Burst, BurstOutcome, EmissionState};
 pub use limit_velocity::{advance_age_percent, DragLaw, DragSize, LimitVelocity, MagnitudeLaw};
 pub use rotation::{BakedCurve, RotationOverLifetime};

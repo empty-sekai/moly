@@ -48,7 +48,7 @@ const SURFACE_RADIUS: f32 = 2.0;
 
 /// 源 NormalCameraState.OnUpdate 的帧时长归一基（字面量 0.016667，非 1/60
 /// 的精确值；native 反编译逐字面量核过）。
-const FRAME_BASE: f32 = 0.016667;
+pub(crate) const FRAME_BASE: f32 = 0.016667;
 
 /// 源 NormalCameraState.OnUpdate 的跟随插值系数：t = clamp((dt/基)·0.1, 0, 1)。
 const FOLLOW_RATE: f32 = 0.1;
@@ -85,7 +85,7 @@ const FPS_CAMERA_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 0.1, 0.0);
 /// 采集/配送走继承支 0.5s，住宅走搬运 case 16 支 0.1s。缓动一律
 /// OutQuad（源 EASE_BASIC = 6，DG.Tweening.Ease 枚举位序）。
 const FPS_ENTER_TWEEN_SECS: f32 = 0.2;
-const FPS_EXIT_TWEEN_SECS_INHERIT: f32 = 0.5;
+pub(crate) const FPS_EXIT_TWEEN_SECS_INHERIT: f32 = 0.5;
 const FPS_EXIT_TWEEN_SECS_CASE16: f32 = 0.1;
 
 /// 真源场地相机的态（`FieldCamera.CurrentState` 的类型，闭集 21 值，
@@ -677,6 +677,12 @@ pub fn frame_site(
     parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
     entities: Query<Entity>,
     mut cameras: Query<&mut Transform, With<Camera3d>>,
+    // A cannon move keeps the camera model it flies with (SiteMoveAction
+    // owns it); the new site only contributes its tracking bounds.
+    (site_move, mut existing): (
+        Option<Res<crate::site_move::SiteMoveActive>>,
+        Option<ResMut<FieldCameraModel>>,
+    ),
 ) {
     let (Some(ground), Some(_), Some(active), Some(setting), Some(config)) =
         (ground, settled, active, setting, config)
@@ -757,6 +763,21 @@ pub fn frame_site(
         center,
         extents: full_extents * 0.5,
     };
+    if site_move.is_some() {
+        if let Some(existing) = existing.as_deref_mut() {
+            // SetupLockAtCameraBounds of the destination; the model itself
+            // is the one the move is flying (Normal re-entry restores the
+            // rest from the setting when the move ends).
+            existing.look_at_bounds = model.look_at_bounds;
+            existing.max_look_at_bounds = model.max_look_at_bounds;
+            info!(
+                "[camera] {site} tracking bounds set during a cannon move: centre ({:.2},{:.2}) near {:?} far {:?}",
+                center.x, center.y, near_extents, full_extents * 0.5
+            );
+            commands.remove_resource::<SiteSettled>();
+            return;
+        }
+    }
     // 初始取景点：站点中心（LookAt 起零后第一次跟随会拉向角色，这里给
     // 首帧一个站点内的合法起点）。
     model.look_at = Vec3::new(center.x, surface, center.y);
@@ -794,7 +815,7 @@ pub fn frame_site(
 /// 作用到 (0,0,-distance) 上。Unity 中 x=-cos(p)·sin(y)·d，y=sin(p)·d，
 /// z=-cos(p)·cos(y)·d；资产导入以(-x,y,z)转换至Bevy右手系，因此这里只有
 /// x项反号。屏幕Y翻转在输入边界处理，不能再用反转世界yaw补偿它。
-fn view_dir(pitch_deg: f32, yaw_deg: f32) -> Vec3 {
+pub(crate) fn view_dir(pitch_deg: f32, yaw_deg: f32) -> Vec3 {
     let pitch = pitch_deg.to_radians();
     let yaw = yaw_deg.to_radians();
     Vec3::new(
@@ -1331,7 +1352,7 @@ fn normalize360(deg: f32) -> f32 {
 
 /// 角度归一到 [−180, 180]（源 `FieldCameraStateBase.ConvertAngle180`：
 /// 先 fmodf 360，>180 减 360，<−180 加 360）。
-fn wrap180(deg: f32) -> f32 {
+pub(crate) fn wrap180(deg: f32) -> f32 {
     let mut v = deg % 360.0;
     if v > 180.0 {
         v -= 360.0;
@@ -1343,19 +1364,19 @@ fn wrap180(deg: f32) -> f32 {
 
 /// 最短有向角（源 `GetToRotation(from, to)` = from + ConvertAngle180(to−from)）：
 /// 转场补间的旋转终点都经它取「朝哪个方向转多少」，不是裸差。
-fn to_rotation(from: f32, to: f32) -> f32 {
+pub(crate) fn to_rotation(from: f32, to: f32) -> f32 {
     from + wrap180(to - from)
 }
 
 /// OutQuad 缓动（源 `EASE_BASIC = 6`，DG.Tweening.Ease 位序：OutQuad）。
-fn out_quad(t: f32) -> f32 {
+pub(crate) fn out_quad(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
 
 /// 读相机本体当前的垂直视场（角度制）。源 `DoTweenCameraSetting` 的
 /// prevFov 从 `Camera.fieldOfView` 取——**相机本体，不是模型字段**；本仓
 /// 等价位是投影件。非透视投影响亮拒绝（场地相机按构造恒透视）。
-fn perspective_fov_deg(projection: &Projection) -> f32 {
+pub(crate) fn perspective_fov_deg(projection: &Projection) -> f32 {
     match projection {
         Projection::Perspective(p) => p.fov.to_degrees(),
         _ => panic!("场地相机应是透视投影（FOV 捕获只对透视定义）"),
@@ -1817,6 +1838,21 @@ pub(crate) fn follow_avatar(
     };
     let player = avatar.translation();
     match state.0 {
+        CameraStateType::HouseEntry => {
+            // HouseEntryCameraState.OnUpdate: LookAt = the player's view
+            // position, UpdatePosition, view.LookAt(LookAt + Offset). The
+            // entry owns entering and leaving this state.
+            models.look_at = player;
+            let pivot = models.look_at + models.offset;
+            let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
+            if let Ok((mut camera, _)) = cameras.single_mut() {
+                *camera = Transform::from_translation(eye).looking_at(pivot, Vec3::Y);
+            }
+        }
+        // The cannon move's camera states: the tween above is their
+        // DoTweenCameraSetting; the per-frame write is
+        // `site_move::camera::update`, which runs right after this system.
+        CameraStateType::SiteMoveAction | CameraStateType::PreSiteMoveAction => {}
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，

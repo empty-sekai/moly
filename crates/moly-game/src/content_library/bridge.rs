@@ -354,6 +354,10 @@ pub(super) fn apply_command(
                 reject(state, "请先停止当前体验并等待场景恢复，再切换地点");
                 return;
             }
+            if io.site_move.is_some() {
+                reject(state, "正在移动地点，请在到达后再切换");
+                return;
+            }
             io.commands
                 .insert_resource(crate::site::SiteChangeRequest(site));
         }
@@ -738,9 +742,10 @@ pub(crate) fn publish(
         Option<Res<crate::weather::PhenomenonCatalogue>>,
         Option<Res<crate::weather_transition::WeatherTransition>>,
     ),
-    (sites, selection): (
+    (sites, selection, entry_ready): (
         Option<Res<crate::site::Sites>>,
         Option<Res<crate::site::SiteSelection>>,
+        Option<ResMut<crate::entry::StageSceneReady>>,
     ),
     server: Res<AssetServer>,
     mut audio_startup: Option<ResMut<crate::audio_startup::BrowserAudioStartup>>,
@@ -769,6 +774,12 @@ pub(crate) fn publish(
             preview.as_ref().is_some_and(|preview| preview.ready(choice, &staged))
         });
         scene_ready &= startup.released();
+    }
+    // The entry cover lifts on the stage at this same readiness.
+    if let Some(mut mirror) = entry_ready {
+        if mirror.0 != scene_ready {
+            mirror.0 = scene_ready;
+        }
     }
     // 天气档位进戳：宿主画的那颗钮读同一份投影，切档必须重发一页，否则
     // 「档位变了但页面没变」会一直停在旧值上。

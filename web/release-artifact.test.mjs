@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { stripDebugNames, splitCatalog, STAGE_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest } from "./release-artifact.mjs";
+import { stripDebugNames, splitCatalog, detailBundle, DETAIL_BUNDLES, STAGE_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest } from "./release-artifact.mjs";
 import { sha256 } from "./build-source.mjs";
 import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
 
@@ -112,12 +113,30 @@ test("catalogue transport preserves exact owner facts and splits only detail pay
   assert.deepEqual(card.presentation, entry.presentation);
   assert.deepEqual(card.fixtureIds, [297]);
   assert.equal("lines" in card, false);
-  const detail = JSON.parse(result.files.get(card.detail));
-  assert.deepEqual(detail, {
-    schemaVersion: 1,
-    snapshotId: "jp-6.8.1-test",
-    entry,
+  assert.equal(card.detail, detailBundle(entry.key));
+  assert.equal(result.index.details.length, DETAIL_BUNDLES);
+  const name = result.index.details[card.detail].slice("/moly/catalog-store/".length);
+  const bytes = result.details.get(name);
+  assert.equal(createHash("sha256").update(bytes).digest("hex") + ".json", name);
+  assert.deepEqual(JSON.parse(bytes), { schemaVersion: 2, entries: { [entry.key]: entry } });
+  // Bundles carry no snapshot identity, so another snapshot shares them.
+  assert.deepEqual(splitCatalog(raw, "jp-6.8.1-other").index.details, result.index.details);
+});
+test("catalogue images are published through the caller's mapping", () => {
+  const image = "fixture-thumbnails/textures/example.png";
+  const pictured = { ...entry, image, fixtures: [{ ...entry.fixtures[0], image }] };
+  const blob = `/moly/asset-store/blobs/ab/${"ab".repeat(32)}.bin`;
+  const result = splitCatalog({ ...raw, entries: [pictured] }, "jp-6.8.1-test", (value) => {
+    assert.equal(value, image);
+    return blob;
   });
+  const card = result.index.entries[0];
+  assert.equal(card.image, blob);
+  const bytes = result.details.get(result.index.details[card.detail].slice("/moly/catalog-store/".length));
+  const published = JSON.parse(bytes).entries[entry.key];
+  assert.equal(published.image, blob);
+  assert.equal(published.fixtures[0].image, blob);
+  assert.equal(splitCatalog({ ...raw, entries: [pictured] }, "jp-6.8.1-test").index.entries[0].image, image);
 });
 test("source identity and duplicate keys fail closed", () => {
   for (const change of [

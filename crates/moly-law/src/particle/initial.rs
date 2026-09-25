@@ -328,7 +328,8 @@ fn prepare(curve: &MinMaxCurve, field: InitialField) -> Result<CurveSampler, Ref
     if !valid {
         return Err(Refused::InvalidCurve(field));
     }
-    Ok(CurveSampler::with_baking(curve, false))
+    CurveSampler::new(curve, crate::particle::curve::CurveTime::Normalized)
+        .map_err(|_| Refused::UnsupportedCurve(field))
 }
 
 fn evaluate4(curve: &CurveSampler, random: &mut ModuleRandom, time: [f32; 4]) -> [f32; 4] {
@@ -555,6 +556,8 @@ mod tests {
             max: crate::particle::value::Curve {
                 multiplier: 1.0,
                 keys: Vec::new(),
+                pre_wrap: None,
+                post_wrap: None,
             },
         });
         let law = InitialLaw::from_params(&invalid, 0.0).unwrap();

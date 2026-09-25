@@ -9,7 +9,7 @@
 //! 「接没接线分不清」。
 //!
 //! 识别但**未映射**的键不丢弃也不报错——收进 `unmapped` 具名清单
-//! （scalingMode、emitterVelocityMode、renderer、以及 shape
+//! （scalingMode、renderer、以及 shape
 //! 的非圆参数族），消费侧可见「这条数据在，但律没管它」。
 
 use std::fmt;
@@ -282,7 +282,14 @@ pub struct EmitterParams {
     pub prewarm: bool,
     pub play_on_awake: bool,
     pub simulation_speed: f32,
+    /// Serialized useUnscaledTime: the system's frame reads Time.unscaledDeltaTime
+    /// instead of Time.deltaTime. Missing/null stays unknown, never false.
+    pub use_unscaled_time: Option<bool>,
     pub simulation_space: SimulationSpace,
+    /// MainModule emitterVelocityMode as exported (0 Transform, 1 Rigidbody,
+    /// 2 Custom). None when the key is absent or not a non-negative integer;
+    /// the consumer refuses what it cannot read rather than assume Transform.
+    pub emitter_velocity_mode: Option<u32>,
     /// Missing/null source ownership remains unknown; zero/false are authored values.
     pub random_seed: Option<u32>,
     pub auto_random_seed: Option<bool>,
@@ -314,11 +321,11 @@ pub struct EmitterParams {
 }
 
 /// system 层已映射进参数的键——之外的键全部进 `unmapped`。
-/// 「识别但具名不迁」的 scalingMode、emitterVelocityMode **不在**此列：它们落
+/// 「识别但具名不迁」的 scalingMode **不在**此列：它落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 29] = [
-    "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed",
-    "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
+const MAPPED_SYSTEM_KEYS: [&str; 31] = [
+    "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed", "useUnscaledTime",
+    "simulationSpace", "emitterVelocityMode", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
     "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
     "limitVelocity", "customData", "shapeEnabled", "subEmitters", "collision",
@@ -427,6 +434,7 @@ impl EmitterParams {
             prewarm: bool_of(system_get(system, "prewarm"), &format!("{ctx}.prewarm"))?,
             play_on_awake: bool_of(system_get(system, "playOnAwake"), &format!("{ctx}.playOnAwake"))?,
             simulation_speed: g("simulationSpeed")?,
+            use_unscaled_time: opt_bool_of(system_get(system, "useUnscaledTime"), &format!("{ctx}.useUnscaledTime"))?,
             random_seed: match system_get(system, "randomSeed") {
                 None | Some(Value::Null) => None,
                 value => Some(u32_of(value, &format!("{ctx}.randomSeed"))?),
@@ -439,6 +447,10 @@ impl EmitterParams {
                 )?;
                 SimulationSpace::from_str(&name, &ctx)?
             },
+            emitter_velocity_mode: system_get(system, "emitterVelocityMode")
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= u32::MAX as f64)
+                .map(|n| n as u32),
             start_delay: min_max_curve(
                 system_get(system, "startDelay"),
                 &format!("{ctx}.startDelay"),
@@ -855,15 +867,32 @@ fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsErr
         }),
         "curve" => Ok(MinMaxCurve::Curve {
             multiplier: f32_of(obj_get(obj, "multiplier"), &format!("{ctx}.multiplier"))?,
-            max: curve_of(obj_get(obj, "keys"), &format!("{ctx}.keys"))?,
+            max: wrapped(curve_of(obj_get(obj, "keys"), &format!("{ctx}.keys"))?,
+                obj, ["preInfinity", "postInfinity"], ctx)?,
         }),
         "twoCurves" => Ok(MinMaxCurve::TwoCurves {
             multiplier: f32_of(obj_get(obj, "multiplier"), &format!("{ctx}.multiplier"))?,
-            min: curve_of(obj_get(obj, "minKeys"), &format!("{ctx}.minKeys"))?,
-            max: curve_of(obj_get(obj, "maxKeys"), &format!("{ctx}.maxKeys"))?,
+            min: wrapped(curve_of(obj_get(obj, "minKeys"), &format!("{ctx}.minKeys"))?,
+                obj, ["minPreInfinity", "minPostInfinity"], ctx)?,
+            max: wrapped(curve_of(obj_get(obj, "maxKeys"), &format!("{ctx}.maxKeys"))?,
+                obj, ["maxPreInfinity", "maxPostInfinity"], ctx)?,
         }),
         _ => Err(EffectsError(format!("{ctx}.mode: unknown {mode:?}"))),
     }
+}
+
+/// The lane's serialized wrap modes (`m_PreInfinity`, `m_PostInfinity`). An
+/// absent or null field stays unknown: only a lane the reader leaves
+/// unoptimized reads it, and that evaluator refuses an unknown wrap. A present
+/// field that is not a non-negative integer is a parse error.
+fn wrapped(mut curve: Curve, obj: &[(String, Value)], keys: [&str; 2], ctx: &str) -> Result<Curve, EffectsError> {
+    let wrap = |key: &str| match obj_get(obj, key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => u32_of(Some(v), &format!("{ctx}.{key}")).map(Some),
+    };
+    curve.pre_wrap = wrap(keys[0])?;
+    curve.post_wrap = wrap(keys[1])?;
+    Ok(curve)
 }
 
 /// 键数组 → 曲线。阶跃切线保留有符号 Infinity；旧 null 编码丢失了符号，
@@ -914,7 +943,7 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
             return Err(EffectsError(format!("{ctx}: keys not sorted by time")));
         }
     }
-    Ok(Curve { multiplier: 1.0, keys })
+    Ok(Curve { multiplier: 1.0, keys, pre_wrap: None, post_wrap: None })
 }
 
 /// `color{color:[r,g,b,a]}` / `gradient{gradient}` / `twoColors{min,max}` /
@@ -1315,9 +1344,8 @@ mod tests {
         // Typed seed ownership preserves explicit zero/true without starting RNG.
         assert_eq!(e.random_seed, Some(0));
         assert_eq!(e.auto_random_seed, Some(true));
-        // 未映射键可见：system 层 2 个 + renderer。
+        // 未映射键可见：system 层 scalingMode + renderer。
         assert!(e.unmapped.contains(&"scalingMode".to_string()));
-        assert!(e.unmapped.contains(&"emitterVelocityMode".to_string()));
         assert!(!e.unmapped.contains(&"randomSeed".to_string()));
         assert!(!e.unmapped.contains(&"autoRandomSeed".to_string()));
         assert_eq!(e.shape.as_ref().unwrap().controls.angle, Some(25.0));

@@ -28,7 +28,8 @@
 //! 模式 2 烘制 · 拖拽非常数（模式 1/2/3）。
 
 use crate::particle::buffer::RingBufferMode;
-use crate::particle::rotation::{hash_mix, normalized_age, BakedCurve};
+use crate::particle::curve::{curve_time_fmax, BakedCurve};
+use crate::particle::rotation::hash_mix;
 use crate::particle::value::MinMaxCurve;
 
 // ---- 杂凑（钳制段双常数） ----
@@ -67,7 +68,10 @@ pub enum MagnitudeLaw {
     Constant(f32),
     /// 模式 3：双常数。逐粒子杂凑一次，lerp 不钳制。
     TwoConstants { min: f32, max: f32 },
-    /// 模式 1 烘制：多项式自带乘子；t = max(agePercent·0.01, 0)。
+    /// Mode 1 with the reader's isOptimizedCurve bit set: ClampVelocityModule
+    /// evaluates the polynomial inline, operation for operation as
+    /// `EvaluateThreaded`'s optimized branch, at `t = fmax(agePercent * 0.01,
+    /// +0)` (a NaN age stays NaN); the coefficients carry the multiplier.
     Baked(BakedCurve),
 }
 
@@ -85,7 +89,7 @@ impl MagnitudeLaw {
             {
                 Some(b) => Ok(MagnitudeLaw::Baked(b)),
                 None => Err(
-                    "limitVelocity.magnitude: 通用曲线模式（非烘制形状）未按原生路径实现，拒绝"
+                    "limitVelocity.magnitude: a curve without the isOptimizedCurve bit takes MagnitudeUpdateTpl, which is not transcribed"
                         .to_string(),
                 ),
             },
@@ -103,7 +107,7 @@ impl MagnitudeLaw {
                 let r = clamp_lerp_hash(seed);
                 (max - min) * r + min
             }
-            MagnitudeLaw::Baked(b) => b.evaluate(normalized_age(age_percent)),
+            MagnitudeLaw::Baked(b) => b.evaluate(curve_time_fmax(age_percent)),
         }
     }
 }

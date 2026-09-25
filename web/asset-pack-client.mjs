@@ -97,6 +97,35 @@ class ReadBudget {
   }
 }
 const budget = new ReadBudget();
+// Work on immutable, content-addressed documents is verified once per page and
+// shared by every client of the same store and transport. It never carries
+// one caller's abort signal; a caller that aborts only stops waiting. A
+// required reader repeats work first done without the required flag, so the
+// service worker still pins the documents behind protected base resources.
+const sharedWork = new WeakMap();
+function shared(transport, key, required, start) {
+  if (!sharedWork.has(transport)) sharedWork.set(transport, new Map());
+  const work = sharedWork.get(transport),
+    known = work.get(key);
+  if (known && (known.required || !required)) return known.promise;
+  const entry = { required, promise: start() };
+  work.set(key, entry);
+  entry.promise.catch(() => {
+    if (work.get(key) === entry) work.delete(key);
+  });
+  return entry.promise;
+}
+function until(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    promise
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
+}
 // Exact-length buffers avoid retaining every chunk plus a second full copy.
 // Reserve the encoded input, a decoder/crypto working copy and decoded output;
 // every representation admitted by BLOB/ASSET fits the shared 512 MiB budget.
@@ -160,10 +189,10 @@ export class PackClient {
       throw new Error("Invalid catalog identity");
     // Keep fetch a function call: Window.fetch rejects a PackClient receiver.
     this.catalogId = catalogId;
+    this.transport = fetchImpl;
     this.fetchImpl = (...args) => fetchImpl(...args);
     this.signal = signal;
     this.required = required;
-    this.manifests = new Map();
     this.catalogPromise = null;
   }
   url(path) {
@@ -172,20 +201,20 @@ export class PackClient {
       this.root,
     ).href;
   }
-  async request(path) {
+  async request(path, { signal = this.signal, required = this.required } = {}) {
     const timeout = AbortSignal.timeout(60000);
     return this.fetchImpl(this.url(path), {
       credentials: "omit",
       redirect: "error",
       cache: "no-store",
-      signal: this.signal ? AbortSignal.any([this.signal, timeout]) : timeout,
-      ...(this.required ? { headers: { "X-Moly-Required": "1" } } : {}),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      ...(required ? { headers: { "X-Moly-Required": "1" } } : {}),
     });
   }
-  async document(path, expected = null) {
+  async document(path, expected = null, options) {
     const release = await budget.acquire(DOCUMENT * 3);
     try {
-      const bytes = await boundedBody(await this.request(path), DOCUMENT);
+      const bytes = await boundedBody(await this.request(path, options), DOCUMENT);
       if (expected && (await packDigest(bytes)) !== expected)
         throw new Error(`Packed document content address mismatch: ${path}`);
       return { value: JSON.parse(decoder.decode(bytes)), bytes };
@@ -193,238 +222,256 @@ export class PackClient {
       release();
     }
   }
-  async selection() {
-    if (!this.catalogPromise)
-      this.catalogPromise = (async () => {
-        const path = this.catalogId
-          ? `catalogs/${this.catalogId}.json`
-          : "asset-packs.json";
-        const { value: catalog } = await this.document(path, this.catalogId);
-        if (catalog?.schema === "moly-asset-packs/1")
-          throw new Error(
-            "Legacy v1 packs require explicit offline migration to v2",
-          );
-        if (
-          !shape(catalog, [
-            "schema",
-            "region",
-            "version",
-            "provenance",
-            "packages",
-          ]) ||
-          catalog.schema !== "moly-asset-packs/2" ||
-          typeof catalog.version !== "string" ||
-          !catalog.version ||
-          !Array.isArray(catalog.packages) ||
-          !catalog.packages.length ||
-          catalog.packages.length > 100000 ||
-          !validRegion(catalog.region) ||
-          !object(catalog.provenance)
-        )
-          throw new Error("Invalid pack catalog");
-        const ids = new Map(),
-          owners = new Map(),
-          manifestNames = new Set();
-        for (const row of catalog.packages) {
-          if (
-            !shape(row, [
-              "id",
-              "kind",
-              "manifest",
-              "content_id",
-              "dependencies",
-              "paths",
-              "download_bytes",
-              "content_bytes",
-            ]) ||
-            typeof row.kind !== "string" ||
-            !row.kind ||
-            !size(row.download_bytes, Number.MAX_SAFE_INTEGER) ||
-            !size(row.content_bytes, Number.MAX_SAFE_INTEGER)
-          )
-            throw new Error("Invalid package declaration");
-          packedPath(row.id);
-          packedPath(row.manifest);
-          address(row.manifest, "packages");
-          if (!validCatalogId(row.content_id))
-            throw new Error("Missing semantic identity");
-          if (
-            ids.has(row.id) ||
-            manifestNames.has(row.manifest) ||
-            !Array.isArray(row.paths) ||
-            !row.paths.length ||
-            !Array.isArray(row.dependencies)
-          )
-            throw new Error("Invalid/duplicate package ownership");
-          ids.set(row.id, row);
-          manifestNames.add(row.manifest);
-          for (const path of row.paths) {
-            packedPath(path);
-            if (owners.has(path))
-              throw new Error("Duplicate logical asset ownership");
-            owners.set(path, row);
-            if (owners.size > 100000)
-              throw new Error("Catalog exceeds path budget");
-          }
-        }
-        const incoming = new Map(),
-          outgoing = new Map();
-        for (const row of catalog.packages) outgoing.set(row.id, []);
-        for (const row of catalog.packages) {
-          incoming.set(row.id, row.dependencies.length);
-          if (new Set(row.dependencies).size !== row.dependencies.length)
-            throw new Error("Duplicate dependency");
-          for (const dependency of row.dependencies) {
-            if (!ids.has(dependency))
-              throw new Error("Missing package dependency");
-            outgoing.get(dependency).push(row.id);
-          }
-        }
-        const ready = [...incoming]
-          .filter(([, n]) => n === 0)
-          .map(([id]) => id);
-        let visited = 0;
-        while (ready.length) {
-          const id = ready.pop();
-          visited++;
-          for (const child of outgoing.get(id)) {
-            const count = incoming.get(child) - 1;
-            incoming.set(child, count);
-            if (!count) ready.push(child);
-          }
-        }
-        if (visited !== ids.size) throw new Error("Package dependency cycle");
-        return { catalog, owners };
-      })().catch((error) => {
+  selection() {
+    if (!this.catalogPromise) {
+      // A pinned catalog is immutable: all clients of this store share one
+      // verified selection and the package manifests read through it.
+      const required = this.required;
+      const load = (options) =>
+        this.loadSelection(options).then((selection) =>
+          Object.assign(selection, { required, manifests: new Map() }),
+        );
+      this.catalogPromise = (
+        this.catalogId
+          ? shared(this.transport, `${this.root.href}catalogs/${this.catalogId}.json`, required, () =>
+              load({ signal: null, required }),
+            )
+          : load()
+      ).catch((error) => {
         this.catalogPromise = null;
         throw error;
       });
-    return this.catalogPromise;
+    }
+    return until(this.catalogPromise, this.signal);
+  }
+  async loadSelection(options) {
+    const path = this.catalogId
+      ? `catalogs/${this.catalogId}.json`
+      : "asset-packs.json";
+    const { value: catalog } = await this.document(path, this.catalogId, options);
+    if (catalog?.schema === "moly-asset-packs/1")
+      throw new Error(
+        "Legacy v1 packs require explicit offline migration to v2",
+      );
+    if (
+      !shape(catalog, [
+        "schema",
+        "region",
+        "version",
+        "provenance",
+        "packages",
+      ]) ||
+      catalog.schema !== "moly-asset-packs/2" ||
+      typeof catalog.version !== "string" ||
+      !catalog.version ||
+      !Array.isArray(catalog.packages) ||
+      !catalog.packages.length ||
+      catalog.packages.length > 100000 ||
+      !validRegion(catalog.region) ||
+      !object(catalog.provenance)
+    )
+      throw new Error("Invalid pack catalog");
+    const ids = new Map(),
+      owners = new Map(),
+      manifestNames = new Set();
+    for (const row of catalog.packages) {
+      if (
+        !shape(row, [
+          "id",
+          "kind",
+          "manifest",
+          "content_id",
+          "dependencies",
+          "paths",
+          "download_bytes",
+          "content_bytes",
+        ]) ||
+        typeof row.kind !== "string" ||
+        !row.kind ||
+        !size(row.download_bytes, Number.MAX_SAFE_INTEGER) ||
+        !size(row.content_bytes, Number.MAX_SAFE_INTEGER)
+      )
+        throw new Error("Invalid package declaration");
+      packedPath(row.id);
+      packedPath(row.manifest);
+      address(row.manifest, "packages");
+      if (!validCatalogId(row.content_id))
+        throw new Error("Missing semantic identity");
+      if (
+        ids.has(row.id) ||
+        manifestNames.has(row.manifest) ||
+        !Array.isArray(row.paths) ||
+        !row.paths.length ||
+        !Array.isArray(row.dependencies)
+      )
+        throw new Error("Invalid/duplicate package ownership");
+      ids.set(row.id, row);
+      manifestNames.add(row.manifest);
+      for (const path of row.paths) {
+        packedPath(path);
+        if (owners.has(path))
+          throw new Error("Duplicate logical asset ownership");
+        owners.set(path, row);
+        if (owners.size > 100000)
+          throw new Error("Catalog exceeds path budget");
+      }
+    }
+    const incoming = new Map(),
+      outgoing = new Map();
+    for (const row of catalog.packages) outgoing.set(row.id, []);
+    for (const row of catalog.packages) {
+      incoming.set(row.id, row.dependencies.length);
+      if (new Set(row.dependencies).size !== row.dependencies.length)
+        throw new Error("Duplicate dependency");
+      for (const dependency of row.dependencies) {
+        if (!ids.has(dependency))
+          throw new Error("Missing package dependency");
+        outgoing.get(dependency).push(row.id);
+      }
+    }
+    const ready = [...incoming]
+      .filter(([, n]) => n === 0)
+      .map(([id]) => id);
+    let visited = 0;
+    while (ready.length) {
+      const id = ready.pop();
+      visited++;
+      for (const child of outgoing.get(id)) {
+        const count = incoming.get(child) - 1;
+        incoming.set(child, count);
+        if (!count) ready.push(child);
+      }
+    }
+    if (visited !== ids.size) throw new Error("Package dependency cycle");
+    return { catalog, owners };
   }
   async catalog() {
     return (await this.selection()).catalog;
   }
   async package(row) {
-    if (!this.manifests.has(row.manifest))
-      this.manifests.set(
+    const selection = await this.selection();
+    if (!selection.manifests.has(row.manifest))
+      selection.manifests.set(
         row.manifest,
-        (async () => {
-          const selection = await this.selection();
-          const expected = address(row.manifest, "packages");
-          const { value: manifest } = await this.document(
-            row.manifest,
-            expected,
-          );
-          if (
-            !shape(manifest, [
-              "schema",
-              "download_bytes",
-              "resident_bytes",
-              "content_bytes",
-              "logical_bytes",
-              "transforms",
-              "entries",
-              "content_id",
-              "encoders",
-            ]) ||
-            ![
-              "download_bytes",
-              "resident_bytes",
-              "content_bytes",
-              "logical_bytes",
-            ].every((name) => size(manifest[name], Number.MAX_SAFE_INTEGER))
-          )
-            throw new Error("Invalid v2 package fields");
-          if (
-            !Array.isArray(manifest.entries) ||
-            manifest.entries.length !== row.paths.length
-          )
-            throw new Error("Package ownership mismatch");
-          if (
-            manifest.schema !== "moly-asset-manifest/2" ||
-            manifest.version !== undefined ||
-            manifest.generated_utc !== undefined ||
-            manifest.blob_prefix !== undefined ||
-            manifest.content_id !== row.content_id ||
-            !object(manifest.transforms) ||
-            !object(manifest.encoders)
-          )
-            throw new Error("Incompatible v2 package");
-          // Runtime profiles have no transforms; arbitrary transform recipes are
-          // not silently treated as plain glTF/image data.
-          if (Object.keys(manifest.transforms).length)
-            throw new Error("Unsupported runtime transform");
-          const entries = new Map();
-          let previous = null;
-          for (const entry of manifest.entries) {
-            if (
-              !shape(entry, [
-                "path",
-                "blob",
-                "blob_bytes",
-                "blob_sha256",
-                "bytes",
-                "content_sha256",
-                "codec",
-                "http_encoding",
-                "xf",
-              ])
-            )
-              throw new Error("Invalid v2 entry fields");
-            packedPath(entry.path);
-            packedPath(entry.blob);
-            if (
-              !validCatalogId(entry.blob_sha256) ||
-              !validCatalogId(entry.content_sha256) ||
-              !size(entry.blob_bytes, BLOB) ||
-              !size(entry.bytes, ASSET) ||
-              !["identity", "gzip"].includes(entry.codec) ||
-              entry.http_encoding !== "identity" ||
-              entry.xf !== null ||
-              (entry.codec === "identity" && entry.blob_bytes !== entry.bytes)
-            )
-              throw new Error("Unsupported packed representation");
-            const suffix = entry.codec === "gzip" ? "gzz" : "bin";
-            if (
-              entry.blob !==
-              `${entry.blob_sha256.slice(0, 2)}/${entry.blob_sha256}.${suffix}`
-            )
-              throw new Error("Blob address mismatch");
-            if (
-              entries.has(entry.path) ||
-              selection.owners.get(entry.path) !== row ||
-              (previous !== null && order(previous, entry.path) >= 0)
-            )
-              throw new Error("Invalid package path ownership/order");
-            entries.set(entry.path, entry);
-            previous = entry.path;
-          }
-          if (row.paths.some((path) => !entries.has(path)))
-            throw new Error("Package differs from release catalog");
-          const projection = {
-            schema: "moly-asset-content/1",
-            transforms: manifest.transforms,
-            entries: [...entries.values()].map(
-              ({ path, bytes, content_sha256, xf }) => ({
-                path,
-                bytes,
-                content_sha256,
-                xf,
-              }),
-            ),
-          };
-          if (
-            (await packDigest(canonicalPackBytes(projection))) !==
-            manifest.content_id
-          )
-            throw new Error("Semantic content identity mismatch");
-          return { manifest, entries };
-        })().catch((error) => {
-          this.manifests.delete(row.manifest);
+        this.loadPackage(selection, row).catch((error) => {
+          selection.manifests.delete(row.manifest);
           throw error;
         }),
       );
-    return this.manifests.get(row.manifest);
+    return until(selection.manifests.get(row.manifest), this.signal);
+  }
+  async loadPackage(selection, row) {
+    const expected = address(row.manifest, "packages");
+    const { value: manifest } = await this.document(row.manifest, expected, {
+      signal: null,
+      required: selection.required,
+    });
+    if (
+      !shape(manifest, [
+        "schema",
+        "download_bytes",
+        "resident_bytes",
+        "content_bytes",
+        "logical_bytes",
+        "transforms",
+        "entries",
+        "content_id",
+        "encoders",
+      ]) ||
+      ![
+        "download_bytes",
+        "resident_bytes",
+        "content_bytes",
+        "logical_bytes",
+      ].every((name) => size(manifest[name], Number.MAX_SAFE_INTEGER))
+    )
+      throw new Error("Invalid v2 package fields");
+    if (
+      !Array.isArray(manifest.entries) ||
+      manifest.entries.length !== row.paths.length
+    )
+      throw new Error("Package ownership mismatch");
+    if (
+      manifest.schema !== "moly-asset-manifest/2" ||
+      manifest.version !== undefined ||
+      manifest.generated_utc !== undefined ||
+      manifest.blob_prefix !== undefined ||
+      manifest.content_id !== row.content_id ||
+      !object(manifest.transforms) ||
+      !object(manifest.encoders)
+    )
+      throw new Error("Incompatible v2 package");
+    // Runtime profiles have no transforms; arbitrary transform recipes are
+    // not silently treated as plain glTF/image data.
+    if (Object.keys(manifest.transforms).length)
+      throw new Error("Unsupported runtime transform");
+    const entries = new Map();
+    let previous = null;
+    for (const entry of manifest.entries) {
+      if (
+        !shape(entry, [
+          "path",
+          "blob",
+          "blob_bytes",
+          "blob_sha256",
+          "bytes",
+          "content_sha256",
+          "codec",
+          "http_encoding",
+          "xf",
+        ])
+      )
+        throw new Error("Invalid v2 entry fields");
+      packedPath(entry.path);
+      packedPath(entry.blob);
+      if (
+        !validCatalogId(entry.blob_sha256) ||
+        !validCatalogId(entry.content_sha256) ||
+        !size(entry.blob_bytes, BLOB) ||
+        !size(entry.bytes, ASSET) ||
+        !["identity", "gzip"].includes(entry.codec) ||
+        entry.http_encoding !== "identity" ||
+        entry.xf !== null ||
+        (entry.codec === "identity" &&
+          (entry.blob_bytes !== entry.bytes ||
+            entry.blob_sha256 !== entry.content_sha256))
+      )
+        throw new Error("Unsupported packed representation");
+      const suffix = entry.codec === "gzip" ? "gzz" : "bin";
+      if (
+        entry.blob !==
+        `${entry.blob_sha256.slice(0, 2)}/${entry.blob_sha256}.${suffix}`
+      )
+        throw new Error("Blob address mismatch");
+      if (
+        entries.has(entry.path) ||
+        selection.owners.get(entry.path) !== row ||
+        (previous !== null && order(previous, entry.path) >= 0)
+      )
+        throw new Error("Invalid package path ownership/order");
+      entries.set(entry.path, entry);
+      previous = entry.path;
+    }
+    if (row.paths.some((path) => !entries.has(path)))
+      throw new Error("Package differs from release catalog");
+    const projection = {
+      schema: "moly-asset-content/1",
+      transforms: manifest.transforms,
+      entries: [...entries.values()].map(
+        ({ path, bytes, content_sha256, xf }) => ({
+          path,
+          bytes,
+          content_sha256,
+          xf,
+        }),
+      ),
+    };
+    if (
+      (await packDigest(canonicalPackBytes(projection))) !==
+      manifest.content_id
+    )
+      throw new Error("Semantic content identity mismatch");
+    return { manifest, entries };
   }
   async resolve(path) {
     packedPath(path);
@@ -463,9 +510,11 @@ export class PackClient {
               true,
             );
       encoded = null;
+      // An identity blob is its content, already checked by its digest.
       if (
         decoded.byteLength !== entry.bytes ||
-        (await packDigest(decoded)) !== entry.content_sha256
+        (entry.codec !== "identity" &&
+          (await packDigest(decoded)) !== entry.content_sha256)
       )
         throw new Error(`Decoded content checksum mismatch: ${path}`);
       return decoded;

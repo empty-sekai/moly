@@ -14,6 +14,20 @@
 //! StartDonut, plain and stepped arc, over any finite radius, torus radius,
 //! thickness, arc and arc spread. These three over any finite shape rotation,
 //! scale, position and position jitter.
+//! Box (the volume shape): three draws, the unit cube around the origin along
+//! +Z; no shape member other than the source affine and the Store controls is
+//! read. Cone: the Random arc mode (arc draw, radial draw) and the Loop arc
+//! mode (the arc clock of ShapeModule::Update interpolated per lane over the
+//! slice, then the radial draw) over any finite radius, thickness, cone angle,
+//! arc and arc spread, with the kernel's own random direction (two more draws
+//! when positive), and the PingPong and BurstSpread arc modes with the same
+//! lane body: PingPong sweeps the arc clock up and down the arc, BurstSpread
+//! spreads the lanes over the accepted batch count. Sphere: the Random arc
+//! mode of StartSphere, thickness exactly zero or one. SingleSidedEdge also in
+//! its BurstSpread radius mode (no draw; the lanes are spread over the accepted
+//! batch count), and Circle in its BurstSpread arc mode (one radial draw). The
+//! Loop, PingPong and BurstSpread kernels read the batch inputs a `ShapeBatch`
+//! carries.
 //! Initial and Shape RNG are independent. A nonempty birth group consumes all
 //! four lanes including padding; capacity, old-prefix storage, StartVelocity,
 //! lifetime modules, event ownership and renderer admission remain caller work.
@@ -23,7 +37,8 @@
 //! No later renormalization follows the outer owner's direction multiplication.
 use super::schema::{ShapeMode, ShapeParams, ShapeTexture};
 use super::seed_owner::ModuleRandom;
-use super::shape::{native_rsqrt, Shell};
+use super::shape::{native_rsqrt, ArcLoopClock, ConeJitter, Shell};
+use std::num::NonZeroU32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
@@ -76,6 +91,56 @@ enum Kernel {
     ConeVolume { thickness: f32, angle: f32, length: f32, arc_spread: f32 },
     SingleSidedEdge { spread: f32 },
     Donut { thickness: f32, donut_radius: f32, arc_spread: f32 },
+    Box,
+    SingleSidedEdgeBurst { spread: f32 },
+    CircleBurst { thickness: f32, arc_spread: f32 },
+    Cone { thickness: f32, angle: f32, arc_spread: f32, random_direction: f32, arc: ConeArc },
+    Sphere { shell: Shell, arc_spread: f32 },
+}
+
+/// The StartCone arc modes. The Loop and PingPong modes read the arc clock;
+/// their arc speed is the authored constant ShapeModule::Update multiplies by
+/// each slice dt. BurstSpread reads the accepted batch count instead.
+#[derive(Clone, Copy, Debug)]
+enum ConeArc {
+    Random,
+    Loop { speed: f32 },
+    PingPong { speed: f32 },
+    BurstSpread,
+}
+
+/// The batch inputs the Loop, PingPong and BurstSpread kernels read, and the
+/// native lane indices they advance by 4.0 per group (in f32, one rounding per
+/// group): the accepted count (after capacity), the emission spacing, and the
+/// arc clock of ShapeModule::Update. The Loop and PingPong lane index starts at
+/// the emission offset plus 0, 1, 2, 3 (each one f32 addition); the BurstSpread
+/// one at 0, 1, 2, 3. Both
+/// count from the first newborn group, not from the stored prefix. Kernels of
+/// the Random modes and Box read none of it.
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeBatch {
+    accepted: NonZeroU32,
+    spacing: f32,
+    clock: ArcLoopClock,
+    loop_index: [f32; 4],
+    burst_index: [f32; 4],
+}
+
+impl ShapeBatch {
+    pub fn new(accepted: NonZeroU32, spacing: f32, offset: f32, clock: ArcLoopClock) -> Self {
+        Self {
+            accepted,
+            spacing,
+            clock,
+            loop_index: [offset, offset + 1.0, offset + 2.0, offset + 3.0],
+            burst_index: [0.0, 1.0, 2.0, 3.0],
+        }
+    }
+
+    pub(crate) fn advance(&mut self) {
+        self.loop_index = self.loop_index.map(|v| v + 4.0);
+        self.burst_index = self.burst_index.map(|v| v + 4.0);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,11 +171,183 @@ impl ShapeBirthLaw {
         match params.shape_type.as_str() {
             "Hemisphere" => Self::hemisphere(params),
             "ConeVolume" => Self::cone_volume(params),
-            "Circle" => Self::circle(params),
-            "SingleSidedEdge" => Self::single_sided_edge(params),
+            "Circle" => match params.controls.arc_mode {
+                Some(ShapeMode::BurstSpread) => Self::circle_burst(params),
+                _ => Self::circle(params),
+            },
+            "SingleSidedEdge" => match params.controls.radius_mode {
+                Some(ShapeMode::BurstSpread) => Self::single_sided_edge_burst(params),
+                _ => Self::single_sided_edge(params),
+            },
             "Donut" => Self::donut(params),
+            "Box" => Self::box_volume(params),
+            "Cone" => Self::cone(params),
+            "Sphere" => Self::sphere(params),
             _ => Err(Refused::UnsupportedSourceShape),
         }
+    }
+
+    /// The arc speed the caller advances the arc clock with each ordinary
+    /// update slice, for the kernels that read that clock (the Loop and
+    /// PingPong cones).
+    pub fn arc_clock_speed(&self) -> Option<f32> {
+        match self.kernel {
+            Kernel::Cone { arc: ConeArc::Loop { speed } | ConeArc::PingPong { speed }, .. } => Some(speed),
+            _ => None,
+        }
+    }
+
+    /// The Store path controls every kernel shares: the export schema, finite
+    /// authored scale, rotation and position, a finite position jitter, and
+    /// the random or spherical direction and align-to-direction Store branches
+    /// that were not executed (refused unless zero and false).
+    fn store_controls(params: &ShapeParams) -> Result<([f32; 3], f32), Refused> {
+        let c = &params.controls;
+        if c.source_version != Some(1) {
+            return Err(Refused::ExportSchema(ExportGap::ControlsVersion));
+        }
+        let finite3 = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
+        let (Some(scale), Some(random_position)) =
+            (c.scale.filter(finite3), c.random_position.filter(|v| v.is_finite()))
+        else {
+            return Err(Refused::UnsupportedSourceShape);
+        };
+        if !finite3(&params.rotation)
+            || !finite3(&params.position)
+            || c.align_to_direction != Some(false)
+            || c.spherical_direction != Some(0.0)
+        {
+            return Err(Refused::UnsupportedSourceShape);
+        }
+        Ok((scale, random_position))
+    }
+
+    fn with_kernel(params: &ShapeParams, kernel: Kernel, scale: [f32; 3], random_position: f32) -> Self {
+        Self {
+            kernel,
+            radius: params.radius,
+            arc: params.arc,
+            random_position,
+            rotation: params.rotation,
+            scale,
+            position: params.position,
+            unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
+        }
+    }
+
+    /// Box reads only the Store path controls and the source affine; its
+    /// radius, arc, angle, thickness, box thickness and both modes are never
+    /// loaded, so none of them gates it.
+    fn box_volume(params: &ShapeParams) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        if params.controls.random_direction != Some(0.0) {
+            return Err(Refused::UnsupportedSourceShape);
+        }
+        Ok(Self::with_kernel(params, Kernel::Box, scale, random_position))
+    }
+
+    /// BurstSpread single-sided edge: any finite radius and radius spread. It
+    /// draws nothing; the lanes are spread over the accepted batch count.
+    fn single_sided_edge_burst(params: &ShapeParams) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        let Some(spread) = params.controls.radius_spread.filter(|v| v.is_finite()) else {
+            return Err(Refused::UnsupportedSourceShape);
+        };
+        if !params.radius.is_finite() || params.controls.random_direction != Some(0.0) {
+            return Err(Refused::UnsupportedSourceShape);
+        }
+        Ok(Self::with_kernel(params, Kernel::SingleSidedEdgeBurst { spread }, scale, random_position))
+    }
+
+    /// BurstSpread circle: any finite radius, thickness, arc and arc spread,
+    /// one radial draw per group; the lanes are spread over the accepted
+    /// batch count. The Store's position jitter, random and spherical
+    /// direction and alignment were not executed after this kernel; they stay
+    /// refused (zero and false). Radius mode, spread and speed, arc speed,
+    /// cone angle and length and torus radius are not read.
+    fn circle_burst(params: &ShapeParams) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        let c = &params.controls;
+        let Some(arc_spread) = c.arc_spread.filter(|v| v.is_finite()) else {
+            return Err(Refused::UnsupportedSourceShape);
+        };
+        if !params.radius.is_finite()
+            || !params.radius_thickness.is_finite()
+            || !params.arc.is_finite()
+            || random_position != 0.0
+            || c.random_direction != Some(0.0)
+        {
+            return Err(Refused::UnsupportedSourceShape);
+        }
+        Ok(Self::with_kernel(
+            params,
+            Kernel::CircleBurst { thickness: params.radius_thickness, arc_spread },
+            scale,
+            random_position,
+        ))
+    }
+
+    /// Cone in any of its four arc modes: any finite radius, thickness, cone
+    /// angle, arc and arc spread, and a random direction in [0, 1] (the cone
+    /// kernel applies it itself). The Loop and PingPong modes need a constant
+    /// arc speed: that is the curve evaluation ShapeModule::Update was executed
+    /// with. The Random and BurstSpread modes never read the clock, so their
+    /// arc speed does not gate them. The radius mode and spread, length, torus
+    /// radius and box thickness are not read.
+    fn cone(params: &ShapeParams) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        let c = &params.controls;
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let (Some(angle), Some(arc_spread), Some(random_direction)) = (
+            c.angle.filter(|v| v.is_finite()),
+            c.arc_spread.filter(|v| v.is_finite()),
+            c.random_direction.filter(|v| (0.0..=1.0).contains(v)),
+        ) else {
+            return refused;
+        };
+        let arc = match (c.arc_mode, c.arc_speed.as_ref()) {
+            (Some(ShapeMode::Random), _) => ConeArc::Random,
+            (Some(ShapeMode::Loop), Some(super::value::MinMaxCurve::Constant(speed))) if speed.is_finite() => {
+                ConeArc::Loop { speed: *speed }
+            }
+            (Some(ShapeMode::PingPong), Some(super::value::MinMaxCurve::Constant(speed))) if speed.is_finite() => {
+                ConeArc::PingPong { speed: *speed }
+            }
+            (Some(ShapeMode::BurstSpread), _) => ConeArc::BurstSpread,
+            _ => return refused,
+        };
+        if !params.radius.is_finite() || !params.radius_thickness.is_finite() || !params.arc.is_finite() {
+            return refused;
+        }
+        Ok(Self::with_kernel(
+            params,
+            Kernel::Cone { thickness: params.radius_thickness, angle, arc_spread, random_direction, arc },
+            scale,
+            random_position,
+        ))
+    }
+
+    /// Sphere in its Random arc mode: the Hemisphere envelope (thickness exactly
+    /// zero or one, any finite radius, arc of zero or more, arc spread of zero
+    /// or more).
+    fn sphere(params: &ShapeParams) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        let c = &params.controls;
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let Some(shell) = Shell::from_thickness(params.radius_thickness) else {
+            return refused;
+        };
+        let Some(arc_spread) = c.arc_spread.filter(|s| s.is_finite() && *s >= 0.0) else {
+            return refused;
+        };
+        if !params.radius.is_finite()
+            || !(params.arc.is_finite() && params.arc >= 0.0)
+            || c.arc_mode != Some(ShapeMode::Random)
+            || c.random_direction != Some(0.0)
+        {
+            return refused;
+        }
+        Ok(Self::with_kernel(params, Kernel::Sphere { shell, arc_spread }, scale, random_position))
     }
 
     /// Gates name only what the Random-arc hemisphere kernel and the base or
@@ -390,8 +627,11 @@ impl ShapeBirthLaw {
     /// axis channel feeds neither and is returned as written, finite or not:
     /// it does not refuse the group, and a consumer of that channel gates
     /// its finiteness itself.
+    /// `batch` carries this birth call's inputs; the group advances its lane
+    /// indices only when it is returned.
     pub fn sample_group(
         &self,
+        batch: &mut ShapeBatch,
         random: &mut ModuleRandom,
         outer_owner: [f32; 16],
         world_space: bool,
@@ -399,6 +639,7 @@ impl ShapeBirthLaw {
         uses_axis_of_rotation: bool,
     ) -> Result<ShapeBirthGroup, Refused> {
         let group = self.evaluate_group(
+            batch,
             *random,
             outer_owner,
             world_space,
@@ -409,6 +650,7 @@ impl ShapeBirthLaw {
             return Err(Refused::NonfiniteOutput);
         }
         *random = group.after_rng;
+        batch.advance();
         Ok(group)
     }
 
@@ -416,6 +658,7 @@ impl ShapeBirthLaw {
     /// refusal; the stream is advanced on a copy only.
     fn evaluate_group(
         &self,
+        batch: &ShapeBatch,
         random: ModuleRandom,
         outer_owner: [f32; 16],
         world_space: bool,
@@ -436,71 +679,128 @@ impl ShapeBirthLaw {
         };
         let before_rng = random;
         let mut next = random;
-        // Draws per group: Hemisphere, ConeVolume and Donut 3, Circle 2 (arc,
-        // then radial fraction), SingleSidedEdge 1.
-        let first = next.next4_u32().map(super::shape::u01_from_bits);
-        let second = match self.kernel {
-            Kernel::SingleSidedEdge { .. } => [0.0; 4],
-            _ => next.next4_u32().map(super::shape::u01_from_bits),
-        };
-        let third = match self.kernel {
-            Kernel::Hemisphere { .. } | Kernel::ConeVolume { .. } | Kernel::Donut { .. } => {
-                next.next4_u32().map(super::shape::u01_from_bits)
+        // Draws per group, in order: Hemisphere, Sphere, ConeVolume, Donut and
+        // Box 3; Circle 2 (arc, then radial fraction); SingleSidedEdge 1;
+        // Cone Random 2 (arc, radial) and Cone Loop, PingPong and BurstSpread 1
+        // (radial), each plus 2 (angle, area) when its random direction is
+        // positive; the BurstSpread circle 1 (radial); the BurstSpread edge none.
+        let mut draw = || next.next4_u32().map(super::shape::u01_from_bits);
+        let lanes = |f: &dyn Fn(usize) -> ([f32; 3], [f32; 3])| -> [([f32; 3], [f32; 3]); 4] { std::array::from_fn(|i| f(i)) };
+        let raw: [([f32; 3], [f32; 3]); 4] = match self.kernel {
+            Kernel::Hemisphere { shell, arc_spread } => {
+                let (a, z, r) = (draw(), draw(), draw());
+                lanes(&|i| super::shape::hemisphere_native(self.radius, shell, self.arc, arc_spread, a[i], z[i], r[i]))
             }
-            Kernel::Circle { .. } | Kernel::SingleSidedEdge { .. } => [0.0; 4],
-        };
-        let raw: [([f32; 3], [f32; 3]); 4] = std::array::from_fn(|i| match self.kernel {
-            Kernel::Hemisphere { shell, arc_spread } => super::shape::hemisphere_native(
-                self.radius,
-                shell,
-                self.arc,
-                arc_spread,
-                first[i],
-                second[i],
-                third[i],
-            ),
+            Kernel::Sphere { shell, arc_spread } => {
+                let (a, z, r) = (draw(), draw(), draw());
+                lanes(&|i| super::shape::sphere_native(self.radius, shell, self.arc, arc_spread, a[i], z[i], r[i]))
+            }
             // Draws: arc, radial fraction.
-            Kernel::Circle {
-                thickness,
-                arc_spread,
-            } => super::shape::circle_at(
-                self.radius,
-                thickness,
-                super::shape::random_arc(self.arc, arc_spread, first[i]),
-                second[i],
-            ),
+            Kernel::Circle { thickness, arc_spread } => {
+                let (a, r) = (draw(), draw());
+                lanes(&|i| super::shape::circle_at(self.radius, thickness, super::shape::random_arc(self.arc, arc_spread, a[i]), r[i]))
+            }
             // Draws: arc, radial fraction, travelled distance.
-            Kernel::ConeVolume {
-                thickness,
-                angle,
-                length,
-                arc_spread,
-            } => super::shape::cone_volume_at(
-                self.radius,
-                thickness,
-                angle,
-                super::shape::random_arc(self.arc, arc_spread, first[i]),
-                length,
-                second[i],
-                third[i],
-            ),
+            Kernel::ConeVolume { thickness, angle, length, arc_spread } => {
+                let (a, r, d) = (draw(), draw(), draw());
+                lanes(&|i| {
+                    super::shape::cone_volume_at(
+                        self.radius,
+                        thickness,
+                        angle,
+                        super::shape::random_arc(self.arc, arc_spread, a[i]),
+                        length,
+                        r[i],
+                        d[i],
+                    )
+                })
+            }
             Kernel::SingleSidedEdge { spread } => {
-                super::shape::single_sided_edge_spread(self.radius, spread, first[i])
+                let a = draw();
+                lanes(&|i| super::shape::single_sided_edge_spread(self.radius, spread, a[i]))
             }
             // Draws: major arc, tube angle, tube radius.
-            Kernel::Donut {
-                thickness,
-                donut_radius,
-                arc_spread,
-            } => super::shape::donut_at(
-                self.radius,
-                donut_radius,
-                thickness,
-                super::shape::random_arc(self.arc, arc_spread, first[i]),
-                second[i],
-                third[i],
-            ),
-        });
+            Kernel::Donut { thickness, donut_radius, arc_spread } => {
+                let (a, t, r) = (draw(), draw(), draw());
+                lanes(&|i| {
+                    super::shape::donut_at(
+                        self.radius,
+                        donut_radius,
+                        thickness,
+                        super::shape::random_arc(self.arc, arc_spread, a[i]),
+                        t[i],
+                        r[i],
+                    )
+                })
+            }
+            Kernel::Box => {
+                let (x, y, z) = (draw(), draw(), draw());
+                lanes(&|i| super::shape::box_volume(x[i], y[i], z[i]))
+            }
+            Kernel::SingleSidedEdgeBurst { spread } => {
+                let reciprocal =
+                    super::shape::burst_spread_reciprocal(super::shape::edge_burst_divisor(batch.accepted));
+                lanes(&|i| super::shape::single_sided_edge_burst(self.radius, spread, reciprocal, batch.burst_index[i]))
+            }
+            Kernel::CircleBurst { thickness, arc_spread } => {
+                let reciprocal = super::shape::burst_spread_reciprocal(super::shape::circle_burst_divisor(
+                    self.arc,
+                    batch.accepted,
+                ));
+                let r = draw();
+                lanes(&|i| {
+                    super::shape::circle_burst(
+                        self.radius,
+                        thickness,
+                        self.arc,
+                        arc_spread,
+                        reciprocal,
+                        batch.burst_index[i],
+                        r[i],
+                    )
+                })
+            }
+            Kernel::Cone { thickness, angle, arc_spread, random_direction, arc } => {
+                let angles = match arc {
+                    ConeArc::Random => {
+                        let a = draw();
+                        a.map(|u| super::shape::random_arc(self.arc, arc_spread, u))
+                    }
+                    ConeArc::Loop { .. } => batch.loop_index.map(|index| {
+                        super::shape::loop_arc_angle(batch.clock, batch.spacing, index, self.arc, arc_spread)
+                    }),
+                    ConeArc::PingPong { .. } => batch.loop_index.map(|index| {
+                        super::shape::pingpong_arc_angle(batch.clock, batch.spacing, index, self.arc, arc_spread)
+                    }),
+                    ConeArc::BurstSpread => {
+                        let reciprocal = super::shape::burst_spread_reciprocal(super::shape::circle_burst_divisor(
+                            self.arc,
+                            batch.accepted,
+                        ));
+                        batch
+                            .burst_index
+                            .map(|index| super::shape::burst_spread_arc(self.arc, arc_spread, reciprocal, index))
+                    }
+                };
+                let r = draw();
+                let jitter = if random_direction > 0.0 {
+                    let (a, area) = (draw(), draw());
+                    Some((a, area))
+                } else {
+                    None
+                };
+                lanes(&|i| {
+                    super::shape::cone_at(
+                        self.radius,
+                        thickness,
+                        angle,
+                        angles[i],
+                        r[i],
+                        jitter.map(|(a, area)| ConeJitter { amount: random_direction, arc: a[i], area: area[i] }),
+                    )
+                })
+            }
+        };
         let before_store = next;
         let (arc, polar) = if self.random_position > 0.0 {
             (
@@ -734,7 +1034,7 @@ pub fn replay_native_rows(text: &str) -> usize {
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let mut random = words(5);
         let group = law
-            .sample_group(&mut random, owner, v[89] == 1, [1.0; 3], false)
+            .sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, v[89] == 1, [1.0; 3], false)
             .unwrap();
         assert_eq!(group.before_rng, words(5));
         assert_eq!(
@@ -896,7 +1196,7 @@ pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let native_nonfinite = v[134..158].iter().any(nonfinite);
         let mut random = words(5);
-        let group = match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
+        let group = match law.sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, floats(86), uses_axis) {
             Ok(group) => group,
             Err(Refused::NonfiniteOutput) => {
                 assert!(native_nonfinite, "case {case}: refused a finite native group");
@@ -1030,7 +1330,7 @@ pub fn replay_cone_volume_rows(text: &str) -> usize {
         let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
         let mut random = words(35);
         let group = law
-            .sample_group(&mut random, owner, world, floats(15), false)
+            .sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, floats(15), false)
             .unwrap();
         assert_eq!(group.before_rng, words(35));
         assert_eq!(group.before_store, words(51), "case {case} before Store RNG");
@@ -1116,7 +1416,7 @@ pub fn replay_cone_volume_rows_v2(text: &str) -> ReplayCount {
         let uses_axis = v[162] == 1;
         let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
         let group = law
-            .evaluate_group(words(35), owner, world, floats(15), uses_axis)
+            .evaluate_group(&ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), words(35), owner, world, floats(15), uses_axis)
             .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
         assert_eq!(group.before_rng, words(35));
         assert_eq!(group.before_store, words(51), "case {case} before Store RNG");
@@ -1150,7 +1450,7 @@ pub fn replay_cone_volume_rows_v2(text: &str) -> ReplayCount {
         }
         let native_nonfinite = v[135..159].iter().any(nonfinite);
         let mut random = words(35);
-        match law.sample_group(&mut random, owner, world, floats(15), uses_axis) {
+        match law.sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, floats(15), uses_axis) {
             Ok(_) => {
                 assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
                 assert_eq!(random, words(67), "case {case}: stream after the group");
@@ -1263,7 +1563,7 @@ pub fn replay_edge_circle_rows(text: &str) -> usize {
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let mut random = words(5);
         let group = law
-            .sample_group(&mut random, owner, world, [1.0; 3], false)
+            .sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, [1.0; 3], false)
             .unwrap_or_else(|refused| panic!("case {case}: refused {refused:?}"));
         assert_eq!(group.before_rng, words(5));
         assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
@@ -1379,7 +1679,7 @@ pub fn replay_edge_circle_rows_v2(text: &str) -> ReplayCount {
         let uses_axis = v[167] == 1;
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let group = law
-            .evaluate_group(words(5), owner, world, floats(86), uses_axis)
+            .evaluate_group(&ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), words(5), owner, world, floats(86), uses_axis)
             .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
         assert_eq!(group.before_rng, words(5));
         assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
@@ -1413,7 +1713,7 @@ pub fn replay_edge_circle_rows_v2(text: &str) -> ReplayCount {
         }
         let native_nonfinite = v[134..158].iter().any(nonfinite);
         let mut random = words(5);
-        match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
+        match law.sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, floats(86), uses_axis) {
             Ok(_) => {
                 assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
                 assert_eq!(random, words(61), "case {case}: stream after the group");
@@ -1518,7 +1818,7 @@ pub fn replay_donut_rows(text: &str) -> usize {
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let mut random = words(5);
         let group = law
-            .sample_group(&mut random, owner, world, floats(86), false)
+            .sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, floats(86), false)
             .unwrap_or_else(|refused| panic!("case {case}: refused {refused:?}"));
         assert_eq!(group.before_rng, words(5));
         assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
@@ -1633,7 +1933,7 @@ pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
         let uses_axis = v[166] == 1;
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
         let group = law
-            .evaluate_group(words(5), owner, world, floats(86), uses_axis)
+            .evaluate_group(&ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), words(5), owner, world, floats(86), uses_axis)
             .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
         assert_eq!(group.before_rng, words(5));
         assert_eq!(group.before_store, words(45), "case {case} before Store RNG");
@@ -1667,7 +1967,7 @@ pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
         }
         let native_nonfinite = v[134..158].iter().any(nonfinite);
         let mut random = words(5);
-        match law.sample_group(&mut random, owner, world, floats(86), uses_axis) {
+        match law.sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, world, floats(86), uses_axis) {
             Ok(_) => {
                 assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
                 assert_eq!(random, words(61), "case {case}: stream after the group");
@@ -1682,6 +1982,243 @@ pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
         }
     }
     count
+}
+
+/// The Shape block of one native row of the batch kernels (139-word layout): the
+/// kernel's own controls from the row, the mode the row's kind names, and
+/// fixed non-zero values for every member the kernel does not read (the
+/// gates must not depend on them).
+#[cfg(test)]
+fn residual_row_source(v: &[u32]) -> ShapeParams {
+    use super::schema::ShapeControls;
+    let f = |i: usize| f32::from_bits(v[i]);
+    let f3 = |i: usize| [f(i), f(i + 1), f(i + 2)];
+    let (shape_type, arc_mode, radius_mode) = match v[0] {
+        5 => ("Box", ShapeMode::Loop, ShapeMode::PingPong),
+        12 => ("SingleSidedEdge", ShapeMode::Loop, ShapeMode::BurstSpread),
+        40 => ("Cone", ShapeMode::Random, ShapeMode::Loop),
+        41 => ("Cone", ShapeMode::Loop, ShapeMode::PingPong),
+        42 => ("Cone", ShapeMode::PingPong, ShapeMode::Loop),
+        43 => ("Cone", ShapeMode::BurstSpread, ShapeMode::Loop),
+        1 => ("Sphere", ShapeMode::Random, ShapeMode::Loop),
+        other => panic!("residual row kind {other}"),
+    };
+    ShapeParams {
+        shape_type: shape_type.into(),
+        radius: f(1),
+        radius_thickness: f(2),
+        arc: f(4),
+        rotation: f3(9),
+        position: f3(15),
+        controls: ShapeControls {
+            source_version: Some(1),
+            angle: Some(f(3)),
+            length: Some(7.5),
+            donut_radius: Some(0.375),
+            scale: Some(f3(12)),
+            box_thickness: Some([0.25, 0.5, 0.75]),
+            arc_mode: Some(arc_mode),
+            arc_spread: Some(f(5)),
+            arc_speed: Some(super::value::MinMaxCurve::Constant(0.05)),
+            radius_mode: Some(radius_mode),
+            radius_spread: Some(f(6)),
+            radius_speed: Some(super::value::MinMaxCurve::Constant(2.5)),
+            align_to_direction: Some(false),
+            random_direction: Some(f(7)),
+            spherical_direction: Some(0.0),
+            random_position: Some(f(8)),
+            // The native runs held the null texture reference.
+            texture: Some(ShapeTexture::None),
+        },
+    }
+}
+
+/// Every native group of the batch kernels: Box, the BurstSpread
+/// single-sided edge, Cone in its Random, Loop, PingPong and BurstSpread arc
+/// modes and Sphere, each through the whole Store. The batch is rebuilt per row from the recorded
+/// accepted count, emission spacing and offset and arc clock, then advanced to
+/// the row's group. Every channel is compared: equal bits, or NaN where native
+/// wrote NaN; the output refusal must fall exactly on the rows whose native
+/// Store output is non-finite and must leave the stream untouched.
+#[cfg(test)]
+pub fn replay_residual_rows(text: &str) -> ReplayCount {
+    let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
+    let mut count = ReplayCount::default();
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Vec<u32> = line.split_whitespace().map(|x| x.parse().unwrap()).collect();
+        assert_eq!(v.len(), 139, "case {case} row width");
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let same = |actual: f32, at: usize, what: &str| {
+            let native = v[at];
+            assert!(
+                actual.to_bits() == native || (actual.is_nan() && f32::from_bits(native).is_nan()),
+                "case {case} {what}: law {:#010x} native {native:#010x}",
+                actual.to_bits()
+            );
+        };
+        let law = ShapeBirthLaw::from_params(&residual_row_source(&v))
+            .unwrap_or_else(|refused| panic!("case {case}: refused a row inside the executed envelope: {refused:?}"));
+        let clock = ArcLoopClock {
+            current: f64::from_bits(u64::from(v[39]) | (u64::from(v[40]) << 32)),
+            previous: f64::from_bits(u64::from(v[41]) | (u64::from(v[42]) << 32)),
+        };
+        let accepted = NonZeroU32::new(v[35]).expect("the template runs only with an accepted birth");
+        let mut batch = ShapeBatch::new(accepted, f32::from_bits(v[37]), f32::from_bits(v[38]), clock);
+        for _ in 0..v[36] {
+            batch.advance();
+        }
+        let world = v[18] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
+        let group = law
+            .evaluate_group(&batch, words(43), owner, world, [1.0; 3], false)
+            .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
+        assert_eq!(group.before_rng, words(43));
+        assert_eq!(group.before_store, words(83), "case {case} RNG at the Store");
+        assert_eq!(group.after_rng, words(99), "case {case} RNG after the Store");
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                same(group.raw_position[lane][axis], 59 + at, "local position");
+                same(group.raw_direction[lane][axis], 71 + at, "local direction");
+                same(group.samples[lane].position[axis], 115 + at, "stored position");
+                same(group.samples[lane].direction[axis], 127 + at, "stored direction");
+            }
+        }
+        let native_nonfinite = v[115..139].iter().any(nonfinite);
+        let mut random = words(43);
+        let before = batch;
+        match law.sample_group(&mut batch, &mut random, owner, world, [1.0; 3], false) {
+            Ok(_) => {
+                assert!(!native_nonfinite, "case {case}: accepted a non-finite native group");
+                assert_eq!(random, words(99), "case {case}: stream after the group");
+                count.replayed += 1;
+            }
+            Err(Refused::NonfiniteOutput) => {
+                assert!(native_nonfinite, "case {case}: refused a finite native group");
+                assert_eq!(random, words(43), "case {case}: refusal consumed the stream");
+                assert_eq!(batch.burst_index, before.burst_index, "case {case}: refusal advanced the batch");
+                count.output_refused += 1;
+            }
+            Err(other) => panic!("case {case}: unexpected refusal {other:?}"),
+        }
+    }
+    count
+}
+
+/// The Circle BurstSpread native rows (150-word layout):
+/// raw kernel output, RNG and the whole Store for each four-lane group, with
+/// the batch rebuilt from the recorded accepted count and group index.
+#[cfg(test)]
+pub fn replay_circle_burst_rows(text: &str) -> ReplayCount {
+    use super::schema::ShapeControls;
+    let mut count = ReplayCount::default();
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Vec<u32> = line.split_whitespace().map(|x| x.parse().unwrap()).collect();
+        assert_eq!(v.len(), 150, "case {case} row width");
+        let f = |i: usize| f32::from_bits(v[i]);
+        let f3 = |i: usize| [f(i), f(i + 1), f(i + 2)];
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let params = ShapeParams {
+            shape_type: "Circle".into(),
+            radius: f(0),
+            radius_thickness: f(1),
+            arc: f(2),
+            rotation: f3(128),
+            position: f3(134),
+            controls: ShapeControls {
+                source_version: Some(1),
+                angle: Some(25.0),
+                length: Some(5.0),
+                donut_radius: Some(0.2),
+                scale: Some(f3(131)),
+                box_thickness: Some([0.0; 3]),
+                arc_mode: Some(ShapeMode::BurstSpread),
+                arc_spread: Some(f(3)),
+                arc_speed: Some(super::value::MinMaxCurve::Constant(1.0)),
+                radius_mode: Some(ShapeMode::Loop),
+                radius_spread: Some(0.3),
+                radius_speed: Some(super::value::MinMaxCurve::Constant(1.0)),
+                align_to_direction: Some(false),
+                random_direction: Some(0.0),
+                spherical_direction: Some(0.0),
+                random_position: Some(0.0),
+                texture: Some(ShapeTexture::None),
+            },
+        };
+        let law = ShapeBirthLaw::from_params(&params)
+            .unwrap_or_else(|refused| panic!("case {case}: refused {refused:?}"));
+        let accepted = u64::from(v[4]) | (u64::from(v[5]) << 32);
+        let accepted = NonZeroU32::new(u32::try_from(accepted).unwrap()).unwrap();
+        let group = (f(6) / 4.0) as u32;
+        let mut batch = ShapeBatch::new(accepted, 0.0, 0.0, ArcLoopClock::default());
+        for _ in 0..group {
+            batch.advance();
+        }
+        let world = v[7] == 1;
+        let mut owner = IDENTITY;
+        if world {
+            for i in 0..12 {
+                owner[i] = f(80 + i);
+            }
+            for a in 0..3 {
+                owner[12 + a] = f(92 + a * 4);
+            }
+        }
+        let g = law
+            .evaluate_group(&batch, words(8), owner, world, [1.0; 3], false)
+            .unwrap_or_else(|refused| panic!("case {case}: owner refusal {refused:?}"));
+        assert_eq!(g.after_rng, words(24), "case {case} RNG after");
+        for i in 0..16 {
+            assert_eq!(g.source_affine[i].to_bits(), v[64 + i], "case {case} affine {i}");
+        }
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                assert_eq!(g.raw_position[lane][axis].to_bits(), v[40 + at], "case {case} local position");
+                assert_eq!(g.raw_direction[lane][axis].to_bits(), v[52 + at], "case {case} local direction");
+                assert_eq!(g.samples[lane].position[axis].to_bits(), v[104 + at], "case {case} stored position");
+                assert_eq!(g.samples[lane].direction[axis].to_bits(), v[116 + at], "case {case} stored direction");
+            }
+        }
+        let mut random = words(8);
+        law.sample_group(&mut batch, &mut random, owner, world, [1.0; 3], false)
+            .unwrap_or_else(|refused| panic!("case {case}: {refused:?}"));
+        assert_eq!(random, words(24));
+        count.replayed += 1;
+    }
+    count
+}
+
+/// ShapeModule::Update's arc clock against its native executions with a
+/// constant arc speed: `clock duration dt speed cur_lo cur_hi prev_lo prev_hi
+/// after_cur_lo after_cur_hi after_prev_lo after_prev_hi` per row.
+#[cfg(test)]
+pub fn replay_arc_clock_rows(text: &str) -> usize {
+    let mut rows = 0;
+    for (case, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Vec<u32> = line.split_whitespace().map(|x| x.parse().unwrap()).collect();
+        assert_eq!(v.len(), 12, "case {case} row width");
+        let d = |at: usize| f64::from_bits(u64::from(v[at]) | (u64::from(v[at + 1]) << 32));
+        let mut clock = ArcLoopClock { current: d(4), previous: d(6) };
+        clock.advance(f32::from_bits(v[3]), f32::from_bits(v[2]));
+        assert_eq!(clock.current.to_bits(), d(8).to_bits(), "case {case} current");
+        assert_eq!(clock.previous.to_bits(), d(10).to_bits(), "case {case} previous");
+        rows += 1;
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -1721,7 +2258,7 @@ mod tests {
         owner[5] = f32::MAX;
         owner[10] = f32::MAX;
         assert_eq!(
-            law.sample_group(&mut random, owner, true, [1.0; 3], false)
+            law.sample_group(&mut ShapeBatch::new(NonZeroU32::MIN, 0.0, 0.0, ArcLoopClock::default()), &mut random, owner, true, [1.0; 3], false)
                 .unwrap_err(),
             Refused::NonfiniteOutput
         );
@@ -1730,6 +2267,51 @@ mod tests {
     fn rows(variable: &str) -> String {
         let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} names the native row file"));
         std::fs::read_to_string(path).unwrap()
+    }
+    /// Each row file an environment variable names (a path list): its path,
+    /// text and number of non-empty rows.
+    fn row_files(variable: &str) -> Vec<(std::path::PathBuf, String, usize)> {
+        let list = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} names the native row files"));
+        std::env::split_paths(&list)
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).unwrap();
+                let rows = text.lines().filter(|line| !line.trim().is_empty()).count();
+                (path, text, rows)
+            })
+            .collect()
+    }
+    /// Every native group of the batch kernels (Box, BurstSpread edge, Cone
+    /// Random, Loop, PingPong and BurstSpread, Sphere), corpus configurations
+    /// and envelopes, bit for bit through the Store. Every row is either
+    /// replayed or refused exactly where the native stored output is
+    /// non-finite; a gate refusal is red.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_RESIDUAL_ROWS to the native row files of the batch kernels, 139-word layout"]
+    fn current_shape_residual_rows_bit_exact_or_refused() {
+        for (path, text, rows) in row_files("MOLY_SHAPE_RESIDUAL_ROWS") {
+            let count = super::replay_residual_rows(&text);
+            eprintln!("{}: {rows} rows, {count:?}", path.display());
+            assert!(rows > 0, "{}: no rows", path.display());
+            assert_eq!(count.replayed + count.output_refused, rows);
+            assert_eq!(count.gate_refused, 0);
+        }
+    }
+    /// Every Circle BurstSpread native group.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_CIRCLE_BURST_ROWS to the Circle BurstSpread native rows, 150-word layout"]
+    fn current_circle_burst_rows_bit_exact() {
+        let count = super::replay_circle_burst_rows(&rows("MOLY_SHAPE_CIRCLE_BURST_ROWS"));
+        assert_eq!(count.replayed, 940);
+    }
+    /// ShapeModule::Update's arc clock over its constant-speed native calls.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_ARC_CLOCK_ROWS to the native ShapeModule::Update row files, 12-word layout"]
+    fn current_arc_clock_rows_bit_exact() {
+        for (path, text, rows) in row_files("MOLY_SHAPE_ARC_CLOCK_ROWS") {
+            eprintln!("{}: {rows} rows", path.display());
+            assert!(rows > 0, "{}: no rows", path.display());
+            assert_eq!(super::replay_arc_clock_rows(&text), rows);
+        }
     }
     /// Every native Hemisphere group of the item receipt that the 158-word
     /// layout can express (unit emitter-state scale, zero arc spread),

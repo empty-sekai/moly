@@ -812,6 +812,7 @@ fn advance(
     mut phase: ResMut<WeatherTransition>,
     mut current: ResMut<CurrentPhenomenon>,
     mut current_id: ResMut<CurrentPhenomenonId>,
+    environment_hold: Option<Res<crate::site_move::EnvironmentHold>>,
 ) {
     if run.phenomena.is_empty() { return; }
     let Some(site) = site.as_deref() else { return; };
@@ -832,7 +833,11 @@ fn advance(
     if current.0 != destination.name { current.0 = destination.name.clone(); }
     current_id.0 = destination.global_effect.phenomenon_id;
     let ramp_ready = server.load_state(&run.phenomena[to].ramp).is_loaded();
-    let started = ramp_ready && prepared.as_deref().is_some_and(|ready| phase.start_prepared(ready));
+    // A cannon move starts its environment cross-fade at its own
+    // ChangeEnvironment step, not when the destination site is loaded.
+    let started = environment_hold.is_none()
+        && ramp_ready
+        && prepared.as_deref().is_some_and(|ready| phase.start_prepared(ready));
     if started {
         run.current = selected;
         run.queued = None;

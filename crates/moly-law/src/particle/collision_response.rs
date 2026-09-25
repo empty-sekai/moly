@@ -1,39 +1,50 @@
-//! Qualified supplied-hit response; query and event ownership remain separate.
+//! The engine CollisionModule's query-side coordinate helpers and its hit
+//! response (World type, 3D mode, High quality).
 //!
-//! Current PerformPlaneCollisions response updates position, persistent velocity
-//! and native age. The qualified query/input and supplied-hit coordinate
-//! boundaries are exposed below; scene hit production (broadphase/PhysX),
-//! child events/messages and later death compaction remain caller obligations.
-//! This module emits no events and removes no particles.
+//! `CollisionResponse::respond` is one hit of the module's reverse hit loop in
+//! the engine's arithmetic: every operation a NaN can reach follows the ARM
+//! rules, and the associations are the engine's. The whole module update, from
+//! the query packs to the child commands, is
+//! [`crate::particle::collision_query::CollisionLaw::update`]; `apply_hits`
+//! stays an entry for hits already supplied in simulation coordinates.
 //!
-//! The full source CollisionModule stays gated until query/event ownership is
-//! integrated and independently verified.
+//! Nothing here queries a scene, emits events or removes particles.
 
+use crate::particle::armf as a;
+use crate::particle::collision_query::arms;
 use crate::particle::{schema::CollisionParams, MinMaxCurve, Particle};
+
+/// The age a collision kill writes: just above 100 percent, so the next kill
+/// pass of the simulation removes the particle.
+pub const KILLED_AGE: u32 = 0x42c8_0001;
+/// The age percent to normalized age factor (0.01 as the engine's constant).
+pub(crate) const AGE_SCALE: f32 = f32::from_bits(0x3c23_d70a);
+/// A hit normal whose squared length is not above this becomes +Z.
+const NORMAL_LIMIT: f32 = f32::from_bits(0x0da2_4260);
 
 /// Source `WorldCollision` query input after the particle/update state has
 /// been sampled.  This is deliberately only the query boundary: it does not
 /// run a scene broadphase, PhysX sweep, hit selection, response or event
-/// ownership.  The current JP receipt (`collision-query-native.md`) qualifies
-/// these fields against libunity 937c6d28..., including the local/custom owner
-/// transform.  The downstream PhysX leaf has its own travel cutoff; it does
-/// not belong to this WorldCollision input builder.
+/// ownership. The downstream sweep has its own travel cutoff; it does not
+/// belong to this WorldCollision input builder.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QueryInput {
     pub position: [f32; 3],
     pub persistent_velocity: [f32; 3],
     pub animated_velocity: [f32; 3],
-    pub speed_modifier: f32,
+    /// The particle's speed modifier, read only when the particle state's
+    /// speed-modifier flag is set (`None` otherwise, and then no multiply).
+    pub speed_modifier: Option<f32>,
     pub dt: f32,
     /// The one size stream selected by the native particle-state flag.  Do not
     /// merge this with the other size stream: WorldCollision reads one pointer
-    /// selected by `ParticleSystemParticles+0x7d2`.
+    /// selected by a particle-state flag (current size or start size).
     pub size: [f32; 3],
-    /// Native `+0x7d4`: false consumes the X component only; true performs
-    /// `fmax(x,y)` then `fmax(result,z)`.
+    /// False consumes the X component only; true takes `fmax(x, y)` then
+    /// `fmax(result, z)`, NaN propagating.
     pub size_is_3d: bool,
     /// Authored CollisionModule radiusScale.  WorldCollision's parameter
-    /// setup halves this value before the SIMD multiply.
+    /// setup halves this value before the multiply.
     pub radius_scale: f32,
     /// `true` for World simulation; false uses the supplied owner affine for
     /// both query endpoints.  This keeps Local and Custom source paths
@@ -42,9 +53,10 @@ pub struct QueryInput {
     pub owner: QueryAffine,
 }
 
-/// Minimal source-space affine used at the collision query boundary.  The
-/// matrix is row-major and multiplies a column vector.  Keeping this type
-/// independent of Bevy lets the law be replayed by native probes and tests.
+/// Minimal source-space affine used at the collision boundary. `linear[r][c]`
+/// is the engine's column-major word `4c + r` and `translation[r]` the word
+/// `12 + r`; it multiplies a column vector. Each helper keeps the association
+/// of the engine loop it stands for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QueryAffine {
     pub linear: [[f32; 3]; 3],
@@ -57,45 +69,58 @@ impl QueryAffine {
         translation: [0.0; 3],
     };
 
-    #[inline]
-    fn is_finite(self) -> bool {
-        self.linear.iter().flatten().all(|value| value.is_finite())
-            && self.translation.iter().all(|value| value.is_finite())
+    /// From the engine's column-major 4x4 words; the bottom row is not read.
+    pub fn from_columns(m: &[f32; 16]) -> Self {
+        Self {
+            linear: std::array::from_fn(|r| std::array::from_fn(|c| m[4 * c + r])),
+            translation: [m[12], m[13], m[14]],
+        }
     }
 
-    #[inline]
-    fn point(self, value: [f32; 3]) -> [f32; 3] {
-        [
-            (self.linear[0][0] * value[0] + self.linear[0][1] * value[1])
-                + self.linear[0][2] * value[2]
-                + self.translation[0],
-            (self.linear[1][0] * value[0] + self.linear[1][1] * value[1])
-                + self.linear[1][2] * value[2]
-                + self.translation[1],
-            (self.linear[2][0] * value[0] + self.linear[2][1] * value[1])
-                + self.linear[2][2] * value[2]
-                + self.translation[2],
-        ]
+    /// A query endpoint into the world: `c0 x + (c1 y + (t + c2 z))`.
+    pub fn point_forward(self, v: [f32; 3]) -> [f32; 3] {
+        let l = self.linear;
+        if arms::on("leftAssociation") {
+            let linear = self.vector_event(v);
+            return std::array::from_fn(|r| a::add(linear[r], self.translation[r]));
+        }
+        std::array::from_fn(|r| {
+            a::add(a::mul(l[r][0], v[0]),
+                a::add(a::mul(l[r][1], v[1]), a::add(self.translation[r], a::mul(l[r][2], v[2]))))
+        })
     }
 
-    #[inline]
-    fn vector(self, value: [f32; 3]) -> [f32; 3] {
-        [
-            (self.linear[0][0] * value[0] + self.linear[0][1] * value[1])
-                + self.linear[0][2] * value[2],
-            (self.linear[1][0] * value[0] + self.linear[1][1] * value[1])
-                + self.linear[1][2] * value[2],
-            (self.linear[2][0] * value[0] + self.linear[2][1] * value[1])
-                + self.linear[2][2] * value[2],
-        ]
+    /// A hit point back into simulation space: `t + (c0 x + (c1 y + c2 z))`.
+    pub fn point_inverse(self, v: [f32; 3]) -> [f32; 3] {
+        let linear = self.vector_inverse(v);
+        std::array::from_fn(|r| a::add(self.translation[r], linear[r]))
+    }
+
+    /// A hit normal back into simulation space: `c0 x + (c1 y + c2 z)`.
+    pub fn vector_inverse(self, v: [f32; 3]) -> [f32; 3] {
+        let l = self.linear;
+        std::array::from_fn(|r| {
+            a::add(a::mul(l[r][0], v[0]), a::add(a::mul(l[r][1], v[1]), a::mul(l[r][2], v[2])))
+        })
+    }
+
+    /// An event position into the world: `t + ((c0 x + c1 y) + c2 z)`.
+    pub fn point_event(self, v: [f32; 3]) -> [f32; 3] {
+        let linear = self.vector_event(v);
+        std::array::from_fn(|r| a::add(self.translation[r], linear[r]))
+    }
+
+    /// An event velocity into the world: `(c0 x + c1 y) + c2 z`.
+    pub fn vector_event(self, v: [f32; 3]) -> [f32; 3] {
+        let l = self.linear;
+        std::array::from_fn(|r| {
+            a::add(a::add(a::mul(l[r][0], v[0]), a::mul(l[r][1], v[1])), a::mul(l[r][2], v[2]))
+        })
     }
 }
 
-/// Current JP query record passed to the physics interface. `start` and `end`
-/// are the swept endpoints; `radius` is the source radius before the native
-/// skin margin and geometry dispatch. Travel direction/length are derived by
-/// the downstream PhysX implementation and are intentionally not fabricated
-/// here.
+/// One query lane as WorldCollision packs it: the swept endpoints and the
+/// radius before the sweep's skin margin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CollisionQuery {
     pub start: [f32; 3],
@@ -103,63 +128,56 @@ pub struct CollisionQuery {
     pub radius: f32,
 }
 
-/// Convert a current-world hit into the simulation coordinates consumed by
-/// `CollisionResponse`. `inverse` is the inverse owner transform supplied by
-/// the native update state; this adapter intentionally does not reconstruct
-/// it from a forward transform. The current JP query receipt qualifies the
-/// inverse-vector normal path, followed by native normalization.
+/// Convert a world hit into the simulation coordinates the response reads,
+/// with the inverse owner the engine's per-frame owner update stores (this
+/// adapter never rebuilds it). The normal is renormalized with the reciprocal
+/// square-root estimate and two refinement steps; a squared length not above
+/// the engine's threshold (a zero or NaN normal included) becomes +Z. There is
+/// no refusal: an infinite squared length gives a NaN normal, as natively.
 pub fn world_hit_to_simulation(
     inverse: QueryAffine,
     particle_index: usize,
     point: [f32; 3],
     normal: [f32; 3],
-) -> Option<SuppliedHit> {
-    if !inverse.is_finite()
-        || point
-            .iter()
-            .chain(normal.iter())
-            .any(|value| !value.is_finite())
-    {
-        return None;
-    }
-    let normal = inverse.vector(normal);
-    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-    if !length.is_finite() || length < 1.0e-30 {
-        return None;
-    }
-    Some(SuppliedHit {
-        particle_index,
-        point: inverse.point(point),
-        normal: [normal[0] / length, normal[1] / length, normal[2] / length],
-    })
+) -> SuppliedHit {
+    let v = inverse.vector_inverse(normal);
+    let squared = a::add(a::add(a::mul(v[0], v[0]), a::mul(v[1], v[1])), a::mul(v[2], v[2]));
+    let normal = if !(squared > NORMAL_LIMIT) {
+        [0.0, 0.0, 1.0]
+    } else {
+        let scale = a::rsqrt2(squared);
+        v.map(|x| a::mul(x, scale))
+    };
+    SuppliedHit { particle_index, point: inverse.point_inverse(point), normal }
 }
 
-/// Build the qualified `WorldCollision` query input. The caller still owns
-/// collider filtering, triangle/BVH traversal and hit response; this function
-/// must not be used as evidence that a source CollisionModule is admitted.
+/// Build one `WorldCollision` query lane. The caller still owns packing,
+/// collider filtering, the sweep and the hit response.
 pub fn build_query(input: QueryInput) -> CollisionQuery {
-    // Native arithmetic is component-wise f32: velocity sum, speed modifier,
-    // then dt, followed by subtraction from the current position.
-    let start = std::array::from_fn(|axis| {
-        input.position[axis]
-            - ((input.persistent_velocity[axis] + input.animated_velocity[axis])
-                * input.speed_modifier)
-                * input.dt
+    // Velocity sum, the optional speed modifier, then dt, subtracted from the
+    // current position; component-wise f32 with the ARM NaN rules.
+    let total: [f32; 3] = std::array::from_fn(|axis| {
+        let total = a::add(input.persistent_velocity[axis], input.animated_velocity[axis]);
+        match input.speed_modifier {
+            Some(modifier) => a::mul(total, modifier),
+            None => total,
+        }
     });
+    let start = std::array::from_fn(|axis| a::sub(input.position[axis], a::mul(total[axis], input.dt)));
     let end = input.position;
     let (start, end) = if input.world_space {
         (start, end)
     } else {
-        (input.owner.point(start), input.owner.point(end))
+        (input.owner.point_forward(start), input.owner.point_forward(end))
     };
     let size = if input.size_is_3d {
-        input.size[0].max(input.size[1]).max(input.size[2])
+        a::max(a::max(input.size[0], input.size[1]), input.size[2])
     } else {
         input.size[0]
     };
     // WorldCollision receives the already-halved radius scale from its
-    // parameter block (`radiusScale * 0.5`) and multiplies that by size.
-    let radius = size * (input.radius_scale * 0.5);
+    // parameter block and multiplies that by size.
+    let radius = a::mul(size, a::mul(input.radius_scale, 0.5));
     CollisionQuery { start, end, radius }
 }
 
@@ -188,6 +206,53 @@ pub enum Refusal {
     InvalidHitIndex,
     UnqualifiedNormal,
     SideArrayLengthMismatch,
+}
+
+/// The module's random stream: four lanes of xorshift128 words (`x` in
+/// `words[0..4]`, then `y`, `z`, `w`). The response makes three draws for
+/// every group of four hits, before its reverse loop; with constant response
+/// curves (the only ones qualified) no output reads the drawn values, so the
+/// words only advance. Who seeds them is not established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollisionRandom {
+    pub words: [u32; 16],
+}
+
+impl CollisionRandom {
+    /// One draw on all four lanes; returns the new `w` words.
+    pub fn draw4(&mut self) -> [u32; 4] {
+        let w = &mut self.words;
+        let next: [u32; 4] = std::array::from_fn(|lane| {
+            let x = w[lane];
+            let t = x ^ (x << 11);
+            let last = w[12 + lane];
+            last ^ (last >> 19) ^ t ^ (t >> 8)
+        });
+        w.copy_within(4..16, 0);
+        w[12..16].copy_from_slice(&next);
+        next
+    }
+
+    /// The draws of one response call over `hits` hits: bounce, lifetime
+    /// loss and dampen, per group of four hits.
+    pub fn advance_for_hits(&mut self, hits: usize) {
+        for _ in 0..hits.div_ceil(4) * 3 {
+            self.draw4();
+        }
+    }
+}
+
+/// One hit's response as the engine writes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Responded {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub age_percent: f32,
+    /// `fmin(age * 0.01, 1)` from the written age, 0 when negative.
+    pub normalized_age: f32,
+    /// The age before the lifetime loss was not above 100 percent: the
+    /// collision sub-emitters record an event for this hit.
+    pub records_event: bool,
 }
 
 /// Only the post-hit coefficients. Successful construction does not admit the
@@ -223,7 +288,7 @@ impl CollisionResponse {
         minimum_speed: f32,
         maximum_speed: f32,
     ) -> Result<Self, Refusal> {
-        // These are the bounded response ranges covered by the current receipt.
+        // These are the bounded response ranges the native rows cover.
         // Do not clamp invalid inputs into an apparently accepted response.
         if [bounce, dampen, lifetime_loss]
             .iter()
@@ -249,9 +314,77 @@ impl CollisionResponse {
         })
     }
 
+    /// One hit of the reverse loop. `modifier` is the particle's speed
+    /// modifier when the particle state's speed-modifier flag is set. The age
+    /// takes the lifetime loss, then the kill test (age above 100 percent, or
+    /// the full speed below the minimum or not at most the maximum) writes the
+    /// killed age; a killed particle still takes the full response. The
+    /// position is reflected about the hit plane through the hit point and the
+    /// velocity likewise, both dampened and with the normal part scaled by the
+    /// bounce, in the engine's operation order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn respond(
+        &self,
+        position: [f32; 3],
+        velocity: [f32; 3],
+        animated: [f32; 3],
+        modifier: Option<f32>,
+        age_percent: f32,
+        point: [f32; 3],
+        normal: [f32; 3],
+    ) -> Responded {
+        let keep = a::sub(1.0, self.bounce);
+        let damp = a::sub(1.0, self.dampen);
+        let mut total: [f32; 3] = std::array::from_fn(|k| a::add(animated[k], velocity[k]));
+        if let Some(modifier) = modifier {
+            total = total.map(|t| a::mul(t, modifier));
+        }
+        let age = a::add(age_percent, a::mul(self.lifetime_loss, 100.0));
+        let speed_squared = dot(total, total);
+        let over = if arms::on("killAtHundred") { age >= 100.0 } else { age > 100.0 };
+        let killed = over
+            || speed_squared < self.minimum_speed_squared
+            || !(speed_squared <= self.maximum_speed_squared);
+        let age = if killed { f32::from_bits(KILLED_AGE) } else { age };
+        let scaled = a::mul(age, AGE_SCALE);
+        let normalized_age = if scaled < 0.0 { 0.0 } else { a::min(scaled, 1.0) };
+        let offset: [f32; 3] = std::array::from_fn(|k| a::sub(position[k], point[k]));
+        let reflect = |v: [f32; 3]| -> [f32; 3] {
+            let projection = a::mul(dot(v, normal), -2.0);
+            std::array::from_fn(|k| a::mul(damp, a::add(v[k], a::mul(normal[k], projection))))
+        };
+        // The final projection adds Z to the X+Y subtotal.
+        let along = |v: [f32; 3]| {
+            a::add(a::mul(normal[2], v[2]), a::add(a::mul(normal[0], v[0]), a::mul(normal[1], v[1])))
+        };
+        let offset = reflect(offset);
+        let offset_along = along(offset);
+        let position = std::array::from_fn(|k| {
+            a::add(point[k], a::sub(offset[k], a::mul(keep, a::mul(normal[k], offset_along))))
+        });
+        let total = reflect(total);
+        let total_along = along(total);
+        let velocity = std::array::from_fn(|k| {
+            let mut v = a::sub(total[k], a::mul(keep, a::mul(normal[k], total_along)));
+            if let Some(modifier) = modifier {
+                v = a::div(v, modifier);
+            }
+            a::sub(v, animated[k])
+        });
+        Responded {
+            position,
+            velocity,
+            age_percent: age,
+            normalized_age,
+            records_event: !(age_percent > 100.0),
+        }
+    }
+
     /// Apply supplied records in the native reverse traversal order. Pool length,
     /// side data and hit indices remain stable until a separate compaction phase.
-    /// Rejection validates the whole batch first, leaving it untouched.
+    /// Rejection validates the whole batch first, leaving it untouched. This
+    /// entry makes no random draws and records no events; the module update
+    /// does both.
     pub fn apply_hits(
         &self,
         particles: &mut [Particle],
@@ -266,9 +399,8 @@ impl CollisionResponse {
                 .get(hit.particle_index)
                 .ok_or(Refusal::InvalidHitIndex)?;
             let frame = &frames[hit.particle_index];
-            // The current response replay includes axis and oblique unit normals.
-            // Accept only a float-rounding neighborhood, without normalizing or
-            // otherwise altering the explicitly supplied query result.
+            // Hits supplied from outside are accepted only near unit length,
+            // without normalizing or otherwise altering them.
             if !unit_normal(hit.normal) {
                 return Err(Refusal::UnqualifiedNormal);
             }
@@ -286,47 +418,18 @@ impl CollisionResponse {
         for hit in hits.iter().rev() {
             let particle = &mut particles[hit.particle_index];
             let frame = frames[hit.particle_index];
-            let total: [f32; 3] = std::array::from_fn(|axis| {
-                (particle.velocity[axis] + frame.animated[axis]) * frame.modifier
-            });
-            let speed_squared = dot(total, total);
-            particle.age_percent += self.lifetime_loss * 100.0;
-            // Thresholds and native death are strict. Even a killed particle
-            // completes the same hit response before the later death phase.
-            if particle.age_percent > 100.0
-                || speed_squared < self.minimum_speed_squared
-                || speed_squared > self.maximum_speed_squared
-            {
-                particle.age_percent = f32::from_bits(0x42c8_0001);
-            }
-            let displacement =
-                std::array::from_fn(|axis| particle.position[axis] - hit.point[axis]);
-            let displacement = self.response(displacement, hit.normal);
-            particle.position = std::array::from_fn(|axis| hit.point[axis] + displacement[axis]);
-            let velocity = self.response(total, hit.normal);
-            particle.velocity =
-                std::array::from_fn(|axis| velocity[axis] / frame.modifier - frame.animated[axis]);
+            let out = self.respond(particle.position, particle.velocity, frame.animated,
+                Some(frame.modifier), particle.age_percent, hit.point, hit.normal);
+            particle.position = out.position;
+            particle.velocity = out.velocity;
+            particle.age_percent = out.age_percent;
         }
         Ok(())
     }
-
-    fn response(&self, vector: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
-        let projection = dot(vector, normal) * -2.0;
-        let reflected: [f32; 3] = std::array::from_fn(|axis| {
-            (vector[axis] + normal[axis] * projection) * (1.0 - self.dampen)
-        });
-        // The native final projection adds Z to the X+Y subtotal. Replacing this
-        // with a generic dot product changes rounding and sometimes signed zero.
-        let normal_component =
-            normal[2] * reflected[2] + (normal[0] * reflected[0] + normal[1] * reflected[1]);
-        std::array::from_fn(|axis| {
-            reflected[axis] - (1.0 - self.bounce) * (normal[axis] * normal_component)
-        })
-    }
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    (a[0] * b[0] + a[1] * b[1]) + a[2] * b[2]
+fn dot(a3: [f32; 3], b3: [f32; 3]) -> f32 {
+    a::add(a::add(a::mul(a3[0], b3[0]), a::mul(a3[1], b3[1])), a::mul(a3[2], b3[2]))
 }
 
 fn all_finite(values: [f32; 3]) -> bool {
@@ -346,7 +449,7 @@ mod tests {
             position: [10.0, 4.0, -2.0],
             persistent_velocity: [2.0, -1.0, 0.5],
             animated_velocity: [0.5, 0.25, -0.5],
-            speed_modifier: 0.5,
+            speed_modifier: Some(0.5),
             dt: 0.25,
             size: [2.0, 3.0, 4.0],
             size_is_3d: true,
@@ -399,20 +502,20 @@ mod tests {
             linear: [[0.5, 0.0, 0.0], [0.0, 1.0 / 3.0, 0.0], [0.0, 0.0, 0.25]],
             translation: [-0.5, 2.0 / 3.0, -1.25],
         };
-        let hit = world_hit_to_simulation(inverse, 7, [21.0, 10.0, -3.0], [0.0, 3.0, 0.0]).unwrap();
+        let hit = world_hit_to_simulation(inverse, 7, [21.0, 10.0, -3.0], [0.0, 3.0, 0.0]);
         assert_eq!(hit.particle_index, 7);
         assert_eq!(hit.point, [10.0, 4.0, -2.0]);
         assert_eq!(hit.normal, [0.0, 1.0, 0.0]);
     }
 
     #[test]
-    fn world_hit_conversion_rejects_zero_normal_but_does_not_rebuild_inverse() {
+    fn world_hit_conversion_turns_a_degenerate_normal_into_z_without_refusing() {
         let singular = QueryAffine {
             linear: [[0.0; 3]; 3],
             translation: [0.0; 3],
         };
-        assert!(world_hit_to_simulation(singular, 0, [0.0; 3], [0.0, 1.0, 0.0]).is_none());
-        assert!(world_hit_to_simulation(QueryAffine::IDENTITY, 0, [0.0; 3], [0.0; 3]).is_none());
+        assert_eq!(world_hit_to_simulation(singular, 0, [0.0; 3], [0.0, 1.0, 0.0]).normal, [0.0, 0.0, 1.0]);
+        assert_eq!(world_hit_to_simulation(QueryAffine::IDENTITY, 0, [0.0; 3], [0.0; 3]).normal, [0.0, 0.0, 1.0]);
     }
 
     fn hit(index: usize, axis: usize) -> SuppliedHit {
@@ -463,8 +566,8 @@ mod tests {
             .unwrap();
         assert_eq!(particles[0].age_percent, 100.0);
         assert_eq!(particles[1].age_percent, 100.0);
-        assert_eq!(particles[2].age_percent.to_bits(), 0x42c8_0001);
-        assert_eq!(particles[3].age_percent.to_bits(), 0x42c8_0001);
+        assert_eq!(particles[2].age_percent.to_bits(), KILLED_AGE);
+        assert_eq!(particles[3].age_percent.to_bits(), KILLED_AGE);
         assert_eq!(particles.len(), 4, "marking is not death compaction");
         assert_eq!(
             particles[3].velocity,

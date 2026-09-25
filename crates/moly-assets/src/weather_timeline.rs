@@ -643,6 +643,8 @@ impl SourceAnimationCurve {
                     weighted_mode: k.weighted_mode as u8,
                 })
                 .collect(),
+            pre_wrap: u32::try_from(self.pre_infinity).ok(),
+            post_wrap: u32::try_from(self.post_infinity).ok(),
         }
     }
     fn validate(&self) -> Result<(), String> {

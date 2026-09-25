@@ -1,0 +1,380 @@
+//! The installed per-frame update against native Update1b rows: the frame
+//! head (emitter velocity, speed scale, minimum-step skip, pending time), the
+//! emission over distance it runs before the slices, the incremental slices
+//! and the emitter-motion placement of World births, read through the product
+//! frame entry. The native harness drove one exported start block with Shape
+//! and Colour off, and Velocity and CustomData off or with their exported
+//! blocks; the probe RNG words it wrote replace the installed streams, never a
+//! claim about client entropy.
+use super::*;
+use moly_law::particle::seed_owner::{ModuleRandom, ScalarRandom};
+use serde_json::{json, Value};
+
+const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
+
+fn f(bits: &Value) -> f32 {
+    f32::from_bits(bits.as_u64().expect("native f32 bits") as u32)
+}
+
+fn word(value: &Value) -> u32 {
+    value.as_u64().expect("native word") as u32
+}
+
+fn read(key: &str) -> Value {
+    let path = std::env::var_os(key).unwrap_or_else(|| panic!("{key} is not set"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// The harness emitter of one case: the recorded start block, the case's
+/// rates, space, speed, capacity and clock, every other module off.
+fn harness_system(start: &Value, config: &Value) -> Runtime {
+    harness_system_with(start, config, None)
+}
+
+/// The same with the recorded Velocity and CustomData blocks enabled.
+fn harness_system_with(start: &Value, config: &Value, modules: Option<&Value>) -> Runtime {
+    let space = if config["space"].as_u64() == Some(0) { "Local" } else { "World" };
+    let mut system = json!({
+        "duration": config["duration"], "looping": config["looping"], "prewarm": false,
+        "playOnAwake": true, "simulationSpeed": 1.0, "simulationSpace": space,
+        // The installer draws an owner; the probe words replace its streams.
+        "randomSeed": 0, "autoRandomSeed": true,
+        "emitterVelocityMode": config["velocity_mode"],
+        "startDelay": {"mode": "constant", "value": 0.0},
+        "ringBufferMode": 0, "ringBufferLoopRange": [0.0, 1.0],
+        "maxParticles": config["maximum"], "start": start.clone(),
+        "emission": {"rateOverTime": {"mode": "constant", "value": config["rate_time"]},
+            "rateOverDistance": {"mode": "constant", "value": config["rate_distance"]}, "bursts": []},
+        "shapeEnabled": false,
+        "sourceModules": {"version": 1, "enabled": ["EmissionModule", "InitialModule"], "unsupported": []},
+    });
+    if let Some(modules) = modules {
+        system["velocityOverLifetime"] = modules["velocityOverLifetime"].clone();
+        system["customData"] = modules["customData"].clone();
+        system["sourceModules"]["enabled"] =
+            json!(["CustomDataModule", "EmissionModule", "InitialModule", "VelocityModule"]);
+    }
+    let document = json!({"effects": {"harness": {"particles": [{"node": "root/harness", "system": system}]}}});
+    let mut decoded = moly_law::particle::schema::Effects::from_json_str(
+        &serde_json::to_vec(&document).unwrap()).unwrap();
+    assert_eq!(decoded.emitters.len(), 1);
+    let mut emitter = decoded.emitters.remove(0);
+    emitter.simulation_speed = match &config["speed"] {
+        Value::String(text) if text == "nan" => f32::NAN,
+        value => value.as_f64().unwrap() as f32,
+    };
+    let mut runtime = test_support::runtime();
+    runtime.node = emitter.node.clone();
+    runtime.effect = emitter.effect.clone();
+    runtime.kind = EffectKind::Sky;
+    runtime.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier).unwrap();
+    runtime.velocity_law = emitter.velocity_over_lifetime.as_ref()
+        .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).unwrap());
+    runtime.custom_law = emitter.custom_data.as_ref()
+        .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).unwrap());
+    assert_eq!(runtime.velocity_law.is_some() && runtime.custom_law.is_some(), modules.is_some());
+    runtime.emitter = emitter;
+    runtime.pool.clear();
+    runtime.side.clear();
+    runtime.playback_head = 0.0;
+    runtime.previous_head = 0.0;
+    runtime.prewarmed = true;
+    runtime.born_total = 0;
+    runtime.died_total = 0;
+    runtime.full_total = 0;
+    runtime.refused_total = 0;
+    runtime.native_birth = None;
+    runtime
+}
+
+fn install(system: &mut Runtime, seeds: &Value) {
+    let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
+    assert!(matches!(install_native_birth(system, &mut manager, &SourceRoute::Ordinary, None).unwrap(),
+        BirthPath::Native));
+    let state = system.native_birth.as_mut().unwrap();
+    state.owner = None;
+    let initial = seeds["initialWords"].as_array().unwrap();
+    assert_eq!(initial.len(), 16);
+    state.initial = ModuleRandom {
+        words: std::array::from_fn(|w| std::array::from_fn(|lane| word(&initial[w * 4 + lane]))),
+    };
+    let emission = seeds["emissionWords"].as_array().unwrap();
+    state.emission.random = ScalarRandom { words: std::array::from_fn(|i| word(&emission[i])) };
+}
+
+/// Runtime X is the reflection of source X. A zero reflects to the other
+/// signed zero, so X zeros compare by value and everything else by bits.
+fn same_x(runtime: f32, native: &Value) -> bool {
+    let native = f(native);
+    if native == 0.0 { runtime == 0.0 } else { (-runtime).to_bits() == native.to_bits() }
+}
+
+fn same(runtime: f32, native: &Value) -> bool {
+    runtime.to_bits() == f(native).to_bits()
+}
+
+#[derive(Default)]
+struct Tally {
+    frames: usize,
+    mismatched_frames: usize,
+    fields: std::collections::BTreeMap<&'static str, (usize, usize)>,
+    first: Vec<String>,
+}
+
+impl Tally {
+    fn check(&mut self, field: &'static str, ok: bool, frame_ok: &mut bool, label: &str) {
+        let entry = self.fields.entry(field).or_default();
+        entry.0 += 1;
+        if !ok {
+            entry.1 += 1;
+            *frame_ok = false;
+            if self.first.len() < 12 {
+                self.first.push(format!("{label} {field}"));
+            }
+        }
+    }
+}
+
+/// Compare the product state after one frame with the native row.
+/// `frame_state` false skips the fields only the per-frame driver keeps.
+fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, label: &str) {
+    let state = system.native_birth.as_ref().unwrap();
+    let after = &row["after"];
+    let mut ok = true;
+    if frame_state {
+        tally.check("pending", same(system.pending, &after["pendingBits"]), &mut ok, label);
+        let prev = &after["prevBits"];
+        let velocity = &row["velocityAfterUpdate1bBits"];
+        tally.check("previousPosition", same_x(state.frame.previous_position[0], &prev[0])
+            && (1..3).all(|a| same(state.frame.previous_position[a], &prev[a])), &mut ok, label);
+        tally.check("emitterVelocity", same_x(state.frame.velocity[0], &velocity[0])
+            && (1..3).all(|a| same(state.frame.velocity[a], &velocity[a])), &mut ok, label);
+    }
+    tally.check("clock", same(system.playback_head, &after["clockBits"]), &mut ok, label);
+    let distribution = state.emission.distribution;
+    let carry = &after["emission"]["f"];
+    tally.check("emissionCarry", same(distribution.spacing, &carry[0]) && same(distribution.offset, &carry[1])
+        && same(distribution.burst_fraction, &carry[2]), &mut ok, label);
+    let rng = &after["emission"]["rng"];
+    tally.check("emissionRng", (0..4).all(|i| state.emission.random.words[i] == word(&rng[i])), &mut ok, label);
+    let initial = &after["initialRng"];
+    tally.check("initialRng", (0..16).all(|i| state.initial.words[i / 4][i % 4] == word(&initial[i])),
+        &mut ok, label);
+    let particles = &row["particles"];
+    let count = particles["count"].as_u64().unwrap() as usize;
+    let count_ok = system.pool.len() == count && system.side.len() == count;
+    tally.check("count", count_ok, &mut ok, label);
+    if count_ok {
+        let mut position = true;
+        let mut velocity = true;
+        let mut scalars = true;
+        for i in 0..count {
+            let p = &system.pool[i];
+            position &= same_x(p.position[0], &particles["pos"][0][i])
+                && (1..3).all(|a| same(p.position[a], &particles["pos"][a][i]));
+            velocity &= same_x(p.velocity[0], &particles["vel"][0][i])
+                && (1..3).all(|a| same(p.velocity[a], &particles["vel"][a][i]));
+            let colour = u32::from_le_bytes(moly_law::particle::gradient::quantize_rgba8(system.side[i].colour));
+            scalars &= same(p.age_percent, &particles["age"][i])
+                && same(p.inverse_lifetime, &particles["inv"][i])
+                && system.side[i].seed == word(&particles["seed"][i])
+                && colour == word(&particles["color"][i]);
+        }
+        tally.check("position", position, &mut ok, label);
+        tally.check("velocity", velocity, &mut ok, label);
+        tally.check("ageLifetimeSeedColour", scalars, &mut ok, label);
+        // The modules receipt also records the animated velocity and the
+        // first custom stream of every particle at the frame end.
+        if let (Some(anim), Some(custom)) = (particles.get("anim"), particles.get("custom1")) {
+            let animated = (0..count).all(|i| same_x(system.side[i].animated[0], &anim[0][i])
+                && (1..3).all(|a| same(system.side[i].animated[a], &anim[a][i])));
+            tally.check("animatedVelocity", animated, &mut ok, label);
+            let custom1 = (0..count).all(|i| (0..4).all(|c| same(system.side[i].custom_data[0][c], &custom[c][i])));
+            tally.check("custom1", custom1, &mut ok, label);
+        }
+    }
+    tally.frames += 1;
+    if !ok {
+        tally.mismatched_frames += 1;
+    }
+}
+
+fn frame_context(input: &Value) -> Context {
+    let t: [f32; 3] = std::array::from_fn(|a| f(&input["positionBits"][a]));
+    Context {
+        sky: GlobalTransform::from_translation(Vec3::new(-t[0], t[1], t[2])),
+        camera: GlobalTransform::IDENTITY,
+        site: GlobalTransform::IDENTITY,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Driver {
+    /// The product per-frame entry.
+    Product,
+    /// One-rule arm: the whole scaled frame as one step (the entry before the
+    /// slice driver).
+    WholeFrame,
+    /// One-rule arm: the slices without the emitter-motion placement.
+    NoBacktrack,
+}
+
+fn run_case(start: &Value, case: &Value, driver: Driver, tally: &mut Tally) {
+    run_case_with(start, case, None, driver, tally);
+}
+
+fn run_case_with(start: &Value, case: &Value, modules: Option<&Value>, driver: Driver, tally: &mut Tally) {
+    let mut system = harness_system_with(start, &case["config"], modules);
+    install(&mut system, &case["seeds"]);
+    let name = case["name"].as_str().unwrap();
+    let before = &case["frames"][0]["before"];
+    assert!(before["pendingBits"] == 0 && before["clockBits"] == 0 && before["flag28"] == 1, "{name}");
+    let mut pending = 0.0_f32;
+    for (index, row) in case["frames"].as_array().unwrap().iter().enumerate() {
+        let input = &row["input"];
+        assert!(matches!(input["flags"].as_u64(), Some(0 | 8)), "{name}");
+        if input["reset"].as_bool().unwrap() {
+            system.native_birth.as_mut().unwrap().frame.reset_previous = true;
+        }
+        let ctx = frame_context(input);
+        let dt = f(&input["dtBits"]);
+        match driver {
+            Driver::Product => { let _ = advance_frame(&mut system, dt, true, &ctx, |_| {}); }
+            Driver::WholeFrame => {
+                let step = dt * system.emitter.simulation_speed;
+                if step > 0.0 { simulate(&mut system, step, &ctx); }
+            }
+            Driver::NoBacktrack => {
+                let head = moly_law::particle::prewarm::FrameStep::new(dt, system.emitter.simulation_speed, PLAYER_TIME);
+                if !head.skips() {
+                    let mut state = system.native_birth.take().unwrap();
+                    let mut plan = head.plan(pending, system.emitter.duration).unwrap();
+                    for slice in plan.by_ref() {
+                        let _ = birth::step_explicit(&mut system, &mut state, slice.unwrap().duration, false, &ctx);
+                    }
+                    pending = plan.remaining();
+                    system.native_birth = Some(state);
+                }
+            }
+        }
+        if driver == Driver::Product && !child::arms::on("distanceAfterSlices") && !child::arms::on("elapsedWithoutPending") {
+            assert_eq!(system.refused_total, 0, "{name} frame {index} refused");
+        }
+        compare(&system, row, driver == Driver::Product, tally, &format!("{name}#{index}"));
+    }
+}
+
+#[test]
+#[ignore = "MOLY_UPDATE1B_FRAMES and MOLY_UPDATE1B_FRAMES_EXTRA must identify the current JP per-frame Update1b receipts"]
+fn installed_per_frame_update_matches_native_update1b_rows() {
+    let receipt = read("MOLY_UPDATE1B_FRAMES");
+    let extra = read("MOLY_UPDATE1B_FRAMES_EXTRA");
+    for document in [&receipt, &extra] {
+        assert_eq!(document["sourceSha256"], SOURCE_SHA256);
+    }
+    let start = &receipt["source"]["system"]["start"];
+    // Every unpatched case, with and without an emission-over-distance rate.
+    let cases: Vec<&Value> = [&receipt, &extra].into_iter()
+        .flat_map(|d| ["s11Cases", "s1Cases", "controls"].into_iter()
+            .filter_map(move |group| d[group].as_array()))
+        .flatten()
+        .filter(|case| case["patched"] != true)
+        .collect();
+    let report = replay(start, &cases, None, "MOLY_UPDATE1B_FRAMES_REPORT");
+    assert_eq!((cases.len(), report["frames"].as_u64().unwrap()), (21, 667));
+}
+
+/// The distance cases with the exported Velocity and CustomData modules on
+/// (and their modules-off control): newborns at a negative elapsed time
+/// through the animated velocity, compared with the native animated velocity
+/// and custom stream as well.
+#[test]
+#[ignore = "MOLY_UPDATE1B_FRAMES_MODULES must identify the current JP per-frame Update1b modules receipt"]
+fn installed_distance_emission_with_modules_matches_native_update1b_rows() {
+    let receipt = read("MOLY_UPDATE1B_FRAMES_MODULES");
+    assert_eq!(receipt["sourceSha256"], SOURCE_SHA256);
+    let start = &read("MOLY_UPDATE1B_FRAMES")["source"]["system"]["start"].clone();
+    let cases: Vec<&Value> = ["s11Cases", "controls"].into_iter()
+        .filter_map(|group| receipt[group].as_array()).flatten()
+        .filter(|case| case["patched"] != true).collect();
+    let report = replay(start, &cases, Some(&receipt["moduleSource"]), "MOLY_UPDATE1B_FRAMES_MODULES_REPORT");
+    assert_eq!((cases.len(), report["frames"].as_u64().unwrap()), (3, 180));
+}
+
+/// The product entry over `cases` with every one-rule arm; panics unless the
+/// product matches every native frame and each arm differs somewhere.
+fn replay(start: &Value, cases: &[&Value], module_source: Option<&Value>, report_key: &str) -> Value {
+    let modules = |case: &Value| (case["modules"] == true).then(|| module_source.expect("module blocks"));
+    let run = |driver: Driver, arm: Option<&'static str>| {
+        child::arms::set(arm);
+        let mut tally = Tally::default();
+        for case in cases {
+            run_case_with(start, case, modules(case), driver, &mut tally);
+        }
+        child::arms::set(None);
+        tally
+    };
+    let product = run(Driver::Product, None);
+    let whole = run(Driver::WholeFrame, None);
+    let unplaced = run(Driver::NoBacktrack, None);
+    let distance_cases = cases.iter().any(|case| case["config"]["rate_distance"] != 0.0);
+    let (late, unpending) = if distance_cases {
+        (Some(run(Driver::Product, Some("distanceAfterSlices"))), Some(run(Driver::Product, Some("elapsedWithoutPending"))))
+    } else {
+        (None, None)
+    };
+    let report = json!({
+        "cases": cases.iter().map(|c| c["name"].clone()).collect::<Vec<_>>(),
+        "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(),
+        "firstMismatches": product.first,
+        "arms": {"wholeFrame": whole.mismatched_frames, "noBacktrack": unplaced.mismatched_frames,
+            "noBacktrackFirst": unplaced.first,
+            "distanceAfterSlices": late.as_ref().map(|t| t.mismatched_frames),
+            "elapsedWithoutPending": unpending.as_ref().map(|t| t.mismatched_frames)},
+    });
+    println!("{report}");
+    if let Some(path) = std::env::var_os(report_key) {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert_eq!(product.mismatched_frames, 0, "{report}");
+    // Every arm must be seen to fail on the same native rows.
+    assert!(whole.mismatched_frames > 0 && unplaced.mismatched_frames > 0, "{report}");
+    for arm in [&late, &unpending].into_iter().flatten() {
+        assert!(arm.mismatched_frames > 0, "{report}");
+    }
+    report
+}
+
+/// Frames the engine skips or clamps, fed to the product entry: nothing may
+/// panic or refuse, and a skipped frame changes only the emitter velocity and
+/// the end-of-frame translation.
+#[test]
+fn nonfinite_and_degenerate_frame_inputs_complete() {
+    let config = json!({"space": 1, "speed": 1.0, "looping": true, "duration": 1.0, "rate_time": 60.0,
+        "rate_distance": 0.0, "maximum": 200, "velocity_mode": 0});
+    let start = json!({"lifetime": {"mode": "constant", "value": 0.5}, "speed": {"mode": "constant", "value": 1.0},
+        "size": {"mode": "constant", "value": 1.0}, "rotation": {"mode": "constant", "value": 0.0},
+        "color": {"mode": "color", "color": [1.0, 1.0, 1.0, 1.0]}, "size3D": false, "rotation3D": false,
+        "gravityModifier": {"mode": "constant", "value": 0.0}});
+    let seeds = json!({"initialWords": (1..=16).collect::<Vec<u32>>(), "emissionWords": [17, 19, 127, 2471805022u32]});
+    let mut distance = config.clone();
+    distance["rate_distance"] = json!(10.0);
+    for (speed, config) in [1.0, 0.0, -1.0, f32::NAN, f32::INFINITY, f32::MIN_POSITIVE, 1.0e30].into_iter()
+        .flat_map(|speed| [(speed, &config), (speed, &distance)]) {
+        let mut system = harness_system(&start, config);
+        system.emitter.simulation_speed = speed;
+        install(&mut system, &seeds);
+        for (index, dt) in [1.0 / 60.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0, 1.0e-7,
+            f32::MAX, 1.0e5, 0.25, f32::MIN_POSITIVE].into_iter().enumerate() {
+            let ctx = Context {
+                sky: GlobalTransform::from_translation(Vec3::new((index as f32).powi(9), 0.0, 0.0)),
+                camera: GlobalTransform::IDENTITY,
+                site: GlobalTransform::IDENTITY,
+            };
+            let _ = advance_frame(&mut system, dt, index % 2 == 0, &ctx, |_| {});
+            assert!(system.pool.len() <= 200);
+        }
+    }
+}

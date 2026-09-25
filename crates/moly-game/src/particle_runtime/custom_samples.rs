@@ -14,7 +14,7 @@ fn curve(value: &Value) -> MinMaxCurve {
         Curve { multiplier: 1.0, keys: [0.0, 1.0].map(|time| CurveKey {
             time, value: if time == 0.0 { a } else { b },
             in_slope: slope, out_slope: slope, weighted_mode: 0, in_weight: 0.0, out_weight: 0.0,
-        }).to_vec() }
+        }).to_vec(), pre_wrap: Some(2), post_wrap: Some(2) }
     };
     match value["mode"].as_u64().unwrap() {
         0 => MinMaxCurve::Constant(number(&value["max"])),
@@ -37,7 +37,7 @@ fn rendering_reads_custom_channels_from_before_the_age_step() {
             components: vec![curve(&json!({"mode":1, "multiplier":1, "linear":true, "high":[0,1]}))] }),
         custom2: None,
     };
-    system.custom_law = Some(CustomData::from_params(&data));
+    system.custom_law = Some(CustomData::from_params(&data).unwrap());
     system.emitter.custom_data = Some(data);
     system.pool[0] = Particle::born([0.0;3], [0.0;3], 1.0);
     system.pool[0].age_percent = 50.0;
@@ -71,7 +71,7 @@ fn custom_data_matches_native_channel_hashes() {
                 components: (0..count).map(|channel| curve(&row["curves"][stream*4+channel])).collect() }
         });
         let params = CustomDataParams { custom1: slot(0), custom2: slot(1) };
-        system.custom_law = Some(CustomData::from_params(&params));
+        system.custom_law = Some(CustomData::from_params(&params).unwrap());
         system.emitter.custom_data = Some(params);
         for lane in 0..4 {
             let mut p = Particle::born([0.0;3], [0.0;3], 100.0);

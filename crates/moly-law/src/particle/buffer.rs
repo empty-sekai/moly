@@ -28,18 +28,32 @@ pub fn birth_capacity(current: usize, mode: RingBufferMode, maximum: usize, requ
 pub fn finish_births<T: Clone, U: Clone>(
     pool: &mut Vec<T>, side: &mut Vec<U>, cursor: &mut usize,
     mode: RingBufferMode, maximum: usize, old_count: usize,
+    on_death: impl FnMut(&T, &U),
+) {
+    let mut none = vec![(); pool.len()];
+    finish_births_with(pool, side, &mut none, cursor, mode, maximum, old_count, on_death);
+}
+
+/// `finish_births` over a second parallel payload, which every rotation,
+/// copy, swap and truncation moves exactly as it moves `side`.
+#[allow(clippy::too_many_arguments)]
+pub fn finish_births_with<T: Clone, U: Clone, V: Clone>(
+    pool: &mut Vec<T>, side: &mut Vec<U>, extra: &mut Vec<V>, cursor: &mut usize,
+    mode: RingBufferMode, maximum: usize, old_count: usize,
     mut on_death: impl FnMut(&T, &U),
 ) {
     assert_eq!(pool.len(), side.len());
+    assert_eq!(pool.len(), extra.len());
     let born = pool.len() - old_count;
     let gap = ((4 - (old_count & 3)) & 3).min(born);
     pool[old_count..].rotate_right(gap);
     side[old_count..].rotate_right(gap);
+    extra[old_count..].rotate_right(gap);
     if mode == RingBufferMode::Disabled || pool.len() <= maximum { return; }
     if maximum == 0 {
         if mode == RingBufferMode::PauseUntilReplaced {
             for (p, s) in pool.iter().zip(side.iter()) { on_death(p, s); }
-            pool.clear(); side.clear();
+            pool.clear(); side.clear(); extra.clear();
         }
         *cursor = 0; return;
     }
@@ -50,13 +64,14 @@ pub fn finish_births<T: Clone, U: Clone>(
                 on_death(&pool[*cursor], &side[*cursor]);
                 pool[*cursor] = pool[source].clone();
                 side[*cursor] = side[source].clone();
+                extra[*cursor] = extra[source].clone();
                 *cursor = (*cursor + 1) % maximum;
             }
-            pool.truncate(maximum); side.truncate(maximum);
+            pool.truncate(maximum); side.truncate(maximum); extra.truncate(maximum);
         }
         RingBufferMode::LoopUntilReplaced => {
             for source in old_count..pool.len() {
-                pool.swap(*cursor, source); side.swap(*cursor, source);
+                pool.swap(*cursor, source); side.swap(*cursor, source); extra.swap(*cursor, source);
                 *cursor = (*cursor + 1) % maximum;
             }
         }
@@ -70,9 +85,31 @@ pub fn finish_births<T: Clone, U: Clone>(
 /// when explicitly killed. Death never changes the ring cursor.
 pub fn compact_with_side<U>(
     pool: &mut Vec<Particle>, side: &mut Vec<U>, mode: RingBufferMode, maximum: usize,
+    on_death: impl FnMut(&Particle, &U),
+) -> usize {
+    let mut none = vec![(); pool.len()];
+    compact_with_sides(pool, side, &mut none, mode, maximum, on_death)
+}
+
+/// `compact_with_side` over a second parallel payload, removed exactly where
+/// `side` is removed (the engine's KillParticle moves every per-particle
+/// array of the last particle into the dead slot).
+pub fn compact_with_sides<U, V>(
+    pool: &mut Vec<Particle>, side: &mut Vec<U>, extra: &mut Vec<V>, mode: RingBufferMode, maximum: usize,
     mut on_death: impl FnMut(&Particle, &U),
 ) -> usize {
+    compact_with_sides_indexed(pool, side, extra, mode, maximum, |_, particle, side| on_death(particle, side))
+}
+
+/// `compact_with_sides` that also hands `on_death` the slot the particle dies
+/// in. It is called before that slot is overwritten, in removal order (the
+/// order in which the engine's KillParticle records death events).
+pub fn compact_with_sides_indexed<U, V>(
+    pool: &mut Vec<Particle>, side: &mut Vec<U>, extra: &mut Vec<V>, mode: RingBufferMode, maximum: usize,
+    mut on_death: impl FnMut(usize, &Particle, &U),
+) -> usize {
     assert_eq!(pool.len(), side.len());
+    assert_eq!(pool.len(), extra.len());
     if mode == RingBufferMode::PauseUntilReplaced { return 0; }
     let protected = if mode == RingBufferMode::LoopUntilReplaced { maximum } else { 0 };
     let mut group = protected & !3;
@@ -87,8 +124,8 @@ pub fn compact_with_side<U>(
         for lane in (0..4).rev() {
             if dead[lane] {
                 let index = group + lane;
-                on_death(&pool[index], &side[index]);
-                pool.swap_remove(index); side.swap_remove(index); removed += 1;
+                on_death(index, &pool[index], &side[index]);
+                pool.swap_remove(index); side.swap_remove(index); extra.swap_remove(index); removed += 1;
             }
         }
     }

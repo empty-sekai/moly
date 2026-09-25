@@ -332,6 +332,9 @@ impl SiteFixtureLayouts {
                     row.direction = direction;
                 }
             }
+            // Owned by the entry, appended after the starter and its smoke
+            // knob, so neither rewrites it.
+            super::append_entry_house(&mut rows);
         }
         let instance_uids = (1..=rows.len())
             .map(|serial| format!("offline-fixture-{site_id}-{serial}"))
