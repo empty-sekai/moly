@@ -404,6 +404,9 @@ impl PlayState {
         if let Some(custom) = system.custom_law.as_mut() {
             custom.clear(&system.pool);
         }
+        if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+            calls.clear(&system.pool);
+        }
         system.pool.clear();
         system.side.clear();
         system.ring_cursor = 0;

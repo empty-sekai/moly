@@ -2169,7 +2169,18 @@ fn judge_in_host(
         }
         crate::particle_runtime::custom_data_storage_eligible(&emitter, &route)
     };
-    if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage)) {
+    // A size lane whose value follows its curve objects' caches runs with the
+    // law that follows the engine's SizeModule calls, on the same conditions.
+    let size_storage = || -> Result<(), String> {
+        if !native_owner {
+            return Err("the Director's Simulate path does not install the native birth owner".into());
+        }
+        if child_parent.is_some() {
+            return Err("a sub-emitter target's module calls include its parents' Emit calls, which are not ported".into());
+        }
+        crate::particle_runtime::size_storage_eligible(&emitter, &route)
+    };
+    if let Err(error) = crate::particle_runtime::curve_admission_with(&emitter, Some(&storage), Some(&size_storage)) {
         tally.law_reject.push(format!("{node}: {error}")); return None;
     }
     if const_of(&emitter.start_delay) != Some(0.0) {
@@ -3009,8 +3020,8 @@ pub(crate) fn spawn_when_ready(
             force_law: planned.emitter.force.as_ref().map(|p|
                 moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
             gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier).expect("curves validated during admission"),
-            size_law: planned.emitter.size_over_lifetime.as_ref()
-                .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission")),
+            size_law: crate::particle_runtime::size_over_lifetime_law(&planned.emitter)
+                .map(|law| law.expect("curves validated during admission")),
             color_law: planned.emitter.color_over_lifetime.as_ref()
                 .map(moly_law::particle::color::ColorOverLifetime::from_params),
             custom_law: planned.emitter.custom_data.as_ref()
@@ -3085,6 +3096,12 @@ pub(crate) fn spawn_when_ready(
                     Ok(crate::particle_runtime::BirthPath::Legacy(reason))
                         if live.runtime.custom_law.as_ref().is_some_and(|custom| custom.tracks_storage()) => {
                         error!(%reason, node=%live.node, "CustomData curve-cache system refused by the native birth installer");
+                        failed = true;
+                    }
+                    // So does a size law that follows the engine's calls.
+                    Ok(crate::particle_runtime::BirthPath::Legacy(reason))
+                        if live.runtime.size_law.as_ref().is_some_and(|size| size.calls().is_some()) => {
+                        error!(%reason, node=%live.node, "size curve-cache system refused by the native birth installer");
                         failed = true;
                     }
                     // Birth events run only on the native path; a parent with

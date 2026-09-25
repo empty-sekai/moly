@@ -1016,10 +1016,9 @@ fn start_common(
     // The newborn kill pass records its death events after every group's
     // call, with the same pending time and emission word.
     let mut deaths = events.as_ref().filter(|newborn| newborn.events.records_deaths()).map(|_| Vec::new());
-    // The newborn lanes as the death pass finds them, for a CustomData law
-    // that follows the slots past the live count.
-    let lanes = system.custom_law.as_ref().filter(|custom| custom.tracks_storage())
-        .map(|_| system.pool[old_count..].to_vec());
+    // The newborn lanes as the death pass finds them, for the laws that
+    // follow the slots past the live count (CustomData, size).
+    let lanes = follows_storage(system).then(|| system.pool[old_count..].to_vec());
     let live_newborns = kill_newborns(system, old_count, accepted, deaths.as_mut());
     if let (Some(NewbornEvents { events, accumulated, emission_word }), Some(deaths)) = (events.as_mut(), deaths.as_ref()) {
         events.record_deaths(system, deaths, true, old_count, *accumulated, *emission_word, ctx);
@@ -1043,11 +1042,8 @@ fn start_common(
             system.emitter.ring_buffer_mode, maximum, old_count, |_, _| replaced += 1),
     }
     system.died_total += replaced;
-    if let (Some(lanes), Some(custom)) = (lanes, system.custom_law.as_mut()) {
-        custom.birth(old_count, &lanes, live_newborns, &system.pool[old_count..]);
-        if let Some(reason) = custom.refused() {
-            return Err(BirthRefused::Unsupported(reason));
-        }
+    if let Some(lanes) = lanes {
+        storage_birth(system, old_count, &lanes, live_newborns).map_err(BirthRefused::Unsupported)?;
     }
     *random = next;
     if let (Some(destination), Some(next)) = (shape_stream.as_mut(), next_shape) {

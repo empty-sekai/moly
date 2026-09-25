@@ -638,7 +638,7 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.velocity_law = e.velocity_over_lifetime.as_ref().map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission"));
     system.force_law = e.force.as_ref().map(|p| moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission"));
     system.gravity_law = moly_law::particle::gravity::Gravity::new(&e.start.gravity_modifier).expect("curves validated during admission");
-    system.size_law = e.size_over_lifetime.as_ref().map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission"));
+    system.size_law = crate::particle_runtime::size_over_lifetime_law(e).map(|law| law.expect("curves validated during admission"));
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
     system.custom_law = e.custom_data.as_ref().map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission"));
     system.sub_emitter_max_lifetime = planned.sub_emitter_max_lifetime;
