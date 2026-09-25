@@ -25,8 +25,10 @@
 //! from every unavailable rectangle, 3 m clear of the arrival point and 3 m
 //! apart; the kinds and counts per site are the mock's choice, and a kind
 //! appears only on a site where a material of its type lists that site.
-//! Treasure boxes (paper airplane lane), tone (camera lane) and birthday
-//! plants (event calendar) are left out and named.
+//! The fixed treasure box is placed once per site with one drop row of a
+//! material of type 3 (the mock's choice); the transported box (paper
+//! airplane), tone and birthday plants (event calendar) are left out and
+//! named.
 
 use std::collections::BTreeMap;
 
@@ -149,23 +151,20 @@ pub(crate) struct MockInputs {
 
 /// Kinds the map mock places, with the mock's per-site count and the material
 /// type its drop rows come from.
-const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 6] = [
+const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 7] = [
     (0, "wood", 6, Some(0)),
     (1, "mineral", 5, Some(1)),
     (2, "plant", 5, Some(2)),
     (5, "other", 4, Some(3)),
     (8, "driftage", 1, Some(3)),
     (7, "toolbox", 1, None),
+    (4, "treasure_box_fixed", 1, Some(3)),
 ];
 /// Kinds left out of the mock map, and who places them.
-pub(crate) const MOCK_EXCLUDED: [(&str, &str); 4] = [
+pub(crate) const MOCK_EXCLUDED: [(&str, &str); 3] = [
     (
         "treasure_box_transport",
         "paper airplane and spawn API (later lane)",
-    ),
-    (
-        "treasure_box_fixed",
-        "treasure boxes need AutoMove and the box open (later lane)",
     ),
     (
         "tone",

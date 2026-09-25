@@ -567,6 +567,7 @@ pub(crate) fn advance(
             Without<crate::talk::TalkHold>,
             Without<PlayerFixtureHeld>,
             Without<crate::entry::EntryHold>,
+            Without<crate::harvest::HarvestAutoMoveHeld>,
         ),
     >,
     mut boundary: Local<Boundary>,

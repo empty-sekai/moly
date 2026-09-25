@@ -13,6 +13,11 @@
 //! The punch is `DOPunchPosition((0.01, 0, 0), 0.7, 6, 1)` on every kind,
 //! never killed first (two overlapping punches run together). In the product
 //! frame the source x axis is reflected, so the punch goes along -x.
+//!
+//! The EffectOnly clip event plays the effect part alone
+//! (`PlayDamageEffectForIndefinite`: the multi views' effect, boost effect,
+//! hit SE and punch without the last-attack SEs; the single views'
+//! `PlayDamageEffect`, boost effect and SE), with no damage and no drop.
 
 use bevy::prelude::*;
 
@@ -48,6 +53,25 @@ const FADE_DELAY: f32 = 2.0;
 const FADE_DURATION: f32 = 0.5;
 /// Driftage and toolbox disappear after `UniTask.Delay(1.0 s)`.
 const DELAYED_HIDE: f32 = 1.0;
+
+/// EffectOnly requests of this frame (`PlayDamageEffectForIndefinite`).
+#[derive(Resource, Default)]
+pub(crate) struct HarvestEffectOnly(pub(crate) Vec<EffectOnly>);
+
+pub(crate) struct EffectOnly {
+    pub(crate) target: Entity,
+    pub(crate) tool_level: i32,
+    pub(crate) is_boost: bool,
+}
+
+/// Object turns to start (`DORotate((0, yaw, 0), 0.2, Fast)`, the default
+/// ease OutQuad): the treasure box's PostStartAction. Yaw in the product
+/// frame.
+#[derive(Resource, Default)]
+pub(crate) struct HarvestTurnRequests(pub(crate) Vec<(Entity, f32)>);
+
+/// The treasure box's turn duration.
+const TURN_DURATION: f32 = 0.2;
 
 /// The toolbox's `OnPlayerActionStart` also waits `Delay(1.0 s)` and then
 /// turns its box off (and stops its cut particle): the earlier of this and
@@ -159,95 +183,21 @@ pub(crate) fn on_damage(
         }
         let last = object.is_last_attack;
         let position = transform.translation;
-        // The multi effects stand 0.2 m back toward the player and 0.35 m up.
-        let effect_at = match player {
-            Some(player) => {
-                let dir =
-                    Vec2::new(position.x - player.x, position.z - player.z).normalize_or_zero();
-                position + Vec3::new(-0.2 * dir.x, 0.35, -0.2 * dir.y)
-            }
-            None => position + Vec3::Y * 0.35,
-        };
-        // ... and turn to face the player (`LookRotation(-0.2 * dir)`; in the
-        // product frame the yaw of that direction).
-        let facing = match player {
-            Some(player) => {
-                let back = Vec2::new(player.x - position.x, player.z - position.z);
-                if back.length_squared() > 0.0 {
-                    Quat::from_rotation_y(back.x.atan2(back.y))
-                } else {
-                    Quat::IDENTITY
-                }
-            }
-            None => Quat::IDENTITY,
-        };
-        let mut cues: Vec<&'static str> = Vec::new();
-        let mut hooks: Vec<u16> = Vec::new();
-        match object.interface {
-            ActionInterface::Multi => {
-                if let Some(kind) = multi_hit_effect(object.class, hit.tool_level) {
-                    hooks.push(kind);
-                }
-                if hit.is_boost {
-                    hooks.push(if hit.tool_level == 5 { 143 } else { 141 });
-                }
-                cues.extend(object.cues.hit);
-                if last {
-                    cues.extend(object.cues.last);
-                    cues.extend(object.cues.rare_break);
-                }
-            }
-            ActionInterface::Single => {
-                match object.class {
-                    "MysekaiAreaPlantView" => hooks.push(101),
-                    "MysekaiAreadDriftageView" => hooks.push(133),
-                    // PlayDamageEffect: the cut particle plays (not drawn)
-                    // and the Animator opens.
-                    "MysekaiAreaTreasureBoxView" => animator_calls
-                        .0
-                        .push((hit.target, PropCall::SetBool("open", true))),
-                    _ => {}
-                }
-                if hit.is_boost
-                    && matches!(
-                        object.class,
-                        "MysekaiAreaJunkView"
-                            | "MysekaiAreadDriftageView"
-                            | "MysekaiBirthdayPlantView"
-                    )
-                {
-                    hooks.push(141);
-                }
-                cues.extend(object.cues.hit);
-            }
-        }
-        // The single-action views emit at their own position.
-        for kind in &hooks {
-            effects.pending.push(match object.interface {
-                ActionInterface::Multi => EffectHook {
-                    kind: *kind,
-                    position: effect_at,
-                    rotation: facing,
-                },
-                ActionInterface::Single => EffectHook::at(*kind, position),
-            });
-        }
-        for cue in &cues {
-            push_se(&mut se, cue, "harvest-hit");
-        }
-        // DamageAnimation on every kind.
-        let tween = PointTween::new(
-            punch_points(PUNCH, PUNCH_DURATION, PUNCH_VIBRATO, PUNCH_ELASTICITY),
-            SegmentEase::OutQuad,
+        let (cues, hooks) = damage_effect(
+            hit.target,
+            &object,
+            position,
+            player,
+            hit.tool_level,
+            hit.is_boost,
+            last,
+            &mut effects,
+            &mut se,
+            &mut animator_calls,
+            "harvest-hit",
         );
-        match punches.get_mut(hit.target) {
-            Ok(mut list) => list.0.push(tween),
-            Err(_) => {
-                commands
-                    .entity(hit.target)
-                    .insert(HarvestPunches(vec![tween]));
-            }
-        }
+        // DamageAnimation on every kind.
+        push_punch(&mut commands, &mut punches, hit.target);
         // HandleResourceDrop: the last attack takes every remaining row
         // (row hp >= hp after); other hits the rows with hp < row hp <= prev.
         assert!(
@@ -593,6 +543,204 @@ pub(crate) fn advance_after_forms(
             }
         }
     }
+}
+
+/// The effect part of `PlayMultiActionDamageEffect(toolLevel, boost, last)`
+/// and `PlaySingleActionDamageEffect(boost)`: the effect hooks, the boost
+/// effect, the SE cues (the last-attack SEs only with `last`), and the
+/// treasure box's `open`. The punch is the caller's. Returns the cues and
+/// the hooks for the caller's line.
+#[allow(clippy::too_many_arguments)]
+fn damage_effect(
+    target: Entity,
+    object: &HarvestObject,
+    position: Vec3,
+    player: Option<Vec3>,
+    tool_level: i32,
+    is_boost: bool,
+    last: bool,
+    effects: &mut HarvestEffectHooks,
+    se: &mut SeRequests,
+    animator_calls: &mut PropAnimatorCalls,
+    label: &'static str,
+) -> (Vec<&'static str>, Vec<u16>) {
+    // The multi effects stand 0.2 m back toward the player and 0.35 m up.
+    let effect_at = match player {
+        Some(player) => {
+            let dir = Vec2::new(position.x - player.x, position.z - player.z).normalize_or_zero();
+            position + Vec3::new(-0.2 * dir.x, 0.35, -0.2 * dir.y)
+        }
+        None => position + Vec3::Y * 0.35,
+    };
+    // ... and turn to face the player (`LookRotation(-0.2 * dir)`; in the
+    // product frame the yaw of that direction).
+    let facing = match player {
+        Some(player) => {
+            let back = Vec2::new(player.x - position.x, player.z - position.z);
+            if back.length_squared() > 0.0 {
+                Quat::from_rotation_y(back.x.atan2(back.y))
+            } else {
+                Quat::IDENTITY
+            }
+        }
+        None => Quat::IDENTITY,
+    };
+    let mut cues: Vec<&'static str> = Vec::new();
+    let mut hooks: Vec<u16> = Vec::new();
+    match object.interface {
+        ActionInterface::Multi => {
+            if let Some(kind) = multi_hit_effect(object.class, tool_level) {
+                hooks.push(kind);
+            }
+            if is_boost {
+                hooks.push(if tool_level == 5 { 143 } else { 141 });
+            }
+            cues.extend(object.cues.hit);
+            if last {
+                cues.extend(object.cues.last);
+                cues.extend(object.cues.rare_break);
+            }
+        }
+        ActionInterface::Single => {
+            match object.class {
+                "MysekaiAreaPlantView" => hooks.push(101),
+                "MysekaiAreadDriftageView" => hooks.push(133),
+                // PlayDamageEffect: the cut particle plays (not drawn) and
+                // the Animator opens.
+                "MysekaiAreaTreasureBoxView" => animator_calls
+                    .0
+                    .push((target, PropCall::SetBool("open", true))),
+                _ => {}
+            }
+            if is_boost
+                && matches!(
+                    object.class,
+                    "MysekaiAreaJunkView" | "MysekaiAreadDriftageView" | "MysekaiBirthdayPlantView"
+                )
+            {
+                hooks.push(141);
+            }
+            cues.extend(object.cues.hit);
+        }
+    }
+    // The single-action views emit at their own position.
+    for kind in &hooks {
+        effects.pending.push(match object.interface {
+            ActionInterface::Multi => EffectHook {
+                kind: *kind,
+                position: effect_at,
+                rotation: facing,
+            },
+            ActionInterface::Single => EffectHook::at(*kind, position),
+        });
+    }
+    for cue in &cues {
+        push_se(se, cue, label);
+    }
+    (cues, hooks)
+}
+
+/// `DOPunchPosition((0.01, 0, 0), 0.7, 6, 1)` added to the object's running
+/// punches.
+fn push_punch(commands: &mut Commands, punches: &mut Query<&mut HarvestPunches>, target: Entity) {
+    let tween = PointTween::new(
+        punch_points(PUNCH, PUNCH_DURATION, PUNCH_VIBRATO, PUNCH_ELASTICITY),
+        SegmentEase::OutQuad,
+    );
+    match punches.get_mut(target) {
+        Ok(mut list) => list.0.push(tween),
+        Err(_) => {
+            commands.entity(target).insert(HarvestPunches(vec![tween]));
+        }
+    }
+}
+
+/// Update, after the action: the EffectOnly clip events
+/// (`PlayDamageEffectForIndefinite(toolLevel, boost)`, `isLastAttack` false).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn on_effect_only(
+    mut commands: Commands,
+    mut requests: ResMut<HarvestEffectOnly>,
+    objects: Query<(&HarvestObject, &Transform)>,
+    mut punches: Query<&mut HarvestPunches>,
+    players: Query<&Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
+    mut se: ResMut<SeRequests>,
+    mut effects: ResMut<HarvestEffectHooks>,
+    mut animator_calls: ResMut<PropAnimatorCalls>,
+) {
+    let player = players.single().ok().map(|transform| transform.translation);
+    for request in std::mem::take(&mut requests.0) {
+        let Ok((object, transform)) = objects.get(request.target) else {
+            continue;
+        };
+        let (cues, hooks) = damage_effect(
+            request.target,
+            object,
+            transform.translation,
+            player,
+            request.tool_level,
+            request.is_boost,
+            false,
+            &mut effects,
+            &mut se,
+            &mut animator_calls,
+            "harvest-effect-only",
+        );
+        let punched = matches!(object.interface, ActionInterface::Multi);
+        if punched {
+            push_punch(&mut commands, &mut punches, request.target);
+        }
+        info!(
+            "[harvest] {}#{} PlayDamageEffectForIndefinite: effect hooks {:?}, SE {:?}{}",
+            object.leaf,
+            object.fixture_id,
+            hooks,
+            cues,
+            if punched { ", punch" } else { "" }
+        );
+    }
+}
+
+/// Update: object turns (`DORotate` on the yaw, `RotateMode.Fast`: the
+/// change wrapped to the shortest way; default ease OutQuad; the frame that
+/// starts a tween counts).
+pub(crate) fn advance_turns(
+    time: Res<Time>,
+    mut requests: ResMut<HarvestTurnRequests>,
+    mut running: Local<Vec<(Entity, f32, f32, crate::site_move::timeline::TweenClock)>>,
+    mut objects: Query<(&HarvestObject, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, to) in std::mem::take(&mut requests.0) {
+        if let Ok((_, transform)) = objects.get(entity) {
+            let from = transform.rotation.to_euler(EulerRot::YXZ).0;
+            running.push((
+                entity,
+                from,
+                to,
+                crate::site_move::timeline::TweenClock::new(TURN_DURATION),
+            ));
+        }
+    }
+    running.retain_mut(|(entity, from, to, clock)| {
+        let Ok((object, mut transform)) = objects.get_mut(*entity) else {
+            return false;
+        };
+        let t = crate::camera::out_quad(clock.advance(dt));
+        transform.rotation = Quat::from_rotation_y(super::law::fast_yaw(*from, *to, t));
+        if clock.done() {
+            info!(
+                "[harvest] {}#{} turn done: yaw {:.2} deg (read back; target {:.2} deg, from {:.2} deg)",
+                object.leaf,
+                object.fixture_id,
+                transform.rotation.to_euler(EulerRot::YXZ).0.to_degrees(),
+                to.to_degrees(),
+                from.to_degrees()
+            );
+            return false;
+        }
+        true
+    });
 }
 
 /// Update: the toolbox's swing-start hide.

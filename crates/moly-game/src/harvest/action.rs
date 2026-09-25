@@ -20,10 +20,13 @@
 //!    of an earlier press: that press ends there, its steps 10-11 never run);
 //! 6. Start: the Start swing and its cool-down;
 //! 7. speed (`GetAnimationSpeed`), `IsAutoChangedTool = false`;
-//! 8. loop: facing (0.2 s, Linear), the swing clip (clip clock at 1.0 then
-//!    set to the speed), `OnPlayerActionStart`, the boost effect, and the
-//!    cool-down `Delay(GetHarvestActionTime / speed)`; then
-//!    `CanContinueAction`;
+//! 8. loop: `PrePlayerHarvestMotion` (the two treasure kinds: the player
+//!    turns toward the box, 0.2 s Linear, and AutoMoves to 0.6 m from it,
+//!    threshold 0.3, no timeout; every other kind goes on at once), facing
+//!    (0.2 s, Linear), the swing clip (clip clock at 1.0 then set to the
+//!    speed `GetAnimationSpeed` reads again on every iteration),
+//!    `OnPlayerActionStart`, the boost effect, and the cool-down
+//!    `Delay(GetHarvestActionTime / speed)`; then `CanContinueAction`;
 //! 9. intercept open; with a tool, the End clip and
 //!    `WhenAny(Delay(End length), WaitWhile(state == 7))`;
 //! 10. the target re-read: alive -> `UpdateHarvestUI`; else contacts
@@ -37,10 +40,17 @@
 //! convention; the animator's own first-frame timing is not read). The SD
 //! body plays the stand-in table (`stand_in`), which never drives the clock.
 //!
-//! Named gaps: treasure-box auto-move (types 3 and 4 are not placed by the
-//! mock); the tone camera; the stamina gauge, HUD and AISAC; the tool
+//! Clip events: `EffectOnly` runs `PlayDamageEffectForIndefinite` (the
+//! effect part of a hit, `damage::on_effect_only`) and the camera shake;
+//! `PostStartAction` turns a treasure box away from the player.
+//!
+//! Named gaps: the tone camera; the stamina gauge, HUD and AISAC; the tool
 //! selector; `EnableMysekaiHarvestButton` (menu, mission, site map and
-//! selected-tool views are not disabled during the action).
+//! selected-tool views are not disabled during the action). The AutoMove's
+//! agent is the walk-field stepper (steering corner by corner at the agent
+//! speed, clamped at each corner), not a NavMeshAgent; the pitch `LookAt`
+//! would give a sloped step is not applied; the photo-shot flag that can stop
+//! an AutoMove after 0.5 s without progress is taken as off.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -73,6 +83,7 @@ use crate::player::{PlayerControlled, PlayerInput};
 use crate::player_avatar::{
     AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, PlayerVisualClips,
 };
+use crate::player_fixture_action::PlayerFixtureNavigation;
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 
 /// `PlayerAvatarView.PlayAnimation(name, 0.25, 1.0)` and the Idle state's
@@ -180,6 +191,34 @@ enum Phase {
     End {
         wait: crate::site_move::timeline::Delay,
     },
+    /// Step 8's `PrePlayerHarvestMotion` for the treasure kinds: the AutoMove
+    /// to the stand-off point, then the swing.
+    PreMotion { auto: AutoMove },
+}
+
+/// `AutoMoveForTargetPosition(player, target, 0.3)` and the AutoMove state it
+/// enters (`PlayerAvatarAutoMoveState`).
+struct AutoMove {
+    /// `ActionData.TargetPosition`: the stand-off point.
+    target: Vec3,
+    corners: Vec<Vec3>,
+    cursor: usize,
+    speed: f32,
+    /// The player state before `ChangeStateAutoMove`, restored after it.
+    recorded: PlayerActionState,
+    /// The state left AutoMove; the `WaitUntil` (Update timing) sees it on the
+    /// next frame.
+    left: bool,
+    unchanged: f32,
+    held_logged: bool,
+}
+
+/// On the player while the harvest AutoMove holds it: the AutoMove state owns
+/// the agent and a Move request is dropped by the closed intercept gate, so
+/// joystick input moves nothing (`player::advance` skips the player).
+#[derive(Component)]
+pub(crate) struct HarvestAutoMoveHeld {
+    dash: bool,
 }
 
 /// The source clip clock of the current `PlayHarvestMotion`.
@@ -249,6 +288,13 @@ impl Default for HarvestAction {
 impl HarvestAction {
     pub(crate) fn in_progress(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// The harvest AutoMove is running (until the state leaves AutoMove).
+    fn auto_moving(&self) -> bool {
+        self.current.as_ref().is_some_and(
+            |current| matches!(&current.phase, Phase::PreMotion { auto } if !auto.left),
+        )
     }
 }
 
@@ -450,6 +496,9 @@ pub(crate) struct ActionWorld<'w> {
     shakes: ResMut<'w, HarvestCameraShakes>,
     animator_calls: ResMut<'w, PropAnimatorCalls>,
     start_hides: ResMut<'w, super::damage::HarvestStartHides>,
+    effect_only: ResMut<'w, super::damage::HarvestEffectOnly>,
+    turns: ResMut<'w, super::damage::HarvestTurnRequests>,
+    navigation: Option<Res<'w, PlayerFixtureNavigation>>,
 }
 
 /// Update: contacts and the target (`OnCollisionEnter/Exit`, `OnUpdate`,
@@ -637,6 +686,7 @@ pub(crate) fn advance(
             break;
         }
         let clip = swing.clip.clone();
+        let player = players.single().ok().map(|transform| transform.translation);
         for (event_time, kind) in due {
             on_animation_event(
                 &mut action,
@@ -648,6 +698,7 @@ pub(crate) fn advance(
                 kind,
                 event_time,
                 &clip,
+                player,
             );
         }
     }
@@ -770,6 +821,41 @@ pub(crate) fn advance(
                         finish = true;
                     }
                 }
+            }
+        }
+        Phase::PreMotion { auto } => {
+            if auto.left {
+                // The WaitUntil sees the state leave AutoMove: the intercept
+                // gate opens, the recorded state comes back, the gate closes.
+                let recorded = auto.recorded;
+                world.states.can_intercept = true;
+                world.states.change_status(recorded);
+                world.states.can_intercept = false;
+                info!(
+                    "[harvest] AutoMove done at {:.3} s since the press: player state {:?} again, intercept closed",
+                    now - current.pressed_at,
+                    world.states.current
+                );
+                match world.targeting.target {
+                    Some(target) => swing(
+                        &mut action,
+                        &mut world,
+                        &mut body,
+                        &mut model,
+                        &catalog,
+                        &clips,
+                        &mut players,
+                        &objects,
+                        &mut current,
+                        target,
+                        boost_speed,
+                        frame,
+                        now,
+                    ),
+                    None => info!("[harvest] loop: no target"),
+                }
+            } else {
+                step_auto_move(auto, &mut world, &mut players, dt, now - current.pressed_at);
             }
         }
         Phase::End { wait } => {
@@ -1032,7 +1118,7 @@ fn motion(
     body.play(&mut current.token, name, state, length, speed, true);
 }
 
-/// One loop iteration (step 8).
+/// One loop iteration (step 8): `PrePlayerHarvestMotion`, then the swing.
 #[allow(clippy::too_many_arguments)]
 fn begin_loop(
     action: &mut HarvestAction,
@@ -1057,12 +1143,237 @@ fn begin_loop(
         info!("[harvest] loop: no target");
         return;
     };
+    // PrePlayerHarvestMotion: the kinds outside mask 0x3E7 (the two treasure
+    // boxes) walk up to the box first; every other kind goes on at once.
+    if matches!(current.fixture_type, 3 | 4) {
+        start_pre_motion(world, players, objects, current, target, now);
+        return;
+    }
+    swing(
+        action,
+        world,
+        body,
+        model,
+        catalog,
+        clips,
+        players,
+        objects,
+        current,
+        target,
+        boost_speed,
+        frame,
+        now,
+    );
+}
+
+/// `PrePlayerHarvestMotion` for a treasure box: `RotateTargetObject` (fire
+/// and forget) and `AutoMoveForTargetPosition(stand-off, 0.3)`.
+fn start_pre_motion(
+    world: &mut ActionWorld,
+    players: &mut Query<&mut Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
+    objects: &Query<(&Transform, &HarvestObject)>,
+    current: &mut Action,
+    target: Entity,
+    now: f64,
+) {
+    let (Ok(player), Ok((object_transform, object))) = (players.single(), objects.get(target))
+    else {
+        return;
+    };
+    let box_position = object_transform.translation;
+    let stand_off = law::treasure_stand_off(box_position, player.translation);
+    // RotateTargetObject: DORotateQuaternion toward the box as seen from the
+    // stand-off point, 0.2 s, Linear (a zero direction keeps the rotation).
+    let from = yaw_of(player.rotation);
+    let look = box_position - stand_off;
+    let to = if Vec2::new(look.x, look.z).length_squared() > 0.0 {
+        law::facing_yaw(Vec2::new(look.x, look.z))
+    } else {
+        from
+    };
+    current.facing = Some(Facing {
+        from,
+        to,
+        clock: crate::site_move::timeline::TweenClock::new(FACING_DURATION),
+    });
+    // AutoMoveForTargetPosition: record the state, gate open,
+    // ChangeStateAutoMove(target, 0.3), gate closed; the state's Initialize
+    // sets the agent's destination and plays AvatarConfig.RunMotion.
+    let recorded = world.states.current;
+    world.states.can_intercept = true;
+    world.states.change_status(PlayerActionState::AutoMove);
+    world.states.can_intercept = false;
+    let (corners, speed, path_note) = match world.navigation.as_deref() {
+        Some(navigation) => match navigation.world.path(player.translation, stand_off) {
+            Ok(path) => (
+                path.corners,
+                navigation.agent_speed,
+                format!("query succeeded {}", path.query_succeeded),
+            ),
+            Err(error) => (
+                Vec::new(),
+                navigation.agent_speed,
+                format!("no path ({error:?}): the agent steers to where it stands"),
+            ),
+        },
+        None => (
+            Vec::new(),
+            0.0,
+            "no walk-field navigation installed: the agent does not move".to_owned(),
+        ),
+    };
+    info!(
+        "[harvest] PrePlayerHarvestMotion {}#{} at {:.3} s since the press: RotateTargetObject yaw {:.1} -> {:.1} deg (0.2 s, Linear); AutoMove from ({:.3}, {:.3}, {:.3}) to the stand-off ({:.3}, {:.3}, {:.3}) {:.3} m from the box, threshold {}, no timeout; {} path corners ({path_note}), agent speed {speed:.3}; player state {:?} -> {:?}, intercept closed; the AutoMove state plays AvatarConfig.RunMotion (avatar motion 37) on the player",
+        object.leaf,
+        object.fixture_id,
+        now - current.pressed_at,
+        from.to_degrees(),
+        to.to_degrees(),
+        player.translation.x,
+        player.translation.y,
+        player.translation.z,
+        stand_off.x,
+        stand_off.y,
+        stand_off.z,
+        stand_off.distance(box_position),
+        law::TREASURE_AUTO_MOVE_THRESHOLD,
+        corners.len(),
+        recorded,
+        world.states.current
+    );
+    current.phase = Phase::PreMotion {
+        auto: AutoMove {
+            target: stand_off,
+            corners,
+            cursor: 0,
+            speed,
+            recorded,
+            left: false,
+            unchanged: 0.0,
+            held_logged: false,
+        },
+    };
+}
+
+/// One frame of the AutoMove state: the arrival test, else `LookAt` and the
+/// agent's step (toward the steering corner at the agent speed, not past it,
+/// on the walk field).
+fn step_auto_move(
+    auto: &mut AutoMove,
+    world: &mut ActionWorld,
+    players: &mut Query<&mut Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
+    dt: f32,
+    since_press: f64,
+) {
+    let Ok(mut transform) = players.single_mut() else {
+        return;
+    };
+    let position = transform.translation;
+    while auto
+        .corners
+        .get(auto.cursor)
+        .is_some_and(|corner| position.distance(*corner) <= 0.00001)
+    {
+        auto.cursor += 1;
+    }
+    // With no path the steering target is where the agent stands.
+    let steering = auto
+        .corners
+        .get(auto.cursor)
+        .or(auto.corners.last())
+        .copied()
+        .unwrap_or(position);
+    match law::auto_move_step(
+        position,
+        steering,
+        auto.target,
+        auto.speed,
+        law::TREASURE_AUTO_MOVE_THRESHOLD,
+    ) {
+        law::AutoMoveStep::Arrived => {
+            world.states.can_intercept = true;
+            world.states.change_status(PlayerActionState::Idle);
+            auto.left = true;
+            info!(
+                "[harvest] AutoMove arrived at {since_press:.3} s since the press: player ({:.3}, {:.3}, {:.3}), {:.3} m from the stand-off (below {}), on its steering corner; SetInterceptFlag(true), next state {:?}",
+                position.x,
+                position.y,
+                position.z,
+                position.distance(auto.target),
+                law::TREASURE_AUTO_MOVE_THRESHOLD,
+                world.states.current
+            );
+        }
+        law::AutoMoveStep::Move(velocity) => {
+            if dt <= 0.0 {
+                return;
+            }
+            // LookAt: the rotation looks along the agent velocity.
+            if velocity.x != 0.0 || velocity.z != 0.0 {
+                transform.rotation = Quat::from_rotation_y(velocity.x.atan2(velocity.z));
+            }
+            let step = velocity * dt;
+            let delta = steering - position;
+            let requested = if step.length_squared() >= delta.length_squared() {
+                steering
+            } else {
+                position + step
+            };
+            let accepted = world
+                .navigation
+                .as_deref()
+                .and_then(|navigation| navigation.world.constrain_move(position, requested))
+                .filter(|point| point.is_finite())
+                .unwrap_or(position);
+            transform.translation = accepted;
+            // Diagnostic only: the source has no timeout.
+            if accepted.distance(position) < 0.001 {
+                auto.unchanged += dt;
+            } else {
+                auto.unchanged = 0.0;
+            }
+            if auto.unchanged >= 0.5 && !auto.held_logged {
+                auto.held_logged = true;
+                warn!(
+                    "[harvest] AutoMove held at ({:.3}, {:.3}, {:.3}) for 0.5 s, {:.3} m from the stand-off (threshold {}); the source has no timeout, the action waits",
+                    accepted.x,
+                    accepted.y,
+                    accepted.z,
+                    accepted.distance(auto.target),
+                    law::TREASURE_AUTO_MOVE_THRESHOLD
+                );
+            }
+        }
+    }
+}
+
+/// The swing of one loop iteration (`PlayHarvestMotion` onward).
+#[allow(clippy::too_many_arguments)]
+fn swing(
+    action: &mut HarvestAction,
+    world: &mut ActionWorld,
+    body: &mut Body,
+    model: &mut HarvestPlayerModel,
+    catalog: &HarvestCatalog,
+    clips: &HarvestClips,
+    players: &mut Query<&mut Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
+    objects: &Query<(&Transform, &HarvestObject)>,
+    current: &mut Action,
+    target: Entity,
+    boost_speed: f32,
+    frame: u64,
+    now: f64,
+) {
     let clock = current.tool.and_then(|id| catalog.tool(id)).map(tool_clock);
     let name = harvest_clip_name(current.fixture_type, clock, current.state);
     let length = name
         .as_deref()
         .and_then(|name| clips.get(name))
         .map_or(0.0, |clip| clip.length);
+    // GetAnimationSpeed / SetAnimationSpeed right after PlayHarvestMotion on
+    // every iteration: a boost that runs out between swings brings the next
+    // swing back to 1.0.
+    current.speed = animation_speed(model.stamina, boost_speed);
     let speed = current.speed;
     motion(
         action,
@@ -1142,6 +1453,7 @@ fn on_animation_event(
     kind: ClipEvent,
     event_time: f32,
     clip: &str,
+    player: Option<Vec3>,
 ) {
     let in_state = world.states.current == PlayerActionState::Harvest;
     let kind = match kind {
@@ -1187,20 +1499,55 @@ fn on_animation_event(
             });
         }
         ClipEvent::EffectOnly => {
+            // PlayDamageEffect: PlayDamageEffectForIndefinite(toolLevel or 0,
+            // boost), then ShakeHarvestCamera with a tool.
             info!(
-                "[harvest] {clip} EffectOnly at {event_time:.4}: PlayDamageEffectForIndefinite on {}#{} (effect-pool step)",
-                object.leaf, object.fixture_id
+                "[harvest] {clip} EffectOnly at {event_time:.4}: PlayDamageEffectForIndefinite on {}#{} (tool level {}, boost {boost})",
+                object.leaf,
+                object.fixture_id,
+                def.map_or(0, |def| def.level)
             );
-            let _ = transform;
+            world.effect_only.0.push(super::damage::EffectOnly {
+                target,
+                tool_level: def.map_or(0, |def| def.level),
+                is_boost: boost,
+            });
             if let Some(def) = def {
                 push_shake(&mut world.shakes, def.id);
             }
         }
         ClipEvent::PostStartAction => {
-            info!(
-                "[harvest] {clip} PostStartAction at {event_time:.4} on {}#{}",
-                object.leaf, object.fixture_id
-            );
+            if object.class == "MysekaiAreaTreasureBoxView" {
+                // The treasure box's PostStartAction: n = the unit vector
+                // from the box to the player on x/z (zero within 1e-5); the
+                // box turns to atan2(n.x, n.z) + 180 deg with DORotate(0.2,
+                // Fast), default ease. The product frame reflects x, so the
+                // yaw is the facing yaw of n plus pi.
+                let d = player.map_or(Vec2::ZERO, |player| {
+                    Vec2::new(
+                        player.x - transform.translation.x,
+                        player.z - transform.translation.z,
+                    )
+                });
+                let n = if d.length() > 1e-5 {
+                    d / d.length()
+                } else {
+                    Vec2::ZERO
+                };
+                let to = law::facing_yaw(n) + std::f32::consts::PI;
+                world.turns.0.push((target, to));
+                info!(
+                    "[harvest] {clip} PostStartAction at {event_time:.4} on {}#{}: the box turns to yaw {:.1} deg (away from the player)",
+                    object.leaf,
+                    object.fixture_id,
+                    to.to_degrees()
+                );
+            } else {
+                info!(
+                    "[harvest] {clip} PostStartAction at {event_time:.4} on {}#{}: the view has no PostStartAction body here",
+                    object.leaf, object.fixture_id
+                );
+            }
         }
         ClipEvent::HitInHarvestState => unreachable!("mapped above"),
     }
@@ -1475,11 +1822,51 @@ fn kind_type(word: &str) -> Option<i32> {
         "wood" => 0,
         "mineral" => 1,
         "plant" => 2,
+        // Both treasure packages' views carry type 3 (the fixed box's master
+        // row says 4).
+        "treasure" => 3,
         "other" => 5,
         "toolbox" => 7,
         "driftage" => 8,
         _ => return None,
     })
+}
+
+/// Update, after `advance`: while the harvest AutoMove runs the player
+/// carries [`HarvestAutoMoveHeld`] and the locomotion runs its run gait (the
+/// AutoMove state's `ChangeAnimation(RunMotion)`, as the fixture approach
+/// does); after it the gait and the dash flag come back.
+pub(crate) fn hold_for_auto_move(
+    action: Res<HarvestAction>,
+    mut commands: Commands,
+    mut players: Query<
+        (
+            Entity,
+            &mut crate::npc::MotionPhase,
+            &mut crate::player::DashMode,
+            Option<&HarvestAutoMoveHeld>,
+        ),
+        With<PlayerControlled>,
+    >,
+) {
+    let holding = action.auto_moving();
+    for (entity, mut phase, mut dash, held) in &mut players {
+        match (holding, held) {
+            (true, None) => {
+                commands
+                    .entity(entity)
+                    .insert(HarvestAutoMoveHeld { dash: dash.0 });
+                *phase = crate::npc::MotionPhase::Walking;
+                dash.0 = true;
+            }
+            (false, Some(held)) => {
+                dash.0 = held.dash;
+                *phase = crate::npc::MotionPhase::Dwelling { remaining: None };
+                commands.entity(entity).remove::<HarvestAutoMoveHeld>();
+            }
+            _ => {}
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1768,11 +2155,20 @@ pub(crate) fn autoplay_press(
 /// Queued by the site change: the action, the target and the button go with
 /// the site.
 pub(crate) fn cancel_for_site_change(world: &mut World) {
+    let was_auto_moving = world.resource::<HarvestAction>().auto_moving();
     let token = world
         .resource_mut::<HarvestAction>()
         .current
         .take()
         .and_then(|current| current.token);
+    if was_auto_moving {
+        let mut states = world.resource_mut::<PlayerAvatarStates>();
+        if states.current == PlayerActionState::AutoMove {
+            states.can_intercept = true;
+            states.change_status(PlayerActionState::Idle);
+        }
+        info!("[harvest] site change during the treasure AutoMove: the AutoMove is dropped with the site");
+    }
     {
         let mut action = world.resource_mut::<HarvestAction>();
         action.cooling = false;

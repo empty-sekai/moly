@@ -57,6 +57,7 @@ use crate::site::GroundMeshes;
 use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
+pub(crate) use action::HarvestAutoMoveHeld;
 pub(crate) use arrival::HarvestViewNodes;
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
@@ -647,6 +648,8 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     world.resource_mut::<HarvestSpawnedCount>().0 = 0;
     world.resource_mut::<HarvestDropBatches>().0.clear();
     world.resource_mut::<damage::HarvestStartHides>().0.clear();
+    world.resource_mut::<damage::HarvestEffectOnly>().0.clear();
+    world.resource_mut::<damage::HarvestTurnRequests>().0.clear();
     world
         .resource_mut::<prop_animator::PropAnimatorCalls>()
         .0
@@ -726,6 +729,8 @@ impl Plugin for HarvestPlugin {
             .init_resource::<effects::HarvestEffects>()
             .init_resource::<prop_animator::PropAnimatorCalls>()
             .init_resource::<damage::HarvestStartHides>()
+            .init_resource::<damage::HarvestEffectOnly>()
+            .init_resource::<damage::HarvestTurnRequests>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),
@@ -750,13 +755,15 @@ impl Plugin for HarvestPlugin {
                     ui::read_input,
                     action::autoplay_press,
                     action::update_targets,
-                    action::advance,
+                    (action::advance, action::hold_for_auto_move).chain(),
+                    damage::on_effect_only,
                     damage::on_damage,
                     action::after_hits,
                     drops::spawn,
                     damage::advance_punches,
                     damage::advance_after_forms,
                     damage::advance_start_hides,
+                    damage::advance_turns,
                     prop_animator::advance,
                     drops::advance_animations,
                     pickup::collect_on_leave,
