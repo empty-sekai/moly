@@ -1307,9 +1307,18 @@ fn baked(state: &CoverageState) -> bool {
     matches!(state, CoverageState::BakedIntoClip { evidence } if !evidence.is_empty())
 }
 
-/// Explicit cast bindings are accepted only when the source track identifies
-/// that exact unit and the actual entity belongs to the current admitted talk.
-/// The single-player/NPC owner contract is otherwise unchanged.
+/// Which actor a track of the selected Director may drive.
+///
+/// A player timeline drives only its owner. An NPC timeline drives its owner
+/// and, for a fixture talk with several characters, every other member of
+/// that talk: the source plays one Director for every member of such a talk.
+/// A member other than the owner is accepted when the track is named after
+/// the member's unit and the member holds the NPC fixture movement lease of
+/// this same activity. The talk's timeline controller puts that lease on
+/// every member before it asks for this check, so the lease is the proof of
+/// membership. A talk owner binds the cast of the current conversation: the
+/// source track names the exact unit and the entity is an admitted
+/// participant.
 fn validate_track_actor(
     world: &World,
     request: &StartTimeline,
@@ -1317,10 +1326,35 @@ fn validate_track_actor(
     actor: Entity,
 ) -> Result<(), TimelineFailure> {
     if request.owner.kind != TimelineOwnerKind::Talk {
-        return if actor == request.owner.activity.actor {
-            Ok(())
-        } else {
-            Err(invalid("track actor differs from the activity owner"))
+        if actor == request.owner.activity.actor {
+            return Ok(());
+        }
+        if request.owner.kind != TimelineOwnerKind::Npc {
+            return Err(invalid("track actor differs from the activity owner"));
+        }
+        let track = request
+            .definition
+            .tracks
+            .iter()
+            .find(|track| &track.identity == identity)
+            .ok_or_else(|| invalid("actor track is outside the selected source director"))?;
+        let unit = track
+            .name
+            .parse::<u32>()
+            .map_err(|_| invalid("NPC member track has no unit name"))?;
+        if world
+            .get::<crate::npc::CharacterUnitId>(actor)
+            .map(|id| id.0)
+            != Some(unit)
+        {
+            return Err(invalid("NPC member track is bound to a different unit"));
+        }
+        return match world.get::<crate::npc_fixture_activity::NpcFixtureMotionOwner>(actor) {
+            None => Err(invalid("NPC member holds no fixture lease")),
+            Some(lease) if lease.0 != request.owner.activity => Err(invalid(
+                "NPC member's fixture lease belongs to another activity",
+            )),
+            Some(_) => Ok(()),
         };
     }
     let track = request
@@ -2049,6 +2083,115 @@ fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
 #[cfg(test)]
 mod handoff_regressions {
     use super::*;
+
+    /// A two-member NPC fixture talk: the owner (unit 1) and a member track
+    /// named after unit 3, as the multiple-character Director of talk 5518
+    /// is authored.
+    fn npc_cast(
+        world: &mut World,
+        member_unit: u32,
+        lease: Option<u64>,
+    ) -> (StartTimeline, SourceAssetId, Entity) {
+        let owner = FixtureActivityOwner {
+            actor: world.spawn(crate::npc::CharacterUnitId(1)).id(),
+            generation: 7,
+        };
+        let member = world.spawn(crate::npc::CharacterUnitId(member_unit)).id();
+        if let Some(generation) = lease {
+            world
+                .entity_mut(member)
+                .insert(crate::npc_fixture_activity::NpcFixtureMotionOwner(
+                    FixtureActivityOwner {
+                        actor: owner.actor,
+                        generation,
+                    },
+                ));
+        }
+        let track = SourceAssetId {
+            file: "director".into(),
+            path_id: "3".into(),
+        };
+        let request = StartTimeline {
+            owner: TimelineOwner {
+                activity: owner,
+                kind: TimelineOwnerKind::Npc,
+            },
+            fixture: world.spawn_empty().id(),
+            definition: Arc::new(TimelineDefinition {
+                package: "fixture".into(),
+                prefab: "fixture".into(),
+                fixture_view: None,
+                director: track.clone(),
+                timeline: track.clone(),
+                duration: 1.,
+                tracks: vec![TimelineTrack {
+                    identity: track.clone(),
+                    class: "AnimationTrack".into(),
+                    name: "3".into(),
+                    clips: vec![],
+                }],
+            }),
+            bindings: TimelineBindings::default(),
+            companions: vec![],
+            timeout_secs: 30.,
+            timeout_budget: TimelineTimeoutBudget::OwnerGated {
+                advance: Some(true),
+            },
+        };
+        (request, track, member)
+    }
+
+    fn refusal(
+        world: &World,
+        request: &StartTimeline,
+        track: &SourceAssetId,
+        member: Entity,
+    ) -> String {
+        validate_track_actor(world, request, track, member)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn npc_member_leased_to_the_activity_drives_its_unit_track() {
+        let mut world = World::new();
+        let (request, track, member) = npc_cast(&mut world, 3, Some(7));
+        assert!(validate_track_actor(&world, &request, &track, member).is_ok());
+        let owner = request.owner.activity.actor;
+        assert!(validate_track_actor(&world, &request, &track, owner).is_ok());
+    }
+
+    #[test]
+    fn npc_member_track_of_another_unit_is_refused() {
+        let mut world = World::new();
+        let (request, track, member) = npc_cast(&mut world, 4, Some(7));
+        assert!(refusal(&world, &request, &track, member).contains("bound to a different unit"));
+    }
+
+    #[test]
+    fn npc_member_without_a_lease_is_refused() {
+        let mut world = World::new();
+        let (request, track, member) = npc_cast(&mut world, 3, None);
+        assert!(refusal(&world, &request, &track, member).contains("holds no fixture lease"));
+    }
+
+    #[test]
+    fn npc_member_leased_to_another_activity_is_refused() {
+        let mut world = World::new();
+        let (request, track, member) = npc_cast(&mut world, 3, Some(8));
+        assert!(refusal(&world, &request, &track, member).contains("belongs to another activity"));
+    }
+
+    #[test]
+    fn player_timeline_stays_bound_to_its_owner() {
+        let mut world = World::new();
+        let (mut request, track, member) = npc_cast(&mut world, 3, Some(7));
+        request.owner.kind = TimelineOwnerKind::Player;
+        assert!(
+            refusal(&world, &request, &track, member).contains("differs from the activity owner")
+        );
+    }
 
     #[test]
     fn retired_actor_library_does_not_drop_the_consumers_selected_clip() {

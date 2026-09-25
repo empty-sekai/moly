@@ -17,6 +17,98 @@ use crate::{
 mod inventory;
 
 pub(crate) const SECTION: &str = "OfflineSiteLayouts";
+
+/// The home site's compact starter layout, from the server panel's housing
+/// layout block (the server decides placements; the panel document is the
+/// only source), each row with the authored piece's traits when the row
+/// states them. Installed once, when the panel document is parsed.
+static HOME_STARTER: std::sync::OnceLock<Vec<StarterRow>> = std::sync::OnceLock::new();
+
+type StarterRow = (PlacementMock<String>, Option<super::region::PieceTraits>);
+
+/// Decodes and installs the panel's home starter rows (once per process);
+/// returns the row count.
+pub(crate) fn install_home_starter_records(records: &[Value]) -> Result<usize, String> {
+    let rows = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            decode_starter_row(record).map_err(|reason| format!("row {index}: {reason}"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let count = rows.len();
+    install_home_starter(rows)?;
+    Ok(count)
+}
+
+fn install_home_starter(rows: Vec<StarterRow>) -> Result<(), String> {
+    match HOME_STARTER.get() {
+        Some(installed) if *installed == rows => Ok(()),
+        Some(_) => Err("a different home housing layout is already installed".into()),
+        None => HOME_STARTER
+            .set(rows)
+            .map_err(|_| "the home housing layout was installed concurrently".into()),
+    }
+}
+
+/// Whether the panel's home starter layout is installed; the site and the
+/// layout owner hold (without an error) until it is.
+pub(crate) fn home_starter_ready() -> bool {
+    HOME_STARTER.get().is_some()
+}
+
+/// One starter row of the panel's housing layout block: package, master
+/// fixture id, texture, the footprint corners, centre height, layout type
+/// bits and rotation (0..3), in the offline layout record's field names, and
+/// optionally `authoredPiece`, the authored piece's master traits (read only
+/// on a snapshot whose fixture master lacks the piece). The footprint is
+/// checked with the same position rules as a saved record.
+fn decode_starter_row(record: &Value) -> Result<StarterRow, String> {
+    let name = record["package"]
+        .as_str()
+        .ok_or("housing layout row package is missing")?;
+    let package = canonical_package(name)
+        .ok_or_else(|| format!("housing layout row package is invalid: {name}"))?;
+    let min = grid(&record["minimum"], "housing layout minimum")?;
+    let max = grid(&record["maximum"], "housing layout maximum")?;
+    let center_y = byte(&record["centerY"], "housing layout centerY")?;
+    let layout = record["layoutType"]
+        .as_u64()
+        .and_then(|v| u8::try_from(v).ok())
+        .ok_or("housing layout layoutType must be u8")?;
+    let direction = record["rotation"]
+        .as_u64()
+        .and_then(|v| u8::try_from(v).ok())
+        .and_then(Direction::from_u8)
+        .ok_or("housing layout rotation must be 0..3")?;
+    let fixture_id = record["mysekaiFixtureId"]
+        .as_i64()
+        .and_then(|v| i32::try_from(v).ok())
+        .ok_or("housing layout mysekaiFixtureId must be i32")?;
+    let texture_id = positive_u32(&record["textureId"], "housing layout textureId")?;
+    let (mut center, size) = moly_law::fixture::position::footprint_to_center_size(min, max)?;
+    center.y = center_y;
+    let (placed_min, placed_max) =
+        moly_law::fixture::position::layout_footprint(center, size, direction, layout)?;
+    moly_law::fixture::position::field_position(placed_min, placed_max, center_y, layout)?;
+    let authored = match record.get("authoredPiece") {
+        None | Some(Value::Null) => None,
+        Some(traits) => Some(super::region::PieceTraits::from_record(traits)?),
+    };
+    Ok((
+        PlacementMock {
+            texture_id,
+            package,
+            min,
+            max,
+            center_y,
+            layout,
+            direction,
+            fixture_id,
+        },
+        authored,
+    ))
+}
 const VERSION: u64 = 1;
 
 /// Private optimistic editor baseline. Full records, including unknown fields,
@@ -225,20 +317,30 @@ impl SiteFixtureLayouts {
         }
         // This showcase is a HOME starter only. A room or harvest map without
         // a saved layout starts empty; it must never inherit outdoor rows.
-        // The starter is region-keyed: without the snapshot's own region there
-        // is no table to pick, and no region is assumed.
-        let mut rows = if site_type == "home_site" {
+        // The compact starter is the server panel's housing layout; the full
+        // showcase is still this module's table. Both are resolved against the
+        // snapshot's own fixture master, whose region must be the snapshot's
+        // source region: without that region no row is installed, and no region
+        // is assumed.
+        let mut rows: Vec<PlacementMock<String>> = Vec::new();
+        if site_type == "home_site" {
             let region = region.ok_or(concat!(
                 "offline HOME starter: the loaded snapshot's source region ",
                 "(source.json source.region) is not available; the starter rows ",
                 "are region-keyed, so none were installed"
             ))?;
-            super::starter_rows(content, region.0)?
-        } else {
-            Vec::new()
-        };
-        if site_type == "home_site" {
-            gallery::append_preview(&mut rows);
+            let mut showcase = Vec::new();
+            match content {
+                OfflineSceneContent::Compact => {
+                    let starter = HOME_STARTER
+                        .get()
+                        .ok_or("the server panel's home housing layout is not installed yet")?;
+                    rows = super::region::resolve_rows(starter.clone(), region.0)?;
+                }
+                OfflineSceneContent::Full => rows = super::full_starter_rows(region.0)?,
+            }
+            gallery::append_preview(&mut showcase);
+            rows.extend(showcase.into_iter().map(PlacementMock::into_owned));
             if let Some(direction) = super::direction_override() {
                 for row in &mut rows {
                     row.direction = direction;
@@ -249,7 +351,7 @@ impl SiteFixtureLayouts {
             .map(|serial| format!("offline-fixture-{site_id}-{serial}"))
             .collect();
         let mut layout = FixturePlacements {
-            rows: rows.into_iter().map(PlacementMock::into_owned).collect(),
+            rows,
             instance_uids,
             site_id,
             site_type: site_type.to_owned(),

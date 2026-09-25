@@ -66,7 +66,7 @@ fn active(world: &mut World, delay: f64) -> (WeatherFxState, Entity) {
     let draw=world.spawn(WeatherFxDraw).id();
     (WeatherFxState { selection:None, global_identity:None,sky_stopped:false,live:vec![LiveWeatherEmitter {runtime:runtime(),native_refusal:None,draw,trail_draw:None,lifecycle:lifecycle(delay),effect_clock:Arc::new(crate::weather_animation::EffectClock::new(0.0)),
         effect_animator:None,animated_chain:None,frame_clock:crate::particle_runtime::FrameClock::Scaled,
-        play:lifecycle::PlayState::played(lifecycle::Culling::Never,false),children:Arc::new(Vec::new())}],
+        play:lifecycle::PlayState::played(lifecycle::Culling::Never,false),children:Arc::new(Vec::new()),sky_owner:None}],
         tier:"old".into(),env_site:"home".into(),admitted:1,records:1 }, draw)
 }
 
@@ -232,6 +232,7 @@ fn effect_instance_age_survives_stop_and_advances_without_a_camera() {
         .init_resource::<bevy::diagnostic::FrameCount>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<WeatherFxRetirements>()
+        .init_resource::<EnvironmentRoot>()
         .add_systems(Update, advance);
     let (mut old, _) = active(app.world_mut(), 2.0);
     let shared = old.live[0].effect_clock.clone();

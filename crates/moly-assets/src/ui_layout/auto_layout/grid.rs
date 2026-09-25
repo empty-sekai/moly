@@ -39,8 +39,9 @@ impl Grid {
         Ok(grid)
     }
 
+    // RectOffset.horizontal / vertical: an integer sum, converted where used.
     fn padding_sum(self, axis: usize) -> f32 {
-        self.padding[axis * 2] as f32 + self.padding[axis * 2 + 1] as f32
+        self.padding[axis * 2].wrapping_add(self.padding[axis * 2 + 1]) as f32
     }
 
     fn cells_fitting(self, axis: usize, size: Vec2) -> i32 {
@@ -125,8 +126,10 @@ impl Grid {
             } else {
                 self.alignment / 3
             };
-            start[axis] = self.padding[axis * 2] as f32
-                + (size[axis] - self.padding_sum(axis) - required) * align as f32 * 0.5;
+            // LayoutGroup.GetStartOffset(axis, required): the padding joins
+            // the required space before the surplus is taken from the size.
+            let surplus = size[axis] - (required + self.padding_sum(axis));
+            start[axis] = self.padding[axis * 2] as f32 + surplus * (align as f32 * 0.5);
         }
         // The source redistributes the final cells when a fixed cross-axis
         // constraint would otherwise leave one of its promised rows/columns empty.

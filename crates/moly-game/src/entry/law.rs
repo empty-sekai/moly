@@ -7,7 +7,9 @@
 
 use bevy::prelude::*;
 
-use crate::camera::{to_rotation, wrap180, CameraSetting, CameraTween, FieldCameraModel};
+use crate::camera::{
+    to_rotation, wrap180, CameraSetting, CameraTween, FieldCameraModel, TweenCompletion,
+};
 
 /// `ColorUtility.WHITE_ALPHA_1`: the static constructor stores four 1.0s.
 pub(crate) const WHITE_ALPHA_1: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -223,6 +225,7 @@ pub(crate) fn camera_setting_tween(
         distance: (model.distance, distance),
         duration,
         elapsed: 0.0,
+        on_complete: TweenCompletion::None,
     }
 }
 

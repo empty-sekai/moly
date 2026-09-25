@@ -118,12 +118,15 @@ impl Decision {
         }
     }
 
-    /// 是否可取消：源只在两处反应构造后写 `CanCancel = 1`，其余目标
-    /// 一律不可取消。
+    /// 是否可取消：源在四档构造后写 `CanCancel = 1`——两处反应档、换站
+    /// 保持档与问候档；其余目标一律不可取消。
     pub fn can_cancel(&self) -> bool {
         matches!(
             self,
-            Decision::HighPriorityTalkReaction | Decision::AfterEditLayoutReaction
+            Decision::HighPriorityTalkReaction
+                | Decision::AfterEditLayoutReaction
+                | Decision::ChangeSite
+                | Decision::Greeting
         )
     }
 
@@ -534,15 +537,17 @@ mod tests {
     }
 
     #[test]
-    fn only_two_ladders_write_can_cancel() {
-        // 源只在两处反应构造写 CanCancel = 1，其余档一律不可取消
+    fn only_four_ladders_write_can_cancel() {
+        // 源在两处反应档与换站保持档、问候档写 CanCancel = 1，其余档一律
+        // 不可取消
+        for decision in [Decision::ChangeSite, Decision::Greeting] {
+            assert!(decision.can_cancel(), "{decision:?} 应可取消");
+        }
         let decisions = [
             Decision::RefuelAndTalk,
             Decision::PhotoShot,
             Decision::NoneTalk,
             Decision::CutScene,
-            Decision::ChangeSite,
-            Decision::Greeting,
             Decision::WaitCommunication,
             Decision::SubCharacterFixtureAction,
             Decision::Select(TalkSelection::Talk(TalkLane::GeneralTalk)),

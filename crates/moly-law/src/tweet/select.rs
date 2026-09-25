@@ -177,15 +177,26 @@ pub const TWEET_DISPLAY_SECONDS: f32 = 5.0;
 /// 摆设编辑到反应 tweet 出场的延迟（秒）。源以 5.0 换算毫秒入延迟等待。
 pub const AFTER_EDIT_REACTION_DELAY_SECONDS: f32 = 5.0;
 
-/// 问候状态的时长（秒）。源静态数组 `(3.0, 5.0)` 的第 0 元：计时
-/// 到达即完成状态。
-pub const GREETING_STATE_SECONDS: f32 = 3.0;
+/// 问候状态的完成时刻（秒）。问候状态类构造写入的静态对第 0 元（5.0）：
+/// 状态计时 `>=` 它即完成。
+pub const GREETING_STATE_SECONDS: f32 = 5.0;
 
-/// 问候气球的最短在屏（秒）。同数组第 1 元：计时不超过它则不收气泡。
-pub const GREETING_BALLOON_MIN_SECONDS: f32 = 5.0;
+/// 问候气泡的收起时刻（秒）。同一静态对的第 1 元（3.0）：计时**严格
+/// 大于**它、且气泡还在显示的第一帧发一次收起事件。
+pub const GREETING_HUD_SECONDS: f32 = 3.0;
 
-/// 玩家离角色多远中断问候（米）。
+/// 问候看向玩家的释放时刻（秒）。更新体里的字面量 3.0（不是静态对）：
+/// 计时 `>=` 它起每帧把注视目标置空。
+pub const GREETING_LOOK_AT_SECONDS: f32 = 3.0;
+
+/// 玩家离角色多远中断问候（米）：三维距离不 `<=` 它即完成。
 pub const GREETING_ABORT_DISTANCE: f32 = 5.0;
+
+/// 问候门的触发距离（米）：玩家与角色的三维距离严格小于它才问候。
+pub const GREETING_TRIGGER_DISTANCE: f32 = 1.5;
+
+/// 问候门的入场保护（秒）：呈现者自初始化起的计时小于它不问候。
+pub const GREETING_AFTER_INIT_SECONDS: f32 = 5.0;
 
 #[cfg(test)]
 mod tests {
@@ -560,8 +571,12 @@ mod tests {
     fn timing_constants_match_source() {
         assert_eq!(TWEET_DISPLAY_SECONDS, 5.0);
         assert_eq!(AFTER_EDIT_REACTION_DELAY_SECONDS, 5.0);
-        assert_eq!(GREETING_STATE_SECONDS, 3.0);
-        assert_eq!(GREETING_BALLOON_MIN_SECONDS, 5.0);
+        // 问候状态的静态对 {5.0, 3.0}（类构造执行结果）与更新体字面量 3.0。
+        assert_eq!(GREETING_STATE_SECONDS.to_bits(), 0x40a00000);
+        assert_eq!(GREETING_HUD_SECONDS.to_bits(), 0x40400000);
+        assert_eq!(GREETING_LOOK_AT_SECONDS, 3.0);
         assert_eq!(GREETING_ABORT_DISTANCE, 5.0);
+        assert_eq!(GREETING_TRIGGER_DISTANCE, 1.5);
+        assert_eq!(GREETING_AFTER_INIT_SECONDS, 5.0);
     }
 }

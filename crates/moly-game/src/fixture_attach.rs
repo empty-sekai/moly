@@ -50,6 +50,8 @@ struct AttachLocal {
     source_index: Option<usize>,
     source_action_point: Option<(i32, i32)>,
     source_name_known: bool,
+    /// The StartLoc GameObject name as serialized.
+    start_name: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -175,6 +177,10 @@ impl AttachPoints {
                         .pointer("/start/name")
                         .and_then(serde_json::Value::as_str)
                         .is_some(),
+                    start_name: entry
+                        .pointer("/start/name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 });
             }
             map.insert(name.clone(), locals);
@@ -224,6 +230,70 @@ impl AttachPoints {
             }),
             end: entry.end.map(project),
         })
+    }
+
+    /// The fixture's action-point array in its serialized order: each
+    /// locator's StartLoc name and its StartLoc/EndLoc poses on the placed
+    /// instance. `Err` names what this archive cannot supply: a package it
+    /// does not carry, an entry without its array index or StartLoc name, an
+    /// array whose indices are not exactly 0..n, or no unique FixtureView.
+    pub(crate) fn source_array(
+        &self,
+        package: &str,
+        world: &GlobalTransform,
+    ) -> Result<Vec<(String, AttachPair)>, String> {
+        let entries = self
+            .packages
+            .get(package)
+            .ok_or_else(|| format!("{package} is not in the locator archive"))?;
+        let mut ordered = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let index = entry
+                .source_index
+                .ok_or_else(|| format!("{package} has a locator without its array index"))?;
+            let name = entry
+                .start_name
+                .clone()
+                .ok_or_else(|| format!("{package} has a locator without its StartLoc name"))?;
+            ordered.push((index, name, entry));
+        }
+        ordered.sort_by_key(|(index, ..)| *index);
+        if ordered.iter().enumerate().any(|(at, (index, ..))| at != *index) {
+            return Err(format!("{package}'s locator indices are not one contiguous array"));
+        }
+        if ordered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let world = world.mul_transform(Transform::from_scale(
+            self.instance_view(package)
+                .ok_or_else(|| format!("{package} has no unique FixtureView"))?
+                .scale,
+        ));
+        let project = |pose: AttachPose| {
+            let composed = world.mul_transform(
+                Transform::from_translation(Vec3::from(pose.position)).with_rotation(pose.rotation),
+            );
+            let (_, rotation, translation) = composed.to_scale_rotation_translation();
+            AttachPose {
+                position: translation.to_array(),
+                rotation,
+            }
+        };
+        Ok(ordered
+            .into_iter()
+            .map(|(_, name, entry)| {
+                (
+                    name,
+                    AttachPair {
+                        start: project(AttachPose {
+                            position: entry.position,
+                            rotation: entry.rotation,
+                        }),
+                        end: entry.end.map(project),
+                    },
+                )
+            })
+            .collect())
     }
 
     /// The serialized FixtureView array index, not the numeric locator code.

@@ -474,40 +474,24 @@ pub struct BirthEventRecord {
     pub commands: Option<[SubEmitterCommand; 2]>,
 }
 
-/// The burst count as the burst accumulation reads it at probability one.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum EventBurstCount {
-    /// The constant truncated toward zero; no draw.
-    Constant(u32),
-    /// Smaller and larger constant, each truncated toward zero. Every hit
-    /// takes one draw from the event's stream and counts lo + word mod
-    /// (hi + 1 - lo) on the whole 32-bit word. Built only by the gate, which
-    /// keeps 0 <= lo <= hi <= 16,777,215 so the modulus is never zero.
-    TwoConstants { lo: u32, hi: u32 },
-}
-
-impl EventBurstCount {
-    fn sample(self, random: &mut ScalarRandom) -> u32 {
-        match self {
-            Self::Constant(count) => count,
-            Self::TwoConstants { lo, hi } => lo + random.next_u32() % (hi + 1 - lo),
-        }
-    }
-}
-
 /// The count law of one cached birth edge, read from the child's start delay,
 /// duration, loop flag and Emission module: a constant start delay, constant
-/// rate over time and over distance, and at most one burst of probability one
-/// and one cycle with a constant or two-constant count. The child's own
-/// update never runs here; this only decides what the parent sends it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// rate over time and over distance, and the child's bursts (up to the eight
+/// slots, a constant or two-constant count; every time, cycle count, repeat
+/// interval and probability). The event's time emission is the child's
+/// EmitOverTime over the window [previous, current) of the particle's life in
+/// child seconds: never a wrap there (previous <= current), so its one
+/// AccumulateBursts window allows repeats, as an autonomous slice without a
+/// wrap does. The child's own update never runs here; this only decides what
+/// the parent sends it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BirthEdgeLaw {
     delay: f32,
     /// The child duration, or f32::MAX for a looping child.
     duration: f32,
     time_rate: f32,
     distance_rate: f32,
-    burst: Option<(f32, EventBurstCount)>,
+    bursts: crate::particle::autonomous_emission::BurstSchedule,
 }
 
 impl BirthEdgeLaw {
@@ -531,7 +515,6 @@ impl BirthEdgeLaw {
             || edge.probability != 1.0
             || edge.emitter.as_ref().is_none_or(|s| s.is_empty())
             || !(1..=2).contains(&cached_birth_edges)
-            || emission.bursts.len() > 1
             || !duration.is_finite()
             || duration <= 0.0
         {
@@ -541,49 +524,14 @@ impl BirthEdgeLaw {
             MinMaxCurve::Constant(value) if value.is_finite() && *value >= 0.0 => Ok(*value),
             _ => Err(unsupported),
         };
-        let burst = emission
-            .bursts
-            .first()
-            .map(|b| {
-                if b.probability != 1.0
-                    || !matches!(b.cycles, BurstCycles::Finite(n) if n.get() == 1)
-                    || !b.time.is_finite()
-                    || b.time < 0.0
-                {
-                    return Err(unsupported);
-                }
-                let count = match b.count {
-                    MinMaxCurve::Constant(value) if value.is_finite() && value >= 0.0 => {
-                        if value > MAX_EXACT_COUNT {
-                            return Err(Refused::CountOutOfRange);
-                        }
-                        EventBurstCount::Constant(value as u32)
-                    }
-                    MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite() => {
-                        // The smaller and the larger by the same strict
-                        // comparisons the native count uses.
-                        let low = if max < min { max } else { min };
-                        let high = if min < max { max } else { min };
-                        if low <= -1.0 {
-                            return Err(unsupported);
-                        }
-                        if high > MAX_EXACT_COUNT {
-                            return Err(Refused::CountOutOfRange);
-                        }
-                        // Truncation toward zero; both lie in (-1, 2^24).
-                        EventBurstCount::TwoConstants { lo: low as u32, hi: high as u32 }
-                    }
-                    _ => return Err(unsupported),
-                };
-                Ok((b.time, count))
-            })
-            .transpose()?;
+        let bursts = crate::particle::autonomous_emission::BurstSchedule::from_params(&emission.bursts)
+            .map_err(|_| unsupported)?;
         Ok(Self {
             delay: constant(delay)?,
             duration: if looping { f32::MAX } else { duration },
             time_rate: constant(&emission.rate_over_time)?,
             distance_rate: constant(&emission.rate_over_distance)?,
-            burst,
+            bursts,
         })
     }
 
@@ -663,25 +611,20 @@ impl BirthEdgeLaw {
         } else {
             0.0
         };
-        let mut burst_total = 0_u32;
-        if let Some((time, count)) = self.burst {
-            // Left-closed, right-open; the count is drawn before the fraction
-            // is written, and the fraction is written on a zero count too.
-            if previous <= time && time < current {
-                burst_total = count.sample(&mut state.random);
-                let relative = (time - previous) / (current - previous);
-                state.distribution.burst_fraction = if relative < 0.0 {
-                    1.0
-                } else {
-                    1.0 - relative.min(1.0)
-                };
-            }
-        }
+        // AccumulateBursts over [previous, current), repeats allowed: a time
+        // inside is left-closed and right-open, a repeat hits once however
+        // many repeats the window spans; each hit draws its probability and
+        // its count before the fraction is written, on a zero count too.
+        let mut fraction = state.distribution.burst_fraction;
+        let burst_sum = self.bursts.accumulate(previous, current, repeats_allowed(), &mut state.random, &mut fraction);
+        state.distribution.burst_fraction = fraction;
         let rate_count = spread(&mut state.distribution, amount)?;
-        let total = rate_count
-            .checked_add(burst_total)
-            .filter(|total| *total as f32 <= MAX_EXACT_COUNT)
-            .ok_or(Refused::CountOutOfRange)?;
+        // The rate count and the burst sum, sign-extended, added in 64 bits.
+        let total = i64::from(rate_count) + i64::from(burst_sum);
+        if !(0..=MAX_EXACT_COUNT as i64).contains(&total) {
+            return Err(Refused::CountOutOfRange);
+        }
+        let total = total as u32;
         *carry = state.distribution.offset;
         let commands = (distance_count != 0 || total != 0 || rate_count != 0).then(|| {
             let command = |count: u32, rate_count: u32, emission: BirthDistribution| SubEmitterCommand {
@@ -744,6 +687,23 @@ fn non_negative(value: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+// The event's AccumulateBursts window allows repeats; the replay arm that
+// turns them off must differ from native.
+#[cfg(test)]
+thread_local! { static NO_REPEATS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+fn repeats_allowed() -> bool {
+    !NO_REPEATS.with(|arm| arm.get())
+}
+#[cfg(test)]
+pub(crate) fn set_no_repeats_arm(on: bool) {
+    NO_REPEATS.with(|arm| arm.set(on));
+}
+#[cfg(not(test))]
+fn repeats_allowed() -> bool {
+    true
 }
 
 /// Add `amount` to the carry and take the whole part as the count: the
@@ -1060,9 +1020,47 @@ mod tests {
     #[test]
     #[ignore = "MOLY_SUBEMITTER_PARENT_RECEIPT must identify the current native parent-event receipt"]
     fn replays_current_native_parent_birth_events() {
+        parent_birth_events("MOLY_SUBEMITTER_PARENT_RECEIPT", |run| {
+            let (calls, newborn, records, commands, mismatched) = run(None);
+            println!("parent birth events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
+            assert_eq!((calls, newborn, records, commands, mismatched), (1426, 296, 13285, 800, 0));
+            // One-rule arms read against the same native rows must fail.
+            for arm in ["catchUpZero", "sliceDt", "burstLow", "burstHigh"] {
+                let wrong = run(Some(arm)).4;
+                println!("arm {arm}: {wrong} records differ");
+                assert!(wrong > 0, "{arm} arm matched every native record");
+            }
+        });
+    }
+
+    /// The same per-call replay against the native calls of the 016 bubble
+    /// parent (ConeVolume, World, rate one) whose two birth edges name
+    /// children with one burst of two, cycle count 0 (repeat without end)
+    /// and a 0.06 s interval: each event's window hits the burst whenever it
+    /// crosses a repeat, once however many repeats it spans. The arm that
+    /// turns repeats off must fail.
+    #[test]
+    #[ignore = "MOLY_SUBEMITTER_REPEAT_RECEIPT must identify the native repeating-burst parent-event receipt"]
+    fn replays_native_repeating_burst_parent_events() {
+        parent_birth_events("MOLY_SUBEMITTER_REPEAT_RECEIPT", |run| {
+            let (calls, newborn, records, commands, mismatched) = run(None);
+            println!("repeating-burst parent events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
+            assert_eq!(mismatched, 0);
+            assert!(calls > 0 && newborn > 0 && records > 0 && commands > 0);
+            let wrong = run(Some("noRepeats")).4;
+            println!("arm noRepeats: {wrong} records differ");
+            assert!(wrong > 0, "noRepeats arm matched every native record");
+        });
+    }
+
+    /// Every native SubModule call of a parent-event receipt through the law:
+    /// `verdict` gets the replay, which takes one arm and returns (calls,
+    /// newborn calls, records, commands, mismatched).
+    fn parent_birth_events(key: &str,
+        verdict: impl FnOnce(&dyn Fn(Option<&str>) -> (usize, usize, usize, usize, usize))) {
         use crate::particle::emit::Burst;
         use crate::particle::json::{parse, Value};
-        let path = std::env::var_os("MOLY_SUBEMITTER_PARENT_RECEIPT").expect("receipt path");
+        let path = std::env::var_os(key).expect("receipt path");
         let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(
             receipt.get("librarySha256").and_then(Value::as_str),
@@ -1103,6 +1101,7 @@ mod tests {
         // window-given replay below carries it.
         let run = |arm: Option<&str>| -> (usize, usize, usize, usize, usize) {
             let (mut calls, mut records, mut commands, mut mismatched, mut newborn) = (0, 0, 0, 0, 0);
+            super::set_no_repeats_arm(arm == Some("noRepeats"));
             for parent in array(at(&receipt, "parentEvents")) {
                 let sub = at(at(parent, "image"), "subEmitters");
                 let edges = array(at(sub, "edges"));
@@ -1240,17 +1239,10 @@ mod tests {
                     }
                 }
             }
+            super::set_no_repeats_arm(false);
             (calls, newborn, records, commands, mismatched)
         };
-        let (calls, newborn, records, commands, mismatched) = run(None);
-        println!("parent birth events: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
-        assert_eq!((calls, newborn, records, commands, mismatched), (1426, 296, 13285, 800, 0));
-        // One-rule arms read against the same native rows must fail.
-        for arm in ["catchUpZero", "sliceDt", "burstLow", "burstHigh"] {
-            let wrong = run(Some(arm)).4;
-            println!("arm {arm}: {wrong} records differ");
-            assert!(wrong > 0, "{arm} arm matched every native record");
-        }
+        verdict(&run);
     }
 
     /// The recording from the native window on, against the sub-emitter
@@ -1345,10 +1337,14 @@ mod tests {
                     bursts,
                 })
         };
+        // Configurations whose bursts repeat (a cycle count other than one).
+        let repeating = |config: usize| array(at(at(at(at(&groups[config], "key"), "schedule"), "emission"), "bursts"))
+            .iter().any(|b| word(at(b, "cycleCount")) != 1);
         // (records compared, mismatched, records per refused configuration)
         let run = |arm: Option<&str>| -> (usize, usize, std::collections::BTreeMap<usize, usize>) {
             let (mut compared, mut mismatched) = (0, 0);
             let mut refused = std::collections::BTreeMap::new();
+            super::set_no_repeats_arm(arm == Some("noRepeats"));
             for parent in array(at(at(&receipt, "birthEventRecording"), "byParent")) {
                 let configs: Vec<usize> = array(at(parent, "edgeConfigIds")).iter().map(|v| word(v) as usize).collect();
                 let cached = word(at(parent, "cachedBirthEdges")) as usize;
@@ -1421,15 +1417,26 @@ mod tests {
                     }
                 }
             }
+            super::set_no_repeats_arm(false);
             (compared, mismatched, refused)
         };
         let (compared, mismatched, refused) = run(None);
-        println!("birth events from the recorded window: {compared} records compared, {mismatched} mismatched, refused configurations {refused:?}");
+        let repeat_records: usize = array(at(at(&receipt, "birthEventRecording"), "byParent")).iter().map(|parent| {
+            let configs: Vec<usize> = array(at(parent, "edgeConfigIds")).iter().map(|v| word(v) as usize).collect();
+            array(at(parent, "records")).iter()
+                .filter(|record| repeating(configs[word(at(record, "slot")) as usize]))
+                .filter(|record| !refused.contains_key(&configs[word(at(record, "slot")) as usize]))
+                .count()
+        }).sum();
+        println!("birth events from the recorded window: {compared} records compared ({repeat_records} of children with repeating bursts), {mismatched} mismatched, refused configurations {refused:?}");
         assert_eq!(mismatched, 0);
         assert!(compared > 0);
-        // Only configurations outside the law may be refused: curve rates (5, 8), several or repeating
-        // bursts or a start delay (7, 9), a repeating burst (17).
-        assert!(refused.keys().all(|config| [5, 7, 8, 9, 17].contains(config)), "{refused:?}");
+        // Only configurations outside the law may be refused: curve rates (5, 8), and the edges of the
+        // one parent with three cached birth edges (7, 8, 9), whose third carry is not transcribed.
+        assert!(refused.keys().all(|config| [5, 7, 8, 9].contains(config)), "{refused:?}");
+        assert!(repeat_records > 0);
+        let wrong = run(Some("noRepeats")).1;
+        println!("arm noRepeats: {wrong} records differ");
         // The burst arms have no signal here (no recorded window holds a burst time); the
         // per-call replay above carries them.
         for arm in ["noCarry"] {

@@ -7,17 +7,12 @@
 //! `AvatarBase.ChangeMotion` resets to 1). The timers of the states'
 //! `UpdateState` are in `player_state::update_house_states`.
 //!
-//! The visible player is the SD body, which has none of the u000 house
-//! clips; the SD stand-ins are chosen by root motion (the source clip's
-//! forward travel at the moment the state or the move acts on it) and play
-//! at 1x, the source waits unchanged:
-//!
-//! | state (source clip)                              | SD stand-in                     | source / SD travel      |
-//! |--------------------------------------------------|---------------------------------|-------------------------|
-//! | EnterMoveHouse `act_u000_hou_house_open_013_o`   | `mov_cw_all_house_out_inside_O` | 0.946 / 0.898 m at 2.0 s |
-//! | ExitMoveHouse `act_u000_hou_house_open_011_o`    | `mov_cw_all_house_in_outside_O` | ends on the locator (1.56 / 0.64 m behind at 0) |
-//! | EnterMoveMyRoom `c_000_mov_myroom_action_02`     | `mov_cw_all_house_in_outside_O` | ends on the locator (2.0 / 0.64 m behind at 0) |
-//! | ExitMoveMyRoom `act_u000_hou_house_open_023_o`   | `mov_cw_all_house_out_inside_O` | 1.239 / 0.640 m at 1.45 s |
+//! | state                  | clip                              |
+//! |------------------------|-----------------------------------|
+//! | EnterMoveHouse (11)    | `act_u000_hou_house_open_013_o`   |
+//! | ExitMoveHouse (13)     | `act_u000_hou_house_open_011_o`   |
+//! | EnterMoveMyRoom (14)   | `c_000_mov_myroom_action_02`      |
+//! | ExitMoveMyRoom (15)    | `act_u000_hou_house_open_023_o`   |
 
 use std::time::Duration;
 
@@ -26,13 +21,14 @@ use bevy::prelude::*;
 
 use crate::player::PlayerControlled;
 use crate::player_avatar::{
-    AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, PlayerVisualClips,
+    AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, AUTO_MOVE_CLIP,
+    IDLE_CLIP,
 };
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 
 use super::door_law::STATE_CLIP_FADE;
 
-/// One of the four states, with its source clip and SD stand-in.
+/// One of the four states, with its source clip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HouseState {
     EnterMoveHouse,
@@ -60,14 +56,6 @@ impl HouseState {
             Self::ExitMoveMyRoom => "act_u000_hou_house_open_023_o",
         }
     }
-
-    /// The SD stand-in (table above).
-    pub(crate) fn sd_clip(self) -> &'static str {
-        match self {
-            Self::EnterMoveHouse | Self::ExitMoveMyRoom => "mov_cw_all_house_out_inside_O",
-            Self::ExitMoveHouse | Self::EnterMoveMyRoom => "mov_cw_all_house_in_outside_O",
-        }
-    }
 }
 
 /// `PlayerAvatarPresenter.ChangeState(state)`. Returns the action token the
@@ -85,65 +73,32 @@ pub(crate) fn change_state(
         warn!("[player-state] ChangeState({state:?}) dropped by the closed intercept gate");
         return token;
     }
-    play(
-        world,
-        state.sd_clip(),
-        false,
-        STATE_CLIP_FADE,
-        token,
-        state.source_clip(),
-    )
+    play(world, state.source_clip(), STATE_CLIP_FADE, token)
 }
 
-/// `PlayerAvatarIdleState.Initialize`: the idle loop with the presenter's
-/// 0.25 s fade, on the move's token.
+/// `PlayerAvatarIdleState.Initialize`: `PlayAnimation("c_000_mov_idle_00")`
+/// with the presenter's 0.25 s fade, on the move's token.
 pub(crate) fn play_idle_loop(
     world: &mut World,
     token: Option<PlayerActionToken>,
 ) -> Option<PlayerActionToken> {
-    let clips = visual_clips(world)?;
-    play(
-        world,
-        &format!("{}_L", clips.idle),
-        true,
-        STATE_CLIP_FADE,
-        token,
-        "c_000_mov_idle_00",
-    )
+    play(world, IDLE_CLIP, STATE_CLIP_FADE, token)
 }
 
-/// `PlayerAvatarAutoMoveState.Initialize`: the run loop with the same fade.
+/// `PlayerAvatarAutoMoveState.Initialize`: `ChangeAnimation(RunMotion)`
+/// (`motion_avatar_run`) with the view's default 0.25 s fade.
 pub(crate) fn play_run_loop(
     world: &mut World,
     token: Option<PlayerActionToken>,
 ) -> Option<PlayerActionToken> {
-    let clips = visual_clips(world)?;
-    play(
-        world,
-        &format!("{}_L", clips.run),
-        true,
-        STATE_CLIP_FADE,
-        token,
-        "auto-move run",
-    )
-}
-
-fn visual_clips(world: &mut World) -> Option<PlayerVisualClips> {
-    let mut players = world.query_filtered::<&PlayerVisualClips, With<PlayerControlled>>();
-    let clips = players.iter(world).next().cloned();
-    if clips.is_none() {
-        error!("[site-move] the player has no SD clip set");
-    }
-    clips
+    play(world, AUTO_MOVE_CLIP, STATE_CLIP_FADE, token)
 }
 
 fn play(
     world: &mut World,
     clip: &str,
-    looping: bool,
     fade: f32,
     token: Option<PlayerActionToken>,
-    source: &str,
 ) -> Option<PlayerActionToken> {
     let mut params = SystemState::<(
         ResMut<Assets<AnimationGraph>>,
@@ -152,16 +107,15 @@ fn play(
     )>::new(world);
     let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
     let Some(mut driver) = drivers.iter_mut().next() else {
-        error!("[site-move] no SD player driver for {clip}");
+        error!("[site-move] no player driver for {clip}");
         return token;
     };
     let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) else {
-        error!("[site-move] SD player animator missing for {clip}");
+        error!("[site-move] player animator missing for {clip}");
         return token;
     };
     let motion = PlayerActionMotion {
         clip,
-        looping,
         speed: 1.0,
         blend: Duration::from_secs_f32(fade),
         blocks_manual_movement: true,
@@ -180,12 +134,26 @@ fn play(
     };
     match result {
         Ok(token) => {
-            info!("[site-move] {source} plays {clip} (crossfade {fade}s, speed 1)");
+            info!("[site-move] PlayAnimation({clip}, fade {fade}s, speed 1)");
             Some(token)
         }
         Err(error) => {
-            error!("[site-move] {source}: SD clip {clip} refused: {error:?}");
+            error!("[site-move] PlayAnimation({clip}) refused: {error:?}");
             token
+        }
+    }
+}
+
+/// The move ends in the Idle state, whose clip is already playing: the
+/// token returns the animator to locomotion without a new `PlayAnimation`.
+pub(crate) fn hand_back(world: &mut World, token: Option<PlayerActionToken>) {
+    let Some(token) = token else {
+        return;
+    };
+    let mut drivers = world.query_filtered::<&mut AvatarDriver, With<PlayerControlled>>();
+    if let Some(mut driver) = drivers.iter_mut(world).next() {
+        if driver.hand_back(token) {
+            info!("[site-move] the move ends in the Idle state: its clip keeps playing");
         }
     }
 }
@@ -194,15 +162,17 @@ fn play(
 /// the animator to locomotion.
 pub(crate) fn finish_idle(world: &mut World, token: Option<PlayerActionToken>, fade: f32) {
     let mut params = SystemState::<(
+        ResMut<Assets<AnimationGraph>>,
         Query<&mut AvatarDriver, With<PlayerControlled>>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
     if let Some(mut driver) = drivers.iter_mut().next() {
         if let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) {
             driver.play_idle(
                 token,
                 Duration::from_secs_f32(fade),
+                &mut graphs,
                 &mut animator,
                 &mut transitions,
             );

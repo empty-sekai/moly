@@ -127,6 +127,21 @@ pub fn install(app: &mut App) {
                 .after(player_talk::advance_session)
                 .after(crate::fixture_activity_timeline::advance),
         );
+    // The presenter's per-frame calls in source order, after the AI loop:
+    // the state machine update (call 3), then the greeting gate (call 10).
+    app.configure_sets(
+        Update,
+        crate::npc_state::NpcPresenterSet.after(npc_objective::decide),
+    )
+    .add_systems(
+        Update,
+        (
+            crate::npc_state::on_update,
+            crate::npc_presenter::try_greeting,
+        )
+            .chain()
+            .in_set(crate::npc_state::NpcPresenterSet),
+    );
     app.init_resource::<crate::npc_fixture_activity::NpcFixtureActivities>()
         .init_resource::<crate::npc_fixture_activity::NpcFixtureAreas>()
         .add_systems(
@@ -164,7 +179,6 @@ pub fn install(app: &mut App) {
         .init_resource::<crate::fixture_gimmick::Gimmicks>()
         .add_systems(Startup, crate::fixture_activity_data::load)
         .add_systems(Startup, crate::fixture_gimmick::load)
-        .add_systems(Startup, player_avatar::switch_gesture::load)
         .add_systems(
             Update,
             crate::fixture_gimmick::parse.before(crate::player_fixture_action::advance),
@@ -312,6 +326,7 @@ pub fn install(app: &mut App) {
                 .before(crate::ui_layout::render),
         );
     app.add_message::<gesture::GestureEvent>()
+        .add_message::<gesture::UiPointerEvent>()
         .add_message::<player_talk::PlayerTalkRequest>()
         .add_message::<crate::player_fixture_action::PlayerFixtureRequest>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
@@ -323,11 +338,13 @@ pub fn install(app: &mut App) {
         // SitePlugin owns the site SceneInstanceReady observer. Registering it
         // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
+        .add_observer(player_avatar::body::on_scene_ready)
         // 气泡链的选取门要读当前现象 id；wasm 分支不装天气插件，资源在
         // 这里兜底建（默认值 = 真源默认现象 1，与档名资源在音频侧兜底建
         // 同款故事；native 上与天气插件的 init 幂等重合）。
         .init_resource::<weather::CurrentPhenomenonId>()
         .init_resource::<weather_fx::WeatherFxRetirements>()
+        .init_resource::<weather_fx::EnvironmentRoot>()
         .init_resource::<crate::particle_runtime::seed::SystemSeedManager>()
         // The player's Time.unscaledDeltaTime holder: advanced once per frame
         // from the real clock, right after the app's clocks update.
@@ -375,6 +392,8 @@ pub fn install(app: &mut App) {
                     // 大表没到齐之前它们就该落定。
                     client_config::load,
                     birthday::load,
+                    // The master rank table the rank gauges read.
+                    crate::mysekai_rank::load,
                     uber_particle::load,
                     // 家具挂点档案（attach-points）的装载请求：动作点
                     // 世界位的数据面，与摆放表（fixture 域）在同一批
@@ -410,8 +429,6 @@ pub fn install(app: &mut App) {
                 .chain(),
         )
         .add_systems(Update, character_material::apply_fog)
-        // The player uses the shared SD body/rig/material installation. No
-        // audience model, audience recolouring or spectator wear is registered.
         .add_systems(
             Update,
             (
@@ -421,6 +438,7 @@ pub fn install(app: &mut App) {
                     // 域，单独成链放最前）。装载失败在这里响亮 panic。
                     client_config::parse,
                     birthday::parse,
+                    crate::mysekai_rank::parse,
                 ),
                 (
                     // 站点域：主表解析 → 换站入口（拆站重选）→ 装载计划
@@ -466,7 +484,7 @@ pub fn install(app: &mut App) {
                     joystick::smoke_autojoystick,
                     // 动作按钮的走位冒烟口也注在摇杆层推进之前：它写入的
                     // 触摸要被同一帧的摇杆层读到。
-                    action_button::smoke_autowalk,
+                    (action_button::smoke_autowalk, action_button::smoke_door_walk).chain(),
                     joystick::advance,
                     gesture::advance,
                     joystick::spawn_when_ready,
@@ -503,12 +521,16 @@ pub fn install(app: &mut App) {
                             .after(npc::parse)
                             .after(fixture_attach::parse),
                         npc::reseed.after(npc::spawn_when_ready),
-                        // 目标机决策（停顿计时、决策梯、抽签、目的地解算、出发——
-                        // 写路径槽与相位）。决策先于推进：当帧决策当帧起步。
+                        // Frame order of one NPC frame: the agent step, then the
+                        // AI loop (the objective machine: rest, ladder, draws,
+                        // destinations, departure, the objective bodies), then
+                        // the presenter's per-frame calls (NpcPresenterSet). A
+                        // destination chosen on a frame is first stepped on the
+                        // next one.
+                        npc::advance.after(npc::reseed),
                         npc_objective::decide
-                            .after(npc::reseed)
-                            .before(npc::advance),
-                        npc::advance,
+                            .after(npc::advance)
+                            .before(npc::sync_rest_lifecycle),
                         npc::report
                             .after(npc::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),
@@ -531,8 +553,12 @@ pub fn install(app: &mut App) {
                         // toon 计划（解析骨架档案建材质）→ toon 换装（等贴图到齐
                         // 摘 Standard 换 Character）。链内命令自动同步点逐级生效：
                         // 前一级插的组件，后一级当帧读得到。
-                        player::parse,
-                        player::spawn_when_ready.after(player::parse),
+                        player::spawn_when_ready,
+                        // The player's body: request -> attach -> wire (the
+                        // loader's animator gets the graph and the driver).
+                        player_avatar::body::request.after(player::spawn_when_ready),
+                        player_avatar::body::attach.after(player_avatar::body::request),
+                        player_avatar::body::wire.after(player_avatar::body::attach),
                         character::plan_when_ready
                             .after(player::spawn_when_ready)
                             .after(npc::spawn_when_ready),
@@ -553,8 +579,8 @@ pub fn install(app: &mut App) {
                         // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
                         // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
                         (player::read_input.after(player::reseed), player::advance).chain(),
-                        // SD body/model wiring is shared with character above;
-                        // its player branch installs the sole AvatarDriver.
+                        // The player's body is installed by player_avatar::body
+                        // above; it installs the sole AvatarDriver.
                     ),
                     (
                         // 待机动作链：两张表解析（装载失败在此响亮失败）→ 逐名挂
@@ -574,32 +600,31 @@ pub fn install(app: &mut App) {
                     (
                         // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
                         // 之后：换段以缺省速率起新段，玩家域同帧把速率压回
-                        // 真源式。其后气泡链：解析主表
-                        // → 烘图集 → 驻留沿触发（读 npc 推进写好的相位）→ 存活
-                        // 计时与淡坡。读相位所以排推进之后。
+                        // 真源式。其后气泡链：烘图集（tweet 行归 NPC 侧解析）
+                        // → HUD 事件消费（NPC 状态机本帧发的事件，排在呈现
+                        // 调用集之后）→ 存活计时与淡坡。
                         player_avatar::drive
                             .after(player::advance)
-                            .after(character::wire_when_ready),
+                            .after(player_avatar::body::wire),
                         player::tune_animation_speed.after(player_avatar::drive),
                         character::probe_playback.after(character::drive),
                         player_avatar::probe_playback.after(player::tune_animation_speed),
                         player::report
                             .after(player::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                        balloon::parse_master,
                         balloon::bake_atlas
-                            .after(balloon::parse_master)
+                            .after(crate::npc_tweet::parse)
                             .after(player_talk::parse),
-                        // 问候触发 → 显式同步点 → after-edit 反应：同一根
+                        // HUD 事件消费 → 显式同步点 → after-edit 反应：同一根
                         // objective 槽位的两条写入沿。链式定序 + 同步点让
-                        // 反应的让位门看得见问候触发本帧铺的气泡——不定序
+                        // 反应的让位门看得见 HUD 事件本帧铺的气泡——不定序
                         // 时两系统并发（命令式写入不构成访问冲突），让位门
                         // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
                         // （真源单状态字段，构造上不允许两只并存）。
                         (
-                            balloon::trigger
+                            balloon::hud_event
                                 .after(balloon::bake_atlas)
-                                .after(npc::advance),
+                                .after(crate::npc_state::NpcPresenterSet),
                             ApplyDeferred,
                             // after-edit 反应链：保存回执 → 池选取
                             // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源
@@ -943,6 +968,36 @@ pub fn install(app: &mut App) {
                 .after(action_button::click)
                 .before(pick::pick),
         )
+        // Source press/click of the camera reset button: same input gate and
+        // order as the tap dispatch (after the action buttons' tap flag, before
+        // the world pick).
+        .init_resource::<menu_shell::SourceInputManager>()
+        .init_resource::<menu_shell::CameraResetPress>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_input
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(action_button::click)
+                .after(menu_shell::click)
+                .before(pick::pick),
+        )
+        // The button's disable while pressed: every frame, input enabled or
+        // not, after the input and before the effect's update.
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_disable
+                .after(menu_shell::camera_reset_input)
+                .before(menu_shell::camera_reset_tap_effect),
+        )
+        // The button's press effect: its fade takes the frame's step after
+        // the press, before the prefab views draw.
+        .init_resource::<menu_shell::CameraResetTapEffect>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_tap_effect
+                .after(menu_shell::camera_reset_input)
+                .before(crate::ui_layout::render),
+        )
         // 层栈推进：读小地图根可见性做直通口对账 + 消费层命令 + 回写槽
         // 位视图。小地图的四条可见性写者（点击 · 自动点 · 解锁推进 ·
         // M 键）与外壳点按全排在它之前——它读的是当帧终值、当帧命令。
@@ -964,13 +1019,10 @@ pub fn install(app: &mut App) {
                 .chain()
                 .after(ui_layers::advance)
                 .after(menu_shell::click),
-        )
-        // 相机复位补间推进：相机输入之后（补间期间输入被吞——真源
-        // _isResetAnimation 门，吞门在 apply_input 里读本资源在场与否）。
-        .add_systems(
-            Update,
-            menu_shell::advance_camera_reset.after(camera::apply_input),
         );
+    // The camera reset is a field-camera tween: camera::follow_avatar
+    // advances it, and camera::apply_input swallows drag/pinch while it runs
+    // (the Normal state's _isResetAnimation gate).
     // ---- 情报层视图（追加段：层栈 + 外壳之后的第一个带内容物的屏幕层） ----
     // 资源与启动施加（进场即按存量档全量施加；刷新率档当值取构造默认
     // high ⇒ 60fps 钳制）。

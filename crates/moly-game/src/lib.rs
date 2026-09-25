@@ -18,6 +18,7 @@ mod browser_stage;
 mod browser_log;
 pub use browser_stage::configure_browser_stage;
 pub mod camera;
+pub mod canvas;
 pub mod character;
 pub mod character_material;
 pub mod client_config;
@@ -64,11 +65,20 @@ mod material_order;
 mod mesh_buffer_release;
 pub mod menu_dialog;
 pub mod menu_shell;
+mod mysekai_rank;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
 pub mod npc;
+mod npc_clock;
 mod npc_fixture_activity;
+mod npc_fixture_talk;
+#[cfg(test)]
+mod npc_harness;
 pub mod npc_objective;
+mod npc_presenter;
+mod npc_state;
+mod npc_talk_lottery;
+mod npc_tweet;
 pub mod option_dialog;
 mod particle_runtime;
 mod particle_geometry;
@@ -90,6 +100,7 @@ mod render;
 mod room_appearance;
 mod room_shell;
 pub mod schedule;
+mod server_panel;
 mod settings_store;
 pub mod shadowmap;
 pub mod site;
@@ -192,6 +203,8 @@ pub fn app(
     ui_layout::install(&mut app);
     app.add_plugins(site::SitePlugin(site));
     schedule::install(&mut app);
+    app.add_plugins(server_panel::ServerPanelPlugin);
+    app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);
     footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
@@ -199,6 +212,7 @@ pub fn app(
     plain_background::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);
     app.add_plugins(character_material::CharacterMaterialPlugin);
+    app.add_plugins(avatar_material::AvatarMaterialPlugin);
     app.add_plugins(shadowmap::ShadowmapPlugin);
     app.add_plugins((
         fixture::FixturePlugin,

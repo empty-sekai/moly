@@ -15,10 +15,11 @@ pub(crate) struct EditorIcons {
     pub(super) ready: bool,
 }
 
+/// The fixture thumbnail catalogue. The runtime Sprite metrics of the editor
+/// tabs come with the UI root's other sources (UiLayouts::runtime_sprites).
 #[derive(Resource)]
 pub(crate) struct EditorAssetRequests {
     thumbnails: Handle<JsonAsset>,
-    sprites: Handle<JsonAsset>,
 }
 
 pub(crate) fn load(
@@ -31,7 +32,6 @@ pub(crate) fn load(
     if stage.is_some() { return; }
     commands.insert_resource(EditorAssetRequests {
         thumbnails: server.load("moly://fixture-thumbnails/fixture-thumbnails.json"),
-        sprites: server.load("moly://ui-layout-v2/runtime-sprites.json"),
     });
 }
 
@@ -50,13 +50,11 @@ pub(crate) fn parse(
         let Some(request) = request else {
             return;
         };
-        for handle in [&request.thumbnails, &request.sprites] {
-            if let LoadState::Failed(error) = server.load_state(handle) {
-                panic!("furniture editor source metadata failed: {error:?}");
-            }
-            if json.get(handle).is_none() {
-                return;
-            }
+        if let LoadState::Failed(error) = server.load_state(&request.thumbnails) {
+            panic!("furniture editor source metadata failed: {error:?}");
+        }
+        if json.get(&request.thumbnails).is_none() {
+            return;
         }
         let thumbs: Value = serde_json::from_str(&json.get(&request.thumbnails).unwrap().0)
             .expect("source fixture thumbnail manifest");
@@ -86,8 +84,10 @@ pub(crate) fn parse(
                 }
             }
         }
-        let sprites: Value = serde_json::from_str(&json.get(&request.sprites).unwrap().0)
-            .expect("source runtime Sprite metadata");
+        let sprites = layouts
+            .runtime_sprites()
+            .expect("the UI root's runtime Sprite metadata is loaded with its layouts")
+            .clone();
         for (name, sprite) in sprites.as_object().expect("runtime Sprite map") {
             if !name.starts_with("editor-tab-") {
                 continue;

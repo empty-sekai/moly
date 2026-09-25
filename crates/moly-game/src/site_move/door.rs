@@ -1009,9 +1009,9 @@ impl DoorMove {
                 self.record_step(DoorStep::EndAction, "[PrepareForNextSite]".into());
             }
         }
-        // The state clip is over; the idle the Idle state plays is taken
-        // over by locomotion.
-        door_state::finish_idle(world, self.token.take(), door_law::STATE_CLIP_FADE);
+        // The state timer already changed to Idle, whose clip is playing;
+        // the move's end plays nothing more.
+        door_state::hand_back(world, self.token.take());
         self.stage = Stage::Done;
     }
 

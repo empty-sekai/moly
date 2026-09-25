@@ -81,6 +81,12 @@ fn stands_on_usable_tile(
     if row.center_y == 0 {
         return Ok(true);
     }
+    if row.layout != layout_type::FLOOR {
+        return Err(FactoryIssue::Gap(format!(
+            "{} stands above grid level 0 on a non-floor layout; this host keeps tile occupancy for the floor layout alone",
+            row.uid
+        )));
+    }
     let below = cell_below_center(row).map_err(FactoryIssue::Gap)?;
     match floor.tile_at_grid(below) {
         FixtureTileKnowledge::Empty | FixtureTileKnowledge::Missing => Ok(false),
@@ -143,8 +149,38 @@ fn source_grid(floor: &FixtureFloorTiles, world: [f32; 3]) -> GridPosition {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct NpcFixtureAnimationOwner(pub FixtureActivityOwner);
 
+/// The draws one no-talk factory call made on the member generator: one
+/// sort key per no-talk row (the source orders the rows by a fresh Guid
+/// each), then, on a hit, one engine range over the chosen group's
+/// timelines (value, length).
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct NoneTalkDraws {
+    pub(crate) keys: usize,
+    pub(crate) timeline_pick: Option<(usize, usize)>,
+}
+
+/// One placement resolved against its live instance.
+type LiveInstance<'a> = (
+    Entity,
+    &'a FixtureActivityIdentity,
+    &'a GlobalTransform,
+    &'a OccupancyRow,
+);
+
+/// A playable action point of one placed fixture: the locator's source array
+/// index and slot, and the StartLoc pose with the height of the site.
+struct PlayablePoint {
+    locate_index: usize,
+    slot_id: i32,
+    position: [f32; 3],
+    rotation: Quat,
+}
+
 #[derive(Clone)]
 pub(crate) struct Selection {
+    /// NoneTalk for a no-talk action; SingleCharacterFixture for a fixture
+    /// talk whose pre-action carries a timeline.
+    kind: TalkType,
     actor: Entity,
     unit: u32,
     pub target: FixtureTarget,
@@ -164,13 +200,14 @@ pub(crate) struct Selection {
 impl Selection {
     pub(crate) fn ai_data(&self) -> AiTalkData {
         AiTalkData {
-            kind: TalkType::NoneTalk,
+            kind: self.kind,
             content: None, // A no-dialogue action has no fabricated talk master.
             target_fixture: Some(self.target.entity),
             target_position: self.position,
             main_character: self.unit,
             characters: vec![self.unit],
             pre_action: None,
+            locate: None,
             pending_factory: None,
         }
     }
@@ -178,6 +215,9 @@ impl Selection {
 
 enum Phase {
     Approaching,
+    /// A fixture talk after its arrival and before its timeline: the
+    /// pre-action tweet, then the wait until the character is not talking.
+    TalkWindow(TalkWindow),
     Preparing,
     Playing,
     /// The source Director has completed, but the admitted talk still owns
@@ -186,6 +226,14 @@ enum Phase {
     /// sparse end pose on every frame.
     TalkHeld,
     Exiting(LocalMove),
+}
+
+/// TryPlayTweetAsync's two waits, each polled from the frame after the one
+/// that created it: the tweet state Done, then not talking.
+#[derive(Clone, Copy)]
+enum TalkWindow {
+    TweetDone { since: u32 },
+    NotTalking { since: u32 },
 }
 
 struct Session {
@@ -200,6 +248,19 @@ struct Session {
     preview_ticket: Option<u64>,
     waiting_seconds: f32,
     tweet_issued: bool,
+    /// The shared timeline's talk flag as last seen: the loop clip with the
+    /// talk flag is entered on its rising edge.
+    talk_clip: bool,
+}
+
+/// One placed fixture as the fixture-talk factories read it (see
+/// [`Factory::talk_fixture_geometry`]).
+pub(crate) struct TalkFixtureGeometry {
+    pub(crate) entity: Entity,
+    pub(crate) locators: Vec<(String, crate::fixture_attach::AttachPair)>,
+    pub(crate) footprint: ((i32, i32), (i32, i32)),
+    pub(crate) floor_bounds: ((i32, i32), (i32, i32)),
+    pub(crate) site_origin: [f32; 3],
 }
 
 #[derive(Resource, Default)]
@@ -259,6 +320,14 @@ pub(crate) struct Factory<'w, 's> {
 }
 
 impl Factory<'_, '_> {
+    /// The placement UID of a live fixture entity.
+    pub(crate) fn uid_of(&self, fixture: Entity) -> Option<String> {
+        self.fixtures
+            .get(fixture)
+            .ok()
+            .map(|(_, identity, _, _)| identity.uid.clone())
+    }
+
     pub(crate) fn owns_actor(&self, actor: Entity) -> bool {
         self.runtime.sessions.contains_key(&actor)
     }
@@ -332,7 +401,52 @@ impl Factory<'_, '_> {
             .then(|| "placement/floor snapshot occupancy is incomplete".to_owned())
     }
 
+    /// The master tables the talk lotteries read, once installed.
+    pub(crate) fn tables(&self) -> Option<&FixtureActivityTables> {
+        self.tables.as_deref()
+    }
+
+    /// The placed fixtures in the fixture manager's insertion order, as the
+    /// talk lotteries read them. Every placement stands on the shown site,
+    /// whose site type value is `site_type`. The motion-area overlap is the
+    /// no-talk factory's own test; a placement without a fixture id is never
+    /// named by a talk condition and is not tested.
+    pub(crate) fn talk_lottery_fixtures(
+        &self,
+        placements: &FixturePlacements,
+        site_type: Option<i32>,
+    ) -> Vec<crate::npc_talk_lottery::PlacedFixture> {
+        let rows = placements.occupancy_rows();
+        let floor = self
+            .inputs
+            .as_deref()
+            .and_then(FixtureSceneSupply::current)
+            .map(|inputs| &inputs.floor);
+        let tables = self.tables.as_deref();
+        rows.iter()
+            .zip(placements.fixture_ids())
+            .map(|(row, fixture_id)| crate::npc_talk_lottery::PlacedFixture {
+                uid: row.uid.clone(),
+                fixture_id,
+                located_site_type: site_type,
+                is_gate: tables
+                    .and_then(|tables| tables.fixture_master(fixture_id))
+                    .is_some_and(|master| master.is_gate),
+                motion_overlap: if fixture_id == 0 {
+                    Err("placement carries no fixture id".into())
+                } else {
+                    match floor {
+                        Some(floor) => self.areas.motion_overlaps(row, &rows, floor),
+                        None => Err("current fixture scene inputs are not ready".into()),
+                    }
+                },
+            })
+            .collect()
+    }
+
     /// Source action-row permutation is independent of asset readiness.
+    /// `draws` receives the factory's draws: the sort keys of the row order
+    /// and, on a hit, the timeline pick.
     /// Empty eligible source pool is Ok(None); missing host data is an issue,
     /// not an invitation to select a different ready animation or a General
     /// story. `unmovable` is this NPC's UnmovableFixtureList (placement UIDs).
@@ -348,6 +462,7 @@ impl Factory<'_, '_> {
         unmovable: &[String],
         face: &ObjectiveFace,
         rng: &mut MemberRng,
+        draws: &mut NoneTalkDraws,
     ) -> Result<Option<Selection>, FactoryIssue> {
         self.select_internal(
             actor,
@@ -361,6 +476,7 @@ impl Factory<'_, '_> {
             face,
             rng,
             None,
+            draws,
         )
     }
 
@@ -400,8 +516,327 @@ impl Factory<'_, '_> {
             face,
             rng,
             Some((&spec, target)),
+            &mut NoneTalkDraws::default(),
         )
         .map_err(FactoryIssue::into_reason)
+    }
+
+    /// GetAllFixture is insertion ordered. The offline placement owner is
+    /// that order in this host; query iteration and package-first lookup are
+    /// not. Resolve every row against exactly one live Entity/UID: live
+    /// instances are grouped by UID once; a row keeps the instances in query
+    /// order whose identity and scene placement both carry its UID.
+    fn live_instances<'a>(
+        &'a self,
+        rows: &'a [OccupancyRow],
+    ) -> Result<Vec<LiveInstance<'a>>, FactoryIssue> {
+        let mut live: HashMap<&str, Vec<_>> = HashMap::with_capacity(rows.len());
+        for fixture in self.fixtures.iter() {
+            let (_, identity, placed, _) = fixture;
+            if identity.uid == placed.0.uid {
+                live.entry(identity.uid.as_str()).or_default().push(fixture);
+            }
+        }
+        let mut instances = Vec::with_capacity(rows.len());
+        for row in rows {
+            let matches = live.get(row.uid.as_str()).map_or(&[][..], Vec::as_slice);
+            let [(entity, identity, placed, world)] = matches else {
+                return Err(FactoryIssue::Gap(format!(
+                    "placement {} has no unique live instance",
+                    row.uid
+                )));
+            };
+            if &placed.0 != row || identity.model_package != row.package {
+                return Err(FactoryIssue::Gap(format!(
+                    "placement {} no longer agrees with its live owner",
+                    row.uid
+                )));
+            }
+            instances.push((*entity, *identity, *world, row));
+        }
+        Ok(instances)
+    }
+
+    /// `CanActionableFixture(character, fixture)` for one live placement.
+    /// `IsAvailableFixtureCaseCharacter`: no NPC holds the fixture through its
+    /// AI talk data (the fixture's NPC-using list is empty), and no other NPC's
+    /// talk data targets it. `IsAvailableFixtureCasePutStatus`: the fixture is
+    /// not in this NPC's UnmovableFixtureList, lies within 1000 m of the NPC,
+    /// has a motion area that overlaps nothing, and stands on grid level 0 or
+    /// on a fixture that is not a block. Every placement stands on the shown
+    /// site, where every NPC of this host also is, so the site-type and
+    /// site-existence tests hold.
+    #[allow(clippy::too_many_arguments)]
+    fn actionable(
+        &self,
+        actor: Entity,
+        target: &FixtureTarget,
+        fixture_world: &GlobalTransform,
+        row: &OccupancyRow,
+        rows: &[OccupancyRow],
+        instances: &[LiveInstance<'_>],
+        floor: &FixtureFloorTiles,
+        tables: &FixtureActivityTables,
+        unmovable: &[String],
+        other_targets: &[(Entity, Option<Entity>)],
+        from: [f32; 3],
+    ) -> Result<bool, FactoryIssue> {
+        // A fixture this NPC failed to reach at an earlier departure stays
+        // excluded until the list is cleared.
+        if unmovable.iter().any(|uid| *uid == target.uid) {
+            return Ok(false);
+        }
+        if self.reservations.npc_target_in_use(target)
+            || other_targets
+                .iter()
+                .any(|(other, held)| *other != actor && *held == Some(target.entity))
+        {
+            return Ok(false);
+        }
+        if fixture_world.translation().distance(Vec3::from(from)) > 1000.0 {
+            return Ok(false);
+        }
+        if self
+            .areas
+            .motion_overlaps(row, rows, floor)
+            .map_err(FactoryIssue::Gap)?
+        {
+            return Ok(false);
+        }
+        stands_on_usable_tile(row, instances, floor, tables)
+    }
+
+    /// `FixtureController.IsPlayableActionPoints(point)` for one live
+    /// placement. `None` when the point is not playable: the fixture's
+    /// locator array has no entry named for it (the source logs an error and
+    /// answers false; a master row can name a point the fixture does not
+    /// carry), its action slot is in use, the StartLoc sampled at site height
+    /// (SamplePosition 0.3) has no hit within half a tile of the query point,
+    /// the StartLoc or EndLoc cell is the null tile, or the StartLoc cell lies
+    /// outside the fixture on a tile that is not empty. No path query:
+    /// reachability is tested once, for the chosen target only, at departure.
+    #[allow(clippy::too_many_arguments)]
+    fn playable_point(
+        &self,
+        target: &FixtureTarget,
+        identity: &FixtureActivityIdentity,
+        fixture_world: &GlobalTransform,
+        row: &OccupancyRow,
+        point: i32,
+        points: &AttachPoints,
+        floor: &FixtureFloorTiles,
+        face: &ObjectiveFace,
+    ) -> Result<Option<PlayablePoint>, FactoryIssue> {
+        use FactoryIssue::Gap;
+        if points
+            .player_action_points(&identity.model_package)
+            .is_some_and(|carried| !carried.contains(&point))
+        {
+            return Ok(None);
+        }
+        let locate_index = points
+            .instance_index(&identity.model_package, point)
+            .ok_or_else(|| {
+                Gap(format!(
+                    "{} locator {point} lacks a unique source array index",
+                    identity.uid
+                ))
+            })?;
+        let slot_id = points
+            .instance_slot(&identity.model_package, point)
+            .ok_or_else(|| Gap(format!("{} locator {point} lacks a source slot", identity.uid)))?;
+        if self.reservations.action_slot_in_use(target, slot_id) {
+            return Ok(None);
+        }
+        let poses = points
+            .instance_poses(&identity.model_package, point, fixture_world)
+            .ok_or_else(|| Gap("source selected locator has no instance pose".into()))?;
+        let end = poses
+            .end
+            .ok_or_else(|| Gap("source selected locator has no EndLoc".into()))?;
+        let position = [
+            poses.start.position[0],
+            floor.site_origin.y,
+            poses.start.position[2],
+        ];
+        let Some(hit) = face.sample(position, 0.3) else {
+            return Ok(None);
+        };
+        if Vec3::from(hit).distance(Vec3::from(position)) > HALF_TILE_SIZE {
+            return Ok(None);
+        }
+        // StartLoc and EndLoc tiles use their own heights: a stacked
+        // fixture's locators sit above grid level 0. A cell outside the
+        // authored floor is the source's null tile.
+        let start_grid = source_grid(floor, poses.start.position);
+        if !floor.contains_grid(start_grid)
+            || !floor.contains_grid(source_grid(floor, end.position))
+        {
+            return Ok(None);
+        }
+        let inside = row.min.x <= start_grid.x
+            && start_grid.x <= row.max.x
+            && row.min.z <= start_grid.z
+            && start_grid.z <= row.max.z;
+        if !inside && !matches!(floor.tile_at_grid(start_grid), FixtureTileKnowledge::Empty) {
+            return Ok(None);
+        }
+        Ok(Some(PlayablePoint {
+            locate_index,
+            slot_id,
+            position,
+            rotation: poses.start.rotation,
+        }))
+    }
+
+    /// The admissibility pair of the playable-fixture lottery gate for one
+    /// placed fixture of a fixture talk, evaluated for the deciding NPC.
+    /// `CanUseFixtureCaseActionPoints(talk, fixture)` first: a talk without a
+    /// pre-action is not usable; a pre-action without a timeline group (0) is
+    /// usable; otherwise the first timeline of the group whose action-point
+    /// row exists decides, and every non-zero action point of that row (in
+    /// member-slot order) must be playable on the fixture; a group with no
+    /// such timeline is not usable. Then `CanActionableFixture(character,
+    /// fixture)`. `Err` names host data this host cannot evaluate.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn talk_fixture_admissible(
+        &self,
+        actor: Entity,
+        from: [f32; 3],
+        talk_id: i32,
+        uid: &str,
+        placements: &FixturePlacements,
+        other_targets: &[(Entity, Option<Entity>)],
+        unmovable: &[String],
+        face: &ObjectiveFace,
+    ) -> Result<bool, String> {
+        if let Some(gap) = self.snapshot_gap() {
+            return Err(gap);
+        }
+        let tables = self
+            .tables
+            .as_deref()
+            .ok_or("talk source tables are still loading")?;
+        let points = self
+            .points
+            .as_deref()
+            .ok_or("source fixture locator arrays are still loading")?;
+        let inputs = self
+            .inputs
+            .as_deref()
+            .and_then(FixtureSceneSupply::current)
+            .ok_or("current fixture scene inputs are not ready")?;
+        let rows = placements.occupancy_rows();
+        let instances = self.live_instances(&rows).map_err(FactoryIssue::into_reason)?;
+        let &(entity, identity, fixture_world, row) = instances
+            .iter()
+            .find(|(_, identity, _, _)| identity.uid == uid)
+            .ok_or_else(|| format!("placement {uid} has no resolved live instance"))?;
+        let target = FixtureTarget {
+            entity,
+            uid: identity.uid.clone(),
+        };
+        let usable = match tables.pre_action_of(talk_id) {
+            None => false,
+            Some(pre_action) => match pre_action.timeline_group_id.unwrap_or(0) {
+                0 => true,
+                group => {
+                    let mut decided = None;
+                    for timeline in tables.timeline_rows(group) {
+                        let Some(action_points) =
+                            tables.action_points_of(timeline.action_point_definition)
+                        else {
+                            continue;
+                        };
+                        let mut every = true;
+                        for point in action_points {
+                            if self
+                                .playable_point(
+                                    &target,
+                                    identity,
+                                    fixture_world,
+                                    row,
+                                    point,
+                                    points,
+                                    &inputs.floor,
+                                    face,
+                                )
+                                .map_err(FactoryIssue::into_reason)?
+                                .is_none()
+                            {
+                                every = false;
+                                break;
+                            }
+                        }
+                        decided = Some(every);
+                        break;
+                    }
+                    decided.unwrap_or(false)
+                }
+            },
+        };
+        if !usable {
+            return Ok(false);
+        }
+        self.actionable(
+            actor,
+            &target,
+            fixture_world,
+            row,
+            &rows,
+            &instances,
+            &inputs.floor,
+            tables,
+            unmovable,
+            other_targets,
+            from,
+        )
+        .map_err(FactoryIssue::into_reason)
+    }
+
+    /// What the fixture-talk factories read of one placed fixture: its live
+    /// entity, its action-point array (StartLoc names and poses, array
+    /// order), its footprint (BoundingBox, grid x/z, inclusive), the floor
+    /// grid's bound (GetGridData(2), inclusive) and the site origin. `Err`
+    /// names host data it cannot resolve.
+    pub(crate) fn talk_fixture_geometry(
+        &self,
+        uid: &str,
+        placements: &FixturePlacements,
+    ) -> Result<TalkFixtureGeometry, String> {
+        if let Some(gap) = self.snapshot_gap() {
+            return Err(gap);
+        }
+        let points = self
+            .points
+            .as_deref()
+            .ok_or("source fixture locator arrays are still loading")?;
+        let inputs = self
+            .inputs
+            .as_deref()
+            .and_then(FixtureSceneSupply::current)
+            .ok_or("current fixture scene inputs are not ready")?;
+        let rows = placements.occupancy_rows();
+        let instances = self.live_instances(&rows).map_err(FactoryIssue::into_reason)?;
+        let &(entity, identity, world, row) = instances
+            .iter()
+            .find(|(_, identity, _, _)| identity.uid == uid)
+            .ok_or_else(|| format!("placement {uid} has no resolved live instance"))?;
+        let locators = points.source_array(&identity.model_package, world)?;
+        let layout = &inputs.floor.layout;
+        // GridData.SetupGridData: [-ceil(w/2), ceil(w/2)) per axis.
+        let half_width = (layout.width + 1) / 2;
+        let half_depth = (layout.depth + 1) / 2;
+        Ok(TalkFixtureGeometry {
+            entity,
+            locators,
+            footprint: (
+                (row.min.x as i32, row.min.z as i32),
+                (row.max.x as i32, row.max.z as i32),
+            ),
+            floor_bounds: ((-half_width, -half_depth), (half_width - 1, half_depth - 1)),
+            site_origin: inputs.floor.site_origin.to_array(),
+        })
     }
 
     fn select_internal(
@@ -417,6 +852,7 @@ impl Factory<'_, '_> {
         face: &ObjectiveFace,
         rng: &mut MemberRng,
         exact: Option<(&ActivitySpec, &FixtureTarget)>,
+        draws: &mut NoneTalkDraws,
     ) -> Result<Option<Selection>, FactoryIssue> {
         use FactoryIssue::{Gap, Pending};
         self.loading(epoch, site_type).map_err(Pending)?;
@@ -437,35 +873,7 @@ impl Factory<'_, '_> {
             .and_then(FixtureSceneSupply::current)
             .ok_or_else(|| Pending("current fixture scene inputs are not ready".into()))?;
         let rows = placements.occupancy_rows();
-        // GetAllFixture is insertion ordered. The offline placement owner is
-        // that order in this host; query iteration and package-first lookup are
-        // not. Resolve every selected row against exactly one live Entity/UID.
-        // Live instances are grouped by UID once; a row keeps the instances in
-        // query order whose identity and scene placement both carry its UID.
-        let mut live: HashMap<&str, Vec<_>> = HashMap::with_capacity(rows.len());
-        for fixture in self.fixtures.iter() {
-            let (_, identity, placed, _) = fixture;
-            if identity.uid == placed.0.uid {
-                live.entry(identity.uid.as_str()).or_default().push(fixture);
-            }
-        }
-        let mut instances = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let matches = live.get(row.uid.as_str()).map_or(&[][..], Vec::as_slice);
-            let [(entity, identity, placed, world)] = matches else {
-                return Err(Gap(format!(
-                    "placement {} has no unique live instance",
-                    row.uid
-                )));
-            };
-            if &placed.0 != row || identity.model_package != row.package {
-                return Err(Gap(format!(
-                    "placement {} no longer agrees with its live owner",
-                    row.uid
-                )));
-            }
-            instances.push((*entity, *identity, *world, row));
-        }
+        let instances = self.live_instances(&rows)?;
         // A projection, not a fabricated row in the NoTalk source table.
         // Exact pre-actions retain their own origin and authored tweet.
         struct Candidate {
@@ -511,6 +919,9 @@ impl Factory<'_, '_> {
                 })
                 .collect()
         };
+        if exact.is_none() {
+            draws.keys = order.len();
+        }
         order.sort_by_key(|(key, _)| *key);
         for (_, action) in order {
             if action.unit != unit {
@@ -550,19 +961,6 @@ impl Factory<'_, '_> {
                 if exact.is_some_and(|(_, selected)| selected != &target) {
                     continue;
                 }
-                // IsAvailableFixtureCasePutStatus: a fixture this NPC failed to
-                // reach at an earlier departure stays excluded until the list is
-                // cleared.
-                if unmovable.iter().any(|uid| *uid == identity.uid) {
-                    continue;
-                }
-                if self.reservations.npc_target_in_use(&target)
-                    || other_targets
-                        .iter()
-                        .any(|(other, target)| *other != actor && *target == Some(*entity))
-                {
-                    continue;
-                }
                 // Every no-talk fixture master is floor-only; this host keeps
                 // tile occupancy for the floor layout alone.
                 if row.layout != layout_type::FLOOR {
@@ -571,17 +969,19 @@ impl Factory<'_, '_> {
                         identity.uid
                     )));
                 }
-                if fixture_world.translation().distance(Vec3::from(from)) > 1000.0 {
-                    continue;
-                }
-                if self
-                    .areas
-                    .motion_overlaps(row, &rows, &inputs.floor)
-                    .map_err(Gap)?
-                {
-                    continue;
-                }
-                if !stands_on_usable_tile(row, &instances, &inputs.floor, tables)? {
+                if !self.actionable(
+                    actor,
+                    &target,
+                    fixture_world,
+                    row,
+                    &rows,
+                    &instances,
+                    &inputs.floor,
+                    tables,
+                    unmovable,
+                    other_targets,
+                    from,
+                )? {
                     continue;
                 }
                 let master = tables.fixture_master(identity.master_id).ok_or_else(|| {
@@ -590,76 +990,19 @@ impl Factory<'_, '_> {
                 if identity.model_package != format!("mysekai__fixture__{}", master.model_name) {
                     return Err(Gap("source action's instance model/master disagree".into()));
                 }
-                // IsPlayableActionPoints: ActionPoints.FirstOrDefault for this
-                // action point. A fixture whose locator array has no entry for
-                // it is not playable, which is data the source ships (a master
-                // row can name a point the fixture does not carry).
-                if points
-                    .player_action_points(&identity.model_package)
-                    .is_some_and(|carried| !carried.contains(&point))
-                {
-                    continue;
-                }
-                let locate_index = points
-                    .instance_index(&identity.model_package, point)
-                    .ok_or_else(|| {
-                        Gap(format!(
-                            "{} locator {point} lacks a unique source array index",
-                            identity.uid
-                        ))
-                    })?;
-                let slot_id = points
-                    .instance_slot(&identity.model_package, point)
-                    .ok_or_else(|| {
-                        Gap(format!("{} locator {point} lacks a source slot", identity.uid))
-                    })?;
-                if self.reservations.action_slot_in_use(&target, slot_id) {
-                    continue;
-                }
-                let poses = points
-                    .instance_poses(&identity.model_package, point, fixture_world)
-                    .ok_or_else(|| Gap("source selected locator has no instance pose".into()))?;
-                let end = poses
-                    .end
-                    .ok_or_else(|| Gap("source selected locator has no EndLoc".into()))?;
-                let position = [
-                    poses.start.position[0],
-                    inputs.floor.site_origin.y,
-                    poses.start.position[2],
-                ];
-                // IsPlayableActionPoints: sample the locator at site height
-                // (SamplePosition 0.3) and reject a hit farther than half a
-                // tile from that query point. No path query: reachability is
-                // tested once, for the chosen target only, at departure.
-                let Some(hit) = face.sample(position, 0.3) else {
+                let Some(playable) = self.playable_point(
+                    &target,
+                    identity,
+                    fixture_world,
+                    row,
+                    point,
+                    points,
+                    &inputs.floor,
+                    face,
+                )?
+                else {
                     continue;
                 };
-                if Vec3::from(hit).distance(Vec3::from(position)) > HALF_TILE_SIZE {
-                    continue;
-                }
-                // StartLoc and EndLoc tiles use their own heights: a stacked
-                // fixture's locators sit above grid level 0. A cell outside
-                // the authored floor is the source's null tile.
-                let start_grid = source_grid(&inputs.floor, poses.start.position);
-                if !inputs.floor.contains_grid(start_grid)
-                    || !inputs
-                        .floor
-                        .contains_grid(source_grid(&inputs.floor, end.position))
-                {
-                    continue;
-                }
-                let inside = row.min.x <= start_grid.x
-                    && start_grid.x <= row.max.x
-                    && row.min.z <= start_grid.z
-                    && start_grid.z <= row.max.z;
-                if !inside
-                    && !matches!(
-                        inputs.floor.tile_at_grid(start_grid),
-                        FixtureTileKnowledge::Empty
-                    )
-                {
-                    continue;
-                }
                 let timeline = if let Some(id) = action.timeline_id {
                     (**group
                         .iter()
@@ -667,9 +1010,12 @@ impl Factory<'_, '_> {
                         .ok_or_else(|| Gap("所选动作已不在原始 Timeline 组中".into()))?)
                     .clone()
                 } else {
-                    (*group[rng.index(group.len())]).clone()
+                    let index = rng.index(group.len());
+                    draws.timeline_pick = Some((index, group.len()));
+                    (*group[index]).clone()
                 };
                 return Ok(Some(Selection {
+                    kind: TalkType::NoneTalk,
                     actor,
                     unit,
                     target,
@@ -682,15 +1028,105 @@ impl Factory<'_, '_> {
                     tweet: action.tweet.clone(),
                     timeline,
                     point,
-                    locate_index,
-                    slot_id,
+                    locate_index: playable.locate_index,
+                    slot_id: playable.slot_id,
                     put_type: master.put_type,
-                    position,
-                    rotation: poses.start.rotation,
+                    position: playable.position,
+                    rotation: playable.rotation,
                 }));
             }
         }
         Ok(None)
+    }
+
+    /// The timeline action of a single-character fixture talk whose
+    /// pre-action carries a timeline: the main's locate row names the
+    /// locator, the talk's picked timeline plays on it, and the pre-action's
+    /// tweet opens the window before it. The claimed slot is the locator
+    /// name's slot (TryParseActionPointNameToSlotId), not the locate row's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn talk_timeline_selection(
+        &self,
+        actor: Entity,
+        unit: u32,
+        epoch: u64,
+        placements: &FixturePlacements,
+        data: &crate::npc_talk_lottery::FixtureTalkData,
+        pre_action_id: i32,
+        tweet: moly_law::talk::TweetRef,
+    ) -> Result<Selection, String> {
+        let tables = self
+            .tables
+            .as_deref()
+            .ok_or("talk source tables are still loading")?;
+        let points = self
+            .points
+            .as_deref()
+            .ok_or("source fixture locator arrays are still loading")?;
+        let rows = placements.occupancy_rows();
+        let instances = self.live_instances(&rows).map_err(FactoryIssue::into_reason)?;
+        let &(entity, identity, world, _) = instances
+            .iter()
+            .find(|(_, identity, _, _)| identity.uid == data.fixture)
+            .ok_or_else(|| format!("placement {} has no resolved live instance", data.fixture))?;
+        let timeline_id = data.timeline.ok_or("the fixture talk carries no timeline")?;
+        let timeline = tables
+            .timeline(timeline_id)
+            .ok_or_else(|| format!("timeline {timeline_id} has no master row"))?
+            .clone();
+        let row = data
+            .locate
+            .as_deref()
+            .and_then(|locate| locate.iter().find(|row| row.unit == unit as i32))
+            .copied()
+            .ok_or("the fixture talk's locate list has no row for its main character")?;
+        let array = points.source_array(&identity.model_package, world)?;
+        let (name, pair) = array
+            .get(row.index)
+            .ok_or_else(|| format!("locator index {} is outside {}'s array", row.index, identity.uid))?;
+        // The action-point value the locator was found by: the digits of the
+        // name's second '_' field.
+        let point = name
+            .split('_')
+            .nth(1)
+            .map(|field| field.chars().filter(char::is_ascii_digit).collect::<String>())
+            .and_then(|digits| digits.parse::<i32>().ok())
+            .ok_or_else(|| format!("locator name {name} carries no action-point value"))?;
+        if points.instance_index(&identity.model_package, point) != Some(row.index) {
+            return Err(format!(
+                "{} locator {point} does not resolve to array index {}",
+                identity.uid, row.index
+            ));
+        }
+        let slot_id = points
+            .instance_slot(&identity.model_package, point)
+            .ok_or_else(|| format!("{} locator {point} lacks a source slot", identity.uid))?;
+        let master = tables
+            .fixture_master(identity.master_id)
+            .ok_or_else(|| format!("missing fixture master {}", identity.master_id))?;
+        Ok(Selection {
+            kind: TalkType::SingleCharacterFixture,
+            actor,
+            unit,
+            target: FixtureTarget {
+                entity,
+                uid: identity.uid.clone(),
+            },
+            identity: (*identity).clone(),
+            site_epoch: epoch,
+            source: ActivityKey {
+                origin: ActivityOrigin::PreAction(pre_action_id),
+                timeline_id,
+            },
+            tweet: Some(tweet),
+            timeline,
+            point,
+            locate_index: row.index,
+            slot_id,
+            put_type: master.put_type,
+            position: data.target_position,
+            rotation: pair.start.rotation,
+        })
     }
 
     pub(crate) fn begin(&mut self, selection: Selection, enable_talk: bool) -> bool {
@@ -710,6 +1146,16 @@ impl Factory<'_, '_> {
             .reservations
             .reserve_npc_target(&selection.target, owner)
         {
+            return false;
+        }
+        // A fixture talk claims its locator's slot when its move starts
+        // (SetUsingFixtureActionPoint); a no-talk action claims it at playback.
+        if selection.kind != TalkType::NoneTalk
+            && !self
+                .reservations
+                .reserve_action_slot(&selection.target, selection.slot_id, owner)
+        {
+            self.reservations.release_owner(owner);
             return false;
         }
         self.runtime.pending_factories.remove(&selection.actor);
@@ -737,6 +1183,7 @@ impl Factory<'_, '_> {
                 preview_ticket: None,
                 waiting_seconds: 0.,
                 tweet_issued: false,
+                talk_clip: false,
             },
         );
         true
@@ -799,17 +1246,10 @@ fn tick(
     session: &mut Session,
 ) -> Result<bool, String> {
     let actor = session.owner.actor;
+    // The source's move has no time limit: it ends by arrival, by the stuck
+    // rule, by a failed route or by a cancel (the route owner reports each).
     if matches!(session.phase, Phase::Approaching | Phase::Preparing) {
         session.waiting_seconds += world.resource::<Time>().delta_secs();
-        if session.waiting_seconds > 120. {
-            return Err(format!(
-                "角色互动准备未完成：{}",
-                session
-                    .last_pending
-                    .as_deref()
-                    .unwrap_or("角色未能走到家具动作点")
-            ));
-        }
     }
     let selection = &session.selection;
     if world
@@ -833,7 +1273,7 @@ fn tick(
         .get::<TalkSlot>(actor)
         .and_then(|slot| slot.current.as_ref())
         .is_none_or(|data| {
-            data.kind != TalkType::NoneTalk || data.target_fixture != Some(selection.target.entity)
+            data.kind != selection.kind || data.target_fixture != Some(selection.target.entity)
         })
     {
         return Err("another objective replaced the selected action".into());
@@ -845,13 +1285,21 @@ fn tick(
     {
         return Err("future fixture reservation was replaced".into());
     }
+    // The playing-fixture talk (the player's talk on this NPC in the fixture
+    // action idle state) plays with this data's target fixture and leaves
+    // the timeline running, as a talk joined on this fixture does.
     let joined_talk = matches!(session.phase, Phase::Playing | Phase::TalkHeld)
-        && world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| {
+        && (world.get_resource::<crate::talk::ActiveTalk>().is_some_and(|talk| {
             talk.participants().iter().any(|(_, entity)| *entity == actor)
                 && talk.fixture_instances().iter().any(|(_, entity)| *entity == selection.target.entity)
-        });
+        }) || world
+            .get_resource::<crate::player_talk::PlayerTalkSession>()
+            .is_some_and(|talk| talk.keeps_fixture_timeline(actor)));
 
-    if world.get::<TalkHold>(actor).is_some() && !joined_talk {
+    // In a fixture talk's window the player's talk on that same data is the
+    // window's purpose: its waits hold for it.
+    let in_window = matches!(session.phase, Phase::TalkWindow(_));
+    if world.get::<TalkHold>(actor).is_some() && !joined_talk && !in_window {
         // Only the admitted cast on this same placed fixture may retain the
         // existing Director. An unrelated conversation still cancels ownership.
         return Err("another conversation owns the actor".into());
@@ -885,12 +1333,58 @@ fn tick(
                 world
                     .entity_mut(actor)
                     .insert(MotionPhase::Dwelling { remaining: None });
-                change_action(world, actor, NpcAction::FixtureAction, false)?;
-                session.phase = Phase::Preparing;
+                if selection.kind == TalkType::NoneTalk {
+                    change_action(world, actor, NpcAction::FixtureAction, false)?;
+                    session.phase = Phase::Preparing;
+                    info!(
+                        "[npc-fixture] unit={} arrived at action {}; preparing its exact source timeline",
+                        selection.unit, selection.source.source_id()
+                    );
+                } else {
+                    // OnArrive: no locator rotation (the data's rotation is
+                    // the zero quaternion), then the look at the fixture.
+                    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+                    info!(
+                        "[npc unit={}] frame={frame} fixture talk {} arrived; OnArrive: call=DoLookAt(fixture)",
+                        selection.unit,
+                        selection.source.source_id()
+                    );
+                    session.phase = match try_play_tweet(world, actor, &session.selection, frame)? {
+                        Some(window) => Phase::TalkWindow(window),
+                        None => start_talk_timeline(world, actor, &session.selection, frame)?,
+                    };
+                }
+            }
+        }
+    }
+    if let Phase::TalkWindow(window) = session.phase {
+        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+        let (tweet_done, talking) = world
+            .get::<NpcActions>(actor)
+            .map(|actions| {
+                (
+                    actions.tweet_state == crate::npc_state::TweetState::Done,
+                    actions.current == NpcAction::Talk,
+                )
+            })
+            .ok_or("NPC action owner disappeared")?;
+        match window {
+            TalkWindow::TweetDone { since } => {
+                if frame != since && tweet_done {
+                    session.phase = Phase::TalkWindow(TalkWindow::NotTalking { since: frame });
+                }
+                return Ok(false);
+            }
+            TalkWindow::NotTalking { since } => {
+                if frame == since || talking || world.get::<TalkHold>(actor).is_some() {
+                    return Ok(false);
+                }
                 info!(
-                    "[npc-fixture] unit={} arrived at action {}; preparing its exact source timeline",
-                    selection.unit, selection.source.source_id()
+                    "[npc unit={}] frame={frame} tweet wait ended; call=TryRotateBeforeRotation",
+                    selection.unit
                 );
+                session.phase = start_talk_timeline(world, actor, &session.selection, frame)?;
+                return Ok(false);
             }
         }
     }
@@ -991,8 +1485,29 @@ fn tick(
                 // recompose against this same instance's live locator.
                 let poses = live_poses(world, &session.selection)?;
                 set_pose(world, actor, poses.0)?;
-                if let Some(mut actions) = world.get_mut::<NpcActions>(actor) {
+                // The loop clip with the talk flag (LoopFlagBehaviour): its
+                // play enables talking and, unless the NPC is talking, changes
+                // it to the fixture action idle state, so the player's talk
+                // takes the playing-fixture row; its pause disables talking
+                // and changes no state back.
+                let entered = enable_talk && !session.talk_clip;
+                session.talk_clip = enable_talk;
+                let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
+                if let Ok((mut actions, mut rest)) = query.get_mut(world, actor) {
                     actions.enable_talk = enable_talk;
+                    if entered
+                        && !matches!(
+                            actions.current,
+                            NpcAction::Talk | NpcAction::FixtureActionIdle
+                        )
+                    {
+                        actions.change(NpcAction::FixtureActionIdle, &mut rest);
+                        info!(
+                            "[npc-fixture] unit={} action={} the loop clip enables talking; change to FixtureActionIdle",
+                            session.selection.unit,
+                            session.selection.source.source_id()
+                        );
+                    }
                 }
                 return Ok(false);
             }
@@ -1048,7 +1563,56 @@ fn tick(
     Ok(false)
 }
 
-fn prepare_exit(world: &World, actor: Entity, start: Transform, end: Transform) -> Result<LocalMove, String> {
+/// TryPlayTweetAsync for a fixture talk: with a pre-action tweet, its id,
+/// the tweet state Pending and the change to the tweet state; the window then
+/// waits for Done. `None` without a tweet.
+fn try_play_tweet(
+    world: &mut World,
+    actor: Entity,
+    selection: &Selection,
+    frame: u32,
+) -> Result<Option<TalkWindow>, String> {
+    let Some(tweet) = selection.tweet.as_ref().filter(|tweet| tweet.id != 0) else {
+        return Ok(None);
+    };
+    let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
+    let (mut actions, mut rest) = query
+        .get_mut(world, actor)
+        .map_err(|_| "NPC action owner disappeared")?;
+    actions.tweet_id = tweet.id;
+    actions.tweet_state = crate::npc_state::TweetState::Pending;
+    actions.change(NpcAction::Tweet, &mut rest);
+    info!(
+        "[npc unit={}] frame={frame} tweet {}: Pending, change to Tweet",
+        selection.unit, tweet.id
+    );
+    Ok(Some(TalkWindow::TweetDone { since: frame }))
+}
+
+/// TryPlayTimelineAsync of a single-character fixture talk: the fixture
+/// action state, then the timeline (the same playback as a no-talk action).
+/// The controller's SetupAsync disables talking before it loads the asset,
+/// as on the no-talk path.
+fn start_talk_timeline(
+    world: &mut World,
+    actor: Entity,
+    selection: &Selection,
+    frame: u32,
+) -> Result<Phase, String> {
+    change_action(world, actor, NpcAction::FixtureAction, false)?;
+    info!(
+        "[npc unit={}] frame={frame} TryPlayTimelineAsync: change to FixtureAction, timeline {}",
+        selection.unit, selection.timeline.id
+    );
+    Ok(Phase::Preparing)
+}
+
+pub(crate) fn prepare_exit(
+    world: &World,
+    actor: Entity,
+    start: Transform,
+    end: Transform,
+) -> Result<LocalMove, String> {
     let speed = world.get::<WalkSpeed>(actor).ok_or("source NPC walk speed is missing")?.0;
     let sample = world.get_resource::<ObjectiveFace>()
         .and_then(|face| face.sample(end.translation.to_array(), 2.0));
@@ -1163,7 +1727,7 @@ fn live_poses(world: &World, selection: &Selection) -> Result<(Transform, Transf
     Ok((pose(poses.start), pose(end)))
 }
 
-fn set_pose(world: &mut World, actor: Entity, pose: Transform) -> Result<(), String> {
+pub(crate) fn set_pose(world: &mut World, actor: Entity, pose: Transform) -> Result<(), String> {
     if !pose.translation.is_finite() || !pose.rotation.is_finite() {
         return Err("nonfinite source actor pose".into());
     }
@@ -1243,6 +1807,7 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
     if site_changed || !world.entities().contains(actor) {
         return;
     }
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
     let mut query = world.query::<(
         &CharacterUnitId,
         &PauseSeconds,
@@ -1256,7 +1821,7 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
     )>();
     if let Ok((
         unit,
-        pause,
+        _pause,
         mut mind,
         mut slot,
         mut actions,
@@ -1267,7 +1832,7 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
     )) = query.get_mut(world, actor)
     {
         let still_ours = slot.current.as_ref().is_some_and(|data| {
-            data.kind == TalkType::NoneTalk
+            data.kind == session.selection.kind
                 && data.target_fixture == Some(session.selection.target.entity)
         });
         if !still_ours {
@@ -1281,26 +1846,70 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
             mind.executing = false;
             return;
         }
-        route.finish_fixture();
+        if completed {
+            // The exit already chose its surface position.
+            route.finish_fixture();
+        } else {
+            // A cancel can leave the character on its locator, off the
+            // walk face: the next move starts from the point the fit left.
+            route.cancel();
+        }
         path.0 = NpcPathWalkSlot::from_corners(Vec::new());
         *phase = MotionPhase::Dwelling { remaining: None };
         actions.enable_talk = session.previous_enable_talk;
-        // Reuse the existing NoneTalk post-action refuel/Rest owner; it still
-        // has its explicitly documented fixture-talk factory limitations.
-        crate::npc_objective::finish_objective(
-            unit.0,
-            &mut mind,
-            &mut slot,
-            pause.0,
-            !completed,
-            &mut actions,
-            &mut rest,
-        );
+        if completed {
+            // The timeline controller's disposal puts its characters in Rest.
+            actions.change(NpcAction::Rest, &mut rest);
+        }
+        if completed && session.selection.kind == TalkType::SingleCharacterFixture {
+            // The timeline's end runs ForceUpdateObjective on its character:
+            // the talk objective's cancel releases its claim, then one call;
+            // the objective's wait sees the cancel on the next frame.
+            crate::npc_objective::owe_force_updates(&mut mind, frame.wrapping_add(1), 1);
+        } else {
+            // The objective's end: the ForceUpdateObjective calls it owes (two
+            // after the timeline end, one after a failed approach), then the Rest.
+            crate::npc_objective::finish_objective(unit.0, &mut mind, &slot, frame, !completed);
+        }
         info!(
             "[npc-fixture] unit={} action={} disposed completed={completed}; instance/slot leases released",
             unit.0, session.selection.source.source_id()
         );
     }
+}
+
+impl NpcFixtureActivities {
+    /// A fresh activity owner for `actor` (the group talks' claims).
+    pub(crate) fn next_owner(&mut self, actor: Entity) -> FixtureActivityOwner {
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("NPC fixture activity generation exhausted");
+        FixtureActivityOwner {
+            actor,
+            generation: self.next_generation,
+        }
+    }
+}
+
+/// Whether a no-talk objective's fixture session drives `actor`.
+pub(crate) fn owns_actor(runtime: &NpcFixtureActivities, actor: Entity) -> bool {
+    runtime.sessions.contains_key(&actor)
+}
+
+/// The greeting cancelled the running no-talk objective of `actor`: the
+/// objective's dispose releases its fixture claims, its timeline token and
+/// its animation lease. The greeting has already replaced the talk data, so
+/// the dispose leaves the objective state to the greeting.
+pub(crate) fn cancel_for_greeting(world: &mut World, actor: Entity) {
+    let Some(mut runtime) = world.remove_resource::<NpcFixtureActivities>() else {
+        return;
+    };
+    runtime.pending_factories.remove(&actor);
+    if let Some(session) = runtime.sessions.remove(&actor) {
+        dispose(world, session, false, false);
+    }
+    world.insert_resource(runtime);
 }
 
 pub(crate) fn cancel_for_site_change(world: &mut World) {
@@ -1339,7 +1948,7 @@ fn cancel_runtime(world: &mut World, site_changed: bool) {
 /// Existing host's local no-NavMesh interpolation, with the source exit speed
 /// and phase order: move first, then turn to the exit orientation. It is not a
 /// replacement for the native agent's on-mesh reattachment/collision behavior.
-struct LocalMove {
+pub(crate) struct LocalMove {
     pose: Transform,
     leg: crate::npc::FitLeg,
     final_rotation: Quat,
@@ -1372,7 +1981,7 @@ impl LocalMove {
         })
     }
 
-    fn step(&mut self, dt: f32) -> (Transform, MotionPhase, bool) {
+    pub(crate) fn step(&mut self, dt: f32) -> (Transform, MotionPhase, bool) {
         let mut turn_delta = dt;
         if self.turn.is_none() {
             self.elapsed += dt;

@@ -19,12 +19,12 @@
 //! Center.Y · LayoutType 位 · Direction），值是我方选择、逐条具名——
 //! 与巡逻环替身同一裁决形态。位置不写死，全部经律现算。
 
-#[path = "fixture_compact.rs"]
-mod compact;
 #[path = "fence.rs"]
 mod fence;
 #[path = "fixture_gallery.rs"]
 mod gallery;
+#[path = "fixture_region.rs"]
+pub(crate) mod region;
 #[path = "fixture_layouts.rs"]
 pub(crate) mod layouts;
 #[path = "road.rs"]
@@ -56,15 +56,11 @@ use moly_law::fixture::{Direction, GridPosition};
 /// 见各自的行注释）。余下 21 条铺自发光族的可见面（材质参数
 /// `_BrightPhenomenaEmission` > 0 的 21 包全取，选位理由见该节注释）。
 ///
-/// Region: this is the CN starter and stays exactly as it is. A JP snapshot's
-/// fixture-model index lacks four of these packages, so the JP starter is the
-/// same rows with JP stand-ins for those four ([`JP_STAND_INS`], picked by the
-/// rule stated there): the star rug `mdl_cncollect_rug_star3` becomes
-/// `mdl_ext0008_rug_rug1`, the table `mdl_twcollect_fixture_table1` becomes
-/// `mdl_env0012_fixture_snowman1`, the planter `mdl_twcollect_fixture_planter1`
-/// becomes `mdl_ext0019_fixture_floatring1`, and the tea stand
-/// `mdl_cncollect_fixture_tea3` becomes `mdl_ext0009_fixture_lamp1`. The region
-/// is the loaded snapshot's own identity (see [`starter_rows`]).
+/// Region: these are the authored rows. On a snapshot whose fixture master
+/// lacks one of their pieces (a JP snapshot lacks the CN star rug and tea
+/// stand and the TW table and planter), the row takes a stand-in chosen from
+/// that master at load by the rule of [`region`]; the traits it matches are in
+/// [`AUTHORED_TRAITS`].
 const PLACEMENTS: [PlacementMock; 38] = [
     // Rug coverage: a rectangular picnic sheet under the birthday chair,
     // and an alpha-clipped star beside the player, in the initial camera.
@@ -704,92 +700,64 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
 ];
 
-/// A JP stand-in for a starter package that only the CN or TW client ships.
-/// The JP snapshot's fixture-model index has no such package, so the JP
-/// starter names this JP package in the same row instead. The row keeps its
-/// position, Center.Y, layout, direction and texture; only the package, and a
-/// master-id anchor that belongs to it, change.
-struct RegionStandIn {
-    /// The CN/TW-only package and its id in the master of the client that ships it.
-    replaces: &'static str,
-    replaces_id: i32,
-    /// The JP package and its id in the JP master.
-    package: &'static str,
-    id: i32,
-}
-
-/// JP stand-ins for the CN/TW-only starter packages (named server-domain mock
-/// values; the JP master has no starter layout of its own).
-///
-/// How each was picked, the same way for all four: from the JP fixture master
-/// and the JP fixture-model index, keep the pieces with the same master grid
-/// size (width, depth, height), the same settable layout type and the same put
-/// type, whose model is exported with a fixture view. Among those, prefer the
-/// fewest differences in fixture type, handle type and player action type (so
-/// a stand-in neither adds nor drops an interaction), then the same main and
-/// sub genre, then the same main genre, then the lowest master id.
-///
-/// Every row keeps its own grid footprint, so the placed footprint is the
-/// replaced row's in every direction; the equal grid size means the stand-in
-/// is also the same size as the piece it stands in for. All other starter rows
-/// already exist in the JP index and stay as they are.
-const JP_STAND_INS: [RegionStandIn; 4] = [
-    // CN star rug: both are 8x8 rugs one cell high, no put type, in the rug
-    // genre, with no handle or action. Four JP rugs fit; this is the lowest id.
-    RegionStandIn {
-        replaces: "mysekai__fixture__mdl_cncollect_rug_star3",
-        replaces_id: 90005,
-        package: "mysekai__fixture__mdl_ext0008_rug_rug1",
-        id: 238,
-    },
-    // TW table: both stand on 2x2 floor cells, 4 high, no put type, with no
-    // handle or action, in the same main genre. JP has no table of this size;
-    // of the 40 fitting pieces, three have no interaction, and this is the
-    // lowest id of those. The laptop row sits at Center.Y 4, the top of this
-    // 4-high volume for either piece, and stays where it is.
-    RegionStandIn {
-        replaces: "mysekai__fixture__mdl_twcollect_fixture_table1",
-        replaces_id: 9000003,
-        package: "mysekai__fixture__mdl_env0012_fixture_snowman1",
-        id: 464,
-    },
-    // TW planter: both stand on 4x4 floor cells, 2 high, no put type, in the
-    // same main and sub genre, with no handle or action. It is the only JP
-    // piece that fits.
-    RegionStandIn {
-        replaces: "mysekai__fixture__mdl_twcollect_fixture_planter1",
-        replaces_id: 9000004,
-        package: "mysekai__fixture__mdl_ext0019_fixture_floatring1",
-        id: 689,
-    },
-    // CN tea stand: both stand on 2x2 floor cells, 3 high, no put type, and
-    // both carry the light handle type and the loop player action, so the
-    // starter keeps a piece with that interaction. It is the only fitting JP
-    // piece with that behaviour; its genre differs.
-    RegionStandIn {
-        replaces: "mysekai__fixture__mdl_cncollect_fixture_tea3",
-        replaces_id: 90008,
-        package: "mysekai__fixture__mdl_ext0009_fixture_lamp1",
-        id: 257,
-    },
+/// The master traits of the authored full-showcase pieces that some region's
+/// fixture master lacks, for the stand-in rule of [`region`]: grid size
+/// (width, depth, height), layout type, put type, fixture type, handle type,
+/// player action type. The CN pieces are the CN master's rows (ids 90005 and
+/// 90008). The TW pieces are the TW master's rows as recorded when the
+/// showcase was authored (ids 9000003 and 9000004); their fixture type is
+/// recorded as normal.
+const AUTHORED_TRAITS: [(&str, [i32; 3], [&str; 5]); 4] = [
+    (
+        "mysekai__fixture__mdl_cncollect_rug_star3",
+        [8, 8, 1],
+        ["rug", "none", "normal", "none", "no_action"],
+    ),
+    (
+        "mysekai__fixture__mdl_twcollect_fixture_table1",
+        [2, 2, 4],
+        ["floor", "none", "normal", "none", "no_action"],
+    ),
+    (
+        "mysekai__fixture__mdl_twcollect_fixture_planter1",
+        [4, 4, 2],
+        ["floor", "none", "normal", "none", "no_action"],
+    ),
+    (
+        "mysekai__fixture__mdl_cncollect_fixture_tea3",
+        [2, 2, 3],
+        ["floor", "none", "normal", "light", "loop"],
+    ),
 ];
 
-/// The offline HOME starter rows for the loaded snapshot's region. CN is the
-/// accepted table, unchanged. JP is the same table row for row, with only the
-/// CN/TW-only packages replaced by their [`JP_STAND_INS`]. A package still
-/// missing from the index is refused by the loader, never filtered out.
-fn starter_rows(
-    content: crate::site::OfflineSceneContent,
-    region: moly_law::carve::NavMeshRegion,
-) -> Result<Vec<PlacementMock>, String> {
-    let rows = match content {
-        crate::site::OfflineSceneContent::Compact => compact::PLACEMENTS.to_vec(),
-        crate::site::OfflineSceneContent::Full => PLACEMENTS.to_vec(),
-    };
-    match region {
-        moly_law::carve::NavMeshRegion::Cn => Ok(rows),
-        moly_law::carve::NavMeshRegion::Jp => rows.into_iter().map(jp_row).collect(),
-    }
+/// The authored traits of a full-showcase row's piece, when recorded.
+fn authored_traits(package: &str) -> Option<region::PieceTraits> {
+    AUTHORED_TRAITS
+        .iter()
+        .find(|(name, _, _)| *name == package)
+        .map(|(_, grid, [layout, put, kind, handle, action])| region::PieceTraits {
+            grid: *grid,
+            layout_type: (*layout).to_owned(),
+            put_type: (*put).to_owned(),
+            fixture_type: (*kind).to_owned(),
+            handle_type: (*handle).to_owned(),
+            player_action_type: (*action).to_owned(),
+        })
+}
+
+/// The full offline HOME showcase rows for the loaded snapshot: the authored
+/// rows, each resolved against the snapshot's own fixture master (see
+/// [`region`]). A package still missing from the index is refused by the
+/// loader, never filtered out. (The compact starter is the server panel's
+/// housing layout.)
+fn full_starter_rows(
+    source_region: moly_law::carve::NavMeshRegion,
+) -> Result<Vec<PlacementMock<String>>, String> {
+    let rows = PLACEMENTS
+        .iter()
+        .map(|row| (row.into_owned(), authored_traits(row.package)))
+        .collect();
+    region::resolve_rows(rows, source_region)
 }
 
 /// The home site always has the player's house (a system fixture the
@@ -897,27 +865,8 @@ pub(crate) fn placements_resolved(world: &mut World) -> bool {
     roots.iter(world).all(|(identity, view)| identity && view)
 }
 
-fn jp_row(mut row: PlacementMock) -> Result<PlacementMock, String> {
-    let Some(stand_in) = JP_STAND_INS.iter().find(|s| s.replaces == row.package) else {
-        return Ok(row);
-    };
-    // A starter fixture_id is either 0 (no anchor) or the package's own master
-    // id; the latter must follow the package into the JP master.
-    if row.fixture_id != 0 {
-        if row.fixture_id != stand_in.replaces_id {
-            return Err(format!(
-                "starter row {} carries fixture id {}, not its master id {}; no JP stand-in was applied",
-                row.package, row.fixture_id, stand_in.replaces_id
-            ));
-        }
-        row.fixture_id = stand_in.id;
-    }
-    row.package = stand_in.package;
-    Ok(row)
-}
-
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PlacementMock<P = &'static str> {
     package: P,
     texture_id: u32,
@@ -1483,6 +1432,19 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(FixturePlacements::default());
 }
 
+/// Whether a restore of this site would read the home starter before the
+/// panel document has installed it, or before the snapshot's fixture master
+/// (which resolves the starter rows' pieces) is installed.
+pub(crate) fn waits_for_panel_layout(
+    site_type: &str,
+    content: crate::site::OfflineSceneContent,
+) -> bool {
+    site_type == "home_site"
+        && (!region::ready()
+            || (content == crate::site::OfflineSceneContent::Compact
+                && !layouts::home_starter_ready()))
+}
+
 fn restore_selected_layout(
     mut commands: Commands,
     selection: Res<crate::site::SiteSelection>,
@@ -1533,6 +1495,11 @@ fn restore_selected_layout(
             ..Default::default()
         })
     } else {
+        // The home starter is the server panel's housing layout: hold, without
+        // an error, until the panel document has installed it.
+        if waits_for_panel_layout(selection.site_type(), selection.content()) {
+            return;
+        }
         saved.restore(
             site_id,
             selection.site_type(),

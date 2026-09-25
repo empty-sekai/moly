@@ -1,32 +1,64 @@
-//! Text measurement and placement with source TMP vertical face metrics.
+//! Text measurement and placement.
 //!
-//! The existing open font supplies glyph advances, pairs and bitmap shapes.
-//! Authored line/paragraph spacing combines with the assigned TMP font's actual
-//! FaceInfo, not the substitute TTF's different line height. Preferred and draw
-//! layout consume the same source metadata and retain their distinct break rules.
+//! With the region root's TMP font assets, each character is looked up as
+//! TMP looks it up (the text's font asset, its run-time fallback list, the
+//! TMP settings fallbacks, then the missing-glyph replacement) and laid out
+//! with the stored glyph advance, the resolving asset's FaceInfo and its
+//! glyph pair records, in TMP's own factorization: the element scale is the
+//! point size over the asset's sampling point size times its face scale,
+//! times the character and glyph scales; the pen step is (advance times the
+//! horizontal FX scale plus the pair advance) times that scale, plus the
+//! spacing terms in em units (the pass's point size over 100), times one
+//! less the width adjustment; a whitespace character or U+200B then adds the
+//! word spacing as a separate addition. The line gap and the base scale are
+//! the text's own asset's. Placement follows the text rect's corners in its
+//! own local space (origin at the pivot): the vertical anchor from the first
+//! line's ascender and the last line's descender, each line justified in the
+//! text area width. A character a dynamic
+//! asset adds at run time from its source font file has no stored advance:
+//! it is laid out with the open font's advance at that asset's sampling
+//! point size and reported, once per text, as unsourced.
+//!
+//! Without font assets (the shared root) the open font supplies advances and
+//! pairs, with the text's own FaceInfo for the vertical metrics. The open
+//! font always supplies the bitmap shapes. Preferred and draw layout consume
+//! the same metrics and retain their distinct break rules.
+//!
+//! The text is read as TMP reads it: its processing array first (escapes of
+//! the serialized text, the `<br>` / `<nbsp>` / `<zwsp>` replacements), then
+//! each '<' validated by TMP's tag scan and tag set, a rejected one drawn as a
+//! character. A tag's value is read by the shared tag parser; a value TMP
+//! would reject (and so draw as characters) is not recognised here.
 
 use bevy::math::Vec2;
 use moly_assets::ui_layout::{UiComponent, UiTextFace};
+use moly_law::text::auto_size::{self, AutoSize};
 use moly_law::text::tags::{
     Indent, LineIndent, SizeSpec, TextSegment, parse_rich_segments, transformed_glyphs,
 };
+use super::tmp_font::{Element, Face, TmpFonts};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use swash::shape::ShapeContext;
 use swash::text::Codepoint;
 
 const FONT: &[u8] = include_bytes!("../../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
-pub(super) const FONT_METRICS_REVISION: &str = "ResourceHanRoundedSC-Medium/metrics-wrap-1-source-face-1";
+pub(super) const FONT_METRICS_REVISION: &str = "ResourceHanRoundedSC-Medium/metrics-wrap-1-source-face-1-tmp-assets-1";
 const EPSILON: f32 = 0.0001;
 const LARGE: f32 = 32767.0;
-const MAX_ITERATIONS: usize = 100;
+/// The margin a preferred-width query lays the text out in: TMP's
+/// k_LargePositiveVector2, int.MaxValue in each component, as a float.
+const LARGE_POSITIVE_VECTOR: f32 = i32::MAX as f32;
+const MAX_ITERATIONS: usize = auto_size::MAX_ITERATION_COUNT as usize;
 
 pub(super) struct TextRules {
     pub(super) leading: HashSet<char>,
     pub(super) following: HashSet<char>,
     pub(super) modern_hangul: bool,
+    /// The root's TMP font assets; None on the shared root, which carries none.
+    pub(super) fonts: Option<Arc<TmpFonts>>,
 }
 
 pub(super) struct PlacedGlyph {
@@ -36,13 +68,24 @@ pub(super) struct PlacedGlyph {
     pub(super) font_size: f32,
     pub(super) scale: f32,
     pub(super) width_scale: f32,
-    /// Pen origin / baseline, relative to the text rect centre, positive Y up.
+    /// Pen origin / baseline in the text rect's local space (origin at its
+    /// pivot), positive Y up.
     pub(super) pen: Vec2,
     pub(super) color: Option<[f32; 4]>,
 }
 
 pub(super) struct TextLayout {
     pub(super) glyphs: Vec<PlacedGlyph>,
+}
+
+/// Reports each (text component, finding) once: layout runs every time a
+/// text is measured or redrawn.
+fn report_once(path_id: i64, finding: String) {
+    static REPORTED: Mutex<Option<HashSet<(i64, String)>>> = Mutex::new(None);
+    let mut reported = REPORTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if reported.get_or_insert_with(HashSet::new).insert((path_id, finding.clone())) {
+        bevy::log::warn!("UI text @{path_id}: {finding}");
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -53,20 +96,26 @@ enum Purpose {
 
 struct Settings {
     face: VerticalFace,
+    /// The text's own font asset in the root's font document.
+    primary: Option<usize>,
+    path_id: i64,
     size: f32,
+    /// `m_fontSizeBase`: where a render pass starts an auto-size search.
+    base: f32,
     min: f32,
     max: f32,
     auto: bool,
     wrap: bool,
     kern: bool,
     rich: bool,
-    controls: bool,
     char_spacing: f32,
     word_spacing: f32,
     line_spacing: f32,
     paragraph_spacing: f32,
     line_spacing_min: f32,
     width_adjustment_max: f32,
+    /// `m_charWidthMaxAdj` as serialized (percent).
+    char_width_max_adj: f32,
     margin: [f32; 4],
     horizontal: i64,
     vertical: i64,
@@ -81,6 +130,9 @@ struct VerticalFace {
     ascent: f32,
     descent: f32,
     leading: f32,
+    /// The text's own font asset's FaceInfo, when the root carries it: the
+    /// base scale and line gap then take TMP's factorization.
+    asset: Option<Face>,
 }
 
 impl VerticalFace {
@@ -102,7 +154,42 @@ impl VerticalFace {
             descent: -face.descent_line * unit_scale,
             leading: (face.line_height - (face.ascent_line - face.descent_line))
                 * unit_scale,
+            asset: None,
         })
+    }
+
+    fn from_asset(face: Face) -> Result<Self, String> {
+        let mut vertical = Self::read(&UiTextFace {
+            point_size: face.point_size,
+            scale: face.scale,
+            line_height: face.line_height,
+            ascent_line: face.ascent_line,
+            descent_line: face.descent_line,
+        })?;
+        vertical.asset = Some(face);
+        Ok(vertical)
+    }
+
+    /// TMP's baseScale: the text's point size over its asset's sampling
+    /// point size, times the face scale (orthographic).
+    fn base_scale(&self, size: f32) -> f32 {
+        match self.asset {
+            Some(face) => size / face.point_size * face.scale,
+            None => size * self.unit_scale,
+        }
+    }
+
+    /// The face's line gap plus the automatic spacing delta, in line space:
+    /// TMP's (lineGap + lineSpacingDelta) * baseScale, lineGap = lineHeight -
+    /// (ascentLine - descentLine) of the text's own asset.
+    fn gap(&self, size: f32, spacing_delta: f32) -> f32 {
+        match self.asset {
+            Some(face) => {
+                (face.line_height - (face.ascent_line - face.descent_line) + spacing_delta)
+                    * self.base_scale(size)
+            }
+            None => self.leading * size + spacing_delta * self.base_scale(size),
+        }
     }
 }
 
@@ -128,7 +215,7 @@ fn integer(fields: &Value, key: &str) -> Result<i64, String> {
 }
 
 impl Settings {
-    fn read(component: &UiComponent, alignment: Option<i64>) -> Result<Self, String> {
+    fn read(component: &UiComponent, alignment: Option<i64>, fonts: Option<&TmpFonts>) -> Result<Self, String> {
         let f = &component.fields;
         let source_face = component.font.as_ref()
             .and_then(|font| font.source_face.as_ref())
@@ -136,12 +223,38 @@ impl Settings {
                 "TMP source font FaceInfo missing for component @{}",
                 component.path_id,
             ))?;
+        let (face, primary) = match fonts {
+            Some(fonts) => {
+                let font = component.font.as_ref()
+                    .ok_or_else(|| format!("TMP text @{} names no font asset", component.path_id))?;
+                let (Some(file), Some(path_id)) = (font.serialized_file.as_deref(), font.path_id) else {
+                    return Err(format!("TMP text @{} font reference has no serialized file or path id", component.path_id));
+                };
+                let primary = fonts.primary(file, path_id)?;
+                let asset = fonts.asset(primary).face;
+                // The layout document's copy of the text's FaceInfo and the
+                // font document's must be the same asset's.
+                if [asset.point_size, asset.scale, asset.line_height, asset.ascent_line, asset.descent_line]
+                    != [source_face.point_size, source_face.scale, source_face.line_height,
+                        source_face.ascent_line, source_face.descent_line]
+                {
+                    return Err(format!(
+                        "TMP text @{}: its FaceInfo differs from {} in the font document",
+                        component.path_id,
+                        fonts.asset(primary).name
+                    ));
+                }
+                (VerticalFace::from_asset(asset)?, Some(primary))
+            }
+            None => (VerticalFace::read(source_face)?, None),
+        };
         if boolean(f, "m_isRightToLeft")? {
             return Err("TMP RTL placement is not implemented".into());
         }
-        if !boolean(f, "m_isOrthographic")? {
-            return Err("TMP perspective text is not a UI rect".into());
-        }
+        // The serialized `m_isOrthographic` is not read: the UI text
+        // component's Awake sets it to true unconditionally and nothing sets
+        // it again, so every UI text lays out orthographic (scale factor 1,
+        // em unit size * 0.01) whatever the prefab stored.
         if integer(f, "m_fontStyle")? != 0 || integer(f, "m_fontWeight")? != 400 {
             return Err("TMP requested a font style not supplied by the current atlas".into());
         }
@@ -188,21 +301,24 @@ impl Settings {
             }
         }
         let result = Self {
-            face: VerticalFace::read(source_face)?,
+            face,
+            primary,
+            path_id: component.path_id,
             size: number(f, "m_fontSize")?,
+            base: number(f, "m_fontSizeBase")?,
             min: number(f, "m_fontSizeMin")?,
             max: number(f, "m_fontSizeMax")?,
             auto: boolean(f, "m_enableAutoSizing")?,
             wrap: boolean(f, "m_enableWordWrapping")?,
             kern: boolean(f, "m_enableKerning")?,
             rich: boolean(f, "m_isRichText")?,
-            controls: boolean(f, "m_parseCtrlCharacters")?,
             char_spacing: number(f, "m_characterSpacing")?,
             word_spacing: number(f, "m_wordSpacing")?,
             line_spacing: number(f, "m_lineSpacing")?,
             paragraph_spacing: number(f, "m_paragraphSpacing")?,
             line_spacing_min: number(f, "m_lineSpacingMax")?,
             width_adjustment_max: number(f, "m_charWidthMaxAdj")? / 100.0,
+            char_width_max_adj: number(f, "m_charWidthMaxAdj")?,
             margin,
             horizontal,
             vertical,
@@ -233,94 +349,329 @@ struct Prepared {
     segments: Vec<TextSegment>,
 }
 
-fn prepare(input: &str, settings: &Settings) -> Result<Prepared, String> {
-    let raw: Vec<char> = input.chars().collect();
-    let mut text = String::new();
-    let mut source = Vec::new();
-    let mut i = 0;
-    while i < raw.len() {
-        if settings.controls && raw[i] == '\\' && i + 1 < raw.len() {
-            let escaped = match raw[i + 1] {
-                'n' => Some('\n'),
-                'r' => Some('\r'),
-                't' => Some('\t'),
-                '\\' => Some('\\'),
+/// A reserved code point standing, in the text handed to the shared tag
+/// parser, for a '<' TMP draws as a character (that parser would take it for
+/// the start of a tag).
+const LITERAL_LESS_THAN: char = '\u{fdd0}';
+
+/// The name hashes `ValidateHtmlTag` switches on: its top-level tag cases,
+/// each tag's lower- and upper-case spelling. A tag whose name hashes to
+/// none of them, and is not a `#` colour of 3, 4, 6 or 8 digits, leaves its
+/// '<' an ordinary character.
+const MARKUP_TAG_HASHES: [i32; 161] = [
+    98, 66, 427, 395, 105, 73, 434, 402,
+    115, 83, 444, 412, 117, 85, 446, 414,
+    43045, 30245, 155892, 143092, 6552, 4728, 22673, 20849,
+    6566, 4742, 22687, 20863, -330774850, 2012149182, -1885698441, 457225591,
+    6380, 4556, 22501, 20677, 16034505, 11642281, 54741026, 50348802,
+    43991, 31191, 43969, 31169, 156816, 144016, 45545, 32745,
+    158392, 145592, 41311, 28511, 154158, 141358, 103415287, 72669687,
+    374360934, 343615334, 320078, 230446, 276254, 186622, 1750458, 426,
+    43066, 30266, 155913, 143113, 275917, 186285, 1065846, 976214,
+    327550, 237918, 1117479, 1027847, 281955, 192323, 100149144, 69403544,
+    371094791, 340349191, 1983971, 1356515, 7513474, 6886018, 2152041, 1524585,
+    7681544, 7054088, 280416, 1071884, 982252, 2068980, 1441524, 7598483,
+    6971027, 1109386397, -842656867, -445537194, 1897386838, 2246877, 1619421, 730022849,
+    514803617, -1668324918, -1883544150, 13526026, 9133802, 781906058, 566686826, 52232547,
+    47840323, -1616441709, -1831660941, 766244328, 551025096, -1632103439, -1847322671, 2109854,
+    1482398, 7639357, 7011901, 1100728678, -855002522, -884817987, -1690034531, 1109349752,
+    -842693512, -445573839, 1897350193, 15115642, 10723418, 1913798, 1286342, 7443301,
+    6815845, 315682, 226050, 1105611, 1015979, 2227963, 1600507, 7757466,
+    7130010, 317446, 227814, 1107375, 1017743, 926, 670, 3229,
+    2973, 916, 660, 3219, 2963, 912, 656, 3215,
+    2959,
+];
+/// `<noparse>` / `<NOPARSE>` and their closing tags.
+const NO_PARSE: [i32; 2] = [15115642, 10723418];
+const END_NO_PARSE: [i32; 2] = [53822163, 49429939];
+/// The tags this port places (the shared tag parser reads their values); a
+/// tag TMP accepts outside this set is refused.
+const PLACED_TAGS: [&str; 17] = [
+    "color", "size", "scale", "alpha", "voffset", "cspace", "line-height", "line-indent", "indent", "pos",
+    "mspace", "align", "space", "uppercase", "allcaps", "lowercase", "smallcaps",
+];
+/// `GetMarkupTagHashCode` values of the tags the processing array replaces
+/// before any tag is validated.
+const LINE_BREAK_TAG: i32 = 2256;
+const NO_BREAK_SPACE_TAG: i32 = 2869039;
+const ZERO_WIDTH_SPACE_TAG: i32 = 3288238;
+const STYLE_TAGS: [i32; 2] = [100252951, 1927738392];
+/// `ToUpperASCIIFast`'s table; a code point above 127 is kept as it is.
+const UPPER_ASCII: &[u8; 128] = b"-------------------------------- !-#$%&-()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[-]^_`ABCDEFGHIJKLMNOPQRSTUVWXYZ{|}~-";
+
+/// `HexToInt`: a character that is not a hex digit reads as 15.
+fn hex_digit(unit: u16) -> u32 {
+    match unit {
+        0x30..=0x39 => (unit - 0x30) as u32,
+        0x41..=0x46 => (unit - 0x41 + 10) as u32,
+        0x61..=0x66 => (unit - 0x61 + 10) as u32,
+        _ => 15,
+    }
+}
+
+/// `GetMarkupTagHashCode`: `((h << 5) + h) ^ upper(c)` over at most 16
+/// code units after a '<', up to a '>', '=' or ' '. Past the end of the text
+/// the backing array holds its terminator and then units of earlier texts,
+/// which this port does not know; they are read as the terminator.
+fn replacement_tag_hash(units: &[u16], start: usize) -> i32 {
+    let mut hash: i32 = 0;
+    for k in start..start + 16 {
+        let c = units.get(k).map_or(0u32, |&unit| unit as u32);
+        if c == '>' as u32 || c == '=' as u32 || c == ' ' as u32 {
+            return hash;
+        }
+        let upper = if c < 128 { UPPER_ASCII[c as usize] as u32 } else { c };
+        hash = hash.wrapping_shl(5).wrapping_add(hash) ^ upper as i32;
+    }
+    hash
+}
+
+/// TMP's text processing array (`PopulateTextProcessingArray`): each code
+/// point with the index of the input character it came from.
+///
+/// A text from the component's serialized text (TMP's text input box
+/// source, `input_box`) has its backslash escapes parsed; a text code
+/// assigned through the text setter does not. `\\` gives two code points,
+/// the backslash and the character after it (which so escapes nothing);
+/// `\n`, `\r`, `\t` and `\v` give LF, CR, tab and VT when control characters
+/// are parsed; `\uXXXX` and `\UXXXXXXXX` give the hex value whenever enough
+/// of the text follows. With rich text, `<br>`, `<nbsp>` and `<zwsp>` (the
+/// name read case-insensitively up to '>', '=' or ' ') become LF, U+00A0 and
+/// U+200B here, each skipping a fixed count of code units from its '<'. The
+/// array ends at its first U+0000. Lengths and indices are the source's
+/// UTF-16 code units.
+fn processing_array(input: &str, rich: bool, controls: bool, input_box: bool) -> Result<Vec<(char, usize)>, String> {
+    let units: Vec<u16> = input.encode_utf16().collect();
+    let mut character = Vec::with_capacity(units.len());
+    for (index, ch) in input.chars().enumerate() {
+        for _ in 0..ch.len_utf16() {
+            character.push(index);
+        }
+    }
+    let scalar = |value: u32| {
+        char::from_u32(value).ok_or_else(|| format!("TMP escape gives U+{value:04X}, which is not a Unicode scalar value"))
+    };
+    let n = units.len();
+    let mut array = Vec::with_capacity(n);
+    let mut r = 0;
+    while r < n {
+        let c = units[r];
+        if c == 0 {
+            break;
+        }
+        if input_box && c == 0x5c && r < n - 1 {
+            let escaped = match units[r + 1] {
+                0x5c if controls && n > r + 2 => {
+                    array.push(('\\', character[r]));
+                    array.push((scalar(units[r + 2] as u32)?, character[r]));
+                    r += 3;
+                    continue;
+                }
+                0x6e if controls => Some(('\n', 2)),
+                0x72 if controls => Some(('\r', 2)),
+                0x74 if controls => Some(('\t', 2)),
+                0x76 if controls => Some(('\u{b}', 2)),
+                0x75 if n > r + 5 => {
+                    let value = (0..4).fold(0u32, |v, k| v + (hex_digit(units[r + 2 + k]) << (12 - 4 * k)));
+                    Some((scalar(value)?, 6))
+                }
+                0x55 if n > r + 9 => {
+                    let value = (0..8).fold(0u32, |v, k| v.wrapping_add(hex_digit(units[r + 2 + k]) << (28 - 4 * k)));
+                    Some((scalar(value)?, 10))
+                }
                 _ => None,
             };
-            if let Some(ch) = escaped {
-                text.push(ch);
-                source.push(i);
-                i += 2;
+            if let Some((ch, length)) = escaped {
+                array.push((ch, character[r]));
+                r += length;
                 continue;
             }
         }
-        text.push(raw[i]);
-        source.push(i);
+        if (0xd800..0xdc00).contains(&c) && n > r + 1 && (0xdc00..0xe000).contains(&units[r + 1]) {
+            let value = 0x10000 + (((c as u32) - 0xd800) << 10) + (units[r + 1] as u32 - 0xdc00);
+            array.push((scalar(value)?, character[r]));
+            r += 2;
+            continue;
+        }
+        if c == 0x3c && rich {
+            let hash = replacement_tag_hash(&units, r + 1);
+            if STYLE_TAGS.contains(&hash) {
+                return Err("TMP <style> tags need the TMP style sheet, which the root does not carry".into());
+            }
+            let replaced = match hash {
+                LINE_BREAK_TAG => Some(('\n', 4)),
+                NO_BREAK_SPACE_TAG => Some(('\u{a0}', 6)),
+                ZERO_WIDTH_SPACE_TAG => Some(('\u{200b}', 6)),
+                _ => None,
+            };
+            if let Some((ch, length)) = replaced {
+                array.push((ch, character[r]));
+                r += length;
+                continue;
+            }
+        }
+        // A Rust string has no lone surrogate, so this is a scalar value.
+        array.push((scalar(c as u32)?, character[r]));
+        r += 1;
+    }
+    // An escaped U+0000 ends the array as a source one does.
+    if let Some(end) = array.iter().position(|(ch, _)| *ch == '\0') {
+        array.truncate(end);
+    }
+    Ok(array)
+}
+
+/// The code points of a text component's processing array (its tags still
+/// in it): the characters a layout of it can draw.
+pub(super) fn processing_characters(text: &str, component: &UiComponent, input_box: bool) -> Result<Vec<char>, String> {
+    let f = &component.fields;
+    let array = processing_array(text, boolean(f, "m_isRichText")?, boolean(f, "m_parseCtrlCharacters")?, input_box)?;
+    Ok(array.into_iter().map(|(ch, _)| ch).collect())
+}
+
+struct ScannedTag {
+    /// Index of the closing '>'.
+    end: usize,
+    /// The first attribute's name hash, `(h << 3) - h + c`.
+    name_hash: i32,
+    /// Code points between the brackets.
+    count: usize,
+}
+
+/// `ValidateHtmlTag`'s scan from the code point after a '<'. It finds no tag
+/// at a '<', a U+0000, the end of the text or 128 code points without a
+/// '>', and at a second space in the tag's names; attribute values follow
+/// its state machine (a number ends at 'p', 'e', '%' or a space, a '#'
+/// colour at a space, other text at a '"'). The source indexes a buffer of
+/// 8 attributes; a ninth is refused.
+fn scan_tag(array: &[(char, usize)], start: usize) -> Result<Option<ScannedTag>, String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Value {
+        None,
+        Number,
+        Colour,
+        Text,
+    }
+    let mut count = 0;
+    let mut attribute_flag = 0u8;
+    let mut value = Value::None;
+    let mut attribute = 0usize;
+    let mut name_hash: i32 = 0;
+    let mut tag_set = false;
+    let mut i = start;
+    while i < array.len() && array[i].0 != '\0' && count < 128 && array[i].0 != '<' {
+        let c = array[i].0;
+        if c == '>' {
+            return Ok(Some(ScannedTag { end: i, name_hash, count }));
+        }
+        count += 1;
+        let mut next_attribute = false;
+        if attribute_flag == 1 {
+            let value_ends = match value {
+                Value::None => false,
+                Value::Number => matches!(c, 'p' | 'e' | '%' | ' '),
+                Value::Colour => c == ' ',
+                Value::Text => c == '"',
+            };
+            if value == Value::None {
+                value = match c {
+                    '+' | '-' | '.' | '0'..='9' => Value::Number,
+                    '#' => Value::Colour,
+                    _ => Value::Text,
+                };
+            } else if value_ends {
+                attribute_flag = 2;
+                value = Value::None;
+                next_attribute = true;
+            }
+        }
+        if c == '=' {
+            attribute_flag = 1;
+        }
+        if attribute_flag == 0 && c == ' ' {
+            if tag_set {
+                return Ok(None);
+            }
+            tag_set = true;
+            attribute_flag = 2;
+            value = Value::None;
+            next_attribute = true;
+        }
+        if next_attribute {
+            attribute += 1;
+            if attribute >= 8 {
+                return Err("TMP rich-text tag has more attributes than the source's attribute buffer".into());
+            }
+        }
+        if attribute_flag == 0 && attribute == 0 {
+            name_hash = name_hash.wrapping_shl(3).wrapping_sub(name_hash).wrapping_add(c as i32);
+        }
+        if attribute_flag == 2 && c == ' ' {
+            attribute_flag = 0;
+        }
         i += 1;
     }
-    let chars: Vec<char> = text.chars().collect();
-    let mut mapped = Vec::new();
+    Ok(None)
+}
+
+/// The tokens and style segments of a processing array. Each '<' is
+/// validated as `ValidateHtmlTag` validates it: inside `<noparse>` only its
+/// closing tag is a tag (and that one is taken anywhere); a tag TMP does not
+/// accept is drawn as characters; a tag it accepts is refused unless this
+/// port places it.
+fn prepare(input: &str, array: &[(char, usize)], settings: &Settings) -> Result<Prepared, String> {
+    if input.contains(LITERAL_LESS_THAN) {
+        return Err(format!("TMP text carries U+{:04X}, which this port reserves", LITERAL_LESS_THAN as u32));
+    }
+    // The characters TMP lays out, and the text for the shared tag parser:
+    // each placed tag kept, each other '<' replaced by the reserved code point.
+    let mut mapped = Vec::with_capacity(array.len());
+    let mut parsed = String::with_capacity(input.len());
     let mut no_parse = false;
-    i = 0;
-    while i < chars.len() {
-        if settings.rich && chars[i] == '<' {
-            if let Some(relative) = chars[i..].iter().position(|ch| *ch == '>') {
-                let end = i + relative;
-                let tag: String = chars[i + 1..end].iter().collect::<String>().to_lowercase();
-                if !no_parse || tag == "/noparse" {
-                    if tag == "noparse" {
+    let mut i = 0;
+    while i < array.len() {
+        let (ch, source) = array[i];
+        if settings.rich && ch == '<' {
+            if let Some(tag) = scan_tag(array, i + 1)? {
+                if END_NO_PARSE.contains(&tag.name_hash) {
+                    no_parse = false;
+                    i = tag.end + 1;
+                    continue;
+                }
+                let colour = tag.count > 0 && array[i + 1].0 == '#' && matches!(tag.count, 4 | 5 | 7 | 9);
+                if !no_parse && (colour || MARKUP_TAG_HASHES.contains(&tag.name_hash)) {
+                    if NO_PARSE.contains(&tag.name_hash) {
                         no_parse = true;
-                    } else if tag == "/noparse" {
-                        no_parse = false;
-                    } else if tag == "br" || tag == "cr" {
-                        mapped.push(('\n', source[i]));
-                    } else if tag == "nbsp" {
-                        mapped.push(('\u{a0}', source[i]));
-                    } else {
-                        let name = tag
-                            .trim_start_matches('/')
-                            .split(['=', ' '])
-                            .next()
-                            .unwrap_or("");
-                        if !matches!(
-                            name,
-                            "color"
-                                | "size"
-                                | "scale"
-                                | "alpha"
-                                | "voffset"
-                                | "cspace"
-                                | "line-height"
-                                | "line-indent"
-                                | "indent"
-                                | "pos"
-                                | "mspace"
-                                | "align"
-                                | "space"
-                                | "uppercase"
-                                | "allcaps"
-                                | "lowercase"
-                                | "smallcaps"
-                        ) && !name.starts_with('#')
-                        {
-                            return Err(format!(
-                                "TMP rich-text tag <{tag}> has no implemented placement"
-                            ));
-                        }
+                        i = tag.end + 1;
+                        continue;
                     }
-                    i = end + 1;
+                    let body: String = array[i + 1..tag.end].iter().map(|(ch, _)| *ch).collect();
+                    let lower = body.to_lowercase();
+                    let name = lower.strip_prefix('/').unwrap_or(&lower).split(['=', ' ']).next().unwrap_or("");
+                    if !colour && !PLACED_TAGS.contains(&name) {
+                        return Err(format!("TMP rich-text tag <{body}> has no implemented placement"));
+                    }
+                    parsed.push('<');
+                    parsed.push_str(&body);
+                    parsed.push('>');
+                    i = tag.end + 1;
                     continue;
                 }
             }
+            mapped.push(('<', source));
+            parsed.push(LITERAL_LESS_THAN);
+            i += 1;
+            continue;
         }
-        mapped.push((chars[i], source[i]));
+        mapped.push((ch, source));
+        parsed.push(ch);
         i += 1;
     }
     let segments = if settings.rich {
-        parse_rich_segments(&text)
+        parse_rich_segments(&parsed)
     } else {
         let mut template = parse_rich_segments(" ").remove(0);
-        template.text = text;
+        template.text = parsed;
         vec![template]
     };
     let mut tokens = Vec::new();
@@ -363,6 +714,7 @@ fn prepare(input: &str, settings: &Settings) -> Result<Prepared, String> {
             });
         }
         for ch in style.text.chars() {
+            let ch = if ch == LITERAL_LESS_THAN { '<' } else { ch };
             let &(expected, origin) = mapped
                 .get(index)
                 .ok_or("TMP rich-text source map exhausted")?;
@@ -453,6 +805,27 @@ fn pair_metric(left: char, right: char) -> Result<PairMetric, String> {
     })
 }
 
+/// The open font's advance of one character in em units, as `measure`
+/// reads it before scaling by the point size (0 for the characters it gives
+/// no advance), for the research instrument that feeds the same advances to
+/// a transcription of the source layout.
+#[cfg(test)]
+pub(super) fn open_font_advance(ch: char) -> Option<f32> {
+    if zero_advance(ch) {
+        return Some(0.0);
+    }
+    let font = font();
+    let gid = font.charmap().map(metric_character(ch));
+    (gid != 0).then(|| font.glyph_metrics(&[]).scale(1.0).advance_width(gid))
+}
+
+/// The kerning pair `measure` applies between two characters: the advance
+/// added to each of them and the placement offsets, in em units.
+#[cfg(test)]
+pub(super) fn open_font_pair(left: char, right: char) -> Result<([f32; 2], [[f32; 2]; 2]), String> {
+    pair_metric(left, right).map(|pair| (pair.advance, [pair.offset[0].to_array(), pair.offset[1].to_array()]))
+}
+
 fn metric_character(ch: char) -> char {
     // TMP's font-asset lookup uses the space / hyphen glyph for these missing
     // nominal characters. Their original codepoint still controls line breaks.
@@ -497,11 +870,21 @@ struct Measured {
     scale: f32,
     fit: f32,
     step: f32,
+    /// The word spacing a whitespace character or U+200B adds to the pen as
+    /// its own addition after `step` (0 for every other character).
+    word: f32,
     pair_offset: Vec2,
     ascent: f32,
     descent: f32,
     voffset: f32,
     cspace: f32,
+    /// Subtracted from the pen after this character for the line's width:
+    /// the spacing terms of its step.
+    spacing_offset: f32,
+    /// The character drawn (TMP's missing-glyph path can replace it).
+    drawn: char,
+    /// TMP's per-character baseline offset from its asset's FaceInfo baseline.
+    baseline: f32,
 }
 
 fn segment_size(spec: &Option<SizeSpec>, base: f32) -> f32 {
@@ -523,6 +906,228 @@ fn indent(value: &Option<Indent>, size: f32, width: f32) -> f32 {
 }
 
 fn measure(
+    prepared: &Prepared,
+    config: &Settings,
+    fonts: Option<&TmpFonts>,
+    purpose: Purpose,
+    size: f32,
+    adjustment: f32,
+) -> Result<Vec<Measured>, String> {
+    match (fonts, config.primary) {
+        (Some(fonts), Some(primary)) => measure_assets(prepared, config, fonts, primary, purpose, size, adjustment),
+        (None, None) => measure_open_font(prepared, config, size, adjustment),
+        _ => Err("TMP text settings and font assets disagree on the font source".into()),
+    }
+}
+
+/// The open font's advance of one character in em units (0 for the
+/// characters that advance nothing), for a character no stored table carries.
+fn open_font_em(ch: char) -> Result<f32, String> {
+    if zero_advance(ch) {
+        return Ok(0.0);
+    }
+    let font = font();
+    let gid = font.charmap().map(metric_character(ch));
+    if gid == 0 {
+        return Err(format!("UI font has no glyph U+{:04X}", ch as u32));
+    }
+    Ok(font.glyph_metrics(&[]).scale(1.0).advance_width(gid))
+}
+
+/// The per-character metrics of TMP 3.0.7 with the root's font assets:
+/// `GenerateTextMesh` for a render pass, `CalculatePreferredValues` for a
+/// preferred-size pass (whose element scale has no glyph scale factor).
+///
+/// Every character takes the pen step from its glyph's advance, the
+/// synthesized zero-metric control characters included (they still take the
+/// spacing terms); a whitespace character or U+200B then adds the word
+/// spacing as a second, separate addition.
+fn measure_assets(
+    prepared: &Prepared,
+    config: &Settings,
+    fonts: &TmpFonts,
+    primary: usize,
+    purpose: Purpose,
+    size: f32,
+    adjustment: f32,
+) -> Result<Vec<Measured>, String> {
+    // TMP's character array holds every character, not the pen events of
+    // tags: the pair lookup reads the neighbours in that array.
+    let mut resolved = Vec::with_capacity(prepared.tokens.len());
+    for token in &prepared.tokens {
+        if token.fixed_space.is_some() {
+            resolved.push(None);
+            continue;
+        }
+        let (hit, replaced) = fonts.resolve(token.ch as u32, primary)?;
+        if replaced {
+            report_once(config.path_id, format!(
+                "U+{:04X} is in no font asset of {}'s chain; TMP replaces it by U+{:04X}",
+                token.ch as u32, fonts.asset(primary).name, hit.unicode,
+            ));
+        }
+        resolved.push(Some(hit));
+    }
+    let characters: Vec<usize> = (0..prepared.tokens.len()).filter(|i| resolved[*i].is_some()).collect();
+    let mut unsourced: Vec<(char, usize)> = Vec::new();
+    let mut result = Vec::with_capacity(prepared.tokens.len());
+    for (i, token) in prepared.tokens.iter().enumerate() {
+        let style = &prepared.segments[token.segment];
+        let point_size = segment_size(&style.size, size);
+        // <scale> sets TMP's horizontal FX scale; <smallcaps> its small caps multiplier.
+        let fx = style.scale.unwrap_or(1.0);
+        let small_caps = token.transform_scale;
+        if point_size <= 0.0 || !point_size.is_finite() || fx <= 0.0 || !fx.is_finite() {
+            return Err("TMP invalid rich-text point size or scale".into());
+        }
+        if token.ch == '\t' {
+            return Err("TMP tab stops require a font-asset tab width".into());
+        }
+        if token.ch == '\u{ad}' {
+            return Err("TMP soft hyphen substitution is not implemented".into());
+        }
+        // currentEmScale of an orthographic text: set once per pass from the
+        // pass's point size, not from a <size> segment's.
+        let em = size * 0.01;
+        let cspace = style.cspace.unwrap_or(0.0);
+        let voffset = style.voffset.unwrap_or(0.0);
+        let Some(hit) = resolved[i] else {
+            // A <space> pen event: no character, the text's own face.
+            result.push(Measured {
+                size: point_size, scale: fx * small_caps, fit: 0.0, step: 0.0, word: 0.0, pair_offset: Vec2::ZERO,
+                ascent: config.face.ascent * point_size, descent: config.face.descent * point_size,
+                voffset, cspace, spacing_offset: 0.0, drawn: token.ch, baseline: 0.0,
+            });
+            continue;
+        };
+        let asset = fonts.asset(hit.asset);
+        let face = asset.face;
+        let (character_scale, glyph) = match hit.element {
+            Element::Stored { character_scale, glyph } => (character_scale, Some(glyph)),
+            // A dynamic asset's run-time character and glyph are created with scale 1.
+            Element::Dynamic => (1.0, None),
+        };
+        // adjustedScale and currentElementScale; the font scale
+        // multiplier is 1 without sub/superscript, which is refused above.
+        // The render pass multiplies by the glyph scale too; the preferred
+        // pass stops at the character (text element) scale.
+        let adjusted = point_size * small_caps / face.point_size * face.scale;
+        let element_scale = match purpose {
+            Purpose::Render => adjusted * 1.0 * character_scale * glyph.map_or(1.0, |g| g.scale),
+            Purpose::Preferred => adjusted * 1.0 * character_scale,
+        };
+        let advance = match glyph {
+            Some(glyph) => glyph.horizontal_advance,
+            None if zero_advance(token.ch) => 0.0,
+            None => {
+                unsourced.push((token.ch, hit.asset));
+                // The open font at the dynamic asset's sampling point size.
+                open_font_em(metric_character(token.ch))? * face.point_size
+            }
+        };
+        // Kerning: the first record of (this, next) and the
+        // second record of (previous, this), in this character's asset.
+        let mut x_advance = 0.0;
+        let mut placement = Vec2::ZERO;
+        let mut character_spacing = config.char_spacing;
+        if config.kern {
+            let position = characters.iter().position(|&c| c == i).expect("character index");
+            let neighbour = |k: Option<usize>| -> Result<Option<u32>, String> {
+                let Some(k) = k else { return Ok(None) };
+                match resolved[characters[k]].map(|r| r.element) {
+                    Some(Element::Stored { glyph, .. }) => Ok(Some(glyph.index)),
+                    _ if asset.has_pairs() => Err(format!(
+                        "TMP pair lookup in {} needs a run-time glyph index", asset.name
+                    )),
+                    _ => Ok(None),
+                }
+            };
+            let own_index = match glyph {
+                Some(glyph) => Some(glyph.index),
+                None if asset.has_pairs() => {
+                    return Err(format!("TMP pair lookup in {} needs a run-time glyph index", asset.name));
+                }
+                None => None,
+            };
+            if let Some(own_index) = own_index {
+                let next = neighbour((position + 1 < characters.len()).then_some(position + 1))?;
+                if let Some(record) = next.and_then(|next| asset.pair(own_index, next)) {
+                    x_advance = record.first.x_advance;
+                    placement = Vec2::new(record.first.x_placement, record.first.y_placement);
+                    if record.ignore_spacing_adjustments {
+                        character_spacing = 0.0;
+                    }
+                }
+                let previous = neighbour(position.checked_sub(1))?;
+                if let Some(record) = previous.and_then(|previous| asset.pair(previous, own_index)) {
+                    x_advance += record.second.x_advance;
+                    placement += Vec2::new(record.second.x_placement, record.second.y_placement);
+                    if record.ignore_spacing_adjustments {
+                        character_spacing = 0.0;
+                    }
+                }
+            }
+        }
+        // The spacing terms of the step and of the line's max advance
+        // (xAdvance and maxAdvanceOffset); bold spacing is 0 for regular text.
+        let spacing = (asset.normal_spacing_offset + character_spacing + 0.0) * em;
+        // The preferred pass's step has no horizontal FX factor on the advance.
+        let fx_step = match purpose {
+            Purpose::Render => fx,
+            Purpose::Preferred => 1.0,
+        };
+        let step = ((advance * fx_step + x_advance) * element_scale + spacing + cspace) * (1.0 - adjustment);
+        let word = if token.ch.is_whitespace() || token.ch == '\u{200b}' {
+            config.word_spacing * em
+        } else {
+            0.0
+        };
+        let fit = advance * (1.0 - adjustment) * element_scale;
+        // U+FEFF and U+0000 keep the zero advance they had: U+0000 ends the
+        // source's processing array and never reaches here, and U+FEFF is
+        // not drawn by this port (a named gap, not a TMP rule).
+        let (step, word, fit) = if matches!(token.ch, '\u{feff}' | '\0') { (0.0, 0.0, 0.0) } else { (step, word, fit) };
+        result.push(Measured {
+            size: point_size,
+            scale: fx * small_caps,
+            fit,
+            step,
+            word,
+            pair_offset: placement * element_scale,
+            // Element ascender and descender in line space;
+            // descent is stored as a depth below the baseline.
+            ascent: face.ascent_line * element_scale / small_caps,
+            descent: -(face.descent_line * element_scale / small_caps),
+            voffset,
+            cspace,
+            spacing_offset: (spacing - cspace) * (1.0 - adjustment),
+            // The bitmap is the open font's: its own substitutions apply.
+            drawn: metric_character(char::from_u32(hit.unicode).ok_or("TMP drew a non-scalar code point")?),
+            // baselineOffset
+            baseline: face.baseline * adjusted * 1.0 * face.scale,
+        });
+    }
+    if !unsourced.is_empty() {
+        let mut by_asset: Vec<(usize, String)> = Vec::new();
+        for (ch, asset) in unsourced {
+            match by_asset.iter_mut().find(|(a, _)| *a == asset) {
+                Some((_, text)) => text.push(ch),
+                None => by_asset.push((asset, ch.to_string())),
+            }
+        }
+        for (asset, text) in by_asset {
+            report_once(config.path_id, format!(
+                "{} characters {text:?} are added at run time by the dynamic font asset {} from its source \
+                 font file; their advances are not stored, so they are laid out with the open font's advance \
+                 at the asset's sampling point size (unsourced)",
+                text.chars().count(), fonts.asset(asset).name,
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn measure_open_font(
     prepared: &Prepared,
     config: &Settings,
     size: f32,
@@ -570,29 +1175,34 @@ fn measure(
                 pair_offset += pair.offset[1];
             }
         }
-        let em = point_size * 0.01;
+        // The pass's em unit, as with the font assets.
+        let em = size * 0.01;
         let cspace = style.cspace.unwrap_or(0.0);
         let fit = glyph_advance * point_size * scale * (1.0 - adjustment);
-        let mut step = ((glyph_advance + pair_advance) * point_size * scale
+        let step = ((glyph_advance + pair_advance) * point_size * scale
             + config.char_spacing * em
             + cspace)
             * (1.0 - adjustment);
-        if token.ch.is_whitespace() || token.ch == '\u{200b}' {
-            step += config.word_spacing * em;
-        }
-        if zero_advance(token.ch) {
-            step = 0.0;
-        }
+        let word = if token.ch.is_whitespace() || token.ch == '\u{200b}' {
+            config.word_spacing * em
+        } else {
+            0.0
+        };
+        let (step, word) = if matches!(token.ch, '\u{feff}' | '\0') { (0.0, 0.0) } else { (step, word) };
         result.push(Measured {
             size: point_size,
             scale,
             fit,
             step,
+            word,
             pair_offset: pair_offset * point_size * scale,
             ascent: config.face.ascent * point_size * scale,
             descent: config.face.descent * point_size * scale,
             voffset: style.voffset.unwrap_or(0.0),
             cspace,
+            spacing_offset: (config.char_spacing * em - cspace) * (1.0 - adjustment),
+            drawn: metric_character(token.ch),
+            baseline: 0.0,
         });
     }
     Ok(result)
@@ -607,53 +1217,110 @@ struct Line {
     positions: Vec<Positioned>,
     width: f32,
     preferred_width: f32,
-    ascent: f32,
-    descent: f32,
-    offset: f32,
-    hard: bool,
+    /// `m_lineOffset` while the line's characters were placed.
+    offset_start: f32,
+    /// The baseline adjustment the line's end made (`AdjustLineOffset`:
+    /// the line's characters move down by it), 0 when the source's gate
+    /// made none.
+    adjust: f32,
     start: usize,
 }
 struct Pass {
     lines: Vec<Line>,
     measured: Vec<Measured>,
     content: Vec2,
+    /// `m_maxTextAscender`: the first line's maximum ascender.
     ascent: f32,
+    /// `maxVisibleDescender`: `m_ElementDescender` at the last line's end
+    /// (signed, line offset included).
+    descender: f32,
     resize: Option<Resize>,
 }
 #[derive(Clone, Copy)]
 enum Resize {
     Width { actual: f32, available: f32 },
-    Height { actual: f32, lines: usize },
+    /// A text taller than its rect: the height TMP tested, the line number
+    /// a line-spacing reduction divides by, whether that reduction may run
+    /// (the current line's offset is positive, or the test was a word
+    /// wrap's new line), and for a word wrap the width a character-width
+    /// reduction takes.
+    Height { actual: f32, lines: usize, may_space: bool, width: Option<(f32, f32)> },
+}
+
+/// The vertical state TMP saves with a break or last-valid state and
+/// restores with it: the line's maximum ascender and (signed) minimum
+/// descender, the text's maximum ascender and `m_ElementDescender`.
+#[derive(Clone, Copy)]
+struct Vertical {
+    line_ascender: f32,
+    line_descender: f32,
+    text_ascender: f32,
+    element_descender: f32,
+}
+
+/// A saved line break: where the next line starts, how many positions the
+/// line keeps, and the vertical state after the character it follows.
+#[derive(Clone, Copy)]
+struct Break {
+    end: usize,
+    count: usize,
+    vertical: Vertical,
+}
+
+/// How a line ends.
+#[derive(Clone, Copy)]
+enum Ending {
+    /// The last character of the text.
+    Last,
+    /// A line-breaking character at this token.
+    Hard(usize),
+    /// A word wrap tested at this token.
+    Wrap(usize),
+    /// Truncation: U+0003 at the tested character, whose baseline offset
+    /// this is, ends the text.
+    Truncated(f32),
+}
+
+/// A character's adjusted ascender and descender in line space (the
+/// descender signed): its element extents shifted by its baseline offset;
+/// with an offset (`<voffset>`) the unshifted extent, computed back from the
+/// shifted one, takes part (the larger ascender, the lower descender).
+fn adjusted_extents(ascent: f32, depth: f32, voffset: f32) -> (f32, f32) {
+    let element_ascender = ascent + voffset;
+    let element_descender = -depth + voffset;
+    if voffset != 0.0 {
+        (
+            ((element_ascender - voffset) / 1.0).max(element_ascender),
+            ((element_descender - voffset) / 1.0).min(element_descender),
+        )
+    } else {
+        (element_ascender, element_descender)
+    }
 }
 
 fn make_line(
     positions: Vec<Positioned>,
     start: usize,
-    hard: bool,
+    offset_start: f32,
+    adjust: f32,
     p: &Prepared,
     m: &[Measured],
-    cfg: &Settings,
-    adjustment: f32,
 ) -> Line {
-    let mut ascent: f32 = 0.0;
-    let mut descent: f32 = 0.0;
     let mut width: f32 = 0.0;
     let mut preferred_width: f32 = 0.0;
     let mut before_carriage_return: f32 = 0.0;
-    for pos in &positions {
+    for pos in positions.iter() {
         let token = &p.tokens[pos.index];
         let metric = &m[pos.index];
-        ascent = ascent.max(metric.ascent + metric.voffset);
-        descent = descent.max(metric.descent - metric.voffset);
         if token.ch == '\r' {
             before_carriage_return = before_carriage_return.max(pos.pen);
         }
         if visible(token.ch) || (positions.len() == 1 && token.ch.is_whitespace()) {
-            // maxAdvance subtracts (character spacing - rich cSpacing).
+            // maxAdvance subtracts (character spacing - rich cSpacing) from
+            // the character's stored xAdvance (after the word spacing).
             // The minus on cSpacing is authored behaviour, not a typo: its
             // closing-tag event also adjusts xAdvance before this expression.
-            width = pos.pen + metric.step
-                - (cfg.char_spacing * metric.size * 0.01 - metric.cspace) * (1.0 - adjustment);
+            width = pos.pen + metric.step + metric.word - metric.spacing_offset;
         }
         // Preferred keeps the last tested visible-character width, while a
         // carriage return saves the previous pen extent before zeroing it.
@@ -666,14 +1333,35 @@ fn make_line(
         positions,
         width,
         preferred_width: preferred_width.max(before_carriage_return),
-        ascent,
-        descent,
-        offset: 0.0,
-        hard,
+        offset_start,
+        adjust,
         start,
     }
 }
 
+/// One layout pass, with TMP's vertical bookkeeping as it goes:
+///
+/// - each character raises the line's maximum ascender and lowers its
+///   minimum descender (the line's first character and non-whitespace ones
+///   only) and records its adjusted extents, which a whitespace character
+///   takes from the line so far;
+/// - a render pass tests each visible character against the rect height
+///   (`m_maxTextAscender - (line descender - line offset)`, plus the
+///   ascender rise over the line's start ascender when the line offset is
+///   positive), and a word wrap's new line against it before wrapping; too
+///   tall asks for a resize, or with Truncate ends the text at the tested
+///   character (the line keeps the characters before it, and U+0003, whose
+///   element scale is 0, joins the line's extents with its baseline offset);
+/// - a line's end makes the baseline adjustment only when its maximum
+///   ascender differs from the ascender its offset assumed by more than
+///   0.01 and the offset is positive, and folds the line's descender into
+///   `m_ElementDescender`;
+/// - a new line's offset adds the line gap from the ended line's descender
+///   and the new line's start ascender: after a line-breaking character that
+///   character's recorded ascender (the line's maximum unless it was the
+///   line's first character), after a word wrap the recorded ascender of the
+///   new line's first character; `<line-height>` in force at that character
+///   replaces the gap.
 fn pass(
     p: &Prepared,
     cfg: &Settings,
@@ -683,42 +1371,95 @@ fn pass(
     adjustment: f32,
     spacing_delta: f32,
     width: f32,
+    // Percentage units (<indent>, <line-indent>, <pos>) are fractions of
+    // the component's own margin width, not of the width laid out in.
+    percent_base: f32,
     height: f32,
     wrapping: bool,
     resize_allowed: bool,
+    // The preferred pass's own character array (`m_internalCharacterInfo`):
+    // the pass writes each character into it as it processes it, and its
+    // "next character is a following character" test reads the next slot
+    // from it, which holds what an earlier pass of this component (or this
+    // pass before a line wrap went back) wrote there, or U+0000 in a slot
+    // nothing wrote since the array was allocated. None for a render pass,
+    // which tests the parsed text.
+    mut internal: Option<&mut Vec<char>>,
 ) -> Result<Pass, String> {
-    let measured = measure(p, cfg, size, adjustment)?;
+    let measured = measure(p, cfg, rules.fonts.as_deref(), purpose, size, adjustment)?;
+    let total = p.tokens.len();
+    if let Some(array) = internal.as_deref_mut() {
+        // TMP reallocates the array (zeroed) only when it is missing or
+        // shorter than the text: to the next power of two, or the count plus
+        // 256 above 1024 characters.
+        if array.len() < total {
+            let length = if total > 1024 { total + 256 } else { total.next_power_of_two() };
+            *array = vec!['\0'; length];
+        }
+    }
+    // A new line's spacing terms: the face's line gap with the automatic
+    // spacing delta, and the line spacing (plus the paragraph spacing after
+    // a line feed or paragraph separator) in em units of the pass's size.
+    let gap = cfg.face.gap(size, spacing_delta);
+    let spacing = |paragraph: f32| {
+        if cfg.face.asset.is_some() {
+            (cfg.line_spacing + paragraph) * (size * 0.01)
+        } else {
+            (cfg.line_spacing + paragraph) * size * 0.01
+        }
+    };
     let mut lines = Vec::new();
     let mut start = 0;
     let mut previous_hard = true;
     let mut resize = None;
     let mut truncated = false;
     let mut last_soft_used = None;
-    while start < p.tokens.len() && !truncated {
+    // m_lineOffset, m_startOfLineAscender, m_IsDrivenLineSpacing.
+    let mut line_offset: f32 = 0.0;
+    let mut start_ascender: f32 = 0.0;
+    let mut driven = false;
+    let mut vertical = Vertical {
+        line_ascender: -LARGE,
+        line_descender: LARGE,
+        text_ascender: 0.0,
+        element_descender: 0.0,
+    };
+    // Each character's adjusted ascender and descender as the pass last
+    // recorded them (characterInfo).
+    let mut recorded = vec![(0.0f32, 0.0f32); total];
+    while start < total && !truncated {
+        let line_number = lines.len();
+        let offset_start = line_offset;
+        vertical.line_ascender = -LARGE;
+        vertical.line_descender = LARGE;
         let first_style = &p.segments[p.tokens[start].segment];
-        let mut pen = indent(&first_style.indent, size, width);
+        let mut pen = indent(&first_style.indent, size, percent_base);
         if previous_hard {
             pen += match &first_style.line_indent {
                 None => 0.0,
                 Some(LineIndent::Pixels(n)) => *n,
-                Some(LineIndent::Percent(n)) => n * width / 100.0,
+                Some(LineIndent::Percent(n)) => n * percent_base / 100.0,
             };
         }
         let mut positions = Vec::new();
-        let mut saved: Option<(usize, usize)> = None;
-        let mut soft: Option<(usize, usize)> = None;
+        let mut saved: Option<Break> = None;
+        let mut soft: Option<Break> = None;
         let mut first_word = true;
         let mut last_cjk = false;
         let mut previous_position: Option<Indent> = None;
-        let mut next_start = p.tokens.len();
+        let mut next_start = total;
         let mut hard = false;
-        for i in start..p.tokens.len() {
+        let mut ending = Ending::Last;
+        for i in start..total {
             let token = &p.tokens[i];
             let m = &measured[i];
             let style = &p.segments[token.segment];
+            if let Some(array) = internal.as_deref_mut() {
+                array[i] = token.ch;
+            }
             if style.position != previous_position {
                 if style.position.is_some() {
-                    pen = indent(&style.position, m.size, width);
+                    pen = indent(&style.position, m.size, percent_base);
                 }
                 previous_position = style.position.clone();
             }
@@ -727,23 +1468,62 @@ fn pass(
                 positions.push(Positioned { index: i, pen });
                 continue;
             }
+            // The last valid state: the state after the previous character.
+            let before = vertical;
+            if positions.is_empty() || !token.ch.is_whitespace() {
+                let (ascender, descender) = adjusted_extents(m.ascent, m.descent, m.voffset);
+                vertical.line_ascender = ascender.max(vertical.line_ascender);
+                vertical.line_descender = descender.min(vertical.line_descender);
+                recorded[i] = (ascender, descender);
+                vertical.element_descender = (-m.descent + m.voffset) - line_offset;
+                if line_number == 0 {
+                    vertical.text_ascender = vertical.line_ascender;
+                }
+            } else {
+                recorded[i] = (vertical.line_ascender, vertical.line_descender);
+                vertical.element_descender = vertical.line_descender - line_offset;
+            }
             let mut origin = pen;
             let mono = style
                 .monospace
                 .as_ref()
-                .map(|_| indent(&style.monospace, m.size, width));
+                .map(|_| indent(&style.monospace, m.size, percent_base));
             if let Some(mono) = mono {
                 origin += (mono - m.fit) * 0.5;
             }
             let fit = origin.abs() + m.fit;
+            if purpose == Purpose::Render && visible(token.ch) {
+                // The current line's vertical bounds.
+                let rise = if line_offset > 0.0 && !driven { vertical.line_ascender - start_ascender } else { 0.0 };
+                let text_height = (vertical.text_ascender - (vertical.line_descender - line_offset)) + rise;
+                if text_height > height + EPSILON {
+                    if resize_allowed {
+                        resize = Some(Resize::Height {
+                            actual: text_height,
+                            lines: line_number,
+                            may_space: line_offset > 0.0,
+                            width: None,
+                        });
+                        break;
+                    }
+                    if cfg.overflow == 3 {
+                        vertical = before;
+                        ending = Ending::Truncated(m.voffset);
+                        break;
+                    }
+                }
+            }
             if visible(token.ch) && fit > width + EPSILON {
                 let can_wrap = wrapping && i != start;
                 if resize_allowed
                     && ((can_wrap && first_word) || (!can_wrap && purpose == Purpose::Render))
                 {
+                    // The reduction's base is the text area width the
+                    // overflow test compares against: the margin width plus
+                    // 0.0001 (less the zero tag margins).
                     resize = Some(Resize::Width {
                         actual: fit,
-                        available: width,
+                        available: width + EPSILON,
                     });
                     break;
                 }
@@ -751,18 +1531,59 @@ fn pass(
                     let take_soft = purpose == Purpose::Render
                         && first_word
                         && soft.is_some()
-                        && soft.map(|v| v.0) != last_soft_used;
-                    if let Some((end, count)) = if take_soft { soft } else { saved } {
-                        positions.truncate(count);
-                        next_start = end;
-                        if take_soft {
-                            last_soft_used = Some(end);
+                        && soft.map(|v| v.end) != last_soft_used;
+                    if let Some(point) = if take_soft { soft } else { saved } {
+                        if purpose == Purpose::Render {
+                            // The new line's height, from the word-wrap
+                            // state; taking the soft break below does not
+                            // recompute it.
+                            let state = saved.unwrap_or(point);
+                            let (ascender, descender) = recorded[state.end];
+                            let delta = match style.line_height {
+                                Some(line_height) => {
+                                    driven = true;
+                                    line_height + spacing(0.0)
+                                }
+                                None => {
+                                    let rise = if line_offset > 0.0 && !driven {
+                                        state.vertical.line_ascender - start_ascender
+                                    } else {
+                                        0.0
+                                    };
+                                    (((rise - state.vertical.line_descender) + ascender) + gap) + spacing(0.0)
+                                }
+                            };
+                            let new_text_height = ((state.vertical.text_ascender + delta) + line_offset) - descender;
+                            if new_text_height > height + EPSILON {
+                                if resize_allowed {
+                                    resize = Some(Resize::Height {
+                                        actual: new_text_height,
+                                        lines: line_number + 1,
+                                        may_space: true,
+                                        width: Some((fit, width + EPSILON)),
+                                    });
+                                    break;
+                                }
+                                if cfg.overflow == 3 {
+                                    vertical = before;
+                                    ending = Ending::Truncated(m.voffset);
+                                    break;
+                                }
+                            }
                         }
+                        positions.truncate(point.count);
+                        vertical = point.vertical;
+                        next_start = point.end;
+                        if take_soft {
+                            last_soft_used = Some(point.end);
+                        }
+                        ending = Ending::Wrap(i);
                         break;
                     }
                 }
                 if purpose == Purpose::Render && cfg.overflow == 3 {
-                    truncated = true;
+                    vertical = before;
+                    ending = Ending::Truncated(m.voffset);
                     break;
                 }
             }
@@ -771,124 +1592,168 @@ fn pass(
                 pen: origin,
             });
             pen += mono.map_or(m.step, |mono| {
-                mono * (1.0 - adjustment) + cfg.char_spacing * m.size * 0.01 + m.cspace
+                mono * (1.0 - adjustment) + cfg.char_spacing * size * 0.01 + m.cspace
             });
+            // The word spacing is its own addition to the pen, after the step.
+            pen += m.word;
             if hard_break(token.ch) {
                 next_start = i + 1;
                 hard = true;
+                ending = Ending::Hard(i);
                 break;
             }
+            // A carriage return resets the pen and, being whitespace, then
+            // saves a word-break state like any breaking space.
             if token.ch == '\r' {
-                pen = indent(&style.indent, m.size, width);
-                continue;
+                pen = indent(&style.indent, m.size, percent_base);
             }
+            let here = Break { end: i + 1, count: positions.len(), vertical };
             if break_space(token.ch) {
-                saved = Some((i + 1, positions.len()));
+                saved = Some(here);
                 soft = None;
                 first_word = false;
                 last_cjk = false;
             } else if east_asian(token.ch, rules.modern_hangul) {
                 let leading = rules.leading.contains(&token.ch);
-                let following = p
-                    .tokens
-                    .get(i + 1)
-                    .is_some_and(|next| rules.following.contains(&next.ch));
+                let following = i + 1 < total
+                    && match internal.as_deref() {
+                        Some(array) => rules.following.contains(&array[i + 1]),
+                        None => rules.following.contains(&p.tokens[i + 1].ch),
+                    };
                 let permitted = !leading || (purpose == Purpose::Preferred && first_word);
                 if permitted {
                     if !following {
-                        saved = Some((i + 1, positions.len()));
+                        saved = Some(here);
                         first_word = false;
                     }
                     if first_word {
                         if token.ch.is_whitespace() {
-                            soft = Some((i + 1, positions.len()));
+                            soft = Some(here);
                         }
-                        saved = Some((i + 1, positions.len()));
+                        saved = Some(here);
                     }
                 } else if first_word && i == start {
-                    saved = Some((i + 1, positions.len()));
+                    saved = Some(here);
                 }
                 last_cjk = true;
             } else if purpose == Purpose::Preferred && last_cjk {
                 if !rules.leading.contains(&token.ch) {
-                    saved = Some((i + 1, positions.len()));
+                    saved = Some(here);
                 }
                 last_cjk = false;
             } else if first_word {
                 if token.ch.is_whitespace() {
-                    soft = Some((i + 1, positions.len()));
+                    soft = Some(here);
                 }
-                saved = Some((i + 1, positions.len()));
+                saved = Some(here);
                 last_cjk = false;
             }
         }
         if resize.is_some() {
             break;
         }
-        lines.push(make_line(
-            positions, start, hard, p, &measured, cfg, adjustment,
-        ));
-        if next_start <= start {
+        if let Ending::Truncated(voffset) = ending {
+            // U+0003 is not whitespace: its extents join the line's.
+            let (ascender, descender) = adjusted_extents(0.0, 0.0, voffset);
+            vertical.line_ascender = ascender.max(vertical.line_ascender);
+            vertical.line_descender = descender.min(vertical.line_descender);
+            vertical.element_descender = (-0.0 + voffset) - line_offset;
+            if line_number == 0 {
+                vertical.text_ascender = vertical.line_ascender;
+            }
+            truncated = true;
+        }
+        // The line's end.
+        let rise = vertical.line_ascender - start_ascender;
+        let mut adjust = 0.0;
+        if line_offset > 0.0 && rise.abs() > 0.01 && !driven {
+            vertical.element_descender -= rise;
+            line_offset += rise;
+            adjust = rise;
+        }
+        let line_descender = vertical.line_descender - line_offset;
+        if !(vertical.element_descender < line_descender) {
+            vertical.element_descender = line_descender;
+        }
+        lines.push(make_line(positions, start, offset_start, adjust, p, &measured));
+        match ending {
+            Ending::Hard(index) => {
+                let (ascender, _) = recorded[index];
+                let paragraph = if matches!(p.tokens[index].ch, '\n' | '\u{2029}') {
+                    cfg.paragraph_spacing
+                } else {
+                    0.0
+                };
+                match p.segments[p.tokens[index].segment].line_height {
+                    Some(line_height) => {
+                        line_offset += line_height + spacing(paragraph);
+                        driven = true;
+                    }
+                    None => {
+                        line_offset += (((0.0 - vertical.line_descender) + ascender) + gap) + spacing(paragraph);
+                        driven = false;
+                    }
+                }
+                start_ascender = ascender;
+            }
+            Ending::Wrap(tested) => {
+                let (ascender, _) = recorded[next_start];
+                match p.segments[p.tokens[tested].segment].line_height {
+                    Some(line_height) => {
+                        line_offset += line_height + spacing(0.0);
+                        driven = true;
+                    }
+                    None => {
+                        line_offset += (((0.0 - vertical.line_descender) + ascender) + gap) + spacing(0.0);
+                        // A render pass keeps the flag; the preferred pass clears it.
+                        if purpose == Purpose::Preferred {
+                            driven = false;
+                        }
+                        start_ascender = ascender;
+                    }
+                }
+                // The preferred pass takes the start ascender either way.
+                if purpose == Purpose::Preferred {
+                    start_ascender = ascender;
+                }
+            }
+            Ending::Last | Ending::Truncated(_) => {}
+        }
+        if !truncated && next_start <= start {
             return Err("TMP word-wrap failed to advance its source cursor".into());
         }
         start = next_start;
         previous_hard = hard;
     }
-    let base_scale = size * cfg.face.unit_scale;
     let mut content = Vec2::ZERO;
-    let mut ascent: f32 = 0.0;
-    let mut lowest: f32 = 0.0;
-    for i in 0..lines.len() {
-        if i == 0 {
-            ascent = lines[i].ascent;
-        } else {
-            let previous = &lines[i - 1];
-            let style = &p.segments[p.tokens[lines[i].start].segment];
-            let paragraph =
-                if previous.hard && matches!(p.tokens[lines[i].start - 1].ch, '\n' | '\u{2029}') {
-                    cfg.paragraph_spacing
-                } else {
-                    0.0
-                };
-            let gap = style.line_height.unwrap_or(
-                previous.descent + lines[i].ascent + cfg.face.leading * size
-                    + spacing_delta * base_scale,
-            );
-            lines[i].offset = previous.offset + gap + (cfg.line_spacing + paragraph) * size * 0.01;
-        }
-        lowest = lowest.min(-lines[i].descent - lines[i].offset);
+    for line in &lines {
         content.x = content.x.max(if purpose == Purpose::Preferred {
-            lines[i].preferred_width
+            line.preferred_width
         } else {
-            lines[i].width
+            line.width
         });
-        let extent = ascent - lowest;
-        if purpose == Purpose::Render && extent > height + EPSILON {
-            if resize_allowed {
-                resize = Some(Resize::Height {
-                    actual: extent,
-                    lines: i,
-                });
-                break;
-            }
-            if cfg.overflow == 3 {
-                lines.truncate(i);
-                break;
-            }
-        }
-        content.y = extent;
     }
+    // renderedHeight: the text's ascender less m_ElementDescender.
+    content.y = vertical.text_ascender - vertical.element_descender;
     Ok(Pass {
         lines,
         measured,
         content,
-        ascent,
+        ascent: vertical.text_ascender,
+        descender: vertical.element_descender,
         resize,
     })
 }
 
+/// `(int)(value * 100 + 1f) / 100f` as the game compiles it: the float to
+/// int conversion saturates, gives 0 for NaN, and gives int.MinValue for
+/// +infinity (the compiled code tests that one value).
 fn preferred_round(value: f32) -> f32 {
-    ((value * 100.0 + 1.0) as i32) as f32 / 100.0
+    let scaled = value * 100.0 + 1.0;
+    if scaled == f32::INFINITY {
+        return i32::MIN as f32 / 100.0;
+    }
+    (scaled as i32) as f32 / 100.0
 }
 
 fn calculate(
@@ -898,115 +1763,170 @@ fn calculate(
     purpose: Purpose,
     rect: Vec2,
     width_only: bool,
+    mut internal: Option<&mut Vec<char>>,
 ) -> Result<(Pass, f32, f32), String> {
-    let mut size = if cfg.auto { cfg.max } else { cfg.size };
-    let mut lower = cfg.min;
-    let mut upper = cfg.max;
-    let mut adjustment = 0.0;
-    let mut spacing_delta = 0.0;
+    // Render passes start the search at the base size clamped to the bounds;
+    // preferred-size queries start at the max size.
+    let start = match purpose {
+        Purpose::Render => auto_size::render_start_size(cfg.auto, cfg.size, cfg.base, cfg.min, cfg.max),
+        Purpose::Preferred => auto_size::preferred_start_size(cfg.auto, cfg.size, cfg.max),
+    };
+    let mut search = AutoSize::new(start, cfg.min, cfg.max);
     let inner_width = rect.x - cfg.margin[0] - cfg.margin[2];
-    let width = if width_only || (purpose == Purpose::Preferred && inner_width == 0.0) {
-        LARGE
-    } else {
+    // A render pass clamps the margin width and height at 0 (`m_marginWidth
+    // > 0 ? m_marginWidth : 0`); the preferred-height query passes the
+    // margin width unclamped, 32767 when it is exactly 0.
+    let width = if width_only {
+        LARGE_POSITIVE_VECTOR
+    } else if purpose == Purpose::Preferred {
+        if inner_width != 0.0 { inner_width } else { LARGE }
+    } else if inner_width > 0.0 {
         inner_width
+    } else {
+        0.0
     };
     let height = if purpose == Purpose::Preferred {
         LARGE
     } else {
-        rect.y - cfg.margin[1] - cfg.margin[3]
+        let inner_height = rect.y - cfg.margin[1] - cfg.margin[3];
+        if inner_height > 0.0 { inner_height } else { 0.0 }
     };
+    // Justified and flush alignments are rejected when the settings are read,
+    // so the width adjustment never takes the justified target.
+    let justified_or_flush = false;
     for iteration in 0..=MAX_ITERATIONS {
-        let can_resize = cfg.auto && !width_only && iteration < MAX_ITERATIONS;
+        // The iteration counter the resize tests read. The render loop adds
+        // one after each generation pass. The preferred-height loop also adds
+        // one after each pass, and each preferred pass adds one more at its
+        // start, so its k-th pass (from 0) tests 2k + 1 against the limit.
+        search.iteration = match purpose {
+            Purpose::Render => iteration as u32,
+            Purpose::Preferred => 2 * iteration as u32 + 1,
+        };
+        let can_resize = cfg.auto && !width_only && search.below_iteration_limit();
+        let size = search.font_size;
+        // The source continues the same pass when a resize it asked for is
+        // not allowed; here that pass is run again without resizing, so the
+        // character array goes back to its state before the attempt.
+        let before_attempt = internal.as_deref().cloned();
         let attempt = pass(
             p,
             cfg,
             rules,
             purpose,
             size,
-            adjustment,
-            spacing_delta,
+            search.char_width_adj_delta,
+            search.line_spacing_delta,
             width,
+            inner_width,
             height,
             !width_only && cfg.wrap,
             can_resize
-                && (size > cfg.min
-                    || adjustment < cfg.width_adjustment_max
-                    || spacing_delta > cfg.line_spacing_min),
+                && (search.may_reduce_point_size(cfg.min)
+                    || search.may_reduce_char_width(cfg.char_width_max_adj)
+                    || search.line_spacing_delta > cfg.line_spacing_min),
+            internal.as_deref_mut(),
         )?;
         match attempt.resize {
             Some(Resize::Width { actual, available })
-                if can_resize && adjustment < cfg.width_adjustment_max =>
+                if can_resize && search.may_reduce_char_width(cfg.char_width_max_adj) =>
             {
-                let unadjusted = actual / (1.0 - adjustment);
-                adjustment =
-                    (adjustment + (actual - available) / unadjusted).min(cfg.width_adjustment_max);
+                search.reduce_char_width(actual, available, justified_or_flush, cfg.char_width_max_adj);
                 continue;
             }
-            Some(Resize::Height { actual, lines })
-                if can_resize && lines > 0 && spacing_delta > cfg.line_spacing_min =>
+            Some(Resize::Height { actual, lines, may_space, .. })
+                if can_resize && search.may_reduce_line_spacing(cfg.line_spacing_min, may_space) =>
             {
-                spacing_delta = (spacing_delta
-                    + (height - actual)
-                        / lines as f32
-                        / (size * cfg.face.unit_scale))
-                    .max(cfg.line_spacing_min);
+                search.reduce_line_spacing(
+                    height,
+                    actual,
+                    lines as u32,
+                    cfg.face.base_scale(size),
+                    cfg.line_spacing_min,
+                );
                 continue;
             }
-            Some(_) if can_resize && size > cfg.min => {
-                upper = size;
-                size =
-                    (((size - ((size - lower) * 0.5).max(0.05)) * 20.0 + 0.5) as i32) as f32 / 20.0;
-                size = size.max(cfg.min);
+            // A word wrap's too-tall new line narrows the characters before
+            // it shrinks the point size.
+            Some(Resize::Height { width: Some((actual, available)), .. })
+                if can_resize && search.may_reduce_char_width(cfg.char_width_max_adj) =>
+            {
+                search.reduce_char_width(actual, available, justified_or_flush, cfg.char_width_max_adj);
+                continue;
+            }
+            Some(_) if can_resize && search.may_reduce_point_size(cfg.min) => {
+                search.reduce_point_size(cfg.min);
                 continue;
             }
             Some(_) => {
+                if let (Some(array), Some(saved)) = (internal.as_deref_mut(), before_attempt) {
+                    *array = saved;
+                }
                 let final_pass = pass(
                     p,
                     cfg,
                     rules,
                     purpose,
                     size,
-                    adjustment,
-                    spacing_delta,
+                    search.char_width_adj_delta,
+                    search.line_spacing_delta,
                     width,
+                    inner_width,
                     height,
                     !width_only && cfg.wrap,
                     false,
+                    internal.as_deref_mut(),
                 )?;
-                return Ok((final_pass, size, adjustment));
+                return Ok((final_pass, size, search.char_width_adj_delta));
             }
             None => {}
         }
-        if can_resize && upper - lower > 0.051 && size < cfg.max {
-            if adjustment < cfg.width_adjustment_max {
-                adjustment = 0.0;
-            }
-            lower = size;
-            size = (((size + ((upper - size) * 0.5).max(0.05)) * 20.0 + 0.5) as i32) as f32 / 20.0;
-            size = size.min(cfg.max);
+        if !width_only && search.may_increase_point_size(cfg.auto, cfg.max) {
+            search.increase_point_size(cfg.max, cfg.char_width_max_adj);
             continue;
         }
-        return Ok((attempt, size, adjustment));
+        return Ok((attempt, size, search.char_width_adj_delta));
     }
     Err("TMP automatic point size exceeded its source iteration bound".into())
 }
 
+/// A text component's processing array, and TMP's early exit: with an
+/// empty processing array (the array ends at its first U+0000) mesh
+/// generation clears the mesh and the preferred size is zero, before any
+/// font scale or layout setting is read.
+fn component_array(text: &str, component: &UiComponent, input_box: bool) -> Result<Option<Vec<(char, usize)>>, String> {
+    let f = &component.fields;
+    let array = processing_array(text, boolean(f, "m_isRichText")?, boolean(f, "m_parseCtrlCharacters")?, input_box)?;
+    Ok((!array.is_empty()).then_some(array))
+}
+
+/// The preferred width (axis 0) or height (axis 1) of a text component.
+///
+/// `internal` is the component's own character array, which its preferred
+/// passes read and write (see [`pass`]); the caller keeps one per component
+/// for as long as the component lives, starting empty. `input_box`: the
+/// text is the component's serialized text (TMP parses its backslash
+/// escapes), not one code assigned.
 pub(super) fn preferred_axis(
     text: &str,
     component: &UiComponent,
     axis: usize,
     rect_size: Vec2,
     rules: &TextRules,
+    input_box: bool,
+    internal: &mut Vec<char>,
 ) -> Result<f32, String> {
     if axis > 1 || !rect_size.is_finite() {
         return Err("TMP invalid layout axis or rect".into());
     }
-    // Alignment changes only the placement inside the rect, not preferred size.
-    let config = Settings::read(component, None)?;
-    let prepared = prepare(text, &config)?;
-    if prepared.tokens.is_empty() {
+    let Some(array) = component_array(text, component, input_box)? else {
         return Ok(0.0);
-    }
+    };
+    // Alignment changes only the placement inside the rect, not preferred size.
+    let config = Settings::read(component, None, rules.fonts.as_deref())?;
+    let prepared = prepare(text, &array, &config)?;
+    // A text of tags only still runs the pass (no characters, size 0) and
+    // then the margins and the rounding below: 0.01 with zero margins.
     let (result, _, _) = calculate(
         &prepared,
         &config,
@@ -1014,44 +1934,67 @@ pub(super) fn preferred_axis(
         Purpose::Preferred,
         rect_size,
         axis == 0,
+        Some(internal),
     )?;
-    let margins = if axis == 0 {
-        config.margin[0].max(0.0) + config.margin[2].max(0.0)
+    // Each positive margin is added on its own, leading side first.
+    let (leading, trailing) = if axis == 0 {
+        (config.margin[0], config.margin[2])
     } else {
-        config.margin[1].max(0.0) + config.margin[3].max(0.0)
+        (config.margin[1], config.margin[3])
     };
-    Ok(preferred_round(result.content[axis] + margins))
+    let positive = |margin: f32| if margin > 0.0 { margin } else { 0.0 };
+    Ok(preferred_round(result.content[axis] + positive(leading) + positive(trailing)))
 }
 
+/// The render layout of a text component; `input_box` as for
+/// [`preferred_axis`].
 pub(super) fn layout(
     text: &str,
     component: &UiComponent,
     rect_size: Vec2,
+    pivot: Vec2,
     rules: &TextRules,
     alignment: Option<i64>,
+    input_box: bool,
 ) -> Result<TextLayout, String> {
-    if !rect_size.is_finite() {
+    if !rect_size.is_finite() || !pivot.is_finite() {
         return Err("TMP non-finite render rect".into());
     }
-    let config = Settings::read(component, alignment)?;
-    let prepared = prepare(text, &config)?;
+    let Some(array) = component_array(text, component, input_box)? else {
+        return Ok(TextLayout { glyphs: Vec::new() });
+    };
+    let config = Settings::read(component, alignment, rules.fonts.as_deref())?;
+    let prepared = prepare(text, &array, &config)?;
     if prepared.tokens.is_empty() {
         return Ok(TextLayout { glyphs: Vec::new() });
     }
     let (result, _, adjustment) =
-        calculate(&prepared, &config, rules, Purpose::Render, rect_size, false)?;
-    let inner = Vec2::new(
-        rect_size.x - config.margin[0] - config.margin[2],
-        rect_size.y - config.margin[1] - config.margin[3],
-    );
-    let left = -rect_size.x * 0.5 + config.margin[0];
-    let top = rect_size.y * 0.5 - config.margin[1];
-    let y_shift = match config.vertical {
-        256 => 0.0,
-        512 => (inner.y - result.content.y) * 0.5,
-        1024 => inner.y - result.content.y,
+        calculate(&prepared, &config, rules, Purpose::Render, rect_size, false, None)?;
+    let margin = config.margin;
+    // The rect's local corners (bottom-left, top-left), origin at the pivot.
+    let x_min = -(pivot.x * rect_size.x);
+    let y_min = -(pivot.y * rect_size.y);
+    let y_max = y_min + rect_size.y;
+    let (ascender, descender) = (result.ascent, result.descender);
+    // The vertical anchor offset, from the corners, the margins, the first
+    // line's ascender and the last line's descender.
+    let anchor = match config.vertical {
+        256 => Vec2::new(x_min + (0.0 + margin[0]), y_max + ((0.0 - ascender) - margin[1])),
+        512 => Vec2::new(
+            (x_min + x_min) * 0.5 + (0.0 + margin[0]),
+            (y_min + y_max) * 0.5 + ((((margin[1] + ascender) + descender) - margin[3]) * -0.5 + 0.0),
+        ),
+        1024 => Vec2::new(x_min + (0.0 + margin[0]), y_min + ((0.0 - descender) + margin[3])),
         _ => unreachable!(),
     };
+    // Each line records the text area width, which TMP computes as the
+    // margin width (clamped at 0) plus 0.0001 less the `<margin>` tag
+    // margins; that tag has no placement here (it is refused above), so
+    // those margins are 0, and so is the line's left margin in the
+    // justification offsets below.
+    let inner_width = rect_size.x - margin[0] - margin[2];
+    let margin_width = if inner_width > 0.0 { inner_width } else { 0.0 };
+    let line_width = margin_width + EPSILON;
     let mut glyphs = Vec::new();
     for line in &result.lines {
         let style = &prepared.segments[prepared.tokens[line.start].segment];
@@ -1061,12 +2004,15 @@ pub(super) fn layout(
             Some("right") => 4,
             _ => config.horizontal,
         };
-        let x_shift = match horizontal {
-            1 => 0.0,
-            2 => (inner.x - line.width) * 0.5,
-            4 => inner.x - line.width,
+        // Left: margin left; Center: margin left + width / 2 - max advance / 2;
+        // Right: margin left + width - max advance.
+        let justification = match horizontal {
+            1 => 0.0 + 0.0,
+            2 => (0.0 + line_width * 0.5) - line.width * 0.5,
+            4 => (0.0 + line_width) - line.width,
             _ => unreachable!(),
         };
+        let offset = Vec2::new(anchor.x + justification, anchor.y + 0.0);
         for placed in &line.positions {
             let token = &prepared.tokens[placed.index];
             if !visible(token.ch) || token.fixed_space.is_some() {
@@ -1089,14 +2035,19 @@ pub(super) fn layout(
                 None
             };
             glyphs.push(PlacedGlyph {
-                ch: metric_character(token.ch),
+                ch: m.drawn,
                 source_index: token.source,
                 font_size: m.size,
                 scale: m.scale,
                 width_scale: 1.0 - adjustment,
+                // origin += offset.x; baseLine (element baseline offset less
+                // the line offset it was placed at, plus the <voffset>
+                // offset, less the line's baseline adjustment) += offset.y.
+                // The pair placement is this port's pen shift for the glyph
+                // bitmap (0 without pair records).
                 pen: Vec2::new(
-                    left + x_shift + placed.pen + m.pair_offset.x * (1.0 - adjustment),
-                    top - y_shift - result.ascent - line.offset + m.voffset + m.pair_offset.y,
+                    (placed.pen + offset.x) + m.pair_offset.x * (1.0 - adjustment),
+                    ((((m.baseline - line.offset_start) + m.voffset) - line.adjust) + offset.y) + m.pair_offset.y,
                 ),
                 color,
             });

@@ -1,6 +1,8 @@
 //! Source-authored phenomenon selection, environment transition and post stack.
 //! All entries are loaded from the current index, ordered by their source IDs.
-//! Native C-key and WeatherRequest share one transition owner.
+//! Native C-key and WeatherRequest share one transition owner. The C key only
+//! edits the server panel's current schedule row; the panel is the only
+//! writer of WeatherRequest.
 //!
 //! EnvironmentShaderView blends light/config over the source transition. At its
 //! completion SetEnvironmentData commits sky-bottom color and emission type;
@@ -1176,21 +1178,18 @@ fn store<T: SameBits>(slot: &mut T, value: T) -> bool {
     true
 }
 
-/// Update：两个入口共用这一条切换链——场景输入可用时 C 键循环推进到下一
-/// 档，以及浏览器桥/宿主 UI 请求的**确定性档位**。两者都在这里核对档位、
-/// 开一段交叉淡化（淡化在下一帧起推进）。
+/// Update：切换链只吃**确定性档位**请求（服务端面板按当日日程写出），在这
+/// 里核对档位、开一段交叉淡化（淡化在下一帧起推进）。场景输入可用时 C 键
+/// 只改面板当前日程行（下一档），由面板重新写出请求——现象不由按键直选。
 ///
-/// 另有**验证用**的自动切换：环境变量 `MOLY_WEATHER_AUTOSWITCH_SECS` 给了
-/// 秒数就按该周期自动切——验收要在无人按键的跑法里从日志推导「轴 resource
-/// 值随切换变」，真人按键路径（C 键）不受影响；变量不给时这条路径完全不
-/// 生效。淡化进行中不叠新切换（0.25s 的窗口，叠了会砍在半途）。
+/// 无人按键跑法里的自动切换是服务端面板文档的控制项（日程行按周期换档），
+/// 不在这里读环境变量。
 ///
 /// 按键仍按场景输入门（设置面板/内容库挡世界输入时不该被键盘改天气），而
 /// 请求来自宿主界面上的显式操作，不受那条门限制——否则正在播一段对话时
 /// 天气钮会变成死键。未知档位只打一行拒绝行：请求面不能 panic。
 fn switch_phenomenon(
     keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
     mut run: ResMut<WeatherRun>,
     site: Option<Res<SiteActive>>,
     mut requests: MessageReader<WeatherRequest>,
@@ -1199,36 +1198,18 @@ fn switch_phenomenon(
     // 自发光账目（换装完成的收账件；Option——换装未完成时缺件，此切换
     // 无行可打）。
     emission: Option<Res<EmissionAccount>>,
-    // (周期, 已计秒数)，首次调用时按环境变量定型。
-    mut auto: Local<Option<(f32, f32)>>,
+    mut schedule_edits: MessageWriter<crate::server_panel::PhenomenaScheduleEdit>,
 ) {
     if run.phenomena.is_empty() {
         return;
     }
-    if auto.is_none() {
-        *auto = std::env::var("MOLY_WEATHER_AUTOSWITCH_SECS")
-            .ok()
-            .and_then(|raw| raw.parse::<f32>().ok())
-            .filter(|period| *period > 0.0)
-            .map(|period| (period, 0.0));
-    }
-    let autoswitch = match auto.as_mut() {
-            Some((period, elapsed)) => {
-                *elapsed += time.delta_secs();
-                if *elapsed >= *period {
-                    *elapsed = 0.0;
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
-        };
-    // 显式请求比同帧的按键更具体：请求给出的是**目标档**，按键只是「下一
-    // 档」。两者都过同一段核对，因此两条入口的淡化与记账逐式同形。
+    // 按键只改面板日程（下一档），面板下一帧写出目标档请求。
     let requested = requests.read().last().map(|request| request.0);
     let pressed = crate::game_settings::scene_input_enabled(panel, library)
-        && (keys.just_pressed(KeyCode::KeyC) || autoswitch);
+        && keys.just_pressed(KeyCode::KeyC);
+    if pressed {
+        schedule_edits.write(crate::server_panel::PhenomenaScheduleEdit::Next);
+    }
     let to = match requested {
         Some(id) => match run.phenomena.iter().position(|entry| entry.id == id) {
             Some(index) => index,
@@ -1237,9 +1218,6 @@ fn switch_phenomenon(
                 return;
             }
         },
-        None if pressed && run.phenomena.len() > 1 => {
-            (run.current + 1) % run.phenomena.len()
-        }
         None => return,
     };
     if run.queued == Some(to) { return; }
@@ -2249,6 +2227,7 @@ impl Plugin for WeatherPlugin {
             .init_resource::<CurrentPhenomenonId>()
             .init_resource::<PhenomenonCatalogue>()
             .add_message::<WeatherRequest>()
+            .add_message::<crate::server_panel::PhenomenaScheduleEdit>()
             .add_systems(Startup, load)
             .add_systems(Update, (parse_index, resolve_all).chain().before(WeatherEnvironmentUpdate))
             .add_systems(Update, (switch_phenomenon, advance).chain().in_set(WeatherEnvironmentUpdate))

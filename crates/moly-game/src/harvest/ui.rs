@@ -25,7 +25,8 @@ use bevy::input::touch::Touches;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::balloon::{canvas_scale, BALLOON_LAYER};
+use crate::balloon::BALLOON_LAYER;
+use crate::canvas::RootCanvas;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
@@ -154,6 +155,7 @@ pub(crate) fn read_input(
     mouse: Res<ButtonInput<MouseButton>>,
     touches: Res<Touches>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    root_canvas: Option<Res<RootCanvas>>,
     layouts: Res<UiLayouts>,
     views: Query<(&HarvestButtonView, &UiPrefabView)>,
     (stack, entry, site): (
@@ -173,11 +175,11 @@ pub(crate) fn read_input(
         button.is_press = false;
         return;
     }
-    let Ok(window) = windows.single() else {
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
         return;
     };
-    let scale = canvas_scale(window.width(), window.height());
-    let size = Vec2::new(window.width(), window.height()) / scale;
+    let scale = root_canvas.scale(window);
+    let size = root_canvas.size(window);
     let over_button = |position: Vec2| -> bool {
         let canvas = Vec2::new(
             position.x - window.width() / 2.0,
@@ -230,6 +232,7 @@ pub(crate) fn read_input(
 /// Update: place and dress the view.
 pub(crate) fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
+    root_canvas: Option<Res<RootCanvas>>,
     button: Res<HarvestButton>,
     (stack, entry, site): (
         Res<crate::ui_layers::UiLayerStack>,
@@ -243,10 +246,10 @@ pub(crate) fn place(
         &mut UiPrefabView,
     )>,
 ) {
-    let Ok(window) = windows.single() else {
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
         return;
     };
-    let scale = canvas_scale(window.width(), window.height());
+    let scale = root_canvas.scale(window);
     let visible = visible_now(&button, &stack, entry.as_deref(), site.as_deref());
     for (marks, mut visibility, mut transform, mut view) in &mut views {
         *visibility = if visible {

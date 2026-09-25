@@ -31,13 +31,23 @@ pub const TILE_SCALE: f32 = 0.25;
 /// 置换后取前几格逐探（源 `Take(5)`）。
 pub const WANDER_TAKE: usize = 5;
 
+/// Which move range a character's own site type selects: site types 1 to 3
+/// (the three room floors) take the in-room minimum and maximum, every other
+/// type the outdoor pair. The type is the character's own current site type,
+/// not the site the player has selected.
+pub fn uses_in_room_move_range(site_type: i32) -> bool {
+    (site_type.wrapping_sub(1) as u32) < 3
+}
+
 /// 环滤谓词：`dx² + dz²` 落在 `[min², max²]`（双端含）。
 ///
 /// `max²` 与整型上界取小（源 `Math.Min(max*max, int.MaxValue)`）；
-/// 距离只在 xz 平面量，格坐标不含高度轴。
+/// 距离只在 xz 平面量，格坐标不含高度轴。A grid cell stores each axis as a
+/// signed byte, and the cell difference is stored the same way, so each axis
+/// difference wraps to a signed byte before it is squared.
 pub fn ring_filter(origin: Cell, candidate: Cell, min_cells: i32, max_cells: i32) -> bool {
-    let dx = candidate.0 as i64 - origin.0 as i64;
-    let dz = candidate.1 as i64 - origin.1 as i64;
+    let dx = i64::from(candidate.0.wrapping_sub(origin.0) as i8);
+    let dz = i64::from(candidate.1.wrapping_sub(origin.1) as i8);
     let distance_sq = dx * dx + dz * dz;
     let min_sq = (min_cells as i64) * (min_cells as i64);
     let max_sq = ((max_cells as i64) * (max_cells as i64)).min(i32::MAX as i64);
@@ -193,12 +203,11 @@ mod tests {
 
     #[test]
     fn ring_filter_clamps_max_square_to_int_bound() {
-        // max² 超整型上界时钳到上界：46341² = 2147488281 > 2147483647
-        assert!(ring_filter((0, 0), (46340, 0), 2, 46341), "d²=2147395600 未超钳后上界");
-        assert!(
-            !ring_filter((0, 0), (46341, 0), 2, 46341),
-            "d²=2147488281 超钳后上界"
-        );
+        // max² 超整型上界时钳到上界：46341² 不溢出，任何字节格差都在界内
+        assert!(ring_filter((0, 0), (127, 0), 2, 46341));
+        // Each axis difference wraps to a signed byte: 270 - 0 reads as 14.
+        assert!(ring_filter((0, 0), (270, 0), 12, 16));
+        assert!(!ring_filter((0, 0), (200, 0), 12, 16), "200 reads as -56");
     }
 
     #[test]

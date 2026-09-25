@@ -11,7 +11,7 @@
 //!   `ScreenLayerMysekaiHarvest` action button, plus the F key as a named
 //!   stand-in), `PlayHarvestAction` with its cool-down and animation waits,
 //!   the hit clock from the source swing clips' AnimationEvents, stamina and
-//!   durability, the SD stand-in motion and the tool in hand.
+//!   durability, the player's source clip and the tool in hand.
 //! - `damage`: `HarvestObjectPresenter.OnDamage`: `UpdateHp`, the multi /
 //!   single dispatch, SEs, the punch, `HandleResourceDrop`, the per-kind
 //!   disappearance (the tree fall and the top's dither fade).
@@ -48,7 +48,6 @@ mod pickup;
 mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
-mod stand_in;
 mod learn;
 mod tone;
 mod tool_model;

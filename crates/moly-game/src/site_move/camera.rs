@@ -18,7 +18,8 @@ use bevy::prelude::*;
 use super::timeline::SourceClip;
 use crate::camera::{
     perspective_fov_deg, to_rotation, view_dir, wrap180, CameraSetting, CameraStateType,
-    CameraTween, FieldCameraModel, FieldCameraState, NormalCameraMemory, FRAME_BASE,
+    CameraTween, FieldCameraModel, FieldCameraState, NormalCameraMemory, TweenCompletion,
+    FRAME_BASE,
 };
 use crate::character::AvatarRoot;
 
@@ -201,6 +202,7 @@ pub(crate) fn enter_site_move(world: &mut World) {
             distance: (model.distance, 8.0),
             duration: 0.5,
             elapsed: 0.0,
+            on_complete: TweenCompletion::None,
         };
         info!(
             "[site-move] camera SiteMoveAction OnEnter: tween 0.5s OutQuad to root {root:.2}, pitch {:.1} -> 10, yaw {:.1} -> {:.1}, distance {:.2} -> 8",
@@ -270,6 +272,7 @@ pub(crate) fn enter_normal(world: &mut World, site: &str, category: &str, prev_s
         distance: (model.distance, distance),
         duration: crate::camera::FPS_EXIT_TWEEN_SECS_INHERIT,
         elapsed: 0.0,
+        on_complete: TweenCompletion::None,
     };
     info!(
         "[site-move] camera -> Normal at {site} (inherit, {}): distance {:.2} -> {:.2}, pitch {:.1} -> {:.1}, yaw {:.1} -> {:.1}",

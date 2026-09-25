@@ -9,11 +9,15 @@
 //! * **盒几何**：真源是 Layout 链（ContentSizeFitter Preferred + bg VLG
 //!   padding 左 40 右 40、上 32 下 32 + 行距 2.5）；此处取其近似式——
 //!   文本宽 + 80 水平 / 文本高 + 64 垂直（= padding 之和），**注明近似**。
-//! * **时序**：入场 DOScale 0→1 与收场 1→0 各 0.2s Linear，作用在
-//!   animation 中间节点（真源 `_animationRoot`，非根）；显示 5.0s 是 NPC
-//!   状态机时长的对应值（真源 HUD 无自定时器，生死由宿主事件驱动——
-//!   事件驱动生命周期在此以驻留沿触发近似）。无点击跳过/关闭语义
-//!   （真源 tweet 路径无打字机，点击只挂回调与音效）。
+//! * **时序**：入场 DOScale 0→1 与收场 →0 各 0.2s Linear，作用在
+//!   animation 中间节点（真源 `_animationRoot`，非根）。NPC 头顶 tweet
+//!   的显示时长不归气泡：真源 HUD 无自定时器，生死由 NPC 状态机发的
+//!   HUD 事件（类型 25，[`crate::npc_state::TweetHudEvent`]）驱动——进
+//!   tweet / 问候状态即显示，出状态即收场（问候在过 3.0s 的第一帧先收，
+//!   状态本身活到 5.0s）。收场从当前缩放起缩（补间从起始时刻的当前值
+//!   出发）。摆设编辑反应与家具前置动作两条链仍按 5.0s 保持（tweet
+//!   状态的时长）。无点击跳过/关闭语义（真源 tweet 路径无打字机，点击
+//!   只挂回调与音效）。
 //! * **canvas 缩放**：SPEC 的盒几何/字号是 canvas 单位，根 UI canvas 以
 //!   ScaleWithScreenSize（参考 1920×1080、MatchWidthOrHeight）缩放上屏；
 //!   match 按屏幕纵横比定（H/W ≥ 1080/1920 → 高度匹配 H/1080，更宽 →
@@ -83,33 +87,29 @@
 //!   表——宽（思考/哭喊按定行字符数 1..12 与 1..10）、高（按行数 1/2）、
 //!   底图 Y 偏移（按行数 1/2），查表失败记错误日志。
 //!
-//! 数据/触发/定位：tweets.json 出主表行与摆设编辑池（join 后形），
-//! tweet-tables.json 出问候链三表（WRT 归属 / 问候候选 / 候选条件）；
-//! 问候选取只走 [`moly_law::tweet::pick_greeting`]——四条链里唯一带
-//! 天气门的一条：条件型 `mysekai_phenomena_time_period` 在选取时比较
-//! **当前现象 id** 与条件 value1（名字里的 time_period 是历史命名，比
-//! 的不是时段枚举）。真源没有「档位变更即重抽」的监听——门只在选取时
-//! 求值，变更只影响下一次选取，这里不做任何变更高压重选。访问计数以 0
-//! 喂入（产品没有访问计数，0 是无数据的诚实值：真源三条访问条件
-//! [1,5)/[5,∞)/[7,∞) 在 0 处全部不成立，门只剩现象一道——选取随档变化
-//! 据此可从日志推导）。
-//! 触发两条：问候走「移动相位进入驻留」为演示替身（真源挂在问候/
-//! 站点入口两域链上）；摆设编辑链走真源域链——保存回执
+//! 数据/触发/定位：tweet 主表与问候链三表归 NPC 侧
+//! （[`crate::npc_tweet::TweetTables`]，同两份提取文件）；问候的门、选取
+//! 与计时都在 NPC 状态机（`npc_presenter` 的问候门、`npc_state` 的问候
+//! 状态），气泡只消费它发的 HUD 事件：Show 上屏、Hide 收场、Retire
+//! （宿主换站重置）立即撤。每名成员只有一只 HUD 气泡：新的 Show 替换
+//! 在屏那只（入场从 0 起；真源 HUD 重入的形状未读）。
+//! 摆设编辑链走真源域链——保存回执
 //! （`crate::fixture_edit::LayoutSaved`）→ 池选取
 //! （[`moly_law::tweet::pick_after_edit_tweet`]）→ 同一呈现链上屏 →
 //! 5.0s 驻留（[`AFTER_EDIT_REACTION_DELAY_SECONDS`]）后收场。
 //! 驻留在上屏**之后**（真源 objective 的序：选取 → 看向玩家 →
 //! 上屏 → 延迟等待 → 收场；反应者抽签与逐角色 500–1000ms 错峰挂账，
-//! 这里全员同帧替身），期间该成员被这条反应占用、问候触发沿让位
-//! （objective 槽位互斥）；驻留内新回执取消旧反应、重抽重上屏。
+//! 这里全员同帧替身）；驻留内新回执取消旧反应、重抽重上屏。这条反应
+//! 不在 NPC 的目标循环里（真源是一个目标，与问候、对话目标互斥），
+//! 具名缺口。
 //! 定位 = avatar 根位 + 世界偏移
 //! (0,1,0) → 主相机投影到屏幕像素 → 盖到只画气泡层的 2D 相机（世界
 //! 单位 = 逻辑像素），每帧跟随。日志只打 id、行数、量法、参数实际值——文本内容不进日志
 //! （文本含非中英文字符）。
 
 use crate::character::CharacterShell;
-use crate::npc::{CharacterUnitId, MotionPhase};
-use bevy::asset::{AssetPath, LoadState, RenderAssetUsages};
+use crate::npc::CharacterUnitId;
+use bevy::asset::{LoadState, RenderAssetUsages};
 use bevy::camera::visibility::RenderLayers;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::image::Image;
@@ -117,15 +117,12 @@ use bevy::math::Rect;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::renderer::RenderDevice;
-use moly_assets::json::JsonAsset;
 use moly_assets::residency::load_image;
 use moly_law::text::advance::{force_fallback_glyph, resolve_glyph_advance};
 use moly_law::text::layout_metrics;
 use moly_law::text::tags::{parse_rich_segments, transformed_glyphs, SizeSpec, TextSegment};
 use moly_law::tweet::{
-    condition_matches, greeting_tweet_id, pick_after_edit_tweet, pick_greeting, AfterEditRow,
-    GreetingConditionRow, GreetingRow, TweetRow, UniformDraw, WithoutRelatedTalkRow,
-    AFTER_EDIT_REACTION_DELAY_SECONDS, CONDITION_TYPE_TIME_PERIOD, CONDITION_TYPE_VISIT_COUNT,
+    pick_after_edit_tweet, AfterEditRow, TweetRow, UniformDraw, AFTER_EDIT_REACTION_DELAY_SECONDS,
     TWEET_DISPLAY_SECONDS,
 };
 use std::collections::HashMap;
@@ -218,26 +215,6 @@ const ORDER_PROBE_NEAR: f32 = 4.0;
 /// 话时另有目标 fixture 项参与均值，此处单员式）。
 const ANCHOR_OFFSET: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
-/// 根 UI canvas 的参考分辨率（真值：基准屏常量 (1920, 1080)，与根
-/// canvas 缩放件的序列化参考分辨率一致——36 份缩放件全部
-/// ScaleWithScreenSize + (1920,1080) + MatchWidthOrHeight）。
-pub(crate) const CANVAS_REF_W: f32 = 1920.0;
-pub(crate) const CANVAS_REF_H: f32 = 1080.0;
-
-/// canvas 缩放（真值式）：SPEC 的盒几何/字号是 canvas 单位，上屏 = 单位
-/// × 本系数。选择律（`ScreenManager.SetUpScreenResolution` 写 match，
-/// `CanvasScaler` 的 MatchWidthOrHeight 模式消费它）：
-/// 1080/1920 ≤ H/W（屏幕与 16:9 等高或更高）→ match=0 → W/1920；
-/// 更宽 → match=1 → H/1080，即完整容纳参考画布。CanvasScaler 的 0 是宽，
-/// 1 是高。本层相机 1 单位 = 1 逻辑像素，物理尺寸与窗口 DPI 因子约掉。
-pub(crate) fn canvas_scale(width: f32, height: f32) -> f32 {
-    if CANVAS_REF_H / CANVAS_REF_W <= height / width {
-        width / CANVAS_REF_W
-    } else {
-        height / CANVAS_REF_H
-    }
-}
-
 /// 真源 TextMeshPro 排版的坐标倍率（行量法的内部常数；摆位换算要
 /// 与它同一坐标系）。
 pub(crate) const TEXT_SCALE: f32 = 2.0;
@@ -249,206 +226,8 @@ pub(crate) const DESCENT_RATIO: f32 = 9.0 / 75.0;
 const FONT_BYTES: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
 
 // ---------------------------------------------------------------------------
-// 数据面：tweets.json（主表）+ tweet-tables.json（问候链三表）→ 行类型
+// 真源纹源的装载（tweet 主表与问候链三表归 NPC 侧：`crate::npc_tweet`）
 // ---------------------------------------------------------------------------
-
-/// tweet 主表的装载请求；解析成功后即撤。主表与问候链三表是两份文件，
-/// 到齐一起解析。
-#[derive(Resource)]
-pub(crate) struct MasterHandle {
-    tweets: Handle<JsonAsset>,
-    tables: Handle<JsonAsset>,
-}
-
-/// 解析后的 tweet 主表：主表行 + 问候链三表（律的入参）+ 摆设编辑链
-/// 的池（律的入参）。
-///
-/// 问候链是四条选取链里唯一带天气门的：候选行经 WRT 归属到角色，再经
-/// 条件行过滤——条件型「当前现象时段相等」比的是**当前现象 id** 与
-/// value1（见 [`crate::weather::CurrentPhenomenonId`]）。摆设编辑链的
-/// 池 = AEH 引用的 WRT 行按角色过滤后的 tweet id 集，无第二道条件
-/// （真源 Where 只比角色归属）。
-#[derive(Resource)]
-pub(crate) struct TweetMaster {
-    /// 主表全行，按 id 升序（真源 MessagePack 表序即 id 序；提取产物是
-    /// keyed dict，落地后自己排回数值序）。
-    tweets: Vec<TweetRow>,
-    /// 问候链的 WRT 行：把 tweet 归属给角色的连接脊（问候与站点入口
-    /// 两张表都指到这里取角色与 tweet）。
-    wrt: Vec<WithoutRelatedTalkRow>,
-    /// 问候候选行。
-    greetings: Vec<GreetingRow>,
-    /// 候选条件行（访问次数区间 / 当前现象 id 相等两型）。
-    conditions: Vec<GreetingConditionRow>,
-    /// 摆设编辑链的 AEH 行。提取产物把 AEH→WRT→tweet 三表 join 成了
-    /// 按角色的池（`afterEditPools`），这里按 WRT 表反查还原成律要的
-    /// 行形状——盘上 WRT 的 (角色, tweet) 对零重复，反查恰一行，行 id
-    /// 本身不参与选取（律只读 without_related_talk_id）。
-    after_edit: Vec<AfterEditRow>,
-}
-
-/// tweet-tables.json 的资产路径。问候链三表在这份文件里（主表 tweets
-/// 在 tweets.json，另一份）。
-fn tweet_tables() -> AssetPath<'static> {
-    AssetPath::from("moly://tweet-tables.json".to_owned())
-}
-
-impl TweetMaster {
-    /// 只取结构键；报错只带字段名与 id——文本内容不进任何报错。
-    /// 摆设编辑池（`afterEditPools`，键 = 角色单元 id，值 = tweet id 列）
-    /// 与主表同文件，一并取出。
-    fn parse_tweets(text: &str) -> (Vec<TweetRow>, Vec<(i32, Vec<i32>)>) {
-        let value: serde_json::Value = serde_json::from_str(text)
-            .unwrap_or_else(|err| panic!("tweet 主表不是合法 JSON：{err}"));
-        let rows = value
-            .get("tweets")
-            .and_then(|v| v.as_object())
-            .unwrap_or_else(|| panic!("tweet 主表缺 tweets 对象"));
-        let mut tweets: Vec<TweetRow> = rows
-            .iter()
-            .map(|(key, row)| {
-                let id: i32 = key
-                    .parse()
-                    .unwrap_or_else(|_| panic!("tweet 键不是数字 id：{key}"));
-                let text = row
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_else(|| panic!("tweet {id} 缺 text"));
-                let motion = match row.get("motion") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(v) => Some(
-                        v.as_str()
-                            .unwrap_or_else(|| panic!("tweet {id} 的 motion 不是字符串"))
-                            .to_owned(),
-                    ),
-                };
-                let eye = row
-                    .get("eye")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_else(|| panic!("tweet {id} 缺 eye"))
-                    .to_owned();
-                let mouth = row
-                    .get("mouth")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_else(|| panic!("tweet {id} 缺 mouth"))
-                    .to_owned();
-                // 表情件列：提取侧 v2 起已导出（216 条非空）；空值/缺列
-                // 按 None 喂，与行类型口径一致。
-                let emoticon = match row.get("emoticon") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(v) => Some(
-                        v.as_str()
-                            .unwrap_or_else(|| panic!("tweet {id} 的 emoticon 不是字符串"))
-                            .to_owned(),
-                    ),
-                };
-                TweetRow {
-                    id,
-                    motion_name: motion,
-                    emoticon_name: emoticon,
-                    eye_name: eye,
-                    mouth_name: mouth,
-                    text: text.to_owned(),
-                }
-            })
-            .collect();
-        tweets.sort_by_key(|row| row.id);
-        // 池的键与值都要求是整数（提取产物保证；解析失败即数据损伤，
-        // 响亮失败在资产边界）。
-        let pools = value
-            .get("afterEditPools")
-            .and_then(|v| v.as_object())
-            .unwrap_or_else(|| panic!("tweet 主表缺 afterEditPools 对象"))
-            .iter()
-            .map(|(key, ids)| {
-                let unit: i32 = key
-                    .parse()
-                    .unwrap_or_else(|_| panic!("after-edit 池键不是角色单元 id：{key}"));
-                let ids = ids
-                    .as_array()
-                    .unwrap_or_else(|| panic!("after-edit 池 {unit} 不是 tweet id 数组"))
-                    .iter()
-                    .map(|id| {
-                        id.as_i64()
-                            .map(|id| id as i32)
-                            .unwrap_or_else(|| panic!("after-edit 池 {unit} 里有非整数 tweet id"))
-                    })
-                    .collect();
-                (unit, ids)
-            })
-            .collect();
-        (tweets, pools)
-    }
-
-    /// 问候链三表（WRT / 问候 / 条件）。value2 的 null 落成 0——律的
-    /// 口径里访问型条件 value2==0 即无上界，现象型不读 value2。
-    fn parse_tables(
-        text: &str,
-    ) -> (
-        Vec<WithoutRelatedTalkRow>,
-        Vec<GreetingRow>,
-        Vec<GreetingConditionRow>,
-    ) {
-        let value: serde_json::Value = serde_json::from_str(text)
-            .unwrap_or_else(|err| panic!("tweet 问候链表不是合法 JSON：{err}"));
-        let int_of = |row: &serde_json::Value, key: &str| -> i32 {
-            row.get(key)
-                .and_then(|v| v.as_i64())
-                .unwrap_or_else(|| panic!("问候链表行缺 {key}")) as i32
-        };
-        let wrt: Vec<WithoutRelatedTalkRow> = value
-            .get("withoutRelatedTalks")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("tweet 问候链表缺 withoutRelatedTalks 数组"))
-            .iter()
-            .map(|row| WithoutRelatedTalkRow {
-                id: int_of(row, "id"),
-                game_character_unit_id: int_of(row, "gameCharacterUnitId"),
-                tweet_id: int_of(row, "tweetId"),
-            })
-            .collect();
-        let greetings: Vec<GreetingRow> = value
-            .get("greetings")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("tweet 问候链表缺 greetings 数组"))
-            .iter()
-            .map(|row| GreetingRow {
-                id: int_of(row, "id"),
-                without_related_talk_id: int_of(row, "withoutRelatedTalkId"),
-                greeting_condition_id: int_of(row, "greetingConditionId"),
-            })
-            .collect();
-        let conditions: Vec<GreetingConditionRow> = value
-            .get("greetingConditions")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("tweet 问候链表缺 greetingConditions 数组"))
-            .iter()
-            .map(|row| {
-                let condition_type = row
-                    .get("conditionType")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_else(|| panic!("条件行缺 conditionType"))
-                    .to_owned();
-                // null（现象型条件的 value2）落成 0：访问型 0 = 无上界，
-                // 现象型不读它。
-                let value2 =
-                    row.get("value2")
-                        .and_then(|v| match v {
-                            serde_json::Value::Null => Some(0),
-                            v => v.as_i64(),
-                        })
-                        .unwrap_or_else(|| panic!("条件行缺 value2")) as i32;
-                GreetingConditionRow {
-                    id: int_of(row, "id"),
-                    condition_type,
-                    value1: int_of(row, "value1"),
-                    value2,
-                }
-            })
-            .collect();
-        (wrt, greetings, conditions)
-    }
-}
 
 /// 真源纹源两件的装载句柄（bg 九宫源图 + 箭头）。Startup 请求，
 /// `bake_atlas` 在两件都到齐后才落 `BalloonArt`——资源在即是闩，
@@ -459,12 +238,8 @@ pub(crate) struct SkinHandle {
     arrow: Handle<Image>,
 }
 
-/// Startup：请求装载 tweet 主表、问候链三表与气泡两件真源纹源。
+/// Startup：请求装载气泡两件真源纹源。
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(MasterHandle {
-        tweets: server.load::<JsonAsset>(moly_assets::tweet_master()),
-        tables: server.load::<JsonAsset>(tweet_tables()),
-    });
     commands.insert_resource(SkinHandle {
         bg: load_image(&server, moly_assets::ui_atlas_sprite("CommonAtlas", "btn_r30_wh")),
         arrow: load_image(
@@ -472,75 +247,6 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
             moly_assets::ui_atlas_sprite("CommonAtlas", "balloon_direction_triangle_wh"),
         ),
     });
-}
-
-/// Update：两份表到齐即解析。装载失败响亮 panic（资产边界的唯一拒绝点）。
-pub(crate) fn parse_master(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    handle: Option<Res<MasterHandle>>,
-) {
-    let Some(handle) = handle else {
-        return;
-    };
-    for (name, handle) in [("主表", &handle.tweets), ("问候链表", &handle.tables)] {
-        if let LoadState::Failed(err) = server.load_state(handle) {
-            panic!("tweet {name}装载失败：{err:?}");
-        }
-    }
-    let Some(tweets_json) = jsons.get(&handle.tweets) else {
-        return;
-    };
-    let Some(tables_json) = jsons.get(&handle.tables) else {
-        return;
-    };
-    let (tweets, pools) = TweetMaster::parse_tweets(&tweets_json.0);
-    let (wrt, greetings, conditions) = TweetMaster::parse_tables(&tables_json.0);
-    // 池的 join 形 → 律的 AEH 行形：每条池内 tweet 反查同角色同 tweet 的
-    // WRT 行。提取产物以 join 形落盘（AEH 原行不在产物里），但链上引用
-    // 是提取期 fail-loud 核过的——反查落空即数据损伤，响亮失败。
-    let mut after_edit: Vec<AfterEditRow> = Vec::new();
-    for (unit, tweet_ids) in &pools {
-        for tweet_id in tweet_ids {
-            let wrt_row = wrt
-                .iter()
-                .find(|w| w.game_character_unit_id == *unit && w.tweet_id == *tweet_id)
-                .unwrap_or_else(|| {
-                    panic!("after-edit 池 {unit} 的 tweet {tweet_id} 无同角色 WRT 行")
-                });
-            after_edit.push(AfterEditRow {
-                id: after_edit.len() as i32 + 1,
-                without_related_talk_id: wrt_row.id,
-            });
-        }
-    }
-    let (visit_rows, period_rows) = conditions.iter().fold((0usize, 0usize), |(v, p), c| {
-        if c.condition_type == CONDITION_TYPE_VISIT_COUNT {
-            (v + 1, p)
-        } else if c.condition_type == CONDITION_TYPE_TIME_PERIOD {
-            (v, p + 1)
-        } else {
-            (v, p)
-        }
-    });
-    info!(
-        "[tweet] 表就绪：主表 {} 条 + 问候链三表（WRT {} · 候选 {} · 条件 {}：访问型 {visit_rows} / 现象型 {period_rows}）+ after-edit 池 {} 单元 {} 行",
-        tweets.len(),
-        wrt.len(),
-        greetings.len(),
-        conditions.len(),
-        pools.len(),
-        after_edit.len(),
-    );
-    commands.insert_resource(TweetMaster {
-        tweets,
-        wrt,
-        greetings,
-        conditions,
-        after_edit,
-    });
-    commands.remove_resource::<MasterHandle>();
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +319,7 @@ pub(crate) fn bake_atlas(
     server: Res<AssetServer>,
     render_device: Res<RenderDevice>,
     mut images: ResMut<Assets<Image>>,
-    master: Option<Res<TweetMaster>>,
+    tables: Option<Res<crate::npc_tweet::TweetTables>>,
     // 对话候选字符集：与 tweet 并集一次烘全（之后到的字符不上屏，
     // 候选集在对话模块的预筛侧已定格）。
     talk_charset: Option<Res<crate::talk::TalkCharset>>,
@@ -671,15 +377,15 @@ pub(crate) fn bake_atlas(
             ARROW_H
         );
     }
-    let (Some(master), Some(talk_charset), Some(player_talk_charset), Some(shell_charset)) =
-        (master, talk_charset, player_talk_charset, shell_charset)
+    let (Some(tables), Some(talk_charset), Some(player_talk_charset), Some(shell_charset)) =
+        (tables, talk_charset, player_talk_charset, shell_charset)
     else {
         return;
     };
     let font = swash::FontRef::from_index(FONT_BYTES, 0)
         .unwrap_or_else(|| panic!("仓内字体不是可读的 OpenType 字体"));
     let mut chars: Vec<char> = Vec::new();
-    for row in &master.tweets {
+    for row in tables.tweets() {
         for ch in row.text.chars() {
             if ch != '\n' && !chars.contains(&ch) {
                 chars.push(ch);
@@ -916,16 +622,8 @@ pub(crate) fn bake_atlas(
 // 触发与选取
 // ---------------------------------------------------------------------------
 
-/// 每名成员的触发状态：走姿相位时武装，进驻留的那一帧开火一次。
-#[derive(Component)]
-pub(crate) struct TweetArm {
-    armed: bool,
-    /// 第几次驻留（喂随机源种子，让每次驻留抽到不同位置）。
-    dwell: u32,
-}
-
 /// 跨帧线性同余抽签：均匀落在 `[0, len)`。律只约束分布与「恰求值一次」，
-/// 引擎序列不在律内；种子随成员与驻留次数走。
+/// 引擎序列不在律内；种子随成员与保存次数走。
 struct Lcg(u64);
 
 impl UniformDraw for Lcg {
@@ -963,128 +661,111 @@ impl UniformDraw for CountedDraw {
     }
 }
 
-/// 访问计数的替身值：产品没有访问计数（什么算一次「重访」归站点域，
-/// 尚无对应物），0 是无数据的诚实值——真源三条访问条件 [1,5)/[5,∞)/
-/// [7,∞) 在 0 处全部不成立，问候门只剩现象一道。真源选取不掷默认值，
-/// 计数由调用方传入；本替身固定喂 0。
-const VISIT_COUNT_STAND_IN: i32 = 0;
+/// NPC 头顶 tweet（HUD 事件 25）的气泡：寿命归 NPC 状态机，气泡只记
+/// 自己的缩放与收场起点。
+#[derive(Component)]
+pub(crate) struct HudBalloon {
+    /// animation 节点的当前缩放（收场从它起缩）。
+    scale: f32,
+    /// 收场起点：(上屏计时, 起缩值)。
+    exit: Option<(f32, f32)>,
+}
 
-/// Update：驻留沿开火——走姿帧武装，进驻留帧对问候链跑一次选取（选取
-/// 只走 [`pick_greeting`]；真源的问候触发挂在玩家入站的事件上，驻留沿
-/// 是演示替身）。只对装配完成的成员跑（有外壳即装配毕）。
+/// Update：消费 NPC 状态机的 HUD 事件（类型 25）。Show 上屏（每名成员
+/// 一只 HUD 气泡，新的替换在屏那只）；Hide 从当前缩放起收场 0.2s；
+/// Retire（宿主换站重置）立即撤。独立场景（内容库占场）里 Show 不上屏，
+/// 与背景气泡让位同一条门。图集未就绪时到达的事件读掉并具名。家具前置
+/// 动作、摆设编辑反应与对话预览的气泡不归这里。
 #[allow(clippy::type_complexity)]
-pub(crate) fn trigger(
+pub(crate) fn hud_event(
     mut commands: Commands,
     library: Res<crate::content_library::ContentLibrary>,
-    master: Option<Res<TweetMaster>>,
     art: Option<Res<BalloonArt>>,
-    // 选取时读当前现象 id——真源的门在选取时求值，不监听档位变更。
-    phenomena: Res<crate::weather::CurrentPhenomenonId>,
-    mut npcs: Query<
-        (
-            Entity,
-            &CharacterUnitId,
-            &MotionPhase,
-            Option<&mut TweetArm>,
-        ),
-        (
-            With<CharacterShell>,
-            Without<crate::player::PlayerControlled>,
-            // 对话参演者（TalkHold）整名让位：驻留相位是对话的持留
-            // 形态，不是 tweet 的触发沿，不在对话头上再叠一只 tweet 气泡。
-            Without<crate::talk::TalkHold>,
-            // after-edit 反应驻留中的成员同样让位：真源 objective 槽位
-            // 互斥，摆设编辑反应占着槽位时问候 objective 进不来。组件经
-            // 延迟命令插入，同帧碰撞拦不住，粒度一帧。
-            Without<AfterEditHold>,
-        ),
-    >,
+    mut events: MessageReader<crate::npc_state::TweetHudEvent>,
+    mut balloons: Query<(Entity, &BalloonAnchor, &Elapsed, &mut HudBalloon)>,
 ) {
-    if library.owns_scene() {
-        return;
-    }
-    let (Some(master), Some(art)) = (master, art) else {
+    use crate::npc_state::TweetHudEvent;
+    let Some(art) = art else {
+        let dropped = events.read().count();
+        if dropped > 0 {
+            warn!("[tweet] HUD 事件 {dropped} 条到达时气泡图集未就绪，未上屏");
+        }
         return;
     };
-    for (npc, unit, phase, arm) in &mut npcs {
-        let walking = matches!(phase, MotionPhase::Walking | MotionPhase::FitWalking { .. });
-        let Some(mut arm) = arm else {
-            // 首见：默认武装，让第一次驻留就能出 tweet。
-            commands.entity(npc).insert(TweetArm {
-                armed: true,
-                dwell: 0,
-            });
-            continue;
-        };
-        if walking {
-            arm.armed = true;
-            continue;
+    // 本次调用铺出的根：命令延迟生效，同帧后续的 Hide / Retire 查询不到
+    // 它们，这里自己记。它们还在缩放 0，收场即撤。
+    let mut spawned: Vec<(Entity, Entity)> = Vec::new();
+    fn drop_spawned(commands: &mut Commands, spawned: &mut Vec<(Entity, Entity)>, npc: Entity) {
+        spawned.retain(|(owner, root)| {
+            if *owner == npc {
+                commands.entity(*root).despawn();
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for event in events.read() {
+        match event {
+            TweetHudEvent::Show {
+                npc,
+                unit,
+                tweet_id,
+                text,
+                site_type,
+            } => {
+                if library.owns_scene() {
+                    info!("[tweet] HUD show unit={unit} tweet={tweet_id}：独立场景占场，不上屏");
+                    continue;
+                }
+                for (root, anchor, _, _) in &balloons {
+                    if anchor.npc == *npc {
+                        commands.entity(root).despawn();
+                    }
+                }
+                drop_spawned(&mut commands, &mut spawned, *npc);
+                let root =
+                    spawn_balloon_text(&mut commands, &art, *npc, *unit, *tweet_id, text, None, false);
+                commands.entity(root).insert(HudBalloon {
+                    scale: 0.0,
+                    exit: None,
+                });
+                spawned.push((*npc, root));
+                info!(
+                    "[tweet] HUD show unit={unit} tweet={tweet_id} site_type={site_type:?}：上屏，寿命归 NPC 状态机"
+                );
+            }
+            TweetHudEvent::Hide {
+                npc,
+                unit,
+                site_type,
+            } => {
+                drop_spawned(&mut commands, &mut spawned, *npc);
+                for (_, anchor, elapsed, mut hud) in &mut balloons {
+                    if anchor.npc == *npc && hud.exit.is_none() {
+                        hud.exit = Some((elapsed.t, hud.scale));
+                        info!(
+                            "[tweet] HUD hide unit={unit} tweet={} site_type={site_type:?}：收场开始（起缩 {:.3}，0.2s Linear），上屏 {:.2}s",
+                            anchor.tweet, hud.scale, elapsed.t
+                        );
+                    }
+                }
+            }
+            TweetHudEvent::Retire { npc } => {
+                drop_spawned(&mut commands, &mut spawned, *npc);
+                for (root, anchor, _, _) in &balloons {
+                    if anchor.npc == *npc {
+                        commands.entity(root).despawn();
+                    }
+                }
+            }
         }
-        if !arm.armed {
-            continue;
-        }
-        arm.armed = false;
-        arm.dwell += 1;
-        let unit_id = unit.0 as i32;
-        let seed = (unit_id as u64) << 32 | arm.dwell as u64;
-        let mut draw = CountedDraw::new(seed);
-        let picked = pick_greeting(
-            &master.greetings,
-            &master.wrt,
-            &master.conditions,
-            unit_id,
-            VISIT_COUNT_STAND_IN,
-            phenomena.0,
-            &mut draw,
-        );
-        let Some(greeting) = picked else {
-            let (by_character, matched) =
-                pool_report(&master, unit_id, VISIT_COUNT_STAND_IN, phenomena.0);
-            info!(
-                "[tweet] unit={} 驻留 #{}：现象={} 访问={} → 候选 {} 条（角色命中 {} 条，条件挡下 {} 条），不抽签跳过",
-                unit.0,
-                arm.dwell,
-                phenomena.0,
-                VISIT_COUNT_STAND_IN,
-                matched,
-                by_character,
-                by_character - matched
-            );
-            continue;
-        };
-        // WRT 一跳解析 tweet id；选取成功的行必然能解析（角色过滤已要求
-        // WRT 在场），此处只是数据损伤时的响亮出口。
-        let Some(tweet_id) = greeting_tweet_id(greeting, &master.wrt) else {
-            warn!(
-                "[tweet] unit={} 驻留 #{}：问候 {} 指向的 WRT 行不在表里，跳过",
-                unit.0, arm.dwell, greeting.id
-            );
-            continue;
-        };
-        let Some(row) = master.tweets.iter().find(|t| t.id == tweet_id) else {
-            warn!(
-                "[tweet] unit={} 驻留 #{}：tweet {tweet_id} 不在主表里，跳过",
-                unit.0, arm.dwell
-            );
-            continue;
-        };
-        info!(
-            "[tweet] unit={} 驻留 #{}：现象={} 访问={} → tweet={} 入选（候选 {} 条，抽签恰 {} 次；显示 5.0s=NPC 状态机对应值）",
-            unit.0,
-            arm.dwell,
-            phenomena.0,
-            VISIT_COUNT_STAND_IN,
-            row.id,
-            draw.last_len,
-            draw.calls
-        );
-        spawn_balloon(&mut commands, &art, npc, unit.0, row);
     }
 }
 
 /// after-edit 反应驻留：上屏后的保持段（真源 objective 的静态
 /// `_waitTime` 5.0s，乘 1000 入延迟等待）。驻留内该成员的 objective
-/// 槽位被这条反应占用：问候触发沿见它让位；新保存回执取消它重启
+/// 槽位被这条反应占用；新保存回执取消它重启
 /// （真源 `TryCancelCurrentObjective`，本 objective 恒可取消）。
 #[derive(Component)]
 pub(crate) struct AfterEditHold {
@@ -1106,19 +787,20 @@ pub(crate) struct AfterEditHold {
 /// objective 直接收场），这里同语义具名一行。驻留内新回执：真源取消
 /// 旧 objective 重挂新链——这里同形，重抽、重上屏、驻留重起；上屏前
 /// 该成员头上的在屏气泡先关（objective 槽位只有一个，新反应进场等于
-/// 旧状态出场，跨链的问候气泡同一条让位门——问候触发与本链在
-/// schedule 里链式定序加显式同步点，同帧铺出的问候气泡当帧可见、
-/// 当帧让位，不定序并发时这一格是盲的）。成员集与问候触发一致
-/// （非玩家、非对话参演者——对话持留头上不叠气泡是同一条呈现门；
+/// 旧状态出场，跨链的 HUD 气泡同一条让位门——HUD 事件消费与本链在
+/// schedule 里链式定序加显式同步点，同帧铺出的 HUD 气泡当帧可见、
+/// 当帧让位，不定序并发时这一格是盲的）。成员集为非玩家、非对话
+/// 参演者（对话持留头上不叠气泡是一条呈现门；
 /// 真源会对对话中成员取消对话强挂反应，跨域让位门是本侧替身，具名）。
 #[allow(clippy::type_complexity)]
 pub(crate) fn after_edit_reaction(
     mut commands: Commands,
     time: Res<Time>,
     mut saves: MessageReader<crate::fixture_edit::LayoutSaved>,
-    master: Option<Res<TweetMaster>>,
+    tables: Option<Res<crate::npc_tweet::TweetTables>>,
     art: Option<Res<BalloonArt>>,
     mut sequence: Local<u32>,
+    mut after_edit: Local<Option<Vec<AfterEditRow>>>,
     npcs: Query<
         (Entity, &CharacterUnitId),
         (
@@ -1130,6 +812,13 @@ pub(crate) fn after_edit_reaction(
     mut holds: Query<(Entity, &CharacterUnitId, &mut AfterEditHold)>,
     balloons: Query<(Entity, &BalloonAnchor)>,
 ) {
+    // 池的 join 形 → 律的 AEH 行形，表一到就建一次（反查落空即数据
+    // 损伤，响亮失败在装载期）。
+    if after_edit.is_none() {
+        if let Some(tables) = tables.as_deref() {
+            *after_edit = Some(after_edit_rows(tables));
+        }
+    }
     // 驻留收段先走（真源延迟等待到点 → ForceUpdateObjective）：到点
     // 让位；同帧新回执的驻留从满值重起。
     for (npc, unit, mut hold) in &mut holds {
@@ -1148,7 +837,7 @@ pub(crate) fn after_edit_reaction(
     }
     *sequence += receipts as u32;
     let sequence = *sequence;
-    let (Some(master), Some(art)) = (master, art) else {
+    let (Some(tables), Some(after_edit), Some(art)) = (tables, after_edit.as_ref(), art) else {
         return;
     };
     info!(
@@ -1160,9 +849,9 @@ pub(crate) fn after_edit_reaction(
         let unit_id = unit.0 as i32;
         let mut draw = CountedDraw::new((unit_id as u64) << 32 | sequence as u64);
         let picked = pick_after_edit_tweet(
-            &master.after_edit,
-            &master.wrt,
-            &master.tweets,
+            after_edit,
+            &tables.wrt,
+            tables.tweets(),
             unit_id,
             &mut draw,
         );
@@ -1205,34 +894,32 @@ pub(crate) fn after_edit_reaction(
     );
 }
 
-/// 池组成的对账量法（只进日志，不参与选取——选取只走律）：角色过滤后
-/// 与条件过滤后各几条。空池时读者从日志直接看出空在哪一道，不必回表
-/// 推导。角色一跳与律同式（WRT 行在场且归属相同）；条件判定直接调律
-/// 的 [`condition_matches`]，不另写一份。
-fn pool_report(master: &TweetMaster, unit: i32, visit: i32, phenomena: i32) -> (usize, usize) {
-    let mut by_character = 0;
-    let mut matched = 0;
-    for greeting in &master.greetings {
-        let character_hit = master
-            .wrt
-            .iter()
-            .find(|w| w.id == greeting.without_related_talk_id)
-            .map(|w| w.game_character_unit_id == unit)
-            .unwrap_or(false);
-        if !character_hit {
-            continue;
-        }
-        by_character += 1;
-        let condition_hit = master
-            .conditions
-            .iter()
-            .find(|c| c.id == greeting.greeting_condition_id)
-            .is_some_and(|c| condition_matches(c, visit, phenomena));
-        if condition_hit {
-            matched += 1;
+/// 池的 join 形 → 律的 AEH 行形：每条池内 tweet 反查同角色同 tweet 的
+/// WRT 行。提取产物以 join 形落盘（AEH 原行不在产物里），但链上引用
+/// 是提取期 fail-loud 核过的——反查落空即数据损伤，响亮失败。
+fn after_edit_rows(tables: &crate::npc_tweet::TweetTables) -> Vec<AfterEditRow> {
+    let mut rows: Vec<AfterEditRow> = Vec::new();
+    for (unit, tweet_ids) in &tables.after_edit_pools {
+        for tweet_id in tweet_ids {
+            let wrt_row = tables
+                .wrt
+                .iter()
+                .find(|w| w.game_character_unit_id == *unit && w.tweet_id == *tweet_id)
+                .unwrap_or_else(|| {
+                    panic!("after-edit 池 {unit} 的 tweet {tweet_id} 无同角色 WRT 行")
+                });
+            rows.push(AfterEditRow {
+                id: rows.len() as i32 + 1,
+                without_related_talk_id: wrt_row.id,
+            });
         }
     }
-    (by_character, matched)
+    info!(
+        "[tweet] after-edit 池 {} 单元 {} 行",
+        tables.after_edit_pools.len(),
+        rows.len()
+    );
+    rows
 }
 
 // ---------------------------------------------------------------------------
@@ -1867,11 +1554,12 @@ pub(crate) fn ascii_or(value: &str) -> &str {
 // 时序与定位
 // ---------------------------------------------------------------------------
 
-/// Update：时序 = 入场 DOScale 0→1（0.2s Linear）→ 保持到 5.0s（NPC
-/// 状态机时长的对应值；真源 HUD 无自定时器、生死事件驱动，近似）→
-/// 收场 DOScale 1→0（0.2s Linear）→ 缩出完成销毁。5.0 的语义按律是
-/// 严格大于（恰 5.0 的那一拍仍满尺寸，之后才收）。缩放写 animation
-/// 节点（非根）。
+/// Update：HUD 气泡 = 入场 DOScale 0→1（0.2s Linear）→ 保持到 Hide →
+/// 从当前缩放收场（0.2s Linear）→ 缩出完成销毁；寿命归 NPC 状态机。
+/// 其余气泡（摆设编辑反应、家具前置动作）= 入场 → 保持到 5.0s（tweet
+/// 状态的时长）→ 收场 DOScale 1→0（0.2s Linear）→ 缩出完成销毁。5.0 的
+/// 语义按律是严格大于（恰 5.0 的那一拍仍满尺寸，之后才收）。缩放写
+/// animation 节点（非根）。
 pub(crate) fn tick(
     mut commands: Commands,
     library: Res<crate::content_library::ContentLibrary>,
@@ -1883,11 +1571,12 @@ pub(crate) fn tick(
         &Children,
         Option<&ActivityBalloon>,
         Option<&TalkPreviewBalloon>,
+        Option<&mut HudBalloon>,
     )>,
     mut anims: Query<&mut Transform, With<BalloonAnim>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, anchor, mut elapsed, kids, activity, preview) in &mut balloons {
+    for (entity, anchor, mut elapsed, kids, activity, preview, hud) in &mut balloons {
         if let Some(preview) = preview {
             if !library.owns_talk_preview(preview.ticket) {
                 commands.entity(entity).despawn();
@@ -1909,6 +1598,37 @@ pub(crate) fn tick(
             continue;
         }
         elapsed.t += dt;
+        if let Some(mut hud) = hud {
+            let scale = match hud.exit {
+                None => (elapsed.t / SCALE_SECONDS).min(1.0),
+                Some((since, from)) => {
+                    let progress = (elapsed.t - since) / SCALE_SECONDS;
+                    if progress >= 1.0 {
+                        info!(
+                            "[tweet] tweet={} 销毁：HUD 收场完成，上屏共 {:.2}s",
+                            anchor.tweet, elapsed.t
+                        );
+                        commands.entity(entity).despawn();
+                        continue;
+                    }
+                    from * (1.0 - progress)
+                }
+            };
+            if !elapsed.entered && hud.exit.is_none() && elapsed.t >= SCALE_SECONDS {
+                elapsed.entered = true;
+                info!(
+                    "[tweet] tweet={} 入场完成：DOScale 0→1 实际 {:.2}s（0.2s Linear）",
+                    anchor.tweet, elapsed.t
+                );
+            }
+            hud.scale = scale;
+            for kid in kids.iter() {
+                if let Ok(mut transform) = anims.get_mut(kid) {
+                    transform.scale = Vec3::splat(scale);
+                }
+            }
+            continue;
+        }
         let end = TWEET_DISPLAY_SECONDS + SCALE_SECONDS;
         if elapsed.t > end {
             info!(
@@ -1954,7 +1674,7 @@ pub(crate) fn tick(
 ///   （不销毁，位置沿用上一帧）；回到前方恢复。
 /// * **顶边缩放**：屏幕 y>H/2 时整体缩（顶边收 0.5×），y≤H/2 恒 1——
 ///   写在根上（与 DOScale 的 animation 节点分层，二者相乘）。
-/// * **canvas 缩放**：见 [`canvas_scale`]。
+/// * **canvas 缩放**：见 [`crate::canvas::RootCanvas::scale`]。
 /// 无屏幕边缘钳制（出界照画；投影失败帧沿用上一帧位置）。
 ///
 /// world_to_viewport 返回的已经是逻辑像素（bevy 走 logical_viewport_rect），
@@ -1976,10 +1696,14 @@ pub(crate) fn place(
     windows: Query<&Window>,
     children_q: Query<&Children>,
     mut parts: Query<(&BalloonPart, &mut Sprite)>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     if balloons.is_empty() {
         return;
     }
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
     let Ok((camera, cam_transform, projection)) = cameras.single() else {
         return;
     };
@@ -1996,7 +1720,7 @@ pub(crate) fn place(
     let fwd = cam_transform.forward();
     let sf = window.scale_factor();
     let (width, height) = (window.width(), window.height());
-    let canvas = canvas_scale(width, height);
+    let canvas = root_canvas.scale(window);
     // 跨气泡层序（真源 `SetSiblingTweetHUD` 每帧重排的对应）：键 = 相机
     // transform 到各气泡目标的欧氏距离（avatar 视图根；投影偏移不参与
     // ——真源排序键与投影锚是两个量），按距离降序 → 远的名次 0；
@@ -2224,7 +1948,7 @@ pub(crate) struct OrderProbe;
 /// 没造出来就一个键都没有）。
 pub(crate) fn order_smoke(
     mut commands: Commands,
-    master: Option<Res<TweetMaster>>,
+    tables: Option<Res<crate::npc_tweet::TweetTables>>,
     art: Option<Res<BalloonArt>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     time: Res<Time>,
@@ -2250,13 +1974,13 @@ pub(crate) fn order_smoke(
     if *spawned {
         return;
     }
-    let (Some(master), Some(art)) = (master.as_deref(), art.as_deref()) else {
+    let (Some(tables), Some(art)) = (tables.as_deref(), art.as_deref()) else {
         return;
     };
     let Ok((_camera, cam_transform)) = cameras.single() else {
         return;
     };
-    let (near_row, far_row) = match (master.tweets.first(), master.tweets.get(1)) {
+    let (near_row, far_row) = match (tables.tweets().first(), tables.tweets().get(1)) {
         (Some(near), Some(far)) => (near, far),
         _ => panic!("layer-order probe needs 2+ master rows"),
     };

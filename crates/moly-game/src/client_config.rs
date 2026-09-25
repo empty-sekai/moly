@@ -84,6 +84,11 @@ pub(crate) const KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE: i32 = 155;
 /// 156）。
 pub(crate) const KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE: i32 = 156;
 
+/// Gate fixture delay in seconds (CharacterGateActionElapsedTime, IntConfigs
+/// key 157): a talk naming the placed gate fixture passes the talk lottery's
+/// gate only once the character has existed longer than this.
+pub(crate) const KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME: i32 = 157;
+
 /// 掉落批逐帧 pacing 的批数阈值（HarvestDropDelayItemCount，
 /// IntConfigs 键 176）：批内项数达到该值才逐帧放行，小批同帧。
 pub(crate) const KEY_HARVEST_DROP_DELAY_ITEM_COUNT: i32 = 176;

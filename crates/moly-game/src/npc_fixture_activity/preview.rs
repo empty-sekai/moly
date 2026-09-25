@@ -219,7 +219,7 @@ pub(super) fn record_progress(world: &mut World, session: &mut Session) {
     };
     let phase = match session.phase {
         Phase::Approaching => PreviewPhase::Approaching,
-        Phase::Preparing => PreviewPhase::Preparing,
+        Phase::TalkWindow(_) | Phase::Preparing => PreviewPhase::Preparing,
         Phase::Playing | Phase::TalkHeld => PreviewPhase::Playing,
         Phase::Exiting(_) => PreviewPhase::Exiting,
     };

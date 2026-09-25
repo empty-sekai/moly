@@ -1,4 +1,5 @@
-//! SD角色上屏：名册成员和玩家外观复用角色包/骨架装配，共享动作库。
+//! SD角色上屏：名册成员的角色包/骨架装配，共享动作库。玩家的身体不走
+//! 这里（见 [`crate::player_avatar::body`]）。
 //!
 //! 装载门形状与站点一致：请求 → 依赖到齐 → 展开 → 装配。名册成员
 //! （npc 域的实体）各自挂自己的角色包场景为子实体——成员实体持位置与
@@ -179,22 +180,12 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
 /// Update：名册成员到齐后逐名发角色包装载。清单的 `unit` 字段是代号
 /// （成员 unitId 加 100——两份资产各持一半，清单持包文件、名册持身份），
 /// 代码里把两侧折到同一坐标系再对。清单里没有某成员的包即响亮失败。
-/// 玩家外观显式带PlayerVisualClips，复用同一个角色包入口但不加入NPC名册。
 pub(crate) fn plan_when_ready(
     mut commands: Commands,
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     manifest_files: Res<ManifestAssets>,
-    npcs: Query<
-        (Entity, &CharacterUnitId),
-        (
-            Or<(
-                With<MotionClips>,
-                With<crate::player_avatar::PlayerVisualClips>,
-            )>,
-            Without<CharacterPack>,
-        ),
-    >,
+    npcs: Query<(Entity, &CharacterUnitId), (With<MotionClips>, Without<CharacterPack>)>,
 ) {
     if npcs.is_empty() {
         return; // 没有待装配的成员：名册未铺，或已全部装配
@@ -315,15 +306,7 @@ pub(crate) fn wire_when_ready(
     clip_assets: Res<Assets<AnimationClip>>,
     mesh_assets: Res<Assets<Mesh>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    npcs: Query<
-        (
-            Entity,
-            &CharacterUnitId,
-            Option<&MotionClips>,
-            Option<&crate::player_avatar::PlayerVisualClips>,
-        ),
-        With<ModelSceneReady>,
-    >,
+    npcs: Query<(Entity, &CharacterUnitId, &MotionClips), With<ModelSceneReady>>,
     children: Query<&Children>,
     names: Query<&Name>,
     models: Query<&CharacterModel>,
@@ -358,7 +341,7 @@ pub(crate) fn wire_when_ready(
         (Some(_), count) => panic!("共享动作库有 {count} 个动画根节点：参考根必须唯一"),
     };
 
-    for (npc, unit, npc_clips, player_clips) in &npcs {
+    for (npc, unit, clips) in &npcs {
         // 模型子实体：CharacterModel 所在的那个孩子。
         let kids = children.get(npc).expect("模型挂载后有子链");
         let mut model = None;
@@ -449,14 +432,8 @@ pub(crate) fn wire_when_ready(
         }
         let height = max.y - min.y;
         // 段并存一图，同一时刻只播一段（驱动系统负责换段过渡）。
-        let (idle_base, walk_base) = if let Some(clips) = player_clips {
-            (clips.idle.as_str(), clips.walk.as_str())
-        } else {
-            let clips = npc_clips.expect("SD model must have NPC or player motion names");
-            (clips.idle.as_str(), clips.walk.as_str())
-        };
-        let idle_clip_name = format!("{idle_base}_L");
-        let walk_clip_name = format!("{walk_base}_L");
+        let idle_clip_name = format!("{}_L", clips.idle);
+        let walk_clip_name = format!("{}_L", clips.walk);
         let idle = lib
             .named_animations
             .get(idle_clip_name.as_str())
@@ -465,48 +442,6 @@ pub(crate) fn wire_when_ready(
             .named_animations
             .get(walk_clip_name.as_str())
             .unwrap_or_else(|| panic!("共享动作库没有段 {walk_clip_name}"));
-        if let Some(clips) = player_clips {
-            let run_clip_name = format!("{}_L", clips.run);
-            let run = lib
-                .named_animations
-                .get(run_clip_name.as_str())
-                .unwrap_or_else(|| panic!("SD玩家共享动作库没有冲刺段 {run_clip_name}"));
-            let mut graph = AnimationGraph::new();
-            let idle_node = graph.add_clip(idle.clone(), 1.0, graph.root);
-            let walk_node = graph.add_clip(walk.clone(), 1.0, graph.root);
-            let run_node = graph.add_clip(run.clone(), 1.0, graph.root);
-            let graph_handle = graphs.add(graph);
-            commands.entity(root).insert((
-                AnimationPlayer::default(),
-                AnimationTransitions::new(),
-                AnimationGraphHandle(graph_handle.clone()),
-            ));
-            commands.entity(npc).insert((
-                crate::player_avatar::AvatarDriver::new_sd(
-                    root,
-                    model,
-                    graph_handle,
-                    [idle_node, walk_node, run_node],
-                    [
-                        idle_clip_name.clone(),
-                        walk_clip_name.clone(),
-                        run_clip_name.clone(),
-                    ],
-                    lib.named_animations
-                        .iter()
-                        .map(|(name, clip)| (name.to_string(), clip.clone()))
-                        .collect(),
-                    time.elapsed_secs(),
-                ),
-                CharacterShell {
-                    height,
-                    lowest: min.y,
-                },
-            ));
-            commands.entity(npc).remove::<ModelSceneReady>();
-            info!("[player] SD unit={} wired: animator={root:?} model={model:?}, targets={targets}, meshes={mesh_entities}, idle={idle_clip_name}, walk={walk_clip_name}, run={run_clip_name}", unit.0);
-            continue;
-        }
         // 转身段：六个基名各 `_S`/`_L` 两节点。选段是运行时的（换腿帧才
         // 定），六个全进图；缺段即响亮失败——转身律选出的段必须全在图里，
         // 运行时选到不在图里的段就是断线。
