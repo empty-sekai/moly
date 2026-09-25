@@ -40,9 +40,10 @@
 //!
 //! Named differences:
 //! - `ManagedEffect.Stop` is `ParticleSystem.Stop()`, which stops emitting
-//!   and lets live particles finish. The fixture particle host has no
-//!   stop-emitting mode, so the flying effect's particles are cleared at its
-//!   stop (it is deactivated).
+//!   and lets live particles finish: the stopped flying copy stays active
+//!   and keeps following the camera (`FollowEffect` never ends itself) until
+//!   the next flying emit restarts the pool's copy, which the product plays
+//!   as a fresh copy and releases the stopped one then.
 //! - A played copy is not reused: the host cannot restart a system that has
 //!   run, so each emit plays a fresh copy, and a copy is released once its
 //!   systems end (it draws nothing by then). Visible only when more emits of
@@ -161,6 +162,8 @@ pub(crate) struct Effects {
     pools: Vec<Pool>,
     live: Vec<Live>,
     flying: Option<Entity>,
+    /// The flying copy after its Stop, still following.
+    stopped: Option<Entity>,
 }
 
 impl Effects {
@@ -181,6 +184,7 @@ impl Effects {
             pools,
             live: Vec::new(),
             flying: None,
+            stopped: None,
         }
     }
 
@@ -279,6 +283,12 @@ impl Effects {
         };
         if kind == EffectType::Flying {
             self.flying = Some(root);
+            if let Some(stopped) = self.stopped.take().filter(|stopped| *stopped != root) {
+                self.live.retain(|live| live.root != stopped);
+                if let Ok(entity) = world.get_entity_mut(stopped) {
+                    entity.despawn();
+                }
+            }
         }
         true
     }
@@ -344,18 +354,17 @@ impl Effects {
         if installed_systems(world, root) == 0 {
             warn!("[site-move] effect Flying stopped with none of its systems prepared: not shown");
         }
-        set_source_nodes_active(world, root, false);
-        // Its particles are cleared with the deactivation; release it.
-        if let Ok(entity) = world.get_entity_mut(root) {
-            entity.despawn();
-        }
-        self.live.retain(|live| live.root != root);
-        world.flush();
+        // ManagedEffect.Stop: ParticleSystem.Stop(withChildren, StopEmitting);
+        // the copy stays active and following, its particles finish.
+        crate::weather_fx::fixture::stop_emitting(world, root);
+        self.stopped = Some(root);
         true
     }
 
+    /// The flying copy the camera carries: the playing one, else the
+    /// stopped one whose particles are finishing.
     pub(crate) fn flying_root(&self) -> Option<Entity> {
-        self.flying
+        self.flying.or(self.stopped)
     }
 
     /// Keep the pools filled, prepare the particles of new instances and

@@ -62,7 +62,7 @@ use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::camera::{CameraTween, FieldCameraModel};
 use crate::player::PlayerControlled;
 use crate::player_avatar::{
-    AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, PlayerVisualClips,
+    AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, IDLE_CLIP, STATE_FADE,
 };
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 use crate::site::{SitePreload, SiteSelection};
@@ -195,14 +195,6 @@ struct PlayerTween {
     clock: TweenClock,
 }
 
-/// A second SD segment to start when the first reaches its length (the
-/// stumble stand-in plays its start then its end).
-struct PendingSegment {
-    at: f32,
-    clip: String,
-    speed: f32,
-}
-
 struct StepRecord {
     step: Step,
     source: Option<f64>,
@@ -240,9 +232,7 @@ pub(crate) struct SiteMove {
     swapped: bool,
     landing: Option<Landing>,
     reveal_wait_logged: bool,
-    clip_clock: f32,
     flying_started: bool,
-    pending_segment: Option<PendingSegment>,
     records: Vec<StepRecord>,
     /// The move admitted when this one ends (see [`SiteMoveRequest`]).
     then: Option<SiteSelection>,
@@ -556,9 +546,7 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         swapped: false,
         landing: None,
         reveal_wait_logged: false,
-        clip_clock: 0.0,
         flying_started: false,
-        pending_segment: None,
         records: Vec::new(),
         then,
         composition,
@@ -866,11 +854,20 @@ impl SiteMove {
             }
         }
         push_se(world, "se_move_site_set");
+        let before = world.resource::<PlayerAvatarStates>().current;
         world
             .resource_mut::<PlayerAvatarStates>()
             .change_status(PlayerActionState::Idle);
-        // SetMoveEnabled(false), with the Idle state's own motion.
-        self.play_idle(world);
+        // SetMoveEnabled(false). Entering Idle plays the Idle state's clip;
+        // a player already Idle replays nothing (`ChangeStatus` to the
+        // current state returns at once) and keeps its clip.
+        if before != PlayerActionState::Idle
+            && world.resource::<PlayerAvatarStates>().current == PlayerActionState::Idle
+        {
+            self.play_idle(world);
+        } else {
+            self.lease_player(world);
+        }
         camera::enter_site_move(world);
         // SetRenderingEnabled(nextSite, false): the destination does not
         // exist here until the swap, which starts the hold.
@@ -1032,8 +1029,11 @@ impl SiteMove {
 
     fn core_end(&mut self, world: &mut World, frame: u64) {
         self.record(Step::CoreEnd, frame);
-        // SetMoveEnabled(true): movement and locomotion come back.
-        self.release_player(world);
+        // SetMoveEnabled(true): movement and locomotion come back. The
+        // player's state is still Idle (set at setup) or an exit state whose
+        // closed gate drops the change below, so no idle is replayed: the
+        // landing clip holds its last frame until the next state.
+        self.hand_back_player(world);
         self.source_clip = None;
         // SetNameTextVisible(true): no-op. OnMoveFinish = ChangeStatus(Idle),
         // which an exit state's closed intercept gate drops.
@@ -1186,10 +1186,12 @@ impl SiteMove {
             ));
             self.record(Step::ExitStateGateOpen, frame);
         }
-        // Player clip clock: animation events and the second SD segment.
-        self.clip_clock += dt;
+        // `PublishFlyingEffectPlay` is an event of the clip the player is
+        // playing: it fires when that clip's own playback time, read from
+        // the animator, reaches the event.
         if let Some(event) = self.source_clip.and_then(SourceClip::flying_play_event) {
-            if !self.flying_started && self.clip_clock >= event {
+            let clip_time = self.source_clip.and_then(|clip| player_clip_time(world, clip.name()));
+            if !self.flying_started && clip_time.is_some_and(|t| t >= event) {
                 self.flying_started = true;
                 let pose = {
                     let mut cameras = world.query_filtered::<&GlobalTransform, With<Camera3d>>();
@@ -1202,16 +1204,10 @@ impl SiteMove {
                     emit_effect(world, effects::EffectType::Flying, pose);
                 }
                 self.due = Some(format!(
-                    "[_s2 clip clock {:.4} >= {event:.4}]",
-                    self.clip_clock
+                    "[_s2 animator time {:.4} >= {event:.4}]",
+                    clip_time.unwrap_or(f32::NAN)
                 ));
                 self.record(Step::FlyingStart, frame);
-            }
-        }
-        if let Some(segment) = &self.pending_segment {
-            if self.clip_clock >= segment.at {
-                let segment = self.pending_segment.take().expect("checked");
-                self.play_sd(world, &segment.clip, false, segment.speed, Duration::ZERO);
             }
         }
     }
@@ -1275,84 +1271,19 @@ impl SiteMove {
         );
     }
 
-    /// The Idle state's motion when the move takes the player.
+    /// `PlayerAvatarIdleState.Initialize` when the move takes the player:
+    /// `PlayAnimation("c_000_mov_idle_00")`, fade 0.25.
     fn play_idle(&mut self, world: &mut World) {
-        let Some(clips) = visual_clips(world) else {
-            error!("[site-move] player has no SD clip set");
-            return;
-        };
-        self.play_sd(
-            world,
-            &format!("{}_L", clips.idle),
-            true,
-            1.0,
-            Duration::from_secs_f32(0.25),
-        );
+        self.play_clip(world, IDLE_CLIP, STATE_FADE);
     }
 
-    /// `ChangeAnimation(name, fade, 1)`, through the SD stand-in table.
+    /// `ChangeAnimation(name, fade, 1)`: the source clip itself.
     fn change_animation(&mut self, world: &mut World, clip: SourceClip) {
         self.source_clip = Some(clip);
-        self.clip_clock = 0.0;
-        self.pending_segment = None;
-        let Some(clips) = visual_clips(world) else {
-            error!("[site-move] player has no SD clip set");
-            return;
-        };
-        let fade = Duration::from_secs_f32(clip.fade());
-        match sd_stand_in(clip, &clips) {
-            Ok(SdStandIn::Single {
-                clip: name,
-                looping,
-            }) => self.play_sd(world, &name, looping, 1.0, fade),
-            Ok(SdStandIn::Pair { first, second }) => {
-                // The source clip lasts `clip.length()`; the stand-in plays
-                // its start at 1x, then its end sped up to finish with it.
-                let lengths = self.sd_lengths(world, &[&first, &second]);
-                match lengths {
-                    Some([first_len, second_len]) if clip.length() > first_len => {
-                        let speed = second_len / (clip.length() - first_len);
-                        self.play_sd(world, &first, false, 1.0, fade);
-                        self.pending_segment = Some(PendingSegment {
-                            at: first_len,
-                            clip: second,
-                            speed,
-                        });
-                        info!(
-                            "[site-move] {} stand-in: {first} {first_len:.3}s then {} at {speed:.3}x (ends at the source length {:.4}s)",
-                            clip.name(), self.pending_segment.as_ref().unwrap().clip, clip.length()
-                        );
-                    }
-                    _ => {
-                        error!(
-                            "[site-move] {} stand-in clips unavailable or too long",
-                            clip.name()
-                        );
-                    }
-                }
-            }
-            Err(error) => error!("[site-move] {error}"),
-        }
+        self.play_clip(world, clip.name(), Duration::from_secs_f32(clip.fade()));
     }
 
-    fn sd_lengths(&self, world: &mut World, names: &[&String; 2]) -> Option<[f32; 2]> {
-        let mut drivers = world.query_filtered::<&AvatarDriver, With<PlayerControlled>>();
-        let driver = drivers.iter(world).next()?;
-        let clips = world.resource::<Assets<AnimationClip>>();
-        Some([
-            driver.sd_clip_duration(names[0], clips)?,
-            driver.sd_clip_duration(names[1], clips)?,
-        ])
-    }
-
-    fn play_sd(
-        &mut self,
-        world: &mut World,
-        clip: &str,
-        looping: bool,
-        speed: f32,
-        blend: Duration,
-    ) {
+    fn play_clip(&mut self, world: &mut World, clip: &str, blend: Duration) {
         let mut state = SystemState::<(
             ResMut<Assets<AnimationGraph>>,
             Query<&mut AvatarDriver, With<PlayerControlled>>,
@@ -1360,17 +1291,16 @@ impl SiteMove {
         )>::new(world);
         let (mut graphs, mut drivers, mut animators) = state.get_mut(world);
         let Some(mut driver) = drivers.iter_mut().next() else {
-            error!("[site-move] no SD player driver for {clip}");
+            error!("[site-move] no player driver for {clip}");
             return;
         };
         let Ok((mut player, mut transitions)) = animators.get_mut(driver.player) else {
-            error!("[site-move] SD player animator missing for {clip}");
+            error!("[site-move] player animator missing for {clip}");
             return;
         };
         let motion = PlayerActionMotion {
             clip,
-            looping,
-            speed,
+            speed: 1.0,
             blend,
             blocks_manual_movement: true,
         };
@@ -1387,91 +1317,60 @@ impl SiteMove {
             ),
         };
         match result {
-            Ok(token) => self.token = Some(token),
-            Err(error) => error!("[site-move] SD motion {clip} refused: {error:?}"),
+            Ok(token) => {
+                self.token = Some(token);
+                info!(
+                    "[site-move] ChangeAnimation({clip}, fade {:.2}s, speed 1)",
+                    blend.as_secs_f32()
+                );
+            }
+            Err(error) => error!("[site-move] ChangeAnimation({clip}) refused: {error:?}"),
         }
     }
 
-    fn release_player(&mut self, world: &mut World) {
+    fn lease_player(&mut self, world: &mut World) {
+        if self.token.is_some() {
+            return;
+        }
+        let mut drivers = world.query_filtered::<&mut AvatarDriver, With<PlayerControlled>>();
+        let Some(mut driver) = drivers.iter_mut(world).next() else {
+            error!("[site-move] no player driver to lease");
+            return;
+        };
+        match driver.acquire(PlayerActionOwner::Cannon) {
+            Ok(token) => {
+                self.token = Some(token);
+                info!("[site-move] ChangeState(Idle) on an Idle player: no clip replayed, the animator is leased");
+            }
+            Err(error) => error!("[site-move] the player's animator is not free: {error:?}"),
+        }
+    }
+
+    fn hand_back_player(&mut self, world: &mut World) {
         let Some(token) = self.token.take() else {
             return;
         };
-        let mut state = SystemState::<(
-            Query<&mut AvatarDriver, With<PlayerControlled>>,
-            Query<&mut AnimationPlayer>,
-        )>::new(world);
-        let (mut drivers, mut animators) = state.get_mut(world);
-        let Some(mut driver) = drivers.iter_mut().next() else {
-            return;
-        };
-        let animator = driver.player;
-        if let Ok(mut player) = animators.get_mut(animator) {
-            driver.release_action(token, &mut player);
+        let mut drivers = world.query_filtered::<&mut AvatarDriver, With<PlayerControlled>>();
+        if let Some(mut driver) = drivers.iter_mut(world).next() {
+            driver.hand_back(token);
         }
     }
 }
 
-fn visual_clips(world: &mut World) -> Option<PlayerVisualClips> {
-    let mut players = world.query_filtered::<&PlayerVisualClips, With<PlayerControlled>>();
-    players.iter(world).next().cloned()
-}
-
-enum SdStandIn {
-    Single { clip: String, looping: bool },
-    Pair { first: String, second: String },
-}
-
-/// The one table of simple SD adaptations (owner decision: the visible
-/// player is the SD body, which has no cannon clips). Waits keep the source
-/// clip lengths; only the playable motion is substituted.
-///
-/// | source clip                 | SD stand-in                               |
-/// |-----------------------------|-------------------------------------------|
-/// | `mov_u000_site_cannon01_s`  | the player's idle loop                    |
-/// | `mov_u000_site_cannon01_s2` | the player's run start (`_S`)             |
-/// | `mov_u000_site_cannon01_l`  | the player's run loop (`_L`)              |
-/// | `mov_u000_site_cannon01_e`  | the player's run end (`_E`)               |
-/// | `mov_u000_site_cannon02_e`  | `mov_c{w,m}_normal_stumble001` start, end |
-///
-/// The stumble family (w or m) is the one of the player's idle and walk
-/// clips; the stumble loop segment is skipped because start plus end already
-/// exceed the source clip's 2.8 s. The four house and room states of the
-/// door moves have their stand-ins in [`door_state`], chosen the same way.
-fn sd_stand_in(clip: SourceClip, clips: &PlayerVisualClips) -> Result<SdStandIn, String> {
-    let family = |name: &str| name.get(4..6).map(str::to_owned);
-    let (Some(idle_family), Some(walk_family)) = (family(&clips.idle), family(&clips.walk)) else {
-        return Err(format!(
-            "SD clip names {} / {} carry no family",
-            clips.idle, clips.walk
-        ));
-    };
-    if idle_family != walk_family || !matches!(idle_family.as_str(), "cw" | "cm") {
-        return Err(format!(
-            "SD idle/walk families disagree or are unknown: {idle_family} / {walk_family}"
-        ));
-    }
-    Ok(match clip {
-        SourceClip::CannonS => SdStandIn::Single {
-            clip: format!("{}_L", clips.idle),
-            looping: true,
-        },
-        SourceClip::CannonS2 => SdStandIn::Single {
-            clip: format!("{}_S", clips.run),
-            looping: false,
-        },
-        SourceClip::CannonL => SdStandIn::Single {
-            clip: format!("{}_L", clips.run),
-            looping: true,
-        },
-        SourceClip::CannonE => SdStandIn::Single {
-            clip: format!("{}_E", clips.run),
-            looping: false,
-        },
-        SourceClip::Cannon02E => SdStandIn::Pair {
-            first: format!("mov_{idle_family}_normal_stumble001_S"),
-            second: format!("mov_{idle_family}_normal_stumble001_E"),
-        },
-    })
+/// The time a clip on the player's animator reaches this frame: the node's
+/// own seek time plus the advance the animator applies later in this frame
+/// (frame delta times the node's speed), so an event fires on the frame the
+/// animator crosses it, as the engine's animation events do.
+fn player_clip_time(world: &mut World, clip: &str) -> Option<f32> {
+    let dt = world.resource::<Time>().delta_secs();
+    let mut drivers = world.query_filtered::<&AvatarDriver, With<PlayerControlled>>();
+    let driver = drivers.iter(world).next()?;
+    let node = driver.node_of(clip)?;
+    let animator = driver.player;
+    world
+        .get::<AnimationPlayer>(animator)?
+        .animation(node)
+        .map(|active| active.seek_time() + dt * active.speed())
 }
 
 fn push_se(world: &mut World, cue: &str) {

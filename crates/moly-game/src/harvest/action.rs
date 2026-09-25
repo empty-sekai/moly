@@ -34,8 +34,9 @@
 //! The hit clock is the source clip's own: its AnimationEvents at their
 //! clip times, the clip time advancing by the frame time times the animator
 //! speed (the frame that starts a clip counts: the product's tween
-//! convention; the animator's own first-frame timing is not read). The SD
-//! body plays the stand-in table (`stand_in`), which never drives the clock.
+//! convention; the animator's own first-frame timing is not read). The
+//! player's body plays the same source clip at the same speed from the same
+//! frame, so the events fall where the visible clip carries them.
 //!
 //! Named gaps: treasure-box auto-move (types 3 and 4 are not placed by the
 //! mock); the tone camera; the stamina gauge, HUD and AISAC; the tool
@@ -60,7 +61,6 @@ use super::law::{
 };
 use super::queue::{HarvestLogQueue, HarvestStack, Stack};
 use super::server_mock::UserTool;
-use super::stand_in::{stand_in, StandIn};
 use super::tool_model::{ToolModelRequest, ToolModelRequests};
 use super::ui::HarvestButton;
 use super::{
@@ -69,9 +69,7 @@ use super::{
 };
 use crate::audio::SeRequests;
 use crate::player::{PlayerControlled, PlayerInput};
-use crate::player_avatar::{
-    AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken, PlayerVisualClips,
-};
+use crate::player_avatar::{AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken};
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 
 /// `PlayerAvatarView.PlayAnimation(name, 0.25, 1.0)` and the Idle state's
@@ -328,12 +326,7 @@ fn show_tool_model(
 
 #[derive(SystemParam)]
 pub(crate) struct Body<'w, 's> {
-    drivers: Query<
-        'w,
-        's,
-        (&'static mut AvatarDriver, &'static PlayerVisualClips),
-        With<PlayerControlled>,
-    >,
+    drivers: Query<'w, 's, &'static mut AvatarDriver, With<PlayerControlled>>,
     animators: Query<
         'w,
         's,
@@ -343,47 +336,28 @@ pub(crate) struct Body<'w, 's> {
         ),
     >,
     graphs: ResMut<'w, Assets<AnimationGraph>>,
-    clips: Res<'w, Assets<AnimationClip>>,
 }
 
 impl Body<'_, '_> {
-    /// Play the stand-in of one source clip on the SD body, starting the
-    /// harvest lease on the first call.
+    /// `PlayerAvatarView.PlayAnimation(name, 0.25, 1.0)` on the player's
+    /// body at the speed the action sets, starting the harvest lease on the
+    /// first call.
     fn play(
         &mut self,
         token: &mut Option<PlayerActionToken>,
         source: &str,
-        state: ToolState,
-        source_length: f32,
         speed: f32,
         blocks: bool,
     ) {
-        let Ok((mut driver, visual)) = self.drivers.single_mut() else {
+        let Ok(mut driver) = self.drivers.single_mut() else {
             return;
-        };
-        let family = visual.idle.get(4..6).unwrap_or("").to_owned();
-        let clip = match stand_in(source, state, &family) {
-            Ok(StandIn::Clip { name }) => name,
-            Ok(StandIn::Idle) => format!("{}_L", visual.idle),
-            Err(reason) => {
-                warn!(
-                    "[harvest] SD stand-in refused for {source}: {reason}; the SD body keeps its current motion"
-                );
-                return;
-            }
-        };
-        let looping = clip == format!("{}_L", visual.idle);
-        let rate = match driver.sd_clip_duration(&clip, &self.clips) {
-            Some(sd) if source_length > 0.0 && !looping => sd / source_length,
-            _ => 1.0,
         };
         let Ok((mut animator, mut transitions)) = self.animators.get_mut(driver.player) else {
             return;
         };
         let motion = PlayerActionMotion {
-            clip: &clip,
-            looping,
-            speed: rate * speed,
+            clip: source,
+            speed,
             blend: CROSSFADE,
             blocks_manual_movement: blocks,
         };
@@ -409,25 +383,22 @@ impl Body<'_, '_> {
             Ok(live) => {
                 *token = Some(live);
                 info!(
-                    "[harvest] SD stand-in {clip} for {source} at {:.3} (sd/source length {:.3} x speed {:.2}){}",
-                    rate * speed,
-                    rate,
-                    speed,
+                    "[harvest] PlayAnimation({source}, fade 0.25s) at speed {speed:.2}{}",
                     if blocks { "" } else { ", movement open" }
                 );
             }
-            Err(error) => warn!("[harvest] SD stand-in {clip} for {source} not played: {error:?}"),
+            Err(error) => warn!("[harvest] PlayAnimation({source}) refused: {error:?}"),
         }
     }
 
     fn idle(&mut self, token: Option<PlayerActionToken>) {
-        let Ok((mut driver, _)) = self.drivers.single_mut() else {
+        let Ok(mut driver) = self.drivers.single_mut() else {
             return;
         };
         let Ok((mut animator, mut transitions)) = self.animators.get_mut(driver.player) else {
             return;
         };
-        driver.play_idle(token, CROSSFADE, &mut animator, &mut transitions);
+        driver.play_idle(token, CROSSFADE, &mut self.graphs, &mut animator, &mut transitions);
     }
 }
 
@@ -576,7 +547,7 @@ pub(crate) fn advance(
         };
         // Step 5 re-creates the end motion's cancellation source: a running
         // End of an earlier press is cancelled there and that press ends
-        // without its steps 10-11. The SD lease carries over.
+        // without its steps 10-11. The animator lease carries over.
         let carried = action.current.take().and_then(|previous| {
             info!("[harvest] press during the End motion: the running action is cancelled (its end steps do not run)");
             previous.token
@@ -743,14 +714,7 @@ pub(crate) fn advance(
                         let wait = harvest_action_time(tool, ToolState::End, length);
                         if let Some(name) = name.as_deref() {
                             start_swing(&mut current, &clips, name);
-                            body.play(
-                                &mut current.token,
-                                name,
-                                ToolState::End,
-                                length,
-                                action.animator_speed,
-                                false,
-                            );
+                            body.play(&mut current.token, name, action.animator_speed, false);
                         }
                         world.states.change_status(PlayerActionState::Harvest);
                         info!(
@@ -953,7 +917,6 @@ fn start_action(
             clips,
             name.as_deref(),
             ToolState::Start,
-            length,
             1.0,
             target,
         );
@@ -985,7 +948,7 @@ fn start_action(
     action.current = Some(current);
 }
 
-/// `PlayHarvestMotion`: facing, the source clip, its SD stand-in.
+/// `PlayHarvestMotion`: facing and the source clip.
 #[allow(clippy::too_many_arguments)]
 fn motion(
     action: &mut HarvestAction,
@@ -997,7 +960,6 @@ fn motion(
     clips: &HarvestClips,
     name: Option<&str>,
     state: ToolState,
-    length: f32,
     speed: f32,
     target: Entity,
 ) {
@@ -1024,9 +986,9 @@ fn motion(
     };
     start_swing(current, clips, name);
     // PlayAnimation(name, 0.25, 1.0); a loop iteration sets the speed in the
-    // same frame (`SetAnimationSpeed`), so the stand-in starts at it.
+    // same frame (`SetAnimationSpeed`), so the clip starts at it.
     action.animator_speed = speed;
-    body.play(&mut current.token, name, state, length, speed, true);
+    body.play(&mut current.token, name, speed, true);
 }
 
 /// One loop iteration (step 8).
@@ -1071,7 +1033,6 @@ fn begin_loop(
         clips,
         name.as_deref(),
         current.state,
-        length,
         speed,
         target,
     );

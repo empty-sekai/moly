@@ -5,7 +5,7 @@
 //! authored event selects the output, never a guess based on the clip name.
 //! A bounded single-Transform Euler lane also preserves authored coefficients.
 //! Non-interrupting source Trigger bits wait for the next eligible evaluation.
-//! The current SD player's switch uses a named, simple source-motion adaptation.
+//! The player's switch plays its source clip `c_000_mov_fixture_action_01_01`.
 //! General controllers and nonzero interruption sources remain separate gaps.
 
 mod rotation;
@@ -714,8 +714,8 @@ struct SwitchActor {
 }
 
 /// The player that can take the switch interval now: the intercept gate is
-/// open, no furniture action holds its controls, and one free SD body can
-/// play the adapted switch motion.
+/// open, no furniture action holds its controls, and one free player body can
+/// play the switch clip.
 fn switch_actor(world: &mut World) -> Result<SwitchActor, String> {
     if world.contains_resource::<PlayerFixtureControlOwner>()
         || !world.resource::<PlayerAvatarStates>().can_intercept
@@ -729,7 +729,7 @@ fn switch_actor(world: &mut World) -> Result<SwitchActor, String> {
         .map(|(entity, _, dash)| (entity, dash.0))
         .collect();
     let [(entity, before_dash)] = actors.as_slice() else {
-        return Err("one free SD player is required".into());
+        return Err("one free player body is required".into());
     };
     if world.get::<crate::talk::TalkHold>(*entity).is_some() {
         return Err("player is in a conversation".into());

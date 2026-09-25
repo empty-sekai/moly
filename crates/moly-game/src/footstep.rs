@@ -120,7 +120,7 @@ fn parse_inputs(
             let parsed = doc.and_then(|doc| FootPhases::parse(&doc));
             match &parsed {
                 Ok(phases) => info!(
-                    "[footstep] event phases from the avatar clips: walk {:?} of {}, run {:?} of {} (fractions of the SD clip playing: product adaptation)",
+                    "[footstep] event phases from the avatar clips: walk {:?} of {}, run {:?} of {} (fractions of the playing clip)",
                     phases.walk,
                     phase::WALK_CLIP,
                     phases.run,
@@ -608,7 +608,6 @@ fn detect_events(
         With<crate::player::PlayerControlled>,
     >,
     animators: Query<&AnimationPlayer>,
-    clips: Res<Assets<AnimationClip>>,
     mut events: ResMut<FootEvents>,
     mut clock: Local<FootClock>,
 ) {
@@ -647,7 +646,7 @@ fn detect_events(
         clock.node = None;
         return;
     };
-    let Some(duration) = driver.sd_clip_duration(clip, &clips).filter(|d| *d > 0.0) else {
+    let Some(duration) = driver.clip_length(clip).filter(|d| *d > 0.0) else {
         clock.node = None;
         return;
     };

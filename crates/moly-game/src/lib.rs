@@ -212,6 +212,7 @@ pub fn app(
     plain_background::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);
     app.add_plugins(character_material::CharacterMaterialPlugin);
+    app.add_plugins(avatar_material::AvatarMaterialPlugin);
     app.add_plugins(shadowmap::ShadowmapPlugin);
     app.add_plugins((
         fixture::FixturePlugin,
