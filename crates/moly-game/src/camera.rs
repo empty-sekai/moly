@@ -184,6 +184,27 @@ pub struct CameraTween {
     pub distance: (f32, f32),
     pub duration: f32,
     pub elapsed: f32,
+    /// The Sequence's OnComplete callback.
+    pub on_complete: TweenCompletion,
+}
+
+/// What a camera tween's completion callback does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TweenCompletion {
+    /// No callback (the transitions pass none).
+    None,
+    /// `NormalCameraState.ResetCameraSetting`'s callback: the state's own
+    /// model mirror takes the setting distance and the reset flag clears.
+    NormalReset { distance: f32 },
+}
+
+impl CameraTween {
+    /// `NormalCameraState._isResetAnimation`: set when the reset starts,
+    /// cleared by its completion (or by leaving the Normal state, which here
+    /// removes the tween).
+    pub fn is_normal_reset(&self) -> bool {
+        matches!(self.on_complete, TweenCompletion::NormalReset { .. })
+    }
 }
 
 /// 相机 JSON 的装载请求；解析成功后即撤。内部形参带私有资源，故
@@ -842,10 +863,10 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// （源 `FieldCamera.OnDrag/OnPinch` 转发给 `CurrentState` 的同名方法）。
 /// 复位补间播着时两族整表吞掉（源 Normal 态 `OnDrag`/`OnPinch` 入口的
 /// `_isResetAnimation` 门，先于 `UpdateAngle` 与 `CanSwitchToFpsMode`
-/// 检查——复位期间捏合既不缩放也进不了 FPS。补间资源是
-/// [`crate::menu_shell::CameraResetTween`]，门按其在场与否判、不分相机态：
-/// 源 FPS 态的 `ResetCameraSetting` 是空方法，真源里 FPS 态按复位钮不
-/// 触发任何补间；本仓复位钮不分态插补间，输入统一由这道门兜住）。
+/// 检查——复位期间捏合既不缩放也进不了 FPS。门读在飞的 [`CameraTween`]
+/// 是否带复位的完成回调（[`CameraTween::is_normal_reset`]）；复位只从
+/// Normal 态发起（[`CameraReset::reset_camera_setting`]），其余态的
+/// `ResetCameraSetting` 是空方法）。
 /// Normal 态律逐条对源：
 ///
 /// - **旋转**（源 `FieldCamera.UpdateAngle`，原生体与伪码双树互证）：
@@ -909,7 +930,7 @@ pub(crate) fn apply_input(
     mut models: Option<ResMut<FieldCameraModel>>,
     edits: Res<crate::fixture_edit::EditSessionActive>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
-    reset: Option<Res<crate::menu_shell::CameraResetTween>>,
+    tween: Option<Res<CameraTween>>,
     mut state: ResMut<FieldCameraState>,
     mut fps_view: ResMut<FpsViewMemory>,
     prev_site: Res<PrevSiteType>,
@@ -974,7 +995,7 @@ pub(crate) fn apply_input(
     // 都先读掉再吞（读数沿纪律，别攒陈账），之后任何态分派——含 FPS
     // 进入支——整表让位。合成输入在这一步被并掉，让无头冒烟能在复位
     // 窗口里造出「被吞的那一下」并留下日志行。
-    if reset.is_some() {
+    if tween.as_deref().is_some_and(CameraTween::is_normal_reset) {
         let drag_total = drag + syn_drag;
         if drag_total != Vec2::ZERO || syn_pinch != 0.0 {
             info!(
@@ -1369,8 +1390,10 @@ pub(crate) fn to_rotation(from: f32, to: f32) -> f32 {
 }
 
 /// OutQuad 缓动（源 `EASE_BASIC = 6`，DG.Tweening.Ease 位序：OutQuad）。
+/// `EaseManager.Evaluate` compiles it as `(t / d - 2) * -(t / d)`; `t` here
+/// is that quotient, already clamped to [0, 1] as the tween's position is.
 pub(crate) fn out_quad(t: f32) -> f32 {
-    1.0 - (1.0 - t) * (1.0 - t)
+    (t - 2.0) * -t
 }
 
 /// 读相机本体当前的垂直视场（角度制）。源 `DoTweenCameraSetting` 的
@@ -1521,6 +1544,7 @@ fn enter_fps(
         distance: (model.distance, FPS_DISTANCE),
         duration: FPS_ENTER_TWEEN_SECS,
         elapsed: 0.0,
+        on_complete: TweenCompletion::None,
     });
     state.0 = CameraStateType::Fps;
     info!(
@@ -1620,6 +1644,7 @@ fn exit_fps(
             distance: (model.distance, distance),
             duration: FPS_EXIT_TWEEN_SECS_INHERIT,
             elapsed: 0.0,
+            on_complete: TweenCompletion::None,
         });
         info!(
             "[camera-fps] 退出 FPS（继承支 {}s）：距离 {:.2}→{:.2}，俯仰 {:.1}°→{:.1}°，偏航 {:.1}°→{:.1}°，FOV {:.1}°→{:.1}°（{}），取景点不动 {}",
@@ -1653,6 +1678,7 @@ fn exit_fps(
             distance: (model.distance, m.distance),
             duration: FPS_EXIT_TWEEN_SECS_CASE16,
             elapsed: 0.0,
+            on_complete: TweenCompletion::None,
         });
         info!(
             "[camera-fps] 退出 FPS（case16 支 {}s）：距离 {:.2}→{:.2}，俯仰 {:.1}°→{:.1}°，偏航 {:.1}°（保持），FOV {:.1}°→{:.1}°，取景点 →玩家位 {}",
@@ -1668,6 +1694,74 @@ fn exit_fps(
         );
     }
     state.0 = CameraStateType::Normal;
+}
+
+/// The field camera's reset inputs, bundled so a UI system stays within the
+/// system-parameter limit.
+#[derive(SystemParam)]
+pub(crate) struct CameraReset<'w, 's> {
+    state: Res<'w, FieldCameraState>,
+    model: Option<ResMut<'w, FieldCameraModel>>,
+    setting: Option<Res<'w, CameraSetting>>,
+    cameras: Query<'w, 's, &'static Projection, With<Camera3d>>,
+}
+
+/// `NormalCameraState.ResetCameraSetting` passes this duration.
+const NORMAL_RESET_TWEEN_SECS: f32 = 0.25;
+
+impl CameraReset<'_, '_> {
+    /// `FieldCamera.ResetCameraSetting`: the current state's
+    /// `ResetCameraSetting`. Normal and HarvestTone have bodies; every other
+    /// state's is empty.
+    pub(crate) fn reset_camera_setting(&mut self, commands: &mut Commands) {
+        match self.state.0 {
+            CameraStateType::Normal => self.normal_reset(commands),
+            CameraStateType::HarvestTone => {
+                panic!("field camera: the harvest-tone state's camera reset is not built")
+            }
+            _ => {}
+        }
+    }
+
+    /// `NormalCameraState.ResetCameraSetting`: the state's model mirror takes
+    /// the setting's pitch bounds at once, the reset flag is set, and
+    /// `DoTweenCameraSetting` runs for 0.25 s towards (LookAt as it is, pitch
+    /// = setting initPitch, yaw as it is, FOV = model FOV, distance = setting
+    /// distance). Its callback writes the setting distance into the mirror
+    /// and clears the flag.
+    fn normal_reset(&mut self, commands: &mut Commands) {
+        let (Some(model), Some(setting)) = (self.model.as_deref_mut(), self.setting.as_deref()) else {
+            warn!("[camera] reset pressed before the field camera model exists");
+            return;
+        };
+        let Ok(projection) = self.cameras.single() else {
+            warn!("[camera] reset pressed without a single field camera");
+            return;
+        };
+        model.min_pitch = setting.min_pitch;
+        model.max_pitch = setting.max_pitch;
+        // DoTweenCameraSetting: start values captured now (LookAt, the camera
+        // body's FOV, distance, and pitch/yaw folded into [-180, 180]); the
+        // rotation end goes the shortest signed way from the folded start.
+        let prev_pitch = wrap180(model.pitch);
+        let prev_yaw = wrap180(model.yaw);
+        let tween = CameraTween {
+            look_at: (model.look_at, model.look_at),
+            fov: (perspective_fov_deg(projection), model.fov),
+            pitch: (prev_pitch, to_rotation(prev_pitch, setting.init_pitch)),
+            yaw: (prev_yaw, to_rotation(prev_yaw, model.yaw)),
+            distance: (model.distance, setting.distance),
+            duration: NORMAL_RESET_TWEEN_SECS,
+            elapsed: 0.0,
+            on_complete: TweenCompletion::NormalReset { distance: setting.distance },
+        };
+        info!(
+            "[camera] reset: pitch {:.2}->{:.2}, yaw {:.2}->{:.2}, distance {:.2}->{:.2}, FOV {:.2}->{:.2} over {}s",
+            tween.pitch.0, tween.pitch.1, tween.yaw.0, tween.yaw.1,
+            tween.distance.0, tween.distance.1, tween.fov.0, tween.fov.1, tween.duration,
+        );
+        commands.insert_resource(tween);
+    }
 }
 
 /// 前站点类型（源 `SiteManager.PrevSiteType` 的镜像）。站点域零跟踪、
@@ -1807,7 +1901,9 @@ pub(crate) fn follow_avatar(
         tw.elapsed += time.delta_secs();
         let e = (tw.elapsed / tw.duration).clamp(0.0, 1.0);
         let k = out_quad(e);
-        models.look_at = tw.look_at.0.lerp(tw.look_at.1, k);
+        // DOTween's Vector3 and float plugins write start + change * eased,
+        // with change = end - start, per component.
+        models.look_at = tw.look_at.0 + (tw.look_at.1 - tw.look_at.0) * k;
         models.pitch = tw.pitch.0 + (tw.pitch.1 - tw.pitch.0) * k;
         models.yaw = tw.yaw.0 + (tw.yaw.1 - tw.yaw.0) * k;
         models.distance = tw.distance.0 + (tw.distance.1 - tw.distance.0) * k;
@@ -1818,6 +1914,9 @@ pub(crate) fn follow_avatar(
             }
         }
         if e >= 1.0 {
+            if let TweenCompletion::NormalReset { distance } = tw.on_complete {
+                models.gestured_distance = distance;
+            }
             info!(
                 "[camera] 转场补间完成（{:.2}s）：距离 {:.2}→{:.2}，俯仰 {:.1}°，偏航 {:.1}°，FOV {:.1}°，取景点 {}",
                 tw.duration,

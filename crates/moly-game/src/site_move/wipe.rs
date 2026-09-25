@@ -47,6 +47,7 @@ use serde_json::Value;
 use std::marker::PhantomData;
 
 use super::door_law::{self, WipeTween, WIPE_OPEN_SCALE};
+use crate::canvas::RootCanvas;
 
 const DOC: &str = "moly://house-transition/sitetransitionernormal/sitetransitionernormal.json";
 const SHADER_NAME: &str = "Sekai/Area/WipeCircle";
@@ -256,12 +257,16 @@ pub(crate) fn advance(world: &mut World) {
     }
     let dt = world.resource::<Time>().delta_secs();
     let frame = u64::from(world.resource::<FrameCount>().0);
+    // Half the screen in canvas units: the wipe canvas sits under the screen
+    // manager's layer, sized by the root canvas.
     let half = {
         let mut windows = world.query_filtered::<&Window, With<PrimaryWindow>>();
+        let root_canvas = world.get_resource::<RootCanvas>();
         windows
             .single(world)
             .ok()
-            .map(|window| door_law::canvas_half_extent(window.width(), window.height()))
+            .zip(root_canvas)
+            .map(|(window, root_canvas)| root_canvas.size(window) * 0.5)
     };
     let (scale, offset, visible, material, quad, camera) = {
         let mut wipe = world.resource_mut::<SiteWipe>();

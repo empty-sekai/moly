@@ -18,6 +18,7 @@ pub mod shading;
 pub mod talk;
 pub mod text;
 pub mod tweet;
+pub mod ui;
 pub mod weather;
 pub mod action_button;
 pub mod animator;

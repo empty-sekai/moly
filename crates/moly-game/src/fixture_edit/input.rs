@@ -113,7 +113,7 @@ pub(crate) fn read_pointer(
         return;
     };
     // Covers source-prefab UI and the product-owned Bevy settings/editor UI.
-    if ui.captures(cursor, Vec2::new(window.width(), window.height()))
+    if ui.captures(cursor, window)
         || node_interactions
             .iter()
             .any(|state| *state != Interaction::None)

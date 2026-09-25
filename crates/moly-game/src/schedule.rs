@@ -327,6 +327,7 @@ pub fn install(app: &mut App) {
                 .before(crate::ui_layout::render),
         );
     app.add_message::<gesture::GestureEvent>()
+        .add_message::<gesture::UiPointerEvent>()
         .add_message::<player_talk::PlayerTalkRequest>()
         .add_message::<crate::player_fixture_action::PlayerFixtureRequest>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
@@ -390,6 +391,8 @@ pub fn install(app: &mut App) {
                     // 大表没到齐之前它们就该落定。
                     client_config::load,
                     birthday::load,
+                    // The master rank table the rank gauges read.
+                    crate::mysekai_rank::load,
                     uber_particle::load,
                     // 家具挂点档案（attach-points）的装载请求：动作点
                     // 世界位的数据面，与摆放表（fixture 域）在同一批
@@ -436,6 +439,7 @@ pub fn install(app: &mut App) {
                     // 域，单独成链放最前）。装载失败在这里响亮 panic。
                     client_config::parse,
                     birthday::parse,
+                    crate::mysekai_rank::parse,
                 ),
                 (
                     // 站点域：主表解析 → 换站入口（拆站重选）→ 装载计划
@@ -961,6 +965,36 @@ pub fn install(app: &mut App) {
                 .after(action_button::click)
                 .before(pick::pick),
         )
+        // Source press/click of the camera reset button: same input gate and
+        // order as the tap dispatch (after the action buttons' tap flag, before
+        // the world pick).
+        .init_resource::<menu_shell::SourceInputManager>()
+        .init_resource::<menu_shell::CameraResetPress>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_input
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(action_button::click)
+                .after(menu_shell::click)
+                .before(pick::pick),
+        )
+        // The button's disable while pressed: every frame, input enabled or
+        // not, after the input and before the effect's update.
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_disable
+                .after(menu_shell::camera_reset_input)
+                .before(menu_shell::camera_reset_tap_effect),
+        )
+        // The button's press effect: its fade takes the frame's step after
+        // the press, before the prefab views draw.
+        .init_resource::<menu_shell::CameraResetTapEffect>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_tap_effect
+                .after(menu_shell::camera_reset_input)
+                .before(crate::ui_layout::render),
+        )
         // 层栈推进：读小地图根可见性做直通口对账 + 消费层命令 + 回写槽
         // 位视图。小地图的四条可见性写者（点击 · 自动点 · 解锁推进 ·
         // M 键）与外壳点按全排在它之前——它读的是当帧终值、当帧命令。
@@ -982,13 +1016,10 @@ pub fn install(app: &mut App) {
                 .chain()
                 .after(ui_layers::advance)
                 .after(menu_shell::click),
-        )
-        // 相机复位补间推进：相机输入之后（补间期间输入被吞——真源
-        // _isResetAnimation 门，吞门在 apply_input 里读本资源在场与否）。
-        .add_systems(
-            Update,
-            menu_shell::advance_camera_reset.after(camera::apply_input),
         );
+    // The camera reset is a field-camera tween: camera::follow_avatar
+    // advances it, and camera::apply_input swallows drag/pinch while it runs
+    // (the Normal state's _isResetAnimation gate).
     // ---- 情报层视图（追加段：层栈 + 外壳之后的第一个带内容物的屏幕层） ----
     // 资源与启动施加（进场即按存量档全量施加；刷新率档当值取构造默认
     // high ⇒ 60fps 钳制）。

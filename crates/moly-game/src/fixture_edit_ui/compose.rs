@@ -117,6 +117,20 @@ fn optional_cloned(
     Ok(result)
 }
 
+/// Whether this layout's `SiteEditView` declares `_reportTipButton`, by the
+/// layout's region tag. Layouts without a tag are the shared root's CN
+/// extractions, whose class serializes it; the JP class of the region root
+/// serializes nine references and the report-tip button is not one of them,
+/// so on JP it is not built. A declared field the layout lacks is still an
+/// error.
+fn declares_report_tip_button(doc: &UiPrefab) -> Result<bool, String> {
+    match doc.source.region.as_deref() {
+        None => Ok(true),
+        Some("jp") => Ok(false),
+        Some(region) => Err(format!("SiteEditView: no declared field set for region {region}")),
+    }
+}
+
 fn f(fields: &Value, name: &str) -> Result<f32, String> {
     fields[name]
         .as_f64()
@@ -277,21 +291,30 @@ pub(super) fn compose(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // Elements without a presenter here. The screen reaches these through its
+    // serialized references; the two paths below have no serialized
+    // reference in the layout (no other component points at them).
     let mut hidden = [
-        "ContentRoot/PlanningConfirmHeadUpDisplay",
-        "ContentRoot/Rectangle",
-        "ContentRoot/LongTapGauge",
-        "ContentRoot/PlacedCountHeadUpDisplay",
-        "ContentRoot/SequentialFixtureStartMarker",
-        "ContentRoot/SequentialFixtureEndMarker",
-        "ContentRoot/SiteEditView/RightBottom",
-        "ContentRoot/ExpansionFixtureSelecter/BaseContent/Background/SiteEnvironment",
-        "ContentRoot/ExpansionFixtureSelecter/BaseContent/Background/Handle/FixtureThumbnail",
-        "ContentRoot/ExpansionFixtureSelecter/BaseContent/LayoutedCount",
+        "_rectangle",
+        "_longTouchGauge",
+        "_placedCountHeadUpDisplay",
+        "_sequentialFixtureStartMarker",
+        "_sequentialFixtureEndMarker",
+        "_rightBottomRoot",
+        "_siteEnvironmentSelectContent",
+        "_fixtureLayoutCountInfo",
     ]
     .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
+    .map(|name| field(&screen, name))
+    .collect::<Result<Vec<_>, _>>()?;
+    hidden.extend(
+        [
+            "ContentRoot/PlanningConfirmHeadUpDisplay",
+            "ContentRoot/ExpansionFixtureSelecter/BaseContent/Background/Handle/FixtureThumbnail",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
     // Full source hierarchy is retained, while unavailable data families have
     // no fabricated rows. Source's inactive outer prototype stays inactive.
     hidden.extend(optional_cloned(
@@ -317,16 +340,21 @@ pub(super) fn compose(
         &fixture_fields,
         "_hashTagFilteredBalloon",
     )?);
-    let mut unsupported_buttons = [
+    let mut unsupported = vec![
         "_removeAllButton",
         "_presetSaveButton",
         "_changeLookButton",
         "_rotateButton",
-        "_reportTipButton",
-    ]
-    .into_iter()
-    .map(|name| field(&action, name))
-    .collect::<Result<Vec<_>, _>>()?;
+    ];
+    if declares_report_tip_button(&doc)? {
+        unsupported.push("_reportTipButton");
+    } else if action.get("_reportTipButton").is_some() {
+        return Err("this region's SiteEditView declares no _reportTipButton, but the layout carries one".into());
+    }
+    let mut unsupported_buttons = unsupported
+        .into_iter()
+        .map(|name| field(&action, name))
+        .collect::<Result<Vec<_>, _>>()?;
     let filter = component(
         list,
         &field(&fixture_fields, "_searchButton")?,

@@ -18,6 +18,7 @@ mod browser_stage;
 mod browser_log;
 pub use browser_stage::configure_browser_stage;
 pub mod camera;
+pub mod canvas;
 pub mod character;
 pub mod character_material;
 pub mod client_config;
@@ -64,6 +65,7 @@ mod material_order;
 mod mesh_buffer_release;
 pub mod menu_dialog;
 pub mod menu_shell;
+mod mysekai_rank;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
 pub mod npc;
