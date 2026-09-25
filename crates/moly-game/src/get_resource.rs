@@ -117,7 +117,6 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::action_button::ActionTapConsumed;
-use crate::balloon::canvas_scale;
 use crate::gesture::{GestureEvent, GestureState};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
@@ -628,6 +627,7 @@ pub(crate) fn place(
     mut player: ResMut<GetResourcePlayer>,
     mut roots: Query<(&mut Visibility, &mut Transform, &mut crate::ui_layout::UiPrefabView), With<GetResourceRoot>>,
     mut was_open: Local<bool>, mut last_cursor: Local<usize>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let open = dialog.get_resource_open;
     match (*was_open, open) {
@@ -639,10 +639,10 @@ pub(crate) fn place(
         _ => {}
     }
     *was_open = open;
-    let Ok(window) = windows.single() else { return; };
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     for (mut visible, mut transform, mut view) in &mut roots {
         *visible = if open { Visibility::Inherited } else { Visibility::Hidden };
-        transform.scale = Vec3::splat(canvas_scale(window.width(), window.height()));
+        transform.scale = Vec3::splat(root_canvas.scale(window));
         let entry = mock.entries.get(player.cursor);
         view.set_text("Content/BodyText", entry.map(|e| e.message_body()).unwrap_or_default());
         view.set_visible("Content/Object3DPreview", entry.is_some_and(|e| e.kind == ResourceKind::MysekaiBlueprint));
@@ -701,6 +701,7 @@ pub(crate) fn click(
     mock: Res<GetResourceMock>,
     mut player: ResMut<GetResourcePlayer>,
     mut consumed: ResMut<ActionTapConsumed>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let taps: Vec<Vec2> = gestures
         .read()
@@ -713,9 +714,12 @@ pub(crate) fn click(
     let Ok(window) = windows.single() else {
         return;
     };
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
     let (width, height) = (window.width(), window.height());
-    let scale = canvas_scale(width, height);
-    let size = Vec2::new(width, height) / scale;
+    let scale = root_canvas.scale(window);
+    let size = root_canvas.size(window);
     let Ok(view) = views.single() else { return; };
     let current_name = mock
         .entries

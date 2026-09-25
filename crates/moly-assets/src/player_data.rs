@@ -46,6 +46,10 @@ pub struct ImportedSite {
 #[derive(Clone, Debug)]
 pub struct ImportedPlayerData {
     pub rank: u32,
+    /// `userMysekaiGamedata.totalExp` when the file carries it: the user's
+    /// MySekai total experience, from which the client derives the rank
+    /// gauges.
+    pub total_exp: Option<i32>,
     pub region: String,
     pub player_name: Option<String>,
     pub player_id: Option<String>,
@@ -282,6 +286,24 @@ impl PlayerDataCatalog {
         .next()
         .ok_or("Player data has no mysekaiRank")?;
         let rank = positive(rank_value, "mysekaiRank")?;
+        let total_exp = [
+            root.get("totalExp"),
+            updated
+                .get("userMysekaiGamedata")
+                .and_then(|v| v.get("totalExp")),
+            root.get("userMysekaiGamedata")
+                .and_then(|v| v.get("totalExp")),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|value| {
+            value
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| format!("totalExp {value} is not an int"))
+        })
+        .transpose()?;
         let sites_value = updated
             .get("userMysekaiSiteHousingLayouts")
             .or_else(|| root.get("userMysekaiSiteHousingLayouts"))
@@ -477,6 +499,7 @@ impl PlayerDataCatalog {
             .and_then(opaque_id);
         Ok(ImportedPlayerData {
             rank,
+            total_exp,
             region: self.region.clone(),
             player_name,
             player_id,

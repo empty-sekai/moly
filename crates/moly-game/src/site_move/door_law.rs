@@ -133,12 +133,6 @@ pub(crate) fn coverage(canvas: Vec2, scale: f32, offset: Vec2) -> Option<f32> {
     Some(if p.dot(p).sqrt() >= 1.0 { 1.0 } else { 0.0 })
 }
 
-/// Half the screen in canvas units: the wipe canvas sits under the screen
-/// manager's layer, whose root canvas scales by `balloon::canvas_scale`.
-pub(crate) fn canvas_half_extent(width: f32, height: f32) -> Vec2 {
-    Vec2::new(width, height) * 0.5 / crate::balloon::canvas_scale(width, height)
-}
-
 // --- The waits the three move states hand to `UniTask.Delay` ------------
 
 /// `HomeToMyRoomActionState.PlayEnterMyRoomAction`: after `EnterMoveHouse`.
@@ -460,8 +454,10 @@ mod tests {
         };
         // _Scale 2: radius 375 canvas units. At 1920x1080 a canvas unit is
         // one pixel; at 1280x720 it is 2/3 of one.
+        // Both screens have the reference aspect, so the root canvas is the
+        // reference resolution whatever the scaler's match.
+        let half = Vec2::new(crate::canvas::CANVAS_REF_W, crate::canvas::CANVAS_REF_H) * 0.5;
         for (width, height, radius_px) in [(1920.0, 1080.0, 375.0), (1280.0, 720.0, 250.0)] {
-            let half = canvas_half_extent(width, height);
             let px_to_canvas = half.x / (width * 0.5);
             for (dx, want) in [(radius_px - 1.0, 0.0), (radius_px + 1.0, 1.0), (0.0, 0.0)] {
                 let canvas = Vec2::new(dx * px_to_canvas, 0.0);

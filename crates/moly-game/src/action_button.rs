@@ -50,7 +50,8 @@ use admission::{
     AdmissionInputs, Availability, Enter, FixtureKind, InputRevision, Probe, Retry,
 };
 
-use crate::balloon::{canvas_scale, BALLOON_LAYER};
+use crate::balloon::BALLOON_LAYER;
+use crate::canvas::RootCanvas;
 use crate::fixture::{FixturePlacement, FixtureRoot, FixtureSource};
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureTarget};
 use crate::fixture_edit::LayoutSaved;
@@ -133,9 +134,12 @@ impl ActionButtonSkin {
         let mut geometry = UiPrefabView::new(SKIN_LAYOUT, BALLOON_LAYER);
         geometry.set_visible(BUTTON_NODE, true);
         Some(Self {
-            // The prefab UI loads its images from the same directory for the
-            // GPU only; the first request's settings win, so this one agrees.
-            background: moly_assets::residency::load_image(server, format!("moly://ui-layout-v2/{image}")),
+            // The prefab UI loads its images through the same asset path for
+            // the GPU only; the first request's settings win, so this one agrees.
+            background: moly_assets::residency::load_image(
+                server,
+                crate::ui_layout::image_asset_path(image),
+            ),
             background_color: color(background),
             icon_color: color(icon),
             geometry,
@@ -150,37 +154,43 @@ pub(crate) struct ActionButtonScreen<'w, 's> {
     windows: Query<'w, 's, (Entity, &'static Window), With<PrimaryWindow>>,
     art: Option<Res<'w, ActionButtonArt>>,
     layouts: Option<Res<'w, UiLayouts>>,
+    root: Option<Res<'w, RootCanvas>>,
 }
 
 impl ActionButtonScreen<'_, '_> {
+    /// Logical pixels per canvas unit, once the host canvas has loaded.
+    fn scale(&self, window: &Window) -> Option<f32> {
+        Some(self.root.as_deref()?.scale(window))
+    }
+
     fn rects(
         &self,
-        size: Vec2,
+        window: &Window,
     ) -> Option<(
         moly_assets::ui_layout::UiRect,
         moly_assets::ui_layout::UiRect,
     )> {
         let skin = self.art.as_deref()?.skin.as_ref()?;
         let layouts = self.layouts.as_deref()?;
-        let canvas = size / canvas_scale(size.x, size.y);
+        let canvas = self.root.as_deref()?.size(window);
         Some((
             skin.geometry.rect(layouts, BUTTON_NODE, canvas)?,
             skin.geometry.rect(layouts, ICON_NODE, canvas)?,
         ))
     }
 
-    fn button_position(&self, size: Vec2) -> Option<Vec2> {
-        let (button, _) = self.rects(size)?;
-        let center = button.center() * canvas_scale(size.x, size.y);
-        Some(Vec2::new(size.x * 0.5 + center.x, size.y * 0.5 - center.y))
+    fn button_position(&self, window: &Window) -> Option<Vec2> {
+        let (button, _) = self.rects(window)?;
+        let center = button.center() * self.scale(window)?;
+        Some(Vec2::new(window.width() * 0.5 + center.x, window.height() * 0.5 - center.y))
     }
 
-    fn hit(&self, position: Vec2, size: Vec2) -> bool {
-        let Some((button, _)) = self.rects(size) else {
+    fn hit(&self, position: Vec2, window: &Window) -> bool {
+        let (Some((button, _)), Some(scale)) = (self.rects(window), self.scale(window)) else {
             return false;
         };
-        let canvas_point = Vec2::new(position.x - size.x * 0.5, size.y * 0.5 - position.y)
-            / canvas_scale(size.x, size.y);
+        let canvas_point = Vec2::new(position.x - window.width() * 0.5, window.height() * 0.5 - position.y)
+            / scale;
         button.active && button.contains(canvas_point)
     }
 }
@@ -1332,9 +1342,8 @@ pub(crate) fn place_ui(
         return;
     };
     let head = state.current();
-    let size = Vec2::new(window.width(), window.height());
-    let rects = screen.rects(size);
-    let scale = canvas_scale(size.x, size.y);
+    let scale = screen.scale(window);
+    let rects = screen.rects(window);
     for (mut visibility, mut transform) in &mut roots {
         // TimelineFixtureProcess hides the action buttons view until the
         // timeline's finish shows it again. They are part of the home
@@ -1348,7 +1357,9 @@ pub(crate) fn place_ui(
         } else {
             Visibility::Hidden
         };
-        transform.scale = Vec3::new(scale, scale, 1.0);
+        if let Some(scale) = scale {
+            transform.scale = Vec3::new(scale, scale, 1.0);
+        }
     }
     let Some((button, _)) = head else { return };
     let (Some(art), Some((background_rect, icon_rect))) = (screen.art.as_deref(), rects) else {
@@ -1439,9 +1450,8 @@ pub(crate) fn click(
         TargetId::Fixture(key) => state.fixture_target(key),
         TargetId::Character(_) => None,
     };
-    let size = Vec2::new(window.width(), window.height());
     for position in taps {
-        if !screen.hit(position, size) {
+        if !screen.hit(position, window) {
             continue;
         }
         let now = time.elapsed_secs();
@@ -1724,7 +1734,7 @@ pub(crate) fn smoke_autowalk(
         });
     };
     // 按钮的屏位（顶原点）：与摆件同一式——覆盖相机世界心翻回屏坐标。
-    let Some(button_pos) = screen.button_position(Vec2::new(width, height)) else {
+    let Some(button_pos) = screen.button_position(window) else {
         return;
     };
     // 收尾：armed 窗口一过两根指都松（走指若还按着，摇杆会拖着最后
@@ -1883,7 +1893,10 @@ pub(crate) fn smoke_autowalk(
         let right = camera.right();
         let right_flat = Vec2::new(right.x, right.z);
         let joy = Vec2::new(dir_world.dot(right_flat), dir_world.dot(forward_flat));
-        let radius = HANDLE_SIZE * canvas_scale(width, height);
+        let Some(scale) = screen.scale(window) else {
+            return;
+        };
+        let radius = HANDLE_SIZE * scale;
         // 触点 = 底盘 + (joy.x, -joy.y) × 半径（屏坐标 y 向下）。
         let position = base + Vec2::new(joy.x, -joy.y) * radius;
         if !*pressing {

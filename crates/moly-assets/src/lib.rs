@@ -245,6 +245,12 @@ pub fn mysekai_music_records() -> AssetPath<'static> {
     AssetPath::from("moly://mysekai-music-records.json".to_owned())
 }
 
+/// The extracted master rank table (`mysekaiRanks`): each row's `id`,
+/// `mysekaiRank` and `totalExp`, keyed by `id`, with the master row order.
+pub fn mysekai_ranks() -> AssetPath<'static> {
+    AssetPath::from("moly://mysekai-ranks.json".to_owned())
+}
+
 /// 家具模型清单的资产路径：包名与 glb 文件名的对应表。
 pub fn fixture_model_index() -> AssetPath<'static> {
     AssetPath::from("moly://fixture-models/index.json".to_owned())

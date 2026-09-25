@@ -66,7 +66,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use moly_assets::json::JsonAsset;
 use std::collections::HashMap;
 
-use crate::balloon::{self, CANVAS_REF_H, CANVAS_REF_W};
+use crate::canvas::{CANVAS_REF_H, CANVAS_REF_W};
 use crate::sitemap_phenomena::{DEFAULT_PHENOMENA_ID, PHENOMENA_ROWS};
 use crate::source_curve::Curve;
 use crate::weather::CurrentPhenomenon;
@@ -87,8 +87,8 @@ const HOME_SITE_ICON_INDEX: usize = 0;
 pub(crate) const SITEMAP_LAYER: usize = 2;
 
 // 层内没有再往下的 fit/居中系数：屏幕层被运行时拉伸到 1920×1080 的参照
-// 画布上（ScreenManager.SetUpScreenResolution 的匹配律 = 气泡层同款
-// [`balloon::canvas_scale`]），底图/图标/面板全部按 canvas 单位直读直用。
+// 画布上（ScreenManager.SetUpScreenResolution 的匹配律，见
+// [`crate::canvas`] 的根画布），底图/图标/面板全部按 canvas 单位直读直用。
 
 /// 入场滑动（`PlayInAnimation`：localPosition y+80 起，0.5s 滑回）。
 const IN_SLIDE_PX: f32 = 80.0;
@@ -605,10 +605,12 @@ pub(crate) fn parse(
         serde_json::from_str(&screen_text).unwrap_or_else(|err| panic!("sitemap：screen_layer.json 不是合法 JSON：{err}"));
     let canvas_ref = {
         let canvas = &screen["canvas"]["referenceResolution"];
-        (
-            canvas[0].as_f64().unwrap_or(1920.0) as f32,
-            canvas[1].as_f64().unwrap_or(1080.0) as f32,
-        )
+        let axis = |i: usize| {
+            canvas[i].as_f64().unwrap_or_else(|| {
+                panic!("sitemap：screen_layer.json 的 canvas.referenceResolution[{i}] 缺失或不是数")
+            }) as f32
+        };
+        (axis(0), axis(1))
     };
     assert_eq!(
         (canvas_ref.0, canvas_ref.1),
@@ -1255,9 +1257,10 @@ pub(crate) fn fit_root(
     windows: Query<&Window>,
     mut map_roots: Query<&mut Transform, (With<MapRoot>, Without<UiRoot>)>,
     mut ui_roots: Query<&mut Transform, (With<UiRoot>, Without<MapRoot>)>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
-    let Ok(window) = windows.single() else { return };
-    let canvas = balloon::canvas_scale(window.width(), window.height());
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return };
+    let canvas = root_canvas.scale(window);
     for mut transform in &mut map_roots {
         transform.scale = Vec3::splat(canvas);
     }
@@ -1967,6 +1970,7 @@ pub(crate) fn click(
     active: Option<Res<crate::site::SiteActive>>,
     birthday: Option<Res<crate::birthday::BirthdayParties>>,
     leave_dialog: Option<Res<crate::menu_shell::ShellDialogState>>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     if !buttons.just_pressed(MouseButton::Left) {
         return;
@@ -1989,7 +1993,8 @@ pub(crate) fn click(
     let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
         return;
     };
-    let scale = balloon::canvas_scale(window.width(), window.height());
+    let Some(root_canvas) = root_canvas.as_deref() else { return };
+    let scale = root_canvas.scale(window);
     let canvas = world / scale;
     dispatch(
         &mut commands,

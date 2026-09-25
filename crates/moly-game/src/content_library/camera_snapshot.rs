@@ -40,7 +40,6 @@ impl CameraSnapshot {
     pub(super) fn prepare_temporary(world: &mut World) {
         world.insert_resource(FieldCameraState(crate::camera::CameraStateType::Normal));
         world.remove_resource::<CameraTween>();
-        world.remove_resource::<crate::menu_shell::CameraResetTween>();
         world.remove_resource::<NormalCameraMemory>();
         let fov = world
             .get_resource::<crate::camera::CameraSetting>()
@@ -67,9 +66,9 @@ impl CameraSnapshot {
         replace(world, self.state);
         replace(world, self.fps);
         replace(world, self.normal.clone());
+        // A reset begun inside the preview is a camera tween too; restoring
+        // the saved tween (or its absence) replaces it.
         replace(world, self.tween);
-        // A reset begun inside the preview must not overwrite restored values.
-        world.remove_resource::<crate::menu_shell::CameraResetTween>();
         for (entity, projection) in &self.projections {
             if let Ok(mut entity) = world.get_entity_mut(*entity) {
                 entity.insert(projection.clone());

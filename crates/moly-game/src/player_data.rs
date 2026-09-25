@@ -367,7 +367,7 @@ impl PlayerDataImport {
                 "hasLayouts": preview.before_layouts.is_some(), "hasProfile": preview.before_profile.is_some() });
             document[layouts::SECTION] = preview.section.clone();
             document[PROFILE] = json!({ "version": 1, "region": preview.data.region,
-                "rank": preview.data.rank, "playerName": preview.data.player_name,
+                "rank": preview.data.rank, "totalExp": preview.data.total_exp, "playerName": preview.data.player_name,
                 "playerId": preview.data.player_id, "source": preview.data.source });
             Ok(())
         })?;
@@ -396,7 +396,7 @@ impl PlayerDataImport {
         // No settings write, localStorage mutation or source account upload.
         let mut document = json!({});
         document[layouts::SECTION] = preview.section.clone();
-        document[PROFILE] = json!({"version":1,"region":preview.data.region,"rank":preview.data.rank});
+        document[PROFILE] = json!({"version":1,"region":preview.data.region,"rank":preview.data.rank,"totalExp":preview.data.total_exp});
         let selection = SiteSelection::for_player_data(&preview.data);
         world.insert_resource(TransientExploration);
         replace_live(world, document, selection);
@@ -409,9 +409,8 @@ impl PlayerDataImport {
         require_clean_editor(world)?;
         let Some((layouts, selection)) = self.exploration.take() else { return Ok(()); };
         world.remove_resource::<TransientExploration>();
-        let rank = saved_rank();
-        if let Some(mut menu) = world.get_resource_mut::<crate::menu_dialog::MenuMock>() { menu.set_player_rank(rank); }
-        if let Some(mut info) = world.get_resource_mut::<crate::info::InfoMock>() { info.set_player_rank(rank); }
+        let total_exp = saved_total_exp();
+        if let Some(mut user) = world.get_resource_mut::<crate::mysekai_rank::UserTotalExp>() { user.set(total_exp); }
         let roots = world.query_filtered::<Entity, With<crate::site::SiteRoot>>().iter(world).collect();
         let mut commands = world.commands();
         crate::site::queue_transition(&mut commands, roots, selection);
@@ -487,7 +486,7 @@ fn require_clean_editor(world: &World) -> Result<(), String> {
 }
 
 fn replace_live(world: &mut World, document: Value, selection: SiteSelection) {
-    let rank = profile_rank(&document);
+    let total_exp = profile_total_exp(&document);
     if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>() {
         panel.close_after_import();
     }
@@ -498,31 +497,29 @@ fn replace_live(world: &mut World, document: Value, selection: SiteSelection) {
     let mut commands = world.commands();
     crate::site::queue_transition(&mut commands, roots, selection);
     commands.queue(move |world: &mut World| {
-        if let Some(mut menu) = world.get_resource_mut::<crate::menu_dialog::MenuMock>() {
-            menu.set_player_rank(rank);
-        }
-        if let Some(mut info) = world.get_resource_mut::<crate::info::InfoMock>() {
-            info.set_player_rank(rank);
+        if let Some(mut user) = world.get_resource_mut::<crate::mysekai_rank::UserTotalExp>() {
+            user.set(total_exp);
         }
         world.insert_resource(SiteFixtureLayouts::from_document(document));
     });
 }
 
-fn profile_rank(document: &Value) -> Option<u32> {
+/// The saved profile's `UserMysekaiGamedata.totalExp`, when the imported
+/// file carried one.
+fn profile_total_exp(document: &Value) -> Option<i32> {
     if document[PROFILE]["version"].as_u64() != Some(1) {
         return None;
     }
-    document[PROFILE]["rank"]
-        .as_u64()
-        .and_then(|v| u32::try_from(v).ok())
-        .filter(|v| *v > 0)
+    document[PROFILE]["totalExp"]
+        .as_i64()
+        .and_then(|v| i32::try_from(v).ok())
 }
 
-pub(crate) fn saved_rank() -> Option<u32> {
+pub(crate) fn saved_total_exp() -> Option<i32> {
     settings_store::read_document()
         .ok()
         .as_ref()
-        .and_then(profile_rank)
+        .and_then(profile_total_exp)
 }
 
 /// Prefer the imported home on restart when the entry point has no explicit site.
