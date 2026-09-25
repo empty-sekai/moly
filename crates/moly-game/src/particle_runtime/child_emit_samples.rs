@@ -28,6 +28,11 @@
 //! A custom stream the target leaves disabled has no storage in the engine
 //! (its rows carry no array for it); it is neither loaded nor compared.
 //!
+//! A Noise target's rows carry the owner seed the harness wrote into the
+//! target's read-only state and the Noise scroll before and after each
+//! command; the product's Noise is installed from them and its scroll after
+//! the command is compared.
+//!
 //! Where this tree's Shape law refuses the target's shape, the engine's
 //! stored Shape output of each group (after its own store with the start
 //! matrix) is fed in its place and the Shape stream is not compared; the
@@ -338,6 +343,15 @@ fn run_row(seq: &Value, row: &Value, block: &Value, tally: &mut Tally, record: b
     let before = &row["before"];
     assert!(before.is_object(), "every row carries its own pool before");
     load_pool(&mut system, &before["pool"]);
+    if let Some(params) = system.emitter.noise.clone() {
+        let seed = image["noiseOwnerSeed"].as_u64().expect("a Noise target's image carries its owner seed") as u32;
+        system.noise = Some(NoiseRuntime {
+            law: NoiseLaw::from_params(&params).expect("receipt Noise inside the Noise law"),
+            state: NoiseState { scroll: f32::from_bits(word(&before["noiseScrollBits"])) },
+            owner_seed: seed,
+            owner: moly_law::particle::seed_owner::SeedOwner { seed, automatic: false },
+        });
+    }
     let mut initial = module_random(&before["rng"]["initial"]);
     let shape_before = module_random(&before["rng"]["shape"]);
     let command = ChildCommand::from_native_bytes(&hex(&row["command"]["rawHex"]), &hex(&row["command"]["emissionHex"]))
@@ -376,6 +390,11 @@ fn run_row(seq: &Value, row: &Value, block: &Value, tally: &mut Tally, record: b
     };
     if flat_random(&initial) != words(&native_after["rng"]["initial"]) {
         bad.push("rngInitial".into());
+    }
+    if let (Some(noise), Some(native)) = (&system.noise, native_after.get("noiseScrollBits")) {
+        if noise.state.scroll.to_bits() != word(native) {
+            bad.push("noiseScroll".into());
+        }
     }
     if let Some(kernel) = &kernel {
         if flat_random(&kernel.stream) != words(&native_after["rng"]["shape"]) {
@@ -428,6 +447,9 @@ const INHERIT_ARMS: [&str; 2] = ["ignoreInheritedSize", "addInheritedSize"];
 /// of the lane's own dt.
 const MODULE_ARMS: [&str; 5] = ["noVelocity", "noClamp", "clampBeforeVelocity", "velocityGroupedAssociation",
     "clampCommandDt"];
+/// Noise or the orbital velocity left out, the Noise scroll advanced on the
+/// newborn call, or left unadvanced on the catch-up steps.
+const NOISE_ARMS: [&str; 4] = ["noNoise", "noOrbital", "noiseScrollOnNewborn", "noiseCatchUpScrollFrozen"];
 
 /// The refusal the child side names for a command of `count` particles whose
 /// block carries an inherited word other than the size; None for a size-only
@@ -610,6 +632,28 @@ fn product_child_emit_matches_native_module_rows() {
     assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
     assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0);
     for arm in MODULE_ARMS {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}
+
+/// Child commands into the 016 bubble targets, which carry Noise and a
+/// two-constant orbital block (Local, Circle, a linear two-constant y):
+/// synthetic commands per frame, catch-up with every flag and none, into
+/// both exported blocks (start colour made constant and CustomData stripped
+/// by the harness; both are covered by their own receipts), and variants: a
+/// scroll speed with a nonzero starting scroll, orbital offsets with a radial
+/// speed, a strength curve, and a strong undamped Noise. The owner seed and
+/// the starting scroll are harness inputs. Every Noise arm must differ from
+/// native.
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_NOISE (the native Noise and orbital child rows)"]
+fn product_child_emit_matches_native_noise_rows() {
+    let arm_names: Vec<&'static str> = ARMS.iter().chain(NOISE_ARMS.iter()).copied().collect();
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_NOISE"], &arm_names);
+    report(&tally, &arm_red);
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0);
+    for arm in NOISE_ARMS {
         assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
     }
 }
