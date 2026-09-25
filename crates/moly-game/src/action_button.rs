@@ -78,6 +78,10 @@ const ICON_NODE: &str = "ActionButtonController/TalkActionButton/Icon";
 const GO_HOME_LAYOUT: &str = "ShellMyRoom";
 const GO_HOME_NODE: &str = "ActionButtonController/GoHomeButton";
 const GO_HOME_ICON_NODE: &str = "ActionButtonController/GoHomeButton/CustomImage";
+// The change-target button of the same controller: its own Image is fully
+// transparent, the visible part is the icon the view loads by type.
+const CHANGE_NODE: &str = "ActionButtonController/ChangeSelectTargetButton";
+const CHANGE_ICON_NODE: &str = "ActionButtonController/ChangeSelectTargetButton/Icon";
 
 /// 按钮根（图标件的父，可见性随栈首）。
 #[derive(Component)]
@@ -86,6 +90,10 @@ pub(crate) struct ActionButtonRoot;
 /// 图标件。
 #[derive(Component)]
 pub(crate) struct ActionButtonIcon;
+
+/// The change-target button (SetChangeButton shows it).
+#[derive(Component)]
+pub(crate) struct ActionButtonChange;
 
 #[derive(Component)]
 pub(crate) struct ActionButtonBackground;
@@ -222,6 +230,42 @@ impl ActionButtonScreen<'_, '_> {
             skin.geometry.rect(layouts, skin.button_node, canvas)?,
             skin.geometry.rect(layouts, skin.icon_node, canvas)?,
         ))
+    }
+
+    /// The change-target button's rect and its icon's, laid out in the head
+    /// view's own layout.
+    fn change_rects(
+        &self,
+        window: &Window,
+        shown: ButtonType,
+    ) -> Option<(
+        moly_assets::ui_layout::UiRect,
+        moly_assets::ui_layout::UiRect,
+    )> {
+        let skin = self.art.as_deref()?.skin_for(shown)?;
+        let layouts = self.layouts.as_deref()?;
+        let canvas = self.root.as_deref()?.size(window);
+        Some((
+            skin.geometry.rect(layouts, CHANGE_NODE, canvas)?,
+            skin.geometry.rect(layouts, CHANGE_ICON_NODE, canvas)?,
+        ))
+    }
+
+    fn change_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
+        let (button, _) = self.change_rects(window, shown)?;
+        let center = button.center() * self.scale(window)?;
+        Some(Vec2::new(window.width() * 0.5 + center.x, window.height() * 0.5 - center.y))
+    }
+
+    fn change_hit(&self, position: Vec2, window: &Window, shown: ButtonType) -> bool {
+        let (Some((button, _)), Some(scale)) =
+            (self.change_rects(window, shown), self.scale(window))
+        else {
+            return false;
+        };
+        let canvas_point = Vec2::new(position.x - window.width() * 0.5, window.height() * 0.5 - position.y)
+            / scale;
+        button.active && button.contains(canvas_point)
     }
 
     fn button_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
@@ -409,6 +453,9 @@ pub(crate) struct ActionButtonState {
     surveyed: bool,
     /// The door sensor entry's last next-frame wait, named once per reason.
     sensor_wait: Option<String>,
+    /// The change-target button was tapped; OnChangeActionTarget runs on
+    /// the next scan.
+    change_tapped: bool,
     /// The house-entry candidate's overlap and last next-frame wait, named
     /// when they change.
     house_touching: Option<bool>,
@@ -438,6 +485,7 @@ impl Default for ActionButtonState {
             reported: None,
             surveyed: false,
             sensor_wait: None,
+            change_tapped: false,
             house_touching: None,
             house_wait: None,
         }
@@ -460,6 +508,17 @@ impl ActionButtonState {
     /// 当前栈首（决定屏幕上显示哪个按钮）。
     pub(crate) fn current(&self) -> Option<(ButtonType, TargetId)> {
         self.stack.first()
+    }
+
+    /// SetChangeButton: shown unless the model hides it (the lock), with
+    /// more than one entry stacked.
+    pub(crate) fn change_shown(&self) -> bool {
+        !self.locked && self.stack.len() > 1
+    }
+
+    /// An entry of this button type is stacked, head or not.
+    fn stacked(&self, button: ButtonType) -> bool {
+        self.stack.buttons().any(|stacked| stacked == button)
     }
 
     fn fixture_target(&self, key: i32) -> Option<FixtureTarget> {
@@ -760,6 +819,12 @@ pub(crate) fn spawn_when_ready(
             GO_HOME_ICON_NODE,
         );
     }
+    // The change-target button is inactive in both prefabs until
+    // SetChangeButton shows it; its rect is read as shown.
+    let fields = &mut *art;
+    for skin in [fields.skin.as_mut(), fields.go_home.as_mut()].into_iter().flatten() {
+        skin.geometry.set_visible(CHANGE_NODE, true);
+    }
     let (Some(skin), Some(go_home)) = (art.skin.as_ref(), art.go_home.as_ref()) else {
         return;
     };
@@ -820,6 +885,21 @@ pub(crate) fn spawn_when_ready(
             RenderLayers::layer(BALLOON_LAYER),
         ))
         .add_children(&[background, icon]);
+    let change_icon = ButtonType::ChangeActionTarget
+        .icon_file_name()
+        .and_then(|name| art.icons.get(name))
+        .cloned()
+        .unwrap_or_default();
+    commands.spawn((
+        ActionButtonChange,
+        Sprite {
+            image: change_icon,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 0.6),
+        Visibility::Hidden,
+        RenderLayers::layer(BALLOON_LAYER),
+    ));
     info!("[action_button] source button background and icon installed under one hidden root");
 }
 
@@ -1113,6 +1193,28 @@ pub(crate) fn advance(
                 info!("[action_button] player timeline ended; stack pruned and unlocked");
             }
             state.timeline = None;
+        }
+    }
+    // OnChangeActionTarget, after its input interval passed in the click:
+    // RemoveNotCollisionObject, then with two or more entries the head
+    // moves to the back and the stack is shown again.
+    if std::mem::take(&mut state.change_tapped) {
+        remove_not_colliding(
+            state,
+            &inputs,
+            &eligibility,
+            player_entity,
+            position,
+            &frame,
+            &index,
+            sensor_frame.as_ref(),
+        );
+        if state.stack.rotate() {
+            info!(
+                "[action_button] change-target: head moves to the back; head now {:?} (stack depth {})",
+                state.stack.first(),
+                state.stack.len()
+            );
         }
     }
     // The Talk button's OnClickPlayerTalkAction awaits the talk action and
@@ -1655,6 +1757,42 @@ pub(crate) fn place_ui(
     }
 }
 
+/// The change-target button: visible with the buttons view while
+/// SetChangeButton shows it, laid out in the head view's layout.
+pub(crate) fn place_change_ui(
+    state: Res<ActionButtonState>,
+    screen: ActionButtonScreen,
+    roots: Query<&Visibility, (With<ActionButtonRoot>, Without<ActionButtonChange>)>,
+    mut change: Query<(&mut Visibility, &mut Transform, &mut Sprite), With<ActionButtonChange>>,
+) {
+    let Ok((_, window)) = screen.windows.single() else {
+        return;
+    };
+    let Ok((mut visibility, mut transform, mut sprite)) = change.single_mut() else {
+        return;
+    };
+    let view_shown = roots
+        .iter()
+        .any(|visibility| *visibility != Visibility::Hidden);
+    let rects = state
+        .current()
+        .and_then(|(head, _)| screen.change_rects(window, head));
+    let (Some((_, icon)), Some(scale), true, true) =
+        (rects, screen.scale(window), view_shown, state.change_shown())
+    else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let (local_scale, rotation, _) = icon.world.to_scale_rotation_translation();
+    *transform = Transform {
+        translation: (icon.center() * scale).extend(0.6),
+        rotation,
+        scale: local_scale * Vec3::new(scale, scale, 1.0),
+    };
+    sprite.custom_size = Some(icon.size);
+    *visibility = Visibility::Visible;
+}
+
 /// Update（拾取之前）：点按落在按钮上就分派动作并吃掉这一帧的点按。
 ///
 /// 节流照源：两次输入之间至少隔 [`ACTION_BUTTON_INPUT_INTERVAL`] 秒。
@@ -1686,7 +1824,12 @@ pub(crate) fn click(
     };
     let taps: Vec<Vec2> = gestures
         .read()
-        .filter(|event| event.kind == GestureKind::Tap && event.state == GestureState::End)
+        // A button takes every pointer click: the second of two quick taps
+        // is a double tap to the field recognizer, still a click here.
+        .filter(|event| {
+            matches!(event.kind, GestureKind::Tap | GestureKind::DoubleTap)
+                && event.state == GestureState::End
+        })
         .map(|event| event.position)
         .collect();
     // Open gap for Talk: available() is closed while any conversation plays,
@@ -1706,7 +1849,11 @@ pub(crate) fn click(
         .iter()
         .any(|visibility| *visibility != Visibility::Hidden);
     if let (Some(&tap), Some((head, _))) = (taps.first(), state.current()) {
-        if head != ButtonType::Talk && (!open || !shown || !screen.hit(tap, window, head)) {
+        let on_change = state.change_shown() && screen.change_hit(tap, window, head);
+        if head != ButtonType::Talk
+            && !on_change
+            && (!open || !shown || !screen.hit(tap, window, head))
+        {
             info!(
                 "[action_button] tap at ({:.0},{:.0}) not taken for {head:?}: field open {open}, button shown {shown}, on the button {}",
                 tap.x,
@@ -1726,6 +1873,19 @@ pub(crate) fn click(
         TargetId::Character(_) | TargetId::Sensor => None,
     };
     for position in taps {
+        // The change-target button: IsCantActionButtonInput (the shared
+        // input interval), then OnChangeActionTarget on the next scan.
+        if state.change_shown() && screen.change_hit(position, window, button) {
+            let now = time.elapsed_secs();
+            consumed.0 = true;
+            if now - state.last_input < ACTION_BUTTON_INPUT_INTERVAL {
+                continue;
+            }
+            state.last_input = now;
+            state.change_tapped = true;
+            info!("[action_button] change-target button pressed (stack depth {})", state.stack.len());
+            continue;
+        }
         if !screen.hit(position, window, button) {
             continue;
         }
@@ -2213,8 +2373,6 @@ pub(crate) struct InjectedTouches<'w> {
 #[derive(Default)]
 pub(crate) struct DoorWalk {
     pressing: bool,
-    /// The tap finger went down at this time.
-    tap_at: Option<f32>,
     /// The site generation the door button was pressed on.
     tapped: Option<u64>,
     /// The site generation this walk runs on, and when it began.
@@ -2222,6 +2380,8 @@ pub(crate) struct DoorWalk {
     /// The walk stopped on this generation (reached or timed out).
     stopped: Option<u64>,
     last_log: f32,
+    /// The last change-target tap.
+    last_change: f32,
 }
 
 /// Instrument (`MOLY_DOOR_WALK_SECS`, off by default; from
@@ -2284,17 +2444,6 @@ pub(crate) fn smoke_door_walk(
             walk.pressing = false;
         }
     };
-    if let Some(at) = walk.tap_at {
-        if now - at >= 0.1 {
-            let shown = button_state
-                .current()
-                .map_or(ButtonType::Talk, |(button, _)| button);
-            let position = screen.button_position(window, shown).unwrap_or(base);
-            touch(TAP_FINGER, TouchPhase::Ended, position);
-            walk.tap_at = None;
-        }
-        return;
-    }
     // Hold the walk finger still at the pad's centre (direction zero) while
     // standing: a free touch would be the joystick's next capture, and the
     // tap finger must reach the gesture layer instead.
@@ -2365,13 +2514,17 @@ pub(crate) fn smoke_door_walk(
             delta.length()
         );
     }
-    if head.is_some_and(|(button, _)| button == expected) {
+    // The buttons share one input interval (0.3 s): after a change-target
+    // tap the door button waits it out.
+    if head.is_some_and(|(button, _)| button == expected)
+        && now - walk.last_change >= ACTION_BUTTON_INPUT_INTERVAL + 0.05
+    {
         hold(walk, &mut touch);
         let Some(position) = screen.button_position(window, expected) else {
             return;
         };
         touch(TAP_FINGER, TouchPhase::Started, position);
-        walk.tap_at = Some(now);
+        touch(TAP_FINGER, TouchPhase::Ended, position);
         walk.tapped = Some(epoch);
         info!(
             "[door-walk] head {head:?} at distance {distance:.2} m (3D {:.2} m); tapping its button at ({:.0},{:.0})",
@@ -2389,6 +2542,27 @@ pub(crate) fn smoke_door_walk(
             now - since
         );
         return;
+    }
+    // The door's button is stacked behind another head: the change-target
+    // button brings it forward, one tap at a time.
+    if head.is_some_and(|(button, _)| button != expected)
+        && button_state.stacked(expected)
+        && button_state.change_shown()
+        && now - walk.last_change >= 1.0
+    {
+        if let Some(position) = head.and_then(|(shown, _)| screen.change_position(window, shown)) {
+            hold(walk, &mut touch);
+            // Down and up in one frame: a slow frame must not turn the tap
+            // into a long touch (0.25 s).
+            touch(TAP_FINGER, TouchPhase::Started, position);
+            touch(TAP_FINGER, TouchPhase::Ended, position);
+            walk.last_change = now;
+            info!(
+                "[door-walk] {expected:?} is stacked behind {head:?}; tapping the change-target button at ({:.0},{:.0})",
+                position.x, position.y
+            );
+            return;
+        }
     }
     // At the door: stand and wait for the head (another entry that joined
     // first keeps it until its object leaves).
