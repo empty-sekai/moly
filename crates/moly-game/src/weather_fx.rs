@@ -3556,6 +3556,7 @@ pub(crate) fn advance(
         camera_transform.translation(),
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
+        perspective.near,
     );
     // Without an active site the frame the anchors are expressed in does not
     // exist (a site switch is in progress); skip the frame like a missing camera.

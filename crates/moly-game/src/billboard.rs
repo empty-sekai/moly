@@ -130,6 +130,8 @@ pub struct CameraBasis {
     pub fov_y: f32,
     /// 视口宽高比。
     pub aspect: f32,
+    /// Near clip plane distance; the renderer's depth sort reads it.
+    pub near: f32,
 }
 
 /// 视口占比钳制：渲染器记录的 min/maxParticleSize。
@@ -265,7 +267,7 @@ pub fn write_quads(
 
 /// 从相机的世界变换矩阵取三条基轴。bevy 的相机看向 `-Z`，所以视线
 /// 方向是第三列的相反数。
-pub fn basis_from_matrix(matrix: Mat3, position: Vec3, fov_y: f32, aspect: f32) -> CameraBasis {
+pub fn basis_from_matrix(matrix: Mat3, position: Vec3, fov_y: f32, aspect: f32, near: f32) -> CameraBasis {
     CameraBasis {
         position,
         forward: -matrix.z_axis.normalize_or_zero(),
@@ -273,5 +275,6 @@ pub fn basis_from_matrix(matrix: Mat3, position: Vec3, fov_y: f32, aspect: f32) 
         up: matrix.y_axis.normalize_or_zero(),
         fov_y,
         aspect,
+        near,
     }
 }
