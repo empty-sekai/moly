@@ -1,14 +1,19 @@
-//! The house controller's `PlayerOff` lane, bounded to what the entry plays.
+//! The house controller's `PlayerOn` and `PlayerOff` lanes, bounded to what
+//! the entry and the door moves play.
 //!
 //! `HouseView` is a separate component on the house's FixtureView object: it
 //! holds the two door locators and the house Animator. Its controller
 //! (`HouseAnimationController`) has four AnyState trigger transitions on
 //! layer 0 and an empty second layer (no states, weight 0), so only layer 0
-//! can write a pose. The entry sets one trigger, `PlayerOff`; this lane plays
-//! exactly that transition: 0.25 s fixed, from the default state `None`
-//! (no motion, write defaults on, so the blend base is the bound pose), into
-//! a four-component quaternion clip on the door joint. The clip's
-//! `OnPlayHouseSE` events play the door sounds through `HouseView.OnPlayHouseSE`.
+//! can write a pose. The entry and the room-to-home move set `PlayerOff`,
+//! the home-to-room move sets `PlayerOn`; this lane plays exactly those
+//! transitions: 0.25 s fixed, from the state the controller is in (the
+//! default state `None` has no motion and writes defaults, so its pose is
+//! the bound pose; a finished clip holds its last pose), into a
+//! four-component quaternion clip on the door joint. The clip's
+//! `OnPlayHouseSE` events play the door sounds through `HouseView.OnPlayHouseSE`,
+//! which drops a sound `CanPlayHouseDoorSe` refuses or one the room-to-home
+//! move put on the view's ignore list (`AddIgnoreSe` / `ClearIgnoreSe`).
 //! Any other shape of house controller is refused with its reason.
 
 use std::{collections::HashMap, sync::Arc};
@@ -27,8 +32,23 @@ use crate::{
     source_curve::Curve,
 };
 
-const TRIGGER: &str = "PlayerOff";
 const SE_EVENT: &str = "OnPlayHouseSE";
+
+/// The two AnyState triggers this lane plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HouseTrigger {
+    PlayerOn,
+    PlayerOff,
+}
+
+impl HouseTrigger {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PlayerOn => "PlayerOn",
+            Self::PlayerOff => "PlayerOff",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NodeId {
@@ -86,10 +106,15 @@ pub(crate) struct HouseDefinition {
     inside_door: Option<NodeId>,
     outside_door: Option<NodeId>,
     player_off: Arc<DoorProgram>,
+    /// Refused on its own: the entry needs only `PlayerOff`.
+    player_on: Result<Arc<DoorProgram>, String>,
 }
 
 /// Packages that carry a `HouseView`, keyed by package name. A package whose
-/// controller is not the bounded shape keeps its refusal reason.
+/// controller is not the bounded shape keeps its refusal reason. Only the
+/// home fixture's record is ever read ([`find_house`]), so a refusal is
+/// reported there, not here: many packages carry a `HouseView` record that
+/// the source never reads.
 #[derive(Resource, Default)]
 pub(crate) struct HouseCatalog(HashMap<String, Result<Arc<HouseDefinition>, String>>);
 
@@ -99,9 +124,6 @@ impl HouseCatalog {
             return;
         }
         let definition = house_definition(package).map(Arc::new);
-        if let Err(reason) = &definition {
-            warn!("[house-door] {name} HouseView preparation: {reason}");
-        }
         self.0.insert(name.to_owned(), definition);
     }
 
@@ -203,19 +225,61 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         return Err("house default state is not the motionless write-defaults state".into());
     }
     let parameters = array(controller, "parameters")?;
+    let program = |trigger| {
+        trigger_program(
+            package,
+            machine,
+            states,
+            parameters,
+            &animator_id,
+            &file,
+            trigger,
+        )
+    };
+    let player_off = program(HouseTrigger::PlayerOff)?;
+    let player_on = program(HouseTrigger::PlayerOn).map(Arc::new);
+    Ok(HouseDefinition {
+        file,
+        view_game_object: view_object
+            .path_id
+            .parse()
+            .map_err(|_| "invalid HouseView GameObject")?,
+        house_view: i64_id(&view["asset"], "HouseView")?,
+        animator: animator_id
+            .path_id
+            .parse()
+            .map_err(|_| "invalid Animator identity")?,
+        inside_door: locator(view, transforms, "insideDoorActionPoint")?,
+        outside_door: locator(view, transforms, "outsideDoorActionPoint")?,
+        player_off: Arc::new(player_off),
+        player_on,
+    })
+}
+
+/// One AnyState trigger transition of layer 0 and the clip it plays.
+fn trigger_program(
+    package: &Value,
+    machine: &Value,
+    states: &[Value],
+    parameters: &[Value],
+    animator_id: &SourceAssetId,
+    file: &str,
+    trigger: HouseTrigger,
+) -> Result<DoorProgram, String> {
+    let name = trigger.name();
     let named: Vec<_> = parameters
         .iter()
-        .filter(|parameter| parameter["name"].as_str() == Some(TRIGGER))
+        .filter(|parameter| parameter["name"].as_str() == Some(name))
         .collect();
     let [parameter] = named.as_slice() else {
-        return Err("house controller has no unique PlayerOff parameter".into());
+        return Err(format!("house controller has no unique {name} parameter"));
     };
     if parameter["type"].as_u64() != Some(9) {
-        return Err("PlayerOff is not a Trigger parameter".into());
+        return Err(format!("{name} is not a Trigger parameter"));
     }
     let parameter_id = parameter["id"]
         .as_u64()
-        .ok_or("PlayerOff parameter has no id")?;
+        .ok_or("trigger parameter has no id")?;
     let transitions: Vec<_> = array(machine, "anyStateTransitions")?
         .iter()
         .filter(|transition| {
@@ -229,32 +293,32 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         })
         .collect();
     let [transition] = transitions.as_slice() else {
-        return Err("PlayerOff has no unique AnyState transition".into());
+        return Err(format!("{name} has no unique AnyState transition"));
     };
     if transition["hasExitTime"].as_bool() != Some(false)
         || transition["hasFixedDuration"].as_bool() != Some(true)
         || transition["raw"]["m_InterruptionSource"].as_u64() != Some(0)
         || number(transition, "offset")? != 0.0
     {
-        return Err(
-            "PlayerOff transition is not a fixed, uninterruptible, zero-offset trigger".into(),
-        );
+        return Err(format!(
+            "{name} transition is not a fixed, uninterruptible, zero-offset trigger"
+        ));
     }
     let transition_seconds = number(transition, "duration")?;
     if transition_seconds < 0.0 {
-        return Err("PlayerOff transition duration is negative".into());
+        return Err(format!("{name} transition duration is negative"));
     }
     let destination = transition["destinationState"]
         .as_u64()
-        .ok_or("PlayerOff transition has no destination")?;
+        .ok_or_else(|| format!("{name} transition has no destination"))?;
     let state = states
         .iter()
         .find(|state| state["index"].as_u64() == Some(destination))
-        .ok_or("PlayerOff destination state absent")?;
+        .ok_or_else(|| format!("{name} destination state absent"))?;
     if !array(state, "transitions")?.is_empty() {
-        return Err(
-            "PlayerOff state has outgoing transitions; it would need a controller runner".into(),
-        );
+        return Err(format!(
+            "{name} state has outgoing transitions; it would need a controller runner"
+        ));
     }
     if state["raw"]["m_CycleOffset"].as_f64() != Some(0.0)
         || state["raw"]["m_SpeedParamID"].as_u64() != Some(0)
@@ -262,31 +326,35 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         || state["raw"]["m_TimeParamID"].as_u64() != Some(0)
         || state["raw"]["m_Mirror"].as_bool() != Some(false)
     {
-        return Err("PlayerOff state has dynamic time or mirror inputs".into());
+        return Err(format!("{name} state has dynamic time or mirror inputs"));
     }
     let speed = number(state, "speed")?;
-    let motion = one(array(state, "motions")?, "PlayerOff motion")?;
+    let motion = one(array(state, "motions")?, name)?;
     let clip = referenced(array(package, "clips")?, &motion["clip"]["source"])?;
     if clip["loopTime"].as_bool() != Some(false) || number(clip, "startTime")? != 0.0 {
-        return Err("PlayerOff clip is looping or does not start at zero".into());
+        return Err(format!("{name} clip is looping or does not start at zero"));
     }
     if !array(clip, "pptrCurves")?.is_empty() {
-        return Err("PlayerOff clip has object-reference curves".into());
+        return Err(format!("{name} clip has object-reference curves"));
     }
     let duration = number(clip, "duration")?;
     if duration < 0.0 || speed <= 0.0 {
-        return Err("PlayerOff clip time domain is invalid".into());
+        return Err(format!("{name} clip time domain is invalid"));
     }
     let curves = array(clip, "curves")?;
     if curves.len() != 4 {
-        return Err("PlayerOff clip is not one quaternion Transform binding".into());
+        return Err(format!(
+            "{name} clip is not one quaternion Transform binding"
+        ));
     }
     let mut joint = None;
     let mut components: [Option<Curve>; 4] = std::array::from_fn(|_| None);
     for value in curves {
         let binding = &value["binding"];
         if binding["typeId"].as_u64() != Some(4) || binding["attribute"].as_u64() != Some(2) {
-            return Err("PlayerOff clip writes something other than a Transform rotation".into());
+            return Err(format!(
+                "{name} clip writes something other than a Transform rotation"
+            ));
         }
         let component = binding["component"]
             .as_u64()
@@ -296,7 +364,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
             return Err("duplicate quaternion component binding".into());
         }
         let output = one(array(value, "targets")?, "quaternion curve target")?;
-        if identity(&output["animator"])? != animator_id {
+        if identity(&output["animator"])? != *animator_id {
             return Err("quaternion curve belongs to another Animator".into());
         }
         let game_object = identity(&output["gameObject"])?;
@@ -331,7 +399,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
     for event in array(clip, "events")? {
         if event["functionName"].as_str() != Some(SE_EVENT) {
             return Err(format!(
-                "PlayerOff event {:?} has no consumer",
+                "{name} event {:?} has no consumer",
                 event["functionName"].as_str()
             ));
         }
@@ -349,28 +417,14 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         });
     }
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
-    Ok(HouseDefinition {
-        file,
-        view_game_object: view_object
-            .path_id
-            .parse()
-            .map_err(|_| "invalid HouseView GameObject")?,
-        house_view: i64_id(&view["asset"], "HouseView")?,
-        animator: animator_id
-            .path_id
-            .parse()
-            .map_err(|_| "invalid Animator identity")?,
-        inside_door: locator(view, transforms, "insideDoorActionPoint")?,
-        outside_door: locator(view, transforms, "outsideDoorActionPoint")?,
-        player_off: Arc::new(DoorProgram {
-            clip: identity(&clip["source"])?,
-            duration,
-            speed,
-            transition_seconds,
-            joint: joint.expect("four curves share one joint"),
-            components: [x, y, z, w],
-            events,
-        }),
+    Ok(DoorProgram {
+        clip: identity(&clip["source"])?,
+        duration,
+        speed,
+        transition_seconds,
+        joint: joint.expect("four curves share one joint"),
+        components: [x, y, z, w],
+        events,
     })
 }
 
@@ -383,8 +437,10 @@ pub(crate) struct HouseBinding {
     pub(crate) outside_door: Option<Entity>,
     /// `HouseView.InsideDoorActionPoint`; `None` when the record has none.
     pub(crate) inside_door: Option<Entity>,
+    /// The `PlayerOff` clip's joint, and the `PlayerOn` clip's when that
+    /// program was accepted.
     joint: Entity,
-    rest: Quat,
+    joint_on: Option<Entity>,
     definition: Arc<HouseDefinition>,
 }
 
@@ -392,7 +448,7 @@ pub(crate) struct HouseBinding {
 pub(crate) enum HouseLookup {
     /// A placed house package is still binding its scene or view.
     Pending(String),
-    /// No placed fixture carries a HouseView.
+    /// No placed fixture is a home fixture.
     Absent,
     Found(HouseBinding),
     /// A house is placed but cannot be driven; the reason names why.
@@ -408,24 +464,52 @@ pub(crate) fn find_house(world: &mut World) -> HouseLookup {
         .iter(world)
         .map(|(entity, identity)| (entity, identity.clone()))
         .collect();
-    let catalog = world.resource::<HouseCatalog>();
-    let houses: Vec<_> = placed
-        .into_iter()
-        .filter_map(|(entity, identity)| {
-            catalog
-                .get(&identity.model_package)
-                .map(|definition| (entity, identity, definition.clone()))
+    // `FixtureManager.GetHouseView`: the `HouseView` component of the view of
+    // `GetHomeFixture()`, the first fixture of the placed list whose master
+    // is a home system fixture (`MysekaiFixtureUtility.IsHomeFixture`). A
+    // `HouseView` record on any other fixture is never read.
+    let Some(homes) = world.get_resource::<crate::entry::house::HomeFixtures>() else {
+        return HouseLookup::Pending("home fixture tables are loading".into());
+    };
+    let order: HashMap<String, usize> = world
+        .get_resource::<crate::fixture::FixturePlacements>()
+        .map(|placements| {
+            placements
+                .placed_instances()
+                .iter()
+                .enumerate()
+                .map(|(index, placed)| (placed.uid.to_owned(), index))
+                .collect()
         })
-        .collect();
-    let [(root, identity, definition)] = houses.as_slice() else {
-        return if houses.is_empty() {
-            HouseLookup::Absent
-        } else {
-            HouseLookup::Failed(format!(
-                "{} placed fixtures carry a HouseView",
-                houses.len()
-            ))
-        };
+        .unwrap_or_default();
+    let mut home_rows = Vec::new();
+    for (entity, identity) in placed {
+        match homes.is_home(&identity.model_package) {
+            Ok(true) => home_rows.push((entity, identity)),
+            Ok(false) => {}
+            Err(reason) => return HouseLookup::Failed(format!("home fixture tables: {reason}")),
+        }
+    }
+    home_rows.sort_by_key(|(_, identity)| order.get(&identity.uid).copied().unwrap_or(usize::MAX));
+    let Some((root, identity)) = home_rows.first() else {
+        return HouseLookup::Absent;
+    };
+    if home_rows.len() > 1 {
+        info!(
+            "[house-door] {} home fixtures placed; the first in layout order is the house ({})",
+            home_rows.len(),
+            identity.uid
+        );
+    }
+    let Some(definition) = world
+        .resource::<HouseCatalog>()
+        .get(&identity.model_package)
+        .cloned()
+    else {
+        return HouseLookup::Failed(format!(
+            "{}: the home fixture carries no HouseView record",
+            identity.model_package
+        ));
     };
     let definition = match definition {
         Ok(definition) => definition.clone(),
@@ -465,7 +549,8 @@ fn bind(
         return Err("bound FixtureView is not the HouseView/Animator object".into());
     }
     let mut stack = vec![view];
-    let (mut outside, mut inside, mut joints) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut outside, mut inside, mut joints, mut joints_on) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     while let Some(entity) = stack.pop() {
         if let Some(children) = world.get::<Children>(entity) {
             stack.extend(children.iter());
@@ -490,6 +575,13 @@ fn bind(
         if definition.player_off.joint.matches(&definition.file, id) {
             joints.push(entity);
         }
+        if definition
+            .player_on
+            .as_ref()
+            .is_ok_and(|program| program.joint.matches(&definition.file, id))
+        {
+            joints_on.push(entity);
+        }
     }
     let single = |found: &[Entity], label: &str| -> Result<Entity, String> {
         match found {
@@ -511,16 +603,21 @@ fn bind(
         .map(|_| single(&inside, "inside door locator"))
         .transpose()?;
     let joint = single(&joints, "door joint")?;
-    let rest = world
-        .get::<Transform>(joint)
-        .ok_or("door joint has no Transform")?
-        .rotation;
-    if let Some(by) = world.get::<AnimatedBy>(joint) {
-        if world
-            .get::<AnimationPlayer>(by.0)
-            .is_some_and(|player| player.playing_animations().next().is_some())
-        {
-            return Err("door joint is already owned by an active animation player".into());
+    let joint_on = match &definition.player_on {
+        Ok(_) => Some(single(&joints_on, "PlayerOn door joint")?),
+        Err(_) => None,
+    };
+    for joint in std::iter::once(joint).chain(joint_on) {
+        if world.get::<Transform>(joint).is_none() {
+            return Err("door joint has no Transform".into());
+        }
+        if let Some(by) = world.get::<AnimatedBy>(joint) {
+            if world
+                .get::<AnimationPlayer>(by.0)
+                .is_some_and(|player| player.playing_animations().next().is_some())
+            {
+                return Err("door joint is already owned by an active animation player".into());
+            }
         }
     }
     Ok(HouseBinding {
@@ -530,7 +627,7 @@ fn bind(
         outside_door,
         inside_door,
         joint,
-        rest,
+        joint_on,
         definition,
     })
 }
@@ -538,9 +635,11 @@ fn bind(
 struct DoorPlayback {
     root: Entity,
     uid: String,
+    trigger: HouseTrigger,
     joint: Entity,
     file: String,
-    rest: Quat,
+    /// The source state's pose the transition blends from.
+    base: Quat,
     program: Arc<DoorProgram>,
     elapsed: f64,
     transition_elapsed: f64,
@@ -548,37 +647,104 @@ struct DoorPlayback {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct HouseDoors(Vec<DoorPlayback>);
+pub(crate) struct HouseDoors {
+    playing: Vec<DoorPlayback>,
+    /// `HouseView.AddIgnoreSe` per house root.
+    ignored: HashMap<Entity, Vec<String>>,
+}
 
-/// `HouseView.SetAnimationTrigger("PlayerOff")`: `Animator.SetTrigger`. The
-/// controller takes the AnyState transition on its next evaluation, which is
-/// this frame's animation update: the playback starts here and advances in
-/// the same frame's [`advance`].
+/// `HouseView.SetAnimationTrigger("PlayerOff")`.
 pub(crate) fn set_trigger_player_off(
     world: &mut World,
     binding: &HouseBinding,
 ) -> Result<(), String> {
+    set_trigger(world, binding, HouseTrigger::PlayerOff)
+}
+
+/// `HouseView.SetAnimationTrigger(trigger)`: `Animator.SetTrigger`. The
+/// controller takes the AnyState transition on its next evaluation, which is
+/// this frame's animation update: the playback starts here and advances in
+/// the same frame's [`advance`]. The transition blends from the pose the
+/// current state writes: the bound pose in the default state, a finished
+/// clip's last pose otherwise (the joint holds it).
+pub(crate) fn set_trigger(
+    world: &mut World,
+    binding: &HouseBinding,
+    trigger: HouseTrigger,
+) -> Result<(), String> {
+    let (program, joint) = match trigger {
+        HouseTrigger::PlayerOff => (binding.definition.player_off.clone(), binding.joint),
+        HouseTrigger::PlayerOn => match (&binding.definition.player_on, binding.joint_on) {
+            (Ok(program), Some(joint)) => (program.clone(), joint),
+            (Err(reason), _) => return Err(format!("PlayerOn refused: {reason}")),
+            (Ok(_), None) => return Err("PlayerOn joint not bound".into()),
+        },
+    };
+    let base = world
+        .get::<Transform>(joint)
+        .ok_or("door joint has no Transform")?
+        .rotation;
     let mut doors = world.get_resource_or_insert_with(HouseDoors::default);
-    if doors.0.iter().any(|door| door.root == binding.root) {
-        return Err("a PlayerOff transition is already playing on this house".into());
+    if doors.playing.iter().any(|door| door.root == binding.root) {
+        return Err(format!(
+            "a transition is already playing on this house; {} not taken",
+            trigger.name()
+        ));
     }
-    let program = binding.definition.player_off.clone();
     info!(
-        "[house-door] {} trigger={TRIGGER} source-clip={:?} transition={}s duration={}s joint={:?}",
-        binding.uid, program.clip, program.transition_seconds, program.duration, binding.joint
+        "[house-door] {} trigger={} source-clip={:?} transition={}s duration={}s joint={:?}",
+        binding.uid,
+        trigger.name(),
+        program.clip,
+        program.transition_seconds,
+        program.duration,
+        joint
     );
-    doors.0.push(DoorPlayback {
+    doors.playing.push(DoorPlayback {
         root: binding.root,
         uid: binding.uid.clone(),
-        joint: binding.joint,
+        trigger,
+        joint,
         file: binding.definition.file.clone(),
-        rest: binding.rest,
+        base,
         program,
         elapsed: 0.0,
         transition_elapsed: 0.0,
         next_event: 0,
     });
     Ok(())
+}
+
+/// `HouseView.AddIgnoreSe(se)`.
+pub(crate) fn add_ignore_se(world: &mut World, binding: &HouseBinding, se: &str) {
+    let mut doors = world.get_resource_or_insert_with(HouseDoors::default);
+    doors
+        .ignored
+        .entry(binding.root)
+        .or_default()
+        .push(se.to_owned());
+    info!("[house-door] {} AddIgnoreSe({se})", binding.uid);
+}
+
+/// `HouseView.ClearIgnoreSe()`.
+pub(crate) fn clear_ignore_se(world: &mut World, binding: &HouseBinding) {
+    if let Some(mut doors) = world.get_resource_mut::<HouseDoors>() {
+        doors.ignored.remove(&binding.root);
+    }
+    info!("[house-door] {} ClearIgnoreSe", binding.uid);
+}
+
+/// The house is about to be torn down with the site (a door move leaves
+/// home): its playback ends with it.
+pub(crate) fn release(world: &mut World, root: Entity) {
+    if let Some(mut doors) = world.get_resource_mut::<HouseDoors>() {
+        let before = doors.playing.len();
+        doors.playing.retain(|door| door.root != root);
+        doors.ignored.remove(&root);
+        if doors.playing.len() != before {
+            info!("[house-door] playback ends with the site teardown");
+        }
+    }
 }
 
 /// Transition weight toward the clip: linear in fixed-duration seconds.
@@ -598,8 +764,7 @@ fn blend(rest: Quat, sampled: Quat, weight: f32) -> Quat {
 }
 
 /// `HouseView.CanPlayHouseDoorSe`: always on the home site, otherwise only
-/// while the player is in ExitMoveHouse (13). The ignore set is written only
-/// by the room-to-home action, which the entry does not run.
+/// while the player is in ExitMoveHouse (13).
 fn can_play_door_se(world: &World) -> bool {
     world
         .get_resource::<crate::site::SiteActive>()
@@ -617,7 +782,8 @@ pub(crate) fn advance(world: &mut World) {
     let Some(mut doors) = world.remove_resource::<HouseDoors>() else {
         return;
     };
-    doors.0.retain_mut(|door| {
+    let ignored = std::mem::take(&mut doors.ignored);
+    doors.playing.retain_mut(|door| {
         let identity_ok = world
             .get::<SourceObjectIdentity>(door.joint)
             .is_some_and(|id| door.program.joint.matches(&door.file, id));
@@ -631,7 +797,7 @@ pub(crate) fn advance(world: &mut World) {
         door.elapsed += f64::from(delta) * door.program.speed;
         door.transition_elapsed += f64::from(delta);
         let weight = transition_weight(door.transition_elapsed, door.program.transition_seconds);
-        let pose = blend(door.rest, door.program.sample(door.elapsed), weight);
+        let pose = blend(door.base, door.program.sample(door.elapsed), weight);
         if let Some(mut transform) = world.get_mut::<Transform>(door.joint) {
             if transform.rotation != pose {
                 transform.rotation = pose;
@@ -643,7 +809,15 @@ pub(crate) fn advance(world: &mut World) {
             .get(door.next_event)
             .filter(|event| event.time <= door.elapsed)
         {
-            if can_play_door_se(world) {
+            let muted = ignored
+                .get(&door.root)
+                .is_some_and(|list| list.contains(&event.se));
+            if muted {
+                info!(
+                    "[house-door] {} event={SE_EVENT}({}) not played: on the ignore list",
+                    door.uid, event.se
+                );
+            } else if can_play_door_se(world) {
                 world.resource_mut::<SeRequests>().0.push(SeRequest {
                     owner: None,
                     cue: event.se.clone(),
@@ -666,12 +840,14 @@ pub(crate) fn advance(world: &mut World) {
             && door.transition_elapsed >= door.program.transition_seconds;
         if finished {
             info!(
-                "[house-door] {} PlayerOff clip held at its last pose",
-                door.uid
+                "[house-door] {} {} clip held at its last pose",
+                door.uid,
+                door.trigger.name()
             );
         }
         !finished
     });
+    doors.ignored = ignored;
     world.insert_resource(doors);
 }
 
