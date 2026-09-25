@@ -604,3 +604,65 @@ fn closest_on_triangle(p: [f32; 2], corners: [[f32; 2]; 3]) -> [f32; 2] {
     .min_by(|a, b| distance2(*a, p).total_cmp(&distance2(*b, p)))
     .expect("three candidate points")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::contour::{Contour, ContourVert};
+    use super::*;
+
+    fn square(region: u32, x0: i32, z0: i32, x1: i32, z1: i32) -> Contour {
+        let v = |x, z| ContourVert { x, z, neighbour: 0 };
+        Contour {
+            verts: vec![v(x0, z0), v(x1, z0), v(x1, z1), v(x0, z1)],
+            region,
+        }
+    }
+
+    /// A 20 x 10 grid, voxel 0.1: region 1 on cells x 0..10, region 2 on
+    /// x 10..20. Only region 1 has navigation cells; region 2 is walkable but
+    /// was not triangulated (a region can lose its cells to contour
+    /// simplification or a failed triangulation).
+    fn fixture() -> (Grid, Regions, PolyMesh) {
+        let (cols, rows) = (20usize, 10usize);
+        let grid = Grid {
+            origin: [0.0, 0.0],
+            voxel: 0.1,
+            cols,
+            rows,
+            walkable: vec![true; cols * rows],
+        };
+        let ids = (0..cols * rows)
+            .map(|i| if i % cols < 10 { 1 } else { 2 })
+            .collect();
+        let regions = Regions { ids, max: 3 };
+        let mut polys = build(&[square(1, 0, 0, 10, 10)]);
+        polys.cache_centres(&grid);
+        (grid, regions, polys)
+    }
+
+    /// Source rule (NavMeshQuery.FindNearestPoly): every polygon in the query
+    /// box competes by closest-point distance, regions play no part, and the
+    /// closest point must lie inside the box.
+    #[test]
+    fn locate_takes_the_nearest_cell_of_any_region_inside_the_query_box() {
+        let (grid, regions, polys) = fixture();
+        // Region 2 point 0.15 m from region 1's cells: a 0.24 box reaches them.
+        let near = [1.15, 0.5];
+        let hit = polys
+            .locate(&grid, &regions, near, 0.24)
+            .expect("nearest cell in the box");
+        let corners = polys.tris[hit as usize].map(|v| to_world(&grid, polys.verts[v as usize]));
+        let closest = closest_on_triangle(near, corners);
+        assert!((distance2(closest, near).sqrt() - 0.15).abs() < 1e-5);
+        // The same point with a box narrower than that distance: no cell.
+        assert!(polys.locate(&grid, &regions, near, 0.1).is_none());
+        // 0.45 m away: the static 0.5 box reaches, the agent 0.24 box does not.
+        let far = [1.45, 0.5];
+        assert!(polys.locate(&grid, &regions, far, 0.5).is_some());
+        assert!(polys.locate(&grid, &regions, far, 0.24).is_none());
+        // Containment in the own region is the fast path and wins.
+        let inside = [0.35, 0.45];
+        let own = polys.locate(&grid, &regions, inside, 0.0).unwrap();
+        assert!(polys.contains(&grid, own, inside));
+    }
+}
