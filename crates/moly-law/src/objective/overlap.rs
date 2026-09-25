@@ -98,3 +98,7 @@ pub fn use_dither(alpha: f32) -> bool { alpha <= 0.999 }
 #[cfg(test)]
 #[path = "overlap_source_cases.rs"]
 mod source_cases;
+
+#[cfg(test)]
+#[path = "dither_source_cases.rs"]
+mod dither_source_cases;

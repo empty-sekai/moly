@@ -1,13 +1,21 @@
 //! Presenter call 5: `UpdateNpcDither`, the NPC's dither alpha.
 //!
 //! Source shape of the call: without a field camera, a graphics config or a
-//! camera object nothing is written; in the photo-shot game state the alpha is
+//! camera object nothing is written; in the cut-scene game state the alpha is
 //! 1.0; outside the Mysekai scene nothing is written; otherwise the view's
 //! `UpdateDitherAlpha(camera, config)`. This host runs the NPC-distance branch
 //! of that update (the first NPC in the avatar list whose hips are within the
 //! transparent distance, measured to its root); the camera and player
 //! branches are named gaps of this file. Transforms are read as the frame's
 //! update sees them: the last propagated pose.
+//!
+//! The NPC branch is off (alpha 1.0) while this NPC is talking or plays a
+//! fixture action (states FixtureAction, FixtureActionIdle and the two
+//! multi-character fixture states with their idles; the idles of the latter
+//! do not exist in this host). Photo mode does not exist in this host.
+//! Also not in this host: the shadow-casting switch at alpha 0, the
+//! obstacle-avoidance write of a match, the dither keyword and its
+//! disable property, and the skip of an approximately equal alpha.
 
 use bevy::prelude::*;
 
@@ -25,6 +33,7 @@ pub(crate) fn update_dither(
             &CharacterUnitId,
             &ToonMaterials,
             Option<&crate::talk::TalkHold>,
+            Option<&crate::npc::NpcActions>,
         ),
         Without<crate::player::PlayerControlled>,
     >,
@@ -37,7 +46,7 @@ pub(crate) fn update_dither(
     // The avatar list's first match per unit.
     let mut positions: std::collections::HashMap<u32, Option<(Vec3, Vec3)>> =
         std::collections::HashMap::new();
-    for (entity, unit, toon, _) in &npcs {
+    for (entity, unit, toon, _, _) in &npcs {
         positions.entry(unit.0).or_insert_with(|| {
             Some((
                 globals.get(toon.hips_entity()).ok()?.translation(),
@@ -45,7 +54,7 @@ pub(crate) fn update_dither(
             ))
         });
     }
-    for (entity, unit, toon, talking) in &npcs {
+    for (entity, unit, toon, talking, actions) in &npcs {
         if !gate.runs(entity) {
             continue;
         }
@@ -64,10 +73,20 @@ pub(crate) fn update_dither(
                 },
             )
             .collect();
+        use crate::npc::NpcAction;
+        let fixture_action = actions.is_some_and(|actions| {
+            matches!(
+                actions.current,
+                NpcAction::FixtureAction
+                    | NpcAction::FixtureActionIdle
+                    | NpcAction::MainSomeFixtureAction
+                    | NpcAction::SomeFixtureAction
+            )
+        });
         let alpha = moly_law::objective::overlap::npc_dither_alpha(
             talking.is_some(),
             false,
-            false,
+            fixture_action,
             &others,
         );
         let use_dither = if moly_law::objective::overlap::use_dither(alpha) {
