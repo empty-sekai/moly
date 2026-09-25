@@ -1818,7 +1818,7 @@ fn judge_in_host(
     }
     let alignment_id = renderer.get("alignment").and_then(Value::as_i64).unwrap_or(-1);
     let mesh_alignment = crate::particle_geometry::Alignment::from_source(alignment_id);
-    if mesh_alignment.is_none() || (render_mode == "Billboard" && alignment_id == 4) {
+    if mesh_alignment.is_none() {
         tally.alignment.push(Alignment::render_space_name(alignment_id).to_owned());
         return None;
     }

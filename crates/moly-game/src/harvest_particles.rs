@@ -434,7 +434,6 @@ fn admit(row: &Value, local_scale: Vec3) -> Result<Admitted, String> {
     };
     let alignment_id = renderer["alignment"].as_i64().unwrap_or(-1);
     let alignment = crate::particle_geometry::Alignment::from_source(alignment_id)
-        .filter(|_| !(render_mode == "Billboard" && alignment_id == 4))
         .ok_or_else(|| format!("render alignment {alignment_id}"))?;
     if renderer["normalDirection"].as_f64() != Some(1.0) {
         return Err("billboard normalDirection other than one is not verified".into());

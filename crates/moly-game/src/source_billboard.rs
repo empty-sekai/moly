@@ -30,6 +30,23 @@ pub(crate) struct Draw {
 fn euler(v: Vec3) -> Mat3 {
     Mat3::from_quat(Quat::from_euler(EulerRot::YXZ, v.y, v.x, v.z))
 }
+/// The renderer's Velocity billboard basis. `velocity` is the particle's
+/// velocity in the simulation space and `simulation` that space's rotation to
+/// world. The direction is normalized in the simulation space (+Z where the
+/// squared speed is at or below 1e-30), and both it and its cross with the
+/// simulation +Z (+Z x direction) are rotated into world before each is
+/// normalized; a rotated direction at or below 1e-30 squared takes world +Z,
+/// a rotated cross world +X. Z is the direction, X the cross and Y = Z x X,
+/// unnormalized on the fallback.
+fn velocity_basis(velocity: Vec3, simulation: Mat3) -> Mat3 {
+    let n = if velocity.length_squared() > 1.0e-30 { velocity.normalize() } else { Vec3::Z };
+    let z = simulation * n;
+    let z = if z.length_squared() > 1.0e-30 { z.normalize() } else { Vec3::Z };
+    let x = simulation * Vec3::new(-n.y, n.x, 0.0);
+    let x = if x.length_squared() > 1.0e-30 { x.normalize() } else { Vec3::X };
+    Mat3::from_cols(x, z.cross(x), z)
+}
+
 fn facing(direction: Vec3, up: Vec3) -> Mat3 {
     let z = direction.normalize_or_zero();
     let x = up.cross(z).normalize_or_zero();
@@ -49,7 +66,7 @@ pub(crate) fn vertices(
     draw: &Draw,
     local_simulation: bool,
 ) -> ([Vec3; 4], Vec3) {
-    vertices_sized(p, frame, draw, local_simulation, p.size)
+    vertices_sized(p, frame, draw, local_simulation, p.size, Mat3::IDENTITY)
 }
 
 fn vertices_sized(
@@ -58,6 +75,7 @@ fn vertices_sized(
     draw: &Draw,
     local_simulation: bool,
     size: Vec3,
+    simulation: Mat3,
 ) -> ([Vec3; 4], Vec3) {
     // The native pivot uses the UNCLAMPED authored size; screen limits affect
     // corner extents, not the pivot offset. Keep the two inputs separate.
@@ -84,7 +102,7 @@ fn vertices_sized(
                     p.position - frame.camera_position,
                     frame.camera_rotation.y_axis,
                 ),
-                Alignment::Velocity => unreachable!("velocity billboard geometry is not admitted"),
+                Alignment::Velocity => velocity_basis(p.velocity, simulation),
             };
             let matrix = if draw.alignment == Alignment::View
                 || (draw.alignment == Alignment::Local && !local_simulation)
@@ -161,6 +179,8 @@ pub(crate) fn screen_limited(size: Vec3, minimum: f32, maximum: f32) -> Vec3 {
 
 /// Preserve source UVs and custom streams. Geometry is stored in the shared
 /// reflected world space; the source-program upload restores source coordinates.
+/// `simulation` is the simulation space's rotation to world; with the Velocity
+/// alignment each instance's velocity is read in the simulation space.
 pub(crate) fn write(
     mesh: &mut Mesh,
     draw: &Draw,
@@ -169,6 +189,7 @@ pub(crate) fn write(
     local_simulation: bool,
     fov_y: f32,
     aspect: f32,
+    simulation: Mat3,
 ) {
     let mut positions = Vec::with_capacity(particles.len() * 4);
     let mut normals = Vec::with_capacity(particles.len() * 4);
@@ -191,7 +212,7 @@ pub(crate) fn write(
             draw.screen_size.x * width,
             draw.screen_size.y * width,
         );
-        let (corners, normal) = vertices_sized(p, frame, draw, local_simulation, size);
+        let (corners, normal) = vertices_sized(p, frame, draw, local_simulation, size, simulation);
         positions.extend(corners.map(|v| reflect(v).to_array()));
         normals.extend([reflect(normal).to_array(); 4]);
         uv.extend([[0.0f32, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);

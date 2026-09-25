@@ -1846,11 +1846,33 @@ pub(crate) fn write_geometry(
                 Geometry::SourceBillboard(draw) => draw.scaling.apply(base_frame),
                 _ => unreachable!(),
             };
-            let instances = geometry_instances(system, to_world);
+            let mut instances = geometry_instances(system, to_world);
             match &system.geometry {
                 Geometry::Mesh(draw) => crate::particle_geometry::write_mesh(mesh, draw, &instances, &frame),
-                Geometry::SourceBillboard(draw) => crate::source_billboard::write(mesh, draw, &instances, &frame,
-                    system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect),
+                Geometry::SourceBillboard(draw) => {
+                    // The Velocity basis reads the velocity in the simulation
+                    // space and that space's rotation to world (source basis:
+                    // the X mirror on both sides). Its composition is read for
+                    // unit-scale owners only; a scaled one draws zero-area
+                    // quads (the vertex and index cardinality the sheet and
+                    // sort rely on stays), loudly.
+                    let m = to_world.affine().matrix3;
+                    let reflect = crate::particle_geometry::reflect;
+                    let simulation = Mat3::from_cols(-reflect(Vec3::from(m.x_axis)), reflect(Vec3::from(m.y_axis)), reflect(Vec3::from(m.z_axis)));
+                    let unit = |s: Vec3| (s - Vec3::ONE).abs().max_element() <= 1.0e-5;
+                    if draw.alignment == crate::particle_geometry::Alignment::Velocity {
+                        for (instance, side) in instances.iter_mut().zip(&system.side) {
+                            instance.velocity = reflect(Vec3::from_array(side.total_velocity));
+                        }
+                        if !(unit(frame.scale) && unit(to_world.to_scale_rotation_translation().0)) {
+                            warn_once!(effect = %system.effect, node = %system.node,
+                                "Velocity billboard over a non-unit owner scale: the scaled basis composition is not read; drawn empty");
+                            for instance in &mut instances { instance.size = Vec3::ZERO; }
+                        }
+                    }
+                    crate::source_billboard::write(mesh, draw, &instances, &frame,
+                        system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect, simulation)
+                }
                 _ => unreachable!(),
             }
         }
