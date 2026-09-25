@@ -22,8 +22,9 @@
 //!   动，移动向量不随动（真源如此，照抄）。
 //! * **让位门**（真源 OnChangeGameState 的 GameStateType 分派，枚举
 //!   直读）：Edit=2 与 Talk=3 → 禁用并 ResetState（正在拖的指以 END
-//!   收场）；CutScene=5/LearnSiteEnvironment=6/SiteMove=10/
-//!   LevelUpMyRoomSite=11/Delivery=12 同禁但本仓无对应态（挂账）；
+//!   收场）；LearnSiteEnvironment=6 同禁（harvest 的学习现象态）；
+//!   CutScene=5/SiteMove=10/LevelUpMyRoomSite=11/Delivery=12 同禁但本仓
+//!   无对应态（挂账）；
 //!   **SomeCharacterTalk=7 不在摇杆的分派表里**——环境配对对话
 //!   （NPC×NPC / NPC×家具）不改游戏态，摇杆照常可用；Harvest=4 与
 //!   PhotoShot=8 反而保持可用（PhotoShot 隐 UI）。本仓对应：摆放编辑
@@ -132,6 +133,7 @@ pub(crate) fn advance(
     mut last_logged: Local<Vec2>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
+    learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
 ) {
     let Some(window) = windows.single().ok() else {
         return;
@@ -147,6 +149,8 @@ pub(crate) fn advance(
         && !library.blocks_exploration_input()
         // GameState SiteMove: EnableGestureLayer(false).
         && site_move.is_none()
+        // GameState LearnSiteEnvironment: the stick resets and hides.
+        && learn.is_none()
         && crate::entry::control_open(entry.as_deref());
     if !state.enabled {
         touches.clear();

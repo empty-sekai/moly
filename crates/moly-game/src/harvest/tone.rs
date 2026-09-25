@@ -28,9 +28,12 @@
 //! the field effect and that SE and fades the BGM back to its initial
 //! volume.
 //!
-//! Named gaps: `ResetCameraSetting` (the 0.5 s tween back to the previous
-//! model when the state is left) is not ported: the reverse phase has brought
-//! the distance and pitch back to within the last frame's step of the start;
+//! Leaving the state: HarvestTone's OnExit only shows the head-up display;
+//! Normal's OnEnter then tweens back to the snapshot Normal's OnExit wrote
+//! (`harvest::action::change_camera_mode`).
+//!
+//! Named gaps: `ResetCameraSetting` (the menu's camera reset while this state
+//! is current, a 0.5 s tween) is not ported: the menu is the UI lane's;
 //! the BGM fade inside the tone's radius (`StartFade(0)` on enter, back to
 //! the initial volume on exit and after the listen) is not ported: the BGM
 //! channel has no manager fade; the field effect's particles are not drawn;
@@ -137,7 +140,7 @@ pub(crate) fn advance_tone_camera(
     } else if !in_state && tone.entered {
         tone.entered = false;
         info!(
-            "[harvest-tone] HarvestToneCameraState.OnExit -> {:?}: the head-up display shown; distance {:.3} pitch {:.2} as the state left them (ResetCameraSetting not ported)",
+            "[harvest-tone] HarvestToneCameraState.OnExit -> {:?}: the head-up display shown; distance {:.3} pitch {:.2} as the state left them",
             state.0, models.distance, models.pitch
         );
     }

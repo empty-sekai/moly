@@ -504,7 +504,6 @@ pub(crate) struct ActionWorld<'w> {
     animator_calls: ResMut<'w, PropAnimatorCalls>,
     start_hides: ResMut<'w, super::damage::HarvestStartHides>,
     effect_only: ResMut<'w, super::damage::HarvestEffectOnly>,
-    camera_state: ResMut<'w, crate::camera::FieldCameraState>,
     turns: ResMut<'w, super::damage::HarvestTurnRequests>,
     navigation: Option<Res<'w, PlayerFixtureNavigation>>,
 }
@@ -1016,7 +1015,7 @@ fn start_action(
     world.states.can_intercept = false;
     // ChangeCameraModeFromFixtureType: tone -> HarvestTone, the rest Normal.
     change_camera_mode(
-        &mut world.camera_state,
+        commands,
         if object.fixture_type == 6 {
             crate::camera::CameraStateType::HarvestTone
         } else {
@@ -1633,16 +1632,36 @@ fn push_shake(shakes: &mut HarvestCameraShakes, tool_id: i64) {
 /// `HarvestPlayerPresenter.ChangeCameraMode(state)` between Normal and
 /// HarvestTone. Another camera state (FPS and the rest) keeps its own exit
 /// path: the harvest press does not switch it here.
-fn change_camera_mode(
-    state: &mut crate::camera::FieldCameraState,
-    to: crate::camera::CameraStateType,
-) {
-    use crate::camera::CameraStateType::{HarvestTone, Normal};
-    if state.0 == to || !matches!(state.0, Normal | HarvestTone) {
-        return;
-    }
-    info!("[harvest] ChangeCameraMode {:?} -> {to:?}", state.0);
-    state.0 = to;
+///
+/// `FieldCamera.ChangeState` runs the leaving state's OnExit and the new
+/// state's OnEnter: Normal's OnExit writes its transfer snapshot for the
+/// site; HarvestTone's OnExit only shows the head-up display again; Normal's
+/// OnEnter after HarvestTone takes the inherit branch on a harvest site (the
+/// previous state is not 17), the 0.5 s tween to that snapshot. Both halves
+/// are the shared ports the cannon move uses.
+fn change_camera_mode(commands: &mut Commands, to: crate::camera::CameraStateType) {
+    commands.queue(move |world: &mut World| {
+        use crate::camera::CameraStateType::{HarvestTone, Normal};
+        let from = world.resource::<crate::camera::FieldCameraState>().0;
+        if from == to || !matches!(from, Normal | HarvestTone) {
+            return;
+        }
+        let Some((site, category)) = world
+            .get_resource::<crate::site::SiteActive>()
+            .map(|site| (site.site_type.clone(), site.category.clone()))
+        else {
+            world.resource_mut::<crate::camera::FieldCameraState>().0 = to;
+            return;
+        };
+        info!("[harvest] ChangeCameraMode {from:?} -> {to:?} at {site}");
+        if to == HarvestTone {
+            crate::site_move::camera::record_normal_exit(world, &site);
+            world.resource_mut::<crate::camera::FieldCameraState>().0 = HarvestTone;
+        } else {
+            let prev = world.resource::<crate::camera::PrevSiteType>().0.clone();
+            crate::site_move::camera::enter_normal(world, &site, &category, &prev);
+        }
+    });
 }
 
 /// Steps 10 and 11.
@@ -1676,10 +1695,7 @@ fn finish_action(
     world.states.can_intercept = true;
     world.states.change_status(PlayerActionState::Idle);
     commands.remove_resource::<HarvestGameState>();
-    change_camera_mode(
-        &mut world.camera_state,
-        crate::camera::CameraStateType::Normal,
-    );
+    change_camera_mode(commands, crate::camera::CameraStateType::Normal);
     action.sustain = false;
     action.animator_speed = 1.0;
     action.cooling = false;
@@ -1957,6 +1973,7 @@ pub(crate) fn autoplay_press(
     objects: Query<(Entity, &Transform, &HarvestObject)>,
     drops: Query<(&Transform, &super::HarvestDropItem)>,
     face: Option<Res<crate::walk_face::WalkFace>>,
+    learn: Option<Res<super::learn::LearnSiteEnvironmentActive>>,
 ) {
     if auto.plan.is_none() {
         let Ok(raw) = std::env::var("MOLY_HARVEST_AUTOPLAY") else {
@@ -1987,7 +2004,9 @@ pub(crate) fn autoplay_press(
     if plan.is_empty() || auto.stage == AutoStage::Done {
         return;
     }
-    if scenes.is_none() || !crate::entry::control_open(entry.as_deref()) {
+    // A person cannot walk while GameState LearnSiteEnvironment hides the
+    // stick; the instrument waits the same way.
+    if scenes.is_none() || !crate::entry::control_open(entry.as_deref()) || learn.is_some() {
         return;
     }
     let Ok((player, mut input)) = players.single_mut() else {

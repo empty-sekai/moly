@@ -160,6 +160,8 @@ pub(crate) struct HarvestUserData {
     pub(crate) materials: std::collections::BTreeMap<i64, i64>,
     /// `userMysekaiTreasureBoxes`.
     pub(crate) boxes: Vec<super::server_mock::UserTreasureBox>,
+    /// `userMysekaiPhenomena`.
+    pub(crate) phenomena: Vec<super::learn::UserPhenomenon>,
 }
 
 fn parse(asset: &JsonAsset, path: &str) -> serde_json::Value {
@@ -577,6 +579,7 @@ pub(crate) fn build(
         stamina,
         materials: Default::default(),
         boxes: mock.treasure_boxes(),
+        phenomena: mock.phenomena(),
     });
     commands.insert_resource(mock);
     commands.insert_resource(HarvestCatalog {

@@ -27,6 +27,8 @@
 //! - `airplane`: the paper airplane that delivers the transported treasure
 //!   box (`TreasureBoxListMock` / `TreasureBoxSpawnMock` in the mock panel).
 //! - `tone`: the HarvestTone camera (state 14) and the tone view's SE.
+//! - `learn`: learning today's phenomenon on arrival (GameState 6, camera
+//!   state 17, `ReleaseApiMock`).
 //!
 //! Named gaps: harvest objects do not carve the walk field (the source's
 //! NavMeshObstacle, also the ones the driftage and treasure views switch);
@@ -47,6 +49,7 @@ mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod stand_in;
+mod learn;
 mod tone;
 mod tool_model;
 mod ui;
@@ -63,6 +66,7 @@ use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
 pub(crate) use action::HarvestAutoMoveHeld;
+pub(crate) use learn::LearnSiteEnvironmentActive;
 pub(crate) use arrival::HarvestViewNodes;
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
@@ -738,6 +742,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<damage::HarvestTurnRequests>()
             .init_resource::<airplane::PaperAirplanes>()
             .init_resource::<tone::HarvestToneCamera>()
+            .init_resource::<learn::LearnEnvironment>()
             .add_systems(
                 Startup,
                 (catalog::load, clips::load, tool_model::load, effects::load),
@@ -753,6 +758,7 @@ impl Plugin for HarvestPlugin {
                     arrival::bind_views,
                     prop_animator::bind,
                     airplane::advance,
+                    learn::advance,
                 )
                     .chain(),
             )
@@ -798,6 +804,7 @@ impl Plugin for HarvestPlugin {
                 (
                     action::advance_camera_shake.before(crate::camera::follow_avatar),
                     tone::advance_tone_camera.after(crate::camera::follow_avatar),
+                    learn::advance_learn_camera.after(crate::camera::follow_avatar),
                 ),
             );
     }
