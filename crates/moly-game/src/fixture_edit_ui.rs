@@ -474,6 +474,7 @@ pub(crate) fn click(
                 Some((&bindings.cancel, EditCommand::Cancel))
             } else if !selected.from_inventory
                 && !selected.is_new_mock
+                && selected.can_clean_up
                 && hit(view, &layouts, &bindings.delete, point, canvas)
             {
                 Some((&bindings.delete, EditCommand::ReturnToInventory))
@@ -693,7 +694,7 @@ pub(crate) fn refresh(
         if let Some(selected) = &edit.selected {
             view.set_visible(
                 &bindings.delete,
-                !selected.from_inventory && !selected.is_new_mock,
+                !selected.from_inventory && !selected.is_new_mock && selected.can_clean_up,
             );
             compose::enabled(&mut view, document, &bindings.cancel, true);
             compose::enabled(

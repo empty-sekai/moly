@@ -140,6 +140,7 @@ impl SiteFixtureLayouts {
     pub(crate) fn begin_edit(
         &self,
         layout: &FixturePlacements,
+        homes: Option<&crate::entry::house::HomeFixtures>,
     ) -> Result<(EditStorageSnapshot, Vec<super::EditableFixture>), String> {
         if layout.site_id == 0 {
             return Err("current site layout is not installed".into());
@@ -154,7 +155,9 @@ impl SiteFixtureLayouts {
             return Err("This site's saved record changed after it was loaded; reload it before editing; no record was changed".into());
         }
         if let Some(record) = snapshot.site_record.as_ref() {
-            let saved = decode(record, layout.site_id, &layout.site_type, layout.level)?;
+            let mut saved = decode(record, layout.site_id, &layout.site_type, layout.level)?;
+            // The loaded layout carries the restore-time house completion.
+            complete_home_site(&mut saved, homes, "saved", false)?;
             if saved.editor_rows() != layout.editor_rows()
                 || saved.next_edit_uid() != layout.next_edit_uid()
             {
@@ -181,13 +184,19 @@ impl SiteFixtureLayouts {
         content: OfflineSceneContent,
         region: Option<NavMeshSourceRegion>,
     ) -> Result<(), String> {
-        let layout = self.restore(site_id, site_type, floor.level, content, region)?;
+        // A dry run of the stored rows: the restore-time house completion
+        // refuses instead of breaking a layout, so it is not part of it.
+        let layout = self.restore(site_id, site_type, floor.level, content, region, None)?;
         validate_floor_layout(&layout, floor)
     }
 
     /// `region` is the loaded snapshot's own source identity. Only the HOME
     /// starter reads it: visited and saved layouts name their packages
     /// themselves, and other sites start empty.
+    ///
+    /// `homes` given: a home site layout (saved or starter) without a house
+    /// gets the entry's mock house ([`complete_home_site`]); visited layouts
+    /// were completed when first restored. `None` is a dry run without it.
     pub(crate) fn restore(
         &self,
         site_id: u32,
@@ -195,6 +204,7 @@ impl SiteFixtureLayouts {
         level: u32,
         content: OfflineSceneContent,
         region: Option<NavMeshSourceRegion>,
+        homes: Option<&crate::entry::house::HomeFixtures>,
     ) -> Result<FixturePlacements, String> {
         if let Some(cached) = self.visited.get(&site_id) {
             if cached.site_type != site_type {
@@ -207,7 +217,11 @@ impl SiteFixtureLayouts {
             return Ok(layout);
         }
         if let Some(saved) = saved_site(self.document.as_ref().map_err(Clone::clone)?, site_id)? {
-            return decode(saved, site_id, site_type, level);
+            let mut layout = decode(saved, site_id, site_type, level)?;
+            if homes.is_some() {
+                complete_home_site(&mut layout, homes, "saved", true)?;
+            }
+            return Ok(layout);
         }
         // This showcase is a HOME starter only. A room or harvest map without
         // a saved layout starts empty; it must never inherit outdoor rows.
@@ -230,14 +244,11 @@ impl SiteFixtureLayouts {
                     row.direction = direction;
                 }
             }
-            // Owned by the entry, appended after the starter and its smoke
-            // knob, so neither rewrites it.
-            super::append_entry_house(&mut rows);
         }
         let instance_uids = (1..=rows.len())
             .map(|serial| format!("offline-fixture-{site_id}-{serial}"))
             .collect();
-        Ok(FixturePlacements {
+        let mut layout = FixturePlacements {
             rows: rows.into_iter().map(PlacementMock::into_owned).collect(),
             instance_uids,
             site_id,
@@ -245,7 +256,34 @@ impl SiteFixtureLayouts {
             level,
             next_edit_uid: 1,
             floor: None,
-        })
+        };
+        // After the starter and its smoke knob, so neither rewrites the house.
+        if homes.is_some() {
+            complete_home_site(&mut layout, homes, "starter", true)?;
+        }
+        Ok(layout)
+    }
+}
+
+/// [`super::complete_home_site`] for home site layouts; other sites are
+/// left alone. A home site needs the tables: `restore` only calls this with
+/// them, and the edit baseline refuses without them.
+fn complete_home_site(
+    layout: &mut FixturePlacements,
+    homes: Option<&crate::entry::house::HomeFixtures>,
+    origin: &str,
+    log: bool,
+) -> Result<(), String> {
+    match homes {
+        Some(homes) if layout.site_type == "home_site" => {
+            super::complete_home_site(layout, homes, origin, log)
+        }
+        Some(_) => Ok(()),
+        None if layout.site_type == "home_site" => Err(
+            "the player's house tables are not loaded; the home site layout cannot be completed"
+                .into(),
+        ),
+        None => Ok(()),
     }
 }
 
