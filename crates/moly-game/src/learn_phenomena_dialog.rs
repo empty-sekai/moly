@@ -24,8 +24,9 @@
 //!   when `adjustSize`, then `Show(true)`: `blocksRaycasts` true and a 0.1 s
 //!   fade to alpha 1. `Hide(true)` fades to 0 over 0.1 s and sets
 //!   `blocksRaycasts` false when that fade completes.
-//! - `AdjustSize(padding)`: with the text's size fitter off, the text rect
-//!   is measured; a width above `maxSize.x - padding.horizontal` sets the
+//! - `AdjustSize(padding)`: a canvas update fits the text to its new string;
+//!   with the text's size fitter then off, the text rect is measured; a
+//!   width above `maxSize.x - padding.horizontal` sets the
 //!   text LayoutElement's preferred width to that bound, a height above
 //!   `maxSize.y - padding.vertical` its preferred height; with the fitter
 //!   back on the text is measured again, each side part gets the horizontal
@@ -639,12 +640,16 @@ fn tap(
     if id == bindings.thumbnail_button {
         sounds.source_button(layouts, KEY, &path);
         view.set_text(&b.text, run.name.clone());
+        // Hide leaves the balloon object active (alpha 0, no raycasts); the
+        // view's visibility stands in for its blocksRaycasts, so the balloon
+        // is shown before AdjustSize: the size fitter only drives an active
+        // text, and the measurement reads the fitted rect.
+        view.set_visible(&b.root, true);
         let mut edited = false;
         if b.adjust_size {
             edited = adjust_size(view, layouts, server, b, canvas);
         }
         run.balloon.blocks = true;
-        view.set_visible(&b.root, true);
         run.balloon.tween = Some((FloatTween::new(1.0, BALLOON_FADE, ease), false));
         info!("[learn-phenomena] thumbnail button: OnClick -> balloon Setup(\"{}\"): Show(true), fade to 1 over {BALLOON_FADE}s", run.name);
         return edited;
