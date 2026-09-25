@@ -159,6 +159,9 @@ pub struct CharacterMaterial {
     /// host fields are not GPU bindings; speech texture writes never touch them.
     pub(crate) lip_pattern: Option<moly_law::facial::LipPattern>,
     pub(crate) lip_pattern_revision: u64,
+    /// The view's current eye pattern (open, close, blink), set by every
+    /// eye-pattern change; the blink reads its cells from it.
+    pub(crate) eye_pattern: Option<moly_law::blink::EyePattern>,
     pub main_tex: Handle<Image>,
     /// body 槽的遮罩贴图；其余槽没有它，绑白色 fallback（采样值不进
     /// 有效支路）。
@@ -715,6 +718,7 @@ fn build_material(
         params_buffer,
         lip_pattern: None,
         lip_pattern_revision: 0,
+        eye_pattern: None,
         main_tex: load(main_tex),
         body_mask_tex: resolved.body_mask_tex.map(load),
         eyebrow_tex,
@@ -757,6 +761,11 @@ impl ToonMaterials {
             .iter()
             .find(|(slot, _)| slot == name)
             .map(|(_, handle)| handle)
+    }
+
+    /// Every material handle of the member.
+    pub(crate) fn slot_handles(&self) -> impl Iterator<Item = &Handle<CharacterMaterial>> {
+        self.slots.iter().map(|(_, handle)| handle)
     }
 }
 
@@ -944,58 +953,36 @@ pub fn swap_when_planned(
 /// buffer during this frame's extraction.
 pub fn update_head(
     mut materials: ResMut<Assets<CharacterMaterial>>,
-    registry: Option<Res<crate::npc::Registry>>,
-    npcs: Query<(Entity, &CharacterUnitId, &ToonMaterials, Option<&crate::talk::TalkHold>, Option<&crate::player::PlayerControlled>)>,
+    npcs: Query<(&CharacterUnitId, &ToonMaterials, Option<&crate::player::PlayerControlled>)>,
     globals: Query<&GlobalTransform>,
 ) {
-    // Preserve Query::find's first matching NPC, including a first match whose
-    // transforms are unavailable. Registry order is applied below, not map order.
-    let mut neighbor_positions: HashMap<u32, Option<(Vec3, Vec3)>> = HashMap::new();
-    for (entity, unit, toon, _, controlled) in &npcs {
-        if controlled.is_some() {
-            continue;
-        }
-        neighbor_positions.entry(unit.0).or_insert_with(|| {
-            Some((
-                globals.get(toon.hips).ok()?.translation(),
-                globals.get(entity).ok()?.translation(),
-            ))
-        });
-    }
-    for (entity, unit, toon, talking, controlled) in &npcs {
+    // The NPC dither alpha is the presenter's call 5 (npc_dither). A member
+    // the player controls keeps alpha 1.0 without dither: the player view's
+    // own dither is not in this host.
+    for (unit, toon, controlled) in &npcs {
         let Ok(global) = globals.get(toon.head) else { continue; };
         let position = global.translation();
         if position == Vec3::ZERO {
             panic!("unit {} 的头参考点是零向量：头骨的世界变换没有传播", unit.0);
         }
-        // IsNearNPC 先用 hips 判资格，透明值再取名册首个近邻的 root 距离。
-        // 当前执行器无拍照模式和家具动作播放态；TalkHold 对应正在对话。
-        let mut alpha = 1.0;
-        if let (None, Some(registry), Ok(hips), Ok(root)) = (controlled, registry.as_deref(), globals.get(toon.hips), globals.get(entity)) {
-            let others: Vec<_> = registry.character_unit_ids.iter()
-                .filter(|id| **id != unit.0)
-                .filter_map(|id| neighbor_positions.get(id).copied().flatten())
-                .map(|(other_hips, other_root)| moly_law::objective::overlap::DitherNeighbor {
-                    hips_distance: other_hips.distance(hips.translation()),
-                    root_distance: other_root.distance(root.translation()),
-                }).collect();
-            alpha = moly_law::objective::overlap::npc_dither_alpha(talking.is_some(), false, false, &others);
-        }
         let head_position = [position.x, position.y, position.z, 0.0];
-        let use_dither = if moly_law::objective::overlap::use_dither(alpha) { 1.0_f32 } else { 0.0_f32 };
+        let player = controlled.is_some();
         for (_, handle) in &toon.slots {
             let changed = materials.get(handle).is_some_and(|material| {
                 material.params.head_position.map(f32::to_bits) != head_position.map(f32::to_bits)
-                    || material.params.dither_alpha.to_bits() != alpha.to_bits()
-                    || material.params.use_dither.to_bits() != use_dither.to_bits()
+                    || (player
+                        && (material.params.dither_alpha.to_bits() != 1.0_f32.to_bits()
+                            || material.params.use_dither.to_bits() != 0.0_f32.to_bits()))
             });
             if !changed {
                 continue;
             }
             if let Some(material) = materials.get_mut_untracked(handle) {
                 material.params.head_position = head_position;
-                material.params.dither_alpha = alpha;
-                material.params.use_dither = use_dither;
+                if player {
+                    material.params.dither_alpha = 1.0;
+                    material.params.use_dither = 0.0;
+                }
             }
         }
     }

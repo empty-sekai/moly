@@ -30,7 +30,7 @@ use moly_law::talk::{
 };
 
 use crate::alone_action_runtime::{
-    apply_eye, apply_mouth_pattern, node_for, play_idle, FacialTables,
+    apply_mouth_pattern, node_for, play_idle, FacialTables,
 };
 use crate::audio::{VoiceLine, VoiceSpeaker, VoiceWho};
 use crate::character::{MotionDriver, MotionLibrary, SEGMENT_BLEND};
@@ -3037,8 +3037,7 @@ pub(crate) fn reset_default_face(
     // existing script ChangeEye/ChangeMouth consumers; no default name is made up.
     let mouth_row = tables.lip_pattern(mouth_pattern).unwrap_or_default();
     apply_mouth_pattern(materials, mouth, mouth_row);
-    let eye_index = tables.eye_open(eye_pattern).unwrap_or(0);
-    apply_eye(materials, eye, Some(&eye_index));
+    crate::alone_action_runtime::apply_eye_pattern(materials, eye, tables.eye_pattern(eye_pattern));
 }
 
 // ---------------------------------------------------------------------------

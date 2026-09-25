@@ -17,7 +17,7 @@ use bevy::prelude::{info, warn, Assets, Commands, Handle, Resource, World};
 use moly_law::talk::FaceSlot;
 use serde_json::Value;
 
-use crate::alone_action_runtime::{apply_eye, apply_mouth_pattern, FacialTables};
+use crate::alone_action_runtime::{apply_eye_pattern, apply_mouth_pattern, FacialTables};
 use crate::character_material::CharacterMaterial;
 
 #[derive(Debug, Clone)]
@@ -58,7 +58,7 @@ impl FaceCommand {
         }
         let index = index.unwrap_or(0);
         let cell = match self.slot {
-            FaceSlot::Eye => apply_eye(materials, eye, Some(&index)),
+            FaceSlot::Eye => apply_eye_pattern(materials, eye, tables.eye_pattern(&self.pattern)),
             FaceSlot::Mouth => apply_mouth_pattern(
                 materials,
                 mouth,
