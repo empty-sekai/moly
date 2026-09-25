@@ -130,6 +130,7 @@ pub(crate) fn advance(
     settings_panel: Res<crate::game_settings::SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
+    entry: Option<Res<crate::entry::EntrySequence>>,
 ) {
     let Some(window) = windows.single().ok() else {
         return;
@@ -138,10 +139,12 @@ pub(crate) fn advance(
     // 让位门（GameStateType 分派）：Edit=2 / Talk=3（玩家自己的对话）
     // → 禁用。环境配对对话不改游戏态（SomeCharacterTalk=7 不在摇杆的
     // 分派表里），不算禁用源。
+    // MysekaiUtility.EnableJoyStick(true) runs in the entry's Finish.
     state.enabled = !edits.is_active()
         && player_talk.is_none()
         && !settings_panel.blocks_world_input()
-        && !library.blocks_exploration_input();
+        && !library.blocks_exploration_input()
+        && crate::entry::control_open(entry.as_deref());
     if !state.enabled {
         touches.clear();
         if state.captured.take().is_some() {

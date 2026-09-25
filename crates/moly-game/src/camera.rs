@@ -1331,7 +1331,7 @@ fn normalize360(deg: f32) -> f32 {
 
 /// 角度归一到 [−180, 180]（源 `FieldCameraStateBase.ConvertAngle180`：
 /// 先 fmodf 360，>180 减 360，<−180 加 360）。
-fn wrap180(deg: f32) -> f32 {
+pub(crate) fn wrap180(deg: f32) -> f32 {
     let mut v = deg % 360.0;
     if v > 180.0 {
         v -= 360.0;
@@ -1343,12 +1343,12 @@ fn wrap180(deg: f32) -> f32 {
 
 /// 最短有向角（源 `GetToRotation(from, to)` = from + ConvertAngle180(to−from)）：
 /// 转场补间的旋转终点都经它取「朝哪个方向转多少」，不是裸差。
-fn to_rotation(from: f32, to: f32) -> f32 {
+pub(crate) fn to_rotation(from: f32, to: f32) -> f32 {
     from + wrap180(to - from)
 }
 
 /// OutQuad 缓动（源 `EASE_BASIC = 6`，DG.Tweening.Ease 位序：OutQuad）。
-fn out_quad(t: f32) -> f32 {
+pub(crate) fn out_quad(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
 
@@ -1817,6 +1817,17 @@ pub(crate) fn follow_avatar(
     };
     let player = avatar.translation();
     match state.0 {
+        CameraStateType::HouseEntry => {
+            // HouseEntryCameraState.OnUpdate: LookAt = the player's view
+            // position, UpdatePosition, view.LookAt(LookAt + Offset). The
+            // entry owns entering and leaving this state.
+            models.look_at = player;
+            let pivot = models.look_at + models.offset;
+            let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
+            if let Ok((mut camera, _)) = cameras.single_mut() {
+                *camera = Transform::from_translation(eye).looking_at(pivot, Vec3::Y);
+            }
+        }
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，

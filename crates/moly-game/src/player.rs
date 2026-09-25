@@ -357,12 +357,15 @@ pub(crate) fn read_input(
     joystick: Res<crate::joystick::JoystickState>,
     settings_panel: Res<crate::game_settings::SettingsPanel>,
     library: Res<crate::content_library::ContentLibrary>,
+    entry: Option<Res<crate::entry::EntrySequence>>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
+    // The keyboard stand-in follows the joystick: off until the entry's Finish.
     if edits.is_active()
         || settings_panel.blocks_world_input()
         || library.blocks_exploration_input()
+        || !crate::entry::control_open(entry.as_deref())
     {
         for (mut input, _) in &mut players {
             input.active = false;
@@ -550,6 +553,7 @@ pub(crate) fn advance(
             With<PlayerControlled>,
             Without<crate::talk::TalkHold>,
             Without<PlayerFixtureHeld>,
+            Without<crate::entry::EntryHold>,
         ),
     >,
     mut boundary: Local<Boundary>,

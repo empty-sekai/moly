@@ -93,7 +93,7 @@ fn scalar(value: &Value) -> Result<f32, String> {
         .ok_or_else(|| "Euler curve contains a non-finite scalar".into())
 }
 
-fn curve(value: &Value) -> Result<Curve, String> {
+pub(super) fn curve(value: &Value) -> Result<Curve, String> {
     let points = array(value, "points")?;
     if points.is_empty() { return Err("Euler curve has no source points".into()); }
     match value["kind"].as_str() {

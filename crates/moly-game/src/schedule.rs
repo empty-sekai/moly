@@ -187,6 +187,23 @@ pub fn install(app: &mut App) {
                 .after(crate::fixture::refresh_activity_view)
                 .before(crate::player_fixture_action::refresh_availability),
         );
+    // MySekai entry: the cover from the first frame, the join action and
+    // its gates. One exclusive step per frame, after the layout and the
+    // player's input and state writers, before the fixture controllers that
+    // consume its house trigger this frame, the player's movement and
+    // animation, and the SE drain.
+    app.add_systems(Startup, (crate::entry::init, crate::entry::cover::spawn))
+        .add_systems(
+            Update,
+            crate::entry::advance
+                .after(crate::fixture::FixtureLayoutSet)
+                .after(player_state::drive_from_input)
+                .after(action_button::click)
+                .before(crate::player_fixture_action::request_end_from_input)
+                .before(player::advance)
+                .before(player_avatar::drive)
+                .before(audio::advance_se),
+        );
     crate::game_settings::install(app);
     crate::player_data::install(app);
     crate::fixture_colors::install(app);
@@ -680,7 +697,9 @@ pub fn install(app: &mut App) {
                         sitemap::tick_entries,
                         sitemap::tick_floats,
                         sitemap::tick_unlock,
-                        sitemap::toggle.run_if(crate::game_settings::scene_input_enabled),
+                        sitemap::toggle
+                            .run_if(crate::game_settings::scene_input_enabled)
+                            .run_if(crate::entry::site_input_open),
                         sitemap::refresh_weather,
                         sitemap::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
                     ),

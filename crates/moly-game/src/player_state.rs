@@ -70,6 +70,9 @@ pub enum PlayerActionState {
     Harvest,
     /// 10: the player's one-second fixture switch interval.
     SwitchGimmick,
+    /// 13: leaving the house on entry (`PlayerAvatarExitMoveHouseState`:
+    /// its Initialize closes the intercept gate; the entry's Finish opens it).
+    ExitMoveHouse,
     /// 23：冲刺（`MoveTo` 的 dash 支；dash 位由替身键切换）。
     Dash,
     /// 28：演出家具（`ChangeStateUseTimelineFixture` 进）。家具会话

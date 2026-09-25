@@ -1107,10 +1107,18 @@ pub(crate) fn read_switch(
     mut exit: MessageWriter<AppExit>,
     edit: Option<Res<crate::fixture_edit::EditSession>>,
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
-    panel: Res<crate::game_settings::SettingsPanel>,
+    // Paired: this system is at the parameter-count limit.
+    (panel, entry): (
+        Res<crate::game_settings::SettingsPanel>,
+        Option<Res<crate::entry::EntrySequence>>,
+    ),
     library: Res<crate::content_library::ContentLibrary>,
 ) {
-    let manual_input = !panel.blocks_world_input() && !library.blocks_world_input();
+    // Site-change keys and the tour follow the back key, enabled once the
+    // entry's JoinMysekai returns.
+    let manual_input = !panel.blocks_world_input()
+        && !library.blocks_world_input()
+        && crate::entry::site_input_open(entry);
     let mut requested = manual_input
         .then(|| key_request(&keys, active.as_deref()))
         .flatten();
