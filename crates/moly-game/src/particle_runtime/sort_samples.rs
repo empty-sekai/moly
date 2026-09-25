@@ -24,7 +24,7 @@ fn renderer_sort_matches_native_in_shared_geometry() {
         let owner = GlobalTransform::from_scale(scale);
         let camera = GlobalTransform::from_translation(reflect(vector(&row["camera"]) * scale));
         let basis = crate::billboard::CameraBasis { position: camera.translation(), forward: -Vec3::Z,
-            right: Vec3::X, up: Vec3::Y, fov_y: 1.0, aspect: 1.0 };
+            right: Vec3::X, up: Vec3::Y, fov_y: 1.0, aspect: 1.0, near: 0.3 };
         for (index, position) in row["positions"].as_array().unwrap().iter().enumerate() {
             let inverse = number(&row["inverseLifetimes"][index]);
             let lifetime = 1.0 / inverse;

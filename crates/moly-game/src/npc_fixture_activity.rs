@@ -1299,7 +1299,14 @@ fn tick(
     // In a fixture talk's window the player's talk on that same data is the
     // window's purpose: its waits hold for it.
     let in_window = matches!(session.phase, Phase::TalkWindow(_));
-    if world.get::<TalkHold>(actor).is_some() && !joined_talk && !in_window {
+    // No path of the player's talk touches the objective: it acts only
+    // through the NPC's state (the talk state stops the agent, the move's
+    // wait pauses in Talk, a local fit runs to its end, and the objective's
+    // next state change ends the talk state). Its hold cancels nothing here.
+    let player_talk = world
+        .get_resource::<crate::player_talk::PlayerTalkSession>()
+        .is_some_and(|talk| talk.npc_entity() == actor);
+    if world.get::<TalkHold>(actor).is_some() && !joined_talk && !in_window && !player_talk {
         // Only the admitted cast on this same placed fixture may retain the
         // existing Director. An unrelated conversation still cancels ownership.
         return Err("another conversation owns the actor".into());

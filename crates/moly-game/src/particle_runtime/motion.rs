@@ -14,6 +14,19 @@ pub(super) fn size_at_age_percent(
         |law| law.evaluate(side.size, side.seed, age_percent))
 }
 
+/// The size the renderer reads for live particle `index`. A size law that
+/// follows the engine's SizeModule calls stored it in the last call, which
+/// every update that births or ages a particle ends in; otherwise the law is
+/// evaluated at the age.
+pub(super) fn current_size(system: &super::Runtime, index: usize, age_percent: f32) -> [f32; 3] {
+    let side = &system.side[index];
+    match system.size_law.as_ref() {
+        Some(law) if law.calls().is_some() => law.stored(index)
+            .expect("a size law that follows the engine's calls stored every live slot in the update's last call"),
+        _ => size_at_age_percent(system, side, age_percent),
+    }
+}
+
 /// Force and linear velocity share the source space transform, including the
 /// emitter scale for world-space modules. Directions are never normalized.
 pub(super) fn module_vector(

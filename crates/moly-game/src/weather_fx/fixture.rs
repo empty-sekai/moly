@@ -865,7 +865,7 @@ pub(crate) fn spawn_when_ready(
             commands.entity(draw).try_insert((source, crate::uber_particle::FixtureParticleLive(runtime), played));
         }
         request.0 = pending;
-        if request.0.is_empty() { commands.entity(root).remove::<Request>(); }
+        if request.0.is_empty() { commands.entity(root).try_remove::<Request>(); }
     }
 }
 

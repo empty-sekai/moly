@@ -430,11 +430,11 @@ fn admit(row: &Value, local_scale: Vec3) -> Result<Admitted, String> {
     let mode = match render_mode {
         "Billboard" => crate::source_billboard::Mode::Billboard,
         "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
+        "VerticalBillboard" => crate::source_billboard::Mode::Vertical,
         other => return Err(format!("render mode {other} is not installed on this path")),
     };
     let alignment_id = renderer["alignment"].as_i64().unwrap_or(-1);
     let alignment = crate::particle_geometry::Alignment::from_source(alignment_id)
-        .filter(|_| !(render_mode == "Billboard" && alignment_id == 4))
         .ok_or_else(|| format!("render alignment {alignment_id}"))?;
     if renderer["normalDirection"].as_f64() != Some(1.0) {
         return Err("billboard normalDirection other than one is not verified".into());

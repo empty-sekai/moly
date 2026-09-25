@@ -328,7 +328,7 @@ impl FixtureTalkGroups {
 /// whether it reported true and how many ForceUpdateObjective calls the
 /// OnCancel makes (the no-talk objective's and the sub objective 9's make
 /// one). The loop then yields before its TryRest.
-fn try_cancel_current(
+pub(crate) fn try_cancel_current(
     world: &mut World,
     groups: &mut FixtureTalkGroups,
     actor: Entity,

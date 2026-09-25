@@ -189,6 +189,7 @@ pub(super) fn source_culling(system: &Value, renderer: &Value, emitter: &Emitter
     let render_mode = match renderer.get("renderMode").and_then(Value::as_str) {
         Some("Billboard") => BoundsRenderMode::Billboard,
         Some("HorizontalBillboard") => BoundsRenderMode::HorizontalBillboard,
+        Some("VerticalBillboard") => BoundsRenderMode::VerticalBillboard,
         Some("Mesh") => BoundsRenderMode::Mesh,
         _ => return refused("render mode outside the bounds law's executed domain"),
     };
@@ -403,6 +404,9 @@ impl PlayState {
     fn clear(&mut self, system: &mut Runtime) {
         if let Some(custom) = system.custom_law.as_mut() {
             custom.clear(&system.pool);
+        }
+        if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+            calls.clear(&system.pool);
         }
         system.pool.clear();
         system.side.clear();

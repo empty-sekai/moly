@@ -70,6 +70,7 @@ mod mysekai_rank;
 mod native_graphics_diagnostics;
 pub mod npc;
 mod npc_clock;
+mod npc_dither;
 mod npc_fixture_activity;
 mod npc_fixture_talk;
 #[cfg(test)]
@@ -79,6 +80,7 @@ mod npc_presenter;
 mod npc_state;
 mod npc_talk_lottery;
 mod npc_tweet;
+mod npc_view;
 pub mod option_dialog;
 mod particle_runtime;
 mod particle_geometry;

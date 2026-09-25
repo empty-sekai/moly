@@ -348,26 +348,44 @@ pub(crate) fn enter_player_talk(commands: &mut Commands, entity: Entity, player:
             &mut NpcActions,
             &mut RestLifecycle,
             &mut RouteStops,
-            &mut PathSlot,
-            &mut WalkState,
             &mut MotionPhase,
         )>();
         let mut queued_before = None;
-        if let Ok((mut actions, mut rest, mut route, mut path, mut walk, mut phase)) =
-            query.get_mut(world, entity)
-        {
+        if let Ok((mut actions, mut rest, mut route, mut phase)) = query.get_mut(world, entity) {
             queued_before = Some(actions.effects.len());
             actions.change(NpcAction::Talk, &mut rest);
             actions.talk_owner = Some(player);
-            route.stop();
-            path.0 = NpcPathWalkSlot::from_corners(Vec::new());
-            walk.0.next_corner = 0;
+            // The player talk never touches the objective: its move keeps
+            // its route. The talk state's enter runs presenter Stop, which
+            // stops an agent on the navigation mesh; a local fit has its
+            // agent disabled and goes on (see [`advance`]).
+            suspend_move_for_talk(&mut route, &phase);
             *phase = MotionPhase::Dwelling { remaining: None };
         }
         if let Some(queued_before) = queued_before {
             crate::npc_state::publish_exits_now(world, entity, queued_before);
         }
     });
+}
+
+/// Keep a running move across a player talk: remember its phase, and stop
+/// its agent unless it is in the local fit (whose agent is already off).
+fn suspend_move_for_talk(route: &mut RouteStops, phase: &MotionPhase) {
+    let fit = matches!(
+        phase,
+        MotionPhase::FitWalking { .. } | MotionPhase::FitTurning { .. }
+    );
+    let moving = fit
+        || !route.stops.is_empty()
+        || route.stalling
+        || matches!(phase, MotionPhase::Walking | MotionPhase::Turning { .. });
+    if !moving || route.suspended.is_some() {
+        return;
+    }
+    route.suspended = Some(*phase);
+    if !fit {
+        route.agent_stopped = true;
+    }
 }
 
 /// General/Set read the live Before state at their normal end. This is not an
@@ -384,6 +402,9 @@ pub(crate) fn leave_player_talk_to(commands: &mut Commands, entity: Entity, stat
         let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
         if let Ok((mut actions, mut rest)) = query.get_mut(world, entity) {
             if actions.current != NpcAction::Talk {
+                // The objective already changed the state (a move finished
+                // under the talk): the talk ends without a state change.
+                actions.talk_owner = None;
                 return;
             }
             let next = state.unwrap_or(match actions.before {
@@ -569,6 +590,16 @@ pub struct RouteStops {
     stalling: bool,
     /// The movement ended as source Stacked rather than by an outside stop.
     stalled: bool,
+    /// The agent's isStopped: the talk state's enter stops a navigation
+    /// agent (presenter Stop: velocity, speed and acceleration 0) and only a
+    /// new leg's SetupMoveNavMesh starts it again. A stopped agent does not
+    /// step; the move's poll still runs.
+    agent_stopped: bool,
+    /// The move's motion phase when a player talk began. The talk's own hold
+    /// and turns replace [`MotionPhase`]; the move itself goes on: its wait
+    /// neither completes nor fails while the state is Talk, and a local fit
+    /// (a timed lerp and its rotate) runs to its end regardless of the state.
+    suspended: Option<MotionPhase>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1481,6 +1512,8 @@ fn start_waypoint(
     walk_face: &crate::walk_face::WalkFace,
     objective_face: &crate::npc_objective::ObjectiveFace,
 ) -> Option<MotionPhase> {
+    // MoveNextPosition: SetupMoveNavMesh(true) for every leg it submits.
+    route.agent_stopped = false;
     let Some(mut waypoint) = route.stops.get(route.next).copied() else {
         route.stops.clear();
         route.next = 0;
@@ -1770,9 +1803,12 @@ pub(crate) fn declare_navigation_action(
 /// 行走（含导航终点未能接近原 waypoint）使用 .09m/5秒 watchdog；停止与
 /// 正常路线耗尽发布不同结果。真正 Rest 不把等待时长记作卡住。
 ///
-/// 对话入场显式停止移动并保留Stopped结果，持留时本移动写者让位。
-/// 目标自己的Rest delay由目标拥有者推进，动作Rest脚本已被出沿Dispose；
-/// 不能在撤持留后恢复旧路线/把停止当到达。朝向归正文的转体帧写。
+/// A player talk does not end the move: the talk state stops a navigation
+/// agent, the move's poll pauses while the state is Talk and resumes after
+/// it (a stopped agent then ends Stacked by the stuck rule), and a local fit
+/// runs to its end during the talk. A route Rest's countdown pauses during
+/// the talk (named gap: the source's delay runs on and its next leg changes
+/// the state to AutoMove). The talk's turns own the rotation meanwhile.
 #[allow(clippy::type_complexity)]
 pub fn advance(
     time: Res<Time>,
@@ -1830,6 +1866,7 @@ pub fn advance(
         // 截断的成员谈话后站定等目标域再判，而不是把旧路线剩下的站走完
         // （源形状：谈话取消移动任务，不是暂停它）。
         if matches!(*phase, MotionPhase::Dwelling { remaining: None })
+            && route.suspended.is_none()
             && (!route.stops.is_empty() || !slot.0.corners().is_empty())
         {
             route.stop();
@@ -1841,10 +1878,40 @@ pub fn advance(
                 unit.0
             );
         }
-        if (talk_hold.is_some() || actions.current == NpcAction::Talk)
+        let player_talking = actions.current == NpcAction::Talk;
+        if (talk_hold.is_some() || player_talking)
             && !talk_lease.is_some_and(|lease| lease.approaching)
         {
+            // A local fit under a player talk runs to its end: the lerp reads
+            // the scaled clock and its rotate is a tween, neither reads the
+            // state. The talk's own turns own the rotation meanwhile; the fit
+            // writes the position only.
+            if player_talking {
+                if let Some(
+                    fit @ (MotionPhase::FitWalking { .. } | MotionPhase::FitTurning { .. }),
+                ) = route.suspended
+                {
+                    let (next, _, done) = step_fit(&mut state.0, fit, transform.rotation, dt);
+                    transform.translation = Vec3::from(state.0.position);
+                    if done {
+                        route.suspended = None;
+                        route.outcome = Some(RouteOutcome::Arrived);
+                        info!(
+                            "[npc unit={}] t={now:.1} 贴合在对话中走完（lerp 与转体不读状态），移动完成",
+                            unit.0
+                        );
+                    } else {
+                        route.suspended = Some(next);
+                    }
+                }
+            }
             continue; // 对话持留：位移推进整名让位（相位与变换都不写）
+        }
+        // The talk has ended: the move goes on from its own phase. A stopped
+        // agent stays stopped; the poll below resumes with the stuck
+        // reference taken before the talk.
+        if let Some(suspended) = route.suspended.take() {
+            *phase = suspended;
         }
         let (Some(walk_face), Some(objective_face)) =
             (walk_face.as_deref(), objective_face.as_deref())
@@ -1930,7 +1997,11 @@ pub fn advance(
         let prior = state.0.position;
         let prior_forward = state.0.forward;
         let prior_corner = state.0.next_corner;
-        let mut verdict = moly_law::path::advance(&mut state.0, &slot.0, speed.0, dt);
+        let mut verdict = if route.agent_stopped && matches!(*phase, MotionPhase::Walking) {
+            WalkVerdict::Walking(0.0)
+        } else {
+            moly_law::path::advance(&mut state.0, &slot.0, speed.0, dt)
+        };
         // Source frame order: the agent moves; the presenter's per-leg loop
         // resumes (its yield continuation runs ahead of the player-loop
         // runner) and, on reaching a CheckPoint within its per-leg test,
@@ -2005,7 +2076,7 @@ pub fn advance(
             ) {
                 state.0.position[1] = surface[1];
             }
-            if let WalkVerdict::Walking(_) = verdict {
+            if let (WalkVerdict::Walking(_), false) = (verdict, route.agent_stopped) {
                 if let Some(corner) = corners.get(end).or_else(|| corners.last()) {
                     state.0.forward = facing_direction(state.0.position, *corner);
                 }
@@ -2070,7 +2141,11 @@ pub fn advance(
             _ if stepped => {}
             WalkVerdict::Walking(_) => {
                 *phase = MotionPhase::Walking;
-                actions.change(NpcAction::AutoMove, &mut rest);
+                // A stopped agent's leg loop changes no state: the state the
+                // talk's end chose stays.
+                if !route.agent_stopped {
+                    actions.change(NpcAction::AutoMove, &mut rest);
+                }
                 match stuck.0 {
                     None => stuck.0 = Some((state.0.position, now)),
                     Some((last, since)) => {
