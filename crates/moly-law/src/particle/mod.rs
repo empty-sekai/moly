@@ -53,6 +53,7 @@ pub mod sort;
 pub mod collision_response;
 pub mod collision_event;
 pub mod death_event;
+pub mod inherit;
 pub mod collision_query;
 pub mod current_size;
 pub mod collision_mesh;

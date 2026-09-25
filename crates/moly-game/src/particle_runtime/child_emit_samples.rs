@@ -1,6 +1,7 @@
 //! Child commands through the product's child Emit against the engine's own
-//! child Emit rows (three receipts: the ground-strike targets' chained and
-//! synthetic commands, the target variants, and the gravity rows). Each row
+//! child Emit rows (the ground-strike targets' chained and synthetic commands,
+//! the target variants, the gravity rows, the death commands and the death
+//! commands that carry an inherited block). Each row
 //! holds the command bytes, the target's owner words, the update inputs, the
 //! pool and both random streams before the command, and the pool, both
 //! streams, the start matrix and the command velocity in the target's space
@@ -8,16 +9,21 @@
 //! override of it); the owner words, streams and pool are the harness's
 //! inputs, not claims about scene placement or client entropy.
 //!
-//! Compared per row: the count and, per lane, position and velocity (X is
-//! the reflected axis; a zero there compares by value), rotation, birth size,
-//! colour, seed, age, inverse lifetime and every CustomData channel; the
+//! Compared per row: the count and, per lane, position, velocity and animated
+//! velocity (X is the reflected axis; a zero there compares by value, and so
+//! does a zero animated word on every axis: an all-zero orbital block adds a
+//! signed zero the product does not compose), rotation, birth size (every
+//! stored axis), colour, seed, age, inverse lifetime and every CustomData
+//! channel; the
 //! Initial stream after; the start matrix and the command velocity in the
 //! target's space. Angular speed is not stored by the product (it is rebuilt
 //! every update), so it is not compared. The size the renderer evaluates at
 //! the final age is compared with the engine's current size where the size
 //! curve is constant or baked; a keyed size curve goes through this tree's
 //! Hermite evaluator, which is not the engine's cached cubic, so those words
-//! are counted with their distance instead.
+//! are counted with their distance instead. Only the SizeModule writes the
+//! engine's current size: a target without one leaves it unwritten (zero in
+//! every row), and the renderer reads the birth size, so it is not compared.
 //!
 //! A custom stream the target leaves disabled has no storage in the engine
 //! (its rows carry no array for it); it is neither loaded nor compared.
@@ -29,6 +35,7 @@
 //! direction are outside the source admission (it refuses any value but 0)
 //! and are counted, not compared.
 use super::child::{apply_command, arms, ChildCommand, ChildShape, ChildUpdate, Refused, SourceShape};
+use moly_law::particle::death_event::size_3d;
 use super::*;
 use moly_law::particle::child_emit::ChildOwner;
 use moly_law::particle::seed_owner::ModuleRandom;
@@ -143,6 +150,7 @@ fn load_pool(system: &mut Runtime, pool: &Value) {
     system.pool.clear();
     system.side.clear();
     let count = pool["count"].as_u64().unwrap() as usize;
+    let three = size_3d(&system.emitter);
     let lane = |key: &str, i: usize| f32::from_bits(word(&pool[key][i]));
     for i in 0..count {
         let position = [-lane("px", i), lane("py", i), lane("pz", i)];
@@ -160,7 +168,7 @@ fn load_pool(system: &mut Runtime, pool: &Value) {
             rand: 0.0,
             seed: word(&pool["seed"][i]),
             rot: [lane("rx", i), lane("ry", i), lane("rz", i)],
-            size: [lane("sx", i); 3],
+            size: if three { [lane("sx", i), lane("sy", i), lane("sz", i)] } else { [lane("sx", i); 3] },
             gravity: 0.0,
             colour: moly_law::particle::gradient::rgba8_to_float(colour),
             total_velocity: velocity,
@@ -170,7 +178,7 @@ fn load_pool(system: &mut Runtime, pool: &Value) {
                 if stored(pool, &key, count) { lane(&key, i) } else { 0.0 }
             })),
             emit_carry: [0.0; 2],
-            animated: [0.0; 3],
+            animated: [-lane("ax", i), lane("ay", i), lane("az", i)],
             current_size: 0.0,
             axis: [0.0, 0.0, 1.0],
         });
@@ -218,28 +226,37 @@ fn pool_mismatches(system: &Runtime, pool: &Value, size: &mut SizeWords) -> Vec<
     let mut bad = Vec::new();
     let lane = |key: &str, i: usize| word(&pool[key][i]);
     let generic = size_curve_generic(system);
+    let three = size_3d(&system.emitter);
+    let axes = if three { 3 } else { 1 };
     for i in 0..count {
         let p = &system.pool[i];
         let s = &system.side[i];
-        let current = motion::size_at_age_percent(system, s, p.age_percent)[0];
-        let native_size = lane("f300", i);
-        let mut size_bad = None;
-        if generic {
-            size.generic += 1;
-            if current.to_bits() != native_size {
-                size.generic_differ += 1;
-                let steps = if current.is_sign_negative() == f32::from_bits(native_size).is_sign_negative() {
-                    current.to_bits().abs_diff(native_size)
-                } else {
-                    u32::MAX
-                };
-                size.generic_max_steps = size.generic_max_steps.max(steps);
+        let current = motion::size_at_age_percent(system, s, p.age_percent);
+        let mut size_bad = Vec::new();
+        for (axis, key) in ["f300", "f320", "f340"].iter().enumerate().take(axes) {
+            if system.size_law.is_none() {
+                break;
             }
-        } else {
-            size.exact += 1;
-            size_bad = (current.to_bits() != native_size).then(|| format!(
-                "f300[{i}] age {:08x} ours {:08x} native {native_size:08x}", p.age_percent.to_bits(),
-                current.to_bits()));
+            let native_size = lane(key, i);
+            let current = current[axis];
+            if generic {
+                size.generic += 1;
+                if current.to_bits() != native_size {
+                    size.generic_differ += 1;
+                    let steps = if current.is_sign_negative() == f32::from_bits(native_size).is_sign_negative() {
+                        current.to_bits().abs_diff(native_size)
+                    } else {
+                        u32::MAX
+                    };
+                    size.generic_max_steps = size.generic_max_steps.max(steps);
+                }
+            } else {
+                size.exact += 1;
+                if current.to_bits() != native_size {
+                    size_bad.push(format!("{key}[{i}] age {:08x} ours {:08x} native {native_size:08x}",
+                        p.age_percent.to_bits(), current.to_bits()));
+                }
+            }
         }
         let mut check = |name: &str, ok: bool| if !ok { bad.push(format!("{name}[{i}]")) };
         check("px", same_reflected(p.position[0], lane("px", i)));
@@ -248,14 +265,22 @@ fn pool_mismatches(system: &Runtime, pool: &Value, size: &mut SizeWords) -> Vec<
         check("vx", same_reflected(p.velocity[0], lane("vx", i)));
         check("vy", p.velocity[1].to_bits() == lane("vy", i));
         check("vz", p.velocity[2].to_bits() == lane("vz", i));
-        // The targets carry no animated velocity: the engine's is zero.
-        for key in ["ax", "ay", "az"] {
-            check(key, f32::from_bits(lane(key, i)) == 0.0);
-        }
+        // The animated velocity; a zero compares by value.
+        let animated = |ours: f32, native: u32| {
+            let native = f32::from_bits(native);
+            if native == 0.0 { ours == 0.0 } else { ours.to_bits() == native.to_bits() }
+        };
+        check("ax", animated(-s.animated[0], lane("ax", i)));
+        check("ay", animated(s.animated[1], lane("ay", i)));
+        check("az", animated(s.animated[2], lane("az", i)));
         for (a, key) in ["rx", "ry", "rz"].iter().enumerate() {
             check(key, s.rot[a].to_bits() == lane(key, i));
         }
         check("sx", s.size[0].to_bits() == lane("sx", i));
+        if three {
+            check("sy", s.size[1].to_bits() == lane("sy", i));
+            check("sz", s.size[2].to_bits() == lane("sz", i));
+        }
         let colour = u32::from_le_bytes(moly_law::particle::gradient::quantize_rgba8(s.colour));
         check("color", colour == lane("color", i));
         check("seed", s.seed == lane("seed", i));
@@ -286,6 +311,12 @@ struct Tally {
     mismatched: Vec<String>,
     families: std::collections::BTreeMap<String, usize>,
     size: SizeWords,
+    /// Rows whose command carries an inherited size other than the neutral
+    /// one and bore particles.
+    inherited_size_births: usize,
+    /// Rows whose command carries an inherited word other than the size,
+    /// refused by that bit's name, per name.
+    refused_by_name: std::collections::BTreeMap<&'static str, usize>,
 }
 
 /// One row through apply_command; the fields that differ from native.
@@ -376,6 +407,8 @@ fn run_row(seq: &Value, row: &Value, block: &Value, tally: &mut Tally, record: b
         if let Ok(applied) = &applied {
             tally.emitted += usize::from(applied.start.is_some());
             tally.catch_up_rows += usize::from(applied.catch_up_steps > 0);
+            let inherited = moly_law::particle::inherit::ChildInherit::from_words(&command.inherited_words);
+            tally.inherited_size_births += usize::from(applied.born > 0 && inherited.is_ok_and(|i| !i.is_neutral()));
         }
         tally.injected_groups += injected.as_ref().map_or(0, |s| s.next);
         if let (Some(_), Ok(applied)) = (&kernel, &applied) {
@@ -387,10 +420,38 @@ fn run_row(seq: &Value, row: &Value, block: &Value, tally: &mut Tally, record: b
 
 const ARMS: [&str; 10] = ["noLookRotation", "noInverse", "backtrackWorldVelocity", "noEmitterScale", "noUpperGate",
     "birthDtIsCommandDt", "paddingKillKeepsAccepted", "noStepRaise", "noGravity", "gravityWorld"];
+/// The inherited size ignored, or added to the target's own start size.
+const INHERIT_ARMS: [&str; 2] = ["ignoreInheritedSize", "addInheritedSize"];
+/// Velocity or ClampVelocity left out, ClampVelocity before Velocity (the
+/// wrong module order), the linear matrix product grouped as
+/// `(x*c0 + y*c1) + z*c2`, and ClampVelocity's k from the command dt instead
+/// of the lane's own dt.
+const MODULE_ARMS: [&str; 5] = ["noVelocity", "noClamp", "clampBeforeVelocity", "velocityGroupedAssociation",
+    "clampCommandDt"];
+
+/// The refusal the child side names for a command of `count` particles whose
+/// block carries an inherited word other than the size; None for a size-only
+/// or neutral block, and for a count of zero (nothing is read).
+fn expected_refusal(row: &Value) -> Option<&'static str> {
+    let command = ChildCommand::from_native_bytes(&hex(&row["command"]["rawHex"]), &hex(&row["command"]["emissionHex"]))
+        .unwrap();
+    if command.count == 0 {
+        return None;
+    }
+    match moly_law::particle::inherit::ChildInherit::from_words(&command.inherited_words) {
+        Ok(_) => None,
+        Err(moly_law::particle::inherit::Refused::Block("color")) => Some("inherited colour block"),
+        Err(moly_law::particle::inherit::Refused::Block("rotation")) => Some("inherited rotation block"),
+        Err(moly_law::particle::inherit::Refused::Block("lifetime")) => Some("inherited lifetime block"),
+        Err(moly_law::particle::inherit::Refused::Block("duration")) => Some("inherited duration block"),
+        Err(other) => panic!("child block refusal {other:?}"),
+    }
+}
 
 /// Every row of the receipts named by `keys` through apply_command, and
-/// every arm on each compared row.
-fn replay(corpus: &Value, keys: &[&str]) -> (Tally, std::collections::BTreeMap<&'static str, usize>) {
+/// every arm of `arm_names` on each compared row.
+fn replay(corpus: &Value, keys: &[&str], arm_names: &[&'static str])
+    -> (Tally, std::collections::BTreeMap<&'static str, usize>) {
     let mut arm_red = std::collections::BTreeMap::<&str, usize>::new();
     let mut tally = Tally::default();
     for &key in keys {
@@ -408,6 +469,17 @@ fn replay(corpus: &Value, keys: &[&str]) -> (Tally, std::collections::BTreeMap<&
                         continue;
                     }
                     arms::set(None);
+                    if let Some(name) = expected_refusal(row) {
+                        let mut ignored = Tally::default();
+                        let bad = run_row(seq, row, block, &mut ignored, false);
+                        if bad.first().map(String::as_str) == Some(format!("refused Unsupported({name:?})").as_str()) {
+                            *tally.refused_by_name.entry(name).or_default() += 1;
+                        } else {
+                            tally.mismatched.push(format!("{key} {} row {index}: expected the refusal {name:?}, got {:?}",
+                                seq["label"], &bad[..bad.len().min(6)]));
+                        }
+                        continue;
+                    }
                     let bad = run_row(seq, row, block, &mut tally, true);
                     for field in &bad {
                         let family: String = field.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
@@ -417,7 +489,7 @@ fn replay(corpus: &Value, keys: &[&str]) -> (Tally, std::collections::BTreeMap<&
                         tally.mismatched.push(format!("{key} {} row {index}: {:?}", seq["label"],
                             &bad[..bad.len().min(6)]));
                     }
-                    for arm in ARMS {
+                    for &arm in arm_names {
                         arms::set(Some(arm));
                         let red = !run_row(seq, row, block, &mut tally, false).is_empty();
                         *arm_red.entry(arm).or_default() += usize::from(red);
@@ -435,7 +507,8 @@ fn report(tally: &Tally, arm_red: &std::collections::BTreeMap<&str, usize>) {
         kernel Shape groups {} direction-randomized (not admitted) {} mismatched {}; arms {:?}",
         tally.rows, tally.compared, tally.emitted, tally.catch_up_rows, tally.injected_groups,
         tally.kernel_groups, tally.direction_randomized, tally.mismatched.len(), arm_red);
-    eprintln!("mismatched field families: {:?}; size words {:?}", tally.families, tally.size);
+    eprintln!("mismatched field families: {:?}; size words {:?}; rows with an inherited size that bore {}; refused by name {:?}",
+        tally.families, tally.size, tally.inherited_size_births, tally.refused_by_name);
     for line in tally.mismatched.iter().take(12) {
         eprintln!("  {line}");
     }
@@ -449,7 +522,8 @@ fn report(tally: &Tally, arm_red: &std::collections::BTreeMap<&str, usize>) {
 #[ignore = "needs MOLY_CHILD_EMIT_RECEIPT, MOLY_CHILD_EMIT_EXTRA, MOLY_CHILD_EMIT_GRAVITY and MOLY_CHILD_EMIT_EFFECTS"]
 fn product_child_emit_matches_current_native_rows() {
     let corpus = read("MOLY_CHILD_EMIT_EFFECTS");
-    let (tally, arm_red) = replay(&corpus, &["MOLY_CHILD_EMIT_RECEIPT", "MOLY_CHILD_EMIT_EXTRA", "MOLY_CHILD_EMIT_GRAVITY"]);
+    let (tally, arm_red) = replay(&corpus, &["MOLY_CHILD_EMIT_RECEIPT", "MOLY_CHILD_EMIT_EXTRA", "MOLY_CHILD_EMIT_GRAVITY"],
+        &ARMS);
     report(&tally, &arm_red);
     assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
     assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0 && tally.size.exact > 0);
@@ -472,11 +546,70 @@ fn product_child_emit_matches_current_native_rows() {
 #[test]
 #[ignore = "needs MOLY_CHILD_EMIT_DEATH (the native death-command child rows)"]
 fn product_child_emit_matches_native_death_command_rows() {
-    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_DEATH"]);
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_DEATH"], &ARMS);
     report(&tally, &arm_red);
     assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
     assert!(tally.compared > 0 && tally.emitted > 0 && tally.size.exact + tally.size.generic > 0);
     for arm in ["noLookRotation", "noInverse"] {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}
+
+/// Death commands whose edge inherits: the commands of the native parent rows
+/// (RecordParticleDeath and KillParticle with the inherited block the parent's
+/// size module wrote: the 012 bubble's three death edges and random parents
+/// with each inherit bit set) executed by the engine's child Emit into the
+/// bubble's dust target (Sphere, Local, 3D start size, no SizeModule) and the
+/// raindrop ring (one size axis, SizeModule, World, no Shape), with the
+/// product's update inputs (flags 0, the world playing, gravity (0, -9.81,
+/// 0)). A command whose block carries a word other than the size refuses by
+/// that bit's name; every other row is compared. The two inherit arms and the
+/// two start-frame arms must differ from native.
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_INHERIT (the native inherited-command child rows)"]
+fn product_child_emit_matches_native_inherit_rows() {
+    let arm_names: Vec<&'static str> = ARMS.iter().chain(INHERIT_ARMS.iter()).copied().collect();
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_INHERIT"], &arm_names);
+    report(&tally, &arm_red);
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.inherited_size_births > 0);
+    assert!(tally.size.exact + tally.size.generic > 0 && !tally.refused_by_name.is_empty());
+    for arm in ["noLookRotation", "noInverse", "ignoreInheritedSize", "addInheritedSize"] {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}
+
+/// Child commands into the targets that carry VelocityOverLifetime and
+/// ClampVelocity: the death commands of the death-edge parent runs into the
+/// raindrops' sub_dust_01 (World, Cone, ClampVelocity with a zero limit,
+/// Rotation, Size), synthetic commands (per frame, and catch-up with every
+/// flag) into pt_trailr (Local and World, Sphere, two-constant linear
+/// velocity) and the meteor ground's pt (Local, Cone, Velocity then
+/// ClampVelocity, gravity), a World pt_trailr with a nonzero linear velocity
+/// under rotated and scaled owners, and a pt whose clamp branch is taken at
+/// newborn speeds. The engine's ClampVelocity called the device libm's powf;
+/// the product's limit law calls the host's, and the pairs where the two
+/// differ are counted. Every module arm must differ from native.
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_MODULES (the native Velocity and ClampVelocity child rows)"]
+fn product_child_emit_matches_native_module_rows() {
+    let receipt = read("MOLY_CHILD_EMIT_MODULES");
+    let (mut pairs, mut host_differs) = (0_usize, 0_usize);
+    for seq in receipt["childSynthetic"].as_array().unwrap() {
+        for call in seq["powfCalls"].as_array().unwrap() {
+            let [x, y, r] = [0, 1, 2].map(|k| word(&call[k]));
+            pairs += 1;
+            host_differs += usize::from(f32::from_bits(x).powf(f32::from_bits(y)).to_bits() != r);
+        }
+    }
+    let arm_names: Vec<&'static str> = ARMS.iter().chain(MODULE_ARMS.iter()).copied().collect();
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_MODULES"], &arm_names);
+    report(&tally, &arm_red);
+    eprintln!("powf calls {pairs}, host powf differs from the device's on {host_differs}");
+    assert!(pairs > 0);
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0);
+    for arm in MODULE_ARMS {
         assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
     }
 }
