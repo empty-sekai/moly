@@ -304,6 +304,7 @@ impl WeatherFxState {
                     crate::particle_runtime::Geometry::SourceBillboard(draw) => match draw.mode {
                         crate::source_billboard::Mode::Billboard => "source_billboard",
                         crate::source_billboard::Mode::Horizontal => "source_horizontal_billboard",
+                        crate::source_billboard::Mode::Vertical => "source_vertical_billboard",
                     },
                     crate::particle_runtime::Geometry::Mesh(_) => "source_mesh",
                     crate::particle_runtime::Geometry::Billboard { .. } => "legacy_billboard",
@@ -1812,7 +1813,7 @@ fn judge_in_host(
         },
     };
     let render_mode = renderer.get("renderMode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "Mesh") {
+    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "VerticalBillboard" | "Mesh") {
         tally.render_mode.push(format!("unsupported source render mode {render_mode}"));
         return None;
     }
@@ -2452,7 +2453,11 @@ fn judge_in_host(
             PlannedGeometry::Mesh { reference, glb, alignment: mesh_alignment.expect("validated Mesh alignment"), source: None, scaling, pivot: Vec3::from_array(pivot), flip, axis_body }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
-                mode: if render_mode == "HorizontalBillboard" { crate::source_billboard::Mode::Horizontal } else { crate::source_billboard::Mode::Billboard },
+                mode: match render_mode {
+                    "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
+                    "VerticalBillboard" => crate::source_billboard::Mode::Vertical,
+                    _ => crate::source_billboard::Mode::Billboard,
+                },
                 alignment: mesh_alignment.expect("validated source Billboard alignment"),
                 screen_size: Vec2::new(min_particle_size as f32, max_particle_size as f32),
                 allow_roll, scaling, pivot: Vec3::from_array(pivot),

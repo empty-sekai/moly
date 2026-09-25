@@ -430,6 +430,7 @@ fn admit(row: &Value, local_scale: Vec3) -> Result<Admitted, String> {
     let mode = match render_mode {
         "Billboard" => crate::source_billboard::Mode::Billboard,
         "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
+        "VerticalBillboard" => crate::source_billboard::Mode::Vertical,
         other => return Err(format!("render mode {other} is not installed on this path")),
     };
     let alignment_id = renderer["alignment"].as_i64().unwrap_or(-1);

@@ -15,6 +15,7 @@ use bevy::{
 pub(crate) enum Mode {
     Billboard,
     Horizontal,
+    Vertical,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,16 @@ fn velocity_basis(velocity: Vec3, simulation: Mat3) -> Mat3 {
     let x = simulation * Vec3::new(-n.y, n.x, 0.0);
     let x = if x.length_squared() > 1.0e-30 { x.normalize() } else { Vec3::X };
     Mat3::from_cols(x, z.cross(x), z)
+}
+
+/// The VerticalBillboard side span: world +Y crossed with the camera's
+/// world-to-camera image of world +Z, normalized, and zero where its square is
+/// at or below 1e-30. With the camera rotation's columns right, up and
+/// forward, and the world-to-camera matrix flipping the camera Z, that image
+/// is (right.z, up.z, -forward.z), so the cross is (-forward.z, 0, -right.z).
+fn vertical_side(camera_rotation: Mat3) -> Vec3 {
+    let side = Vec3::new(-camera_rotation.z_axis.z, 0.0, -camera_rotation.x_axis.z);
+    if side.length_squared() > 1.0e-30 { side.normalize() } else { Vec3::ZERO }
 }
 
 fn facing(direction: Vec3, up: Vec3) -> Mat3 {
@@ -128,21 +139,22 @@ fn vertices_sized(
                 .cross(offsets[1].normalize_or_zero());
             (offsets, normal)
         }
-        Mode::Horizontal => {
+        Mode::Horizontal | Mode::Vertical => {
+            // One geometry body serves both modes; they differ only in the
+            // two world spans the quad is laid on.
+            let (side, up) = match draw.mode {
+                Mode::Horizontal => (Vec3::NEG_X, Vec3::Z),
+                _ => (vertical_side(frame.camera_rotation), Vec3::Y),
+            };
             let (sin, cos) = (p.rotation.z + std::f32::consts::FRAC_PI_4).sin_cos();
-            let x = size.x * scale.x * 0.5;
-            let z = size.y * scale.z * 0.5;
-            let corners = [
-                Vec3::new(-cos * x, 0.0, sin * z),
-                Vec3::new(sin * x, 0.0, cos * z),
-                Vec3::new(cos * x, 0.0, -sin * z),
-                Vec3::new(-sin * x, 0.0, -cos * z),
-            ];
-            let pivot = Vec3::new(
-                p.size.x * scale.x * draw.pivot.x * cos,
-                p.size.x * scale.y * draw.pivot.z,
-                p.size.y * scale.z * draw.pivot.y * sin,
-            );
+            let (x, y) = (size.x * 0.5, size.y * 0.5);
+            let across = [cos * x, -sin * x, -cos * x, sin * x];
+            let along = [sin * y, cos * y, -sin * y, -cos * y];
+            let corners: [Vec3; 4] = std::array::from_fn(|k| (side * across[k] + up * along[k]) * scale);
+            let pivot = (-side * (p.size.x * draw.pivot.x * cos)
+                + up * (p.size.y * draw.pivot.y * sin)
+                + side.cross(up) * (p.size.x * draw.pivot.z))
+                * scale;
             let normal = corners[0]
                 .normalize_or_zero()
                 .cross(corners[1].normalize_or_zero());

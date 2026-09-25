@@ -306,3 +306,77 @@ fn velocity_billboard_matches_native_rows() {
     assert!(rows > 0, "no rows");
     assert!(failures.is_empty(), "{} mismatched corners:\n{}", failures.len(), failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n"));
 }
+
+/// Research instrument: the engine's Horizontal and VerticalBillboard geometry
+/// (the renderer's span setup, then the shared geometry body of both modes)
+/// executed in an ARMv8 emulator on the current engine library, over sampled
+/// cameras (including one whose world-to-camera image of world +Z is parallel
+/// to world +Y, where the vertical side span is zero), World and rotated Local
+/// owners, unit and non-unit renderer scale, pivots and 2D rotation. Every
+/// corner must match. Point MOLY_HV_BILLBOARD_NATIVE at the recorded rows;
+/// MOLY_HV_BILLBOARD_MUTANT names a deliberate defect that must fail.
+#[test]
+#[ignore = "needs MOLY_HV_BILLBOARD_NATIVE"]
+fn horizontal_and_vertical_billboards_match_native_rows() {
+    let path = std::env::var("MOLY_HV_BILLBOARD_NATIVE").expect("MOLY_HV_BILLBOARD_NATIVE");
+    let data: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(data["sourceSha256"], "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9");
+    let mutant = std::env::var("MOLY_HV_BILLBOARD_MUTANT").unwrap_or_default();
+    let word = |v: &Value| f32::from_bits(v.as_u64().unwrap() as u32);
+    let v3 = |v: &Value| Vec3::new(word(&v[0]), word(&v[1]), word(&v[2]));
+    let (mut rows, mut vertical, mut failures, mut maximum) = (0usize, 0usize, Vec::new(), 0.0f32);
+    for (index, row) in data["rows"].as_array().unwrap().iter().enumerate() {
+        let o: Vec<f32> = row["owner"].as_array().unwrap().iter().map(word).collect();
+        let owner = Mat3::from_cols(Vec3::new(o[0], o[1], o[2]), Vec3::new(o[4], o[5], o[6]), Vec3::new(o[8], o[9], o[10]));
+        let translation = Vec3::new(o[12], o[13], o[14]);
+        let c: Vec<f32> = row["cameraRotation"].as_array().unwrap().iter().map(word).collect();
+        let camera_rotation = Mat3::from_cols_slice(&c);
+        // Mutants: the camera Z flip of the world-to-camera matrix left out,
+        // the Horizontal spans for both modes, or the renderer scale ignored.
+        let camera_rotation = if mutant == "unflipped-z" {
+            camera_rotation * Mat3::from_diagonal(Vec3::new(1.0, 1.0, -1.0))
+        } else {
+            camera_rotation
+        };
+        let frame = Frame {
+            rotation: owner,
+            scale: if mutant == "no-scale" { Vec3::ONE } else { v3(&row["scale"]) },
+            camera_rotation,
+            camera_position: v3(&row["cameraPosition"]),
+        };
+        let is_vertical = row["mode"] == "VerticalBillboard";
+        let p = Instance {
+            position: owner * v3(&row["position"]) + translation,
+            velocity: Vec3::ZERO,
+            rotation: v3(&row["rotation"]),
+            size: v3(&row["size"]),
+            colour: Vec4::ONE,
+            custom1: Vec4::ZERO,
+            custom2: Vec4::ZERO,
+            seed: 0,
+            age_percent: 0.0,
+            axis: Vec3::Z,
+        };
+        let draw = Draw {
+            mode: if is_vertical && mutant != "horizontal-spans" { Mode::Vertical } else { Mode::Horizontal },
+            alignment: Alignment::View,
+            pivot: v3(&row["pivot"]),
+            screen_size: Vec2::new(0.0, 10000.0),
+            allow_roll: true,
+            scaling: crate::particle_geometry::Scaling::Hierarchy,
+        };
+        let (corners, _) = vertices_sized(&p, &frame, &draw, row["simulation"] == "Local", p.size, owner);
+        for (k, corner) in corners.iter().enumerate() {
+            let error = (*corner - v3(&row["corners"][k])).abs().max_element();
+            maximum = maximum.max(error);
+            if !error.is_finite() || error > 0.000025 {
+                failures.push(format!("row {index} ({} {}) corner {k}: error {error}", row["mode"], row["entry"]));
+            }
+        }
+        rows += 1;
+        vertical += usize::from(is_vertical);
+    }
+    println!("horizontal/vertical billboard: {rows} particles ({vertical} vertical), max corner error {maximum}, {} mismatched corners", failures.len());
+    assert!(rows > 0 && vertical > 0 && vertical < rows, "both modes must be present");
+    assert!(failures.is_empty(), "{} mismatched corners:\n{}", failures.len(), failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n"));
+}
