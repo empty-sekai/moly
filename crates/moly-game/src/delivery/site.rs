@@ -508,6 +508,9 @@ pub(crate) struct DeliveryAutoplay {
     pressed_at: Option<f32>,
     released: bool,
     dialog_since: Option<f32>,
+    /// When the walk toward the drops began; after 30 s the instrument
+    /// leaves the remaining drops and walks to the place.
+    drops_since: Option<f32>,
 }
 
 fn autoplay_config() -> Option<(f32, f32)> {
@@ -542,6 +545,7 @@ pub(crate) fn autoplay(
     mut touches: MessageWriter<TouchInput>,
     mut requests: MessageWriter<DeliveryRequest>,
     mut closes: MessageWriter<DeliveryDialogClosed>,
+    navigation: Option<Res<crate::player_fixture_action::PlayerFixtureNavigation>>,
 ) {
     let Some((hold, close)) = autoplay_config() else {
         return;
@@ -610,9 +614,10 @@ pub(crate) fn autoplay(
         return;
     }
     // Target: the nearest landed drop, else the place circle.
+    let drops_open = now - *run.drops_since.get_or_insert(now) < 30.0;
     let target = drops
         .iter()
-        .filter(|(_, drop)| drop.radius > 0.0 && !drop.gathering())
+        .filter(|(_, drop)| drops_open && drop.radius > 0.0 && !drop.gathering())
         .map(|(transform, _)| transform.translation)
         .min_by(|a, b| {
             a.distance(player.translation)
@@ -635,7 +640,18 @@ pub(crate) fn autoplay(
         return;
     }
     let goal = target.unwrap_or(objects.place);
-    let delta = goal - player.translation;
+    // Steer along the walk field's path (the first corner not yet reached),
+    // so the trunk does not hold the walk.
+    let steer = navigation
+        .as_deref()
+        .and_then(|navigation| navigation.world.path(player.translation, goal).ok())
+        .and_then(|path| {
+            path.corners
+                .into_iter()
+                .find(|corner| corner.xz().distance(player.translation.xz()) > 0.1)
+        })
+        .unwrap_or(goal);
+    let delta = steer - player.translation;
     let mut world = Vec2::new(delta.x, delta.z);
     if world.length_squared() < f32::EPSILON {
         world = Vec2::X;
