@@ -67,6 +67,13 @@ pub enum PlayerActionState {
     Talk,
     /// 7：采集（`HarvestPresenter` 命中臂进、收场臂出）。
     Harvest,
+    /// 8: the birthday-party delivery (`PlayerAvatarDeliveryState`), entered
+    /// by the delivery pre-action after the approach; the delivery closes
+    /// the intercept gate for it and opens it at its end action.
+    Delivery,
+    /// 9: the honor reward (`PlayerAvatarDeliveryHonorRewardState`); its
+    /// camera state and look-at are the delivery's.
+    DeliveryHonorReward,
     /// 10: the player's one-second fixture switch interval.
     SwitchGimmick,
     /// 11: walking into the house (`PlayerAvatarEnterMoveHouseState`, the

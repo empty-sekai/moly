@@ -25,6 +25,8 @@ pub mod client_config;
 pub mod cloth_runtime;
 mod content_library;
 mod delayed_faces;
+pub mod delivery;
+mod delivery_camera;
 pub mod emoticon;
 mod entry;
 pub mod env;
@@ -230,6 +232,7 @@ pub fn app(
         harvest_material::HarvestMaterialPlugin,
         harvest_particles::HarvestParticlePlugin,
     ));
+    app.add_plugins(delivery::DeliveryPlugin);
     app
 }
 
