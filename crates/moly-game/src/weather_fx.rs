@@ -1154,7 +1154,7 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
                 edges.births.push(crate::particle_runtime::BirthEdge { target: target.to_owned(), law });
             }
             SubEmitterTrigger::Death => {
-                let law = moly_law::particle::death_event::DeathEmitEdge::from_source(edge, &child)
+                let law = moly_law::particle::death_event::DeathEmitEdge::from_source(edge, emitter, &child)
                     .map_err(|refused| format!("{target}: death edge outside the death event law ({refused:?})"))?;
                 edges.deaths.push(crate::particle_runtime::DeathEdge { target: target.to_owned(), law });
             }

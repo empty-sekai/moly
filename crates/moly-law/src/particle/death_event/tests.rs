@@ -61,16 +61,20 @@ enum Arm {
     TwoConstantsLow,
     /// The burst's own probability draw skipped.
     NoBurstDraw,
+    /// The inherited size ignored: the neutral block on a size edge.
+    InheritIgnored,
 }
-const ARMS: [Arm; 6] = [Arm::CatchUpZero, Arm::NoAnimated, Arm::TranslationFirst, Arm::NoEdgeGate,
-    Arm::TwoConstantsLow, Arm::NoBurstDraw];
+const ARMS: [Arm; 7] = [Arm::CatchUpZero, Arm::NoAnimated, Arm::TranslationFirst, Arm::NoEdgeGate,
+    Arm::TwoConstantsLow, Arm::NoBurstDraw, Arm::InheritIgnored];
 
 /// Our event for the row under an arm; `None` when the gate refuses the row.
 fn ours(row: &Value, arm: Option<Arm>) -> Option<(RecordedDeath, bool)> {
     let edge = field(row, "edge");
-    if word(field(edge, "properties")) != 0 {
-        return None;
-    }
+    let parent = field(row, "parent");
+    // These rows' parents have no SizeModule: the inherited size is the stored size.
+    let inherit = crate::particle::inherit::InheritSize::from_parent(word(field(edge, "properties")), None,
+        field(parent, "size3d").as_bool().unwrap_or_else(|| word(field(parent, "size3d")) != 0)).ok()?;
+    let inherit = inherit.filter(|_| arm != Some(Arm::InheritIgnored));
     let child = field(row, "child");
     let mut burst = first_burst(child).ok()?;
     let mut probability = bits(field(edge, "probabilityBits"));
@@ -90,8 +94,7 @@ fn ours(row: &Value, arm: Option<Arm>) -> Option<(RecordedDeath, bool)> {
             _ => EdgeBurst::new(p, bits(field(count, "bits"))).unwrap(),
         });
     }
-    let edge = DeathEmitEdge::new(probability, burst).ok()?;
-    let parent = field(row, "parent");
+    let edge = DeathEmitEdge::new(probability, burst).ok()?.with_inherit(inherit);
     let simulation = word(field(parent, "simulation"));
     let owner_words = words(field(parent, "ownerBits"));
     let mut owner = EventOwner {
@@ -109,6 +112,10 @@ fn ours(row: &Value, arm: Option<Arm>) -> Option<(RecordedDeath, bool)> {
         position: vec3(field(parent, "position")),
         velocity: vec3(field(parent, "velocity")),
         animated: vec3(field(parent, "animated")),
+        size: vec3(field(parent, "size")),
+        // Not read without a parent SizeModule.
+        age_percent: 0.0,
+        inverse_lifetime: 1.0,
     };
     if arm == Some(Arm::NoAnimated) {
         dying.animated = [0.0; 3];
@@ -166,9 +173,10 @@ fn compare(row: &Value, recorded: &RecordedDeath) -> Vec<&'static str> {
 
 /// Every native death record, from RecordParticleDeath over every index and
 /// KillParticle with recording on, is reproduced word for word: the state
-/// before and after, whether commands are issued, and every command byte.
-/// Records whose edge inherits properties are refused by the gate and
-/// counted. Every one-rule arm differs from native on at least one row.
+/// before and after, whether commands are issued, and every command byte
+/// (the inherited block of the size edges included). Records the gate
+/// refuses are counted. Every one-rule arm differs from native on at least
+/// one row.
 #[test]
 #[ignore = "needs MOLY_DEATH_EVENT_ROWS"]
 fn death_records_match_native_rows() {
@@ -206,7 +214,7 @@ fn death_records_match_native_rows() {
             }
         }
     }
-    println!("death rows {} {kinds:?}: compared {compared}, refused (inherited properties) {refused}, \
+    println!("death rows {} {kinds:?}: compared {compared}, refused {refused}, \
         with commands {with_commands}, World {world}, two-constant counts {two_constants}",
         rows.len());
     println!("arms red (rows): {red:?}");
@@ -240,7 +248,8 @@ fn record_death_never_panics() {
                 seed = seed.wrapping_mul(0x6c07_8965).wrapping_add(1);
                 let owner = EventOwner { local_to_world: [v; 16], world_space: seed & 1 == 0, accumulated_time: v,
                     emission_word: seed.rotate_left(7) };
-                let parent = DeathParent { index: usize::MAX, seed, position: [v; 3], velocity: [-v; 3], animated: [v; 3] };
+                let parent = DeathParent { index: usize::MAX, seed, position: [v; 3], velocity: [-v; 3], animated: [v; 3],
+                    size: [v; 3], age_percent: v, inverse_lifetime: -v };
                 let _ = record_death(&edge, usize::MAX, &parent, &owner);
             }
         }
