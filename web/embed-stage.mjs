@@ -12,6 +12,7 @@ import {
   resourceBase,
   resourceOrigin,
   contentKey,
+  site as checkedSite,
   MAX_PENDING_INTENTS,
 } from "./embed-contract.mjs";
 
@@ -96,6 +97,8 @@ export function mountStage(container, options = {}) {
   if (selected) url.searchParams.set("content", selected);
   if (initial.fixture) url.searchParams.set("fixture", String(initial.fixture));
   if (initial.tab) url.searchParams.set("tab", initial.tab);
+  if (options.site !== undefined)
+    url.searchParams.set("site", checkedSite(options.site));
   const frame = document.createElement("iframe");
   frame.title = TITLES[ui.locale];
   frame.allow = "autoplay; fullscreen";
@@ -111,7 +114,8 @@ export function mountStage(container, options = {}) {
   let pending = [];
   let documentInstance = null,
     requestedPlay = null,
-    requestedWeather = null;
+    requestedWeather = null,
+    requestedSite = null;
   let currentFilters = { ...initial },
     currentSelection = selected;
   const owner = {};
@@ -132,6 +136,7 @@ export function mountStage(container, options = {}) {
     if (type === "play" || type === "preview") requestedPlay = command;
     if (["stop", "restore", "close"].includes(type)) requestedPlay = null;
     if (type === "weather") requestedWeather = command.value;
+    if (type === "site") requestedSite = command.value;
     if (type === "sound") ui.sound = command.value;
     if (connected) post("intent", command);
     else {
@@ -164,25 +169,22 @@ export function mountStage(container, options = {}) {
       connected = true;
       lastSnapshot = null;
       configure();
-      const queuedPlay = pending.some(
-        (command) => command.type === "play" || command.type === "preview",
-      );
+      const queued = new Set(pending.map((command) => command.type));
       for (const command of pending) post("intent", command);
       pending = [];
+      // Site and weather are scene settings, not playback intentions: an
+      // engine reload comes back on the ones the user last chose instead of
+      // the page's initial site and the default phenomenon. They go first so
+      // a replayed Play is staged in that scene.
+      if (reloaded && requestedSite !== null && !queued.has("site"))
+        post("intent", { type: "site", value: requestedSite });
+      if (reloaded && requestedWeather !== null && !queued.has("weather"))
+        post("intent", { type: "weather", value: requestedWeather });
       // Retry after a download/initialization failure restores only the last
       // unacknowledged user Play intention. A previously playing scene is not
       // silently resumed after a crash, and current browsing is never rewound.
-      if (reloaded && requestedPlay && !queuedPlay)
+      if (reloaded && requestedPlay && !queued.has("play") && !queued.has("preview"))
         post("intent", requestedPlay);
-      // The weather dial is a scene setting, not a playback intention: an
-      // engine reload must come back on the档 the user last chose instead of
-      // silently rewinding to the default phenomenon.
-      if (
-        reloaded &&
-        requestedWeather !== null &&
-        !pending.some((command) => command.type === "weather")
-      )
-        post("intent", { type: "weather", value: requestedWeather });
     } else if (
       type === "player-data" &&
       value?.schemaVersion === 1 &&
@@ -271,6 +273,9 @@ export function mountStage(container, options = {}) {
     },
     setWeather(value) {
       dispatch("weather", value);
+    },
+    setSite(value) {
+      dispatch("site", value);
     },
     setSoundEnabled(value) {
       dispatch("sound", !!value);

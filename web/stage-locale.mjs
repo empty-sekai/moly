@@ -19,6 +19,7 @@ const messages = {
     stalled: "准备耗时较长，可继续等待或重新加载。",
     cached: "已保留的资源会在下次进入时复用。",
     tap: "点击场景以启用键盘操作",
+    site: "地点",
     weather: {
       soapbubble: "泡泡",
       universe: "宇宙",
@@ -65,6 +66,7 @@ const messages = {
       "Preparation is taking longer than expected. You can wait or reload.",
     cached: "Retained resources will be reused next time.",
     tap: "Click the scene to enable keyboard controls",
+    site: "Location",
     weather: {
       soapbubble: "Bubbles",
       universe: "Universe",
@@ -109,6 +111,7 @@ const messages = {
     stalled: "準備に時間がかかっています。待機するか、再読み込みしてください。",
     cached: "保持したリソースは次回の起動時に再利用されます。",
     tap: "シーンをクリックするとキーボード操作が有効になります",
+    site: "場所",
     weather: {
       soapbubble: "シャボン玉",
       universe: "宇宙",
@@ -150,6 +153,7 @@ const messages = {
     stalled: "準備時間較長，可繼續等待或重新載入。",
     cached: "保留的資源會在下次進入時重複使用。",
     tap: "點擊場景以啟用鍵盤操作",
+    site: "地點",
     weather: {
       soapbubble: "泡泡",
       universe: "宇宙",
@@ -193,6 +197,7 @@ const messages = {
     stalled: "준비가 지연되고 있습니다. 기다리거나 다시 불러오세요.",
     cached: "보관된 리소스는 다음 실행 시 재사용됩니다.",
     tap: "장면을 클릭하면 키보드 조작이 활성화됩니다",
+    site: "장소",
     weather: {
       soapbubble: "비눗방울",
       universe: "우주",

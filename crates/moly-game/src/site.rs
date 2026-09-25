@@ -301,6 +301,8 @@ impl SiteSelection {
 struct SiteRow {
     id: u32,
     site_type: String,
+    /// The master row's display name, in the snapshot region's own language.
+    name: String,
     category: String,
     /// 场景目录名：主表行以它指向提取产物（glTF 主根与它同名）。
     scene: String,
@@ -435,12 +437,14 @@ impl Sites {
                 let id = field("id").as_u64().and_then(|id| u32::try_from(id).ok())
                     .filter(|id| *id != 0).unwrap_or_else(|| panic!("站点 {site_type} 缺有效 id"));
                 let scene = text("scene");
+                let name = text("name");
                 let asset_bundle = text("assetbundleName");
                 let position = [axis("x"), axis("y"), axis("z")];
                 SiteRow {
                     id,
                     category,
                     site_type,
+                    name,
                     scene,
                     asset_bundle,
                     position,
@@ -534,6 +538,15 @@ impl Sites {
 
     pub(crate) fn site_id(&self, site_type: &str) -> Option<u32> {
         self.row_opt(site_type).map(|row| row.id)
+    }
+
+    /// The sites a switch can reach, in master-row order, each with the
+    /// master's own display name. Only rows of the supported set are listed.
+    pub(crate) fn switchable(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.rows
+            .iter()
+            .filter(|row| is_supported(&row.site_type))
+            .map(|row| (row.site_type.as_str(), row.name.as_str()))
     }
 
     /// 场景包站点的可行走面来源；authored 无烘档的场景返回 None。
@@ -1300,6 +1313,11 @@ impl Default for Tour {
 
 fn is_room(site_type: &str) -> bool {
     ROOM_TYPES.contains(&site_type)
+}
+
+/// Whether a site type is one the loader can switch to.
+pub(crate) fn is_supported(site_type: &str) -> bool {
+    SUPPORTED.contains(&site_type)
 }
 
 /// Update（站点定案后的下一帧）：每站一条装载锚行。这里统计保留的
