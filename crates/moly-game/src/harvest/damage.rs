@@ -1,0 +1,474 @@
+//! `HarvestObjectPresenter.OnDamage` and what a hit shows.
+//!
+//! Per hit: `UpdateHp`; then by the view's interface.
+//! - Multi (tree, stone): `PlayMultiActionDamageEffect(toolLevel, boost,
+//!   isLast)` = the hit effect by tool level, the boost effect, `PlayHitSE`,
+//!   `DamageAnimation` (the punch), and on the last attack `PlayLastAttackSE`;
+//!   a rare last attack also `PlayRareObjectBreakSE`; `HandleResourceDrop`;
+//!   on the last attack `ChangeAfterObject` and `RemoveCollisionObject`.
+//! - Single (the other kinds): `PlayDamageEffect`, the boost effect,
+//!   `PlaySE`, the punch, `HandleResourceDrop`, `ChangeAfterObject`,
+//!   `RemoveCollisionObject`.
+//!
+//! The punch is `DOPunchPosition((0.01, 0, 0), 0.7, 6, 1)` on every kind,
+//! never killed first (two overlapping punches run together). In the product
+//! frame the source x axis is reflected, so the punch goes along -x.
+
+use bevy::prelude::*;
+
+use super::law::{punch_points, PointTween, SegmentEase};
+use super::{
+    ActionInterface, DropBatch, EffectHook, HarvestDropBatches, HarvestEffectHooks,
+    HarvestHitResults, HarvestHits, HarvestObject, HarvestStats, HarvestViewNodes, HitResult,
+    PendingDrop, STATUS_HARVESTED,
+};
+use crate::audio::{SeClass, SeRequest, SeRequests};
+use crate::player::PlayerControlled;
+
+/// `DamageAnimation`'s punch in the product frame (source (0.01, 0, 0)).
+const PUNCH: Vec3 = Vec3::new(-0.01, 0.0, 0.0);
+const PUNCH_DURATION: f32 = 0.7;
+const PUNCH_VIBRATO: i32 = 6;
+const PUNCH_ELASTICITY: f32 = 1.0;
+
+/// The tree fall: the top rotates to local Euler (90, 0, 0) over 2.0 s with
+/// InQuart; `PlayFadeAsync` waits 2.0 s, emits 132 at the delete position and
+/// fades the top over 0.5 s, then turns it off.
+const FALL_DURATION: f32 = 2.0;
+const FADE_DELAY: f32 = 2.0;
+const FADE_DURATION: f32 = 0.5;
+/// Driftage and toolbox disappear after `UniTask.Delay(1.0 s)`.
+const DELAYED_HIDE: f32 = 1.0;
+
+/// Running punches of one object, in creation order.
+#[derive(Component, Default)]
+pub(crate) struct HarvestPunches(Vec<PointTween>);
+
+/// A disappearance in progress (`ChangeAfterObject`).
+#[derive(Component)]
+pub(crate) enum HarvestAfterForm {
+    TreeFall {
+        elapsed: f32,
+        from: Option<Quat>,
+        emitted: bool,
+    },
+    DelayedHide {
+        remaining: f32,
+    },
+}
+
+pub(crate) fn push_se(se: &mut SeRequests, cue: &str, source: &'static str) {
+    se.0.push(SeRequest {
+        owner: None,
+        cue: cue.to_owned(),
+        class: SeClass::Ingame,
+        source,
+    });
+}
+
+/// Hit effect by tool level (`PlayDamageNormalEffect`): tree 121 / 122 / 123
+/// (levels 3 and 4) / 124; stone 111 / 112 / 113 / 114.
+fn multi_hit_effect(class: &str, tool_level: i32) -> Option<u16> {
+    let base = match class {
+        "MysekaiAreaTreeView" => 120,
+        "MysekaiAreaStoneView" => 110,
+        _ => return None,
+    };
+    Some(match tool_level {
+        1 => base + 1,
+        2 => base + 2,
+        3 | 4 => base + 3,
+        5 => base + 4,
+        _ => return None,
+    })
+}
+
+/// Update: drain the hit queue through `OnDamage`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn on_damage(
+    mut commands: Commands,
+    mut hits: ResMut<HarvestHits>,
+    mut results: ResMut<HarvestHitResults>,
+    mut objects: Query<(
+        &mut HarvestObject,
+        &mut Visibility,
+        &Transform,
+        Option<&HarvestViewNodes>,
+    )>,
+    mut punches: Query<&mut HarvestPunches>,
+    mut node_visibility: Query<&mut Visibility, Without<HarvestObject>>,
+    players: Query<&Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
+    mut batches: ResMut<HarvestDropBatches>,
+    mut stats: ResMut<HarvestStats>,
+    mut se: ResMut<SeRequests>,
+    mut effects: ResMut<HarvestEffectHooks>,
+    configs: Option<Res<crate::client_config::ClientConfigs>>,
+) {
+    let Some(configs) = configs else {
+        return;
+    };
+    let drop_delay_count =
+        configs.int(crate::client_config::KEY_HARVEST_DROP_DELAY_ITEM_COUNT) as usize;
+    let player = players.single().ok().map(|transform| transform.translation);
+    for hit in std::mem::take(&mut hits.0) {
+        let Ok((mut object, mut visibility, transform, nodes)) = objects.get_mut(hit.target) else {
+            warn!("[harvest] a hit names no harvest object: {:?}", hit.target);
+            continue;
+        };
+        let already = object.status == STATUS_HARVESTED;
+        object.hits_taken += 1;
+        let returned = object.update_hp(hit.damage);
+        stats.hits += 1;
+        if already {
+            stats.idle_returns += 1;
+            info!(
+                "[harvest] hit on {}#{} already harvested: UpdateHp returned {returned}, nothing shown",
+                object.leaf, object.fixture_id
+            );
+            results.0.push(HitResult {
+                target: hit.target,
+                damage: hit.damage,
+                used: returned,
+                is_last_attack: object.is_last_attack,
+                tool: hit.tool,
+            });
+            continue;
+        }
+        let last = object.is_last_attack;
+        let position = transform.translation;
+        // The multi effects stand 0.2 m back toward the player and 0.35 m up.
+        let effect_at = match player {
+            Some(player) => {
+                let dir =
+                    Vec2::new(position.x - player.x, position.z - player.z).normalize_or_zero();
+                position + Vec3::new(-0.2 * dir.x, 0.35, -0.2 * dir.y)
+            }
+            None => position + Vec3::Y * 0.35,
+        };
+        // ... and turn to face the player (`LookRotation(-0.2 * dir)`; in the
+        // product frame the yaw of that direction).
+        let facing = match player {
+            Some(player) => {
+                let back = Vec2::new(player.x - position.x, player.z - position.z);
+                if back.length_squared() > 0.0 {
+                    Quat::from_rotation_y(back.x.atan2(back.y))
+                } else {
+                    Quat::IDENTITY
+                }
+            }
+            None => Quat::IDENTITY,
+        };
+        let mut cues: Vec<&'static str> = Vec::new();
+        let mut hooks: Vec<u16> = Vec::new();
+        match object.interface {
+            ActionInterface::Multi => {
+                if let Some(kind) = multi_hit_effect(object.class, hit.tool_level) {
+                    hooks.push(kind);
+                }
+                if hit.is_boost {
+                    hooks.push(if hit.tool_level == 5 { 143 } else { 141 });
+                }
+                cues.extend(object.cues.hit);
+                if last {
+                    cues.extend(object.cues.last);
+                    cues.extend(object.cues.rare_break);
+                }
+            }
+            ActionInterface::Single => {
+                match object.class {
+                    "MysekaiAreaPlantView" => hooks.push(101),
+                    "MysekaiAreadDriftageView" => hooks.push(133),
+                    _ => {}
+                }
+                if hit.is_boost
+                    && matches!(
+                        object.class,
+                        "MysekaiAreaJunkView"
+                            | "MysekaiAreadDriftageView"
+                            | "MysekaiBirthdayPlantView"
+                    )
+                {
+                    hooks.push(141);
+                }
+                cues.extend(object.cues.hit);
+            }
+        }
+        // The single-action views emit at their own position.
+        for kind in &hooks {
+            effects.pending.push(match object.interface {
+                ActionInterface::Multi => EffectHook {
+                    kind: *kind,
+                    position: effect_at,
+                    rotation: facing,
+                },
+                ActionInterface::Single => EffectHook::at(*kind, position),
+            });
+        }
+        for cue in &cues {
+            push_se(&mut se, cue, "harvest-hit");
+        }
+        // DamageAnimation on every kind.
+        let tween = PointTween::new(
+            punch_points(PUNCH, PUNCH_DURATION, PUNCH_VIBRATO, PUNCH_ELASTICITY),
+            SegmentEase::OutQuad,
+        );
+        match punches.get_mut(hit.target) {
+            Ok(mut list) => list.0.push(tween),
+            Err(_) => {
+                commands
+                    .entity(hit.target)
+                    .insert(HarvestPunches(vec![tween]));
+            }
+        }
+        // HandleResourceDrop: the last attack takes every remaining row
+        // (row hp >= hp after); other hits the rows with hp < row hp <= prev.
+        assert!(
+            object.fixture_type < 10,
+            "fixture type {} is outside the drop gate",
+            object.fixture_type
+        );
+        let (hp, prev_hp) = (object.hp, object.prev_hp);
+        let admitted: Vec<PendingDrop> = object
+            .pending_drops
+            .iter()
+            .filter(|drop| {
+                if last {
+                    drop.row.hp >= hp
+                } else {
+                    hp < drop.row.hp && drop.row.hp <= prev_hp
+                }
+            })
+            .cloned()
+            .collect();
+        let mut tail = String::new();
+        if !admitted.is_empty() {
+            let count = admitted.len();
+            let delay = drop_delay_count <= count;
+            super::drops::play_drop_item_se(object.fixture_type, &admitted, &mut se);
+            batches.0.push(DropBatch {
+                origin: Some(hit.target),
+                position_x: object.position_x,
+                position_z: object.position_z,
+                fixture_type: object.fixture_type,
+                remaining: admitted,
+                delay,
+            });
+            stats.drop_batches += 1;
+            tail = format!(
+                " -> drop batch of {count} (thresholds {:?}; {} with HarvestDropDelayItemCount {drop_delay_count})",
+                batches
+                    .0
+                    .last()
+                    .expect("pushed")
+                    .remaining
+                    .iter()
+                    .map(|d| d.row.hp)
+                    .collect::<Vec<_>>(),
+                if delay { "one a frame" } else { "same frame" }
+            );
+        }
+        let disappears = object.interface == ActionInterface::Single || last;
+        if disappears {
+            match object.interface {
+                ActionInterface::Multi => stats.multi_final += 1,
+                ActionInterface::Single => stats.single_hits += 1,
+            }
+            change_after_object(
+                &mut commands,
+                hit.target,
+                &object,
+                position,
+                &mut visibility,
+                nodes,
+                &mut node_visibility,
+                &mut effects,
+            );
+            object.collision = false;
+            tail.push_str(" -> ChangeAfterObject + RemoveCollisionObject");
+        } else {
+            stats.multi_hits += 1;
+        }
+        info!(
+            "[harvest] OnDamage {}#{} hit {}: damage {} hp {} -> {} returned {} last {} ({:?}) SE {:?} effect hooks {:?}{tail}",
+            object.leaf,
+            object.fixture_id,
+            object.hits_taken,
+            hit.damage,
+            prev_hp,
+            hp,
+            returned,
+            last,
+            object.interface,
+            cues,
+            hooks,
+        );
+        results.0.push(HitResult {
+            target: hit.target,
+            damage: hit.damage,
+            used: returned,
+            is_last_attack: last,
+            tool: hit.tool,
+        });
+    }
+}
+
+fn hide(
+    entity: Option<Entity>,
+    root_visibility: &mut Visibility,
+    nodes: &mut Query<&mut Visibility, Without<HarvestObject>>,
+) {
+    match entity.and_then(|entity| nodes.get_mut(entity).ok()) {
+        Some(mut visibility) => *visibility = Visibility::Hidden,
+        None => *root_visibility = Visibility::Hidden,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn change_after_object(
+    commands: &mut Commands,
+    root: Entity,
+    object: &HarvestObject,
+    position: Vec3,
+    root_visibility: &mut Visibility,
+    nodes: Option<&HarvestViewNodes>,
+    node_visibility: &mut Query<&mut Visibility, Without<HarvestObject>>,
+    effects: &mut HarvestEffectHooks,
+) {
+    let object_node = nodes.and_then(|nodes| nodes.object);
+    match object.class {
+        "MysekaiAreaTreeView" => {
+            let (Some(after), Some(nodes)) = (nodes.and_then(|n| n.after), nodes) else {
+                warn!(
+                    "[harvest] {}#{}: tree after mesh unresolved; the whole tree hides",
+                    object.leaf, object.fixture_id
+                );
+                *root_visibility = Visibility::Hidden;
+                return;
+            };
+            // FallDownAnimation: before off, after on, under on.
+            hide(object_node, root_visibility, node_visibility);
+            if let Ok(mut visibility) = node_visibility.get_mut(after) {
+                *visibility = Visibility::Inherited;
+            }
+            if let Some(mut visibility) = nodes
+                .under
+                .and_then(|under| node_visibility.get_mut(under).ok())
+            {
+                *visibility = Visibility::Inherited;
+            }
+            commands.entity(root).insert(HarvestAfterForm::TreeFall {
+                elapsed: 0.0,
+                from: None,
+                emitted: false,
+            });
+        }
+        "MysekaiAreaStoneView" => {
+            hide(object_node, root_visibility, node_visibility);
+            effects.pending.push(EffectHook::at(131, position));
+        }
+        "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView" => {
+            commands.entity(root).insert(HarvestAfterForm::DelayedHide {
+                remaining: DELAYED_HIDE,
+            });
+        }
+        _ => hide(object_node, root_visibility, node_visibility),
+    }
+}
+
+/// Update: advance every running punch in creation order; the last written
+/// value stands, as with two DOTween punches on one transform.
+pub(crate) fn advance_punches(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut HarvestPunches, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut punches, mut transform) in &mut query {
+        let mut current = transform.translation;
+        for tween in &mut punches.0 {
+            current = tween.advance(current, dt);
+        }
+        transform.translation = current;
+        punches.0.retain(|tween| !tween.done());
+        if punches.0.is_empty() {
+            commands.entity(entity).remove::<HarvestPunches>();
+        }
+    }
+}
+
+/// Update: the tree fall and the delayed disappearances.
+#[allow(clippy::type_complexity)]
+pub(crate) fn advance_after_forms(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut forms: Query<(
+        Entity,
+        &mut HarvestAfterForm,
+        &HarvestObject,
+        &HarvestViewNodes,
+        &mut Visibility,
+    )>,
+    mut nodes: Query<(&mut Transform, &mut Visibility, &GlobalTransform), Without<HarvestObject>>,
+    mut effects: ResMut<HarvestEffectHooks>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut form, object, view, mut root_visibility) in &mut forms {
+        match &mut *form {
+            HarvestAfterForm::TreeFall {
+                elapsed,
+                from,
+                emitted,
+            } => {
+                let Some(after) = view.after else {
+                    commands.entity(entity).remove::<HarvestAfterForm>();
+                    continue;
+                };
+                *elapsed += dt;
+                if let Ok((mut transform, _, _)) = nodes.get_mut(after) {
+                    let start = *from.get_or_insert(transform.rotation);
+                    let t = (*elapsed / FALL_DURATION).clamp(0.0, 1.0);
+                    let eased = t * t * t * t;
+                    transform.rotation =
+                        start.slerp(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), eased);
+                }
+                if *elapsed >= FADE_DELAY && !*emitted {
+                    *emitted = true;
+                    let position = view
+                        .delete_at
+                        .and_then(|node| nodes.get(node).ok())
+                        .map(|(_, _, global)| global.translation())
+                        .unwrap_or_default();
+                    effects.pending.push(EffectHook::at(132, position));
+                    info!(
+                        "[harvest] {}#{} fall: 2.0 s delay done, delete effect 132 at {position:.2}; dither fade not ported, the top hides after {FADE_DURATION} s",
+                        object.leaf, object.fixture_id
+                    );
+                }
+                if *elapsed >= FADE_DELAY + FADE_DURATION {
+                    if let Ok((_, mut visibility, _)) = nodes.get_mut(after) {
+                        *visibility = Visibility::Hidden;
+                    }
+                    info!(
+                        "[harvest] {}#{} fall done at {:.3} s: top off, the under part stays until the next load",
+                        object.leaf, object.fixture_id, elapsed
+                    );
+                    commands.entity(entity).remove::<HarvestAfterForm>();
+                }
+            }
+            HarvestAfterForm::DelayedHide { remaining } => {
+                *remaining -= dt;
+                if *remaining <= 0.0 {
+                    match view.object.and_then(|node| nodes.get_mut(node).ok()) {
+                        Some((_, mut visibility, _)) => *visibility = Visibility::Hidden,
+                        None => *root_visibility = Visibility::Hidden,
+                    }
+                    info!(
+                        "[harvest] {}#{} off after the 1.0 s delay",
+                        object.leaf, object.fixture_id
+                    );
+                    commands.entity(entity).remove::<HarvestAfterForm>();
+                }
+            }
+        }
+    }
+}

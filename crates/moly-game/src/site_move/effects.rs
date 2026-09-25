@@ -607,7 +607,7 @@ const UNINSTALLED_RELEASE_AGE: f32 = 10.0;
 
 /// Some(true) when every installed system under the instance is done;
 /// None when none is installed.
-fn systems_finished(world: &World, root: Entity) -> Option<bool> {
+pub(crate) fn systems_finished(world: &World, root: Entity) -> Option<bool> {
     let children = world.get::<Children>(root)?;
     let mut any = false;
     for child in children.iter() {

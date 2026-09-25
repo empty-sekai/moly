@@ -88,6 +88,28 @@ pub(crate) const KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE: i32 = 156;
 /// IntConfigs 键 176）：批内项数达到该值才逐帧放行，小批同帧。
 pub(crate) const KEY_HARVEST_DROP_DELAY_ITEM_COUNT: i32 = 176;
 
+/// Period of the harvest log loop, seconds (HarvestAPIInterval, FloatConfigs
+/// key 81): the queue of harvest and gather stacks is flushed once per period.
+pub(crate) const KEY_HARVEST_API_INTERVAL: i32 = 81;
+
+/// Drop approach step per frame, metres (DropItemApproachSpeed, FloatConfigs
+/// key 89): a drop moves toward the moving player by this plus its
+/// accumulated time each frame.
+pub(crate) const KEY_DROP_ITEM_APPROACH_SPEED: i32 = 89;
+
+/// Drop collection distance, metres (DropItemApproachDistance, FloatConfigs
+/// key 90): closer than this, the drop is collected.
+pub(crate) const KEY_DROP_ITEM_APPROACH_DISTANCE: i32 = 90;
+
+/// Swing speed with boost or enhance stamina (BoostStaminaAnimationSpeed,
+/// FloatConfigs key 91).
+pub(crate) const KEY_BOOST_STAMINA_ANIMATION_SPEED: i32 = 91;
+
+/// Random scale bounds of trees and stones (HarvestObjectScaleMin /
+/// HarvestObjectScaneMax, FloatConfigs keys 130 / 131).
+pub(crate) const KEY_HARVEST_OBJECT_SCALE_MIN: i32 = 130;
+pub(crate) const KEY_HARVEST_OBJECT_SCALE_MAX: i32 = 131;
+
 /// 配送站强制现象 id（DeliveryPhenomenaId，IntConfigs 键 170）：下一站类别为
 /// delivery 时，换站事件带的现象 id 是它，不是当日现象；BGM 默认选曲里现象 id
 /// 等于它时取站点 normal 档，配送类站点的站点控制器恒以它起 BGM。
