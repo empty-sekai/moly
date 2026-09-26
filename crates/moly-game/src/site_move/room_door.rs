@@ -170,7 +170,82 @@ struct DoorPrefab {
 struct RoomDoorRefusals(Option<u64>);
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<RoomDoorRefusals>();
+    app.init_resource::<RoomDoorRefusals>()
+        .add_systems(Update, cull_wall_fixtures);
+}
+
+/// A renderer `CullingWallFixture` switched off.
+#[derive(Component)]
+struct WallCulled;
+
+/// `MyRoomSiteController.CullingWallFixture`, called every frame by the
+/// room's `UpdateRoomSite` loop (started at the end of `OnEnterSite`, one
+/// call per `UniTask.Yield` in Update) and once more 0.03 s into
+/// HomeToMyRoom's `MoveMyRoom`, which the loop already covers. For every
+/// fixture of a grid whose layout type has a wall flag (`HasAnyFlag(type,
+/// 0xF0)`): `d = normalize(view.position - camera.position)` (zero below
+/// 1e-5), and `SetRendererActive(dot(view.forward, d) >= 0)`, which enables
+/// or disables every renderer of the view that was enabled at load. The
+/// camera is the field camera's view as the frame starts (its LateUpdate
+/// pose of the previous frame).
+///
+/// Here a renderer is a mesh entity under the placed fixture's root; one
+/// hidden for another reason (an inactive node, a switched-off renderer) is
+/// never touched, and only the ones this system hid are shown again.
+/// Particle renderers of a wall fixture are not covered.
+fn cull_wall_fixtures(
+    active: Option<Res<crate::site::SiteActive>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    fixtures: Query<
+        (Entity, &crate::fixture::FixtureVisualRoot, &GlobalTransform),
+        With<crate::fixture::FixtureRoot>,
+    >,
+    children: Query<&Children>,
+    mut renderers: Query<(&mut Visibility, Has<WallCulled>), With<Mesh3d>>,
+    mut commands: Commands,
+) {
+    if !active.is_some_and(|site| site.is_indoor()) {
+        return;
+    }
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let camera = camera.translation();
+    let (mut off, mut on) = (0usize, 0usize);
+    for (root, placed, view) in &fixtures {
+        if !placed.is_wall_layout() {
+            continue;
+        }
+        let offset = view.translation() - camera;
+        let length = offset.length();
+        let direction = if length > 1e-5 {
+            offset / length
+        } else {
+            Vec3::ZERO
+        };
+        // The source forward is the root's local +Z (see door.rs's facing).
+        let forward = view.rotation() * Vec3::Z;
+        let visible = forward.dot(direction) >= 0.0;
+        for entity in children.iter_descendants(root) {
+            let Ok((mut visibility, culled)) = renderers.get_mut(entity) else {
+                continue;
+            };
+            if visible {
+                if culled {
+                    *visibility = Visibility::Inherited;
+                    commands.entity(entity).remove::<WallCulled>();
+                    on += 1;
+                }
+            } else if !culled && *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+                commands.entity(entity).insert(WallCulled);
+                off += 1;
+            }
+        }
+    }
+    if off + on > 0 {
+        info!("[room-door] CullingWallFixture: {off} wall-fixture renderer(s) off, {on} on");
+    }
 }
 
 fn current(world: &World) -> Option<&RoomDoor> {
