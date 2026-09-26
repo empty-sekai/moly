@@ -225,6 +225,26 @@ pub(crate) const DESCENT_RATIO: f32 = 9.0 / 75.0;
 /// 仓内开源字体（OFL-1.1 授权文本与字体同目录进仓）。
 const FONT_BYTES: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
 
+/// Code points TMP synthesizes into a static font asset that lacks them when
+/// it reads the asset: a glyph of index 0 with all-zero metrics, so the
+/// character advances nothing and draws nothing. The game's text components
+/// use the static base font assets (population mode 0), whose character table
+/// holds only the space, so these always resolve to the synthesized glyph in
+/// the source. TMP's list also holds U+0009, U+000A, U+000B, U+000D, U+2028
+/// and U+2029, which its layout handles as tab and line breaks before any
+/// advance; the balloon walk splits lines on U+000A only, so those stay on the
+/// regular path.
+const TMP_ZERO_METRIC: [char; 6] = [
+    '\u{0003}', '\u{061C}', '\u{200B}', '\u{200E}', '\u{200F}', '\u{2060}',
+];
+
+/// Whether TMP lays `ch` out with its synthesized zero-metric glyph (see
+/// [`TMP_ZERO_METRIC`]); the open font's own glyph, if it has one, is not
+/// what the source measures or draws.
+fn tmp_zero_metric(ch: char) -> bool {
+    TMP_ZERO_METRIC.contains(&ch)
+}
+
 // ---------------------------------------------------------------------------
 // 真源纹源的装载（tweet 主表与问候链三表归 NPC 侧：`crate::npc_tweet`）
 // ---------------------------------------------------------------------------
@@ -285,6 +305,17 @@ impl BalloonArt {
     /// 没烘进的字符返回 `None`（缺字形在烘制时已具名计数）。
     pub(crate) fn glyph_cell(&self, ch: char) -> Option<(Rect, f32)> {
         self.cells.get(&ch).map(|c| (c.rect, c.advance))
+    }
+
+    /// The base advance the line measurement reads for `ch`: zero for the
+    /// code points TMP lays out with its synthesized zero-metric glyph, the
+    /// baked glyph's advance otherwise (`None` = missing, the law's fallback).
+    /// Measurement and [`walk_glyphs`] placement read the same rule.
+    pub(crate) fn advance(&self, ch: char) -> Option<f32> {
+        if tmp_zero_metric(ch) {
+            return Some(0.0);
+        }
+        self.cells.get(&ch).map(|c| c.advance)
     }
 
     /// 首页面身份供整组图集的缓存失效判断；绘制字符应取 glyph_image_for。
@@ -407,6 +438,10 @@ pub(crate) fn bake_atlas(
             chars.push(*ch);
         }
     }
+    // TMP lays these out with its synthesized zero-metric glyph: nothing to
+    // bake, and not a missing glyph.
+    let zero_metric = chars.iter().filter(|ch| tmp_zero_metric(**ch)).count();
+    chars.retain(|ch| !tmp_zero_metric(*ch));
     chars.sort_unstable();
 
     let mut context = swash::scale::ScaleContext::new();
@@ -579,7 +614,7 @@ pub(crate) fn bake_atlas(
         .map(|ch| format!("U+{:04X}", *ch as u32))
         .collect();
     info!(
-        "字形图集烘成：{} 格（字符集 {}，{page_count} 页 {atlas_size}x{atlas_size}，每页容量 {page_capacity}，总容量 {capacity}，设备上限 {max_edge}），缺字形 {} 个 [{}]，烘制 {:.0}px 实际墨迹上界 {:.1} 下界 {:.1} ⇒ 格 {:.0}px 笔点=({pen_x:.0},{baseline_from_top:.0})",
+        "字形图集烘成：{} 格（字符集 {}，{page_count} 页 {atlas_size}x{atlas_size}，每页容量 {page_capacity}，总容量 {capacity}，设备上限 {max_edge}），TMP 零度量字符 {zero_metric} 个（不烘），缺字形 {} 个 [{}]，烘制 {:.0}px 实际墨迹上界 {:.1} 下界 {:.1} ⇒ 格 {:.0}px 笔点=({pen_x:.0},{baseline_from_top:.0})",
         cells.len(),
         chars.len(),
         missing.len(),
@@ -1039,7 +1074,18 @@ fn starts_with(left: &[char], prefix: &[char]) -> bool {
 /// 逐字走一遍文本：行、段消费次序、笔点推进全按行量法的次序——
 /// 推进逐式同源（`resolve_glyph_advance` × 段缩放；`cspace` 每字一笔、
 /// 行尾再补一次；`<space=N>` 固定段无消费跟踪）。字形 quad 只对字形表
-/// 命中的字符出（缺字形只占位并计数，推进与律同一回退公式）。
+/// 命中的字符出。
+///
+/// Characters the open font lacks follow the source's TMP lookup, not a
+/// guess: the code points TMP synthesizes into the game's static base asset
+/// ([`TMP_ZERO_METRIC`]) advance zero and draw nothing. Every other character
+/// is answered in the source by the base asset's fallback chain (the static
+/// on-demand asset, then the dynamic asset that adds glyphs from the game's
+/// own font file), so TMP's missing-glyph replacement (U+25A1, then U+0020)
+/// never fires on these texts; drawing a white square here would be a
+/// replacement the source does not make. Such a character keeps the law's
+/// fallback advance and is counted: its image is missing only because the
+/// open font subset does not carry it.
 /// `char_extra`/`word_extra` 是真源字距的增量（`m_characterSpacing` 与
 /// `m_wordSpacing` 的消费式：值 × 0.01 × 字号，正交字体乘 1；空白字
 /// 后另补 word 一笔）——气泡两值皆 0，对话窗体带非 0 值进来。
@@ -1135,8 +1181,11 @@ pub(crate) fn walk_glyphs(
             for (part_index, raw_ch) in part.iter().enumerate() {
                 let raw_ch = *raw_ch;
                 for (rendered_ch, char_scale) in transformed_glyphs(raw_ch, seg) {
+                    let zero = tmp_zero_metric(rendered_ch);
                     let glyph = if force_fallback_glyph(rendered_ch) {
                         None
+                    } else if zero {
+                        Some(0.0)
                     } else {
                         art.cells.get(&rendered_ch).map(|cell| cell.advance)
                     };
@@ -1145,7 +1194,9 @@ pub(crate) fn walk_glyphs(
                             * char_scale
                             * seg_scale
                             + char_extra;
-                    if let Some(_) = glyph {
+                    if zero {
+                        // TMP's synthesized zero-metric glyph: no quad.
+                    } else if glyph.is_some() {
                         lines[li].push((
                             GlyphSpot {
                                 ch: rendered_ch,
@@ -1158,7 +1209,8 @@ pub(crate) fn walk_glyphs(
                             seg_raw_base[si] + seg_raw_of_clean[si][raw_base_in_seg + part_index],
                         ));
                     } else if !force_fallback_glyph(rendered_ch) {
-                        // 律给回退推进、字形表没有：不出图，只占位并计数。
+                        // The source draws this glyph from its fallback chain;
+                        // the open font subset lacks it: fallback advance, counted.
                         missing_used += 1;
                     }
                     pen += step;
@@ -1180,14 +1232,19 @@ pub(crate) fn walk_glyphs(
             .map(|l| l.chars().count() + 1)
             .sum();
         for (fallback_pos, raw_ch) in remaining.into_iter().enumerate() {
+            let zero = tmp_zero_metric(raw_ch);
             let glyph = if force_fallback_glyph(raw_ch) {
                 None
+            } else if zero {
+                Some(0.0)
             } else {
                 art.cells.get(&raw_ch).map(|cell| cell.advance)
             };
             let step = resolve_glyph_advance(glyph, raw_ch, font_size, BAKE_PPEM, FONT_FAMILY)
                 + char_extra;
-            if glyph.is_some() {
+            if zero {
+                // TMP's synthesized zero-metric glyph: no quad.
+            } else if glyph.is_some() {
                 lines[li].push((
                     GlyphSpot {
                         ch: raw_ch,
@@ -1254,7 +1311,7 @@ fn spawn_balloon_text(
         FONT_FAMILY,
         LINE_SPACING,
         BAKE_PPEM,
-        &|ch: char| art.cells.get(&ch).map(|cell| cell.advance),
+        &|ch: char| art.advance(ch),
     );
     let (lines, missing_used) = walk_glyphs(text, art, FONT_SIZE, 0.0, 0.0);
     let line_count = metrics.line_widths.len();
