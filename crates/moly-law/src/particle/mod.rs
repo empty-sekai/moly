@@ -31,6 +31,7 @@ mod json;
 pub mod value;
 pub mod shape;
 pub mod shape_birth;
+pub mod shape_mesh;
 pub mod emit;
 pub mod step;
 pub mod buffer;

@@ -68,8 +68,10 @@
 //! * **源物理几何的单层投影**：原版收集 PhysicsColliders。宿主走
 //!   `bake_colliders`，保留真实节点变换、源几何和每格高度范围；
 //!   旧的 `BakeInput` 矩形接口仅供独立律的兼容测试。本地投影不处理
-//!   多层连通；凸 MeshCollider 保留三维凸体而不是当作凹三角网，但
-//!   通用凸包不是 PhysX 的精确 cooking/简化结果，仍不声称原生等价。
+//!   多层连通。MeshCollider 不论是否标 convex，都以它共享网格自己的
+//!   三角形作分离表面入烘（引擎把碰撞体转成导航源时只读网格引用与
+//!   变换，不读 convex；物理凸包不是导航输入）；Box/Sphere/Capsule
+//!   仍是实心体。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
 
 mod contour;
@@ -127,6 +129,24 @@ pub const GENERATE_PATH_SAMPLE_DISTANCE: f32 = 500.0;
 pub struct NavPath {
     pub corners: Vec<[f32; 2]>,
     pub complete: bool,
+}
+
+/// [`WalkField::endpoint_report`]: one query endpoint as the field sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EndpointReport {
+    /// The point's own cell is walkable.
+    pub walkable: bool,
+    /// The walkable point the query box maps it to.
+    pub mapped: Option<[f32; 2]>,
+    /// Navigation cells of the mapped point's region.
+    pub region_cells: usize,
+    /// One of them contains the mapped point.
+    pub contained: bool,
+    /// Horizontal distance from the mapped point to the nearest navigation
+    /// cell of any region.
+    pub nearest_cell_distance: Option<f32>,
+    /// The mapped point locates onto a navigation cell (the query succeeds).
+    pub locates: bool,
 }
 
 /// 引擎 `Mathf.Approximately`：`|b−a| < max(1e-6·max(|a|,|b|), 8·ε)`，ε 取
@@ -412,6 +432,28 @@ impl WalkField {
     /// a complete or a partial result exists, so success is exactly that.
     pub fn can_calculate_path(&self, source: [f32; 2], target: [f32; 2], half_extent: f32) -> bool {
         query::calculate_path_succeeds(&self.grid, &self.polys, &self.regions, source, target, half_extent)
+    }
+
+    /// Diagnostics for one query endpoint (QA probes): how the grid maps it in
+    /// a query box of `half_extent`, and how the navigation cells see the
+    /// mapped point. Changes nothing.
+    pub fn endpoint_report(&self, p: [f32; 2], half_extent: f32) -> EndpointReport {
+        let mapped = query::nearest_walkable_in_box(&self.grid, p, half_extent);
+        let (region_cells, contained, nearest_cell_distance) = match mapped {
+            Some(q) => self.polys.locate_report(&self.grid, &self.regions, q),
+            None => (0, false, None),
+        };
+        EndpointReport {
+            walkable: self.walkable_at(p),
+            mapped,
+            region_cells,
+            contained,
+            nearest_cell_distance,
+            locates: mapped.is_some_and(|q| {
+                self.polys
+                    .locates(&self.grid, &self.regions, q, half_extent)
+            }),
+        }
     }
 
     /// `MoveUtility.CanNavmeshMoveTargetPosition`：静态路径查询成功，且末

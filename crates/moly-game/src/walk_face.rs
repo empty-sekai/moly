@@ -236,6 +236,146 @@ pub(crate) fn rebake_on_save(
     *pending = false;
 }
 
+/// QA probe state: what the last report covered, so that a report is written
+/// once per walk-field generation, site and set of door locators.
+#[derive(Default)]
+pub(crate) struct ProbeState {
+    read: bool,
+    pairs: Option<Vec<([f32; 2], [f32; 2])>>,
+    reported: Option<(String, u64, Vec<[i32; 2]>)>,
+}
+
+/// Parses `x,z>x,z;x,z>x,z` (empty entries skipped).
+fn probe_pairs(raw: &str) -> Result<Vec<([f32; 2], [f32; 2])>, String> {
+    let point = |text: &str| -> Result<[f32; 2], String> {
+        let mut parts = text.split(',').map(|v| v.trim().parse::<f32>());
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(Ok(x)), Some(Ok(z)), None) if x.is_finite() && z.is_finite() => Ok([x, z]),
+            _ => Err(format!("walk probe point {text:?} is not x,z")),
+        }
+    };
+    raw.split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (from, to) = entry
+                .split_once('>')
+                .ok_or_else(|| format!("walk probe entry {entry:?} is not from>to"))?;
+            Ok((point(from)?, point(to)?))
+        })
+        .collect()
+}
+
+/// QA probe, active only while `MOLY_WALK_PROBE` is set. For every walk-field
+/// generation it reports, per door locator (`loc_inside`), the static path
+/// query `CanNavmeshMoveTargetPosition` uses (from each `loc_outside` and from
+/// the player), and, per `from>to` pair in the variable, the agent path query
+/// `GeneratePath` uses. It changes nothing.
+pub(crate) fn probe(
+    face: Option<Res<WalkFace>>,
+    site: Option<Res<SiteActive>>,
+    named: Query<(&Name, &GlobalTransform)>,
+    players: Query<&GlobalTransform, With<crate::player::PlayerControlled>>,
+    mut state: Local<ProbeState>,
+) {
+    if !state.read {
+        state.read = true;
+        state.pairs = std::env::var("MOLY_WALK_PROBE")
+            .ok()
+            .map(|raw| probe_pairs(&raw).unwrap_or_else(|error| panic!("[walk-probe] {error}")));
+    }
+    let Some(pairs) = state.pairs.as_ref() else {
+        return;
+    };
+    let (Some(face), Some(site)) = (face, site) else {
+        return;
+    };
+    let xz = |transform: &GlobalTransform| {
+        let t = transform.translation();
+        [t.x, t.z]
+    };
+    let inside: Vec<[f32; 2]> = named
+        .iter()
+        .filter(|(name, _)| name.as_str() == "loc_inside")
+        .map(|(_, transform)| xz(transform))
+        .collect();
+    let key = (
+        site.site_type.clone(),
+        face.generation,
+        inside
+            .iter()
+            .map(|p| {
+                [
+                    (p[0] * 1000.0).round() as i32,
+                    (p[1] * 1000.0).round() as i32,
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
+    if state.reported.as_ref() == Some(&key) {
+        return;
+    }
+    let field = &face.field;
+    let end_distance = |from: [f32; 2], to: [f32; 2]| {
+        field
+            .calculate_path(from, to, carve::STATIC_QUERY_HALF_EXTENT)
+            .and_then(|path| path.corners.last().copied())
+            .map(|last| ((last[0] - to[0]).powi(2) + (last[1] - to[1]).powi(2)).sqrt())
+    };
+    let mut origins: Vec<(&str, [f32; 2])> = named
+        .iter()
+        .filter(|(name, _)| name.as_str() == "loc_outside")
+        .map(|(_, transform)| ("loc_outside", xz(transform)))
+        .collect();
+    origins.extend(players.iter().map(|transform| ("player", xz(transform))));
+    for target in &inside {
+        let off_field = field
+            .nearest_walkable(*target, None)
+            .map(|p| ((p[0] - target[0]).powi(2) + (p[1] - target[1]).powi(2)).sqrt());
+        for (label, origin) in &origins {
+            let reach = crate::site_move::door_law::HOUSE_ENTRY_REACH;
+            info!(
+                "[walk-probe] {} generation {}: loc_inside ({:.4}, {:.4}) walkable {} off-field {:?} from {label} ({:.4}, {:.4}): static path end distance {:?}, CanNavmeshMoveTargetPosition({reach}) {}",
+                site.site_type,
+                face.generation,
+                target[0],
+                target[1],
+                field.walkable_at(*target),
+                off_field,
+                origin[0],
+                origin[1],
+                end_distance(*origin, *target),
+                field.can_navmesh_move_target_position(*origin, *target, reach),
+            );
+        }
+    }
+    for (from, to) in pairs {
+        let corners = field.generate_path(*from, *to);
+        info!(
+            "[walk-probe] {} generation {}: ({:.3}, {:.3}) -> ({:.3}, {:.3}): walkable {}, agent query maps {}, GeneratePath {} corners, static path end distance {:?}",
+            site.site_type,
+            face.generation,
+            from[0],
+            from[1],
+            to[0],
+            to[1],
+            field.walkable_at(*from),
+            field.can_calculate_path(*from, *to, carve::AGENT_QUERY_HALF_EXTENT),
+            corners.len(),
+            end_distance(*from, *to),
+        );
+        info!(
+            "[walk-probe] {} generation {}: ({:.3}, {:.3}) agent-box endpoint {:?}",
+            site.site_type,
+            face.generation,
+            from[0],
+            from[1],
+            field.endpoint_report(*from, carve::AGENT_QUERY_HALF_EXTENT),
+        );
+    }
+    state.reported = Some(key);
+}
+
 /// 换站清扫：面、面源柄与已存台账一起撤（新站由 [`build`] 重建）。
 pub(crate) fn teardown(commands: &mut Commands) {
     commands.remove_resource::<WalkFaceMeshes>();

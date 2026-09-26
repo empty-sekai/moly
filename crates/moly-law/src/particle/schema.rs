@@ -170,6 +170,16 @@ pub struct ShapeControls {
     /// texture field (an older producer), so the value is undecided; it is
     /// not the null reference.
     pub texture: Option<ShapeTexture>,
+    /// The mesh shape's placement (0 vertex, 1 edge, 2 triangle).
+    pub mesh_placement: Option<u32>,
+    pub mesh_normal_offset: Option<f32>,
+    /// Whether the mesh shape takes its colours from the mesh and renderer
+    /// materials (the mesh-emission block of a Mesh shape).
+    pub mesh_use_colors: Option<bool>,
+    /// Whether the mesh shape emits from one submesh only.
+    pub mesh_use_material_index: Option<bool>,
+    /// That submesh's index; the export writes it only when the filter is on.
+    pub mesh_material_index: Option<u32>,
 }
 
 /// ShapeModule's texture reference. The exporter writes `null` for the null
@@ -617,13 +627,14 @@ fn burst_repeat_interval(v: Option<&Value>, ctx: &str) -> Result<f32, EffectsErr
     f32_of(v, ctx)
 }
 
-/// shape 层映射的闭集；其余（mesh* 与 texture 之外的六个贴图控制键）收
+/// shape 层映射的闭集；其余（meshes 与 texture 之外的六个贴图控制键）收
 /// unmapped。
 const MAPPED_SHAPE_KEYS: &[&str] = &[
     "type", "radius", "radiusThickness", "arc", "rotation", "position", "sourceVersion",
     "angle", "length", "donutRadius", "scale", "boxThickness", "arcMode", "arcSpread", "arcSpeed",
     "radiusMode", "radiusSpread", "radiusSpeed", "alignToDirection", "randomDirectionAmount",
     "sphericalDirectionAmount", "randomPositionAmount", "texture",
+    "meshPlacement", "meshNormalOffset", "meshMaterialIndex", "meshEmission",
 ];
 
 impl ShapeMode {
@@ -646,6 +657,9 @@ impl ShapeControls {
             .map(|v| min_max_curve(Some(v), &format!("{ctx}.{key}"))).transpose();
         let mode = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
             .map(|v| ShapeMode::from_value(v, &format!("{ctx}.{key}"))).transpose();
+        let mesh_flag = |key: &str| value.get("meshEmission").and_then(|m| m.get(key))
+            .filter(|v| !matches!(v, Value::Null))
+            .map(|v| bool_of(Some(v), &format!("{ctx}.meshEmission.{key}"))).transpose();
         Ok(Self {
             source_version:value.get("sourceVersion").map(|v|u32_of(Some(v),ctx)).transpose()?,
             angle:number("angle")?,length:number("length")?,donut_radius:number("donutRadius")?,
@@ -657,6 +671,13 @@ impl ShapeControls {
             random_direction:number("randomDirectionAmount")?,spherical_direction:number("sphericalDirectionAmount")?,
             random_position:number("randomPositionAmount")?,
             texture:ShapeTexture::from_value(value.get("texture"),&format!("{ctx}.texture"))?,
+            mesh_placement:value.get("meshPlacement").filter(|v|!matches!(v,Value::Null))
+                .map(|v|u32_of(Some(v),&format!("{ctx}.meshPlacement"))).transpose()?,
+            mesh_normal_offset:number("meshNormalOffset")?,
+            mesh_use_colors:mesh_flag("useColors")?,
+            mesh_use_material_index:mesh_flag("useMaterialIndex")?,
+            mesh_material_index:value.get("meshMaterialIndex").filter(|v|!matches!(v,Value::Null))
+                .map(|v|u32_of(Some(v),&format!("{ctx}.meshMaterialIndex"))).transpose()?,
         })
     }
 }
