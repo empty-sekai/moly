@@ -6,9 +6,12 @@
 //! Flow, each piece in its module:
 //! - `site`: the delivery site's scene objects (`DeliverySiteView` and the
 //!   views it references), the place and board collision circles and their
-//!   enter / exit message, the start / end requests the delivery screen
-//!   sends, the named keyboard stand-in and the `MOLY_DELIVERY_AUTOPLAY`
-//!   instrument.
+//!   enter / exit message, and the `MOLY_DELIVERY_AUTOPLAY` instrument.
+//! - `screen`: `ScreenLayerMysekaiDelivery`'s view, presenter and model
+//!   (the gauge, the party cells, the delivery button and the information
+//!   button), following the screen manager's layer, and the controller's
+//!   `OnChangeUILayer`: the delivery button's press and release are the
+//!   start / end requests.
 //! - The server's side is the server model's delivery section
 //!   (`crate::server::delivery`): the user rows and the two master configs
 //!   the client reads as its copies (`ClientBirthdayPartyData`), the two API
@@ -37,6 +40,7 @@ pub(crate) mod bloom;
 pub(crate) mod drops;
 pub(crate) mod flow;
 pub(crate) mod honor;
+pub(crate) mod screen;
 pub(crate) mod site;
 
 use bevy::prelude::*;
@@ -378,6 +382,16 @@ pub(crate) fn publish(
     });
 }
 
+/// `ObjectCollisionManager.TriggerOnEnterCollisions` (the controller's
+/// `OnChangeUILayer` of the delivery screen): every object the player
+/// collides with runs its enter callback again, the place and the board in
+/// `site::scan`, the drops in `drops::scan`, on the next scan.
+#[derive(Resource, Default)]
+pub(crate) struct DeliveryEnterRetrigger {
+    pub(crate) site: bool,
+    pub(crate) drops: bool,
+}
+
 /// Queued by the site transition: the drops go with the site, GameState 12
 /// ends, the flow and the hold are cancelled; the next arrival rebuilds.
 pub(crate) fn clear_for_site_change(world: &mut World) {
@@ -447,6 +461,10 @@ impl Plugin for DeliveryPlugin {
             .init_resource::<honor::DialogAwait>()
             .init_resource::<crate::delivery_camera::DeliveryHonorCamera>()
             .init_resource::<bloom::DeliveryBloom>()
+            .init_resource::<screen::DeliveryScreen>()
+            .init_resource::<DeliveryEnterRetrigger>()
+            .add_systems(Startup, screen::load)
+            .add_systems(Update, (screen::load_names, screen::spawn_when_ready))
             .add_systems(
                 Update,
                 (
@@ -454,7 +472,8 @@ impl Plugin for DeliveryPlugin {
                     site::arrive,
                     site::scan,
                     drops::scan,
-                    site::keyboard,
+                    screen::follow_screen,
+                    screen::input.run_if(crate::game_settings::scene_input_enabled),
                     site::autoplay,
                     flow::advance,
                     drops::spawn,
@@ -463,6 +482,8 @@ impl Plugin for DeliveryPlugin {
                     drops::gather_loop,
                     honor::advance,
                     flow::apply_face,
+                    screen::update_model,
+                    screen::advance,
                 )
                     .chain()
                     .after(crate::player::read_input)

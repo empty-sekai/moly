@@ -115,6 +115,8 @@ struct PendingSpawn {
 pub(crate) struct DeliveryDropSpawns {
     pending: Vec<PendingSpawn>,
     ground: Option<Vec<Vec3>>,
+    /// `RemoveDropItemView`: the drop views to destroy on the next step.
+    removed: Vec<u64>,
 }
 
 impl DeliveryDropSpawns {
@@ -254,9 +256,7 @@ pub(crate) fn generate_unclaimed(
                 on_drop_item(model, spawns, objects, id, -1, false, true, "unclaimed");
             }
         } else if count > dropped {
-            warn!(
-                "[delivery-drop] GenerateUnclaimedDropItemsIfNeeded ({reason}) party {id}: the client holds {count}, the server counts {dropped}: RemoveSynchronizedDropItems is not ported"
-            );
+            remove_synchronized_drop_items(model, spawns, id, count - dropped, reason);
         }
     }
 }
@@ -450,16 +450,91 @@ pub(crate) fn spawn(
     }
 }
 
+/// `RemoveSynchronizedDropItems(siteData, removeCount)`: nothing below 1;
+/// otherwise the first `min(removeCount, count)` unsynchronized drops, then
+/// the first `min(rest, count)` synchronized ones, each removed from the
+/// model (`DeliverySiteModel.RemoveDropItem`) and its view destroyed
+/// (`RemoveDropItemView`).
+fn remove_synchronized_drop_items(
+    model: &mut DeliveryModel,
+    spawns: &mut DeliveryDropSpawns,
+    party_id: i32,
+    remove_count: i32,
+    reason: &str,
+) {
+    if remove_count < 1 {
+        return;
+    }
+    let Some(party) = model.party(party_id) else {
+        return;
+    };
+    let take = |list: &[DropModel], n: i32| -> Vec<u64> {
+        list.iter()
+            .take(n.max(0) as usize)
+            .map(|drop| drop.uid)
+            .collect()
+    };
+    let mut uids = take(&party.unsynced_drops, remove_count);
+    let rest = remove_count - uids.len() as i32;
+    if rest >= 1 {
+        uids.extend(take(&party.drops, rest));
+    }
+    for uid in &uids {
+        model.remove_drop(*uid);
+        let before = spawns.pending.len();
+        spawns.pending.retain(|pending| pending.model.uid != *uid);
+        if spawns.pending.len() == before {
+            spawns.removed.push(*uid);
+        }
+    }
+    info!(
+        "[delivery-drop] GenerateUnclaimedDropItemsIfNeeded ({reason}) party {party_id}: the client holds {remove_count} more than the server counts: RemoveSynchronizedDropItems removes {uids:?} (unsynchronized first)"
+    );
+}
+
+/// `OnCollisionEnterDropItem`: the uid joins the collision list (a list
+/// add, a second enter adds it again), state Gather (published).
+fn enter_drop(
+    model: &mut DeliveryModel,
+    progress: &mut MessageWriter<DeliveryProgress>,
+    uid: u64,
+    why: &str,
+) {
+    model.collision_drops.push(uid);
+    model.state = DeliveryActionState::Gather;
+    let rate = model.rate;
+    publish(progress, DeliveryActionState::Gather, None, 0, 0.0, rate);
+    info!("[delivery-drop] OnCollisionEnterDropItem uid {uid} ({why}); state Gather");
+}
+
 /// Update: the drops' collision edges (the collision manager, while it
-/// updates).
+/// updates), and the delivery screen's `TriggerOnEnterCollisions`, which
+/// runs the enter callback of every drop the player collides with whatever
+/// the game state.
 pub(crate) fn scan(
     eligibility: crate::interaction::InteractionEligibility,
     mut model: ResMut<DeliveryModel>,
     mut progress: MessageWriter<DeliveryProgress>,
+    mut retrigger: ResMut<super::DeliveryEnterRetrigger>,
     players: Query<&Transform, (With<PlayerControlled>, Without<DeliveryDropItem>)>,
     mut drops: Query<(&Transform, &mut DeliveryDropItem), Without<PlayerControlled>>,
 ) {
-    if model.site_id.is_none() || !eligibility.collision_updates() {
+    let again = std::mem::take(&mut retrigger.drops);
+    if model.site_id.is_none() {
+        return;
+    }
+    if again {
+        let mut colliding: Vec<u64> = drops
+            .iter()
+            .filter(|(_, item)| item.inside)
+            .map(|(_, item)| item.model.uid)
+            .collect();
+        colliding.sort_unstable();
+        for uid in colliding {
+            enter_drop(&mut model, &mut progress, uid, "TriggerOnEnterCollisions");
+        }
+    }
+    if !eligibility.collision_updates() {
         return;
     }
     let Ok(player) = players.single() else {
@@ -479,24 +554,15 @@ pub(crate) fn scan(
         item.inside = inside;
         let uid = item.model.uid;
         if inside {
-            model.collision_drops.push(uid);
-            model.state = DeliveryActionState::Gather;
-            let rate = model.rate;
-            publish(
-                &mut progress,
-                DeliveryActionState::Gather,
-                None,
-                0,
-                0.0,
-                rate,
-            );
-            info!(
-                "[delivery-drop] OnCollisionEnterDropItem uid {uid}: player {:.3} m away (radius {}); state Gather",
+            let why = format!(
+                "player {:.3} m away, radius {}",
                 player.translation.distance(transform.translation),
                 item.radius
             );
-        } else {
-            model.collision_drops.retain(|u| *u != uid);
+            enter_drop(&mut model, &mut progress, uid, &why);
+        } else if let Some(index) = model.collision_drops.iter().position(|u| *u == uid) {
+            // `List.Remove`: the first occurrence.
+            model.collision_drops.remove(index);
         }
     }
 }
@@ -507,6 +573,7 @@ pub(crate) fn advance(
     mut commands: Commands,
     time: Res<Time>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
+    mut spawns: ResMut<DeliveryDropSpawns>,
     mut model: ResMut<DeliveryModel>,
     mut se: ResMut<SeRequests>,
     players: Query<&Transform, (With<PlayerControlled>, Without<DeliveryDropItem>)>,
@@ -520,6 +587,15 @@ pub(crate) fn advance(
         Without<PlayerControlled>,
     >,
 ) {
+    if !spawns.removed.is_empty() {
+        let removed = std::mem::take(&mut spawns.removed);
+        for (entity, _, item, _) in &drops {
+            if removed.contains(&item.model.uid) {
+                commands.entity(entity).despawn();
+            }
+        }
+        info!("[delivery-drop] RemoveDropItemView {removed:?}: views destroyed");
+    }
     let Some(configs) = configs else {
         return;
     };

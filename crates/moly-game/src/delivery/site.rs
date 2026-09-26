@@ -1,6 +1,5 @@
-//! The delivery site's scene objects, their collision circles, the requests
-//! the delivery screen sends, the keyboard stand-in and the autoplay
-//! instrument.
+//! The delivery site's scene objects, their collision circles and the
+//! autoplay instrument.
 //!
 //! Scene objects (`DeliverySiteView`, one instance in the site's scene
 //! document): `_deliveryCollisionObjects` references the place view
@@ -22,18 +21,18 @@
 //! enter or exit edge becomes event 68 (`OnCollisionDeliveryObject`), which
 //! this module publishes as [`DeliveryCollision`] for the delivery screen.
 //!
-//! Requests: the delivery screen sends [`DeliveryRequest::Start`] on the
-//! delivery button's press and [`DeliveryRequest::End`] on its release.
-//! Named stand-in: the G key presses and releases the button while the
-//! place circle holds the player (the screen shows the button only then)
-//! and the field takes input. The reward dialogs close on the screen
-//! manager's hardware back key (Escape). `MOLY_DELIVERY_AUTOPLAY` (off by
-//! default, WARN when set) is an instrument: `hold[,close]` in seconds; it
-//! walks the player through the joystick's touch stream to each drop on
-//! the ground, then into the place circle, holds the button for `hold`
-//! seconds and releases it, and `close` seconds (default 1.5) after an
-//! awaited dialog is shown presses the back key (an Escape key press and
-//! release through the keyboard input stream).
+//! Requests: the delivery screen (`super::screen`) sends
+//! [`DeliveryRequest::Start`] on the delivery button's press and
+//! [`DeliveryRequest::End`] on its release. The reward dialogs close on the
+//! screen manager's hardware back key (Escape). `MOLY_DELIVERY_AUTOPLAY`
+//! (off by default, WARN when set) is an instrument: `hold[,close]` in
+//! seconds; it walks the player through the joystick's touch stream to each
+//! drop on the ground, then into the place circle, touches the drawn
+//! delivery button through the window's touch stream (the gesture layer
+//! and the button's source handlers take it), holds it `hold` seconds and
+//! lifts the finger, and `close` seconds (default 1.5) after an awaited
+//! dialog is shown presses the back key (an Escape key press and release
+//! through the keyboard input stream).
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::touch::{TouchInput, TouchPhase};
@@ -45,7 +44,7 @@ use moly_assets::source_navigation::SourceObjectIdentity;
 use moly_law::action_button::inside_circle;
 use serde_json::Value;
 
-use super::{CollisionEdge, DeliveryCollision, DeliveryModel, DeliveryObjectType, DeliveryRequest};
+use super::{CollisionEdge, DeliveryCollision, DeliveryModel, DeliveryObjectType};
 use crate::fixture_activity_timeline::{
     ReceiverCall, SignalReaction, SignalReceiverBinding, SourceAssetId,
 };
@@ -674,16 +673,37 @@ pub(crate) fn arrive(
     );
 }
 
-/// Update: the collision circles of the place and the board.
+/// Update: the collision circles of the place and the board, and the
+/// delivery screen's `TriggerOnEnterCollisions` (the enter callback of each
+/// object the player collides with again, whatever the game state).
 pub(crate) fn scan(
     mut state: ResMut<DeliverySite>,
     eligibility: crate::interaction::InteractionEligibility,
     players: Query<&Transform, With<PlayerControlled>>,
     mut collisions: MessageWriter<DeliveryCollision>,
+    mut retrigger: ResMut<super::DeliveryEnterRetrigger>,
 ) {
+    let again = std::mem::take(&mut retrigger.site);
     let Some(objects) = state.objects.clone() else {
         return;
     };
+    if again {
+        for (index, object) in [
+            DeliveryObjectType::DeliveryPlace,
+            DeliveryObjectType::Information,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if state.inside[index] {
+                collisions.write(DeliveryCollision {
+                    object,
+                    edge: CollisionEdge::Enter,
+                });
+                info!("[delivery] TriggerOnEnterCollisions: OnCollisionDeliveryObject Enter {object:?} again");
+            }
+        }
+    }
     if !eligibility.collision_updates() {
         return;
     }
@@ -725,31 +745,6 @@ pub(crate) fn scan(
     }
 }
 
-/// Update: the G key presses and releases the delivery button (the named
-/// stand-in for the delivery screen).
-pub(crate) fn keyboard(
-    keys: Res<ButtonInput<KeyCode>>,
-    state: Res<DeliverySite>,
-    eligibility: crate::interaction::InteractionEligibility,
-    mut requests: MessageWriter<DeliveryRequest>,
-    mut holding: Local<bool>,
-) {
-    if state.objects.is_none() {
-        *holding = false;
-        return;
-    }
-    if keys.just_pressed(KeyCode::KeyG) && state.in_place() && eligibility.field_input_open() {
-        *holding = true;
-        requests.write(DeliveryRequest::Start(None));
-        info!("[delivery] G down (stand-in for the delivery button's press)");
-    }
-    if *holding && keys.just_released(KeyCode::KeyG) {
-        *holding = false;
-        requests.write(DeliveryRequest::End);
-        info!("[delivery] G up (stand-in for the delivery button's release)");
-    }
-}
-
 /// The instrument's progress on the current visit.
 #[derive(Resource, Default)]
 pub(crate) struct DeliveryAutoplay {
@@ -758,6 +753,10 @@ pub(crate) struct DeliveryAutoplay {
     walking: bool,
     pressed_at: Option<f32>,
     released: bool,
+    /// The delivery button's window point the finger went down on.
+    tap_point: Vec2,
+    /// The wait for a drawn delivery button is logged.
+    waiting_logged: bool,
     /// The awaited dialog and when the instrument first saw it.
     dialog_since: Option<(crate::ui_layers::DialogId, f32)>,
     /// The back key is down (released on the next frame).
@@ -798,7 +797,10 @@ pub(crate) fn autoplay(
     drops: Query<(&Transform, &super::drops::DeliveryDropItem), Without<PlayerControlled>>,
     mut touches: MessageWriter<TouchInput>,
     mut keys: MessageWriter<KeyboardInput>,
-    mut requests: MessageWriter<DeliveryRequest>,
+    (screen, mut window_events): (
+        Res<super::screen::DeliveryScreen>,
+        MessageWriter<bevy::window::WindowEvent>,
+    ),
     navigation: Option<Res<crate::player_fixture_action::PlayerFixtureNavigation>>,
 ) {
     let Some((hold, close)) = autoplay_config() else {
@@ -876,6 +878,18 @@ pub(crate) fn autoplay(
         return;
     };
     const FINGER: u64 = 99031;
+    const TAP_FINGER: u64 = 99032;
+    // The joystick reads the touch messages; the gesture layer reads the
+    // window's event stream, so the button's finger goes there.
+    let mut tap = |phase: TouchPhase, position: Vec2| {
+        window_events.write(bevy::window::WindowEvent::TouchInput(TouchInput {
+            phase,
+            position,
+            window: window_entity,
+            force: None,
+            id: TAP_FINGER,
+        }));
+    };
     let base = Vec2::new(window.width() * 0.15, window.height() * 0.75);
     let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
         touches.write(TouchInput {
@@ -889,9 +903,11 @@ pub(crate) fn autoplay(
     if let Some(pressed_at) = run.pressed_at {
         if !run.released && now - pressed_at >= hold {
             run.released = true;
-            requests.write(DeliveryRequest::End);
+            tap(TouchPhase::Ended, run.tap_point);
             info!(
-                "[delivery-autoplay] releases the delivery button after {:.3} s",
+                "[delivery-autoplay] lifts the finger from the delivery button at ({:.1}, {:.1}) after {:.3} s",
+                run.tap_point.x,
+                run.tap_point.y,
                 now - pressed_at
             );
         }
@@ -915,9 +931,20 @@ pub(crate) fn autoplay(
             info!("[delivery-autoplay] inside the place circle at ({:.3}, {:.3}, {:.3}): walk finger up", player.translation.x, player.translation.y, player.translation.z);
             return;
         }
+        let Some(point) = screen.button_point() else {
+            if !run.waiting_logged {
+                run.waiting_logged = true;
+                info!("[delivery-autoplay] inside the place circle: waits for the drawn delivery button to take a press");
+            }
+            return;
+        };
         run.pressed_at = Some(now);
-        requests.write(DeliveryRequest::Start(None));
-        info!("[delivery-autoplay] presses the delivery button");
+        run.tap_point = point;
+        tap(TouchPhase::Started, point);
+        info!(
+            "[delivery-autoplay] touches the delivery button at ({:.1}, {:.1})",
+            point.x, point.y
+        );
         return;
     }
     if !joystick.enabled {

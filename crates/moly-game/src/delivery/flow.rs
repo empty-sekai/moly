@@ -941,10 +941,19 @@ fn delivery_api(
                 cost,
             ) {
                 Ok(reply) => {
+                    // The source's own check: `droppedRewardCount` against the
+                    // unsynchronized drop list, a LogError and
+                    // `GenerateUnclaimedDropItemsIfNeededAsync` when they
+                    // differ. They can differ in the source too: a drop
+                    // gathered while its gather request still waits in the
+                    // stack (the gather loop sends only in state Gather) is
+                    // gone from the client's lists and still dropped on the
+                    // server, and the delivery request carries only the
+                    // consumed count.
                     let regenerate = reply.dropped_reward_count != unsynced;
                     if regenerate {
                         error!(
-                            "[delivery] the reply's dropped reward count {} is not the client's {unsynced} unsynchronized drops (party {party_id})",
+                            "[delivery] DeliveryExecuteApiAsync: the drop count after the delivery API does not match (the source's LogError): birthdayDeliveryId {party_id}, droppedRewardCount {}, unsynchronizedDropItemCount {unsynced}; GenerateUnclaimedDropItemsIfNeededAsync",
                             reply.dropped_reward_count
                         );
                     }
@@ -952,12 +961,11 @@ fn delivery_api(
                     if let Some(site_party) = world.model.party_mut(party_id) {
                         site_party.update_synchronized(have, points);
                     }
+                    // Not a source check: the auto-gather list fills when a
+                    // flying drop reaches the player, which can come after the
+                    // reply, and the race above shifts the server's split, so
+                    // the two counts are logged side by side only.
                     let obtained_after = obtained(&world.client);
-                    if auto_count != obtained_after - obtained_before {
-                        error!(
-                            "[delivery] party {party_id}: {auto_count} drops flew to the player, the reply's obtained count moved {obtained_before} -> {obtained_after}"
-                        );
-                    }
                     info!(
                         "[delivery] DeliveryExecuteApiAsync party {party_id}: sent {cost}; dropped {} (client {unsynced}), auto-gathered {auto_count} (obtained {obtained_before} -> {obtained_after}); synchronized: have {have}, points {points}; {} total rewards; isRefreshed {}",
                         reply.dropped_reward_count,
