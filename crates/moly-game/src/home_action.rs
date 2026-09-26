@@ -44,14 +44,14 @@
 //! names. The SE volume class is the in-game one.
 //!
 //! Triggers: [`HomeActionRequest`] (what the screens send; each is first
-//! posted to [`server_mock::HomeActionApiMock`]), [`HomeActionSkip`] (the
+//! posted to the server model through
+//! [`crate::server::client::home_action::post`], and a refused reply starts
+//! nothing), [`HomeActionSkip`] (the
 //! skip button), [`SketchModeRequest`] (the menu's sketch button enters game
 //! state 9 and player state 27; the sketch screen's exit leaves game state 9).
 //! Stand-in keys: J craft and K canvas at the nearest craft tool, L enters
 //! sketch mode and then sketches, U skips, I leaves sketch mode. Instrument:
 //! `MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch` (off by default).
-
-pub(crate) mod server_mock;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -75,7 +75,7 @@ use crate::player_avatar::{
     STATE_FADE,
 };
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
-use server_mock::{HomeActionApi, HomeActionApiMock};
+use crate::server::client::home_action::{post, HomeActionApi};
 
 /// `EffectType.Craft`.
 const CRAFT_EFFECT_TYPE: u16 = 15;
@@ -168,8 +168,8 @@ impl HomeAction {
 }
 
 /// What the craft, canvas and sketch screens send when their request is
-/// made; the reply comes from [`HomeActionApiMock`] and a success starts the
-/// world sequence.
+/// made; the reply comes from the server model ([`post`]) and a success starts
+/// the world sequence.
 #[derive(Message, Debug, Clone)]
 pub(crate) enum HomeActionRequest {
     /// A craft at the workbench the player pressed.
@@ -696,9 +696,7 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
             return;
         }
     }
-    let reply = world
-        .resource_mut::<HomeActionApiMock>()
-        .post(action.api(), target.as_ref().map(|target| target.uid.as_str()));
+    let reply = post(world, action.api(), target.as_ref().map(|target| target.uid.as_str()));
     if !reply.success {
         return;
     }
@@ -1229,7 +1227,6 @@ pub(crate) fn autoplay(
 pub(crate) fn install(app: &mut App) {
     use crate::player_avatar::avatar_item;
     app.init_resource::<HomeActions>()
-        .init_resource::<HomeActionApiMock>()
         .init_resource::<HomeActionPresentation>()
         .init_resource::<AvatarItemView>()
         .add_message::<HomeActionRequest>()
