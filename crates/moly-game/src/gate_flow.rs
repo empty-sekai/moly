@@ -336,6 +336,17 @@ struct Appearance {
     generation: u64,
     /// The gate parts whose assets are loaded ahead of their start.
     warmed: Vec<&'static str>,
+    /// The last reason the appearance waited, for the logs.
+    waiting: Option<String>,
+}
+
+impl Appearance {
+    fn wait(&mut self, t: f64, reason: String) {
+        if self.waiting.as_deref() != Some(reason.as_str()) {
+            info!("[gate] t={t:.3} PlayGateCharacterAppearTimeline waits: {reason}");
+            self.waiting = Some(reason);
+        }
+    }
 }
 
 /// `HideEffect(name).Forget()` in flight on one stopped system: from the
@@ -1154,6 +1165,7 @@ fn start_character_appearance(world: &mut World, change: Change) -> Stage {
         spawned: false,
         generation: 0,
         warmed: Vec::new(),
+        waiting: None,
     }))
 }
 
@@ -1178,7 +1190,8 @@ fn stay_effect(world: &World, gate: Entity) -> Option<Entity> {
 fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
     let t = now(world);
     let Some(gate) = gate_fixture(world) else {
-        return false; // the gate's model is being placed
+        appearance.wait(t, "no placed gate carries its identity yet".to_owned());
+        return false;
     };
     // The gate shows its model (its scene is out and its materials are
     // swapped) before its effects and parts are looked up.
@@ -1186,6 +1199,7 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
         .get::<crate::fixture::FixtureVisualReady>(gate)
         .is_none()
     {
+        appearance.wait(t, format!("the gate {gate:?} does not show its model yet"));
         return false;
     }
 
@@ -1221,12 +1235,22 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
             })
         });
         let Some(node) = stay_effect(world, gate) else {
-            if all {
-                error!("[gate] the gate has no {STAY_EFFECT} node; ShowEffect finds nothing");
+            if all && appearance.waiting.as_deref() != Some(STAY_EFFECT) {
+                error!(
+                    "[gate] the gate {gate:?} has no {STAY_EFFECT} node; ShowEffect finds nothing"
+                );
+                appearance.waiting = Some(STAY_EFFECT.to_owned());
             }
             return false;
         };
         if !all {
+            appearance.wait(
+                t,
+                format!(
+                    "WaitUntil(IsExistNPCAll): not every one of {:?} stands",
+                    appearance.units
+                ),
+            );
             return false;
         }
         let package = world
@@ -1248,7 +1272,13 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
                 appearance.stay = Some(binding);
                 appearance.stay_node = Some(node);
             }
-            Err(error) if error.retryable => return false,
+            Err(error) if error.retryable => {
+                appearance.wait(
+                    t,
+                    format!("gate.ShowEffect({STAY_EFFECT}): {}", error.message),
+                );
+                return false;
+            }
             Err(error) => {
                 error!("[gate] gate.ShowEffect({STAY_EFFECT}): refused by the particle host: {}; the appearance goes on", error.message);
                 appearance.stay_node = Some(node);
