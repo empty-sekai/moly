@@ -24,6 +24,13 @@
 //! Every step writes one `[npc-gate] {json}` line with the generator state
 //! before its draw, so a replay can recompute each value.
 //!
+//! An empty gathering ends the appearance there: the source takes the
+//! minimum of the gathering, which raises on an empty one, so nobody is
+//! placed and the room's appeared flags are never set; the player entry's
+//! wait for them then ends on its own timeout. That path needs an empty
+//! roster, which never reaches the draw (the start waits for a non-empty
+//! one, and a non-empty roster always gathers at least one unit).
+//!
 //! Not modelled: the room notification and the first-visit callback after
 //! the placements, the player entry's wait for every NPC to be reported
 //! appeared, the return-from-another-room flag (the panel does not carry
@@ -94,7 +101,19 @@ enum State {
     #[default]
     Waiting,
     Running(Box<Run>),
+    /// Every member is placed.
     Done,
+    /// The appearance ended without placing anyone (an empty gathering).
+    Ended,
+}
+
+/// What the start found.
+enum Begin {
+    /// Not every visiting unit runs its entry-site objective yet.
+    NotYet,
+    /// The gathering is empty: the appearance ends.
+    Ended,
+    Run(Run),
 }
 
 /// The appearance's progress (once per app run: a scene is set up once).
@@ -154,7 +173,7 @@ pub(crate) fn appear(world: &mut World) {
     let state = std::mem::take(&mut world.resource_mut::<GateAppearance>().state);
     let state = match state {
         State::Waiting => match start(world, frame) {
-            Some(run) => {
+            Begin::Run(run) => {
                 let mut run = Box::new(run);
                 if advance(world, &mut run, frame) {
                     State::Done
@@ -162,7 +181,8 @@ pub(crate) fn appear(world: &mut World) {
                     State::Running(run)
                 }
             }
-            None => State::Waiting,
+            Begin::NotYet => State::Waiting,
+            Begin::Ended => State::Ended,
         },
         State::Running(mut run) => {
             if advance(world, &mut run, frame) {
@@ -172,6 +192,7 @@ pub(crate) fn appear(world: &mut World) {
             }
         }
         State::Done => State::Done,
+        State::Ended => State::Ended,
     };
     world.resource_mut::<GateAppearance>().state = state;
 }
@@ -192,16 +213,20 @@ fn hide_entry_site_starts(world: &mut World, frame: u32) {
 }
 
 /// The start: every visiting unit exists and runs its entry-site objective.
-fn start(world: &mut World, frame: u32) -> Option<Run> {
-    world.get_resource::<crate::npc::Spawned>()?;
+fn start(world: &mut World, frame: u32) -> Begin {
+    if world.get_resource::<crate::npc::Spawned>().is_none() {
+        return Begin::NotYet;
+    }
     // The roster: the visiting units in the panel's expansion order (the
     // host's full-catalogue showcase is every catalogue unit instead).
-    let units: Vec<u32> = world
-        .get_resource::<crate::npc::Registry>()?
-        .character_unit_ids
-        .clone();
+    let Some(units) = world
+        .get_resource::<crate::npc::Registry>()
+        .map(|registry| registry.character_unit_ids.clone())
+    else {
+        return Begin::NotYet;
+    };
     if units.is_empty() {
-        return None;
+        return Begin::NotYet;
     }
     let mut query = world.query::<(&CharacterUnitId, &ObjectiveMind)>();
     let running: HashSet<u32> = query
@@ -213,7 +238,7 @@ fn start(world: &mut World, frame: u32) -> Option<Run> {
         .map(|(unit, _)| unit.0)
         .collect();
     if !units.iter().all(|unit| running.contains(unit)) {
-        return None;
+        return Begin::NotYet;
     }
     let mut rand = appearance::EngineRand::from_state(engine_state());
     let mut keys = MemberRng::from_platform();
@@ -222,8 +247,8 @@ fn start(world: &mut World, frame: u32) -> Option<Run> {
     let take = rand.range_int(appearance::GATHER_MIN, max);
     let order = guid_order(&mut keys, units.len());
     let Some(plan) = appearance::gather_plan(&units, take, &order) else {
-        error!("[npc-gate] frame={frame} the gathering is empty: its minimum raises and no character appears");
-        return None;
+        error!("[npc-gate] frame={frame} the gathering is empty: its minimum raises, the appearance ends and no character appears (the appeared flags stay unset; the entry's wait ends on its timeout)");
+        return Begin::Ended;
     };
     let walkable: Vec<Cell> = world
         .get_resource::<ObjectiveFace>()
@@ -248,7 +273,7 @@ fn start(world: &mut World, frame: u32) -> Option<Run> {
     let mut members = vec![(plan.first, Kind::First)];
     members.extend(plan.near.iter().map(|&unit| (unit, Kind::Near)));
     members.extend(plan.rest.iter().map(|&unit| (unit, Kind::Rest)));
-    Some(Run {
+    Begin::Run(Run {
         rand,
         keys,
         members,
