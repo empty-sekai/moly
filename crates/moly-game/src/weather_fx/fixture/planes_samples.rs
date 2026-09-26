@@ -39,7 +39,7 @@ fn fixture_planes_collision_systems_simulate() {
             if particle["system"]["collision"]["type"] != "planes" { continue; }
             systems += 1;
             let node = particle["node"].as_str().unwrap_or("");
-            let plan = match admit(package, particle, &by_path, &owners, server, Path::Control, Stepping::Director) {
+            let plan = match admit(package, particle, &by_path, nodes, &owners, server, Path::Control, Stepping::Director) {
                 Ok(plan) => plan,
                 Err(reason) => {
                     println!("planes-sim | {file} | {node} | refused | {}", reason.strip_prefix(node).unwrap_or(&reason));
@@ -53,7 +53,7 @@ fn fixture_planes_collision_systems_simulate() {
             let mut system = runtime(&plan, Entity::PLACEHOLDER, Handle::default());
             system.emitter.random_seed = Some(system.emitter.random_seed.unwrap_or(0));
             system.emitter.auto_random_seed = Some(false);
-            let birth = match crate::particle_runtime::director_restart(&mut system, &plan.route, &ctx) {
+            let birth = match crate::particle_runtime::director_restart(&mut system, &plan.route, plan.event_edges.as_ref(), &ctx) {
                 Ok(crate::particle_runtime::BirthPath::Native) => "native".to_owned(),
                 Ok(crate::particle_runtime::BirthPath::Legacy(reason)) => format!("legacy: {reason}"),
                 Err(reason) => { println!("planes-sim | {file} | {node} | y {height} | restart refused | {reason}"); continue; }

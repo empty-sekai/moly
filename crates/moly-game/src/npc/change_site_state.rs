@@ -53,13 +53,15 @@
 //!   time (the angle to turn / 60 s) with an out-quart ease, on a floor
 //!   towards the room door's forward over 0 s (it completes at its first
 //!   update, the next frame); the turn clip the presenter starts with each
-//!   and the idle clip it awaits after it are not played (the character is
-//!   hidden while it turns), and that idle clip's wait is taken as none;
+//!   plays through the motion driver while the look-at runs (the character
+//!   is hidden meanwhile), the idle clip after it is the driver's idle, and
+//!   the wait on that idle clip's change is taken as none;
 //! - the room-entry tweet's turn to the player is the same awaited look-at
 //!   (towards the player's position over the rotate time, out-quart), with
-//!   the same clips not played; the knock sound's wait and the door's open
-//!   wait end at once (this host reads
-//!   neither the sound nor the door clip's length back); the brightness
+//!   the same clips; the knock sound is awaited until its playback is over
+//!   (one frame late: the sound player drops a finished playback on its next
+//!   run), the door's open wait ends at once (the room door does not report
+//!   its open clip's end to the NPC side); the brightness
 //!   fade, the tweet's eye, mouth and emoticon, and the facial reset are not
 //!   played.
 
@@ -122,6 +124,9 @@ enum Stage {
     WaitNotMoveModeAfterPlace,
     /// An awaited entry turn (the look-at tween) is running.
     Turning { next: AfterTurn },
+    /// FloorEnter on the player's site: the knock sound's playback runs;
+    /// the state goes on once it is over.
+    KnockWait,
     /// The entry clip plays; home shows the NPC one frame after it starts.
     EntryClip {
         node: AnimationNodeIndex,
@@ -551,12 +556,21 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             if world.get::<crate::npc_look_at::NpcLookAt>(actor).is_some() {
                 return;
             }
-            info!("[npc-change-site] unit={unit} frame={frame} entry turn done (the idle clip after it is not played)");
+            info!("[npc-change-site] unit={unit} frame={frame} entry turn done (the idle clip after it is the motion driver's; its wait is taken as none)");
             match next {
                 AfterTurn::HomeClip => home_clip(world, actor, unit, frame),
                 AfterTurn::FloorKnock => floor_knock(world, actor, unit, frame),
                 AfterTurn::EntryTweet => entry_tweet(world, actor, unit, frame),
             }
+        }
+        Stage::KnockWait => {
+            if knock_playing(world, actor) {
+                return;
+            }
+            info!(
+                "[npc-change-site] unit={unit} frame={frame} se_knock_door playback over (awaited)"
+            );
+            floor_door(world, actor, unit, frame, true);
         }
         Stage::EntryClip { node, shown } => {
             if !shown {
@@ -650,12 +664,15 @@ fn begin_turn(
             (towards - position).to_array(),
         ))
     });
-    world.entity_mut(actor).insert(crate::npc_look_at::NpcLookAt::new(
-        towards,
-        duration,
-        moly_law::ui::dotween::Ease::OutQuart,
-        frame,
-    ));
+    world
+        .entity_mut(actor)
+        .insert(crate::npc_look_at::NpcLookAt::new(
+            towards,
+            forward,
+            duration,
+            moly_law::ui::dotween::Ease::OutQuart,
+            frame,
+        ));
     info!(
         "[npc-change-site] unit={unit} frame={frame} DoLookAtAsync(({:.3},{:.3},{:.3}), {duration} s, out-quart), awaited",
         towards.x, towards.y, towards.z
@@ -681,17 +698,54 @@ fn home_clip(world: &mut World, actor: Entity, unit: u32, frame: u32) {
     start_clip(world, actor, unit, HOME_ENTER_CLIP, frame, false);
 }
 
-/// FloorEnter after its turn: on the player's site the knock sound and the
-/// door-open sound, the door opens, the character is shown and plays its
-/// entry clip.
+/// FloorEnter after its turn: on the player's site the knock sound plays
+/// and is awaited (`PlayKnockDoorSE`: until its playback reports removed),
+/// then the door-open sound starts (not awaited); off it, neither sound. Then
+/// the door opens, the character is shown and plays its entry clip.
 fn floor_knock(world: &mut World, actor: Entity, unit: u32, frame: u32) {
     let own = world
         .get::<NpcActions>(actor)
         .and_then(|actions| residency::site_type_value(&actions.site_type));
     if own == player_site(world) {
-        push_se(world, "se_knock_door");
+        push_owned_se(world, actor, "se_knock_door");
+        info!("[npc-change-site] unit={unit} frame={frame} se_knock_door, awaited until its playback is over");
+        set_stage(world, actor, Stage::KnockWait, frame);
+    } else {
+        floor_door(world, actor, unit, frame, false);
+    }
+}
+
+/// Whether the knock sound this NPC requested is still queued or playing:
+/// its playback is scoped to the NPC, and the sound player drops a scoped
+/// playback the frame after it ends. A cue the sound table lacks never
+/// plays (the sound side warns); the wait then ends at once, where the
+/// source's null playback would raise inside its wait.
+fn knock_playing(world: &mut World, actor: Entity) -> bool {
+    let queued = world
+        .get_resource::<crate::audio::SeRequests>()
+        .is_some_and(|requests| {
+            requests
+                .0
+                .iter()
+                .any(|request| request.owner == Some(actor))
+        });
+    if queued {
+        return true;
+    }
+    let mut query = world.query::<&crate::audio::ScopedSe>();
+    query.iter(world).any(|scope| scope.0 == actor)
+}
+
+/// FloorEnter after the knock: the door-open sound on the player's site,
+/// `OpenDoorAsync` (awaited in the source until the open clip's length has
+/// passed; not awaited here: this host's room door does not report its open
+/// clip's end to the NPC side), the show, the entry clip.
+fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: bool) {
+    if on_site {
         push_se(world, "se_door_open");
-        info!("[npc-change-site] unit={unit} frame={frame} se_knock_door (its end not awaited here), se_door_open");
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} se_door_open (not awaited), OpenDoorAsync"
+        );
     }
     crate::site_move::room_door::open(world);
     // The brightness fade is not played; SetTransparencyEnabled(true).
@@ -757,6 +811,18 @@ fn place_on_target(world: &mut World, actor: Entity, target: i32, position: Vec3
         actions.resume_on_site(epoch);
     }
     change_state(world, actor, NpcAction::ChangeSite);
+}
+
+/// A sound request whose playback is scoped to `owner`.
+fn push_owned_se(world: &mut World, owner: Entity, cue: &str) {
+    if let Some(mut requests) = world.get_resource_mut::<crate::audio::SeRequests>() {
+        requests.0.push(crate::audio::SeRequest {
+            owner: Some(owner),
+            cue: cue.to_owned(),
+            class: crate::audio::SeClass::Ingame,
+            source: "npc-change-site",
+        });
+    }
 }
 
 fn push_se(world: &mut World, cue: &str) {

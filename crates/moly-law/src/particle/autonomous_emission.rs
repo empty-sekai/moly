@@ -7,7 +7,8 @@
 //! the emission load normalization, all with zero failures.
 //! Scope: initialized clock, one incremental slice per call (the
 //! per-frame head supplies the slices; their births-ahead argument is applied
-//! by the birth placement, not here), a constant or two-constant rate, up to
+//! by the birth placement, not here), a constant, two-constant, curve or
+//! two-curve rate (evaluated at the segment end over the duration), up to
 //! eight bursts with a constant or two-constant count and any probability,
 //! cycle count, repeat interval and time. Emission over distance is a separate
 //! law (`ConstantDistanceEmission`) that the per-frame head runs once before
@@ -17,6 +18,7 @@
 //! StartParticles uses (current - slice_dt, current), both times native reciprocal
 //! duration. Prepare clock -> existing pre/sim/death/post -> schedule -> births.
 
+use crate::particle::curve::{CurveSampler, CurveTime};
 use crate::particle::emit::{Burst, BurstCycles};
 use crate::particle::gradient::{arm_fmax, arm_fmin};
 use crate::particle::schema::EmissionParams;
@@ -47,9 +49,8 @@ pub enum Refused {
 /// so a draw whose low 23 bits are all ones gives exactly 1.0.
 const UNIT_SCALE: f32 = f32::from_bits(0x3400_0001);
 
-/// Rate over time in the two MinMaxCurve::Evaluate modes EmitOverTime is
-/// qualified for.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Rate over time in the MinMaxCurve::Evaluate modes EmitOverTime reads.
+#[derive(Clone, Debug)]
 enum EmissionRate {
     /// Constant mode reads only the max scalar; the min scalar is never read.
     Constant(f32),
@@ -57,32 +58,64 @@ enum EmissionRate {
     /// operations, r coming from this call's entry draw. Evaluate neither
     /// orders min and max nor clamps r.
     TwoConstants { min: f32, max: f32 },
+    /// Curve and TwoCurves: the curve's scalar (its multiplier) gates the
+    /// evaluation like the max scalar above. EmitOverTime's four-lane
+    /// Evaluate takes the optimized polynomial where the reader set the
+    /// curve's optimized bit (the multiplier already in its coefficients) and
+    /// otherwise the AnimationCurve of each lane times the multiplier, all
+    /// four lanes at the same time and with the entry draw r for the two-curve
+    /// blend min + r * (max - min); EmitOverTime reads lane 0.
+    Curve { multiplier: f32, curve: CurveSampler },
 }
 
 impl EmissionRate {
     /// EmitOverTime decides whether to evaluate the rate from the max scalar
-    /// alone (the constant itself in Constant mode): at or below zero, or NaN,
-    /// the amount is +0 and Evaluate is not called. The min is not read here.
-    fn gate(self) -> f32 {
-        match self {
+    /// alone (the constant itself in Constant mode, the multiplier in the
+    /// curve modes): at or below zero, or NaN, the amount is +0 and Evaluate
+    /// is not called. The min is not read here.
+    fn gate(&self) -> f32 {
+        match *self {
             Self::Constant(value) => value,
             Self::TwoConstants { max, .. } => max,
+            Self::Curve { multiplier, .. } => multiplier,
         }
     }
 
-    /// Evaluate's result followed by EmitOverTime's maximum with +0, which
-    /// sends a negative value, -0 and NaN to +0. Written as a comparison
-    /// because f32::max leaves the sign of a zero result unspecified.
-    fn value(self, r: f32) -> f32 {
+    /// Evaluate's result at the normalized time `t` followed by
+    /// EmitOverTime's maximum with +0, which sends a negative value, -0 and
+    /// NaN to +0. Written as a comparison because f32::max leaves the sign of
+    /// a zero result unspecified. The constant modes do not read `t`.
+    fn value(&self, r: f32, t: f32) -> f32 {
         let value = match self {
-            Self::Constant(value) => value,
+            Self::Constant(value) => *value,
             Self::TwoConstants { min, max } => min + r * (max - min),
+            Self::Curve { curve, .. } => curve.evaluate(t, if arms::on("curveIgnoresDraw") { 0.0 } else { r }),
         };
         if value > 0.0 {
             value
         } else {
             0.0
         }
+    }
+}
+
+/// Test instrumentation: one named change to the law per replay arm.
+#[cfg(test)]
+pub(crate) mod arms {
+    use std::cell::Cell;
+    thread_local! { static ARM: Cell<Option<&'static str>> = const { Cell::new(None) }; }
+    pub fn set(arm: Option<&'static str>) {
+        ARM.with(|a| a.set(arm));
+    }
+    pub fn on(name: &str) -> bool {
+        ARM.with(|a| a.get() == Some(name))
+    }
+}
+#[cfg(not(test))]
+pub(crate) mod arms {
+    #[inline(always)]
+    pub fn on(_: &str) -> bool {
+        false
     }
 }
 
@@ -534,14 +567,20 @@ impl ConstantAutonomousEmission {
         let word = random.next_u32();
         let amount = if self.rate.gate() > 0.0 {
             let r = (word & 0x7f_ffff) as f32 * UNIT_SCALE;
-            // On a wrap native evaluates the rate once per segment with the
-            // same random factor, so both segments use the same value.
-            let rate = self.rate.value(r);
+            // The rate is evaluated at the segment's end time divided (not
+            // multiplied by the reciprocal) by the duration. On a wrap native
+            // evaluates it once per segment with the same random factor: at
+            // current / duration for [0, current) and at duration / duration
+            // for [previous, duration).
+            let time = |end: f32| if arms::on("rateTimeReciprocal") { end * (1.0 / self.duration) } else { end / self.duration };
             if current < previous {
+                let head = self.rate.value(r, time(current));
+                let tail = if arms::on("wrapTailAtHead") { head } else { self.rate.value(r, time(self.duration)) };
                 // Native two separate rounded products followed by a rounded sum.
-                current * rate + (self.duration - previous) * rate
+                current * head + (self.duration - previous) * tail
             } else {
-                (current - previous) * rate
+                let end = if arms::on("rateAtPrevious") { previous } else { current };
+                (current - previous) * self.rate.value(r, time(end))
             }
         } else {
             0.0
@@ -745,12 +784,20 @@ impl ConstantDistanceEmission {
 
 /// The rate over time as EmitOverTime reads it. Every finite constant is
 /// admitted: a max at or below zero skips evaluation and a negative evaluated
-/// value is raised to +0, both as native. Curve modes are not transcribed.
+/// value is raised to +0, both as native. A curve mode is admitted with a
+/// finite multiplier where the curve evaluator admits its lanes on the
+/// normalized clock EmitOverTime feeds (a segment end over the duration, in
+/// [0, 1]).
 fn rate(curve: &MinMaxCurve) -> Result<EmissionRate, Refused> {
     match *curve {
         MinMaxCurve::Constant(value) if value.is_finite() => Ok(EmissionRate::Constant(value)),
         MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite() => {
             Ok(EmissionRate::TwoConstants { min, max })
+        }
+        MinMaxCurve::Curve { multiplier, .. } | MinMaxCurve::TwoCurves { multiplier, .. } if multiplier.is_finite() => {
+            let sampler = CurveSampler::new(curve, CurveTime::Normalized)
+                .map_err(|_| Refused::UnsupportedConfiguration)?;
+            Ok(EmissionRate::Curve { multiplier, curve: sampler })
         }
         _ => Err(Refused::UnsupportedConfiguration),
     }
@@ -779,15 +826,25 @@ fn burst_count(curve: &MinMaxCurve) -> Result<BurstCount, Refused> {
 /// load path (the binary and the type-converting reader, and the clone
 /// that serializes through the same transfer) before emission reads it:
 /// each scalar below zero becomes +0 and any other is at most 1e7 (a NaN
-/// stays NaN). The curve modes' keys are not touched and stay refused.
+/// stays NaN). In the curve modes the scalar is the multiplier, clamped the
+/// same way before the reader builds the optimized polynomial from it; the
+/// keys are not touched.
 fn load_rate(curve: &MinMaxCurve) -> MinMaxCurve {
-    match *curve {
-        MinMaxCurve::Constant(value) => MinMaxCurve::Constant(load_rate_scalar(value)),
+    match curve {
+        MinMaxCurve::Constant(value) => MinMaxCurve::Constant(load_rate_scalar(*value)),
         MinMaxCurve::TwoConstants { min, max } => MinMaxCurve::TwoConstants {
-            min: load_rate_scalar(min),
-            max: load_rate_scalar(max),
+            min: load_rate_scalar(*min),
+            max: load_rate_scalar(*max),
         },
-        ref other => other.clone(),
+        MinMaxCurve::Curve { multiplier, max } => MinMaxCurve::Curve {
+            multiplier: load_rate_scalar(*multiplier),
+            max: max.clone(),
+        },
+        MinMaxCurve::TwoCurves { multiplier, min, max } => MinMaxCurve::TwoCurves {
+            multiplier: load_rate_scalar(*multiplier),
+            min: min.clone(),
+            max: max.clone(),
+        },
     }
 }
 
@@ -1798,6 +1855,78 @@ mod tests {
     fn replays_native_burst_schedule_rows() {
         let tally = replay_native_battery("MOLY_EMISSION_BURST_ROWS");
         assert!(tally.exact > 0);
+    }
+
+    /// The native EmitOverTime calls of the curve-rate receipt (every call of
+    /// the native Update1b frames, recorded at its entry and its return), each
+    /// on its recorded state through the runtime gate and `schedule`: rate
+    /// count, total and the emission state words after the call equal the
+    /// native bits on every call. Each named change of the curve-rate reading
+    /// must change a call, and so must the bit-flipped receipt.
+    #[test]
+    #[ignore = "MOLY_EMISSION_CURVE_CALLS must name the private native curve-rate EmitOverTime calls"]
+    fn replays_native_curve_rate_emit_over_time() {
+        let read = |variable: &str| {
+            let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} is not set"));
+            json::parse(&std::fs::read(path).unwrap()).unwrap()
+        };
+        let receipt = read("MOLY_EMISSION_CURVE_CALLS");
+        assert_eq!(
+            at(at(&receipt, "summary"), "librarySha256").as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        // (calls, mismatched calls, calls on a curve-mode rate)
+        let replay = |receipt: &Value| -> (usize, usize, usize) {
+            let mut tally = (0, 0, 0);
+            for family in array(at(receipt, "families")) {
+                let config = at(family, "config");
+                let rate = crate::particle::schema::min_max_curve(Some(at(config, "rate")), "rate").unwrap();
+                let curve = matches!(rate, MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. });
+                let bursts: Vec<LoadedBurst> = array(at(config, "bursts"))
+                    .iter()
+                    .map(|b| LoadedBurst {
+                        time: field(b, "time"),
+                        count: crate::particle::schema::min_max_curve(Some(at(b, "count")), "count").unwrap(),
+                        cycles: word(at(b, "cycleCount")),
+                        interval: field(b, "repeatInterval"),
+                        probability: field(b, "probability"),
+                    })
+                    .collect();
+                let law = ConstantAutonomousEmission::from_runtime(bits_at(config, "durationBits"),
+                    boolean(config, "looping"), &rate, &bursts)
+                    .unwrap_or_else(|refused| panic!("{}: refused {refused:?}", at(family, "family").as_str().unwrap()));
+                for row in array(at(family, "rows")) {
+                    let call = at(row, "call");
+                    exact(law.duration, bits_at(call, "duration"), "EmitOverTime length");
+                    let mut state = recorded_state(at(call, "stateBefore"));
+                    let clock = direct_clock(&law, bits_at(call, "previous"), bits_at(call, "current"));
+                    let same = match law.schedule(clock, &mut state, crate::particle::initial::initial_reciprocal) {
+                        Ok(Some(batch)) => Some(u64::from(batch.rate_count)) == native_count(at(call, "rateCount"))
+                            && Some(u64::from(batch.total)) == native_count(at(call, "total"))
+                            && state_bits(&state) == state_bits(&recorded_state(at(call, "stateAfter"))),
+                        _ => false,
+                    };
+                    tally.0 += 1;
+                    tally.1 += usize::from(!same);
+                    tally.2 += usize::from(curve);
+                }
+            }
+            tally
+        };
+        let (calls, mismatched, curve_calls) = replay(&receipt);
+        let mut red = Vec::new();
+        for arm in ["rateTimeReciprocal", "wrapTailAtHead", "rateAtPrevious", "curveIgnoresDraw"] {
+            arms::set(Some(arm));
+            red.push((arm, replay(&receipt).1));
+            arms::set(None);
+        }
+        let flipped = std::env::var_os("MOLY_EMISSION_CURVE_CALLS_BITFLIP")
+            .map(|_| replay(&read("MOLY_EMISSION_CURVE_CALLS_BITFLIP")).1);
+        eprintln!("curve-rate EmitOverTime: {calls} calls ({curve_calls} on a curve-mode rate), {mismatched} mismatched;             arms red {red:?}; bit-flipped receipt mismatched {flipped:?}");
+        assert!(calls > 0 && curve_calls > 0);
+        assert_eq!(mismatched, 0);
+        assert!(red.iter().all(|(_, n)| *n > 0), "every arm must mismatch: {red:?}");
+        assert!(flipped.is_none_or(|n| n > 0), "the bit-flipped receipt must mismatch");
     }
 
     /// The load normalization against native rows of the burst transfer and

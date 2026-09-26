@@ -288,17 +288,24 @@ fn source_json_installed_birth_matches_current_native_three_frames() {
     let other_route = source_route(&source_system(&root, &other["source"]));
     assert_eq!(other_route, SourceRoute::Procedural);
     let words_before = manager.manager_words_for_test();
+    // Its first-Play warm is the procedural update, which the native owner
+    // runs when the composition qualifies; either path resets the seed.
     let other_reason = match install_native_birth(&mut other_system, &mut manager, &other_route, None).unwrap() {
-        BirthPath::Legacy(reason) => reason,
-        BirthPath::Native => panic!("procedural source route installed a native owner"),
+        BirthPath::Legacy(reason) => {
+            assert!(reason.contains("procedural first-Play warm"), "{reason}");
+            assert!(other_system.native_birth.is_none());
+            reason
+        }
+        BirthPath::Native => {
+            assert!(other_system.native_birth.as_ref().is_some_and(|native| native.procedural));
+            String::new()
+        }
     };
-    assert!(other_reason.contains("procedural source route"), "{other_reason}");
-    assert!(other_system.native_birth.is_none());
-    assert_ne!(manager.manager_words_for_test(), words_before, "the legacy path resets its seed too");
+    assert_ne!(manager.manager_words_for_test(), words_before, "the installer resets its seed");
     let report = json!({"source":row["source"],"sourceFrames":3,"particleFrames":particle_frames,
         "customChannels":custom_channels,"failureCount":0,"comparison":"Exact scalar bits and all captured Initial/Emission RNG words; zero vector signs ignored; 1D native size X expanded for runtime render side",
         "route":"actual effects.json -> Effects/EmitterParams -> install_native_birth -> simulate -> installed native step",
-        "scope":"Initialized source 009 only, captured probe RNG overwritten after installer, identity owner, all enabled simulation modules retained. Shared OS manager order across nonqualified systems and original-client entropy/world/renderer are not proven. Source 014 takes the procedural source route and stays on the legacy step without drawing a seed.","legacyReason":other_reason});
+        "scope":"Initialized source 009 only, captured probe RNG overwritten after installer, identity owner, all enabled simulation modules retained. Shared OS manager order across nonqualified systems and original-client entropy/world/renderer are not proven. Source 014 takes the procedural source route; its warm is the procedural update.","legacyReason":other_reason});
     if let Some(path) = std::env::var_os("MOLY_PARTICLE_BIRTH_SOURCE_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }

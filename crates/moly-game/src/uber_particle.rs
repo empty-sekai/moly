@@ -1337,7 +1337,7 @@ pub(crate) fn advance_fixture_particles(
     mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
         Option<&mut crate::fixture_timeline_particles::DirectorClock>,
         Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
-        Option<&mut crate::weather_fx::fixture::Played>)>,
+        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
     time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
@@ -1364,7 +1364,7 @@ pub(crate) fn advance_fixture_particles(
         now: time.elapsed_secs_f64(),
     };
     let mut targets = Vec::new();
-    for (entity, mut particle, mut clock, stopped, played) in &mut live {
+    for (entity, mut particle, mut clock, stopped, played, trail) in &mut live {
         let system = &mut particle.0;
         let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
         if let Some(mut stopped) = stopped {
@@ -1381,6 +1381,7 @@ pub(crate) fn advance_fixture_particles(
                 if let Some(mesh) = meshes.get_mut(&system.mesh) {
                     if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
                 }
+                clear_trail_mesh(&mut meshes, trail);
                 continue;
             }
         }
@@ -1388,6 +1389,7 @@ pub(crate) fn advance_fixture_particles(
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
+            clear_trail_mesh(&mut meshes, trail);
             continue;
         }
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
@@ -1399,6 +1401,7 @@ pub(crate) fn advance_fixture_particles(
                 if let Some(mesh) = meshes.get_mut(&system.mesh) {
                     if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
                 }
+                clear_trail_mesh(&mut meshes, trail);
                 continue;
             }
         } else if let Some(mut played) = played {
@@ -1410,6 +1413,7 @@ pub(crate) fn advance_fixture_particles(
                 system.pool.clear();
                 system.side.clear();
                 if let Some(mesh) = meshes.get_mut(&system.mesh) { *mesh = billboard::empty_mesh(); }
+                clear_trail_mesh(&mut meshes, trail);
                 commands.entity(entity).remove::<(FixtureParticleLive, crate::weather_fx::fixture::Played)>();
                 continue;
             }
@@ -1437,17 +1441,34 @@ pub(crate) fn advance_fixture_particles(
         if let Some(mesh) = meshes.get_mut(&system.mesh) {
             crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
         }
+        // The renderer's second draw: the trail strip from this frame's
+        // recorded points.
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        }
     }
     deliver_played_commands(&mut live, &families, &locals, clocks.scaled);
     for (entity, anchor) in targets {
-        let Ok((_, particle, ..)) = live.get(entity) else { continue };
-        let system = &particle.0;
+        let Ok((_, mut particle, _, _, _, trail)) = live.get_mut(entity) else { continue };
+        let system = &mut particle.0;
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if let Some(mesh) = meshes.get_mut(&system.mesh) {
             crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
         }
+        // The renderer's second draw: the trail strip from this frame's
+        // recorded points.
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        }
     }
     commands.queue(crate::fixture_timeline_particles::collect_garbage);
+}
+
+/// Empty a fixture-host system's trail draw with its particle draw.
+fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
+    if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+        if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+    }
 }
 
 /// Hands each played parent's commands of this frame, in the order recorded,
@@ -1460,7 +1481,7 @@ pub(crate) fn advance_fixture_particles(
 fn deliver_played_commands(live: &mut Query<(Entity, &mut FixtureParticleLive,
         Option<&mut crate::fixture_timeline_particles::DirectorClock>,
         Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
-        Option<&mut crate::weather_fx::fixture::Played>)>, families: &Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
+        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>, families: &Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
     locals: &Query<(&Transform, Option<&ChildOf>)>, frame_dt: f32) {
     let families: Vec<(Entity, Vec<(String, Entity)>)> = families.iter().map(|(parent, targets)| (parent, targets.0.clone())).collect();
     for _round in 0..families.len() {
@@ -1501,7 +1522,7 @@ fn deliver_played_commands(live: &mut Query<(Entity, &mut FixtureParticleLive,
                 }
             }
             if dropped > 0 {
-                if let Ok((_, particle, _, _, Some(mut played))) = live.get_mut(*parent) {
+                if let Ok((_, particle, _, _, Some(mut played), _)) = live.get_mut(*parent) {
                     crate::weather_fx::fixture::count_dropped(&mut played, &particle.0, dropped);
                 }
             }

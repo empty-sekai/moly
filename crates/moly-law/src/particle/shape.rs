@@ -6,6 +6,8 @@
 //! The native trigonometric kernel is signed and contains all five coefficients.
 //! A two-dimensional billboard is a renderer choice, never a substitute shape.
 
+use super::device_libm::{exp2f, log2f};
+
 const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
 const INV_TAU: f32 = f32::from_bits(0x3e22_f983);
 const NATIVE_TAU: f32 = f32::from_bits(0x40c9_0fdb);
@@ -63,35 +65,41 @@ pub(crate) fn engine_sincos(angle: f32) -> (f32, f32) {
     (polynomial(fold(turns - 0.25)), polynomial(fold(turns)))
 }
 
-/// Radial shell of the native sphere kernels, restricted to the two authored
-/// thickness values whose scalar shell preparation is fixed bit for bit by
-/// IEEE 754 / C99 Annex F: `exp2f(log2f(1 - thickness) * 3)`. Thickness one is
-/// `log2f(+0) = -inf`, times three, `exp2f(-inf) = +0` (a filled ball);
-/// thickness zero is `log2f(1) = +0`, `exp2f(+0) = 1` (the outer surface).
-/// Every other thickness takes its bits from the device libm, which is not
-/// part of the engine library, so it cannot be constructed here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Shell {
-    Full,
-    Surface,
+/// Radial shell of the native sphere kernels: the inner radius cubed that
+/// StartSphere and StartHemiSphere prepare once per call before their lanes,
+/// `exp2f(log2f(1 - thickness) * 3)`, through the device libm
+/// ([`shell_inner_cube`]). Thickness one is `log2f(+0) = -inf`, times three,
+/// `exp2f(-inf) = +0` (a filled ball); thickness zero is `log2f(1) = +0`,
+/// `exp2f(+0) = 1` (the outer surface). The kernels do not clamp the
+/// thickness; a value outside [0, 1] makes `1 - thickness` negative or pushes
+/// the vector cube root outside the unit volume, which no native run covered,
+/// so only [0, 1] is admitted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shell {
+    inner_cube: f32,
 }
 impl Shell {
     pub fn from_thickness(thickness: f32) -> Option<Self> {
-        if thickness == 1.0 {
-            Some(Self::Full)
-        } else if thickness == 0.0 {
-            Some(Self::Surface)
-        } else {
-            None
-        }
+        (0.0..=1.0).contains(&thickness).then(|| Self { inner_cube: shell_inner_cube(thickness) })
     }
     /// The inner radius cubed that the scalar shell preparation returns.
     pub fn inner_cube(self) -> f32 {
-        match self {
-            Self::Full => 0.0,
-            Self::Surface => 1.0,
-        }
+        self.inner_cube
     }
+}
+
+/// The sphere kernels' scalar shell preparation: `1 - thickness`, the device
+/// `log2f`, times three, the device `exp2f`.
+pub fn shell_inner_cube(thickness: f32) -> f32 {
+    #[cfg(test)]
+    if shell_arms::on("shellBinary64Chain") {
+        return (((1.0 - thickness) as f64).log2() * 3.0).exp2() as f32;
+    }
+    #[cfg(test)]
+    if shell_arms::on("shellThicknessNotComplemented") {
+        return exp2f(log2f(thickness) * 3.0);
+    }
+    exp2f(log2f(1.0 - thickness) * 3.0)
 }
 
 const fn rsqrt_estimates() -> [u16; 256] {
@@ -146,10 +154,10 @@ pub(crate) fn native_rsqrt(value: f32) -> f32 {
 }
 
 /// Native vector log2/exp2 cube-root kernel. It is not the host cbrt intrinsic.
-/// The scalar shell preparation remains the source log2f/exp2f call sequence;
-/// host libm stands in for the device one here, exact only at `Shell` values.
+/// The scalar shell preparation is the source log2f/exp2f call sequence
+/// through the device libm ([`shell_inner_cube`]).
 fn sphere_radius(radius: f32, thickness: f32, random: f32) -> f32 {
-    sphere_radius_from_inner(radius, ((1.0 - thickness).log2() * 3.0).exp2(), random)
+    sphere_radius_from_inner(radius, shell_inner_cube(thickness), random)
 }
 
 fn sphere_radius_from_inner(radius: f32, inner_cube: f32, random: f32) -> f32 {
@@ -504,6 +512,79 @@ fn arm_fmin(a: f32, b: f32) -> f32 {
 /// modes are not loaded); the source affine does the sizing.
 pub fn box_volume(x: f32, y: f32, z: f32) -> ([f32; 3], [f32; 3]) {
     ([x - 0.5, y - 0.5, z - 0.5], [0.0, 0.0, 1.0])
+}
+
+/// The two surface forms of the box, which ShapeModule::Start runs inline, one
+/// body each, differing only in the per-axis select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxSurface {
+    /// BoxShell: the axis the face draw names takes its extreme, the other
+    /// two keep their draws (a point on one of the six faces).
+    Shell,
+    /// BoxEdge: the axis the face draw names keeps its draw, the other two
+    /// take their extremes (a point on one of the twelve edges).
+    Edge,
+}
+
+/// One lane of BoxShell or BoxEdge, native operation order. Seven draws per
+/// lane, in this order: the three coordinates `coordinate` (the unit
+/// projection), the face as a raw word (taken modulo 3: 0 X, 1 Y, 2 Z), then
+/// the three shell draws `shell`. Per axis the extreme is 1.0 where the
+/// coordinate draw is at least 0.5 and 0.0 otherwise; the shell factor is
+/// `(1 - box_thickness) * s + (1 - s)` as a multiply, a subtract and an add
+/// (unfused); the local position is `factor * selected - 0.5`, which leaves
+/// the lower extreme at -0.5 whatever the thickness. Emitted along local +Z.
+/// Radius, arc, angle, thickness and both modes are not loaded.
+pub fn box_surface(
+    surface: BoxSurface, box_thickness: [f32; 3], coordinate: [f32; 3], face: u32, shell: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let face = face % 3;
+    #[cfg(test)]
+    let (surface, face, shell) = {
+        let surface = if shell_arms::on("boxSurfaceSelectSwapped") {
+            match surface { BoxSurface::Shell => BoxSurface::Edge, BoxSurface::Edge => BoxSurface::Shell }
+        } else { surface };
+        let face = if shell_arms::on("boxFaceAxesRotated") { (face + 1) % 3 } else { face };
+        let shell = if shell_arms::on("boxShellDrawsReversed") { [shell[2], shell[1], shell[0]] } else { shell };
+        (surface, face, shell)
+    };
+    let position = std::array::from_fn(|axis| {
+        let u = coordinate[axis];
+        let extreme = if u >= 0.5 { 1.0 } else { 0.0 };
+        let named = face == axis as u32;
+        let selected = match (surface, named) {
+            (BoxSurface::Shell, true) | (BoxSurface::Edge, false) => extreme,
+            (BoxSurface::Shell, false) | (BoxSurface::Edge, true) => u,
+        };
+        let k = 1.0 - box_thickness[axis];
+        let s = shell[axis];
+        #[cfg(test)]
+        if shell_arms::on("boxShellFactorFused") {
+            return k.mul_add(s, 1.0 - s) * selected - 0.5;
+        }
+        #[cfg(test)]
+        if shell_arms::on("boxThicknessUnread") {
+            return (s + (1.0 - s)) * selected - 0.5;
+        }
+        (k * s + (1.0 - s)) * selected - 0.5
+    });
+    (position, [0.0, 0.0, 1.0])
+}
+
+/// Test-only mutants of the shell preparation and the box surface kernels.
+#[cfg(test)]
+pub(crate) mod shell_arms {
+    use std::cell::Cell;
+    thread_local! { static ARM: Cell<Option<&'static str>> = const { Cell::new(None) }; }
+    pub(crate) fn on(name: &str) -> bool {
+        ARM.with(|arm| arm.get() == Some(name))
+    }
+    pub(crate) fn set(name: Option<&'static str>) {
+        ARM.with(|arm| arm.set(name));
+    }
+    pub(crate) const ALL: [&str; 9] = ["log2fSubnormalUnscaled", "exp2fUnderflowBelow149", "shellBinary64Chain",
+        "shellThicknessNotComplemented", "boxSurfaceSelectSwapped", "boxFaceAxesRotated", "boxShellDrawsReversed",
+        "boxShellFactorFused", "boxThicknessUnread"];
 }
 
 /// The Random mode's spread quantization of one draw over an extent (the arc

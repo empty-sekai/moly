@@ -14,15 +14,15 @@ const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc
 
 mod seed_zero;
 
-fn f(bits: &Value) -> f32 {
+pub(super) fn f(bits: &Value) -> f32 {
     f32::from_bits(bits.as_u64().expect("native f32 bits") as u32)
 }
 
-fn word(value: &Value) -> u32 {
+pub(super) fn word(value: &Value) -> u32 {
     value.as_u64().expect("native word") as u32
 }
 
-fn read(key: &str) -> Value {
+pub(super) fn read(key: &str) -> Value {
     let path = std::env::var_os(key).unwrap_or_else(|| panic!("{key} is not set"));
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
@@ -111,25 +111,25 @@ fn replace_streams(system: &mut Runtime, seeds: &Value) {
 
 /// Runtime X is the reflection of source X. A zero reflects to the other
 /// signed zero, so X zeros compare by value and everything else by bits.
-fn same_x(runtime: f32, native: &Value) -> bool {
+pub(super) fn same_x(runtime: f32, native: &Value) -> bool {
     let native = f(native);
     if native == 0.0 { runtime == 0.0 } else { (-runtime).to_bits() == native.to_bits() }
 }
 
-fn same(runtime: f32, native: &Value) -> bool {
+pub(super) fn same(runtime: f32, native: &Value) -> bool {
     runtime.to_bits() == f(native).to_bits()
 }
 
 #[derive(Default)]
-struct Tally {
-    frames: usize,
-    mismatched_frames: usize,
-    fields: std::collections::BTreeMap<&'static str, (usize, usize)>,
-    first: Vec<String>,
+pub(super) struct Tally {
+    pub(super) frames: usize,
+    pub(super) mismatched_frames: usize,
+    pub(super) fields: std::collections::BTreeMap<&'static str, (usize, usize)>,
+    pub(super) first: Vec<String>,
 }
 
 impl Tally {
-    fn check(&mut self, field: &'static str, ok: bool, frame_ok: &mut bool, label: &str) {
+    pub(super) fn check(&mut self, field: &'static str, ok: bool, frame_ok: &mut bool, label: &str) {
         let entry = self.fields.entry(field).or_default();
         entry.0 += 1;
         if !ok {
@@ -144,7 +144,7 @@ impl Tally {
 
 /// Compare the product state after one frame with the native row.
 /// `frame_state` false skips the fields only the per-frame driver keeps.
-fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, label: &str) {
+pub(super) fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, label: &str) {
     // A host that left the system without the native owner has none of the
     // owner state to compare: the frame mismatches as a whole.
     let Some(state) = system.native_birth.as_ref() else {
@@ -201,6 +201,12 @@ fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, 
         tally.check("position", position, &mut ok, label);
         tally.check("velocity", velocity, &mut ok, label);
         tally.check("ageLifetimeSeedColour", scalars, &mut ok, label);
+        // The start size arrays, where the receipt records them (X, and Y and
+        // Z with 3D size storage).
+        if let Some(size) = particles.get("size").and_then(Value::as_array) {
+            let sizes = (0..count).all(|i| size.iter().enumerate().all(|(a, axis)| same(system.side[i].size[a], &axis[i])));
+            tally.check("startSize", sizes, &mut ok, label);
+        }
         // The modules receipt also records the animated velocity and the
         // first custom stream of every particle at the frame end.
         if let (Some(anim), Some(custom)) = (particles.get("anim"), particles.get("custom1")) {
@@ -217,7 +223,7 @@ fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, 
     }
 }
 
-fn frame_context(input: &Value) -> Context {
+pub(super) fn frame_context(input: &Value) -> Context {
     let t: [f32; 3] = std::array::from_fn(|a| f(&input["positionBits"][a]));
     Context {
         sky: GlobalTransform::from_translation(Vec3::new(-t[0], t[1], t[2])),
@@ -468,7 +474,8 @@ fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Run
         "startDelay": {"mode": "constant", "value": config.get("start_delay").cloned().unwrap_or(json!(0.0))},
         "ringBufferMode": 0, "ringBufferLoopRange": [0.0, 1.0],
         "maxParticles": config["maximum"], "start": start.clone(),
-        "emission": {"rateOverTime": {"mode": "constant", "value": config["rate_time"]},
+        "emission": {"rateOverTime": config.get("rateOverTime").cloned()
+                .unwrap_or_else(|| json!({"mode": "constant", "value": config["rate_time"]})),
             "rateOverDistance": {"mode": "constant", "value": config["rate_distance"]},
             "bursts": config.get("bursts").cloned().unwrap_or(json!([]))},
         "shapeEnabled": false,
@@ -678,6 +685,69 @@ fn births_receipt_matches_native_rows() {
             println!("control {path}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
             assert!(tally.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
         }
+    }
+}
+
+/// A curve-mode rate over time (the gate-flash emission blocks and three
+/// synthetic ones: the optimized polynomial, two curves, a non-looping end)
+/// against the native Update1b frames: every frame through the product frame
+/// entry, the emission state and every particle compared. The native control
+/// rows prove the curve is consumed (the constant rate 45 changes the rows)
+/// and that the rows read a static initializer (the identity cleared changes
+/// them); a bit-flipped receipt must mismatch.
+#[test]
+#[ignore = "MOLY_EMISSION_CURVE_RECEIPT must identify the JP curve-rate receipt"]
+fn emission_curve_receipt_matches_native_rows() {
+    let receipt = read("MOLY_EMISSION_CURVE_RECEIPT");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_EMISSION_CURVE_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0, "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    assert!(receipt["k1VersusE1DifferingFrames"].as_u64().unwrap() > 0);
+    assert!(receipt["staticInitializers"]["e1VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    if let Some(path) = std::env::var_os("MOLY_EMISSION_CURVE_BITFLIP") {
+        let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let (_, tally, rotation) = replay_modules(&control, None);
+        println!("bitflip: {} mismatched frames", tally.mismatched_frames + rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "the bit-flipped receipt must mismatch");
+    }
+}
+
+/// Curve-mode start lifetime, size, rotation and speed against the native
+/// Update1b rows (the curve-mode start receipt): every case through the
+/// product frame entry, per frame and on Director chunk schedules with a start
+/// delay, each frame compared with the start size arrays. The positive
+/// control (the curves as constants) must change the rows, the static
+/// initializer control too, and a bit-flipped receipt must mismatch.
+#[test]
+#[ignore = "MOLY_INITIAL_CURVES_RECEIPT must identify the JP curve-mode start receipt"]
+fn initial_curves_receipt_matches_native_rows() {
+    let receipt = read("MOLY_INITIAL_CURVES_RECEIPT");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "rotationFrames": rotation.0, "rotationMismatched": rotation.1,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_INITIAL_CURVES_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0, "{report}");
+    assert!(product.fields.get("startSize").is_some_and(|(n, _)| *n > 0), "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    assert!(receipt["k1VersusC0DifferingFrames"].as_u64().unwrap() > 0);
+    assert!(receipt["staticInitializers"]["c0VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    if let Some(path) = std::env::var_os("MOLY_INITIAL_CURVES_BITFLIP") {
+        let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let (_, tally, rotation) = replay_modules(&control, None);
+        println!("bitflip: {} mismatched frames", tally.mismatched_frames + rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "the bit-flipped receipt must mismatch");
     }
 }
 

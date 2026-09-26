@@ -53,6 +53,7 @@ fn existing_range_advances_noise_once_and_adds_transient_velocity() {
         NoiseState { scroll: 1.0 / 60.0 },
         crate::particle_geometry::reflect(Vec3::from_array(before)).to_array(),
         0x1234_5678,
+        system.side[0].seed,
         system.pool[0].age_percent,
     );
     simulate_stopped(&mut system, 1.0 / 60.0, &context());
@@ -117,6 +118,9 @@ fn native_install_draws_one_owner_for_birth_streams_and_noise() {
         refused.emitter.random_seed = Some(0);
         refused.emitter.auto_random_seed = Some(true);
         refused.emitter.noise = Some(NoiseParams { octaves, ..params() });
+        if route == SourceRoute::Procedural {
+            refused.emitter.simulation_space = SimulationSpace::World;
+        }
         let mut manager = seed::SystemSeedManager::from_entropy_words(ENTROPY);
         assert!(matches!(
             install_native_birth(&mut refused, &mut manager, &route, None).unwrap(),
@@ -172,9 +176,10 @@ fn current_snow_noise_source_installs_only_the_qualified_consumer() {
             NoiseState { scroll: 0.0 },
             [0.25, -0.5, 1.0],
             expected_owner,
+            0,
             0.0
         ),
-        law.sample(NoiseState::default(), [0.25, -0.5, 1.0], expected_owner, 0.0)
+        law.sample(NoiseState::default(), [0.25, -0.5, 1.0], expected_owner, 0, 0.0)
     );
 }
 

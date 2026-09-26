@@ -104,6 +104,10 @@ pub(crate) struct DirectorClock {
     stop_emitting: bool,
     /// The route the restart's birth decision and warm take.
     route: SourceRoute,
+    /// A sub-emitter parent's birth events, which each restart installs.
+    event_edges: Option<crate::particle_runtime::EventEdges>,
+    /// Sub-emitter commands with no installed target, dropped.
+    dropped: u64,
     /// A refused Simulate retires the system: it draws nothing until released.
     failed: bool,
 }
@@ -1175,10 +1179,17 @@ pub(crate) fn initialize_seed(automatic: bool, serialized: u32, clip_seed: u32) 
 /// serialized seed. The system is stopped and cleared; the playable starts
 /// with no last time.
 fn initialize(world: &mut World, draw: Entity, clip_seed: u32) -> Result<DirectorClock, TimelineFailure> {
-    let route = world
+    // A played parent whose targets are installed hands them its commands
+    // after each frame's updates; a Director's Simulate would step those
+    // targets before it, which this host does not run.
+    if world.get::<crate::weather_fx::fixture::SubEmitterTargets>(draw).is_some() {
+        return Err(invalid("a Director over a played sub-emitter parent with installed targets: the Simulate that steps its sub-emitters first is not run"));
+    }
+    let (route, event_edges) = world
         .get::<crate::weather_fx::fixture::DirectorRoute>(draw)
-        .map(|route| route.0.clone())
-        .or_else(|| world.get::<crate::weather_fx::fixture::Played>(draw).map(|played| played.route().clone()))
+        .map(|route| (route.0.clone(), route.1.clone()))
+        .or_else(|| world.get::<crate::weather_fx::fixture::Played>(draw)
+            .map(|played| (played.route().clone(), played.event_edges().cloned())))
         .ok_or_else(|| invalid("controlled particle system has no source route"))?;
     let live = world
         .get::<FixtureParticleLive>(draw)
@@ -1208,6 +1219,8 @@ fn initialize(world: &mut World, draw: Entity, clip_seed: u32) -> Result<Directo
         times: PlayableTimes::NEW,
         stop_emitting: false,
         route,
+        event_edges,
+        dropped: 0,
         failed: false,
     })
 }
@@ -1316,6 +1329,16 @@ const EXTERNAL_FLOOR: f32 = f32::from_bits(8);
 /// playable is not evaluated and the paused system keeps its particles). An
 /// inactive system forgets the last time and draws nothing. Returns whether
 /// the system draws this frame.
+///
+/// Each of the playable's Simulate calls enters SimulateChildrenRecursive
+/// (withChildren false): when the system's SubModule is enabled, every
+/// sub-emitter it names is simulated first, by the same time (by zero at a
+/// restart), and then the system itself, unless it is one of them. Under a
+/// Director the fixture host installs no sub-emitter target (the judgement
+/// refuses each one there, and a played parent whose targets are installed
+/// takes no Director clock, see [`initialize`]), so the call is the system's
+/// own update; the commands its updates leave for the targets are dropped,
+/// counted, as the played path drops a command whose target is not installed.
 pub(crate) fn advance(
     system: &mut Runtime,
     clock: &mut DirectorClock,
@@ -1335,9 +1358,19 @@ pub(crate) fn advance(
         return true;
     };
     let mut times = clock.times;
-    let mut target = ControlledSystem { system: &mut *system, stop_emitting: &mut clock.stop_emitting, route: &clock.route, ctx };
+    let mut target = ControlledSystem { system: &mut *system, stop_emitting: &mut clock.stop_emitting, route: &clock.route,
+        event_edges: clock.event_edges.as_ref(), ctx };
     let result = prepare_frame(&mut target, &mut times, time as f32);
     clock.times = times;
+    let dropped = system.native_birth.as_mut().and_then(|birth| birth.events.as_mut())
+        .map_or(0, |events| events.take_commands().len() as u64);
+    if dropped > 0 {
+        if clock.dropped == 0 {
+            warn!(effect=%system.effect, node=%system.node,
+                "sub-emitter commands dropped: their target is not installed");
+        }
+        clock.dropped += dropped;
+    }
     match result {
         Ok(()) => true,
         Err(reason) => {
@@ -1404,6 +1437,7 @@ struct ControlledSystem<'a> {
     system: &'a mut Runtime,
     stop_emitting: &'a mut bool,
     route: &'a SourceRoute,
+    event_edges: Option<&'a crate::particle_runtime::EventEdges>,
     ctx: &'a Context,
 }
 
@@ -1413,7 +1447,7 @@ impl Controlled for ControlledSystem<'_> {
     }
 
     fn restart(&mut self) -> Result<(), String> {
-        crate::particle_runtime::director_restart(self.system, self.route, self.ctx)?;
+        crate::particle_runtime::director_restart(self.system, self.route, self.event_edges, self.ctx)?;
         *self.stop_emitting = false;
         Ok(())
     }
@@ -1456,6 +1490,8 @@ mod tests {
             times: PlayableTimes::NEW,
             stop_emitting: false,
             route: SourceRoute::Ordinary,
+            event_edges: None,
+            dropped: 0,
             failed: false,
         }
     }

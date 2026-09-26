@@ -312,6 +312,14 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     if !scalar(&emitter.start.speed) {
         return unsupported("target start speed curve mode");
     }
+    // The target's Initial curves read the time the child Emit passes, which
+    // only a constant ignores; the curve modes were executed for an
+    // emitter's own births only.
+    let start = &emitter.start;
+    if ![Some(&start.lifetime), Some(&start.size), start.size_y.as_ref(), start.size_z.as_ref(), Some(&start.rotation),
+        start.rotation_x.as_ref(), start.rotation_y.as_ref()].into_iter().flatten().all(scalar) {
+        return unsupported("target start lifetime, size or rotation curve mode");
+    }
     let inherit = match &emitter.inherit_velocity {
         None => None,
         Some(params) => match params.mode {
@@ -923,7 +931,7 @@ fn advanced_scroll(system: &Runtime, scroll: f32, dt: f32) -> f32 {
 fn add_noise(system: &Runtime, lane: &mut Lane, scroll: f32) {
     if let Some(noise) = &system.noise {
         let state = moly_law::particle::noise::NoiseState { scroll };
-        let value = noise.law.sample(state, lane.position, noise.owner_seed, lane.age);
+        let value = noise.law.sample(state, lane.position, noise.owner_seed, lane.seed, lane.age);
         lane.animated = std::array::from_fn(|a| lane.animated[a] + value[a]);
     }
 }
@@ -1101,6 +1109,8 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
         frame: birth::FrameState::default(),
         events: None,
         target: Some(ChildTarget { owner, commands: 0, births: 0, refused: 0, last_refusal: None }),
+        procedural: false,
+        replays: Vec::new(),
     });
     Ok(())
 }
