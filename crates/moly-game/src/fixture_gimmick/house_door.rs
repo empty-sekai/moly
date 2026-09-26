@@ -35,7 +35,7 @@ use crate::{
 
 const SE_EVENT: &str = "OnPlayHouseSE";
 
-/// The two AnyState triggers this lane plays.
+/// The AnyState triggers this lane plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HouseTrigger {
     PlayerOn,
