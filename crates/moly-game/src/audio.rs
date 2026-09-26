@@ -5,8 +5,8 @@
 //!
 //! - **BGM**（BGM 管理器 `MysekaiBGMManager` 的选曲）：按「当前站点 × 当前
 //!   现象」现算。真源 `PlayBGMAsync(site, phenomenon)` 先问用户唱片设定（只在
-//!   住宅类站点查；设定是服务端用户态，服务端模型接上之前取一个具名常量，
-//!   见 [`UserMusicPlaySettings`]），再走默认选曲
+//!   住宅类站点查；设定是服务端用户态，由服务端模型的响应写进客户端副本
+//!   [`crate::server::client::music::ClientMusicPlaySettings`]，默认为空），再走默认选曲
 //!   `PlayDefaultBGMAsync`：现象 id 等于客户端配置的配送现象 id → 站点
 //!   normal 档；现象主表亮度档非 none →
 //!   站点×亮度档行；none → 现象自己的 BGM 行（主数据缓存按 mysekaiPhenomenaId
@@ -1981,53 +1981,26 @@ pub(crate) struct BgmChannel {
     music_refused_for: Option<u32>,
 }
 
-/// The user's music-record settings: per site, the record the jukebox plays
-/// and the vocal version (the server's `UserMysekaiMusicPlayFixtureSetting`
-/// rows, one per site). They are **server state**: the client copy is filled
-/// by the server's responses. Until the server model carries this section the
-/// copy is filled from [`USER_MUSIC_PLAY_SETTINGS`].
-///
-/// The client side, which is ported: only housing sites (categories
-/// `housing_home` / `housing_room`) look the setting up; other sites go
-/// straight to the default choice. Resolving a record to its music (the
-/// record master's track type: soundtrack or song; a song through the music
-/// master, the vocal version by the local default vocal type and the song's
-/// vocal setting; then the music's audio package and cue, with the default
-/// choice when nothing resolves) needs the song audio, which the runtime
-/// root does not carry: a set record is refused by name by the BGM channel,
-/// and the default choice plays, which differs from the source whenever the
-/// record resolves.
-#[derive(Resource)]
-pub(crate) struct UserMusicPlaySettings {
-    /// siteId → (record id, vocal version id).
-    per_site: HashMap<u32, (i64, i64)>,
-}
-
-/// The server's music-record settings as `(site id, record id, vocal version
-/// id)` rows, empty: no site has a record set, as for a user who never set
-/// one.
-// TODO(server model): take these rows from the server document's user music
-// play settings section (crate::server) once it lands, through the join
-// response like the other user sections, and drop this constant.
-const USER_MUSIC_PLAY_SETTINGS: &[(u32, i64, i64)] = &[];
-
-impl Default for UserMusicPlaySettings {
-    fn default() -> Self {
-        let mut per_site = HashMap::new();
-        for &(site, record, vocal) in USER_MUSIC_PLAY_SETTINGS {
-            if per_site.insert(site, (record, vocal)).is_some() {
-                panic!("USER_MUSIC_PLAY_SETTINGS 里站点 {site} 出现两次");
-            }
-        }
-        Self { per_site }
-    }
-}
-
-impl UserMusicPlaySettings {
-    fn setting(&self, site_id: u32) -> Option<(i64, i64)> {
-        self.per_site.get(&site_id).copied()
-    }
-}
+// The user's music-record settings (the server's
+// `UserMysekaiMusicPlayFixtureSetting` rows: per site, the record the jukebox
+// plays and the vocal version) are server state: the server model holds them
+// (document section `userMysekaiMusicPlayFixtureSettings`) and its responses
+// write the client copy `crate::server::client::music::ClientMusicPlaySettings`.
+// It is empty by default (no site has a record set; the default choice plays).
+// The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD` (`site:record:vocal`,
+// comma separated, refused loudly when malformed) writes the native server
+// document; the game mode does not read it.
+//
+// The client side, which is ported: only housing sites (categories
+// `housing_home` / `housing_room`) look the setting up; other sites go
+// straight to the default choice. Resolving a record to its music (the
+// record master's track type: soundtrack or song; a song through the music
+// master, the vocal version by the local default vocal type and the song's
+// vocal setting; then the music's audio package and cue, with the default
+// choice when nothing resolves) needs the song audio, which the runtime
+// root does not carry: a set record is refused by name by the BGM channel,
+// and the default choice plays, which differs from the source whenever the
+// record resolves.
 
 /// Update：BGM 逐帧——淡出旧声、推进淡入、intro→loop 交接、按档换曲。
 pub(crate) fn advance_bgm(
@@ -2039,7 +2012,7 @@ pub(crate) fn advance_bgm(
     phenomenon: Res<CurrentPhenomenon>,
     site: Option<Res<SiteActive>>,
     configs: Option<Res<ClientConfigs>>,
-    music: Res<UserMusicPlaySettings>,
+    music: Res<crate::server::client::music::ClientMusicPlaySettings>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<BgmChannel>,
     mut sinks: Query<&mut AudioSink>,
@@ -3661,7 +3634,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<AudioGate>()
         .init_resource::<LocalVolumeSettings>()
         .init_resource::<CurrentPhenomenon>()
-        .init_resource::<UserMusicPlaySettings>()
+        .init_resource::<crate::server::client::music::ClientMusicPlaySettings>()
         .init_resource::<BgmChannel>()
         .init_resource::<AmbientChannel>()
         .init_resource::<SequenceWorkAreas>()
