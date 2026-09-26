@@ -730,7 +730,8 @@ fn matches_fixture_tag_condition(
     talk: i32,
     fixture_id: i32,
 ) -> Result<bool, Halt> {
-    let tags = match scene.fixture_gates().extras.map(|extras| &extras.fixture_tags) {
+    let extras = scene.fixture_gates.as_ref().and_then(|gates| gates.extras);
+    let tags = match extras.map(|extras| &extras.fixture_tags) {
         Some(Ok(tags)) => tags,
         Some(Err(reason)) => return Err(Halt::gap(reason.clone())),
         None => return Err(Halt::gap("the fixture tag-group table is not loaded")),
