@@ -1075,14 +1075,28 @@ fn own_clock_emitter(emitter: &EmitterParams) -> EmitterParams {
 }
 
 /// Called once when an admitted sub-emitter target is installed: its seed
-/// owner and streams as any system's first Play makes them, and the child
-/// owner words its commands read.
+/// owner and streams as any system's first Play makes them, the start delay
+/// word that Play writes, and the child owner words its commands read.
+///
+/// The target stays stopped every frame (the engine marks every cached
+/// sub-emitter stopped), and a stopped update never counts the word down; it
+/// ticks the clock only by the part of a slice beyond the word. A target
+/// with a start delay therefore keeps its clock at zero while the frame's
+/// slices stay at or below the word, for as long as it lives. A random delay
+/// is Play's evaluation with the system seed's hash, which is not
+/// transcribed, and is refused.
 pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     owner: ChildOwner) -> Result<(), String> {
     if system.native_birth.is_some() {
         return Err("target already has a birth owner".into());
     }
     child_target_eligible(&system.emitter, system.geometry.shape_evidence())?;
+    let start_delay = if arms::on("targetDelayWordZero") {
+        0.0
+    } else {
+        super::play_start_delay(&system.emitter)
+            .ok_or("random start delay on a sub-emitter target: Play's seed-hash evaluation is not transcribed")?
+    };
     system.emitter = own_clock_emitter(&system.emitter);
     // Qualified by child_target_eligible above; built before the owner draw.
     let noise_law = system.emitter.noise.as_ref()
@@ -1106,7 +1120,7 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
         shape_clock: moly_law::particle::shape::ArcLoopClock::default(),
         emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(
             streams.scalar_birth),
-        frame: birth::FrameState::default(),
+        frame: birth::FrameState { start_delay, ..birth::FrameState::default() },
         events: None,
         target: Some(ChildTarget { owner, commands: 0, births: 0, refused: 0, last_refusal: None }),
         procedural: false,

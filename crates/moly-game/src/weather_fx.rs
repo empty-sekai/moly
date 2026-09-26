@@ -2341,16 +2341,17 @@ fn judge_in_host(
         // down on the native birth path (the frame head's distance births
         // wait for it too). A random delay is evaluated with the system
         // seed's hash, not transcribed; the Director's Simulate path and the
-        // legacy step carry no such word; a sub-emitter target is stopped
-        // every frame, so its word never counts down and holds its clock
-        // (its Tick is not called while the word is not below the slice),
-        // which the target install does not carry.
+        // legacy step carry no such word. A sub-emitter target is stopped
+        // every frame, so its word never counts down and holds its clock (its
+        // Tick takes only the part of a slice beyond the word); the target
+        // install writes the word its Play writes and its stopped frame keeps
+        // it, and the target takes no route of its own.
         let reason = if crate::particle_runtime::play_start_delay(&emitter).is_none() {
             Some("random start delay: Play's seed-hash evaluation is not transcribed".to_owned())
         } else if !native_owner {
             Some("start delay: the Director's Simulate path runs the legacy step, which has no start delay word".to_owned())
         } else if child_parent.is_some() {
-            Some("start delay on a sub-emitter target: its uncounted word holds the target's clock, which the target install does not carry".to_owned())
+            None
         } else {
             crate::particle_runtime::native_birth_eligible(&emitter, &route).err()
                 .map(|reason| format!("start delay needs the native birth path: {reason}"))
