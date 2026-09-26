@@ -125,11 +125,15 @@
 //! The engine's pool also holds, for a while, the local player's avatar box:
 //! the avatar's only collider, a BoxCollider with no body, which enters when
 //! the avatar is cloned, is posed once (a bounds update) and leaves when the
-//! game disables it once the avatar model has loaded, at points of the site
-//! sequence not read. The pruner does not hold it, so its order is claimed
-//! only while the pool with that box fits one leaf, on the assumption (not
-//! read) that the box left before the site was shown; the scene still feeds
-//! and queries the pruners and logs how many queries they agree on.
+//! game disables it once the avatar model has loaded. On the
+//! housing-competition entry both come before the site is instantiated
+//! (unless the model load outlasts the scene's five-second wait for the
+//! player); on the normal entry the clone follows the server's messages, at
+//! a frame not read. The pruner does not hold the box, so its order is
+//! claimed only while the pool with that box fits one leaf, on the
+//! assumption (read only for the housing-competition entry) that the box
+//! left before the site was shown; the scene still feeds and queries the
+//! pruners and logs how many queries they agree on.
 //!
 //! Where the pruner cannot give the order, the query falls back to the add
 //! order: while the scene holds at most four static shapes and no shape has
@@ -1186,23 +1190,30 @@ const BOUNDARY_STEPS: usize = 64;
 /// avatar (and the game adds none at run time), so a static shape; it enters
 /// the pool when the avatar is cloned, moves once when the clone is posed (a
 /// bounds update, which forces a rebuild), and leaves when the game disables
-/// it for the local player once the avatar model has loaded. Where those
-/// three fall in the site sequence is not read, and the pruner does not hold
-/// the box. Its add and removal restart the rebuild, and a removal while
-/// shapes added after it are in the pool moves the pool's last shape into
-/// its slot. While one leaf holds the whole pool and the box has left before
-/// the site is shown, the visits keep the fed pool order; the scene claims
-/// the order only there, and that the box has left before the showing is an
-/// assumption (not read).
+/// it for the local player once the avatar model has loaded. On the
+/// housing-competition entry, where the scene creates the player itself, the
+/// clone and the disable come before the site is instantiated: the scene
+/// waits for the player (registered only after the disable), or five
+/// seconds, before it sets up the sites, and a model load past that wait
+/// moves the disable later. On the normal entry the clone follows the
+/// server's messages, at a frame not read. The pruner does not hold the box:
+/// its add and removal restart the rebuild, and a removal while shapes added
+/// after it are in the pool moves the pool's last shape into its slot. While
+/// one leaf holds the whole pool and the box has left before the site is
+/// shown, the visits keep the fed pool order; the scene claims the order
+/// only there, and on the normal entry that the box has left before the
+/// showing is an assumption (not read).
 const UNFED_TRANSIENT_SHAPES: usize = 1;
 
 /// Why the pruner's order is not claimed while the pool is more than a leaf.
-const TRANSIENT_SHAPE: &str = "the local player's avatar box enters and leaves the engine's pool at points of the \
-    site sequence not read, beside more than a leaf of other shapes, and the pruner does not hold it";
+const TRANSIENT_SHAPE: &str = "the local player's avatar box enters, moves once and leaves the engine's pool (before \
+    the site is instantiated on the housing-competition entry, at a frame the server's messages set on the normal \
+    entry), the pruner holds neither that box nor its move, and the pool is more than a leaf";
 
 /// The assumption the order stands on where it is claimed.
-const TRANSIENT_ASSUMED: &str = "orders claimed on the assumption (not read) that the local player's avatar box \
-    left the pool before the site was shown";
+const TRANSIENT_ASSUMED: &str = "orders claimed on the assumption that the local player's avatar box left the pool \
+    before the site was shown: so on the housing-competition entry when the avatar model loads within the \
+    five-second wait; on the normal entry the avatar's clone follows the server's messages (not read)";
 
 /// The engine's static pruner for the scene's static shapes, fed the
 /// engine's add and remove sequence for the site and the placed fixtures
