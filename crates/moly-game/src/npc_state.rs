@@ -133,6 +133,7 @@ impl Plugin for NpcStatePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<TweetHudEvent>()
             .init_resource::<SequencePickSeeder>()
+            .init_resource::<crate::npc_gate::GateAppearance>()
             .init_resource::<crate::npc_clock::NpcClock>()
             .add_systems(Startup, (crate::npc_tweet::load, crate::npc_clock::load))
             .add_systems(

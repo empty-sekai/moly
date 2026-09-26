@@ -1118,7 +1118,16 @@ pub(crate) fn spawn_when_ready(
                 idle: idle.clone(),
                 walk: walk.clone(),
             },
-            crate::npc_objective::TalkSlot::default(),
+            // The AI's set-up: entry-site talk data with the entry-site
+            // interrupt marker, so the first decision starts the entry-site
+            // objective (hidden until the gate's appearance cancels it, see
+            // `npc_gate`). A roster created away from its site, or the
+            // embedded stage's cast, keeps empty data.
+            if away || stage.is_some() {
+                crate::npc_objective::TalkSlot::default()
+            } else {
+                crate::npc_objective::TalkSlot::entry_site(*unit_id)
+            },
             // 出生态：起动旗立起（源起动装配「立即可执行下一目标」的同
             // 形），首判不等停顿。
             crate::npc_objective::ObjectiveMind::at_spawn(),

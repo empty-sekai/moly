@@ -78,6 +78,7 @@ mod npc_clock;
 mod npc_dither;
 mod npc_fixture_activity;
 mod npc_fixture_talk;
+mod npc_gate;
 #[cfg(test)]
 mod npc_harness;
 pub mod npc_objective;
