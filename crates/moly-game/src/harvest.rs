@@ -34,7 +34,7 @@
 //!   the walk field's runtime carving.
 //!
 //! Named gaps: the particle systems the driftage, toolbox and treasure views
-//! play and stop are not drawn; drop models keep their glb materials.
+//! play and stop are not drawn (their particle archives are not exported).
 
 pub(crate) mod action;
 mod airplane;
@@ -417,6 +417,8 @@ pub(crate) struct HarvestDropBatches(pub(crate) Vec<DropBatch>);
 #[derive(Component)]
 pub struct HarvestDropItem {
     pub uid: u64,
+    /// The drop model's package (its prefab and document).
+    pub(crate) package: String,
     /// 0 while scattering; 1.0 once landed.
     pub radius: f32,
     pub rarity: i32,
@@ -795,7 +797,7 @@ impl Plugin for HarvestPlugin {
                     drops::advance_animations,
                     pickup::collect_on_leave,
                     pickup::advance,
-                    tool_model::apply,
+                    (tool_model::apply, tool_model::swap_materials).chain(),
                     ui::place,
                     queue::advance,
                 )

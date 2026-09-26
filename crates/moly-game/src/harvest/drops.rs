@@ -172,6 +172,7 @@ pub(crate) fn spawn(
                     SceneRoot(scene),
                     HarvestDropItem {
                         uid,
+                        package: package.clone(),
                         radius: if is_scatter { 0.0 } else { 1.0 },
                         rarity: item.rarity,
                         resource_type: item.row.resource_type,

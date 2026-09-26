@@ -31,16 +31,26 @@
 use std::collections::HashMap;
 
 use bevy::asset::LoadState;
+use bevy::ecs::system::{lifetimeless::SRes, SystemParamItem};
 use bevy::gltf::{Gltf, GltfMaterialName};
-use bevy::pbr::{MeshMaterial3d, StandardMaterial};
+use bevy::pbr::{
+    Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin, MeshMaterial3d,
+    StandardMaterial,
+};
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_resource::*;
+use bevy::render::renderer::RenderDevice;
+use bevy::render::texture::GpuImage;
+use bevy::shader::ShaderRef;
 use moly_assets::sidecar::{parse_site_sidecar, SiteSidecar};
 use moly_law::shading::fieldobject;
 
+use crate::env::SiteEnvGpuBuffer;
 use crate::harvest::{HarvestDocs, HarvestGltfs, HarvestObject, HarvestRoot, HarvestScenesReady};
 use crate::site_material::{
-    load_dir_texture, resolve_fieldobject, resolve_treasurebox, resolve_tree, SiteFamily,
-    SiteMaterial, TREASUREBOX_SHADER_NAME,
+    load_dir_texture, resolve_dropitem, resolve_fieldobject, resolve_treasurebox, resolve_tree,
+    SiteFamily, SiteMaterial, DROPITEM_SHADER_NAME, TREASUREBOX_SHADER_NAME,
 };
 
 /// 换装完成标记。
@@ -386,12 +396,274 @@ fn build_swap_plan(
     })
 }
 
+/// The tool in the player's hand: `Mysekai/Avatar-Tool`, pass Base
+/// (LightMode MysekaiObject; ZTest LEqual, ZWrite On, Cull Back, Blend One
+/// Zero, queue Geometry 2000). The program: object to world to clip with uv0
+/// as is; the main texture at the global mip bias; with
+/// `_UsePhenomenaLighting` above 0.5 the colour becomes
+/// `c + light.w (c light.rgb - c)` with the phenomena directional light;
+/// alpha is the texture's; the second target is a constant zero (not drawn,
+/// as for every site family). The Stencil Shadow pass (ref 1, Equal, ZTest
+/// Greater, DecrSat) and the stencil write of Base (ref 0, Always, Replace)
+/// are not drawn: the product has no stencil shadow for the avatar's parts.
+/// The material's `_groupDither` / `_DitherAlpha` have no reader in the Base
+/// program.
+#[derive(Asset, TypePath, Clone)]
+pub(crate) struct HarvestToolMaterial {
+    /// x = `_UsePhenomenaLighting`.
+    pub(crate) options: [f32; 4],
+    pub(crate) main_tex: Handle<Image>,
+}
+
+/// `Mysekai/Avatar-Tool`.
+pub(crate) const AVATAR_TOOL_SHADER_NAME: &str = "Mysekai/Avatar-Tool";
+
+impl AsBindGroup for HarvestToolMaterial {
+    type Data = ();
+    type Param = (SRes<SiteEnvGpuBuffer>, SRes<RenderAssets<GpuImage>>);
+    fn label() -> &'static str {
+        "harvest_tool_material"
+    }
+    fn bind_group_data(&self) -> Self::Data {}
+    fn unprepared_bind_group(
+        &self,
+        _layout: &BindGroupLayout,
+        _device: &RenderDevice,
+        (env, images): &mut SystemParamItem<'_, '_, Self::Param>,
+        _force_no_bindless: bool,
+    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        let image = images
+            .get(&self.main_tex)
+            .ok_or(AsBindGroupError::RetryNextUpdate)?;
+        let bytes = self.options.iter().flat_map(|v| v.to_le_bytes()).collect();
+        Ok(UnpreparedBindGroup {
+            bindings: BindingResources(vec![
+                (0, OwnedBindingResource::Data(OwnedData(bytes))),
+                (1, OwnedBindingResource::Buffer(env.buffer.clone())),
+                (
+                    2,
+                    OwnedBindingResource::TextureView(
+                        TextureViewDimension::D2,
+                        image.texture_view.clone(),
+                    ),
+                ),
+                (
+                    3,
+                    OwnedBindingResource::Sampler(
+                        SamplerBindingType::Filtering,
+                        image.sampler.clone(),
+                    ),
+                ),
+            ]),
+        })
+    }
+    fn bind_group_layout_entries(
+        _device: &RenderDevice,
+        _force_no_bindless: bool,
+    ) -> Vec<BindGroupLayoutEntry> {
+        let uniform = |binding| BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        vec![
+            uniform(0),
+            uniform(1),
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                count: None,
+            },
+        ]
+    }
+}
+
+impl Material for HarvestToolMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://moly_game/shaders/harvest_tool.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        Self::vertex_shader()
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        crate::material_order::set_queue(descriptor, 2000);
+        descriptor.primitive.cull_mode = Some(Face::Back);
+        Ok(())
+    }
+}
+
+/// Marks a drop whose materials were resolved (swapped or kept by name).
+#[derive(Component)]
+pub(crate) struct DropMaterialsSwapped;
+
+/// The drop models' material cache: a glb material handle resolves once and
+/// every drop of that package takes the same site material.
+#[derive(Default)]
+pub(crate) struct DropMaterialCache {
+    resolved: HashMap<Handle<StandardMaterial>, Option<Handle<SiteMaterial>>>,
+    pending: HashMap<Handle<StandardMaterial>, SiteMaterial>,
+}
+
+/// Update: a drop model's `Mysekai/DropItem` materials take the site
+/// pipeline's DropItem family (the program that reads the four
+/// `_MysekaiDropItem*` globals) once its scene has expanded and the family's
+/// texture is loaded. The document's material at the handle's glb index
+/// (name checked; else the unique same-named one) is resolved. A material of
+/// another shader keeps its glb material and is counted by name.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn switch_drop_materials(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    json: Res<Assets<moly_assets::json::JsonAsset>>,
+    docs: Option<Res<HarvestDocs>>,
+    gltfs: Res<Assets<Gltf>>,
+    glbs: Option<Res<HarvestGltfs>>,
+    drops: Query<(Entity, &crate::harvest::HarvestDropItem), Without<DropMaterialsSwapped>>,
+    children: Query<&Children>,
+    parts: Query<(Entity, &MeshMaterial3d<StandardMaterial>, &GltfMaterialName)>,
+    mut materials: ResMut<Assets<SiteMaterial>>,
+    mut cache: Local<DropMaterialCache>,
+) {
+    let (Some(docs), Some(glbs)) = (docs, glbs) else {
+        return;
+    };
+    // Pending resolutions whose textures have arrived become site materials.
+    let ready: Vec<Handle<StandardMaterial>> = cache
+        .pending
+        .iter()
+        .filter(|(_, material)| {
+            match server.load_state(&material.main_tex) {
+                LoadState::Failed(err) => panic!("drop material texture failed to load: {err:?}"),
+                LoadState::Loaded => true,
+                _ => false,
+            }
+        })
+        .map(|(handle, _)| handle.clone())
+        .collect();
+    for handle in ready {
+        let material = cache.pending.remove(&handle).expect("listed above");
+        let site = materials.add(material);
+        cache.resolved.insert(handle, Some(site));
+    }
+    for (root, drop) in &drops {
+        let mut found = Vec::new();
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if let Ok(kids) = children.get(entity) {
+                stack.extend(kids.iter());
+            }
+            if let Ok(part) = parts.get(entity) {
+                found.push(part);
+            }
+        }
+        if found.is_empty() {
+            continue; // the scene has not expanded yet
+        }
+        let package = drop.package.as_str();
+        let leaf = package.rsplit("__").next().unwrap_or(package).to_owned();
+        let Some(doc) = docs.0.get(package).and_then(|handle| json.get(handle)) else {
+            continue;
+        };
+        let sidecar = parse_site_sidecar(doc.0.as_bytes())
+            .unwrap_or_else(|err| panic!("drop document is not a sidecar ({package}): {err:?}"));
+        let gltf = glbs.by_key.get(package).and_then(|handle| gltfs.get(handle));
+        // Resolve every handle of this drop not seen before.
+        for (_, material, name) in &found {
+            if cache.resolved.contains_key(&material.0) || cache.pending.contains_key(&material.0) {
+                continue;
+            }
+            let glb_index = gltf
+                .and_then(|gltf| gltf.materials.iter().position(|candidate| *candidate == material.0));
+            let by_index = glb_index
+                .and_then(|index| sidecar.materials.get(index))
+                .filter(|source| source.name == name.0);
+            let slot = by_index.or_else(|| {
+                let mut same = sidecar.materials.iter().filter(|source| source.name == name.0);
+                match (same.next(), same.next()) {
+                    (Some(source), None) => Some(source),
+                    _ => None,
+                }
+            });
+            let Some(slot) = slot else {
+                warn!("[harvest-drop] {leaf}: material {} has no single document entry; glb material kept", name.0);
+                cache.resolved.insert(material.0.clone(), None);
+                continue;
+            };
+            if slot.shader != DROPITEM_SHADER_NAME {
+                info!("[harvest-drop] {leaf}: material {} is {}; glb material kept", name.0, slot.shader);
+                cache.resolved.insert(material.0.clone(), None);
+                continue;
+            }
+            let dir = format!("site/props/{leaf}");
+            let load = |uri: &str| load_dir_texture(&server, &sidecar, &dir, uri);
+            match resolve_dropitem(&sidecar, slot, load) {
+                Ok(site) => {
+                    cache.pending.insert(material.0.clone(), site);
+                }
+                Err(reason) => {
+                    warn!("[harvest-drop] {leaf}: DropItem material {} refused: {reason}", name.0);
+                    cache.resolved.insert(material.0.clone(), None);
+                }
+            }
+        }
+        // Swap only when every handle of this drop is settled.
+        if found.iter().any(|(_, material, _)| !cache.resolved.contains_key(&material.0)) {
+            continue;
+        }
+        let mut swapped = 0usize;
+        for (entity, material, _) in &found {
+            if let Some(Some(site)) = cache.resolved.get(&material.0) {
+                commands
+                    .entity(*entity)
+                    .remove::<MeshMaterial3d<StandardMaterial>>()
+                    .insert(MeshMaterial3d(site.clone()));
+                swapped += 1;
+            }
+        }
+        commands.entity(root).insert(DropMaterialsSwapped);
+        info!(
+            "[harvest-drop] {leaf} uid {}: {swapped} of {} mesh parts drawn with the DropItem family",
+            drop.uid,
+            found.len()
+        );
+    }
+}
+
 /// 采集物材质插件。材质管线（`MaterialPlugin<SiteMaterial>`）与全局量桥
-/// 由站点材质插件装着，这里只挂换装系统。
+/// 由站点材质插件装着，这里挂换装系统与手中工具的材质管线。
 pub struct HarvestMaterialPlugin;
 
 impl Plugin for HarvestMaterialPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, switch_materials);
+        bevy::asset::embedded_asset!(app, "shaders/harvest_tool.wgsl");
+        app.add_plugins(MaterialPlugin::<HarvestToolMaterial>::default())
+            .add_systems(Update, (switch_materials, switch_drop_materials));
     }
 }
