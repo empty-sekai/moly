@@ -122,6 +122,13 @@
 //!   world point; the scene composes that point its own way, which stands in
 //!   for the transform's arithmetic (not read).
 //!
+//! The engine's pool also holds the player avatar's box: the avatar's only
+//! collider, a BoxCollider with no body, so a static shape that moves with
+//! the avatar, and every move is a bounds update that forces a rebuild. The
+//! pruner holds neither, so its order is claimed only while the pool with
+//! that box fits one leaf (the visits then keep the pool order); the scene
+//! still feeds and queries the pruners and counts the queries they agree on.
+//!
 //! Where the pruner cannot give the order, the query falls back to the add
 //! order: while the scene holds at most four static shapes and no shape has
 //! left it since it was last empty, every query meets its shapes in the order
@@ -1171,6 +1178,20 @@ const MAX_FIXED_STEPS: u32 = 16;
 /// pruners must have settled.
 const BOUNDARY_STEPS: usize = 64;
 
+/// The static shapes the engine's pool holds beside the ones the scene
+/// feeds: the player avatar's box. The avatar prefab's only collider is a
+/// BoxCollider on its avatar root with no body anywhere on the avatar (and
+/// the game adds none at run time), so it is a static shape that moves with
+/// the avatar; each move is a bounds update, which marks its tree node for
+/// refit and forces a rebuild. The pruner has no bounds update and does not
+/// hold that box, so its order stands only while one leaf holds the whole
+/// pool, where the visits keep the pool order whatever the box does.
+const UNFED_MOVING_SHAPES: usize = 1;
+
+/// Why the pruner's order is not claimed while the pool is more than a leaf.
+const MOVING_SHAPE: &str = "the player avatar's box, a static shape that moves with the avatar, is in the engine's \
+    pool beside more than a leaf of other shapes, and the pruner holds neither that box nor its bounds updates";
+
 /// The engine's static pruner for the scene's static shapes, fed the
 /// engine's add and remove sequence for the site and the placed fixtures
 /// (see the module notes). Where that sequence has an unread number of
@@ -1195,6 +1216,9 @@ struct PrunerScene {
     clock: f64,
     /// The lines already reported to the log.
     reported: Vec<String>,
+    /// Queries answered while fed; of them, the ones every pruner agreed on.
+    queries: u64,
+    agreed: u64,
 }
 
 /// Each distinct pruner once (a pruner's future answers are a function of
@@ -1460,6 +1484,17 @@ impl PrunerScene {
                 Some(first) if *first == seq => {}
                 Some(_) => split = true,
             }
+        }
+        self.queries += 1;
+        self.agreed += u64::from(!split);
+        let moving = self.variants[0].pool_order().len() + UNFED_MOVING_SHAPES > LEAF_SHAPES;
+        if self.queries % 2000 == 1 {
+            let line = format!("{} queries; the pruners agree on {}{}", self.queries, self.agreed,
+                if moving { format!("; no order claimed: {MOVING_SHAPE}") } else { String::new() });
+            self.report(line);
+        }
+        if moving {
+            return Err(MOVING_SHAPE.to_owned());
         }
         if split {
             let why = format!("the pruners of the unread step counts disagree on this query ({})",
