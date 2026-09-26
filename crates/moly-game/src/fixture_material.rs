@@ -1622,10 +1622,9 @@ fn switch_materials(
     mut materials: ResMut<Assets<FixtureMaterial>>,
     mut plan: Local<Option<SwapPlan>>,
     layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
-        MessageWriter<crate::gpu_image_release::ImageTextureReplaced>),
-    mut default_white: Local<Option<Handle<Image>>>,
+        MessageWriter<crate::gpu_image_release::ImageTextureReplaced>, Local<Option<Handle<Image>>>),
 ) {
-    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced) = layout;
+    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced, mut default_white) = layout;
     let mut pending_roots: Vec<_> = roots.iter().map(|(entity, _)| entity).collect();
     pending_roots.sort_unstable();
     if *seen_roots != pending_roots {
