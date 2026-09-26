@@ -380,6 +380,9 @@ pub(crate) struct GateFlow {
     hides: Vec<PendingHide>,
     /// The last reason a reply waited, for the logs.
     waiting: Option<&'static str>,
+    /// The placed gate the server document's home gate was last checked
+    /// against.
+    restore_checked: Option<Entity>,
     /// The running cast's cloth space, while one of this flow's cut-scenes
     /// plays.
     cast_space: Option<CastSpace>,
@@ -486,6 +489,7 @@ fn start(mut commands: Commands, server: Res<AssetServer>) {
         rand: EngineRand::from_state(engine_state()),
         hides: Vec::new(),
         waiting: None,
+        restore_checked: None,
         cast_space: None,
     });
 }
@@ -711,9 +715,16 @@ fn take_reply(world: &mut World) -> Stage {
         .get_resource::<crate::server::ServerGateReplies>()
         .is_some_and(|replies| !replies.0.is_empty());
     if !pending {
+        restore_saved_gate(world);
         return Stage::Idle;
     }
-    let gate = match ready(world) {
+    let readiness = ready(world).and_then(|gate| {
+        world
+            .contains_resource::<crate::fixture_activity_data::FixtureActivityTables>()
+            .then_some(gate)
+            .ok_or("the unit-group table is loading")
+    });
+    let gate = match readiness {
         Ok(gate) => gate,
         Err(reason) => {
             note_wait(world, "a gate reply", reason);
@@ -771,7 +782,7 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
         grant_pass: true,
     } = request
     {
-        grant_colorful_pass(world);
+        grant_colorful_pass();
         return Stage::Request {
             request: Request::Reserve {
                 unit,
@@ -804,7 +815,7 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
 /// The server panel's edits that give the user a colorful pass for a day of
 /// the server clock (`userMysekaiColorfulPass`), then its `sync` action,
 /// which delivers the pass to the client's copy as a response.
-fn grant_colorful_pass(world: &mut World) {
+fn grant_colorful_pass() {
     let result = crate::server::with_model(|model| {
         let expired_at = model.now_ms().saturating_add(86_400_000);
         let mut edit = serde_json::Map::new();
@@ -926,17 +937,32 @@ fn reserve_process(
         );
         return Stage::Idle;
     };
+    // The presenter's pass check comes before its request; a reply the
+    // server panel made without the gate screen is checked here, as the
+    // screen would have.
+    let realtime = world.resource::<Time<Real>>().elapsed_secs();
+    let pass = world
+        .get_resource::<crate::server::ClientUserData>()
+        .is_some_and(|client| client.has_mysekai_colorful_pass(realtime));
+    if !pass {
+        info!("[gate] ReserveProcessAsync: HasMysekaiColorfulPass false: ShowNotInvitationExpiredPassDialog (UI); the reply is not presented (the server holds the reservation)");
+        return Stage::Idle;
+    }
     let present = present_npcs(world);
     if present.iter().any(|(id, _)| *id == unit) {
         info!("[gate] ReserveProcessAsync: IsExistNPC({unit}) true: SetSelectedGameCharacterUnitId, Refresh and FadeInAsync (UI); no AddGateCharacters, no UpdateTalkList, no invite cut-scene");
         return Stage::Idle;
     }
+    // `MysekaiBootData.AddGateCharacters`: the reply's row joins the gate
+    // characters the server holds.
+    let visitors = crate::server::with_model(|model| model.document().gate_characters.clone())
+        .unwrap_or_else(|| vec![row]);
     crate::server::client_update_talk_list(
         world,
         TalkListUpdate {
             caller: "ReserveProcessAsync: MysekaiBootData.AddGateCharacters(the reply's rows); MysekaiTalkDataStore.UpdateTalkList([], the reply's talk list, [])",
             talks,
-            visitors: Some(vec![row]),
+            visitors: Some(visitors),
         },
     );
     info!("[gate] ReserveProcessAsync: IsExistNPC({unit}) false: MysekaiBootData.AddGateCharacters and MysekaiTalkDataStore.UpdateTalkList handed to the client's talk store; the view's fade out and ShowSendInvitationDialog are UI");
@@ -1109,6 +1135,69 @@ fn execute_change_gate_process(
             error!("[gate] TryShowGoHomeCutSceneAsync: {reason}");
             change_gate(world, id, skin, change)
         }
+    }
+}
+
+/// The home gate shows the model of the gate the server document sets at the
+/// home site (`MysekaiGateModel.AssetBundleName`), checked once per placed
+/// gate: a home load places a new one. The document persists the gate
+/// change in the browser game.
+fn restore_saved_gate(world: &mut World) {
+    let Some((gate_id, skin_id)) = crate::server::home_gate() else {
+        return;
+    };
+    if world
+        .get_resource::<crate::site::SiteActive>()
+        .is_none_or(|site| site.site_type != "home_site")
+    {
+        return;
+    }
+    let Some(gate) = gate_fixture(world) else {
+        return;
+    };
+    if world.resource::<GateFlow>().restore_checked == Some(gate) {
+        return;
+    }
+    world.resource_mut::<GateFlow>().restore_checked = Some(gate);
+    let Some(bundle) = world
+        .resource::<GateFlow>()
+        .parsed
+        .as_ref()
+        .map(|tables| tables.gate_bundle(i64::from(gate_id), i64::from(skin_id)))
+    else {
+        return;
+    };
+    let package = match bundle {
+        Ok(bundle) => format!("mysekai__fixture__{bundle}"),
+        Err(reason) => {
+            error!("[gate] the home gate {gate_id} / skin {skin_id}: MysekaiGateModel.AssetBundleName: {reason}; the gate keeps its model");
+            return;
+        }
+    };
+    let current = world
+        .get::<FixtureActivityIdentity>(gate)
+        .map(|identity| identity.model_package.clone());
+    if current.as_deref() == Some(package.as_str()) {
+        return;
+    }
+    match indexed(world, &package) {
+        Ok(true) => {}
+        Ok(false) => {
+            error!("[gate] the home gate {gate_id} / skin {skin_id}: the gate model {package} is not in the fixture index (not extracted); the gate keeps its model");
+            return;
+        }
+        Err(reason) => {
+            // The index is loading: check this gate again.
+            debug!("[gate] the home gate check waits: {reason}");
+            world.resource_mut::<GateFlow>().restore_checked = None;
+            return;
+        }
+    }
+    match swap_gate_model(world, &package) {
+        Ok(old) => info!("[gate] the home gate {gate_id} / skin {skin_id} of the server document: the gate shows {package} (was {old})"),
+        Err(reason) => error!(
+            "[gate] the home gate {gate_id} / skin {skin_id}: {reason}; the gate keeps its model"
+        ),
     }
 }
 
