@@ -1977,6 +1977,7 @@ pub struct FixturePlugin;
 fn bind_activity_identities(
     mut commands: Commands,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
+    gate_models: Option<Res<crate::gate_flow::GateModelPackages>>,
     roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureIdentityResolved>>,
 ) {
     let Some(tables) = tables else {
@@ -1987,9 +1988,15 @@ fn bind_activity_identities(
             continue;
         };
         let master = if seed.master != 0 {
-            tables
-                .fixture_master(seed.master)
-                .filter(|row| row.model_name == model)
+            // A gate shows its gate's or its skin's model
+            // (`MysekaiGateModel.AssetBundleName`), not its master's.
+            tables.fixture_master(seed.master).filter(|row| {
+                row.model_name == model
+                    || (row.is_gate
+                        && gate_models
+                            .as_ref()
+                            .is_some_and(|models| models.0.contains(&seed.package)))
+            })
         } else {
             tables.unique_fixture_master_for_model(model)
         };
