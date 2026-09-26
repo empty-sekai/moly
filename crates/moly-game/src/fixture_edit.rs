@@ -13,6 +13,8 @@
 
 mod actors;
 mod assets;
+mod autoplay;
+mod game_state;
 mod input;
 mod presentation;
 mod put_effect;
@@ -269,6 +271,7 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     }
     presentation::clear(world);
     actors::clear_overlay(world);
+    game_state::exit_for_site_change(world);
 }
 
 fn receive_commands(
@@ -357,6 +360,7 @@ fn begin(world: &mut World, session: &mut EditSession) {
     crate::fixture_gimmick::cancel_for_site_change(world);
     crate::fixture_scene_inputs::invalidate_for_site_change(world);
     play_se(world, "se_change_layout", "edit-enter");
+    game_state::enter(world);
     session.say("已进入家具编辑：点击家具或清单选中；决定后仍是草稿，保存才写入本地图。");
 }
 
@@ -787,9 +791,13 @@ fn apply_commands(world: &mut World) {
     for command in pending {
         apply_command(world, &mut session, command);
     }
+    let was_active = world.resource::<EditSessionActive>().active;
     world.resource_mut::<EditSessionActive>().active = session.phase != EditPhase::Idle;
     if session.phase == EditPhase::Idle {
         presentation::clear(world);
+        if was_active {
+            game_state::exit(world);
+        }
     }
     world.insert_resource(session);
 }
@@ -810,6 +818,7 @@ fn advance_recovery(world: &mut World) {
                         session.finish();
                         world.resource_mut::<EditSessionActive>().active = false;
                         presentation::clear(world);
+                        game_state::exit(world);
                         session.say("场景与导航已恢复，已退出家具编辑。");
                     }
                     Err(error) => {
@@ -932,6 +941,12 @@ impl Plugin for FixtureEditPlugin {
             )
             .add_systems(
                 Update,
+                autoplay::autoplay
+                    .before(FixtureEditSystems::Commands)
+                    .run_if(crate::game_settings::scene_input_enabled),
+            )
+            .add_systems(
+                Update,
                 put_effect::advance
                     .after(FixtureEditSystems::Commands)
                     .before(crate::audio::SeDrainSet::Drain),
@@ -944,7 +959,11 @@ impl Plugin for FixtureEditPlugin {
             )
             .add_systems(
                 PostUpdate,
-                crate::floor_edit_camera::sample.after(crate::camera::follow_avatar),
+                (
+                    crate::floor_edit_camera::sample.after(crate::camera::follow_avatar),
+                    game_state::sample_tweets
+                        .after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+                ),
             )
             .add_systems(
                 PostUpdate,
