@@ -19,6 +19,15 @@
 //! - **Gate replies** (reserve and change): the panel's gate actions stand
 //!   in for the requests the gate screens make (those screens are not built);
 //!   the reply is queued in [`ServerGateReplies`] for the gate presenter.
+//! - **Birthday-party delivery replies** (`PutUserMysekaiBirthdayPartyDeliveryApi`,
+//!   `PutUserMysekaiBirthdayPartyGatherApi`): the delivery site calls
+//!   [`delivery::put_birthday_party_delivery`] and
+//!   [`delivery::put_birthday_party_gather`]; their `updatedResources` merge
+//!   into [`delivery::ClientBirthdayPartyData`] at once, as the API executor
+//!   merges them before the caller reads the user data. The rows of a party
+//!   that comes into session are a response of their own
+//!   ([`ResponseKind::BirthdayPartySeat`], a named adaptation of the login's
+//!   user data).
 //! - **Refresh** (named adaptation): when the running server clock enters a
 //!   new master refresh window, the server refreshes and the client gets the
 //!   refreshed values at once, standing in for the join request the client
@@ -68,6 +77,7 @@
 //! environment variable ([`instrument_env`]).
 
 pub(crate) mod clock;
+pub(crate) mod delivery;
 pub(crate) mod document;
 pub(crate) mod edit;
 pub(crate) mod local;
@@ -132,6 +142,8 @@ pub(crate) struct Masters {
     pub(crate) ranks: Option<Vec<(i32, i32)>>,
     /// Gate ids and gate skin ids.
     pub(crate) gates: Option<(Vec<i32>, Vec<i32>)>,
+    /// The birthday-party delivery tables (`birthday-party-delivery.json`).
+    pub(crate) delivery: Option<delivery::DeliveryTables>,
     pub(crate) missing: Vec<String>,
 }
 
@@ -169,6 +181,9 @@ pub(crate) enum ResponseKind {
     GateChange,
     Refresh,
     Sync,
+    BirthdayPartyDelivery,
+    BirthdayPartyGather,
+    BirthdayPartySeat,
 }
 
 impl ResponseKind {
@@ -181,6 +196,11 @@ impl ResponseKind {
             Self::GateChange => "PostUserMysekaiGateChangeApi (panel action)",
             Self::Refresh => "refresh (the server clock entered a new window)",
             Self::Sync => "sync (panel action)",
+            Self::BirthdayPartyDelivery => "PutUserMysekaiBirthdayPartyDeliveryApi",
+            Self::BirthdayPartyGather => "PutUserMysekaiBirthdayPartyGatherApi",
+            Self::BirthdayPartySeat => {
+                "user data (the rows of the birthday parties now in session)"
+            }
         }
     }
 }
@@ -197,6 +217,8 @@ pub(crate) struct ServerResponse {
     pub(crate) colorful_pass: Option<Option<ColorfulPass>>,
     /// The rows the schedule write reads (join and refresh).
     pub(crate) schedules: Option<Vec<ScheduleRow>>,
+    /// The birthday-party delivery sections it carries.
+    pub(crate) delivery: delivery::DeliveryUpdate,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -365,6 +387,9 @@ pub(crate) struct ServerModel {
     pub(super) client: Value,
     /// The page backend persists the document.
     pub(super) persist: bool,
+    /// The birthday parties in session at the server clock, as the server
+    /// last seated them.
+    pub(super) party_masters: Vec<delivery::PartyMaster>,
 }
 
 static MODEL: Mutex<Option<ServerModel>> = Mutex::new(None);
@@ -411,6 +436,7 @@ impl ServerModel {
             errors: Vec::new(),
             client: Value::Null,
             persist,
+            party_masters: Vec::new(),
         }
     }
 
@@ -587,6 +613,7 @@ impl ServerModel {
             },
             colorful_pass: has(SECTION_PASS).then_some(self.doc.colorful_pass),
             schedules,
+            delivery: self.delivery_update(&sections),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -612,11 +639,9 @@ impl ServerModel {
                 "the stored server document disagrees with the masters: {error} (kept as stored)"
             ));
         }
-        self.respond(
-            ResponseKind::Join,
-            refreshed,
-            &[SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS],
-        );
+        let mut carries = vec![SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
+        carries.extend(delivery::SECTIONS);
+        self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
     /// The running clock's check.
@@ -899,6 +924,11 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
             "fixture-models/player-data.json (gates, gate skins)",
             parse_gates,
         ),
+        (
+            server.load(moly_assets::birthday_party_delivery()),
+            "birthday-party-delivery.json (delivery reward, point bonus and total reward tables)",
+            delivery::parse_tables,
+        ),
     ]));
 }
 
@@ -1086,6 +1116,59 @@ fn resolve_masters(
                 model.masters.missing
             );
             model.masters_ready = true;
+            // The client reads the same master tables.
+            if let Some(tables) = model.masters.delivery.clone() {
+                commands.insert_resource(tables);
+            }
+        }
+    });
+}
+
+/// The birthday parties in session at the server clock: the new party row
+/// and delivery item stock policies, answered as a response when they seat
+/// a row.
+fn seat_birthday_parties(parties: Option<Res<crate::birthday::BirthdayParties>>) {
+    let Some(parties) = parties else {
+        return;
+    };
+    with_model(|model| {
+        if !model.joined {
+            return;
+        }
+        let now = model.now_ms();
+        let mut in_session = Vec::new();
+        for row in parties.in_session(now) {
+            let ids = (
+                i32::try_from(row.id),
+                i32::try_from(row.delivery_item_material_id),
+                i32::try_from(row.delivery_reward_material_id),
+            );
+            match ids {
+                (Ok(id), Ok(item), Ok(reward)) => in_session.push(delivery::PartyMaster {
+                    birthday_party_id: id,
+                    delivery_item_material_id: item,
+                    delivery_reward_mysekai_material_id: reward,
+                }),
+                _ => model.push_error(format!(
+                    "birthday party {} has an id that does not fit a 32-bit integer",
+                    row.label
+                )),
+            }
+        }
+        if in_session == model.party_masters {
+            return;
+        }
+        let changed = model.seat_parties(&in_session);
+        info!(
+            "[server] birthday parties in session at {now}: {:?}",
+            in_session
+                .iter()
+                .map(|party| party.birthday_party_id)
+                .collect::<Vec<_>>()
+        );
+        if !changed.is_empty() {
+            model.commit();
+            model.respond(ResponseKind::BirthdayPartySeat, false, &changed);
         }
     });
 }
@@ -1124,6 +1207,7 @@ fn deliver(
     mut ranks: MessageWriter<RankDelivered>,
     mut local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>,
     mut total_exp: Option<ResMut<crate::mysekai_rank::UserTotalExp>>,
+    mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1139,7 +1223,8 @@ fn deliver(
     let realtime = time.elapsed_secs();
     let mut copy = client.as_deref().cloned();
     let mut schedule = live_rows;
-    for response in responses {
+    for mut response in responses {
+        birthday.apply(std::mem::take(&mut response.delivery));
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
             None => ClientUserData {
@@ -1231,6 +1316,7 @@ fn deliver(
         "userMysekaiStamina": copy.stamina.map(document::stamina_value),
         "hasMysekaiColorfulPass": copy.has_mysekai_colorful_pass(realtime),
         "currentTimestamp": copy.current_timestamp(realtime),
+        "birthdayParty": birthday.view(),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1304,11 +1390,20 @@ impl Plugin for ServerPlugin {
             .init_resource::<LiveSchedule>()
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()
+            .init_resource::<delivery::ClientBirthdayPartyData>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(
                 PreUpdate,
-                (install_native, resolve_masters, join, tick, deliver).chain(),
+                (
+                    install_native,
+                    resolve_masters,
+                    join,
+                    seat_birthday_parties,
+                    tick,
+                    deliver,
+                )
+                    .chain(),
             )
             .add_systems(Last, persist_local);
     }
@@ -1349,7 +1444,7 @@ pub(crate) fn schema_view() -> String {
 mod tests {
     use super::*;
 
-    fn model() -> ServerModel {
+    pub(super) fn model() -> ServerModel {
         let doc = document::migrate_v1(CHECKED_IN_SLICE, Migration::CheckedInDefault).unwrap();
         let mut model = ServerModel::new(doc, Origin::CheckedInDefault, Vec::new(), false);
         model.masters.periods = Some(vec![
