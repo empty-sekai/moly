@@ -30,6 +30,7 @@
 //! Business actions (doors, the entry, the cannon, harvest, gimmicks) take the
 //! animator with a token and play their own source clips on it.
 
+pub(crate) mod avatar_item;
 pub(crate) mod body;
 pub(crate) mod item_timeline;
 pub(crate) mod switch_gesture;
@@ -107,6 +108,8 @@ impl Locomotion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlayerActionOwner {
     Conversation,
+    /// Craft, canvas and sketch (`home_action`).
+    HomeAction,
     Harvest,
     Door,
     Cannon,

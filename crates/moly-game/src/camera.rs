@@ -1937,10 +1937,11 @@ pub(crate) fn follow_avatar(
     };
     let player = avatar.translation();
     match state.0 {
-        CameraStateType::HouseEntry => {
+        CameraStateType::HouseEntry | CameraStateType::ZoomPlayer => {
             // HouseEntryCameraState.OnUpdate: LookAt = the player's view
             // position, UpdatePosition, view.LookAt(LookAt + Offset). The
-            // entry owns entering and leaving this state.
+            // entry owns entering and leaving this state. ZoomPlayer's
+            // OnUpdate is the same body (`zoom_player_camera`).
             models.look_at = player;
             let pivot = models.look_at + models.offset;
             let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;

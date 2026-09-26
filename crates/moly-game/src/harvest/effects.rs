@@ -49,6 +49,15 @@ fn is_harvest_type(kind: u16) -> bool {
     (100..=143).contains(&kind)
 }
 
+/// `EffectType.Craft`: the workbench's effect, which the fixture emits and
+/// keeps while the player crafts at it (`home_action`).
+pub(crate) const EFFECT_TYPE_CRAFT: u16 = 15;
+
+/// The table rows this player draws: the harvest types and the craft effect.
+fn is_drawn_type(kind: u16) -> bool {
+    is_harvest_type(kind) || kind == EFFECT_TYPE_CRAFT
+}
+
 struct Pool {
     name: String,
     prefab: String,
@@ -63,6 +72,9 @@ struct Live {
     root: Entity,
     planned: bool,
     age: f32,
+    /// `ManagedEffect.Stop` ran: emission stopped, the copy is released once
+    /// its live particles are gone.
+    stopped: bool,
 }
 
 /// A played harvest effect's root (removed with the site).
@@ -78,6 +90,8 @@ pub(crate) struct HarvestEffects {
     ready: bool,
     absent: bool,
     live: Vec<Live>,
+    /// Kept copies by the emitter's ticket.
+    kept: HashMap<u64, Entity>,
     pub(crate) played: usize,
     pub(crate) skipped: usize,
 }
@@ -154,7 +168,7 @@ fn build(effects: &mut HarvestEffects, world: &mut World) {
         let kind = row["effectType"]
             .as_u64()
             .unwrap_or_else(|| panic!("{TABLE}: row without effectType")) as u16;
-        if !is_harvest_type(kind) {
+        if !is_drawn_type(kind) {
             continue;
         }
         let name = row["effectTypeName"].as_str().unwrap_or("").to_owned();
@@ -170,6 +184,8 @@ fn build(effects: &mut HarvestEffects, world: &mut World) {
             format!("moly://site-harvest-object-effects/{glb}")
         } else if package.contains("__harvest__action__") {
             format!("moly://site-action-effects/{prefab}/{prefab}.glb")
+        } else if package.contains("__site__home__") {
+            format!("moly://site-home-effects/{prefab}/{prefab}.glb")
         } else {
             warn!(
                 "[harvest-effect] type {kind} ({name}): bundle {package} has no exported prefab; not drawn"
@@ -204,7 +220,7 @@ fn build(effects: &mut HarvestEffects, world: &mut World) {
     let mut kinds: Vec<u16> = pools.keys().copied().collect();
     kinds.sort_unstable();
     info!(
-        "[harvest-effect] effect table: {} harvest types {kinds:?} (prefabs and particle documents requested)",
+        "[harvest-effect] effect table: {} harvest and craft types {kinds:?} (prefabs and particle documents requested)",
         pools.len()
     );
     effects.pools = pools;
@@ -221,15 +237,26 @@ pub(crate) fn advance(world: &mut World) {
         for hook in pending {
             emit(&mut effects, world, hook);
         }
+        let kept = std::mem::take(&mut world.resource_mut::<HarvestEffectHooks>().kept);
+        world.resource_mut::<HarvestEffectHooks>().total += kept.len();
+        for (ticket, hook) in kept {
+            if let Some(root) = emit(&mut effects, world, hook) {
+                effects.kept.insert(ticket, root);
+            }
+        }
+        let stops = std::mem::take(&mut world.resource_mut::<HarvestEffectHooks>().stops);
+        for ticket in stops {
+            stop(&mut effects, world, ticket);
+        }
         let dt = world.resource::<Time>().delta_secs();
         prepare(&mut effects, world, dt);
     });
 }
 
-fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) {
+fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) -> Option<Entity> {
     if effects.absent {
         effects.skipped += 1;
-        return;
+        return None;
     }
     let Some(pool) = effects.pools.get_mut(&hook.kind) else {
         effects.skipped += 1;
@@ -237,7 +264,7 @@ fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) {
             "[harvest-effect] EffectManager.Emit({}) at {:.2}: the type is not in the effect table (or its table is not loaded yet); not drawn",
             hook.kind, hook.position
         );
-        return;
+        return None;
     };
     let server = world.resource::<AssetServer>();
     if server.load_state(&pool.glb).is_failed() || server.load_state(&pool.doc).is_failed() {
@@ -249,7 +276,7 @@ fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) {
             pool.warned = true;
         }
         effects.skipped += 1;
-        return;
+        return None;
     }
     let scene = world
         .resource::<Assets<Gltf>>()
@@ -261,7 +288,7 @@ fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) {
             "[harvest-effect] type {} ({}) emitted before its prefab loaded; not drawn",
             hook.kind, pool.name
         );
-        return;
+        return None;
     };
     let root = world
         .spawn((
@@ -290,7 +317,39 @@ fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) {
         root,
         planned: false,
         age: 0.0,
+        stopped: false,
     });
+    Some(root)
+}
+
+/// `ManagedEffect.Stop` on a kept copy: `ParticleSystem.Stop()` (children
+/// included, stop emitting); its particles finish their lifetimes.
+fn stop(effects: &mut HarvestEffects, world: &mut World, ticket: u64) {
+    let Some(root) = effects.kept.remove(&ticket) else {
+        return;
+    };
+    let Some(live) = effects.live.iter_mut().find(|live| live.root == root) else {
+        return;
+    };
+    live.stopped = true;
+    let systems = crate::weather_fx::fixture::stop_emitting(world, root);
+    info!(
+        "[harvest-effect] ManagedEffect.Stop type {} {root:?}: emission stopped on {systems} systems{}; the copy is released when its particles are gone",
+        live.kind,
+        if live.planned { "" } else { " (not prepared yet: the stop applies when it is)" }
+    );
+}
+
+/// Whether every installed system under the copy holds no live particle.
+fn particles_gone(world: &World, root: Entity) -> bool {
+    let Some(children) = world.get::<Children>(root) else {
+        return true;
+    };
+    children.iter().all(|child| {
+        world
+            .get::<crate::uber_particle::FixtureParticleLive>(child)
+            .is_none_or(|live| live.0.pool.is_empty())
+    })
 }
 
 /// `ManagedEffect.Play`: the root system with its children, every emitter
@@ -344,6 +403,16 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
                     draws.len()
                 );
                 effects.live[index].planned = true;
+                // The source emits from a copy it already holds; here the
+                // copy can still be loading when its Stop runs. The Stop
+                // then takes effect as the systems are prepared.
+                if effects.live[index].stopped {
+                    let systems = crate::weather_fx::fixture::stop_emitting(world, root);
+                    info!(
+                        "[harvest-effect] type {kind} {root:?}: prepared {:.2} s after its Emit, after its ManagedEffect.Stop ran; emission stopped on {systems} systems now",
+                        effects.live[index].age
+                    );
+                }
             }
             Prepared::Pending => {}
             Prepared::Refused(error) => {
@@ -366,10 +435,14 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
             }
             return true;
         }
-        let done = match systems_finished(world, live.root) {
-            Some(done) => done,
-            // Nothing installed (every emitter refused).
-            None => live.age >= UNPREPARED_RELEASE_AGE,
+        let done = if live.stopped {
+            particles_gone(world, live.root)
+        } else {
+            match systems_finished(world, live.root) {
+                Some(done) => done,
+                // Nothing installed (every emitter refused).
+                None => live.age >= UNPREPARED_RELEASE_AGE,
+            }
         };
         if done {
             finished.push(live.root);
@@ -385,5 +458,7 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
 
 /// Queued by the site change.
 pub(crate) fn clear_for_site_change(world: &mut World) {
-    world.resource_mut::<HarvestEffects>().live.clear();
+    let mut effects = world.resource_mut::<HarvestEffects>();
+    effects.live.clear();
+    effects.kept.clear();
 }

@@ -58,6 +58,7 @@ pub mod learn_phenomena_dialog;
 mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
+mod home_action;
 mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
@@ -122,6 +123,7 @@ mod weather_animation;
 mod weather_animation_replay;
 pub mod talk;
 pub mod talk_camera;
+mod zoom_player_camera;
 mod talk_ingest;
 pub mod talk_window;
 pub mod uber_particle;
@@ -233,6 +235,7 @@ pub fn app(
         harvest_particles::HarvestParticlePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
+    home_action::install(&mut app);
     app
 }
 

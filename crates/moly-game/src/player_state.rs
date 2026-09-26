@@ -93,6 +93,22 @@ pub enum PlayerActionState {
     ExitMoveMyRoom,
     /// 23：冲刺（`MoveTo` 的 dash 支；dash 位由替身键切换）。
     Dash,
+    /// 24: crafting at a workbench (`PlayerAvatarCraftMotionState`). The
+    /// home action enters it with the gate open and closes the gate; its
+    /// Initialize and Dispose run in `home_action` (the state's clip, facing
+    /// the target fixture, then the idle clip at fade 0 and ClearAvatarItem).
+    Craft,
+    /// 25: painting a canvas (`PlayerAvatarDrawMotionState`), as Craft.
+    Draw,
+    /// 26: sketching (`PlayerAvatarSketchMotionState`): its Initialize also
+    /// plays `se_sketch`; it does not turn the player.
+    Sketch,
+    /// 27: choosing a fixture to sketch (`PlayerAvatarSelectSketchItemState`):
+    /// Initialize only clears the next state; UpdateState and Dispose are
+    /// empty. The gate stays open: input moves the player out of it, and
+    /// without input it stays (the input writer's finish set is {Move,
+    /// AutoMove, Dash}).
+    SelectSketchItem,
     /// 28：演出家具（`ChangeStateUseTimelineFixture` 进）。家具会话
     /// 持有该态和截获门，离座或取消释放后才开门回 Idle。
     UseTimelineFixture,
