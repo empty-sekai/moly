@@ -127,6 +127,9 @@ enum Stage {
     /// FloorEnter on the player's site: the knock sound's playback runs;
     /// the state goes on once it is over.
     KnockWait,
+    /// FloorEnter's awaited `OpenDoorAsync`: the room door's open clip runs
+    /// (its length in delta time); the show and the entry clip follow.
+    DoorOpenWait,
     /// The entry clip plays; home shows the NPC one frame after it starts.
     EntryClip {
         node: AnimationNodeIndex,
@@ -580,6 +583,13 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             );
             floor_door(world, actor, unit, frame, true);
         }
+        Stage::DoorOpenWait => {
+            if !crate::site_move::room_door::open_finished(world) {
+                return;
+            }
+            info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync done (the open clip's length has passed)");
+            floor_enter_after_door(world, actor, unit, frame);
+        }
         Stage::EntryClip { node, shown } => {
             if !shown {
                 // ShowAfterOneFrame.
@@ -744,18 +754,26 @@ fn knock_playing(world: &mut World, actor: Entity) -> bool {
     query.iter(world).any(|scope| scope.0 == actor)
 }
 
-/// FloorEnter after the knock: the door-open sound on the player's site,
-/// `OpenDoorAsync` (awaited in the source until the open clip's length has
-/// passed; not awaited here: this host's room door does not report its open
-/// clip's end to the NPC side), the show, the entry clip.
+/// FloorEnter after the knock: the door-open sound on the player's site
+/// (not awaited), then `OpenDoorAsync`, awaited: the room door plays its
+/// open clip and the wait ends once the clip's length has passed in delta
+/// time (a room without a door has nothing to wait on). The wait starts with
+/// the coroutine's Yield, so it ends on a later frame.
 fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: bool) {
     if on_site {
         push_se(world, "se_door_open");
         info!(
-            "[npc-change-site] unit={unit} frame={frame} se_door_open (not awaited), OpenDoorAsync"
+            "[npc-change-site] unit={unit} frame={frame} se_door_open (not awaited), OpenDoorAsync awaited"
         );
+    } else {
+        info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync awaited (off the player's site: no sounds)");
     }
     crate::site_move::room_door::open(world);
+    set_stage(world, actor, Stage::DoorOpenWait, frame);
+}
+
+/// FloorEnter after the door opened: the show and the entry clip.
+fn floor_enter_after_door(world: &mut World, actor: Entity, unit: u32, frame: u32) {
     // The brightness fade is not played; SetTransparencyEnabled(true).
     if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
         *visibility = Visibility::Inherited;
