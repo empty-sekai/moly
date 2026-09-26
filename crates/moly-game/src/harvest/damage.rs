@@ -375,7 +375,7 @@ fn change_after_object(
         // waits 2.0 s and stops the cut particle: the opened box stays.
         // PlayDamageEffect stopped the field effect (its node hides here);
         // ChangeAfterObject waits the listen clip's length, then stops the
-        // SE and fades the BGM back (the fade is not ported).
+        // SE and fades the BGM back.
         "MysekaiAreaToneView" => {
             hide(object_node, root_visibility, node_visibility);
             commands.entity(root).insert(HarvestAfterForm::ToneStop {
@@ -563,9 +563,15 @@ pub(crate) fn advance_after_forms(
                     let owner = entity;
                     commands.queue(move |world: &mut World| {
                         crate::audio::dispose_scoped_se(world, owner);
+                        match world.get_resource_mut::<crate::audio::MysekaiBgmFade>() {
+                            Some(mut fade) => {
+                                fade.start_fade(crate::audio::BgmFadeTarget::Initial)
+                            }
+                            None => error!("[harvest-tone] ChangeAfterObject: the BGM manager fade is not installed; StartFade(InitialVolume) not run"),
+                        }
                     });
                     info!(
-                        "[harvest-tone] {}#{} ChangeAfterObject: the listen time passed; the tone SE stopped (the BGM fade back is not ported)",
+                        "[harvest-tone] {}#{} ChangeAfterObject: the listen time passed; the tone SE stopped, MysekaiBGMManager.StartFade(InitialVolume)",
                         object.leaf, object.fixture_id
                     );
                     commands.entity(entity).remove::<HarvestAfterForm>();

@@ -491,6 +491,7 @@ pub(crate) fn update_targets(
     mut targeting: ResMut<HarvestTargeting>,
     mut button: ResMut<HarvestButton>,
     mut tool_models: ResMut<ToolModelRequests>,
+    mut bgm_fade: Option<ResMut<crate::audio::MysekaiBgmFade>>,
 ) {
     let (Some(catalog), Some(model)) = (catalog, model.as_deref_mut()) else {
         return;
@@ -518,6 +519,19 @@ pub(crate) fn update_targets(
                     "[harvest] OnCollisionEnter {}#{} (radius {:.2})",
                     object.leaf, object.fixture_id, object.radius
                 );
+                super::tone::on_collision(object, true, bgm_fade.as_deref_mut());
+            }
+        }
+    }
+    // An exit is dispatched only for an object still registered: a removed
+    // one (RemoveCollisionObject) leaves the lists without an exit.
+    for entity in &targeting.contacts {
+        if contacts.contains(entity) {
+            continue;
+        }
+        if let Ok((_, _, object)) = objects.get(*entity) {
+            if object.collision {
+                super::tone::on_collision(object, false, bgm_fade.as_deref_mut());
             }
         }
     }
