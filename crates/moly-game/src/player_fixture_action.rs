@@ -1526,6 +1526,22 @@ fn step_session(
             }
             session.last_position = accepted;
             if session.unchanged_secs >= 0.5 {
+                warn!(
+                    "[player-fixture] approach stalled 0.5 s at ({:.3},{:.3},{:.3}): approach hit ({:.3},{:.3},{:.3}) {:.3} m away; corner {}/{} {:?}; requested ({:.3},{:.3},{:.3})",
+                    accepted.x,
+                    accepted.y,
+                    accepted.z,
+                    session.prepared.approach_hit.x,
+                    session.prepared.approach_hit.y,
+                    session.prepared.approach_hit.z,
+                    accepted.distance(session.prepared.approach_hit),
+                    session.path_cursor,
+                    session.prepared.approach_path.len(),
+                    session.prepared.approach_path,
+                    requested.x,
+                    requested.y,
+                    requested.z
+                );
                 return Err(NavigationFailed);
             }
             set_world_pose(world, actor, pose).ok_or(PlayerRemoved)?;
