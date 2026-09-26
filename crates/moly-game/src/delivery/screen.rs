@@ -71,8 +71,13 @@
 //! the field menu shell's and are not disabled here; the information
 //! button's click (`OnClickInformationButton`: the board's interaction and
 //! `PushUIScreen(MysekaiDeliveryInformation)`) is not taken, the root has
-//! no prefab for that screen; the press particle (`UIParticle`
-//! `fx_mysekai_delivery_action_pt`) is not ported; the cell count's colour
+//! no prefab for that screen; the press particle is not ported
+//! (`CreateParticle` on `Start` instantiates `fx_mysekai_delivery_action_pt`
+//! of the festival_garden site bundle under the button and keeps its
+//! `UIParticle` inactive; `OnPressed` activates and plays it, `OnReleased`
+//! stops and deactivates it): the site document carries that prefab's root
+//! (three nodes) and no particle rows for it, so the UI particle host has
+//! nothing to play; the cell count's colour
 //! (`ColorUtility.FONT_COLOR_BLACK` for a positive quantity, else
 //! `FONT_COLOR_PINK2`) needs a text colour the view cannot set, so the
 //! serialized colour is drawn; a disabled cell button's look
@@ -1431,7 +1436,7 @@ fn apply_actions(
                     .view
                     .cover_tweens
                     .push(FloatTween::new(1.0, PRESS_FADE_SECONDS, ease));
-                info!("[delivery-screen] DeliveryActionButtonInteraction.OnPressed: ActiveCover DOFade(1, {PRESS_FADE_SECONDS}); the press particle is not ported");
+                info!("[delivery-screen] DeliveryActionButtonInteraction.OnPressed: ActiveCover DOFade(1, {PRESS_FADE_SECONDS}); the press particle is not ported (no particle rows in the site document)");
             }
             ButtonAction::Released(0) => {
                 screen
