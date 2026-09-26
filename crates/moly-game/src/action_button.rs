@@ -32,6 +32,7 @@
 //! runs ObjectCollisionManager.ForceUpdate.
 
 pub(crate) mod admission;
+pub(crate) mod dash;
 
 use std::collections::HashMap;
 
@@ -2109,7 +2110,9 @@ fn dispatch(
             info!("[action_button] 生日演出按钮按下（目标 {target:?}；生日演出域未建，具名挂账）——按下沿到此");
         }
         (ButtonType::Dash, _) => {
-            info!("[action_button] 冲刺按钮按下 → 冲刺域未建（具名挂账）——按下沿到此");
+            // The dash button is its own view (see `dash`); the target stack
+            // never carries its type.
+            error!("[action_button] Dash reached the stack dispatch; the dash button has its own click");
         }
         (ButtonType::ChangeActionTarget, _) => {
             info!("[action_button] 换目标按钮按下 → 目标切换域未建（具名挂账）——按下沿到此");

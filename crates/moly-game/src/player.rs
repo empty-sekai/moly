@@ -18,16 +18,15 @@
 //! 输入形态（方法体直读，非推断）：
 //! * 主路是虚拟摇杆（`OnTouchJoyStick`：摇杆向量投到相机的
 //!   forward/right 上，相机相对）——触摸面在 [`crate::joystick`]，活跃
-//!   时优先（真源 `GetMoveDirection` 只读摇杆面）。键盘路
-//!   （`GetKeyMoveDirection`）在真源**没有调用点**，我方留作桌面替身：
-//!   `Input.GetAxis("Horizontal")` 与 `("Vertical")`，
-//!   方向 = 纵 × 相机前（去 y 后归一）+ 横 × 相机右。
-//!   WASD 各贡献 ±1，**和向量不归一**——真源如此，斜向输入模长 √2，
-//!   斜走比直走快四成；照抄不修。
+//!   时优先（真源 `GetMoveDirection` 只读摇杆面）。
+//! * **键盘是非真源的桌面适配**（具名）：真源产品只有触屏摇杆，键盘路
+//!   `GetKeyMoveDirection` 在真源**没有调用点**。适配守摇杆的量纲律：
+//!   WASD 给出摇杆比值 (横, 纵) ∈ {-1,0,1}²，过摇杆 HandleInput 的夹
+//!   （超上限 1 归一），再用摇杆的烘基式投到相机上——与一根拖到同一
+//!   比值的摇杆产出同一个移动向量，斜向不比正向快。
 //! * dash 是**模式开关**不是触发：`PlayerAvatarStateMachine.MoveTo` 按
 //!   玩家 `IsDashMode` 分派 Move/Dash 态，开关本身由 HUD 的 dash 按钮
-//!   驱动（UI 域，不在本单）。我方替身：左 Shift 按一下切换（宿主输入
-//!   面，具名）。
+//!   驱动（[`crate::action_button`] 的冲刺按钮）。
 //! * 无输入回待机：`UpdateController` 在移动态读到空输入即转 Idle。
 //!
 //! 朝向**直设**：`Quaternion.Euler(0, atan2(输入.x, 输入.z), 0)`，无
@@ -54,8 +53,15 @@ use crate::walk_face;
 use bevy::prelude::*;
 use moly_law::path::heading_yaw;
 
-/// 出生点：站点中心外环、名册首名的对侧。真源出生点来自存档数据，
-/// 未提取——位置是替身。
+/// Placement for the product's own starts only. In the source the player is
+/// placed by the join (`JoinMysekaiActionState.MoveToEntrance`: the house's
+/// outside door locator, ported in the entry), by the site moves (the cannon
+/// landing, the house and room doors) and by the gate warp; nothing else
+/// positions it. The starts the source never makes (the embedded web stage
+/// without a house, a first site other than home, a site switch outside a
+/// site move) have no source position, so they use this ring: the side of
+/// the site centre opposite the roster's first member, seated on the walk
+/// field. A named adaptation, not a source value.
 const SEED_RADIUS: f32 = 3.0;
 
 /// 地表高度采样半径：取「脚下的地面」，与名册同款。
@@ -85,7 +91,8 @@ const MAX_ANIMATION_SPEED: f32 = 1.8;
 #[derive(Component)]
 pub struct PlayerControlled;
 
-/// dash 模式开关（真源 `IsDashMode` 同义；切换来源是替身键）。
+/// dash 模式开关（真源 `PlayerAvatarPresenter.IsDashMode`；切换来源是
+/// HUD 的冲刺按钮）。
 #[derive(Component, Default)]
 pub struct DashMode(pub bool);
 
@@ -148,9 +155,10 @@ pub(crate) fn spawn_when_ready(
     }
     let (center, center_y) = crate::npc::center_of(&verts);
     let scale = crate::npc::ring_scale(&verts);
-    // 出生在名册首名（环角 0）的对侧（环角 π），替身位（真源出生点未接）；
-    // 半径经收缩系数适配房间级地面。替身出生点再落座到可行走面内
-    // （真源出生点来自存档，必在 navmesh 上——见 walk_face 模块注释）。
+    // The adaptation ring (see SEED_RADIUS): opposite the roster's first
+    // member, the radius scaled to room-sized ground, seated on the walk
+    // field. On the home start the entry moves the player to the house door
+    // before the cover lifts, as the source's join does.
     let radius = SEED_RADIUS * scale;
     let (mut seed_x, mut seed_z) = (center.x - radius, center.y + radius);
     if let Some(face) = face.as_deref() {
@@ -270,19 +278,16 @@ pub(crate) fn reseed(
 /// Update：读输入面，合成相机相对的移动方向。
 ///
 /// 两个输入面并存，摇杆优先：真源 `GetMoveDirection` 只读摇杆面
-///（`OnTouchJoyStick` 烘好的 `_joyStickMoveDirection`），键盘路
-///（`GetKeyMoveDirection`）在真源是孤儿——没有调用点，我方留作桌面
-/// 替身。摇杆活跃（拖动中）时吃摇杆向量；否则吃键盘合成。方向合成
-/// 照真源键盘路：纵 × 相机前（去 y 归一）+ 横 × 相机右，和向量不归一
-///（斜向模长 √2 是真源形状——摇杆面同形，夹上限后斜向最大 √2）。
-/// dash 模式在左 Shift 的按下沿切换（替身键，真源是 HUD 按钮）。
+///（`OnTouchJoyStick` 烘好的 `_joyStickMoveDirection`，按下即活跃、
+/// 拖过阈值前向量为零——见 [`crate::joystick`]）。键盘是具名的桌面
+/// 适配：WASD 的比值过摇杆的 HandleInput 夹，再过摇杆的烘基式，摇杆
+/// 不活跃时才吃它。dash 模式不在这里切换（HUD 冲刺按钮）。
 ///
 /// 冒烟口（`MOLY_PLAYER_AUTOWALK_SECS`，宿主侧仪表，同仓 emoticon 的
 /// `MOLY_EMOTICON_SHOW_SECS` 同款）：设为正数时启动后该秒数内合成固定
 /// 输入（先 walk 段后 dash 段各半），供无人值守跑验证位移律——窗口焦点
 /// 不在时键盘路收不到事件，真实输入面的判据仍是用户手验。
-/// `MOLY_PLAYER_AUTOWALK_DIAGONAL` 置正数时方向改 (1,0,1) 不归一（键盘
-/// 斜向的和向量形状，模长 √2）。
+/// `MOLY_PLAYER_AUTOWALK_DIAGONAL` 置正数时方向改归一斜向 (1,0,1)/√2。
 /// 输入（键盘 + 摇杆两个面）的读取与合成，只被本仓 schedule 消费。
 pub(crate) fn read_input(
     keys: Res<ButtonInput<KeyCode>>,
@@ -301,7 +306,7 @@ pub(crate) fn read_input(
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
     // GameState SiteMove disables the gesture layer and taps as well.
-    // The keyboard stand-in follows the joystick: off until the entry's Finish.
+    // The keyboard adaptation follows the joystick: off until the entry's Finish.
     if edits.is_active()
         || settings_panel.blocks_world_input()
         || library.blocks_exploration_input()
@@ -333,34 +338,18 @@ pub(crate) fn read_input(
         0.0
     };
     let active = vertical != 0.0 || horizontal != 0.0;
-    // 相机基：取主相机的世界前/右。相机前去 y 后归一（真源同式）；竖直
-    // 朝地的极端姿态下回退单位前向，不做除零。
-    let (forward, right) = match cameras.single() {
-        Ok(global) => {
-            let flat = global.forward().with_y(0.0);
-            let forward = if flat.length_squared() < 1e-10 {
-                Vec3::Z
-            } else {
-                flat.normalize()
-            };
-            (forward, global.right().as_vec3())
-        }
-        Err(_) => (Vec3::Z, Vec3::X),
-    };
-    let direction = if active {
-        let d = forward * vertical + right * horizontal;
-        // 模长上限 1（HandleInput 同形：超上限归一 ×1、中段保持原比）。
-        // 真源没有键盘路（摇杆独占），这是桌面替身——但替身的输出必须守
-        // InputVec 模长 ≤ 1 的不变量：游戏里斜向不比正向快。此前键盘两键
-        // 同按的和向量模长 √2（斜走快四成）是我方替身没夹模长，不是真源
-        // 行为（所有者实测：游戏各向移速相同）。
-        if d.length() > 1.0 {
-            d.normalize()
-        } else {
-            d
-        }
-    } else {
-        Vec3::ZERO
+    // The adaptation's stick ratio (x right, y up), clamped by HandleInput
+    // and baked on the main camera exactly as a stick UPDATE is. Without a
+    // camera the source's bake does not run and the input stays off.
+    let baked = cameras.single().ok().map(|global| {
+        crate::joystick::bake(
+            crate::joystick::handle_input(Vec2::new(horizontal, vertical)),
+            global,
+        )
+    });
+    let (direction, active) = match baked {
+        Some(vector) if active => (vector, true),
+        _ => (Vec3::ZERO, false),
     };
     // 冒烟口：窗口无焦点时键盘路收不到事件，设了环境变量就以固定输入
     // 驱动前半段（walk 档）与后半段（dash 档），验证位移律真的在动。
@@ -387,13 +376,6 @@ pub(crate) fn read_input(
         None
     };
     for (mut input, mut dash) in &mut players {
-        if keys.just_pressed(KeyCode::ShiftLeft) {
-            dash.0 = !dash.0;
-            info!(
-                "[player] dash 模式切换：{}",
-                if dash.0 { "开" } else { "关" }
-            );
-        }
         if let Some(first_half) = smoke {
             // 冒烟输入：固定世界方向，前半 walk、后半 dash——速度差在
             // 日志行上现算可辨（位移对时间的斜率）。
@@ -406,13 +388,38 @@ pub(crate) fn read_input(
             input.active = true;
         } else if joystick.active {
             // 摇杆优先：真源移动消费链只读摇杆面（GetMoveDirection →
-            // _joyStickMoveDirection），键盘路是真源孤儿、我方桌面替身。
+            // _joyStickMoveDirection）；键盘是具名桌面适配。
             input.direction = joystick.move_vector;
             input.active = true;
         } else {
             input.direction = direction;
             input.active = active;
         }
+    }
+}
+
+/// The player domain's systems that the host schedule does not list: the
+/// dash button (its view and its click, beside the action buttons) and the
+/// player avatar's talk-camera dither. Added by the avatar material plugin,
+/// which the host registers.
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<crate::action_button::dash::DashButton>()
+            .add_systems(
+                Update,
+                (
+                    crate::action_button::dash::spawn_when_ready,
+                    (
+                        crate::action_button::dash::place,
+                        crate::action_button::dash::click,
+                    )
+                        .chain()
+                        .after(crate::action_button::click)
+                        .before(crate::pick::pick),
+                ),
+            );
     }
 }
 
