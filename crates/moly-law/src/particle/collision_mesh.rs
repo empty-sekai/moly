@@ -59,6 +59,7 @@ mod bv4_query;
 mod cook;
 mod mtd;
 mod overlap;
+pub mod static_pruner;
 mod sweep;
 mod vector;
 
