@@ -179,7 +179,6 @@ pub(crate) fn spawn(
                         resource_id: item.row.resource_id,
                         site_id,
                         row: item.row.clone(),
-                        material_type: item.material_type,
                         acceleration: 0.0,
                         attracting: true,
                     },

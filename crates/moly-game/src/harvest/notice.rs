@@ -9,7 +9,8 @@
 //!   or a rarity of rarity_2 and above, plays `se_get_rare_material`, else
 //!   `se_get_material`), `isRare` = rarity_2 to rarity_4;
 //! - `mysekai_fixture` and `material` (a master row): `se_get_material`, not
-//!   limit, new or rare;
+//!   limit, new or rare (the general `material` master is not an input here,
+//!   so that arm is refused with an error line);
 //! - `mysekai_item` (a master row): `se_get_material`, rare;
 //! - `mysekai_blueprint` and `mysekai_music_record`: no notice; a
 //!   get-resource sub-window dialog is chained instead (a repeated blueprint
@@ -52,8 +53,6 @@ pub(crate) enum NoticeArm {
     MysekaiMaterial,
     MysekaiFixture,
     MysekaiItem,
-    /// `material` (the game's general material master).
-    Material,
     /// A type outside the switch (empty name).
     Other,
 }

@@ -428,7 +428,6 @@ pub struct HarvestDropItem {
     pub resource_id: i64,
     pub(crate) site_id: u32,
     pub(crate) row: UserDrop,
-    pub(crate) material_type: i32,
     /// `_acceleration` of the approach.
     pub(crate) acceleration: f32,
     /// `_isAttractToPlayer` (constructor default true).

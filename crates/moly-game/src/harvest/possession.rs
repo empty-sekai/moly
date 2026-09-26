@@ -21,7 +21,7 @@
 //!
 //! The limit tables are master data (both documents are inputs here); a
 //! document that fails to load is named once and every material and fixture
-//! drop is refused (no default limit).
+//! drop is refused (no default limit), as it is while they load.
 //!
 //! Server values: `PossessionMock`, the named panel. Its values are the
 //! mock's own choices, not the server's: both possession levels 1 (the
@@ -72,11 +72,6 @@ pub(crate) struct PossessionLimits {
     pub(crate) material: BTreeMap<i32, i64>,
     pub(crate) fixture: BTreeMap<i32, i64>,
 }
-
-/// A limit document failed to load (named once; material and fixture drops
-/// are refused).
-#[derive(Resource)]
-pub(crate) struct PossessionLimitsAbsent(pub(crate) String);
 
 /// `PossessionMock`: the user possession values the capacity check reads
 /// (see the module comment for the mock's choices).
@@ -206,7 +201,6 @@ pub(crate) fn build(
             LoadState::Failed(error) => {
                 let line = format!("{path} ({table}): {error}");
                 error!("[harvest-pickup] possession limit input absent, material and fixture drops are refused: {line}");
-                commands.insert_resource(PossessionLimitsAbsent(line));
                 commands.remove_resource::<PossessionInputs>();
                 return;
             }
@@ -223,7 +217,6 @@ pub(crate) fn build(
             Ok(rows) => tables.push(rows),
             Err(line) => {
                 error!("[harvest-pickup] possession limit input refused, material and fixture drops are refused: {line}");
-                commands.insert_resource(PossessionLimitsAbsent(line));
                 commands.remove_resource::<PossessionInputs>();
                 return;
             }
@@ -285,8 +278,8 @@ impl Capacity<'_> {
         if self.over_limit_receivable(resource_id) {
             return true;
         }
+        // Absent limits (still loading, or refused once at the load): refused.
         let Some(limits) = self.limits else {
-            error!("[harvest-pickup] CanCollectMaterial: the material possession limits are absent; refused");
             return false;
         };
         let Some(&limit) = limits.material.get(&self.mock.material_level) else {
@@ -302,7 +295,6 @@ impl Capacity<'_> {
     /// `CanCollectFixture(quantity)`.
     pub(crate) fn can_collect_fixture(&self, quantity: i32) -> bool {
         let Some(limits) = self.limits else {
-            error!("[harvest-pickup] CanCollectFixture: the fixture possession limits are absent; refused");
             return false;
         };
         let Some(&limit) = limits.fixture.get(&self.mock.fixture_level) else {
