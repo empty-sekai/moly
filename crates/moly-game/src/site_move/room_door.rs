@@ -25,15 +25,21 @@
 //! paused and sought by the door's own clock (the clock advances from the
 //! frame of `Play`, the product's convention for animator clocks).
 //!
+//! - The door texture (`SetUpDoor`, after `CullingDoor`): the texture named
+//!   `string.Format(MyRoomDoorAppearanceAssetName, bundle, textureId)` is
+//!   loaded from the skin bundle; when present it becomes `_MainTex` of the
+//!   first active renderer whose name contains the bundle name, and every
+//!   door material gets `SetPhenomenaLighting(true)` (no change on the
+//!   extracted materials: no `_SKIP_PHENOMENA_LIGHT` keyword and
+//!   `_UsePhenomenaLighting` already 1). The texture id is the wall
+//!   appearance's colour ([`crate::room_appearance::RoomAppearance`]).
+//! - `CullingDoor` sets the prefab active only when
+//!   `dot(door.forward, normalize(door.position - camera.position)) >= 0`.
+//!   Its only callers are `SetUpDoor` and `ChangeDoor`, and every room entry
+//!   path then reaches `SetupRoom`'s `ShowDoor`, so the door is spawned
+//!   shown and the test has no visible result.
+//!
 //! Named differences:
-//! - `CullingDoor` (the prefab active only while the camera is behind the
-//!   door's forward) runs once in `SetUpDoor` and every room entry path the
-//!   product has then reaches `SetupRoom`'s `ShowDoor`; the door is spawned
-//!   shown.
-//! - The door texture: `SetUpDoor` sets the renderer's texture from the
-//!   surface-appearance bundle named by the server config's
-//!   `MyRoomDoorAppearanceAssetName` and the texture id; the product keeps
-//!   the texture the skin prefab carries.
 //! - The base material is `Mysekai/Fixture/Basic`, whose parameters the
 //!   fixture material path reads from glTF extras the skin glb does not
 //!   carry: the door is drawn with the imported base-colour material. The
@@ -63,6 +69,10 @@ const DOOR_ANCHOR: &str = "Loc_door";
 const INSIDE: &str = "loc_inside";
 /// `SetupDoorSensor`'s search, compared ignoring case.
 const SENSOR: &str = "gimmick_door";
+/// `ClientConfig.Mysekai.MyRoomDoorAppearanceAssetName` (StringConfigs 137):
+/// the door texture's name pattern, formatted with the wall skin bundle and
+/// the texture id.
+const KEY_MY_ROOM_DOOR_APPEARANCE_ASSET_NAME: i32 = 137;
 /// `new PlayerActionSensor(1f, transform)`.
 pub(crate) const DOOR_SENSOR_RADIUS: f32 = 1.0;
 const OPEN_STATE: &str = "Base Layer.Open";
@@ -122,6 +132,8 @@ struct Instance {
 pub(crate) struct RoomDoor {
     epoch: u64,
     skin: String,
+    /// The wall appearance's texture (colour) id: `SetUpDoor`'s `textureId`.
+    color: u32,
     glb: Handle<Gltf>,
     sidecar: Handle<JsonAsset>,
     anchor: Entity,
@@ -149,6 +161,8 @@ struct DoorPrefab {
     hidden: Vec<String>,
     /// Material names with the source shader attribute of their program.
     attributes: Vec<(String, u8)>,
+    /// The skin bundle's textures (the sidecar's `textures` list).
+    textures: Vec<String>,
 }
 
 /// The rooms this port refused a door for, so the refusal is named once.
@@ -221,6 +235,15 @@ pub(crate) fn ensure(world: &mut World) {
         .is_some_and(|door| door.epoch == epoch && world.get_entity(door.anchor).is_ok());
     if !current {
         world.remove_resource::<RoomDoor>();
+        // SetUpDoor(wallId, textureId) runs with the room's wall appearance,
+        // which is resolved per room load.
+        let Some((skin, color)) = world
+            .get_resource::<crate::room_appearance::RoomAppearance>()
+            .filter(|appearance| appearance.resolved_for(epoch))
+            .map(|appearance| (appearance.wall.clone(), appearance.wall_color))
+        else {
+            return;
+        };
         let found = find_points(world);
         let (anchor, inside, sensor) = match found {
             Ok(points) => points,
@@ -232,16 +255,13 @@ pub(crate) fn ensure(world: &mut World) {
                 return;
             }
         };
-        let skin = world
-            .get_resource::<crate::room_appearance::RoomAppearance>()
-            .map(|appearance| appearance.wall.clone())
-            .unwrap_or_default();
         let server = world.resource::<AssetServer>().clone();
         world.insert_resource(RoomDoor {
             epoch,
             glb: server.load(format!("moly://site/skins/{skin}/{skin}.glb")),
             sidecar: server.load(format!("moly://site/skins/{skin}/{skin}.json")),
             skin,
+            color,
             anchor,
             inside,
             sensor: sensor.as_ref().ok().copied(),
@@ -461,6 +481,14 @@ impl RoomDoor {
                     .collect()
             })
             .unwrap_or_default();
+        let textures = doc["textures"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(DoorPrefab {
             scene,
             open,
@@ -469,6 +497,7 @@ impl RoomDoor {
             close_length,
             hidden,
             attributes,
+            textures,
         })
     }
 
@@ -510,6 +539,7 @@ impl RoomDoor {
                 marked += 1;
             }
         }
+        self.set_door_texture(world, root, &prefab);
         let animator = entities
             .iter()
             .copied()
@@ -548,6 +578,124 @@ impl RoomDoor {
             animator: bound,
             lengths: (prefab.open_length, prefab.close_length),
         });
+    }
+
+    /// `SetUpDoor`'s texture step: `LoadResource<Texture2D>` of
+    /// `string.Format(MyRoomDoorAppearanceAssetName, bundle, textureId)`;
+    /// when the bundle has it, the first active renderer (hierarchy order)
+    /// whose name contains the bundle name gets it as `_MainTex` of its
+    /// shared material. A missing texture returns before the step, and so
+    /// does the material loop after it (`SetPhenomenaLighting(true)` on every
+    /// door material: it clears `_SKIP_PHENOMENA_LIGHT` and writes
+    /// `_UsePhenomenaLighting` 1, both already so in the extracted door
+    /// materials, so nothing changes there).
+    fn set_door_texture(&self, world: &mut World, root: Entity, prefab: &DoorPrefab) {
+        let Some(pattern) = world
+            .get_resource::<crate::client_config::ClientConfigs>()
+            .map(|configs| {
+                configs
+                    .string(KEY_MY_ROOM_DOOR_APPEARANCE_ASSET_NAME)
+                    .to_owned()
+            })
+        else {
+            error!(
+                "[room-door] {}: ClientConfig is not loaded; the door keeps its prefab texture",
+                self.skin
+            );
+            return;
+        };
+        let name = pattern
+            .replace("{0}", &self.skin)
+            .replace("{1}", &self.color.to_string());
+        if name.contains('{') || name.contains('}') {
+            error!("[room-door] door texture name pattern {pattern} has an unported placeholder; the door keeps its prefab texture");
+            return;
+        }
+        let Some(uri) = prefab.textures.iter().find(|uri| {
+            uri.strip_prefix("textures/")
+                .and_then(|rest| rest.strip_suffix(".png"))
+                .and_then(|stem| stem.rsplit_once('-'))
+                .is_some_and(|(stem, _)| stem == name)
+        }) else {
+            info!(
+                "[room-door] {}: LoadResource<Texture2D>({name}) is null in the skin bundle; the door keeps its prefab texture",
+                self.skin
+            );
+            return;
+        };
+        // GetComponentsInChildren<Renderer>() in hierarchy order, active only;
+        // a renderer is the node that carries the mesh primitives.
+        let mut order = Vec::new();
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            order.push(entity);
+            if let Some(children) = world.get::<Children>(entity) {
+                stack.extend(children.iter().rev());
+            }
+        }
+        let renderer = order.iter().copied().find(|entity| {
+            let active = world
+                .get::<Visibility>(*entity)
+                .is_none_or(|visibility| *visibility != Visibility::Hidden);
+            let named = world
+                .get::<Name>(*entity)
+                .is_some_and(|name| name.as_str().contains(self.skin.as_str()));
+            let meshes = world.get::<Children>(*entity).is_some_and(|children| {
+                children.iter().any(|child| {
+                    world
+                        .get::<MeshMaterial3d<StandardMaterial>>(child)
+                        .is_some()
+                })
+            });
+            active && named && meshes
+        });
+        let Some(renderer) = renderer else {
+            error!(
+                "[room-door] {}: no door renderer's name contains the bundle name; {name} is not set",
+                self.skin
+            );
+            return;
+        };
+        let primitives: Vec<Entity> = world
+            .get::<Children>(renderer)
+            .map(|children| {
+                children
+                    .iter()
+                    .filter(|child| {
+                        world
+                            .get::<MeshMaterial3d<StandardMaterial>>(*child)
+                            .is_some()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // sharedMaterial: the renderer's first material slot.
+        let Some(&primitive) = primitives.first() else {
+            return;
+        };
+        let source = world
+            .get::<MeshMaterial3d<StandardMaterial>>(primitive)
+            .map(|material| material.0.clone())
+            .expect("filtered above");
+        let server = world.resource::<AssetServer>().clone();
+        let image = moly_assets::residency::load_image(
+            &server,
+            format!("moly://site/skins/{}/{uri}", self.skin),
+        );
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        let Some(mut material) = materials.get(&source).cloned() else {
+            return;
+        };
+        material.base_color_texture = Some(image);
+        let handle = materials.add(material);
+        world.entity_mut(primitive).insert(MeshMaterial3d(handle));
+        info!(
+            "[room-door] {}: SetUpDoor texture {name} ({uri}) set as _MainTex of {:?}",
+            self.skin,
+            world
+                .get::<Name>(renderer)
+                .map(|name| name.as_str().to_owned())
+        );
     }
 
     fn play(&mut self, world: &mut World, clip: Clip, frame: u64) {
