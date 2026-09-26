@@ -364,6 +364,24 @@ pub(crate) struct GateFlow {
     hides: Vec<PendingHide>,
     /// The last reason a reply waited, for the logs.
     waiting: Option<&'static str>,
+    /// The running cast's cloth space, while one of this flow's cut-scenes
+    /// plays.
+    cast_space: Option<CastSpace>,
+}
+
+/// The cloth space of the cast avatars of the running cut-scene. The cloth
+/// runtime takes a member's own `Transform` as its world, so an avatar
+/// under the view's character root is solved in that root's frame. That
+/// is the world solve turned by the root's rotation when the root stands
+/// still, turns about the vertical alone and has unit scale: gravity points
+/// down in both frames and the anchors move alike up to that turn.
+struct CastSpace {
+    root: Entity,
+    first: Transform,
+    drift_translation: f32,
+    drift_degrees: f32,
+    cloth: Vec<u32>,
+    frames: u64,
 }
 
 fn now(world: &World) -> f64 {
@@ -447,6 +465,7 @@ fn start(mut commands: Commands, server: Res<AssetServer>) {
         rand: EngineRand::from_state(engine_state()),
         hides: Vec::new(),
         waiting: None,
+        cast_space: None,
     });
 }
 
@@ -609,6 +628,12 @@ fn advance(world: &mut World) {
     }
     create_after_yield(world);
     hide_effects(world);
+    if matches!(
+        world.resource::<GateFlow>().stage,
+        Stage::InviteCutScene | Stage::GoHome { .. }
+    ) {
+        watch_cast_space(world);
+    }
     if tables(world).is_none() {
         return;
     }
@@ -1696,8 +1721,85 @@ pub(crate) fn cut_scene_end_callback(world: &mut World, cast: &Cast) {
 
 /// `CutSceneExecutor.PlayAsync` returned (after the presenter's fade out,
 /// or at once when its load was refused).
+/// Each frame of this flow's cut-scene: the cast avatars' parent, whether
+/// it stays put, and which avatars carry a cloth runtime.
+fn watch_cast_space(world: &mut World) {
+    let members: Vec<(u32, Option<Entity>, bool)> = world
+        .query_filtered::<(
+            &CharacterUnitId,
+            Option<&ChildOf>,
+            Has<crate::cloth_runtime::ClothRuntime>,
+        ), With<crate::cutscene::CutSceneAvatar>>()
+        .iter(world)
+        .map(|(unit, parent, cloth)| (unit.0, parent.map(ChildOf::parent), cloth))
+        .collect();
+    let Some(root) = members.iter().find_map(|(_, parent, _)| *parent) else {
+        return;
+    };
+    let Some(pose) = world
+        .get::<GlobalTransform>(root)
+        .map(|global| global.compute_transform())
+    else {
+        return;
+    };
+    let mut space = world
+        .resource_mut::<GateFlow>()
+        .cast_space
+        .take()
+        .filter(|space| space.root == root)
+        .unwrap_or_else(|| {
+            let (yaw, pitch, roll) = pose.rotation.to_euler(bevy::math::EulerRot::YXZ);
+            info!(
+                "[gate] cast cloth space: avatars {:?} under the character root {root:?}: world translation {:.3?}, rotation yaw {:.3} pitch {:.4} roll {:.4} degrees, scale {:.4?}",
+                members.iter().map(|(unit, parent, _)| (*unit, *parent)).collect::<Vec<_>>(),
+                pose.translation.to_array(),
+                yaw.to_degrees(),
+                pitch.to_degrees(),
+                roll.to_degrees(),
+                pose.scale.to_array()
+            );
+            CastSpace {
+                root,
+                first: pose,
+                drift_translation: 0.0,
+                drift_degrees: 0.0,
+                cloth: Vec::new(),
+                frames: 0,
+            }
+        });
+    space.frames += 1;
+    space.drift_translation = space
+        .drift_translation
+        .max(pose.translation.distance(space.first.translation));
+    space.drift_degrees = space.drift_degrees.max(
+        pose.rotation
+            .angle_between(space.first.rotation)
+            .to_degrees(),
+    );
+    for (unit, parent, cloth) in &members {
+        if *cloth && !space.cloth.contains(unit) {
+            space.cloth.push(*unit);
+            info!(
+                "[gate] cast cloth space: unit {unit}'s avatar carries a cloth runtime at frame {} of the cut-scene, parent {parent:?}",
+                space.frames
+            );
+        }
+    }
+    world.resource_mut::<GateFlow>().cast_space = Some(space);
+}
+
 pub(crate) fn cut_scene_returned(world: &mut World, cast: Cast) {
+    if let Some(space) = world
+        .get_resource_mut::<GateFlow>()
+        .and_then(|mut flow| flow.cast_space.take())
+    {
+        info!(
+            "[gate] cast cloth space over {} frames: the character root {:?} moved at most {:.6} m and turned at most {:.6} degrees; avatars with a cloth runtime {:?}",
+            space.frames, space.root, space.drift_translation, space.drift_degrees, space.cloth
+        );
+    }
     let outcome = cast.outcome.clone().unwrap_or(Ok(()));
+
     for (_, avatar) in cast.avatars() {
         crate::cutscene::dispose_avatar(world, avatar);
     }
