@@ -562,16 +562,28 @@ fn update_stamina_gate_view(
         "[menu_dialog] UpdateStaminaGateView: {stamina:?} over maxima {max:?}, stock {} -> {state:?}",
         boost_stamina_stock_count(stamina.boost, max)
     );
-    let palette = |entry: usize| {
-        layouts.palette_color(entry)
-            .unwrap_or_else(|| panic!("[menu_dialog] palette entry {entry} is not on this UI root"))
+    // PaletteUtility.GetColor: the palette is on a region root only; the
+    // shared root carries none, so there the colour stays as serialized.
+    let set_color = |view: &mut UiPrefabView, graphic: i64, entry: Option<usize>| {
+        let color = match entry {
+            None => [1.0; 4],
+            Some(entry) => match layouts.palette_color(entry) {
+                Some(color) => color,
+                None => {
+                    error_once!(
+                        "[menu_dialog] {}: palette entry {entry} is not on this UI root; the stamina colours stay as serialized",
+                        doc.prefab
+                    );
+                    return;
+                }
+            },
+        };
+        view.set_graphic_color(graphic, color);
     };
-    let gauge_color = if state.gauge_palette { palette(STAMINA_GAUGE_COLOR_ENTRY) } else { [1.0; 4] };
-    view.set_graphic_color(targets.gauge, gauge_color);
+    set_color(view, targets.gauge, state.gauge_palette.then_some(STAMINA_GAUGE_COLOR_ENTRY));
     view.set_visible(&targets.gradient, state.gradient);
     set_sprite_name(view, layouts, doc, targets.icon, state.icon);
-    let icon_color = if state.icon_palette { palette(STAMINA_EMPTY_ICON_COLOR_ENTRY) } else { [1.0; 4] };
-    view.set_graphic_color(targets.icon, icon_color);
+    set_color(view, targets.icon, state.icon_palette.then_some(STAMINA_EMPTY_ICON_COLOR_ENTRY));
     view.set_visible(&targets.on_stock, state.on_stock);
     view.set_visible(&targets.on_no_stock, !state.on_stock);
     view.set_visible(&targets.boost_count_node, state.boost_count.is_some());
