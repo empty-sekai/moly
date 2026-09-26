@@ -145,9 +145,11 @@ fn mesh_bounds(mesh: &CookedMesh, pose: &Pose, inflation: f32) -> [f32; 6] {
 /// the minimum and added to the maximum (the binary32 value of 0.005).
 const POOL_GROWTH: f32 = f32::from_bits(0x3ba3_d70a);
 
-/// The inflation the bounds computation takes when the pruner is handed no
-/// simulation bounds (the binary32 value of 1.01). The colliders here never
-/// take that path; it stays as a named variant of the replay.
+/// The inflation the engine's static-shape bounds take (the binary32 value
+/// of 1.01): the pruner computes them when an add hands it no simulation
+/// bounds (the colliders here never take that path; it stays as a named
+/// variant of the add's replay), and the scene query's flush writes them for
+/// every moved static shape.
 pub(super) const UNBUFFERED_INFLATION: f32 = f32::from_bits(0x3f81_47ae);
 
 /// The pose a static shape's bounds are taken at: the actor's pose composed

@@ -23,7 +23,15 @@
 //! fixture's source center (a drag onto it), then the same decide and drag
 //! back; then the second fixture is picked (it carries what stands on it), a
 //! one-cell drag, the fixture rotate button (`Rotate`), the decide button,
-//! and the same drag back and decide.
+//! and the same drag back and decide. With `MOLY_EDIT_AUTOPLAY_HOLD=<secs>`
+//! the run waits that long after the camera buttons, with nothing selected
+//! and no command sent, so a drag given from outside (a real pointer drag
+//! on the ground) reaches the edit camera's drag. With
+//! `MOLY_EDIT_AUTOPLAY_CLEAN_UP` set, before the save button the run presses
+//! the remove-all button (`RequestCleanUp`) and the confirmation's clean-up
+//! button (`CleanUpAll`). With `MOLY_EDIT_AUTOPLAY_RETURN_BASE` set, the
+//! base of the stack run is picked once more and sent to storage with the
+//! delete button (`ReturnToInventory`) before that.
 
 use bevy::prelude::*;
 use moly_law::fixture::GridPosition;
@@ -57,6 +65,9 @@ enum Step {
     Repicked,
     MovedBack,
     DecidedBack,
+    Returning,
+    CleanUpAsked,
+    CleanedUp,
     Saving,
     Done,
 }
@@ -83,6 +94,12 @@ pub(super) struct Run {
     base_next: Option<String>,
     /// The fixture rotate button is pressed once before the next decide.
     rotate_pending: bool,
+    /// The hold after the camera buttons was taken.
+    held: bool,
+    /// The remove-all buttons were pressed.
+    cleaned: bool,
+    /// The stack run's base, for the delete button.
+    base_uid: Option<String>,
 }
 
 /// The catalog indices, each with whether its put is decided (a trailing
@@ -227,6 +244,25 @@ pub(super) fn autoplay(
         Step::LookedBack | Step::CatalogCancelled => {
             if elapsed < AFTER_CAMERA {
                 return;
+            }
+            if run.step == Step::LookedBack && !run.held {
+                run.held = true;
+                let hold = std::env::var("MOLY_EDIT_AUTOPLAY_HOLD")
+                    .ok()
+                    .map(|raw| {
+                        raw.trim().parse::<f32>().unwrap_or_else(|_| {
+                            panic!("MOLY_EDIT_AUTOPLAY_HOLD is not seconds: {raw:?}")
+                        })
+                    })
+                    .unwrap_or(0.0);
+                if hold > 0.0 {
+                    info!(
+                        "[edit-autoplay] holding {hold:.1}s with nothing selected ({}): no command is sent",
+                        if view.selected.is_none() { "selection none" } else { "a selection is open" }
+                    );
+                    run.at = now + hold;
+                    return;
+                }
             }
             let queue = run.catalog.get_or_insert_with(catalog_indices);
             if queue.is_empty() {
@@ -473,6 +509,7 @@ pub(super) fn autoplay(
                         row.fixture_id, row.center.x, row.center.y, row.center.z
                     );
                     out.write(EditCommand::SelectPlaced { uid: base.clone() });
+                    run.base_uid = Some(base.clone());
                     run.uid = base;
                     run.start = touch;
                     run.onto = None;
@@ -484,7 +521,71 @@ pub(super) fn autoplay(
                 }
                 warn!("[edit-autoplay] the base {base} is not a placed row any more");
             }
+            if std::env::var("MOLY_EDIT_AUTOPLAY_RETURN_BASE").is_ok() {
+                if let Some(base) = run.base_uid.take() {
+                    info!("[edit-autoplay] the screen picks the base {base} again for the delete button: SelectPlaced");
+                    out.write(EditCommand::SelectPlaced { uid: base });
+                    run.step = Step::Returning;
+                    run.at = now;
+                    return;
+                }
+            }
+            if !run.cleaned && std::env::var("MOLY_EDIT_AUTOPLAY_CLEAN_UP").is_ok() {
+                run.cleaned = true;
+                info!(
+                    "[edit-autoplay] the remove-all button: RequestCleanUp ({} placed rows, {} in storage)",
+                    view.placed_rows.len(),
+                    view.inventory.len()
+                );
+                out.write(EditCommand::RequestCleanUp);
+                run.step = Step::CleanUpAsked;
+                run.at = now;
+                return;
+            }
             info!("[edit-autoplay] the save button: SaveAndExit");
+            out.write(EditCommand::SaveAndExit);
+            run.step = Step::Saving;
+            run.at = now;
+        }
+        Step::Returning => {
+            if elapsed < AFTER_PICK {
+                return;
+            }
+            info!(
+                "[edit-autoplay] the delete button: ReturnToInventory ({} placed rows, {} in storage)",
+                view.placed_rows.len(),
+                view.inventory.len()
+            );
+            out.write(EditCommand::ReturnToInventory);
+            run.step = Step::DecidedBack;
+            run.at = now;
+        }
+        Step::CleanUpAsked => {
+            if elapsed < AFTER_CAMERA {
+                return;
+            }
+            info!(
+                "[edit-autoplay] the confirmation is {}; its clean-up button: CleanUpAll",
+                if view.clean_up_dialog {
+                    "open"
+                } else {
+                    "not open"
+                }
+            );
+            out.write(EditCommand::CleanUpAll);
+            run.step = Step::CleanedUp;
+            run.at = now;
+        }
+        Step::CleanedUp => {
+            if elapsed < AFTER_DECIDE {
+                return;
+            }
+            info!(
+                "[edit-autoplay] after the clean-up: {} placed rows, {} in storage, confirmation {}; the save button: SaveAndExit",
+                view.placed_rows.len(),
+                view.inventory.len(),
+                if view.clean_up_dialog { "open" } else { "closed" }
+            );
             out.write(EditCommand::SaveAndExit);
             run.step = Step::Saving;
             run.at = now;
