@@ -213,13 +213,14 @@ pub(crate) fn can_craft_count(
         else {
             return Ok(0);
         };
-        if cost.quantity == 0 {
-            return Err(format!(
-                "cost row {} of blueprint {} has quantity 0",
-                cost.id, blueprint.id
-            ));
-        }
-        count = count.min(row.quantity / cost.quantity);
+        // A signed division that gives 0 for a zero divisor, as the game's
+        // own build computes it.
+        let crafts = if cost.quantity == 0 {
+            0
+        } else {
+            row.quantity.wrapping_div(cost.quantity)
+        };
+        count = count.min(crafts);
     }
     Ok(count.min(owned.remaining_fixture_capacity()?))
 }
