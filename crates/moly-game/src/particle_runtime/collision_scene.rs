@@ -1488,7 +1488,7 @@ impl PrunerScene {
         self.queries += 1;
         self.agreed += u64::from(!split);
         let moving = self.variants[0].pool_order().len() + UNFED_MOVING_SHAPES > LEAF_SHAPES;
-        if self.queries % 2000 == 1 {
+        if self.queries.is_power_of_two() {
             let line = format!("{} queries; the pruners agree on {}{}", self.queries, self.agreed,
                 if moving { format!("; no order claimed: {MOVING_SHAPE}") } else { String::new() });
             self.report(line);
