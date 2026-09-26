@@ -4,6 +4,7 @@ mod filled_image;
 mod tmp_font;
 mod tmp_layout;
 mod clip_render;
+mod stencil_mask;
 mod raycast;
 pub(crate) use raycast::Pointer;
 #[cfg(test)]
@@ -144,7 +145,12 @@ impl PointerUi<'_, '_> {
         if self.dialogs.blocks_field_input() { return true; }
         let editor_layer = self.layers.current() == crate::ui_layers::LayerId::MysekaiSiteEdit;
         if !self.layers.on_field() && !editor_layer { return true; }
-        if editor_layer && self.editor.as_deref().is_some_and(|edit| edit.exit_dialog) {
+        if editor_layer
+            && self
+                .editor
+                .as_deref()
+                .is_some_and(|edit| edit.exit_dialog || edit.clean_up_dialog)
+        {
             return true;
         }
         let (Some(layouts), Some(root)) = (self.layouts.as_deref(), self.root.as_deref()) else { return false; };
@@ -241,6 +247,9 @@ pub(crate) struct UiLayouts {
     /// (document, component) pairs already reported as drawn by the plain
     /// sprite path instead of the Image mesh rules.
     image_fallbacks: Mutex<HashSet<(String, i64)>>,
+    /// (document, Mask component) pairs already reported as refused by the
+    /// stencil consumer.
+    stencil_refusals: Mutex<HashSet<(String, i64)>>,
     /// Documents already reported as drawing sprites without an exported
     /// downscale multiplier.
     downscale_defaults: Mutex<HashSet<String>>,
@@ -798,6 +807,20 @@ impl UiLayouts {
         }
     }
 
+    fn note_stencil_refusal(&self, doc: &UiPrefab, mask: &UiComponent, reason: &str) {
+        let first = self
+            .stencil_refusals
+            .lock()
+            .expect("UI stencil refusal log poisoned")
+            .insert((doc.prefab.clone(), mask.path_id));
+        if first {
+            error!(
+                "UI {}: Mask @{} is not drawn as a stencil ({reason}); the Graphics under it are not clipped",
+                doc.prefab, mask.path_id
+            );
+        }
+    }
+
     /// The real host Canvas supplies this when it is outside the source prefab.
     pub(crate) fn set_canvas_reference_pixels_per_unit(&mut self, value: f32) {
         assert!(
@@ -1265,6 +1288,9 @@ struct Override {
     size_delta: Option<Vec2>,
     /// `Graphic.color` set by code on the Graphic component with this id.
     graphic_color: Option<(i64, [f32; 4])>,
+    /// `Behaviour.enabled` set by code on the component with this id (read by
+    /// the stencil Mask).
+    behaviour_enabled: Option<(i64, bool)>,
 }
 
 impl Override {
@@ -1276,12 +1302,14 @@ impl Override {
                     && self.fill == other.fill
                     && self.texture == other.texture
                     && self.graphic_color == other.graphic_color
+                    && self.behaviour_enabled == other.behaviour_enabled
             }
             None => self.text.is_none()
                 && self.text_alignment.is_none()
                 && self.fill.is_none()
                 && self.texture.is_none()
-                && self.graphic_color.is_none(),
+                && self.graphic_color.is_none()
+                && self.behaviour_enabled.is_none(),
         }
     }
 }
@@ -1426,6 +1454,15 @@ impl UiPrefabView {
             return;
         }
         self.update(&path, |v| v.graphic_color = Some((graphic, value)));
+    }
+    /// `Behaviour.enabled = value` on the component `component` (its node is
+    /// the one `@component` names).
+    pub(crate) fn set_behaviour_enabled(&mut self, component: i64, value: bool) {
+        let path = format!("@{component}");
+        if self.overrides.get(&path).and_then(|v| v.behaviour_enabled) == Some((component, value)) {
+            return;
+        }
+        self.update(&path, |v| v.behaviour_enabled = Some((component, value)));
     }
     pub(crate) fn set_size_delta(&mut self, path: &str, value: Vec2) {
         assert!(value.is_finite(), "non-finite UI size delta");
@@ -1682,6 +1719,7 @@ pub(crate) struct ViewCache {
 struct NodeSnapshot {
     rect: UiRect,
     change: Override,
+    stencil: Option<clip_render::Stencil>,
 }
 
 #[derive(Default)]
@@ -2003,6 +2041,7 @@ pub(crate) fn render(
             .collect();
         let rects = view.resolved(&layouts, canvas).unwrap();
         let alphas = group_alphas(doc, &overrides);
+        let stencils = stencil_mask::resolve(&layouts, doc, &rects, &overrides, &alphas);
         let text_layout_changed = previous.measurement_revision != layouts.measurement_revision
             || previous.font_metrics_revision != Some(tmp_layout::FONT_METRICS_REVISION);
         previous.measurement_revision = layouts.measurement_revision;
@@ -2064,8 +2103,13 @@ pub(crate) fn render(
                 // applied when this node actually becomes visible again.
                 continue;
             }
+            let stencil = stencils.tested[index].as_ref();
+            // A stencil-tested Graphic samples its masking graphic's texture.
+            let stencil_ready = stencil.and_then(|s| s.texture.as_ref())
+                .is_none_or(|texture| images.get(texture).is_some());
             if rendered.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.rect == *rect && snapshot.change.same_paint(change)
+                    && snapshot.stencil.as_ref() == stencil
             }) && !image_dirty
                 && !rendered.redraw
             {
@@ -2081,7 +2125,8 @@ pub(crate) fn render(
                         .all(|path| {
                             layouts.image_ready(path, &server)
                                 && images.get(&layouts.images[path]).is_some()
-                        });
+                        })
+                        && stencil_ready;
                     if ready {
                         if let Some(entity) = rendered.entity {
                             commands.entity(entity).insert(Visibility::Inherited);
@@ -2096,6 +2141,7 @@ pub(crate) fn render(
             let snapshot = NodeSnapshot {
                 rect: rect.clone(),
                 change: change.cloned().unwrap_or_default(),
+                stencil: stencil.cloned(),
             };
             let ready = node
                 .components
@@ -2108,7 +2154,8 @@ pub(crate) fn render(
                 .all(|path| {
                     layouts.image_ready(path, &server)
                         && images.get(&layouts.images[path]).is_some()
-                });
+                })
+                && stencil_ready;
             if !ready {
                 if !rendered.hidden {
                     if let Some(entity) = rendered.entity {
@@ -2152,8 +2199,12 @@ pub(crate) fn render(
                     continue;
                 }
                 let f = &comp.fields;
+                // A masking graphic that does not show writes no colour.
+                if stencils.unshown[index] == Some(comp.path_id) {
+                    continue;
+                }
                 if comp.class.ends_with("Image") && f.get("m_Color").is_some() {
-                    let clip = clip_render::for_component(comp, rect);
+                    let clip = clip_render::with_stencil(comp, rect, stencil);
                     let path = image_path(&layouts, comp, change);
                     let image = path.map(|p| layouts.images[p].clone()).unwrap_or_default();
                     // A colour set by code reaches the vertices as Color32.
@@ -2281,7 +2332,7 @@ pub(crate) fn render(
                         view.layer,
                         alphas[index],
                         rendered,
-                        clip_render::for_component(comp, rect),
+                        clip_render::with_stencil(comp, rect, stencil),
                         &images,
                         &mut meshes,
                         &mut clip_materials,

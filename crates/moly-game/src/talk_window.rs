@@ -997,7 +997,7 @@ fn spawn_label_glyphs(
         FONT_FAMILY,
         WINDOW_LINE_SPACING,
         BAKE_PPEM,
-        &|ch| art.glyph_cell(ch).map(|(_, advance)| advance),
+        &|ch| art.advance(ch),
     );
     let (lines, missing) = walk_glyphs(text, art, LABEL_FONT, 0.0, 0.0);
     if missing > 0 {
@@ -1039,7 +1039,7 @@ fn spawn_content_glyphs(
         FONT_FAMILY,
         WINDOW_LINE_SPACING,
         BAKE_PPEM,
-        &|ch| art.glyph_cell(ch).map(|(_, advance)| advance),
+        &|ch| art.advance(ch),
     );
     let (lines, missing) = walk_glyphs(
         text,

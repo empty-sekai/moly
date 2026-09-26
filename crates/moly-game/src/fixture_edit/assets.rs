@@ -4,6 +4,7 @@ use bevy::{asset::LoadState, gltf::Gltf, prelude::*};
 use moly_assets::json::JsonAsset;
 use moly_law::fixture::Vector3Int;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(super) struct CatalogRow {
     pub package: &'static str,
@@ -36,7 +37,7 @@ pub(super) const CANDIDATES: [CatalogRow; 4] = [
 ];
 
 #[derive(Clone)]
-pub(super) struct MetaGrid {
+pub(crate) struct MetaGrid {
     pub rows: usize,
     pub cols: usize,
     pub cells: Vec<bool>,
@@ -77,6 +78,9 @@ pub(super) struct FixtureAreas {
     pub loaded: bool,
     pub motion: HashMap<String, MetaGrid>,
     pub cutscene: HashMap<String, MetaGrid>,
+    /// Each bundle meta's `stackEnables` and `AddUsingGrid` (the put rules'
+    /// inputs).
+    pub stack: Arc<HashMap<String, super::tile_rules::StackMeta>>,
 }
 
 #[derive(Resource)]
@@ -128,6 +132,7 @@ pub(super) fn parse_areas(
         .get("packages")
         .and_then(|packages| packages.as_object())
         .expect("areas.json must contain packages");
+    let mut stack = HashMap::with_capacity(packages.len());
     for (name, entry) in packages {
         if let Some(meta) = entry.get("motionArea").and_then(MetaGrid::from_json) {
             areas.motion.insert(name.clone(), meta);
@@ -135,7 +140,15 @@ pub(super) fn parse_areas(
         if let Some(meta) = entry.get("cutsceneArea").and_then(MetaGrid::from_json) {
             areas.cutscene.insert(name.clone(), meta);
         }
+        stack.insert(
+            name.clone(),
+            super::tile_rules::StackMeta {
+                stack_enables: entry.get("stackEnables").and_then(MetaGrid::from_json),
+                add_using: entry.get("AddUsingGrid").and_then(MetaGrid::from_json),
+            },
+        );
     }
+    areas.stack = Arc::new(stack);
     areas.loaded = true;
     commands.remove_resource::<AreasAsset>();
 }

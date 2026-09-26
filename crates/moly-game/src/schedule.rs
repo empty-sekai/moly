@@ -915,6 +915,13 @@ pub fn install(app: &mut App) {
                     .run_if(common_conditions::on_timer(cloth_runtime::REPORT_PERIOD)),
             ),
         )
+        // The weather's physics scene: the site's readiness and the local
+        // player's avatar, after the transforms propagate and before the
+        // weather particles query it.
+        .add_systems(
+            PostUpdate,
+            crate::particle_runtime::collision_scene::observe_product.after(TransformSystems::Propagate),
+        )
         // TransformPropagate 之后：scene 实体当帧展开，取景要读已传播的全局变换。
         // 追角色再排在取景之后：角色就位当帧起，追角色每帧覆盖机位。
         // 天空钉位收尾：读玩家视变换当帧（传播之后）的世界位置。
@@ -942,7 +949,8 @@ pub fn install(app: &mut App) {
                 // 机位都要当帧值。
                 weather_fx::advance
                     .after(TransformSystems::Propagate)
-                    .after(camera::follow_avatar),
+                    .after(camera::follow_avatar)
+                    .after(crate::particle_runtime::collision_scene::observe_product),
                 // 角色侧相机态（屏幕/投影参数）与站点取景同拍；头参考点在
                 // TransformPropagate 之后回写——动画在 Propagate 之前推进，
                 // 读到的是当帧姿势。
@@ -1093,8 +1101,9 @@ pub fn install(app: &mut App) {
                 .after(info::click),
         );
     // ---- 菜单对话框（追加段：外壳菜单钮的目标，Dialog 槽） ----
-    // mock 面板资源（服务端态具名：体力/等级两格 + 四个使能输入，环境
-    // 变量覆写）。
+    // The menu's named mock enable inputs (visiting and three permissions,
+    // native instruments); stamina and rank are the server model's client
+    // copies.
     app.add_systems(Startup, menu_dialog::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并菜单对话框固定文案，
         // 烘制门四员到齐条件不变——菜单对话框的字随外壳成员一起进图集）。
@@ -1121,8 +1130,9 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::place),
         );
     // ---- 获得子窗（追加段：Dialog 槽的第三件，四开门者共用的获得窗） ----
-    // mock 面板资源（服务端态具名：开门者 + 资源队列，环境变量覆写）与
-    // 链播放态（关一格出队开下一格）。
+    // The native instrument's opener and resource queue (not a server value;
+    // game mode reads no instrument) and the chain player state (closing one
+    // window opens the next).
     app.add_systems(Startup, get_resource::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并获得子窗固定文案，烘制
         // 门四员到齐条件不变——获得子窗的字随外壳成员一起进图集）。

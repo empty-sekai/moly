@@ -1,4 +1,6 @@
-// Clipping terms for UI/Default, FillColor and the two TMP material families.
+// Clipping terms for UI/Default, FillColor and the two TMP material families,
+// and the stencil test of a Graphic under one UGUI Mask (whose masking
+// graphic may itself be under a RectMask2D).
 // Source color/font shading remains the existing prefab host's bitmap path.
 #import bevy_sprite::mesh2d_functions as mesh_functions
 #ifdef TONEMAP_IN_SHADER
@@ -11,11 +13,18 @@ struct ClipUniform {
     rect: vec4<f32>,
     softness_pixel: vec4<f32>,
     flags: vec4<u32>,
+    stencil_alpha: vec4<f32>,
+    stencil_quads: array<vec4<f32>, 9>,
+    stencil_uvs: array<vec4<f32>, 9>,
+    stencil_rect: vec4<f32>,
+    stencil_clip: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: ClipUniform;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var image: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var image_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var stencil_image: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var stencil_sampler: sampler;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -65,6 +74,39 @@ fn fragment(input: Varyings) -> @location(0) vec4<f32> {
             color.a *= sampled.a;
         } else {
             color *= sampled;
+        }
+    }
+    if material.flags.w != 0u {
+        // The masking graphic wrote the stencil where its fragment passed the
+        // alpha clip (alpha - 0.001 not negative) inside a quad it drew. Its
+        // alpha there is UI/Default's: vertex alpha times texture, times its
+        // own RectMask2D factor under UNITY_UI_CLIP_RECT.
+        let p = input.canvas_position;
+        var mask_clip = 1.0;
+        let clip_rect = material.stencil_rect;
+        if material.stencil_clip.z == 1.0 {
+            let clamped = clamp(clip_rect, vec4(-2e10), vec4(2e10));
+            let m = clamp((clip_rect.zw - clip_rect.xy - abs(p * 2.0 - clamped.xy - clamped.zw))
+                * material.stencil_clip.xy, vec2(0.0), vec2(1.0));
+            mask_clip = m.x * m.y;
+        } else if material.stencil_clip.z == 2.0 {
+            mask_clip = select(0.0, 1.0, all(p >= clip_rect.xy) && all(p <= clip_rect.zw));
+        }
+        var written = false;
+        for (var i = 0u; i < min(material.flags.w, 9u); i++) {
+            let quad = material.stencil_quads[i];
+            if all(p >= quad.xy) && all(p <= quad.zw) {
+                var mask_alpha = material.stencil_alpha.x;
+                if material.stencil_alpha.y != 0.0 {
+                    let map = material.stencil_uvs[i];
+                    mask_alpha *= textureSampleLevel(stencil_image, stencil_sampler, p * map.xy + map.zw, 0.0).a;
+                }
+                mask_alpha *= mask_clip;
+                written = written || mask_alpha >= 0.001;
+            }
+        }
+        if !written {
+            discard;
         }
     }
     var factor = 1.0;

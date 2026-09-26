@@ -122,6 +122,7 @@ pub(crate) struct EditorRoot {
 pub(crate) enum EditorAuxiliary {
     Header { back: String },
     Exit(auxiliary::ExitBindings),
+    CleanUp(auxiliary::CleanUpBindings),
 }
 
 #[derive(Resource)]
@@ -195,6 +196,7 @@ pub(crate) fn spawn_when_ready(
             "EditorTab",
             auxiliary::HEADER,
             auxiliary::EXIT,
+            auxiliary::CLEAN_UP,
         ]
         .iter()
         .any(|key| !layouts.ready(key, &server))
@@ -249,6 +251,20 @@ pub(crate) fn spawn_when_ready(
         Transform::from_xyz(0., 0., 100.),
         RenderLayers::layer(SITEMAP_LAYER),
         exit,
+    ));
+    let mut clean_up = UiPrefabView::new(auxiliary::CLEAN_UP, SITEMAP_LAYER);
+    let clean_up_bindings = auxiliary::clean_up(
+        layouts.document(auxiliary::CLEAN_UP).unwrap(),
+        &layouts,
+        &mut clean_up,
+    )
+    .expect("original two-button clean-up confirmation");
+    commands.spawn((
+        EditorAuxiliary::CleanUp(clean_up_bindings),
+        Visibility::Hidden,
+        Transform::from_xyz(0., 0., 100.),
+        RenderLayers::layer(SITEMAP_LAYER),
+        clean_up,
     ));
     commands.insert_resource(EditorSpawned);
 }
@@ -349,6 +365,42 @@ pub(crate) fn click(
             };
             if let Some((button, command)) = choice {
                 sounds.source_button(&layouts, dialog_view.key, button);
+                actions.write(command);
+                break;
+            }
+        }
+        return;
+    }
+    if edit.clean_up_dialog {
+        ui.drag = None;
+        for event in events
+            .iter()
+            .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
+        {
+            consumed.0 = true;
+            let point = canvas_position(event.position, size, scale);
+            let Some((EditorAuxiliary::CleanUp(dialog), dialog_view)) = auxiliaries
+                .iter()
+                .find(|(auxiliary, _)| matches!(auxiliary, EditorAuxiliary::CleanUp(_)))
+            else {
+                continue;
+            };
+            let choice = if hit(dialog_view, &layouts, &dialog.positive, point, canvas) {
+                Some((Some(&dialog.positive), EditCommand::CleanUpAll))
+            } else if hit(dialog_view, &layouts, &dialog.negative, point, canvas) {
+                Some((Some(&dialog.negative), EditCommand::CancelCleanUp))
+            } else if hit(dialog_view, &layouts, &dialog.close, point, canvas) {
+                Some((Some(&dialog.close), EditCommand::CancelCleanUp))
+            } else if !hit(dialog_view, &layouts, &dialog.window, point, canvas) {
+                // allowCloseExternal: a tap outside the window closes it.
+                Some((None, EditCommand::CancelCleanUp))
+            } else {
+                None
+            };
+            if let Some((button, command)) = choice {
+                if let Some(button) = button {
+                    sounds.source_button(&layouts, dialog_view.key, button);
+                }
                 actions.write(command);
                 break;
             }
@@ -480,6 +532,11 @@ pub(crate) fn click(
         if let Some((button, command)) = camera {
             sounds.source_button(&layouts, view.key, button);
             actions.write(command);
+            break;
+        }
+        if hit(view, &layouts, &bindings.remove_all, point, canvas) {
+            sounds.source_button(&layouts, view.key, &bindings.remove_all);
+            actions.write(EditCommand::RequestCleanUp);
             break;
         }
         let choice = if edit.can_save && hit(view, &layouts, &bindings.save, point, canvas) {
@@ -759,6 +816,7 @@ pub(crate) fn refresh(
                 }
                 active && edit.exit_dialog
             }
+            EditorAuxiliary::CleanUp(_) => active && edit.clean_up_dialog,
         };
         *visibility = if visible {
             Visibility::Inherited
