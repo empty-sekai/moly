@@ -124,8 +124,9 @@
 //!   the first with the highest level; its `putCostLimit`, else 0. Both
 //!   tables are master data from the runtime root
 //!   (`mysekai-rank-releases.json`, `mysekai-fixture-put-limit-levels.json`);
-//!   a root without them leaves the two texts as the prefab has them, named
-//!   once.
+//!   a root without them, or with tables not in this shape, leaves the two
+//!   texts as the prefab has them, named once. The CN rank page has no
+//!   put-cost texts and does not read the tables.
 //! - The rank page binds through `MysekaiInfoRankPage`'s serialized
 //!   references when the layout decodes them, else through the same nodes'
 //!   prefab paths.
@@ -1017,7 +1018,9 @@ impl PutLimitTables {
     }
 }
 
-/// The two tables once both requests settle; None while one still loads.
+/// The two tables once both requests settle; None while one still loads. A
+/// table that is missing, not JSON, or not in the shape the JP rule reads is
+/// an error naming it.
 fn resolve_put_limit(server: &AssetServer, jsons: &Assets<JsonAsset>, handles: &PutLimitHandles) -> Option<Result<PutLimitTables, String>> {
     let mut values = Vec::new();
     for (handle, path) in handles.0.iter().zip([RANK_RELEASES, PUT_LIMIT_LEVELS]) {
@@ -1025,10 +1028,12 @@ fn resolve_put_limit(server: &AssetServer, jsons: &Assets<JsonAsset>, handles: &
             return Some(Err(format!("{path} is not in this runtime root ({error})")));
         }
         let json = jsons.get(handle)?;
-        let value: Value = serde_json::from_str(&json.0).unwrap_or_else(|e| panic!("{path} is not JSON: {e}"));
-        values.push(value);
+        match serde_json::from_str::<Value>(&json.0) {
+            Ok(value) => values.push(value),
+            Err(e) => return Some(Err(format!("{path} is not JSON: {e}"))),
+        }
     }
-    Some(Ok(PutLimitTables::parse(&values[0], &values[1]).unwrap_or_else(|e| panic!("Info put-limit tables: {e}"))))
+    Some(PutLimitTables::parse(&values[0], &values[1]).map_err(|e| format!("the put-limit tables are not in the JP shape: {e}")))
 }
 
 // ScreenLayerMysekaiInfo's constructor sets the page fade duration to 0.1s.
@@ -1040,17 +1045,25 @@ pub(crate) fn spawn_when_ready(
 ) {
     if spawned.is_some() || !["Info","Common1"].iter().all(|key|layouts.ready(key,&server)) {return;}
     let Some(handles) = handles else { return; };
-    let Some(put_limit) = resolve_put_limit(&server, &jsons, &handles) else { return; };
+    let doc = layouts.document("Info").expect("ready Info prefab");
+    // Only the put-cost texts read the two tables; a rank page without them
+    // (the CN classes, whose count texts come from the panel) does not read
+    // them, so a CN root's own table shape is never parsed here.
+    let put_limit = if info_field_set(doc).put_limit_costs {
+        let Some(put_limit) = resolve_put_limit(&server, &jsons, &handles) else { return; };
+        match &put_limit {
+            Ok(tables) => info!("[info] put-limit tables: {} put-limit releases, {} level rows", tables.releases.len(), tables.levels.len()),
+            Err(reason) => warn!("[info] {reason}; the rank page's put-cost texts keep the prefab's text"),
+        }
+        put_limit
+    } else {
+        Err("this region's rank page has no put-cost texts".to_owned())
+    };
     commands.remove_resource::<PutLimitHandles>();
-    match &put_limit {
-        Ok(tables) => info!("[info] put-limit tables: {} put-limit releases, {} level rows", tables.releases.len(), tables.levels.len()),
-        Err(reason) => warn!("[info] {reason}; the rank page's put-cost texts keep the prefab's text"),
-    }
     let missing: Vec<&str> = WORDINGS.iter().copied().filter(|key| !layouts.wordings.contains_key(*key)).collect();
     if !missing.is_empty() {
         warn!("[info] wordings missing from this root: {missing:?}; a text writing one of them refuses");
     }
-    let doc = layouts.document("Info").expect("ready Info prefab");
     commands.insert_resource(InfoPresentation { bindings: InfoBindings::from_prefab(doc), elapsed: 0., put_limit });
     commands.spawn((InfoRoot,Visibility::Hidden,Transform::default(),RenderLayers::layer(SITEMAP_LAYER),crate::ui_layout::UiPrefabView::new("Info",SITEMAP_LAYER)));
     for (which,key) in [(InfoDialog::RankList,"Common1")] {
