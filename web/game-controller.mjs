@@ -42,7 +42,8 @@ export function isGameSnapshot(value) {
     !!persist &&
     revisionOf(persist.revision) &&
     revisionOf(persist.acked) &&
-    Number.isSafeInteger(value.memory?.wasmBytes) &&
+    // null: the engine has not measured its memory (yet).
+    (value.memory?.wasmBytes === null || Number.isSafeInteger(value.memory?.wasmBytes)) &&
     Array.isArray(value.errors) &&
     value.errors.every((error) => typeof error === "string")
   );
