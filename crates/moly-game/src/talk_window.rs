@@ -33,8 +33,12 @@
 //!   两栏水平居左、垂直居顶、行距 −80、margin 0——行量法与摆位全按
 //!   排版律（`moly_law::text`），字距增量在摆位侧逐字加。
 //! * **尾标**（EndSign）：中心 (718,−434) 100×100 组，可见标记是
-//!   50×44 的 `icon_pageForward_gn`（直接消费 ScenarioAtlas 真源裁件）；同组 12×12 星标与缩放/位移动效是装饰
-//!   （替身缺动效，具名）。打字机收尾拍才激活。
+//!   50×44 的 `icon_pageForward_gn`（直接消费 ScenarioAtlas 真源裁件，
+//!   pivot 底边中点）。打字机收尾拍才激活；激活期间组上的 Animator 循环
+//!   播唯一状态 `PageForward`（见 [`PAGE_FORWARD_LENGTH`] 一族）：标记的
+//!   anchoredPosition 写成 (0, y(t))、localScale 写成 (1, s(t), 1)。
+//!   同组的 12×12 星标（带 TweenScale/TweenPosition）序列化为**未激活**，
+//!   且真源里没有任何写者激活它（见 [`spawn_tree`] 的注释）——不画。
 //!
 //! **时序**：
 //! * **打字机**（`ShowTextAsync`）：第 0 字在 t=0 即现，第 k 字在 50k ms，
@@ -46,11 +50,14 @@
 //!   到 0，被 hide 过再 show 走 0.3s 淡入；缓动取补间库缺省（OutQuad）。
 //! * **收口**：层弹出路径不带淡出——对话收尾即时撤窗。
 //!
-//! **具名缺口**（真源有、此处不做假）：面板后方的全宽暗带（`bg_story_adv`，
-//! ScenarioAtlas 未解码）；尾标星形动效与 Animator 状态；段落距
-//! （m_paragraphSpacing 5.16——只作用于 U+2029 段落分隔，语料 0 个，
-//! 恒不触发）；软换行（`wordWrapping` 开，但排版律无软换行且语料行宽
-//! 全部在盒内，硬断行即全部形态）。
+//! * **点击无音效**：点跳与放行都不发 SE（真源点击链全程不调音频，
+//!   论证见 [`tick_window`] 的注释）。
+//!
+//! **具名缺口**（真源有、此处不做）：段落距（m_paragraphSpacing 5.16——
+//! 只作用于 U+2029 段落分隔，语料 0 个，恒不触发）；软换行（`wordWrapping`
+//! 开，但排版律无软换行且语料行宽全部在盒内，硬断行即全部形态）；
+//! `PageForward` 的曲线按真源裁件的值编进本文件（UI 布局提取器尚未导出
+//! Animator 控制器与剪辑——提取侧缺口，不是呈现侧缺口）。
 //!
 //! 日志口径同对话域：只带 id/字数/步号/量法值——文本内容与名字栏文字
 //! 不进日志（语言网关纪律）。
@@ -62,10 +69,9 @@ use bevy::math::Rect;
 use bevy::prelude::*;
 use moly_law::text::{layout_metrics, LayoutMetrics};
 
-use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::balloon::{
-    walk_glyphs, BalloonArt, GlyphSpot, ASCENT_RATIO, BAKE_PPEM, BALLOON_LAYER,
-    FONT_FAMILY, TEXT_SCALE,
+    walk_glyphs, BalloonArt, GlyphSpot, ASCENT_RATIO, BAKE_PPEM, BALLOON_LAYER, FONT_FAMILY,
+    TEXT_SCALE,
 };
 use crate::gesture::{GestureEvent, GestureState};
 use crate::ui_layout::UiLayouts;
@@ -145,11 +151,68 @@ const CONTENT_WORD_EXTRA: f32 = 3.892;
 /// 两栏同值：`m_lineSpacing` −80（序列化原值，换算在行量律内部）。
 const WINDOW_LINE_SPACING: f32 = -80.0;
 
-/// 尾标可见标记：50×44，中心 (716.7,−416.7)（EndSign 中心 (718,−434)
-/// 100×100 组内、pivot(0.5,0) 底托在组心下 4.7）。
-const END_ICON_CENTER: Vec2 = Vec2::new(716.7, -416.7);
+/// EndSign 组心：名字栏盒心 (−406,−234) + 组的 anchoredPosition
+/// (1124,−200)。
+const END_SIGN_CENTER: Vec2 = Vec2::new(718.0, -434.0);
+/// 尾标可见标记（`Image`）：50×44，pivot (0.5,0)——摆位点是标记底边中点，
+/// 缩放绕它。序列化的 anchoredPosition (−1.3,−4.7) 在激活后的首次
+/// Animator 求值即被剪辑覆写（x 常量 0、y 走曲线），不上屏。
 const END_ICON_W: f32 = 50.0;
 const END_ICON_H: f32 = 44.0;
+
+/// `PageForward` 剪辑长度（m_StopTime − m_StartTime，65 帧 @60fps），
+/// 状态 loop、速度 1、Animator 普通更新模式（缩放时间）。
+const PAGE_FORWARD_LENGTH: f32 = 1.0833334;
+
+/// 剪辑的流式曲线段：(键时, [a, b, c, d])，段内 v(dt) = ((a·dt+b)·dt+c)·dt+d，
+/// dt = t − 键时——引擎求值流式剪辑就是这个三次式，系数原样照录（f32）。
+/// 标记的 localScale.y；x/z 两条曲线四键恒 1（剪辑里存为常值段）。
+const PAGE_FORWARD_SCALE_Y: [(f32, [f32; 4]); 4] = [
+    (0.0, [9.831591, -3.195267, 0.0, 1.0]),
+    (0.21666667, [-29.494772, 9.585801, 0.0, 0.95]),
+    (0.43333334, [0.7282659, -0.7100593, 0.0, 1.1]),
+    (1.0833334, [0.0, 0.0, 0.0, 1.0]),
+];
+
+/// 标记的 m_AnchoredPosition.y（x 是常量曲线 0）。
+const PAGE_FORWARD_POS_Y: [(f32, [f32; 4]); 30] = [
+    (0.0, [140.62201, -8.922928, -4.668121, 0.0]),
+    (0.21666667, [299.05084, -95.50585, 11.269543, 0.0]),
+    (0.43333334, [-236.18683, 80.996284, 12.000001, 1.0]),
+    (0.65, [0.0, 0.0, 11.6421585, 5.0]),
+    (0.6666667, [0.0, 0.0, 8.325556, 5.1940365]),
+    (0.68333334, [0.0, 0.0, 5.927788, 5.3327956]),
+    (0.7, [0.0, 0.0, 4.008011, 5.431592]),
+    (0.71666664, [0.0, 0.0, 2.3674617, 5.498392]),
+    (0.73333335, [0.0, 0.0, 0.9002217, 5.53785]),
+    (0.75, [0.0, 0.0, -0.45805022, 5.5528536]),
+    (
+        0.76666665,
+        [-8.046564e-04, 1.3410975e-05, -1.7491105, 5.5452194],
+    ),
+    (0.78333336, [0.0, 0.0, -3.0034475, 5.5160675]),
+    (0.8, [0.00321866, -5.3644282e-05, -4.244417, 5.46601]),
+    (0.81666666, [0.0, 0.0, -5.49171, 5.39527]),
+    (0.8333333, [0.0, 0.0, -6.763126, 5.3037415]),
+    (0.85, [0.0, 0.0, -8.075531, 5.1910224]),
+    (0.8666667, [0.0, 0.0, -9.446963, 5.0564303]),
+    (0.8833333, [0.0, 0.0, -10.896674, 4.898981]),
+    (0.9, [0.0, 0.0, -12.447134, 4.71737]),
+    (0.9166667, [0.0, 0.0, -14.125027, 4.5099173]),
+    (0.93333334, [0.0, 0.0, -15.963636, 4.2745004]),
+    (0.95, [-0.01287464, 2.1457713e-04, -18.006252, 4.00844]),
+    (0.96666664, [0.0, 0.0, -20.309591, 3.708336]),
+    (
+        0.98333335,
+        [0.01287464, -2.1457713e-04, -22.95275, 3.369842],
+    ),
+    (1.0, [-0.01287464, 2.1457713e-04, -26.04931, 2.9872966]),
+    (1.0166667, [0.0, 0.0, -29.770102, 2.5531418]),
+    (1.0333333, [0.0, 0.0, -34.388844, 2.056974]),
+    (1.05, [0.0, -4.2914815e-04, -40.3778, 1.4838271]),
+    (1.0666667, [0.0, 4.2915426e-04, -48.651623, 0.8108596]),
+    (1.0833334, [0.0, 0.0, 0.0, 0.0]),
+];
 
 /// show 步淡入时长（readonly 字段 0.3s）。
 const SHOW_FADE_SECONDS: f32 = 0.3;
@@ -191,11 +254,12 @@ pub(crate) struct TalkWindowState {
     playing: bool,
     /// `_isClicked`（点击闩：跳过支与放行门共写）。
     clicked: bool,
-    /// wait_click 放行沿待发（步进放行支经 consume_click 置位、本模块帧
-    /// 推进取走入一次性 SE 队列——步进主循环的系统参数已满，经状态中转）。
-    released: bool,
     /// `_endIconObj` 激活态。
     end_icon: bool,
+    /// EndSign 上 Animator 的状态时间（秒，未取模）：激活沿归 0，激活
+    /// 期间按帧时间推进；停用即归 0（`m_KeepAnimatorStateOnDisable` 关，
+    /// 再激活从默认状态头起播）。
+    end_clock: f32,
     /// 正文/名字栏的改版计数（呈现侧按版本重建字形实体）。
     text_version: u64,
     label_version: u64,
@@ -209,8 +273,11 @@ impl TalkWindowState {
         // HideTalkWindow fades alpha without unmounting the session. An
         // accessibility/QA reader must not mistake a retained window for a
         // visible dialogue prompt and accidentally skip a silent finale.
-        let displaying = self.present && self.fade.as_ref()
-            .map_or(self.alpha > 0.01, |(_, target, _, _)| *target > 0.01);
+        let displaying = self.present
+            && self
+                .fade
+                .as_ref()
+                .map_or(self.alpha > 0.01, |(_, target, _, _)| *target > 0.01);
         (&self.label, &self.text, displaying, self.playing)
     }
 }
@@ -227,8 +294,8 @@ impl Default for TalkWindowState {
             typing_clock: 0.0,
             playing: false,
             clicked: false,
-            released: false,
             end_icon: false,
+            end_clock: 0.0,
             text_version: 0,
             label_version: 0,
             built_text: 0,
@@ -267,8 +334,8 @@ impl TalkWindowState {
         self.typing_clock = 0.0;
         self.playing = false;
         self.clicked = false;
-        self.released = false;
         self.end_icon = false;
+        self.end_clock = 0.0;
         self.text_version += 1;
         self.label_version += 1;
     }
@@ -285,8 +352,8 @@ impl TalkWindowState {
         self.typing_clock = 0.0;
         self.playing = false;
         self.clicked = false;
-        self.released = false;
         self.end_icon = false;
+        self.end_clock = 0.0;
         self.text_version += 1;
         self.label_version += 1;
     }
@@ -316,6 +383,7 @@ impl TalkWindowState {
         self.text.push_str(text);
         self.playing = true;
         self.end_icon = false;
+        self.end_clock = 0.0;
         self.typing_clock = 0.0;
         self.shown = 0;
         let len = text.chars().count();
@@ -352,16 +420,10 @@ impl TalkWindowState {
         !self.clicked
     }
 
-    /// 耗尽闩（`WaitClicked` 放行后的清闩——该击即耗尽）。放行沿同时置
-    /// 待发 SE 标记（帧推进取走入队）。同上要会话作保。
+    /// 耗尽闩（`WaitClicked` 放行后的清闩——该击即耗尽）。放行不发音效
+    /// （见 [`tick_window`]）。同上要会话作保。
     pub(crate) fn consume_click(&mut self, _owner: TalkSession<'_>) {
         self.clicked = false;
-        self.released = true;
-    }
-
-    /// 取走放行沿待发标记（有即返回 true 并清）。仅本模块的帧推进调。
-    fn take_released(&mut self) -> bool {
-        std::mem::take(&mut self.released)
     }
 }
 
@@ -393,11 +455,8 @@ pub(crate) struct TalkEndMark;
 // 装载与输入
 // ---------------------------------------------------------------------------
 
-/// Startup：请求面板页贴图、程序化烘尾标替身、初始化窗体状态（常驻）。
-pub(crate) fn load(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-) {
+/// Startup：请求面板页贴图与尾标裁件、初始化窗体状态（常驻）。
+pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
     let page = moly_assets::residency::load_image(&server, AssetPath::from(PANEL_PAGE.to_owned()));
     let end_mark = moly_assets::residency::load_image(
         &server,
@@ -451,7 +510,7 @@ pub(crate) fn read_click_input(
 }
 
 /// 冒烟口（`MOLY_TALK_TAP_AT_SECS`，逗号分隔的时刻表；宿主侧仪表，与
-/// 采集 autohit 同款）：到点即置闩——与真点击/替身同一条路（打字中即
+/// 采集 autohit 同款）：到点即置闩——与真点击同一条路（打字中即
 /// 点跳，收尾后放行）。无头窗口收不到真点击，点跳半边的 SE 验证靠它。
 /// 同样按会话在场门控：时刻落在无会话的空档不消费（对窗体惰性，挂到
 /// 下一场对话开场后即拍）。
@@ -514,9 +573,20 @@ pub(crate) fn smoke_tap(
 // 帧推进
 // ---------------------------------------------------------------------------
 
-/// Update（对话链内、步进后）：状态机半（跳过/打字机/淡变）+ 呈现
-/// （树生死、字形重建、揭示与 α 写回、canvas 缩放）。只在纹源到齐后
+/// Update（对话链内、步进后）：状态机半（跳过/打字机/淡变/尾标动效）
+/// + 呈现（树生死、字形重建、揭示与 α 写回、canvas 缩放）。只在纹源到齐后
 /// 动实体；装载失败响亮 panic（资产边界的拒绝点）。
+///
+/// **点击不发音效**（点跳与放行皆然）。真源的点击链是：手势事件 →
+/// 对话引擎 `OnGesture`（TAP 族且态为 End）→ `OnClick` → 窗体 `OnClick`
+/// 只置 `_isClicked`（UI 隐藏时连闩都不置）；打字机的点跳支只做
+/// 「整段 SetText、清闩」，`WaitClicked` 只是 `WaitUntil(IsWaitClick)`，
+/// Lua 侧 `wait_click` 只 yield 这个等待再冲延迟命令——整条链没有一次
+/// 音频调用。表面反例：①对话剧本有 `se(label)` 这个 Lua 入口（转到
+/// `PlaySe`），但日服全部 6919 个对话脚本里词表外调用 0 次、`se(` 0 次；
+/// ②布局里的全屏点击区 `ClickArea` 是一个 CustomButton，但它序列化为
+/// 未激活，只在场景为 OutGame 时（`SetupOutGame(true)`）才激活——
+/// MySekai 场景里的对话不经过它。
 #[allow(clippy::type_complexity)]
 pub(crate) fn tick_window(
     mut commands: Commands,
@@ -527,16 +597,23 @@ pub(crate) fn tick_window(
     art: Option<Res<BalloonArt>>,
     window_art: Option<Res<WindowArt>>,
     mut state: ResMut<TalkWindowState>,
-    mut se: ResMut<SeRequests>,
-    mut roots: Query<(Entity, &mut Transform), With<TalkWindowRoot>>,
+    mut roots: Query<(Entity, &mut Transform), (With<TalkWindowRoot>, Without<TalkEndMark>)>,
     mut glyphs: Query<(Entity, &TalkGlyph, &mut Visibility)>,
     label_glyphs: Query<(Entity, &TalkLabelGlyph)>,
-    mut end_marks: Query<&mut Visibility, (With<TalkEndMark>, Without<TalkGlyph>)>,
+    mut end_marks: Query<
+        (&mut Visibility, &mut Transform),
+        (
+            With<TalkEndMark>,
+            Without<TalkGlyph>,
+            Without<TalkWindowRoot>,
+        ),
+    >,
     mut parts: Query<(&TalkWindowPart, &mut Sprite)>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let dt = time.delta_secs();
+    let end_was_active = state.end_icon;
 
     // --- 状态机半：跳过支（先于推进——真源逐字循环每拍先查闩） ---
     if state.clicked && state.playing {
@@ -545,26 +622,7 @@ pub(crate) fn tick_window(
         state.playing = false;
         state.end_icon = true;
         state.clicked = false;
-        // 点跳 SE：真源对话窗 OnClick 体 0 cue（读不出），按 mysekai UI
-        // 家族的 select 档具名 mock（按下沿语义，CustomSelectableDefine
-        // 同表）；2.0s 抑制在 SE 通道侧。
-        se.0.push(SeRequest { owner: None,
-            cue: "se_mysekai_ui_select".into(),
-            class: SeClass::Ui,
-            source: "talk-skip",
-        });
         info!("[talkwin] 点跳：跳过打字机（{len} 字一次揭示），点击闩清零——放行须再点");
-    }
-
-    // --- 放行沿 SE：wait_click 放行发生在步进主循环（其系统参数已满，
-    // 经状态中转，见 consume_click/take_released）——decision 档具名 mock，
-    // 与点跳的 select 档同表同源。 ---
-    if state.take_released() {
-        se.0.push(SeRequest { owner: None,
-            cue: "se_mysekai_ui_decision".into(),
-            class: SeClass::Ui,
-            source: "talk-advance",
-        });
     }
 
     // --- 状态机半：打字机推进（第 k 字在 50k ms，DONE 在 50×len ms） ---
@@ -581,6 +639,15 @@ pub(crate) fn tick_window(
                 state.typing_clock
             );
         }
+    }
+
+    // --- 状态机半：尾标 Animator 的状态时间。激活沿那一帧按 t=0 取姿态，
+    // 此后每帧推进帧时间（普通更新模式）；停用即归 0。激活帧本身是否
+    // 已推进一帧，未对引擎取证（差至多一帧）。 ---
+    if state.end_icon && end_was_active {
+        state.end_clock += dt;
+    } else {
+        state.end_clock = 0.0;
     }
 
     // --- 状态机半：淡变（OutQuad——补间库缺省） ---
@@ -647,7 +714,9 @@ pub(crate) fn tick_window(
         return;
     };
     if *root_transform != placement || state.built_text != state.text_version {
-        commands.entity(root).insert(stage_layout::source_metrics(placement, &state.text));
+        commands
+            .entity(root)
+            .insert(stage_layout::source_metrics(placement, &state.text));
     }
     *root_transform = placement;
 
@@ -699,7 +768,14 @@ pub(crate) fn tick_window(
 fn update_visibility(
     state: &TalkWindowState,
     glyphs: &mut Query<(Entity, &TalkGlyph, &mut Visibility)>,
-    end_marks: &mut Query<&mut Visibility, (With<TalkEndMark>, Without<TalkGlyph>)>,
+    end_marks: &mut Query<
+        (&mut Visibility, &mut Transform),
+        (
+            With<TalkEndMark>,
+            Without<TalkGlyph>,
+            Without<TalkWindowRoot>,
+        ),
+    >,
     parts: &mut Query<(&TalkWindowPart, &mut Sprite)>,
 ) {
     // --- 呈现：揭示与尾标 ---
@@ -710,12 +786,13 @@ fn update_visibility(
             Visibility::Hidden
         };
     }
-    for mut visible in end_marks.iter_mut() {
+    for (mut visible, mut transform) in end_marks.iter_mut() {
         *visible = if state.end_icon {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
+        *transform = end_mark_transform(state.end_clock);
     }
 
     // --- 呈现：α 写回（淡变值乘进每个部件的基础色） ---
@@ -723,6 +800,36 @@ fn update_visibility(
     for (part, mut sprite) in parts.iter_mut() {
         sprite.color = part.base.with_alpha(part.base.alpha() * alpha);
     }
+}
+
+/// 引擎对流式剪辑曲线的求值：取键时 ≤ t 的最后一段，段内三次式
+/// ((a·dt+b)·dt+c)·dt+d（f32，与引擎同精度）。末键之后落在末段（常值）。
+fn streamed_curve(segments: &[(f32, [f32; 4])], t: f32) -> f32 {
+    let index = segments
+        .partition_point(|(key, _)| *key <= t)
+        .saturating_sub(1);
+    let (key, [a, b, c, d]) = segments[index];
+    let dt = t - key;
+    ((a * dt + b) * dt + c) * dt + d
+}
+
+/// `PageForward` 在状态时间 `clock` 的姿态：标记的 anchoredPosition 与
+/// localScale.y（状态 loop：按剪辑长度取模）。
+fn page_forward_pose(clock: f32) -> (Vec2, f32) {
+    let t = clock.rem_euclid(PAGE_FORWARD_LENGTH);
+    (
+        Vec2::new(0.0, streamed_curve(&PAGE_FORWARD_POS_Y, t)),
+        streamed_curve(&PAGE_FORWARD_SCALE_Y, t),
+    )
+}
+
+/// 尾标可见标记的 Transform（canvas 单位、组心系）：pivot 在底边中点，
+/// 缩放绕 pivot ⇒ sprite 中心 = 组心 + anchoredPosition + (0, 半高 × s)。
+fn end_mark_transform(clock: f32) -> Transform {
+    let (anchored, scale_y) = page_forward_pose(clock);
+    let pivot = END_SIGN_CENTER + anchored;
+    Transform::from_xyz(pivot.x, pivot.y + END_ICON_H * 0.5 * scale_y, 0.0)
+        .with_scale(Vec3::new(1.0, scale_y, 1.0))
 }
 
 fn window_root_transform(
@@ -767,6 +874,15 @@ fn spawn_tree(
             RenderLayers::layer(BALLOON_LAYER),
         ))
         .id();
+    // 面板之下**没有**全宽暗带，这是真源状态，不是缺件。表面反例：
+    // 窗体节点 `Window`（1920×415、底边锚定）上挂着一张九宫 CustomImage，
+    // 指向 ScenarioAtlas 里真实存在的 `bg_story_adv`，布局文档把它原样列
+    // 出。但该组件序列化为 **enabled=false**（国服与日服两份预制体一致），
+    // 而真源里能碰到它的写者一个都没有：对话层的序列化字段按顺序是名字栏、
+    // 正文、自动播放标、尾标 GameObject、窗体 CanvasGroup、菜单/隐藏 UI/
+    // 截图三组按钮与 CanvasGroup，外加四个 Vector2——没有一个指向这张
+    // 图；层代码只动 CanvasGroup 的 α、两栏文本、自动播放标与尾标的激活。
+    // ⇒ 引擎不画它，这里也不画。
     // 面板：退化九宫（四角原生 + 上下横带 1px 采样列拉伸）。
     for (rect, size, pos) in panel_pieces() {
         let piece = commands
@@ -785,7 +901,13 @@ fn spawn_tree(
             .id();
         commands.entity(root).add_child(piece);
     }
-    // 尾标（替身三角；激活态随打字机，先隐）。
+    // 尾标：真源 `icon_pageForward_gn` 裁件，姿态由 `PageForward` 剪辑
+    // 逐帧写（见 `update_visibility`）；激活态随打字机，先隐。
+    // 同组的星标 `star`（12×12，MenuAtlas `icon_pageForward_2`，带
+    // TweenScale 1.1→0.8 / TweenPosition 两个循环补间）**不铺**：它序列化
+    // 为未激活，Animator 剪辑不绑它（只绑 `Image`），层代码对尾标只做
+    // `_endIconObj.SetActive(true/false)`——激活父级不会激活一个自身未激活
+    // 的子级，于是它的两个补间永远不会起跑。
     let end = commands
         .spawn((
             Sprite {
@@ -798,7 +920,7 @@ fn spawn_tree(
                 custom_size: Some(Vec2::new(END_ICON_W, END_ICON_H)),
                 ..default()
             },
-            Transform::from_xyz(END_ICON_CENTER.x, END_ICON_CENTER.y, 0.0),
+            end_mark_transform(state.end_clock),
             TalkWindowPart { base: Color::WHITE },
             TalkEndMark,
             Visibility::Hidden,
@@ -1047,6 +1169,132 @@ fn spawn_text_glyphs(
     count
 }
 
-// ---------------------------------------------------------------------------
-// 程序化替身
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// crc32 of the Animator-relative path `Image` (the end mark under EndSign).
+    const IMAGE_PATH_HASH: i64 = 83_635_035;
+    /// crc32 of `m_AnchoredPosition.y` / `m_AnchoredPosition.x` (RectTransform bindings).
+    const ANCHORED_Y: i64 = 538_195_251;
+    const ANCHORED_X: i64 = 1_460_864_421;
+
+    fn segments(curve: &serde_json::Value) -> Vec<(f32, [f32; 4])> {
+        curve["raw"]
+            .as_array()
+            .expect("raw segments")
+            .iter()
+            .map(|row| {
+                let c = &row[1];
+                let f = |v: &serde_json::Value| v.as_f64().expect("number") as f32;
+                (f(&row[0]), [f(&c[0]), f(&c[1]), f(&c[2]), f(&c[3])])
+            })
+            .collect()
+    }
+
+    /// Value check against the source clip. `MOLY_TALK_END_SIGN_CLIP` names
+    /// the EndSign controller's `PageForward` clip decoded from the game's
+    /// own serialized file (streamed-clip polynomials, bindings, and the
+    /// clip evaluated at its 60 fps sample rate by the extractor's decoder).
+    /// Red when the source clip's length, loop flag, bound properties,
+    /// polynomial coefficients or sampled values differ from what this
+    /// module renders.
+    #[test]
+    #[ignore = "needs the decoded source clip in MOLY_TALK_END_SIGN_CLIP"]
+    fn page_forward_matches_the_source_clip() {
+        let path = std::env::var("MOLY_TALK_END_SIGN_CLIP").expect("MOLY_TALK_END_SIGN_CLIP");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("clip file")).expect("json");
+        assert_eq!(doc["clip"], "PageForward");
+        assert_eq!(doc["loopTime"], true, "the state loops");
+        let length = (doc["stop"].as_f64().unwrap() - doc["start"].as_f64().unwrap()) as f32;
+        assert_eq!(
+            PAGE_FORWARD_LENGTH.to_bits(),
+            length.to_bits(),
+            "clip length"
+        );
+
+        let mut seen = [false; 5];
+        for curve in doc["curves"].as_array().expect("curves") {
+            let b = &curve["binding"];
+            let key = (
+                b[0].as_i64().unwrap(),
+                b[1].as_i64().unwrap(),
+                b[2].as_i64().unwrap(),
+                b[3].as_i64().unwrap(),
+            );
+            assert_eq!(key.2, IMAGE_PATH_HASH, "every curve binds the Image child");
+            let exact = |ours: &[(f32, [f32; 4])], name: &str| {
+                let source = segments(curve);
+                assert_eq!(source.len(), ours.len(), "{name}: segment count");
+                for (i, ((st, sc), (ot, oc))) in source.iter().zip(ours).enumerate() {
+                    assert_eq!(st.to_bits(), ot.to_bits(), "{name}: key time {i}");
+                    for k in 0..4 {
+                        assert_eq!(
+                            sc[k].to_bits(),
+                            oc[k].to_bits(),
+                            "{name}: segment {i} coefficient {k}"
+                        );
+                    }
+                }
+            };
+            match key {
+                (4, 3, _, 1) => {
+                    exact(&PAGE_FORWARD_SCALE_Y, "localScale.y");
+                    seen[0] = true;
+                }
+                (4, 3, _, 0) | (4, 3, _, 2) => {
+                    for (t, c) in segments(curve) {
+                        assert_eq!(c, [0.0, 0.0, 0.0, 1.0], "localScale x/z constant 1 at {t}");
+                    }
+                    seen[1 + key.3 as usize / 2] = true;
+                }
+                (224, ANCHORED_Y, _, 0) => {
+                    exact(&PAGE_FORWARD_POS_Y, "anchoredPosition.y");
+                    seen[3] = true;
+                }
+                (224, ANCHORED_X, _, 0) => {
+                    assert_eq!(curve["kind"], "const");
+                    assert_eq!(curve["raw"][0][1].as_f64(), Some(0.0), "anchoredPosition.x");
+                    seen[4] = true;
+                }
+                other => panic!("unexpected binding {other:?}"),
+            }
+        }
+        assert_eq!(seen, [true; 5], "every bound property is accounted for");
+
+        // Sampled pose, over two loops, against the decoder's own evaluation.
+        let frames = doc["frames60"].as_array().expect("frames60");
+        let rate = doc["sampleRate"].as_f64().unwrap() as f32;
+        for lap in 0..2 {
+            for row in frames.iter().take(frames.len() - 1) {
+                let t = row[0].as_f64().unwrap() as f32;
+                let clock = t + lap as f32 * PAGE_FORWARD_LENGTH;
+                let (anchored, scale_y) = page_forward_pose(clock);
+                let want_scale = row[2].as_f64().unwrap() as f32;
+                let want_y = row[4].as_f64().unwrap() as f32;
+                assert!(
+                    (scale_y - want_scale).abs() < 2e-5,
+                    "scale.y at {t} lap {lap}: {scale_y} vs {want_scale}"
+                );
+                assert!(
+                    (anchored.y - want_y).abs() < 2e-4,
+                    "pos.y at {t} lap {lap}: {} vs {want_y}",
+                    anchored.y
+                );
+                assert_eq!(anchored.x, 0.0);
+            }
+        }
+        // The loop wraps to the first frame at exactly one clip length.
+        let (wrap, wrap_scale) = page_forward_pose(PAGE_FORWARD_LENGTH);
+        assert_eq!(
+            (wrap.y, wrap_scale),
+            (frames[0][4].as_f64().unwrap() as f32, 1.0)
+        );
+        assert_eq!(
+            frames.len() as f32 - 1.0,
+            (length * rate).round(),
+            "sample count covers the clip"
+        );
+    }
+}
