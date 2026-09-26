@@ -711,11 +711,7 @@ impl Plugin for AvatarMaterialPlugin {
         app.add_systems(Startup, (insert_neutral, crate::avatar_wear::load))
             .add_systems(
                 Update,
-                (
-                    plan_and_swap,
-                    crate::avatar_wear::attach_accessory,
-                    crate::avatar_wear::attach_penlight,
-                )
+                (plan_and_swap, crate::avatar_wear::attach_accessory)
                     .chain()
                     .after(crate::player_avatar::body::wire),
             )
