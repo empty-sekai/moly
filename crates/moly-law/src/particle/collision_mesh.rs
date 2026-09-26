@@ -52,6 +52,7 @@
 //! asked for.
 
 mod box_sweep;
+mod convex_sweep;
 mod bv4_cook;
 mod bv4_query;
 mod cook;
@@ -61,6 +62,7 @@ mod sweep;
 mod vector;
 
 pub use box_sweep::{box_world_bounds, sweep_sphere_box, BoxSweepTrace};
+pub use convex_sweep::{convex_world_bounds, sweep_sphere_convex, GaussMap, HullSupport};
 pub use cook::{cook, CookedMesh};
 pub use overlap::{overlap_box, overlap_oriented_box, world_bounds};
 pub use sweep::{sweep_sphere, MeshSweepHit, SweepTrace};
