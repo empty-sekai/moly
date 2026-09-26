@@ -1216,9 +1216,19 @@ pub fn box_world_bounds(half_extents: [f32; 3], pose: &Pose) -> [f32; 6] {
 /// inflation one grown as `pool_box` does.
 pub fn pool_bounds_box(half_extents: [f32; 3], pose: &Pose) -> [f32; 6] {
     if arms::on("poolUnbufferedRecipe") {
-        return box_bounds(half_extents, pose, UNBUFFERED_INFLATION);
+        // The replay compares this variant with the engine's 1.01 bounds.
+        return flush_bounds_box(half_extents, pose);
     }
     pool_box(box_world_bounds(half_extents, pose))
+}
+
+/// The box the scene query's flush of dirty shapes writes into the static
+/// pruner's pool for a box shape that moved to `pose` (the composed pose of
+/// `shape_world_pose`): the engine's static-shape bounds, the world bounds
+/// with no contact offset at inflation 1.01 about their centre. Not the add
+/// path's box (`pool_bounds_box`): the flush computes the bounds itself.
+pub fn flush_bounds_box(half_extents: [f32; 3], pose: &Pose) -> [f32; 6] {
+    box_bounds(half_extents, pose, UNBUFFERED_INFLATION)
 }
 
 /// `Gu::computeBounds` of a box with no contact offset at an inflation: the
