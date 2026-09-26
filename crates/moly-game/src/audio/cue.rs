@@ -108,6 +108,8 @@ pub(crate) fn track_volume(
 pub(crate) enum RngSlot {
     Ambient,
     OneShot,
+    /// Timeline SE clips (see `start_timeline_cue`).
+    #[allow(dead_code)]
     Timeline,
 }
 
@@ -125,7 +127,7 @@ impl CueRngs {
 /// One track of the current round.
 enum RoundVoice {
     Waiting { slot: usize, due: f64 },
-    Sounding { slot: usize, entity: Entity },
+    Sounding { entity: Entity },
     Done,
 }
 
@@ -359,10 +361,7 @@ pub(crate) fn advance_cue_playbacks(
                                 if voice.stream.loops { "（波形带循环：这一轮不会自己收）" } else { "" }
                             );
                         }
-                        playback.voices[index] = RoundVoice::Sounding {
-                            slot,
-                            entity: sound,
-                        };
+                        playback.voices[index] = RoundVoice::Sounding { entity: sound };
                     }
                     RoundVoice::Sounding { entity: sound, .. } => {
                         if one_shot_finished_or_failed(sound, &server, &players, &sinks) {

@@ -1624,6 +1624,9 @@ pub(crate) struct CuePlan {
     voices: Vec<PlanVoice>,
     repeat: bool,
     gain: Option<CueGain>,
+    /// A structured cue's parameters that do not reach the sound here (bus
+    /// sends to the effect buses, parameter 69, command codes not decoded).
+    not_consumed: Option<String>,
 }
 
 /// The plan of a structured cue; `Err` names what of its structure is not
@@ -1726,6 +1729,7 @@ fn structured_plan(
         weights: (!block.track_values.is_empty()).then(|| block.track_values.clone()),
         voices,
         repeat: block.repeat.is_some_and(|flag| flag != 0),
+        not_consumed: Some(block.not_consumed.clone()),
         gain: index
             .gains
             .get(&(cue.to_string(), package.to_string()))
@@ -1776,6 +1780,7 @@ impl Routing {
             }],
             repeat: false,
             gain: self.sequences.gains.get(&key).cloned(),
+            not_consumed: None,
         })
     }
 
@@ -1786,6 +1791,8 @@ impl Routing {
             .get(&(cue.to_string(), package.to_string()))
     }
 
+    /// Timeline SE clips prepare their sounds through this.
+    #[allow(dead_code)]
     /// The waveform paths one cue can play, in track order (what a caller
     /// that prepares its sounds before starting must request), or the named
     /// reason it cannot be played.
@@ -2421,6 +2428,12 @@ pub(crate) fn advance_ambient(
             None => "cue 的类别与音量命令未导出：按 SE_AREA_AMBIENT 类".to_string(),
         },
     );
+    if let Some(parameters) = &plan.not_consumed {
+        info!(
+            "环境音 cue {} 不进声音的参数：{parameters}",
+            label(&route.cue)
+        );
+    }
     channel.playback = Some(cue::spawn_playback(
         &mut commands,
         cue::start_cue(
@@ -2440,6 +2453,8 @@ pub(crate) fn advance_ambient(
     channel.playing = Some(route.cue.clone());
 }
 
+/// Timeline SE clips start their cue through this.
+#[allow(dead_code)]
 /// Start a timeline's SE clip as the middleware plays the cue (plain or a
 /// sequence of type 0-4), with the waveforms the timeline prepared from
 /// [`Routing::cue_asset_paths`] (track order). Returns the playback entity:
@@ -3142,13 +3157,6 @@ impl SeClass {
     /// SE player times the family's category (no cue facts).
     fn volume(self, bus: &VolumeBus) -> f32 {
         bus.player.se * bus.slot_volume(self.slot())
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ingame => "se_ingame",
-            Self::Ui => "se_ui",
-        }
     }
 }
 
