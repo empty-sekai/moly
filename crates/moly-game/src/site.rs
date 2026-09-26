@@ -1554,6 +1554,10 @@ pub fn spawn_when_ready(
     spawned: Option<Res<GroundMeshes>>,
     reuse: Option<Res<SiteReuse>>,
     hidden_roots: Query<(&ResidentSiteRoot, Has<SiteNavigationRoot>)>,
+    (mut nodes, children): (
+        Query<(&mut Transform, &mut GlobalTransform)>,
+        Query<&Children>,
+    ),
 ) {
     if spawned.is_some() {
         return;
@@ -1699,19 +1703,27 @@ pub fn spawn_when_ready(
             .filter_map(|&root| hidden_roots.get(root).ok().map(|found| (root, found)))
             .collect();
         if kept.len() == scenes.len() {
-            for (root, (resident, navigation)) in kept {
+            let kept: Vec<(Entity, Transform, bool, bool)> = kept
+                .into_iter()
+                .map(|(root, (resident, navigation))| {
+                    (root, resident.local, resident.origin, navigation)
+                })
+                .collect();
+            for (root, local, origin, navigation) in kept {
                 let mut entity = commands.entity(root);
-                entity.remove::<ResidentSiteRoot>().insert((
-                    SiteRoot,
-                    resident.local,
-                    Visibility::Hidden,
-                ));
-                if resident.origin {
+                entity
+                    .remove::<ResidentSiteRoot>()
+                    .insert((SiteRoot, Visibility::Hidden));
+                if origin {
                     entity.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin);
                 }
                 if !navigation {
                     entity.insert(SiteVisualPending);
                 }
+                // Readers of this frame (the walk face, the camera framing)
+                // take the instance's world transforms: put it back at the
+                // origin now, not at the next propagation.
+                place_subtree(root, local, &mut nodes, &children);
             }
             info!(
                 "[site] AddSite: {} roots of the listed site shown again (no new instance)",
@@ -1749,6 +1761,34 @@ pub fn spawn_when_ready(
     commands.insert_resource(GroundMeshes(ground));
     commands.insert_resource(WalkFaceMeshes(face));
     commands.insert_resource(SiteScenePending(pending));
+}
+
+/// Set a root's local transform and write its subtree's global transforms
+/// from it at once.
+fn place_subtree(
+    root: Entity,
+    local: Transform,
+    nodes: &mut Query<(&mut Transform, &mut GlobalTransform)>,
+    children: &Query<&Children>,
+) {
+    let global = GlobalTransform::from(local);
+    if let Ok((mut transform, mut own)) = nodes.get_mut(root) {
+        *transform = local;
+        *own = global;
+    }
+    let mut stack = vec![(root, global)];
+    while let Some((entity, global)) = stack.pop() {
+        let Ok(kids) = children.get(entity) else {
+            continue;
+        };
+        for kid in kids.iter() {
+            if let Ok((transform, mut own)) = nodes.get_mut(kid) {
+                let child = global.mul_transform(*transform);
+                *own = child;
+                stack.push((kid, child));
+            }
+        }
+    }
 }
 
 /// Update: `HomeSiteObstacleController.UpdateView` on the revealed rings: a
