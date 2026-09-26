@@ -3,7 +3,11 @@
 //! server's values to the client's copies.
 //!
 //! **What is server and what is client.** The document (schemaVersion 2,
-//! [`document`]) holds only server-decided values. The client's copies are
+//! [`document`]) holds only server-decided values. The client side of the
+//! newer sections ([`client`]: the music record settings, the avatar wear and
+//! its masters, the home actions' requests, the native instruments) depends
+//! on no server internals, so it can sit below the server in the crate
+//! graph; the model here is its only writer. The client's copies are
 //! [`ClientUserData`] (`UserDataManager`'s `UserMysekaiGamedata`,
 //! `UserMysekaiStamina`, `UserMysekaiColorfulPass` and the server date it
 //! last got) and the application's local lists (the local document,
@@ -76,11 +80,15 @@
 //! fixed server clock) to the native document; game mode reads no
 //! environment variable ([`instrument_env`]).
 
+pub(crate) mod avatar;
+pub(crate) mod client;
 pub(crate) mod clock;
 pub(crate) mod delivery;
 pub(crate) mod document;
 pub(crate) mod edit;
+pub(crate) mod home_action;
 pub(crate) mod local;
+pub(crate) mod music;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -107,6 +115,12 @@ const PHENOMENA_INDEX: &str = "moly://phenomena/index.json";
 const STAMINAS: &str = "moly://mysekai-staminas.json";
 const STAMINA_RECOVERY: &str = "moly://mysekai-stamina-recovery.json";
 const GATE_CATALOG: &str = "moly://fixture-models/player-data.json";
+const CONFIGS: &str = "moly://configs.json";
+const MUSIC_RECORDS: &str = "moly://mysekai-music-records.json";
+const AVATAR_COSTUMES: &str = "moly://avatar-costumes.json";
+const AVATAR_ACCESSORIES: &str = "moly://avatar-accessories.json";
+const AVATAR_SKIN_COLORS: &str = "moly://avatar-skin-colors.json";
+const AVATAR_COORDINATES: &str = "moly://avatar-coordinates.json";
 
 /// Seconds between the running clock's refresh checks.
 const TICK_SECONDS: f32 = 1.0;
@@ -144,6 +158,12 @@ pub(crate) struct Masters {
     pub(crate) gates: Option<(Vec<i32>, Vec<i32>)>,
     /// The birthday-party delivery tables (`birthday-party-delivery.json`).
     pub(crate) delivery: Option<delivery::DeliveryTables>,
+    /// The master configs (`configs.json`): configKey -> value.
+    pub(crate) configs: Option<std::collections::BTreeMap<String, String>>,
+    /// The music record ids (`mysekai-music-records.json`).
+    pub(crate) music_records: Option<Vec<i32>>,
+    /// The avatar wear masters.
+    pub(crate) avatar: client::avatar::AvatarMasters,
     pub(crate) missing: Vec<String>,
 }
 
@@ -184,6 +204,9 @@ pub(crate) enum ResponseKind {
     BirthdayPartyDelivery,
     BirthdayPartyGather,
     BirthdayPartySeat,
+    HomeActionCraft,
+    HomeActionCanvas,
+    HomeActionSketch,
 }
 
 impl ResponseKind {
@@ -198,6 +221,9 @@ impl ResponseKind {
             Self::Sync => "sync (panel action)",
             Self::BirthdayPartyDelivery => "PutUserMysekaiBirthdayPartyDeliveryApi",
             Self::BirthdayPartyGather => "PutUserMysekaiBirthdayPartyGatherApi",
+            Self::HomeActionCraft => "PostUserMysekaiCraftApi (craft)",
+            Self::HomeActionCanvas => "PostUserMysekaiCraftApi (canvas)",
+            Self::HomeActionSketch => "PostUserMysekaiHousingSketchApi",
             Self::BirthdayPartySeat => {
                 "user data (the rows of the birthday parties now in session)"
             }
@@ -219,6 +245,10 @@ pub(crate) struct ServerResponse {
     pub(crate) schedules: Option<Vec<ScheduleRow>>,
     /// The birthday-party delivery sections it carries.
     pub(crate) delivery: delivery::DeliveryUpdate,
+    /// `userMysekaiMusicPlayFixtureSettings` when it carries them.
+    pub(crate) music: Option<Vec<client::music::MusicPlaySetting>>,
+    /// `userAvatar` when it carries it.
+    pub(crate) avatar: Option<client::avatar::UserAvatar>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -390,6 +420,10 @@ pub(crate) struct ServerModel {
     /// The birthday parties in session at the server clock, as the server
     /// last seated them.
     pub(super) party_masters: Vec<delivery::PartyMaster>,
+    /// Home-action requests answered (craft, canvas, sketch).
+    pub(super) home_action_replies: [u64; 3],
+    /// The native avatar instrument, applied once the masters resolve.
+    pub(super) avatar_instrument: avatar::AvatarInstrument,
 }
 
 static MODEL: Mutex<Option<ServerModel>> = Mutex::new(None);
@@ -437,6 +471,8 @@ impl ServerModel {
             client: Value::Null,
             persist,
             party_masters: Vec::new(),
+            home_action_replies: [0; 3],
+            avatar_instrument: avatar::AvatarInstrument::default(),
         }
     }
 
@@ -614,6 +650,8 @@ impl ServerModel {
             colorful_pass: has(SECTION_PASS).then_some(self.doc.colorful_pass),
             schedules,
             delivery: self.delivery_update(&sections),
+            music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
+            avatar: has(avatar::SECTION).then_some(self.doc.avatar),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -639,8 +677,19 @@ impl ServerModel {
                 "the stored server document disagrees with the masters: {error} (kept as stored)"
             ));
         }
+        if !self.avatar_instrument.is_empty() {
+            let instrument = std::mem::take(&mut self.avatar_instrument);
+            let (avatar, unresolved) = instrument.resolve(&self.masters.avatar);
+            for line in unresolved {
+                self.push_error(format!("native avatar instrument: {line}"));
+            }
+            info!("[server] native overlay: MOLY_AVATAR_MOCK_* -> userAvatar {avatar:?}");
+            self.doc.avatar = avatar;
+            self.commit();
+        }
         let mut carries = vec![SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
         carries.extend(delivery::SECTIONS);
+        carries.extend([music::SECTION, avatar::SECTION]);
         self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
@@ -692,6 +741,8 @@ pub(crate) fn check_seed_local(text: &str) -> Result<(), String> {
 /// The browser game: the seed's documents (checked by the seed parser),
 /// persisted through the page backend.
 pub(crate) fn install_from_seed(server: Option<String>, local_text: Option<String>) {
+    // The page's game mode: every native instrument is off from here on.
+    client::enter_game_mode();
     let model = match server {
         Some(text) => {
             let (doc, pending) = document::parse_v2(&text).unwrap_or_else(|reason| {
@@ -716,25 +767,14 @@ pub(crate) fn installed() -> bool {
     with_model(|_| ()).is_some()
 }
 
-/// The environment variable of a native instrument. Game mode reads none:
-/// every instrument is off there, and the one document is the only input.
-pub(crate) fn instrument_env(name: &str) -> Option<String> {
-    if crate::browser_game::game_mode_active() {
-        return None;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = name;
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::env::var(name).ok()
-    }
-}
+/// The native instruments' environment variables (read by the owners'
+/// seams as `crate::server::instrument_env`; the function lives with the
+/// client side).
+pub(crate) use client::instrument_env;
 
-/// The native overlay of the menu mock's instruments onto the document.
-fn native_overlay(doc: &mut ServerDocument) {
+/// The native overlay of the groups' instruments onto the document; the
+/// avatar instrument names bundles and a colour, so it waits for the masters.
+fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
     let int = |name: &str| -> Option<i32> {
         let raw = instrument_env(name)?;
         match raw.trim().parse::<i32>() {
@@ -787,6 +827,25 @@ fn native_overlay(doc: &mut ServerDocument) {
     }
     if instrument_env("MOLY_MENU_MOCK_STAMINA_MAX").is_some() {
         warn!("[server] MOLY_MENU_MOCK_STAMINA_MAX is not applied: the gauge maximum is the master maxStamina");
+    }
+    const MUSIC: &str = "MOLY_AUDIO_MOCK_MUSIC_RECORD";
+    if let Some(raw) = instrument_env(MUSIC) {
+        doc.music_settings = music::parse_instrument(MUSIC, &raw);
+        info!(
+            "[server] native overlay: {MUSIC} -> userMysekaiMusicPlayFixtureSettings ({} sites)",
+            doc.music_settings.len()
+        );
+    }
+    let text = |name: &str| {
+        instrument_env(name)
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty())
+    };
+    avatar::AvatarInstrument {
+        coordinate: text("MOLY_AVATAR_MOCK_COORDINATE"),
+        costume: text("MOLY_AVATAR_MOCK_COSTUME"),
+        accessory: text("MOLY_AVATAR_MOCK_ACCESSORY"),
+        skin_color: text("MOLY_AVATAR_MOCK_SKIN_COLOR"),
     }
 }
 
@@ -929,6 +988,36 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
             "birthday-party-delivery.json (delivery reward, point bonus and total reward tables)",
             delivery::parse_tables,
         ),
+        (
+            server.load(CONFIGS),
+            "configs.json (master configs)",
+            parse_configs,
+        ),
+        (
+            server.load(MUSIC_RECORDS),
+            "mysekai-music-records.json (music records)",
+            music::parse_records,
+        ),
+        (
+            server.load(AVATAR_COSTUMES),
+            "avatar-costumes.json (avatar costumes)",
+            avatar::parse_costumes,
+        ),
+        (
+            server.load(AVATAR_ACCESSORIES),
+            "avatar-accessories.json (avatar accessories)",
+            avatar::parse_accessories,
+        ),
+        (
+            server.load(AVATAR_SKIN_COLORS),
+            "avatar-skin-colors.json (avatar skin colours)",
+            avatar::parse_skin_colors,
+        ),
+        (
+            server.load(AVATAR_COORDINATES),
+            "avatar-coordinates.json (avatar coordinates)",
+            avatar::parse_coordinates,
+        ),
     ]));
 }
 
@@ -955,11 +1044,13 @@ fn install_native(mut commands: Commands, read: Option<ResMut<SliceRead>>) {
     let mut doc = document::migrate_v1(&text, migration).unwrap_or_else(|reason| {
         panic!("server document ({}) is refused: {reason}", origin.name())
     });
-    native_overlay(&mut doc);
-    install(ServerModel::new(doc, origin, Vec::new(), false));
+    let instrument = native_overlay(&mut doc);
+    let mut model = ServerModel::new(doc, origin, Vec::new(), false);
+    model.avatar_instrument = instrument;
+    install(model);
 }
 
-fn keyed_rows(value: &Value, table: &str) -> Result<Vec<Value>, String> {
+pub(super) fn keyed_rows(value: &Value, table: &str) -> Result<Vec<Value>, String> {
     if value["semantics"]["table"].as_str() != Some(table) {
         return Err(format!("it is not the {table} table"));
     }
@@ -971,11 +1062,39 @@ fn keyed_rows(value: &Value, table: &str) -> Result<Vec<Value>, String> {
     Ok(rows)
 }
 
-fn int32(value: &Value, key: &str) -> Result<i32, String> {
+pub(super) fn int32(value: &Value, key: &str) -> Result<i32, String> {
     value[key]
         .as_i64()
         .and_then(|v| i32::try_from(v).ok())
         .ok_or_else(|| format!("{key} of {value} is not an int"))
+}
+
+/// `configs.json`: configKey -> value (the value is a string in the master).
+fn parse_configs(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if value["semantics"]["table"].as_str() != Some("configs") {
+        return Err("it is not the configs table".into());
+    }
+    let entries = value["entries"]
+        .as_object()
+        .ok_or("configs has no entries")?;
+    let configs = entries
+        .iter()
+        .map(|(key, row)| {
+            let text = match &row["value"] {
+                Value::String(text) => text.clone(),
+                Value::Number(number) => number.to_string(),
+                other => {
+                    return Err(format!(
+                        "configs {key} has a value {other} that is not text"
+                    ))
+                }
+            };
+            Ok((key.clone(), text))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?;
+    masters.configs = Some(configs);
+    Ok(())
 }
 
 fn parse_phenomena(text: &str, masters: &mut Masters) -> Result<(), String> {
@@ -1120,6 +1239,7 @@ fn resolve_masters(
             if let Some(tables) = model.masters.delivery.clone() {
                 commands.insert_resource(tables);
             }
+            commands.insert_resource(model.masters.avatar.clone());
         }
     });
 }
@@ -1208,6 +1328,8 @@ fn deliver(
     mut local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>,
     mut total_exp: Option<ResMut<crate::mysekai_rank::UserTotalExp>>,
     mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
+    mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
+    mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1225,6 +1347,12 @@ fn deliver(
     let mut schedule = live_rows;
     for mut response in responses {
         birthday.apply(std::mem::take(&mut response.delivery));
+        if let Some(rows) = response.music.take() {
+            music_copy.apply(rows);
+        }
+        if let Some(avatar) = response.avatar.take() {
+            avatar_copy.apply(avatar);
+        }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
             None => ClientUserData {
@@ -1317,6 +1445,8 @@ fn deliver(
         "hasMysekaiColorfulPass": copy.has_mysekai_colorful_pass(realtime),
         "currentTimestamp": copy.current_timestamp(realtime),
         "birthdayParty": birthday.view(),
+        "userMysekaiMusicPlayFixtureSettings": music_copy.view(),
+        "userAvatar": client::avatar::value(&avatar_copy.avatar),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1391,6 +1521,8 @@ impl Plugin for ServerPlugin {
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()
             .init_resource::<delivery::ClientBirthdayPartyData>()
+            .init_resource::<client::music::ClientMusicPlaySettings>()
+            .init_resource::<client::avatar::ClientUserAvatar>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(
@@ -1406,6 +1538,8 @@ impl Plugin for ServerPlugin {
                     .chain(),
             )
             .add_systems(Last, persist_local);
+        let endpoint = app.world_mut().register_system(home_action::handle);
+        app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
     }
 }
 
@@ -1427,6 +1561,11 @@ pub(crate) fn document_view() -> String {
             "client": model.client,
             "joined": model.joined,
             "missingMasters": model.masters.missing,
+            "homeActionReplies": {
+                "craft": model.home_action_replies[0],
+                "canvas": model.home_action_replies[1],
+                "sketch": model.home_action_replies[2],
+            },
             "errors": model.errors,
         })
         .to_string()

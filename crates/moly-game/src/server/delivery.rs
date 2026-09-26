@@ -14,9 +14,15 @@
 //! - `userCards`: `UserCard` rows reduced to `cardId`; read when
 //!   `policies.ownedCards` is `stated`.
 //! - `userHonors`: `UserHonor` (`honorId`, `level`, `obtainedAt`).
-//! - `masterConfigs`: the two master configs the delivery reads with
-//!   `MasterDataManager.GetMasterConfigToInt` (no master copy on disk has
-//!   them, so the server document holds them).
+//!
+//! The two master configs the delivery reads with
+//! `MasterDataManager.GetMasterConfigToInt`
+//! (`birthday_party_delivery_base_point`,
+//! `birthday_party_delivery_reward_drop_upper_limit`) are master data: the
+//! server model reads them from the configs master (`configs.json`) and the
+//! join hands them to the client's copy, standing in for the master download.
+//! A document written before this was known may carry a `masterConfigs` key;
+//! it is read and ignored by name.
 //!
 //! The mock's own keys: `policies.ownedCards` and
 //! `policies.birthdayPlantRefreshPoints`. Every key is optional when a
@@ -101,11 +107,6 @@ const MYSEKAI_MATERIAL: &str = "mysekai_material";
 pub(crate) const NEW_PARTY_DROPPED: i32 = 3;
 /// The delivery item stock policy's have-quantity.
 pub(crate) const DELIVERY_ITEM_STOCK: i32 = 300;
-/// `birthday_party_delivery_base_point` of a document that states none.
-pub(crate) const DEFAULT_BASE_POINT: i32 = 100;
-/// `birthday_party_delivery_reward_drop_upper_limit` of a document that
-/// states none.
-pub(crate) const DEFAULT_DROP_UPPER_LIMIT: i32 = 5;
 /// `policies.birthdayPlantRefreshPoints` of a document that states none (the
 /// repeat-refresh requirement of every party row on disk).
 pub(crate) const DEFAULT_PLANT_REFRESH_POINTS: i32 = 10_000;
@@ -149,8 +150,6 @@ pub(crate) struct DeliveryDoc {
     /// `userCards` card ids (read when the owned cards policy is stated).
     pub(crate) cards: Vec<i64>,
     pub(crate) honors: Vec<HonorRow>,
-    pub(crate) base_point: i32,
-    pub(crate) drop_upper_limit: i32,
     pub(crate) plant_refresh_points: i32,
 }
 
@@ -163,8 +162,6 @@ impl Default for DeliveryDoc {
             owned_cards: OwnedCards::EveryPointBonusCard,
             cards: Vec::new(),
             honors: Vec::new(),
-            base_point: DEFAULT_BASE_POINT,
-            drop_upper_limit: DEFAULT_DROP_UPPER_LIMIT,
             plant_refresh_points: DEFAULT_PLANT_REFRESH_POINTS,
         }
     }
@@ -274,20 +271,6 @@ pub(crate) fn parse_owned_cards(value: &Value) -> Result<OwnedCards, String> {
     }
 }
 
-/// `masterConfigs`: (base point, drop upper limit).
-pub(crate) fn parse_master_configs(value: &Value) -> Result<(i32, i32), String> {
-    let configs = object(value, SECTION_MASTER_CONFIGS)?;
-    only(
-        configs,
-        &[CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT],
-        SECTION_MASTER_CONFIGS,
-    )?;
-    Ok((
-        int32(configs, CONFIG_BASE_POINT, SECTION_MASTER_CONFIGS)?,
-        int32(configs, CONFIG_DROP_UPPER_LIMIT, SECTION_MASTER_CONFIGS)?,
-    ))
-}
-
 impl DeliveryDoc {
     /// The section from a schemaVersion 2 document: each key optional (the
     /// default when absent), each present one strict.
@@ -312,8 +295,8 @@ impl DeliveryDoc {
         if let Some(value) = doc.get(SECTION_HONORS) {
             out.honors = parse_honors(value)?;
         }
-        if let Some(value) = doc.get(SECTION_MASTER_CONFIGS) {
-            (out.base_point, out.drop_upper_limit) = parse_master_configs(value)?;
+        if doc.contains_key(SECTION_MASTER_CONFIGS) {
+            warn!("[server] the document's {SECTION_MASTER_CONFIGS} is ignored: {CONFIG_BASE_POINT} and {CONFIG_DROP_UPPER_LIMIT} are master data (configs.json)");
         }
         if let Some(value) = policies.get("ownedCards") {
             out.owned_cards = parse_owned_cards(value)?;
@@ -390,16 +373,6 @@ impl DeliveryDoc {
                 ));
             }
         }
-        for (name, value) in [
-            (CONFIG_BASE_POINT, self.base_point),
-            (CONFIG_DROP_UPPER_LIMIT, self.drop_upper_limit),
-        ] {
-            if value < 0 {
-                return Err(format!(
-                    "{SECTION_MASTER_CONFIGS}.{name} = {value} is negative"
-                ));
-            }
-        }
         if self.plant_refresh_points < 0 {
             return Err(format!(
                 "policies.birthdayPlantRefreshPoints = {} is negative (0 turns the refresh off)",
@@ -436,10 +409,6 @@ impl DeliveryDoc {
         doc.insert(
             SECTION_HONORS.into(),
             Value::Array(self.honors.iter().map(|row| honor_value(*row)).collect()),
-        );
-        doc.insert(
-            SECTION_MASTER_CONFIGS.into(),
-            json!({CONFIG_BASE_POINT: self.base_point, CONFIG_DROP_UPPER_LIMIT: self.drop_upper_limit}),
         );
         policies.insert(
             "ownedCards".into(),
@@ -833,13 +802,38 @@ impl ServerModel {
                 .then(|| doc.mysekai_materials.clone()),
             cards: has(SECTION_CARDS).then(|| self.owned_cards()),
             honors: has(SECTION_HONORS).then(|| doc.honors.clone()),
-            configs: has(SECTION_MASTER_CONFIGS).then(|| {
-                BTreeMap::from([
-                    (CONFIG_BASE_POINT.to_owned(), doc.base_point),
-                    (CONFIG_DROP_UPPER_LIMIT.to_owned(), doc.drop_upper_limit),
-                ])
-            }),
+            configs: has(SECTION_MASTER_CONFIGS)
+                .then(|| self.delivery_configs())
+                .flatten(),
         }
+    }
+
+    /// The delivery's master configs the configs master holds as integers
+    /// (`None` while the master is absent).
+    fn delivery_configs(&self) -> Option<BTreeMap<String, i32>> {
+        let configs = self.masters.configs.as_ref()?;
+        Some(
+            [CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT]
+                .into_iter()
+                .filter_map(|key| {
+                    let value = configs.get(key)?.trim().parse::<i32>().ok()?;
+                    Some((key.to_owned(), value))
+                })
+                .collect(),
+        )
+    }
+
+    /// One delivery master config (`GetMasterConfigToInt`), refused by name.
+    fn master_config_int(&self, key: &str) -> Result<i32, String> {
+        let configs = self.masters.configs.as_ref().ok_or_else(|| {
+            format!("the configs master (configs.json) is absent: {key} cannot be read")
+        })?;
+        let raw = configs
+            .get(key)
+            .ok_or_else(|| format!("the configs master has no {key}"))?;
+        raw.trim()
+            .parse::<i32>()
+            .map_err(|_| format!("the configs master's {key} = {raw:?} is not an integer"))
     }
 
     /// The new party row and delivery item stock policies for the parties in
@@ -971,6 +965,8 @@ impl ServerModel {
                 tables.member_bonus(i64::from(birthday_party_id), &owned),
             )
         };
+        let base_point = self.master_config_int(CONFIG_BASE_POINT)?;
+        let drop_upper_limit = self.master_config_int(CONFIG_DROP_UPPER_LIMIT)?;
         let now = self.now_ms();
         let delivery = &self.doc.delivery;
         let row = *delivery
@@ -988,16 +984,16 @@ impl ServerModel {
             unsynchronized_cost: 0,
             synchronized_points: row.delivery_total_point,
             unsynchronized_points: 0,
-            base_point: delivery.base_point,
+            base_point,
             member_bonus,
             reward_loop_requirement: requirement,
-            max_drop_item_count: delivery.drop_upper_limit,
+            max_drop_item_count: drop_upper_limit,
         };
         let loops_before = tally.total_drop_count();
         let spent = tally.spend(consumed);
         let loops_after = tally.total_drop_count();
         let new_loops = loops_after - loops_before;
-        let free = (delivery.drop_upper_limit - row.dropped_mysekai_material_count).max(0);
+        let free = (drop_upper_limit - row.dropped_mysekai_material_count).max(0);
         let dropped = new_loops.min(free);
         let obtained = new_loops - dropped;
         let points_before = row.delivery_total_point;
@@ -1031,9 +1027,7 @@ impl ServerModel {
             &mut changed,
         )?;
         info!(
-            "[server] delivery reply party {birthday_party_id}: sent {consumed}, spent {spent} (have {have}); points {points_before} -> {points_after} (base {}, bonus {member_bonus}, loop requirement {requirement}); loops {loops_before} -> {loops_after}; dropped {dropped} (limit {}), obtained {obtained}; isRefreshed {is_refreshed} (birthday plant refresh every {refresh} points, an inference)",
-            self.doc.delivery.base_point,
-            self.doc.delivery.drop_upper_limit
+            "[server] delivery reply party {birthday_party_id}: sent {consumed}, spent {spent} (have {have}); points {points_before} -> {points_after} (base {base_point}, bonus {member_bonus}, loop requirement {requirement}); loops {loops_before} -> {loops_after}; dropped {dropped} (limit {drop_upper_limit}), obtained {obtained}; isRefreshed {is_refreshed} (birthday plant refresh every {refresh} points, an inference)"
         );
         Ok((
             DeliveryResponse {
@@ -1253,15 +1247,6 @@ pub(crate) fn edit_path(
             doc.honors = rows;
             Some(SECTION_HONORS)
         }),
-        [SECTION_MASTER_CONFIGS, key] => (|| {
-            let amount = edit_int(value, path)?;
-            match *key {
-                CONFIG_BASE_POINT => doc.base_point = amount,
-                CONFIG_DROP_UPPER_LIMIT => doc.drop_upper_limit = amount,
-                _ => return Err(format!("{path} is not a delivery master config")),
-            }
-            Ok(Some(SECTION_MASTER_CONFIGS))
-        })(),
         ["policies", "ownedCards"] => parse_owned_cards(value).map(|policy| {
             doc.owned_cards = policy;
             // The client's card copy follows the policy.
@@ -1313,10 +1298,6 @@ pub(crate) fn schema_sections(model: Option<&ServerModel>) -> Value {
                 {"path": "userHonors", "type": "rows", "row": {"honorId": "int", "level": "int", "obtainedAt": "epoch-ms"}},
                 {"path": "userCards", "type": "rows", "row": {"cardId": "int"},
                     "when": {"policies.ownedCards": OWNED_STATED}},
-                {"path": format!("{SECTION_MASTER_CONFIGS}.{CONFIG_BASE_POINT}"), "type": "int", "min": 0,
-                    "note": "a master config no master copy on disk has"},
-                {"path": format!("{SECTION_MASTER_CONFIGS}.{CONFIG_DROP_UPPER_LIMIT}"), "type": "int", "min": 0,
-                    "note": "a master config no master copy on disk has"},
             ],
         },
         {
@@ -1381,6 +1362,10 @@ mod tests {
     fn model() -> ServerModel {
         let mut model = super::super::tests::model();
         model.masters.delivery = Some(tables());
+        model.masters.configs = Some(BTreeMap::from([
+            (CONFIG_BASE_POINT.to_owned(), "100".to_owned()),
+            (CONFIG_DROP_UPPER_LIMIT.to_owned(), "5".to_owned()),
+        ]));
         model.joined = true;
         model
     }
@@ -1441,6 +1426,23 @@ mod tests {
     }
 
     #[test]
+    fn the_delivery_refuses_without_the_configs_master() {
+        let mut model = model();
+        model.seat_parties(&[PARTY]);
+        model.masters.configs = None;
+        assert!(model
+            .birthday_party_delivery(1, 10)
+            .unwrap_err()
+            .contains("configs.json"));
+        assert_eq!(
+            model
+                .delivery_update(&[SECTION_MASTER_CONFIGS.to_owned()])
+                .configs,
+            None
+        );
+    }
+
+    #[test]
     fn a_gather_can_reach_a_total_reward() {
         let mut model = model();
         model.seat_parties(&[PARTY]);
@@ -1497,7 +1499,12 @@ mod tests {
         doc.owned_cards = OwnedCards::Stated;
         let (mut top, mut policies) = (Map::new(), Map::new());
         doc.write(&mut top, &mut policies);
+        assert!(!top.contains_key(SECTION_MASTER_CONFIGS));
         assert_eq!(DeliveryDoc::parse(&top, &policies).unwrap(), doc);
+        // An earlier document's masterConfigs reads and is ignored.
+        let mut earlier = top.clone();
+        earlier.insert(SECTION_MASTER_CONFIGS.into(), json!({CONFIG_BASE_POINT: 1}));
+        assert_eq!(DeliveryDoc::parse(&earlier, &policies).unwrap(), doc);
         assert_eq!(
             DeliveryDoc::parse(&Map::new(), &Map::new()).unwrap(),
             DeliveryDoc::default()
@@ -1524,10 +1531,8 @@ mod tests {
             NEW_PARTY_DROPPED
         );
         assert!(client.cards().contains(&7));
-        assert_eq!(
-            client.master_config_int(CONFIG_BASE_POINT),
-            Some(DEFAULT_BASE_POINT)
-        );
+        assert_eq!(client.master_config_int(CONFIG_BASE_POINT), Some(100));
+        assert_eq!(client.master_config_int(CONFIG_DROP_UPPER_LIMIT), Some(5));
         let (_, changed) = model.birthday_party_delivery(1, 10).unwrap();
         let update = model.delivery_reply(ResponseKind::BirthdayPartyDelivery, &changed);
         client.apply(update);
