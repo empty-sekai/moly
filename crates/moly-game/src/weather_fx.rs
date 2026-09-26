@@ -3054,9 +3054,9 @@ pub(crate) fn spawn_when_ready(
         }
     }
     // GPU readiness gates the preparation, as the source's fade waits for its
-    // load. The render resets readiness to pending every frame and sets it
-    // ready only when every pass pipeline and the view's colour target are
-    // ready; once this plan's preparation has started the fade, a frame that
+    // load. The render publishes each frame's readiness verdict: ready only
+    // when every pass pipeline and the view's colour target are ready; once
+    // this plan's preparation has started the fade, a frame that
     // went back to pending does not hold the installs, which follow the
     // source order from there (a failure above still stops them).
     let ready = |source: &SourceParticle| matches!(*source.readiness.lock().unwrap(), ParticleReadiness::Ready);
