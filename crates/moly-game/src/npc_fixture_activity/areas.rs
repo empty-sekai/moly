@@ -26,6 +26,13 @@ impl NpcFixtureAreas {
         let mut rows = HashMap::new();
         for (name, source) in packages {
             let parsed = (|| {
+                // FixtureFactory: a bundle without a FixtureBundleMeta gets a
+                // fresh one whose four arrays are all empty (0 x 0), so the
+                // fixture has no motion area and uses no grid.
+                if crate::fixture_scene_inputs::bundle_has_no_meta(source) {
+                    let empty = GridAreaData::from_meta(0, 0, |_, _| false);
+                    return Ok((empty.clone(), empty));
+                }
                 if source["hasMeta"].as_bool() != Some(true) || !source["readError"].is_null() {
                     return Err(format!("{name} has no complete source FixtureBundleMeta"));
                 }
