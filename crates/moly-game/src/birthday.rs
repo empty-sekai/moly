@@ -6,10 +6,12 @@
 //! TimeUtility.IsWithinTime 的两臂律（行上 startAt/closedAt，
 //! epoch 毫秒；closedAt 0 = 无截止），见 [`is_within_time`]。
 //!
-//! 「现在」：真源的当前时刻是服务器对过表的基准加启动以来的实时偏移
-//! （主管理器域）。本机离线无对表基准，墙钟 epoch 毫秒作替身；验收钩子
-//! `MOLY_BIRTHDAY_NOW_MS` 把「现在」钉成定值——行值零 mock，钉的只是
-//! 钟（同 MOLY_SITEMAP_AUTOCLICK_* 家族）。
+//! "Now": the source's current time is the server date it last got plus the
+//! real time since. Here it is the one server clock of the server model
+//! (device time by default, or the fixed time the server document sets);
+//! before the model is installed, device time. The native instrument
+//! `MOLY_BIRTHDAY_NOW_MS` fixes that server clock through the model's native
+//! overlay; game mode reads no environment variable.
 
 use bevy::asset::{Assets, LoadState};
 use bevy::prelude::*;
@@ -80,10 +82,10 @@ pub(crate) fn parse(
         .filter(|row| is_within_time(now, row.start_at, row.closed_at))
         .map(|row| row.label())
         .collect();
-    let clock = if std::env::var("MOLY_BIRTHDAY_NOW_MS").is_ok() {
-        "MOLY_BIRTHDAY_NOW_MS 钉值"
+    let clock = if crate::server::server_now_ms().is_some() {
+        "server clock"
     } else {
-        "墙钟"
+        "device time (the server model is not installed yet)"
     };
     info!(
         "[birthday] 派对主表就绪：{} 行，now={}（{clock}），档期内 {} 行{}——庆典门按档期放行/拒",
@@ -197,28 +199,8 @@ pub(crate) fn is_within_time(check_at: i64, start_at: i64, end_at: i64) -> bool 
     }
 }
 
-/// 「现在」的 epoch 毫秒：`MOLY_BIRTHDAY_NOW_MS` 钉值优先（验收钩子，
-/// 非法值响亮拒绝——静默退墙钟会把「开门」验成「关门」）；否则墙钟。
+/// The epoch millisecond "now": the server clock, or device time before the
+/// server model is installed.
 pub(crate) fn now_ms() -> i64 {
-    if let Ok(pinned) = std::env::var("MOLY_BIRTHDAY_NOW_MS") {
-        return pinned.trim().parse::<i64>().unwrap_or_else(|_| {
-            panic!("MOLY_BIRTHDAY_NOW_MS 不是整型毫秒：{pinned:?}")
-        });
-    }
-    wall_now_ms()
-}
-
-/// 墙钟的 epoch 毫秒。wasm 上 std 的 SystemTime 是未实现的桩（运行时
-/// panic），epoch 走 JS 的 Date.now；native 走系统时钟。
-#[cfg(target_arch = "wasm32")]
-fn wall_now_ms() -> i64 {
-    js_sys::Date::now() as i64
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn wall_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("系统时钟早于 Unix 纪元")
-        .as_millis() as i64
+    crate::server::server_now_ms().unwrap_or_else(crate::server::clock::device_now_ms)
 }

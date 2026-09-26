@@ -14,14 +14,18 @@
 //! (`ManagedEffect.Play`: `SetActive(true)`, then `ParticleSystem.Play()` on
 //! the root system, children included), even a copy still playing. No copy
 //! is ever returned: `ManagedEffect.Stop` only stops emission. An emit of a
-//! type whose pool is not built returns nothing. `SiteMoveEffect`,
+//! type whose pool is not built returns nothing; `Setup` runs in the field
+//! scene's `SetupAsync`, and `CreateAssetsPool` loads each row's bundle
+//! synchronously (`AssetManager.LoadAssetBundle`, then `UniTask.Yield`), so
+//! every pool is built a frame per row inside that setup. `SiteMoveEffect`,
 //! `FollowEffect` and `HarvestObjectEffect` do not end themselves: after its
 //! systems stop a copy stays active and draws nothing.
 //!
 //! Here the table and the two indexes that resolve its bundles are requested
 //! at startup and the table is read once. Every row whose bundle ships a
-//! prefab and a particle document has both requested; once both have loaded,
-//! its `poolSize` copies are instantiated (at most one row a frame), held
+//! prefab and a particle document has both requested and its ring of
+//! `poolSize` copies made at once; once both have loaded, its copies are
+//! instantiated (at most one row a frame), held
 //! inactive (their source nodes hidden, so their particle clocks do not run)
 //! and their particles prepared while inactive, so that an emit plays a
 //! prepared copy at once. A copy's systems are prepared as the explicit
@@ -51,6 +55,11 @@
 //! Named differences:
 //! - Rows are built in the order their prefab and document finish loading
 //!   (still one row a frame), not in table order.
+//! - The loads are asynchronous here, so a row can still be loading when an
+//!   emit comes, where the source's pool has long been built. The emit takes
+//!   the ring's next copy as the source's does and places it; the copy
+//!   starts when it has been instantiated and prepared (the same late start
+//!   as a copy played before its systems were prepared), not at the emit.
 //! - A copy the ring reaches again is played by the particle host's own
 //!   `ParticleSystem.Play` ([`crate::weather_fx::fixture::play`]: a system
 //!   that still holds particles keeps its seeds and restarts its clock; one
@@ -444,6 +453,49 @@ impl EffectPools {
             rows.len()
         );
         self.table = TableState::Read;
+        // Every row's ring exists from here, as the source's pools do once
+        // `Setup`'s pass has run: an emit takes the ring's next copy while
+        // the copy's prefab or document is still loading.
+        for index in 0..self.rows.len() {
+            self.allocate_ring(world, index);
+        }
+    }
+
+    /// The row's `poolSize` copies, empty until its prefab has loaded (held
+    /// hidden, out of any site's rendering hold).
+    fn allocate_ring(&mut self, world: &mut World, index: usize) {
+        let (kind, pool_size, name) = {
+            let row = &self.rows[index];
+            (row.kind, row.pool_size, row.name.clone())
+        };
+        let mut ring = Vec::with_capacity(pool_size);
+        for slot in 0..pool_size {
+            let root = world
+                .spawn((
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                    SiteMoveOwned,
+                    Name::new(format!("effect copy {name} {slot}")),
+                ))
+                .id();
+            ring.push(self.copies.len());
+            self.copies.push(PoolCopy {
+                kind,
+                slot,
+                root,
+                age: 0.0,
+                planned: false,
+                held: false,
+                plays: 0,
+                played_at: None,
+                prepared_at: None,
+                stopped: false,
+                draws: Vec::new(),
+                timing: PrepTiming::start(),
+                next_sample: 0.0,
+            });
+        }
+        self.rows[index].ring = ring;
     }
 
     /// Instantiate the copies of one row whose prefab and document have
@@ -468,6 +520,10 @@ impl EffectPools {
                     row.doc_path
                 );
                 row.state = RowState::Failed;
+                let roots: Vec<Entity> = row.ring.iter().map(|&i| self.copies[i].root).collect();
+                for root in roots {
+                    world.despawn(root);
+                }
                 continue;
             }
             if !(server.is_loaded_with_dependencies(&row.glb)
@@ -488,45 +544,38 @@ impl EffectPools {
                     row.glb_path
                 );
                 row.state = RowState::Failed;
+                let roots: Vec<Entity> = row.ring.iter().map(|&i| self.copies[i].root).collect();
+                for root in roots {
+                    world.despawn(root);
+                }
                 continue;
             };
             let (kind, pool_size, name) = (row.kind, row.pool_size, row.name.clone());
-            let mut ring = Vec::with_capacity(pool_size);
-            for slot in 0..pool_size {
-                let root = world
-                    .spawn((
-                        SceneRoot(scene.clone()),
-                        Transform::IDENTITY,
-                        // Hidden until its source nodes are held inactive
-                        // (the first frame its instance exists).
-                        Visibility::Hidden,
-                        SiteMoveOwned,
-                        PendingInstance,
-                        Name::new(format!("effect copy {name} {slot}")),
-                    ))
-                    .id();
-                ring.push(self.copies.len());
-                self.copies.push(PoolCopy {
-                    kind,
-                    slot,
-                    root,
-                    age: 0.0,
-                    planned: false,
-                    held: false,
-                    plays: 0,
-                    played_at: None,
-                    prepared_at: None,
-                    stopped: false,
-                    draws: Vec::new(),
-                    timing: PrepTiming::start(),
-                    next_sample: 0.0,
-                });
+            let ring = row.ring.clone();
+            let mut early = 0;
+            for &copy in &ring {
+                let (root, played) = (self.copies[copy].root, self.copies[copy].plays > 0);
+                // An unplayed copy stays hidden until its source nodes are
+                // held inactive (the first frame its instance exists); one
+                // emitted while loading keeps the visibility its emit set.
+                let Ok(mut entity) = world.get_entity_mut(root) else {
+                    warn!(
+                        "{} effect {name} copy {root:?} is gone before its prefab loaded",
+                        log_tag(kind)
+                    );
+                    continue;
+                };
+                entity.insert((SceneRoot(scene.clone()), PendingInstance));
+                if !played {
+                    entity.insert(Visibility::Hidden);
+                }
+                early += usize::from(played);
+                self.copies[copy].timing = PrepTiming::start();
             }
             let row = &mut self.rows[index];
-            row.ring = ring;
             row.state = RowState::Built;
             info!(
-                "[effect-pool] type {kind} {name}: pool built, {pool_size} inactive copies of {}",
+                "[effect-pool] type {kind} {name}: pool built, {pool_size} copies of {} ({early} emitted while it loaded, starting when prepared)",
                 row.prefab
             );
             return;
@@ -567,19 +616,15 @@ impl EffectPools {
             });
         };
         match row.state {
-            RowState::Loading => {
-                return Err(format!(
-                    "the pool of {} is not built yet (its prefab or particle document is still loading)",
-                    row.name
-                ))
-            }
+            // The ring exists: the copy is placed now and starts when its
+            // instance is made and prepared.
+            RowState::Loading | RowState::Built => {}
             RowState::Failed => {
                 return Err(format!(
                     "{} has no pool (its prefab or particle document failed)",
                     row.name
                 ))
             }
-            RowState::Built => {}
         }
         let slot = row.pick;
         row.pick = (row.pick + 1) % row.ring.len();

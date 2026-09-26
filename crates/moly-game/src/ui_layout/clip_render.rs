@@ -1,5 +1,6 @@
-//! RectMask2D consumer for the existing prefab renderer's images and glyphs.
-//! No atlas is created: clipped text uses the same BalloonArt image pages.
+//! RectMask2D and stencil Mask consumer for the existing prefab renderer's
+//! images and glyphs. No atlas is created: clipped text uses the same
+//! BalloonArt image pages.
 
 use super::NodeCache;
 use bevy::{
@@ -17,6 +18,7 @@ use moly_assets::ui_layout::{
     clipping::{UiClipRect, maskable},
 };
 use std::marker::PhantomData;
+use super::stencil_mask::MAX_STENCIL_QUADS;
 
 const SHADER: Handle<Shader> = Handle::Uuid(
     Uuid::from_u128(0x7569_7265_6374_636c_6970_0000_0000_0001),
@@ -29,8 +31,15 @@ struct ClipUniform {
     rect: Vec4,
     // xy: softness; zw: source projection's half-pixel term in canvas units.
     softness_pixel: Vec4,
-    // texture, hard-clipping, FillColor's alpha-only texture read, reserved.
+    // texture, hard-clipping, FillColor's alpha-only texture read, stencil
+    // test (the masking graphic's quad count).
     flags: UVec4,
+    // x: the masking graphic's vertex alpha; y: 1 when it samples its texture.
+    stencil_alpha: Vec4,
+    // The masking graphic's quads in canvas units (min xy, max xy).
+    stencil_quads: [Vec4; MAX_STENCIL_QUADS],
+    // Per quad, canvas point to the masking graphic's uv: xy scale, zw offset.
+    stencil_uvs: [Vec4; MAX_STENCIL_QUADS],
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -40,6 +49,9 @@ pub(crate) struct UiClipMaterial {
     #[texture(1)]
     #[sampler(2)]
     texture: Option<Handle<Image>>,
+    #[texture(3)]
+    #[sampler(4)]
+    stencil_texture: Option<Handle<Image>>,
 }
 
 impl Material2d for UiClipMaterial {
@@ -71,14 +83,39 @@ pub(super) fn install(app: &mut App) {
         .expect("UI clip shader installation");
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Clipped {
     rect: UiClipRect,
     softness: Vec2,
     pixel_scale: Vec2,
     hard: bool,
     fill_color: bool,
+    stencil: Option<Stencil>,
 }
+
+/// The stencil a maskable Graphic is tested against: the masking graphic of
+/// its enclosing `Mask` (one level). The masking graphic writes the stencil
+/// where its own fragment survives the alpha clip `StencilMaterial` turns on
+/// for it (`color.a - 0.001`, color = texture sample x vertex colour), inside
+/// the quad it draws; a Graphic under it draws only there.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Stencil {
+    /// The quads the masking graphic draws: the canvas rectangle (min xy,
+    /// max xy) and the uv map of a canvas point `p` (`p * xy + zw`). Empty
+    /// when it draws nothing (a Filled amount below 0.001), so nothing under
+    /// it is drawn.
+    pub(super) quads: Vec<(Vec4, Vec4)>,
+    /// The masking graphic's vertex alpha (its Color32 alpha times the
+    /// inherited group alpha).
+    pub(super) vertex_alpha: f32,
+    /// The masking graphic's texture; `None` when it has no sprite (the white
+    /// texture, alpha 1).
+    pub(super) texture: Option<Handle<Image>>,
+}
+
+/// A rectangle test that never fails, for a stencil-tested Graphic outside
+/// every RectMask2D (the vertex stage clamps the rectangle to 2e10).
+const UNBOUNDED: f32 = 1e10;
 
 pub(super) fn for_component(component: &UiComponent, rect: &UiRect) -> Option<Clipped> {
     if !maskable(component) {
@@ -101,6 +138,36 @@ pub(super) fn for_component(component: &UiComponent, rect: &UiRect) -> Option<Cl
         upper = upper.max(point);
     }
     clip.valid &= clip.max.cmpgt(lower).all() && upper.cmpgt(clip.min).all();
+    Some(profile(component, clip))
+}
+
+/// A Graphic's clip under a stencil Mask as well as its RectMask2D. A Graphic
+/// that is not maskable has stencil value 0 and is not tested
+/// (`MaskableGraphic.GetModifiedMaterial`). Outside every RectMask2D the
+/// rectangle test is a hard, unbounded one, so only the stencil decides.
+pub(super) fn with_stencil(component: &UiComponent, rect: &UiRect, stencil: Option<&Stencil>) -> Option<Clipped> {
+    let clip = for_component(component, rect);
+    let Some(stencil) = stencil.filter(|_| maskable(component)) else {
+        return clip;
+    };
+    let mut clip = clip.unwrap_or_else(|| {
+        let unbounded = UiClipRect {
+            min: Vec2::splat(-UNBOUNDED),
+            max: Vec2::splat(UNBOUNDED),
+            softness: Vec2::ZERO,
+            valid: true,
+        };
+        let mut clip = profile(component, unbounded);
+        clip.hard = true;
+        clip
+    });
+    clip.rect.valid &= !stencil.quads.is_empty();
+    clip.stencil = Some(stencil.clone());
+    Some(clip)
+}
+
+/// The clip parameters of the Graphic's material family for a rectangle.
+fn profile(component: &UiComponent, clip: UiClipRect) -> Clipped {
     let default_image = component.fields.get("m_fontSize").is_none()
         && component.fields["m_Material"]
             .as_array()
@@ -122,6 +189,7 @@ pub(super) fn for_component(component: &UiComponent, rect: &UiRect) -> Option<Cl
         pixel_scale: Vec2::ONE,
         hard: false,
         fill_color: false,
+        stencil: None,
     };
     match shader {
         "UI/Default" | "Sekai/UI/UIGradient" => {}
@@ -148,7 +216,7 @@ pub(super) fn for_component(component: &UiComponent, rect: &UiRect) -> Option<Cl
             component.path_id
         ),
     }
-    Some(result)
+    result
 }
 
 pub(super) struct Draw<'a, 'w, 's> {
@@ -175,6 +243,13 @@ impl Draw<'_, '_, '_> {
         if !clip.rect.valid {
             return;
         }
+        let stencil = clip.stencil.as_ref();
+        let mut stencil_quads = [Vec4::ZERO; MAX_STENCIL_QUADS];
+        let mut stencil_uvs = [Vec4::ZERO; MAX_STENCIL_QUADS];
+        for (i, (quad, uv)) in stencil.map_or(&[][..], |s| &s.quads[..]).iter().enumerate() {
+            stencil_quads[i] = *quad;
+            stencil_uvs[i] = *uv;
+        }
         let material = self.materials.add(UiClipMaterial {
             value: ClipUniform {
                 color: linear(color.with_alpha(color.alpha() * alpha)),
@@ -194,10 +269,16 @@ impl Draw<'_, '_, '_> {
                     u32::from(texture.is_some()),
                     u32::from(clip.hard),
                     u32::from(clip.fill_color),
-                    0,
+                    stencil.map_or(0, |s| s.quads.len() as u32),
                 ),
+                stencil_alpha: stencil.map_or(Vec4::ZERO, |s| {
+                    Vec4::new(s.vertex_alpha, f32::from(u8::from(s.texture.is_some())), 0., 0.)
+                }),
+                stencil_quads,
+                stencil_uvs,
             },
             texture,
+            stencil_texture: stencil.and_then(|s| s.texture.clone()),
         });
         // All mesh vertices live in this prefab's existing canvas coordinates.
         // The view's normal parent transform/camera still positions the draw.
@@ -317,7 +398,7 @@ impl Draw<'_, '_, '_> {
                     Transform::from_xyz(0., 0., depth),
                     Color::WHITE,
                     page.take(),
-                    clip,
+                    clip.clone(),
                     alpha,
                 );
             }

@@ -20,6 +20,20 @@
 // Basic material defaults follow the phenomenon. Animation events also write
 // override mode 1 (force on) and 2 (force off), carried in emission.w.
 //
+// # JP 6.8.1 additions (Basic only; the Rug programs are unchanged)
+//
+// - `_UseEmissionColorPicker`, a runtime int in every JP Basic program: on,
+//   the emission colour is `_EmissionColor.xyz * _EmissionIntensity` instead
+//   of the mask texel (the source samples the mask only in the else branch;
+//   sampling it unconditionally here selects the same value).
+// - FIXTURE_CRYSTAL_EMISSION, the crystal programs, after the gate:
+//   `_UseNormalDrivenEmission`: e = hl * (e * _NormalBrightToEmission * 0.2 -
+//   e * _NormalDarkEmission * 0.2) + e * _NormalDarkEmission * 0.2, with hl the
+//   main target's half-Lambert term on the normal-mapped normal;
+//   `_UseCenterEmissionDamp`: e *= 1 - sat((sat(N.V) - min) / max(|max - min|,
+//   1e-5)) * sat(_CenterEmissionDamp), with N the interpolated normal and V the
+//   direction to the camera.
+//
 // # 与主 pass 的两点已知同差（同站点族的既有裁决）
 //
 // - 抖动屏幕坐标走片元内置坐标（源走 clip 位与屏参乘 0.125）；两者在
@@ -65,6 +79,17 @@ struct EmissionObject {
     emission: vec4<f32>,
     // x is the main renderer's joint offset (storage-buffer backend only).
     skin: vec4<u32>,
+    // JP: (_EmissionColor.xyz * _EmissionIntensity, _UseEmissionColorPicker).
+    colour_picker: vec4<f32>,
+    // Crystal: (_UseNormalDrivenEmission, _NormalDarkEmission,
+    // _NormalBrightToEmission, _UseCenterEmissionDamp).
+    crystal_emission: vec4<f32>,
+    // Crystal: (_CenterEmissionDamp, _CenterEmissionSuppressMin,
+    // _CenterEmissionSuppressMax, 0).
+    centre_damp: vec4<f32>,
+    // Normal map: (_BumpScale, _NormalExaggeration, _UseNormalParallaxShift,
+    // _NormalParallaxShift).
+    normal_map: vec4<f32>,
 }
 
 #ifdef SKINNED
@@ -131,6 +156,9 @@ struct SiteEnv {
 @group(1) @binding(2) var main_tex: texture_2d<f32>;
 @group(1) @binding(3) var main_sampler: sampler;
 @group(1) @binding(4) var mask_sampler: sampler;
+// `_NormalMap` of the crystal normal-map variant (fallback elsewhere, unread).
+@group(1) @binding(5) var normal_tex: texture_2d<f32>;
+@group(1) @binding(6) var normal_sampler: sampler;
 
 // ---- 色彩域（改这个 pass 的输出之前先读）----
 //
@@ -177,6 +205,12 @@ struct EmissionVertexInput {
     @location(2) joint_indices: vec4<u32>,
     @location(3) joint_weights: vec4<f32>,
 #endif
+#ifdef FIXTURE_CRYSTAL_EMISSION
+    @location(5) normal: vec3<f32>,
+#ifdef EMISSION_UV1
+    @location(6) uv1: vec2<f32>,
+#endif
+#endif
 }
 
 struct EmissionVertexOutput {
@@ -192,6 +226,14 @@ struct EmissionVertexOutput {
     @location(4) clip_corner_3: vec2<f32>,
     @location(5) clip_valid: f32,
     @location(6) ndc: vec2<f32>,
+#endif
+#ifdef FIXTURE_CRYSTAL_EMISSION
+    @location(7) world_position: vec3<f32>,
+    @location(8) world_normal: vec3<f32>,
+#ifdef FIXTURE_NORMAL_MAP
+    // Raw uv1 in the source's bottom-left origin, as in the main pass.
+    @location(9) uv1: vec2<f32>,
+#endif
 #endif
 }
 
@@ -214,6 +256,25 @@ fn emission_vertex(mesh: EmissionVertexInput) -> EmissionVertexOutput {
         uv.x,
         select(uv.y, 1.0 - uv.y, object.params.uv_v_flip.x > 0.5),
     );
+#ifdef FIXTURE_CRYSTAL_EMISSION
+    out.world_position = world_position.xyz;
+    // The normal matrix as the cofactor of the model's upper 3x3, sign-fixed
+    // by the determinant: the inverse transpose up to a positive scale, which
+    // the normalisation removes (the main pass uses the inverse transpose).
+    let m0 = world_from_local[0].xyz;
+    let m1 = world_from_local[1].xyz;
+    let m2 = world_from_local[2].xyz;
+    let cofactor = mat3x3<f32>(cross(m1, m2), cross(m2, m0), cross(m0, m1));
+    let det_sign = select(-1.0, 1.0, dot(m0, cross(m1, m2)) >= 0.0);
+    out.world_normal = normalize(cofactor * mesh.normal) * det_sign;
+#ifdef FIXTURE_NORMAL_MAP
+#ifdef EMISSION_UV1
+    out.uv1 = mesh.uv1;
+#else
+    out.uv1 = vec2<f32>(0.0);
+#endif
+#endif
+#endif
 
 #ifdef FIXTURE_WINDOW_CLIP
     out.ndc = clip.xy / clip.w;
@@ -251,6 +312,41 @@ fn emission_vertex(mesh: EmissionVertexInput) -> EmissionVertexOutput {
 
 // ---- 片元共用件（与主 pass 同一份 Bayer 表与窗门判定）----
 
+#ifdef FIXTURE_NORMAL_MAP
+// The JP normal-map block: the same statements as `crystal_normal` in
+// `fixture_material.wgsl` (change both), reading this pass's object slots.
+fn crystal_normal(n: vec3<f32>, world_position: vec3<f32>, uv1: vec2<f32>) -> vec3<f32> {
+    let duv_x = dpdx(uv1);
+    let duv_y = dpdy(uv1);
+    let dpos_x = dpdx(world_position);
+    let dpos_y = dpdy(world_position);
+    let dp1perp = n.yzx * dpos_x.zxy - n.zxy * dpos_x.yzx;
+    let dp2perp = dpos_y.yzx * n.zxy - n.yzx * dpos_y.zxy;
+    let tangent_raw = dp2perp * duv_x.x + duv_y.x * dp1perp;
+    let bitangent_raw = dp2perp * duv_x.y + duv_y.y * dp1perp;
+    let frame_scale = inverseSqrt(max(dot(tangent_raw, tangent_raw), dot(bitangent_raw, bitangent_raw)));
+    let tangent = frame_scale * tangent_raw;
+    let bitangent = frame_scale * bitangent_raw;
+    let to_camera = env.camera_position.xyz - world_position;
+    let view = inverseSqrt(dot(to_camera, to_camera)) * to_camera;
+    let shifted = vec2<f32>(dot(tangent, view), dot(bitangent, view))
+        * vec2<f32>(object.normal_map.w) + uv1;
+    let uv = select(uv1, shifted, object.normal_map.z > 0.5);
+    let fetch_uv = vec2<f32>(uv.x, select(uv.y, 1.0 - uv.y, object.params.uv_v_flip.x > 0.5));
+    let texel = srgb_format_encode(
+        textureSampleBias(normal_tex, normal_sampler, fetch_uv, env.mip_bias.x).rgb,
+    );
+    var decoded = texel * vec3<f32>(2.0) + vec3<f32>(-1.0);
+    decoded = vec3<f32>(decoded.xy * vec2<f32>(object.normal_map.x), decoded.z);
+    var bumped = bitangent * decoded.y;
+    bumped = decoded.x * tangent + bumped;
+    bumped = decoded.z * n + bumped;
+    bumped = bumped * inverseSqrt(dot(bumped, bumped)) - n;
+    bumped = vec3<f32>(object.normal_map.y) * bumped + n;
+    return inverseSqrt(dot(bumped, bumped)) * bumped;
+}
+#endif
+
 fn cross2(a: vec2<f32>, b: vec2<f32>) -> f32 {
     return a.x * b.y - a.y * b.x;
 }
@@ -276,6 +372,15 @@ fn emission_fragment(in: EmissionVertexOutput) -> @location(0) vec4<f32> {
     // Texture derivatives are evaluated before conditional clipping.
     let base = textureSampleBias(main_tex, main_sampler, in.uv, env.mip_bias.x);
     let mask = textureSampleBias(mask_tex, mask_sampler, in.uv, env.mip_bias.x);
+#ifdef FIXTURE_CRYSTAL_EMISSION
+    // The normal block runs before the clip chain in the source as well.
+    let crystal_n = normalize(in.world_normal);
+#ifdef FIXTURE_NORMAL_MAP
+    let crystal_lit_normal = crystal_normal(crystal_n, in.world_position, in.uv1);
+#else
+    let crystal_lit_normal = crystal_n;
+#endif
+#endif
 
 #ifdef FIXTURE_WINDOW_CLIP
     // 窗外观门（模板 Equal 的等价形，判定式与主 pass 同一条）。
@@ -331,6 +436,23 @@ fn emission_fragment(in: EmissionVertexOutput) -> @location(0) vec4<f32> {
         case 2: { gate = 0.0; }
         default: {}
     }
-    return vec4<f32>(srgb_format_encode(mask.rgb) * gate, base.a);
+    var emission = select(srgb_format_encode(mask.rgb), object.colour_picker.xyz, object.colour_picker.w > 0.5);
+    emission = emission * gate;
+#ifdef FIXTURE_CRYSTAL_EMISSION
+    let half_lambert = dot(env.light_vector.xyz, crystal_lit_normal) * 0.5 + 0.5;
+    let driven_dark = emission * vec3<f32>(object.crystal_emission.y) * vec3<f32>(0.200000003);
+    let driven_span = emission * vec3<f32>(object.crystal_emission.z) * vec3<f32>(0.200000003) - driven_dark;
+    emission = select(emission, vec3<f32>(half_lambert) * driven_span + driven_dark,
+        object.crystal_emission.x > 0.5);
+    let to_camera = env.camera_position.xyz - in.world_position;
+    let view = inverseSqrt(dot(to_camera, to_camera)) * to_camera;
+    let n_dot_v = clamp(dot(crystal_n, view), 0.0, 1.0);
+    var suppress = (n_dot_v - object.centre_damp.y)
+        / max(abs(object.centre_damp.z - object.centre_damp.y), 9.99999975e-06);
+    suppress = clamp(suppress, 0.0, 1.0);
+    let damp = suppress * -clamp(object.centre_damp.x, 0.0, 1.0) + 1.0;
+    emission = select(emission, vec3<f32>(damp) * emission, object.crystal_emission.w > 0.5);
+#endif
+    return vec4<f32>(emission, base.a);
 #endif
 }

@@ -35,9 +35,12 @@
 //!   core; here the site-move input lock holds until the executor's Normal
 //!   (in the source the player's closed intercept gate and the HouseEntry
 //!   camera hold the same span).
-//! - `CullingWallFixture` (home to room, 0.03 s after HouseEntry),
-//!   `MysekaiTransitioner.SafeFinish` and the player's render layer have no
-//!   product counterpart; each is logged at its step. The room's expansion
+//! - `MysekaiTransitioner.SafeFinish` does nothing in solo play: no white
+//!   transitioner exists (`UIUtility.PlayMysekaiTransition` has one caller,
+//!   the multiplay layout update). Logged at its step.
+//! - `CullingWallFixture` (home to room, 0.03 s after HouseEntry) and the
+//!   player's render layer have no product counterpart; each is logged at
+//!   its step. The room's expansion
 //!   performance in `OnFinishEnterAsync` is `site_expansion`.
 //! - Normal's private camera model is written on its exit only while no
 //!   camera tween is in flight: the source clears that flag only during its
@@ -429,7 +432,7 @@ impl DoorMove {
                     if self.kind == DoorKind::RoomToHome {
                         self.change_site(world);
                     } else {
-                        info!("[site-move] MoveMyRoom: ChangeSubState(34) (multiplay notification, solo no-op); MysekaiTransitioner.SafeFinish: no product counterpart");
+                        info!("[site-move] MoveMyRoom: ChangeSubState(34) (multiplay notification, solo no-op); MysekaiTransitioner.SafeFinish: no instance in solo play, nothing to finish");
                         self.stage = Stage::RoomWait(Delay::new(
                             door_law::wait(door_law::ROOM_TO_ROOM_WAIT),
                             frame,
@@ -862,7 +865,7 @@ impl DoorMove {
     fn site_ready(&mut self, world: &mut World, frame: u64) {
         match self.kind {
             DoorKind::HomeToRoom => {
-                info!("[site-move] GetSite, SiteManager.SetupRoom (room and door set up, ShowDoor); SetPlayerLayer: no product counterpart; MoveMyRoom: MysekaiTransitioner.SafeFinish: no product counterpart; OpenDoorAsync().Forget()");
+                info!("[site-move] GetSite, SiteManager.SetupRoom (room and door set up, ShowDoor); SetPlayerLayer: no product counterpart; MoveMyRoom: MysekaiTransitioner.SafeFinish: no instance in solo play; OpenDoorAsync().Forget()");
                 super::room_door::open(world);
                 self.stage = Stage::EnterRoomWait(Delay::new(
                     door_law::wait(door_law::ENTER_ROOM_DOOR_WAIT),
@@ -947,7 +950,7 @@ impl DoorMove {
         }
         self.house_entry_camera(world);
         world.remove_resource::<super::BgmHold>();
-        info!("[site-move] PlayBGMAsync released; StartMysekaiTransition: MysekaiTransitioner.SafeFinish, LiveTransitioner.SafeFinish (no product counterpart)");
+        info!("[site-move] PlayBGMAsync released; StartMysekaiTransition: MysekaiTransitioner.SafeFinish (no instance in solo play), LiveTransitioner.SafeFinish (no cover up after the entry)");
         self.stage = Stage::StartTransitionWait(Delay::new(
             door_law::wait(door_law::START_TRANSITION_WAIT),
             frame,

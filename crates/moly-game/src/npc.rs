@@ -15,13 +15,17 @@
 //! 原地预转；独立转身与家具局部贴合保留各自相位。
 //!
 //! 常规路线按源调用选步行，速度来自角色表的 walkSpeedMetersPerSecond。
-//! 名册来自服务端面板的访客行（见 `server_panel`）；出生分布仍为面内
-//! 等距散布的具名替身；家具 Fit 的
+//! 名册来自服务端面板的访客行（见 `server_panel`）。成员建在世界原点、
+//! 单位旋转（单机房间的实例化不带位姿，取零向量与单位四元数），隐藏在
+//! 入站目标里，由门控制器的随机登场落位（见 `npc_gate`）；家具 Fit 的
 //! 局部移动遵循先位移后转向；导航再附着仍非原生代理，不能当作完整还原。
 //! 换站保留实体/装配，由 reseed 在新面定案后重置落位与目标机。
 
 pub(crate) mod change_site;
 pub(crate) mod change_site_state;
+pub(crate) mod dispose;
+pub(crate) mod entry_probe;
+pub(crate) mod gate_entries;
 pub(crate) mod random_fixture_action;
 pub(crate) mod residency;
 
@@ -44,10 +48,17 @@ use moly_law::path::{
     FORWARD_FALLBACK, WAYPOINT_SAMPLE_DISTANCE,
 };
 
-/// 名册成员身位距站点中心的半径，替身值（真源出生点的来源未接）。
-/// 只喂玩家出生环（`player` 域与 [`ring_scale`]）；名册成员的落位走
-/// 目标面的可行走格（见 `npc_objective::seed_position`）。
+/// The player's spawn ring radius, a stand-in owned by the player domain
+/// (see `player` and [`ring_scale`]). No NPC reads it: a roster member is
+/// created at [`CREATION_POSITION`] and placed by the gate's appearance.
 const SEED_RING_RADIUS: f32 = 3.0;
+
+/// Where a roster member is created: the single-player room instantiates
+/// the NPC's network object through the overload without a pose, which
+/// passes the zero vector and the identity rotation. The member stays there,
+/// hidden in the entry-site objective, until the gate's appearance warps it
+/// (see `npc_gate`).
+pub(crate) const CREATION_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// 地表高度采样半径：取「脚下的地面」，与站点取景同款。
 const SURFACE_RADIUS: f32 = 2.0;
@@ -687,6 +698,10 @@ pub struct RouteStops {
     /// neither completes nor fails while the state is Talk, and a local fit
     /// (a timed lerp and its rotate) runs to its end regardless of the state.
     suspended: Option<MotionPhase>,
+    /// A route Rest ended under a player talk: the next leg changed the state
+    /// from Talk to AutoMove and started the agent again, so the talk's hold
+    /// no longer holds this move (see [`advance`]).
+    released_from_talk: bool,
     /// The NPC's navigation agent in the engine's crowd.
     crowd: CrowdMotion,
 }
@@ -967,9 +982,8 @@ impl Catalog {
                 )
             })
             .collect();
-        // 行序按 unitId 定序：出生位按名册位次等距取格（见
-        // `npc_objective::seed_position`），顺序要不受清单键的字典序影响
-        // ——重播种按身份列排序，两处同序才能同一员拿到同一出生位。
+        // 行序按 unitId 定序：Full 全员展示与重播种都按这个次序读清单，
+        // 不受清单键的字典序影响。
         rows.sort_by_key(|(unit_id, ..)| *unit_id);
         Self(rows)
     }
@@ -1007,9 +1021,10 @@ pub(crate) fn parse(
 ///
 /// 名册是服务端面板的访客行展开后的 unit（行序、去重；真源在建 NPC 之前
 /// 先设对话列表，所以这里等对话列表就位）。Full 是产品自有的全员展示，
-/// 不是访客状态，保留全目录。成员落位走目标面的可行走格等距散布（构造上
-/// 不在家具脚印内、在面上）。目标机以出生态插入——起动旗立起（源起动
-/// 装配的同形），首判在名册铺开的当帧由目标机执行：出生即决策、即出发。
+/// 不是访客状态，保留全目录。成员建在 [`CREATION_POSITION`]、单位旋转
+/// （真源单机房间的无位姿实例化），落位由门的随机登场做。目标机以出生态
+/// 插入——起动旗立起（源起动装配的同形），首判在名册铺开的当帧由目标机
+/// 执行：出生即决策、即出发。
 pub(crate) fn spawn_when_ready(
     mut commands: Commands,
     catalog: Option<Res<Catalog>>,
@@ -1088,14 +1103,15 @@ pub(crate) fn spawn_when_ready(
     let count = roster.len();
     let mut ids = Vec::with_capacity(count);
     let (mut pause_min, mut pause_max) = (f32::INFINITY, f32::NEG_INFINITY);
-    for (i, (unit_id, walk_speed, pause_seconds, idle, walk)) in roster.into_iter().enumerate() {
-        let seed = crate::npc_objective::seed_position(face, i, count);
+    for (unit_id, walk_speed, pause_seconds, idle, walk) in roster.into_iter() {
+        let seed = CREATION_POSITION;
         pause_min = pause_min.min(*pause_seconds);
         pause_max = pause_max.max(*pause_seconds);
         let unit = CharacterUnitId(*unit_id);
         let mut member = commands.spawn((
             unit,
-            Transform::from_translation(Vec3::from(seed)),
+            // The identity rotation of the instantiation.
+            Transform::from_translation(Vec3::from(seed)).with_rotation(Quat::IDENTITY),
             // 成员是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
             // 不带它时子实体的可见性只能靠引擎的回退（视为可见）并告警。
             if away {
@@ -2160,9 +2176,13 @@ pub(crate) fn declare_navigation_action(
 /// A player talk does not end the move: the talk state stops a navigation
 /// agent, the move's poll pauses while the state is Talk and resumes after
 /// it (a stopped agent then ends Stacked by the stuck rule), and a local fit
-/// runs to its end during the talk. A route Rest's countdown pauses during
-/// the talk (named gap: the source's delay runs on and its next leg changes
-/// the state to AutoMove). The talk's turns own the rotation meanwhile.
+/// runs to its end during the talk. A route Rest's wait is an Update-timed
+/// delay on the scaled clock that no state reads, so it runs on under the
+/// talk; when it ends, the per-leg loop submits the next leg as it would
+/// otherwise: the state changes to AutoMove (the change has no Talk guard,
+/// so the Talk state ends), the agent's setup starts it again and the leg is
+/// walked while the talk goes on. The talk's turns own the rotation while
+/// the state is Talk.
 #[allow(clippy::type_complexity)]
 pub fn advance(
     time: Res<Time>,
@@ -2236,14 +2256,34 @@ pub fn advance(
             );
         }
         let player_talking = actions.current == NpcAction::Talk;
+        if talk_hold.is_none() {
+            route.released_from_talk = false;
+        }
+        let mut rest_ended_under_talk = false;
         if (talk_hold.is_some() || player_talking)
             && !talk_lease.is_some_and(|lease| lease.approaching)
+            && !route.released_from_talk
         {
+            // A route Rest's delay runs on under the talk (Update timing,
+            // scaled time). Its end falls through to the Rest's end below,
+            // which submits the next leg on this frame.
+            if player_talking {
+                if let Some(MotionPhase::Dwelling {
+                    remaining: Some(remaining),
+                }) = route.suspended
+                {
+                    let left = remaining - dt;
+                    route.suspended = Some(MotionPhase::Dwelling {
+                        remaining: Some(left),
+                    });
+                    rest_ended_under_talk = left <= 0.0;
+                }
+            }
             // A local fit under a player talk runs to its end: the lerp reads
             // the scaled clock and its rotate is a tween, neither reads the
             // state. The talk's own turns own the rotation meanwhile; the fit
             // writes the position only.
-            if player_talking {
+            if player_talking && !rest_ended_under_talk {
                 if let Some(
                     fit @ (MotionPhase::FitWalking { .. } | MotionPhase::FitTurning { .. }),
                 ) = route.suspended
@@ -2262,13 +2302,22 @@ pub fn advance(
                     }
                 }
             }
-            continue; // 对话持留：位移推进整名让位（相位与变换都不写）
+            if !rest_ended_under_talk {
+                continue; // 对话持留：位移推进整名让位（相位与变换都不写）
+            }
         }
         // The talk has ended: the move goes on from its own phase. A stopped
         // agent stays stopped; the poll below resumes with the stuck
         // reference taken before the talk.
         if let Some(suspended) = route.suspended.take() {
             *phase = suspended;
+        }
+        if rest_ended_under_talk {
+            route.released_from_talk = true;
+            info!(
+                "[npc unit={}] t={now:.1} route Rest ended under a player talk: the next leg changes the state to AutoMove and starts the agent",
+                unit.0
+            );
         }
         let (Some(walk_face), Some(objective_face)) =
             (walk_face.as_deref(), objective_face.as_deref())

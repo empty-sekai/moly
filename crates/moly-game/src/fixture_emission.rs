@@ -8,6 +8,11 @@
 //! 为预滤波源。着色程序在 `shaders/fixture_emission.wgsl`（片元式与绑定
 //! 契约的注释在那里）。
 //!
+//! JP 6.8.1 additions carried by [`FixtureEmission`]: the colour picker
+//! (every JP Basic program) and the crystal programs' normal-driven step and
+//! centre damp, which need the world normal (and uv1 plus `_NormalMap` for the
+//! normal-map block) in this pass.
+//!
 //! # 帧内节奏
 //!
 //! Extract 抽带 [`FixtureEmission`] 组件的可见网格及世界矩阵 →
@@ -26,7 +31,8 @@
 //!
 //! - 相机不唯一（未就绪或两台 3D 相机并存）：整帧清名单，一个不画——
 //!   不画好过按错投影画。
-//! - 网格缺 uv 布局：该网格的管线记 INVALID（一次性告警），draw 跳过。
+//! - 网格缺 uv 布局（crystal 变体另缺法线）：该网格的管线记 INVALID（一次性告警），draw 跳过。
+//! - crystal 的 normal map 没有 GPU 侧资源：那条 draw 跳过（同遮罩）。
 //! - 遮罩/主贴图任一没有 GPU 侧资源：那条 draw 跳过（不缓存失败，下一
 //!   帧再试）。
 //! - 本帧没有任何 draw：缓冲照样清——不清会把上一帧的余像喂进泛光。
@@ -83,10 +89,12 @@ const FIXTURE_EMISSION_SHADER: Handle<Shader> = Handle::Uuid(
 pub(crate) const EMISSION_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 /// 逐对象 uniform（着色程序里的 `EmissionObject`）的字节数：对象矩阵
-/// 64 + 材质参数 12 槽 192 + 自发光 vec4 16 + skin address uvec4 16。槽序契约见
-/// `shaders/fixture_emission.wgsl`。家具存 world_from_local；粒子的既有
-/// 对象契约仍存 clip_from_local，二者由相应着色器解释，字节偏移不变。
-const EMISSION_OBJECT_BYTES: usize = 64 + 192 + 16 + 16;
+/// 64 + 材质参数 12 槽 192 + 自发光 vec4 16 + skin address uvec4 16 + JP
+/// second-target slots 4 vec4 64. 槽序契约见 `shaders/fixture_emission.wgsl`。
+/// 家具存 world_from_local；粒子的既有对象契约仍存 clip_from_local，二者由
+/// 相应着色器解释，字节偏移不变（the particle shader reads only the first
+/// 288 bytes; its JP slots are zero）。
+const EMISSION_OBJECT_BYTES: usize = 64 + 192 + 16 + 16 + 64;
 
 /// 逐实体对象池的容量上限；超出的 draw 丢弃并告警一次（摆件量级远低于
 /// 此，上限只是护栏——与阴影链同值）。
@@ -115,6 +123,13 @@ pub struct FixtureEmission {
     pub bright: f32,
     /// `_DarkPhenomenaEmission`（类型 2 的门比较对象）。
     pub dark: f32,
+    /// JP `_UseEmissionColorPicker` on: `_EmissionColor.rgb *
+    /// _EmissionIntensity` replaces the mask texel (the mask slot is then
+    /// sampled but not read).
+    pub colour_picker: Option<[f32; 3]>,
+    /// JP crystal program: the normal-driven step and the centre damp on the
+    /// second target, with the normal-map block for the half-Lambert term.
+    pub crystal: Option<crate::fixture_material::CrystalParams>,
 }
 
 /// Per-instance material override written by fixture animation callbacks.
@@ -173,6 +188,13 @@ struct EmissionDraw {
     phenomena_light: [f32; 4],
     /// (bright, dark)。
     emission: [f32; 4],
+    /// JP second-target slots, in `EmissionObject` order: colour picker,
+    /// crystal emission, centre damp, normal map.
+    jp: [[f32; 4]; 4],
+    /// The crystal steps are compiled in (FIXTURE_CRYSTAL_EMISSION).
+    crystal: bool,
+    /// `_NormalMap` of a crystal with the normal-map block.
+    normal_map: Option<AssetId<Image>>,
     key: FixtureMaterialKey,
     blend: bool,
     /// 视空间 z（右手视空间，前方为负；越负越远）：混合 draw 的排序键。
@@ -216,6 +238,8 @@ struct EmissionPipelineKey {
     particle: Option<(bool, bool, CullArm, BlendArm, bool)>,
     source_state: Option<moly_assets::material_passes::SourceRenderState>,
     skinned: bool,
+    /// (crystal steps, normal-map block, mesh carries uv1).
+    crystal: (bool, bool, bool),
 }
 
 /// 已入队的管线：键 → 缓存 id。
@@ -251,6 +275,7 @@ fn emission_vertex_layout(
     mesh: &RenderMesh,
     particle: bool,
     skinned: bool,
+    crystal: (bool, bool, bool),
 ) -> Result<bevy::mesh::VertexBufferLayout, ()> {
     let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0), Mesh::ATTRIBUTE_UV_0.at_shader_location(1)];
     if particle {
@@ -262,6 +287,14 @@ fn emission_vertex_layout(
     if skinned {
         attributes.push(Mesh::ATTRIBUTE_JOINT_INDEX.at_shader_location(2));
         attributes.push(Mesh::ATTRIBUTE_JOINT_WEIGHT.at_shader_location(3));
+    }
+    // The crystal steps read the world normal; the normal-map block also
+    // reads uv1 when the mesh has it (the main pass reads zero otherwise).
+    if crystal.0 {
+        attributes.push(Mesh::ATTRIBUTE_NORMAL.at_shader_location(5));
+    }
+    if crystal.2 {
+        attributes.push(Mesh::ATTRIBUTE_UV_1.at_shader_location(6));
     }
     mesh.layout.0.get_layout(&attributes).map_err(|_| ())
 }
@@ -293,6 +326,24 @@ fn extract_emission_draws(
             let view_z = view_from_world
                 .transform_point3(world_from_local.w_axis.xyz())
                 .z;
+            let picker = emission.colour_picker;
+            let crystal = emission.crystal.as_ref();
+            let normal_map = crystal.and_then(|crystal| crystal.normal_map.as_ref());
+            let jp = [
+                match picker {
+                    Some([r, g, b]) => [r, g, b, 1.0],
+                    None => [0.0; 4],
+                },
+                crystal.map_or([0.0; 4], |c| [
+                    c.use_normal_driven_emission, c.normal_dark_emission,
+                    c.normal_bright_to_emission, c.use_centre_emission_damp,
+                ]),
+                crystal.map_or([0.0; 4], |c| [
+                    c.centre_emission_damp, c.centre_emission_suppress_min,
+                    c.centre_emission_suppress_max, 0.0,
+                ]),
+                normal_map.map_or([0.0; 4], |n| [n.bump_scale, n.exaggeration, n.use_parallax_shift, n.parallax_shift]),
+            ];
             list.draws.push(EmissionDraw {
                 mesh: mesh.0.id(),
                 skin: skin.map(|_| entity.into()),
@@ -304,6 +355,9 @@ fn extract_emission_draws(
                 // 是粒子专用的，家具这条路不写也不读。
                 phenomena_light: [0.0; 4],
                 emission: [emission.bright, emission.dark, f32::from(emission.force_emission), mode.copied().unwrap_or_default().uniform()],
+                jp,
+                crystal: crystal.is_some(),
+                normal_map: normal_map.map(|n| n.texture.id()),
                 key: emission.key,
                 blend: emission.blend,
                 view_z,
@@ -319,6 +373,7 @@ fn extract_emission_draws(
                 mesh: mesh.0.id(), vertex_transform: view_proj * transform.to_matrix(),
                 skin: None, skin_byte_offset: None,
                 params: None, particle: Some(*effect), emission: [0.0; 4],
+                jp: [[0.0; 4]; 4], crystal: false, normal_map: None,
                 phenomena_light,
                 key: FixtureMaterialKey { fence: false, rug: None, render_queue: 0, alpha_clip: false, dither: false, window_clip: false, fresnel: false, reflection: false },
                 blend: true, view_z: view_from_world.transform_point3(transform.translation()).z,
@@ -368,6 +423,9 @@ fn emission_object_bytes(draw: &EmissionDraw) -> Vec<u8> {
     // Storage buffers address the whole palette; uniform buffers instead use
     // a dynamic byte offset at binding 2. Keep existing particle slots intact.
     for value in [draw.skin_byte_offset.unwrap_or(0) / 64, 0, 0, 0] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in draw.jp.iter().flatten() {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     debug_assert_eq!(bytes.len(), EMISSION_OBJECT_BYTES);
@@ -454,13 +512,18 @@ fn prepare_emission(
             continue;
         }
         let skinned = item.skin.is_some();
-        let vertex_layout = match emission_vertex_layout(render_mesh, item.particle.is_some(), skinned) {
+        let crystal = (
+            item.crystal,
+            item.normal_map.is_some(),
+            item.normal_map.is_some() && render_mesh.layout.0.contains(Mesh::ATTRIBUTE_UV_1),
+        );
+        let vertex_layout = match emission_vertex_layout(render_mesh, item.particle.is_some(), skinned, crystal) {
             Ok(layout) => layout,
             Err(()) => {
                 if !*missing_uv_warned {
                     *missing_uv_warned = true;
                     warn!(
-                        "自发光 pass 遇到缺 uv 布局的网格，该网格不进第二颜色目标（仅告警一次）"
+                        "自发光 pass 遇到缺 uv（或 crystal 所需法线）布局的网格，该网格不进第二颜色目标（仅告警一次）"
                     );
                 }
                 continue;
@@ -481,6 +544,7 @@ fn prepare_emission(
                 particle,
                 source_state: item.particle.and_then(|p| p.source_state),
                 skinned,
+                crystal,
             })
             .or_insert_with(|| {
                 let mut defs: Vec<&str> = Vec::new();
@@ -505,6 +569,15 @@ fn prepare_emission(
                 }
                 if mat_key.window_clip {
                     defs.push("FIXTURE_WINDOW_CLIP");
+                }
+                if crystal.0 {
+                    defs.push("FIXTURE_CRYSTAL_EMISSION");
+                }
+                if crystal.1 {
+                    defs.push("FIXTURE_NORMAL_MAP");
+                }
+                if crystal.2 {
+                    defs.push("EMISSION_UV1");
                 }
                 let mut descriptor = RenderPipelineDescriptor {
                     label: Some("fixture_emission_pipeline".into()),
@@ -724,13 +797,14 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         // group 1：按 (遮罩, 主贴图) 对去重；缺 GPU 侧资源的对不建组，对应
         // draw 跳过（fail-closed，下一帧再试）。
         let texture_layout = pipeline_cache.get_bind_group_layout(&gpu.texture_layout);
-        let mut texture_groups: HashMap<(AssetId<Image>, AssetId<Image>), BindGroup> =
+        let fallback = world.resource::<bevy::render::texture::FallbackImage>();
+        let mut texture_groups: HashMap<(AssetId<Image>, AssetId<Image>, Option<AssetId<Image>>), BindGroup> =
             HashMap::new();
         // group 1 的建组也必须在 begin pass 之前（设备句柄借 render_context
         // 的不可变引用，pass 要可变借用——见上）。缺 GPU 侧资源的对不建组，
         // 对应 draw 在 pass 里跳过（fail-closed，下一帧再试）。
         for item in &draws.draws {
-            if texture_groups.contains_key(&(item.mask, item.main)) {
+            if texture_groups.contains_key(&(item.mask, item.main, item.normal_map)) {
                 continue;
             }
             let (Some(mask_image), Some(main_image)) =
@@ -738,8 +812,17 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
             else {
                 continue;
             };
+            // Only the normal-map variant reads bindings 5/6; every other
+            // draw binds the engine fallback (the layout is shared).
+            let normal_image = match item.normal_map {
+                Some(id) => match images.get(id) {
+                    Some(image) => image,
+                    None => continue,
+                },
+                None => &fallback.d2,
+            };
             texture_groups.insert(
-                (item.mask, item.main),
+                (item.mask, item.main, item.normal_map),
                 groups.get(
                     device,
                     "fixture_emission_texture_bind_group",
@@ -750,6 +833,8 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
                         (2, Bound::View(&main_image.texture_view)),
                         (3, Bound::Sampler(&main_image.sampler)),
                         (4, Bound::Sampler(&mask_image.sampler)),
+                        (5, Bound::View(&normal_image.texture_view)),
+                        (6, Bound::Sampler(&normal_image.sampler)),
                     ],
                     frame,
                 ),
@@ -793,11 +878,12 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
             let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
                 continue;
             };
-            if !texture_groups.contains_key(&(item.mask, item.main)) {
+            let texture_key = (item.mask, item.main, item.normal_map);
+            if !texture_groups.contains_key(&texture_key) {
                 // 缺件的对在 pass 前建组时已被跳过——这里同样跳过 draw。
                 continue;
             }
-            let texture_bind_group = &texture_groups[&(item.mask, item.main)];
+            let texture_bind_group = &texture_groups[&texture_key];
             pass.set_pipeline(pipeline);
             let object_offsets = [
                 (index as u32) * gpu.object_stride,
@@ -933,6 +1019,9 @@ fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevi
                 (2u32, texture_2d(TextureSampleType::Float { filterable: true })),
                 (3u32, sampler(SamplerBindingType::Filtering)),
                 (4u32, sampler(SamplerBindingType::Filtering)),
+                // `_NormalMap` of the crystal normal-map variant.
+                (5u32, texture_2d(TextureSampleType::Float { filterable: true })),
+                (6u32, sampler(SamplerBindingType::Filtering)),
             ),
         ),
     );

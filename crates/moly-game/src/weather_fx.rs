@@ -1425,6 +1425,14 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
     -> Result<crate::particle_runtime::EventEdges, String> {
     use moly_law::particle::schema::SubEmitterTrigger;
     let cached = emitter.sub_emitters.iter().filter(|edge| edge.trigger == SubEmitterTrigger::Birth).count();
+    // The engine sorts its birth table by the children's instance ids at run
+    // time and only the first two slots keep a per-particle carry; with more
+    // than two birth edges that order decides which children's emission
+    // carries over between calls, and the export holds neither the clones'
+    // hierarchy order nor their ids.
+    if cached > 2 {
+        return Err(format!("{cached} birth edges: which two keep a per-particle carry follows the birth table's run-time instance-id order, which the export does not carry"));
+    }
     let mut edges = crate::particle_runtime::EventEdges::default();
     for edge in &emitter.sub_emitters {
         let target = edge.emitter.as_deref().filter(|name| !name.is_empty())
@@ -2345,16 +2353,17 @@ fn judge_in_host(
         // down on the native birth path (the frame head's distance births
         // wait for it too). A random delay is evaluated with the system
         // seed's hash, not transcribed; the Director's Simulate path and the
-        // legacy step carry no such word; a sub-emitter target is stopped
-        // every frame, so its word never counts down and holds its clock
-        // (its Tick is not called while the word is not below the slice),
-        // which the target install does not carry.
+        // legacy step carry no such word. A sub-emitter target is stopped
+        // every frame, so its word never counts down and holds its clock (its
+        // Tick takes only the part of a slice beyond the word); the target
+        // install writes the word its Play writes and its stopped frame keeps
+        // it, and the target takes no route of its own.
         let reason = if crate::particle_runtime::play_start_delay(&emitter).is_none() {
             Some("random start delay: Play's seed-hash evaluation is not transcribed".to_owned())
         } else if !native_owner {
             Some("start delay: the Director's Simulate path runs the legacy step, which has no start delay word".to_owned())
         } else if child_parent.is_some() {
-            Some("start delay on a sub-emitter target: its uncounted word holds the target's clock, which the target install does not carry".to_owned())
+            None
         } else {
             crate::particle_runtime::native_birth_eligible(&emitter, &route).err()
                 .map(|reason| format!("start delay needs the native birth path: {reason}"))
@@ -3058,9 +3067,9 @@ pub(crate) fn spawn_when_ready(
         }
     }
     // GPU readiness gates the preparation, as the source's fade waits for its
-    // load. The render resets readiness to pending every frame and sets it
-    // ready only when every pass pipeline and the view's colour target are
-    // ready; once this plan's preparation has started the fade, a frame that
+    // load. The render publishes each frame's readiness verdict: ready only
+    // when every pass pipeline and the view's colour target are ready; once
+    // this plan's preparation has started the fade, a frame that
     // went back to pending does not hold the installs, which follow the
     // source order from there (a failure above still stops them).
     let ready = |source: &SourceParticle| matches!(*source.readiness.lock().unwrap(), ParticleReadiness::Ready);

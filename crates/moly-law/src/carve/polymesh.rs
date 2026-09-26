@@ -35,10 +35,24 @@ use std::collections::{BinaryHeap, HashMap};
 /// 「没有邻居」。
 const NO_NEIGHBOUR: u32 = u32::MAX;
 
+/// The grid position of a vertex made by a runtime carve.
+const CARVED_VERTEX: [i32; 2] = [i32::MIN, i32::MIN];
+
+mod carving;
+pub(crate) use carving::carve_cells;
+pub use carving::RuntimeCarve;
+
 /// 三角化后的导航多边形网。
+#[derive(Clone)]
 pub(crate) struct PolyMesh {
-    /// 顶点，格坐标。
+    /// 顶点，格坐标。A vertex a runtime carve created has no grid position
+    /// (`CARVED_VERTEX`); its world position is in `world`.
     verts: Vec<[i32; 2]>,
+    /// World x/z of every vertex, for the grid in `centre_grid` (filled by
+    /// `cache_centres`; authoritative for carved meshes).
+    world: Vec<[f32; 2]>,
+    /// Each cell's region (the contour it was triangulated from).
+    cell_region: Vec<u32>,
     /// 每个单元的三个顶点下标（逆时针）。
     tris: Vec<[u32; 3]>,
     /// 每个单元三条边的邻居单元；边 `k` 是 `tris[k] → tris[(k+1)%3]`。
@@ -166,6 +180,8 @@ pub(crate) fn build(contours: &[Contour]) -> PolyMesh {
     let components = connected_components(&neighbours);
     PolyMesh {
         verts,
+        world: Vec::new(),
+        cell_region: regions,
         tris,
         neighbours,
         by_region,
@@ -321,7 +337,7 @@ impl PolyMesh {
         }
         let mut best: Option<(u32, f32)> = None;
         for index in 0..self.tris.len() as u32 {
-            let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+            let corners = self.tris[index as usize].map(|v| self.vertex(grid, v));
             let q = closest_on_triangle(p, corners);
             if (q[0] - p[0]).abs() > half_extent || (q[1] - p[1]).abs() > half_extent {
                 continue;
@@ -369,7 +385,7 @@ impl PolyMesh {
         };
         let nearest = (0..self.tris.len())
             .map(|index| {
-                let corners = self.tris[index].map(|v| to_world(grid, self.verts[v as usize]));
+                let corners = self.tris[index].map(|v| self.vertex(grid, v));
                 distance2(closest_on_triangle(p, corners), p)
             })
             .min_by(f32::total_cmp)
@@ -379,7 +395,7 @@ impl PolyMesh {
 
     fn contains(&self, grid: &Grid, index: u32, p: [f32; 2]) -> bool {
         let triangle = self.tris[index as usize];
-        let corners = triangle.map(|v| to_world(grid, self.verts[v as usize]));
+        let corners = triangle.map(|v| self.vertex(grid, v));
         let sign = |a: [f32; 2], b: [f32; 2]| {
             (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
         };
@@ -389,13 +405,30 @@ impl PolyMesh {
         (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0)
     }
 
-    /// Precompute `centre` for the grid this mesh was baked on.
+    /// Precompute the world vertices and `centre` for the grid this mesh was
+    /// baked on. A carved mesh keeps its world vertices.
     pub(crate) fn cache_centres(&mut self, grid: &Grid) {
         self.centre_grid = None;
+        if self.world.len() != self.verts.len() {
+            self.world = self.verts.iter().map(|v| to_world(grid, *v)).collect();
+        }
+        self.centre_grid = Some((grid.origin, grid.voxel));
         self.centres = (0..self.tris.len() as u32)
             .map(|index| self.compute_centre(grid, index))
             .collect();
-        self.centre_grid = Some((grid.origin, grid.voxel));
+    }
+
+    /// A vertex's world x/z.
+    fn vertex(&self, grid: &Grid, v: u32) -> [f32; 2] {
+        if self.centre_grid == Some((grid.origin, grid.voxel)) && self.world.len() == self.verts.len() {
+            return self.world[v as usize];
+        }
+        let cell = self.verts[v as usize];
+        assert!(
+            cell != CARVED_VERTEX,
+            "carved vertex {v} read for a grid the mesh was not cached for"
+        );
+        to_world(grid, cell)
     }
 
     fn centre(&self, grid: &Grid, index: u32) -> [f32; 2] {
@@ -409,7 +442,7 @@ impl PolyMesh {
         let triangle = self.tris[index as usize];
         let mut sum = [0.0f32; 2];
         for v in triangle {
-            let world = to_world(grid, self.verts[v as usize]);
+            let world = self.vertex(grid, v);
             sum[0] += world[0];
             sum[1] += world[1];
         }
@@ -482,8 +515,8 @@ impl PolyMesh {
         let k = self.neighbours[from as usize]
             .iter()
             .position(|n| *n == to)?;
-        let a = to_world(grid, self.verts[triangle[k] as usize]);
-        let b = to_world(grid, self.verts[triangle[(k + 1) % 3] as usize]);
+        let a = self.vertex(grid, triangle[k]);
+        let b = self.vertex(grid, triangle[(k + 1) % 3]);
         // 三角形按逆时针存 ⇒ 沿边 k（a→b）走时内部在左，**穿出**这条边的
         // 前进方向是 a→b 的右侧；面朝该方向时左手侧是 b、右手侧是 a。
         // 写成 [a, b] 会让漏斗左右互换，路径会被甩到走廊外的远角上。
@@ -603,7 +636,7 @@ impl PolyMesh {
     /// 允许单元边偏离格面，所以该点若不在可走格上，就沿它到单元心的线段
     /// 退回到第一处可走格；单元心也不可走时取离它最近的可走格心。
     fn partial_end(&self, grid: &Grid, index: u32, goal: [f32; 2]) -> [f32; 2] {
-        let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+        let corners = self.tris[index as usize].map(|v| self.vertex(grid, v));
         let closest = closest_on_triangle(goal, corners);
         let centre = self.centre(grid, index);
         const STEPS: u32 = 8;
@@ -751,7 +784,7 @@ impl PolyMesh {
     pub(crate) fn engine_cell(&self, grid: &Grid, index: u32) -> ([[f32; 3]; 3], [u32; 3]) {
         let [a, b, c] = self.tris[index as usize];
         let at = |v: u32| {
-            let p = to_world(grid, self.verts[v as usize]);
+            let p = self.vertex(grid, v);
             [p[0], 0.0, p[1]]
         };
         let n = self.neighbours[index as usize];
@@ -788,7 +821,7 @@ impl PolyMesh {
         }
         let mut best: Option<(u32, [f32; 2], f32)> = None;
         for index in 0..self.tris.len() as u32 {
-            let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+            let corners = self.tris[index as usize].map(|v| self.vertex(grid, v));
             let q = closest_on_triangle(p, corners);
             if (q[0] - p[0]).abs() > half_extent || (q[1] - p[1]).abs() > half_extent {
                 continue;
@@ -1003,6 +1036,8 @@ mod tests {
         let components = vec![0; tris.len()];
         PolyMesh {
             verts,
+            world: Vec::new(),
+            cell_region: vec![0; tris.len()],
             tris,
             neighbours,
             by_region: HashMap::new(),

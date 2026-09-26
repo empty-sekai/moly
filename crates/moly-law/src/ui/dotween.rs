@@ -22,8 +22,9 @@
 //! `EaseManager.Evaluate` for the eases here, in the compiled operation order:
 //! Linear `time / duration`; OutQuad `(t + -2) * -t` with `t = time /
 //! duration`; OutQuart `-((t * (t * (t * t))) + -1)` with `t = time /
-//! duration + -1`. An ease value outside the evaluated table (0, Unset) takes
-//! the OutQuad arm.
+//! duration + -1`; OutCubic `t * (t * t) + 1` with `t = time / duration +
+//! -1`. An ease value outside the evaluated table (0, Unset) takes the OutQuad
+//! arm.
 
 /// The `DG.Tweening.Ease` values evaluated here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub enum Ease {
     Linear,
     /// `Ease.OutQuad` (6).
     OutQuad,
+    /// `Ease.OutCubic` (9).
+    OutCubic,
     /// `Ease.OutQuart` (12).
     OutQuart,
 }
@@ -42,6 +45,7 @@ impl Ease {
         match self {
             Self::Linear => 1,
             Self::OutQuad => 6,
+            Self::OutCubic => 9,
             Self::OutQuart => 12,
         }
     }
@@ -54,6 +58,10 @@ impl Ease {
             Self::OutQuad => {
                 let t = time / duration;
                 (t + -2.0) * -t
+            }
+            Self::OutCubic => {
+                let t = time / duration + -1.0;
+                t * (t * t) + 1.0
             }
             Self::OutQuart => {
                 let t = time / duration + -1.0;

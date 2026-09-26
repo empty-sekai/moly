@@ -57,8 +57,11 @@ fn fragment(in: SurfaceOutput) -> @location(0) vec4<f32> {
     let cells = floor(in.uv * surface.controls.x);
     let parity = fract((fract(abs(cells.x) * 0.5) * 2.0 + abs(cells.y)) * 0.5) * 2.0;
     var color = (surface.color2 - surface.color1) * parity + surface.color1;
-    color.a *= surface.controls.w;
     color = select(color, surface.outline, edge);
+    // JP 6.8.1: the face opacity multiplies the output alpha after the
+    // outline mix, so edges fade with the faces (CN 6.0.0 scaled the face
+    // colour's alpha before the mix and kept the outline alpha).
+    color.a *= surface.controls.w;
     return vec4<f32>(target_color(color.rgb), color.a);
 #else
     // The source Base program samples UV0 directly (no ST or alpha clip).
