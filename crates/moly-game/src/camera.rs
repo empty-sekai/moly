@@ -196,7 +196,30 @@ pub enum TweenCompletion {
     /// `NormalCameraState.ResetCameraSetting`'s callback: the state's own
     /// model mirror takes the setting distance and the reset flag clears.
     NormalReset { distance: f32 },
+    /// `HarvestToneCameraState.ResetCameraSetting`'s callback: the tone
+    /// state's private model ([`HarvestToneModel`]) takes the setting
+    /// distance. It writes neither the shared model nor Normal's mirror, and
+    /// the tone state has no reset flag.
+    HarvestToneReset { distance: f32 },
 }
+
+/// `HarvestToneCameraState._model`: the tone state's private copy of the
+/// field camera's model, taken when the camera's state machine is built,
+/// right after the camera builds its model from the setting (so it holds the
+/// setting's values and a zero LookAt). The state's OnUpdate looks at the
+/// shared LookAt plus this copy's offset; the camera reset writes this copy's
+/// pitch bounds and its completion this copy's distance. Nothing reads those
+/// three afterwards.
+#[derive(Resource, Debug, Clone)]
+pub struct HarvestToneModel(pub FieldCameraModel);
+
+/// `HarvestToneCameraState._preCameraModel`: the copy of the field camera's
+/// model that the tone state's OnEnter takes (the copy constructor carries
+/// LookAt, offset, FOV, the distances, yaw, pitch and the pitch bounds). The
+/// tone state's camera reset tweens back to it. Written on the frame the
+/// state becomes HarvestTone and removed when the state is left.
+#[derive(Resource, Debug, Clone)]
+pub struct HarvestTonePreModel(pub FieldCameraModel);
 
 impl CameraTween {
     /// `NormalCameraState._isResetAnimation`: set when the reset starts,
@@ -548,6 +571,9 @@ pub(crate) fn parse(
         setting.max_pitch,
         setting.rot_sensitivity
     );
+    // The state machine is built right after SetupModel: the tone state's
+    // private model is a copy of the model the setting just built.
+    commands.insert_resource(HarvestToneModel(FieldCameraModel::from_setting(&setting)));
     commands.insert_resource(setting);
     commands.insert_resource(params);
     commands.remove_resource::<CameraJsonHandle>();
@@ -1703,24 +1729,81 @@ pub(crate) struct CameraReset<'w, 's> {
     state: Res<'w, FieldCameraState>,
     model: Option<ResMut<'w, FieldCameraModel>>,
     setting: Option<Res<'w, CameraSetting>>,
+    tone_pre: Option<Res<'w, HarvestTonePreModel>>,
+    tone_model: Option<ResMut<'w, HarvestToneModel>>,
     cameras: Query<'w, 's, &'static Projection, With<Camera3d>>,
 }
 
 /// `NormalCameraState.ResetCameraSetting` passes this duration.
 const NORMAL_RESET_TWEEN_SECS: f32 = 0.25;
+/// `HarvestToneCameraState.ResetCameraSetting` passes this duration.
+const HARVEST_TONE_RESET_TWEEN_SECS: f32 = 0.5;
 
 impl CameraReset<'_, '_> {
     /// `FieldCamera.ResetCameraSetting`: the current state's
-    /// `ResetCameraSetting`. Normal and HarvestTone have bodies; every other
-    /// state's is empty.
+    /// `ResetCameraSetting` (no lock check on the way). Normal and
+    /// HarvestTone have bodies; every other state's is empty.
     pub(crate) fn reset_camera_setting(&mut self, commands: &mut Commands) {
         match self.state.0 {
             CameraStateType::Normal => self.normal_reset(commands),
-            CameraStateType::HarvestTone => {
-                panic!("field camera: the harvest-tone state's camera reset is not built")
-            }
+            CameraStateType::HarvestTone => self.harvest_tone_reset(commands),
             _ => {}
         }
+    }
+
+    /// `HarvestToneCameraState.ResetCameraSetting`: the tone state's private
+    /// model takes the setting's pitch bounds at once (one 8-byte copy of
+    /// minPitch and maxPitch), then `DoTweenCameraSetting` runs for 0.5 s
+    /// towards the model its OnEnter copied: LookAt, rotation (pitch, yaw),
+    /// FOV and distance all from that copy. The callback writes the setting
+    /// distance into the private model. The shared model's pitch bounds are
+    /// not touched. While the tone animation runs, its OnUpdate still writes
+    /// distance and pitch after the tween each frame; the tween's yaw and
+    /// FOV stand, and its LookAt is where the tone's follow step starts.
+    fn harvest_tone_reset(&mut self, commands: &mut Commands) {
+        let (Some(model), Some(setting)) = (self.model.as_deref(), self.setting.as_deref()) else {
+            warn!("[camera] harvest-tone reset pressed before the field camera model exists");
+            return;
+        };
+        let Ok(projection) = self.cameras.single() else {
+            warn!("[camera] harvest-tone reset pressed without a single field camera");
+            return;
+        };
+        // The copy is taken on the first frame the state reads HarvestTone.
+        // A press on the very frame the state changed comes before that
+        // frame's copy; nothing has moved the model since the change, so the
+        // live model is what OnEnter copied.
+        let (pre, taken) = match self.tone_pre.as_deref() {
+            Some(pre) => (pre.0.clone(), "OnEnter copy"),
+            None => (model.clone(), "live model, entered this frame"),
+        };
+        match self.tone_model.as_deref_mut() {
+            Some(private) => {
+                private.0.min_pitch = setting.min_pitch;
+                private.0.max_pitch = setting.max_pitch;
+            }
+            None => warn!("[camera] harvest-tone private model not built (no camera setting parse)"),
+        }
+        let prev_pitch = wrap180(model.pitch);
+        let prev_yaw = wrap180(model.yaw);
+        let tween = CameraTween {
+            look_at: (model.look_at, pre.look_at),
+            fov: (perspective_fov_deg(projection), pre.fov),
+            pitch: (prev_pitch, to_rotation(prev_pitch, pre.pitch)),
+            yaw: (prev_yaw, to_rotation(prev_yaw, pre.yaw)),
+            distance: (model.distance, pre.distance),
+            duration: HARVEST_TONE_RESET_TWEEN_SECS,
+            elapsed: 0.0,
+            on_complete: TweenCompletion::HarvestToneReset { distance: setting.distance },
+        };
+        info!(
+            "[camera] harvest-tone reset: private pitch bounds [{:.2}, {:.2}]; tween {}s to the pre-camera model ({taken}): LookAt {:.3} -> {:.3}, pitch {:.2} -> {:.2}, yaw {:.2} -> {:.2}, distance {:.3} -> {:.3}, FOV {:.2} -> {:.2}; callback: private distance = {:.3}",
+            setting.min_pitch, setting.max_pitch, tween.duration,
+            tween.look_at.0, tween.look_at.1, tween.pitch.0, tween.pitch.1,
+            tween.yaw.0, tween.yaw.1, tween.distance.0, tween.distance.1,
+            tween.fov.0, tween.fov.1, setting.distance,
+        );
+        commands.insert_resource(tween);
     }
 
     /// `NormalCameraState.ResetCameraSetting`: the state's model mirror takes
@@ -1881,10 +1964,30 @@ pub(crate) fn follow_avatar(
     talk_camera: Option<Res<crate::talk_camera::TalkCamera>>,
     // 16 态面朝追迹的 0.5s 累计器（AUTOFPS 冒烟窗口内用）。
     mut face_trace: Local<f32>,
+    // The state this system saw last frame (HarvestTone's entry copy).
+    mut seen_state: Local<Option<CameraStateType>>,
 ) {
     let Some(mut models) = models else {
         return; // 站点未取景（或 JSON 未装）：模型未立，等下一帧
     };
+    // HarvestToneCameraState.OnEnter copies the field camera's model into
+    // `_preCameraModel` (its InheritPreCameraModel then copies it back, which
+    // changes nothing). The state is written in Update and this is the first
+    // camera system after it, before any tween or follow write this frame
+    // (the harvest camera shake before it moves only the offset, which the
+    // tone reset does not read from the copy).
+    if *seen_state != Some(state.0) {
+        if state.0 == CameraStateType::HarvestTone {
+            info!(
+                "[camera] HarvestTone entered: pre-camera model copied (LookAt {:.3}, pitch {:.2}, yaw {:.2}, distance {:.3}, FOV {:.2})",
+                models.look_at, models.pitch, models.yaw, models.distance, models.fov
+            );
+            commands.insert_resource(HarvestTonePreModel(models.clone()));
+        } else if *seen_state == Some(CameraStateType::HarvestTone) {
+            commands.remove_resource::<HarvestTonePreModel>();
+        }
+        *seen_state = Some(state.0);
+    }
     // A player conversation owns the camera, including its entry tween.
     // Normal following resumes on the actual session's completion frame;
     // it must not tug at a conversation target before the Talk writer runs.
@@ -1914,8 +2017,17 @@ pub(crate) fn follow_avatar(
             }
         }
         if e >= 1.0 {
-            if let TweenCompletion::NormalReset { distance } = tw.on_complete {
-                models.gestured_distance = distance;
+            match tw.on_complete {
+                TweenCompletion::NormalReset { distance } => models.gestured_distance = distance,
+                TweenCompletion::HarvestToneReset { distance } => {
+                    commands.queue(move |world: &mut World| {
+                        if let Some(mut private) = world.get_resource_mut::<HarvestToneModel>() {
+                            private.0.distance = distance;
+                        }
+                    });
+                    info!("[camera] harvest-tone reset complete: the tone state's private distance = {distance:.3}");
+                }
+                TweenCompletion::None => {}
             }
             info!(
                 "[camera] 转场补间完成（{:.2}s）：距离 {:.2}→{:.2}，俯仰 {:.1}°，偏航 {:.1}°，FOV {:.1}°，取景点 {}",
