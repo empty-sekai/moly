@@ -210,6 +210,13 @@ impl AvatarDriver {
         self.nodes.get(&literal.to_lowercase()).copied()
     }
 
+    /// The source literal of a graph node, for run traces.
+    pub(crate) fn literal_of(&self, node: AnimationNodeIndex) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find_map(|(literal, index)| (*index == node).then_some(literal.as_str()))
+    }
+
     pub(crate) fn locomotion_owns_animator(&self) -> bool {
         self.action.is_none()
     }
