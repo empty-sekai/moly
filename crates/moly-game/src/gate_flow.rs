@@ -51,8 +51,10 @@
 //! store through [`crate::server::client_update_talk_list`]. Native request
 //! instruments (the gate screens' requests; those screens are the UI
 //! group's):
-//! - `MOLY_GATE_INVITE=<unit>`: the reserve request for the selected unit
-//!   (the unit group of a single unit has the unit's id);
+//! - `MOLY_GATE_INVITE=<unit>[,pass]`: the reserve request for the selected
+//!   unit (the unit group of a single unit has the unit's id); `pass` first
+//!   gives the user a colorful pass through the server panel's edit (the
+//!   product default has none, and the reserve needs one);
 //! - `MOLY_GATE_CHANGE=<mysekaiGateId>[/<mysekaiGateSkinId>]:<group>,...`:
 //!   the gate change, with the server's answer stated (the new gate, its
 //!   skin and the visiting unit groups are server values).
@@ -128,7 +130,10 @@ pub(crate) struct GateModelPackages(pub(crate) HashSet<String>);
 #[derive(Clone, Debug)]
 enum Request {
     /// `ExecutePostUserMysekaiGateReserveApi(SelectedGameCharacterUnitId)`.
-    Reserve { unit: i32 },
+    /// `grant_pass`: the server panel's edit first gives the user a colorful
+    /// pass (a server value; the product default has none), delivered by
+    /// its `sync` action.
+    Reserve { unit: i32, grant_pass: bool },
     /// The gate change, with the server's answer stated.
     Change {
         gate: i32,
@@ -143,7 +148,7 @@ impl Request {
         let mut map = serde_json::Map::new();
         map.insert("type".into(), "server.edit".into());
         match self {
-            Self::Reserve { unit } => {
+            Self::Reserve { unit, .. } => {
                 map.insert("action".into(), "gate.reserve".into());
                 map.insert("mysekaiGameCharacterUnitGroupId".into(), (*unit).into());
             }
@@ -401,10 +406,15 @@ fn now(world: &World) -> f64 {
 
 fn parse_instruments() -> Option<Request> {
     if let Some(raw) = crate::server::instrument_env(INVITE) {
-        return match raw.trim().parse::<i32>() {
-            Ok(unit) if unit > 0 => Some(Request::Reserve { unit }),
+        let (unit, grant_pass) = match raw.trim().split_once(',') {
+            Some((unit, "pass")) => (unit, true),
+            Some(_) => ("", false),
+            None => (raw.trim(), false),
+        };
+        return match unit.trim().parse::<i32>() {
+            Ok(unit) if unit > 0 => Some(Request::Reserve { unit, grant_pass }),
             _ => {
-                error!("[gate] {INVITE}={raw:?} is not a unit id; no reserve request is made (the pass is the client's copy of userMysekaiColorfulPass, not an instrument)");
+                error!("[gate] {INVITE}={raw:?} is not <unit>[,pass]; no reserve request is made");
                 None
             }
         };
@@ -756,7 +766,21 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
         };
     }
     world.resource_mut::<GateFlow>().waiting = None;
-    if let Request::Reserve { unit } = request {
+    if let Request::Reserve {
+        unit,
+        grant_pass: true,
+    } = request
+    {
+        grant_colorful_pass(world);
+        return Stage::Request {
+            request: Request::Reserve {
+                unit,
+                grant_pass: false,
+            },
+            ready_since: Some(since),
+        };
+    }
+    if let Request::Reserve { unit, .. } = request {
         let realtime = world.resource::<Time<Real>>().elapsed_secs();
         let pass = world
             .resource::<crate::server::ClientUserData>()
@@ -775,6 +799,31 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
         None => error!("[gate] instrument request {request:?}: no server model is installed; nothing is requested"),
     }
     Stage::Idle
+}
+
+/// The server panel's edits that give the user a colorful pass for a day of
+/// the server clock (`userMysekaiColorfulPass`), then its `sync` action,
+/// which delivers the pass to the client's copy as a response.
+fn grant_colorful_pass(world: &mut World) {
+    let result = crate::server::with_model(|model| {
+        let expired_at = model.now_ms().saturating_add(86_400_000);
+        let mut edit = serde_json::Map::new();
+        edit.insert("type".into(), "server.edit".into());
+        edit.insert("path".into(), "userMysekaiColorfulPass".into());
+        edit.insert(
+            "value".into(),
+            serde_json::json!({"mysekaiColorfulPassId": 1, "expiredAt": expired_at}),
+        );
+        let mut sync = serde_json::Map::new();
+        sync.insert("type".into(), "server.edit".into());
+        sync.insert("action".into(), "sync".into());
+        (model.edit(&edit), model.edit(&sync))
+    });
+    match result {
+        Some((Ok(pass), Ok(sync))) => info!("[gate] instrument: the server panel gives the user a colorful pass: {pass}; sync: {sync}"),
+        Some((pass, sync)) => error!("[gate] instrument: the colorful pass edit {pass:?}, sync {sync:?}"),
+        None => error!("[gate] instrument: no server model is installed; no colorful pass"),
+    }
 }
 
 /// `HideEffect`'s wait and `SetActive(false)` for each stopped stay effect.
