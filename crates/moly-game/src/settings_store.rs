@@ -1,9 +1,11 @@
 //! Shared local settings document. Every writer merges its own fields into the
 //! latest document, so an audio save cannot erase graphics preferences.
 //!
-//! The browser game keeps the document in the page backend ([`PageDocument`]):
-//! the page seeds it, every committed write bumps its revision, and the page
-//! stores the revision it takes. Writers are the same in every backend.
+//! The browser game keeps the document in the page backend ([`PageDocument`])
+//! beside the server model's two documents (`server` and `local`): the page
+//! seeds all three, every committed write of any of them bumps the one
+//! revision, and the page stores the revision it takes, all three together.
+//! Settings writers are the same in every backend.
 
 use bevy::prelude::*;
 use serde_json::{Map, Value};
@@ -260,7 +262,7 @@ pub(crate) fn location() -> String {
 
 /// The page backend's document, or the platform store when none is installed.
 pub(crate) fn read_text() -> Result<Option<String>, String> {
-    match with_page(|page| page.text.clone()) {
+    match with_page(|page| page.texts[0].clone()) {
         Some(text) => Ok(text),
         None => platform_read_text(),
     }
@@ -294,40 +296,75 @@ fn transaction_guard() -> Result<Option<PlatformGuard>, String> {
     }
 }
 
-/// In-memory settings document of the browser game. Revision 0 is the seed;
-/// each committed write is the next revision. `acked` is the newest revision
-/// the page reported as stored.
+/// The documents of the page backend, in the order the page stores them.
+pub(crate) const PAGE_DOCUMENTS: [&str; 3] = ["settings", "server", "local"];
+
+/// In-memory documents of the browser game: the settings document and the
+/// server model's `server` and `local` documents. Revision 0 is the seed;
+/// each committed write of any document is the next revision. `acked` is
+/// the newest revision the page reported as stored.
 #[derive(Debug, Default)]
 pub(crate) struct PageDocument {
-    text: Option<String>,
+    texts: [Option<String>; 3],
     revision: u32,
     acked: u32,
     refused: u32,
 }
 
 impl PageDocument {
-    pub(crate) fn seeded(text: Option<String>) -> Self {
+    pub(crate) fn seeded(
+        settings: Option<String>,
+        server: Option<String>,
+        local: Option<String>,
+    ) -> Self {
         Self {
-            text,
+            texts: [settings, server, local],
             ..Self::default()
         }
     }
 
-    fn write(&mut self, text: &str) -> Result<(), String> {
+    fn bump(&mut self) -> Result<(), String> {
         self.revision = self
             .revision
             .checked_add(1)
             .ok_or("Settings revision is exhausted")?;
-        self.text = Some(text.to_owned());
         Ok(())
     }
 
-    /// The newest document when it is newer than `after`.
-    pub(crate) fn take(&self, after: u32) -> Option<(u32, &str)> {
+    fn write(&mut self, text: &str) -> Result<(), String> {
+        self.bump()?;
+        self.texts[0] = Some(text.to_owned());
+        Ok(())
+    }
+
+    /// A named document's new text; an unchanged text is not a revision.
+    fn write_named(&mut self, name: &str, text: String) -> Result<(), String> {
+        let index = PAGE_DOCUMENTS
+            .iter()
+            .position(|known| *known == name)
+            .ok_or_else(|| format!("page document {name} is unknown"))?;
+        if self.texts[index].as_deref() == Some(text.as_str()) {
+            return Ok(());
+        }
+        self.bump()?;
+        self.texts[index] = Some(text);
+        Ok(())
+    }
+
+    /// Every document (null when never written) when the newest revision is
+    /// newer than `after`.
+    pub(crate) fn take(&self, after: u32) -> Option<(u32, [Option<&str>; 3])> {
         if self.revision <= after {
             return None;
         }
-        Some((self.revision, self.text.as_deref()?))
+        Some((
+            self.revision,
+            [
+                self.texts[0].as_deref(),
+                self.texts[1].as_deref(),
+                self.texts[2].as_deref(),
+            ],
+        ))
     }
 
     /// The page may only acknowledge a revision it was offered.
@@ -360,10 +397,29 @@ static PAGE: Mutex<Option<PageDocument>> = Mutex::new(None);
 
 /// Selects the page backend before the app is built; the platform store is
 /// never read or written afterwards.
-pub(crate) fn install_page_document(text: Option<String>) {
+pub(crate) fn install_page_document(
+    settings: Option<String>,
+    server: Option<String>,
+    local: Option<String>,
+) {
     if let Ok(mut page) = PAGE.lock() {
-        *page = Some(PageDocument::seeded(text));
+        *page = Some(PageDocument::seeded(settings, server, local));
     }
+}
+
+/// Commits the new text of the page's `server` or `local` document, under
+/// the same exclusive-writer rule as the settings document. `Err` without a
+/// page backend.
+pub(crate) fn commit_page_document(name: &str, text: String) -> Result<(), String> {
+    let writable = browser_storage_writable();
+    with_page(|page| {
+        if !writable {
+            page.refused = page.refused.saturating_add(1);
+            return Err(READ_ONLY.to_owned());
+        }
+        page.write_named(name, text)
+    })
+    .unwrap_or_else(|| Err("the page backend is not installed".into()))
 }
 
 fn page_installed() -> bool {
