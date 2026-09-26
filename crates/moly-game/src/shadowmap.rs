@@ -31,8 +31,15 @@
 //!   Off), move each vertex by the pipeline's caster bias along the light and
 //!   along the normal, clamp to the near plane, and are drawn under the
 //!   pipeline's global raster bias of the shadow slice (see
-//!   [`CHARACTER_RASTER_BIAS`]).
+//!   [`SHADOW_SLICE_RASTER_BIAS`]).
 //! Other skinned meshes (skinned fixtures) stay out, as before, and are counted.
+//!
+//! The rigid casters carry the same source bias: every site program's
+//! ShadowCaster pass (field object, tree, ground, water, fixture, object,
+//! fence, canvas) runs the same vertex bias along the light and along the
+//! normal, with the same near-plane clamp, under the same raster bias of the
+//! shadow slice. A rigid mesh without a normal stream gets the bias along
+//! the light only, and is counted in the account line.
 //!
 //! # 数值口径（真源档已读出，本单替换自选值）
 //!
@@ -42,9 +49,12 @@
 //! m_Shadows 强度 1（软影档）。`_MainLightShadowParams` 四分量按引擎
 //! 装配式逐项可推导：x = 主光强度 1、y = 软影开 1（律式不读此槽，账面
 //! 与源一致）、z/w = 距离 fade 两系数，按引擎线性距离 fade 算式从
-//! 距离与边距现算（见 [`SHADOW_FADE_SCALE`] 的推导注释）。仍在自选的：
-//! 光源正交框的前后垫量与光栅深度偏置（见 [`DEPTH_PAD`] 与管线
-//! `DepthBiasState` 的注释）。
+//! 距离与边距现算（见 [`SHADOW_FADE_SCALE`] 的推导注释）。Caster 偏置同样
+//! 读自真源：管线资产的深度/法线偏置 1.0/1.0 × texel × 软影核 2.5（顶点侧，
+//! 沿光与沿法线），与阴影切片的全局光栅偏置 1 / 2.5
+//! （[`SHADOW_SLICE_RASTER_BIAS`]）。仍在自选的：光源正交框的前后垫量
+//! （见 [`DEPTH_PAD`]），以及 texel 的口径（本图的光框宽 / 1024，不是源
+//! 级联投影的宽）。
 //!
 //! # 阴影账目（本单）
 //!
@@ -146,7 +156,7 @@ fn probe_interval() -> u64 {
 const PROBE_CLEAR_EPS: f32 = 0.9999;
 
 /// 深度 pass 帧块的 GPU 字节数：两个 4×4（裁剪矩阵 + 采样矩阵）+ 两个
-/// vec4（角色 caster 偏置 + 向光方向）。
+/// vec4（caster 偏置 + 向光方向）。
 const FRAME_BYTES: usize = 160;
 
 /// The site pipeline asset's shadow depth bias and normal bias (both 1.0).
@@ -162,9 +172,10 @@ const PIPELINE_SHADOW_NORMAL_BIAS: f32 = 1.0;
 const SOFT_SHADOW_KERNEL_RADIUS: f32 = 2.5;
 
 /// The raster bias the pipeline sets globally around the shadow slice's draw
-/// (units 1.0, slope 2.5). The character ShadowCaster passes declare no
-/// offset of their own, so this is their whole raster bias.
-const CHARACTER_RASTER_BIAS: DepthBiasState = DepthBiasState {
+/// (units 1.0, slope 2.5). No ShadowCaster pass of the site or character
+/// programs declares an offset of its own, so this is every caster's whole
+/// raster bias.
+const SHADOW_SLICE_RASTER_BIAS: DepthBiasState = DepthBiasState {
     constant: 1,
     slope_scale: 2.5,
     clamp: 0.0,
@@ -198,7 +209,7 @@ struct ShadowFrame {
     light_view_proj: [Vec4; 4],
     /// 采样矩阵：xy 图内 uv（含 y 翻转），z 比较深度。
     world_to_shadow: [Vec4; 4],
-    /// The character caster bias in world units: x along the light, y along
+    /// The caster bias in world units: x along the light, y along
     /// the normal (both negative, as the pipeline computes them).
     shadow_bias: Vec4,
     /// xyz: the direction towards the light.
@@ -360,6 +371,11 @@ struct AccountInner {
     skinned_tally: SkinnedTally,
     /// 最近一次解出的光框几何与消费矩阵。
     light_box: Option<(f32, f32, f32)>,
+    /// The latest caster bias written: texel size, depth bias and normal
+    /// bias, in metres.
+    caster_bias: Option<(f32, f32, f32)>,
+    /// The latest prepare's rigid casters whose mesh has no normal stream.
+    rigid_without_normals: usize,
     world_to_shadow: Option<Mat4>,
     /// 深度图读回缓冲（复用；native 侧诊断，wasm 不建）。
     #[cfg(not(target_arch = "wasm32"))]
@@ -392,6 +408,8 @@ struct DepthPipelineKey {
     two_sided: bool,
     /// The skinned character entry point instead of the rigid one.
     skinned: bool,
+    /// The mesh has a normal stream (the rigid entry point's normal bias).
+    normals: bool,
 }
 
 fn depth_pipeline_key(mesh: &RenderMesh, two_sided: bool, skinned: bool) -> DepthPipelineKey {
@@ -400,6 +418,7 @@ fn depth_pipeline_key(mesh: &RenderMesh, two_sided: bool, skinned: bool) -> Dept
         topology: mesh.primitive_topology(),
         two_sided,
         skinned,
+        normals: mesh.layout.0.contains(Mesh::ATTRIBUTE_NORMAL),
     }
 }
 
@@ -879,26 +898,37 @@ fn queue_depth_pipeline(
                 depth_write_enabled: true,
                 depth_compare: CompareFunction::Less,
                 stencil: StencilState::default(),
-                bias: CHARACTER_RASTER_BIAS,
+                bias: SHADOW_SLICE_RASTER_BIAS,
             }),
             multisample: Default::default(),
             ..Default::default()
         });
     }
     // 位置属性的偏移由网格布局自身给出；缺位置的网格按 INVALID
-    // 记账，节点侧跳过。
-    match key
-        .layout
-        .0
-        .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])
-    {
+    // 记账，节点侧跳过。With a normal stream the rigid entry point runs the
+    // whole source bias; without one, the bias along the light only.
+    let (attributes, entry_point) = if key.normals {
+        (
+            vec![
+                Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+                Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            ],
+            "shadow_depth_vertex",
+        )
+    } else {
+        (
+            vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)],
+            "shadow_depth_vertex_without_normal",
+        )
+    };
+    match key.layout.0.get_layout(&attributes) {
         Ok(vertex) => pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("site_shadow_depth_pipeline".into()),
             layout: vec![gpu.depth_layout.clone()],
             vertex: VertexState {
                 shader: SHADOW_DEPTH_SHADER.clone(),
                 shader_defs: vec![],
-                entry_point: Some("shadow_depth_vertex".into()),
+                entry_point: Some(entry_point.into()),
                 buffers: vec![vertex],
             },
             fragment: None,
@@ -911,15 +941,10 @@ fn queue_depth_pipeline(
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                // normal-Z：保留离光最近（深度最小）的面。光栅偏置抵
-                // acne；源偏置值读不出，取正交常规档（模块注释）。
+                // normal-Z：保留离光最近（深度最小）的面。
                 depth_compare: CompareFunction::Less,
                 stencil: StencilState::default(),
-                bias: DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
-                },
+                bias: SHADOW_SLICE_RASTER_BIAS,
             }),
             multisample: Default::default(),
             ..Default::default()
@@ -1085,7 +1110,21 @@ fn prepare_shadow_draws(
         if let Some(matrices) = &resolved {
             inner.light_box = Some((matrices.width, matrices.height, matrices.depth));
             inner.world_to_shadow = Some(matrices.consumer);
+            inner.caster_bias = Some((
+                matrices.width / SHADOWMAP_SIZE as f32,
+                frame.shadow_bias.x,
+                frame.shadow_bias.y,
+            ));
         }
+        inner.rigid_without_normals = draws
+            .draws
+            .iter()
+            .filter(|item| {
+                meshes
+                    .get(item.mesh)
+                    .is_some_and(|mesh| !mesh.layout.0.contains(Mesh::ATTRIBUTE_NORMAL))
+            })
+            .count();
     }
     let mut frame_bytes = Vec::with_capacity(FRAME_BYTES);
     for matrix in [frame.light_view_proj, frame.world_to_shadow] {
@@ -1549,6 +1588,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         }
     }
     let (box_w, box_h, box_d) = inner.light_box.unwrap_or((0.0, 0.0, 0.0));
+    let caster_bias = inner.caster_bias.unwrap_or((0.0, 0.0, 0.0));
     let total_texels = (SHADOWMAP_SIZE * SHADOWMAP_SIZE) as f32;
 
     // The player's caster window: the texel rectangle the player's skinned
@@ -1627,7 +1667,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         .map(|(low, high)| ((low + high) * 0.5, high - low))
         .unwrap_or((Vec3::ZERO, Vec3::ZERO));
     info!(
-        "shadow account, skinned casters: {} drawn {} (player {}, NPC {}; NPC Off at dither alpha 0: {}; other skinned meshes not casting: {}; layout without normal/joint streams {}); palettes {}, joints {} (joint world transform x inverse bind pose, this frame); rigid casters {}, total casters {}; player window {:?}: nonclear {} texels, min depth {:.4}, changed since last read-back {:?} (rest of map {:?}); player bounds centre ({:.3}, {:.3}, {:.3}) size ({:.3}, {:.3}, {:.3}); caster bias from pipeline 1.0/1.0 x texel x 2.5, raster bias 1 / 2.5",
+        "shadow account, skinned casters: {} drawn {} (player {}, NPC {}; NPC Off at dither alpha 0: {}; other skinned meshes not casting: {}; layout without normal/joint streams {}); palettes {}, joints {} (joint world transform x inverse bind pose, this frame); rigid casters {}, total casters {}; player window {:?}: nonclear {} texels, min depth {:.4}, changed since last read-back {:?} (rest of map {:?}); player bounds centre ({:.3}, {:.3}, {:.3}) size ({:.3}, {:.3}, {:.3}); caster bias (all casters) from pipeline 1.0/1.0 x texel x 2.5: texel {:.6} m, depth {:.6} m, normal {:.6} m; raster bias 1 / 2.5; rigid casters without normals {}",
         inner.skinned_casters,
         inner.skinned_recorded,
         tally.player,
@@ -1650,6 +1690,10 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         extent.x,
         extent.y,
         extent.z,
+        caster_bias.0,
+        caster_bias.1,
+        caster_bias.2,
+        inner.rigid_without_normals,
     );
     info!(
         "主光阴影账目：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；光框 {box_w:.1}×{box_h:.1} m 深 {box_d:.1} m（texel {:.2} cm）；深度图非清 {} texel（{:.2}%）、最小深度 {min_depth:.4}；caster 原点：投影 {origins}、出框 {out_of_range}、邻域有图 {near_nonclear}；单 texel 比较 lit {lit} vs 影 {shadowed}、最大深度差 {max_gap:.4}",
