@@ -796,7 +796,12 @@ impl FixtureActivityTables {
             .fixtures
             .get(&fixture.fixture_id)
             .ok_or_else(|| missing("fixture", fixture.fixture_id))?;
-        if fixture.model_package != format!("mysekai__fixture__{}", fixture_master.model_name) {
+        // A gate shows its gate's or its skin's model
+        // (`MysekaiGateModel.AssetBundleName`), not its master's; the
+        // instance identity admitted it.
+        if !fixture_master.is_gate
+            && fixture.model_package != format!("mysekai__fixture__{}", fixture_master.model_name)
+        {
             return Err(PrepareError::InvalidData(
                 "instance model/master mismatch".into(),
             ));

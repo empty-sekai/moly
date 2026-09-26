@@ -812,7 +812,13 @@ pub fn install(app: &mut App) {
                 crate::player_fixture_action::advance,
                 crate::fixture_gimmick::advance,
                 crate::player_avatar::item_timeline::advance,
-                crate::fixture_activity_timeline::advance,
+                // The director's script outputs evaluate after the NPC
+                // presenter's update in the source frame (the avatar store's
+                // Update, then the director update): its character mixers
+                // (eye preset, blink state, fade) write after the view's blink
+                // and dither of the same frame.
+                crate::fixture_activity_timeline::advance
+                    .after(crate::npc_state::NpcPresenterSet),
             )
                 .chain()
                 .after(action_button::click)
