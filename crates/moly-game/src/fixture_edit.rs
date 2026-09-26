@@ -29,6 +29,7 @@ use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
 
 pub(crate) use input::{read_keyboard, read_pointer};
+pub(crate) use put_effect::site_origin;
 
 #[derive(Resource, Default)]
 pub struct EditSessionActive {
@@ -62,6 +63,10 @@ pub(crate) enum EditCommand {
     KeepEditing,
     SaveAndExit,
     DiscardAndExit,
+    /// The camera rotate button (`LayoutAction` 13).
+    RotateCamera,
+    /// The change-look button (`LayoutAction` 14).
+    ChangeLookCamera,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -355,6 +360,25 @@ fn begin(world: &mut World, session: &mut EditSession) {
     session.say("已进入家具编辑：点击家具或清单选中；决定后仍是草稿，保存才写入本地图。");
 }
 
+/// `FocusOnLayoutEdit` (event 36) for a fixture: its view position, its
+/// current grid size and zoom support unless it is a block.
+fn focus(world: &mut World, item: &EditableFixture, source: &'static str) {
+    let Ok(pose) = item.pose() else {
+        return;
+    };
+    let position = site_origin(world) + pose.translation;
+    let size = put_effect::current_grid_size(item.grid_size, item.direction);
+    let size = Vec3::new(size.x as f32, size.y as f32, size.z as f32);
+    let zoom_support = match put_effect::is_block(world, item.fixture_id) {
+        Some(block) => !block,
+        None => {
+            warn!("[edit-camera] focus on {} ({source}): fixture {} has no handle type in the fixture table; focused without zoom support", item.uid, item.fixture_id);
+            false
+        }
+    };
+    crate::floor_edit_camera::focus(world, position, size, zoom_support, source);
+}
+
 fn select(
     session: &mut EditSession,
     item: EditableFixture,
@@ -383,12 +407,20 @@ fn select(
     session.changed();
     match put {
         // FloorEditState.PutFixture (a selector cell): the new fixture shows
-        // the put effect with its put sound; the pick sound is not played.
-        Some(item) => put_effect::show(world, &item, "edit-put"),
-        // FloorEditState.SelectFixture: the pick sound, then (after the
-        // focus and scale animation) FixtureController.PlayPutSound.
+        // the put effect with its put sound, then the focus; the pick sound
+        // is not played.
+        Some(item) => {
+            put_effect::show(world, &item, "edit-put");
+            focus(world, &item, "edit-put");
+        }
+        // FloorEditState.SelectFixture: the pick sound, the focus, then
+        // (after the scale animation) FixtureController.PlayPutSound.
         None => {
             play_se(world, "se_pick_furniture", "edit-pick");
+            if let Some(selected) = session.selected.as_ref() {
+                let item = selected.item.clone();
+                focus(world, &item, "edit-pick");
+            }
             put_effect::play_put_sound(world, fixture_id, "edit-pick");
         }
     }
@@ -446,6 +478,10 @@ fn decide(session: &mut EditSession, world: &mut World) {
     // sound), then the finish sound.
     put_effect::show(world, &decided, "edit-decide");
     play_se(world, "se_housing_finish", "edit-decide");
+    // Publish(7, LayoutEditEventData(1, uid)): the edit camera's distance
+    // restore.
+    let block = put_effect::is_block(world, decided.fixture_id);
+    crate::floor_edit_camera::decided(world, block, "edit-decide");
     session.say("已决定摆放，尚未保存。");
 }
 
@@ -683,6 +719,8 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             }
         }
         EditCommand::Decide => decide(session, world),
+        EditCommand::RotateCamera => crate::floor_edit_camera::rotate(world),
+        EditCommand::ChangeLookCamera => crate::floor_edit_camera::change_look(world),
         EditCommand::Cancel => session.cancel_selection(),
         EditCommand::ReturnToInventory => return_item(session),
         EditCommand::Save => {
@@ -897,6 +935,16 @@ impl Plugin for FixtureEditPlugin {
                 put_effect::advance
                     .after(FixtureEditSystems::Commands)
                     .before(crate::audio::SeDrainSet::Drain),
+            )
+            .add_systems(
+                Update,
+                crate::floor_edit_camera::input
+                    .after(FixtureEditSystems::Commands)
+                    .run_if(crate::game_settings::camera_input_enabled),
+            )
+            .add_systems(
+                PostUpdate,
+                crate::floor_edit_camera::sample.after(crate::camera::follow_avatar),
             )
             .add_systems(
                 PostUpdate,
