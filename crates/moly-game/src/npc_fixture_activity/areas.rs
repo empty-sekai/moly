@@ -123,6 +123,31 @@ impl NpcFixtureAreas {
         }
         Ok(false)
     }
+
+    /// FixtureController.IsInAddUsingGridXZ on this host's floor grid: the
+    /// controller's add-using bounds are one cell each (the rotated centre
+    /// plus each add-using cell), so a cell is inside when some add-using
+    /// cell has its x and z.
+    pub(crate) fn add_using_contains(
+        &self,
+        row: &OccupancyRow,
+        x: i8,
+        z: i8,
+    ) -> Result<bool, String> {
+        let mut add = self.row(&row.package)?.1.clone();
+        let (center, direction, _) = mirror_fixture_layout(
+            row.layout_center,
+            row.layout_grid_size,
+            row.direction,
+            row.layout,
+        )?;
+        add.rotate(direction, true);
+        let add_center = rotated_center_grid(center, row.layout_grid_size, direction);
+        Ok(add.enable_tiles.iter().any(|cell| {
+            let point = reflect_cell(add_center + *cell);
+            point.x == x && point.z == z
+        }))
+    }
 }
 
 // Native area laws use the source layout anchor, then occupied cells cross the

@@ -1631,8 +1631,9 @@ impl MemberSnap {
 }
 
 /// CreateGeneralTalkData's target position: the spot near another character,
-/// else a random floor position. Both chains start from the character's own
-/// position, not from its navigation origin. Returns the position (none when
+/// else a random floor position over the site's walkable list (see
+/// `npc::walkable`). Both chains start from the character's own position,
+/// not from its navigation origin. Returns the position (none when
 /// both miss) and the log detail; every draw goes into `record`.
 #[allow(clippy::too_many_arguments)]
 fn general_talk_target(
@@ -1641,6 +1642,7 @@ fn general_talk_target(
     position: [f32; 3],
     snaps: &[MemberSnap],
     occupied: &HashSet<Cell>,
+    walkable: &[Cell],
     face: &ObjectiveFace,
     config: &ClientConfigs,
     catalog: &crate::player_talk::TalkCatalog<'_>,
@@ -1710,8 +1712,7 @@ fn general_talk_target(
     // wraps each axis difference to a signed byte, so the unwrapped cell
     // gives the same ring.
     let origin = cell_of(position[0], position[2]);
-    let eligible: Vec<Cell> = face
-        .walkable()
+    let eligible: Vec<Cell> = walkable
         .iter()
         .copied()
         .filter(|cell| !occupied.contains(cell))
@@ -1769,10 +1770,11 @@ pub(crate) fn decide(
         Option<Res<npc_talk_lottery::TalkExtraTables>>,
         Option<Res<npc_talk_lottery::TalkExtraRequests>>,
     ),
-    (walk_face, mut change_site, hidden): (
+    (walk_face, mut change_site, hidden, mut walkable): (
         Option<Res<crate::walk_face::WalkFace>>,
         ResMut<crate::npc::change_site_state::ChangeSiteRuns>,
         Query<(), With<crate::npc::gate_entries::ModelHidden>>,
+        crate::npc::walkable::WalkableSource,
     ),
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
@@ -1865,6 +1867,11 @@ pub(crate) fn decide(
     }
     let dt = clock.delta();
     let frame = frame_count.0;
+    // The site's walkable list (the general talk's floor position reads
+    // it): the AI holds until it exists, as it holds for the site data.
+    let Ok(walkable_cells) = walkable.cells() else {
+        return;
+    };
 
     // 成员快照：社交链的候选（位置 + 导航目的地 + 对话目标位）与游走链的
     // 占格都从全员位置算。每名成员决策后按它的现值刷新自己那一格，后决策
@@ -2995,6 +3002,7 @@ pub(crate) fn decide(
                             state.0.position,
                             &snaps,
                             &occupied,
+                            &walkable_cells,
                             face,
                             config,
                             &catalog,
@@ -3512,6 +3520,7 @@ pub(crate) struct CascadeScene<'w, 's> {
     attach_worlds: Option<Res<'w, crate::fixture_attach::AttachWorlds>>,
     seeder: ResMut<'w, SequencePickSeeder>,
     fixture_activities: crate::npc_fixture_activity::Factory<'w, 's>,
+    walkable: crate::npc::walkable::WalkableSource<'w, 's>,
 }
 
 /// One character of the avatar list as the cascade's scene reads it: its
@@ -3616,6 +3625,7 @@ impl CascadeScene<'_, '_> {
         cause: &str,
     ) -> Result<Result<(), String>, CascadeHold> {
         let hold = |reason: &str| Err(CascadeHold(reason.to_owned()));
+        let walkable = self.walkable.cells().map_err(CascadeHold)?;
         let (Some(face), Some(epoch), Some(config), Some(talk_list), Some(together)) = (
             self.face.as_deref(),
             self.epoch.as_deref(),
@@ -3793,19 +3803,29 @@ impl CascadeScene<'_, '_> {
         }
         record.set("fixture_admissible", admissions.into_inner());
         record.extend_draws(draws);
+        // A host data gap takes the decision pass's path: the data is null
+        // (here dropped either way) and the draws made so far stay made.
         let outcome = match result {
-            Err(npc_talk_lottery::Halt::Gap(reason)) => return Err(CascadeHold(reason)),
+            Err(npc_talk_lottery::Halt::Gap(reason)) => {
+                record.set("host_gap", reason.as_str());
+                Ok(())
+            }
             Err(npc_talk_lottery::Halt::Fault(reason)) => {
                 record.set("reason", reason.as_str());
                 Err(reason)
             }
+            Ok(npc_talk_lottery::TalkPlan::General { talk_id, .. })
+                if catalog.resolve(talk_id).is_none() =>
+            {
+                record.set("talk_id", talk_id);
+                record.set(
+                    "host_gap",
+                    format!("general talk {talk_id} is not in the loaded talk scripts"),
+                );
+                Ok(())
+            }
             Ok(npc_talk_lottery::TalkPlan::General { talk_id, .. }) => {
                 record.set("talk_id", talk_id);
-                if catalog.resolve(talk_id).is_none() {
-                    return Err(CascadeHold(format!(
-                        "general talk {talk_id} is not in the loaded talk scripts"
-                    )));
-                }
                 // CreateGeneralTalkData's target position.
                 let (target, _) = general_talk_target(
                     seeker.unit,
@@ -3813,6 +3833,7 @@ impl CascadeScene<'_, '_> {
                     member.snap.position,
                     &snaps,
                     &occupied,
+                    &walkable,
                     face,
                     config,
                     catalog,

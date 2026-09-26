@@ -46,6 +46,7 @@ pub mod presenter;
 pub mod random_fixture_action;
 pub mod rest;
 pub mod social;
+pub mod walkable;
 pub mod wander;
 
 pub use approach::{APPROACH_HALF_TILE_OFFSET, APPROACH_SEARCH_RANGE, approach_ring_cells, approach_target};
