@@ -17,20 +17,49 @@
 //! returns when the second pass (or a first pass that reached the target)
 //! ends, which is the frame the predicate first holds.
 //!
+//! The NPC's own action (`NPCAvatarPresenter.ExecuteRandomFixtureAction`),
+//! evaluated for each try in pass order, after the tries before it forced
+//! theirs:
+//! - its unread fixture-action talks: the unread rows of the talk list that
+//!   pass the fixture-action filters (see
+//!   `npc_talk_lottery::fixture_action_talk_ids`);
+//! - its no-talk actions: the NoTalk rows of its unit, in master order, whose
+//!   fixture is placed and for which a fixture passes the no-talk tests;
+//! - one engine pick of each non-empty list, then `Random.value` only when
+//!   both exist (above 0.5 takes the talk);
+//! - the no-talk action is forced on the character: its current objective is
+//!   cancelled (nothing more when that reports false), the AI model is reset
+//!   and given the action's no-talk data (the data's timeline pick draws
+//!   here), the talk interrupt (4) is raised, the next rest is skipped, and
+//!   the character is placed on the navigation surface within 0.25 of the
+//!   action point's StartLoc when the surface has a point there. Its next
+//!   decision runs the no-talk objective on that data.
+//!
 //! Host shape. This host has no multiplay: the player is always solo and the
 //! room owner. A tutorial run returns at once in the source (the door goes on
 //! in its own frame); here the answer comes on the next frame, when this side
-//! first sees the request.
+//! first sees the request. The home controller's draws and the character's
+//! share one generator, as the source's engine generator is one.
 //!
-//! Not ported yet (named): the NPC's own action, which picks one unread
-//! fixture-action talk and one no-talk fixture action of that character,
-//! forces one of them as its next objective and places the cast near the
-//! fixture's action points. Every try here reports failure without drawing,
-//! so both passes run and nobody is forced; the selection, its draws and the
-//! await's timing are the source's.
+//! Not ported (named):
+//! - forcing the talk (`ForceExecuteReadTalkFixtureTalk`): which of its two
+//!   talk-data builders runs is chosen by the some-character timeline table,
+//!   which this host's tables do not carry, and the other speakers then get
+//!   the sub-character objective (8), which is not ported. The branch, its
+//!   draws and its return value are the source's; the talk is logged and not
+//!   forced.
+//! - the cancelled objective's own ForceUpdateObjective cascade (a no-talk
+//!   objective's cancel makes one) is not drawn: its data is replaced by the
+//!   reset that follows.
 
+use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use moly_law::objective::random_fixture_action as law;
+use moly_law::objective::{InterruptMarker, TalkType};
+
+use crate::npc::residency::Away;
+use crate::npc::{CharacterUnitId, NpcActions, WalkState};
+use crate::npc_objective::{ObjectiveFace, ObjectiveMind, TalkSlot};
 
 /// Marker: a reader of [`RandomFixtureActionPending`] is installed. The door
 /// move waits on the pending resource only while this exists.
@@ -52,8 +81,8 @@ pub(crate) struct RandomFixtureActionPending {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DoorAnswerSet;
 
-/// The home controller's draws on the engine's global generator (the shuffle
-/// is its only draw while the NPC's own action is not ported).
+/// The engine's global generator as the home controller and the characters'
+/// random fixture actions draw on it.
 #[derive(Resource)]
 pub(crate) struct ControllerRandom(crate::npc_objective::MemberRng);
 
@@ -90,6 +119,13 @@ impl Caller {
     }
 }
 
+/// The talk interrupt a forced no-talk action raises.
+const TALK_INTERRUPT: InterruptMarker = InterruptMarker {
+    marker_type: 4,
+    can_interrupt: true,
+};
+
+
 /// The body, one call per frame at most.
 pub(crate) fn answer(world: &mut World, mut state: Local<AnswerState>) {
     let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
@@ -118,8 +154,8 @@ pub(crate) fn answer(world: &mut World, mut state: Local<AnswerState>) {
     }
     // WaitForNPCInitialization: WaitUntil(npc list is non-empty).
     let mut list = world.query_filtered::<(
-        &crate::npc::CharacterUnitId,
-        &crate::npc::NpcActions,
+        &CharacterUnitId,
+        &NpcActions,
         &Visibility,
     ), Without<crate::player::PlayerControlled>>();
     let present: Vec<(u32, String, bool)> = list
@@ -171,14 +207,13 @@ pub(crate) fn answer(world: &mut World, mut state: Local<AnswerState>) {
         let found = present.iter().any(|(u, ..)| *u as i32 == unit);
         tries.push((unit, found));
         if found {
-            // The NPC's own action is not ported (see the module notes).
-            law::TryOutcome::Failed
+            execute_random_fixture_action(world, unit as u32, frame)
         } else {
             law::TryOutcome::NoNpc
         }
     });
     info!(
-        "[npc-door] ExecuteNPCRandomFixtureAction from {} at frame {frame}: visible home NPCs {candidates:?}, shuffle draws (bound, value) {draws:?} -> {ids:?}, target ceil(n*0.3f) = {target}, pass 1 {first}/{target}{}, tries (unit, NPC found) {tries:?}; the NPC's own action is not ported: each try reports failure",
+        "[npc-door] ExecuteNPCRandomFixtureAction from {} at frame {frame}: visible home NPCs {candidates:?}, shuffle draws (bound, value) {draws:?} -> {ids:?}, target ceil(n*0.3f) = {target}, pass 1 {first}/{target}{}, tries (unit, NPC found) {tries:?}",
         caller.word(),
         match second {
             Some(count) => format!(", pass 2 {count}/{}", target - first),
@@ -186,6 +221,416 @@ pub(crate) fn answer(world: &mut World, mut state: Local<AnswerState>) {
         },
     );
     finish(world, caller, &mut state);
+}
+
+/// A character's two candidate lists, or why they could not be read.
+struct Candidates {
+    talks: Vec<i32>,
+    actions: Vec<i32>,
+    /// Host data a list could not be evaluated over (that list reads as
+    /// empty).
+    gaps: Vec<String>,
+}
+
+/// `NPCAvatarPresenter.ExecuteRandomFixtureAction` for `unit`; returns what
+/// the pass reads back from it.
+fn execute_random_fixture_action(world: &mut World, unit: u32, frame: u32) -> law::TryOutcome {
+    let Some(actor) = find_npc(world, unit) else {
+        return law::TryOutcome::NoNpc;
+    };
+    let mut line = serde_json::Map::new();
+    line.insert("v".into(), 1.into());
+    line.insert("unit".into(), unit.into());
+    line.insert("frame".into(), frame.into());
+    let candidates = match candidates(world, actor, unit) {
+        Ok(candidates) => candidates,
+        Err(reason) => {
+            line.insert("refused".into(), reason.clone().into());
+            warn!("[npc-door-action] {}", serde_json::Value::Object(line));
+            // Nothing is evaluated for this character: no draw, failure.
+            return law::TryOutcome::Failed;
+        }
+    };
+    line.insert("talks".into(), serde_json::json!(candidates.talks));
+    line.insert("no_talk_rows".into(), serde_json::json!(candidates.actions));
+    if !candidates.gaps.is_empty() {
+        line.insert("gaps".into(), serde_json::json!(candidates.gaps));
+    }
+    // RandomPick of each list (none for an empty one), then Random.value
+    // only when both are non-empty.
+    let mut draw_log = Vec::new();
+    let (talk, action, pick) = world.resource_scope(|_, mut random: Mut<ControllerRandom>| {
+        let talk = (!candidates.talks.is_empty()).then(|| {
+            let index =
+                crate::npc_objective::engine_int_draw(&mut random.0, candidates.talks.len());
+            draw_log.push(serde_json::json!({"use": "talk_pick", "value": index, "range": [0, candidates.talks.len()]}));
+            candidates.talks[index]
+        });
+        let action = (!candidates.actions.is_empty()).then(|| {
+            let index =
+                crate::npc_objective::engine_int_draw(&mut random.0, candidates.actions.len());
+            draw_log.push(serde_json::json!({"use": "no_talk_pick", "value": index, "range": [0, candidates.actions.len()]}));
+            candidates.actions[index]
+        });
+        let pick = law::pick_npc_fixture_action(talk.is_some(), action.is_some(), &mut || {
+            let value = crate::npc_objective::engine_float_draw(&mut random.0, 1.0);
+            draw_log.push(serde_json::json!({"use": "talk_or_no_talk", "value": value, "bits": format!("{:08x}", value.to_bits())}));
+            value
+        });
+        (talk, action, pick)
+    });
+    let reports_success = match pick {
+        law::NpcFixtureActionPick::NoTalk { reports_success } => {
+            let row = action.expect("the no-talk arm has an action");
+            line.insert("pick".into(), "no_talk".into());
+            line.insert("no_talk_row".into(), row.into());
+            force_no_talk_action(world, actor, unit, row, frame, &mut line, &mut draw_log);
+            reports_success
+        }
+        law::NpcFixtureActionPick::Talk { reports_success } => {
+            let talk = talk.expect("the talk arm has a talk");
+            line.insert("pick".into(), "talk".into());
+            line.insert("talk_id".into(), talk.into());
+            line.insert(
+                "forced".into(),
+                "not ported: the some-character timeline table that chooses the talk-data builder is not in the host tables, and the sub-character objective (8) is not ported"
+                    .into(),
+            );
+            reports_success
+        }
+        law::NpcFixtureActionPick::Nothing => {
+            line.insert("pick".into(), "nothing".into());
+            false
+        }
+    };
+    line.insert("draws".into(), serde_json::Value::Array(draw_log));
+    line.insert("returns".into(), reports_success.into());
+    info!("[npc-door-action] {}", serde_json::Value::Object(line));
+    if !reports_success {
+        return law::TryOutcome::Failed;
+    }
+    // The pass reads the talk data the character now carries.
+    let data = world
+        .get::<TalkSlot>(actor)
+        .and_then(|slot| slot.current.as_ref())
+        .map(|data| {
+            (
+                data.characters
+                    .iter()
+                    .map(|unit| *unit as i32)
+                    .collect::<Vec<_>>(),
+                data.kind == TalkType::MultipleCharacterFixture,
+            )
+        });
+    law::TryOutcome::Succeeded {
+        multiple: data.as_ref().is_some_and(|(_, multiple)| *multiple),
+        cast: data.map(|(cast, _)| cast),
+    }
+}
+
+/// `AvatarDataStore.FindNPC(unit)`.
+fn find_npc(world: &mut World, unit: u32) -> Option<Entity> {
+    let mut query = world
+        .query_filtered::<(Entity, &CharacterUnitId), Without<crate::player::PlayerControlled>>();
+    query
+        .iter(world)
+        .find(|(_, id)| id.0 == unit)
+        .map(|(entity, _)| entity)
+}
+
+/// The character's unread fixture-action talks and its no-talk actions.
+#[allow(clippy::type_complexity)]
+fn candidates(world: &mut World, actor: Entity, unit: u32) -> Result<Candidates, String> {
+    let mut params = SystemState::<(
+        crate::npc_fixture_activity::Factory<'_, '_>,
+        Res<crate::fixture::FixturePlacements>,
+        Option<Res<ObjectiveFace>>,
+        crate::player_talk::TalkCatalog<'_>,
+        Option<Res<crate::client_config::ClientConfigs>>,
+        Option<Res<crate::server_panel::TalkDataStore>>,
+        Option<Res<crate::site::GroundEpoch>>,
+        Option<Res<crate::site::SiteSelection>>,
+        Query<
+            (
+                Entity,
+                &CharacterUnitId,
+                &TalkSlot,
+                &ObjectiveMind,
+                &NpcActions,
+                &WalkState,
+            ),
+            Without<Away>,
+        >,
+        Query<(&CharacterUnitId, &NpcActions), Without<crate::player::PlayerControlled>>,
+    )>::new(world);
+    let (factory, placements, face, catalog, configs, talk_list, epoch, selection, npcs, store) =
+        params.get_mut(world);
+    let face = face.ok_or("the objective face is not built")?;
+    let config = configs.ok_or("the client configs are not loaded")?;
+    let talk_list = talk_list.ok_or("the talk list is not set")?;
+    let epoch = epoch.ok_or("no site generation is set")?.0;
+    let tables = factory
+        .tables()
+        .ok_or("the talk and fixture master tables are still loading")?;
+    let (_, _, _, mind, actions, walk) = npcs
+        .get(actor)
+        .map_err(|_| format!("unit {unit} is not on the loaded site"))?;
+    let views: Vec<crate::npc_talk_lottery::NpcView> = npcs
+        .iter()
+        .map(
+            |(_, unit, slot, mind, actions, _)| crate::npc_talk_lottery::NpcView {
+                unit: unit.0,
+                site_type: catalog.site_type_value(&actions.site_type),
+                previous_talk_id: slot.previous_id().unwrap_or(0),
+                talk_type: slot.kind(),
+                objective: mind.current,
+                state: actions.current as u8,
+                since_initialized: actions.since_initialized,
+            },
+        )
+        .collect();
+    // IsMatchedSubCharacterSite reads every NPC of the store, on any site.
+    let store: Vec<(u32, Option<i32>)> = store
+        .iter()
+        .map(|(unit, actions)| (unit.0, catalog.site_type_value(&actions.site_type)))
+        .collect();
+    let seeker = views
+        .iter()
+        .find(|view| view.unit == unit)
+        .expect("the character is in the list it was read from");
+    let fixtures = factory.talk_lottery_fixtures(
+        &placements,
+        selection
+            .as_deref()
+            .and_then(|site| catalog.site_type_value(site.site_type())),
+    );
+    let other_targets: Vec<(Entity, Option<Entity>)> = npcs
+        .iter()
+        .map(|(entity, _, slot, ..)| {
+            (
+                entity,
+                slot.current.as_ref().and_then(|data| data.target_fixture),
+            )
+        })
+        .collect();
+    let position = walk.0.position;
+    let unmovable: &[String] = &mind.unmovable_fixtures;
+    let admissible = |talk: i32, fixture: &crate::npc_talk_lottery::PlacedFixture| {
+        factory.talk_fixture_admissible(
+            actor,
+            position,
+            talk,
+            &fixture.uid,
+            &placements,
+            &other_targets,
+            unmovable,
+            &face,
+        )
+    };
+    let site_type_of_site = |site: i32| catalog.site_type_of_site(site);
+    let scene = crate::npc_talk_lottery::LotteryScene {
+        tables,
+        talk_list: talk_list.talk_list(),
+        phenomena_id: catalog.phenomena_id(),
+        site_type_of_site: &site_type_of_site,
+        npcs: &views,
+        fixtures: &fixtures,
+        // The fixture-action filters draw nothing; the weights are unread.
+        weights: moly_law::talk::select::LotteryWeights {
+            talk1: 0.0,
+            talk2: 0.0,
+            talk3: 0.0,
+            talk4: 0.0,
+        },
+        fixture_gates: Some(crate::npc_talk_lottery::FixtureGateInputs {
+            gate_action_elapsed_seconds: config
+                .int(crate::client_config::KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME),
+            admissible: &admissible,
+        }),
+        fixture_host: None,
+        together: None,
+    };
+    let mut gaps = Vec::new();
+    let talks = match crate::npc_talk_lottery::fixture_action_talk_ids(&scene, seeker, &store) {
+        Ok(talks) => talks,
+        Err(crate::npc_talk_lottery::Halt::Gap(reason)) => {
+            gaps.push(format!("talks: {reason}"));
+            Vec::new()
+        }
+        Err(crate::npc_talk_lottery::Halt::Fault(reason)) => {
+            return Err(format!(
+                "the fixture-action talk filters raise in the source ({reason})"
+            ));
+        }
+    };
+    let actions = match factory.no_talk_action_rows(
+        actor,
+        unit,
+        &actions.site_type,
+        epoch,
+        position,
+        &placements,
+        &other_targets,
+        unmovable,
+        &face,
+    ) {
+        Ok(rows) => rows,
+        Err(crate::npc_fixture_activity::FactoryIssue::Pending(reason))
+        | Err(crate::npc_fixture_activity::FactoryIssue::Gap(reason)) => {
+            gaps.push(format!("no-talk actions: {reason}"));
+            Vec::new()
+        }
+    };
+    Ok(Candidates {
+        talks,
+        actions,
+        gaps,
+    })
+}
+
+/// `ForceExecuteNoneTalkFixtureActionObjective(action)` on `actor`.
+fn force_no_talk_action(
+    world: &mut World,
+    actor: Entity,
+    unit: u32,
+    row: i32,
+    frame: u32,
+    line: &mut serde_json::Map<String, serde_json::Value>,
+    draw_log: &mut Vec<serde_json::Value>,
+) {
+    // TryCancelCurrentObjective.
+    let (cancelled, owed) = world.resource_scope(
+        |world, mut groups: Mut<crate::npc_fixture_talk::FixtureTalkGroups>| {
+            crate::npc_fixture_talk::try_cancel_current(world, &mut groups, actor, frame)
+        },
+    );
+    line.insert("cancel".into(), cancelled.into());
+    if !cancelled {
+        return;
+    }
+    if owed > 0 {
+        line.insert("cancel_force_updates_not_drawn".into(), owed.into());
+    }
+    // ForceUpdateNoneTalkFixtureActionObjective: Reset, then SetAITalkData(
+    // CreateNoneTalkData(character, action)), then SetCanInterruptTalkData(4).
+    let selected = world.resource_scope(|world, mut random: Mut<ControllerRandom>| {
+        select_row(world, actor, unit, row, &mut random.0)
+    });
+    let selection = match selected {
+        Ok((selection, draws)) => {
+            if let Some((value, len)) = draws.timeline_pick {
+                draw_log.push(serde_json::json!({"use": "none_talk_timeline_pick", "value": value, "range": [0, len]}));
+            }
+            selection
+        }
+        Err(reason) => {
+            line.insert("data_gap".into(), reason.into());
+            None
+        }
+    };
+    world
+        .resource_mut::<crate::npc_fixture_activity::NpcFixtureActivities>()
+        .clear_forced(actor);
+    if let Some(mut slot) = world.get_mut::<TalkSlot>(actor) {
+        slot.reset_ai_talk_data();
+        if let Some(selection) = &selection {
+            slot.set_current(selection.ai_data());
+        }
+        slot.interrupt = Some(TALK_INTERRUPT);
+    }
+    if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
+        // The cancelled objective's own ForceUpdateObjective ran inside the
+        // cancel, before this reset: nothing stays owed.
+        mind.force_updates = 0;
+        // ImmediatelyExecuteNextObjective.
+        mind.skip_next_rest = true;
+    }
+    let Some(selection) = selection else {
+        line.insert("data".into(), "null".into());
+        return;
+    };
+    line.insert("fixture".into(), selection.target.uid.clone().into());
+    line.insert("timeline".into(), selection.timeline_id().into());
+    // ForceSetFixtureActionPointNearPosition: the StartLoc, sampled within
+    // 0.25; no surface point there places nothing.
+    let hit = world
+        .get_resource::<ObjectiveFace>()
+        .and_then(|face| face.sample(selection.start_loc, law::NEAR_ACTION_POINT_RADIUS));
+    match hit {
+        Some(hit) => {
+            crate::npc::force_set_position(world, actor, hit);
+            line.insert("placed".into(), serde_json::json!(hit));
+        }
+        None => {
+            line.insert(
+                "placed".into(),
+                "no surface point within 0.25 of the StartLoc".into(),
+            );
+        }
+    }
+    world
+        .resource_mut::<crate::npc_fixture_activity::NpcFixtureActivities>()
+        .force(actor, selection);
+}
+
+/// CreateNoneTalkData(character, action) for one NoTalk row.
+#[allow(clippy::type_complexity)]
+fn select_row(
+    world: &mut World,
+    actor: Entity,
+    unit: u32,
+    row: i32,
+    random: &mut crate::npc_objective::MemberRng,
+) -> Result<
+    (
+        Option<crate::npc_fixture_activity::Selection>,
+        crate::npc_fixture_activity::NoneTalkDraws,
+    ),
+    String,
+> {
+    let mut params = SystemState::<(
+        crate::npc_fixture_activity::Factory<'_, '_>,
+        Res<crate::fixture::FixturePlacements>,
+        Option<Res<ObjectiveFace>>,
+        Option<Res<crate::site::GroundEpoch>>,
+        Query<(Entity, &TalkSlot, &ObjectiveMind, &NpcActions, &WalkState), Without<Away>>,
+    )>::new(world);
+    let (factory, placements, face, epoch, npcs) = params.get_mut(world);
+    let face = face.ok_or("the objective face is not built")?;
+    let epoch = epoch.ok_or("no site generation is set")?.0;
+    let (_, _, mind, actions, walk) = npcs
+        .get(actor)
+        .map_err(|_| format!("unit {unit} is not on the loaded site"))?;
+    let other_targets: Vec<(Entity, Option<Entity>)> = npcs
+        .iter()
+        .map(|(entity, slot, ..)| {
+            (
+                entity,
+                slot.current.as_ref().and_then(|data| data.target_fixture),
+            )
+        })
+        .collect();
+    let mut draws = crate::npc_fixture_activity::NoneTalkDraws::default();
+    let selection = factory
+        .select_no_talk_row(
+            row,
+            actor,
+            unit,
+            &actions.site_type,
+            epoch,
+            walk.0.position,
+            &placements,
+            &other_targets,
+            &mind.unmovable_fixtures,
+            &face,
+            random,
+            &mut draws,
+        )
+        .map_err(|issue| match issue {
+            crate::npc_fixture_activity::FactoryIssue::Pending(reason)
+            | crate::npc_fixture_activity::FactoryIssue::Gap(reason) => reason,
+        })?;
+    Ok((selection, draws))
 }
 
 fn finish(world: &mut World, caller: Caller, state: &mut AnswerState) {

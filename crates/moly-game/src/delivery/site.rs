@@ -46,7 +46,14 @@ use super::{
     CollisionEdge, DeliveryCollision, DeliveryDialogClosed, DeliveryModel, DeliveryObjectType,
     DeliveryRequest,
 };
+use crate::fixture_activity_timeline::{
+    ReceiverCall, SignalReaction, SignalReceiverBinding, SourceAssetId,
+};
+use crate::fixture_timeline_particles::SignalCall;
 use crate::player::PlayerControlled;
+
+/// A site's package: its bundle under the field prefix.
+const SITE_PACKAGE_PREFIX: &str = "mysekai__site__field__";
 
 /// The resolved scene objects of the current delivery site (product frame).
 #[derive(Clone, Debug)]
@@ -71,6 +78,9 @@ pub(crate) struct DeliveryObjects {
     pub(crate) bloom_timeline: Option<String>,
     /// The place view's `_playableDirector` (its component id).
     pub(crate) place_director: Option<i64>,
+    /// `_deliveryAnimationSignalReceiver` with its reaction table, or why it
+    /// cannot be followed in the scene document.
+    pub(crate) signal_receiver: Result<SignalReceiverBinding, String>,
 }
 
 #[derive(Resource, Default)]
@@ -88,6 +98,8 @@ pub(crate) struct DeliverySite {
     inside: [bool; 2],
     /// The arrival (model setup, unclaimed drops) ran for this epoch.
     pub(crate) arrived: bool,
+    /// The delivery signal receiver's particle targets are prepared.
+    signals_prepared: bool,
 }
 
 impl DeliverySite {
@@ -132,6 +144,46 @@ fn float(fields: &Value, class: &str, name: &str) -> Result<f32, String> {
 enum Resolve {
     Pending,
     Failed(String),
+}
+
+/// Update (exclusive): the delivery signal receiver's particle targets are
+/// prepared on the particle host as soon as the site's objects resolve, so
+/// the step item that binds the receiver does not wait for them.
+pub(crate) fn prepare_signal_targets(world: &mut World) {
+    let Some(state) = world.get_resource::<DeliverySite>() else {
+        return;
+    };
+    if state.signals_prepared {
+        return;
+    }
+    let Some((receiver, bundle)) = state.objects.as_ref().and_then(|objects| {
+        objects
+            .signal_receiver
+            .as_ref()
+            .ok()
+            .map(|receiver| (receiver.clone(), objects.bundle.clone()))
+    }) else {
+        return;
+    };
+    let package = format!("{SITE_PACKAGE_PREFIX}{bundle}");
+    let started = crate::fixture_timeline_particles::realtime(world);
+    match crate::fixture_activity_timeline::prepare_receiver_targets(world, &receiver, &package) {
+        Ok(false) => {}
+        Ok(true) => {
+            world.resource_mut::<DeliverySite>().signals_prepared = true;
+            info!(
+                "[delivery] {}: its particle targets are prepared on the particle host ahead of the step item (real time {started:.3})",
+                receiver.receiver
+            );
+        }
+        Err(error) => {
+            world.resource_mut::<DeliverySite>().signals_prepared = true;
+            error!(
+                "[delivery] {}: its particle targets are not prepared ahead: {}",
+                receiver.receiver, error.message
+            );
+        }
+    }
 }
 
 /// Update: resolve the scene objects on each delivery-site arrival.
@@ -323,6 +375,185 @@ fn read_objects(
         arrive: offset,
         bloom_timeline,
         place_director,
+        signal_receiver: signal_receiver(&doc, view),
+    })
+}
+
+/// A pointer field of an instance, followed to (file, pathId): `fileId` 0 is
+/// the referrer's own file; another file cannot be followed here, the scene
+/// document carries no external table.
+fn follow(referrer: &Value, pointer: &Value, what: &str) -> Result<Option<SourceAssetId>, String> {
+    let path_id = pointer["pathId"]
+        .as_i64()
+        .ok_or_else(|| format!("{what} has no pathId"))?;
+    if path_id == 0 {
+        return Ok(None);
+    }
+    match pointer["fileId"].as_i64() {
+        Some(0) => {}
+        other => {
+            return Err(format!(
+                "{what} points into file {other:?}, outside the referrer's"
+            ))
+        }
+    }
+    let file = referrer["file"].as_str().ok_or_else(|| {
+        "the scene document's component instances carry no identity (file, pathId); the site's scene was exported before they did".to_owned()
+    })?;
+    Ok(Some(SourceAssetId {
+        file: file.to_owned(),
+        path_id: path_id.to_string(),
+    }))
+}
+
+/// The node of the component `id` in the scene document: a particle system
+/// or any exported component instance.
+fn component_node(doc: &Value, id: &SourceAssetId) -> Option<String> {
+    let path_id: i64 = id.path_id.parse().ok()?;
+    let particle = doc["particles"].as_array().and_then(|rows| {
+        rows.iter()
+            .find(|row| row["pathId"].as_i64() == Some(path_id))
+            .and_then(|row| row["node"].as_str())
+    });
+    particle.map(str::to_owned).or_else(|| {
+        doc["components"].as_object()?.values().find_map(|entry| {
+            entry["instances"].as_array()?.iter().find_map(|instance| {
+                (instance["pathId"].as_i64() == Some(path_id)
+                    && instance["file"].as_str() == Some(id.file.as_str()))
+                .then(|| instance["node"].as_str().unwrap_or("").to_owned())
+            })
+        })
+    })
+}
+
+/// `PersistentListenerMode`: the argument a persistent call passes.
+fn call_argument(arguments: &Value, mode: i64) -> String {
+    match mode {
+        0 => "the event's argument".to_owned(),
+        1 => String::new(),
+        2 => format!("{}", arguments["m_ObjectArgument"]),
+        3 => format!("{}", arguments["m_IntArgument"]),
+        4 => format!("{}", arguments["m_FloatArgument"]),
+        5 => format!("{}", arguments["m_StringArgument"]),
+        6 => format!("{}", arguments["m_BoolArgument"].as_i64() == Some(1)),
+        other => format!("mode {other}"),
+    }
+}
+
+/// `DeliverySiteView._deliveryAnimationSignalReceiver`: the receiver's
+/// `SignalReceiver.m_Events` pairs `m_Signals[i]` with `m_Events[i]`, a
+/// UnityEvent whose persistent calls are its reaction.
+fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, String> {
+    let field = "DeliverySiteView._deliveryAnimationSignalReceiver";
+    let id = follow(
+        view,
+        &view["fields"]["_deliveryAnimationSignalReceiver"],
+        field,
+    )?
+    .ok_or_else(|| format!("{field} is null"))?;
+    let instances = doc["components"]["SignalReceiver"]["instances"]
+        .as_array()
+        .ok_or("the delivery scene has no SignalReceiver")?;
+    let hits: Vec<_> = instances
+        .iter()
+        .filter(|instance| {
+            instance["file"].as_str() == Some(id.file.as_str())
+                && instance["pathId"].as_i64().map(|n| n.to_string()) == Some(id.path_id.clone())
+        })
+        .collect();
+    let [receiver] = hits.as_slice() else {
+        return Err(format!(
+            "{field} ({}/{}) matches {} SignalReceiver instances",
+            id.file,
+            id.path_id,
+            hits.len()
+        ));
+    };
+    let events = &receiver["fields"]["m_Events"];
+    let signals = events["m_Signals"]
+        .as_array()
+        .ok_or("SignalReceiver.m_Events.m_Signals is missing")?;
+    let reactions = events["m_Events"]
+        .as_array()
+        .ok_or("SignalReceiver.m_Events.m_Events is missing")?;
+    if signals.len() != reactions.len() {
+        return Err(format!(
+            "SignalReceiver.m_Events has {} signals and {} events",
+            signals.len(),
+            reactions.len()
+        ));
+    }
+    let mut rows = Vec::with_capacity(signals.len());
+    for (signal, event) in signals.iter().zip(reactions) {
+        let signal_id = follow(receiver, signal, "SignalReceiver.m_Events.m_Signals")?
+            .ok_or("SignalReceiver.m_Events.m_Signals holds a null signal")?;
+        let calls = event["m_PersistentCalls"]["m_Calls"]
+            .as_array()
+            .ok_or("a SignalReceiver event has no m_PersistentCalls.m_Calls")?;
+        let calls = calls
+            .iter()
+            .map(|call| {
+                let full_type = call["m_TargetAssemblyTypeName"]
+                    .as_str()
+                    .and_then(|name| name.split(',').next());
+                let type_name = full_type
+                    .and_then(|name| name.rsplit('.').next())
+                    .unwrap_or("?");
+                let target = follow(receiver, &call["m_Target"], "a persistent call's m_Target")
+                    .ok()
+                    .flatten();
+                let on = target.as_ref().map_or("no target".to_owned(), |target| {
+                    match component_node(doc, target) {
+                        Some(node) => format!("{node} ({})", target.path_id),
+                        None => format!("component {}", target.path_id),
+                    }
+                });
+                // `UnityEventCallState`: Off 0, EditorAndRuntime 1,
+                // RuntimeOnly 2; an Off call gives no runtime call.
+                let call_state = call["m_CallState"].as_i64();
+                let state = match call_state {
+                    Some(0) => ", off",
+                    Some(1) => ", editor and runtime",
+                    _ => "",
+                };
+                let method = call["m_MethodName"].as_str().unwrap_or("?");
+                let mode = call["m_Mode"].as_i64().unwrap_or(-1);
+                let runtime = matches!(call_state, Some(1) | Some(2));
+                // `PersistentListenerMode.Void` (1) finds the method with no
+                // parameter: `ParticleSystem.Play()` plays with its
+                // children, `Stop()` stops emitting with its children.
+                let particle = match (full_type, method, mode, &target) {
+                    (Some("UnityEngine.ParticleSystem"), "Play", 1, Some(target)) if runtime => {
+                        Some((SignalCall::Play, target.clone()))
+                    }
+                    (Some("UnityEngine.ParticleSystem"), "Stop", 1, Some(target)) if runtime => {
+                        Some((SignalCall::Stop, target.clone()))
+                    }
+                    _ => None,
+                };
+                ReceiverCall {
+                    text: format!(
+                        "{type_name}.{method}({}) on {on}{state}",
+                        call_argument(&call["m_Arguments"], mode)
+                    ),
+                    runtime,
+                    particle,
+                }
+            })
+            .collect();
+        rows.push(SignalReaction {
+            signal: signal_id,
+            signal_name: signal["name"].as_str().unwrap_or("?").to_owned(),
+            calls,
+        });
+    }
+    Ok(SignalReceiverBinding {
+        receiver: format!(
+            "SignalReceiver on {} ({})",
+            receiver["node"].as_str().unwrap_or(""),
+            id.path_id
+        ),
+        reactions: rows,
     })
 }
 

@@ -498,7 +498,15 @@ pub(crate) fn plan(
 
     let mut tally = Tally::default();
     let mut plans = Vec::new();
+    let mut not_play_on_awake = 0usize;
     for system in &doc.particles {
+        // A system that does not play on awake runs only when its owner plays
+        // it (a director's Control clip, a Signal reaction's Play), never from
+        // the scene's load.
+        if system.system.as_ref().and_then(|v| v.get("playOnAwake")).and_then(serde_json::Value::as_bool) == Some(false) {
+            not_play_on_awake += 1;
+            continue;
+        }
         match judge(
             system,
             doc,
@@ -526,6 +534,10 @@ pub(crate) fn plan(
             .filter(|node| node.contains("fx_env_site_")).collect();
         info!("[uber-particle] {} scene-embedded environment effect rows {:?}; admitted {:?}",
             active.scene, embedded, admitted);
+    }
+    if not_play_on_awake > 0 {
+        info!("[uber-particle] {}: {not_play_on_awake} systems do not play on awake; their owners play them, so they are not run from load",
+            active.scene);
     }
     if tally.records == 0 {
         // 这个站点包里没有这一族的粒子系统：不留资源，也不每帧重扫。
@@ -1015,6 +1027,7 @@ pub(crate) fn advance(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     anchors: Query<&GlobalTransform>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
+    taken: Query<(), With<crate::fixture_timeline_particles::DrivenByPrefabOwner>>,
 ) {
     let Some(mut state) = state else {
         return;
@@ -1047,7 +1060,9 @@ pub(crate) fn advance(
     let dt = crate::particle_runtime::source_delta_time(time.delta());
     let state = &mut *state;
     for system in &mut state.live {
-        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
+        // A system a prefab's director owner took over is the owner's, drawn
+        // by the fixture host.
+        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok() || taken.get(entity).is_ok()) {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
@@ -1328,6 +1343,8 @@ pub(crate) fn advance_fixture_particles(
     time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut camera_speed: Local<billboard::CameraVelocity>,
+    families: Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
+    locals: Query<(&Transform, Option<&ChildOf>)>,
 ) {
     let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
@@ -1346,6 +1363,7 @@ pub(crate) fn advance_fixture_particles(
         unscaled: unscaled.as_deref().map(|clock| clock.delta()),
         now: time.elapsed_secs_f64(),
     };
+    let mut targets = Vec::new();
     for (entity, mut particle, mut clock, stopped, played, trail) in &mut live {
         let system = &mut particle.0;
         let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
@@ -1413,6 +1431,26 @@ pub(crate) fn advance_fixture_particles(
                 error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
             }
         }
+        // A played sub-emitter target draws after its parents' commands of
+        // this frame reached it.
+        if system.native_birth.as_ref().is_some_and(|native| native.target.is_some()) {
+            targets.push((entity, anchor));
+            continue;
+        }
+        let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
+        if let Some(mesh) = meshes.get_mut(&system.mesh) {
+            crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+        }
+        // The renderer's second draw: the trail strip from this frame's
+        // recorded points.
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        }
+    }
+    deliver_played_commands(&mut live, &families, &locals, clocks.scaled);
+    for (entity, anchor) in targets {
+        let Ok((_, mut particle, _, _, _, trail)) = live.get_mut(entity) else { continue };
+        let system = &mut particle.0;
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if let Some(mesh) = meshes.get_mut(&system.mesh) {
             crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
@@ -1430,6 +1468,68 @@ pub(crate) fn advance_fixture_particles(
 fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
     if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
         if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+    }
+}
+
+/// Hands each played parent's commands of this frame, in the order recorded,
+/// to its installed targets, as the weather host hands its own: a target's
+/// owner words are composed from its instance first, a refused command
+/// changes nothing but the target's refusal count, and a command whose target
+/// is not installed is dropped, counted. A target that is a parent in turn
+/// records commands while it takes its parent's; those go in the next round,
+/// until none is left (one round per family at most).
+fn deliver_played_commands(live: &mut Query<(Entity, &mut FixtureParticleLive,
+        Option<&mut crate::fixture_timeline_particles::DirectorClock>,
+        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
+        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>, families: &Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
+    locals: &Query<(&Transform, Option<&ChildOf>)>, frame_dt: f32) {
+    let families: Vec<(Entity, Vec<(String, Entity)>)> = families.iter().map(|(parent, targets)| (parent, targets.0.clone())).collect();
+    for _round in 0..families.len() {
+        let mut delivered = false;
+        for (parent, targets) in &families {
+            let taken = match live.get_mut(*parent) {
+                Ok((_, mut particle, ..)) => particle.0.native_birth.as_mut().and_then(|native| native.events.as_mut())
+                    .map_or_else(Vec::new, |events| events.take_commands()),
+                Err(_) => continue,
+            };
+            if taken.is_empty() {
+                continue;
+            }
+            delivered = true;
+            let mut dropped = 0;
+            let mut refreshed = std::collections::HashSet::new();
+            for (target, command) in taken {
+                let Some(&(_, draw)) = targets.iter().find(|(node, _)| *node == target) else { dropped += 1; continue };
+                let Ok((_, mut child, ..)) = live.get_mut(draw) else { dropped += 1; continue };
+                let system = &mut child.0;
+                if refreshed.insert(draw) {
+                    let owner = system.anchor.ok_or_else(|| "target has no instance node".to_owned())
+                        .and_then(|anchor| crate::weather_fx::fixture::target_scaling(system).and_then(|scaling|
+                            crate::weather_fx::fixture::instance_owner(anchor, scaling,
+                                |entity| locals.get(entity).ok().map(|(transform, _)| *transform),
+                                |entity| locals.get(entity).ok().and_then(|(_, parent)| parent.map(ChildOf::parent)))));
+                    match (owner, system.native_birth.as_mut().and_then(|native| native.target.as_mut())) {
+                        (Ok(owner), Some(state)) => state.owner = owner,
+                        (Err(reason), _) => error!(%reason, node=%system.node,
+                            "sub-emitter target owner words not composed; its commands read the last ones"),
+                        _ => {}
+                    }
+                }
+                if let Err(reason) = crate::particle_runtime::deliver_command(system, &command, frame_dt) {
+                    if system.native_birth.as_ref().and_then(|native| native.target.as_ref()).is_some_and(|state| state.refused == 1) {
+                        error!(%reason, effect=%system.effect, node=%system.node, "sub-emitter command refused by its target");
+                    }
+                }
+            }
+            if dropped > 0 {
+                if let Ok((_, particle, _, _, Some(mut played), _)) = live.get_mut(*parent) {
+                    crate::weather_fx::fixture::count_dropped(&mut played, &particle.0, dropped);
+                }
+            }
+        }
+        if !delivered {
+            return;
+        }
     }
 }
 

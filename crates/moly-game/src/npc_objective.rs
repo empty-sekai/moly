@@ -298,11 +298,14 @@ impl ObjectiveFace {
             .collect()
     }
 
+    /// One agent move on the navigation cells (the engine's corridor move,
+    /// see `WalkField::move_position`), the cells `fixture_path` corners come
+    /// from; the height is the navigation surface's at the answer.
     pub(crate) fn fixture_move(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
         if !from.is_finite() || !to.is_finite() {
             return None;
         }
-        let point = self.field.constrain_move([from.x, from.z], [to.x, to.z]);
+        let point = self.field.move_position(from.to_array(), to.to_array());
         self.navigation_point_at(point).map(Vec3::from)
     }
 
@@ -318,8 +321,15 @@ impl ObjectiveFace {
 }
 
 /// 目标面的探测合同实现：把 [`ObjectiveFace`] 借给律的三条目的地链。
-struct FaceProbe<'a> {
+pub(crate) struct FaceProbe<'a> {
     face: &'a ObjectiveFace,
+}
+
+impl ObjectiveFace {
+    /// The face as the destination chains' surface and path probe.
+    pub(crate) fn probe(&self) -> FaceProbe<'_> {
+        FaceProbe { face: self }
+    }
 }
 
 impl SurfaceProbe for FaceProbe<'_> {
@@ -824,6 +834,30 @@ impl TalkSlot {
         self.current = Some(data);
     }
 
+    /// The AI's set-up (`ForceUpdateEntrySiteObjective`, then the
+    /// interrupt marker 14): entry-site talk data for the character and the
+    /// entry-site interrupt, which the first decision takes.
+    pub(crate) fn entry_site(unit: u32) -> Self {
+        Self {
+            current: Some(AiTalkData {
+                kind: TalkType::EntrySite,
+                content: None,
+                target_fixture: None,
+                target_position: [0.0; 3],
+                main_character: unit,
+                characters: vec![unit],
+                pre_action: None,
+                locate: None,
+                pending_factory: None,
+            }),
+            previous: None,
+            interrupt: Some(objective::InterruptMarker {
+                marker_type: ENTRY_SITE_INTERRUPT_MARKER,
+                can_interrupt: true,
+            }),
+        }
+    }
+
     /// Call only at an AI reset/release edge, never when a player window ends.
     pub(crate) fn reset_ai_talk_data(&mut self) {
         self.previous = self.current.take();
@@ -960,6 +994,9 @@ impl moly_law::path::WaypointDraw for MemberRng {
 /// tested on a later frame, as the source's WaitUntil and Delay are).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum BodyWait {
+    /// The entry-site objective: hidden until its cancel (the gate's
+    /// appearance, see `npc_gate`).
+    EntrySite { since: u32 },
     /// The talk objective's tweet: until the tweet state is Done.
     TweetDone { since: u32, step: TweetStep },
     /// The talk objective's tweet: until the character is not talking.
@@ -1349,6 +1386,12 @@ enum DecisionRoute {
     NoneTalk,
     /// The greeting objective on the greeting data the gate wrote.
     Greeting,
+    /// The change-site objective on the change-site data (row 8, or the
+    /// change-site interrupt); its body is `npc::change_site_state`'s.
+    ChangeSite,
+    /// The entry-site objective (the entry-site interrupt the AI's set-up
+    /// raises): hidden, waiting for its cancel.
+    EntrySite,
 }
 
 impl DecisionRoute {
@@ -1359,9 +1402,14 @@ impl DecisionRoute {
             DecisionRoute::SubObjective(_) => "sub:interrupt",
             DecisionRoute::NoneTalk => "nonetalk",
             DecisionRoute::Greeting => "greeting",
+            DecisionRoute::ChangeSite => "change_site",
+            DecisionRoute::EntrySite => "entry_site",
         }
     }
 }
+
+/// The interrupt marker type the AI's set-up raises: the entry-site objective.
+const ENTRY_SITE_INTERRUPT_MARKER: i32 = 14;
 
 /// The Talk interrupt marker the general and fixture-common factories raise.
 const TALK_INTERRUPT: objective::InterruptMarker = objective::InterruptMarker {
@@ -1400,7 +1448,7 @@ pub(crate) fn engine_int_draw(rng: &mut MemberRng, len: usize) -> usize {
 
 /// The engine float range `[0, total]` on the member generator, both ends
 /// reachable: 23 bits scaled onto the range.
-fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
+pub(crate) fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
     let bits = (rng.next() >> 41) as u32;
     bits as f32 / 8_388_607.0 * total
 }
@@ -1477,7 +1525,10 @@ pub(crate) fn decide(
         Option<Res<crate::server_panel::TalkDataStore>>,
         Option<Res<crate::fixture_activity_data::TogetherCommunicationTable>>,
     ),
-    walk_face: Option<Res<crate::walk_face::WalkFace>>,
+    (walk_face, mut change_site): (
+        Option<Res<crate::walk_face::WalkFace>>,
+        ResMut<crate::npc::change_site_state::ChangeSiteRuns>,
+    ),
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
     catalog: crate::player_talk::TalkCatalog,
@@ -1767,6 +1818,9 @@ pub(crate) fn decide(
                         finish_objective(unit.0, &mut mind, &mut slot, frame, false);
                     }
                 }
+                // The entry-site objective waits for its cancel, which ends
+                // the objective (see `owe_force_updates`).
+                BodyWait::EntrySite { .. } => {}
                 BodyWait::Stacked { since, mut delay } => {
                     if frame != since {
                         if delay.advance(dt) {
@@ -1920,8 +1974,13 @@ pub(crate) fn decide(
         }
         // The start-up flag (the AI's set-up raises it before its first
         // TryRest) is consumed here on the first decision; after an objective
-        // the Yield step above has already consumed it.
-        mind.skip_next_rest = false;
+        // the Yield step above has already consumed it. A pass that makes
+        // owed ForceUpdateObjective calls keeps it: the source makes those
+        // calls before a caller raises the flag again (the overlap cancel,
+        // the gate's appearance), and its TryRest reads that flag.
+        if mind.force_updates == 0 {
+            mind.skip_next_rest = false;
+        }
         'cascade: loop {
             // A no-talk end owes ForceUpdateObjective calls: each is a reset and
             // UpdateObjective's reset and row-1 cascade, with no ladder draw and no
@@ -2011,6 +2070,23 @@ pub(crate) fn decide(
                 objective::Decision::NoneTalk
                 | objective::Decision::Select(select::Objective::NoneTalk) => DecisionRoute::NoneTalk,
                 objective::Decision::Greeting => DecisionRoute::Greeting,
+                objective::Decision::ChangeSite => DecisionRoute::ChangeSite,
+                objective::Decision::Interrupt {
+                    dispatch: objective::InterruptDispatch::Direct(ObjectiveType::ChangeSite),
+                } => {
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                    DecisionRoute::ChangeSite
+                }
+                objective::Decision::Interrupt {
+                    dispatch: objective::InterruptDispatch::Direct(ObjectiveType::EntrySite),
+                } => {
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                    DecisionRoute::EntrySite
+                }
                 other => unreachable!(
                     "决策梯落到了产品不可达的档（{other:?}）：快照里摆拍/保持档的输入按构造恒假，\
                      打断标记只写对话一种，槽位与当前目标的值域里没有它们"
@@ -2019,6 +2095,8 @@ pub(crate) fn decide(
             let objective_type = match decision_route {
                 DecisionRoute::NoneTalk => ObjectiveType::NoneTalk,
                 DecisionRoute::Greeting => ObjectiveType::Greeting,
+                DecisionRoute::ChangeSite => ObjectiveType::ChangeSite,
+                DecisionRoute::EntrySite => ObjectiveType::EntrySite,
                 DecisionRoute::SubObjective(kind) => kind,
                 _ => ObjectiveType::Talk,
             };
@@ -2027,6 +2105,8 @@ pub(crate) fn decide(
                 match objective_type {
                     ObjectiveType::NoneTalk => "none_talk",
                     ObjectiveType::Greeting => "greeting",
+                    ObjectiveType::ChangeSite => "change_site",
+                    ObjectiveType::EntrySite => "entry_site",
                     ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub => {
                         "sub_while_doing_wait"
                     }
@@ -2036,6 +2116,37 @@ pub(crate) fn decide(
             );
             record.set("lane", decision_route.word());
             record.set("phenomenon", catalog.phenomena_id());
+            if let DecisionRoute::ChangeSite = decision_route {
+                // The change-site objective draws nothing; its body runs in
+                // the change-site state's steps.
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("path", "change_site_objective");
+                record.emit("change_site", calls);
+                fixture_activities.clear_pending(entity);
+                mind.begin_objective(ObjectiveType::ChangeSite);
+                mind.executing = true;
+                change_site.decided(entity, unit.0, frame);
+                continue 'npc;
+            }
+            if let DecisionRoute::EntrySite = decision_route {
+                // The entry-site objective draws nothing: it hides the
+                // character (the host has no cut-scene game state, the one
+                // state in which it stays shown) and waits until it is
+                // cancelled. `npc_gate` hides it on this frame.
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("path", "entry_site_objective");
+                record.emit("entry_site", calls);
+                fixture_activities.clear_pending(entity);
+                mind.begin_objective(ObjectiveType::EntrySite);
+                mind.executing = true;
+                mind.body = Some(BodyWait::EntrySite { since: frame });
+                info!("[npc unit={}] frame={frame} entry-site objective: hidden until cancelled", unit.0);
+                continue 'npc;
+            }
             if let DecisionRoute::Greeting = decision_route {
                 // The greeting objective: the greeting state, then a wait until
                 // the first talk is complete. It draws nothing.
@@ -2433,6 +2544,8 @@ pub(crate) fn decide(
                 }
                 DecisionRoute::NoneTalk => {}
                 DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
+                DecisionRoute::EntrySite => unreachable!("the entry-site objective returned above"),
             }
             match halt {
                 Some(npc_talk_lottery::Halt::Fault(reason)) => {
@@ -2513,6 +2626,9 @@ pub(crate) fn decide(
             let mut gate_fixture: Option<String> = None;
             let mut none_talk_null = false;
             let mut none_talk_gap = false;
+            // Row 5 on no-talk data a forced objective set: the no-talk
+            // objective runs on that data as it is (no factory, no reset).
+            let mut forced_data = false;
             let destination = if let Some(data) = fixture_talk.as_ref().map(|prepared| &prepared.data) {
                 // MoveAsync goes to the data's target position; a talk data
                 // TargetFixture takes IfMoveTargetFixtureActionPosition.
@@ -2634,6 +2750,30 @@ pub(crate) fn decide(
                         }
                     }
                     DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                    DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
+                    DecisionRoute::EntrySite => unreachable!("the entry-site objective returned above"),
+                    DecisionRoute::NoneTalk
+                        if matches!(decision, objective::Decision::NoneTalk)
+                            && forced_none_talk(&mut fixture_activities, entity, &slot) =>
+                    {
+                        let selected = fixture_activities
+                            .take_forced(entity)
+                            .expect("the guard found the forced data");
+                        record.set("path", "none_talk_existing_data");
+                        if let Some(row) = selected.no_talk_row() {
+                            record.set("no_talk_row", row);
+                        }
+                        record.set("timeline", selected.timeline_id());
+                        detail = format!(
+                            "existing no-talk data on {:?}/{}",
+                            selected.target.entity, selected.target.uid
+                        );
+                        gate_fixture = Some(selected.target.uid.clone());
+                        forced_data = true;
+                        let position = selected.position;
+                        fixture_selection = Some(selected);
+                        Some(position)
+                    }
                     DecisionRoute::NoneTalk => {
                         record.set("path", "none_talk_factory");
                         let fixture_targets: Vec<(Entity, Option<Entity>)> = snaps
@@ -2725,7 +2865,9 @@ pub(crate) fn decide(
             if general_talk.is_some() || fixture_talk.is_some() {
                 record.set("talk_target", serde_json::json!(target_position));
             }
-            if let Some(selected) = &fixture_selection {
+            if forced_data {
+                // The slot already holds this data.
+            } else if let Some(selected) = &fixture_selection {
                 // ForceUpdateNoneTalkObjective: Reset, then SetAITalkData.
                 slot.reset_ai_talk_data();
                 slot.set_current(selected.ai_data());
@@ -3004,6 +3146,25 @@ pub(crate) fn decide(
             break 'cascade;
         }
     }
+}
+
+/// Whether `actor` carries forced no-talk data that its slot still holds
+/// (the same fixture in no-talk data); stale forced data is dropped.
+fn forced_none_talk(
+    activities: &mut crate::npc_fixture_activity::Factory<'_, '_>,
+    actor: Entity,
+    slot: &TalkSlot,
+) -> bool {
+    let Some(selected) = activities.take_forced(actor) else {
+        return false;
+    };
+    let holds = slot.current.as_ref().is_some_and(|data| {
+        data.kind == TalkType::NoneTalk && data.target_fixture == Some(selected.target.entity)
+    });
+    if holds {
+        activities.keep_forced(actor, selected);
+    }
+    holds
 }
 
 /// The objective ended on `frame` (`failed`: it ended without its body, for

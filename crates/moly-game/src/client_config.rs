@@ -36,6 +36,11 @@ pub(crate) const KEY_INVISIBLE_GRID_COUNT: i32 = 69;
 /// 家具旁配对对话的半径，米（NPCTalkRadius，FloatConfigs 键 104）。
 pub(crate) const KEY_NPC_TALK_RADIUS: i32 = 104;
 
+/// CharacterCommunicationDistance (FloatConfigs key 122, metres): the
+/// gate's appearance places a gathering member at most this far from the
+/// first one.
+pub(crate) const KEY_CHARACTER_COMMUNICATION_DISTANCE: i32 = 122;
+
 /// CharacterOverlapTime / CharacterOverlapDistance（FloatConfigs，秒/米）。
 pub(crate) const KEY_CHARACTER_OVERLAP_TIME: i32 = 134;
 pub(crate) const KEY_CHARACTER_OVERLAP_DISTANCE: i32 = 135;

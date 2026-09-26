@@ -468,6 +468,20 @@ pub(crate) fn click(
                 break;
             }
         }
+        // The floor edit camera's two buttons answer with or without a
+        // selection.
+        let camera = if hit(view, &layouts, &bindings.camera_rotate, point, canvas) {
+            Some((&bindings.camera_rotate, EditCommand::RotateCamera))
+        } else if hit(view, &layouts, &bindings.change_look, point, canvas) {
+            Some((&bindings.change_look, EditCommand::ChangeLookCamera))
+        } else {
+            None
+        };
+        if let Some((button, command)) = camera {
+            sounds.source_button(&layouts, view.key, button);
+            actions.write(command);
+            break;
+        }
         let choice = if edit.can_save && hit(view, &layouts, &bindings.save, point, canvas) {
             // CN 6.0.0: OnReceiveSaveLayout -> SaveLayoutWithValidation ->
             // GetSaveLayoutEventData(..., true). The successful save returns

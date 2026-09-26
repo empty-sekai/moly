@@ -46,10 +46,12 @@
 //! does when the avatar has no step object. The tree's bloom is the place
 //! view's director (`bloom`).
 //!
-//! Named stand-ins and gaps: `BindSignalReceiver` binds the step item's
-//! Signal track to the site's delivery signal receiver; no exporter reads a
-//! Signal track's markers, so the two signals it sends (the tree effect's
-//! play and stop) are not emitted. The AutoMove state's run clip plays as
+//! `BindSignalReceiver` binds the step item's Signal track to the site's
+//! delivery signal receiver: the track's markers notify it on the director's
+//! clock, and its reactions (the tree effect's `ParticleSystem.Play()` and
+//! `Stop()`) run through the particle host.
+//!
+//! Named stand-ins and gaps: the AutoMove state's run clip plays as
 //! the locomotion's dash gait (the harvest AutoMove's stand-in). The
 //! joystick's forced reset and its GameState Delivery arm are the joystick's
 //! (not wired). `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog
@@ -781,9 +783,24 @@ fn play_avatar_delivery_animation(world: &mut FlowWorld, objects: &DeliveryObjec
     let bundle = format!("{STEP_ITEM_BUNDLE_PREFIX}{}", objects.bundle);
     step.update_step_item_object(&bundle, DEWDROP_TIMELINE);
     step.setup(Some(StepItemOnStop::MoveEndTime));
-    info!(
-        "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): BindSignalReceiver(the site's delivery signal receiver): the step item's Signal track markers are not exported, so its signals are not sent (named gap)"
-    );
+    match &objects.signal_receiver {
+        Ok(receiver) => {
+            for reaction in &receiver.reactions {
+                info!(
+                    "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): {} reacts to {} ({}/{}) with {}",
+                    receiver.receiver,
+                    reaction.signal_name,
+                    reaction.signal.file,
+                    reaction.signal.path_id,
+                    reaction.calls_text()
+                );
+            }
+            step.bind_signal_receiver(receiver.clone());
+        }
+        Err(reason) => error!(
+            "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): BindSignalReceiver is not made: {reason}; the step item's signals reach no receiver"
+        ),
+    }
     step.play();
 }
 

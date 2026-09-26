@@ -420,6 +420,12 @@ impl Plugin for DeliveryPlugin {
                     .before(crate::fixture_activity_timeline::advance),
             )
             .add_systems(
+                Update,
+                site::prepare_signal_targets
+                    .after(site::resolve)
+                    .before(crate::player_avatar::item_timeline::advance),
+            )
+            .add_systems(
                 PostUpdate,
                 crate::delivery_camera::advance.after(crate::camera::follow_avatar),
             );

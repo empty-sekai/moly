@@ -11,9 +11,9 @@ mod effects;
 mod source;
 
 pub(crate) use source::{
-    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, ExposedSource,
-    SourceAssetId, TimelineClip, TimelineClipKey, TimelineDefinition, TimelinePackage,
-    TimelinePayload, TimelineTrack,
+    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, CutScenePayload,
+    ExpansionEffect, ExposedSource, SourceAssetId, TimelineClip, TimelineClipKey,
+    TimelineDefinition, TimelinePackage, TimelinePayload, TimelineTrack,
 };
 
 use crate::{
@@ -842,6 +842,57 @@ pub(crate) struct TimelineBindings {
     /// that this runner does not drive, each with the reason, by clip. The
     /// rest of the timeline plays; each one is a named coverage gap.
     pub refused_controls: HashMap<TimelineClipKey, String>,
+    /// The `SignalReceiver` bound to a track's output (`SetGenericBinding`),
+    /// by track: its markers' signals go to this receiver's reactions.
+    pub signal_receivers: HashMap<SourceAssetId, SignalReceiverBinding>,
+    /// The particle calls a marker's signal makes on its track's receiver,
+    /// prepared on the systems they play or stop, by the `SignalEmitter`
+    /// marker (see [`prepare_source_signals`]).
+    pub signals: HashMap<SourceAssetId, Vec<crate::fixture_timeline_particles::SignalReaction>>,
+    /// The particle calls of Signal markers that are not prepared, each with
+    /// the reason: named coverage gaps that send nothing.
+    pub refused_signals: Vec<String>,
+}
+
+/// A `SignalReceiver` bound to a track: its name and its reaction table.
+#[derive(Clone, Debug)]
+pub(crate) struct SignalReceiverBinding {
+    /// The receiver's GameObject, for the logs.
+    pub receiver: String,
+    pub reactions: Vec<SignalReaction>,
+}
+
+/// One row of a receiver's table: a signal asset and the persistent calls
+/// its UnityEvent makes.
+#[derive(Clone, Debug)]
+pub(crate) struct SignalReaction {
+    pub signal: SourceAssetId,
+    pub signal_name: String,
+    pub calls: Vec<ReceiverCall>,
+}
+
+impl SignalReaction {
+    /// The row's calls as `Type.Method(argument) on target`, for the logs.
+    pub(crate) fn calls_text(&self) -> String {
+        self.calls
+            .iter()
+            .map(|call| call.text.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// One persistent call of a reaction's UnityEvent.
+#[derive(Clone, Debug)]
+pub(crate) struct ReceiverCall {
+    /// `Type.Method(argument) on target`, with its call state.
+    pub text: String,
+    /// The call state is not `Off`: `UnityEvent.Invoke` runs it at run time.
+    pub runtime: bool,
+    /// A call the particle host runs: `ParticleSystem.Play()` or `Stop()`
+    /// with no argument, on at run time, with the ParticleSystem component
+    /// it targets. `None` for any other call.
+    pub particle: Option<(crate::fixture_timeline_particles::SignalCall, SourceAssetId)>,
 }
 #[derive(Clone)]
 pub(crate) struct TimelineCompanionTrack {
@@ -863,6 +914,11 @@ pub(crate) enum TimelineOwnerKind {
     /// plays with no timeout and its view holds it paused at a time
     /// (`Pause`, then evaluated every frame).
     SceneDirector,
+    /// A cut-scene view's director (`CutSceneView.PlayAsync`): it plays with
+    /// no timeout; its cut-scene tracks (camera, fade panel, obstacles,
+    /// expansion effect, effects) are driven by the cut-scene owner from this
+    /// clock.
+    CutScene,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TimelineTimeoutBudget {
@@ -959,6 +1015,16 @@ struct Session {
     timeout_requested: bool,
     completion: Option<TimelineCompletionReason>,
     active_events: HashSet<TimelineClipKey>,
+    /// The sampled time of the previous tick (the notification behaviour's
+    /// previous time).
+    signal_time: Option<f64>,
+    /// The signal emitters whose notification has fired and is not re-armed.
+    signals_fired: HashSet<SourceAssetId>,
+    /// The objects a signal played in this session, sampled for their live
+    /// particles, whether a signal stopped them since, and the real time of
+    /// the last sample.
+    signal_played: Vec<(Entity, bool)>,
+    signal_sampled: f64,
 }
 #[derive(Resource, Default)]
 pub(crate) struct FixtureActivityTimelines {
@@ -1019,6 +1085,10 @@ impl FixtureActivityTimelines {
                 timeout_requested: false,
                 completion: None,
                 active_events: HashSet::new(),
+                signal_time: None,
+                signals_fired: HashSet::new(),
+                signal_played: Vec::new(),
+                signal_sampled: f64::NEG_INFINITY,
             },
         );
         token
@@ -1321,6 +1391,167 @@ pub(crate) fn prepare_source_effects(
     effects::prepare(world, request).map_err(source_effect_failure)
 }
 
+/// The particle calls of the director's Signal markers. A `SignalEmitter`
+/// on a track bound to a receiver notifies it (`SignalReceiver.OnNotify`):
+/// the receiver invokes the UnityEvent of the first row whose signal is the
+/// marker's (`IndexOf`), whose persistent calls run in order. Each
+/// `ParticleSystem.Play()` / `Stop()` call is prepared here on the spawned
+/// object that carries its target system, read from the director's package
+/// particle document, and sent by the notification pass through the
+/// particle host. A call the host refuses, or any other call, is a named
+/// coverage gap and sends nothing. Retry while the error is retryable.
+pub(crate) fn prepare_source_signals(
+    world: &mut World,
+    request: &mut StartTimeline,
+) -> Result<(), TimelineFailure> {
+    let mut signals: HashMap<
+        SourceAssetId,
+        Vec<crate::fixture_timeline_particles::SignalReaction>,
+    > = HashMap::new();
+    let mut refused = Vec::new();
+    let definition = request.definition.clone();
+    for track in &definition.tracks {
+        let Some(binding) = request
+            .bindings
+            .signal_receivers
+            .get(&track.identity)
+            .cloned()
+        else {
+            continue;
+        };
+        for marker in track
+            .markers
+            .iter()
+            .filter(|marker| marker.class == "SignalEmitter")
+        {
+            let Some(row) = marker.signal.as_ref().and_then(|signal| {
+                binding
+                    .reactions
+                    .iter()
+                    .find(|reaction| &reaction.signal == signal)
+            }) else {
+                continue;
+            };
+            for call in &row.calls {
+                let Some((kind, component)) = &call.particle else {
+                    continue;
+                };
+                let head = format!(
+                    "track {} t={:.4}: {} of {}",
+                    track.name, marker.time, call.text, binding.receiver
+                );
+                let target = match signal_target(world, component) {
+                    Ok(target) => target,
+                    Err(reason) => {
+                        refused.push(format!("{head}: {reason}"));
+                        continue;
+                    }
+                };
+                let (object, owner) = target;
+                let played = match crate::fixture_timeline_particles::prepare_played_object(
+                    world,
+                    owner,
+                    object,
+                    &definition.package,
+                ) {
+                    Ok(played) => played,
+                    Err(error) if error.retryable => return Err(source_effect_failure(error)),
+                    Err(error) => {
+                        refused.push(format!(
+                            "{head}: refused by the particle host: {}",
+                            error.message
+                        ));
+                        continue;
+                    }
+                };
+                signals.entry(marker.asset.clone()).or_default().push(
+                    crate::fixture_timeline_particles::SignalReaction {
+                        time: marker.time,
+                        emit_once: marker.emit_once,
+                        signal: row.signal_name.clone(),
+                        call: *kind,
+                        target: played,
+                    },
+                );
+            }
+        }
+    }
+    request.bindings.signals = signals;
+    request.bindings.refused_signals = refused;
+    Ok(())
+}
+
+/// The particle calls of a receiver's table, prepared on the systems they
+/// play or stop ahead of the director that will notify it: the host's
+/// preparation takes frames the source does not spend, and a director waits
+/// for it before it starts. `Ok(true)` once every call is prepared or
+/// refused (a refused call is named again when the director binds it).
+pub(crate) fn prepare_receiver_targets(
+    world: &mut World,
+    receiver: &SignalReceiverBinding,
+    package: &str,
+) -> Result<bool, TimelineFailure> {
+    let mut pending = false;
+    for reaction in &receiver.reactions {
+        for call in &reaction.calls {
+            let Some((_, component)) = &call.particle else {
+                continue;
+            };
+            let Ok((object, owner)) = signal_target(world, component) else {
+                continue;
+            };
+            match crate::fixture_timeline_particles::prepare_played_object(
+                world, owner, object, package,
+            ) {
+                Ok(_) => {}
+                Err(error) if error.retryable => pending = true,
+                Err(_) => {}
+            }
+        }
+    }
+    Ok(!pending)
+}
+
+/// The spawned node that carries a receiver call's target ParticleSystem
+/// component, and the prefab root above it that owns the particle document
+/// (the nearest ancestor under the coordinate contract).
+fn signal_target(world: &mut World, component: &SourceAssetId) -> Result<(Entity, Entity), String> {
+    let wanted: i64 = component
+        .path_id
+        .parse()
+        .map_err(|_| format!("invalid target component id {}", component.path_id))?;
+    let hits: Vec<Entity> = world
+        .query::<(
+            Entity,
+            &moly_assets::source_navigation::SourceObjectIdentity,
+        )>()
+        .iter(world)
+        .filter(|(_, identity)| {
+            identity.file == component.file && identity.components.contains(&wanted)
+        })
+        .map(|(entity, _)| entity)
+        .collect();
+    let [object] = hits.as_slice() else {
+        return Err(format!(
+            "{} spawned nodes carry its target component {}/{}",
+            hits.len(),
+            component.file,
+            component.path_id
+        ));
+    };
+    let mut owner = *object;
+    while world
+        .get::<moly_assets::coordinates::CanonicalCoordinates>(owner)
+        .is_none()
+    {
+        owner = world
+            .get::<ChildOf>(owner)
+            .map(ChildOf::parent)
+            .ok_or("its node has no ancestor under the coordinate contract")?;
+    }
+    Ok((*object, owner))
+}
+
 fn source_effect_failure(mut failure: TimelineFailure) -> TimelineFailure {
     failure.message = format!("source-effects: {}", failure.message);
     failure
@@ -1361,7 +1592,8 @@ fn validate(
         (
             TimelineOwnerKind::Player
             | TimelineOwnerKind::StepItem
-            | TimelineOwnerKind::SceneDirector,
+            | TimelineOwnerKind::SceneDirector
+            | TimelineOwnerKind::CutScene,
             TimelineTimeoutBudget::PlayerWall,
         )
         | (
@@ -1577,6 +1809,13 @@ fn validate(
                 TimelinePayload::LoopFlag { .. } => loop_count += 1,
                 TimelinePayload::NoPresetChange => {}
                 TimelinePayload::Control(_) => {}
+                TimelinePayload::CutScene(payload) => {
+                    if request.owner.kind != TimelineOwnerKind::CutScene {
+                        return Err(invalid(format!(
+                            "cut-scene track payload outside a cut-scene owner: {payload:?}"
+                        )));
+                    }
+                }
                 TimelinePayload::Unsupported { class, .. } => {
                     return Err(invalid(format!(
                         "nonempty unsupported track payload: {class}"
@@ -1818,6 +2057,27 @@ fn initialize(
     }
     effects::claim(world, token, &session.request, &mut session.effects)
         .map_err(source_effect_failure)?;
+    for track in &session.request.definition.tracks {
+        for clip in &track.clips {
+            let (TimelinePayload::Control(_), Some(binding)) = (
+                &clip.payload,
+                session.request.bindings.controls.get(&clip.key),
+            ) else {
+                continue;
+            };
+            info!(
+                "[timeline-control] {}/{} Control clip {} [{:.4}, {:.4}) drives {:?}",
+                session.request.definition.package,
+                session.request.definition.prefab,
+                clip.source_envelope["m_DisplayName"]
+                    .as_str()
+                    .unwrap_or("?"),
+                clip.start,
+                clip.end(),
+                world.get::<Name>(binding.root).map(Name::as_str)
+            );
+        }
+    }
     // Canonical locators, actor models and animation clips share one frame.
     // Validate before mutating any owned pose; an authored negative scale is
     // not a signal to introduce another spatial reflection.
@@ -1947,6 +2207,51 @@ fn initialize(
             detail: reason.clone(),
         });
     }
+    for track in &request.definition.tracks {
+        let emitters = track
+            .markers
+            .iter()
+            .filter(|marker| marker.class == "SignalEmitter")
+            .count();
+        if emitters == 0 {
+            continue;
+        }
+        match request.bindings.signal_receivers.get(&track.identity) {
+            None => session.coverage.push(TimelineCoverageGap {
+                clip: None,
+                feature: "SourceSignalBinding",
+                detail: format!(
+                    "track {}: {emitters} Signal markers; no receiver is bound to its output at run time and the director's own scene bindings are not read, so they notify nothing",
+                    track.name
+                ),
+            }),
+            Some(binding) => {
+                for reaction in &binding.reactions {
+                    for call in reaction
+                        .calls
+                        .iter()
+                        .filter(|call| call.runtime && call.particle.is_none())
+                    {
+                        session.coverage.push(TimelineCoverageGap {
+                            clip: None,
+                            feature: "SourceSignalReaction",
+                            detail: format!(
+                                "track {}: {} reacts to {} with {}: not a ParticleSystem Play()/Stop() on at run time; not driven",
+                                track.name, binding.receiver, reaction.signal_name, call.text
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for reason in &request.bindings.refused_signals {
+        session.coverage.push(TimelineCoverageGap {
+            clip: None,
+            feature: "SourceSignalReaction",
+            detail: reason.clone(),
+        });
+    }
     if !request.bindings.sounds.is_empty() {
         session.coverage.push(TimelineCoverageGap { clip:None,feature:"SourceSESpatialization",detail:"exact source cue/package uses the existing 2D one-shot SE bus; native positional attenuation is not reproduced".into() });
     }
@@ -2055,6 +2360,8 @@ fn tick(
     )
     .map_err(source_effect_failure)?;
     apply_events(world, session, sampled_time)?;
+    emit_signals(world, session, sampled_time)?;
+    sample_signal_targets(world, session, sampled_time);
     update_facial_gates(world, token, session, sampled_time);
     session.sound_entities.retain(|entity| {
         if !world.entities().contains(*entity) {
@@ -2271,6 +2578,183 @@ fn apply_events(
     Ok(())
 }
 
+/// `TimeNotificationBehaviour` over the tracks' signal emitters, on the
+/// sampled time. `OnGraphStart` (the first tick) takes the start time as the
+/// previous time. Each `PrepareFrame` (a playback frame, not a looped one:
+/// this director never wraps, its backward jumps are loop-flag subtractions
+/// and `MoveEndTime` writes) runs `TriggerNotificationsInRange(previous,
+/// current, checkState true)`: nothing when current < previous; otherwise an
+/// emitter not yet fired fires when previous <= time <= current (both ends
+/// included), or, when retroactive, when time < current. Then every fired
+/// emitter that is not emit-once is re-armed when current < previous and
+/// current <= its time. `OnBehaviourPause` on a done playable fires the
+/// unfired ones in [previous, duration]; the runner's last frame samples
+/// the clamped duration, so that range is already covered.
+/// Each signal goes to the receiver bound to its track (`OnNotify`: the
+/// first row of the signal); its particle calls run through the particle
+/// host ([`prepare_source_signals`]), the others are logged by name.
+fn emit_signals(
+    world: &mut World,
+    session: &mut Session,
+    time: f64,
+) -> Result<(), TimelineFailure> {
+    let previous = session.signal_time.replace(time).unwrap_or(time);
+    let definition = session.request.definition.clone();
+    let emitters = || {
+        definition.tracks.iter().flat_map(|track| {
+            track
+                .markers
+                .iter()
+                .filter(|marker| marker.class == "SignalEmitter")
+                .map(move |marker| (track, marker))
+        })
+    };
+    for (track, marker) in emitters() {
+        let due = previous <= time
+            && ((previous <= marker.time && marker.time <= time)
+                || (marker.retroactive && marker.time < time));
+        if !due || !session.signals_fired.insert(marker.asset.clone()) {
+            continue;
+        }
+        let name = marker.signal_name.as_deref().unwrap_or("?");
+        let head = format!(
+            "[timeline-signal] {}/{} track {} t={:.4}: SignalEmitter {} ({}, retroactive {}, emitOnce {})",
+            definition.package,
+            definition.prefab,
+            track.name,
+            marker.time,
+            name,
+            marker
+                .signal
+                .as_ref()
+                .map_or("no signal asset".to_owned(), |s| s.path_id.clone()),
+            marker.retroactive,
+            marker.emit_once
+        );
+        match session
+            .request
+            .bindings
+            .signal_receivers
+            .get(&track.identity)
+        {
+            None => info!("{head}: the track is bound to no receiver; nothing is notified"),
+            Some(binding) => {
+                let row = binding
+                    .reactions
+                    .iter()
+                    .find(|reaction| Some(&reaction.signal) == marker.signal.as_ref());
+                let Some(reaction) = row else {
+                    info!(
+                        "{head}: receiver {} has no reaction to it",
+                        binding.receiver
+                    );
+                    continue;
+                };
+                let calls = session
+                    .request
+                    .bindings
+                    .signals
+                    .get(&marker.asset)
+                    .cloned()
+                    .unwrap_or_default();
+                info!(
+                    "{head}: receiver {} reacts with {}; {} particle calls prepared",
+                    binding.receiver,
+                    reaction.calls_text(),
+                    calls.len()
+                );
+                for call in &calls {
+                    let count = crate::fixture_timeline_particles::react(world, call)
+                        .map_err(|error| source_effect_failure(invalid(error)))?;
+                    let stopped = call.call == crate::fixture_timeline_particles::SignalCall::Stop;
+                    match session
+                        .signal_played
+                        .iter_mut()
+                        .find(|(root, _)| *root == call.target.root)
+                    {
+                        Some(row) => row.1 = stopped,
+                        None if !stopped => session.signal_played.push((call.target.root, false)),
+                        None => {}
+                    }
+                    info!(
+                        "{head}: director time {time:.4}: {} (marker {:.4} s, emitOnce {}): ParticleSystem.{:?}() on {:?} through the particle host: {count} systems",
+                        call.signal,
+                        call.time,
+                        call.emit_once,
+                        call.call,
+                        world.get::<Name>(call.target.root).map(Name::as_str)
+                    );
+                }
+            }
+        }
+    }
+    if time < previous {
+        for (track, marker) in emitters() {
+            if !marker.emit_once
+                && time <= marker.time
+                && session.signals_fired.remove(&marker.asset)
+            {
+                info!(
+                    "[timeline-signal] {}/{} track {} t={:.4}: SignalEmitter {} re-armed (the director went back from {previous:.4} to {time:.4})",
+                    definition.package,
+                    definition.prefab,
+                    track.name,
+                    marker.time,
+                    marker.signal_name.as_deref().unwrap_or("?")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The live particles of the objects a signal played in this session: every
+/// frame while no signal stopped them, then four times a real second while
+/// they hold any (a trace of the particle host's state, read from its
+/// systems).
+fn sample_signal_targets(world: &mut World, session: &mut Session, time: f64) {
+    if session.signal_played.is_empty() {
+        return;
+    }
+    let now = crate::fixture_timeline_particles::realtime(world);
+    let emitting = session.signal_played.iter().any(|(_, stopped)| !stopped);
+    if !emitting && now - session.signal_sampled < 0.25 {
+        return;
+    }
+    session.signal_sampled = now;
+    for &(root, _) in &session.signal_played {
+        let (systems, live, born) = played_particles(world, root);
+        if live == 0 {
+            continue;
+        }
+        info!(
+            "[timeline-signal] {}/{} director time {time:.4}: {:?} systems {systems} live {live} born {born}",
+            session.request.definition.package,
+            session.request.definition.prefab,
+            world.get::<Name>(root).map(Name::as_str)
+        );
+    }
+}
+
+/// The systems the particle host drew under a played object: how many, their
+/// live particles and their births so far.
+pub(crate) fn played_particles(world: &World, root: Entity) -> (usize, usize, u64) {
+    let Some(children) = world.get::<Children>(root) else {
+        return (0, 0, 0);
+    };
+    let mut systems = 0;
+    let mut live = 0;
+    let mut born = 0;
+    for child in children.iter() {
+        if let Some(system) = world.get::<crate::uber_particle::FixtureParticleLive>(child) {
+            systems += 1;
+            live += system.0.pool.len();
+            born += system.0.born_total;
+        }
+    }
+    (systems, live, born)
+}
+
 fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Session, time: f64) {
     let mut gates: HashMap<Entity, (bool, Option<bool>, bool)> = HashMap::new();
     for track in &session.request.definition.tracks {
@@ -2450,6 +2934,7 @@ mod handoff_regressions {
                     class: "AnimationTrack".into(),
                     name: "3".into(),
                     clips: vec![],
+                    markers: vec![],
                 }],
             }),
             bindings: TimelineBindings::default(),

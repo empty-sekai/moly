@@ -13,9 +13,24 @@
 //! site package's site prefab: layers 0, 4 and 9 by the package census) are
 //! static and in the scene for the whole visit. The placed fixtures'
 //! colliders sit on layer 9 (the fixture view moves every fixture node to the
-//! navigation build layer when it attaches its components); their placement
-//! is a mock and their shapes are not cooked here, so a site with placed
-//! fixtures carries them as colliders the queries cannot answer against. No
+//! navigation build layer when it attaches its components), and every placed
+//! fixture view also adds a touch BoxCollider child at its origin (see
+//! [`touch_box`]); the queries answer against a box with the ported box
+//! sweep and world bounds, at the node's pose composed with the box centre.
+//! The fixtures' authored MeshColliders are convex: each is cooked into its
+//! hull the way the engine cooks a convex mesh with the collider's options,
+//! and the queries answer against the hull with the ported sphere-versus-
+//! convex sweep and the hull's tight world bounds, at the node's pose
+//! composed with the shape's identity local pose (the collider's scale is
+//! the mesh scale, so only unscaled nodes are cooked). A convex collider
+//! without cooking options or on a scaled node stays in the scene with a
+//! bound that encloses the engine's world bounds of it, and a query whose
+//! box meets that bound refuses, so a query that answers is one the engine
+//! answers without that collider. A touch box's layer is not read (it is created on the
+//! default layer and the view's recursive layer write may or may not reach
+//! it), so it stands on both: a query whose mask names only one of them and
+//! whose box meets it refuses. Until the fixtures' collision scenes are
+//! loaded a placeholder refuses every query naming their layers. No
 //! character collider is in the scene.
 //!
 //! What a query meets. The module asks the scene for the static shapes (and
@@ -58,12 +73,33 @@
 //!   is refused by name at admission, and a query whose mask names it
 //!   refuses.
 //!
-//! The order of several touches. The broadphase returns the colliders in the
-//! order its pruner stores them, which depends on the scene's history of
-//! additions and removals; that order is not transcribed. The query reports
-//! the order unknown whenever the overlap returns more than one collider, and
-//! the module law then selects over every order and refuses a lane the order
-//! decides.
+//! The order of several touches. The broadphase returns the shapes in the
+//! order its static pruner visits them: every static shape of the scene
+//! (colliders, triggers and the ones the queries cannot answer against,
+//! whatever their layer) sits in one pool, in the order the shapes were
+//! added, with a tree over it of at most four shapes per leaf and a bucket
+//! for the shapes added since that tree was built; a query visits the tree
+//! and then the bucket, and a leaf's shapes in pool order. A removal moves
+//! the pool's last shape into the gap. So while the scene holds at most four
+//! static shapes and no shape has left it since it was last empty, every
+//! query meets its shapes in the order they were added, whatever the rebuild
+//! timing and the pool boxes. A collider adds itself to the scene when it
+//! wakes and leaves it when its node is deactivated. The game instantiates a
+//! site prefab under an active parent (a prefab clone wakes its colliders in
+//! ascending instance id of the originals, the order the package's preload
+//! table first names them), hides the site at once, which removes them, and
+//! shows it when the player enters, which adds them again children first,
+//! each node's children before its own components (the export's
+//! `activationOrder`); the installed things are added in the order
+//! installed. Whether an effect's colliders go through a site's hide and
+//! show is not read, so an effect's add order is unknown. The query reports
+//! that order known in that state, when every installed shape carries its
+//! add rank; otherwise (more shapes, a removal, the placed fixtures, whose
+//! add order is not read) it reports the order unknown whenever the overlap
+//! returns more than one collider, and the module law then selects over
+//! every order and refuses a lane the order decides. Residual: the scene
+//! holds no character collider and no harvest item, so a source scene that
+//! has such static shapes beside the site's has more shapes than this one.
 use moly_law::particle::collision_mesh::{self as law, CookedMesh, Pose};
 use moly_law::particle::collision_query::{Candidate, CollisionScene, OverlapQuery, SweepHit, SweepRequest};
 use serde_json::Value;
@@ -76,8 +112,44 @@ const FIXTURE_LAYER: u32 = 9;
 /// The layers the site packages' colliders are on (the package census).
 const SITE_LAYERS: u32 = (1 << 0) | (1 << 4) | (1 << 9);
 
-/// Why a system whose mask names the placed fixtures' layer is refused.
-pub(crate) const FIXTURE_REFUSAL: &str = "fixture colliders: placement mock and convex/box cooking not ported";
+/// Why a query naming the placed fixtures' layers refuses before their
+/// collision scenes are loaded.
+pub(crate) const FIXTURE_PENDING: &str = "placed fixtures: their collision scenes are not loaded yet";
+
+/// Why a query refuses when it meets the bound of a convex MeshCollider the
+/// scene does not cook (no cooking options, or a scaled node).
+const CONVEX_REFUSAL: &str = "a convex MeshCollider without cooking options or on a scaled node";
+
+/// Why a query refuses when it meets the bound of a convex MeshCollider whose
+/// cook takes a path the convex cooker does not carry.
+const CONVEX_COOK_REFUSAL: &str = "a convex MeshCollider whose cook takes a path the convex cooker does not carry";
+
+/// How far a convex collider's bound grows past its input's box, as a
+/// fraction of the box's largest side plus a constant: the cooker turns a
+/// flat or point-like input into a box thickened by a twentieth of the
+/// shortest other side or by a hundredth of the length scale (one), both
+/// below this.
+const CONVEX_BOUND_MARGIN: (f32, f32) = (0.1, 0.02);
+
+/// Why a query refuses when it meets a box whose pose the scene cannot hold.
+const BOX_REFUSAL: &str = "a BoxCollider at a pose the scene cannot hold (non-finite, or a scaled node)";
+
+/// Why a query refuses when its mask names only some of the layers a
+/// collider may be on and its box meets the collider.
+const LAYER_REFUSAL: &str = "a fixture's touch box whose layer is not read, for a mask naming only one of its layers";
+
+/// Why a query refuses when it meets a fixture's non-convex MeshCollider
+/// that the scene does not cook (other cooking options, or a rotated or
+/// scaled pose).
+const FIXTURE_MESH_REFUSAL: &str = "a fixture MeshCollider with unported cooking options or a rotated or scaled pose";
+
+/// Why a query naming a fixture collider's layer refuses when the scene has
+/// no bound for it.
+const FIXTURE_UNBOUNDED: &str = "a fixture collider the scene can neither answer against nor bound";
+
+/// The most vertices the convex cooker keeps before it bounds the hull by
+/// other means; a hull within it has only input points as vertices.
+const CONVEX_VERTEX_LIMIT: usize = 255;
 
 /// Why a query meets a collider the scene cannot answer against.
 const UNPORTED_QUERY: &str = "a collider on a layer the mask names is not ported";
@@ -94,6 +166,10 @@ pub(crate) struct GroundScene {
     unported: Vec<Unported>,
     /// Trigger colliders: in the scene, but no query output depends on them.
     inert: Vec<Unported>,
+    /// Each collider's position in the order this thing adds its static
+    /// shapes to the physics scene, when that order is established for every
+    /// shape it adds (see the module notes).
+    add_positions: Option<Vec<usize>>,
 }
 
 struct GroundCollider {
@@ -101,15 +177,27 @@ struct GroundCollider {
     node: String,
     geometry: String,
     cooking: u32,
-    mesh: Arc<CookedMesh>,
+    shape: ColliderShape,
     pose: Pose,
     layer: u32,
+    /// Every layer it may be on, as a mask (its one layer unless the layer
+    /// is not read).
+    layers: u32,
     /// World bounds at inflation one: min then max.
     bounds: [f32; 6],
     /// The collider's ordinal in the export. The engine reports runtime
     /// instance ids, which are not package facts; only hit records carry
     /// them and no product output reads them.
     collider_id: i32,
+}
+
+/// What the queries answer against: a cooked mesh, a box's half extents, or
+/// a cooked convex hull.
+#[derive(Clone)]
+enum ColliderShape {
+    Mesh(Arc<CookedMesh>),
+    Box([f32; 3]),
+    Convex(Arc<law::HullSupport>),
 }
 
 #[derive(Clone)]
@@ -123,21 +211,50 @@ struct Unported {
     reason: String,
     /// What a query that meets it refuses with.
     query_refusal: &'static str,
+    /// World bounds (min then max, source axes) that enclose the engine's
+    /// bounds of the collider. A query refuses only when its box meets them,
+    /// and admission leaves such a collider to the queries; without them any
+    /// query naming its layers refuses, and so does admission.
+    bounds: Option<[f32; 6]>,
 }
 
 impl GroundScene {
     fn empty() -> Self {
-        Self { colliders: Vec::new(), unported: Vec::new(), inert: Vec::new() }
+        Self { colliders: Vec::new(), unported: Vec::new(), inert: Vec::new(), add_positions: Some(Vec::new()) }
+    }
+
+    /// The static shapes it adds to the physics scene.
+    fn shape_count(&self) -> usize {
+        self.colliders.len() + self.unported.len() + self.inert.len()
     }
 
     /// What the scene holds, for diagnostics.
     pub(crate) fn describe(&self) -> Value {
-        Value::Array(self.colliders.iter().map(|c| serde_json::json!({
-            "effect": c.effect, "node": c.node, "geometry": c.geometry, "cooking": c.cooking, "layer": c.layer,
-            "triangles": c.mesh.triangle_count(), "vertices": c.mesh.vertex_count(),
-            "translation": c.pose.translation(),
-        })).chain(self.unported.iter().map(|u| serde_json::json!({
+        Value::Array(self.colliders.iter().map(|c| {
+            let mut entry = serde_json::json!({
+                "effect": c.effect, "node": c.node, "geometry": c.geometry, "cooking": c.cooking, "layer": c.layer,
+                "translation": c.pose.translation(),
+            });
+            match &c.shape {
+                ColliderShape::Mesh(mesh) => {
+                    entry["triangles"] = mesh.triangle_count().into();
+                    entry["vertices"] = mesh.vertex_count().into();
+                }
+                ColliderShape::Box(half) => {
+                    entry["halfExtents"] = serde_json::json!(half);
+                    entry["rotation"] = serde_json::json!(c.pose.rotation());
+                    entry["layers"] = c.layers.into();
+                }
+                ColliderShape::Convex(hull) => {
+                    entry["hullVertices"] = hull.vertices.len().into();
+                    entry["gaussMap"] = hull.gauss_map.is_some().into();
+                    entry["rotation"] = serde_json::json!(c.pose.rotation());
+                }
+            }
+            entry
+        }).chain(self.unported.iter().map(|u| serde_json::json!({
             "effect": u.effect, "node": u.node, "layers": u.layers, "unported": u.reason,
+            "bounds": u.bounds,
         }))).chain(self.inert.iter().map(|u| serde_json::json!({
             "effect": u.effect, "node": u.node, "layers": u.layers, "inert": u.reason,
         }))).collect())
@@ -152,19 +269,19 @@ impl GroundScene {
     /// mask names.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn colliders_named(&self, mask: u32) -> usize {
-        self.colliders.iter().filter(|c| mask & (1u32 << c.layer) != 0).count()
+        self.colliders.iter().filter(|c| mask & c.layers != 0).count()
     }
 
     /// Why a system with this mask cannot query the scene: the first
     /// collider it cannot answer against on a layer the mask names.
     pub(crate) fn refusal_for(&self, mask: u32) -> Option<String> {
-        self.unported.iter().find(|u| mask & u.layers != 0).map(|u| {
-            if u.query_refusal == FIXTURE_REFUSAL {
-                FIXTURE_REFUSAL.to_owned()
-            } else {
-                format!("collision scene: {} collider {} (layers {:#x}): {}", u.effect, u.node, u.layers, u.reason)
-            }
-        })
+        self.unported.iter().find(|u| u.bounds.is_none() && mask & u.layers != 0).map(|u|
+            format!("collision scene: {} collider {} (layers {:#x}): {}", u.effect, u.node, u.layers, u.reason))
+    }
+
+    /// The number of colliders the scene carries with a bound it refuses in.
+    pub(crate) fn bounded_count(&self) -> usize {
+        self.unported.iter().filter(|u| u.bounds.is_some()).count()
     }
 
     /// Whether two colliders give the same answer to every query: the same
@@ -188,6 +305,8 @@ impl GroundScene {
         }
         let mut scene = GroundScene::empty();
         scene.colliders.push(collider.share());
+        // Its one shape is the first it adds.
+        scene.add_positions = Some(vec![0]);
         Some(Arc::new(scene))
     }
 
@@ -203,18 +322,254 @@ impl GroundScene {
     }
 
     fn extend(&mut self, other: &GroundScene) {
+        let offset = self.shape_count();
+        self.add_positions = match (self.add_positions.take(), &other.add_positions) {
+            (Some(mut mine), Some(theirs)) => {
+                mine.extend(theirs.iter().map(|p| p + offset));
+                Some(mine)
+            }
+            _ => None,
+        };
         self.colliders.extend(other.colliders.iter().map(GroundCollider::share));
         self.unported.extend(other.unported.iter().cloned());
         self.inert.extend(other.inert.iter().cloned());
     }
 }
 
-/// The placed fixtures' colliders, as the scene carries them: on their
-/// layer, not answered against.
-pub(crate) fn fixture_colliders() -> Arc<GroundScene> {
+/// The layers a fixture's touch box may be on: its GameObject is created on
+/// the default layer, and whether the view's recursive layer write reaches it
+/// afterwards is not read, so both layers stand.
+pub(crate) const TOUCH_BOX_LAYERS: u32 = (1 << 0) | (1 << FIXTURE_LAYER);
+
+/// The placed fixtures' colliders before their collision scenes are loaded:
+/// every query naming their layers refuses.
+pub(crate) fn fixture_pending() -> Arc<GroundScene> {
     let mut scene = GroundScene::empty();
-    scene.unported.push(Unported { effect: "placed fixtures".into(), node: "*".into(), layers: 1 << FIXTURE_LAYER,
-        reason: FIXTURE_REFUSAL.into(), query_refusal: FIXTURE_REFUSAL });
+    scene.add_positions = None;
+    scene.unported.push(Unported { effect: "placed fixtures".into(), node: "*".into(),
+        layers: TOUCH_BOX_LAYERS, reason: FIXTURE_PENDING.into(), query_refusal: FIXTURE_PENDING, bounds: None });
+    Arc::new(scene)
+}
+
+/// One placed fixture collider in source axes: its shape in its node's frame,
+/// the node's world matrix (column major), and the node's pose (rotation
+/// x, y, z, w and translation) when the node is unscaled.
+pub(crate) struct FixturePart {
+    pub(crate) what: String,
+    pub(crate) layers: u32,
+    pub(crate) world: [f32; 16],
+    pub(crate) pose: Option<([f32; 4], [f32; 3])>,
+    pub(crate) shape: FixtureShape,
+}
+
+/// `PxQuat::operator*`.
+fn quat_mul(p: [f32; 4], q: [f32; 4]) -> [f32; 4] {
+    let [x, y, z, w] = p;
+    [
+        w * q[0] + q[3] * x + y * q[2] - q[1] * z,
+        w * q[1] + q[3] * y + z * q[0] - q[2] * x,
+        w * q[2] + q[3] * z + x * q[1] - q[0] * y,
+        w * q[3] - x * q[0] - y * q[1] - z * q[2],
+    ]
+}
+
+/// `PxQuat::rotate`.
+fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let [x, y, z, w] = q;
+    let (vx, vy, vz) = (2.0 * v[0], 2.0 * v[1], 2.0 * v[2]);
+    let w2 = w * w - 0.5;
+    let dot2 = x * vx + y * vy + z * vz;
+    [
+        vx * w2 + (y * vz - z * vy) * w + x * dot2,
+        vy * w2 + (z * vx - x * vz) * w + y * dot2,
+        vz * w2 + (x * vy - y * vx) * w + z * dot2,
+    ]
+}
+
+/// A box shape's query pose: the static actor's pose (the node's) composed
+/// with the shape's local pose (the box centre, no rotation), as
+/// `PxTransform::transform` composes them.
+fn box_pose(node: ([f32; 4], [f32; 3]), center: [f32; 3]) -> Option<Pose> {
+    let (q, t) = node;
+    let r = quat_rotate(q, center);
+    let p = [r[0] + t[0], r[1] + t[1], r[2] + t[2]];
+    Pose::rotated(quat_mul(q, [0.0, 0.0, 0.0, 1.0]), p).ok()
+}
+
+pub(crate) enum FixtureShape {
+    Mesh { convex: bool, cooking: Option<u32>, positions: Vec<[f32; 3]>, triangles: Vec<[u32; 3]> },
+    Box { center: [f32; 3], half: [f32; 3] },
+    Unknown(String),
+}
+
+/// A fixture view's touch box (the view's touch collider): a BoxCollider
+/// child at the view's origin, with no rotation, sized from the placement's
+/// grid size and layout type: a layout other than 0 spans the grid's X and Z
+/// tiles plus the view's touch adjustment and the touch height (halved for
+/// layout 2); layout 0 spans the X tiles, the Y tiles and one Z tile. Its
+/// centre is half its height up. The adjustment is what the view's
+/// constructor sets, half a tile; the tile is 0.25 on every axis and the
+/// touch height 0.125 (the constants' static constructor). Returns the
+/// centre and half extents.
+pub(crate) fn touch_box(grid: [i32; 3], layout: u8) -> ([f32; 3], [f32; 3]) {
+    const TILE: f32 = 0.25;
+    const TOUCH_HEIGHT: f32 = 0.125;
+    const ADJUST: f32 = TILE * 0.5;
+    let size = if layout != 0 {
+        let height = if layout == 2 { TOUCH_HEIGHT * 0.5 } else { TOUCH_HEIGHT };
+        [TILE * grid[0] as f32 + ADJUST, height, ADJUST + TILE * grid[2] as f32]
+    } else {
+        [TILE * grid[0] as f32, TILE * grid[1] as f32, TILE]
+    };
+    ([0.0, size[1] * 0.5, 0.0], size.map(|v| v * 0.5))
+}
+
+/// The world bounds of a box in a node's frame through its world matrix
+/// (the eight corners), grown outward by a relative binary32 step so that the
+/// engine's own rounding of the same bounds stays inside.
+fn enclosing_bounds(world: &[f32; 16], lo: [f32; 3], hi: [f32; 3]) -> Option<[f32; 6]> {
+    let mut out = [f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    for corner in 0..8 {
+        let c = [if corner & 1 == 0 { lo[0] } else { hi[0] }, if corner & 2 == 0 { lo[1] } else { hi[1] },
+            if corner & 4 == 0 { lo[2] } else { hi[2] }].map(f64::from);
+        for k in 0..3 {
+            let v = f64::from(world[k]) * c[0] + f64::from(world[4 + k]) * c[1] + f64::from(world[8 + k]) * c[2]
+                + f64::from(world[12 + k]);
+            out[k] = out[k].min(v);
+            out[3 + k] = out[3 + k].max(v);
+        }
+    }
+    let grow = |v: f64, up: bool| {
+        let step = 1e-5 * (1.0 + v.abs());
+        let v = if up { v + step } else { v - step };
+        v as f32
+    };
+    let bounds = [grow(out[0], false), grow(out[1], false), grow(out[2], false),
+        grow(out[3], true), grow(out[4], true), grow(out[5], true)];
+    bounds.iter().all(|v| v.is_finite()).then_some(bounds)
+}
+
+/// The placed fixtures' colliders as the physics scene carries them.
+pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
+    let mut scene = GroundScene::empty();
+    // The fixture views add their colliders at run time, in an order not read.
+    scene.add_positions = None;
+    for part in parts {
+        let unbounded = |reason: String| Unported { effect: "placed fixtures".into(), node: part.what.clone(),
+            layers: part.layers, reason, query_refusal: FIXTURE_UNBOUNDED, bounds: None };
+        let bounded = |reason: &'static str, bounds: Option<[f32; 6]>| match bounds {
+            Some(bounds) => Unported { effect: "placed fixtures".into(), node: part.what.clone(), layers: part.layers,
+                reason: reason.into(), query_refusal: reason, bounds: Some(bounds) },
+            None => unbounded(format!("{reason}; its bounds are not finite")),
+        };
+        let local_box = |points: &[[f32; 3]]| points.iter().fold(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
+            |(lo, hi), p| (std::array::from_fn(|k| lo[k].min(p[k])), std::array::from_fn(|k| hi[k].max(p[k]))));
+        let entry = match &part.shape {
+            FixtureShape::Box { center, half } => {
+                match part.pose.and_then(|node| box_pose(node, *center)).filter(|_| half.iter().all(|h| h.is_finite())) {
+                    Some(pose) => {
+                        let bounds = law::box_world_bounds(*half, &pose);
+                        scene.colliders.push(GroundCollider { effect: "placed fixtures".into(), node: part.what.clone(),
+                            geometry: "box".into(), cooking: 0, shape: ColliderShape::Box(*half), pose,
+                            layer: part.layers.trailing_zeros(), layers: part.layers, bounds, collider_id: i32::MAX });
+                        continue;
+                    }
+                    None => {
+                        let lo = std::array::from_fn(|k| center[k] - half[k]);
+                        let hi = std::array::from_fn(|k| center[k] + half[k]);
+                        bounded(BOX_REFUSAL, enclosing_bounds(&part.world, lo, hi))
+                    }
+                }
+            }
+            FixtureShape::Mesh { convex: true, cooking, positions, triangles } => {
+                // The shape's query pose: the node's, composed with the
+                // shape's identity local pose.
+                let pose = part.pose.and_then(|node| box_pose(node, [0.0; 3]));
+                let indices: Vec<u32> = triangles.iter().flatten().copied().collect();
+                let cooked = cooking.zip(pose).map(|(cooking, pose)| {
+                    law::cook_convex(positions, &indices, cooking)
+                        .and_then(|hull| law::convex_world_bounds(&hull, &pose).map(|bounds| (hull, bounds)))
+                        .map(|(hull, bounds)| (cooking, pose, hull, bounds))
+                });
+                match cooked {
+                    Some(Ok((cooking, pose, hull, bounds))) if part.layers.count_ones() == 1 => {
+                        scene.colliders.push(GroundCollider { effect: "placed fixtures".into(), node: part.what.clone(),
+                            geometry: "fixture convex".into(), cooking, shape: ColliderShape::Convex(Arc::new(hull)),
+                            pose, layer: part.layers.trailing_zeros(), layers: part.layers, bounds,
+                            collider_id: i32::MAX });
+                        continue;
+                    }
+                    Some(Ok(_)) => unbounded("a fixture MeshCollider on an unsettled layer".into()),
+                    // The engine's own cook fails: the collider has no shape
+                    // and is not in the physics scene.
+                    Some(Err(refused)) if law::engine_cooks_nothing(&refused) => continue,
+                    Some(Err(refused)) => {
+                        let (lo, hi) = local_box(positions);
+                        let side = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f32, f32::max);
+                        let margin = CONVEX_BOUND_MARGIN.0 * side + CONVEX_BOUND_MARGIN.1;
+                        let lo = lo.map(|v| v - margin);
+                        let hi = hi.map(|v| v + margin);
+                        match enclosing_bounds(&part.world, lo, hi) {
+                            Some(bounds) => Unported { effect: "placed fixtures".into(), node: part.what.clone(),
+                                layers: part.layers, reason: format!("{CONVEX_COOK_REFUSAL}: {}", refused.0),
+                                query_refusal: CONVEX_COOK_REFUSAL, bounds: Some(bounds) },
+                            None => unbounded(format!("{CONVEX_COOK_REFUSAL}: {}; its bounds are not finite", refused.0)),
+                        }
+                    }
+                    None => {
+                        // The cooked hull's vertices are input points while
+                        // the hull stays within the cooker's vertex limit, so
+                        // the input's box encloses the hull's own; a hull past
+                        // the limit is bounded by other means that are not read.
+                        let points: Vec<parry3d::math::Vector> = positions.iter().copied()
+                            .map(parry3d::math::Vector::from_array).collect();
+                        match parry3d::transformation::try_convex_hull(&points) {
+                            Ok((hull, _)) if !hull.is_empty() && hull.len() <= CONVEX_VERTEX_LIMIT => {
+                                let (lo, hi) = local_box(positions);
+                                bounded(CONVEX_REFUSAL, enclosing_bounds(&part.world, lo, hi))
+                            }
+                            Ok((hull, _)) => unbounded(format!("a convex MeshCollider whose hull has {} vertices \
+                                (the cooker's vertex-limit path is not read)", hull.len())),
+                            Err(error) => unbounded(format!("a convex MeshCollider whose hull is degenerate: {error:?}")),
+                        }
+                    }
+                }
+            }
+            FixtureShape::Mesh { convex: false, cooking, positions, triangles } => {
+                let identity = part.world[..12] == [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+                let cooked = cooking.filter(|_| identity)
+                    .and_then(|cooking| law::cook(positions, triangles, cooking).ok().map(|mesh| (cooking, mesh)));
+                match cooked {
+                    Some((cooking, mesh)) => {
+                        let translation = [part.world[12], part.world[13], part.world[14]]
+                            .map(|v| if v == 0.0 { 0.0 } else { v });
+                        match Pose::new([0.0, 0.0, 0.0, 1.0], translation) {
+                            Ok(pose) => {
+                                let mesh = Arc::new(mesh);
+                                let bounds = law::world_bounds(&mesh, &pose);
+                                let layer = part.layers.trailing_zeros();
+                                if part.layers.count_ones() == 1 {
+                                    scene.colliders.push(GroundCollider { effect: "placed fixtures".into(),
+                                        node: part.what.clone(), geometry: "fixture".into(), cooking,
+                                        shape: ColliderShape::Mesh(mesh), pose, layer, layers: part.layers, bounds,
+                                        collider_id: i32::MAX });
+                                    continue;
+                                }
+                                unbounded("a fixture MeshCollider on an unsettled layer".into())
+                            }
+                            Err(_) => unbounded("a fixture MeshCollider pose the scene cannot hold".into()),
+                        }
+                    }
+                    None => {
+                        let (lo, hi) = local_box(positions);
+                        bounded(FIXTURE_MESH_REFUSAL, enclosing_bounds(&part.world, lo, hi))
+                    }
+                }
+            }
+            FixtureShape::Unknown(kind) => unbounded(format!("a {kind}")),
+        };
+        scene.unported.push(entry);
+    }
     Arc::new(scene)
 }
 
@@ -308,9 +663,8 @@ impl SceneBuilder {
                 scene.extend(&self.site_colliders(site));
             }
         }
-        if selection.fixtures {
-            scene.extend(&fixture_colliders());
-        }
+        // The placed fixtures' colliders are judged by the queries: the
+        // host installs them (or the placeholder) in the live scene.
         let verdict = verdict.map(|()| Arc::new(scene));
         self.verdicts.insert(selection.clone(), verdict.clone());
         verdict
@@ -355,8 +709,9 @@ impl SceneBuilder {
             && c.get("site").and_then(Value::as_str) == Some(site), &owner));
         let scene = Arc::new(scene.unwrap_or_else(|reason| {
             let mut scene = GroundScene::empty();
+            scene.add_positions = None;
             scene.unported.push(Unported { effect: owner.clone(), node: "*".into(), layers: SITE_LAYERS, reason,
-                query_refusal: UNPORTED_QUERY });
+                query_refusal: UNPORTED_QUERY, bounds: None });
             scene
         }));
         self.sites.insert(site.to_owned(), scene.clone());
@@ -368,6 +723,9 @@ impl SceneBuilder {
         let records = document.get("colliders").and_then(Value::as_array)
             .ok_or("the collider export has no collider list")?;
         let mut scene = GroundScene::empty();
+        // Each shape's add rank (the export's activationOrder): colliders,
+        // then the other shapes, in the order pushed.
+        let (mut collider_ranks, mut other_ranks) = (Vec::new(), Vec::new());
         for (ordinal, c) in records.iter().enumerate() {
             if !selects(c)
                 || c.get("enabled").and_then(Value::as_bool) != Some(true)
@@ -378,22 +736,50 @@ impl SceneBuilder {
             let layer = c.get("layer").and_then(Value::as_u64).and_then(|l| u32::try_from(l).ok()).filter(|&l| l < 32)
                 .ok_or_else(|| format!("collider {node}: no layer"))?;
             let unported = |reason: String| Unported { effect: owner.to_owned(), node: node.clone(), layers: 1 << layer,
-                reason, query_refusal: UNPORTED_QUERY };
+                reason, query_refusal: UNPORTED_QUERY, bounds: None };
+            // A site's colliders are the ones its activation added (the game
+            // hides a site once instantiated and shows it on entry); whether
+            // an effect's colliders go through that cycle is not read.
+            let rank = (c.get("kind").and_then(Value::as_str) == Some("scene"))
+                .then(|| c.get("activationOrder").and_then(Value::as_u64)).flatten();
             if let Some(reason) = c.get("reason").and_then(Value::as_str) {
                 scene.unported.push(unported(format!("not placed by the export: {reason}")));
+                other_ranks.push(rank);
                 continue;
             }
             if c.get("isTrigger").and_then(Value::as_bool) == Some(true) {
                 scene.inert.push(unported("a trigger: the module drops its hits".into()));
+                other_ranks.push(rank);
                 continue;
             }
             match ground_collider(&mut self.meshes, document, ordinal, c, owner, layer) {
-                Ok(collider) => scene.colliders.push(collider),
-                Err(reason) => scene.unported.push(unported(reason)),
+                Ok(collider) => {
+                    scene.colliders.push(collider);
+                    collider_ranks.push(rank);
+                }
+                Err(reason) => {
+                    scene.unported.push(unported(reason));
+                    other_ranks.push(rank);
+                }
             }
         }
+        scene.add_positions = add_positions(&collider_ranks, &other_ranks);
         Ok(scene)
     }
+}
+
+/// Each collider's position in the add order of one installed thing: its
+/// shapes in ascending add rank. `None` when a shape has no rank or two share
+/// one (a rank is a first position in one table, so a tie means the ranks
+/// came from different tables).
+fn add_positions(collider_ranks: &[Option<u64>], other_ranks: &[Option<u64>]) -> Option<Vec<usize>> {
+    let ranks: Vec<u64> = collider_ranks.iter().chain(other_ranks).copied().collect::<Option<_>>()?;
+    let mut sorted = ranks.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+    Some(collider_ranks.iter().map(|rank| sorted.binary_search(&rank.unwrap_or(0)).unwrap_or(usize::MAX)).collect())
 }
 
 impl GroundCollider {
@@ -403,9 +789,10 @@ impl GroundCollider {
             node: self.node.clone(),
             geometry: self.geometry.clone(),
             cooking: self.cooking,
-            mesh: self.mesh.clone(),
+            shape: self.shape.clone(),
             pose: self.pose,
             layer: self.layer,
+            layers: self.layers,
             bounds: self.bounds,
             collider_id: self.collider_id,
         }
@@ -463,9 +850,10 @@ fn ground_collider(meshes: &mut MeshCache, document: &Value, ordinal: usize, c: 
         geometry,
         cooking,
         layer,
+        layers: 1 << layer,
         bounds,
         collider_id: i32::try_from(ordinal).unwrap_or(i32::MAX),
-        mesh,
+        shape: ColliderShape::Mesh(mesh),
         pose,
     })
 }
@@ -526,6 +914,28 @@ pub(crate) struct SiteScene(Arc<RwLock<SiteEntries>>);
 struct SiteEntries {
     next: u64,
     entries: Vec<(u64, Arc<GroundScene>)>,
+    /// A removal since the scene was last empty moved static shapes within
+    /// the pool (the removed thing's shapes were not the pool's last) or left
+    /// a split tree behind (the scene held more than one leaf of shapes).
+    reshuffled: bool,
+}
+
+/// The most static shapes a pruner leaf holds: a scene of at most this many
+/// is one leaf in the tree and in the bucket.
+const LEAF_SHAPES: usize = 4;
+
+impl SiteEntries {
+    fn shape_count(&self) -> usize {
+        self.entries.iter().map(|(_, scene)| scene.shape_count()).sum()
+    }
+
+    /// Whether every query meets its shapes in add order (see the module
+    /// notes): at most one leaf of shapes, no reshuffling removal, and every
+    /// installed thing's add order established.
+    fn add_order_holds(&self) -> bool {
+        !self.reshuffled && self.shape_count() <= LEAF_SHAPES
+            && self.entries.iter().all(|(_, scene)| scene.add_positions.is_some())
+    }
 }
 
 impl SiteScene {
@@ -548,11 +958,27 @@ impl SiteScene {
 
     /// Removes a destroyed thing's colliders.
     pub(crate) fn remove(&self, id: u64) {
-        self.entries_mut().entries.retain(|(entry, _)| *entry != id);
+        let mut entries = self.entries_mut();
+        if let Some(at) = entries.entries.iter().position(|(entry, _)| *entry == id) {
+            // Shapes after the removed thing's in the pool move into its
+            // gaps; and a scene of more than one leaf keeps its split tree
+            // until a rebuild, whose timing is not modelled here.
+            let later = entries.entries[at + 1..].iter().map(|(_, scene)| scene.shape_count()).sum::<usize>();
+            let removed = entries.entries[at].1.shape_count();
+            if removed > 0 && (later > 0 || entries.shape_count() > LEAF_SHAPES) {
+                entries.reshuffled = true;
+            }
+            entries.entries.remove(at);
+        }
+        if entries.shape_count() == 0 {
+            entries.reshuffled = false;
+        }
     }
 
     pub(crate) fn clear(&self) {
-        self.entries_mut().entries.clear();
+        let mut entries = self.entries_mut();
+        entries.entries.clear();
+        entries.reshuffled = false;
     }
 
     /// The colliders the scene holds now that the queries answer against.
@@ -604,20 +1030,35 @@ impl CollisionScene for GroundQuery {
         self.last.clear();
         self.refusal = None;
         let entries = self.scene.entries();
+        let add_order = entries.add_order_holds();
         let mut touched = Vec::new();
-        for (_, scene) in &entries.entries {
-            if let Some(u) = scene.unported.iter().find(|u| query.collides_with & u.layers != 0) {
+        for (at, (_, scene)) in entries.entries.iter().enumerate() {
+            if let Some(u) = scene.unported.iter().find(|u| query.collides_with & u.layers != 0
+                && u.bounds.as_ref().map_or(true, |bounds| bounds_meet(bounds, query.center, query.extents))) {
                 self.refusal.get_or_insert(u.query_refusal);
             }
             for (i, c) in scene.colliders.iter().enumerate() {
-                if query.collides_with & (1u32 << c.layer) != 0 && bounds_meet(&c.bounds, query.center, query.extents) {
-                    touched.push((scene.clone(), i));
+                let named = query.collides_with & c.layers;
+                if named == 0 || !bounds_meet(&c.bounds, query.center, query.extents) {
+                    continue;
                 }
+                if named != c.layers {
+                    self.refusal.get_or_insert(LAYER_REFUSAL);
+                    continue;
+                }
+                // A position the scene does not carry leaves the order unknown.
+                let position = scene.add_positions.as_ref().and_then(|positions| positions.get(i).copied());
+                touched.push((at, position, scene.clone(), i));
             }
         }
         drop(entries);
+        let add_order = add_order && touched.iter().all(|&(_, position, _, _)| position.is_some());
+        if add_order {
+            touched.sort_by_key(|&(at, position, _, _)| (at, position));
+        }
+        let mut touched: Vec<(Arc<GroundScene>, usize)> = touched.into_iter().map(|(_, _, scene, i)| (scene, i)).collect();
         let limit = usize::try_from(query.max_shapes.max(0)).unwrap_or(0);
-        self.order_known = touched.len() <= 1;
+        self.order_known = touched.len() <= 1 || add_order;
         if touched.len() > limit && !self.order_known {
             self.refusal.get_or_insert("more touches than the shape limit keeps, in an unknown order");
         }
@@ -627,19 +1068,20 @@ impl CollisionScene for GroundQuery {
     }
 
     /// Every collider the mask names. A collider the queries cannot answer
-    /// against stands in with unbounded bounds, so a lane that could reach
-    /// it refuses the call instead of skipping it.
+    /// against stands in with its enclosing bounds, or unbounded bounds when
+    /// it has none, so a lane that could reach it refuses the call instead of
+    /// skipping it.
     fn reachable(&self, collides_with: u32) -> Vec<Candidate> {
         self.scene.entries().entries.iter().flat_map(|(_, scene)| {
-            let unported = scene.unported.iter().filter(|u| collides_with & u.layers != 0).map(|_| Candidate {
-                bounds_min: [-f32::MAX; 3],
-                bounds_max: [f32::MAX; 3],
+            let unported = scene.unported.iter().filter(|u| collides_with & u.layers != 0).map(|u| Candidate {
+                bounds_min: u.bounds.map_or([-f32::MAX; 3], |b| [b[0], b[1], b[2]]),
+                bounds_max: u.bounds.map_or([f32::MAX; 3], |b| [b[3], b[4], b[5]]),
                 is_trigger: false,
                 collider_id: -1,
                 body_id: None,
             });
             (0..scene.colliders.len())
-                .filter(|&i| collides_with & (1u32 << scene.colliders[i].layer) != 0)
+                .filter(|&i| collides_with & scene.colliders[i].layers != 0)
                 .map(|i| scene.candidate(i))
                 .chain(unported)
                 .collect::<Vec<_>>()
@@ -652,8 +1094,17 @@ impl CollisionScene for GroundQuery {
             return None;
         };
         let c = &scene.colliders[*index];
-        match law::sweep_sphere(&c.mesh, &c.pose, request.origin, request.sphere_radius, request.direction,
-            request.distance, None) {
+        let swept = match &c.shape {
+            ColliderShape::Mesh(mesh) => law::sweep_sphere(mesh, &c.pose, request.origin, request.sphere_radius,
+                request.direction, request.distance, None),
+            ColliderShape::Box(half) => law::sweep_sphere_box(*half, &c.pose, request.origin, request.sphere_radius,
+                request.direction, request.distance, None),
+            // The module's hit record starts with the face index -1, and a
+            // sweep hit keeps it (the hit flags ask for no face index).
+            ColliderShape::Convex(hull) => law::sweep_sphere_convex(hull, &c.pose, request.origin, request.sphere_radius,
+                request.direction, request.distance, u32::MAX, None),
+        };
+        match swept {
             // A hit without the position flag leaves the zeroed position.
             Ok(hit) => hit.map(|hit| SweepHit { position: hit.position.unwrap_or([0.0; 3]), normal: hit.normal,
                 distance: hit.distance }),

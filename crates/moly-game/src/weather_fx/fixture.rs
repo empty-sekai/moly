@@ -33,6 +33,14 @@ struct Candidate {
     plan: Planned,
     /// The prefab chain a Local trail's owner words are composed on.
     prefab: Option<Vec<SourceTrs>>,
+    /// A control preparation saw this draw's GPU source Ready once. The
+    /// render world resets readiness to Pending at each frame's queue and
+    /// sets it again once the pipelines are confirmed, so waiting for every
+    /// candidate to read Ready at the same instant is a race it can lose for
+    /// a long time; a confirmed candidate is not asked again.
+    confirmed: bool,
+    /// The same for the renderer's trail draw, seen Ready once.
+    trail_confirmed: bool,
 }
 
 #[derive(Component)]
@@ -205,7 +213,22 @@ pub(crate) fn prepare_control(
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::Played)
+    prepare(world, root, doc, selected, Stepping::Played, Activity::Authored)
+}
+
+/// The same for an owner that plays the systems with `ParticleSystem.Play`
+/// later (a timeline Signal reaction): the systems are prepared and admitted
+/// as [`prepare_control`]'s, but wait stopped and out of the manager, drawing
+/// nothing, until [`play_pending`] runs their first Play (its seed reset and
+/// birth owner install). `Ok(None)` while geometry or GPU preparation is
+/// pending. Activity is the run time's (see [`Activity::Runtime`]).
+pub(crate) fn prepare_play_later(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::PlayLater, Activity::Runtime)
 }
 
 /// The same for a Director's ControlPlayable: the systems wait for its paused
@@ -218,7 +241,34 @@ pub(crate) fn prepare_director_control(
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::Director)
+    prepare(world, root, doc, selected, Stepping::Director, Activity::Authored)
+}
+
+/// [`prepare_director_control`] for a prefab's director owner (a step item,
+/// a site scene's director): activity is the run time's (see
+/// [`Activity::Runtime`]).
+pub(crate) fn prepare_owner_director_control(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::Director, Activity::Runtime)
+}
+
+/// Whether a selected system's authored activity gates its admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activity {
+    /// An inactive authored object refuses the system (the fixture routes).
+    Authored,
+    /// The owner's own activation decides at run time: a Control clip's
+    /// ActivationControlPlayable activates its object for the clip, and
+    /// ControlPlayableAsset takes every system of the object's Transform
+    /// subtree whether its object is active or not (a Signal target's
+    /// inactive children likewise). An object authored inactive is admitted
+    /// and the host leaves its system dormant, drawing nothing, while its
+    /// anchor is inactive.
+    Runtime,
 }
 
 fn prepare(
@@ -227,6 +277,7 @@ fn prepare(
     doc: &Value,
     selected: &[(Entity, usize)],
     stepping: Stepping,
+    activity: Activity,
 ) -> Result<Option<Vec<Entity>>, String> {
     let server = world.resource::<AssetServer>().clone();
     let mut preparation = match world.entity_mut(root).take::<ControlPreparation>() {
@@ -234,65 +285,123 @@ fn prepare(
         None => {
             let particles = doc["emitters"].as_array().ok_or("missing source emitter list")?;
             let nodes = doc["nodes"].as_array().ok_or("missing source node list")?;
-            let by_path = nodes.iter().filter_map(|node|
+            // Runtime activity: the selected systems' own node rows, as active.
+            let released: Vec<Value> = match activity {
+                Activity::Authored => Vec::new(),
+                Activity::Runtime => selected.iter()
+                    .filter_map(|&(_, ordinal)| particles[ordinal]["node"].as_str())
+                    .filter_map(|path| nodes.iter().find(|node| node["node"].as_str() == Some(path)))
+                    .map(|node| { let mut node = node.clone(); node["active"] = Value::Bool(true); node })
+                    .collect(),
+            };
+            let mut by_path: HashMap<String, &Value> = nodes.iter().filter_map(|node|
                 Some((node["node"].as_str()?.to_owned(), node))).collect();
+            for node in &released {
+                if let Some(path) = node["node"].as_str() { by_path.insert(path.to_owned(), node); }
+            }
             let owners = source_sub_emitter_owners(particles);
             let package = doc["name"].as_str().unwrap_or("fixture");
             let mut candidates = Vec::new();
             for &(anchor, ordinal) in selected {
                 let particle = &particles[ordinal];
-                let mut plan = admit(package, particle, &by_path, nodes, &owners, &server, Path::Control, stepping)?;
+                let mut plan = match admit(package, particle, &by_path, nodes, &owners, &server, Path::Control, stepping) {
+                    Ok(plan) => plan,
+                    // A director owner steps each system of its object by its
+                    // own playable (or plays it by its own Play): one this host
+                    // refuses is left undrawn, by name, and the others play.
+                    Err(reason) if activity == Activity::Runtime => {
+                        warn!("[prefab-director] {reason}; this system is not drawn, the object's other systems play");
+                        continue;
+                    }
+                    Err(reason) => return Err(reason),
+                };
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
                 plan.source.force_phenomena_lighting();
                 if let Some(trail) = plan.trail.as_mut() { trail.source.force_phenomena_lighting(); }
-                let prefab = trail_prefab(&plan, nodes)
-                    .map_err(|reason| format!("{node}: source particle control rejected {reason}", node = particle["node"]))?;
-                candidates.push(Candidate { anchor, plan, prefab });
+                let prefab = match trail_prefab(&plan, nodes) {
+                    Ok(prefab) => prefab,
+                    Err(reason) if activity == Activity::Runtime => {
+                        warn!("[prefab-director] {node}: source particle control rejected {reason}; this system is not drawn, the object's other systems play",
+                            node = particle["node"]);
+                        continue;
+                    }
+                    Err(reason) => return Err(format!("{node}: source particle control rejected {reason}", node = particle["node"])),
+                };
+                candidates.push(Candidate { anchor, plan, prefab, confirmed: false, trail_confirmed: false });
             }
             ControlPreparation(candidates, 0.0)
         }
     };
     preparation.1 = crate::fixture_timeline_particles::realtime(world);
     let result = (|| {
-        for candidate in &mut preparation.0 {
+        let mut refused = Vec::new();
+        let mut pending = false;
+        for (index, candidate) in preparation.0.iter_mut().enumerate() {
+            if candidate.confirmed {
+                continue;
+            }
             let plan = &mut candidate.plan;
-            let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
-                world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
-                world.resource::<Assets<Mesh>>())?;
-            if !ready { return Ok(None); }
-            if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
-                return Ok(None);
-            }
-            if plan.draw.is_none() {
-                let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
-                let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
-                    NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
-                plan.draw = Some((draw, mesh));
-            }
-            match plan.source.readiness.lock().unwrap().clone() {
-                ParticleReadiness::Pending => return Ok(None),
-                ParticleReadiness::Failed(error) => return Err(error),
-                ParticleReadiness::Ready => {}
-            }
-            let leader = plan.draw.as_ref().expect("particle draw spawned").0;
-            if let Some(trail) = plan.trail.as_mut() {
-                if !trail.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
-                    return Ok(None);
+            let trail_confirmed = &mut candidate.trail_confirmed;
+            let step = (|| -> Result<bool, String> {
+                let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
+                    world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
+                    world.resource::<Assets<Mesh>>())?;
+                if !ready { return Ok(false); }
+                if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
+                    return Ok(false);
                 }
-                if trail.draw.is_none() {
+                if plan.draw.is_none() {
                     let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
-                    let draw = world.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
-                        NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(leader))).id();
-                    trail.draw = Some((draw, mesh));
+                    let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
+                        NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
+                    plan.draw = Some((draw, mesh));
                 }
-                match trail.source.readiness.lock().unwrap().clone() {
-                    ParticleReadiness::Pending => return Ok(None),
-                    ParticleReadiness::Failed(error) => return Err(format!("trail draw: {error}")),
-                    ParticleReadiness::Ready => {}
+                let readiness = plan.source.readiness.lock().unwrap().clone();
+                let ready = match readiness {
+                    ParticleReadiness::Pending => false,
+                    ParticleReadiness::Failed(error) => return Err(error),
+                    ParticleReadiness::Ready => true,
+                };
+                // The renderer's second draw, a child of the particle draw.
+                let leader = plan.draw.as_ref().expect("particle draw spawned").0;
+                if let Some(trail) = plan.trail.as_mut() {
+                    if !trail.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
+                        return Ok(false);
+                    }
+                    if trail.draw.is_none() {
+                        let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                        let draw = world.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
+                            NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(leader))).id();
+                        trail.draw = Some((draw, mesh));
+                    }
+                    if !*trail_confirmed {
+                        match trail.source.readiness.lock().unwrap().clone() {
+                            ParticleReadiness::Pending => return Ok(false),
+                            ParticleReadiness::Failed(error) => return Err(format!("trail draw: {error}")),
+                            ParticleReadiness::Ready => *trail_confirmed = true,
+                        }
+                    }
                 }
+                Ok(ready)
+            })();
+            match step {
+                Ok(true) => candidate.confirmed = true,
+                Ok(false) => pending = true,
+                // As at admission: a director owner's other systems play.
+                Err(error) if activity == Activity::Runtime => refused.push((index, error)),
+                Err(error) => return Err(error),
             }
+        }
+        for (index, error) in refused.into_iter().rev() {
+            let candidate = preparation.0.remove(index);
+            warn!("[prefab-director] {}: source particle preparation failed: {error}; this system is not drawn, the object's other systems play",
+                doc["emitters"][candidate.plan.ordinal]["node"]);
+            if let Some((draw, _)) = candidate.plan.draw { world.despawn(draw); }
+        }
+        if pending {
+            return Ok(None);
         }
         let mut draws = Vec::new();
         for candidate in &preparation.0 {
@@ -324,6 +433,20 @@ fn prepare(
                         .map_err(|reason| format!("{}: source particle control rejected {reason}",
                             doc["emitters"][candidate.plan.ordinal]["node"]))?;
                     world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system), played));
+                }
+                // Stopped and out of the manager until its owner's first Play:
+                // the host skips a stopped system (it draws nothing), and only
+                // that Play installs the birth owner.
+                Stepping::PlayLater => {
+                    if let Some(owner) = trail_owner {
+                        crate::particle_runtime::attach_trail_owner(&mut system, owner)
+                            .map_err(|reason| format!("{}: source particle control rejected {reason}", candidate.plan.node))?;
+                    }
+                    let inactive = world.get::<moly_assets::scene_state::SourceInactive>(candidate.anchor).is_some();
+                    world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system),
+                        PendingPlay { route: candidate.plan.route.clone(), event_edges: candidate.plan.event_edges.clone(),
+                            culling: candidate.plan.culling.clone(), target: candidate.plan.child_owner.is_some() },
+                        crate::fixture_timeline_particles::StoppedByDirector { was_inactive: inactive }));
                 }
             }
             if let Some((trail, trail_mesh)) = candidate.plan.trail.as_ref().and_then(|trail| trail.draw.clone()) {
@@ -382,13 +505,158 @@ pub(crate) enum Path {
 
 /// Who steps an admitted system. `Played`: its own per-frame update after a
 /// `ParticleSystem.Play` (play on awake or explicit), which this host runs as
-/// the weather host does, with the native birth owner. `Director`:
+/// the weather host does, with the native birth owner. `PlayLater`: the same
+/// once its owner's Play arrives; stopped until then. `Director`:
 /// `ParticleSystem.Simulate` from a ControlPlayable, whose restarts install
 /// the birth owner from the manual seed and whose chunks run the same update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stepping {
     Played,
+    PlayLater,
     Director,
+}
+
+/// A system prepared for a later `ParticleSystem.Play` (see
+/// [`prepare_play_later`]): what its first Play installs.
+#[derive(Component)]
+pub(crate) struct PendingPlay {
+    route: crate::particle_runtime::SourceRoute,
+    event_edges: Option<crate::particle_runtime::EventEdges>,
+    culling: lifecycle::Culling,
+    /// A sub-emitter target: installed as its parent's child at the first
+    /// Play, with owner words composed from the instance then.
+    target: bool,
+}
+
+/// The first `ParticleSystem.Play` of a system [`prepare_play_later`] left
+/// stopped: the seed reset and birth owner install of [`install`], then the
+/// per-frame update as any played system. `Ok(false)` for a draw with no
+/// pending Play (it played already, or is not this host's).
+pub(crate) fn play_pending(world: &mut World, draw: Entity) -> Result<bool, String> {
+    let Some(pending) = world.entity_mut(draw).take::<PendingPlay>() else { return Ok(false) };
+    world.entity_mut(draw).remove::<crate::fixture_timeline_particles::StoppedByDirector>();
+    if pending.target {
+        return install_target(world, draw, pending).map(|()| true);
+    }
+    world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
+        let mut entity = world.entity_mut(draw);
+        let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() else {
+            return Err("pending system has no simulation".to_owned());
+        };
+        let played = install_with(&mut live.0, &pending.route, pending.event_edges.clone(), pending.culling.clone(), &mut seeds)
+            .map_err(|reason| format!("{}: first Play refused: {reason}", live.0.node))?;
+        if live.0.emitter.trails.is_some()
+            && (live.0.trail.is_none() || !crate::particle_runtime::trail_owner_ready(&live.0)) {
+            return Err(format!("{}: first Play refused: trail system installed without its trail state or owner words", live.0.node));
+        }
+        entity.insert(played);
+        Ok(true)
+    })
+}
+
+/// A sub-emitter target's first Play on the played route. The Play that
+/// reaches it hands it to its parent instead (see [`play_draws`]): it is
+/// installed as the parent's child, with its seed owner and streams as any
+/// first Play resets them and the owner words its parent's commands read,
+/// composed from the instance (see [`instance_owner`]), and it stays stopped,
+/// taking only its parent's commands.
+fn install_target(world: &mut World, draw: Entity, pending: PendingPlay) -> Result<(), String> {
+    let live = world.get::<crate::uber_particle::FixtureParticleLive>(draw).ok_or("pending target has no simulation")?;
+    let anchor = live.0.anchor.ok_or("pending target has no instance node")?;
+    let scaling = target_scaling(&live.0)?;
+    let owner = instance_owner(anchor, scaling, |entity| world.get::<Transform>(entity).copied(),
+        |entity| world.get::<ChildOf>(entity).map(ChildOf::parent))?;
+    world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
+        let mut entity = world.entity_mut(draw);
+        let mut live = entity.get_mut::<crate::uber_particle::FixtureParticleLive>().expect("pending target simulation");
+        crate::particle_runtime::install_child_target(&mut live.0, &mut seeds, owner)
+            .map_err(|reason| format!("{}: sub-emitter target refused by the child installer: {reason}", live.0.node))?;
+        if let Some(edges) = pending.event_edges.clone() {
+            live.0.native_birth.as_mut().expect("target owner just installed").events =
+                Some(crate::particle_runtime::BirthEvents::with_edges(edges));
+        }
+        entity.insert(Played {
+            play: lifecycle::PlayState::played(pending.culling.clone(), false),
+            culling: pending.culling,
+            procedural_warm: false,
+            emitting: false,
+            route: pending.route,
+            event_edges: pending.event_edges,
+            legacy: None,
+            dropped: 0,
+            hands_commands: false,
+        });
+        Ok(())
+    })
+}
+
+/// The owner update's branch of an installed target's scaling mode.
+pub(crate) fn target_scaling(system: &Runtime) -> Result<moly_law::particle::owner::OwnerScaling, String> {
+    system.geometry.shape_evidence().map(|evidence| super::owner_scaling(evidence.scaling))
+        .ok_or_else(|| format!("{}: sub-emitter target has no scaling evidence", system.node))
+}
+
+/// A target's owner words from the spawned instance: the local transform of
+/// its instance node and of every node above it, root first, in source axes
+/// (the runtime frame is the source frame with x reflected), composed as the
+/// engine's owner update composes a node's chain.
+pub(crate) fn instance_owner(anchor: Entity, scaling: moly_law::particle::owner::OwnerScaling,
+    transform: impl Fn(Entity) -> Option<Transform>, parent: impl Fn(Entity) -> Option<Entity>)
+    -> Result<moly_law::particle::child_emit::ChildOwner, String> {
+    use moly_assets::coordinates::{source_position, source_rotation};
+    let mut chain = Vec::new();
+    let mut current = Some(anchor);
+    while let Some(entity) = current {
+        let local = transform(entity).unwrap_or_default();
+        chain.push(moly_law::particle::owner::SourceTrs {
+            t: source_position(local.translation).to_array(),
+            q: source_rotation(local.rotation).to_array(),
+            s: local.scale.to_array(),
+        });
+        current = parent(entity);
+    }
+    chain.reverse();
+    let owner = super::environment_owner(&[], &chain, false, scaling)?;
+    Ok(moly_law::particle::child_emit::ChildOwner::from_owner(&owner))
+}
+
+/// On a played parent: its installed sub-emitter targets by node, which the
+/// host hands its commands to after each frame's updates.
+#[derive(Component, Clone)]
+pub(crate) struct SubEmitterTargets(pub(crate) Vec<(String, Entity)>);
+
+/// Link each played parent among `draws` to its installed targets among
+/// them: its commands go to them from now on (a command whose target is not
+/// installed is dropped, counted). Returns how many targets were linked.
+pub(crate) fn link_targets(world: &mut World, draws: &[Entity]) -> usize {
+    let installed: Vec<(String, Entity)> = draws.iter().copied().filter_map(|draw| {
+        let live = world.get::<crate::uber_particle::FixtureParticleLive>(draw)?;
+        live.0.native_birth.as_ref()?.target.as_ref()?;
+        Some((live.0.node.clone(), draw))
+    }).collect();
+    let mut linked = 0;
+    for &draw in draws {
+        let Some(edges) = world.get::<Played>(draw).and_then(|played| played.event_edges.clone()) else { continue };
+        let targets: Vec<(String, Entity)> = installed.iter()
+            .filter(|(node, _)| edges.targets().any(|target| target == node.as_str())).cloned().collect();
+        if targets.is_empty() {
+            continue;
+        }
+        linked += targets.len();
+        world.get_mut::<Played>(draw).expect("played parent").hands_commands = true;
+        world.entity_mut(draw).insert(SubEmitterTargets(targets));
+    }
+    linked
+}
+
+/// Count commands a played parent could not hand to an installed target.
+pub(crate) fn count_dropped(played: &mut Played, system: &Runtime, dropped: u64) {
+    if dropped > 0 {
+        if played.dropped == 0 {
+            warn!(effect=%system.effect, node=%system.node, "sub-emitter commands dropped: their target is not installed");
+        }
+        played.dropped += dropped;
+    }
 }
 
 /// The source route of a system a Director prepared and its birth events (a
@@ -446,7 +714,7 @@ fn admit(
     };
     let mut tally = Tally::default();
     let plan = judge_in_host(package, particle, by_path, owners, EffectKind::Site, false,
-        None, true, "fixture-particles-v2", Some(GlobalTransform::IDENTITY),
+        None, true, "fixture-particles-v2", Some(GlobalTransform::IDENTITY), stepping == Stepping::PlayLater,
         &Err("collision scene: fixture particles carry no collider export".to_owned()),
         &census_names_no_body(by_path), server, &mut tally);
     let Some(plan) = plan else {
@@ -461,17 +729,21 @@ fn admit(
     if plan.trail.is_some() && plan.emitter.simulation_space == SimulationSpace::Local {
         trail_owner_admissible(package, nodes, &plan.node).map_err(refuse)?;
     }
-    // Noise, sub-emitter events and emission over distance run with the
-    // native birth owner this host installs. A sub-emitter target is refused
-    // by the judgement (its owner words exist only for a site effect on its
-    // authored chain; this host always judges with an instance anchor), so a
-    // parent's commands find no installed target and are dropped, counted,
-    // under either stepping. The Director's Simulate steps a system's
-    // sub-emitters before the system (see `fixture_timeline_particles::advance`),
-    // which with no target installed leaves the system's own update.
-    if stepping == Stepping::Played {
+    if stepping != Stepping::Director {
+        // Noise, sub-emitter events and emission over distance run with the
+        // native birth owner this host installs. A sub-emitter target is
+        // admitted only on the played route, whose host composes its owner
+        // words from the spawned instance and hands it its parent's commands
+        // (see [`link_targets`]); elsewhere the judgement refuses it (its
+        // owner words exist only for a site effect on its authored chain), so
+        // a parent's commands find no installed target and are dropped,
+        // counted.
         return Ok(plan);
     }
+    // Under a Director the judgement refuses every sub-emitter target, so the
+    // Simulate that steps a system's sub-emitters before the system (see
+    // `fixture_timeline_particles::advance`) is the parent's own update, and
+    // its commands are dropped, counted.
     crate::particle_runtime::director_restart_warm(&plan.emitter, &plan.route, plan.sub_emitter_max_lifetime)
         .map_err(refuse)?;
     director_birth_path(&plan).map_err(refuse)?;
@@ -543,7 +815,7 @@ pub(crate) fn plan(
                 plan.source.force_phenomena_lighting();
                 if let Some(trail) = plan.trail.as_mut() { trail.source.force_phenomena_lighting(); }
                 match trail_prefab(&plan, nodes) {
-                    Ok(prefab) => candidates.push(Candidate { anchor, plan, prefab }),
+                    Ok(prefab) => candidates.push(Candidate { anchor, plan, prefab, confirmed: false, trail_confirmed: false }),
                     Err(reason) => warn!("[fixture-source] {package}/{node}: {reason}"),
                 }
             }
@@ -554,6 +826,9 @@ pub(crate) fn plan(
         commands.entity(root).insert(Request(candidates));
     }
 }
+
+#[cfg(test)]
+mod planes_samples;
 
 #[cfg(test)]
 mod tests {
@@ -673,6 +948,7 @@ mod tests {
                 play: lifecycle::PlayState::played(lifecycle::Culling::Refused("mutant".into()), false),
                 culling: lifecycle::Culling::Refused("mutant".into()), procedural_warm: false, emitting: true,
                 route: SourceRoute::Ordinary, event_edges: None, legacy: Some("mutant: no birth owner".into()), dropped: 0,
+                hands_commands: false,
             },
             &|system, played, dt, ctx| { let _ = step_played(system, played, &clocks(dt), ctx); });
         // The foot effect's own step: one explicit slice of the scaled dt.
@@ -1119,7 +1395,7 @@ pub(crate) fn spawn_when_ready(
                     ParticleReadiness::Ready => {}
                 }
             }
-            let Candidate { anchor, plan: planned, prefab } = candidate;
+            let Candidate { anchor, plan: planned, prefab, .. } = candidate;
             let (draw, mesh) = planned.draw.clone().expect("prepared source draw");
             let mut runtime = runtime(&planned, anchor, mesh);
             runtime.geometry.keep_unit_chain(unit_ancestry(anchor,
@@ -1178,9 +1454,12 @@ pub(crate) struct Played {
     /// Why the installer left the system on the legacy step (`None` on the
     /// native birth path).
     legacy: Option<String>,
-    /// Sub-emitter commands with no installed target (this host installs no
-    /// target), dropped.
+    /// Sub-emitter commands with no installed target, dropped.
     dropped: u64,
+    /// The host hands this system's sub-emitter commands to its installed
+    /// targets after the frame's updates (see [`deliver_commands`]) instead
+    /// of dropping them in its step.
+    hands_commands: bool,
 }
 
 impl Played {
@@ -1287,6 +1566,7 @@ fn install_with(system: &mut Runtime, route: &crate::particle_runtime::SourceRou
         event_edges: events,
         legacy,
         dropped: 0,
+        hands_commands: false,
     })
 }
 
@@ -1330,6 +1610,9 @@ pub(crate) fn step_played(system: &mut Runtime, played: &mut Played, clocks: &Fr
         crate::particle_runtime::advance_frame(system, dt, played.emitting, ctx, |s| play.slice_start(s, now))?;
         play.end_update(system, now, dt != 0.0);
     }
+    if played.hands_commands {
+        return Ok(());
+    }
     let dropped = system.native_birth.as_mut().and_then(|birth| birth.events.as_mut())
         .map_or(0, |events| events.take_commands().len() as u64);
     if dropped > 0 {
@@ -1365,6 +1648,46 @@ pub(crate) fn stop_emitting(world: &mut World, root: Entity) -> usize {
     draws.len()
 }
 
+/// `ParticleSystem.Stop(withChildren: true, StopEmittingAndClear)` reaching
+/// the played systems among `draws`: each stops emitting and is cleared at
+/// once, live particles included, and its play ends (see
+/// [`lifecycle::PlayState::stop_and_clear`]). A system that never played is
+/// left waiting for its first Play. Returns how many systems stopped.
+pub(crate) fn stop_and_clear(world: &mut World, draws: &[Entity]) -> usize {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    let mut stopped = 0;
+    for &draw in draws {
+        let mut entity = world.entity_mut(draw);
+        let mut played = match entity.take::<Played>() { Some(played) => played, None => continue };
+        played.emitting = false;
+        if let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() {
+            played.play.stop_and_clear(&mut live.0, now);
+        }
+        entity.insert(played);
+        stopped += 1;
+    }
+    stopped
+}
+
+/// `ParticleSystem.randomSeed = value` on one admitted system (see
+/// [`crate::particle_runtime::set_random_seed`]). `false` for a draw with no
+/// simulation.
+pub(crate) fn set_random_seed(world: &mut World, draw: Entity, value: u32) -> bool {
+    let Some(mut live) = world.get_mut::<crate::uber_particle::FixtureParticleLive>(draw) else { return false };
+    crate::particle_runtime::set_random_seed(&mut live.0, value);
+    true
+}
+
+/// `ParticleSystem.isPlaying` of one admitted system; a system that never
+/// played is not playing.
+pub(crate) fn system_playing(world: &World, draw: Entity) -> bool {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    match (world.get::<crate::uber_particle::FixtureParticleLive>(draw), world.get::<Played>(draw)) {
+        (Some(live), Some(played)) => played.playing(&live.0, now),
+        _ => false,
+    }
+}
+
 /// `ParticleSystem.Play()` again on the root system of an instance (children
 /// included). A system that still holds particles keeps its seeds and warm
 /// and restarts its clock (`later_play`); one that holds none plays as at its
@@ -1372,6 +1695,13 @@ pub(crate) fn stop_emitting(world: &mut World, root: Entity) -> usize {
 /// looping prewarm system warms again.
 pub(crate) fn play(world: &mut World, root: Entity) -> Result<usize, String> {
     let draws = played_draws(world, root);
+    play_draws(world, &draws)
+}
+
+/// [`play`] on the played systems among `draws` (a system that never played
+/// is left to [`play_pending`]). Returns how many it played.
+pub(crate) fn play_draws(world: &mut World, draws: &[Entity]) -> Result<usize, String> {
+    let draws: Vec<Entity> = draws.iter().copied().filter(|&draw| world.get::<Played>(draw).is_some()).collect();
     world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
         for &draw in &draws {
             let mut entity = world.entity_mut(draw);
@@ -1381,8 +1711,14 @@ pub(crate) fn play(world: &mut World, root: Entity) -> Result<usize, String> {
                 continue;
             };
             let system = &mut live.0;
-            played.emitting = true;
             played.play = lifecycle::PlayState::played(played.culling.clone(), played.procedural_warm);
+            // Play hands a sub-emitter target to its parent without playing
+            // it: the target stays stopped and takes its parent's commands.
+            if system.native_birth.as_ref().is_some_and(|native| native.target.is_some()) {
+                entity.insert(played);
+                continue;
+            }
+            played.emitting = true;
             if let Err(error) = crate::particle_runtime::play_after_stop(system, &mut seeds, &played.route,
                 played.event_edges.clone()) {
                 return Err(format!("{}: {error}", system.node));

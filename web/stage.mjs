@@ -11,7 +11,7 @@ import {
   resourceBase,
   resourceOrigin,
 } from "./embed-contract.mjs";
-import { selectRenderer } from "./boot.mjs";
+import { loadEngine, releaseEnginePath } from "./engine-loader.mjs";
 import { audioActivation } from "./stage-audio.mjs";
 import { createStageController } from "./stage-controller.mjs";
 import { stageMessages } from "./stage-locale.mjs";
@@ -279,152 +279,98 @@ const observer = new PerformanceObserver((list) => {
 });
 observer.observe({ type: "resource", buffered: true });
 
-async function loadEngine() {
+async function loadStageEngine() {
   if (loading || wasm || started || failed) return;
   loading = true;
-  mark("bundleStart");
-  report("downloading");
-  const abort = new AbortController();
-  let lastChunk = performance.now();
-  const watchdog = setInterval(() => {
-    if (performance.now() - lastChunk > 30000)
-      abort.abort(new Error("Engine download made no progress for 30 seconds"));
-  }, 2000);
+  const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
+  let configuredBase, publicOrigin;
   try {
-    if (!["cn", "jp", "tw", "en", "kr"].includes(region))
-      throw new Error("An explicit supported resource region is required");
-    const configuredBase = params.get("resource_base")
-      ? resourceBase(params.get("resource_base"))
-      : undefined;
-    const publicOrigin = resourceOrigin(params.get("resource_origin") ??
-      (configuredBase ? new URL(configuredBase).origin : undefined));
-    if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
-      throw new Error("resource_origin must match resource_base");
-    resourceDirectory(
-      params.get("assets") || "",
-      location.href,
-      configuredBase ?? publicOrigin,
-    );
-    configuredResourceBase = configuredBase;
-    try {
-      await preflightCoordinates({
-        assets: new URL(params.get("assets"), location.href).href, region, version,
-        packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
-        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href,
-        resourceOrigin: publicOrigin, resourceBase: configuredBase,
-      }, { signal: abort.signal });
-      lastChunk = performance.now();
-    } catch (error) { fail("source_mismatch", error); throw error; }
-    weatherArtwork = createWeatherArtwork({
-      assets: params.get("assets"),
-      baseUrl: location.href,
-      resourceBase: configuredBase,
-      packs: params.get("packs") === "1",
-      assetCatalog: params.get("asset_catalog"),
-    });
-    const basePreparation = warmBaseResources(
-      {
-        region,
-        version,
-        assets: new URL(params.get("assets"), location.href).href,
-        resourceBase: configuredBase,
-        packs: params.get("packs") === "1",
-        assetCatalog: params.get("asset_catalog") ?? undefined,
-      },
-      {
-        signal: abort.signal,
-        onProgress({ completed, total }) {
-          baseCompleted = completed;
-          baseTotal = total;
-          lastProgress = performance.now();
-          if (phase === "base") render();
-        },
-      },
-    );
-    // The original promise remains rejectable at the join below.
-    void basePreparation.catch(() => {});
-    const renderer = await selectRenderer(requested, { navigator, document });
-    backend = renderer.backend;
-    mark("backendSelected");
-    const localPath = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
-    const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
-    let path;
-    if (configuredBase) {
-      if (!releaseId) throw new Error("Invalid immutable stage path");
-      path = new URL(`releases/${releaseId}/pkg/${backend}/moly-app.js`, configuredBase);
-      if (!path.pathname.startsWith(new URL(configuredBase).pathname + "releases/"))
-        throw new Error("Invalid immutable engine path");
-    } else {
-      if (publicOrigin && !/^\/moly\/releases\/[a-z0-9][a-z0-9._-]{0,95}\/pkg\/(?:webgpu|webgl2)\/moly-app\.js$/.test(localPath.pathname))
-        throw new Error("Invalid immutable engine path");
-      path = publicOrigin ? new URL(localPath.pathname, publicOrigin) : localPath;
-    }
-    const module = await import(path.href);
-    if (typeof module.start_stage !== "function")
-      throw new Error("Runtime does not implement the stage contract");
-    const response = await fetch(new URL("./moly-app_bg.wasm", path), {
-      signal: abort.signal,
-      credentials: "omit",
-      redirect: "error",
-    });
-    if (
-      !response.ok ||
-      !response.headers.get("content-type")?.startsWith("application/wasm")
-    )
-      throw new Error(`Invalid WASM response ${response.status}`);
-    if (!response.body) throw new Error("Streaming response is unavailable");
-    mark("engineDownloadStart");
-    const reader = response.body.getReader();
-    const stream = new ReadableStream({
-      async pull(sink) {
+    const loaded = await loadEngine({
+      requested,
+      environment: { navigator, document },
+      mark,
+      report,
+      async prepare({ signal, progress }) {
+        if (!["cn", "jp", "tw", "en", "kr"].includes(region))
+          throw new Error("An explicit supported resource region is required");
+        configuredBase = params.get("resource_base")
+          ? resourceBase(params.get("resource_base"))
+          : undefined;
+        publicOrigin = resourceOrigin(params.get("resource_origin") ??
+          (configuredBase ? new URL(configuredBase).origin : undefined));
+        if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
+          throw new Error("resource_origin must match resource_base");
+        resourceDirectory(
+          params.get("assets") || "",
+          location.href,
+          configuredBase ?? publicOrigin,
+        );
+        configuredResourceBase = configuredBase;
         try {
-          const { done, value } = await reader.read();
-          lastChunk = performance.now();
-          if (done) {
-            clearInterval(watchdog);
-            mark("engineDownloadEnd");
-            report("initializing");
-            sink.close();
-            return;
-          }
-          engineBytes += value.byteLength;
-          if (engineBytes > 192 * 1024 * 1024) {
-            abort.abort();
-            throw new Error("Engine exceeds the bounded release payload");
-          }
-          sink.enqueue(value);
-        } catch (error) {
-          sink.error(error);
-        }
+          await preflightCoordinates({
+            assets: new URL(params.get("assets"), location.href).href, region, version,
+            packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
+            snapshotId: params.get("snapshot") ?? undefined, pageUrl: location.href,
+            releaseId, resourcePrefix: "/moly/",
+            resourceOrigin: publicOrigin, resourceBase: configuredBase,
+          }, { signal });
+          progress();
+        } catch (error) { fail("source_mismatch", error); throw error; }
+        weatherArtwork = createWeatherArtwork({
+          assets: params.get("assets"),
+          baseUrl: location.href,
+          resourceBase: configuredBase,
+          packs: params.get("packs") === "1",
+          assetCatalog: params.get("asset_catalog"),
+        });
+        const basePreparation = warmBaseResources(
+          {
+            region,
+            version,
+            assets: new URL(params.get("assets"), location.href).href,
+            resourceBase: configuredBase,
+            packs: params.get("packs") === "1",
+            assetCatalog: params.get("asset_catalog") ?? undefined,
+          },
+          {
+            signal,
+            onProgress({ completed, total }) {
+              baseCompleted = completed;
+              baseTotal = total;
+              lastProgress = performance.now();
+              if (phase === "base") render();
+            },
+          },
+        );
+        // The original promise remains rejectable at the join below.
+        void basePreparation.catch(() => {});
+        return { ready: basePreparation };
       },
-      cancel(reason) {
-        return reader.cancel(reason);
+      onBackend(selected) {
+        backend = selected;
+      },
+      resolve: (selected) =>
+        releaseEnginePath({
+          backend: selected,
+          moduleUrl: import.meta.url,
+          releaseId,
+          resourceBase: configuredBase,
+          publicOrigin,
+          prefix: "/moly/",
+        }),
+      exports: ["start_stage"],
+      contract: "stage",
+      onBytes(total) {
+        engineBytes = total;
+      },
+      waitTick() {
+        if (phase === "base") render();
       },
     });
-    await module.default({
-      module_or_path: new Response(stream, {
-        status: response.status,
-        headers: response.headers,
-      }),
-    });
-    mark("wasmReady");
-    report("base");
-    const progressTimer = setInterval(() => {
-      if (phase === "base") render();
-    }, 2000);
-    try {
-      await basePreparation;
-    } finally {
-      clearInterval(progressTimer);
-    }
-    mark("baseResourcesReady");
-    wasm = module;
+    wasm = loaded.module;
     loading = false;
   } catch (error) {
-    abort.abort();
     fail(backend ? "engine_failed" : "unsupported", error);
-  } finally {
-    clearInterval(watchdog);
   }
   enter();
 }
@@ -637,4 +583,4 @@ send("hello", {
   instance:
     globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
 });
-void loadEngine();
+void loadStageEngine();

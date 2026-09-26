@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 
 const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
 
+mod seed_zero;
+
 pub(super) fn f(bits: &Value) -> f32 {
     f32::from_bits(bits.as_u64().expect("native f32 bits") as u32)
 }

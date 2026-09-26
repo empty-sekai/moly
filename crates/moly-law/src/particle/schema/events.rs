@@ -123,6 +123,83 @@ pub struct CollisionParams {
     pub multiply_force_by_angle: bool,
     pub plane_slots: u32,
     pub planes: Vec<String>,
+    /// What each plane slot holds, in slot order; `None` when the export
+    /// does not record it.
+    pub plane_sources: Option<Vec<PlaneSource>>,
+}
+
+/// What one plane slot of a CollisionModule holds, as exported.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaneSource {
+    /// An empty slot.
+    Empty,
+    /// A node of the system's own prefab, by path.
+    Node(String),
+    /// A Transform of another package, which the slot names without that
+    /// package being instantiated: its node path in its own file and its
+    /// local transform chain, root first.
+    Asset { package: String, node: String, chain: Vec<PlaneLink> },
+    /// A slot naming something the export could not resolve.
+    Unresolved,
+}
+
+/// One link of an asset Transform's local chain, as serialized: position,
+/// rotation (x, y, z, w) and scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaneLink {
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
+fn floats<const N: usize>(v: Option<&Value>, ctx: &str) -> Result<[f32; N], EffectsError> {
+    let items = v
+        .and_then(Value::as_array)
+        .filter(|items| items.len() == N)
+        .ok_or_else(|| EffectsError(format!("{ctx}: {N} numbers expected")))?;
+    let mut out = [0.0; N];
+    for (k, item) in items.iter().enumerate() {
+        out[k] = f32_of(Some(item), &format!("{ctx}[{k}]"))?;
+    }
+    Ok(out)
+}
+
+impl PlaneSource {
+    fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        if matches!(v, Value::Null) {
+            return Ok(Self::Empty);
+        }
+        if let Some(node) = v.get("node") {
+            return Ok(Self::Node(str_of(Some(node), &format!("{ctx}.node"))?));
+        }
+        if let Some(asset) = v.get("asset") {
+            let ctx = format!("{ctx}.asset");
+            let chain = asset
+                .get("chain")
+                .and_then(Value::as_array)
+                .ok_or_else(|| EffectsError(format!("{ctx}.chain: array expected")))?
+                .iter()
+                .enumerate()
+                .map(|(k, link)| {
+                    let ctx = format!("{ctx}.chain[{k}]");
+                    Ok(PlaneLink {
+                        position: floats(link.get("position"), &format!("{ctx}.position"))?,
+                        rotation: floats(link.get("rotation"), &format!("{ctx}.rotation"))?,
+                        scale: floats(link.get("scale"), &format!("{ctx}.scale"))?,
+                    })
+                })
+                .collect::<Result<_, EffectsError>>()?;
+            return Ok(Self::Asset {
+                package: str_of(asset.get("package"), &format!("{ctx}.package"))?,
+                node: str_of(asset.get("node"), &format!("{ctx}.node"))?,
+                chain,
+            });
+        }
+        if v.get("unresolved").and_then(Value::as_bool) == Some(true) {
+            return Ok(Self::Unresolved);
+        }
+        Err(EffectsError(format!("{ctx}: unknown plane source")))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +376,18 @@ impl CollisionParams {
                 .iter()
                 .map(|v| str_of(Some(v), &format!("{ctx}.planes[]")))
                 .collect::<Result<_, _>>()?,
+            plane_sources: match v.get("planeSources") {
+                None | Some(Value::Null) => None,
+                Some(sources) => Some(
+                    sources
+                        .as_array()
+                        .ok_or_else(|| EffectsError(format!("{ctx}.planeSources: array expected")))?
+                        .iter()
+                        .enumerate()
+                        .map(|(k, source)| PlaneSource::from_value(source, &format!("{ctx}.planeSources[{k}]")))
+                        .collect::<Result<_, _>>()?,
+                ),
+            },
         })
     }
 }

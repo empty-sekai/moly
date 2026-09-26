@@ -4,17 +4,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { stripDebugNames, splitCatalog, detailBundle, DETAIL_BUNDLES, STAGE_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest } from "./release-artifact.mjs";
+import { stripDebugNames, splitCatalog, detailBundle, DETAIL_BUNDLES, STAGE_FILES, GAME_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest } from "./release-artifact.mjs";
 import { sha256 } from "./build-source.mjs";
 import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
 
 test("published stage includes every statically imported local module", () => {
-  const shipped = new Set(STAGE_FILES);
   const root = path.dirname(fileURLToPath(import.meta.url));
-  for (const name of STAGE_FILES.filter((file) => file.endsWith(".mjs"))) {
-    const source = readFileSync(path.join(root, name), "utf8");
-    for (const match of source.matchAll(/\bfrom\s+["']\.\/([^"']+\.mjs)["']/g))
-      assert.ok(shipped.has(match[1]), `${name} imports unpublished ${match[1]}`);
+  for (const files of [STAGE_FILES, GAME_FILES]) {
+    const shipped = new Set(files);
+    for (const name of files.filter((file) => file.endsWith(".mjs"))) {
+      const source = readFileSync(path.join(root, name), "utf8");
+      for (const match of source.matchAll(/\bfrom\s+["']\.\/([^"']+\.mjs)["']/g))
+        assert.ok(shipped.has(match[1]), `${name} imports unpublished ${match[1]}`);
+    }
   }
 });
 test("S3 publication projection removes host-only /moly prefixes from descriptors", () => {

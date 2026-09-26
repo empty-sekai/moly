@@ -127,8 +127,14 @@ struct StepItem {
     /// Bindings of the last preparation attempt (its SE handles and the SE
     /// found silent carry over to the next attempt).
     draft: Option<TimelineBindings>,
+    /// `BindSignalReceiver`: the receiver bound to the output named
+    /// "Signal Track".
+    signal_receiver: Option<timeline::SignalReceiverBinding>,
     director: Option<Director>,
 }
+
+/// `BindSignalReceiver`'s output name.
+const SIGNAL_TRACK_OUTPUT: &str = "Signal Track";
 
 /// The step item service of the player avatar.
 #[derive(Resource, Default)]
@@ -163,6 +169,7 @@ impl PlayerStepItem {
             stop: false,
             loop_flag: None,
             draft: None,
+            signal_receiver: None,
             director: None,
         });
         info!("[step-item] UpdateStepItemObject({bundle}, {file})");
@@ -195,6 +202,23 @@ impl PlayerStepItem {
             item.loop_flag = None;
             self.stopped.extend(item.director.take());
             info!("[step-item] {} Setup(onStop {on_stop:?})", item.file);
+        }
+    }
+
+    /// `BindSignalReceiver(signalReceiver)`: when the director's asset has an
+    /// output named "Signal Track", the first such output's source track is
+    /// bound to the receiver (`SetGenericBinding`); otherwise nothing is
+    /// bound. The binding is the director's, so it holds for the plays of
+    /// this step object.
+    pub(crate) fn bind_signal_receiver(&mut self, receiver: timeline::SignalReceiverBinding) {
+        if let Some(item) = self.item.as_mut() {
+            info!(
+                "[step-item] {} BindSignalReceiver({}, {} reactions)",
+                item.file,
+                receiver.receiver,
+                receiver.reactions.len()
+            );
+            item.signal_receiver = Some(receiver);
         }
     }
 
@@ -399,8 +423,16 @@ fn step(
             item.file
         );
     }
+    for reason in &request.bindings.refused_signals {
+        warn!(
+            "[step-item] {}: Signal reaction {reason}; it sends nothing",
+            item.file
+        );
+    }
     let duration = request.definition.duration;
     let bound = request.bindings.animations.len();
+    let controls = request.bindings.controls.len();
+    let signals: usize = request.bindings.signals.values().map(Vec::len).sum();
     let token = world
         .resource_mut::<FixtureActivityTimelines>()
         .request_start(request);
@@ -413,7 +445,7 @@ fn step(
         duration,
     });
     info!(
-        "[step-item] {} Play: director {token:?} started (duration {duration:.4} s, {bound} animation clips bound, {} Control clips refused)",
+        "[step-item] {} Play: director {token:?} started (duration {duration:.4} s, {bound} animation clips bound, {controls} Control clips driven, {} Control clips refused, {signals} Signal reactions)",
         item.file,
         refused.len()
     );
@@ -671,9 +703,45 @@ fn prepare(
     };
     // An SE found silent stays silent; the last attempt's SE handles come
     // along, so a load that has failed since is seen as failed.
+    let first_attempt = item.draft.is_none();
     if let Some(previous) = item.draft.take() {
         request.bindings.silent_sounds = previous.silent_sounds;
         request.bindings.sounds = previous.sounds;
+        // The Control clips an earlier attempt prepared stay prepared: a
+        // dropped binding releases its systems.
+        request.bindings.controls = previous.controls;
+    }
+    if let Some(receiver) = item.signal_receiver.as_ref() {
+        let outputs: Vec<_> = request
+            .definition
+            .tracks
+            .iter()
+            .filter(|track| track.name == SIGNAL_TRACK_OUTPUT)
+            .collect();
+        match outputs.first() {
+            None if first_attempt => info!(
+                "[step-item] {}: BindSignalReceiver: no output named {SIGNAL_TRACK_OUTPUT:?}; nothing is bound",
+                item.file
+            ),
+            None => {}
+            Some(track) => {
+                if first_attempt {
+                    info!(
+                        "[step-item] {}: BindSignalReceiver: {} bound to track {} ({}/{}, the first of {} outputs of that name)",
+                        item.file,
+                        receiver.receiver,
+                        track.name,
+                        track.identity.file,
+                        track.identity.path_id,
+                        outputs.len()
+                    );
+                }
+                request
+                    .bindings
+                    .signal_receivers
+                    .insert(track.identity.clone(), receiver.clone());
+            }
+        }
     }
     let file = item.file.clone();
     let silence = |world: &World, request: &mut StartTimeline| {
@@ -712,6 +780,7 @@ fn bind(
     prepare_prop_bindings(world, request, entry, gltf)?;
     timeline::prepare_source_sounds(world, request)?;
     timeline::prepare_source_effects(world, request)?;
+    timeline::prepare_source_signals(world, request)?;
     Ok(with_events)
 }
 

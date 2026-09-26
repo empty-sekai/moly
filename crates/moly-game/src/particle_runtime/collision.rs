@@ -9,6 +9,19 @@
 //! `moly_law::particle::collision_query`; this file maps the pool into it in
 //! source axes and commits what it writes.
 //!
+//! Both calls start at a multiple of four in the engine's storage. The
+//! post-simulation call covers the pool from slot 0. A birth writes its
+//! newborns from the live count rounded up to four (the newborn death pass
+//! and the packing into the gap below come after every group's modules), and
+//! its groups start there, four lanes apart. The module's packing rewrites
+//! the lanes of the last pack from the range end on with that pack's first
+//! lane whenever the end is not a multiple of four, so with an aligned start
+//! every lane it reads past the end is such a copy: it never reads a slot
+//! past the end as the storage holds it. The pool here is packed (the
+//! newborns follow the live particles directly), so a newborn call is made
+//! over the engine's slot indices and each slot is read from, and written
+//! to, the pool particle the alignment gap below it.
+//!
 //! The module's scene is the site's physics scene (see `collision_scene`):
 //! the MeshColliders of every installed weather effect (a stopped effect's
 //! until it is destroyed), the site's own colliders and the placed fixtures'.
@@ -28,6 +41,21 @@
 //! no current size (a size-affected trail is refused), so the order is not
 //! observable.
 //!
+//! A Planes-type module tests its plane slots instead of the physics scene
+//! (the engine gives the module its world cache only for the World type). Its
+//! cache is built from the slots once per update, before the slices: each
+//! slot's Transform at its world pose, taken into the system's simulation
+//! space through the owner's world-to-local when that is not World. The
+//! cache's inputs do not change within an update (the owner words are written
+//! outside the step), so each call here builds it from the same words and
+//! gets the same planes. A slot naming a Transform of another package that is
+//! a root is read at its stored local pose, which is what the engine's
+//! position and rotation getters return for a root, whether or not it was
+//! ever instantiated; a slot naming a node of the prefab, or a child
+//! Transform of another package, is refused by name (their world pose composes
+//! the parent chain, which is not transcribed here), as is a slot the export
+//! could not resolve. A Planes system is installed with no physics scene.
+//!
 //! Collision sub-emitter edges record RecordEmit trigger 1 events inside the
 //! module call. Each event's two commands go to the edge's child: queued, in
 //! the order recorded, when the child is an installed target of the same
@@ -39,8 +67,11 @@ use moly_law::particle::collision_query::{
     ParticleFlags, ParticleLane, Refused, SweepHit, SweepRequest, UpdateInput,
 };
 use moly_law::particle::collision_event::CollisionEmitEdge;
+use moly_law::particle::collision_planes::{cache_planes, PlaneTransform};
 use moly_law::particle::collision_response::CollisionRandom;
+use moly_law::particle::schema::{CollisionParams, CollisionType, PlaneSource};
 use moly_law::particle::current_size::CurrentSizeLaw;
+use moly_law::particle::noise_size::noise_writes_size;
 use moly_law::particle::sub_emission::SubEmitterCommand;
 
 pub(crate) struct CollisionRuntime {
@@ -55,6 +86,9 @@ pub(crate) struct CollisionRuntime {
     /// The owner words of a Local system, from its authored chain.
     pub(crate) owner: Option<OwnerPair>,
     pub(crate) scene: Box<dyn CollisionScene + Send + Sync>,
+    /// A Planes-type module's plane slots in slot order (`None` for an empty
+    /// slot); `None` for the World type.
+    pub(crate) planes: Option<Vec<Option<PlaneTransform>>>,
     pub(crate) calls: u64,
     pub(crate) hits: u64,
     pub(crate) draws: u64,
@@ -117,22 +151,24 @@ impl CollisionRuntime {
 }
 
 /// The module law for an emitter, with the product's own limits: a
-/// current-size stream only from a qualified SizeModule (no Noise size), no
-/// per-particle speed modifier and World or Local space. The mask is the
-/// system's own; the scene judges the layers it names.
+/// current-size stream only from a qualified SizeModule (a Noise module only
+/// with a zero size amount, which neither gives the particle state that
+/// stream nor writes it), no per-particle speed modifier and World or Local
+/// space. The mask is the system's own; the scene judges the layers it names.
 /// Collision sub-emitter edges are taken; their children are resolved by
 /// admission. The particle-state flags follow the module set: with a
 /// size-over-lifetime module the current-size stream is read, else the
-/// start-size stream (a size-by-speed module has no consumer on this runtime
-/// at all), as its X or, with the 3D start size, the largest component;
-/// without a speed modifier none is applied. The flags of the corpus
-/// collision systems agree with this; the flags' writer was not read.
+/// start-size stream (a size-by-speed module, which also gives the stream,
+/// has no consumer on this runtime at all), as its X or, with the 3D start
+/// size, the largest component; without a speed modifier none is applied.
+/// The engine's rule for the current-size flag is
+/// `noise_size::reads_current_size`.
 pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, String> {
     let Some(params) = emitter.collision.as_ref() else {
         return Ok(None);
     };
-    if emitter.noise.is_some() {
-        return Err("collision current-size stream: the Noise size condition at the collision points is not transcribed".into());
+    if emitter.noise.as_ref().is_some_and(|noise| noise_writes_size(&noise.size_amount)) {
+        return Err("collision current-size stream: a Noise size amount with a non-zero scalar is not transcribed".into());
     }
     current_size_law(emitter)?;
     if emitter.velocity_over_lifetime.as_ref().is_some_and(|velocity|
@@ -149,7 +185,64 @@ pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, S
         size_3d: emitter.start.size3d,
         speed_modifier: false,
     };
-    CollisionLaw::from_params(params, world, flags).map(Some).map_err(|refused| format!("{refused:?}"))
+    let law = if params.kind == CollisionType::Planes {
+        plane_slots(params)?;
+        CollisionLaw::planes_from_params(params, world, flags)
+    } else {
+        CollisionLaw::from_params(params, world, flags)
+    };
+    law.map(Some).map_err(|refused| format!("{refused:?}"))
+}
+
+/// Whether the emitter's CollisionModule is of the Planes type, which reads
+/// its plane slots and no physics scene.
+pub(crate) fn is_planes(emitter: &EmitterParams) -> bool {
+    emitter.collision.as_ref().is_some_and(|params| params.kind == CollisionType::Planes)
+}
+
+/// The plane slots of a Planes-type module in slot order, as the cache reads
+/// them (see the module notes): an empty slot is `None`; a root Transform of
+/// another package gives its stored local position and rotation. The id a
+/// hit record carries is the Transform's instance id, a run-time number that
+/// no output reads while collision messages are refused; the slot's position
+/// stands in for it.
+pub(crate) fn plane_slots(params: &CollisionParams) -> Result<Vec<Option<PlaneTransform>>, String> {
+    let sources = params.plane_sources.as_ref()
+        .ok_or("collision planes: the export does not record what the plane slots hold")?;
+    if sources.len() != params.plane_slots as usize {
+        return Err(format!("collision planes: {} plane sources for {} slots", sources.len(), params.plane_slots));
+    }
+    sources.iter().enumerate().map(|(slot, source)| match source {
+        PlaneSource::Empty => Ok(None),
+        PlaneSource::Asset { chain, .. } => match chain.as_slice() {
+            [root] => Ok(Some(PlaneTransform { position: root.position, rotation: root.rotation, id: slot as i32 + 1 })),
+            [] => Err("collision plane naming a Transform of another package with no chain".to_owned()),
+            _ => Err("collision plane naming a child Transform of another package: its world pose composes the \
+                parent chain, which is not transcribed".to_owned()),
+        },
+        PlaneSource::Node(_) => Err("collision plane naming a node of the prefab: its world pose composes the \
+            parent chain, which is not transcribed".to_owned()),
+        PlaneSource::Unresolved => Err("collision plane slot the export could not resolve".to_owned()),
+    }).collect()
+}
+
+/// The scene a Planes-type module is installed with: the module never
+/// queries it, and a query refuses.
+pub(crate) struct NoScene;
+
+impl CollisionScene for NoScene {
+    fn overlap(&mut self, _query: &OverlapQuery) -> Vec<Candidate> {
+        Vec::new()
+    }
+    fn reachable(&self, _collides_with: u32) -> Vec<Candidate> {
+        Vec::new()
+    }
+    fn sweep_sphere(&mut self, _request: &SweepRequest) -> Option<SweepHit> {
+        None
+    }
+    fn refusal(&self) -> Option<&'static str> {
+        Some("a Planes module has no physics scene")
+    }
 }
 
 /// The SizeModule law of the current-size stream, when the emitter has one.
@@ -161,7 +254,8 @@ fn current_size_law(emitter: &EmitterParams) -> Result<Option<CurrentSizeLaw>, S
 }
 
 /// The export's wrap modes of the size curves the current-size stream reads
-/// (the law reads the keys only): only the clamp wraps are transcribed.
+/// (the law reads the keys only): only the clamp wraps are transcribed. One
+/// curve carries its two wraps; two curves carry each side's two.
 pub(crate) fn current_size_source_gate(system: &serde_json::Value) -> Result<(), String> {
     let Some(size) = system.get("sizeOverLifetime").filter(|v| v.is_object()) else {
         return Ok(());
@@ -170,13 +264,15 @@ pub(crate) fn current_size_source_gate(system: &serde_json::Value) -> Result<(),
     let keys: &[&str] = if separate { &["curve", "y", "z"] } else { &["curve"] };
     for key in keys {
         let curve = size.get(*key).ok_or_else(|| format!("collision current-size stream: size {key} not exported"))?;
-        if !matches!(curve.get("mode").and_then(serde_json::Value::as_str), Some("curve" | "twoCurves")) {
-            continue;
-        }
-        for wrap in ["preInfinity", "postInfinity"] {
-            if curve.get(wrap).and_then(serde_json::Value::as_u64) != Some(2) {
+        let wraps: &[&str] = match curve.get("mode").and_then(serde_json::Value::as_str) {
+            Some("curve") => &["preInfinity", "postInfinity"],
+            Some("twoCurves") => &["minPreInfinity", "minPostInfinity", "maxPreInfinity", "maxPostInfinity"],
+            _ => continue,
+        };
+        for wrap in wraps {
+            if curve.get(*wrap).and_then(serde_json::Value::as_u64) != Some(2) {
                 return Err(format!("collision current-size stream: size curve {wrap} {:?} is not the clamp wrap",
-                    curve.get(wrap)));
+                    curve.get(*wrap)));
             }
         }
     }
@@ -199,12 +295,17 @@ pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send
     if system.emitter.simulation_space == SimulationSpace::Local && owner.is_none() {
         return Err("a Local collision system needs its owner words".into());
     }
+    let planes = match system.emitter.collision.as_ref() {
+        Some(params) if law.is_planes() => Some(plane_slots(params)?),
+        _ => None,
+    };
     system.collision = Some(CollisionRuntime {
         law,
         state: CollisionState::default(),
         random: Some(CollisionRandom { words: std::array::from_fn(|i| random.words[i / 4][i % 4]) }),
         owner,
         scene,
+        planes,
         calls: 0,
         hits: 0,
         draws: 0,
@@ -219,11 +320,15 @@ pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send
     Ok(())
 }
 
-/// The pool in source axes; slots at or past `end` are not known.
+/// The pool in source axes, indexed by the engine's slots: slot `i` below
+/// `end` is the pool particle `i - gap`; slots at or past `end` are not known.
 struct PoolView<'a> {
     pool: &'a [Particle],
     side: &'a [Side],
     end: usize,
+    /// The engine's slots below a newborn group that the pool does not hold
+    /// (the live count rounded up to four, less the live count).
+    gap: usize,
     /// The size read is the current-size stream (else the start size).
     current_size: bool,
 }
@@ -237,6 +342,7 @@ impl CollisionParticles for PoolView<'_> {
         if index >= self.end {
             return None;
         }
+        let index = index.checked_sub(self.gap)?;
         let (particle, side) = (self.pool.get(index)?, self.side.get(index)?);
         Some(ParticleLane {
             position: source(particle.position),
@@ -253,7 +359,7 @@ impl CollisionParticles for PoolView<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize, dt: [f32; 4],
+fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize, gap: usize, dt: [f32; 4],
     pending: f32, emission_word: u32) -> Result<(), String> {
     // Every collision edge must be attached: a missing one would drop its
     // events without a trace.
@@ -262,24 +368,36 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
     if collision.edges.len() != authored {
         return Err(format!("collision: {} of {authored} collision sub-emitter edges attached", collision.edges.len()));
     }
-    let view = PoolView { pool: &system.pool, side: &system.side, end: to,
+    let view = PoolView { pool: &system.pool, side: &system.side, end: to, gap,
         current_size: collision.law.reads_current_size() };
     let edges: Vec<CollisionEmitEdge> = collision.edges.iter().map(|slot| slot.law).collect();
     let input = UpdateInput { from, to, dt, owner: collision.owner, edges: &edges, emission_word, pending };
     let law = collision.law;
-    let outcome = match law.update(&mut collision.state, collision.random.as_mut(), &view, &input,
-        collision.scene.as_mut(), None) {
-        Err(Refused::OrderDependent { dependent, order_free }) if collision.listed_order_fallback => {
-            collision.order_dependent += dependent as u64;
-            collision.order_free += order_free as u64;
-            law.update(&mut collision.state, collision.random.as_mut(), &view, &input,
-                &mut ListedOrder(collision.scene.as_mut()), None)
+    let outcome = match collision.planes.as_ref() {
+        // The module's plane cache of this update (see the module notes).
+        Some(slots) => {
+            let world_to_local = match system.emitter.simulation_space {
+                SimulationSpace::World => None,
+                _ => Some(&collision.owner.as_ref()
+                    .ok_or("collision planes: a system outside World space without its owner words")?.world_to_local),
+            };
+            let planes = cache_planes(slots, world_to_local);
+            law.update_planes(&mut collision.state, collision.random.as_mut(), &view, &input, &planes)
         }
-        other => other,
+        None => match law.update(&mut collision.state, collision.random.as_mut(), &view, &input,
+            collision.scene.as_mut(), None) {
+            Err(Refused::OrderDependent { dependent, order_free }) if collision.listed_order_fallback => {
+                collision.order_dependent += dependent as u64;
+                collision.order_free += order_free as u64;
+                law.update(&mut collision.state, collision.random.as_mut(), &view, &input,
+                    &mut ListedOrder(collision.scene.as_mut()), None)
+            }
+            other => other,
+        },
     }.map_err(|refused| format!("collision {refused:?}"))?;
     collision.order_free += outcome.order_free as u64;
     for written in &outcome.written {
-        let particle = &mut system.pool[written.index];
+        let particle = &mut system.pool[written.index - gap];
         particle.position = source(written.position);
         particle.velocity = source(written.velocity);
         particle.age_percent = written.age_percent;
@@ -337,15 +455,18 @@ fn write_current_size(system: &mut Runtime, collision: &CollisionRuntime, from: 
 pub(super) fn post_simulation(system: &mut Runtime, collision: &mut CollisionRuntime, dt: f32, pending: f32,
     emission_word: u32) -> Result<(), String> {
     let count = system.pool.len();
-    call(system, collision, 0, count, [dt; 4], pending, emission_word)?;
+    call(system, collision, 0, count, 0, [dt; 4], pending, emission_word)?;
     write_current_size(system, collision, 0, system.pool.len());
     Ok(())
 }
 
-/// One newborn group's current-size write and call over `[from, to)` with the
-/// group's birth times.
+/// One newborn group's current-size write and call over the engine's slots
+/// `[from, to)` with the group's birth times; `gap` is how many engine slots
+/// below the group the pool does not hold (see the module notes).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn newborn_block(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize,
-    dt: [f32; 4], pending: f32, emission_word: u32) -> Result<(), String> {
-    write_current_size(system, collision, from, to);
-    call(system, collision, from, to, dt, pending, emission_word)
+    gap: usize, dt: [f32; 4], pending: f32, emission_word: u32) -> Result<(), String> {
+    let start = from.checked_sub(gap).ok_or("collision: a newborn group starts inside the alignment gap")?;
+    write_current_size(system, collision, start, to - gap);
+    call(system, collision, from, to, gap, dt, pending, emission_word)
 }

@@ -488,8 +488,9 @@ pub(crate) struct WeatherFxRetirements {
     retiring_colliders: Vec<(u64, f64)>,
     /// The installed site's collider entry, by site.
     site_colliders: Option<(String, u64)>,
-    /// The placed fixtures' collider entry while the active site has any.
-    fixture_colliders: Option<u64>,
+    /// The placed fixtures' collider entry while the active site has any, and
+    /// the layout revision it was built for (none: the placeholder).
+    fixture_colliders: Option<(u64, Option<u64>)>,
 }
 
 impl WeatherFxRetirements {
@@ -581,19 +582,36 @@ impl WeatherFxRetirements {
             "[weather-fx] site colliders installed in the physics scene");
     }
     /// Keeps the placed fixtures' colliders in the physics scene exactly
-    /// while the active site has placed fixtures.
-    fn sync_fixtures(&mut self, present: bool) {
-        match (present, self.fixture_colliders) {
-            (true, None) => {
-                self.fixture_colliders = Some(self.physics.install(crate::particle_runtime::collision_scene::fixture_colliders()));
-                info!("[weather-fx] placed fixtures' colliders in the physics scene: {}",
-                    crate::particle_runtime::collision_scene::FIXTURE_REFUSAL);
-            }
-            (false, Some(entry)) => {
+    /// while the active site has placed fixtures: the placeholder until their
+    /// collision scenes are loaded, then their own colliders, rebuilt when the
+    /// layout revision changes.
+    fn sync_fixtures(&mut self, present: bool, revision: u64,
+        build: impl FnOnce() -> Result<Arc<crate::particle_runtime::collision_scene::GroundScene>, String>) {
+        use crate::particle_runtime::collision_scene as scene;
+        if !present {
+            if let Some((entry, _)) = self.fixture_colliders.take() {
                 self.physics.remove(entry);
-                self.fixture_colliders = None;
             }
-            _ => {}
+            return;
+        }
+        if matches!(self.fixture_colliders, Some((_, Some(built))) if built == revision) {
+            return;
+        }
+        match build() {
+            Ok(built) => {
+                if let Some((entry, _)) = self.fixture_colliders.take() {
+                    self.physics.remove(entry);
+                }
+                info!("[weather-fx] placed fixtures' colliders in the physics scene: revision {revision}, {} answered \
+                    against, {} bounded and refused in; {}", built.collider_count(), built.bounded_count(), built.describe());
+                self.fixture_colliders = Some((self.physics.install(built), Some(revision)));
+            }
+            Err(reason) => {
+                if self.fixture_colliders.is_none() {
+                    info!("[weather-fx] placed fixtures' colliders in the physics scene: {} ({reason})", scene::FIXTURE_PENDING);
+                    self.fixture_colliders = Some((self.physics.install(scene::fixture_pending()), None));
+                }
+            }
         }
     }
     fn clear_colliders(&mut self) {
@@ -618,9 +636,68 @@ fn fixtures_placed(placements: Option<&crate::fixture::FixturePlacements>, site:
 pub(crate) fn sync_fixture_colliders(
     placements: Option<Res<crate::fixture::FixturePlacements>>,
     site: Option<Res<SiteActive>>,
+    revision: Option<Res<crate::fixture::FixtureLayoutRevision>>,
+    collision: crate::fixture_collision::CollisionInputs,
     mut retiring: ResMut<WeatherFxRetirements>,
 ) {
-    retiring.sync_fixtures(fixtures_placed(placements.as_deref(), site.as_deref()));
+    let present = fixtures_placed(placements.as_deref(), site.as_deref());
+    let revision = revision.map_or(0, |revision| revision.0);
+    retiring.sync_fixtures(present, revision, || {
+        let placements = placements.as_deref().ok_or_else(|| "no placements".to_owned())?;
+        fixture_parts(&collision, placements).map(crate::particle_runtime::collision_scene::fixture_scene)
+    });
+}
+
+/// A canonical-frame pose (source X reflected) in source axes: the rotation
+/// (x, y, z, w) and the translation.
+fn source_pose(rotation: Quat, translation: Vec3) -> ([f32; 4], [f32; 3]) {
+    ([rotation.x, -rotation.y, -rotation.z, rotation.w], [-translation.x, translation.y, translation.z])
+}
+
+/// A canonical-frame matrix (source X reflected) in source axes.
+fn source_matrix(world: &GlobalTransform) -> [f32; 16] {
+    let m = world.to_matrix().to_cols_array();
+    let sign = |i: usize| if i == 0 { -1.0 } else { 1.0 };
+    std::array::from_fn(|n| sign(n % 4) * sign(n / 4) * m[n])
+}
+
+/// The placed fixtures' colliders in source axes: the colliders of their
+/// collision scenes, and each placed view's touch box at the placement's pose.
+/// The view receives the fixture's own (unturned) grid size for its touch box
+/// and turns its own transform to the direction, so the touch box, a child
+/// at the view's origin, turns with it.
+fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placements: &crate::fixture::FixturePlacements)
+    -> Result<Vec<crate::particle_runtime::collision_scene::FixturePart>, String> {
+    use crate::fixture_collision::PhysicsShape;
+    use crate::particle_runtime::collision_scene::{touch_box, FixturePart, FixtureShape, TOUCH_BOX_LAYERS};
+    let reflect = |p: [f32; 3]| [-p[0], p[1], p[2]];
+    let mut parts = Vec::new();
+    for (i, collider) in collision.physics_colliders(placements.total())?.into_iter().enumerate() {
+        let shape = match collider.shape {
+            PhysicsShape::Mesh { convex, cooking, positions, triangles } => FixtureShape::Mesh {
+                convex, cooking,
+                positions: positions.into_iter().map(reflect).collect(),
+                // The canonical frame reverses the winding.
+                triangles: triangles.into_iter().map(|t| [t[0], t[2], t[1]].map(|v| v as u32)).collect(),
+            },
+            PhysicsShape::Box { center, size } => FixtureShape::Box { center: reflect(center), half: size.map(|v| v * 0.5) },
+            PhysicsShape::Other(kind) => FixtureShape::Unknown(kind),
+        };
+        let (scale, rotation, translation) = collider.world.to_scale_rotation_translation();
+        let pose = (scale == Vec3::ONE).then(|| source_pose(rotation, translation));
+        parts.push(FixturePart { what: format!("collider {i}"), layers: 1 << collider.layer,
+            world: source_matrix(&collider.world), pose, shape });
+    }
+    for row in placements.editor_rows() {
+        let view = row.pose()?;
+        let world = source_matrix(&GlobalTransform::from(view));
+        let pose = (view.scale == Vec3::ONE).then(|| source_pose(view.rotation, view.translation));
+        let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
+        let shape = FixtureShape::Box { center, half };
+        parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, pose,
+            shape });
+    }
+    Ok(parts)
 }
 
 /// `IsActiveParticle`: whether any child of the instance is playing.
@@ -1513,7 +1590,7 @@ fn drop_orphan_targets(plans: &mut Vec<Planned>, start: usize) -> Vec<String> {
 /// the Local or Hierarchy scaling mode (the owner updates transcribed).
 /// Returns the parent.
 fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitterGraph<'_>, kind: EffectKind,
-    instance_anchor: Option<GlobalTransform>) -> Result<String, String> {
+    instance_anchor: Option<GlobalTransform>, instance_targets: bool) -> Result<String, String> {
     let [parent] = owners else {
         return Err(format!("{} parents ({}): the order of their commands is not in the export",
             owners.len(), owners.join(", ")));
@@ -1538,7 +1615,9 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
             _ => break,
         }
     }
-    if instance_anchor.is_some() {
+    // A host that composes a target's owner words from its instance's own
+    // hierarchy (the played route) admits it on an instance anchor.
+    if instance_anchor.is_some() && !instance_targets {
         return Err("owner words are composed only for a site effect on its authored chain".into());
     }
     if kind == EffectKind::Camera {
@@ -1694,7 +1773,8 @@ fn authored_trs(by_path: &HashMap<String, &Value>, path: &str)
 #[allow(clippy::too_many_arguments)]
 fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMap<String, &Value>,
     graph: &SubEmitterGraph<'_>, kind: EffectKind, camera_rotation: bool,
-    lifecycle: Option<WeatherEffectLifecycle>, asset_root: &str,
+    lifecycle: Option<WeatherEffectLifecycle>, native_owner: bool, asset_root: &str,
+    instance_anchor: Option<GlobalTransform>, instance_targets: bool,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict, bodies: &Result<(), String>,
     server: &AssetServer) -> Result<(), String> {
     let records: Vec<&Value> = graph.records.get(parent).into_iter().flatten().copied()
@@ -1705,8 +1785,8 @@ fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMa
         return Err(format!("parent {parent}: {} records name this target", records.len()));
     };
     let mut scratch = Tally::default();
-    match judge_in_archive(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, asset_root,
-        None, ground, bodies, server, &mut scratch) {
+    match judge_in_host(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, native_owner, asset_root,
+        instance_anchor, instance_targets, ground, bodies, server, &mut scratch) {
         Some(planned) if planned.event_edges.as_ref().is_some_and(|edges| edges.targets().any(|target| target == node)) =>
             Ok(()),
         Some(_) => Err(format!("parent {parent} admitted without an event edge to this target")),
@@ -1811,7 +1891,7 @@ fn judge_in_archive(
 ) -> Option<Planned> {
     // The weather host (a lifecycle) installs the native birth owner.
     judge_in_host(effect_name, particle, by_path, sub_emitter_owners, kind, camera_rotation, lifecycle,
-        lifecycle.is_some(), asset_root, instance_anchor, ground, bodies, server, tally)
+        lifecycle.is_some(), asset_root, instance_anchor, false, ground, bodies, server, tally)
 }
 
 /// [`judge_in_archive`] for a host that says whether it installs the native
@@ -1831,6 +1911,9 @@ fn judge_in_host(
     native_owner: bool,
     asset_root: &str,
     instance_anchor: Option<GlobalTransform>,
+    // The host composes a sub-emitter target's owner words from the spawned
+    // instance hierarchy (see [`sub_emitter_target_gate`]).
+    instance_targets: bool,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
     bodies: &Result<(), String>,
     server: &AssetServer,
@@ -1860,7 +1943,8 @@ fn judge_in_host(
     // one admitted parent; the rest of its gates follow the law parse.
     let child_parent = match particle.get("node").and_then(Value::as_str).and_then(|node| sub_emitter_owners.get(node)) {
         None => None,
-        Some(owners) => match sub_emitter_target_gate(owners, particle, sub_emitter_owners, kind, instance_anchor) {
+        Some(owners) => match sub_emitter_target_gate(owners, particle, sub_emitter_owners, kind, instance_anchor,
+            instance_targets) {
             Ok(parent) => Some(parent),
             Err(reason) => { tally.law_reject.push(format!("sub-emitter target: {reason}")); return None; }
         },
@@ -2530,7 +2614,8 @@ fn judge_in_host(
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
                 .and_then(|()| child_owner_words(by_path, node, kind, owner_scaling(scaling)))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
-                    camera_rotation, lifecycle, asset_root, ground, bodies, server).map(|()| owner));
+                    camera_rotation, lifecycle, native_owner, asset_root, instance_anchor, instance_targets, ground,
+                    bodies, server).map(|()| owner));
             match owner {
                 Ok((owner, chain)) => {
                     sky_owner_chain = sky_owner_chain.or(chain);
@@ -2547,6 +2632,8 @@ fn judge_in_host(
     // installs, bound here or refused by name.
     let collision_scene = match (emitter.collision.as_ref(), ground) {
         (None, _) => None,
+        // A Planes module tests its plane slots and never queries the scene.
+        (Some(params), _) if params.kind == moly_law::particle::schema::CollisionType::Planes => None,
         (Some(params), Ok(scene)) => match scene.refusal_for(params.collides_with) {
             None => Some(scene.clone()),
             Some(reason) => {
@@ -3195,10 +3282,15 @@ pub(crate) fn spawn_when_ready(
                 // The plan's verdict bound the scene; the module queries the
                 // host's live physics scene, which holds the installed and
                 // the retiring effects' colliders.
-                let collision = collision_scene.map(|_| crate::particle_runtime::CollisionInstall {
-                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
-                    owner: collision_owner,
-                });
+                let collision = match collision_scene {
+                    Some(_) => Some(crate::particle_runtime::CollisionInstall {
+                        scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
+                        owner: collision_owner,
+                    }),
+                    None if crate::particle_runtime::is_planes(&live.runtime.emitter) =>
+                        Some(crate::particle_runtime::CollisionInstall::planes(collision_owner)),
+                    None => None,
+                };
                 match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route, collision) {
                     Ok(crate::particle_runtime::BirthPath::Native) if has_collision && live.runtime.collision.is_none() => {
                         error!(node=%live.node, "collision system installed without its collision state");
@@ -3328,6 +3420,66 @@ pub(crate) fn refresh_effect_visible(
             if particle.enabled != shown { particle.enabled = shown; }
         }
     }
+}
+
+/// How the engine updates one installed system in a frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FrameUpdate {
+    /// Neither listed in the manager nor collected by a parent's update.
+    Skipped,
+    /// Listed and not a target of an updated parent: it updates itself with
+    /// the frame's delta.
+    Root,
+    /// A target of an updated parent: that update collects it, listed or not,
+    /// with the frame's delta when its parent or itself was playing at the
+    /// end of the last frame and with none otherwise.
+    Collected { delta: bool },
+}
+
+/// Each system's update this frame. The engine marks, from every listed
+/// system, the sub-emitter targets below it; the update roots are the listed
+/// systems left unmarked, and each root's update collects its targets (and
+/// theirs) whether they are listed or not, reading both play words before
+/// anything of this frame changes them. Scheduling a collected target's job
+/// plays it again and lists it; the frame's end unlists any system that holds
+/// no particle once its emission has stopped. So a target runs whenever its
+/// parent runs, and after its parent leaves the manager it runs on its own
+/// until its last particle dies. A system refused this frame is not updated,
+/// and neither is what only its update would collect.
+fn frame_updates(systems: &[(&mut LiveWeatherEmitter, bool)], refused: &[Entity]) -> Vec<FrameUpdate> {
+    // Each target has one parent in its effect instance.
+    let parents: Vec<Option<usize>> = systems.iter().enumerate().map(|(index, (live, _))| {
+        if !live.native_birth.as_ref().is_some_and(|birth| birth.target.is_some()) {
+            return None;
+        }
+        systems.iter().enumerate().position(|(other, (parent, _))| other != index
+            && Arc::ptr_eq(&parent.effect_clock, &live.effect_clock)
+            && direct_targets(&parent.runtime).iter().any(|target| *target == live.node))
+    }).collect();
+    fn resolve(index: usize, systems: &[(&mut LiveWeatherEmitter, bool)], refused: &[Entity],
+        parents: &[Option<usize>], memo: &mut [Option<FrameUpdate>], depth: usize) -> FrameUpdate {
+        if let Some(update) = memo[index] {
+            return update;
+        }
+        let live = &systems[index].0;
+        let update = if refused.contains(&live.draw) {
+            FrameUpdate::Skipped
+        } else {
+            // A chain longer than the systems is a cycle, which the edges
+            // never form; it is read as no parent.
+            let parent = parents[index].filter(|_| depth < systems.len())
+                .filter(|&parent| resolve(parent, systems, refused, parents, memo, depth + 1) != FrameUpdate::Skipped);
+            match parent {
+                Some(parent) => FrameUpdate::Collected { delta: systems[parent].0.play.playing() || live.play.playing() },
+                None if live.play.managed() => FrameUpdate::Root,
+                None => FrameUpdate::Skipped,
+            }
+        };
+        memo[index] = Some(update);
+        update
+    }
+    let mut memo = vec![None; systems.len()];
+    (0..systems.len()).map(|index| resolve(index, systems, refused, &parents, &mut memo, 0)).collect()
 }
 
 /// Marks every birth edge whose child is an installed target of the same
@@ -3791,7 +3943,12 @@ pub(crate) fn advance(
             first_play_warm(&mut systems, index, &ctx, &mut refused);
         }
     }
-    for (live, emitting) in systems.iter_mut() {
+    // Which systems the engine updates this frame, and how (frame_updates).
+    let updates = frame_updates(&systems, &refused);
+    // Collected targets whose frame end and culling pass wait for this
+    // frame's commands (see below).
+    let mut collected_ends = Vec::new();
+    for (index, (live, emitting)) in systems.iter_mut().enumerate() {
         let emitting = *emitting;
         let LiveWeatherEmitter { draw, runtime: system, effect_animator, animated_chain, frame_clock, play, .. } = &mut **live;
         let draw = *draw;
@@ -3808,16 +3965,26 @@ pub(crate) fn advance(
             system.node_affine = chain.affine(|path| animator.rotation(path));
         }
         play.played_bounds(system, &compose_to_world(system, &ctx));
-        // A culled or stopped system is out of the manager: no update, no
-        // bounds, no play-state transition; it keeps its particles.
-        if play.managed() {
+        // A culled or stopped system that no parent's update collects is out
+        // of the manager: no update, no bounds, no play-state transition; it
+        // keeps its particles.
+        let delta = match updates[index] {
+            FrameUpdate::Skipped => None,
+            FrameUpdate::Root => Some(true),
+            FrameUpdate::Collected { delta } => {
+                play.keep_updating(now);
+                Some(delta)
+            }
+        };
+        if let Some(delta) = delta {
             let frame_dt = match frame_clock {
                 crate::particle_runtime::FrameClock::Scaled => Some(dt),
                 crate::particle_runtime::FrameClock::Unscaled => unscaled.as_deref().map(|clock| clock.delta()),
             };
             match frame_dt {
                 Some(frame_dt) => {
-                    match crate::particle_runtime::advance_frame(system, frame_dt, emitting, &ctx, |s| play.slice_start(s, now)) {
+                    let step_dt = if delta { frame_dt } else { 0.0 };
+                    match crate::particle_runtime::advance_frame(system, step_dt, emitting, &ctx, |s| play.slice_start(s, now)) {
                         Ok(true) => play.update_bounds(system, &compose_to_world(system, &ctx)),
                         Ok(false) => {}
                         Err(reason) => {
@@ -3833,10 +4000,19 @@ pub(crate) fn advance(
                     error!(effect=%system.effect, node=%system.node, "useUnscaledTime system has no unscaled clock this frame");
                 }
             }
-            // Every managed system is stepped in this frame, the frame its
+            // Every updated system is stepped in this frame, the frame its
             // update job is scheduled in; Update2 then needs a non-zero delta
-            // of the system's clock. Without a clock no update ran.
-            play.end_update(system, now, frame_dt.is_some_and(|delta| delta != 0.0));
+            // of the system's clock (the clock's, not the collected one's).
+            // Without a clock no update ran.
+            let update2 = frame_dt.is_some_and(|delta| delta != 0.0);
+            // A collected target ends its frame after its parents' commands of
+            // this frame reached it: the engine's frame end counts the births
+            // they gave it.
+            if matches!(updates[index], FrameUpdate::Collected { .. }) {
+                collected_ends.push((index, update2));
+                continue;
+            }
+            play.end_update(system, now, update2);
         }
         // The frame's culling pass: the renderer's world box from the last
         // bounds and the camera's planes, before this frame's geometry (the
@@ -3850,6 +4026,11 @@ pub(crate) fn advance(
     // Every target's own frame has run: the parents' commands of this frame
     // now reach their targets, and the geometry below shows their births.
     deliver_sub_emitter_commands(&mut systems, dt);
+    for (index, update2) in collected_ends {
+        let LiveWeatherEmitter { runtime: system, play, .. } = &mut *systems[index].0;
+        play.end_update(system, now, update2);
+        play.render_pass(system, &compose_to_world(system, &ctx), &pass, now);
+    }
     for (live, _) in systems.iter_mut() {
         // A system refused this frame is retired below and draws nothing.
         if refused.contains(&live.draw) {
