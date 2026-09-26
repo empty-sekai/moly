@@ -143,6 +143,7 @@ pub mod talk_window;
 pub mod uber_particle;
 pub mod ui_layers;
 pub mod ui_layout;
+mod ui_particle;
 mod voice_mouth;
 mod voice_pcm;
 pub mod walk_face;
@@ -263,6 +264,7 @@ pub fn app(
         harvest_particles::HarvestParticlePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
+    app.add_plugins(ui_particle::UiParticlePlugin);
     home_action::install(&mut app);
     app
 }
