@@ -118,6 +118,9 @@ fn native_install_draws_one_owner_for_birth_streams_and_noise() {
         refused.emitter.random_seed = Some(0);
         refused.emitter.auto_random_seed = Some(true);
         refused.emitter.noise = Some(NoiseParams { octaves, ..params() });
+        if route == SourceRoute::Procedural {
+            refused.emitter.simulation_space = SimulationSpace::World;
+        }
         let mut manager = seed::SystemSeedManager::from_entropy_words(ENTROPY);
         assert!(matches!(
             install_native_birth(&mut refused, &mut manager, &route, None).unwrap(),
