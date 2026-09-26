@@ -19,8 +19,8 @@
 //! JP 6.8.1 crystal variant (`_ENABLE_CRYSTAL_FIXTURE`, with the JP
 //! normal-map block): see `FIXTURE_CRYSTAL` / `FIXTURE_NORMAL_MAP` in the
 //! WGSL. Its second colour target (the colour-picker emission, the
-//! normal-driven emission and the centre damp) belongs to the emission pass
-//! and is not drawn there yet.
+//! normal-driven emission and the centre damp) is drawn by the emission pass
+//! from the same [`CrystalParams`]; a blocked crystal draws no second target.
 //!
 //! JP `_ENABLE_MULTI_UV_SCROLL` variant: the base colour is not `_MainTex`
 //! but up to three `_LayerTex*` layers. `_LayerTex1` is always on;
@@ -300,6 +300,16 @@ pub struct CrystalParams {
     pub bright_fresnel_add_intensity: f32,
     /// The normal-map block (`_UseNormalMap` > 0.5) with its texture.
     pub normal_map: Option<NormalMap>,
+    /// Second target, normal-driven step: `_NormalDarkEmission` (the bright
+    /// end is `normal_bright_to_emission`, shared with the main target).
+    pub normal_dark_emission: f32,
+    /// Second target, centre damp: `_UseCenterEmissionDamp` (an int compared
+    /// with 0.5 at run time), `_CenterEmissionDamp`,
+    /// `_CenterEmissionSuppressMin`, `_CenterEmissionSuppressMax`.
+    pub use_centre_emission_damp: f32,
+    pub centre_emission_damp: f32,
+    pub centre_emission_suppress_min: f32,
+    pub centre_emission_suppress_max: f32,
 }
 
 /// `_NormalMap` and the block's four values.
@@ -755,6 +765,9 @@ struct ResolvedBasic {
     /// extras 纹理表里 `_EmissionMaskTex` 的 glTF 纹理下标；缺键 None
     /// （门 int 全零的材质无所谓；非零的组合按零贡献具名告警）。
     mask_index: Option<u32>,
+    /// JP `_UseEmissionColorPicker` on: `_EmissionColor.rgb *
+    /// _EmissionIntensity`, which replaces the mask texel in the second target.
+    colour_picker: Option<[f32; 3]>,
 }
 
 /// 驱动源第二颜色目标开关链的两个材质 int（数据侧是 0/1 浮点）。
@@ -990,6 +1003,11 @@ fn resolve_basic(
                     use_bright_fresnel_add: crystal_get("_UseBrightFresnelAdd")?,
                     bright_fresnel_add_intensity: crystal_get("_BrightFresnelAddIntensity")?,
                     normal_map,
+                    normal_dark_emission: crystal_get("_NormalDarkEmission")?,
+                    use_centre_emission_damp: crystal_get("_UseCenterEmissionDamp")?,
+                    centre_emission_damp: crystal_get("_CenterEmissionDamp")?,
+                    centre_emission_suppress_min: crystal_get("_CenterEmissionSuppressMin")?,
+                    centre_emission_suppress_max: crystal_get("_CenterEmissionSuppressMax")?,
                 }),
                 None,
             ),
@@ -1131,6 +1149,24 @@ fn resolve_basic(
         .and_then(|textures| textures.get("_EmissionMaskTex"))
         .and_then(|value| value.as_u64())
         .map(|value| value as u32);
+    // JP `_UseEmissionColorPicker`, a runtime int in every JP Basic program:
+    // on, the second target starts from `_EmissionColor.xyz *
+    // _EmissionIntensity` and the mask is not sampled. The colour property is
+    // passed as authored (gamma project, no conversion).
+    let colour_picker = match extras_float(extras, "_UseEmissionColorPicker") {
+        Some(value) if value > 0.5 => {
+            let colour = extras_color(extras, "_EmissionColor")
+                .ok_or_else(|| format!("家具材质 {name} 开着 _UseEmissionColorPicker 却缺 _EmissionColor"))?;
+            let intensity = extras_float(extras, "_EmissionIntensity")
+                .ok_or_else(|| format!("家具材质 {name} 开着 _UseEmissionColorPicker 却缺 _EmissionIntensity"))?;
+            Some([
+                colour[0] as f32 * intensity as f32,
+                colour[1] as f32 * intensity as f32,
+                colour[2] as f32 * intensity as f32,
+            ])
+        }
+        _ => None,
+    };
     let base_queue = match (window_clip, blend) {
         (true, true) => 2085, (true, false) => 2035,
         (false, true) => 3020, (false, false) => 2065,
@@ -1168,6 +1204,7 @@ fn resolve_basic(
         reflection_needs_cubemap,
         crystal_blocked,
         mask_index,
+        colour_picker,
     })
 }
 
@@ -1182,6 +1219,8 @@ pub(crate) struct SiteBasic {
     pub material: FixtureMaterial,
     /// `_EmissionMaskTex` is a non-empty slot of the material.
     pub has_mask: bool,
+    /// JP `_UseEmissionColorPicker` on: the second target's colour.
+    pub colour_picker: Option<[f32; 3]>,
     pub bright: f32,
     pub dark: f32,
 }
@@ -1226,6 +1265,7 @@ pub(crate) fn resolve_site_basic(
     Ok(SiteBasic {
         material,
         has_mask: resolved.mask_index.is_some(),
+        colour_picker: resolved.colour_picker,
         // Missing ints take the shader default 0, as on the furniture path.
         bright: resolved.emission.bright.unwrap_or(0.0) as f32,
         dark: resolved.emission.dark.unwrap_or(0.0) as f32,
@@ -1267,7 +1307,7 @@ fn resolve_fence(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>
         },
         // GetAttribute maps Fence directly to 5, without the Basic usage/blend table.
         attribute: 5, emission: EmissionInts { bright: Some(0.0), dark: Some(0.0) },
-        force_emission: false, mask_index: None, receive_shadows_off: true,
+        force_emission: false, mask_index: None, colour_picker: None, receive_shadows_off: true,
         reflection_needs_cubemap: false, crystal_blocked: None,
         unported_keywords: keywords.iter().filter(|k| !["_DISABLE_DITHER", "_RECEIVE_SHADOWS_OFF",
             "_USE_ALPHA_CLIP", "_USE_MYSEKAI_FOG", "_USE_MYSEKAI_SITE_EXTENSION", "INSTANCING_ON"].contains(k))
@@ -1314,6 +1354,8 @@ fn resolve_rug(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) 
         receive_shadows_off: get("_ReceiveShadow")? == 0.0,
         unported_keywords, reflection_needs_cubemap: false, crystal_blocked: None,
         mask_index: extras.get("textures").and_then(|v| v.get("_EmissionMaskTex")).and_then(|v| v.as_u64()).map(|v| v as u32),
+        // The Rug shader declares no colour picker (its programs are unchanged in JP).
+        colour_picker: None,
     })
 }
 
@@ -1718,8 +1760,8 @@ struct Planned {
     reflection_needs_cubemap: bool,
     /// Crystal keyword on, branch off (named reason).
     crystal_blocked: Option<String>,
-    /// JP `_UseEmissionColorPicker` > 0.5.
-    emission_colour_picker: bool,
+    /// JP `_UseEmissionColorPicker` on: the second target's colour.
+    colour_picker: Option<[f32; 3]>,
     /// The main texture is the shader's declared default (`white`) because
     /// the material's `_MainTex` slot is empty.
     default_main_tex: bool,
@@ -1975,16 +2017,15 @@ fn switch_materials(
         }
         // 门 int 非零而遮罩缺失：fail-closed 零贡献（不静默取空白遮罩），
         // 具名告警——这类组合的实体不插自发光组件。
-        if item.mask.is_none() && item.emission_colour_picker {
-            // JP `_UseEmissionColorPicker`: the second target takes
-            // `_EmissionColor * _EmissionIntensity` instead of the mask. The
-            // emission pass samples only the mask, so nothing is drawn.
+        if let Some(reason) = &item.crystal_blocked {
+            // The crystal program's second target runs the normal-driven step
+            // and the centre damp on the emission colour; without the crystal
+            // branch those steps have no inputs, so nothing is drawn.
             warn!(
-                "Fixture material {}: colour-picker emission (_UseEmissionColorPicker) is not \
-                 drawn by the emission pass; zero contribution",
+                "Fixture material {}: second colour target not drawn, the crystal branch is off ({reason})",
                 item.name
             );
-        } else if item.mask.is_none() {
+        } else if item.mask.is_none() && item.colour_picker.is_none() {
             warn!(
                 "家具材质 {} 的门 int 非零但 extras 缺 _EmissionMaskTex：\
                  自发光按零贡献处理（fail-closed，不取空白遮罩）",
@@ -2060,9 +2101,15 @@ fn switch_materials(
                 // 自发光参与资格：遮罩在手即插（门 int 全零也插——片元里
                 // 的门按现象类型比较，自然为零；类型翻档即活）。遮罩缺失
                 // 的材质不插（门 int 非零的组合已在收账段具名告警）。
-                if let Some(mask) = &item.mask {
+                // The colour picker replaces the mask texel, so a picker
+                // material without a mask binds its main texture in the
+                // unread mask slot. A blocked crystal draws no second target.
+                let emission_mask = item.mask.clone()
+                    .or_else(|| item.colour_picker.map(|_| item.material.main_tex.clone()))
+                    .filter(|_| item.crystal_blocked.is_none());
+                if let Some(mask) = emission_mask {
                     commands.entity(entity).insert(FixtureEmission {
-                        mask: mask.clone(),
+                        mask,
                         main_tex: item.material.main_tex.clone(),
                         params: item.material.params,
                         key: item.material.key,
@@ -2071,6 +2118,8 @@ fn switch_materials(
                         bright: item.emission.bright.unwrap_or(0.0) as f32,
                         dark: item.emission.dark.unwrap_or(0.0) as f32,
                         force_emission: item.force_emission,
+                        colour_picker: item.colour_picker,
+                        crystal: item.material.crystal.clone(),
                     });
                 }
                 *swapped_entities.entry(index).or_default() += 1;
@@ -2559,8 +2608,7 @@ fn build_swap_plan(
                     unported_keywords: resolved.unported_keywords,
                     reflection_needs_cubemap: resolved.reflection_needs_cubemap,
                     crystal_blocked: resolved.crystal_blocked,
-                    emission_colour_picker: extras_float(&extras, "_UseEmissionColorPicker")
-                        .is_some_and(|value| value > 0.5),
+                    colour_picker: resolved.colour_picker,
                     default_main_tex,
                     mask,
                     main_tex_st: extras

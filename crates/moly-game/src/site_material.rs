@@ -1876,9 +1876,11 @@ fn resolve_fixture_basic(
         let uri = sidecar.texture_uris.get(index).ok_or_else(|| {
             format!("Fixture/Basic 材质 {} 的 _EmissionMaskTex 下标越界", slot.name)
         })?;
-        Some((load_texture(uri), basic.bright, basic.dark))
+        Some((load_texture(uri), basic.bright, basic.dark, basic.colour_picker))
     } else {
-        None
+        // The colour picker replaces the mask texel: the main texture fills
+        // the unread mask slot.
+        basic.colour_picker.map(|picker| (basic.material.main_tex.clone(), basic.bright, basic.dark, Some(picker)))
     };
     Ok(PlannedMaterial::FixtureBasic { material: basic.material, emission })
 }
@@ -1915,8 +1917,10 @@ enum PlannedMaterial {
     Site(SiteMaterial),
     FixtureBasic {
         material: crate::fixture_material::FixtureMaterial,
-        /// `(_EmissionMaskTex, bright int, dark int)` when the slot is bound.
-        emission: Option<(Handle<Image>, f32, f32)>,
+        /// `(_EmissionMaskTex, bright int, dark int, colour picker)` when the
+        /// slot is bound or the colour picker is on (then the main texture
+        /// fills the unread mask slot).
+        emission: Option<(Handle<Image>, f32, f32, Option<[f32; 3]>)>,
     },
 }
 
@@ -1929,7 +1933,7 @@ impl PlannedMaterial {
                 .chain(material.leaf_mask_tex.iter())
                 .collect(),
             Self::FixtureBasic { material, emission } => std::iter::once(&material.main_tex)
-                .chain(emission.as_ref().map(|(mask, _, _)| mask))
+                .chain(emission.as_ref().map(|(mask, _, _, _)| mask))
                 .collect(),
         }
     }
@@ -2096,7 +2100,7 @@ fn switch_materials(
                             target
                                 .remove::<MeshMaterial3d<StandardMaterial>>()
                                 .insert(MeshMaterial3d(handle.clone()));
-                            if let Some((mask, bright, dark)) = emission {
+                            if let Some((mask, bright, dark, colour_picker)) = emission {
                                 target.insert(crate::fixture_emission::FixtureEmission {
                                     force_emission: false,
                                     mask: mask.clone(),
@@ -2106,6 +2110,8 @@ fn switch_materials(
                                     blend: material.blend,
                                     bright: *bright,
                                     dark: *dark,
+                                    colour_picker: *colour_picker,
+                                    crystal: material.crystal.clone(),
                                 });
                             }
                         }
