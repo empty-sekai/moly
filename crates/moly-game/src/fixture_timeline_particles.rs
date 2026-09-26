@@ -595,8 +595,7 @@ fn initialize(world: &mut World, draw: Entity, clip_seed: u32) -> Result<Directo
     let mut live = world.get_mut::<FixtureParticleLive>(draw).unwrap();
     live.0.emitter.random_seed = Some(seed);
     live.0.emitter.auto_random_seed = Some(false);
-    live.0.pool.clear();
-    live.0.side.clear();
+    crate::particle_runtime::clear_particles(&mut live.0);
     Ok(DirectorClock {
         requested: None,
         times: PlayableTimes::NEW,
@@ -684,8 +683,7 @@ pub(crate) fn collect_garbage(world: &mut World) {
 }
 
 fn clear(system: &mut Runtime) {
-    system.pool.clear();
-    system.side.clear();
+    crate::particle_runtime::clear_particles(system);
     system.emission = Default::default();
     system.ring_cursor = 0;
     system.playback_head = 0.0;

@@ -513,6 +513,20 @@ pub(crate) fn has_start_delay(emitter: &EmitterParams) -> bool {
     play_start_delay(emitter) != Some(0.0)
 }
 
+/// `ParticleSystem.Clear` of the particles: the live count returns to zero.
+/// The laws that follow the engine's storage (a CustomData or size law with
+/// its slot tail) keep the cleared particles' slots, as the storage does.
+pub(crate) fn clear_particles(system: &mut Runtime) {
+    if let Some(custom) = system.custom_law.as_mut() {
+        custom.clear(&system.pool);
+    }
+    if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+        calls.clear(&system.pool);
+    }
+    system.pool.clear();
+    system.side.clear();
+}
+
 /// `ParticleSystem.Play` on a system that holds no particle: it plays as at
 /// its first Play. The birth owner goes (the host installs it again, with the
 /// seed reset), the clock, the pending time and the emission state return to
@@ -1547,8 +1561,7 @@ pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, ctx: &
     }
     let warm = director_restart_warm(&system.emitter, route, system.sub_emitter_max_lifetime)?;
     let velocity = system.native_birth.as_ref().map_or([0.0; 3], |native| native.frame.velocity);
-    system.pool.clear();
-    system.side.clear();
+    clear_particles(system);
     system.born_total = 0;
     system.died_total = 0;
     system.full_total = 0;
