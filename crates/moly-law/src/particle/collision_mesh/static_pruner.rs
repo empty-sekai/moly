@@ -33,10 +33,17 @@
 //! and half extents grown by 1.01, and a box meets it when on every axis the
 //! distance of the centres is at most the sum of the half extents.
 //!
+//! A static shape that moves reaches the pruner as a bounds update
+//! (`update`): the flush of the scene query's dirty shapes writes each new
+//! box into the pool first, then, over the dirty list in order, marks a
+//! shape in the main tree for the next refit or moves it within its bucket
+//! tree (in place when the new box still meets its leaf's box, else out and
+//! in again), notes it for the rebuilt tree while the rebuild maps or
+//! refits, and asks for a new tree.
+//!
 //! What the model does not hold refuses by name (`Unmodeled`) and keeps
-//! refusing: non-finite boxes, an object added twice, the removal of an
-//! object the pruner does not hold. The pruner has no bounds update here:
-//! static site and fixture colliders do not move.
+//! refusing: non-finite boxes, an object added twice, the removal or update
+//! of an object the pruner does not hold.
 use super::arms;
 use std::collections::{HashMap, VecDeque};
 
@@ -1043,6 +1050,34 @@ impl Bucket {
         }
     }
 
+    /// A bucket object's box changed: the last tree is searched first; the
+    /// object stays in its leaf when its new box still meets the leaf's box
+    /// (the leaf and its ancestors are refitted), else it leaves the tree and
+    /// goes in again. False when neither tree holds it.
+    fn update(&mut self, index: u32, boxes: &[Bounds]) -> bool {
+        let ti = if self.trees[self.last].mapping.contains_key(&index) {
+            self.last
+        } else {
+            self.current
+        };
+        let t = &mut self.trees[ti];
+        let Some(&node) = t.mapping.get(&index) else {
+            return false;
+        };
+        let b = &boxes[index as usize];
+        let (mn, mx) = (lo(b), hi(b));
+        let n = &t.tree.nodes[node];
+        let meets = !((0..3).any(|k| n.min[k] > mx[k]) || (0..3).any(|k| mn[k] > n.max[k]));
+        if meets && !arms::on("update-bucket-reinsert") {
+            t.tree.update_after_remove(node, boxes);
+        } else {
+            t.tree.remove(node, index, boxes);
+            t.tree.insert(index, boxes);
+        }
+        t.remap();
+        true
+    }
+
     fn drop_last(&mut self) {
         self.trees[self.last] = CoreTree::default();
     }
@@ -1093,6 +1128,9 @@ pub struct StaticPruner {
     uncommitted: bool,
     needs_new_tree: bool,
     fixups: Vec<(u32, u32)>,
+    /// Pool indices updated while the rebuild mapped or refitted, marked on
+    /// the rebuilt tree when it comes in (a release keeps them).
+    to_refit: Vec<u32>,
     unmodeled: Option<Unmodeled>,
 }
 
@@ -1121,6 +1159,7 @@ impl StaticPruner {
             uncommitted: false,
             needs_new_tree: false,
             fixups: Vec::new(),
+            to_refit: Vec::new(),
             unmodeled: None,
         }
     }
@@ -1184,6 +1223,50 @@ impl StaticPruner {
         }
     }
 
+    /// The flush of dirty static shapes: every shape's new pruner box goes
+    /// into the pool first, then each shape, in the given order, is marked
+    /// for the main tree's next refit or moved within its bucket tree.
+    pub fn update(&mut self, shapes: &[(u64, Bounds)]) {
+        if shapes.is_empty() {
+            return;
+        }
+        let mut indices = Vec::with_capacity(shapes.len());
+        for &(id, bounds) in shapes {
+            if !bounds.iter().all(|v| v.is_finite()) {
+                self.refuse("a non-finite pruner box");
+                return;
+            }
+            let Some(&handle) = self.handles.get(&id) else {
+                self.refuse("the update of an object the pruner does not hold");
+                return;
+            };
+            indices.push(self.pool.handle_to_index[handle as usize]);
+        }
+        for (&(_, bounds), &index) in shapes.iter().zip(&indices) {
+            self.pool.boxes[index as usize] = bounds;
+        }
+        self.uncommitted = true;
+        let Some(tree) = self.tree.as_mut() else {
+            return;
+        };
+        if !arms::on("update-keeps-tree") {
+            self.needs_new_tree = true;
+        }
+        for &index in &indices {
+            let node = self.tree_map.get(index);
+            if node != INVALID {
+                if !arms::on("update-no-refit-mark") {
+                    tree.mark(node);
+                }
+            } else if !arms::on("update-bucket-skipped") && !self.bucket.update(index, &self.pool.boxes) {
+                self.unmodeled.get_or_insert(Unmodeled("an updated object in neither the tree nor the bucket"));
+            }
+            if matches!(self.progress, Progress::NewMapping | Progress::FullRefit) && !arms::on("update-no-to-refit") {
+                self.to_refit.push(index);
+            }
+        }
+    }
+
     fn release(&mut self) {
         self.bucket = Bucket::default();
         self.tree_map = TreeMap::default();
@@ -1232,6 +1315,12 @@ impl StaticPruner {
                 tree.mark(node);
             }
             self.tree_map.invalidate(removed, relocated, &mut tree);
+        }
+        for index in std::mem::take(&mut self.to_refit) {
+            let node = self.tree_map.get(index);
+            if node != INVALID {
+                tree.mark(node);
+            }
         }
         if self.pool.count > 0 {
             tree.refit_marked(&self.pool.boxes);
