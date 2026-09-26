@@ -17,10 +17,12 @@
 //!   and looks at the look-at plus the offset. Pinch and drag do nothing.
 //! - OnExit: the camera unlocks and the sequence is killed.
 //!
-//! Leaving goes back to the previous state; from Normal that is Normal's
-//! OnEnter (the tween back to the snapshot Normal's OnExit wrote). A
-//! previous state other than Normal is set back without its OnEnter (named:
-//! the first-person entry path is not called from here).
+//! Entering runs the current state's OnExit first (`camera::exit_state`):
+//! Normal's writes its private model and the site's transfer entry; the
+//! first-person state's shows the player. Leaving goes back to the previous
+//! state through its OnEnter (`camera::enter_state`): Normal's (the inherit
+//! branch on the delivery site, the tween back to the site's transfer entry)
+//! or the first-person state's.
 //!
 //! The construction copies are taken at entry from the current camera
 //! setting (the product builds no camera state objects up front; the
@@ -51,21 +53,14 @@ pub(crate) struct DeliveryHonorCamera {
     last_logged: f32,
 }
 
-/// `ChangeState(DeliveryHonorReward)`: the current state's exit (Normal
-/// records its snapshot), then this state's OnEnter.
+/// `ChangeState(DeliveryHonorReward)`: the current state's OnExit
+/// (`camera::exit_state`), then this state's OnEnter.
 pub(crate) fn enter(world: &mut World) {
     let from = world.resource::<FieldCameraState>().0;
     if from == CameraStateType::DeliveryHonorReward {
         return;
     }
-    let site = world
-        .get_resource::<crate::site::SiteActive>()
-        .map(|site| site.site_type.clone());
-    if from == CameraStateType::Normal {
-        if let Some(site) = site.as_deref() {
-            crate::site_move::camera::record_normal_exit(world, site);
-        }
-    }
+    crate::camera::exit_state(world, from, "delivery-camera");
     let distance = world
         .get_resource::<crate::client_config::ClientConfigs>()
         .map(|configs| configs.float(KEY_HONOR_CAMERA_DISTANCE));
@@ -119,7 +114,7 @@ pub(crate) fn enter(world: &mut World) {
 }
 
 /// `ChangeState(PrevState)`: this state's OnExit, then the previous state's
-/// entry.
+/// OnEnter (`camera::enter_state`).
 pub(crate) fn exit(world: &mut World) {
     if world.resource::<FieldCameraState>().0 != CameraStateType::DeliveryHonorReward {
         return;
@@ -138,19 +133,12 @@ pub(crate) fn exit(world: &mut World) {
         model.as_ref().map(|m| m.distance),
         model.as_ref().map(|m| m.pitch)
     );
-    let site = world
-        .get_resource::<crate::site::SiteActive>()
-        .map(|site| (site.site_type.clone(), site.category.clone()));
-    match (prev, site) {
-        (CameraStateType::Normal, Some((site, category))) => {
-            let prev_site = world.resource::<crate::camera::PrevSiteType>().0.clone();
-            crate::site_move::camera::enter_normal(world, &site, &category, &prev_site);
-        }
-        (other, _) => {
-            warn!("[delivery-camera] previous state {other:?} is set back without its OnEnter (not ported from here)");
-            world.resource_mut::<FieldCameraState>().0 = other;
-        }
-    }
+    crate::camera::enter_state(
+        world,
+        prev,
+        CameraStateType::DeliveryHonorReward,
+        "delivery-camera",
+    );
 }
 
 /// PostUpdate, after the field camera's follow: the sequence and OnUpdate.
