@@ -409,7 +409,7 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
                 if effects.live[index].stopped {
                     let systems = crate::weather_fx::fixture::stop_emitting(world, root);
                     info!(
-                        "[harvest-effect] type {kind} {root:?}: its ManagedEffect.Stop ran {:.2} s before it was prepared; emission stopped on {systems} systems now",
+                        "[harvest-effect] type {kind} {root:?}: prepared {:.2} s after its Emit, after its ManagedEffect.Stop ran; emission stopped on {systems} systems now",
                         effects.live[index].age
                     );
                 }
