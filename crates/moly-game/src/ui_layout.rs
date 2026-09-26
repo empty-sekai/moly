@@ -206,6 +206,7 @@ const DOCUMENTS: &[(&str, &str)] = &[
     ("EditorHeader", "editor/ScreenLayerHeader.json"),
     ("LearnPhenomena", "menu/LearnPhenomenaSubWindowDialog.json"),
     ("Notice", "hud/ScreenLayerMysekaiNotice.json"),
+    ("HarvestSummary", "hud/ScreenLayerMysekaiHarvestSummary.json"),
 ];
 
 #[derive(Resource, Default)]
