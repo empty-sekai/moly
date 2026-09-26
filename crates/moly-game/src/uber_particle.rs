@@ -1322,7 +1322,7 @@ pub(crate) fn advance_fixture_particles(
     mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
         Option<&mut crate::fixture_timeline_particles::DirectorClock>,
         Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
-        Option<&mut crate::weather_fx::fixture::Played>)>,
+        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
     time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
@@ -1346,7 +1346,7 @@ pub(crate) fn advance_fixture_particles(
         unscaled: unscaled.as_deref().map(|clock| clock.delta()),
         now: time.elapsed_secs_f64(),
     };
-    for (entity, mut particle, mut clock, stopped, played) in &mut live {
+    for (entity, mut particle, mut clock, stopped, played, trail) in &mut live {
         let system = &mut particle.0;
         let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
         if let Some(mut stopped) = stopped {
@@ -1363,6 +1363,7 @@ pub(crate) fn advance_fixture_particles(
                 if let Some(mesh) = meshes.get_mut(&system.mesh) {
                     if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
                 }
+                clear_trail_mesh(&mut meshes, trail);
                 continue;
             }
         }
@@ -1370,6 +1371,7 @@ pub(crate) fn advance_fixture_particles(
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
+            clear_trail_mesh(&mut meshes, trail);
             continue;
         }
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
@@ -1381,6 +1383,7 @@ pub(crate) fn advance_fixture_particles(
                 if let Some(mesh) = meshes.get_mut(&system.mesh) {
                     if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
                 }
+                clear_trail_mesh(&mut meshes, trail);
                 continue;
             }
         } else if let Some(mut played) = played {
@@ -1392,6 +1395,7 @@ pub(crate) fn advance_fixture_particles(
                 system.pool.clear();
                 system.side.clear();
                 if let Some(mesh) = meshes.get_mut(&system.mesh) { *mesh = billboard::empty_mesh(); }
+                clear_trail_mesh(&mut meshes, trail);
                 commands.entity(entity).remove::<(FixtureParticleLive, crate::weather_fx::fixture::Played)>();
                 continue;
             }
@@ -1413,8 +1417,20 @@ pub(crate) fn advance_fixture_particles(
         if let Some(mesh) = meshes.get_mut(&system.mesh) {
             crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
         }
+        // The renderer's second draw: the trail strip from this frame's
+        // recorded points.
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.1)) {
+            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        }
     }
     commands.queue(crate::fixture_timeline_particles::collect_garbage);
+}
+
+/// Empty a fixture-host system's trail draw with its particle draw.
+fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
+    if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.1)) {
+        if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+    }
 }
 
 /// 拆站面：撤下计划与状态，让新站的判读重新起跳。实体随场景树一起撤。

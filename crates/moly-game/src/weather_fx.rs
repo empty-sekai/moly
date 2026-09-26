@@ -168,9 +168,10 @@ struct Planned {
     /// The owner words a Local collision system's query and hits read (its
     /// authored chain on the site anchor); `None` for every other system.
     collision_owner: Option<moly_law::particle::collision_query::OwnerPair>,
-    /// The owner local-to-world words a Local system's trail job composes
-    /// with the view (the same chain); `None` for every other system.
-    trail_owner: Option<[f32; 16]>,
+    /// The owner words a Local system's trail job reads (the same chain);
+    /// `None` for every other system and for an instance's system, whose host
+    /// composes them from the instance's placement.
+    trail_owner: Option<crate::particle_runtime::TrailOwner>,
     /// A sky system with owner words (child, collision or trail): its authored
     /// chain from the prefab root down, which the environment root's chain
     /// carries. The words above are composed with the root at the site
@@ -2471,19 +2472,26 @@ fn judge_in_host(
     let mut sky_owner_chain = None;
     let local_owner = match emitter.simulation_space {
         moly_law::particle::schema::SimulationSpace::Local if emitter.collision.is_some() || emitter.trails.is_some() => {
-            if instance_anchor.is_some() {
+            if instance_anchor.is_some() && emitter.collision.is_some() {
                 tally.law_reject.push(format!(
                     "{node}: owner words of a Local collision or trail are composed only for a site effect on its authored chain"));
                 return None;
             }
-            match chain_owner(by_path, node, kind, owner_scaling(scaling)) {
-                Ok((owner, chain)) => {
-                    sky_owner_chain = chain;
-                    Some(owner)
-                }
-                Err(reason) => {
-                    tally.law_reject.push(format!("{node}: owner words of a Local collision or trail: {reason}"));
-                    return None;
+            // A Local trail of an instance: its host composes the owner words
+            // from the instance's placement (the fixture host for a placed
+            // fixture's prefab) and refuses the rest.
+            if instance_anchor.is_some() {
+                None
+            } else {
+                match chain_owner(by_path, node, kind, owner_scaling(scaling)) {
+                    Ok((owner, chain)) => {
+                        sky_owner_chain = chain;
+                        Some(owner)
+                    }
+                    Err(reason) => {
+                        tally.law_reject.push(format!("{node}: owner words of a Local collision or trail: {reason}"));
+                        return None;
+                    }
                 }
             }
         }
@@ -2496,7 +2504,8 @@ fn judge_in_host(
             world_to_local: QueryAffine::from_columns(&owner.world_to_local),
         }
     });
-    let trail_owner = local_owner.filter(|_| emitter.trails.is_some()).map(|owner| owner.local_to_world);
+    let trail_owner = local_owner.filter(|_| emitter.trails.is_some())
+        .map(|owner| crate::particle_runtime::TrailOwner::from_matrices(&owner));
     // The collision calls are in the native slices only; a collision system
     // is never admitted to the legacy step without them. (A sub-emitter
     // target with a CollisionModule is refused by the child composition.)
@@ -3056,7 +3065,7 @@ pub(crate) fn spawn_when_ready(
                         local_to_world: QueryAffine::from_columns(&owner.local_to_world),
                         world_to_local: QueryAffine::from_columns(&owner.world_to_local),
                     });
-                    planned.trail_owner = planned.trail_owner.map(|_| owner.local_to_world);
+                    planned.trail_owner = planned.trail_owner.map(|_| crate::particle_runtime::TrailOwner::from_matrices(&owner));
                     Some(SkyOwner { chain, anchor: anchor.map(f32::to_bits) })
                 }
                 Err(reason) => {
@@ -3649,7 +3658,8 @@ fn write_owner_words(runtime: &mut Runtime, owner: &moly_law::particle::owner::O
         });
     }
     if runtime.trail.as_ref().is_some_and(|trail| trail.owner.is_some()) {
-        crate::particle_runtime::attach_trail_owner(runtime, owner.local_to_world).map_err(str::to_owned)?;
+        crate::particle_runtime::attach_trail_owner(runtime, crate::particle_runtime::TrailOwner::from_matrices(owner))
+            .map_err(str::to_owned)?;
     }
     if let Some(target) = runtime.native_birth.as_mut().and_then(|native| native.target.as_mut()) {
         target.owner = moly_law::particle::child_emit::ChildOwner::from_owner(owner);

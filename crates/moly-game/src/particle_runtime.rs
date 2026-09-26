@@ -11,7 +11,7 @@ pub(crate) mod collision_scene;
 pub(crate) use collision::{collision_eligible, current_size_source_gate};
 pub(crate) use trails::{
     attach_owner as attach_trail_owner, draw_eligible as trail_draw_eligible, owner_ready as trail_owner_ready,
-    write_mesh as write_trail_mesh, TrailState,
+    write_mesh as write_trail_mesh, TrailOwner, TrailState,
 };
 pub(crate) use sub_events::{BirthEdge, BirthEvents, CollisionEdge, DeathEdge, EventEdges};
 pub(crate) use child::{child_target_eligible, deliver_command, install_child_target};

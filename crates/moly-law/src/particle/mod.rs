@@ -66,6 +66,7 @@ pub mod initial;
 pub mod autonomous_emission;
 pub mod sub_emission;
 pub mod owner;
+pub mod placement;
 pub mod child_emit;
 pub mod prewarm;
 pub mod frame_time;

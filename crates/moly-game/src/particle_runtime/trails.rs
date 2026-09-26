@@ -12,6 +12,22 @@ use super::*;
 use moly_law::particle::trail::{self as recording, Refused, TrailClock, TrailParticle, TrailRing, TrailSize};
 use moly_law::particle::trail_geometry::{self as strip, GeometryParticle, TrailGeometryLaw, TrailMesh, TrailView};
 
+/// The owner words a Local simulation's trail job reads: the engine's owner
+/// local-to-world (source axes, column major), which the job composes with
+/// the view, and the emitter scale its owner update stores (the node's own
+/// scale in Local scaling, the lossy global scale in Hierarchy scaling).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrailOwner {
+    pub(crate) local_to_world: [f32; 16],
+    pub(crate) emitter_scale: [f32; 3],
+}
+
+impl TrailOwner {
+    pub(crate) fn from_matrices(owner: &moly_law::particle::owner::OwnerMatrices) -> Self {
+        Self { local_to_world: owner.local_to_world, emitter_scale: owner.emitter_scale }
+    }
+}
+
 /// The installed trail of one native system.
 #[derive(Clone, Debug)]
 pub(crate) struct TrailState {
@@ -22,10 +38,10 @@ pub(crate) struct TrailState {
     /// The first refusal of the geometry pass, if any (the draw is empty then).
     pub(crate) draw_refusal: Option<Refused>,
     pub(crate) vertices: usize,
-    /// The owner matrix the trail job of a Local simulation composes with the
-    /// view: the engine's owner local-to-world words (source axes, column
-    /// major), attached at install. `None` for a World simulation.
-    pub(crate) owner: Option<[f32; 16]>,
+    /// The owner words of a Local simulation, attached by the host; they stay
+    /// across the installs of later Plays and restarts. `None` for a World
+    /// simulation.
+    pub(crate) owner: Option<TrailOwner>,
 }
 
 impl TrailState {
@@ -79,10 +95,16 @@ pub(crate) fn qualify(emitter: &EmitterParams) -> Result<Option<TrailGeometryLaw
     if params.world_space {
         return Err("world-space trail: the matrix the recording transforms with is not identified");
     }
-    if params.size_affects_width || params.size_affects_lifetime {
-        // The module reads the start or the current size array by a flag;
-        // this runtime keeps neither the flag's writer nor a current-size array.
-        return Err("size-affected trail: the size array the module reads is not kept by this runtime");
+    if (params.size_affects_width || params.size_affects_lifetime) && current_size_writer(emitter) {
+        // The module reads the particles' current-size array once the array
+        // setup has marked it in use, and the start size array otherwise.
+        // The setup marks it for an enabled SizeModule, an enabled
+        // SizeBySpeedModule and an enabled NoiseModule whose size amount is
+        // above zero, and nothing clears the mark; the start size array is
+        // the side's size. With a writer the module reads the SizeModule's
+        // post-simulation write, whose order against the trail update is not
+        // transcribed here.
+        return Err("size-affected trail with a current-size writer: the order of the size write and the trail update is not transcribed");
     }
     if params.split_sub_emitter_ribbons || params.attach_ribbons_to_transform {
         return Err("ribbon trail controls on a per-particle trail are not executed");
@@ -97,12 +119,25 @@ pub(crate) fn qualify(emitter: &EmitterParams) -> Result<Option<TrailGeometryLaw
     Ok(Some(law))
 }
 
-/// Attach the owner words a Local simulation's trail job composes with.
-pub(crate) fn attach_owner(system: &mut Runtime, owner: [f32; 16]) -> Result<(), &'static str> {
+/// Whether the particle array setup marks the current-size array in use.
+fn current_size_writer(emitter: &EmitterParams) -> bool {
+    let noise_size = emitter.noise.as_ref().is_some_and(|noise|
+        !matches!(noise.size_amount, moly_law::particle::MinMaxCurve::Constant(v) if v <= 0.0));
+    emitter.size_over_lifetime.is_some() || noise_size || emitter.unmapped.iter().any(|key| key == "sizeBySpeed")
+}
+
+/// Attach the owner words a Local simulation's trail job composes with. A
+/// system whose trail is not installed yet (a Director's system before its
+/// first restart) keeps them for the install.
+pub(crate) fn attach_owner(system: &mut Runtime, owner: TrailOwner) -> Result<(), &'static str> {
     if system.emitter.simulation_space != SimulationSpace::Local {
         return Err("trail owner words on a system that is not a Local simulation");
     }
-    let Some(trail) = system.trail.as_mut() else { return Err("trail owner words without an installed trail") };
+    if system.trail.is_none() {
+        let Ok(Some(law)) = qualify(&system.emitter) else { return Err("trail owner words without a qualified trail") };
+        system.trail = Some(TrailState::new(law, 0));
+    }
+    let trail = system.trail.as_mut().expect("trail state present");
     trail.owner = Some(owner);
     Ok(())
 }
@@ -129,17 +164,21 @@ fn refusal(refused: Refused) -> &'static str {
 }
 
 /// Install the qualified trail of a system whose native birth owner was
-/// just installed.
+/// just installed, keeping the owner words already attached.
 pub(super) fn install(system: &mut Runtime, law: TrailGeometryLaw) {
-    system.trail = Some(TrailState::new(law, system.pool.len()));
+    let owner = system.trail.as_ref().and_then(|trail| trail.owner);
+    system.trail = Some(TrailState { owner, ..TrailState::new(law, system.pool.len()) });
 }
 
 /// The emitter scale the trail job reads: the emitter's own local scale in
-/// Local scaling mode. The Hierarchy mode's value is not produced here.
+/// Local scaling mode; in Hierarchy mode the lossy global scale of the owner
+/// words (a Local simulation's; a World simulation's is not produced here).
 fn emitter_scale(system: &Runtime) -> Result<[f32; 3], &'static str> {
     match system.geometry.shape_evidence().map(|evidence| evidence.scaling) {
         Some(crate::particle_geometry::Scaling::Local { scale, .. }) => Ok(scale.to_array()),
-        Some(crate::particle_geometry::Scaling::Hierarchy) => Err("Hierarchy scaling: the trail job's emitter scale is not produced here"),
+        Some(crate::particle_geometry::Scaling::Hierarchy) => system.trail.as_ref().and_then(|trail| trail.owner)
+            .map(|owner| owner.emitter_scale)
+            .ok_or("Hierarchy scaling: the trail job's emitter scale comes with the owner words, which are not attached"),
         None => Err("legacy billboard carries no authored scaling mode"),
     }
 }
@@ -152,7 +191,9 @@ pub(crate) fn draw_eligible(emitter: &EmitterParams, evidence: Option<ShapeEmitt
     }
     match evidence.map(|evidence| evidence.scaling) {
         Some(crate::particle_geometry::Scaling::Local { .. }) => Ok(()),
-        Some(crate::particle_geometry::Scaling::Hierarchy) => Err("Hierarchy scaling: the trail job's emitter scale is not produced here"),
+        // The owner words the host attaches to a Local simulation carry it.
+        Some(crate::particle_geometry::Scaling::Hierarchy) if emitter.simulation_space == SimulationSpace::Local => Ok(()),
+        Some(crate::particle_geometry::Scaling::Hierarchy) => Err("Hierarchy scaling of a World simulation: the trail job's emitter scale is not produced here"),
         None => Err("legacy billboard carries no authored scaling mode"),
     }
 }
@@ -203,7 +244,7 @@ fn build(system: &Runtime, owner: &GlobalTransform, camera: &GlobalTransform) ->
     // with the engine's owner words attached at install (none: no draw).
     let job_owner = match (simulation_world, trail.owner) {
         (true, _) => identity,
-        (false, Some(words)) if system.emitter.simulation_space == SimulationSpace::Local => words,
+        (false, Some(words)) if system.emitter.simulation_space == SimulationSpace::Local => words.local_to_world,
         _ => return Err(Refused::SingularView),
     };
     let evidence = system.geometry.shape_evidence();
@@ -252,19 +293,22 @@ mod tests {
     /// call as the product issues it (a newborn call resets its rings by
     /// appending fresh ones). Compares every call's clock, each ring's count,
     /// path length and points, and the trail lifetimes the call evaluated.
-    /// Rows with size-affected lifetimes or world-space trails are outside
-    /// this runtime's qualification and are counted, not driven.
+    /// A size-affected lifetime reads the start size array (the side's size)
+    /// on rows whose size pair is the start array; rows on the current-size
+    /// array and world-space rows are outside this runtime's qualification
+    /// and are counted, not driven.
     #[test]
     #[ignore = "needs MOLY_TRAIL_RECORD_ROWS"]
     fn product_trail_state_matches_native_recording_rows() {
         let path = std::env::var("MOLY_TRAIL_RECORD_ROWS").expect("MOLY_TRAIL_RECORD_ROWS");
         let doc: Value = serde_json::from_slice(&std::fs::read(&path).expect("read rows")).expect("parse rows");
-        let (mut cases, mut calls, mut points, mut skipped) = (0usize, 0usize, 0usize, 0usize);
+        let (mut cases, mut calls, mut points, mut skipped, mut size_driven) = (0usize, 0usize, 0usize, 0usize, 0usize);
         for row in doc["rows"].as_array().expect("rows") {
             let case = &row["case"];
             let id = case["id"].as_str().unwrap();
             let t = &case["trail"];
-            if t["sizeAffectsLifetime"].as_bool().unwrap() || t["worldSpace"].as_bool().unwrap() {
+            let size_lifetime = t["sizeAffectsLifetime"].as_bool().unwrap();
+            if (size_lifetime && case["particles"]["sizePair"].as_f64().unwrap() != 0.0) || t["worldSpace"].as_bool().unwrap() {
                 skipped += 1;
                 continue;
             }
@@ -283,7 +327,7 @@ mod tests {
                 ratio: bits(&t["ratio"]), lifetime, min_vertex_distance: bits(&t["minVertexDistance"]),
                 texture_mode: moly_law::particle::schema::TrailTextureMode::Stretch, texture_scale: [1.0, 1.0],
                 ribbon_count: 1, shadow_bias: 0.5, world_space: false, die_with_particles: true,
-                size_affects_width: false, size_affects_lifetime: false, inherit_particle_color: true,
+                size_affects_width: false, size_affects_lifetime: size_lifetime, inherit_particle_color: true,
                 generate_lighting_data: false, split_sub_emitter_ribbons: false, attach_ribbons_to_transform: false,
                 color_over_lifetime: moly_law::particle::MinMaxGradient::Color([1.0; 4]),
                 width_over_trail: moly_law::particle::MinMaxCurve::Constant(0.09),
@@ -294,6 +338,12 @@ mod tests {
             let parts = &case["particles"];
             let seeds: Vec<u32> = parts["seeds"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
             let inv: Vec<f32> = parts["inv"].as_array().unwrap().iter().map(bits).collect();
+            let start_sizes: Vec<[f32; 3]> = parts["sizeA"].as_array().unwrap().iter()
+                .map(|s| std::array::from_fn(|k| bits(&s[k]))).collect();
+            let size3d = parts["size3D"].as_bool().unwrap();
+            if size_lifetime {
+                size_driven += 1;
+            }
             let mut state = TrailState {
                 law,
                 clock: TrailClock::default(),
@@ -307,7 +357,7 @@ mod tests {
                 inverse_lifetime: inv[i], age_percent: 0.0,
             }).collect();
             let side: Vec<Side> = (0..n).map(|i| Side {
-                rand: 0.0, seed: seeds[i], rot: [0.0; 3], size: [1.0; 3], gravity: 0.0, colour: [1.0; 4],
+                rand: 0.0, seed: seeds[i], rot: [0.0; 3], size: start_sizes[i], gravity: 0.0, colour: [1.0; 4],
                 total_velocity: [0.0; 3], custom_data: [[0.0; 4]; 2], emit_carry: [0.0; 2], animated: [0.0; 3], current_size: 0.0,
                 axis: [0.0, 0.0, 1.0],
             }).collect();
@@ -323,7 +373,7 @@ mod tests {
                     pool[i].age_percent = bits(&call["ages"][i]);
                 }
                 let (from, to) = (call["from"].as_u64().unwrap() as usize, call["to"].as_u64().unwrap() as usize);
-                state.update(&pool, &side, from, to, bits(&call["dt"]), false);
+                state.update(&pool, &side, from, to, bits(&call["dt"]), size3d);
                 let native = &natives[k];
                 let time = u64::from_str_radix(native["timeBits"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
                 assert_eq!(state.clock.time.to_bits(), time, "{id} call {k} clock");
@@ -342,8 +392,8 @@ mod tests {
             }
             cases += 1;
         }
-        println!("product trail replay: {cases} cases, {calls} calls, {points} points compared, {skipped} cases outside \
-            the runtime's qualification");
-        assert!(cases > 0 && points > 0);
+        println!("product trail replay: {cases} cases ({size_driven} with a size-affected lifetime on the start size array), \
+            {calls} calls, {points} points compared, {skipped} cases outside the runtime's qualification");
+        assert!(cases > 0 && points > 0 && size_driven > 0);
     }
 }

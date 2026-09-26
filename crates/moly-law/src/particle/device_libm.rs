@@ -1,5 +1,6 @@
 //! The four C library functions the engine's weighted curve segment calls on the
-//! device (`logf`, `exp`, `cosf` and `atan2f`), in plain Rust.
+//! device (`logf`, `exp`, `cosf` and `atan2f`), in plain Rust, and the `sincosf` of the
+//! engine's Euler-angle conversion (see [`super::placement`]).
 //!
 //! The Bezier time solve of a weighted AnimationCurve segment calls them through the
 //! dynamic linker, so its value is whatever the phone's libm returns. On Android that is
@@ -20,10 +21,12 @@
 //! How this is known: the AOSP arm64 emulator images for API 29, 31, 33, 35 and 36 carry
 //! these functions with these table values; executed in an emulator they give the same
 //! bits as this module. The API 24 and 28 images carry the msun `logf`, `exp` and
-//! `cosf`; this module does not reproduce those.
+//! `cosf`; this module does not reproduce those. `sincosf` is the API 29 image's,
+//! executed in an emulator over every path of the function.
 //!
 //! Ported from Arm Optimized Routines (`math/logf.c`, `math/logf_data.c`, `math/exp.c`,
-//! `math/exp_data.c`, `math/cosf.c`, `math/sincosf.h`, `math/sincosf_data.c`),
+//! `math/exp_data.c`, `math/cosf.c`, `math/sincosf.c`, `math/sincosf.h`,
+//! `math/sincosf_data.c`),
 //! Copyright (c) 2017-2018 Arm Limited, MIT licence, and from FreeBSD msun
 //! (`e_atan2f.c`, `s_atanf.c`), Copyright (C) 1993 by Sun Microsystems, Inc.; see the
 //! repository's third-party notices.
@@ -209,6 +212,66 @@ pub fn cosf(y: f32) -> f32 {
         let s = x3.mul_add(t.s[0], x);
         (x7 * s1 + s) as f32
     }
+}
+
+/// `sincosf(y)`: `(sin y, cos y)`.
+///
+/// Fused on the device, on every path: the fast reduction `x - kd * pi/2` and every
+/// polynomial term, the last sine term `s + x5 (S2 + x2 S3)` and the last cosine term
+/// `c + x6 (C3 + x2 C4)` included (unlike `cosf`, whose last terms after a reduction are
+/// a multiply and an add). Below 2^-12 the pair is `(y, 1)`. After a reduction the
+/// sine polynomial takes the signed reduced argument and an odd quadrant swaps the pair.
+pub fn sincosf(y: f32) -> (f32, f32) {
+    let ix = y.to_bits();
+    let top = (ix >> 20) & 0x7ff;
+    let x = y as f64;
+    if top < 0x3f4 {
+        // |y| < pi/4.
+        if top < 0x398 {
+            return (y, 1.0); // |y| < 2^-12
+        }
+        let t = &SINCOSF[0];
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let c2 = x2.mul_add(t.c[4], t.c[3]);
+        let s1 = x2.mul_add(t.s[2], t.s[1]);
+        let s = x3.mul_add(t.s[0], x);
+        let x4 = x2 * x2;
+        let x5 = x2 * x3;
+        let c1 = x2.mul_add(t.c[1], t.c[0]);
+        let x6 = x2 * x4;
+        let c = x4.mul_add(t.c[2], c1);
+        return (x5.mul_add(s1, s) as f32, x6.mul_add(c2, c) as f32);
+    }
+    let (r, n, sign_n) = if top < 0x42f {
+        // |y| < 120.
+        let t = &SINCOSF[0];
+        let z = t.hpi_inv * x;
+        let n = round_half_away_to_i64(z) as i32;
+        let r = (-t.hpi).mul_add(round_half_away(z), x);
+        (r, n, n)
+    } else if top < 0x7f8 {
+        let (r, n) = reduce_large(ix);
+        (r, n, n.wrapping_add((ix >> 31) as i32))
+    } else {
+        let nan = y - y;
+        return (nan, nan);
+    };
+    let t = if sign_n & 2 == 0 { &SINCOSF[0] } else { &SINCOSF[1] };
+    let x2 = r * r;
+    let xs = SINCOSF[0].sign[(sign_n & 3) as usize] * r;
+    let c2 = x2.mul_add(t.c[4], t.c[3]);
+    let s1 = x2.mul_add(t.s[2], t.s[1]);
+    let x4 = x2 * x2;
+    let c1 = x2.mul_add(t.c[1], t.c[0]);
+    let x3 = xs * x2;
+    let s = x3.mul_add(t.s[0], xs);
+    let x6 = x2 * x4;
+    let x5 = x2 * x3;
+    let c = x4.mul_add(t.c[2], c1);
+    let sine = x5.mul_add(s1, s) as f32;
+    let cosine = x6.mul_add(c2, c) as f32;
+    if n & 1 == 0 { (sine, cosine) } else { (cosine, sine) }
 }
 
 /// The large-argument reduction of `cosf` (120 <= |y| < inf): `y * 2/pi` in fixed point

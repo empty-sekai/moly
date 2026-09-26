@@ -16,15 +16,23 @@
 //! a prewarm system, and each chunk is the same update without the backlog
 //! widening, with the native birth owner where the route and modules qualify.
 //!
+//! A TrailModule system draws its trail as the renderer's second draw, as the
+//! weather host does; a Local simulation's trail job reads owner words, which
+//! this host composes for a placed fixture's prefab from the fixture's
+//! placement ([`placed_fixture_owner`]) and refuses elsewhere.
+//!
 //! Named differences from the weather host: no culling pass (a system is
-//! never culled), no trail draw (a TrailModule system is refused), and no
-//! sub-emitter target (a target's owner words are composed only for a site
-//! effect on its authored chain), so a parent's commands are dropped, counted.
+//! never culled), and no sub-emitter target (a target's owner words are
+//! composed only for a site effect on its authored chain), so a parent's
+//! commands are dropped, counted.
 use super::*;
+use moly_law::particle::owner::{OwnerMatrices, OwnerScaling, SourceTrs};
 
 struct Candidate {
     anchor: Entity,
     plan: Planned,
+    /// The prefab chain a Local trail's owner words are composed on.
+    prefab: Option<Vec<SourceTrs>>,
 }
 
 #[derive(Component)]
@@ -44,6 +52,146 @@ pub(crate) fn discard_abandoned_controls(world: &mut World, now: f64) {
             }
         }
     }
+}
+
+/// The trail draw of a fixture-host system: the renderer's second draw, a
+/// child of the particle draw (so it goes with it), and its mesh.
+#[derive(Component)]
+pub(crate) struct FixtureTrailDraw(pub(crate) Entity, pub(crate) Handle<Mesh>);
+
+/// The prefab of a placed fixture: the fixture interface package, whose root
+/// carries the FixtureView the placement writes.
+fn placed_fixture_package(package: &str) -> bool {
+    package.starts_with("mysekai__fixture__")
+}
+
+/// One record's serialized TRS words.
+fn record_trs(record: &Value) -> Result<SourceTrs, String> {
+    fn words<const N: usize>(record: &Value, key: &str) -> Option<[f32; N]> {
+        let list = record.get(key)?.as_array().filter(|list| list.len() == N)?;
+        let mut out = [0.0f32; N];
+        for (slot, value) in out.iter_mut().zip(list) {
+            *slot = value.as_f64()? as f32;
+        }
+        Some(out)
+    }
+    (|| Some(SourceTrs { t: words(record, "position")?, q: words(record, "rotation")?, s: words(record, "scale")? }))()
+        .ok_or_else(|| format!("{}: authored TRS not exported", record["node"]))
+}
+
+/// A prefab's chain in source TRS words, the prefab root first: one entry per
+/// prefix of the node's path. A document repeats a path for same-named
+/// siblings; every record of a prefix must carry the same words.
+fn prefab_chain(nodes: &[Value], path: &str) -> Result<Vec<SourceTrs>, String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let mut chain = Vec::with_capacity(parts.len());
+    for depth in 1..=parts.len() {
+        let prefix = parts[..depth].join("/");
+        let mut records = nodes.iter().filter(|record| record["node"].as_str() == Some(prefix.as_str()));
+        let first = record_trs(records.next().ok_or_else(|| format!("prefab chain: {prefix} has no record"))?)?;
+        for record in records {
+            if record_trs(record)? != first {
+                return Err(format!("prefab chain: {prefix} names records with different TRS words"));
+            }
+        }
+        chain.push(first);
+    }
+    Ok(chain)
+}
+
+/// Admission's half of a Local trail's owner words: a placed fixture's
+/// prefab, whose chain is exported. The placement is read at install.
+fn trail_owner_admissible(package: &str, nodes: &[Value], node: &str) -> Result<(), String> {
+    if !placed_fixture_package(package) {
+        return Err("owner words of a Local trail: this host composes them only for a placed fixture's prefab".into());
+    }
+    prefab_chain(nodes, node).map(|_| ())
+}
+
+/// The owner words of a system in a placed fixture's prefab, in its scaling
+/// mode. The chain the engine's owner update walks: the site's fixture
+/// container and the site view's parent, both at the identity (the container
+/// is a new GameObject placed at the site view's position, and this host draws
+/// the active site at its origin); the fixture view, which is the prefab root,
+/// with the local position `FixtureView.SetPosition` writes (the field
+/// position), the local rotation `FixtureView.ForceSetRotation` leaves
+/// ([`moly_law::particle::placement::fixture_view_rotation`]) and its
+/// authored scale; then the prefab below the root.
+///
+/// `placement` is the fixture root's transform in this runtime's axes (source
+/// X reflected; the placement import swapped Left and Right, so the source
+/// direction is the reflected yaw's quarter turns taken backwards).
+fn placed_fixture_owner(placement: &Transform, prefab: &[SourceTrs], scaling: OwnerScaling) -> Result<OwnerMatrices, String> {
+    let q = placement.rotation;
+    let yaw = 2.0 * (q.y as f64).atan2(q.w as f64);
+    let quarters = (yaw / std::f64::consts::FRAC_PI_2).round();
+    if q.x != 0.0 || q.z != 0.0 || (yaw - quarters * std::f64::consts::FRAC_PI_2).abs() > 1e-5 || placement.scale != Vec3::ONE {
+        return Err(format!("fixture placement {placement:?} is not a quarter-turn yaw at unit scale"));
+    }
+    let reflected = (quarters as i64).rem_euclid(4) as u8;
+    let direction = (4 - reflected) % 4;
+    let t = placement.translation;
+    let x = if t.x == 0.0 { 0.0 } else { -t.x };
+    let identity = SourceTrs { t: [0.0; 3], q: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] };
+    let ancestors = [identity, identity];
+    let root = prefab.first().ok_or("owner chain lacks the prefab root")?;
+    let view = SourceTrs { t: [x, t.y, t.z], q: moly_law::particle::placement::fixture_view_rotation(direction, &ancestors), s: root.s };
+    let chain: Vec<SourceTrs> = ancestors.iter().copied().chain(std::iter::once(view)).chain(prefab[1..].iter().copied()).collect();
+    let owner = moly_law::particle::owner::owner_matrices(&chain, scaling).map_err(|refused| format!("owner words {refused:?}"))?;
+    if !owner.invert_ok {
+        return Err("owner matrix below the inverse's determinant threshold".into());
+    }
+    Ok(owner)
+}
+
+/// The fixture root above `anchor` and its transform, if `anchor` is in a
+/// placed fixture.
+fn fixture_placement(anchor: Entity, parent: impl Fn(Entity) -> Option<Entity>,
+    root_transform: impl Fn(Entity) -> Option<Transform>) -> Option<Transform> {
+    let mut current = Some(anchor);
+    while let Some(entity) = current {
+        if let Some(transform) = root_transform(entity) {
+            return Some(transform);
+        }
+        current = parent(entity);
+    }
+    None
+}
+
+/// The prefab chain of an admitted plan whose system is a Local simulation
+/// with a trail (`None` for any other plan).
+fn trail_prefab(plan: &Planned, nodes: &[Value]) -> Result<Option<Vec<SourceTrs>>, String> {
+    if plan.trail.is_none() || plan.emitter.simulation_space != SimulationSpace::Local {
+        return Ok(None);
+    }
+    prefab_chain(nodes, &plan.node).map(Some)
+}
+
+/// The trail owner words of a plan with a prefab chain, from its fixture's
+/// placement.
+fn plan_trail_owner(plan: &Planned, prefab: Option<&[SourceTrs]>, placement: Option<Transform>)
+    -> Result<Option<crate::particle_runtime::TrailOwner>, String> {
+    let Some(prefab) = prefab else { return Ok(None) };
+    let placement = placement.ok_or("owner words of a Local trail: the emitter is not in a placed fixture")?;
+    let scaling = match &plan.geometry {
+        PlannedGeometry::Billboard(draw) => draw.scaling,
+        PlannedGeometry::Mesh { scaling, .. } | PlannedGeometry::EmptyMesh { scaling, .. } => *scaling,
+    };
+    let owner = placed_fixture_owner(&placement, prefab, owner_scaling(scaling))?;
+    Ok(Some(crate::particle_runtime::TrailOwner::from_matrices(&owner)))
+}
+
+/// After the Play's install: attach a Local trail's owner words, and refuse
+/// a trail system left without its trail state or owner words.
+fn attach_installed_trail(system: &mut Runtime, plan: &Planned, owner: Option<crate::particle_runtime::TrailOwner>)
+    -> Result<(), String> {
+    if let Some(owner) = owner {
+        crate::particle_runtime::attach_trail_owner(system, owner).map_err(str::to_owned)?;
+    }
+    if plan.trail.is_some() && (system.trail.is_none() || !crate::particle_runtime::trail_owner_ready(system)) {
+        return Err("trail system installed without its trail state or owner words".into());
+    }
+    Ok(())
 }
 
 /// Prepare the selected emitters of an instance for an owner that plays them
@@ -93,12 +241,15 @@ fn prepare(
             let mut candidates = Vec::new();
             for &(anchor, ordinal) in selected {
                 let particle = &particles[ordinal];
-                let mut plan = admit(package, particle, &by_path, &owners, &server, Path::Control, stepping)?;
+                let mut plan = admit(package, particle, &by_path, nodes, &owners, &server, Path::Control, stepping)?;
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
                 plan.source.force_phenomena_lighting();
-                candidates.push(Candidate { anchor, plan });
+                if let Some(trail) = plan.trail.as_mut() { trail.source.force_phenomena_lighting(); }
+                let prefab = trail_prefab(&plan, nodes)
+                    .map_err(|reason| format!("{node}: source particle control rejected {reason}", node = particle["node"]))?;
+                candidates.push(Candidate { anchor, plan, prefab });
             }
             ControlPreparation(candidates, 0.0)
         }
@@ -125,6 +276,23 @@ fn prepare(
                 ParticleReadiness::Failed(error) => return Err(error),
                 ParticleReadiness::Ready => {}
             }
+            let leader = plan.draw.as_ref().expect("particle draw spawned").0;
+            if let Some(trail) = plan.trail.as_mut() {
+                if !trail.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
+                    return Ok(None);
+                }
+                if trail.draw.is_none() {
+                    let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                    let draw = world.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
+                        NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(leader))).id();
+                    trail.draw = Some((draw, mesh));
+                }
+                match trail.source.readiness.lock().unwrap().clone() {
+                    ParticleReadiness::Pending => return Ok(None),
+                    ParticleReadiness::Failed(error) => return Err(format!("trail draw: {error}")),
+                    ParticleReadiness::Ready => {}
+                }
+            }
         }
         let mut draws = Vec::new();
         for candidate in &preparation.0 {
@@ -133,20 +301,37 @@ fn prepare(
             system.geometry.keep_unit_chain(unit_ancestry(candidate.anchor,
                 |entity| world.get::<Transform>(entity).map(|t| t.scale),
                 |entity| world.get::<ChildOf>(entity).map(ChildOf::parent)));
+            let placement = fixture_placement(candidate.anchor, |entity| world.get::<ChildOf>(entity).map(ChildOf::parent),
+                |entity| world.get::<crate::fixture::FixtureRoot>(entity).and_then(|_| world.get::<Transform>(entity).copied()));
+            let trail_owner = plan_trail_owner(&candidate.plan, candidate.prefab.as_deref(), placement)
+                .map_err(|reason| format!("{}: source particle control rejected {reason}", candidate.plan.node))?;
             match stepping {
                 // No playOnAwake here. The owning Director installs a paused
                 // clock; its first restart installs the owner.
                 Stepping::Director => {
+                    // Each restart installs the trail with the words kept here.
+                    if let Some(owner) = trail_owner {
+                        crate::particle_runtime::attach_trail_owner(&mut system, owner)
+                            .map_err(|reason| format!("{}: source particle control rejected {reason}", candidate.plan.node))?;
+                    }
                     world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system),
                         DirectorRoute(candidate.plan.route.clone())));
                 }
                 Stepping::Played => {
                     let played = world.resource_scope(|_, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>|
                         install(&mut system, &candidate.plan, &mut seeds))
+                        .and_then(|played| attach_installed_trail(&mut system, &candidate.plan, trail_owner).map(|()| played))
                         .map_err(|reason| format!("{}: source particle control rejected {reason}",
                             doc["emitters"][candidate.plan.ordinal]["node"]))?;
                     world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system), played));
                 }
+            }
+            if let Some((trail, trail_mesh)) = candidate.plan.trail.as_ref().and_then(|trail| trail.draw.clone()) {
+                let mut source = candidate.plan.trail.as_ref().expect("trail plan").source.clone();
+                source.enabled = true;
+                source.follows = Some(draw);
+                world.entity_mut(trail).insert(source);
+                world.entity_mut(draw).insert(FixtureTrailDraw(trail, trail_mesh));
             }
             draws.push(draw);
         }
@@ -238,10 +423,12 @@ pub(crate) fn census_names_no_body(by_path: &HashMap<String, &Value>) -> Result<
 /// judgement, then the host's own gates. `Err` names the reason; on the
 /// control path every refusal carries the `<node>: source particle control
 /// rejected` prefix its callers skip single emitters by.
+#[allow(clippy::too_many_arguments)]
 fn admit(
     package: &str,
     particle: &Value,
     by_path: &HashMap<String, &Value>,
+    nodes: &[Value],
     owners: &SubEmitterGraph<'_>,
     server: &AssetServer,
     path: Path,
@@ -267,9 +454,10 @@ fn admit(
         });
     };
     // A TrailModule draws with the renderer's trail material in a second
-    // draw, which this host does not spawn.
-    if plan.trail.is_some() {
-        return Err(refuse("trails need a trail draw, which the fixture host does not spawn".into()));
+    // draw; a Local simulation's trail job reads the owner words this host
+    // composes for a placed fixture's prefab.
+    if plan.trail.is_some() && plan.emitter.simulation_space == SimulationSpace::Local {
+        trail_owner_admissible(package, nodes, &plan.node).map_err(refuse)?;
     }
     if stepping == Stepping::Played {
         // Noise, sub-emitter events and emission over distance run with the
@@ -340,7 +528,7 @@ pub(crate) fn plan(
         let Some(anchor) = anchors.get(&format!("/{node}")).and_then(|list| list.first()).copied() else {
             warn!("[fixture-source] {package}/{node}: emitter instance missing"); continue;
         };
-        match admit(package, particle, &by_path, &owners, server, Path::Autonomous, Stepping::Played) {
+        match admit(package, particle, &by_path, nodes, &owners, server, Path::Autonomous, Stepping::Played) {
             Err(reason) => warn!("[fixture-source] {package}/{node}: {reason}"),
             Ok(mut plan) => {
                 plan.ordinal = ordinal;
@@ -351,8 +539,13 @@ pub(crate) fn plan(
                 // filter (only a null material or a null shader is skipped), so
                 // particle renderers are forced like meshes. Authored flags of
                 // fixture particle materials therefore never reach the draw.
+                // The renderer's trail material is one of its materials too.
                 plan.source.force_phenomena_lighting();
-                candidates.push(Candidate { anchor, plan });
+                if let Some(trail) = plan.trail.as_mut() { trail.source.force_phenomena_lighting(); }
+                match trail_prefab(&plan, nodes) {
+                    Ok(prefab) => candidates.push(Candidate { anchor, plan, prefab }),
+                    Err(reason) => warn!("[fixture-source] {package}/{node}: {reason}"),
+                }
             }
         }
     }
@@ -591,7 +784,7 @@ mod tests {
                     continue;
                 };
                 rows += 1;
-                let verdict = census_admit(package, particle, &by_path, &owners, server, path, stepping);
+                let verdict = census_admit(package, particle, &by_path, nodes, &owners, server, path, stepping);
                 let reason = match verdict {
                     Ok(label) => { admitted += 1; label }
                     Err(reason) => census_reason(&reason, &particle["node"]),
@@ -613,9 +806,10 @@ mod tests {
     /// owner's install decision (the installer's route and emitter-state test
     /// on the plan's geometry evidence, and its refusal of what the legacy
     /// step cannot run); no seed is drawn.
-    fn census_admit(package: &str, particle: &Value, by_path: &HashMap<String, &Value>, owners: &SubEmitterGraph<'_>,
-        server: &AssetServer, path: Path, stepping: Stepping) -> Result<String, String> {
-        let plan = admit(package, particle, by_path, owners, server, path, stepping)?;
+    #[allow(clippy::too_many_arguments)]
+    fn census_admit(package: &str, particle: &Value, by_path: &HashMap<String, &Value>, nodes: &[Value],
+        owners: &SubEmitterGraph<'_>, server: &AssetServer, path: Path, stepping: Stepping) -> Result<String, String> {
+        let plan = admit(package, particle, by_path, nodes, owners, server, path, stepping)?;
         if stepping == Stepping::Director {
             return Ok(match director_birth_path(&plan)? {
                 None => "admitted, Director native birth owner".to_owned(),
@@ -864,6 +1058,7 @@ pub(crate) fn spawn_when_ready(
     nodes: Res<Assets<GltfNode>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     ancestry: Query<(Option<&Transform>, Option<&ChildOf>)>,
+    fixture_roots: Query<&Transform, With<crate::fixture::FixtureRoot>>,
 ) {
     for (root, mut request) in &mut requests {
         let mut pending = Vec::new();
@@ -896,14 +1091,46 @@ pub(crate) fn spawn_when_ready(
                 }
                 ParticleReadiness::Ready => {}
             }
-            let Candidate { anchor, plan: planned } = candidate;
+            let leader = planned.draw.as_ref().expect("particle draw spawned").0;
+            if let Some(trail) = planned.trail.as_mut() {
+                match trail.source.resolve(&server, &catalogues) {
+                    Ok(true) => {}
+                    Ok(false) => { pending.push(candidate); continue; }
+                    Err(error) => {
+                        warn!("[fixture-source] {} trail draw: {}", planned.node, error.0);
+                        commands.entity(leader).try_despawn();
+                        continue;
+                    }
+                }
+                if trail.draw.is_none() {
+                    let mesh = meshes.add(billboard::empty_mesh());
+                    let draw = commands.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
+                        NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(leader))).id();
+                    trail.draw = Some((draw, mesh));
+                }
+                let readiness = trail.source.readiness.lock().unwrap().clone();
+                match readiness {
+                    ParticleReadiness::Pending => { pending.push(candidate); continue; }
+                    ParticleReadiness::Failed(error) => {
+                        warn!("[fixture-source] {} trail GPU: {error}", planned.node);
+                        commands.entity(leader).try_despawn();
+                        continue;
+                    }
+                    ParticleReadiness::Ready => {}
+                }
+            }
+            let Candidate { anchor, plan: planned, prefab } = candidate;
             let (draw, mesh) = planned.draw.clone().expect("prepared source draw");
             let mut runtime = runtime(&planned, anchor, mesh);
             runtime.geometry.keep_unit_chain(unit_ancestry(anchor,
                 |entity| ancestry.get(entity).ok().and_then(|(t, _)| t.map(|t| t.scale)),
                 |entity| ancestry.get(entity).ok().and_then(|(_, p)| p.map(ChildOf::parent))));
+            let placement = fixture_placement(anchor, |entity| ancestry.get(entity).ok().and_then(|(_, p)| p.map(ChildOf::parent)),
+                |entity| fixture_roots.get(entity).ok().copied());
             // Play on awake: the first Play installs the birth owner.
-            let played = match install(&mut runtime, &planned, &mut seeds) {
+            let played = match plan_trail_owner(&planned, prefab.as_deref(), placement)
+                .and_then(|owner| install(&mut runtime, &planned, &mut seeds)
+                    .and_then(|played| attach_installed_trail(&mut runtime, &planned, owner).map(|()| played))) {
                 Ok(played) => played,
                 Err(reason) => {
                     error!("[fixture-source] {}: {reason}; not installed", planned.node);
@@ -915,6 +1142,13 @@ pub(crate) fn spawn_when_ready(
             source.enabled = true;
             info!("[fixture-source] {}: installed ({}); fixture setup phenomena-lighting write {:?}",
                 planned.node, played.birth_path(), source.phenomena_lighting_written);
+            if let Some((trail, trail_mesh)) = planned.trail.as_ref().and_then(|trail| trail.draw.clone()) {
+                let mut trail_source = planned.trail.as_ref().expect("trail plan").source.clone();
+                trail_source.enabled = true;
+                trail_source.follows = Some(draw);
+                commands.entity(trail).try_insert(trail_source);
+                commands.entity(draw).try_insert(FixtureTrailDraw(trail, trail_mesh));
+            }
             // The prefab can be destroyed on the frame its draw turns ready (a
             // cannon's effects go with the cannon); its draw is gone then, and
             // so is the system the source played, so nothing is left to attach.
