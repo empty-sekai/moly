@@ -761,15 +761,16 @@ pub(crate) fn set_trigger_player_off(
     set_trigger(world, binding, HouseTrigger::PlayerOff)
 }
 
-/// `HouseView.SetAnimationTrigger(trigger)`: `Animator.SetTrigger`. The
-/// controller takes the AnyState transition on its next evaluation, which is
-/// this frame's animation update: the playback starts here and advances in
-/// the same frame's [`advance`]. The transition blends from the pose the
-/// current state writes: the bound pose in the default state, a finished
-/// clip's last pose (the joint holds it), or the previous clip still playing
-/// when the trigger comes mid-clip. While this house's transition runs the
-/// trigger stays set and is taken when that transition ends: the house
-/// transitions are uninterruptible (interruption source None in the record).
+/// `HouseView.SetAnimationTrigger(trigger)`: `Animator.SetTrigger` sets the
+/// parameter; the controller takes the AnyState transition on its next
+/// evaluation, the animation update ([`advance`]), which checks the
+/// transitions in their order and starts the first whose trigger is set. The
+/// transition blends from the pose the current state writes: the bound pose
+/// in the default state, a finished clip's last pose (the joint holds it), or
+/// the previous clip still playing when the trigger comes mid-clip. While
+/// this house's transition runs the trigger stays set and is taken when that
+/// transition ends: the house transitions are uninterruptible (interruption
+/// source None in the record).
 pub(crate) fn set_trigger(
     world: &mut World,
     binding: &HouseBinding,
@@ -788,10 +789,9 @@ pub(crate) fn set_trigger(
             (Ok(_), None) => return Err("NPCOn joint not bound".into()),
         },
     };
-    let base = world
-        .get::<Transform>(joint)
-        .ok_or("door joint has no Transform")?
-        .rotation;
+    if world.get::<Transform>(joint).is_none() {
+        return Err("door joint has no Transform".into());
+    }
     let start = PendingTrigger {
         root: binding.root,
         uid: binding.uid.clone(),
@@ -807,16 +807,16 @@ pub(crate) fn set_trigger(
             binding.uid,
             trigger.name()
         );
-        if !doors
-            .pending
-            .iter()
-            .any(|pending| pending.root == start.root && pending.trigger == trigger)
-        {
-            doors.pending.push(start);
-        }
-        return Ok(());
     }
-    doors.begin(start, base);
+    // A set trigger is one parameter: setting it again before a transition
+    // consumes it changes nothing.
+    if !doors
+        .pending
+        .iter()
+        .any(|pending| pending.root == start.root && pending.trigger == trigger)
+    {
+        doors.pending.push(start);
+    }
     Ok(())
 }
 
@@ -889,6 +889,32 @@ pub(crate) fn advance(world: &mut World) {
         return;
     };
     let ignored = std::mem::take(&mut doors.ignored);
+    // The animation update: a house not in a transition takes the first of
+    // its set triggers in transition order, then every playback advances
+    // this frame.
+    let mut pending = std::mem::take(&mut doors.pending);
+    pending.sort_by_key(|start| start.program.transition_index);
+    for start in pending {
+        if world.get_entity(start.root).is_err() {
+            continue;
+        }
+        if doors.in_transition(start.root) {
+            doors.pending.push(start);
+            continue;
+        }
+        let Some(base) = world
+            .get::<Transform>(start.joint)
+            .map(|transform| transform.rotation)
+        else {
+            warn!(
+                "[house-door] {} trigger={} dropped: its door joint disappeared",
+                start.uid,
+                start.trigger.name()
+            );
+            continue;
+        };
+        doors.begin(start, base);
+    }
     doors.playing.retain_mut(|door| {
         let identity_ok = world
             .get::<SourceObjectIdentity>(door.joint)
@@ -948,34 +974,6 @@ pub(crate) fn advance(world: &mut World) {
         }
         !finished
     });
-    let mut pending = std::mem::take(&mut doors.pending);
-    pending.sort_by_key(|start| start.program.transition_index);
-    for start in pending {
-        if world.get_entity(start.root).is_err() {
-            continue;
-        }
-        if doors.in_transition(start.root) {
-            doors.pending.push(start);
-            continue;
-        }
-        let Some(base) = world
-            .get::<Transform>(start.joint)
-            .map(|transform| transform.rotation)
-        else {
-            warn!(
-                "[house-door] {} trigger={} dropped: its door joint disappeared",
-                start.uid,
-                start.trigger.name()
-            );
-            continue;
-        };
-        info!(
-            "[house-door] {} trigger={} taken: the running transition ended",
-            start.uid,
-            start.trigger.name()
-        );
-        doors.begin(start, base);
-    }
     doors.ignored = ignored;
     world.insert_resource(doors);
 }
