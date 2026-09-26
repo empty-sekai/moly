@@ -133,6 +133,7 @@ impl Plugin for NpcStatePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<TweetHudEvent>()
             .init_resource::<SequencePickSeeder>()
+            .init_resource::<crate::npc_gate::GateAppearance>()
             .init_resource::<crate::npc_clock::NpcClock>()
             .add_systems(Startup, (crate::npc_tweet::load, crate::npc_clock::load))
             .add_systems(
@@ -412,6 +413,7 @@ pub(crate) fn on_update(
         ),
     >,
     site: Option<Res<crate::site::SiteActive>>,
+    mut commands: Commands,
 ) {
     // The avatar store's per-frame NPC update, of which this is call 3.
     if !crate::npc::residency::loaded_site_runs(site.as_deref()) {
@@ -521,6 +523,15 @@ pub(crate) fn on_update(
                     actions.tweet_id = tweet_id;
                     crate::npc::stop_agent(&mut route, &mut path, &mut walk, &mut phase);
                     actions.locals.greeting.looking_at_player = player.is_some();
+                    // DoLookAtAsync(player position, 1.0, Linear), not awaited.
+                    if let Some(player) = player {
+                        commands.entity(entity).insert(crate::npc_look_at::NpcLookAt::new(
+                            player,
+                            crate::npc_look_at::GREETING_LOOK_AT_SECONDS,
+                            moly_law::ui::dotween::Ease::Linear,
+                            frame,
+                        ));
+                    }
                     info!(
                         "[npc-state] unit={unit} frame={frame} greeting enter: visit={visits} phenomenon={phenomena} greeting={} tweet={tweet_id}; call=SetIKTarget(player) call=DoLookAt(player, 1.0, Linear)",
                         greeting.id

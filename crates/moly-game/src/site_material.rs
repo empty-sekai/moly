@@ -100,6 +100,7 @@ use crate::env::SiteEnvGpuBuffer;
 use crate::render::gpu::SharedSamplers;
 use crate::shadowmap::ShadowMapGpu;
 use crate::site::{SiteAssets, SiteScenesReady, SiteVisualPending};
+use crate::site_extension::SiteExtensionGpuBuffer;
 
 /// Ground-Birthday 族名（真源 shader 名）。law 侧只收了四个老族；
 /// 这四个新族的族名在本层声明。
@@ -212,6 +213,11 @@ pub struct SiteParams {
     pub additive_color: [f32; 4],
     /// `_BaseTextureMappingMode`。Object 主贴图坐标源开关。
     pub object_texture_mapping: f32,
+    /// `_ObjectShaderUsage` of an Object material (0 for every other family).
+    /// Only the site-extension arm reads it (`== 8` selects the dissolve
+    /// edge); it rides in the unused `.y` lane of the mapping slot, so the
+    /// slot table is unchanged.
+    pub object_shader_usage: f32,
     /// `_MainTextureLocalMapping`。Object 的 uv0 覆写开关。
     pub object_main_texture_local_mapping: f32,
     /// TreasureBox rare arm: `(_RareBlendRate, _RareFresnelIntensity,
@@ -278,6 +284,7 @@ impl SiteParams {
             ui_uber_main_st: [0.0; 4],
             additive_color: [0.0; 4],
             object_texture_mapping: 0.0,
+            object_shader_usage: 0.0,
             object_main_texture_local_mapping: 0.0,
             treasure_rare_blend: [0.0; 4],
             treasure_rare_fresnel: [0.0; 4],
@@ -339,7 +346,12 @@ impl SiteParams {
             [self.dropitem_uv_scroll[0], self.dropitem_uv_scroll[1], 0.0, 0.0],
             self.ui_uber_main_st,
             self.additive_color,
-            [self.object_texture_mapping, 0.0, 0.0, 0.0],
+            [
+                self.object_texture_mapping,
+                self.object_shader_usage,
+                0.0,
+                0.0,
+            ],
             [self.object_main_texture_local_mapping, 0.0, 0.0, 0.0],
             self.treasure_rare_blend,
             self.treasure_rare_fresnel,
@@ -436,6 +448,7 @@ impl AsBindGroup for SiteMaterial {
         SRes<FallbackImage>,
         SRes<FallbackImageZero>,
         SRes<SharedSamplers>,
+        SRes<SiteExtensionGpuBuffer>,
     );
 
     fn label() -> &'static str {
@@ -446,7 +459,7 @@ impl AsBindGroup for SiteMaterial {
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
-        (env_buffer, shadow, images, fallback, fallback_zero, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
+        (env_buffer, shadow, images, fallback, fallback_zero, samplers, site_extension): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -542,6 +555,12 @@ impl AsBindGroup for SiteMaterial {
                     shadow.cmp_sampler.clone(),
                 ),
             ),
+            // binding 13: the site-extension globals (keyword and nine
+            // values), one buffer for every site material.
+            (
+                13,
+                OwnedBindingResource::Buffer(site_extension.buffer.clone()),
+            ),
         ]);
         Ok(UnpreparedBindGroup { bindings })
     }
@@ -626,6 +645,18 @@ impl AsBindGroup for SiteMaterial {
                 binding: 12,
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                count: None,
+            },
+            // binding 13: the site-extension globals (site_extension.rs),
+            // read by the fragment stage only.
+            BindGroupLayoutEntry {
+                binding: 13,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             },
         ]
@@ -1559,6 +1590,9 @@ pub(crate) fn resolve_object(
     // 2 (wall AO), 14 (pass-through) and default (the toon ramp). Usage 4 (the
     // item usage, e.g. the cannon's `mat_base`) takes the same three answers
     // as 8 and 12, so it is the same program path; no other stage reads it.
+    // With the global `_USE_MYSEKAI_SITE_EXTENSION` keyword on, the program
+    // reads it a fourth time: `== 8` takes the dissolve edge (and its
+    // discard), which is why the value is kept in the parameter block.
     float_domain(slot, "Object", "_ObjectShaderUsage", usage, &[4.0, 8.0, 12.0])?;
     let mapping = get("_BaseTextureMappingMode")?;
     float_domain(slot, "Object", "_BaseTextureMappingMode", mapping, &[0.0, 1.0, 2.0])?;
@@ -1590,6 +1624,7 @@ pub(crate) fn resolve_object(
         .get("_AdditiveColor")
         .ok_or_else(|| format!("Object 材质 {} 缺 _AdditiveColor", slot.name))?;
     params.object_texture_mapping = mapping;
+    params.object_shader_usage = usage;
     params.object_main_texture_local_mapping = local_mapping;
     // 高度淡出在源里无 keyword、恒编译；当前数据 _UseHeightFade 全 0，
     // 块保留（运行时选择）。
@@ -2222,6 +2257,7 @@ impl Plugin for SiteMaterialPlugin {
         crate::gpu_image_release::prepare_after_images::<SiteMaterial>(app);
         app.add_plugins((
             crate::env::SiteEnvPlugin,
+            crate::site_extension::SiteExtensionPlugin,
             MaterialPlugin::<SiteMaterial>::default(),
         ))
         .init_asset::<MolyJson>()

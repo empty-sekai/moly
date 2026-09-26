@@ -25,6 +25,12 @@ use super::*;
 struct Candidate {
     anchor: Entity,
     plan: Planned,
+    /// A control preparation saw this draw's GPU source Ready once. The
+    /// render world resets readiness to Pending at each frame's queue and
+    /// sets it again once the pipelines are confirmed, so waiting for every
+    /// candidate to read Ready at the same instant is a race it can lose for
+    /// a long time; a confirmed candidate is not asked again.
+    confirmed: bool,
 }
 
 #[derive(Component)]
@@ -57,7 +63,22 @@ pub(crate) fn prepare_control(
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::Played)
+    prepare(world, root, doc, selected, Stepping::Played, Activity::Authored)
+}
+
+/// The same for an owner that plays the systems with `ParticleSystem.Play`
+/// later (a timeline Signal reaction): the systems are prepared and admitted
+/// as [`prepare_control`]'s, but wait stopped and out of the manager, drawing
+/// nothing, until [`play_pending`] runs their first Play (its seed reset and
+/// birth owner install). `Ok(None)` while geometry or GPU preparation is
+/// pending. Activity is the run time's (see [`Activity::Runtime`]).
+pub(crate) fn prepare_play_later(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::PlayLater, Activity::Runtime)
 }
 
 /// The same for a Director's ControlPlayable: the systems wait for its paused
@@ -70,7 +91,34 @@ pub(crate) fn prepare_director_control(
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::Director)
+    prepare(world, root, doc, selected, Stepping::Director, Activity::Authored)
+}
+
+/// [`prepare_director_control`] for a prefab's director owner (a step item,
+/// a site scene's director): activity is the run time's (see
+/// [`Activity::Runtime`]).
+pub(crate) fn prepare_owner_director_control(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::Director, Activity::Runtime)
+}
+
+/// Whether a selected system's authored activity gates its admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activity {
+    /// An inactive authored object refuses the system (the fixture routes).
+    Authored,
+    /// The owner's own activation decides at run time: a Control clip's
+    /// ActivationControlPlayable activates its object for the clip, and
+    /// ControlPlayableAsset takes every system of the object's Transform
+    /// subtree whether its object is active or not (a Signal target's
+    /// inactive children likewise). An object authored inactive is admitted
+    /// and the host leaves its system dormant, drawing nothing, while its
+    /// anchor is inactive.
+    Runtime,
 }
 
 fn prepare(
@@ -79,6 +127,7 @@ fn prepare(
     doc: &Value,
     selected: &[(Entity, usize)],
     stepping: Stepping,
+    activity: Activity,
 ) -> Result<Option<Vec<Entity>>, String> {
     let server = world.resource::<AssetServer>().clone();
     let mut preparation = match world.entity_mut(root).take::<ControlPreparation>() {
@@ -86,45 +135,91 @@ fn prepare(
         None => {
             let particles = doc["emitters"].as_array().ok_or("missing source emitter list")?;
             let nodes = doc["nodes"].as_array().ok_or("missing source node list")?;
-            let by_path = nodes.iter().filter_map(|node|
+            // Runtime activity: the selected systems' own node rows, as active.
+            let released: Vec<Value> = match activity {
+                Activity::Authored => Vec::new(),
+                Activity::Runtime => selected.iter()
+                    .filter_map(|&(_, ordinal)| particles[ordinal]["node"].as_str())
+                    .filter_map(|path| nodes.iter().find(|node| node["node"].as_str() == Some(path)))
+                    .map(|node| { let mut node = node.clone(); node["active"] = Value::Bool(true); node })
+                    .collect(),
+            };
+            let mut by_path: HashMap<String, &Value> = nodes.iter().filter_map(|node|
                 Some((node["node"].as_str()?.to_owned(), node))).collect();
+            for node in &released {
+                if let Some(path) = node["node"].as_str() { by_path.insert(path.to_owned(), node); }
+            }
             let owners = source_sub_emitter_owners(particles);
             let package = doc["name"].as_str().unwrap_or("fixture");
             let mut candidates = Vec::new();
             for &(anchor, ordinal) in selected {
                 let particle = &particles[ordinal];
-                let mut plan = admit(package, particle, &by_path, &owners, &server, Path::Control, stepping)?;
+                let mut plan = match admit(package, particle, &by_path, &owners, &server, Path::Control, stepping) {
+                    Ok(plan) => plan,
+                    // A director owner steps each system of its object by its
+                    // own playable (or plays it by its own Play): one this host
+                    // refuses is left undrawn, by name, and the others play.
+                    Err(reason) if activity == Activity::Runtime => {
+                        warn!("[prefab-director] {reason}; this system is not drawn, the object's other systems play");
+                        continue;
+                    }
+                    Err(reason) => return Err(reason),
+                };
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
                 plan.source.force_phenomena_lighting();
-                candidates.push(Candidate { anchor, plan });
+                candidates.push(Candidate { anchor, plan, confirmed: false });
             }
             ControlPreparation(candidates, 0.0)
         }
     };
     preparation.1 = crate::fixture_timeline_particles::realtime(world);
     let result = (|| {
-        for candidate in &mut preparation.0 {
+        let mut refused = Vec::new();
+        let mut pending = false;
+        for (index, candidate) in preparation.0.iter_mut().enumerate() {
+            if candidate.confirmed {
+                continue;
+            }
             let plan = &mut candidate.plan;
-            let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
-                world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
-                world.resource::<Assets<Mesh>>())?;
-            if !ready { return Ok(None); }
-            if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
-                return Ok(None);
+            let step = (|| -> Result<bool, String> {
+                let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
+                    world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
+                    world.resource::<Assets<Mesh>>())?;
+                if !ready { return Ok(false); }
+                if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
+                    return Ok(false);
+                }
+                if plan.draw.is_none() {
+                    let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                    let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
+                        NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
+                    plan.draw = Some((draw, mesh));
+                }
+                let readiness = plan.source.readiness.lock().unwrap().clone();
+                match readiness {
+                    ParticleReadiness::Pending => Ok(false),
+                    ParticleReadiness::Failed(error) => Err(error),
+                    ParticleReadiness::Ready => Ok(true),
+                }
+            })();
+            match step {
+                Ok(true) => candidate.confirmed = true,
+                Ok(false) => pending = true,
+                // As at admission: a director owner's other systems play.
+                Err(error) if activity == Activity::Runtime => refused.push((index, error)),
+                Err(error) => return Err(error),
             }
-            if plan.draw.is_none() {
-                let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
-                let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
-                    NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
-                plan.draw = Some((draw, mesh));
-            }
-            match plan.source.readiness.lock().unwrap().clone() {
-                ParticleReadiness::Pending => return Ok(None),
-                ParticleReadiness::Failed(error) => return Err(error),
-                ParticleReadiness::Ready => {}
-            }
+        }
+        for (index, error) in refused.into_iter().rev() {
+            let candidate = preparation.0.remove(index);
+            warn!("[prefab-director] {}: source particle preparation failed: {error}; this system is not drawn, the object's other systems play",
+                doc["emitters"][candidate.plan.ordinal]["node"]);
+            if let Some((draw, _)) = candidate.plan.draw { world.despawn(draw); }
+        }
+        if pending {
+            return Ok(None);
         }
         let mut draws = Vec::new();
         for candidate in &preparation.0 {
@@ -146,6 +241,16 @@ fn prepare(
                         .map_err(|reason| format!("{}: source particle control rejected {reason}",
                             doc["emitters"][candidate.plan.ordinal]["node"]))?;
                     world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system), played));
+                }
+                // Stopped and out of the manager until its owner's first Play:
+                // the host skips a stopped system (it draws nothing), and only
+                // that Play installs the birth owner.
+                Stepping::PlayLater => {
+                    let inactive = world.get::<moly_assets::scene_state::SourceInactive>(candidate.anchor).is_some();
+                    world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system),
+                        PendingPlay { route: candidate.plan.route.clone(), event_edges: candidate.plan.event_edges.clone(),
+                            culling: candidate.plan.culling.clone() },
+                        crate::fixture_timeline_particles::StoppedByDirector { was_inactive: inactive }));
                 }
             }
             draws.push(draw);
@@ -197,13 +302,43 @@ pub(crate) enum Path {
 
 /// Who steps an admitted system. `Played`: its own per-frame update after a
 /// `ParticleSystem.Play` (play on awake or explicit), which this host runs as
-/// the weather host does, with the native birth owner. `Director`:
+/// the weather host does, with the native birth owner. `PlayLater`: the same
+/// once its owner's Play arrives; stopped until then. `Director`:
 /// `ParticleSystem.Simulate` from a ControlPlayable, whose restarts install
 /// the birth owner from the manual seed and whose chunks run the same update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stepping {
     Played,
+    PlayLater,
     Director,
+}
+
+/// A system prepared for a later `ParticleSystem.Play` (see
+/// [`prepare_play_later`]): what its first Play installs.
+#[derive(Component)]
+pub(crate) struct PendingPlay {
+    route: crate::particle_runtime::SourceRoute,
+    event_edges: Option<crate::particle_runtime::EventEdges>,
+    culling: lifecycle::Culling,
+}
+
+/// The first `ParticleSystem.Play` of a system [`prepare_play_later`] left
+/// stopped: the seed reset and birth owner install of [`install`], then the
+/// per-frame update as any played system. `Ok(false)` for a draw with no
+/// pending Play (it played already, or is not this host's).
+pub(crate) fn play_pending(world: &mut World, draw: Entity) -> Result<bool, String> {
+    let Some(pending) = world.entity_mut(draw).take::<PendingPlay>() else { return Ok(false) };
+    world.entity_mut(draw).remove::<crate::fixture_timeline_particles::StoppedByDirector>();
+    world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
+        let mut entity = world.entity_mut(draw);
+        let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() else {
+            return Err("pending system has no simulation".to_owned());
+        };
+        let played = install_with(&mut live.0, &pending.route, pending.event_edges.clone(), pending.culling.clone(), &mut seeds)
+            .map_err(|reason| format!("{}: first Play refused: {reason}", live.0.node))?;
+        entity.insert(played);
+        Ok(true)
+    })
 }
 
 /// The source route of a system a Director prepared, which its restarts read.
@@ -271,7 +406,7 @@ fn admit(
     if plan.trail.is_some() {
         return Err(refuse("trails need a trail draw, which the fixture host does not spawn".into()));
     }
-    if stepping == Stepping::Played {
+    if stepping != Stepping::Director {
         // Noise, sub-emitter events and emission over distance run with the
         // native birth owner this host installs (a sub-emitter target is
         // refused by the judgement: its owner words exist only for a site
@@ -352,7 +487,7 @@ pub(crate) fn plan(
                 // particle renderers are forced like meshes. Authored flags of
                 // fixture particle materials therefore never reach the draw.
                 plan.source.force_phenomena_lighting();
-                candidates.push(Candidate { anchor, plan });
+                candidates.push(Candidate { anchor, plan, confirmed: false });
             }
         }
     }
@@ -899,7 +1034,7 @@ pub(crate) fn spawn_when_ready(
                 }
                 ParticleReadiness::Ready => {}
             }
-            let Candidate { anchor, plan: planned } = candidate;
+            let Candidate { anchor, plan: planned, .. } = candidate;
             let (draw, mesh) = planned.draw.clone().expect("prepared source draw");
             let mut runtime = runtime(&planned, anchor, mesh);
             runtime.geometry.keep_unit_chain(unit_ancestry(anchor,

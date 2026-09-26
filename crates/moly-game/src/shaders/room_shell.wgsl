@@ -29,6 +29,12 @@
 // every room shell material (_Enable_Emission, manual, debug, bright and dark
 // phenomena emission all 0), so the second target is not drawn.
 //
+// Site expansion dissolve: the global keyword _USE_MYSEKAI_SITE_EXTENSION is
+// the flag of binding 7 (site_extension.rs). The Object program with the
+// keyword applies the fade band after the phenomena gate and before the
+// additive colour; its usage-8 edge arm cannot occur here (room_shell.rs
+// admits usages 2, 10 and 14 only). Room/Floor has no such keyword.
+//
 // Colour domain: as in site_material.wgsl. The source is a Gamma player;
 // sampled texels are encoded back to the stored domain, uniforms and vertex
 // colours are stored values, and the output is decoded once before the sRGB
@@ -103,6 +109,23 @@ struct SiteShadow {
 @group(3) @binding(4) var<uniform> shadow: SiteShadow;
 @group(3) @binding(5) var shadow_tex: texture_depth_2d;
 @group(3) @binding(6) var shadow_cmp: sampler_comparison;
+
+// The site-extension globals; slot order is the contract with
+// site_extension.rs gpu_bytes (the same struct as in site_material.wgsl).
+struct SiteExtension {
+    // (_SiteExtensionRadius, _SiteExtensionInnerRadius,
+    //  _SiteExtensionSmoothness, keyword: 1 enabled, 0 disabled)
+    radii: vec4<f32>,
+    // _SiteExtensionCenter in this pipeline's world (xz read).
+    center: vec4<f32>,
+    edge_color: vec4<f32>,
+    fade_color: vec4<f32>,
+    // (_SiteExtensionFadeMinRadius, _SiteExtensionFadeMaxRadius,
+    //  _SiteExtensionLimitLineWidth, 0)
+    fade_range: vec4<f32>,
+}
+
+@group(3) @binding(7) var<uniform> site_extension: SiteExtension;
 
 fn srgb_format_encode(linear: vec3<f32>) -> vec3<f32> {
     let x = max(linear, vec3<f32>(0.0));
@@ -433,6 +456,22 @@ fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @locati
         let tinted = drop_shadow_tint(rgb);
         rgb = s * (rgb - tinted) + tinted;
         rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+    }
+    // Site expansion dissolve, the fade band in the source's operation order
+    // (as site_extension_band in site_material.wgsl).
+    if site_extension.radii.w > 0.5 {
+        let delta = in.world_position.xz + -site_extension.center.xz;
+        let d = sqrt(dot(delta, delta));
+        let toward = -rgb + site_extension.fade_color.rgb;
+        let span = -site_extension.radii.y + site_extension.radii.x;
+        var t = d + -site_extension.radii.y;
+        t = t / span;
+        t = clamp(t, 0.0, 1.0);
+        let w = t * site_extension.fade_color.w;
+        let mixed = vec3<f32>(w) * toward + rgb;
+        var o = select(rgb, mixed, 0.999000013 >= t);
+        o = select(rgb, o, site_extension.fade_range.y >= d);
+        rgb = select(rgb, o, d >= site_extension.fade_range.x);
     }
     rgb = params.additive_color.rgb * params.additive_color.a + rgb;
     var out_rgb = rgb;

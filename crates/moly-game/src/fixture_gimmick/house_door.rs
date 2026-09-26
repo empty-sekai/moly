@@ -1,13 +1,14 @@
-//! The house controller's `PlayerOn` and `PlayerOff` lanes, bounded to what
-//! the entry and the door moves play.
+//! The house controller's `PlayerOn`, `PlayerOff` and `NPCOn` lanes, bounded
+//! to what the entry, the door moves and an NPC's entry to home play.
 //!
 //! `HouseView` is a separate component on the house's FixtureView object: it
 //! holds the two door locators and the house Animator. Its controller
 //! (`HouseAnimationController`) has four AnyState trigger transitions on
 //! layer 0 and an empty second layer (no states, weight 0), so only layer 0
 //! can write a pose. The entry and the room-to-home move set `PlayerOff`,
-//! the home-to-room move sets `PlayerOn`; this lane plays exactly those
-//! transitions: 0.25 s fixed, from the state the controller is in (the
+//! the home-to-room move sets `PlayerOn`, an NPC's change-site entry to home
+//! (`HomeSiteEnter`, after its turn) sets `NPCOn`; this lane plays exactly
+//! those transitions: 0.25 s fixed, from the state the controller is in (the
 //! default state `None` has no motion and writes defaults, so its pose is
 //! the bound pose; a finished clip holds its last pose), into a
 //! four-component quaternion clip on the door joint. The clip's
@@ -34,11 +35,12 @@ use crate::{
 
 const SE_EVENT: &str = "OnPlayHouseSE";
 
-/// The two AnyState triggers this lane plays.
+/// The AnyState triggers this lane plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HouseTrigger {
     PlayerOn,
     PlayerOff,
+    NpcOn,
 }
 
 impl HouseTrigger {
@@ -46,6 +48,7 @@ impl HouseTrigger {
         match self {
             Self::PlayerOn => "PlayerOn",
             Self::PlayerOff => "PlayerOff",
+            Self::NpcOn => "NPCOn",
         }
     }
 }
@@ -111,6 +114,8 @@ pub(crate) struct HouseDefinition {
     player_off: Arc<DoorProgram>,
     /// Refused on its own: the entry needs only `PlayerOff`.
     player_on: Result<Arc<DoorProgram>, String>,
+    /// Refused on its own, like `PlayerOn`.
+    npc_on: Result<Arc<DoorProgram>, String>,
 }
 
 /// Packages that carry a `HouseView`, keyed by package name. A package whose
@@ -241,6 +246,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
     };
     let player_off = program(HouseTrigger::PlayerOff)?;
     let player_on = program(HouseTrigger::PlayerOn).map(Arc::new);
+    let npc_on = program(HouseTrigger::NpcOn).map(Arc::new);
     Ok(HouseDefinition {
         file,
         view_game_object: view_object
@@ -256,6 +262,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         outside_door: locator(view, transforms, "outsideDoorActionPoint")?,
         player_off: Arc::new(player_off),
         player_on,
+        npc_on,
     })
 }
 
@@ -447,6 +454,8 @@ pub(crate) struct HouseBinding {
     /// program was accepted.
     joint: Entity,
     joint_on: Option<Entity>,
+    /// The `NPCOn` clip's joint when that program was accepted.
+    joint_npc_on: Option<Entity>,
     definition: Arc<HouseDefinition>,
 }
 
@@ -555,8 +564,8 @@ fn bind(
         return Err("bound FixtureView is not the HouseView/Animator object".into());
     }
     let mut stack = vec![view];
-    let (mut outside, mut inside, mut joints, mut joints_on) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut outside, mut inside, mut joints, mut joints_on, mut joints_npc_on) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     while let Some(entity) = stack.pop() {
         if let Some(children) = world.get::<Children>(entity) {
             stack.extend(children.iter());
@@ -588,6 +597,13 @@ fn bind(
         {
             joints_on.push(entity);
         }
+        if definition
+            .npc_on
+            .as_ref()
+            .is_ok_and(|program| program.joint.matches(&definition.file, id))
+        {
+            joints_npc_on.push(entity);
+        }
     }
     let single = |found: &[Entity], label: &str| -> Result<Entity, String> {
         match found {
@@ -613,7 +629,11 @@ fn bind(
         Ok(_) => Some(single(&joints_on, "PlayerOn door joint")?),
         Err(_) => None,
     };
-    for joint in std::iter::once(joint).chain(joint_on) {
+    let joint_npc_on = match &definition.npc_on {
+        Ok(_) => Some(single(&joints_npc_on, "NPCOn door joint")?),
+        Err(_) => None,
+    };
+    for joint in std::iter::once(joint).chain(joint_on).chain(joint_npc_on) {
         if world.get::<Transform>(joint).is_none() {
             return Err("door joint has no Transform".into());
         }
@@ -634,6 +654,7 @@ fn bind(
         inside_door,
         joint,
         joint_on,
+        joint_npc_on,
         definition,
     })
 }
@@ -740,15 +761,16 @@ pub(crate) fn set_trigger_player_off(
     set_trigger(world, binding, HouseTrigger::PlayerOff)
 }
 
-/// `HouseView.SetAnimationTrigger(trigger)`: `Animator.SetTrigger`. The
-/// controller takes the AnyState transition on its next evaluation, which is
-/// this frame's animation update: the playback starts here and advances in
-/// the same frame's [`advance`]. The transition blends from the pose the
-/// current state writes: the bound pose in the default state, a finished
-/// clip's last pose (the joint holds it), or the previous clip still playing
-/// when the trigger comes mid-clip. While this house's transition runs the
-/// trigger stays set and is taken when that transition ends: the house
-/// transitions are uninterruptible (interruption source None in the record).
+/// `HouseView.SetAnimationTrigger(trigger)`: `Animator.SetTrigger` sets the
+/// parameter; the controller takes the AnyState transition on its next
+/// evaluation, the animation update ([`advance`]), which checks the
+/// transitions in their order and starts the first whose trigger is set. The
+/// transition blends from the pose the current state writes: the bound pose
+/// in the default state, a finished clip's last pose (the joint holds it), or
+/// the previous clip still playing when the trigger comes mid-clip. While
+/// this house's transition runs the trigger stays set and is taken when that
+/// transition ends: the house transitions are uninterruptible (interruption
+/// source None in the record).
 pub(crate) fn set_trigger(
     world: &mut World,
     binding: &HouseBinding,
@@ -761,11 +783,15 @@ pub(crate) fn set_trigger(
             (Err(reason), _) => return Err(format!("PlayerOn refused: {reason}")),
             (Ok(_), None) => return Err("PlayerOn joint not bound".into()),
         },
+        HouseTrigger::NpcOn => match (&binding.definition.npc_on, binding.joint_npc_on) {
+            (Ok(program), Some(joint)) => (program.clone(), joint),
+            (Err(reason), _) => return Err(format!("NPCOn refused: {reason}")),
+            (Ok(_), None) => return Err("NPCOn joint not bound".into()),
+        },
     };
-    let base = world
-        .get::<Transform>(joint)
-        .ok_or("door joint has no Transform")?
-        .rotation;
+    if world.get::<Transform>(joint).is_none() {
+        return Err("door joint has no Transform".into());
+    }
     let start = PendingTrigger {
         root: binding.root,
         uid: binding.uid.clone(),
@@ -781,16 +807,16 @@ pub(crate) fn set_trigger(
             binding.uid,
             trigger.name()
         );
-        if !doors
-            .pending
-            .iter()
-            .any(|pending| pending.root == start.root && pending.trigger == trigger)
-        {
-            doors.pending.push(start);
-        }
-        return Ok(());
     }
-    doors.begin(start, base);
+    // A set trigger is one parameter: setting it again before a transition
+    // consumes it changes nothing.
+    if !doors
+        .pending
+        .iter()
+        .any(|pending| pending.root == start.root && pending.trigger == trigger)
+    {
+        doors.pending.push(start);
+    }
     Ok(())
 }
 
@@ -863,6 +889,32 @@ pub(crate) fn advance(world: &mut World) {
         return;
     };
     let ignored = std::mem::take(&mut doors.ignored);
+    // The animation update: a house not in a transition takes the first of
+    // its set triggers in transition order, then every playback advances
+    // this frame.
+    let mut pending = std::mem::take(&mut doors.pending);
+    pending.sort_by_key(|start| start.program.transition_index);
+    for start in pending {
+        if world.get_entity(start.root).is_err() {
+            continue;
+        }
+        if doors.in_transition(start.root) {
+            doors.pending.push(start);
+            continue;
+        }
+        let Some(base) = world
+            .get::<Transform>(start.joint)
+            .map(|transform| transform.rotation)
+        else {
+            warn!(
+                "[house-door] {} trigger={} dropped: its door joint disappeared",
+                start.uid,
+                start.trigger.name()
+            );
+            continue;
+        };
+        doors.begin(start, base);
+    }
     doors.playing.retain_mut(|door| {
         let identity_ok = world
             .get::<SourceObjectIdentity>(door.joint)
@@ -922,34 +974,6 @@ pub(crate) fn advance(world: &mut World) {
         }
         !finished
     });
-    let mut pending = std::mem::take(&mut doors.pending);
-    pending.sort_by_key(|start| start.program.transition_index);
-    for start in pending {
-        if world.get_entity(start.root).is_err() {
-            continue;
-        }
-        if doors.in_transition(start.root) {
-            doors.pending.push(start);
-            continue;
-        }
-        let Some(base) = world
-            .get::<Transform>(start.joint)
-            .map(|transform| transform.rotation)
-        else {
-            warn!(
-                "[house-door] {} trigger={} dropped: its door joint disappeared",
-                start.uid,
-                start.trigger.name()
-            );
-            continue;
-        };
-        info!(
-            "[house-door] {} trigger={} taken: the running transition ended",
-            start.uid,
-            start.trigger.name()
-        );
-        doors.begin(start, base);
-    }
     doors.ignored = ignored;
     world.insert_resource(doors);
 }

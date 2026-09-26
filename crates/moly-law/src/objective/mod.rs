@@ -37,6 +37,7 @@
 //! 保留在 [`ladder::interrupt_dispatch`]）。枚举值域是源闭集，本模块
 //! 不增删。
 
+pub mod appearance;
 pub mod approach;
 pub mod change_site;
 pub mod ladder;

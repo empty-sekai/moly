@@ -3,11 +3,22 @@
 //! Source shape of the call: without a field camera, a graphics config or a
 //! camera object nothing is written; in the cut-scene game state the alpha is
 //! 1.0; outside the Mysekai scene nothing is written; otherwise the view's
-//! `UpdateDitherAlpha(camera, config)`. This host runs the NPC-distance branch
-//! of that update (the first NPC in the avatar list whose hips are within the
-//! transparent distance, measured to its root); the camera and player
-//! branches are named gaps of this file. Transforms are read as the frame's
-//! update sees them: the last propagated pose.
+//! `UpdateDitherAlpha(camera, config)`. This host runs its NPC-distance
+//! branch (the first NPC in the avatar list whose hips are within the
+//! transparent distance, measured to its root) and its player branch (the
+//! local player within 1.15 of the NPC's hips while the NPC is not talking:
+//! with the player visible, the distance from the NPC's root to the player
+//! remapped over 0.45), and takes the smaller of the two. Transforms are read
+//! as the frame's update sees them: the last propagated pose.
+//!
+//! The camera branch is not applied: it remaps the NPC's screen depth from
+//! the near clip plus the graphics config's NPC dither start offset over its
+//! fall-off, and those two config values are not in the extracted data. It
+//! is the player branch's value when the player is not visible, and it
+//! lowers the result when the player is visible and the NPC is not talking;
+//! both are left out, and the first frame that needs it says so once.
+//! Multiplayer's other players (the second near-player kind) do not exist in
+//! this host.
 //!
 //! The NPC branch is off (alpha 1.0) while this NPC is talking or plays a
 //! fixture action (states FixtureAction, FixtureActionIdle and the two
@@ -39,6 +50,8 @@ pub(crate) fn update_dither(
     >,
     globals: Query<&GlobalTransform>,
     gate: crate::npc_presenter::PresenterGate,
+    players: Query<(Entity, &InheritedVisibility), With<crate::player::PlayerControlled>>,
+    mut camera_gap_reported: Local<bool>,
 ) {
     let Some(registry) = registry.as_deref() else {
         return;
@@ -54,6 +67,11 @@ pub(crate) fn update_dither(
             ))
         });
     }
+    // The local player: its position and whether it is shown (TPS mode).
+    let player = players
+        .iter()
+        .next()
+        .and_then(|(entity, visible)| Some((globals.get(entity).ok()?.translation(), visible.get())));
     for (entity, unit, toon, talking, actions) in &npcs {
         if !gate.runs(entity) {
             continue;
@@ -83,11 +101,26 @@ pub(crate) fn update_dither(
                     | NpcAction::SomeFixtureAction
             )
         });
-        let alpha = moly_law::objective::overlap::npc_dither_alpha(
-            talking.is_some(),
-            false,
-            fixture_action,
-            &others,
+        use moly_law::objective::overlap as law;
+        let npc_alpha = law::npc_dither_alpha(talking.is_some(), false, fixture_action, &others);
+        // IsValidPlayerDistanceTransparent: not talking (no photo mode here),
+        // the player within the near distance of the hips.
+        let near_player = player.filter(|(position, _)| {
+            talking.is_none() && law::player_near((*position - hips.translation()).to_array())
+        });
+        let tps = player.is_some_and(|(_, visible)| visible);
+        let camera_needed =
+            near_player.is_some_and(|(_, shown)| !shown) || (tps && talking.is_none());
+        if camera_needed && !*camera_gap_reported {
+            *camera_gap_reported = true;
+            warn!("[npc-dither] unit={}: the camera branch is not applied (the graphics config's NPC dither start offset and fall-off are not extracted)", unit.0);
+        }
+        let alpha = law::update_dither_alpha(
+            npc_alpha,
+            near_player.map(|(position, _)| (position - root.translation()).to_array()),
+            tps,
+            talking.is_none(),
+            None,
         );
         let use_dither = if moly_law::objective::overlap::use_dither(alpha) {
             1.0_f32

@@ -875,6 +875,11 @@ pub fn plan_when_wired(
             let slot = rig.slots.get(name.as_str()).unwrap_or_else(|| {
                 panic!("unit {} 的骨架档案里没有 glb 网格材质 {name}", unit.0)
             });
+            // The accessory program declares no ShadowCaster pass, so its
+            // renderer never draws into the main light's shadow map.
+            if slot.shader == law::SHADER_NAME_ACCESSORY {
+                commands.entity(entity).insert(crate::shadowmap::NoShadowCast);
+            }
             let material = match build_material(&rig, slot, &pack.rig_file, &server, &render_device, true) {
                 Ok(material) => material,
                 Err(reason) => panic!("unit {} 的角色材质解析失败：{reason}", unit.0),

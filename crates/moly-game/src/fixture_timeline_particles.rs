@@ -41,6 +41,9 @@ pub(crate) struct ParticleControlBinding {
 #[derive(Component)]
 struct Archive {
     index: Handle<JsonAsset>,
+    /// The particle package this holder's document was chosen by: the
+    /// fixture's own source package, or the package a director owner named.
+    package: Option<String>,
     document: Option<Handle<JsonAsset>>,
     parsed: Option<Arc<Value>>,
     last_used: f64,
@@ -158,6 +161,16 @@ impl StoppedByDirector {
 #[derive(Component)]
 pub(crate) struct RestoredAutonomous;
 
+/// On an emitter node whose system a prefab's director owner took over
+/// ([`prepare_object`], [`prepare_played_object`]): from the owner's first
+/// preparation the system is the owner's (a ControlPlayable's Initialize stops
+/// and clears it at graph build; a Signal-played system waits for its Play),
+/// so a scene host that plays the scene's systems from load skips it. Never
+/// removed: Simulate and Stop leave a system out of the per-frame manager,
+/// and nothing plays it again but its owner or an activation edge.
+#[derive(Component)]
+pub(crate) struct DrivenByPrefabOwner;
+
 fn json(world: &World, handle: &Handle<JsonAsset>) -> Result<Arc<Value>, TimelineFailure> {
     if let LoadState::Failed(error) = world.resource::<AssetServer>().load_state(handle) {
         return Err(invalid(format!("source particle archive failed: {error}")));
@@ -171,10 +184,21 @@ fn json(world: &World, handle: &Handle<JsonAsset>) -> Result<Arc<Value>, Timelin
         .map_err(|error| invalid(format!("invalid source particle archive: {error}")))
 }
 
-fn archive(world: &mut World, fixture: Entity) -> Result<Arc<Value>, TimelineFailure> {
+/// The particle document a holder's controls read: `package` names it for a
+/// director owner whose prefab carries no fixture source of its own (a step
+/// item, a site scene, a cut scene); `None` reads the fixture's own source
+/// package. One holder reads one package.
+fn archive(world: &mut World, fixture: Entity, package: Option<&str>) -> Result<Arc<Value>, TimelineFailure> {
     let now = realtime(world);
     if let Some(mut archive) = world.get_mut::<Archive>(fixture) {
         archive.last_used = now;
+    }
+    if let (Some(wanted), Some(held)) = (package, world.get::<Archive>(fixture).and_then(|a| a.package.clone())) {
+        if wanted != held {
+            return Err(invalid(format!(
+                "particle owner already reads the {held} particle document, not {wanted}"
+            )));
+        }
     }
     if let Some(parsed) = world.get::<Archive>(fixture).and_then(|a| a.parsed.clone()) {
         return Ok(parsed);
@@ -185,6 +209,7 @@ fn archive(world: &mut World, fixture: Entity) -> Result<Arc<Value>, TimelineFai
             .load("moly://fixture-particles-v2/index.json");
         world.entity_mut(fixture).insert(Archive {
             index,
+            package: package.map(str::to_owned),
             document: None,
             parsed: None,
             last_used: now,
@@ -195,15 +220,20 @@ fn archive(world: &mut World, fixture: Entity) -> Result<Arc<Value>, TimelineFai
         Some(handle) => handle,
         None => {
             let index = json(world, &index)?;
-            let source = world
-                .get::<crate::fixture::FixtureSource>(fixture)
-                .ok_or_else(|| invalid("particle control fixture has no source GLB"))?;
-            let package = source
-                .0
-                .path()
-                .and_then(|path| path.path().file_stem())
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| invalid("particle control source package is missing"))?;
+            let package = match package {
+                Some(package) => package.to_owned(),
+                None => world
+                    .get::<crate::fixture::FixtureSource>(fixture)
+                    .ok_or_else(|| invalid("particle control fixture has no source GLB"))?
+                    .0
+                    .path()
+                    .and_then(|path| path.path().file_stem())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid("particle control source package is missing"))?,
+            };
+            let package = package.as_str();
+            world.get_mut::<Archive>(fixture).unwrap().package = Some(package.to_owned());
             let file = index["packages"][package]["file"].as_str().ok_or_else(|| {
                 invalid(format!("fixture {package} lacks a source particle archive"))
             })?;
@@ -224,8 +254,30 @@ fn archive(world: &mut World, fixture: Entity) -> Result<Arc<Value>, TimelineFai
             handle
         }
     };
-    let parsed = json(world, &document)?;
+    let parsed = shared_document(world, &document)?;
     world.get_mut::<Archive>(fixture).unwrap().parsed = Some(parsed.clone());
+    Ok(parsed)
+}
+
+/// Parsed particle documents by asset, shared by every holder reading the
+/// same package (a step item, the site it plays on and the site's director
+/// read one document); a document lives while a holder keeps it.
+#[derive(Resource, Default)]
+struct ParsedDocuments(HashMap<AssetId<JsonAsset>, Weak<Value>>);
+
+fn shared_document(world: &mut World, handle: &Handle<JsonAsset>) -> Result<Arc<Value>, TimelineFailure> {
+    let id = handle.id();
+    if let Some(parsed) = world
+        .get_resource::<ParsedDocuments>()
+        .and_then(|cache| cache.0.get(&id))
+        .and_then(Weak::upgrade)
+    {
+        return Ok(parsed);
+    }
+    let parsed = json(world, handle)?;
+    let mut cache = world.get_resource_or_insert_with(ParsedDocuments::default);
+    cache.0.retain(|_, held| held.strong_count() > 0);
+    cache.0.insert(id, Arc::downgrade(&parsed));
     Ok(parsed)
 }
 
@@ -248,10 +300,19 @@ fn collect(world: &World, entity: Entity, prefix: &str, output: &mut Vec<(Entity
 /// The source GameObject a spawned fixture GLB node stands for. Sibling
 /// GameObjects may share a name (four `sekai` emitters under one effect), so
 /// a node path does not name one object; every fixture GLB node carries its
-/// GameObject identity, and so does every archive node and emitter.
+/// GameObject identity, and so does every archive node and emitter. A site
+/// or step-item GLB node carries it as its source object identity; within
+/// one package's document the GameObject path id names one object.
 fn instance_identity(world: &World, entity: Entity) -> Option<i64> {
-    let extras = world.get::<bevy::gltf::GltfExtras>(entity)?;
-    serde_json::from_str::<Value>(&extras.value).ok()?["gameObjectId"].as_i64()
+    let fixture = world
+        .get::<bevy::gltf::GltfExtras>(entity)
+        .and_then(|extras| serde_json::from_str::<Value>(&extras.value).ok())
+        .and_then(|extras| extras["gameObjectId"].as_i64());
+    fixture.or_else(|| {
+        world
+            .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)
+            .map(|source| source.game_object)
+    })
 }
 
 fn identity(record: &Value, what: &str) -> Result<i64, TimelineFailure> {
@@ -415,6 +476,63 @@ fn inventory(doc: &Value, root: i64, settings: &ControlSettings) -> Result<(), T
     Ok(())
 }
 
+/// One package document's emitter and node lists, with each emitter by its
+/// GameObject identity.
+struct Inventory<'a> {
+    particles: &'a [Value],
+    nodes: &'a [Value],
+    by_id: HashMap<i64, usize>,
+}
+
+impl<'a> Inventory<'a> {
+    fn of(doc: &'a Value) -> Result<Self, TimelineFailure> {
+        let particles = doc["emitters"]
+            .as_array()
+            .ok_or_else(|| invalid("source emitter inventory is missing"))?;
+        let nodes = doc["nodes"]
+            .as_array()
+            .ok_or_else(|| invalid("source node inventory is missing"))?;
+        let mut by_id = HashMap::new();
+        for (index, particle) in particles.iter().enumerate() {
+            if by_id
+                .insert(identity(particle, "particle")?, index)
+                .is_some()
+            {
+                return Err(invalid(format!(
+                    "{}: source particle identity is duplicated",
+                    particle["node"].as_str().unwrap_or("?")
+                )));
+            }
+        }
+        Ok(Self { particles, nodes, by_id })
+    }
+
+    /// Each spawned node under `top` with the emitter it instantiates.
+    fn instances(&self, world: &World, top: Entity) -> Result<Instances, TimelineFailure> {
+        let mut paths = Vec::new();
+        collect(world, top, "", &mut paths);
+        let mut instances = Vec::with_capacity(paths.len());
+        let mut placed = HashSet::new();
+        for (entity, path) in paths {
+            let ordinal = instance_identity(world, entity).and_then(|id| self.by_id.get(&id).copied());
+            if let Some(ordinal) = ordinal {
+                if !placed.insert(ordinal) {
+                    return Err(invalid(format!(
+                        "{path}: one source particle has two spawned instances"
+                    )));
+                }
+            }
+            instances.push((entity, path, ordinal));
+        }
+        Ok(Instances { rows: instances, placed })
+    }
+}
+
+struct Instances {
+    rows: Vec<(Entity, String, Option<usize>)>,
+    placed: HashSet<usize>,
+}
+
 pub(crate) fn prepare(
     world: &mut World,
     fixture: Entity,
@@ -424,44 +542,13 @@ pub(crate) fn prepare(
     if world.get_entity(fixture).is_err() {
         return Err(invalid("particle fixture was destroyed"));
     }
-    let doc = archive(world, fixture)?;
-    let particles = doc["emitters"]
-        .as_array()
-        .ok_or_else(|| invalid("source emitter inventory is missing"))?;
-    let nodes = doc["nodes"]
-        .as_array()
-        .ok_or_else(|| invalid("source node inventory is missing"))?;
-    let mut by_id = HashMap::new();
-    for (index, particle) in particles.iter().enumerate() {
-        if by_id
-            .insert(identity(particle, "particle")?, index)
-            .is_some()
-        {
-            return Err(invalid(format!(
-                "{}: source particle identity is duplicated",
-                particle["node"].as_str().unwrap_or("?")
-            )));
-        }
-    }
-    let mut paths = Vec::new();
-    collect(world, fixture, "", &mut paths);
-    // Each spawned node with the emitter it instantiates.
-    let mut instances = Vec::with_capacity(paths.len());
-    let mut placed = HashSet::new();
-    for (entity, path) in paths {
-        let ordinal = instance_identity(world, entity).and_then(|id| by_id.get(&id).copied());
-        if let Some(ordinal) = ordinal {
-            if !placed.insert(ordinal) {
-                return Err(invalid(format!(
-                    "{path}: one source particle has two spawned instances"
-                )));
-            }
-        }
-        instances.push((entity, path, ordinal));
-    }
+    let doc = archive(world, fixture, None)?;
+    let inventory = Inventory::of(&doc)?;
+    let instances = inventory.instances(world, fixture)?;
     // Game BindEffect uses the first source-order ParticleSystem name inside
     // this fixture instance. A renderer or another fixture is not a candidate.
     let (root, root_ordinal) = instances
+        .rows
         .iter()
         .find_map(|(entity, path, ordinal)| {
             ordinal
@@ -469,17 +556,425 @@ pub(crate) fn prepare(
                 .map(|ordinal| (*entity, ordinal))
         })
         .ok_or_else(|| invalid(format!("fixture particle binding not found: {bind_name}")))?;
-    let root_id = identity(&particles[root_ordinal], "particle")?;
-    inventory(&doc, root_id, settings)?;
+    let root_id = identity(&inventory.particles[root_ordinal], "particle")?;
+    prepare_root(world, fixture, &doc, &inventory, &instances, root, root_id, settings, true)
+}
+
+/// A Control clip of a director whose prefab carries no fixture particle
+/// archive of its own (a step item, a site scene's director, a cut scene):
+/// `object` is the spawned node its `sourceGameObject` resolves to on the
+/// director (`ExposedReference.Resolve`), `owner` the spawned prefab root the
+/// director owns, and `package` the particle package whose document holds
+/// that prefab (the timeline's own package: an exposed reference or a default
+/// value of file 0 names an object of the same serialized file). The binding
+/// is then driven by [`sample`], [`validate`] and [`release`] exactly as the
+/// fixture route's.
+///
+/// ControlPlayableAsset.CreatePlayable controls a ParticleSystem only when
+/// the object carries one itself or `searchHierarchy` is set
+/// (GetControllableParticleSystems); it then takes every ParticleSystem of the
+/// object's Transform subtree in pre-order, one ParticleControlPlayable each.
+pub(crate) fn prepare_object(
+    world: &mut World,
+    owner: Entity,
+    object: Entity,
+    package: &str,
+    settings: &ControlSettings,
+) -> Result<ParticleControlBinding, TimelineFailure> {
+    if world.get_entity(owner).is_err() || world.get_entity(object).is_err() {
+        return Err(invalid("particle owner or controlled object was destroyed"));
+    }
+    if !instance_descends(world, object, owner) {
+        return Err(invalid("controlled object is outside its director's prefab"));
+    }
+    let root_id = instance_identity(world, object)
+        .ok_or_else(|| invalid("controlled object carries no source GameObject identity"))?;
+    let doc = archive(world, owner, Some(package))?;
+    let source = Inventory::of(&doc)?;
+    let node = source
+        .nodes
+        .iter()
+        .find(|node| node["gameObjectId"].as_i64() == Some(root_id))
+        .ok_or_else(|| invalid(format!("GameObject {root_id} is not in the {package} particle document")))?;
+    let carries_system = node["componentClasses"]
+        .as_array()
+        .ok_or_else(|| invalid(format!("GameObject {root_id}: component inventory missing; re-extract")))?
+        .iter()
+        .any(|class| class.as_str() == Some("ParticleSystem"));
+    let instances = source.instances(world, object)?;
+    if !carries_system && !settings.search_hierarchy {
+        inventory(&doc, root_id, settings)?;
+        return Ok(empty_binding(object, owner));
+    }
+    prepare_root(world, owner, &doc, &source, &instances, object, root_id, settings, false)
+}
+
+/// The systems of one object that an owner plays and stops by
+/// `ParticleSystem.Play()` / `Stop()` on the object's own system: a timeline
+/// Signal reaction (a SignalReceiver's persistent call on the target), which
+/// runs them on the per-frame manager path, not by Simulate. The systems are
+/// the object's: its draws are its children and go with it, whoever sent the
+/// signal (a step item's director may end long before the object does).
+#[derive(Clone)]
+pub(crate) struct ParticlePlayBinding {
+    pub root: Entity,
+    draws: Vec<Entity>,
+}
+
+#[derive(Component)]
+struct PreparedPlay {
+    draws: Vec<Entity>,
+    /// Stop() ran since the last Play(), or no Play ran yet: the next Play
+    /// restarts the systems (Stop set their restart flag). A Play on a
+    /// playing system restarts nothing.
+    stopped: bool,
+}
+
+/// Prepare the systems `ParticleSystem.Play(withChildren: true)` on `object`'s
+/// own system reaches: that system and every system of its Transform subtree,
+/// stopped until [`play_object`]. `package`, `owner` and `object` as in
+/// [`prepare_object`]. A sub-emitter parent is refused (its children would be
+/// played by their parent, which this host does not install). Retry while
+/// the error is retryable.
+pub(crate) fn prepare_played_object(
+    world: &mut World,
+    owner: Entity,
+    object: Entity,
+    package: &str,
+) -> Result<ParticlePlayBinding, TimelineFailure> {
+    if world.get_entity(owner).is_err() || world.get_entity(object).is_err() {
+        return Err(invalid("particle owner or played object was destroyed"));
+    }
+    if !instance_descends(world, object, owner) {
+        return Err(invalid("played object is outside its owner's prefab"));
+    }
+    if let Some(prepared) = world.get::<PreparedPlay>(object) {
+        return Ok(ParticlePlayBinding { root: object, draws: prepared.draws.clone() });
+    }
+    let root_id = instance_identity(world, object)
+        .ok_or_else(|| invalid("played object carries no source GameObject identity"))?;
+    let doc = archive(world, owner, Some(package))?;
+    let inventory = Inventory::of(&doc)?;
+    if !inventory.by_id.contains_key(&root_id) {
+        return Err(invalid(format!("GameObject {root_id} carries no ParticleSystem in the {package} particle document")));
+    }
+    let instances = inventory.instances(world, object)?;
+    let mut selected = Vec::new();
+    for (anchor, path, ordinal) in &instances.rows {
+        let Some(ordinal) = *ordinal else { continue };
+        let particle = &inventory.particles[ordinal];
+        if let Some(error) = particle["systemError"].as_str() {
+            return Err(invalid(format!("{path}: {error}")));
+        }
+        let modules = ParticleSourceModules::from_system(&particle["system"])
+            .map_err(|error| invalid(format!("{path}: {error}")))?;
+        if modules.enabled.iter().any(|name| name == "SubModule")
+            || particle["system"]["subEmitters"].as_array().is_some_and(|rows| !rows.is_empty())
+        {
+            return Err(invalid(format!("{path}: a played sub-emitter parent is not installed by this host")));
+        }
+        // A system whose Emission module is off never emits; Play leaves it empty.
+        if !modules.enabled.iter().any(|name| name == "EmissionModule") {
+            continue;
+        }
+        shared_path_reads_agree(inventory.particles, inventory.nodes, particle)?;
+        selected.push((*anchor, ordinal));
+    }
+    for (anchor, _) in &selected {
+        world.entity_mut(*anchor).insert(DrivenByPrefabOwner);
+    }
+    let draws = crate::weather_fx::fixture::prepare_play_later(world, object, &doc, &selected)
+        .map_err(invalid)?
+        .ok_or_else(|| loading("source particle shader/geometry is preparing"))?;
+    for &draw in &draws {
+        if let Some(mut source) = world.get_mut::<SourceParticle>(draw) {
+            source.enabled = true;
+        }
+    }
+    world.entity_mut(object).insert(PreparedPlay {
+        draws: draws.clone(),
+        stopped: true,
+    });
+    Ok(ParticlePlayBinding { root: object, draws })
+}
+
+/// `ParticleSystem.Play()` on the object's system (withChildren): a system
+/// never played takes its first Play (seed reset, birth owner, first-Play
+/// warm); a stopped one plays again (see
+/// [`crate::weather_fx::fixture::play`]); a playing one is left as it is.
+/// Returns how many systems it played.
+pub(crate) fn play_object(world: &mut World, binding: &ParticlePlayBinding) -> Result<usize, String> {
+    let Some(mut prepared) = world.entity_mut(binding.root).take::<PreparedPlay>() else {
+        return Err("played object was released".into());
+    };
+    let result = (|| {
+        if !prepared.stopped {
+            return Ok(0);
+        }
+        // Systems that played before: Play after Stop.
+        let mut played = crate::weather_fx::fixture::play(world, binding.root)?;
+        for &draw in &binding.draws {
+            if world.get_entity(draw).is_ok() && crate::weather_fx::fixture::play_pending(world, draw)? {
+                played += 1;
+            }
+        }
+        prepared.stopped = false;
+        Ok(played)
+    })();
+    world.entity_mut(binding.root).insert(prepared);
+    result
+}
+
+/// `ParticleSystem.Stop()` on the object's system: `Stop(withChildren: true,
+/// StopEmitting)`, so the live particles finish their lifetimes. Returns how
+/// many systems it stopped.
+pub(crate) fn stop_object(world: &mut World, binding: &ParticlePlayBinding) -> usize {
+    let stopped = crate::weather_fx::fixture::stop_emitting(world, binding.root);
+    if let Some(mut prepared) = world.get_mut::<PreparedPlay>(binding.root) {
+        prepared.stopped = true;
+    }
+    stopped
+}
+
+/// The call a SignalReceiver reaction makes on a ParticleSystem: its
+/// persistent call with no argument (`ParticleSystem.Play()`, `Stop()`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignalCall {
+    Play,
+    Stop,
+}
+
+/// A Signal marker of a director's timeline with the reaction of the
+/// receiver its track is bound to: at `time` the receiver's persistent call
+/// runs `call` on `target`'s system. `emit_once`: the marker's own flag.
+#[derive(Clone)]
+pub(crate) struct SignalReaction {
+    pub time: f64,
+    pub emit_once: bool,
+    pub signal: String,
+    pub call: SignalCall,
+    pub target: ParticlePlayBinding,
+}
+
+/// Run one reaction's call; returns how many systems it played or stopped.
+pub(crate) fn react(world: &mut World, reaction: &SignalReaction) -> Result<usize, String> {
+    match reaction.call {
+        SignalCall::Play => play_object(world, &reaction.target),
+        SignalCall::Stop => Ok(stop_object(world, &reaction.target)),
+    }
+}
+
+/// A director session's Signal reactions, sent as its time passes their
+/// markers. Stand-in dispatch: a marker is sent in the first sample whose
+/// time reaches it after a sample before it (the first sample includes its
+/// own time); a time that goes back (a loop) arms the markers again, and an
+/// `emit_once` marker is sent once per session. The notification pass of the
+/// source (its interval test, retroactive markers, restore on loop) is not
+/// ported.
+#[derive(Default)]
+pub(crate) struct SignalDispatch {
+    reactions: Vec<SignalReaction>,
+    sent: Vec<bool>,
+    last: Option<f64>,
+}
+
+impl SignalDispatch {
+    pub(crate) fn new(reactions: Vec<SignalReaction>) -> Self {
+        let sent = vec![false; reactions.len()];
+        Self { reactions, sent, last: None }
+    }
+
+    pub(crate) fn advance(&mut self, world: &mut World, time: f64) -> Result<(), String> {
+        let previous = self.last.replace(time);
+        let looped = previous.is_some_and(|previous| time < previous);
+        for (index, reaction) in self.reactions.iter().enumerate() {
+            if reaction.emit_once && self.sent[index] {
+                continue;
+            }
+            let due = match previous {
+                None => reaction.time <= time,
+                Some(_) if looped => reaction.time <= time,
+                Some(previous) => previous < reaction.time && reaction.time <= time,
+            };
+            if !due {
+                continue;
+            }
+            self.sent[index] = true;
+            let count = react(world, reaction)?;
+            info!(
+                "[prefab-director] Signal {} (marker {:.4} s) at director time {time:.4}: {:?} on {count} systems of {:?}",
+                reaction.signal,
+                reaction.time,
+                reaction.call,
+                world.get::<Name>(reaction.target.root).map(Name::as_str)
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Developer stand-in (DevTools only) for the Signal markers and receiver
+/// reactions the timeline tables do not carry yet. It knows one Signal
+/// track: the dewdrop step item's, which the delivery flow binds to the
+/// site's delivery signal receiver. Its two markers (the tree effect's play
+/// at 0.6833 s, sent once, and its stop at 1.15 s) and that receiver (on the
+/// site tree's `fx_bdtree02`, whose reactions call `Play()` / `Stop()` on the
+/// same object's system) are read from the site package. Every other
+/// definition gets no reactions. The exported (time, signal, receiver)
+/// rows replace it.
+pub(crate) fn signal_stand_in(
+    world: &mut World,
+    definition: &crate::fixture_activity_timeline::TimelineDefinition,
+) -> Result<Vec<SignalReaction>, TimelineFailure> {
+    const DIRECTOR: &str = "-3154110674756471997";
+    const TRACK: &str = "-1252092068188085713";
+    const RECEIVER: i64 = 6653597469877562143;
+    const MARKERS: [(f64, bool, &str, SignalCall); 2] = [
+        (0.6833333333333335, true, "fx_bdtree02_effect_play", SignalCall::Play),
+        (1.1500000000000004, false, "fx_bdtree02_effect_stop", SignalCall::Stop),
+    ];
+    if !crate::dev_tools::installed()
+        || definition.director.path_id != DIRECTOR
+        || !definition
+            .tracks
+            .iter()
+            .any(|track| track.class == "SignalTrack" && track.identity.path_id == TRACK)
+    {
+        return Ok(Vec::new());
+    }
+    let file = definition.director.file.clone();
+    let hits: Vec<Entity> = world
+        .query::<(Entity, &moly_assets::source_navigation::SourceObjectIdentity)>()
+        .iter(world)
+        .filter(|(_, identity)| identity.file == file && identity.components.contains(&RECEIVER))
+        .map(|(entity, _)| entity)
+        .collect();
+    let [target] = hits.as_slice() else {
+        warn!(
+            "[prefab-director] {} spawned nodes carry the site's delivery signal receiver; the Signal stand-in sends nothing",
+            hits.len()
+        );
+        return Ok(Vec::new());
+    };
+    let mut owner = *target;
+    while world
+        .get::<moly_assets::coordinates::CanonicalCoordinates>(owner)
+        .is_none()
+    {
+        owner = world
+            .get::<ChildOf>(owner)
+            .map(ChildOf::parent)
+            .ok_or_else(|| invalid("the signal receiver has no coordinate-contract ancestor"))?;
+    }
+    let binding = match prepare_played_object(world, owner, *target, &definition.package) {
+        Ok(binding) => binding,
+        Err(error) if error.retryable => return Err(error),
+        Err(error) => {
+            warn!(
+                "[prefab-director] the Signal stand-in's receiver target {:?} is refused by the particle host: {}; no signal is sent",
+                world.get::<Name>(*target).map(Name::as_str),
+                error.message
+            );
+            return Ok(Vec::new());
+        }
+    };
+    Ok(MARKERS
+        .iter()
+        .map(|&(time, emit_once, signal, call)| SignalReaction {
+            time,
+            emit_once,
+            signal: signal.to_owned(),
+            call,
+            target: binding.clone(),
+        })
+        .collect())
+}
+
+/// Developer trace (DevTools only), once a second: the live and born counts
+/// of every object whose systems a prefab's director owner drives.
+pub(crate) fn trace_owned(world: &mut World) {
+    if !crate::dev_tools::installed() {
+        return;
+    }
+    let now = realtime(world);
+    let last = world.get_resource_or_insert_with(|| OwnedTrace(f64::NEG_INFINITY)).0;
+    if now - last < 1.0 {
+        return;
+    }
+    world.resource_mut::<OwnedTrace>().0 = now;
+    let mut objects: Vec<(Entity, Vec<Entity>, &'static str)> = world
+        .query::<(Entity, &Prepared)>()
+        .iter(world)
+        .map(|(entity, prepared)| (entity, prepared.draws.clone(), "control"))
+        .collect();
+    objects.extend(
+        world
+            .query::<(Entity, &PreparedPlay)>()
+            .iter(world)
+            .map(|(entity, prepared)| (entity, prepared.draws.clone(), "signal")),
+    );
+    let mut rows = Vec::new();
+    for (object, draws, route) in objects {
+        let (mut systems, mut live, mut born, mut owned) = (0usize, 0usize, 0u64, false);
+        for draw in &draws {
+            let Some(system) = world.get::<FixtureParticleLive>(*draw) else {
+                continue;
+            };
+            owned |= system
+                .0
+                .anchor
+                .is_some_and(|anchor| world.get::<DrivenByPrefabOwner>(anchor).is_some());
+            systems += 1;
+            live += system.0.pool.len();
+            born += system.0.born_total;
+        }
+        if owned {
+            rows.push(format!(
+                "{object:?} {:?} {route} systems {systems} live {live} born {born}",
+                world.get::<Name>(object).map(Name::as_str)
+            ));
+        }
+    }
+    if !rows.is_empty() {
+        rows.sort();
+        info!("[prefab-director-trace] {}", rows.join("; "));
+    }
+}
+
+#[derive(Resource)]
+struct OwnedTrace(f64);
+
+fn empty_binding(root: Entity, fixture: Entity) -> ParticleControlBinding {
+    ParticleControlBinding {
+        root,
+        fixture,
+        draws: Vec::new(),
+        created: Vec::new(),
+        seeds: HashMap::new(),
+        lease: Arc::new(()),
+    }
+}
+
+/// The controlled systems under `root` and their dormant draws. `fixture_host`
+/// waits for a fixture's own autonomous preparation first, so taking over an
+/// already active emitter never creates two simulations for one node.
+#[allow(clippy::too_many_arguments)]
+fn prepare_root(
+    world: &mut World,
+    fixture: Entity,
+    doc: &Value,
+    source: &Inventory<'_>,
+    instances: &Instances,
+    root: Entity,
+    root_id: i64,
+    settings: &ControlSettings,
+    fixture_host: bool,
+) -> Result<ParticleControlBinding, TimelineFailure> {
+    let (particles, nodes, by_id, placed) = (source.particles, source.nodes, &source.by_id, &instances.placed);
+    let instances = &instances.rows;
+    inventory(doc, root_id, settings)?;
     if !settings.update_particle {
-        return Ok(ParticleControlBinding {
-            root,
-            fixture,
-            draws: Vec::new(),
-            created: Vec::new(),
-            seeds: HashMap::new(),
-            lease: Arc::new(()),
-        });
+        return Ok(empty_binding(root, fixture));
     }
     if let Some(binding) = world.get::<Prepared>(root).and_then(Prepared::binding) {
         validate(world, &binding)?;
@@ -512,21 +1007,22 @@ pub(crate) fn prepare(
     }
     // Let the normal fixture path finish first, so taking over an already
     // active emitter never creates two autonomous simulations for one node.
-    if world
-        .get::<crate::uber_particle::FixtureParticlesResolved>(fixture)
-        .is_none()
-        || world
-            .get::<crate::uber_particle::FixtureParticleRequest>(fixture)
-            .is_some()
-        || world
-            .get::<crate::weather_fx::fixture::Request>(fixture)
-            .is_some()
+    if fixture_host
+        && (world
+            .get::<crate::uber_particle::FixtureParticlesResolved>(fixture)
+            .is_none()
+            || world
+                .get::<crate::uber_particle::FixtureParticleRequest>(fixture)
+                .is_some()
+            || world
+                .get::<crate::weather_fx::fixture::Request>(fixture)
+                .is_some())
     {
         return Err(loading("fixture particle preparation is still loading"));
     }
     let mut selected = Vec::new();
     let mut seeds = HashMap::new();
-    for (anchor, path, ordinal) in &instances {
+    for (anchor, path, ordinal) in instances {
         let Some(ordinal) = *ordinal else {
             continue;
         };
@@ -564,6 +1060,11 @@ pub(crate) fn prepare(
         seeds.insert(*anchor, if auto_seed { None } else { Some(seed) });
         selected.push((*anchor, ordinal));
     }
+    if !fixture_host {
+        for (anchor, _) in &selected {
+            world.entity_mut(*anchor).insert(DrivenByPrefabOwner);
+        }
+    }
     let existing: Vec<_> = world
         .query::<(Entity, &FixtureParticleLive)>()
         .iter(world)
@@ -587,7 +1088,11 @@ pub(crate) fn prepare(
         .copied()
         .filter(|(anchor, _)| !existing.iter().any(|(_, old)| old == anchor))
         .collect();
-    let created = crate::weather_fx::fixture::prepare_director_control(world, root, &doc, &new)
+    let created = if fixture_host {
+        crate::weather_fx::fixture::prepare_director_control(world, root, doc, &new)
+    } else {
+        crate::weather_fx::fixture::prepare_owner_director_control(world, root, doc, &new)
+    }
         .map_err(invalid)?
         .ok_or_else(|| loading("source particle shader/geometry is preparing"))?;
     let draws: Vec<_> = existing
@@ -642,15 +1147,14 @@ pub(crate) fn validate(
         if world.get::<FixtureParticleLive>(draw).is_none() {
             return Err(invalid("prepared particle simulation is missing"));
         }
+        // Preparation returned this draw only once its GPU source was Ready.
+        // The render world resets readiness to Pending at each frame's queue
+        // and sets Ready again once the pipelines are confirmed, so a later
+        // read may see that window (or a dormant draw it did not queue):
+        // after preparation only a failure refuses.
         if let Some(source) = world.get::<SourceParticle>(draw) {
-            match &*source.readiness.lock().unwrap() {
-                ParticleReadiness::Ready => {}
-                ParticleReadiness::Pending => {
-                    return Err(loading("particle source GPU is preparing"));
-                }
-                ParticleReadiness::Failed(error) => {
-                    return Err(invalid(format!("particle source GPU: {error}")));
-                }
+            if let ParticleReadiness::Failed(error) = &*source.readiness.lock().unwrap() {
+                return Err(invalid(format!("particle source GPU: {error}")));
             }
         }
     }
@@ -790,6 +1294,7 @@ fn discard(world: &mut World, prepared: Prepared) {
 /// Called from the existing particle PostUpdate. No cache outlives its request
 /// or a short in-flight preparation grace period, even when admission fails.
 pub(crate) fn collect_garbage(world: &mut World) {
+    trace_owned(world);
     let expired: Vec<_> = world
         .query::<(Entity, &Prepared)>()
         .iter(world)
@@ -1083,6 +1588,7 @@ mod tests {
         let fixture = world.spawn_empty().id();
         world.entity_mut(fixture).insert(Archive {
             index: Handle::default(),
+            package: None,
             document: None,
             parsed: Some(Arc::new(json!({"temporary":"source inventory"}))),
             last_used: 0.0,

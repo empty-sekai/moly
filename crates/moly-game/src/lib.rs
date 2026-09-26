@@ -22,9 +22,12 @@ pub mod camera;
 pub mod canvas;
 pub mod character;
 pub mod character_material;
+mod character_silhouette;
 pub mod client_config;
 pub mod cloth_runtime;
 mod content_library;
+mod cutscene;
+mod cutscene_camera;
 mod delayed_faces;
 pub mod delivery;
 mod delivery_camera;
@@ -43,6 +46,7 @@ pub mod fixture_attach;
 mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
+mod floor_edit_camera;
 pub mod fixture_emission;
 mod fixture_clock;
 mod fixture_gimmick;
@@ -54,6 +58,7 @@ mod fixture_tiles;
 mod footstep;
 mod frame_capture;
 pub mod game_settings;
+mod game_state;
 pub mod gesture;
 pub mod get_resource;
 pub mod learn_phenomena_dialog;
@@ -80,6 +85,8 @@ mod npc_clock;
 mod npc_dither;
 mod npc_fixture_activity;
 mod npc_fixture_talk;
+mod npc_gate;
+mod npc_look_at;
 #[cfg(test)]
 mod npc_harness;
 pub mod npc_objective;
@@ -109,16 +116,19 @@ mod render;
 mod room_appearance;
 mod room_shell;
 pub mod schedule;
+mod screen_fade;
 mod server_panel;
 mod settings_store;
 pub mod shadowmap;
 pub mod site;
 pub mod site_material;
 pub mod site_sound;
+mod site_expansion;
 pub(crate) mod site_move;
 pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
+pub mod site_extension;
 mod source_curve;
 mod weather_animation;
 #[cfg(test)]
@@ -221,6 +231,11 @@ pub fn app(
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);
+    screen_fade::install(&mut app);
+    game_state::install(&mut app);
+    site_expansion::install(&mut app);
+    cutscene_camera::install(&mut app);
+    cutscene::install(&mut app);
     footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
@@ -234,6 +249,7 @@ pub fn app(
         fixture_material::FixtureMaterialPlugin,
         fixture_emission::FixtureEmissionPlugin,
     ));
+    app.add_plugins(character_silhouette::CharacterSilhouettePlugin);
     app.add_plugins(fixture_edit::FixtureEditPlugin);
     app.add_plugins((source_color::SourceColorPlugin, source_particle_render::SourceParticlePlugin));
     app.add_plugins((

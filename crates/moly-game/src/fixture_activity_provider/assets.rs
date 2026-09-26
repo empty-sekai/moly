@@ -55,6 +55,11 @@ impl TimelineFamily {
         root: "site-timeline",
         prefix: "mysekai__site__",
     };
+    /// Cut-scene timelines (`mysekai/cut_scene/...` bundles).
+    pub(crate) const CUTSCENE: Self = Self {
+        root: "cutscene-timeline",
+        prefix: "mysekai__cut_scene__",
+    };
 }
 
 #[derive(Default)]
