@@ -19,7 +19,11 @@
 //! The execution cancels the current objective (none means no greeting this
 //! frame; every objective this host runs can be cancelled; a Rest's cancel
 //! changes to Idle; a no-talk objective's cancel releases its fixture
-//! session), resets the AI model twice, draws a general talk (one
+//! session; the no-talk objective's and the while-doing-wait sub objective's
+//! cancels make one ForceUpdateObjective, the sub objective's after a change
+//! to Idle: a reset and a row-1 cascade on the decision pass's scene, whose
+//! data the greeting's own reset then discards while its draws stay made),
+//! resets the AI model twice, draws a general talk (one
 //! engine integer range over the character's general talks), writes greeting
 //! data with that talk, the talk's pre-action tweet id and the flag that
 //! skips the next Rest, and stops the character. The cancelled objective ends
@@ -29,12 +33,15 @@
 //! Named inputs: the tutorial flag comes from the server panel; no character
 //! communication, cut scene executor or birthday context exists in this
 //! host, so rows 2 and 9 read false and row 5 reads the host's one cut-scene
-//! flag. Named gap: a cancelled no-talk objective runs a ForceUpdateObjective
-//! in the source (a reset and a row-1 cascade whose data the greeting's own
-//! reset discards); its draws are not made here. A general lottery that raises, or a drawn talk this host cannot
+//! flag. A general lottery that raises, or a drawn talk this host cannot
 //! resolve, is a source exception inside the presenter update: it is logged
 //! by name and this character makes no further greeting attempt (the source
-//! would raise again on every later frame).
+//! would raise again on every later frame). A cascade whose factory raises is
+//! caught by the cancel in the source (the cancel reports false and the
+//! objective keeps its cancelled flag); that path is not modelled: it is
+//! logged by name and this character makes no further greeting attempt. A
+//! cascade over a scene this host cannot evaluate yet holds the greeting
+//! without drawing, as the decision pass holds.
 
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
@@ -47,10 +54,12 @@ use crate::client_config::{
     KEY_NPC_LOTTERY_TALK3_WIGHT, KEY_NPC_LOTTERY_TALK4_WIGHT,
 };
 use crate::npc::{
-    CharacterUnitId, MotionPhase, NpcAction, NpcActions, PathSlot, RestLifecycle, RouteStops,
-    WalkState,
+    CharacterUnitId, MotionPhase, MoveTarget, NpcAction, NpcActions, PathSlot, RestLifecycle,
+    RouteStops, WalkState,
 };
-use crate::npc_objective::{AiTalkData, MemberRng, ObjectiveMind, TalkSlot};
+use crate::npc_objective::{
+    AiTalkData, CascadeHold, CascadeMember, MemberRng, ObjectiveMind, TalkSlot,
+};
 
 /// No character communication runs in this host.
 const OVER_PRIORITY_SOME_CHARACTER: bool = false;
@@ -66,8 +75,9 @@ fn halt(mind: &mut ObjectiveMind, unit: u32, reason: String) {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn try_greeting(
     mut commands: Commands,
-    frame: Res<FrameCount>,
-    fixture_sessions: Option<Res<crate::npc_fixture_activity::NpcFixtureActivities>>,
+    (frame, time): (Res<FrameCount>, Res<Time>),
+    mut cascade: crate::npc_objective::CascadeScene,
+    mut cascade_hold: Local<Option<String>>,
     panel: Option<Res<crate::server_panel::ServerPanel>>,
     gate: Res<crate::alone_action_runtime::AloneExecutionGate>,
     catalog: crate::player_talk::TalkCatalog,
@@ -90,6 +100,7 @@ pub(crate) fn try_greeting(
             &mut WalkState,
             &mut MotionPhase,
             &mut RestLifecycle,
+            &MoveTarget,
         ),
         (
             Without<crate::player::PlayerControlled>,
@@ -120,6 +131,16 @@ pub(crate) fn try_greeting(
         talk4: configs.float(KEY_NPC_LOTTERY_TALK4_WIGHT),
     };
     let player = players.single().ok().map(|transform| transform.translation);
+    // The avatar list as the cancel's cascade reads it (the decision pass's
+    // views and snapshots), refreshed for a character after its greeting.
+    let mut members: Vec<CascadeMember> = npcs
+        .iter()
+        .map(
+            |(entity, unit, _, actions, mind, slot, _, _, _, walk, _, _, target)| {
+                CascadeMember::new(entity, unit.0, &catalog, actions, mind, slot, walk, target)
+            },
+        )
+        .collect();
     for (
         entity,
         unit,
@@ -133,6 +154,7 @@ pub(crate) fn try_greeting(
         mut walk,
         mut phase,
         mut rest,
+        target,
     ) in &mut npcs
     {
         let unit = unit.0;
@@ -181,25 +203,71 @@ pub(crate) fn try_greeting(
         if mind.yield_since.is_some() || mind.force_updates > 0 {
             continue;
         }
+        let own = members.iter().position(|member| member.entity() == entity);
+        // The cancelled objective's OnCancel: the no-talk objective's and the
+        // while-doing-wait sub objective's make one ForceUpdateObjective (the
+        // sub objective's after its change to Idle). A cancel on an objective
+        // cancelled before reports true without running OnCancel again.
+        let on_cancel_state = match current {
+            ObjectiveType::NoneTalk => Some(actions.current as u8),
+            ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub => {
+                Some(NpcAction::Idle as u8)
+            }
+            _ => None,
+        }
+        .filter(|_| mind.cancel_reports() && !mind.cancelled);
+        if let (Some(state), Some(own)) = (on_cancel_state, own) {
+            members[own].reset_for_cascade(state);
+            let outcome = cascade.discarded_create_ai_talk_data(
+                &catalog,
+                &members,
+                own,
+                Some(player),
+                &mind.unmovable_fixtures,
+                &mut rng,
+                time.elapsed_secs_f64(),
+                frame,
+                "greeting",
+            );
+            members[own] = CascadeMember::new(
+                entity, unit, &catalog, &actions, &mind, &slot, &walk, target,
+            );
+            match outcome {
+                Err(CascadeHold(reason)) => {
+                    if cascade_hold.as_deref() != Some(reason.as_str()) {
+                        info!("[npc-greeting] unit={unit}: the cancel's ForceUpdateObjective cannot be evaluated yet ({reason}); the greeting holds");
+                        *cascade_hold = Some(reason);
+                    }
+                    continue;
+                }
+                Ok(Err(reason)) => {
+                    halt(
+                        &mut mind,
+                        unit,
+                        format!(
+                            "the cancel's ForceUpdateObjective raised inside the cancel: {reason}"
+                        ),
+                    );
+                    continue;
+                }
+                Ok(Ok(())) => {}
+            }
+            if current == ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub {
+                actions.change(NpcAction::Idle, &mut rest);
+            }
+        }
         if mind.rest.is_some() {
             // The Rest objective's cancel changes to Idle.
             mind.rest = None;
             actions.change(NpcAction::Idle, &mut rest);
         } else if current == ObjectiveType::NoneTalk && mind.executing {
-            // The no-talk objective's cancel runs ForceUpdateObjective, whose
-            // data the greeting's own reset discards (its draws are not made
-            // here); its dispose releases the fixture it walks to.
-            if fixture_sessions
-                .as_deref()
-                .is_some_and(|sessions| crate::npc_fixture_activity::owns_actor(sessions, entity))
-            {
+            // The no-talk objective's dispose releases the fixture it walks
+            // to (its OnCancel's cascade was made above).
+            if cascade.owns_fixture_session(entity) {
                 commands.queue(move |world: &mut World| {
                     crate::npc_fixture_activity::cancel_for_greeting(world, entity);
                 });
             }
-            warn!(
-                "[npc-greeting] unit={unit}: the cancelled no-talk objective's ForceUpdateObjective cascade is not drawn"
-            );
         }
         mind.executing = false;
         mind.body = None;
@@ -299,6 +367,11 @@ pub(crate) fn try_greeting(
         });
         mind.skip_next_rest = true;
         crate::npc::stop_agent(&mut route, &mut path, &mut walk, &mut phase);
+        if let Some(own) = own {
+            members[own] = CascadeMember::new(
+                entity, unit, &catalog, &actions, &mind, &slot, &walk, target,
+            );
+        }
         info!(
             "[npc-greeting] {}",
             serde_json::json!({

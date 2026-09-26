@@ -1441,6 +1441,16 @@ impl DecisionRecord {
             .insert("draws".into(), serde_json::Value::Array(self.draws));
         info!("[npc-decision] {}", serde_json::Value::Object(self.fields));
     }
+
+    /// The same record under another line tag, for draws made outside a
+    /// decision (not counted as a decision line).
+    fn emit_as(mut self, tag: &str, outcome: &str, rng_calls: u64) {
+        self.fields.insert("outcome".into(), outcome.into());
+        self.fields.insert("rng_calls".into(), rng_calls.into());
+        self.fields
+            .insert("draws".into(), serde_json::Value::Array(self.draws));
+        info!("[{tag}] {}", serde_json::Value::Object(self.fields));
+    }
 }
 
 /// The talk factory a decision row calls (see `npc_talk_lottery`).
@@ -1583,6 +1593,7 @@ pub(crate) fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
 pub(crate) const SAMPLE_GATE_TOLERANCE: f32 = 0.3;
 
 /// 成员快照（社交链的候选输入与游走链的占格都按它算）。
+#[derive(Clone)]
 struct MemberSnap {
     entity: Entity,
     target_fixture: Option<Entity>,
@@ -1617,6 +1628,111 @@ impl MemberSnap {
             talk_target: self.talk_target?,
         })
     }
+}
+
+/// CreateGeneralTalkData's target position: the spot near another character,
+/// else a random floor position. Both chains start from the character's own
+/// position, not from its navigation origin. Returns the position (none when
+/// both miss) and the log detail; every draw goes into `record`.
+#[allow(clippy::too_many_arguments)]
+fn general_talk_target(
+    unit: u32,
+    site_type: &str,
+    position: [f32; 3],
+    snaps: &[MemberSnap],
+    occupied: &HashSet<Cell>,
+    face: &ObjectiveFace,
+    config: &ClientConfigs,
+    catalog: &crate::player_talk::TalkCatalog<'_>,
+    trial: &mut MemberRng,
+    record: &mut DecisionRecord,
+) -> (Option<[f32; 3]>, String) {
+    let mut probe = FaceProbe { face };
+    let world_of = |cell: Cell| face.world_of(cell);
+    let near: Vec<(u32, objective::SocialCandidate)> = snaps
+        .iter()
+        .filter_map(|snap| {
+            snap.social_candidate(unit, site_type)
+                .map(|candidate| (snap.unit, candidate))
+        })
+        .collect();
+    // The candidates as this decision read them, so a replay can check them
+    // against the others' live state.
+    record.set(
+        "near_candidates",
+        near.iter()
+            .map(|(other, candidate)| {
+                serde_json::json!({
+                    "unit": other,
+                    "position": candidate.position,
+                    "destination": candidate.destination,
+                    "talk_target": candidate.talk_target,
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+    let candidates: Vec<objective::SocialCandidate> =
+        near.into_iter().map(|(_, candidate)| candidate).collect();
+    let npc_positions: Vec<[f32; 3]> = snaps.iter().map(|snap| snap.position).collect();
+    let mut uniform = UniformSource::new(&mut *trial);
+    let social = objective::social_target(
+        &candidates,
+        position,
+        &npc_positions,
+        &mut probe,
+        &mut uniform,
+    );
+    record.uniform("near_character_pick", DRAW_ENGINE_INT_RANGE, &uniform.draws);
+    if let Some(spot) = social {
+        let detail = format!(
+            "社交链 池抽 {}（候选 {} 员）",
+            uniform.account(),
+            candidates.len()
+        );
+        return (Some(spot), detail);
+    }
+    // The move range follows the site type of this character's own site.
+    let in_room = catalog
+        .site_type_value(site_type)
+        .is_some_and(objective::uses_in_room_move_range);
+    let (wander_min, wander_max) = if in_room {
+        (
+            config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE),
+            config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE),
+        )
+    } else {
+        (
+            config.int(KEY_NPC_RANDOM_MOVE_MIN_DISTANCE),
+            config.int(KEY_NPC_RANDOM_MOVE_MAX_DISTANCE),
+        )
+    };
+    // The source stores the grid origin as signed bytes; the ring filter
+    // wraps each axis difference to a signed byte, so the unwrapped cell
+    // gives the same ring.
+    let origin = cell_of(position[0], position[2]);
+    let eligible: Vec<Cell> = face
+        .walkable()
+        .iter()
+        .copied()
+        .filter(|cell| !occupied.contains(cell))
+        .collect();
+    let mut permute = PermuteSource::new(&mut *trial);
+    let wander = objective::wander_target(
+        origin,
+        wander_min,
+        wander_max,
+        &eligible,
+        world_of,
+        &mut permute,
+        &mut probe,
+    );
+    record.keys("floor_position_order", permute.keys);
+    let detail = format!(
+        "社交未命中→游走 环 {} 格（键 {}，档 {wander_min}..{wander_max}）",
+        eligible.len(),
+        permute.keys
+    );
+    (wander, detail)
 }
 
 /// Update：目标机推进——停顿计时（对话态冻结）、路线尽收场（无对话目标
@@ -2820,8 +2936,6 @@ pub(crate) fn decide(
             }
 
             // —— 目的地解算 ——
-            let mut probe = FaceProbe { face };
-            let world_of = |cell: Cell| face.world_of(cell);
             let from = route.navigation_origin(state.0.position, walk_face);
             let detail;
             let mut fixture_selection = None;
@@ -2875,97 +2989,20 @@ pub(crate) fn decide(
                         Some(data.target_position)
                     }
                     DecisionRoute::Factory(_) => {
-                        // CreateGeneralTalkData: the spot near another character,
-                        // else a random floor position. Both chains start from the
-                        // character's own position, not from its navigation origin.
-                        let position = state.0.position;
-                        let near: Vec<(u32, objective::SocialCandidate)> = snaps
-                            .iter()
-                            .filter_map(|snap| {
-                                snap.social_candidate(unit.0, &actions.site_type)
-                                    .map(|candidate| (snap.unit, candidate))
-                            })
-                            .collect();
-                        // The candidates as this decision read them, so a replay
-                        // can check them against the others' live state.
-                        record.set(
-                            "near_candidates",
-                            near.iter()
-                                .map(|(other, candidate)| {
-                                    serde_json::json!({
-                                        "unit": other,
-                                        "position": candidate.position,
-                                        "destination": candidate.destination,
-                                        "talk_target": candidate.talk_target,
-                                    })
-                                })
-                                .collect::<Vec<_>>(),
+                        let (spot, text) = general_talk_target(
+                            unit.0,
+                            &actions.site_type,
+                            state.0.position,
+                            &snaps,
+                            &occupied,
+                            face,
+                            config,
+                            &catalog,
+                            &mut trial,
+                            &mut record,
                         );
-                        let candidates: Vec<objective::SocialCandidate> =
-                            near.into_iter().map(|(_, candidate)| candidate).collect();
-                        let npc_positions: Vec<[f32; 3]> =
-                            snaps.iter().map(|snap| snap.position).collect();
-                        let mut uniform = UniformSource::new(&mut trial);
-                        let social = objective::social_target(
-                            &candidates,
-                            position,
-                            &npc_positions,
-                            &mut probe,
-                            &mut uniform,
-                        );
-                        record.uniform("near_character_pick", DRAW_ENGINE_INT_RANGE, &uniform.draws);
-                        if let Some(spot) = social {
-                            detail = format!(
-                                "社交链 池抽 {}（候选 {} 员）",
-                                uniform.account(),
-                                candidates.len()
-                            );
-                            Some(spot)
-                        } else {
-                            // The move range follows the site type of this
-                            // character's own site.
-                            let in_room = catalog
-                                .site_type_value(&actions.site_type)
-                                .is_some_and(objective::uses_in_room_move_range);
-                            let (wander_min, wander_max) = if in_room {
-                                (
-                                    config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MIN_DISTANCE),
-                                    config.int(KEY_NPC_RANDOM_MOVE_IN_ROOM_MAX_DISTANCE),
-                                )
-                            } else {
-                                (
-                                    config.int(KEY_NPC_RANDOM_MOVE_MIN_DISTANCE),
-                                    config.int(KEY_NPC_RANDOM_MOVE_MAX_DISTANCE),
-                                )
-                            };
-                            // The source stores the grid origin as signed bytes; the
-                            // ring filter wraps each axis difference to a signed byte,
-                            // so the unwrapped cell gives the same ring.
-                            let origin = cell_of(position[0], position[2]);
-                            let eligible: Vec<Cell> = face
-                                .walkable()
-                                .iter()
-                                .copied()
-                                .filter(|cell| !occupied.contains(cell))
-                                .collect();
-                            let mut permute = PermuteSource::new(&mut trial);
-                            let wander = objective::wander_target(
-                                origin,
-                                wander_min,
-                                wander_max,
-                                &eligible,
-                                world_of,
-                                &mut permute,
-                                &mut probe,
-                            );
-                            record.keys("floor_position_order", permute.keys);
-                            detail = format!(
-                                "社交未命中→游走 环 {} 格（键 {}，档 {wander_min}..{wander_max}）",
-                                eligible.len(),
-                                permute.keys
-                            );
-                            wander
-                        }
+                        detail = text;
+                        spot
                     }
                     DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
                     DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
@@ -3454,6 +3491,363 @@ fn sub_objective_move_failed(
     } else {
         actions.change(crate::npc::NpcAction::Idle, rest);
         owe_force_updates(mind, frame, 1);
+    }
+}
+
+/// The resources the decision pass's lottery scene reads besides the NPC
+/// components, for a caller outside the decision pass that makes a
+/// ForceUpdateObjective cascade (see
+/// [`CascadeScene::discarded_create_ai_talk_data`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct CascadeScene<'w, 's> {
+    face: Option<Res<'w, ObjectiveFace>>,
+    epoch: Option<Res<'w, GroundEpoch>>,
+    selection: Option<Res<'w, SiteSelection>>,
+    placements: Res<'w, FixturePlacements>,
+    configs: Option<Res<'w, ClientConfigs>>,
+    talk_list: Option<Res<'w, crate::server_panel::TalkDataStore>>,
+    together: Option<Res<'w, crate::fixture_activity_data::TogetherCommunicationTable>>,
+    extras: Option<Res<'w, npc_talk_lottery::TalkExtraTables>>,
+    extras_pending: Option<Res<'w, npc_talk_lottery::TalkExtraRequests>>,
+    attach_worlds: Option<Res<'w, crate::fixture_attach::AttachWorlds>>,
+    seeder: ResMut<'w, SequencePickSeeder>,
+    fixture_activities: crate::npc_fixture_activity::Factory<'w, 's>,
+}
+
+/// One character of the avatar list as the cascade's scene reads it: its
+/// view in the talk lotteries and its snapshot for the general talk's
+/// target chains.
+pub(crate) struct CascadeMember {
+    snap: MemberSnap,
+    view: npc_talk_lottery::NpcView,
+}
+
+impl CascadeMember {
+    /// The character as the decision pass reads it from its components.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        entity: Entity,
+        unit: u32,
+        catalog: &crate::player_talk::TalkCatalog<'_>,
+        actions: &crate::npc::NpcActions,
+        mind: &ObjectiveMind,
+        slot: &TalkSlot,
+        walk: &WalkState,
+        target: &MoveTarget,
+    ) -> Self {
+        Self {
+            snap: MemberSnap {
+                entity,
+                target_fixture: slot.current.as_ref().and_then(|data| data.target_fixture),
+                unit,
+                site_type: actions.site_type.clone(),
+                talk_target: prepared_social_target(slot),
+                state: actions.current as u8,
+                cancel_reports: mind.cancel_reports(),
+                position: walk.0.position,
+                destination: if mind.executing {
+                    target.0
+                } else {
+                    walk.0.position
+                },
+            },
+            view: npc_talk_lottery::NpcView {
+                unit,
+                site_type: catalog.site_type_value(&actions.site_type),
+                previous_talk_id: slot.previous_id().unwrap_or(0),
+                talk_type: slot.kind(),
+                objective: mind.current,
+                state: actions.current as u8,
+                since_initialized: actions.since_initialized,
+            },
+        }
+    }
+
+    pub(crate) fn entity(&self) -> Entity {
+        self.snap.entity
+    }
+
+    /// The character inside Model.ForceUpdateObjective, before its factory:
+    /// both resets done (no talk data, no previous talk, no talk target)
+    /// and its action state as the cancelled objective's OnCancel left it.
+    pub(crate) fn reset_for_cascade(&mut self, state: u8) {
+        self.snap.target_fixture = None;
+        self.snap.talk_target = None;
+        self.snap.state = state;
+        self.view.previous_talk_id = 0;
+        self.view.talk_type = None;
+        self.view.state = state;
+    }
+}
+
+/// Why the cascade cannot be evaluated now: the caller holds without
+/// drawing, as the decision pass holds in front of every draw.
+pub(crate) struct CascadeHold(pub(crate) String);
+
+impl CascadeScene<'_, '_> {
+    /// Whether a no-talk fixture session holds `actor`.
+    pub(crate) fn owns_fixture_session(&self, actor: Entity) -> bool {
+        self.fixture_activities.owns_actor(actor)
+    }
+
+    /// Model.ForceUpdateObjective made outside the decision pass, whose data
+    /// the caller's own reset then discards (the greeting's cancel of a
+    /// no-talk or while-doing-wait objective): its two resets, then
+    /// CreateAITalkData on the decision pass's full scene (its lotteries,
+    /// the row-1 fixture chooser and, for a general talk, the target chains
+    /// of CreateGeneralTalkData), on the character's generator and the
+    /// sequence-pick seeder. The data is dropped; the draws stay made.
+    /// `members[own]` is the character after [`CascadeMember::reset_for_cascade`].
+    /// A source exception inside the factory comes back as `Ok(Err(reason))`
+    /// after its draws are committed; a scene this host cannot evaluate yet
+    /// comes back as `Err` with nothing drawn. One `[npc-cascade] {json}`
+    /// line records the draws.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn discarded_create_ai_talk_data(
+        &mut self,
+        catalog: &crate::player_talk::TalkCatalog<'_>,
+        members: &[CascadeMember],
+        own: usize,
+        player: Option<Vec3>,
+        unmovable: &[String],
+        rng: &mut MemberRng,
+        seconds: f64,
+        frame: u32,
+        cause: &str,
+    ) -> Result<Result<(), String>, CascadeHold> {
+        let hold = |reason: &str| Err(CascadeHold(reason.to_owned()));
+        let (Some(face), Some(epoch), Some(config), Some(talk_list), Some(together)) = (
+            self.face.as_deref(),
+            self.epoch.as_deref(),
+            self.configs.as_deref(),
+            self.talk_list.as_deref(),
+            self.together.as_deref(),
+        ) else {
+            return hold(
+                "the decision scene's face, configs, talk list or together table is not installed",
+            );
+        };
+        if !face.is_fresh(epoch.0) || !catalog.ready() || self.extras_pending.is_some() {
+            return hold("the decision scene is still loading");
+        }
+        if self.attach_worlds.is_none() && self.placements.fixture_ids().iter().any(|id| *id != 0) {
+            return hold("the action point table is still loading");
+        }
+        let Some(member) = members.get(own) else {
+            return hold("the character is not in the avatar list");
+        };
+        let site_type = member.snap.site_type.as_str();
+        if let Err(reason) = self.fixture_activities.loading(epoch.0, site_type) {
+            return Err(CascadeHold(reason));
+        }
+        let entity = member.snap.entity;
+        let seeker = member.view.clone();
+        let views: Vec<npc_talk_lottery::NpcView> =
+            members.iter().map(|member| member.view.clone()).collect();
+        let snaps: Vec<MemberSnap> = members.iter().map(|member| member.snap.clone()).collect();
+        let mut occupied: HashSet<Cell> = snaps
+            .iter()
+            .map(|snap| cell_of(snap.position[0], snap.position[2]))
+            .collect();
+        if let Some(player) = player {
+            occupied.insert(cell_of(player.x, player.z));
+        }
+        let weights = LotteryWeights {
+            talk1: config.float(KEY_NPC_LOTTERY_TALK1_WIGHT),
+            talk2: config.float(KEY_NPC_LOTTERY_TALK2_WIGHT),
+            talk3: config.float(KEY_NPC_LOTTERY_TALK3_WIGHT),
+            talk4: config.float(KEY_NPC_LOTTERY_TALK4_WIGHT),
+        };
+        let percents = LotteryPercents {
+            fixture_talk: config.float(KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT),
+            already_read_fixture_talk: config
+                .float(KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT),
+            none_talk_fixture_action: config
+                .float(KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT),
+            already_read_when_has_not_read: config
+                .float(KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ),
+        };
+        let selection_site_type = self
+            .selection
+            .as_deref()
+            .and_then(|site| catalog.site_type_value(site.site_type()));
+        let mut trial = rng.clone();
+        let mut trial_seeder = self.seeder.seeder().clone();
+        let calls_before = rng.calls();
+        let fixture_activities = &self.fixture_activities;
+        let placements: &FixturePlacements = &self.placements;
+        let Some(tables) = fixture_activities.tables() else {
+            return hold("the master tables are not installed");
+        };
+        let fixtures = fixture_activities.talk_lottery_fixtures(placements, selection_site_type);
+        let admissions = std::cell::RefCell::new(Vec::new());
+        let (result, draws, lottery_rows, fixture_walks) = {
+            let site_type_of_site = |site: i32| catalog.site_type_of_site(site);
+            let other_targets: Vec<(Entity, Option<Entity>)> = snaps
+                .iter()
+                .map(|snap| (snap.entity, snap.target_fixture))
+                .collect();
+            let position = member.snap.position;
+            let admissible = |talk: i32, fixture: &npc_talk_lottery::PlacedFixture| {
+                let result = fixture_activities.talk_fixture_admissible(
+                    entity,
+                    position,
+                    talk,
+                    &fixture.uid,
+                    placements,
+                    &other_targets,
+                    unmovable,
+                    face,
+                );
+                admissions.borrow_mut().push(serde_json::json!({
+                    "talk_id": talk,
+                    "uid": fixture.uid,
+                    "result": match &result {
+                        Ok(value) => serde_json::json!(value),
+                        Err(reason) => serde_json::json!({ "gap": reason }),
+                    },
+                }));
+                result
+            };
+            let geometry = |uid: &str| fixture_activities.talk_fixture_geometry(uid, placements);
+            let host = TalkFixtureHost::new(
+                snaps
+                    .iter()
+                    .map(|snap| (snap.unit, snap.position))
+                    .collect(),
+                &geometry,
+                face,
+                config.float(KEY_CHARACTER_FIXTURE_MOVE_OFFSET),
+            );
+            let scene = npc_talk_lottery::LotteryScene {
+                tables,
+                talk_list: talk_list.talk_list(),
+                phenomena_id: catalog.phenomena_id(),
+                site_type_of_site: &site_type_of_site,
+                npcs: &views,
+                fixtures: &fixtures,
+                weights,
+                fixture_gates: Some(npc_talk_lottery::FixtureGateInputs {
+                    gate_action_elapsed_seconds: config.int(KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME),
+                    admissible: &admissible,
+                    extras: self.extras.as_deref(),
+                }),
+                fixture_host: Some(&host),
+                together: Some(&together.0),
+            };
+            let engine = std::cell::RefCell::new(&mut trial);
+            let mut engine_int = |len: usize| {
+                let mut guard = engine.borrow_mut();
+                engine_int_draw(&mut **guard, len)
+            };
+            let mut engine_float = |total: f32| {
+                let mut guard = engine.borrow_mut();
+                engine_float_draw(&mut **guard, total)
+            };
+            let mut sequence_pick = |count: usize| trial_seeder.pick(count);
+            let mut draws = npc_talk_lottery::Draws {
+                engine_int: &mut engine_int,
+                engine_float: &mut engine_float,
+                sequence_pick: &mut sequence_pick,
+                record: Vec::new(),
+            };
+            let result = npc_talk_lottery::create_ai_talk_data(&scene, &seeker, &mut draws);
+            let counts = npc_talk_lottery::list_counts(&scene);
+            (result, draws.record, counts, host.walks.into_inner())
+        };
+        let mut record = DecisionRecord::new(
+            seeker.unit,
+            site_type,
+            seconds,
+            "discarded_force_update_objective",
+            &percents,
+            &weights,
+            talk_list.any_unread(),
+            talk_list,
+            &[],
+        );
+        record.set("frame", frame);
+        record.set("cause", cause);
+        record.set("lane", TalkFactory::CreateAiTalkData.word());
+        record.set("phenomenon", catalog.phenomena_id());
+        record.set(
+            "npc_views",
+            views
+                .iter()
+                .map(|view| {
+                    serde_json::json!({
+                        "unit": view.unit,
+                        "site_type": view.site_type,
+                        "previous_talk_id": view.previous_talk_id,
+                        "talk_type": view.talk_type.map(|kind| kind as u8),
+                        "objective": view.objective.map(|kind| kind as u8),
+                        "state": view.state,
+                        "since_initialized": view.since_initialized,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        record.set("fixture_lottery_rows", lottery_rows);
+        if !fixture_walks.is_empty() {
+            record.set("fixture_walks", fixture_walks);
+        }
+        record.set("fixture_admissible", admissions.into_inner());
+        record.extend_draws(draws);
+        let outcome = match result {
+            Err(npc_talk_lottery::Halt::Gap(reason)) => return Err(CascadeHold(reason)),
+            Err(npc_talk_lottery::Halt::Fault(reason)) => {
+                record.set("reason", reason.as_str());
+                Err(reason)
+            }
+            Ok(npc_talk_lottery::TalkPlan::General { talk_id, .. }) => {
+                record.set("talk_id", talk_id);
+                if catalog.resolve(talk_id).is_none() {
+                    return Err(CascadeHold(format!(
+                        "general talk {talk_id} is not in the loaded talk scripts"
+                    )));
+                }
+                // CreateGeneralTalkData's target position.
+                let (target, _) = general_talk_target(
+                    seeker.unit,
+                    site_type,
+                    member.snap.position,
+                    &snaps,
+                    &occupied,
+                    face,
+                    config,
+                    catalog,
+                    &mut trial,
+                    &mut record,
+                );
+                record.set("talk_target", serde_json::json!(target));
+                Ok(())
+            }
+            Ok(npc_talk_lottery::TalkPlan::Null { reason, .. }) => {
+                record.set("null_reason", reason.as_str());
+                Ok(())
+            }
+            Ok(npc_talk_lottery::TalkPlan::Fixture(data)) => {
+                record.set("talk_id", data.talk_id);
+                Ok(())
+            }
+            Ok(npc_talk_lottery::TalkPlan::CommonFixture { talk_id, .. }) => {
+                record.set("talk_id", talk_id);
+                Ok(())
+            }
+        };
+        let calls = trial.calls() - calls_before;
+        *rng = trial;
+        *self.seeder.seeder() = trial_seeder;
+        record.emit_as(
+            "npc-cascade",
+            if outcome.is_ok() {
+                "discarded"
+            } else {
+                "source_exception"
+            },
+            calls,
+        );
+        Ok(outcome)
     }
 }
 
