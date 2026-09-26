@@ -208,6 +208,12 @@ impl SiteSelection {
         &self.site
     }
 
+    /// A housing site's displayed expansion stage, as the rank change of the
+    /// server's reply sets it (`site_expansion`).
+    pub(crate) fn set_level(&mut self, site_type: &str, level: u32) {
+        self.levels.insert(site_type.to_owned(), level);
+    }
+
     /// The furniture layout the loader will restore for this (already
     /// admitted) selection: the same `restore` call the fixture loader makes.
     pub(crate) fn restored_layout(
@@ -826,8 +832,11 @@ pub(crate) fn plan(
     temporary: Option<Res<TemporarySiteActive>>,
     mut last_input_error: Local<Option<String>>,
     source_region: Option<Res<NavMeshSourceRegion>>,
+    level_hold: Option<Res<crate::site_expansion::LevelHold>>,
 ) {
-    if assets.is_some() {
+    // A rank change is delivered before the first site: the housing sites'
+    // displayed levels follow it.
+    if assets.is_some() || level_hold.is_some() {
         return;
     }
     let (Some(sites), Some(mut selection)) = (sites, selection) else {

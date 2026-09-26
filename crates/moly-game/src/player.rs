@@ -296,6 +296,7 @@ pub(crate) fn read_input(
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
     learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
+    held: Option<Res<crate::game_state::HeldGameState>>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
@@ -307,6 +308,8 @@ pub(crate) fn read_input(
         || site_move.is_some()
         // GameState LearnSiteEnvironment hides the stick.
         || learn.is_some()
+        // GameState CutScene / LevelUpMyRoomSite disable the stick.
+        || held.is_some()
         || !crate::entry::control_open(entry.as_deref())
     {
         for (mut input, _) in &mut players {
