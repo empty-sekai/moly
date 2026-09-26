@@ -18,8 +18,8 @@
 //! law, with the target's installed owner seed and scroll), ClampVelocity (one
 //! axis group, a constant limit, zero drag), InheritVelocity (Initial with a
 //! constant or two-constant curve; Current outside World space, which does
-//! nothing here), SizeOverLifetime and
-//! ColorOverLifetime (render-time), CustomData, no ring buffer, simulation
+//! nothing here), SizeOverLifetime,
+//! ColorOverLifetime and the texture sheet (render-time), CustomData, no ring buffer, simulation
 //! speed one. Any other module on the target, and any other configuration of
 //! those, refuses.
 //!
@@ -287,10 +287,15 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     if emitter.simulation_speed != 1.0 {
         return unsupported("target simulation speed other than one");
     }
+    // The texture sheet (UV module) takes no part in the birth: the child
+    // Emit's start pass and its newborn and catch-up module passes read none
+    // of it, and it adds no per-particle storage; the renderer derives each
+    // particle's sheet cell from the particle's own seed (and age, for a
+    // curve), which the child Emit writes as any birth does. A target's
+    // sheet is drawn as any system's.
     if emitter.force.is_some()
         || emitter.collision.is_some()
         || emitter.trails.is_some()
-        || emitter.texture_sheet.is_some()
     {
         return unsupported("target module outside the child composition");
     }
@@ -555,6 +560,10 @@ pub(super) fn apply_command_with_events(
     command.validate()?;
     let inherit = inherited_size(&command.inherited_words)?;
     let laws = child_laws(&system.emitter)?;
+    // Replay arm: a sheet word drawn at birth from the Initial stream.
+    if system.emitter.texture_sheet.is_some() && arms::on("uvDrawsInitialWord") {
+        let _ = initial.next4_u32();
+    }
     if system.emitter.noise.is_some() != system.noise.is_some() {
         return Err(Refused::Unsupported("target Noise without its installed owner seed and scroll"));
     }
@@ -1098,6 +1107,10 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
             .ok_or("random start delay on a sub-emitter target: Play's seed-hash evaluation is not transcribed")?
     };
     system.emitter = own_clock_emitter(&system.emitter);
+    // Replay arm: the target's texture sheet lost at install.
+    if arms::on("uvDroppedAtInstall") {
+        system.texture_sheet = None;
+    }
     // Qualified by child_target_eligible above; built before the owner draw.
     let noise_law = system.emitter.noise.as_ref()
         .map(|params| moly_law::particle::noise::NoiseLaw::from_params(params).map_err(str::to_owned))

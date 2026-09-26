@@ -682,3 +682,116 @@ fn product_child_emit_matches_native_inherit_velocity_rows() {
         assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
     }
 }
+
+/// A texture sheet drawn from the Initial stream at birth.
+const UV_ARMS: [&str; 1] = ["uvDrawsInitialWord"];
+
+/// The sheet cells of one row's child particles as the product draws them:
+/// the target runtime built as the hosts build it (its texture sheet from its
+/// block), installed as a sub-emitter target, the row's command applied, and
+/// each newborn's table position from its seed through the installed sheet;
+/// compared with the engine's own texture-sheet evaluation of the native
+/// pool's seeds. The fields that differ.
+fn uv_row(seq: &Value, row: &Value, block: &Value) -> Vec<String> {
+    let image = &seq["image"];
+    let node = seq["node"].as_str().unwrap();
+    let mut system = target_runtime(node, block, image["simulation"].as_u64().unwrap());
+    // The hosts install every admitted system with its texture sheet and the
+    // renderer's scaling mode; a target is then installed as a target.
+    let mut installed = target_runtime(node, block, image["simulation"].as_u64().unwrap());
+    installed.texture_sheet = installed.emitter.texture_sheet.as_ref()
+        .map(|p| moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("receipt texture sheet"));
+    installed.geometry = test_support::source_billboard(crate::particle_geometry::Scaling::Hierarchy);
+    let owner = ChildOwner {
+        local_to_world: floats(&image["owner"]),
+        world_to_local: floats(&image["inverse"]),
+        local_rotation: floats(&image["st114"]),
+        emitter_scale: floats(&image["scale"]),
+        shape_scale: floats(&image["shapeScale"]),
+    };
+    let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
+    if let Err(reason) = super::install_child_target(&mut installed, &mut manager, owner) {
+        return vec![format!("install refused {reason}")];
+    }
+    // Without a sheet the renderer draws every particle at table position 0.
+    let sheet = installed.texture_sheet;
+    let before = &row["before"];
+    load_pool(&mut system, &before["pool"]);
+    let mut initial = module_random(&before["rng"]["initial"]);
+    let command = ChildCommand::from_native_bytes(&hex(&row["command"]["rawHex"]), &hex(&row["command"]["emissionHex"]))
+        .unwrap();
+    let update = ChildUpdate {
+        flags: word(&row["updateFlags"]),
+        frame_dt: f32::from_bits(word(&row["frameDtBits"])),
+        world_playing: row["worldPlaying"].as_bool().unwrap(),
+        gravity: floats(&image["gravity"]),
+    };
+    let law = system.emitter.shape.as_ref().map(|p| ShapeBirthLaw::from_params(p).expect("receipt Shape inside the law"));
+    let mut kernel = law.map(|law| SourceShape { law, stream: module_random(&before["rng"]["shape"]),
+        shape_scale: owner.shape_scale, uses_axis_of_rotation: false });
+    let shape = kernel.as_mut().map(|k| k as &mut dyn ChildShape);
+    if let Err(refused) = apply_command(&mut system, &owner, &mut initial, shape, &command, update) {
+        return vec![format!("refused {refused:?}")];
+    }
+    let native = words(&row["uvPositionBits"]);
+    let ours: Vec<u32> = system.side.iter()
+        .map(|side| sheet.as_ref().map_or(0.0, |sheet| sheet.position(side.seed)).to_bits())
+        .collect();
+    if ours == native { Vec::new() } else { vec![format!("uvPosition ours {} native {}", ours.len(), native.len())] }
+}
+
+/// Child commands into sub-emitter targets that carry an enabled texture
+/// sheet (the home expansion effect's two World-space wave targets, Sphere,
+/// Velocity; start colour made constant, SizeOverLifetime stripped and the
+/// RotationOverLifetime curve made two constants by the harness): synthetic
+/// commands per frame, catch-up with every flag and none, the exported sheet
+/// (whole sheet, frame 0) and two variants whose cell follows the seed (a
+/// two-constant start frame; a random row with a two-constant frame). The
+/// engine's child Emit read no byte of the UV block and entered no sheet
+/// kernel on any row, and the same commands with the module disabled gave the
+/// same rows. Every row is compared through the product's child Emit, and the
+/// sheet cell of every child particle through the installed target's sheet.
+/// The arms: a sheet word drawn from the Initial stream at birth (the pool and
+/// the stream differ), and the sheet lost at install (the cells differ).
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_UV (the native child rows of texture-sheet targets)"]
+fn product_child_emit_matches_native_uv_target_rows() {
+    let receipt = read("MOLY_CHILD_EMIT_UV");
+    let observed = &receipt["totals"];
+    assert_eq!(observed["uvBlockReadsInEmit"], 0, "the engine's child Emit read the UV block");
+    assert_eq!(observed["uvKernelHits"], 0, "the engine's child Emit entered a sheet kernel");
+    assert!(observed["startModulesInEmit"].as_u64().unwrap() > 0 && observed["shapeBlockReadsInEmit"].as_u64().unwrap() > 0);
+    assert_eq!(receipt["controls"]["uvOnVsOffIdentical"], true);
+    let arm_names: Vec<&'static str> = ARMS.iter().chain(UV_ARMS.iter()).copied().collect();
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_UV"], &arm_names);
+    report(&tally, &arm_red);
+    let (mut particles, mut distinct_rows, mut uv_bad, mut dropped_red) = (0usize, 0usize, Vec::new(), 0usize);
+    for seq in receipt["childSynthetic"].as_array().unwrap() {
+        let block = target_block(seq, &Value::Null);
+        for (index, row) in seq["rows"].as_array().unwrap().iter().enumerate() {
+            let native = words(&row["uvPositionBits"]);
+            particles += native.len();
+            distinct_rows += usize::from(native.iter().collect::<std::collections::BTreeSet<_>>().len() > 1);
+            arms::set(None);
+            let bad = uv_row(seq, row, block);
+            if !bad.is_empty() {
+                uv_bad.push(format!("{} row {index}: {bad:?}", seq["label"]));
+            }
+            arms::set(Some("uvDroppedAtInstall"));
+            dropped_red += usize::from(!uv_row(seq, row, block).is_empty());
+            arms::set(None);
+        }
+    }
+    eprintln!("uv target replay: child particles with a sheet cell {particles}, rows whose cells differ between particles \
+        {distinct_rows}, cell mismatches {}, arm uvDroppedAtInstall red on {dropped_red} rows", uv_bad.len());
+    for line in uv_bad.iter().take(12) {
+        eprintln!("  {line}");
+    }
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(uv_bad.is_empty(), "{} rows' sheet cells differ from native", uv_bad.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0 && particles > 0 && distinct_rows > 0);
+    for arm in UV_ARMS {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+    assert!(dropped_red > 0, "arm uvDroppedAtInstall never differs from native");
+}
