@@ -21,7 +21,8 @@
 //! harvest site's arrival from the user harvest map (the server mock's). 其余
 //! （`Mysekai/Effect/UberUnlit` 演出族、粒子 listen point 一族）是
 //! 范围外：按 shader 名计数保留。Particle system materials are not glb
-//! materials; the stay particles are drawn by `harvest_particles.rs`.
+//! materials; the views play theirs through the fixture particle host
+//! (`harvest::particles`).
 //!
 //! 换装时机：全部摆放的 scene 展开完毕（`HarvestScenesReady`）后一次
 //! 性建 plan、等贴图到齐、逐实体换。挂账：采集物贴图不补 mip 链

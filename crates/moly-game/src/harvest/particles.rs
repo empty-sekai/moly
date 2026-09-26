@@ -119,11 +119,6 @@ pub(crate) struct HarvestParticleCalls {
 }
 
 impl HarvestParticleCalls {
-    /// Whether the archive index lists `package` (`None` until it is read).
-    pub(crate) fn listed(&self, package: &str) -> Option<bool> {
-        self.listed.as_ref().map(|listed| listed.contains(package))
-    }
-
     /// One call (see the module comment for the source's calls).
     pub(crate) fn queue(
         &mut self,
@@ -430,7 +425,7 @@ fn plant_has_renderer(world: &World, root: Entity) -> bool {
 }
 
 /// Whether the archive index lists `package` (`None` while it loads).
-pub(crate) fn archive_listed(world: &mut World, package: &str) -> Option<bool> {
+fn archive_listed(world: &mut World, package: &str) -> Option<bool> {
     let handle = {
         let server = world.resource::<AssetServer>().clone();
         let mut calls = world.resource_mut::<HarvestParticleCalls>();
@@ -463,10 +458,6 @@ pub(crate) fn archive_listed(world: &mut World, package: &str) -> Option<bool> {
 /// Exclusive, Update: the due delayed calls join the queue; then the queue
 /// runs in order until a call waits.
 pub(crate) fn advance(world: &mut World) {
-    // The index is read once (the stay host waits on the answer).
-    if world.resource::<HarvestParticleCalls>().listed.is_none() {
-        let _ = archive_listed(world, "");
-    }
     let frame = u64::from(world.resource::<bevy::diagnostic::FrameCount>().0);
     let dt = world.resource::<Time>().delta_secs();
     {

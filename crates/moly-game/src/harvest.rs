@@ -517,8 +517,8 @@ pub(crate) struct HarvestGltfs {
 #[derive(Resource, Default)]
 pub(crate) struct HarvestDocs(pub(crate) HashMap<String, Handle<moly_assets::json::JsonAsset>>);
 
-/// Every placed scene of the arrival has expanded (the material swap and the
-/// stay particles wait for it).
+/// Every placed scene of the arrival has expanded (the material swap waits
+/// for it).
 #[derive(Resource)]
 pub struct HarvestScenesReady;
 
@@ -626,7 +626,7 @@ pub(crate) fn prefab_scene_index(document: &str, leaf: &str) -> usize {
 }
 
 /// Global observer: count the arrival's expanded scenes; all expanded opens
-/// the material swap and the stay particles.
+/// the material swap.
 fn on_scene_ready(
     trigger: On<SceneInstanceReady>,
     roots: Query<&HarvestRoot>,
