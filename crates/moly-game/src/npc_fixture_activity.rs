@@ -174,6 +174,8 @@ struct PlayablePoint {
     slot_id: i32,
     position: [f32; 3],
     rotation: Quat,
+    /// The StartLoc's own world position.
+    start_loc: [f32; 3],
 }
 
 #[derive(Clone)]
@@ -195,9 +197,24 @@ pub(crate) struct Selection {
     put_type: PutType,
     pub position: [f32; 3],
     pub rotation: Quat,
+    /// The StartLoc's own world position (its own height).
+    pub start_loc: [f32; 3],
 }
 
 impl Selection {
+    /// The NoTalk master row id, for an action from that table.
+    pub(crate) fn no_talk_row(&self) -> Option<i32> {
+        match self.source.origin {
+            ActivityOrigin::NoTalk(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The fixture timeline the action plays.
+    pub(crate) fn timeline_id(&self) -> i32 {
+        self.timeline.id
+    }
+
     pub(crate) fn ai_data(&self) -> AiTalkData {
         AiTalkData {
             kind: self.kind,
@@ -271,6 +288,23 @@ pub(crate) struct NpcFixtureActivities {
     /// Host data gaps already reported for the no-talk factory. Each is
     /// reported once until a layout edit or site change can alter it.
     reported_gaps: HashSet<String>,
+    /// No-talk data a forced objective set on a character (the home
+    /// controller's random fixture action): the decision that finds the
+    /// no-talk data in the character's slot runs the no-talk objective on
+    /// this selection instead of drawing a new one.
+    forced: HashMap<Entity, Selection>,
+}
+
+impl NpcFixtureActivities {
+    /// Keep `selection` as the data a forced no-talk objective set.
+    pub(crate) fn force(&mut self, actor: Entity, selection: Selection) {
+        self.forced.insert(actor, selection);
+    }
+
+    /// Forget the forced data of `actor` (its slot was replaced).
+    pub(crate) fn clear_forced(&mut self, actor: Entity) {
+        self.forced.remove(&actor);
+    }
 }
 
 /// Why the no-talk factory produced no result on this frame. Neither kind is
@@ -476,6 +510,7 @@ impl Factory<'_, '_> {
             face,
             rng,
             None,
+            None,
             draws,
         )
     }
@@ -516,9 +551,109 @@ impl Factory<'_, '_> {
             face,
             rng,
             Some((&spec, target)),
+            None,
             &mut NoneTalkDraws::default(),
         )
         .map_err(FactoryIssue::into_reason)
+    }
+
+    /// The no-talk actions a character's random fixture action chooses
+    /// from: the NoTalk rows in master order whose fixture id has a placed
+    /// fixture (IsTargetFixture), whose unit is `unit`, and for which
+    /// GetTargetNoTalkFixture finds a fixture (the same actionable and
+    /// playable tests as the lottery, `unmovable` being this character's
+    /// UnmovableFixtureList). Returns the row ids.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn no_talk_action_rows(
+        &self,
+        actor: Entity,
+        unit: u32,
+        site_type: &str,
+        epoch: u64,
+        from: [f32; 3],
+        placements: &FixturePlacements,
+        other_targets: &[(Entity, Option<Entity>)],
+        unmovable: &[String],
+        face: &ObjectiveFace,
+    ) -> Result<Vec<i32>, FactoryIssue> {
+        let tables = self
+            .tables
+            .as_deref()
+            .ok_or_else(|| FactoryIssue::Pending("no-talk source tables are still loading".into()))?;
+        let mut rows = Vec::new();
+        for row in tables.no_talk_rows().iter().filter(|row| row.unit == unit) {
+            // The probe draws the timeline pick on a scratch generator: only
+            // whether a fixture is found matters here.
+            let mut scratch = MemberRng::seeded(unit);
+            if self
+                .select_internal(
+                    actor,
+                    unit,
+                    site_type,
+                    epoch,
+                    from,
+                    placements,
+                    other_targets,
+                    unmovable,
+                    face,
+                    &mut scratch,
+                    None,
+                    Some(row.id),
+                    &mut NoneTalkDraws::default(),
+                )?
+                .is_some()
+            {
+                rows.push(row.id);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// `CreateNoneTalkData(character, action)`: GetTargetNoTalkFixture for
+    /// the one NoTalk row, then, on a hit, one engine pick of the timeline in
+    /// its group on `rng`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select_no_talk_row(
+        &self,
+        row: i32,
+        actor: Entity,
+        unit: u32,
+        site_type: &str,
+        epoch: u64,
+        from: [f32; 3],
+        placements: &FixturePlacements,
+        other_targets: &[(Entity, Option<Entity>)],
+        unmovable: &[String],
+        face: &ObjectiveFace,
+        rng: &mut MemberRng,
+        draws: &mut NoneTalkDraws,
+    ) -> Result<Option<Selection>, FactoryIssue> {
+        self.select_internal(
+            actor,
+            unit,
+            site_type,
+            epoch,
+            from,
+            placements,
+            other_targets,
+            unmovable,
+            face,
+            rng,
+            None,
+            Some(row),
+            draws,
+        )
+    }
+
+    /// The forced no-talk data of `actor`, taken (see
+    /// [`NpcFixtureActivities::force`]).
+    pub(crate) fn take_forced(&mut self, actor: Entity) -> Option<Selection> {
+        self.runtime.forced.remove(&actor)
+    }
+
+    /// Put forced data back (see [`Self::take_forced`]).
+    pub(crate) fn keep_forced(&mut self, actor: Entity, selection: Selection) {
+        self.runtime.forced.insert(actor, selection);
     }
 
     /// GetAllFixture is insertion ordered. The offline placement owner is
@@ -686,6 +821,7 @@ impl Factory<'_, '_> {
             slot_id,
             position,
             rotation: poses.start.rotation,
+            start_loc: poses.start.position,
         }))
     }
 
@@ -852,6 +988,7 @@ impl Factory<'_, '_> {
         face: &ObjectiveFace,
         rng: &mut MemberRng,
         exact: Option<(&ActivitySpec, &FixtureTarget)>,
+        only_row: Option<i32>,
         draws: &mut NoneTalkDraws,
     ) -> Result<Option<Selection>, FactoryIssue> {
         use FactoryIssue::{Gap, Pending};
@@ -898,6 +1035,28 @@ impl Factory<'_, '_> {
                     tweet: spec.tweet.clone(),
                 },
             )]
+        } else if let Some(id) = only_row {
+            // One NoTalk row, as GetTargetNoTalkFixture(action) and
+            // CreateNoneTalkData(character, action) read it: no order draw.
+            tables
+                .no_talk_rows()
+                .iter()
+                .filter(|row| row.id == id)
+                .map(|row| {
+                    (
+                        0,
+                        Candidate {
+                            origin: ActivityOrigin::NoTalk(row.id),
+                            unit: row.unit,
+                            fixture_id: row.fixture_id,
+                            group_id: row.timeline_group_id,
+                            point: None,
+                            timeline_id: None,
+                            tweet: None,
+                        },
+                    )
+                })
+                .collect()
         } else {
             // Preserve the natural source permutation and draw count.
             tables
@@ -919,7 +1078,7 @@ impl Factory<'_, '_> {
                 })
                 .collect()
         };
-        if exact.is_none() {
+        if exact.is_none() && only_row.is_none() {
             draws.keys = order.len();
         }
         order.sort_by_key(|(key, _)| *key);
@@ -1033,6 +1192,7 @@ impl Factory<'_, '_> {
                     put_type: master.put_type,
                     position: playable.position,
                     rotation: playable.rotation,
+                    start_loc: playable.start_loc,
                 }));
             }
         }
@@ -1126,6 +1286,7 @@ impl Factory<'_, '_> {
             put_type: master.put_type,
             position: data.target_position,
             rotation: pair.start.rotation,
+            start_loc: pair.start.position,
         })
     }
 

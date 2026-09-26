@@ -32,6 +32,9 @@ pub(crate) struct TweetTables {
     pub(crate) greetings: Vec<GreetingRow>,
     /// The greeting condition rows.
     pub(crate) conditions: Vec<GreetingConditionRow>,
+    /// The site-entry rows' owner-row ids (`withoutRelatedTalkId`), in
+    /// master order: the change-site state's room-entry tweets.
+    pub(crate) site_entries: Vec<i32>,
     /// The after-edit pools as extracted: character unit -> tweet ids (read
     /// by the balloon's after-edit reaction through its seam).
     #[allow(dead_code, reason = "read by the balloon through its seam")]
@@ -88,12 +91,14 @@ pub(crate) fn parse(
     };
     let (tweets, after_edit_pools) = parse_tweets(&tweets_json.0);
     let (wrt, greetings, conditions) = parse_greeting_tables(&tables_json.0);
+    let site_entries = parse_site_entries(&tables_json.0);
     info!(
-        "[npc-tweet] tables ready: tweets {} / owner rows {} / greetings {} / conditions {} / after-edit pools {}",
+        "[npc-tweet] tables ready: tweets {} / owner rows {} / greetings {} / conditions {} / site entries {} / after-edit pools {}",
         tweets.len(),
         wrt.len(),
         greetings.len(),
         conditions.len(),
+        site_entries.len(),
         after_edit_pools.len()
     );
     commands.insert_resource(TweetTables {
@@ -101,6 +106,7 @@ pub(crate) fn parse(
         wrt,
         greetings,
         conditions,
+        site_entries,
         after_edit_pools,
     });
     commands.remove_resource::<TweetTableHandles>();
@@ -173,6 +179,24 @@ pub(crate) fn parse_tweets(text: &str) -> (Vec<TweetRow>, Vec<(i32, Vec<i32>)>) 
         })
         .collect();
     (tweets, pools)
+}
+
+/// `tweet-tables.json`: the site-entry rows' owner-row ids, in master order.
+pub(crate) fn parse_site_entries(text: &str) -> Vec<i32> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).unwrap_or_else(|err| panic!("tweet tables are not JSON: {err}"));
+    value
+        .get("siteEntries")
+        .and_then(|value| value.as_array())
+        .unwrap_or_else(|| panic!("tweet tables have no siteEntries array"))
+        .iter()
+        .map(|row| {
+            row.get("withoutRelatedTalkId")
+                .and_then(|value| value.as_i64())
+                .unwrap_or_else(|| panic!("site-entry row has no withoutRelatedTalkId"))
+                as i32
+        })
+        .collect()
 }
 
 /// `tweet-tables.json`: the owner, greeting and condition tables. A null

@@ -1400,7 +1400,7 @@ pub(crate) fn engine_int_draw(rng: &mut MemberRng, len: usize) -> usize {
 
 /// The engine float range `[0, total]` on the member generator, both ends
 /// reachable: 23 bits scaled onto the range.
-fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
+pub(crate) fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
     let bits = (rng.next() >> 41) as u32;
     bits as f32 / 8_388_607.0 * total
 }
@@ -2513,6 +2513,9 @@ pub(crate) fn decide(
             let mut gate_fixture: Option<String> = None;
             let mut none_talk_null = false;
             let mut none_talk_gap = false;
+            // Row 5 on no-talk data a forced objective set: the no-talk
+            // objective runs on that data as it is (no factory, no reset).
+            let mut forced_data = false;
             let destination = if let Some(data) = fixture_talk.as_ref().map(|prepared| &prepared.data) {
                 // MoveAsync goes to the data's target position; a talk data
                 // TargetFixture takes IfMoveTargetFixtureActionPosition.
@@ -2634,6 +2637,28 @@ pub(crate) fn decide(
                         }
                     }
                     DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                    DecisionRoute::NoneTalk
+                        if matches!(decision, objective::Decision::NoneTalk)
+                            && forced_none_talk(&mut fixture_activities, entity, &slot) =>
+                    {
+                        let selected = fixture_activities
+                            .take_forced(entity)
+                            .expect("the guard found the forced data");
+                        record.set("path", "none_talk_existing_data");
+                        if let Some(row) = selected.no_talk_row() {
+                            record.set("no_talk_row", row);
+                        }
+                        record.set("timeline", selected.timeline_id());
+                        detail = format!(
+                            "existing no-talk data on {:?}/{}",
+                            selected.target.entity, selected.target.uid
+                        );
+                        gate_fixture = Some(selected.target.uid.clone());
+                        forced_data = true;
+                        let position = selected.position;
+                        fixture_selection = Some(selected);
+                        Some(position)
+                    }
                     DecisionRoute::NoneTalk => {
                         record.set("path", "none_talk_factory");
                         let fixture_targets: Vec<(Entity, Option<Entity>)> = snaps
@@ -2725,7 +2750,9 @@ pub(crate) fn decide(
             if general_talk.is_some() || fixture_talk.is_some() {
                 record.set("talk_target", serde_json::json!(target_position));
             }
-            if let Some(selected) = &fixture_selection {
+            if forced_data {
+                // The slot already holds this data.
+            } else if let Some(selected) = &fixture_selection {
                 // ForceUpdateNoneTalkObjective: Reset, then SetAITalkData.
                 slot.reset_ai_talk_data();
                 slot.set_current(selected.ai_data());
@@ -3004,6 +3031,25 @@ pub(crate) fn decide(
             break 'cascade;
         }
     }
+}
+
+/// Whether `actor` carries forced no-talk data that its slot still holds
+/// (the same fixture in no-talk data); stale forced data is dropped.
+fn forced_none_talk(
+    activities: &mut crate::npc_fixture_activity::Factory<'_, '_>,
+    actor: Entity,
+    slot: &TalkSlot,
+) -> bool {
+    let Some(selected) = activities.take_forced(actor) else {
+        return false;
+    };
+    let holds = slot.current.as_ref().is_some_and(|data| {
+        data.kind == TalkType::NoneTalk && data.target_fixture == Some(selected.target.entity)
+    });
+    if holds {
+        activities.keep_forced(actor, selected);
+    }
+    holds
 }
 
 /// The objective ended on `frame` (`failed`: it ended without its body, for
