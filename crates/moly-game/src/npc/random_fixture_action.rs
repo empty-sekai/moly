@@ -362,8 +362,9 @@ fn candidates(world: &mut World, actor: Entity, unit: u32) -> Result<Candidates,
             Without<Away>,
         >,
         Query<(&CharacterUnitId, &NpcActions), Without<crate::player::PlayerControlled>>,
+        Option<Res<crate::npc_talk_lottery::TalkExtraTables>>,
     )>::new(world);
-    let (factory, placements, face, catalog, configs, talk_list, epoch, selection, npcs, store) =
+    let (factory, placements, face, catalog, configs, talk_list, epoch, selection, npcs, store, extras) =
         params.get_mut(world);
     let face = face.ok_or("the objective face is not built")?;
     let config = configs.ok_or("the client configs are not loaded")?;
@@ -446,6 +447,7 @@ fn candidates(world: &mut World, actor: Entity, unit: u32) -> Result<Candidates,
             gate_action_elapsed_seconds: config
                 .int(crate::client_config::KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME),
             admissible: &admissible,
+            extras: extras.as_deref(),
         }),
         fixture_host: None,
         together: None,

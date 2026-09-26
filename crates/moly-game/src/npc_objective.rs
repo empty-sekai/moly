@@ -54,12 +54,15 @@
 //! * **内容绑定**：通用对话数据保存所选 master、既有 preAction 投影、
 //!   目标位与 self 成员。Previous 只在 AI Reset 沿迁移；玩家窗口结束
 //!   不更新它。
-//! * **未移植的工厂**：家具对话的三个建数工厂（带 timeline 组、带等待
-//!   通信、带目标家具）、家具可用性一对谓词、家具标签条件、角色初始化
-//!   以来的时长与常设家具对话表不在宿主里；抽签走到它们时按具名缺口
-//!   收场（对话数据为空，进停顿），不静默换道。源异常（抽签池空且无
-//!   上一条、成员数桶空、行类型越界、缺 master 的解引用）让该角色的
-//!   AI 循环终止。
+//! * **家具对话的工厂与表**：三个建数工厂、家具可用性一对谓词、家具标签
+//!   条件与常设家具对话（fixture-common）都在 `npc_talk_lottery`；它们读
+//!   的表（等待通信表、常设家具对话两表、标签组表）各自装载，资产源缺表
+//!   时走到该路径按具名缺口收场（对话数据为空，进停顿），不静默换道。源
+//!   异常（抽签池空且无上一条、成员数桶空、行类型越界、缺 master 的解引
+//!   用）让该角色的 AI 循环终止。
+//! * **对话打断重跑**：打断标记 4 在同一数据上重立对话目标。无目标家具的
+//!   数据与常设家具对话（类型 5，无前置动作、无时间轴）按原数据重走；其余
+//!   带目标家具的数据（类型 2/3/6）重跑按具名缺口收场。
 //! * **抽签引擎**：整数档与浮点档都在成员引擎上抽（整数 `[0,n)`、浮点
 //!   `[0,总和]` 两端可达），引擎序列本身不在律内。序列上的抽取每次新建
 //!   一个运行时随机数生成器，种子取线程种子器的下一个值；种子器由进程级
@@ -373,6 +376,17 @@ impl PreparedFixtureTalk {
             TalkType::CommunicationWhileDoingWait | TalkType::MultipleCharacterFixture
         )
     }
+}
+
+/// A fixture-common talk the factory built: its loaded script, the fixture
+/// entity and placement, the target, and the tweet id its objective change
+/// leaves on the AI model.
+struct PreparedCommonTalk {
+    resolved: crate::player_talk::ResolvedTalk,
+    fixture: Entity,
+    uid: String,
+    target_position: [f32; 3],
+    tweet_id: i32,
 }
 
 /// One other member of a group talk at the main's decision.
@@ -1520,10 +1534,12 @@ pub(crate) fn decide(
         Local<String>,
         ResMut<crate::npc_fixture_talk::FixtureTalkGroups>,
     ),
-    (configs, talk_list, together): (
+    (configs, talk_list, together, extras, extras_pending): (
         Option<Res<ClientConfigs>>,
         Option<Res<crate::server_panel::TalkDataStore>>,
         Option<Res<crate::fixture_activity_data::TogetherCommunicationTable>>,
+        Option<Res<npc_talk_lottery::TalkExtraTables>>,
+        Option<Res<npc_talk_lottery::TalkExtraRequests>>,
     ),
     (walk_face, mut change_site): (
         Option<Res<crate::walk_face::WalkFace>>,
@@ -1606,6 +1622,13 @@ pub(crate) fn decide(
     let Some(together) = together.as_deref() else {
         return;
     };
+    // The other talk tables load on their own as well; hold while their
+    // loads are pending (without their loader the paths that read them name
+    // the missing table).
+    if extras_pending.is_some() {
+        return;
+    }
+    let extras = extras.as_deref();
     // No decision before the engine's frame clock runs (and none at all if
     // its settings were refused).
     if !clock.ready() {
@@ -2173,6 +2196,7 @@ pub(crate) fn decide(
             // the decision ends as empty data does).
             let mut general_talk: Option<crate::player_talk::ResolvedTalk> = None;
             let mut fixture_talk: Option<PreparedFixtureTalk> = None;
+            let mut common_talk: Option<PreparedCommonTalk> = None;
             let mut null_talk: Option<String> = None;
             let mut halt: Option<npc_talk_lottery::Halt> = None;
             match decision_route {
@@ -2304,6 +2328,7 @@ pub(crate) fn decide(
                                 gate_action_elapsed_seconds: config
                                     .int(KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME),
                                 admissible: &admissible,
+                                extras,
                             }),
                             fixture_host: Some(&host),
                             together: Some(&together.0),
@@ -2517,13 +2542,67 @@ pub(crate) fn decide(
                                 },
                             }
                         }
+                        Ok(npc_talk_lottery::TalkPlan::CommonFixture {
+                            talk_id,
+                            fixture,
+                            target_position,
+                            target_found,
+                            common_id,
+                        }) => {
+                            // ChangeFixtureCommonTalkObjective raises the Talk
+                            // interrupt whether or not data was built.
+                            slot.interrupt = Some(TALK_INTERRUPT);
+                            record.set("talk_id", talk_id);
+                            record.set(
+                                "fixture_common_talk",
+                                serde_json::json!({
+                                    "fixture": fixture,
+                                    "target": target_position,
+                                    "target_found": target_found,
+                                    "common_id": common_id,
+                                }),
+                            );
+                            let prepared = catalog
+                                .resolve(talk_id)
+                                .ok_or_else(|| {
+                                    format!("general talk {talk_id} is not in the loaded talk scripts")
+                                })
+                                .and_then(|resolved| {
+                                    let geometry =
+                                        fixture_activities.talk_fixture_geometry(&fixture, &placements)?;
+                                    // SetTweetId(common id), then SetTweetId(master):
+                                    // the talk's pre-action tweet when it has one.
+                                    let tweet_id = fixture_activities
+                                        .tables()
+                                        .and_then(|tables| tables.pre_action_of(talk_id))
+                                        .map_or(common_id, |pre| pre.tweet_id);
+                                    Ok(PreparedCommonTalk {
+                                        resolved,
+                                        fixture: geometry.entity,
+                                        uid: fixture.clone(),
+                                        target_position,
+                                        tweet_id,
+                                    })
+                                });
+                            match prepared {
+                                Ok(prepared) => common_talk = Some(prepared),
+                                Err(reason) => {
+                                    halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                        "fixture-common talk {talk_id}: {reason}"
+                                    )));
+                                }
+                            }
+                        }
                         Err(stop) => halt = Some(stop),
                     }
                 }
                 DecisionRoute::SameTalkData => {
                     record.set("path", "same_talk_data");
                     match slot.current.as_ref() {
-                        Some(data) if data.target_fixture.is_none() => {
+                        Some(data)
+                            if data.target_fixture.is_none()
+                                || data.kind == TalkType::CommonFixture =>
+                        {
                             if let Some(content) = &data.content {
                                 record.set("talk_id", content.master_id);
                             }
@@ -2635,6 +2714,14 @@ pub(crate) fn decide(
                 detail = format!("fixture talk {} on {}", data.talk_id, data.fixture);
                 gate_fixture = Some(data.fixture.clone());
                 Some(data.target_position)
+            } else if let Some(prepared) = &common_talk {
+                detail = format!(
+                    "fixture-common talk {} on {}",
+                    prepared.resolved.content().master_id,
+                    prepared.uid
+                );
+                gate_fixture = Some(prepared.uid.clone());
+                Some(prepared.target_position)
             } else {
                 match decision_route {
                     DecisionRoute::SameTalkData => {
@@ -2643,6 +2730,11 @@ pub(crate) fn decide(
                             .as_ref()
                             .expect("the interrupt row re-runs existing talk data");
                         detail = "同一对话数据".to_owned();
+                        // Common-fixture data keeps its TargetFixture, so its
+                        // move takes IfMoveTargetFixtureActionPosition.
+                        gate_fixture = data
+                            .target_fixture
+                            .and_then(|fixture| fixture_activities.uid_of(fixture));
                         Some(data.target_position)
                     }
                     DecisionRoute::SubObjective(_) => {
@@ -2862,7 +2954,7 @@ pub(crate) fn decide(
             }
 
             let target_position = destination.unwrap_or(state.0.position);
-            if general_talk.is_some() || fixture_talk.is_some() {
+            if general_talk.is_some() || fixture_talk.is_some() || common_talk.is_some() {
                 record.set("talk_target", serde_json::json!(target_position));
             }
             if forced_data {
@@ -2884,6 +2976,22 @@ pub(crate) fn decide(
                     main_character: unit.0,
                     characters: vec![unit.0],
                     pre_action: Some(resolved.pre_action()),
+                    locate: None,
+                    pending_factory: None,
+                });
+            } else if let Some(prepared) = &common_talk {
+                // CreateCharacterFixtureCommonTalkData, then SetAITalkData:
+                // type 5, the master, the fixture, the target position, the
+                // main character and the one-member list; no pre-action.
+                actions.tweet_id = prepared.tweet_id;
+                slot.set_current(AiTalkData {
+                    kind: TalkType::CommonFixture,
+                    content: Some(prepared.resolved.content()),
+                    target_fixture: Some(prepared.fixture),
+                    target_position,
+                    main_character: unit.0,
+                    characters: vec![unit.0],
+                    pre_action: None,
                     locate: None,
                     pending_factory: None,
                 });
