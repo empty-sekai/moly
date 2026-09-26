@@ -239,6 +239,11 @@ pub(super) fn restore(world: &mut World) -> Result<(), String> {
             Ok((*actor, Vec3::from(point), *player))
         })
         .collect::<Result<_, String>>()?;
+    let players: Vec<Entity> = points
+        .iter()
+        .filter(|(_, _, player)| *player)
+        .map(|(actor, _, _)| *actor)
+        .collect();
     for (actor, point, player) in points {
         if player {
             if let Some(mut transform) = world.get_mut::<Transform>(actor) {
@@ -253,6 +258,14 @@ pub(super) fn restore(world: &mut World) -> Result<(), String> {
         }
     }
     clear_overlay(world);
+    // EditGameState.OnExit: the local player's presenter shows
+    // (`PlayerAvatarPresenter.Show`) whatever its view was before the edit;
+    // an edit entered from the first-person camera must not leave it hidden.
+    for actor in players {
+        if let Ok(mut entity) = world.get_entity_mut(actor) {
+            entity.insert(Visibility::Visible);
+        }
+    }
     Ok(())
 }
 

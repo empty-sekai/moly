@@ -38,6 +38,11 @@
 //!   and the dialog's destruction (`closeBehavior` Destroy). The tapped
 //!   button plays its own serialized SE.
 //!
+//! Opener: the screen manager ([`crate::ui_layers`]) shows the dialog
+//! (`ShowDialog` with its `Dialog/` prefab), and this view reports `Open`,
+//! the open animation's end, `Close` and the destruction back to it; the
+//! manager hands it the back key when it is the topmost dialog.
+//!
 //! Host mapping: the dialog occupies the dialog input layer from the request
 //! to the end of its close animation (`ShellDialogState`); a tap the window
 //! does not take while it is not raycastable goes to the background cover,
@@ -65,6 +70,7 @@ use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::harvest::{LearnPhenomenaDialogClosed, LearnPhenomenaDialogRequest};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
+use crate::ui_layers::{DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager};
 use crate::ui_layout::{Pointer, UiLayouts, UiPrefabView};
 
 pub(crate) const KEY: &str = "LearnPhenomena";
@@ -130,6 +136,8 @@ enum Stage {
 }
 
 struct Run {
+    /// The dialog the screen manager shows.
+    id: DialogId,
     phenomena_id: i32,
     name: String,
     stage: Stage,
@@ -396,6 +404,7 @@ pub(crate) fn open(
     mut shell: ResMut<ShellDialogState>,
     mut sounds: ResMut<SeRequests>,
     mut views: Query<&mut UiPrefabView, With<LearnPhenomenaRoot>>,
+    mut screens: ResMut<ScreenManager>,
 ) {
     for request in requests.read() {
         let dialog = &mut *dialog;
@@ -432,6 +441,19 @@ pub(crate) fn open(
             .icon_source
             .as_ref()
             .unwrap_or_else(|| panic!("[learn-phenomena] the thumbnail {icon} was not extracted"));
+        // ShowSubWindowDialog: InstantiateDialog("Dialog/" + type) and Initialize.
+        let id = match screens.show_dialog(
+            DialogType::LearnPhenomenaSubWindowDialog,
+            DisplayLayerType::LayerDialog,
+            DialogBackKey::Close,
+            "HarvestUtility (learn phenomenon)",
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                error!("[learn-phenomena] {error}: the dialog does not open");
+                continue;
+            }
+        };
         let alias = format!("learn-phenomena/{icon}");
         layouts.register_runtime_texture(
             &alias,
@@ -467,11 +489,13 @@ pub(crate) fn open(
             });
         }
         shell.learn_phenomena_open = true;
+        screens.open_dialog(id);
         info!(
             "[learn-phenomena] t {:.4}: ShowSubWindowDialog(type 381): Open plays {:?}; OpenAnimation: alpha 0, no raycasts, fade to 1 over {OPEN_ANIMATION_DURATION}s {ease:?}; Setup(\"{}\", {}): balloon Initialize (hidden), message \"{message}\", {SETUP_SE}",
             time.elapsed_secs_f64(), bindings.open_se, master.name, request.thumbnail
         );
         dialog.run = Some(Run {
+            id,
             phenomena_id: master.id,
             name: master.name.clone(),
             stage: Stage::Opening,
@@ -620,6 +644,7 @@ fn tap(
     sounds: &mut SeRequests,
     now: f64,
     closed: &mut MessageWriter<LearnPhenomenaDialogClosed>,
+    screens: &mut ScreenManager,
 ) -> bool {
     let b = &bindings.balloon;
     if b.allowed_close {
@@ -656,15 +681,60 @@ fn tap(
     }
     if bindings.close_buttons.contains(&id) {
         sounds.source_button(layouts, KEY, &path);
-        closed.write(LearnPhenomenaDialogClosed);
-        run.stage = Stage::Closing;
-        run.fade = FloatTween::new(0.0, CLOSE_ANIMATION_DURATION, ease);
-        info!(
-            "[learn-phenomena] t {now:.4}: close button {path}: Close -> onClose (LearnPhenomenaDialogClosed), close animation fade to 0 over {CLOSE_ANIMATION_DURATION}s ({:.4}s after the open)",
-            now - run.opened_at
-        );
+        close(run, ease, now, &format!("close button {path}"), closed, screens);
     }
     false
+}
+
+/// `Close`: the onClose callback, then the close animation.
+fn close(
+    run: &mut Run,
+    ease: Ease,
+    now: f64,
+    by: &str,
+    closed: &mut MessageWriter<LearnPhenomenaDialogClosed>,
+    screens: &mut ScreenManager,
+) {
+    closed.write(LearnPhenomenaDialogClosed);
+    run.stage = Stage::Closing;
+    run.fade = FloatTween::new(0.0, CLOSE_ANIMATION_DURATION, ease);
+    screens.close_dialog(run.id);
+    info!(
+        "[learn-phenomena] t {now:.4}: {by}: Close -> onClose (LearnPhenomenaDialogClosed), close animation fade to 0 over {CLOSE_ANIMATION_DURATION}s ({:.4}s after the open)",
+        now - run.opened_at
+    );
+}
+
+/// The back key the screen manager hands the topmost dialog:
+/// `SubWindowDialog.OnHardwareBackKeyProcess` is `CloseProcess`, which is
+/// `Close`.
+pub(crate) fn back_key(
+    mut keys: MessageReader<DialogBackKeyEvent>,
+    time: Res<Time>,
+    layouts: Res<UiLayouts>,
+    mut dialog: ResMut<LearnPhenomenaDialog>,
+    mut screens: ResMut<ScreenManager>,
+    mut closed: MessageWriter<LearnPhenomenaDialogClosed>,
+) {
+    for key in keys.read() {
+        let dialog = &mut *dialog;
+        let Some(run) = dialog.run.as_mut().filter(|run| run.id == key.id) else {
+            continue;
+        };
+        if run.stage == Stage::Closing {
+            info!("[learn-phenomena] back key while the close animation runs: Close again changes nothing");
+            continue;
+        }
+        let ease = default_ease(&layouts, &mut dialog.ease_warned);
+        close(
+            run,
+            ease,
+            time.elapsed_secs_f64(),
+            "back key (SubWindowDialog.OnHardwareBackKeyProcess -> CloseProcess)",
+            &mut closed,
+            &mut screens,
+        );
+    }
 }
 
 /// Taps while the dialog is open (the dialog slot is modal).
@@ -681,6 +751,7 @@ pub(crate) fn click(
     mut consumed: ResMut<ActionTapConsumed>,
     mut sounds: ResMut<SeRequests>,
     mut closed: MessageWriter<LearnPhenomenaDialogClosed>,
+    mut screens: ResMut<ScreenManager>,
 ) {
     let taps: Vec<Vec2> = gestures
         .read()
@@ -721,6 +792,7 @@ pub(crate) fn click(
             &mut sounds,
             time.elapsed_secs_f64(),
             &mut closed,
+            &mut screens,
         ) {
             dialog.edited_document = true;
         }
@@ -739,6 +811,7 @@ pub(crate) fn place(
         (&mut Visibility, &mut Transform, &mut UiPrefabView),
         With<LearnPhenomenaRoot>,
     >,
+    mut screens: ResMut<ScreenManager>,
 ) {
     let Ok((mut visibility, mut transform, mut view)) = roots.single_mut() else {
         return;
@@ -777,6 +850,7 @@ pub(crate) fn place(
         match stage {
             Stage::Opening => {
                 run.stage = Stage::Open;
+                screens.dialog_open_finished(run.id);
                 info!(
                     "[learn-phenomena] t {now:.4}: OpenAnimation done ({:.4}s after the open): blocksRaycasts true, OnFinishOpenAnimation",
                     now - run.opened_at
@@ -787,6 +861,7 @@ pub(crate) fn place(
                     "[learn-phenomena] t {now:.4}: close animation done ({:.4}s after the open): the dialog of phenomenon {} is destroyed",
                     now - run.opened_at, run.phenomena_id
                 );
+                screens.dialog_destroyed(run.id);
                 dialog.run = None;
                 shell.learn_phenomena_open = false;
                 *visibility = Visibility::Hidden;

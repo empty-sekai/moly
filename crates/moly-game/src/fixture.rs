@@ -1095,6 +1095,23 @@ impl FixturePlacements {
         self.next_edit_uid = next;
     }
 
+    /// The home gate's rows show the gate model the server set at the home
+    /// site (a gate model the index lacks leaves the row as it is).
+    pub(crate) fn show_gate_model(&mut self, model: &crate::gate_flow::HomeGateModel) {
+        let Some(package) = model.package.as_deref() else {
+            return;
+        };
+        for (row, uid) in self.rows.iter_mut().zip(&self.instance_uids) {
+            if model.masters.contains(&row.fixture_id) && row.package != package {
+                info!(
+                    "[offline-layout] home gate {uid}: {} -> {package} (userMysekaiGates)",
+                    row.package
+                );
+                row.package = package.to_owned();
+            }
+        }
+    }
+
     pub(crate) fn editor_rows(&self) -> Vec<EditableFixture> {
         self.rows
             .iter()
@@ -1458,6 +1475,7 @@ fn restore_selected_layout(
     exploration: Option<Res<crate::player_data::TransientExploration>>,
     source_region: Option<Res<crate::site::NavMeshSourceRegion>>,
     homes: Option<Res<crate::entry::house::HomeFixtures>>,
+    gate_model: Option<Res<crate::gate_flow::HomeGateModel>>,
 ) {
     let Some(sites) = sites else {
         return;
@@ -1474,6 +1492,11 @@ fn restore_selected_layout(
     // The home site's layout is completed with the player's house, which
     // needs the fixture tables.
     if selection.site_type() == "home_site" && homes.is_none() {
+        return;
+    }
+    // The home gate shows the model of the gate the server set at the home
+    // site (`MysekaiGateModel.AssetBundleName`).
+    if selection.site_type() == "home_site" && gate_model.is_none() {
         return;
     }
     // An embedded stage starts with no preset or persisted layout. The same
@@ -1516,6 +1539,11 @@ fn restore_selected_layout(
         Ok(mut layout) => {
             info!("[offline-layout] site {} ({}) level {}: restored {} fixtures; layouts are per-site",
                 site_id, selection.site_type(), floor.level, layout.total());
+            if selection.site_type() == "home_site" {
+                if let Some(model) = gate_model.as_deref() {
+                    layout.show_gate_model(model);
+                }
+            }
             layout.floor = Some(floor);
             *placements = layout;
             revision.0 = revision
@@ -1540,7 +1568,7 @@ fn restore_selected_layout(
 /// live instances and derived state, never the per-site storage or source data.
 pub(crate) fn reload_current_layout(world: &mut World) {
     let roots: Vec<_> = world
-        .query_filtered::<Entity, With<FixtureRoot>>()
+        .query_filtered::<Entity, Or<(With<FixtureRoot>, With<PendingInstanceModel>)>>()
         .iter(world)
         .collect();
     for root in roots {
@@ -1785,29 +1813,7 @@ fn spawn_when_ready(
             panic!("家具 glb 没有默认 scene：{}", row.package);
         };
         let placed = row.placed();
-        commands.spawn((
-            SceneRoot(scene),
-            FixtureRoot,
-            FixtureVisualRoot { layout: row.layout },
-            crate::fixture_colors::FixtureColorChoice {
-                package: row.package.clone(),
-                texture_id: row.texture_id,
-            },
-            fence::FixtureRow(index),
-            FixturePlacement {
-                layout: row.layout,
-                fixture_id: row.fixture_id,
-            },
-            FixtureSource(handle.clone()),
-            FixtureInstanceSeed {
-                uid: placements.instance_uids[index].clone(),
-                package: row.package.clone(),
-                master: row.fixture_id,
-            },
-            crate::fixture_scene_inputs::FixtureScenePlacement(occupancy[index].clone()),
-            source_transform(placed.position, placed.yaw),
-            Visibility::Hidden,
-        ));
+        spawn_instance(&mut commands, &placements, &occupancy, index, handle.clone(), scene);
         // Per-instance browser logging is surprisingly expensive for real Home
         // layouts. Keep detailed evidence for small fixtures, otherwise sample
         // progress without serializing hundreds of near-identical messages.
@@ -1828,6 +1834,181 @@ fn spawn_when_ready(
         spawned_this_frame += 1;
     }
     assets.release_spawned(spawned.0);
+}
+
+/// The root of placement row `index` over its loaded glb, hidden until its
+/// materials are swapped.
+fn spawn_instance(
+    commands: &mut Commands,
+    placements: &FixturePlacements,
+    occupancy: &[OccupancyRow],
+    index: usize,
+    handle: Handle<Gltf>,
+    scene: Handle<Scene>,
+) -> Entity {
+    let row = &placements.rows[index];
+    let placed = row.placed();
+    commands
+        .spawn((
+            SceneRoot(scene),
+            FixtureRoot,
+            FixtureVisualRoot { layout: row.layout },
+            crate::fixture_colors::FixtureColorChoice {
+                package: row.package.clone(),
+                texture_id: row.texture_id,
+            },
+            fence::FixtureRow(index),
+            FixturePlacement {
+                layout: row.layout,
+                fixture_id: row.fixture_id,
+            },
+            FixtureSource(handle),
+            FixtureInstanceSeed {
+                uid: placements.instance_uids[index].clone(),
+                package: row.package.clone(),
+                master: row.fixture_id,
+            },
+            crate::fixture_scene_inputs::FixtureScenePlacement(occupancy[index].clone()),
+            source_transform(placed.position, placed.yaw),
+            Visibility::Hidden,
+        ))
+        .id()
+}
+
+/// A placed instance waiting for the model [`replace_instance_model`] gave
+/// it.
+#[derive(Component)]
+struct PendingInstanceModel {
+    uid: String,
+    handle: Handle<Gltf>,
+}
+
+/// `SiteView.UpdateFixture` on one placed instance: its row shows `package`
+/// and its root is replaced by a root over the new model once that loads.
+/// The other instances, their activities and the layout's footprints stay;
+/// the per-package reads of the layout (the action points, the planned
+/// fixture timelines) are composed again. Returns the old package.
+pub(crate) fn replace_instance_model(
+    world: &mut World,
+    uid: &str,
+    package: &str,
+) -> Result<String, String> {
+    let index = world
+        .get_resource::<FixtureIndexAsset>()
+        .map(|asset| asset.0.clone())
+        .ok_or("the fixture index was not requested")?;
+    let text = world
+        .resource::<Assets<moly_assets::json::JsonAsset>>()
+        .get(&index)
+        .map(|json| json.0.clone())
+        .ok_or("the fixture index is not loaded")?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("the fixture index is not JSON: {error}"))?;
+    let entry = value
+        .get("packages")
+        .and_then(|packages| packages.get(package))
+        .ok_or_else(|| format!("{package} is not in the fixture index"))?;
+    moly_assets::coordinates::validate_document(entry)
+        .map_err(|error| format!("fixture {package}: {error}"))?;
+    if entry.get("status").and_then(|v| v.as_str()) != Some("exported")
+        || entry.get("hasFixtureView").and_then(|v| v.as_bool()) != Some(true)
+    {
+        return Err(format!("{package} is not an exported fixture view"));
+    }
+    let glb = entry
+        .get("glb")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{package} has no glb in the fixture index"))?;
+    let path = format!("moly://fixture-models/{glb}");
+    let (row, old) = {
+        let mut placements = world
+            .get_resource_mut::<FixturePlacements>()
+            .ok_or("the layout is not installed")?;
+        let row = placements
+            .instance_uids
+            .iter()
+            .position(|placed| placed == uid)
+            .ok_or_else(|| format!("the layout has no instance {uid}"))?;
+        let old = std::mem::replace(&mut placements.rows[row].package, package.to_owned());
+        (row, old)
+    };
+    if let Some(mut assets) = world.get_resource_mut::<FixtureGltfAssets>() {
+        if let Some(planned) = assets.paths.get_mut(row) {
+            *planned = path.clone();
+        }
+    }
+    let roots: Vec<Entity> = world
+        .query::<(Entity, &FixtureInstanceSeed)>()
+        .iter(world)
+        .filter(|(_, seed)| seed.uid == uid)
+        .map(|(root, _)| root)
+        .collect();
+    for root in roots {
+        world.despawn(root);
+    }
+    let server = world.resource::<AssetServer>().clone();
+    let handle = moly_assets::residency::load_gltf(
+        &server,
+        bevy::asset::AssetPath::from(path),
+        moly_assets::residency::GltfResidency::CpuTextures,
+    );
+    world.spawn(PendingInstanceModel {
+        uid: uid.to_owned(),
+        handle,
+    });
+    world.remove_resource::<crate::fixture_attach::AttachWorlds>();
+    world.remove_resource::<crate::fixture_talk::TimelinesPlanned>();
+    world.remove_resource::<crate::fixture_talk::TimelineAssets>();
+    Ok(old)
+}
+
+/// Update, after [`spawn_when_ready`]: a replaced instance's root, once its
+/// new model is loaded.
+fn spawn_replaced_models(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    placements: Res<FixturePlacements>,
+    pending: Query<(Entity, &PendingInstanceModel)>,
+) {
+    for (entity, model) in &pending {
+        let failed = match (
+            server.load_state(&model.handle),
+            server.recursive_dependency_load_state(&model.handle),
+        ) {
+            (LoadState::Failed(error), _) => Some(format!("{error:?}")),
+            (_, RecursiveDependencyLoadState::Failed(error)) => Some(format!("{error:?}")),
+            _ => None,
+        };
+        if let Some(error) = failed {
+            error!("[fixture] instance {}: its new model failed to load: {error}; it stays without a model", model.uid);
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if !server.is_loaded_with_dependencies(&model.handle) {
+            continue;
+        }
+        let Some(gltf) = gltfs.get(&model.handle) else {
+            continue;
+        };
+        let Some(index) = placements.instance_uids.iter().position(|uid| *uid == model.uid) else {
+            error!("[fixture] instance {} left the layout before its new model loaded", model.uid);
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let Some(scene) = gltf.default_scene.clone() else {
+            error!("[fixture] instance {}: its new model has no default scene", model.uid);
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let occupancy = placements.occupancy_rows();
+        let root = spawn_instance(&mut commands, &placements, &occupancy, index, model.handle.clone(), scene);
+        info!(
+            "[fixture] SiteView.UpdateFixture: instance {} shows {} as root {root:?}",
+            model.uid, placements.rows[index].package
+        );
+        commands.entity(entity).despawn();
+    }
 }
 
 /// （`FixtureScenesReady`，换装系统只看它）。
@@ -2133,6 +2314,7 @@ impl Plugin for FixturePlugin {
                     restore_selected_layout,
                     plan_when_ready,
                     spawn_when_ready,
+                    spawn_replaced_models,
                     bind_activity_identities,
                     bind_source_views,
                     refresh_activity_view,

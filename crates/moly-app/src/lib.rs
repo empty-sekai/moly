@@ -292,3 +292,18 @@ pub fn game_snapshot() -> String {
 pub fn game_take_persist(after_revision: u32) -> String {
     moly_game::game_take_persist(after_revision)
 }
+
+/// The editable fields of the server document, for the page's panel.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn game_server_schema() -> String {
+    moly_game::game_server_schema()
+}
+
+/// The server document with its clock, the client's copies, the pending
+/// sections and the named refusals.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn game_server_document() -> String {
+    moly_game::game_server_document()
+}

@@ -342,15 +342,15 @@ fn queue(
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
 ) {
     gpu.queued.clear();
-    for item in &frame.particles {
-        let mut readiness = item.source.readiness.lock().unwrap();
-        if !matches!(
-            *readiness,
-            crate::source_particle::ParticleReadiness::Failed(_)
-        ) {
-            *readiness = crate::source_particle::ParticleReadiness::Pending;
-        }
-    }
+    // Readiness is not reset here. Frame order under pipelined rendering:
+    // after extracting frame N the main app runs update N+1 while the render
+    // app runs frame N (QueueMeshes: this queue; PrepareBindGroups: `prepare`
+    // below; then the graph). The main-world preparations read the cell
+    // during update N+1, so a reset here and a set at the end of `prepare`
+    // would open a Pending window inside every frame, and a reader whose
+    // sampling instant keeps falling inside it reads Pending frame after
+    // frame while every frame ends Ready. The cell is written once per
+    // frame, at the end of `prepare`, with that frame's verdict.
     let function = functions.read().id::<DrawSourceParticle>();
     for (view_entity, view, target, msaa, role) in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
@@ -790,6 +790,10 @@ fn prepare(
         }
     }
     gpu.packets.retain(|key, _| live.contains(key));
+    // This frame's verdict per readiness cell (a cell shared by several
+    // draws is ready when any of them is), published below in one write.
+    let cell = |source: &SourceParticle| Arc::as_ptr(&source.readiness) as usize;
+    let mut ready_cells = HashSet::new();
     for (view_entity, _, _, _, _, color) in &views {
         for item in &frame.particles {
             let mut readiness = item.source.readiness.lock().unwrap();
@@ -827,9 +831,23 @@ fn prepare(
                     .get(&(view_entity, item.entity, p.effect))
                     .is_some_and(|packet| cache.get_render_pipeline(packet.pipeline).is_some())
             }) {
-                *readiness = crate::source_particle::ParticleReadiness::Ready;
+                ready_cells.insert(cell(&item.source));
             }
         }
+    }
+    for item in &frame.particles {
+        let mut readiness = item.source.readiness.lock().unwrap();
+        if matches!(
+            *readiness,
+            crate::source_particle::ParticleReadiness::Failed(_)
+        ) {
+            continue;
+        }
+        *readiness = if ready_cells.contains(&cell(&item.source)) {
+            crate::source_particle::ParticleReadiness::Ready
+        } else {
+            crate::source_particle::ParticleReadiness::Pending
+        };
     }
 }
 

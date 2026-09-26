@@ -628,6 +628,86 @@ fn start_delay_matches_native_rows() {
     }
 }
 
+/// Sub-emitter targets with a start delay: the product's target install
+/// (the word the target's Play writes) and the target's stopped frames, over
+/// the native Update1b rows of a played system whose stop byte is set as the
+/// engine sets it on every cached sub-emitter: the word never counts down,
+/// the clock ticks only by the part of a slice beyond the word, and a
+/// non-looping end still stops. Compared per frame: the word, the clock, the
+/// pending time, the emission state and streams and the pool. The install
+/// without the word and the whole-slice tick must mismatch, and so must a
+/// bit-flipped receipt.
+#[test]
+#[ignore = "MOLY_TARGET_START_DELAY must identify the JP stopped start delay receipt"]
+fn target_start_delay_matches_native_rows() {
+    let receipt = read("MOLY_TARGET_START_DELAY");
+    let (cases, product) = replay_target_delay(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_TARGET_START_DELAY_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0 && product.fields.get("startDelay").is_some_and(|f| f.0 > 0), "{report}");
+    assert_eq!(product.mismatched_frames, 0, "{report}");
+    assert!(receipt["wordZeroControlDifferingFrames"].as_u64().unwrap() > 0);
+    assert!(receipt["staticInitializers"]["identityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    for arm in ["targetDelayWordZero", "delayTicksWholeSlice"] {
+        let (_, tally) = replay_target_delay(&receipt, Some(arm));
+        println!("arm {arm}: {} mismatched frames", tally.mismatched_frames);
+        assert!(tally.mismatched_frames > 0, "arm {arm} must mismatch");
+    }
+    if let Ok(paths) = std::env::var("MOLY_TARGET_START_DELAY_CONTROLS") {
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let (_, tally) = replay_target_delay(&control, None);
+            println!("control {path}: {} mismatched frames", tally.mismatched_frames);
+            assert!(tally.mismatched_frames > 0, "control {path} must mismatch");
+        }
+    }
+}
+
+/// Every target case of the stopped start delay receipt through the product's
+/// target install and frame entry.
+fn replay_target_delay(receipt: &Value, arm: Option<&'static str>) -> (usize, Tally) {
+    assert_eq!(receipt["sourceSha256"], SOURCE_SHA256);
+    let cases = receipt["targetCases"].as_array().expect("target cases");
+    let mut tally = Tally::default();
+    with_arm(arm, || {
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let modules = if case["modules"] == false { &Value::Null } else { &case["moduleSource"] };
+            let mut system = harness_system_modules(&case["start"], &case["config"], modules);
+            let mut identity = [0.0f32; 16];
+            for i in 0..4 { identity[i * 5] = 1.0; }
+            let owner = moly_law::particle::child_emit::ChildOwner {
+                local_to_world: identity,
+                world_to_local: identity,
+                local_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                emitter_scale: [1.0; 3],
+                shape_scale: [1.0; 3],
+            };
+            let mut manager = seed::SystemSeedManager::from_entropy_words([17, 19, 127, 2471805022]);
+            install_child_target(&mut system, &mut manager, owner).unwrap_or_else(|e| panic!("{name}: {e}"));
+            replace_streams(&mut system, &case["seeds"]);
+            for (index, row) in case["frames"].as_array().unwrap().iter().enumerate() {
+                let input = &row["input"];
+                assert!(row["stoppedBefore"] == true, "{name}#{index}: a target row is stopped");
+                if input["reset"].as_bool().unwrap() {
+                    system.native_birth.as_mut().unwrap().frame.reset_previous = true;
+                }
+                assert_eq!(input["flags"].as_u64(), Some(0), "{name}#{index}: the per-frame update");
+                // A target's own frame: the host passes its play state, and
+                // the target install makes every frame a stopped one.
+                let _ = advance_frame(&mut system, f(&input["dtBits"]), true, &frame_context(input), |_| {});
+                compare(&system, row, true, &mut tally, &format!("{name}#{index}"));
+            }
+        }
+    });
+    (cases.len(), tally)
+}
+
 /// A control copy of the receipt with mutated native words must mismatch.
 #[test]
 #[ignore = "MOLY_PLAW_DISTANCE_MODULES_CONTROLS identifies mutated copies of the distance module receipt"]

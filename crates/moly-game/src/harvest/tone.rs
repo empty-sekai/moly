@@ -16,9 +16,11 @@
 //!   `t` = 1); a reverse `t >= 1` ends the animation (unlocks, no write that
 //!   frame); a reverse `t` below 1 becomes `1 - t`. `e = EaseInOutQuad(t)`
 //!   clamped to [0, 1]; `Distance = start + e (1.7 - start)`,
-//!   `Pitch = start + e (8.0 - start)`; then the camera position and its
-//!   look at the look-at point plus the offset. When not animating the state
-//!   writes nothing;
+//!   `Pitch = start + e (8.0 - start)`; then `UpdatePosition` places the eye
+//!   from the shared model (its offset) and the view looks at the look-at
+//!   point plus the offset of the state's own model (a copy taken when the
+//!   state machine was built, `camera::HarvestToneModel`). When not
+//!   animating the state writes nothing;
 //! - OnExit: the head-up display shows again.
 //!
 //! The tone view: Setup names its SE `"se_" + assetbundleName`;
@@ -32,9 +34,10 @@
 //! Normal's OnEnter then tweens back to the snapshot Normal's OnExit wrote
 //! (`harvest::action::change_camera_mode`).
 //!
-//! Named gaps: `ResetCameraSetting` (the menu's camera reset while this state
-//! is current, a 0.5 s tween) is not ported: the menu is the UI lane's;
-//! the BGM fade inside the tone's radius (`StartFade(0)` on enter, back to
+//! The menu's camera reset while this state is current (`ResetCameraSetting`,
+//! a 0.5 s tween back to the model OnEnter copied) is the camera module's.
+//!
+//! Named gaps: the BGM fade inside the tone's radius (`StartFade(0)` on enter, back to
 //! the initial volume on exit and after the listen) is not ported: the BGM
 //! channel has no manager fade; the field effect's particles are not drawn;
 //! the SE plays through the ordinary one-shot path (the environment SE's own
@@ -118,6 +121,7 @@ pub(crate) fn advance_tone_camera(
     models: Option<ResMut<FieldCameraModel>>,
     players: Query<&GlobalTransform, With<PlayerControlled>>,
     mut cameras: Query<&mut Transform, With<Camera3d>>,
+    tone_model: Option<Res<crate::camera::HarvestToneModel>>,
 ) {
     let Some(mut models) = models else {
         return;
@@ -166,9 +170,15 @@ pub(crate) fn advance_tone_camera(
     let (start_distance, start_pitch) = (tone.start_distance, tone.start_pitch);
     models.distance = start_distance + e * (END_DISTANCE - start_distance);
     models.pitch = start_pitch + e * (END_PITCH - start_pitch);
-    // UpdatePosition, then the view looks at the look-at point plus offset.
-    let pivot = models.look_at + models.offset;
-    let eye = pivot + crate::camera::view_dir(models.pitch, models.yaw) * models.distance;
+    // UpdatePosition places the eye from the shared model; the view then
+    // looks at the look-at point plus the state's own model's offset.
+    let eye = models.look_at
+        + models.offset
+        + crate::camera::view_dir(models.pitch, models.yaw) * models.distance;
+    let own_offset = tone_model
+        .as_deref()
+        .map_or(models.offset, |own| own.0.offset);
+    let pivot = models.look_at + own_offset;
     if let Ok(mut camera) = cameras.single_mut() {
         *camera = Transform::from_translation(eye).looking_at(pivot, Vec3::Y);
     }

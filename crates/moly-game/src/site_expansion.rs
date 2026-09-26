@@ -14,12 +14,18 @@
 //!   list holds none of theirs); the other floors show the rank's level.
 //!
 //! Server input: the rank before and after the change
-//! (`UserMysekaiGamedata.mysekaiRank` of the previous and the new reply).
-//! The instrument `MOLY_RANK_CHANGE=<prev>,<current>` delivers that pair as
-//! the reply would, before the first site loads; without it no rank change
-//! arrives and nothing here runs. Client state: [`MysekaiLocalSettings`]
-//! (the topic list and the unlocked site-level list), state of the web save
-//! layer; it starts empty, as on a fresh install.
+//! (`UserMysekaiGamedata.mysekaiRank` of the previous and the new reply),
+//! delivered by the server model (`crate::server::RankDelivered`). In the
+//! browser game the join delivers the rank with no previous reply (so no new
+//! topic: the displayed levels follow the rank and the local lists), and the
+//! site loader waits for it; natively the join delivers nothing and the
+//! sites keep their offline levels. Every later response that changes the
+//! rank delivers the pair. The native instrument
+//! `MOLY_RANK_CHANGE=<prev>,<current>` delivers a pair as the reply would,
+//! before the first site loads. Client state: [`MysekaiLocalSettings`] (the
+//! topic list and the unlocked site-level list); the server model seeds it
+//! from the browser game's local document and persists it there, and it
+//! starts empty natively, as on a fresh install.
 //!
 //! Room performance (`MyRoomSiteController.OnFinishEnterAsync` ->
 //! `RoomSitePerformExecutor.PlayRoomSiteExpansionPerformAsync`):
@@ -97,8 +103,12 @@ struct PendingRankChange {
 #[derive(Resource)]
 pub(crate) struct LevelHold;
 
+/// The browser game's loader hold until the join has delivered the rank.
+#[derive(Resource)]
+struct JoinHold;
+
 fn parse_instrument() -> Option<PendingRankChange> {
-    let raw = std::env::var(INSTRUMENT).ok()?;
+    let raw = crate::server::instrument_env(INSTRUMENT)?;
     let parsed = raw.split_once(',').and_then(|(prev, current)| {
         Some((
             prev.trim().parse::<i32>().ok()?,
@@ -116,8 +126,14 @@ fn parse_instrument() -> Option<PendingRankChange> {
     }
 }
 
-/// Startup: the local lists, the master request and the instrument.
+/// Startup: the browser game's join hold, the master request and the
+/// instrument.
 fn load(mut commands: Commands, server: Res<AssetServer>) {
+    if crate::browser_game::game_mode_active() {
+        info!("[site-expansion] the join delivers UserMysekaiGamedata.mysekaiRank; the site loader waits for the displayed levels");
+        commands.insert_resource(LevelHold);
+        commands.insert_resource(JoinHold);
+    }
     let Some(change) = parse_instrument() else {
         return;
     };
@@ -128,6 +144,56 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(change);
     commands.insert_resource(LevelHold);
     commands.insert_resource(MastersHandle(server.load::<JsonAsset>(PLAYER_DATA)));
+}
+
+/// Update, before the site loader: a rank the server model delivered becomes
+/// the pending change (a pending one keeps its previous rank). A join that
+/// delivered no rank releases the browser game's hold.
+fn take_server_rank(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    mut ranks: MessageReader<crate::server::RankDelivered>,
+    pending: Option<Res<PendingRankChange>>,
+    join_hold: Option<Res<JoinHold>>,
+    user: Option<Res<crate::server::ClientUserData>>,
+) {
+    let mut change = pending.as_deref().copied();
+    let mut delivered_any = false;
+    for delivered in ranks.read() {
+        let prev = change.map_or(
+            delivered.previous.unwrap_or(delivered.current),
+            |pending| pending.prev,
+        );
+        info!(
+            "[site-expansion] {}: UserMysekaiGamedata.mysekaiRank {:?} -> {} (pending change {prev} -> {})",
+            delivered.response, delivered.previous, delivered.current, delivered.current
+        );
+        change = Some(PendingRankChange {
+            prev,
+            current: delivered.current,
+        });
+        delivered_any = true;
+    }
+    if delivered_any {
+        match change {
+            Some(change) if change.prev > 0 && change.current > 0 => {
+                commands.insert_resource(change);
+                commands.insert_resource(LevelHold);
+                commands.insert_resource(MastersHandle(server.load::<JsonAsset>(PLAYER_DATA)));
+            }
+            other => {
+                error!("[site-expansion] the delivered rank change {other:?} is not two positive ranks; nothing is delivered");
+                commands.remove_resource::<LevelHold>();
+            }
+        }
+        commands.remove_resource::<JoinHold>();
+        return;
+    }
+    if join_hold.is_some() && user.is_some_and(|user| user.gamedata.mysekai_rank.is_none()) {
+        error!("[site-expansion] the join delivered no mysekaiRank (the server could not seat it); the sites load at their ordinary levels");
+        commands.remove_resource::<JoinHold>();
+        commands.remove_resource::<LevelHold>();
+    }
 }
 
 /// Update, before the site loader: once the masters are in, deliver the rank
@@ -638,6 +704,9 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(
             Update,
             (
+                take_server_rank
+                    .before(apply_rank_change)
+                    .before(crate::site::plan),
                 apply_rank_change.before(crate::site::plan),
                 advance_room.before(crate::screen_fade::advance),
             ),

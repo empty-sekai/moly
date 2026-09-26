@@ -2,8 +2,8 @@
 //! dialog and the info screen build from it.
 //!
 //! The table is master data, so it comes from the runtime root. The user's
-//! total experience is server-side user state, one named mock both screens
-//! read ([`UserTotalExp`]). A root without the table does not stop the
+//! total experience is server-side user state from the server document, one
+//! value both screens read ([`UserTotalExp`]). A root without the table does not stop the
 //! start; the first rank model asked of it panics with the missing file
 //! named, as the source throws when its table is absent.
 
@@ -23,24 +23,19 @@ pub(crate) struct MysekaiRanks(Result<Vec<MasterMysekaiRank>, String>);
 
 /// `UserMysekaiGamedata.totalExp`, the server-side user state both rank
 /// models read: the saved player data's value when it carries one, else the
-/// mock panel's `MOLY_MENU_MOCK_TOTAL_EXP` (default 180000, our chosen value).
+/// server document's (its responses keep it current; the native overlay of
+/// `MOLY_MENU_MOCK_TOTAL_EXP` lands in that document), else the document's
+/// default before the document is installed.
 #[derive(Resource)]
 pub(crate) struct UserTotalExp(pub(crate) i32);
 
 impl UserTotalExp {
     fn panel() -> i32 {
-        const NAME: &str = "MOLY_MENU_MOCK_TOTAL_EXP";
-        const DEFAULT: i32 = 180_000;
-        match std::env::var(NAME) {
-            Ok(raw) => raw.trim().parse().unwrap_or_else(|_| {
-                warn!("[mysekai-rank] mock panel: {NAME}={raw:?} is not an int; using {DEFAULT}");
-                DEFAULT
-            }),
-            Err(_) => DEFAULT,
-        }
+        crate::server::with_model(|model| model.document().gamedata.total_exp)
+            .unwrap_or(crate::server::document::DEFAULT_TOTAL_EXP)
     }
 
-    /// Imported player data's total experience, or the panel's value.
+    /// Imported player data's total experience, or the server document's.
     pub(crate) fn set(&mut self, imported: Option<i32>) {
         self.0 = imported.unwrap_or_else(Self::panel);
     }
