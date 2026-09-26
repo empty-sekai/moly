@@ -30,9 +30,9 @@ pub(crate) struct TimelineEffectBinding {
 /// A Control clip's `sourceGameObject` as its director resolves it
 /// (`ExposedReference.Resolve`): the director's exposed-reference table
 /// holds the clip's exposed name -> that value (null included); otherwise the
-/// reference's default value. Read for a director whose prefab root carries
-/// no fixture timeline view; a view binds its Control clips through its own
-/// effect list instead.
+/// reference's default value. A fixture timeline view's `BindEffects` sets
+/// the reference value of the clips its effect list names, when it finds the
+/// named ParticleSystem; every other clip keeps this resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ExposedSource {
     /// The document carries no exposed-reference table for this director, or
@@ -554,8 +554,9 @@ pub(crate) struct TimelineClip {
     /// None is retained for legacy metadata or an authored null reference.
     pub playable: Option<SourceAssetId>,
     pub effect_binding: Option<TimelineEffectBinding>,
-    /// A Control clip of a director with no fixture timeline view: its source
-    /// object through the director's exposed-reference table.
+    /// A Control clip's source object through the director's exposed-reference
+    /// table (`ExposedReference.Resolve`). A fixture timeline view replaces it
+    /// only for the clips its effect list names (`BindEffects`).
     pub exposed_source: Option<ExposedSource>,
     pub start: f64,
     pub duration: f64,
@@ -867,8 +868,10 @@ impl TimelinePackage {
                         .find(|binding| binding.playable.as_ref() == Some(playable))
                         .cloned()
                 });
-                let exposed_source = match (&body, &fixture_view) {
-                    (TimelinePayload::Control(settings), None) => Some(resolve_exposed(
+                // Every Control clip keeps its director's resolution: a view
+                // overrides it only for the clips its effect list names.
+                let exposed_source = match &body {
+                    TimelinePayload::Control(settings) => Some(resolve_exposed(
                         &exposed,
                         &settings.exposed_name,
                         &payload["fields"]["sourceGameObject"]["defaultValue"],

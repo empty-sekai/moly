@@ -838,9 +838,9 @@ pub(crate) struct TimelineBindings {
     pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
     pub controls:
         HashMap<TimelineClipKey, crate::fixture_timeline_particles::ParticleControlBinding>,
-    /// Control clips of a director that binds them through its own
-    /// exposed-reference table (a step item, a site prefab's director) and
-    /// that this runner does not drive, each with the reason, by clip. The
+    /// Control clips this runner does not drive, each with the reason, by
+    /// clip: a source object that resolves to no spawned node, a later clip
+    /// over the same object, or an object the particle host refuses. The
     /// rest of the timeline plays; each one is a named coverage gap.
     pub refused_controls: HashMap<TimelineClipKey, String>,
     /// The `SignalReceiver` bound to a track's output (`SetGenericBinding`),
