@@ -528,6 +528,9 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         "[site-move] admitted {from} -> {to} (cannon): offset {delta:.1}, GameState SiteMove; pre-action: PlayerFootEffect stop, CleanupCurrentSite, AddSite preload"
     );
     crate::footstep::stop_key(world, "cannon pre-action");
+    if from_place.category == "housing_home" {
+        crate::ui_layers::harvest_summary::save_harvest_point(world, "MoveSiteUseCannonActionState.OnSiteMovePreAction");
+    }
     world.insert_resource(SiteMove {
         source_clip: None,
         from,
@@ -780,7 +783,7 @@ impl SiteMove {
                     }
                     let delay = *delay;
                     self.due_by(delay);
-                    info!("[site-move] HarvestUtility.ShowHarvestPointSummary: the harvest result popup is not ported (named gap)");
+                    crate::ui_layers::harvest_summary::show_harvest_point_summary(world, "MoveSiteUseCannonActionState.EndAction");
                     self.normal(world, frame);
                     self.stage = Stage::Done;
                 }
