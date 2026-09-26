@@ -3,8 +3,8 @@
 //! exercise each entry before the gate lane calls it. Only with developer
 //! tools installed and `MOLY_NPC_ENTRY_PROBE` set.
 //!
-//! The script is `;`-separated steps `SECONDS:OP[:UNIT]`, each run once when
-//! the app clock passes `SECONDS`:
+//! The script is `;`-separated steps `SECONDS:OP[:UNIT[:ARG]]`, each run once
+//! when the app clock passes `SECONDS`:
 //! - `create:UNIT`: the invite's CreateNPC at the gate's first end locator
 //!   with the invite rotation, then its two waits and its calls after them;
 //! - `dispose:UNIT`, `dispose_all`;
@@ -12,7 +12,10 @@
 //!   `force_update:UNIT`;
 //! - `takeover:UNIT` (the cut-scene presenter's takeover), `restore:UNIT`
 //!   (its RestoreStates), `on_start:UNIT` (the go-home start callback with
-//!   that target).
+//!   that target);
+//! - `move:UNIT:SITE`: the change-site controller's MoveNPC to that site type
+//!   value (0 home, 1 the first floor, ...), whose floor entry on the
+//!   player's site knocks, opens the room door and waits for its open clip.
 //!
 //! Every step writes one `[npc-entry-probe]` line.
 
@@ -26,6 +29,7 @@ struct Step {
     at: f64,
     op: String,
     unit: Option<u32>,
+    arg: Option<i32>,
     done: bool,
 }
 
@@ -55,10 +59,12 @@ fn parse(script: &str) -> Vec<Step> {
             let unit = parts
                 .next()
                 .and_then(|unit| unit.trim().parse::<u32>().ok());
+            let arg = parts.next().and_then(|arg| arg.trim().parse::<i32>().ok());
             Some(Step {
                 at,
                 op,
                 unit,
+                arg,
                 done: false,
             })
         })
@@ -76,7 +82,14 @@ fn gate(world: &mut World) -> Option<Entity> {
         .map(|(entity, _)| entity)
 }
 
-fn run_step(world: &mut World, probe: &mut EntryProbe, op: &str, unit: Option<u32>, t: f64) {
+fn run_step(
+    world: &mut World,
+    probe: &mut EntryProbe,
+    op: &str,
+    unit: Option<u32>,
+    arg: Option<i32>,
+    t: f64,
+) {
     let npc = unit.and_then(|unit| gate_entries::find_npc(world, unit));
     let word = match (op, unit, npc) {
         ("dispose_all", _, _) => format!("{:?}", dispose::dispose_npc_all(world, "probe")),
@@ -140,9 +153,21 @@ fn run_step(world: &mut World, probe: &mut EntryProbe, op: &str, unit: Option<u3
             gate_entries::restore_state(world, npc);
             "idle".to_owned()
         }
+        ("move", Some(unit), Some(npc)) => match arg {
+            Some(site) => {
+                let frame = world
+                    .get_resource::<bevy::diagnostic::FrameCount>()
+                    .map_or(0, |count| count.0);
+                format!(
+                    "MoveNPC({site}) took {}",
+                    crate::npc::change_site_state::move_npc(world, npc, unit, site, frame)
+                )
+            }
+            None => "no site".to_owned(),
+        },
         _ => "unknown step".to_owned(),
     };
-    info!("[npc-entry-probe] t={t:.3} {op} {unit:?}: {word}");
+    info!("[npc-entry-probe] t={t:.3} {op} {unit:?} {arg:?}: {word}");
 }
 
 /// One frame of the probe (called from the gate's appearance system).
@@ -169,7 +194,8 @@ pub(crate) fn step(world: &mut World) {
             probe.steps[index].done = true;
             let op = probe.steps[index].op.clone();
             let unit = probe.steps[index].unit;
-            run_step(world, &mut probe, &op, unit, t);
+            let arg = probe.steps[index].arg;
+            run_step(world, &mut probe, &op, unit, arg, t);
         }
         index += 1;
     }
