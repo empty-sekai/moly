@@ -89,7 +89,9 @@ const KEY: &str = "Option";
 /// wordings: the numeric selectors' numbers.
 pub(crate) const FIXED_TEXTS: &[&str] = &["0123456789.-+%"];
 
-/// Wordings this dialog writes into buttons (`UIPartsCommonButton.SetWordingKey`).
+/// Wordings this dialog writes: the System buttons'
+/// `UIPartsCommonButton.SetWordingKey` and the numeric selectors' button
+/// texts (`SetupButton`). The atlas charset takes their glyphs from here.
 pub(crate) const WORDINGS: &[&str] = &[
     "WORD_DOWNLOADED",
     "WORD_BULK_DOWNLOAD",
@@ -1916,6 +1918,15 @@ pub(crate) fn spawn_when_ready(
         return;
     }
     let doc = layouts.document(KEY).expect("ready layout");
+    // The wordings the pages write resolve here or the write refuses later.
+    let missing: Vec<&str> = WORDINGS
+        .iter()
+        .copied()
+        .filter(|key| !layouts.wordings.contains_key(*key))
+        .collect();
+    if !missing.is_empty() {
+        warn!("[option] wordings missing from this root: {missing:?}; a page writing one of them refuses");
+    }
     commands.insert_resource(OptionBindings::from_prefab(doc));
     commands.spawn((
         OptionDialogRoot,
