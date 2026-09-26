@@ -194,6 +194,13 @@ pub fn birthday_parties() -> AssetPath<'static> {
     AssetPath::from("moly://birthday-parties.json".to_owned())
 }
 
+/// The birthday-party delivery tables (the `birthday-party-delivery`
+/// extraction's output): reward rows, point bonus rows, total reward rows
+/// and the total reward boxes the delivery site reads.
+pub fn birthday_party_delivery() -> AssetPath<'static> {
+    AssetPath::from("moly://birthday-party-delivery.json".to_owned())
+}
+
 /// UI atlas 页纹图的资产路径（`ui` 提取命令的产物）：`textures/` 下的
 /// 整页 PNG，文件名沿用提取产物（含 atlas 名、页号与内容指纹）。
 pub fn ui_atlas_page(file: &str) -> AssetPath<'static> {

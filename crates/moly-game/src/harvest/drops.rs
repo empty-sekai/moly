@@ -34,6 +34,24 @@ pub(crate) struct HarvestDropAnimation {
     d1: f32,
     d2: f32,
     r: f32,
+    /// The delivery drop's `DOScale(one, 0.6)` from zero, linear, joined to
+    /// the hop.
+    scale_in: bool,
+}
+
+impl HarvestDropAnimation {
+    /// The same hop for another drop family (the delivery's).
+    pub(crate) fn hop(spawn: Vec3, landing: Vec3, d1: f32, d2: f32, r: f32, scale_in: bool) -> Self {
+        Self {
+            elapsed: 0.0,
+            spawn,
+            landing,
+            d1,
+            d2,
+            r,
+            scale_in,
+        }
+    }
 }
 
 /// `PlayDropItemSE`: a birthday-plant fixture has its own cue; otherwise by
@@ -177,6 +195,7 @@ pub(crate) fn spawn(
                     d1,
                     d2,
                     r,
+                    scale_in: false,
                 });
             }
             stats.drop_items += 1;
@@ -227,7 +246,8 @@ fn remove_pending(
     }
 }
 
-/// Update: the drop hop; a landed item takes radius 1.0.
+/// Update: the drop hop; a landed harvest item takes radius 1.0 (a delivery
+/// drop's radius is its own module's).
 pub(crate) fn advance_animations(
     time: Res<Time>,
     mut commands: Commands,
@@ -235,15 +255,20 @@ pub(crate) fn advance_animations(
         Entity,
         &mut HarvestDropAnimation,
         &mut Transform,
-        &mut HarvestDropItem,
+        Option<&mut HarvestDropItem>,
     )>,
 ) {
-    for (entity, mut anim, mut transform, mut item) in &mut drops {
+    for (entity, mut anim, mut transform, item) in &mut drops {
         anim.elapsed += time.delta_secs();
         let t = anim.elapsed;
+        if anim.scale_in {
+            transform.scale = Vec3::splat((t / DROP_DURATION).min(1.0));
+        }
         if t >= DROP_DURATION {
             transform.translation = anim.landing;
-            item.radius = 1.0;
+            if let Some(mut item) = item {
+                item.radius = 1.0;
+            }
             commands.entity(entity).remove::<HarvestDropAnimation>();
             continue;
         }

@@ -509,7 +509,14 @@ impl HarvestDocs {
 /// ten tries of sample-then-path; after a failed try the target moves toward
 /// `from` by `clamp01(k / 10)` with k from 9 down; all failing returns `from`.
 pub(crate) fn snap(face: &WalkFace, target: Vec2) -> (Vec2, i32) {
-    let from = Vec2::ZERO;
+    snap_from(face, Vec2::ZERO, target)
+}
+
+/// `TryGetCanNavmeshTargetPosition(from, target)` on the walk field: ten
+/// tries, each sampling within 5 m and requiring a path from `from`,
+/// shrinking the target toward `from` between tries; `from` itself when
+/// none succeeds.
+pub(crate) fn snap_from(face: &WalkFace, from: Vec2, target: Vec2) -> (Vec2, i32) {
     let mut current = target;
     for (attempt, k) in (0..SNAP_TRIES).rev().enumerate() {
         if let Some(hit) = face.sample(current.to_array(), SAMPLE_DISTANCE) {
