@@ -572,9 +572,13 @@ struct ObstacleRecord {
     time_to_stationary: f32,
 }
 
+/// A node without a top-level `navMeshObstacles` key has no obstacles; the
+/// text can also appear inside other extras, which the quick text test in
+/// [`RuntimeCarving::adopt`] lets through.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ObstacleExtras {
+    #[serde(default)]
     nav_mesh_obstacles: Vec<ObstacleJson>,
 }
 
