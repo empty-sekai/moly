@@ -378,6 +378,98 @@ impl PreparedFixtureTalk {
     }
 }
 
+/// Fixture talk data a forced objective set on a character (the door's
+/// forced read talk): the decision that re-runs the character's talk data on
+/// the Talk interrupt executes it.
+#[derive(Resource, Default)]
+pub(crate) struct ForcedFixtureTalks(pub(crate) HashMap<Entity, npc_talk_lottery::FixtureTalkData>);
+
+/// Fixture talk data made ready for this host's execution: the fixture
+/// entity, for a single-character talk with a timeline its fixture session,
+/// the locator names, IsGeneralTalk, and the members' data from `drafts`.
+#[allow(clippy::too_many_arguments)]
+fn prepare_fixture_talk(
+    fixture_activities: &crate::npc_fixture_activity::Factory<'_, '_>,
+    placements: &FixturePlacements,
+    resolved: crate::player_talk::ResolvedTalk,
+    entity: Entity,
+    unit: u32,
+    epoch: u64,
+    data: npc_talk_lottery::FixtureTalkData,
+    drafts: &[RawDraft],
+) -> Result<PreparedFixtureTalk, String> {
+    let geometry = fixture_activities.talk_fixture_geometry(&data.fixture, placements)?;
+    let timeline = match data.timeline {
+        Some(_) if data.kind == TalkType::SingleCharacterFixture => {
+            let pre_action = fixture_activities
+                .tables()
+                .and_then(|tables| tables.pre_action_of(data.talk_id))
+                .map(|pre| pre.id)
+                .ok_or("the fixture talk has no pre-action row")?;
+            Some(fixture_activities.talk_timeline_selection(
+                entity,
+                unit,
+                epoch,
+                placements,
+                &data,
+                pre_action,
+                resolved.pre_action(),
+            )?)
+        }
+        _ => None,
+    };
+    let fixture = geometry.entity;
+    let names = geometry
+        .locators
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    let tables = fixture_activities
+        .tables()
+        .ok_or("the talk tables are not installed")?;
+    let is_general = npc_talk_lottery::is_general_talk(tables, data.talk_id)?;
+    let content = TalkContent {
+        is_general: Some(is_general),
+        ..resolved.content()
+    };
+    // The members' data carries this master, fixture and pre-action.
+    let drafts = drafts
+        .iter()
+        .map(|draft| crate::npc_fixture_talk::MemberDraft {
+            entity: draft.entity,
+            unit: draft.unit,
+            drafted: draft.drafted,
+            cancel: draft.cancel,
+            data: draft.data.as_ref().map(|member| AiTalkData {
+                kind: member.kind,
+                content: Some(content.clone()),
+                target_fixture: Some(fixture),
+                target_position: member.target_position,
+                // A while-doing-wait member is its own data's main; a
+                // multiple-character member keeps the main.
+                main_character: if member.kind == TalkType::CommunicationWhileDoingWait {
+                    draft.unit
+                } else {
+                    unit
+                },
+                characters: member.members.clone(),
+                pre_action: Some(resolved.pre_action()),
+                locate: member.locate.clone(),
+                pending_factory: None,
+            }),
+        })
+        .collect();
+    Ok(PreparedFixtureTalk {
+        data,
+        resolved,
+        content,
+        fixture,
+        timeline,
+        names,
+        drafts,
+    })
+}
+
 /// A fixture-common talk the factory built: its loaded script, the fixture
 /// entity and placement, the target, and the tweet id its objective change
 /// leaves on the AI model.
@@ -505,7 +597,7 @@ type TalkGeometry = crate::npc_fixture_activity::TalkFixtureGeometry;
 /// live positions, each placed fixture's geometry (resolved once), the
 /// objective face and the configured fixture move offset (key 153). Every
 /// GetLittleFarPosition walk goes into `walks` for the decision record.
-struct TalkFixtureHost<'a> {
+pub(crate) struct TalkFixtureHost<'a> {
     positions: Vec<(u32, [f32; 3])>,
     geometry: &'a dyn Fn(&str) -> Result<TalkGeometry, String>,
     resolved: std::cell::RefCell<HashMap<String, Result<std::rc::Rc<TalkGeometry>, String>>>,
@@ -514,7 +606,26 @@ struct TalkFixtureHost<'a> {
     walks: std::cell::RefCell<Vec<serde_json::Value>>,
 }
 
-impl TalkFixtureHost<'_> {
+impl<'a> TalkFixtureHost<'a> {
+    /// A host over the avatar store's positions (unit, position), each
+    /// placed fixture's geometry, the objective face and the fixture move
+    /// offset (config key 153).
+    pub(crate) fn new(
+        positions: Vec<(u32, [f32; 3])>,
+        geometry: &'a dyn Fn(&str) -> Result<TalkGeometry, String>,
+        face: &'a ObjectiveFace,
+        move_offset: f32,
+    ) -> Self {
+        Self {
+            positions,
+            geometry,
+            resolved: Default::default(),
+            face,
+            move_offset,
+            walks: Default::default(),
+        }
+    }
+
     fn fixture(&self, uid: &str) -> Result<std::rc::Rc<TalkGeometry>, npc_talk_lottery::Halt> {
         self.resolved
             .borrow_mut()
@@ -1528,11 +1639,12 @@ pub(crate) fn decide(
     epoch: Option<Res<GroundEpoch>>,
     selection: Option<Res<SiteSelection>>,
     placements: Res<FixturePlacements>,
-    (mut seeder, mut reported_gaps, mut last_placed, mut groups): (
+    (mut seeder, mut reported_gaps, mut last_placed, mut groups, mut forced_talks): (
         ResMut<SequencePickSeeder>,
         Local<HashSet<String>>,
         Local<String>,
         ResMut<crate::npc_fixture_talk::FixtureTalkGroups>,
+        Option<ResMut<ForcedFixtureTalks>>,
     ),
     (configs, talk_list, together, extras, extras_pending): (
         Option<Res<ClientConfigs>>,
@@ -2439,107 +2551,33 @@ pub(crate) fn decide(
                                     "members": data.members,
                                 }),
                             );
-                            match data.kind {
-                                _ => match catalog.resolve(data.talk_id) {
-                                    Some(resolved) => {
-                                        let prepared = fixture_activities
-                                            .talk_fixture_geometry(&data.fixture, &placements)
-                                            .and_then(|geometry| {
-                                                let timeline = match data.timeline {
-                                                    Some(_) if data.kind == TalkType::SingleCharacterFixture => {
-                                                        let pre_action = fixture_activities
-                                                            .tables()
-                                                            .and_then(|tables| tables.pre_action_of(data.talk_id))
-                                                            .map(|pre| pre.id)
-                                                            .ok_or("the fixture talk has no pre-action row")?;
-                                                        Some(fixture_activities.talk_timeline_selection(
-                                                            entity,
-                                                            unit.0,
-                                                            epoch.0,
-                                                            &placements,
-                                                            &data,
-                                                            pre_action,
-                                                            resolved.pre_action(),
-                                                        )?)
-                                                    }
-                                                    _ => None,
-                                                };
-                                                let names = geometry
-                                                    .locators
-                                                    .into_iter()
-                                                    .map(|(name, _)| name)
-                                                    .collect::<Vec<_>>();
-                                                Ok((geometry.entity, timeline, names))
-                                            });
-                                        let prepared = prepared.and_then(|(fixture, timeline, names)| {
-                                            let tables = fixture_activities
-                                                .tables()
-                                                .ok_or("the talk tables are not installed")?;
-                                            let is_general = npc_talk_lottery::is_general_talk(tables, data.talk_id)?;
-                                            Ok((fixture, timeline, names, is_general))
-                                        });
-                                        match prepared {
-                                            Ok((fixture, timeline, names, is_general)) => {
-                                                let content = crate::npc_objective::TalkContent {
-                                                    is_general: Some(is_general),
-                                                    ..resolved.content()
-                                                };
-                                                // The members' data carries this
-                                                // master, fixture and pre-action.
-                                                let drafts = drafts
-                                                    .iter()
-                                                    .map(|draft| crate::npc_fixture_talk::MemberDraft {
-                                                        entity: draft.entity,
-                                                        unit: draft.unit,
-                                                        drafted: draft.drafted,
-                                                        cancel: draft.cancel,
-                                                        data: draft.data.as_ref().map(|member| AiTalkData {
-                                                            kind: member.kind,
-                                                            content: Some(content.clone()),
-                                                            target_fixture: Some(fixture),
-                                                            target_position: member.target_position,
-                                                            // A while-doing-wait member is its own
-                                                            // data's main; a multiple-character
-                                                            // member keeps the main.
-                                                            main_character: if member.kind
-                                                                == TalkType::CommunicationWhileDoingWait
-                                                            {
-                                                                draft.unit
-                                                            } else {
-                                                                unit.0
-                                                            },
-                                                            characters: member.members.clone(),
-                                                            pre_action: Some(resolved.pre_action()),
-                                                            locate: member.locate.clone(),
-                                                            pending_factory: None,
-                                                        }),
-                                                    })
-                                                    .collect();
-                                                fixture_talk = Some(PreparedFixtureTalk {
-                                                    data,
-                                                    resolved,
-                                                    content,
-                                                    fixture,
-                                                    timeline,
-                                                    names,
-                                                    drafts,
-                                                });
-                                            }
-                                            Err(reason) => {
-                                                halt = Some(npc_talk_lottery::Halt::Gap(format!(
-                                                    "fixture talk {}: {reason}",
-                                                    data.talk_id
-                                                )));
-                                            }
+                            match catalog.resolve(data.talk_id) {
+                                Some(resolved) => {
+                                    let talk_id = data.talk_id;
+                                    match prepare_fixture_talk(
+                                        &fixture_activities,
+                                        &placements,
+                                        resolved,
+                                        entity,
+                                        unit.0,
+                                        epoch.0,
+                                        data,
+                                        &drafts,
+                                    ) {
+                                        Ok(prepared) => fixture_talk = Some(prepared),
+                                        Err(reason) => {
+                                            halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                                "fixture talk {talk_id}: {reason}"
+                                            )));
                                         }
                                     }
-                                    None => {
-                                        halt = Some(npc_talk_lottery::Halt::Gap(format!(
-                                            "fixture talk {} is not in the loaded talk scripts",
-                                            data.talk_id
-                                        )));
-                                    }
-                                },
+                                }
+                                None => {
+                                    halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                        "fixture talk {} is not in the loaded talk scripts",
+                                        data.talk_id
+                                    )));
+                                }
                             }
                         }
                         Ok(npc_talk_lottery::TalkPlan::CommonFixture {
@@ -2607,7 +2645,52 @@ pub(crate) fn decide(
                                 record.set("talk_id", content.master_id);
                             }
                         }
-                        _ => {
+                        Some(data) => {
+                            // Forced read-talk data: its talk objective runs on
+                            // the data the force built.
+                            let master = data.content.as_ref().map(|content| content.master_id);
+                            let forced = forced_talks
+                                .as_deref_mut()
+                                .and_then(|store| store.0.remove(&entity))
+                                .filter(|forced| Some(forced.talk_id) == master);
+                            match forced {
+                                Some(forced) => {
+                                    record.set("talk_id", forced.talk_id);
+                                    record.set("path", "forced_fixture_talk");
+                                    let talk_id = forced.talk_id;
+                                    let prepared = catalog
+                                        .resolve(talk_id)
+                                        .ok_or_else(|| "not in the loaded talk scripts".to_owned())
+                                        .and_then(|resolved| {
+                                            prepare_fixture_talk(
+                                                &fixture_activities,
+                                                &placements,
+                                                resolved,
+                                                entity,
+                                                unit.0,
+                                                epoch.0,
+                                                forced,
+                                                &[],
+                                            )
+                                        });
+                                    match prepared {
+                                        Ok(prepared) => fixture_talk = Some(prepared),
+                                        Err(reason) => {
+                                            halt = Some(npc_talk_lottery::Halt::Gap(format!(
+                                                "forced fixture talk {talk_id}: {reason}"
+                                            )));
+                                        }
+                                    }
+                                }
+                                None => {
+                                    halt = Some(npc_talk_lottery::Halt::Gap(
+                                        "the talk interrupt re-runs fixture-targeted data this host does not build"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
                             halt = Some(npc_talk_lottery::Halt::Gap(
                                 "the talk interrupt re-runs fixture-targeted data this host does not build"
                                     .into(),

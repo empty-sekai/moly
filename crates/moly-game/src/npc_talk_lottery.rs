@@ -1449,6 +1449,130 @@ impl LotteryScene<'_> {
     }
 }
 
+/// What `ForceUpdateReadTalkFixtureTalk` builds (see
+/// [`force_update_read_talk_fixture_talk`]).
+#[derive(Debug, Clone)]
+pub(crate) enum ReadTalkPlan {
+    /// CreateFixtureAITalkData's data.
+    Fixture(FixtureTalkData),
+    /// CreateFixtureAITalkData on a fixture without action points: it
+    /// returns CreateGeneralTalkData(talk), the general target chain's data.
+    General { talk_id: i32 },
+}
+
+/// Whether `ForceUpdateReadTalkFixtureTalk(talk)` for `main_unit` takes the
+/// some-character branch: a some-character row names the talk with this
+/// unit as its main character (the first such row).
+pub(crate) fn read_talk_some_character_row(
+    rows: &[SomeCharacterTalkRow],
+    talk: i32,
+    main_unit: u32,
+) -> Option<&SomeCharacterTalkRow> {
+    rows.iter()
+        .find(|row| row.talk_id == talk && row.main_unit == main_unit as i32)
+}
+
+/// `NPCAvatarAIModel.ForceUpdateReadTalkFixtureTalk(talk)` for `seeker` on
+/// the branch without a some-character row (the caller takes the other
+/// branch before this): the pre-action (absent raises), the random character
+/// talk fixture (null raises), the locate list of the pre-action group's
+/// first timeline row, then `CreateFixtureAITalkData(fixture, talk,
+/// pre-action, character, locate list, false)`: one sequence pick over the
+/// group's timelines; a fixture without action points gives the general
+/// data; the character's position (no presenter raises); its own locate row
+/// (`List.Find`, the default row's index 0 without one; a null list raises);
+/// GetTargetPosition, its bool kept in the data but not deciding; the talk's
+/// unit group's non-zero units as the character list; type 3 for two or
+/// more of them, else 2. The tweet id the caller writes is the pre-action's
+/// tweet and is not part of this data.
+pub(crate) fn force_update_read_talk_fixture_talk(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    talk: i32,
+    draws: &mut Draws<'_>,
+) -> Result<ReadTalkPlan, Halt> {
+    let master = scene
+        .tables
+        .talk_master(talk)
+        .ok_or_else(|| Halt::fault(format!("talk {talk} has no master row")))?;
+    let pre = scene
+        .tables
+        .pre_action_of(talk)
+        .ok_or_else(|| Halt::fault(format!("talk {talk} has no pre-action (the source throws)")))?;
+    let fixture = random_character_talk_fixture(scene, talk, draws)?.ok_or_else(|| {
+        Halt::fault(format!("talk {talk} has no target fixture (the source throws)"))
+    })?;
+    // The locate list's timeline: the first row of the pre-action's group.
+    let first_timeline = pre
+        .timeline_group_id
+        .and_then(|group| scene.tables.timeline_rows(group).next().map(|row| row.id));
+    let locate = scene.locate_list(Some(&fixture), master.unit_group_id, first_timeline)?;
+    // CreateFixtureAITalkData: RandomPick over the group's timelines.
+    let group = pre.timeline_group_id.unwrap_or(0);
+    let timelines: Vec<i32> = scene.tables.timeline_rows(group).map(|row| row.id).collect();
+    let index = (draws.sequence_pick)(timelines.len());
+    draws.record.push(json!({
+        "use": "fixture_timeline_pick:read_talk", "value": index, "range": [0, timelines.len()],
+        "group": group, "source": SOURCE_SEQUENCE_PICK,
+    }));
+    let timeline = timelines[index.ok_or_else(|| {
+        Halt::fault(format!(
+            "talk {talk}: timeline group {group} has no timeline (sequence pick on an empty set)"
+        ))
+    })?];
+    let host = scene.host();
+    if host.action_point_names(&fixture)?.is_empty() {
+        return Ok(ReadTalkPlan::General { talk_id: talk });
+    }
+    let position = host.npc_position(seeker.unit).ok_or_else(|| {
+        Halt::fault(format!("unit {} has no presenter (null dereference)", seeker.unit))
+    })?;
+    let locate = locate.ok_or_else(|| {
+        Halt::fault(format!(
+            "talk {talk}: the locate list of timeline {first_timeline:?} is null (null dereference)"
+        ))
+    })?;
+    let own = own_index(&locate, seeker.unit);
+    let mut steps = Vec::new();
+    let (found, target) = scene.target_position(position, talk, &fixture, own, &mut steps)?;
+    let slots = scene.tables.unit_group_slots(master.unit_group_id).ok_or_else(|| {
+        Halt::fault(format!(
+            "talk {talk}: unit group {} is absent (null dereference)",
+            master.unit_group_id
+        ))
+    })?;
+    let members: Vec<u32> = slots
+        .iter()
+        .map(|unit| unit.unwrap_or(0))
+        .filter(|unit| *unit != 0)
+        .map(|unit| unit as u32)
+        .collect();
+    let kind = if members.len() >= 2 {
+        TalkType::MultipleCharacterFixture
+    } else {
+        TalkType::SingleCharacterFixture
+    };
+    steps.push(json!({
+        "factory": "create_fixture_ai_talk_data", "result": "built", "timeline": timeline,
+        "locate": locate_json(&locate), "index": own, "target": target, "found": found,
+        "members": members,
+    }));
+    draws.record.push(json!({
+        "use": "fixture_factory_steps", "talk_id": talk, "fixture": fixture, "steps": steps,
+    }));
+    Ok(ReadTalkPlan::Fixture(FixtureTalkData {
+        kind,
+        talk_id: talk,
+        fixture,
+        target_position: target,
+        rotation: None,
+        timeline: Some(timeline),
+        locate: Some(locate),
+        members,
+        target_found: found,
+    }))
+}
+
 /// TryCreateFixtureActionSomeCharacterTalkData.
 fn try_some_character_fixture(
     scene: &LotteryScene<'_>,
