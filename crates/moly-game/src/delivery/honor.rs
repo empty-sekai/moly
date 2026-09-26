@@ -198,10 +198,18 @@ impl RewardRuns {
     }
 }
 
-/// A dialog the flow awaits is shown (the instrument reads it).
+/// A dialog the flow awaits is shown (the instrument reads it): `open` for
+/// the reward runs', `refresh` for the end action's refresh dialog.
 #[derive(Resource, Default)]
 pub(crate) struct DialogAwait {
     pub(crate) open: Option<DialogId>,
+    pub(crate) refresh: Option<DialogId>,
+}
+
+impl DialogAwait {
+    pub(crate) fn awaited(&self) -> Option<DialogId> {
+        self.open.or(self.refresh)
+    }
 }
 
 /// Update: step every run.

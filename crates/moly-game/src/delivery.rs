@@ -415,6 +415,7 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     let had_state = world.remove_resource::<DeliveryGameState>().is_some();
     let was_executing = world.resource::<DeliveryModel>().executing;
     *world.resource_mut::<DeliveryModel>() = DeliveryModel::default();
+    flow::release_auto_move(world);
     world.resource_mut::<flow::DeliveryFlow>().cancel();
     world.resource_mut::<flow::DeliveryFace>().0 = None;
     world.resource_mut::<drops::DeliveryGatherLoop>().cancel();
@@ -428,7 +429,15 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
         }
         info!("[delivery] site change: the reward dialogs {shown:?} close with their run");
     }
-    world.resource_mut::<honor::DialogAwait>().open = None;
+    let refresh = std::mem::take(&mut *world.resource_mut::<honor::DialogAwait>()).refresh;
+    if let Some(id) = refresh {
+        // The site's enable token cancels the refresh's `WaitUntil`; the
+        // dialog goes with the site's UI.
+        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        screens.close_dialog(id);
+        screens.dialog_destroyed(id);
+        info!("[delivery] site change: the refresh dialog {id:?} closes with the end action");
+    }
     world.resource_mut::<site::DeliverySite>().clear();
     if count > 0 || had_state || was_executing {
         info!(

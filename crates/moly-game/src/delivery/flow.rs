@@ -56,18 +56,37 @@
 //! joystick's GameState Delivery arm is unreachable: `DeliveryGameState.
 //! OnEnter` publishes no game-state change.
 //!
-//! Named stand-ins and gaps: the AutoMove state's run clip plays as
-//! the locomotion's dash gait (the harvest AutoMove's stand-in).
-//! `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog the root has
-//! no prefab for; the server replies refreshed by its birthday plant
-//! refresh policy (`crate::server::delivery`).
+//! A refreshed reply (the server's birthday plant refresh policy,
+//! `crate::server::delivery`) runs `ExecuteHarvestSiteRefresh` after the
+//! reward animation and before state Idle: `ShowSubWindowDialog<
+//! MysekaiRefreshBirthdayPlantSubWindowDialog>(null, onClose,
+//! allowCloseExternal true, DialogType 450, Layer_Overlay)` through the
+//! screen manager, `Setup(party)`, then `WhenAll(WaitUntil(onClose ran),
+//! HarvestUtility.DestroySiteAllHarvestFixtures())` on the site's enable
+//! token. `DestroySiteAllHarvestFixtures` walks `SiteManager.SiteList.
+//! OfType<HarvestSiteController>()`; `DeliverySiteController` is not a
+//! `HarvestSiteController`, and at a delivery site the list holds home, the
+//! loaded floor and the delivery site (a harvest site is removed when it is
+//! left, `CanRemoveSite`), so the walk has no element and the await is the
+//! dialog's close.
+//!
+//! The AutoMove state (`PlayerAvatarAutoMoveState.Initialize`) plays
+//! `ChangeAnimation(AvatarConfig.RunMotion)`, `motion_avatar_run` with the
+//! view's 0.25 s fade, on the player's animator under the delivery's action
+//! token; the Idle state it changes to on arrival plays `c_000_mov_idle_00`
+//! (0.25 s) and the animator goes back to locomotion.
+//!
+//! Named gaps: the refresh dialog has no view in this product (as the reward dialogs in
+//! `honor`): `Setup`'s icon (`icon_refresh.png` of the party's bundle
+//! through `_iconLoader`) is not drawn, the open animation passes at once
+//! and the dialog closes on the screen manager's back key.
 
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use moly_law::delivery as law;
 
-use super::honor::{RewardOwner, RewardRuns};
+use super::honor::{DialogAwait, RewardOwner, RewardRuns};
 use super::site::{DeliveryObjects, DeliverySite};
 use super::{
     publish, DeliveryActionState, DeliveryGameState, DeliveryHold, DeliveryModel, DeliveryProgress,
@@ -75,8 +94,17 @@ use super::{
 };
 use crate::player::PlayerControlled;
 use crate::player_avatar::item_timeline::{PlayerStepItem, StepItemOnStop};
+use crate::player_avatar::{
+    PlayerActionMotion, PlayerActionOwner, PlayerActionToken, AUTO_MOVE_CLIP, STATE_FADE,
+};
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 use crate::site_move::timeline::{delay_seconds, Delay, TweenClock};
+use crate::ui_layers::{
+    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
+};
+
+/// `DialogType.MysekaiRefreshBirthdayPlantSubWindowDialog`.
+const REFRESH_DIALOG: DialogType = DialogType(450);
 
 /// `MinBirthdayDeliveryCostCountPerSecond` (FloatConfigs 166).
 pub(crate) const KEY_MIN_COST_PER_SECOND: i32 = 166;
@@ -217,6 +245,11 @@ enum Phase {
     Reward {
         is_refreshed: bool,
     },
+    /// `ExecuteHarvestSiteRefresh`: the refresh dialog is shown and its
+    /// onClose is awaited.
+    Refresh {
+        dialog: DialogId,
+    },
 }
 
 #[derive(Resource, Default)]
@@ -224,8 +257,8 @@ pub(crate) struct DeliveryFlow {
     phase: Phase,
     party: Option<i32>,
     started_at: f64,
-    /// The motion state before the AutoMove (the dash flag).
-    dash_before: bool,
+    /// The AutoMove state's run clip holds the player's animator.
+    auto_move: Option<PlayerActionToken>,
     /// The last half second the trace line was written for.
     last_trace: f64,
 }
@@ -243,6 +276,7 @@ impl DeliveryFlow {
             Phase::Loop { .. } => "loop",
             Phase::EndTimeline { .. } => "end action (step item run-out)",
             Phase::Reward { .. } => "reward",
+            Phase::Refresh { .. } => "harvest site refresh",
         }
     }
 }
@@ -267,6 +301,10 @@ pub(crate) struct FlowWorld<'w, 's> {
     step: Option<ResMut<'w, PlayerStepItem>>,
     timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
     bloom: ResMut<'w, super::bloom::DeliveryBloom>,
+    screens: ResMut<'w, ScreenManager>,
+    back_keys: MessageReader<'w, 's, DialogBackKeyEvent>,
+    awaiting: ResMut<'w, DialogAwait>,
+    graphs: ResMut<'w, Assets<AnimationGraph>>,
 }
 
 type PlayerQuery<'w, 's> = Query<
@@ -277,9 +315,18 @@ type PlayerQuery<'w, 's> = Query<
         &'static mut Transform,
         &'static mut crate::npc::MotionPhase,
         &'static mut crate::player::DashMode,
-        Option<&'static crate::player_avatar::AvatarDriver>,
+        Option<&'static mut crate::player_avatar::AvatarDriver>,
     ),
     With<PlayerControlled>,
+>;
+
+type AnimatorQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut AnimationPlayer,
+        &'static mut AnimationTransitions,
+    ),
 >;
 
 /// Update: the requests and the flow.
@@ -288,17 +335,26 @@ pub(crate) fn advance(
     mut flow: ResMut<DeliveryFlow>,
     mut requests: MessageReader<DeliveryRequest>,
     mut players: PlayerQuery,
-    animators: Query<&AnimationPlayer>,
+    mut animators: AnimatorQuery,
 ) {
     let frame = u64::from(world.frames.0);
     let now = world.time.elapsed_secs_f64();
     let dt = world.time.delta_secs();
+    let back: Vec<DialogBackKeyEvent> = world.back_keys.read().copied().collect();
     let Some(objects) = world.site.objects.clone() else {
         requests.clear();
         return;
     };
     for request in requests.read().copied().collect::<Vec<_>>() {
-        on_request(&mut world, &mut flow, &mut players, &objects, request, now);
+        on_request(
+            &mut world,
+            &mut flow,
+            &mut players,
+            &mut animators,
+            &objects,
+            request,
+            now,
+        );
     }
     let Some(party_id) = flow.party else {
         return;
@@ -325,6 +381,9 @@ pub(crate) fn advance(
                     dt,
                     now - flow.started_at,
                 );
+                if approach.left {
+                    idle_state_clip(&mut world, &mut flow, &mut players, &mut animators);
+                }
                 flow.phase = Phase::Approach(approach);
             }
         }
@@ -419,31 +478,90 @@ pub(crate) fn advance(
                 return;
             }
             if is_refreshed {
-                info!(
-                    "[delivery] ExecuteHarvestSiteRefresh: the refreshed reply's dialog (UI lane)"
-                );
+                if let Some(dialog) = show_refresh(&mut world, party_id) {
+                    flow.phase = Phase::Refresh { dialog };
+                    return;
+                }
             }
-            // The end action's last publish carries the party with its
-            // current points (nothing added).
-            world.model.state = DeliveryActionState::Idle;
-            let party = world.model.party(party_id).cloned();
-            let current = party.as_ref().map_or(0, |p| p.tally.current_points());
-            publish(
-                &mut world.progress,
-                DeliveryActionState::Idle,
-                party.as_ref(),
-                current,
-                0.0,
-                world.model.rate,
-            );
-            world.model.executing = false;
-            flow.party = None;
+            end_idle(&mut world, &mut flow, party_id, now);
+        }
+        Phase::Refresh { dialog } => {
+            let closed = back
+                .iter()
+                .any(|event| event.id == dialog && event.back_key == DialogBackKey::Close);
+            if !closed {
+                flow.phase = Phase::Refresh { dialog };
+                return;
+            }
+            // `SubWindowDialog.CloseProcess` (the icon loader unloads) ->
+            // `Close`: onClose sets the flag the `WaitUntil` reads; the
+            // dialog closes and, with no close animation, is destroyed.
+            world.screens.close_dialog(dialog);
+            world.screens.dialog_destroyed(dialog);
+            world.awaiting.refresh = None;
             info!(
-                "[delivery] ExecuteDeliveryEndAction done at {:.3} s since the press: state Idle, IsExecuteDelivery false",
+                "[delivery] ExecuteHarvestSiteRefresh: {REFRESH_DIALOG:?} closed on the back key at {:.3} s since the press: CloseProcess -> Close: onClose; WhenAll done",
                 now - flow.started_at
             );
+            end_idle(&mut world, &mut flow, party_id, now);
         }
     }
+}
+
+/// `ExecuteHarvestSiteRefresh`'s dialog: shown on the overlay layer and
+/// opened (no view: its open animation passes at once), `Setup(party)`.
+/// None when the manager has no prefab for it (`InstantiateDialog` returns
+/// null and the source's `Setup` would throw): logged, and the end action
+/// goes on.
+fn show_refresh(world: &mut FlowWorld, party_id: i32) -> Option<DialogId> {
+    let caller = "DeliverySiteController.ExecuteHarvestSiteRefresh";
+    match world.screens.show_dialog(
+        REFRESH_DIALOG,
+        DisplayLayerType::LayerOverlay,
+        DialogBackKey::Close,
+        caller,
+    ) {
+        Ok(dialog) => {
+            world.screens.open_dialog(dialog);
+            world.screens.dialog_open_finished(dialog);
+            world.awaiting.refresh = Some(dialog);
+            info!(
+                "[delivery] {caller}: {REFRESH_DIALOG:?} shown on {} and opened; Setup(birthday party {party_id}): icon_refresh.png of the party's bundle (no view in this product); DestroySiteAllHarvestFixtures: no HarvestSiteController is listed at a delivery site; awaiting its onClose (the back key closes it)",
+                DisplayLayerType::LayerOverlay.label()
+            );
+            Some(dialog)
+        }
+        Err(reason) => {
+            error!(
+                "[delivery] {reason}; the refresh dialog is not shown and the end action goes on"
+            );
+            None
+        }
+    }
+}
+
+/// The end action's tail: state Idle, published with the party's current
+/// points (nothing added), `IsExecuteDelivery` false.
+fn end_idle(world: &mut FlowWorld, flow: &mut DeliveryFlow, party_id: i32, now: f64) {
+    // The end action's last publish carries the party with its
+    // current points (nothing added).
+    world.model.state = DeliveryActionState::Idle;
+    let party = world.model.party(party_id).cloned();
+    let current = party.as_ref().map_or(0, |p| p.tally.current_points());
+    publish(
+        &mut world.progress,
+        DeliveryActionState::Idle,
+        party.as_ref(),
+        current,
+        0.0,
+        world.model.rate,
+    );
+    world.model.executing = false;
+    flow.party = None;
+    info!(
+        "[delivery] ExecuteDeliveryEndAction done at {:.3} s since the press: state Idle, IsExecuteDelivery false",
+        now - flow.started_at
+    );
 }
 
 /// Every half second of a delivery: the player's position, facing, state
@@ -453,7 +571,7 @@ fn trace_player(
     world: &FlowWorld,
     flow: &mut DeliveryFlow,
     players: &PlayerQuery,
-    animators: &Query<&AnimationPlayer>,
+    animators: &AnimatorQuery,
     now: f64,
 ) {
     let since = now - flow.started_at;
@@ -466,7 +584,7 @@ fn trace_player(
     };
     let clips: Vec<String> = driver
         .and_then(|driver| {
-            animators.get(driver.player).ok().map(|animator| {
+            animators.get(driver.player).ok().map(|(animator, _)| {
                 animator
                     .playing_animations()
                     .map(|(node, animation)| {
@@ -511,6 +629,7 @@ fn on_request(
     world: &mut FlowWorld,
     flow: &mut DeliveryFlow,
     players: &mut PlayerQuery,
+    animators: &mut AnimatorQuery,
     objects: &DeliveryObjects,
     request: DeliveryRequest,
     now: f64,
@@ -545,21 +664,23 @@ fn on_request(
             }
             let party_id = party.id;
             world.model.enabled = true;
-            execute_delivery(world, flow, players, objects, party_id, now);
+            execute_delivery(world, flow, players, animators, objects, party_id, now);
         }
     }
 }
 
 /// `ExecuteDelivery` up to the AutoMove of `PrePlayerHarvestMotion`.
+#[allow(clippy::too_many_arguments)]
 fn execute_delivery(
     world: &mut FlowWorld,
     flow: &mut DeliveryFlow,
     players: &mut PlayerQuery,
+    animators: &mut AnimatorQuery,
     objects: &DeliveryObjects,
     party_id: i32,
     now: f64,
 ) {
-    let Ok((entity, transform, mut phase, mut dash, _)) = players.single_mut() else {
+    let Ok((entity, transform, mut phase, _, driver)) = players.single_mut() else {
         return;
     };
     world.model.executing = true;
@@ -609,17 +730,31 @@ fn execute_delivery(
         ),
     };
     world.commands.entity(entity).insert(DeliveryHold);
-    world.joystick_resets.write(crate::joystick::ForceResetJoystick {
-        reason: "delivery pre-action",
-    });
-    flow.dash_before = dash.0;
-    *phase = crate::npc::MotionPhase::Walking;
-    dash.0 = true;
+    world
+        .joystick_resets
+        .write(crate::joystick::ForceResetJoystick {
+            reason: "delivery pre-action",
+        });
+    // The AutoMove state's Initialize: `ChangeAnimation(RunMotion)`. The
+    // state replaces locomotion's, which stays at rest under the token.
+    *phase = crate::npc::MotionPhase::Dwelling { remaining: None };
+    let clip = run_motion(world, driver, animators, entity);
+    flow.auto_move = clip.as_ref().ok().copied();
+    let clip = match clip {
+        Ok(_) => format!(
+            "{AUTO_MOVE_CLIP} plays (fade {:.2} s)",
+            STATE_FADE.as_secs_f32()
+        ),
+        Err(reason) => {
+            error!("[delivery] PlayerAvatarAutoMoveState.Initialize: ChangeAnimation({AUTO_MOVE_CLIP}) refused: {reason}");
+            format!("{AUTO_MOVE_CLIP} refused")
+        }
+    };
     flow.party = Some(party_id);
     flow.started_at = now;
     flow.last_trace = -1.0;
     info!(
-        "[delivery] ExecuteDelivery party {party_id}: IsExecuteDelivery, rate {} (min) carry 0; pre-action: state InDelivery; ForceResetJoyStick; PrePlayerHarvestMotion: AutoMove from ({:.3}, {:.3}, {:.3}) to ({:.3}, {:.3}, {:.3}), {:.3} m from the place (animation radius {}), threshold {}; {} path corners ({note}), agent speed {speed:.3}; player state {:?}, intercept closed; the AutoMove run clip plays as the dash gait (stand-in)",
+        "[delivery] ExecuteDelivery party {party_id}: IsExecuteDelivery, rate {} (min) carry 0; pre-action: state InDelivery; ForceResetJoyStick; PrePlayerHarvestMotion: AutoMove from ({:.3}, {:.3}, {:.3}) to ({:.3}, {:.3}, {:.3}), {:.3} m from the place (animation radius {}), threshold {}; {} path corners ({note}), agent speed {speed:.3}; player state {:?}, intercept closed; AutoMove: {clip}",
         world.model.rate.current,
         player.x,
         player.y,
@@ -643,6 +778,87 @@ fn execute_delivery(
         held_logged: false,
         unchanged: 0.0,
     });
+}
+
+/// `PlayerAvatarAutoMoveState.Initialize`'s `ChangeAnimation(AvatarConfig.
+/// RunMotion)`: `motion_avatar_run`, crossfading 0.25 s at speed 1, taken
+/// under the delivery's action token (manual movement blocked; the flow
+/// moves the player).
+fn run_motion(
+    world: &mut FlowWorld,
+    driver: Option<Mut<crate::player_avatar::AvatarDriver>>,
+    animators: &mut AnimatorQuery,
+    player: Entity,
+) -> Result<PlayerActionToken, String> {
+    let Some(mut driver) = driver else {
+        return Err(format!("the player {player:?} has no avatar driver"));
+    };
+    let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) else {
+        return Err("the player's animator is not installed".to_owned());
+    };
+    driver
+        .start_action(
+            PlayerActionOwner::Delivery,
+            PlayerActionMotion {
+                clip: AUTO_MOVE_CLIP,
+                speed: 1.0,
+                blend: STATE_FADE,
+                blocks_manual_movement: true,
+            },
+            &mut world.graphs,
+            &mut animator,
+            &mut transitions,
+        )
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// The AutoMove state changed to Idle on arrival: `PlayerAvatarIdleState.
+/// Initialize` plays `c_000_mov_idle_00` (0.25 s) and the token gives the
+/// animator back to locomotion, at rest.
+fn idle_state_clip(
+    world: &mut FlowWorld,
+    flow: &mut DeliveryFlow,
+    players: &mut PlayerQuery,
+    animators: &mut AnimatorQuery,
+) {
+    let Some(token) = flow.auto_move.take() else {
+        return;
+    };
+    let Ok((_, _, _, _, Some(mut driver))) = players.single_mut() else {
+        return;
+    };
+    let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) else {
+        return;
+    };
+    driver.play_idle(
+        Some(token),
+        STATE_FADE,
+        &mut world.graphs,
+        &mut animator,
+        &mut transitions,
+    );
+    info!("[delivery] AutoMove -> Idle: PlayerAvatarIdleState.Initialize plays the idle clip; the animator goes back to locomotion");
+}
+
+/// The site change cancels the flow: the run clip's token, if the AutoMove
+/// still holds the animator, gives it back.
+pub(crate) fn release_auto_move(world: &mut World) {
+    let Some(token) = world.resource_mut::<DeliveryFlow>().auto_move.take() else {
+        return;
+    };
+    let mut params = bevy::ecs::system::SystemState::<(
+        Query<&mut crate::player_avatar::AvatarDriver, With<PlayerControlled>>,
+        Query<&mut AnimationPlayer>,
+    )>::new(world);
+    let (mut drivers, mut animators) = params.get_mut(world);
+    let Some(mut driver) = drivers.iter_mut().next() else {
+        return;
+    };
+    let Ok(mut animator) = animators.get_mut(driver.player) else {
+        return;
+    };
+    let released = driver.cancel_action(token, &mut animator);
+    info!("[delivery] site change: the AutoMove's run clip token released ({released})");
 }
 
 /// One frame of the AutoMove state (the harvest AutoMove's law).
@@ -744,13 +960,11 @@ fn finish_pre_action(
     approach: Approach,
     now: f64,
 ) {
-    let Ok((_, transform, mut phase, mut dash, _)) = players.single_mut() else {
+    let Ok((_, transform, _, _, _)) = players.single_mut() else {
         flow.phase = Phase::Approach(approach);
         return;
     };
     world.states.can_intercept = approach.recorded_gate;
-    *phase = crate::npc::MotionPhase::Dwelling { remaining: None };
-    dash.0 = flow.dash_before;
     let face = LookAtTween::new(
         transform.rotation,
         transform.translation,
@@ -838,7 +1052,14 @@ fn loop_step(world: &mut FlowWorld, objects: &DeliveryObjects, party_id: i32, dt
     let before_drops = party.tally.total_drop_count();
     let count = rate.step_count(party.tally.unsynchronized_cost, dt);
     let spent = party.tally.spend(count);
-    publish(&mut world.progress, state, Some(party), before_points, dt, *rate);
+    publish(
+        &mut world.progress,
+        state,
+        Some(party),
+        before_points,
+        dt,
+        *rate,
+    );
     let after_drops = party.tally.total_drop_count();
     if spent > 0 {
         debug!(

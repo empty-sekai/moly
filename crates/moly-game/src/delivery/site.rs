@@ -831,7 +831,7 @@ pub(crate) fn autoplay(
         run.back_down = false;
         escape(&mut keys, ButtonState::Released);
     }
-    match awaiting.open {
+    match awaiting.awaited() {
         Some(dialog) => {
             let since = match run.dialog_since {
                 Some((seen, since)) if seen == dialog => since,
