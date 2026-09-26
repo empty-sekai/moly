@@ -1597,12 +1597,23 @@ impl PrunerScene {
                 self.variants.len());
             self.report(line);
         }
+        let mut seq = agreed.unwrap_or_default();
         if split {
+            // A diagnostic only, off unless named in the environment: take the
+            // pruner with no flush in any gap before the showing (the reading
+            // of which game code queries at home before the entry, which is
+            // bounded, not exhaustive).
+            static NO_EARLY_FLUSH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let diag = *NO_EARLY_FLUSH.get_or_init(|| std::env::var_os("MOLY_PRUNER_DIAG_NO_EARLY_FLUSH").is_some());
             let why = "the pruners of the unread flushes disagree on this query".to_owned();
             self.report(why.clone());
-            return Err(why);
+            if !diag {
+                return Err(why);
+            }
+            let visits = self.variants[0].overlap(center, extents).map_err(|why| why.0.to_owned())?;
+            seq = visits.into_iter().filter(|id| touched.contains(id)).collect();
+            self.report("diagnostic: the order of the pruner with no flush before the showing taken where the pruners                 disagree".to_owned());
         }
-        let seq = agreed.unwrap_or_default();
         if seq.len() != touched.len() {
             return Err("a collider the query meets that the pruner does not visit".to_owned());
         }
