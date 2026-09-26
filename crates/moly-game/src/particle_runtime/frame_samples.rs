@@ -453,8 +453,8 @@ pub(crate) fn with_arm<T>(arm: Option<&'static str>, f: impl FnOnce() -> T) -> T
 
 /// The harness emitter of a case that carries its own start block, module
 /// blocks (any of Velocity, CustomData, ClampVelocity, RotationOverLifetime,
-/// RotationBySpeed, in the export's shape) and emission bursts and looping in
-/// its config.
+/// RotationBySpeed, Force, in the export's shape) and emission bursts and
+/// looping in its config.
 fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Runtime {
     let mut runtime = harness_system(start, config);
     let space = if config["space"].as_u64() == Some(0) { "Local" } else { "World" };
@@ -473,7 +473,7 @@ fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Run
     });
     for (key, module) in [("velocityOverLifetime", "VelocityModule"), ("customData", "CustomDataModule"),
         ("limitVelocity", "ClampVelocityModule"), ("rotationOverLifetime", "RotationModule"),
-        ("rotationBySpeed", "RotationBySpeedModule")] {
+        ("rotationBySpeed", "RotationBySpeedModule"), ("forceOverLifetime", "ForceModule")] {
         if let Some(block) = modules.get(key).filter(|b| b.is_object()) {
             system[key] = block.clone();
             enabled.push(module);
@@ -495,6 +495,8 @@ fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Run
         &p.magnitude, p.dampen, p.drag.as_ref(), p.multiply_drag_by_size, p.multiply_drag_by_velocity).unwrap());
     runtime.rol = emitter.rotation_over_lifetime.as_ref().map(|p|
         RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve).unwrap());
+    runtime.force_law = emitter.force.as_ref()
+        .map(|p| moly_law::particle::force::ForceOverLifetime::from_params(p).unwrap());
     runtime.emitter = emitter;
     runtime
 }
@@ -516,7 +518,13 @@ fn run_module_case(receipt: &Value, case: &Value, tally: &mut Tally, rotation: &
         // The native stop byte before the frame (the non-looping end sets it
         // inside the incremental update); the host's play state stands in.
         let stopped = row.get("stoppedBefore").is_some_and(|v| v == true || v == 1);
-        let _ = advance_frame(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {});
+        // UpdateData flags 0 is the per-frame update; 4 a script Simulate
+        // chunk (a Director's), which the product runs through its own entry.
+        let _ = match input["flags"].as_u64() {
+            Some(0) => advance_frame(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {}),
+            Some(4) => director_chunk(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {}),
+            other => panic!("{name}: UpdateData flags {other:?} have no product entry here"),
+        };
         let label = format!("{name}#{index}");
         compare(&system, row, true, tally, &label);
         let particles = &row["particles"];
@@ -621,5 +629,52 @@ fn distance_module_controls_fail() {
         let (_, product, rotation) = replay_modules(&receipt, None);
         println!("control {path}: {} mismatched frames, {} rotation", product.mismatched_frames, rotation.1);
         assert!(product.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
+    }
+}
+
+/// Distance births with orbital, orbital-offset and radial Velocity terms
+/// (Local and World, per frame and on a Director clip's chunks), module
+/// curves at the stored age word (Velocity, ClampVelocity, Force), script
+/// Simulate chunks without the backlog widening and a delayed system on
+/// them: every native frame of the receipt through the product entries. The
+/// receipt's own controls must hold (the supportsProcedural byte changes no
+/// row and is not read on the per-frame path while the clock is; Velocity
+/// off, flags 0 and the cleared identity each change rows), and every
+/// one-rule arm must mismatch.
+#[test]
+#[ignore = "MOLY_BIRTHS_RECEIPT must identify the JP births receipt"]
+fn births_receipt_matches_native_rows() {
+    let receipt = read("MOLY_BIRTHS_RECEIPT");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "rotationFrames": rotation.0, "rotationMismatched": rotation.1,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_BIRTHS_RECEIPT_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0 && rotation.0 > 0, "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    let procedural = &receipt["procedural"];
+    assert_eq!(procedural["differingFrames"], 0);
+    assert!(procedural["readsOfState20to23"].as_object().unwrap().is_empty());
+    assert!(procedural["readsOfClock"].as_object().unwrap().values().any(|n| n.as_u64().unwrap() > 0));
+    for control in ["k3VersusO3DifferingFrames", "k20VersusS1DifferingFrames", "kfVersusA1DifferingFrames"] {
+        assert!(receipt[control].as_u64().unwrap() > 0, "{control}");
+    }
+    assert!(receipt["staticInitializers"]["o1VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    for arm in ["moduleAgeFromNormalized", "orbitalSkipsBirths", "scriptSimulateWidens"] {
+        let (_, tally, rotation) = replay_modules(&receipt, Some(arm));
+        println!("arm {arm}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "arm {arm} must mismatch");
+    }
+    if let Ok(paths) = std::env::var("MOLY_BIRTHS_RECEIPT_CONTROLS") {
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let (_, tally, rotation) = replay_modules(&control, None);
+            println!("control {path}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
+            assert!(tally.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
+        }
     }
 }

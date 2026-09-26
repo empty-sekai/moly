@@ -122,11 +122,16 @@ pub fn time_step(scaled: f32, maximum_particle_timestep: f32) -> f32 {
 /// How the incremental update was entered. The per-frame update passes
 /// UpdateData flags 0 and Play's explicit-dt update passes 8; the Update1b,
 /// GetTimeStep and Update1Incremental bodies test only bits 0, 1 and 2, which
-/// are clear in both, so both run the same slice loop.
+/// are clear in both, so both run the same slice loop. `ParticleSystem.Simulate`
+/// from script passes flags 4 to its time update (bit 2 set; bit 1 as well on
+/// a restart, whose time update is zero and skips): Update1Incremental then
+/// takes every slice as `min(pending, step)`, without the 5 s / 10 s backlog
+/// widening.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncrementalEntry {
     PerFrame,
     ExplicitDt,
+    ScriptSimulate,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,6 +156,8 @@ pub struct IncrementalSlices {
     base_step: f32,
     prior_step: f32,
     duration: f32,
+    /// UpdateData flags bit 2 clear: the backlog widening applies.
+    widen: bool,
     budget: usize,
 }
 
@@ -164,7 +171,6 @@ impl IncrementalSlices {
         entry: IncrementalEntry,
         duration: f32,
     ) -> Result<Self, &'static str> {
-        let _ = entry;
         if !(total.is_finite()
             && total > 0.0
             && step.is_finite()
@@ -182,6 +188,7 @@ impl IncrementalSlices {
             base_step: step,
             prior_step: step,
             duration,
+            widen: entry != IncrementalEntry::ScriptSimulate,
             budget: SLICE_BUDGET,
         })
     }
@@ -212,14 +219,14 @@ impl Iterator for IncrementalSlices {
         // exceeds the 1 s (above 10 s pending) or 0.2 s (above 5 s pending)
         // threshold; otherwise the duration capped at that threshold is taken.
         // The two caps are IEEE minNum, which keeps the threshold for a NaN
-        // duration.
-        if before > 10.0 {
+        // duration. With bit 2 set neither test is made.
+        if self.widen && before > 10.0 {
             step = if self.prior_step > 1.0 {
                 self.prior_step
             } else {
                 self.duration.min(1.0)
             };
-        } else if before > 5.0 {
+        } else if self.widen && before > 5.0 {
             step = if self.prior_step > 0.2 {
                 self.prior_step
             } else {
@@ -260,13 +267,25 @@ pub fn frame_step(
     time: TimeManagerSnapshot,
     duration: f32,
 ) -> Result<FrameStep, &'static str> {
+    frame_step_entry(pending, dt, simulation_speed, time, duration, IncrementalEntry::PerFrame)
+}
+
+/// [`frame_step`] for an update entered as `entry` (the per-frame update, or
+/// a script `Simulate` time update, which skips the backlog widening).
+pub fn frame_step_entry(
+    pending: f32,
+    dt: f32,
+    simulation_speed: f32,
+    time: TimeManagerSnapshot,
+    duration: f32,
+    entry: IncrementalEntry,
+) -> Result<FrameStep, &'static str> {
     let scaled = dt * fmax_zero(simulation_speed);
     let step = time_step(scaled, time.maximum_particle_timestep);
     if !(step >= MINIMUM_STEP) {
         return Ok(FrameStep::Skipped);
     }
-    IncrementalSlices::new(pending + scaled, step, IncrementalEntry::PerFrame, duration)
-        .map(FrameStep::Slices)
+    IncrementalSlices::new(pending + scaled, step, entry, duration).map(FrameStep::Slices)
 }
 
 #[cfg(test)]

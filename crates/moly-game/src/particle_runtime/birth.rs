@@ -64,6 +64,29 @@ impl Default for FrameState {
 /// The emitter velocity is refreshed only for a raw frame dt above this.
 const MIN_VELOCITY_DT: f32 = f32::from_bits(0x38d1_b717);
 
+impl FrameState {
+    /// The frame state after `ParticleSystem.Simulate`'s restart branch:
+    /// Play sets the emitter reset and does not clear the emitter velocity,
+    /// which keeps `velocity`; a warm update of raw dt `warm_dt` then takes its
+    /// own translation as the previous one, so it refreshes the velocity to
+    /// zero when the dt is above the refresh threshold, and its end of update
+    /// (a nonzero dt) stores that translation.
+    pub(super) fn after_restart(velocity: [f32; 3], warm_dt: Option<f32>, translation: [f32; 3],
+        start_delay: f32) -> Self {
+        let mut frame = Self { velocity, start_delay, ..Self::default() };
+        if let Some(dt) = warm_dt {
+            if dt > MIN_VELOCITY_DT {
+                frame.velocity = [0.0; 3];
+            }
+            if dt != 0.0 {
+                frame.previous_position = translation;
+                frame.reset_previous = false;
+            }
+        }
+        frame
+    }
+}
+
 /// Placement of the births of one command along the emitter's motion.
 /// StartModules moves every World-space birth back by
 /// (births_ahead + fraction) * (dt / speed) times the emitter velocity, after
@@ -142,8 +165,10 @@ fn qualify(emitter: &EmitterParams, frame_head: bool) -> Result<(), BirthRefused
 /// no first-Play warm (the warm's own update would take the branch), and
 /// newborns whose negative elapsed time runs only through Initial gravity
 /// with a constant modifier, RotationOverLifetime, a Local VelocityModule with
-/// constant or two-constant linear terms, zero orbital and radial terms and a
-/// constant unit speed modifier, ClampVelocity, RotationBySpeed and
+/// constant or two-constant linear, orbital, orbital-offset and radial terms
+/// and a constant unit speed modifier (the orbital displacement over the
+/// negative elapsed time turns the newborn back about the axes, in the
+/// simulation space's own frame), ClampVelocity, RotationBySpeed and
 /// CustomData. A distance birth takes the same pre-simulation chain as every
 /// other birth, in the same order (Initial, the rotation-over-lifetime rate,
 /// Velocity, ClampVelocity with its damping from the lane's |elapsed|, the
@@ -169,17 +194,12 @@ fn qualify_distance_composition(emitter: &EmitterParams) -> Result<(), BirthRefu
         return refuse("emission over distance: gravity modifier other than a constant");
     }
     if let Some(velocity) = &emitter.velocity_over_lifetime {
-        let zero = |curve: &MinMaxCurve| match *curve {
-            MinMaxCurve::Constant(v) => v == 0.0,
-            MinMaxCurve::TwoConstants { min, max } => min == 0.0 && max == 0.0,
-            _ => false,
-        };
-        let linear = |curve: &MinMaxCurve| matches!(*curve, MinMaxCurve::Constant(v) if v.is_finite())
+        let scalar = |curve: &MinMaxCurve| matches!(*curve, MinMaxCurve::Constant(v) if v.is_finite())
             || matches!(*curve, MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite());
+        let orbital = velocity.orbital.iter().chain(&velocity.orbital_offset).chain([&velocity.radial]).all(scalar);
         if velocity.in_world_space
-            || ![&velocity.x, &velocity.y, &velocity.z].into_iter().all(linear)
-            || !velocity.orbital.iter().all(zero)
-            || !zero(&velocity.radial)
+            || ![&velocity.x, &velocity.y, &velocity.z].into_iter().all(scalar)
+            || !orbital
             || !matches!(velocity.speed_modifier, MinMaxCurve::Constant(v) if v == 1.0)
         {
             return refuse("emission over distance: VelocityModule outside the executed subset");
@@ -212,6 +232,7 @@ pub(super) fn advance_frame(
     state: &mut NativeBirthState,
     frame_dt: f32,
     stopped: bool,
+    entry: moly_law::particle::frame_time::IncrementalEntry,
     ctx: &Context,
     slice_start: &mut dyn FnMut(&Runtime),
 ) -> Result<bool, BirthRefused> {
@@ -236,7 +257,7 @@ pub(super) fn advance_frame(
         // frame's time is dropped and the pending time stays as it was. The
         // engine has no such refusal. Counted and named, as the legacy head
         // does; the system is not retired.
-        match head.plan(system.pending, system.emitter.duration) {
+        match head.plan_entry(system.pending, system.emitter.duration, entry) {
             Ok(plan) => {
                 let pending = plan.remaining();
                 let late = super::child::arms::on("distanceAfterSlices");
