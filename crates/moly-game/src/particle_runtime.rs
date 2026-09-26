@@ -527,6 +527,25 @@ pub(crate) fn play_after_stop(system: &mut Runtime, seeds: &mut seed::SystemSeed
     Ok(())
 }
 
+/// `ParticleSystem.randomSeed = value` (after its job sync): the system
+/// becomes a manual owner with `value`, useAutoRandomSeed going false even
+/// when the seed is unchanged, and nothing is reset: the live streams keep
+/// the words of the last reset, and the next seed reset (a Play with no
+/// particle alive, or a first Play) expands `value` without a shared-manager
+/// draw. The installed owners mirror the read-only state the setter writes:
+/// the birth owner, and Noise, which reads that state's seed.
+pub(crate) fn set_random_seed(system: &mut Runtime, value: u32) {
+    system.emitter.random_seed = Some(value);
+    system.emitter.auto_random_seed = Some(false);
+    if let Some(owner) = system.native_birth.as_mut().and_then(|native| native.owner.as_mut()) {
+        owner.set_manual_seed(value);
+    }
+    if let Some(noise) = system.noise.as_mut() {
+        noise.owner.set_manual_seed(value);
+        noise.owner_seed = value;
+    }
+}
+
 /// The start delay word ParticleSystem::Play writes when it restarts a
 /// stopped system: with prewarm on it writes nothing (the word keeps its
 /// construction zero), otherwise the start delay curve evaluated at time zero

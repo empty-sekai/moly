@@ -1347,9 +1347,17 @@ impl std::ops::Deref for SubEmitterGraph<'_> {
 
 impl<'a> SubEmitterGraph<'a> {
     /// The one system record at `node` whose system object id is `path_id`.
+    /// The id is one 64-bit integer written two ways: the weather export and
+    /// every sub-emitter pointer carry it as a decimal string, the fixture
+    /// export's records as a JSON integer.
     fn child(&self, node: &str, path_id: &str) -> Option<&'a Value> {
+        let same = |id: &Value| match id {
+            Value::String(text) => text == path_id,
+            Value::Number(number) => number.as_i64().is_some_and(|id| id.to_string() == path_id),
+            _ => false,
+        };
         let mut found = self.records.get(node)?.iter().copied()
-            .filter(|record| record.get("systemPathId").and_then(Value::as_str) == Some(path_id));
+            .filter(|record| record.get("systemPathId").is_some_and(same));
         let child = found.next()?;
         found.next().is_none().then_some(child)
     }
@@ -1576,7 +1584,7 @@ fn drop_orphan_targets(plans: &mut Vec<Planned>, start: usize) -> Vec<String> {
 /// the Local or Hierarchy scaling mode (the owner updates transcribed).
 /// Returns the parent.
 fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitterGraph<'_>, kind: EffectKind,
-    instance_anchor: Option<GlobalTransform>) -> Result<String, String> {
+    instance_anchor: Option<GlobalTransform>, instance_targets: bool) -> Result<String, String> {
     let [parent] = owners else {
         return Err(format!("{} parents ({}): the order of their commands is not in the export",
             owners.len(), owners.join(", ")));
@@ -1601,7 +1609,9 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
             _ => break,
         }
     }
-    if instance_anchor.is_some() {
+    // A host that composes a target's owner words from its instance's own
+    // hierarchy (the played route) admits it on an instance anchor.
+    if instance_anchor.is_some() && !instance_targets {
         return Err("owner words are composed only for a site effect on its authored chain".into());
     }
     if kind == EffectKind::Camera {
@@ -1757,7 +1767,8 @@ fn authored_trs(by_path: &HashMap<String, &Value>, path: &str)
 #[allow(clippy::too_many_arguments)]
 fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMap<String, &Value>,
     graph: &SubEmitterGraph<'_>, kind: EffectKind, camera_rotation: bool,
-    lifecycle: Option<WeatherEffectLifecycle>, asset_root: &str,
+    lifecycle: Option<WeatherEffectLifecycle>, native_owner: bool, asset_root: &str,
+    instance_anchor: Option<GlobalTransform>, instance_targets: bool,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict, bodies: &Result<(), String>,
     server: &AssetServer) -> Result<(), String> {
     let records: Vec<&Value> = graph.records.get(parent).into_iter().flatten().copied()
@@ -1768,8 +1779,8 @@ fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMa
         return Err(format!("parent {parent}: {} records name this target", records.len()));
     };
     let mut scratch = Tally::default();
-    match judge_in_archive(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, asset_root,
-        None, ground, bodies, server, &mut scratch) {
+    match judge_in_host(effect_name, record, by_path, graph, kind, camera_rotation, lifecycle, native_owner, asset_root,
+        instance_anchor, instance_targets, ground, bodies, server, &mut scratch) {
         Some(planned) if planned.event_edges.as_ref().is_some_and(|edges| edges.targets().any(|target| target == node)) =>
             Ok(()),
         Some(_) => Err(format!("parent {parent} admitted without an event edge to this target")),
@@ -1874,7 +1885,7 @@ fn judge_in_archive(
 ) -> Option<Planned> {
     // The weather host (a lifecycle) installs the native birth owner.
     judge_in_host(effect_name, particle, by_path, sub_emitter_owners, kind, camera_rotation, lifecycle,
-        lifecycle.is_some(), asset_root, instance_anchor, ground, bodies, server, tally)
+        lifecycle.is_some(), asset_root, instance_anchor, false, ground, bodies, server, tally)
 }
 
 /// [`judge_in_archive`] for a host that says whether it installs the native
@@ -1894,6 +1905,9 @@ fn judge_in_host(
     native_owner: bool,
     asset_root: &str,
     instance_anchor: Option<GlobalTransform>,
+    // The host composes a sub-emitter target's owner words from the spawned
+    // instance hierarchy (see [`sub_emitter_target_gate`]).
+    instance_targets: bool,
     ground: &crate::particle_runtime::collision_scene::SceneVerdict,
     bodies: &Result<(), String>,
     server: &AssetServer,
@@ -1923,7 +1937,8 @@ fn judge_in_host(
     // one admitted parent; the rest of its gates follow the law parse.
     let child_parent = match particle.get("node").and_then(Value::as_str).and_then(|node| sub_emitter_owners.get(node)) {
         None => None,
-        Some(owners) => match sub_emitter_target_gate(owners, particle, sub_emitter_owners, kind, instance_anchor) {
+        Some(owners) => match sub_emitter_target_gate(owners, particle, sub_emitter_owners, kind, instance_anchor,
+            instance_targets) {
             Ok(parent) => Some(parent),
             Err(reason) => { tally.law_reject.push(format!("sub-emitter target: {reason}")); return None; }
         },
@@ -2584,7 +2599,8 @@ fn judge_in_host(
             let owner = crate::particle_runtime::child_target_eligible(&emitter, Some(evidence))
                 .and_then(|()| child_owner_words(by_path, node, kind, owner_scaling(scaling)))
                 .and_then(|owner| parent_delivers(effect_name, parent, node, by_path, sub_emitter_owners, kind,
-                    camera_rotation, lifecycle, asset_root, ground, bodies, server).map(|()| owner));
+                    camera_rotation, lifecycle, native_owner, asset_root, instance_anchor, instance_targets, ground,
+                    bodies, server).map(|()| owner));
             match owner {
                 Ok((owner, chain)) => {
                     sky_owner_chain = sky_owner_chain.or(chain);

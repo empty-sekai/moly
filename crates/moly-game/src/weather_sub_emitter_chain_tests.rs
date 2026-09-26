@@ -24,7 +24,7 @@ fn record(node: &str, targets: &[&str]) -> Value {
 fn gate(records: &[Value], node: &str) -> Result<String, String> {
     let graph = source_sub_emitter_owners(records);
     let particle = records.iter().find(|record| record["node"] == node).expect("record of the node");
-    sub_emitter_target_gate(&graph[node], particle, &graph, EffectKind::Site, None)
+    sub_emitter_target_gate(&graph[node], particle, &graph, EffectKind::Site, None, false)
 }
 
 #[test]
