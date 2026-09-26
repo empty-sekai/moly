@@ -2,7 +2,13 @@
 //! in seconds after the joystick opens, default 3): one layout edit at the
 //! current site, sent as the same commands the menu and the edit screen
 //! send. The menu's edit button (`Enter`), the camera rotate button once and
-//! the change-look button twice (`RotateCamera`, `ChangeLookCamera`), a
+//! the change-look button twice (`RotateCamera`, `ChangeLookCamera`); then,
+//! for each catalog index in `MOLY_EDIT_AUTOPLAY_CATALOG` (comma separated,
+//! default `2,0`), the catalog cell (`SelectCatalog`), which puts the new
+//! fixture on the tile the spiral finds, and after the put effect the
+//! screen's cancel button (`Cancel`, which removes the pre-placement), or,
+//! for an index written with a trailing `d`, the decide button (`Decide`,
+//! which places it, so the next put searches around it); a
 //! placed fixture picked from the screen (`SelectPlaced`), a one-cell drag
 //! (`MoveTo`), the decide button (`Decide`); the same fixture again, dragged
 //! back to its start and decided; then the save button (`SaveAndExit`). A drag whose cell the
@@ -36,6 +42,8 @@ enum Step {
     Rotated,
     Looked,
     LookedBack,
+    CatalogPut,
+    CatalogCancelled,
     Picked,
     Moved,
     Decided,
@@ -58,6 +66,28 @@ pub(super) struct Run {
     tried: Vec<String>,
     rotated: bool,
     waiting_logged: bool,
+    catalog: Option<Vec<(usize, bool)>>,
+    decide_put: bool,
+}
+
+/// The catalog indices, each with whether its put is decided (a trailing
+/// `d`) rather than cancelled.
+fn catalog_indices() -> Vec<(usize, bool)> {
+    let raw = std::env::var("MOLY_EDIT_AUTOPLAY_CATALOG").unwrap_or_else(|_| "2,0".into());
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (digits, decide) = match part.strip_suffix('d') {
+                Some(digits) => (digits, true),
+                None => (part, false),
+            };
+            let index = digits.parse::<usize>().unwrap_or_else(|_| {
+                panic!("MOLY_EDIT_AUTOPLAY_CATALOG is not a list of catalog indices: {raw:?}")
+            });
+            (index, decide)
+        })
+        .collect()
 }
 
 fn delay() -> Option<f32> {
@@ -162,12 +192,56 @@ pub(super) fn autoplay(
             };
             run.at = now;
         }
-        Step::LookedBack => {
+        Step::LookedBack | Step::CatalogCancelled => {
             if elapsed < AFTER_CAMERA {
                 return;
             }
-            run.step = Step::Entered;
-            run.at = now - AFTER_ENTER;
+            let queue = run.catalog.get_or_insert_with(catalog_indices);
+            if queue.is_empty() {
+                run.step = Step::Entered;
+                run.at = now - AFTER_ENTER;
+                return;
+            }
+            let (index, decide) = queue.remove(0);
+            info!("[edit-autoplay] the catalog cell {index}: SelectCatalog");
+            out.write(EditCommand::SelectCatalog { index });
+            run.decide_put = decide;
+            run.step = Step::CatalogPut;
+            run.at = now;
+        }
+        Step::CatalogPut => {
+            if elapsed < AFTER_DECIDE {
+                return;
+            }
+            let (button, command) = if run.decide_put && view.selected.is_some() {
+                ("the decide button: Decide", EditCommand::Decide)
+            } else {
+                ("the screen's cancel button: Cancel", EditCommand::Cancel)
+            };
+            match view.selected.as_ref() {
+                Some(selected) => info!(
+                    "[edit-autoplay] catalog put selected {} at center ({}, {}, {}) direction {:?}, put status {:?}; {button}",
+                    selected.item.uid,
+                    selected.item.center.x,
+                    selected.item.center.y,
+                    selected.item.center.z,
+                    selected.item.direction,
+                    selected.put_status
+                ),
+                None => info!(
+                    "[edit-autoplay] catalog put left nothing selected ({}); {button}",
+                    view.feedback
+                ),
+            }
+            out.write(command);
+            // After a decide, the put effect's samples (3.5 s) before the
+            // next button.
+            run.step = Step::CatalogCancelled;
+            run.at = if run.decide_put {
+                now + AFTER_DECIDE - AFTER_CAMERA
+            } else {
+                now
+            };
         }
         Step::Entered => {
             if elapsed < AFTER_ENTER {
