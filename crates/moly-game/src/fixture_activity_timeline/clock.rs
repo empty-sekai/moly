@@ -21,6 +21,9 @@ pub(super) struct Clock {
     /// A step item view turned its loop flag off (`ChangeLoopFlag(false)`).
     /// No other owner sets it.
     loop_flag_off: bool,
+    /// A scene director view paused the director: its time does not advance
+    /// and the held time is sampled every frame. No other owner sets it.
+    paused: bool,
 }
 
 impl Clock {
@@ -30,6 +33,10 @@ impl Clock {
 
     pub fn set_loop_flag(&mut self, state: bool) {
         self.loop_flag_off = !state;
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
     }
 
     /// The next frame samples `time` (a view's `MoveEndTime`).
@@ -63,7 +70,8 @@ impl Clock {
                 self.player_end_applied = true;
             }
         }
-        self.sampled_time = (self.time + if first { 0.0 } else { delta }).min(definition.duration);
+        let step = if first || self.paused { 0.0 } else { delta };
+        self.sampled_time = (self.time + step).min(definition.duration);
         self.time = self.sampled_time;
         let Some(clip) = loop_clip else {
             return;

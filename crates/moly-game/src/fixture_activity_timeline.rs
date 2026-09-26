@@ -11,9 +11,9 @@ mod effects;
 mod source;
 
 pub(crate) use source::{
-    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, SourceAssetId,
-    TimelineClip, TimelineClipKey, TimelineDefinition, TimelinePackage, TimelinePayload,
-    TimelineTrack,
+    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, ExposedSource,
+    SourceAssetId, TimelineClip, TimelineClipKey, TimelineDefinition, TimelinePackage,
+    TimelinePayload, TimelineTrack,
 };
 
 use crate::{
@@ -837,6 +837,11 @@ pub(crate) struct TimelineBindings {
     pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
     pub controls:
         HashMap<TimelineClipKey, crate::fixture_timeline_particles::ParticleControlBinding>,
+    /// Control clips of a director that binds them through its own
+    /// exposed-reference table (a step item, a site prefab's director) and
+    /// that this runner does not drive, each with the reason, by clip. The
+    /// rest of the timeline plays; each one is a named coverage gap.
+    pub refused_controls: HashMap<TimelineClipKey, String>,
 }
 #[derive(Clone)]
 pub(crate) struct TimelineCompanionTrack {
@@ -853,6 +858,11 @@ pub(crate) enum TimelineOwnerKind {
     /// its director plays with no timeout, and its view sets the loop flag
     /// (`LoopFlagClip.ChangeLoopFlagState`) instead of skipping the loop.
     StepItem,
+    /// A director inside a site prefab, bound to the site scene's own
+    /// objects (the delivery site's tree, `DeliveryPlaceObjectView`): it
+    /// plays with no timeout and its view holds it paused at a time
+    /// (`Pause`, then evaluated every frame).
+    SceneDirector,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TimelineTimeoutBudget {
@@ -1101,6 +1111,24 @@ impl FixtureActivityTimelines {
         s.clock.move_to(s.request.definition.duration);
         true
     }
+    /// A scene director view's `Pause` (held: the clock stops and the paused
+    /// time is evaluated every frame) or `Play` (released: the clock runs
+    /// from the held time).
+    pub(crate) fn set_paused(&mut self, token: TimelineToken, paused: bool) -> bool {
+        let Some(s) = self.sessions.get_mut(&token) else {
+            return false;
+        };
+        if s.request.owner.kind != TimelineOwnerKind::SceneDirector
+            || !matches!(
+                s.status,
+                TimelineStatus::Preparing | TimelineStatus::Playing { .. }
+            )
+        {
+            return false;
+        }
+        s.clock.set_paused(paused);
+        true
+    }
     /// A conversation can own a new Director or join an existing NPC activity.
     /// Release the loop of each admitted cast/fixture owner and retain the exact
     /// generations until their authored tails finish. No replacement is drawn.
@@ -1331,7 +1359,9 @@ fn validate(
     }
     match (request.owner.kind, request.timeout_budget) {
         (
-            TimelineOwnerKind::Player | TimelineOwnerKind::StepItem,
+            TimelineOwnerKind::Player
+            | TimelineOwnerKind::StepItem
+            | TimelineOwnerKind::SceneDirector,
             TimelineTimeoutBudget::PlayerWall,
         )
         | (
@@ -1905,6 +1935,17 @@ fn initialize(
                 });
             }
         }
+    }
+    let mut refused: Vec<_> = request.bindings.refused_controls.iter().collect();
+    refused.sort_by(|a, b| {
+        (&a.0.track.path_id, a.0.clip_index).cmp(&(&b.0.track.path_id, b.0.clip_index))
+    });
+    for (key, reason) in refused {
+        session.coverage.push(TimelineCoverageGap {
+            clip: Some(key.clone()),
+            feature: "SourceControlClip",
+            detail: reason.clone(),
+        });
     }
     if !request.bindings.sounds.is_empty() {
         session.coverage.push(TimelineCoverageGap { clip:None,feature:"SourceSESpatialization",detail:"exact source cue/package uses the existing 2D one-shot SE bus; native positional attenuation is not reproduced".into() });
