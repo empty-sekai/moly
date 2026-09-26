@@ -50,10 +50,17 @@
 //! [`LearnPhenomenaDialogRequest`] where `ShowLearnPhenomenaDialog` opens it
 //! and waits for [`LearnPhenomenaDialogClosed`] (its onClose).
 //!
-//! Named gaps: the release reply
-//! lands in the same frame (the source's API call is asynchronous); the
-//! harvest button during GameState 6 is not gated (the harvest screen is the
-//! UI lane's).
+//! The harvest button in GameState 6: the source has no gate for it. No
+//! harvest screen subscribes to `ChangeGameState` (the subscribers are the
+//! game states, the joystick, the harvest presenter's release, the home and
+//! my-room controllers and the photo view), and the press path
+//! (`HarvestButtonInteraction.OnPressed`, `OnHarvestAction`,
+//! `PlayHarvestAction` up to its `ChangeState(Harvest)`) reads no game
+//! state; while the dialog is open its full-screen close area takes the
+//! taps, which here is the dialog slot's field-input block.
+//!
+//! Named gaps: the release reply lands in the same frame (the source's API
+//! call is asynchronous).
 
 use bevy::animation::AnimatedBy;
 use bevy::diagnostic::FrameCount;
@@ -138,10 +145,12 @@ struct LearnRun {
 enum Stage {
     /// `Delay(1.3 s)` after the camera change.
     Delay(Delay),
-    /// The dialog is open until its onClose.
+    /// The dialog is open until its onClose. The close is a tap, handled in
+    /// the scripts' update after UniTask's Update runner (inserted first in
+    /// the Update loop), so `WaitUntil` sees it at the next frame's runner,
+    /// and Play continues there. This system runs before the dialog's taps,
+    /// so it reads the close message at that same next frame.
     Open,
-    /// The dialog closed; the `WaitUntil` sees it the next frame.
-    WaitClose { closed_frame: u64 },
 }
 
 /// `LearnSiteEnvironmentCameraState.OnEnter` on the owner model.
@@ -398,21 +407,17 @@ pub(crate) fn advance(
                 run.stage = Stage::Open;
             }
         }
-        Stage::Open => {
-            if closed_now {
-                run.stage = Stage::WaitClose {
-                    closed_frame: frame,
-                };
-            }
-        }
-        Stage::WaitClose { closed_frame } => closed = frame > *closed_frame,
+        Stage::Open => closed = closed_now,
     }
     if closed {
         // WaitUntil(closed), FieldCamera.ChangeState(Normal); Play returns
         // and PlayLearnEnvironment changes the game state.
         commands.queue(leave_learn_camera);
         commands.remove_resource::<LearnSiteEnvironmentActive>();
-        info!("[harvest-learn] dialog closed: FieldCamera.ChangeState(Normal), then GameState Normal: gesture layer on, joystick shown");
+        info!(
+            "[harvest-learn] frame {frame} t {:.4}: dialog closed (WaitUntil at the frame after the tap): FieldCamera.ChangeState(Normal), then GameState Normal: gesture layer on, joystick shown",
+            time.elapsed_secs_f64()
+        );
         learn.run = None;
     }
 }
