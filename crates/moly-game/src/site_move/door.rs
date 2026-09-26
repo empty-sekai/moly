@@ -23,6 +23,17 @@
 //! anchor (admission, the arrival at the door, the destination standing),
 //! the source offset from that anchor, the measured one and the frames.
 //!
+//! What leads into a room in the source: the house-entry button
+//! (`first_floor`), the room screen's floor selector (the other floors) and
+//! the home and room screen presenters' `ChangeSite` (`first_floor`). The
+//! site map publishes a room-to-anywhere change as the nested
+//! `ChangeSite(home_site, next)` and an outdoor change directly
+//! (`PublishMoveMapEvent`: the current site in home or the outdoor sites,
+//! mask 0x1F1), and it has no icon for a floor. So no source path goes from
+//! an outdoor site to a room: the product composition that serves that pair
+//! (the cannon home, then HomeToMyRoom as its second leg) is reached only by
+//! a request the source never makes, such as a dev site switch.
+//!
 //! Named differences:
 //! - `HomeSiteController.ExecuteNPCRandomFixtureAction` (room to home, the
 //!   NPCs take random fixture actions while the wipe opens) belongs to the
