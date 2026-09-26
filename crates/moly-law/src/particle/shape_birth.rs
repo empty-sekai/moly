@@ -27,7 +27,11 @@
 //! its BurstSpread radius mode (no draw; the lanes are spread over the accepted
 //! batch count), and Circle in its BurstSpread arc mode (one radial draw). The
 //! Loop, PingPong and BurstSpread kernels read the batch inputs a `ShapeBatch`
-//! carries.
+//! carries. Mesh: the Triangle placement (one table draw, the area walk, two
+//! barycentric draws, the normal offset) over any finite normal offset, with
+//! or without the material filter, mesh colours off; it reads the module's
+//! mesh cache (`shape_mesh`), which the caller supplies with each group, and
+//! returns the material colour each lane's colour is then multiplied by.
 //! Initial and Shape RNG are independent. A nonempty birth group consumes all
 //! four lanes including padding; capacity, old-prefix storage, StartVelocity,
 //! lifetime modules, event ownership and renderer admission remain caller work.
@@ -38,6 +42,7 @@
 use super::schema::{ShapeMode, ShapeParams, ShapeTexture};
 use super::seed_owner::ModuleRandom;
 use super::shape::{native_rsqrt, ArcLoopClock, ConeJitter, Shell};
+use super::shape_mesh::MeshShapeCache;
 use std::num::NonZeroU32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +56,11 @@ pub enum Refused {
     /// ShapeModule references a texture. The samplers read so far then call
     /// ApplyTexture for each birth group, which is not transcribed.
     ShapeTexture,
+    /// A Mesh kernel was sampled without the module's mesh cache.
+    MeshCacheMissing,
+    /// The supplied mesh cache was built with another material filter than
+    /// the module's.
+    MeshCacheMismatch,
 }
 
 /// What an export lacks for the Shape law.
@@ -82,6 +92,10 @@ pub struct ShapeBirthGroup {
     /// EmitterStoreData's axis-of-rotation channel, all four lanes; present
     /// only when the particle arrays carry that channel. It draws no RNG.
     pub axis_of_rotation: Option<[[f32; 3]; 4]>,
+    /// Mesh kernels only: the material colour of each lane's triangle, which
+    /// the Store multiplies the lane's particle colour with (see
+    /// `MeshShapeCache::store_colour`).
+    pub mesh_colour: Option<[[u8; 4]; 4]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +110,7 @@ enum Kernel {
     CircleBurst { thickness: f32, arc_spread: f32 },
     Cone { thickness: f32, angle: f32, arc_spread: f32, random_direction: f32, arc: ConeArc },
     Sphere { shell: Shell, arc_spread: f32 },
+    MeshTriangle { normal_offset: f32, material: Option<u32> },
 }
 
 /// The StartCone arc modes. The Loop and PingPong modes read the arc clock;
@@ -183,6 +198,7 @@ impl ShapeBirthLaw {
             "Box" => Self::box_volume(params),
             "Cone" => Self::cone(params),
             "Sphere" => Self::sphere(params),
+            "Mesh" => Self::mesh(params),
             _ => Err(Refused::UnsupportedSourceShape),
         }
     }
@@ -233,6 +249,36 @@ impl ShapeBirthLaw {
             position: params.position,
             unit_affine: source_affine(params.rotation, scale, params.position, [1.0; 3]),
         }
+    }
+
+    /// Whether the kernel reads the module's mesh cache.
+    pub fn reads_mesh_cache(&self) -> bool {
+        matches!(self.kernel, Kernel::MeshTriangle { .. })
+    }
+
+    /// Mesh in its Triangle placement: any finite normal offset, the
+    /// material filter on (with its index) or off, mesh colours off (the
+    /// renderer-material colour path is not transcribed). The spawn mode,
+    /// spread and speed belong to the Vertex and Edge placements and are not
+    /// read by this one; radius, arc and the other shape controls are not
+    /// read either. The Store's random and spherical direction and alignment
+    /// stay refused.
+    fn mesh(params: &ShapeParams) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        let c = &params.controls;
+        let refused = Err(Refused::UnsupportedSourceShape);
+        let Some(normal_offset) = c.mesh_normal_offset.filter(|v| v.is_finite()) else {
+            return refused;
+        };
+        let material = match (c.mesh_use_material_index, c.mesh_material_index) {
+            (Some(false), _) => None,
+            (Some(true), Some(index)) => Some(index),
+            _ => return refused,
+        };
+        if c.mesh_placement != Some(2) || c.mesh_use_colors != Some(false) || c.random_direction != Some(0.0) {
+            return refused;
+        }
+        Ok(Self::with_kernel(params, Kernel::MeshTriangle { normal_offset, material }, scale, random_position))
     }
 
     /// Box reads only the Store path controls and the source affine; its
@@ -638,13 +684,30 @@ impl ShapeBirthLaw {
         emitter_scale: [f32; 3],
         uses_axis_of_rotation: bool,
     ) -> Result<ShapeBirthGroup, Refused> {
-        let group = self.evaluate_group(
+        self.sample_group_with_mesh(batch, random, outer_owner, world_space, emitter_scale, uses_axis_of_rotation, None)
+    }
+
+    /// `sample_group` with the module's mesh cache, which a Mesh kernel reads
+    /// (and refuses without); the other kernels ignore it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_group_with_mesh(
+        &self,
+        batch: &mut ShapeBatch,
+        random: &mut ModuleRandom,
+        outer_owner: [f32; 16],
+        world_space: bool,
+        emitter_scale: [f32; 3],
+        uses_axis_of_rotation: bool,
+        mesh: Option<&MeshShapeCache>,
+    ) -> Result<ShapeBirthGroup, Refused> {
+        let group = self.evaluate_group_with_mesh(
             batch,
             *random,
             outer_owner,
             world_space,
             emitter_scale,
             uses_axis_of_rotation,
+            mesh,
         )?;
         if group.has_nonfinite_output() {
             return Err(Refused::NonfiniteOutput);
@@ -656,6 +719,7 @@ impl ShapeBirthLaw {
 
     /// One group as the native boundary computes it, before the output
     /// refusal; the stream is advanced on a copy only.
+    #[cfg(test)]
     fn evaluate_group(
         &self,
         batch: &ShapeBatch,
@@ -665,6 +729,30 @@ impl ShapeBirthLaw {
         emitter_scale: [f32; 3],
         uses_axis_of_rotation: bool,
     ) -> Result<ShapeBirthGroup, Refused> {
+        self.evaluate_group_with_mesh(batch, random, outer_owner, world_space, emitter_scale, uses_axis_of_rotation, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate_group_with_mesh(
+        &self,
+        batch: &ShapeBatch,
+        random: ModuleRandom,
+        outer_owner: [f32; 16],
+        world_space: bool,
+        emitter_scale: [f32; 3],
+        uses_axis_of_rotation: bool,
+        mesh: Option<&MeshShapeCache>,
+    ) -> Result<ShapeBirthGroup, Refused> {
+        let mesh = match (self.kernel, mesh) {
+            (Kernel::MeshTriangle { material, .. }, Some(mesh)) => {
+                if mesh.material_filter() != material {
+                    return Err(Refused::MeshCacheMismatch);
+                }
+                Some(mesh)
+            }
+            (Kernel::MeshTriangle { .. }, None) => return Err(Refused::MeshCacheMissing),
+            _ => None,
+        };
         if world_space && outer_owner.iter().any(|x| !x.is_finite()) {
             return Err(Refused::NonfiniteOwner);
         }
@@ -683,7 +771,9 @@ impl ShapeBirthLaw {
         // Box 3; Circle 2 (arc, then radial fraction); SingleSidedEdge 1;
         // Cone Random 2 (arc, radial) and Cone Loop, PingPong and BurstSpread 1
         // (radial), each plus 2 (angle, area) when its random direction is
-        // positive; the BurstSpread circle 1 (radial); the BurstSpread edge none.
+        // positive; the BurstSpread circle 1 (radial); the BurstSpread edge none;
+        // Mesh 3 (the table pick, then the two barycentric weights).
+        let mut mesh_colour = None;
         let mut draw = || next.next4_u32().map(super::shape::u01_from_bits);
         let lanes = |f: &dyn Fn(usize) -> ([f32; 3], [f32; 3])| -> [([f32; 3], [f32; 3]); 4] { std::array::from_fn(|i| f(i)) };
         let raw: [([f32; 3], [f32; 3]); 4] = match self.kernel {
@@ -736,6 +826,13 @@ impl ShapeBirthLaw {
             Kernel::Box => {
                 let (x, y, z) = (draw(), draw(), draw());
                 lanes(&|i| super::shape::box_volume(x[i], y[i], z[i]))
+            }
+            Kernel::MeshTriangle { normal_offset, .. } => {
+                let mesh = mesh.expect("checked above");
+                let picked = draw().map(|r| mesh.pick(r));
+                let (u, v) = (draw(), draw());
+                mesh_colour = Some(picked.map(|t| mesh.material_colour(t)));
+                lanes(&|i| mesh.point(picked[i], u[i], v[i], normal_offset))
             }
             Kernel::SingleSidedEdgeBurst { spread } => {
                 let reciprocal =
@@ -838,6 +935,7 @@ impl ShapeBirthLaw {
             after_rng: next,
             source_affine: affine,
             axis_of_rotation,
+            mesh_colour,
         })
     }
 }
@@ -1522,6 +1620,7 @@ fn edge_circle_row_source(v: &[u32]) -> ShapeParams {
             random_position: Some(f32::from_bits(v[4])),
             // The native runs held the null texture reference.
             texture: Some(ShapeTexture::None),
+            ..Default::default()
         },
     }
 }
@@ -1779,6 +1878,7 @@ fn donut_row_source(
             random_position: Some(f32::from_bits(v[4])),
             // The native runs held the null texture reference.
             texture: Some(ShapeTexture::None),
+            ..Default::default()
         },
     }
 }
@@ -2035,6 +2135,7 @@ fn residual_row_source(v: &[u32]) -> ShapeParams {
             random_position: Some(f(8)),
             // The native runs held the null texture reference.
             texture: Some(ShapeTexture::None),
+            ..Default::default()
         },
     }
 }
@@ -2159,6 +2260,7 @@ pub fn replay_circle_burst_rows(text: &str) -> ReplayCount {
                 spherical_direction: Some(0.0),
                 random_position: Some(0.0),
                 texture: Some(ShapeTexture::None),
+                ..Default::default()
             },
         };
         let law = ShapeBirthLaw::from_params(&params)
