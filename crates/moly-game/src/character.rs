@@ -550,7 +550,10 @@ pub fn drive(
             &mut MotionDriver,
             Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
         ),
-        Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
+        (
+            Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
+            Without<crate::npc::change_site_state::ChangeSiteClip>,
+        ),
     >,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,

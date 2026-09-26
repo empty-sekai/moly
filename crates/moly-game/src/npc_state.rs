@@ -159,12 +159,19 @@ impl Plugin for NpcStatePlugin {
             // The change-site controller: the lottery on entering home or a
             // floor and its loop (see `npc::change_site`).
             .init_resource::<crate::npc::change_site::ChangeSiteController>()
+            .init_resource::<crate::npc::change_site_state::ChangeSiteRuns>()
             .add_systems(Startup, crate::npc::change_site::load)
             .add_systems(
                 Update,
                 (
                     crate::npc::change_site::parse,
+                    crate::npc::change_site_state::cancel_on_site_change
+                        .after(crate::npc::residency::mark_away),
                     crate::npc::change_site::run.after(crate::npc::residency::mark_away),
+                    // ChangeSiteAsync: the orders, then the monitor.
+                    crate::npc::change_site::change_site_async,
+                    // The ordered NPCs' change-site objective and state.
+                    crate::npc::change_site_state::advance,
                 )
                     .chain(),
             );

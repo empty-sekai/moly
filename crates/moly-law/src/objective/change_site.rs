@@ -40,6 +40,40 @@
 /// `NPCAvatarChangeSiteData.type` of a move order.
 pub const MOVE: i32 = 1;
 
+/// The change-site objective's walk to the own door: its goal distance.
+pub const GOAL_DISTANCE: f32 = 0.1;
+/// The change-site state's door waits: the player, and every other NPC, must
+/// be farther than this from the state's start position.
+pub const LEAVE_DOOR_DISTANCE: f32 = 0.7;
+/// The room-entry tweet's display time.
+pub const ENTRY_TWEET_MILLISECONDS: i32 = 3000;
+/// The game-state values the entry reaction waits out: Edit and
+/// LevelUpMyRoomSite.
+pub const STATE_EDIT: i32 = 2;
+pub const STATE_LEVEL_UP_MY_ROOM_SITE: i32 = 11;
+
+/// `Vector3.Distance(a, b) > 0.7`: the door waits' predicate for one
+/// position against the start position.
+pub fn clear_of_door(position: [f32; 3], start: [f32; 3]) -> bool {
+    let dx = position[0] - start[0];
+    let dy = position[1] - start[1];
+    let dz = position[2] - start[2];
+    (dx * dx + dy * dy + dz * dz).sqrt() > LEAVE_DOOR_DISTANCE
+}
+
+/// `CanShowEntryReaction`: the game state is neither Edit nor
+/// LevelUpMyRoomSite.
+pub fn can_show_entry_reaction(game_state: i32) -> bool {
+    game_state != STATE_EDIT && game_state != STATE_LEVEL_UP_MY_ROOM_SITE
+}
+
+/// One test of the controller's monitor on an ordered NPC: it keeps waiting
+/// while its token is not cancelled, the NPC's current objective type is the
+/// change-site one (5) and the NPC is not on the target site type.
+pub fn monitor_waits(cancelled: bool, objective_type: i32, own_site: i32, target: i32) -> bool {
+    !cancelled && objective_type == 5 && own_site != target
+}
+
 /// One row of the change list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeSiteData {

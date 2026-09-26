@@ -21,6 +21,7 @@
 //! 换站保留实体/装配，由 reseed 在新面定案后重置落位与目标机。
 
 pub(crate) mod change_site;
+pub(crate) mod change_site_state;
 pub(crate) mod random_fixture_action;
 pub(crate) mod residency;
 
@@ -518,6 +519,42 @@ pub(crate) fn stop_for_external_activity(world: &mut World, actor: Entity) {
 /// after the main member's own move finishes, and its teardown returns every
 /// member to the pose from before the approach, where the source leaves
 /// each one where it stopped.
+/// `NPCAvatarPresenter.ForceSetPosition(position)`: the agent is placed at
+/// `at` (its path and route dropped, standing), facing as before.
+pub(crate) fn force_set_position(world: &mut World, actor: Entity, at: [f32; 3]) -> bool {
+    let mut query = world.query::<(
+        &mut PathSlot,
+        &mut WalkState,
+        &mut MoveTarget,
+        &mut RouteStops,
+        &mut StuckBaseline,
+        &mut Transform,
+        &mut MotionPhase,
+    )>();
+    let generation = world
+        .get_resource::<crate::walk_face::WalkFace>()
+        .map(|face| face.generation());
+    let Ok((mut path, mut walk, mut target, mut route, mut stuck, mut transform, mut phase)) =
+        query.get_mut(world, actor)
+    else {
+        return false;
+    };
+    path.0 = NpcPathWalkSlot::from_corners(Vec::new());
+    let forward = walk.0.forward;
+    walk.0 = LawWalkState::new(at, forward);
+    *target = MoveTarget(at);
+    // The placement is on the current walk face: the route keeps its
+    // generation, so the agent step does not replan (a replan would declare
+    // an idle action over the state the caller is in).
+    let kept = generation.unwrap_or(route.generation);
+    *route = RouteStops::default();
+    route.generation = kept;
+    *stuck = StuckBaseline::default();
+    transform.translation = Vec3::from(at);
+    *phase = MotionPhase::Dwelling { remaining: None };
+    true
+}
+
 pub(crate) fn begin_external_approach(
     world: &mut World,
     actor: Entity,
