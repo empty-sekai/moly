@@ -85,6 +85,28 @@ pub(crate) fn play_idle_loop(
     play(world, IDLE_CLIP, STATE_CLIP_FADE, token)
 }
 
+/// `PlayerAvatarPresenter.PlayAnimation(clip, 1)` of a state outside the
+/// four above (the entry's `PlayerAvatarRefreshState`), with the view's
+/// 0.25 s fade, on the given token or a new Door one.
+pub(crate) fn play_state_clip(
+    world: &mut World,
+    clip: &'static str,
+    token: Option<PlayerActionToken>,
+) -> Option<PlayerActionToken> {
+    play(world, clip, STATE_CLIP_FADE, token)
+}
+
+/// `PlayerAvatarView.OnAnimationFinished` for a clip that does not loop:
+/// whether `clip` has played to its end on the player's animator. None when
+/// the clip is not on the animator (its `ChangeMotion` did not play it).
+pub(crate) fn clip_finished(world: &mut World, clip: &str) -> Option<bool> {
+    let mut drivers = world.query_filtered::<&AvatarDriver, With<PlayerControlled>>();
+    let driver = drivers.iter(world).next()?;
+    let (node, player) = (driver.node_of(clip)?, driver.player);
+    let animator = world.get::<AnimationPlayer>(player)?;
+    animator.animation(node).map(|active| active.is_finished())
+}
+
 /// `PlayerAvatarAutoMoveState.Initialize`: `ChangeAnimation(RunMotion)`
 /// (`motion_avatar_run`) with the view's default 0.25 s fade.
 pub(crate) fn play_run_loop(
