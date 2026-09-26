@@ -1347,17 +1347,9 @@ impl std::ops::Deref for SubEmitterGraph<'_> {
 
 impl<'a> SubEmitterGraph<'a> {
     /// The one system record at `node` whose system object id is `path_id`.
-    /// The phenomena archive writes a record's id as a decimal string, the
-    /// fixture archive as a JSON integer; an edge's pointer id is a decimal
-    /// string in both, so the id is compared as the signed 64-bit value.
     fn child(&self, node: &str, path_id: &str) -> Option<&'a Value> {
-        let id = path_id.parse::<i64>().ok()?;
         let mut found = self.records.get(node)?.iter().copied()
-            .filter(|record| match record.get("systemPathId") {
-                Some(Value::String(text)) => text.parse::<i64>().ok() == Some(id),
-                Some(Value::Number(number)) => number.as_i64() == Some(id),
-                _ => false,
-            });
+            .filter(|record| record.get("systemPathId").and_then(Value::as_str) == Some(path_id));
         let child = found.next()?;
         found.next().is_none().then_some(child)
     }
