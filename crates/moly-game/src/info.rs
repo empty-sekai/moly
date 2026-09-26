@@ -65,8 +65,12 @@
 //!   （`OnExited` 里 `ChangeVisitType`，服务端域 ⇒ 面板下发 mock）。
 //!
 //! **启动施加律**：真源场地进场（`SceneMysekai.Start`）即按存量档全量施加
-//! （forceUpdate=true 两档合施）。本仓无持久化层 ⇒ 当值取构造默认（画质
-//! normal · 刷新率 high ⇒ 60），`init` 在 Startup 施加。
+//! （forceUpdate=true 两档合施）。存量档 = 本地设置档的
+//! `MysekaiOptionSettingData`（`ApplicationLocalSettings` 同名成员，三键
+//! `MysekaiImageQualityType` / `MysekaiFpsQualityType` /
+//! `MysekaiConvertFxitureNotificationType`，枚举存整数值）；无档取构造默认
+//! （画质 normal · 刷新率 high ⇒ 60）。`init` 在 Startup 施加，首个场景帧
+//! 再施加一次刷新率（产品面板的启动装载在 `init` 之后，会写入它自己存的帧率）。
 //!
 //! ## 页切换律（ChangePage / MoveXxxPage）
 //!
@@ -84,8 +88,8 @@
 //! `OnInitComponent`（三档读入 + 七 Setup：页签/排名详情钮/箭头钮/页四件
 //! 已接，贴图/粒子/翻页手势三件挂账）→ `OnFinishStartAnimation`（全部页
 //! Hide 后当前页 FadeIn）→ … → `OnExitStart`（当前页 FadeOut）→
-//! `OnExited`（三档写回 SaveToStorage——**持久化层未建，写回沿到此**；
-//! 访问许可 `ChangeVisitType` 上报——服务端域 ⇒ mock）。
+//! `OnExited`（三档写回 SaveToStorage：只并入 `MysekaiOptionSettingData`
+//! 一节，写后读回核对；访问许可 `ChangeVisitType` 上报——服务端域 ⇒ mock）。
 //!
 //! ## 服务端域与 mock 面板（照音频域音量面板的形：具名资源 + 默认 +
 //! 环境变量覆写，非法值响亮告警回默认）
@@ -333,7 +337,7 @@ impl ConvertNotification {
 // ---------------------------------------------------------------------------
 
 /// 情报层会话档位（真源 `MysekaiOptionSettingData` 的本仓对应物：会话内
-/// 常驻，重开层读到的就是改过的值；写回持久化在出场链具名挂账）。访问
+/// 常驻，重开层读到的就是改过的值；出场链 OnExited 写回本地设置档）。访问
 /// 许可一格在每次进层时从 mock 面板重读（真源 OnBoot 读服务端现值）。
 #[derive(Resource)]
 pub(crate) struct InfoSettings {
@@ -352,6 +356,98 @@ impl Default for InfoSettings {
             fps: FpsQuality::High,
             convert: ConvertNotification::On,
         }
+    }
+}
+
+/// `ApplicationLocalSettings.MysekaiOptionSettingData`: its key in the local
+/// settings document (the audio half of the same class writes `LiveVolume` and
+/// `SystemVolume` beside it) and the class's three MessagePack keys. The enums
+/// are stored as their integer values; the convert key keeps the source's
+/// `Fxiture` spelling.
+const OPTION_SECTION: &str = "MysekaiOptionSettingData";
+const KEY_IMAGE_QUALITY: &str = "MysekaiImageQualityType";
+const KEY_FPS_QUALITY: &str = "MysekaiFpsQualityType";
+const KEY_CONVERT: &str = "MysekaiConvertFxitureNotificationType";
+
+impl InfoSettings {
+    /// `ApplicationLocalSettings.LoadFromStorage().MysekaiOptionSettingData`.
+    /// A document without the section is a first run: `SetDefaultValueIfNeeded`
+    /// puts a new object there (image quality normal, the other two 0). A key
+    /// the stored object lacks keeps that constructor default, as MessagePack
+    /// leaves an absent member at its initializer. A value outside the enum is
+    /// not written by this client; it is named and the default kept.
+    fn from_document(document: &Value) -> (Self, &'static str) {
+        let mut settings = InfoSettings::default();
+        let section = &document[OPTION_SECTION];
+        if section.is_null() {
+            return (settings, "无存档（首跑：构造默认）");
+        }
+        let Some(object) = section.as_object() else {
+            warn!("[info] 本地设置档 {OPTION_SECTION} 不是对象（{section}），三档取构造默认");
+            return (settings, "存档损坏（构造默认）");
+        };
+        let read = |key: &str| -> Option<usize> {
+            let raw = object.get(key)?;
+            let value = raw.as_u64().and_then(|v| usize::try_from(v).ok());
+            if value.is_none() {
+                warn!("[info] 本地设置档 {OPTION_SECTION}.{key}={raw} 不是枚举整数值，该档取构造默认");
+            }
+            value
+        };
+        if let Some(index) = read(KEY_IMAGE_QUALITY) {
+            match ImageQuality::from_index(index) {
+                Some(value) => settings.image_quality = value,
+                None => warn!("[info] 本地设置档 {KEY_IMAGE_QUALITY}={index} 不在 high/normal/low，取构造默认 normal"),
+            }
+        }
+        if let Some(index) = read(KEY_FPS_QUALITY) {
+            match FpsQuality::from_index(index) {
+                Some(value) => settings.fps = value,
+                None => warn!("[info] 本地设置档 {KEY_FPS_QUALITY}={index} 不在 high/normal，取构造默认 high"),
+            }
+        }
+        if let Some(index) = read(KEY_CONVERT) {
+            match ConvertNotification::from_index(index) {
+                Some(value) => settings.convert = value,
+                None => warn!("[info] 本地设置档 {KEY_CONVERT}={index} 不在 on/off，取构造默认 on"),
+            }
+        }
+        (settings, "本地设置档")
+    }
+
+    /// The stored object, one integer per enum.
+    fn section(&self) -> Value {
+        serde_json::json!({
+            KEY_IMAGE_QUALITY: self.image_quality.index(),
+            KEY_FPS_QUALITY: self.fps.index(),
+            KEY_CONVERT: self.convert.index(),
+        })
+    }
+}
+
+/// `OnExited`: `LoadFromStorage()`, put this layer's option object in it and
+/// `SaveToStorage`. The store merges the one section into the fresh document,
+/// so every other domain's fields stay as stored.
+fn save_option_settings(settings: &InfoSettings) {
+    let section = settings.section();
+    match crate::settings_store::save_sections(&[(OPTION_SECTION, section.clone())]) {
+        Ok(()) => {
+            let stored = crate::settings_store::read_document()
+                .map(|document| document[OPTION_SECTION].clone());
+            match stored {
+                Ok(stored) if stored == section => info!(
+                    "[info] OnExited SaveToStorage：{OPTION_SECTION}={section} → {} 读回一致",
+                    crate::settings_store::location()
+                ),
+                Ok(stored) => warn!(
+                    "[info] OnExited SaveToStorage：写入 {section}，读回 {stored}——持久化层不一致"
+                ),
+                Err(error) => warn!("[info] OnExited SaveToStorage：写后读回失败：{error}"),
+            }
+        }
+        Err(error) => warn!(
+            "[info] OnExited SaveToStorage 失败：{error}——三档在本会话内仍是新值，重启回存盘值"
+        ),
     }
 }
 
@@ -512,23 +608,45 @@ pub(crate) struct InfoDialogRoot {
 // Startup：资源与启动施加
 // ---------------------------------------------------------------------------
 
-/// Startup：资源落位 + 启动施加律（进场即按存量档全量施加；无持久化 ⇒
-/// 当值取构造默认）。
+/// Startup：资源落位 + 启动施加律（进场即按存量档全量施加：画质与刷新率
+/// 两档读自本地设置档，无档取构造默认）。
 pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_settings::GameSettings>) {
-    commands.init_resource::<InfoSettings>();
-    commands.init_resource::<InfoMock>();
-    commands.init_resource::<InfoPageState>();
-    commands.init_resource::<InfoDialogState>();
-    let settings = InfoSettings::default();
+    let (settings, origin) = match crate::settings_store::read_document() {
+        Ok(document) => InfoSettings::from_document(&document),
+        Err(error) => {
+            // PersistentDataUtility.Load failing gives a new object.
+            warn!("[info] 本地设置档读取失败：{error}——三档取构造默认");
+            (InfoSettings::default(), "读取失败（构造默认）")
+        }
+    };
     info!(
-        "[info] 启动施加（进场全量施加律）：画质={} · 刷新率={}（帧率上限 {}fps）——\
-         持久化层未建，当值取构造默认（画质 normal · 刷新率 high，见模块头承重句）",
+        "[info] 启动施加（进场全量施加律）：来源={origin} · 画质={} · 刷新率={}（帧率上限 {}fps）· 变换通知={}",
         settings.image_quality.label(),
         settings.fps.label(),
-        settings.fps.target_frame_rate()
+        settings.fps.target_frame_rate(),
+        settings.convert.label()
     );
     apply_image_quality(&mut graphics, settings.image_quality);
     apply_fps(&mut graphics, settings.fps);
+    commands.insert_resource(settings);
+    commands.init_resource::<InfoMock>();
+    commands.init_resource::<InfoPageState>();
+    commands.init_resource::<InfoDialogState>();
+}
+
+/// `SceneMysekai.Start` applies the stored pair with forceUpdate. The product
+/// panel's startup load runs after [`init`] and seats its own saved frame limit
+/// (a second copy of the same value the source keeps only here), so the first
+/// scene frame applies the stored fps quality again.
+fn apply_on_scene_start(graphics: &mut crate::game_settings::GameSettings, settings: &InfoSettings) {
+    let rate = settings.fps.target_frame_rate() as u16;
+    if graphics.graphics.frame_rate != rate {
+        info!(
+            "[info] SceneMysekai.Start SetFpsQuality(forceUpdate)：{} → {rate}fps（产品面板的帧率存档是同一值的第二份，以本档为准）",
+            graphics.graphics.frame_rate
+        );
+    }
+    apply_fps(graphics, settings.fps);
 }
 
 /// 画质施加：FXAA 与目标 DPI 写入现游戏设置，场景相机据此施加渲染比例。
@@ -809,14 +927,14 @@ fn on_close(settings: &InfoSettings, page_state: &InfoPageState) {
         page_label(page_state.current)
     );
     info!(
-        "[info] OnExited：三档写回 SaveToStorage（画质 {} · 刷新率 {} · 变换通知 {}）——\
-         持久化层未建，写回沿到此（具名挂账）；访问许可上报 ChangeVisitType={}（服务端域 ⇒ \
-         面板下发 mock，上报沿到此）",
+        "[info] OnExited：三档写回 SaveToStorage（画质 {} · 刷新率 {} · 变换通知 {}）；访问许可上报 \
+         ChangeVisitType={}（服务端域 ⇒ 面板下发 mock，上报沿到此）",
         settings.image_quality.label(),
         settings.fps.label(),
         settings.convert.label(),
         settings.access.true_name()
     );
+    save_option_settings(settings);
 }
 
 /// Review is a locked presentation of the reject option, not another toggle.
@@ -871,7 +989,13 @@ pub(crate) fn place(
     total_exp: Res<crate::mysekai_rank::UserTotalExp>,
     layouts: Res<crate::ui_layout::UiLayouts>,
     mut rank: Local<Option<moly_law::ui::mysekai_rank::MysekaiRankModel>>,
+    mut graphics: ResMut<crate::game_settings::GameSettings>,
+    mut scene_started: Local<bool>,
 ) {
+    if !*scene_started {
+        *scene_started = true;
+        apply_on_scene_start(&mut graphics, &settings);
+    }
     let open=stack.current()==LayerId::MysekaiInfo;
     let opening = open && !*was_open;
     if opening {
