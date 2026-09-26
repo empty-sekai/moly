@@ -1288,6 +1288,9 @@ struct Override {
     size_delta: Option<Vec2>,
     /// `Graphic.color` set by code on the Graphic component with this id.
     graphic_color: Option<(i64, [f32; 4])>,
+    /// `Behaviour.enabled` set by code on the component with this id (read by
+    /// the stencil Mask).
+    behaviour_enabled: Option<(i64, bool)>,
 }
 
 impl Override {
@@ -1299,12 +1302,14 @@ impl Override {
                     && self.fill == other.fill
                     && self.texture == other.texture
                     && self.graphic_color == other.graphic_color
+                    && self.behaviour_enabled == other.behaviour_enabled
             }
             None => self.text.is_none()
                 && self.text_alignment.is_none()
                 && self.fill.is_none()
                 && self.texture.is_none()
-                && self.graphic_color.is_none(),
+                && self.graphic_color.is_none()
+                && self.behaviour_enabled.is_none(),
         }
     }
 }
@@ -1449,6 +1454,15 @@ impl UiPrefabView {
             return;
         }
         self.update(&path, |v| v.graphic_color = Some((graphic, value)));
+    }
+    /// `Behaviour.enabled = value` on the component `component` (its node is
+    /// the one `@component` names).
+    pub(crate) fn set_behaviour_enabled(&mut self, component: i64, value: bool) {
+        let path = format!("@{component}");
+        if self.overrides.get(&path).and_then(|v| v.behaviour_enabled) == Some((component, value)) {
+            return;
+        }
+        self.update(&path, |v| v.behaviour_enabled = Some((component, value)));
     }
     pub(crate) fn set_size_delta(&mut self, path: &str, value: Vec2) {
         assert!(value.is_finite(), "non-finite UI size delta");

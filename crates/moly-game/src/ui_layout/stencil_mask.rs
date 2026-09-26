@@ -91,7 +91,12 @@ pub(super) fn resolve(
         let mut next = own.clone();
         let mask = node.components.iter().find(|c| c.class == "UnityEngine.UI.Mask");
         if let (Some(mask), Some(graphic)) = (mask, graphic(node)) {
-            if rects[index].active && mask.enabled {
+            // Behaviour.enabled as code last set it, else as serialized.
+            let enabled = overrides.get(&index)
+                .and_then(|change| change.behaviour_enabled)
+                .filter(|(id, _)| *id == mask.path_id)
+                .map_or(mask.enabled, |(_, value)| value);
+            if rects[index].active && enabled {
                 if mask.fields["m_ShowMaskGraphic"].as_bool() == Some(false) {
                     unshown[index] = Some(graphic.path_id);
                 }
