@@ -220,6 +220,13 @@ pub fn install(app: &mut App) {
         Update,
         crate::entry::house::build.before(crate::fixture::FixtureLayoutSet),
     )
+    // ForceResetJoyStick: a press lets the stick go in the click's frame.
+    .add_systems(
+        Update,
+        joystick::force_reset
+            .after(action_button::click)
+            .before(player::advance),
+    )
     .add_systems(
         Update,
         crate::entry::advance
@@ -330,6 +337,7 @@ pub fn install(app: &mut App) {
         .add_message::<gesture::UiPointerEvent>()
         .add_message::<player_talk::PlayerTalkRequest>()
         .add_message::<crate::player_fixture_action::PlayerFixtureRequest>()
+        .add_message::<joystick::ForceResetJoystick>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
         .add_message::<fixture_edit::LayoutSaved>()
         .init_resource::<gesture::GestureLayerState>()

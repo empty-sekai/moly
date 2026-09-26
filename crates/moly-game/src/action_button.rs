@@ -1793,6 +1793,24 @@ pub(crate) fn place_change_ui(
     *visibility = Visibility::Visible;
 }
 
+/// The click wrapper's IsResetJoyStick, then ForceResetJoyStick. The
+/// prefabs' own reset flags are not exported; for every type the stack
+/// shows the answer is the same either way (the type's bit resets).
+fn reset_joystick(
+    button: ButtonType,
+    resets: &mut MessageWriter<crate::joystick::ForceResetJoystick>,
+) {
+    match button.resets_joystick(false) {
+        Some(true) => {
+            resets.write(crate::joystick::ForceResetJoystick {
+                reason: "action button press",
+            });
+        }
+        Some(false) => {}
+        None => error!("[action_button] IsResetJoyStick: type {button:?} is not in the check's table"),
+    }
+}
+
 /// Update（拾取之前）：点按落在按钮上就分派动作并吃掉这一帧的点按。
 ///
 /// 节流照源：两次输入之间至少隔 [`ACTION_BUTTON_INPUT_INTERVAL`] 秒。
@@ -1817,6 +1835,7 @@ pub(crate) fn click(
     mut talk_requests: MessageWriter<PlayerTalkRequest>,
     mut fixture_requests: MessageWriter<crate::player_fixture_action::PlayerFixtureRequest>,
     mut layer_commands: MessageWriter<LayerCommand>,
+    mut joystick_resets: MessageWriter<crate::joystick::ForceResetJoystick>,
 ) {
     consumed.0 = false;
     let Ok((_, window)) = screen.windows.single() else {
@@ -1878,6 +1897,7 @@ pub(crate) fn click(
         if state.change_shown() && screen.change_hit(position, window, button) {
             let now = time.elapsed_secs();
             consumed.0 = true;
+            reset_joystick(ButtonType::ChangeActionTarget, &mut joystick_resets);
             if now - state.last_input < ACTION_BUTTON_INPUT_INTERVAL {
                 continue;
             }
@@ -1889,6 +1909,9 @@ pub(crate) fn click(
         if !screen.hit(position, window, button) {
             continue;
         }
+        // The button's click wrapper lets the joystick go before the
+        // action runs, and the action's own input interval comes after.
+        reset_joystick(button, &mut joystick_resets);
         let now = time.elapsed_secs();
         if button != ButtonType::Talk && now - state.last_input < ACTION_BUTTON_INPUT_INTERVAL {
             info!(
@@ -2227,6 +2250,12 @@ pub(crate) fn smoke_autowalk(
             .is_some_and(|(button, _)| button == ButtonType::Talk)
     {
         let (_, target) = button_state.current().expect("上面刚查过栈首");
+        // The press lets the stick go (ForceResetJoyStick); the walk
+        // finger lifts and presses again on its next step.
+        if *pressing {
+            write(&mut touches, TouchPhase::Ended, base);
+            *pressing = false;
+        }
         write_tap(&mut touches, TouchPhase::Started, button_pos);
         *tap_pressing = true;
         *tap_pressed_at = now;
@@ -2255,10 +2284,12 @@ pub(crate) fn smoke_autowalk(
     if targets.is_empty() {
         return;
     }
-    // 驻足中：站在锚旁等，触摸回底盘心（方向零 → 站定）。
+    // Lingering at the anchor: the finger lifts. Resting on the pad centre
+    // would keep the input on with a zero vector, facing yaw 0.
     if now < *linger_until {
         if *pressing {
-            write(&mut touches, TouchPhase::Moved, base);
+            write(&mut touches, TouchPhase::Ended, base);
+            *pressing = false;
         }
         return;
     }

@@ -246,6 +246,7 @@ pub(crate) struct FlowWorld<'w, 's> {
     catalog: Option<Res<'w, crate::harvest::catalog::HarvestCatalog>>,
     navigation: Option<Res<'w, crate::player_fixture_action::PlayerFixtureNavigation>>,
     game_state: Option<Res<'w, DeliveryGameState>>,
+    joystick_resets: MessageWriter<'w, crate::joystick::ForceResetJoystick>,
 }
 
 type PlayerQuery<'w, 's> = Query<
@@ -561,6 +562,9 @@ fn execute_delivery(
         ),
     };
     world.commands.entity(entity).insert(DeliveryHold);
+    world.joystick_resets.write(crate::joystick::ForceResetJoystick {
+        reason: "delivery pre-action",
+    });
     flow.dash_before = dash.0;
     *phase = crate::npc::MotionPhase::Walking;
     dash.0 = true;
@@ -568,7 +572,7 @@ fn execute_delivery(
     flow.started_at = now;
     flow.last_trace = -1.0;
     info!(
-        "[delivery] ExecuteDelivery party {party_id}: IsExecuteDelivery, rate {} (min) carry 0; pre-action: state InDelivery; ForceResetJoyStick (the joystick's, not wired); PrePlayerHarvestMotion: AutoMove from ({:.3}, {:.3}, {:.3}) to ({:.3}, {:.3}, {:.3}), {:.3} m from the place (animation radius {}), threshold {}; {} path corners ({note}), agent speed {speed:.3}; player state {:?}, intercept closed; the AutoMove run clip plays as the dash gait (stand-in)",
+        "[delivery] ExecuteDelivery party {party_id}: IsExecuteDelivery, rate {} (min) carry 0; pre-action: state InDelivery; ForceResetJoyStick; PrePlayerHarvestMotion: AutoMove from ({:.3}, {:.3}, {:.3}) to ({:.3}, {:.3}, {:.3}), {:.3} m from the place (animation radius {}), threshold {}; {} path corners ({note}), agent speed {speed:.3}; player state {:?}, intercept closed; the AutoMove run clip plays as the dash gait (stand-in)",
         world.model.rate.current,
         player.x,
         player.y,
