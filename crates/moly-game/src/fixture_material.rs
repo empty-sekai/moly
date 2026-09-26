@@ -1812,9 +1812,9 @@ fn switch_materials(
     mut materials: ResMut<Assets<FixtureMaterial>>,
     mut plan: Local<Option<SwapPlan>>,
     layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
-        MessageWriter<crate::gpu_image_release::ImageTextureReplaced>, Local<Option<Handle<Image>>>),
+        MessageWriter<crate::gpu_image_release::ImageTextureReplaced>),
 ) {
-    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced, mut default_white) = layout;
+    let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced) = layout;
     let mut pending_roots: Vec<_> = roots.iter().map(|(entity, _)| entity).collect();
     pending_roots.sort_unstable();
     if *seen_roots != pending_roots {
@@ -1834,18 +1834,9 @@ fn switch_materials(
     if !surfaces_ready.0 { return; }
     // The shader's declared `white` default for an empty `_MainTex` slot:
     // Unity binds its built-in white texture, (1, 1, 1, 1) in the stored
-    // domain. One shared 1x1 image, created once.
-    let white = default_white
-        .get_or_insert_with(|| {
-            images.add(Image::new_fill(
-                Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                TextureDimension::D2,
-                &[255, 255, 255, 255],
-                TextureFormat::Rgba8UnormSrgb,
-                bevy::asset::RenderAssetUsages::default(),
-            ))
-        })
-        .clone();
+    // domain. Bevy's image plugin registers the same thing at the default
+    // handle: a 1x1 image of all-255 bytes in the default sRGB format.
+    let white = Handle::<Image>::default();
     let Some(mut state) = plan.take().or_else(|| {
         build_swap_plan(
             &roots,
