@@ -38,7 +38,7 @@
 //! Named gap: the `ScreenLayerMysekaiNotice` weather banner steps (INFO
 //! lines). The cover's loading indicator is drawn from the extracted prefab
 //! ([`indicator`]), its start particle through the UIParticle host
-//! ([`cover`]).
+//! ([`cover`]; the host refuses its two UI particle programs for now).
 
 pub(crate) mod cover;
 pub(crate) mod house;
