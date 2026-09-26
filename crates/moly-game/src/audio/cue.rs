@@ -23,6 +23,9 @@ pub(crate) enum Player {
     Bgm,
     Se,
     Voice,
+    /// A call that passes its own volume instead of the player's (the option
+    /// page's fixed-volume previews); see [`CuePlayback::scaled`].
+    Unscaled,
 }
 
 /// The categories a sounding track is attenuated by. `Cue` holds category
@@ -141,6 +144,16 @@ pub(crate) struct CuePlayback {
     round: u64,
     voices: Vec<RoundVoice>,
     channel: &'static str,
+    /// The call's own volume factor (1.0 unless the call passes one).
+    scale: f32,
+}
+
+impl CuePlayback {
+    /// The call's own volume: multiplies every track's volume.
+    pub(crate) fn scaled(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
 }
 
 /// Start a cue: request its waveforms and run the first start of its
@@ -221,6 +234,7 @@ pub(crate) fn start_cue_with_handles(
         round: 0,
         voices: Vec::new(),
         channel,
+        scale: 1.0,
     };
     start_round(&mut playback, work, rngs, now);
     playback
@@ -319,12 +333,13 @@ pub(crate) fn advance_cue_playbacks(
                         } else {
                             PlaybackSettings::ONCE
                         };
-                        let volume = track_volume(
+                        let mut volume = track_volume(
                             playback.plan.gain.as_ref(),
                             playback.player,
                             playback.fallback_slot,
                             slot,
                         );
+                        volume.gain *= playback.scale;
                         let linear = volume.linear(&bus) * gate.factor();
                         let sound = commands
                             .spawn((

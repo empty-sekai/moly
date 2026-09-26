@@ -250,6 +250,7 @@ impl VolumeBus {
             Player::Bgm => self.player.bgm,
             Player::Se => self.player.se,
             Player::Voice => self.player.voice,
+            Player::Unscaled => 1.0,
         }
     }
 
@@ -445,7 +446,10 @@ pub(crate) fn apply_system_volume(bus: &mut VolumeBus, system: &VolumeSettingDat
 /// StopVoiceAll also cancels deferred line requests at this command boundary.
 /// The active dialogue owners are exclusive and share this global voice bus.
 pub(crate) fn stop_voice_all(channel: &mut VoiceChannel, commands: &mut Commands) {
-    if let Some(old) = channel.sink.take() {
+    for old in [channel.sink.take(), channel.preview.take()]
+        .into_iter()
+        .flatten()
+    {
         if let Ok(mut entity_commands) = commands.get_entity(old) {
             entity_commands.despawn();
         }
@@ -2774,6 +2778,11 @@ pub(crate) struct VoiceChannel {
     sink: Option<Entity>,
     /// 在播 cue（起播时记下，账目行用）。
     cue: Option<String>,
+    /// A volume preview on the voice player (`SoundManager.PlayVoice` /
+    /// `PlayVoiceFixedVolume` from the option volume page): a cue playback
+    /// entity. It is not a dialogue line: no playback identity, no mouth, no
+    /// analyzer.
+    preview: Option<Entity>,
 }
 
 impl VoiceChannel {
@@ -3161,7 +3170,24 @@ pub struct SeRequest {
 /// `CustomSelectableDefine.PlaySE` calls; they resolve against the cue bank
 /// when the queue drains.
 #[derive(Resource, Default)]
-pub struct SeRequests(pub Vec<SeRequest>, pub(crate) Vec<ButtonSe>);
+pub struct SeRequests(
+    pub Vec<SeRequest>,
+    pub(crate) Vec<ButtonSe>,
+    pub(crate) Vec<PreviewSound>,
+);
+
+/// One volume preview call of the option volume page.
+#[derive(Debug, Clone)]
+pub(crate) enum PreviewSound {
+    /// `PlayVoice(cue, 1)`: the voice player at its player volume times 1.
+    Voice(String),
+    /// `SamplePlaySE(cue, volume)`: the SE player's sample player (index 5)
+    /// at `volume`, without a player volume.
+    SampleSe(String, f32),
+    /// `PlayVoiceFixedVolume(cue, volume)`: the voice player at `volume`,
+    /// without its player volume.
+    VoiceFixed(String, f32),
+}
 
 /// One `CustomSelectableDefine.PlaySE(se, otherSeName)` call.
 #[derive(Debug, Clone)]
@@ -3190,6 +3216,11 @@ impl SeRequests {
         other_se_name: String,
     ) {
         self.1.push(ButtonSe { se, other_se_name });
+    }
+
+    /// Queues a volume preview call.
+    pub(crate) fn preview(&mut self, sound: PreviewSound) {
+        self.2.push(sound);
     }
 }
 
@@ -3246,9 +3277,16 @@ pub(crate) fn advance_se(
     mut rngs: ResMut<CueRngs>,
     playbacks: Query<(), With<CuePlayback>>,
     owners: Query<()>,
+    mut voice: ResMut<VoiceChannel>,
 ) {
     // A playback despawns itself when it has played out.
     channel.live.retain(|entity| playbacks.contains(*entity));
+    if voice
+        .preview
+        .is_some_and(|entity| !playbacks.contains(entity))
+    {
+        voice.preview = None;
+    }
     let Some(routing) = routing else {
         return; // 路由表未就绪：请求留队（就绪后排空，窗口照样去重）
     };
@@ -3271,6 +3309,63 @@ pub(crate) fn advance_se(
             ),
             None => {}
         }
+    }
+    // The previews resolve like plain cue names and play as cues. The voice
+    // ones replace the preview on the voice player (StopVoiceAll ran at the
+    // call); the fixed ones play at the volume they were called with instead
+    // of the player's (the cue's categories and volume commands still apply).
+    for preview in std::mem::take(&mut queue.2) {
+        let (cue, fixed, on_voice) = match &preview {
+            PreviewSound::Voice(cue) => (cue.as_str(), None, true),
+            PreviewSound::SampleSe(cue, volume) => (cue.as_str(), Some(*volume), false),
+            PreviewSound::VoiceFixed(cue, volume) => (cue.as_str(), Some(*volume), true),
+        };
+        let plan = plain_se_package(&routing.streams, cue)
+            .ok_or_else(|| "not in a loaded bank".to_string())
+            .and_then(|package| routing.cue_plan(cue, package).map(|plan| (package, plan)));
+        let (package, plan) = match plan {
+            Ok(found) => found,
+            Err(reason) => {
+                if channel.warned_missing.insert(cue.to_owned()) {
+                    warn!("SE: preview cue {}: {reason}; nothing plays", label(cue));
+                }
+                continue;
+            }
+        };
+        let (player, slot) = match &preview {
+            PreviewSound::Voice(_) => (Player::Voice, SLOT_VOX_SCENARIO),
+            PreviewSound::VoiceFixed(..) => (Player::Unscaled, SLOT_VOX_SCENARIO),
+            PreviewSound::SampleSe(..) => (Player::Unscaled, SLOT_SE_INGAME),
+        };
+        let playback = cue::start_cue(
+            &server,
+            &mut work,
+            &mut rngs,
+            time.elapsed_secs_f64(),
+            cue,
+            package,
+            &plan,
+            player,
+            slot,
+            RngSlot::OneShot,
+            "option preview",
+        )
+        .scaled(fixed.unwrap_or(1.0));
+        let entity = cue::spawn_playback(&mut commands, playback);
+        if on_voice {
+            if let Some(old) = voice.preview.replace(entity) {
+                if let Ok(mut entity_commands) = commands.get_entity(old) {
+                    entity_commands.despawn();
+                }
+            }
+        } else {
+            channel.live.push(entity);
+        }
+        channel.played += 1;
+        info!(
+            "SE preview: {} ({preview:?}, player {player:?})",
+            label(cue)
+        );
     }
     for request in queue.0.drain(..) {
         if request
