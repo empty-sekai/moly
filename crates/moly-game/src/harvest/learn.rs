@@ -328,7 +328,14 @@ pub(crate) fn advance(
             error!("[harvest-learn] OnFinishEnterAsync: no current phenomenon id; HasTodayEnvironment is not evaluated");
             return;
         };
-        let known = user.as_deref().map(|user| user.phenomena.as_slice());
+        // The user phenomena rows and the release reply are the server
+        // panel's: with it absent (harvest inputs missing) the check is not
+        // evaluated and the flow does not start.
+        let (Some(mock), Some(user)) = (mock.as_deref_mut(), user.as_deref_mut()) else {
+            error!("[harvest-learn] OnFinishEnterAsync: the harvest server panel is not built (its inputs are absent); HasTodayEnvironment is not evaluated and the learn flow does not start");
+            return;
+        };
+        let known = Some(user.phenomena.as_slice());
         let has = has_today_environment(known, today);
         info!(
             "[harvest-learn] HarvestSiteController.OnFinishEnterAsync on {} (site {}): HasTodayEnvironment({today}) = {has} over {} user phenomena rows",
@@ -341,20 +348,15 @@ pub(crate) fn advance(
             commands.insert_resource(LearnSiteEnvironmentActive);
             info!("[harvest-learn] GameState LearnSiteEnvironment: ChangeGameState(6) published, gesture layer off, joystick reset and hidden");
             // HarvestPresenter.OnChangeGameState(6): ExecuteReleaseAPI.
-            match (mock.as_deref_mut(), user.as_deref_mut()) {
-                (Some(mock), Some(user)) => {
-                    let rows = mock.release(site.site_id, today);
-                    info!(
-                        "[harvest-learn] PostUserMysekaiReleaseApi(site {}) -> ReleaseApiMock reply: userMysekaiPhenomena (id, obtainedAt) {:?} (UpdateAll)",
-                        site.site_id,
-                        rows.iter()
-                            .map(|row| (row.phenomena_id, row.obtained_at))
-                            .collect::<Vec<_>>()
-                    );
-                    user.phenomena = rows;
-                }
-                _ => error!("[harvest-learn] ExecuteReleaseAPI: the server mock or the user data is not built; no reply merged"),
-            }
+            let rows = mock.release(site.site_id, today);
+            info!(
+                "[harvest-learn] PostUserMysekaiReleaseApi(site {}) -> ReleaseApiMock reply: userMysekaiPhenomena (id, obtainedAt) {:?} (UpdateAll)",
+                site.site_id,
+                rows.iter()
+                    .map(|row| (row.phenomena_id, row.obtained_at))
+                    .collect::<Vec<_>>()
+            );
+            user.phenomena = rows;
             // GetMysekaiPhenomena(today), then PlayLearnEnvironment -> Play.
             match crate::sitemap_phenomena::PHENOMENA_ROWS
                 .iter()
