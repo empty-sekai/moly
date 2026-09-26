@@ -693,6 +693,11 @@ impl ClientBirthdayPartyData {
             .unwrap_or(0)
     }
 
+    /// The `userMysekaiMaterials` rows: mysekai material id -> quantity.
+    pub(crate) fn mysekai_materials(&self) -> &BTreeMap<i32, i32> {
+        &self.mysekai_materials
+    }
+
     /// The card ids of `userCards` (`UserDataManager.GetCard(id) != null`).
     pub(crate) fn cards(&self) -> &BTreeSet<i64> {
         &self.cards

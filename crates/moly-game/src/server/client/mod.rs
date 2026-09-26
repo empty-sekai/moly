@@ -17,10 +17,10 @@
 //!   which game mode never reads.
 
 pub(crate) mod avatar;
-pub(crate) mod home_action;
-pub(crate) mod music;
 pub(crate) mod craft;
+pub(crate) mod home_action;
 pub(crate) mod inventory;
+pub(crate) mod music;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

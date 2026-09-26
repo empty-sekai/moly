@@ -16,9 +16,11 @@
 //! `failure` refuses every request, as the server would when the request is
 //! not valid (the client shows the API error and starts nothing).
 //!
-//! **Not modelled** (named): the craft's material spend, fixture inventory and
-//! experience, and the sketch's blueprint. The requests the home actions send
-//! carry no blueprint, because the craft and sketch screens are not built.
+//! **Not answered here** (named): the craft's material spend, fixture grant
+//! and experience, and the sketch's blueprint. The requests the home actions
+//! send carry no blueprint; the craft and sketch requests that carry one are
+//! [`super::craft`]'s. Natively, `MOLY_CRAFT_MOCK_REQUEST` names a blueprint
+//! for the home action's craft request, which [`super::craft`] then answers.
 
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
@@ -108,6 +110,17 @@ impl ServerModel {
                 HomeActionReply { success: false }
             }
             HomeActionReplyPolicy::Success => {
+                if api == HomeActionApi::Craft {
+                    if let Some(request) = super::craft::instrument_request() {
+                        let success = self.instrument_craft(&request);
+                        info!(
+                            "[server] {} for {}: MOLY_CRAFT_MOCK_REQUEST {request:?} answered by the craft policies: success {success} (request {count})",
+                            kind(api).name(),
+                            target.unwrap_or("no fixture")
+                        );
+                        return HomeActionReply { success };
+                    }
+                }
                 info!(
                     "[server] {} for {}: success (request {count}); the reply carries the pending sections; material spend, fixture inventory, experience and the sketch blueprint are not modelled (the request carries no blueprint)",
                     kind(api).name(),
