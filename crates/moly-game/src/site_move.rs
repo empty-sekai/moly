@@ -1069,6 +1069,9 @@ impl SiteMove {
         if self.to_category == "housing_home" {
             // SetupScreenLayerMysekaiHome: ChangeUIScreen(MysekaiHome).
             world.write_message(LayerCommand::Change(LayerId::HomeField));
+            world.write_message(crate::cutscene::HomeScreenStartAnimation {
+                caller: "a cannon arrival at home",
+            });
         }
     }
 

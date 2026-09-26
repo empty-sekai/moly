@@ -46,6 +46,7 @@ use super::{
     CollisionEdge, DeliveryCollision, DeliveryDialogClosed, DeliveryModel, DeliveryObjectType,
     DeliveryRequest,
 };
+use crate::fixture_activity_timeline::{SignalReaction, SignalReceiverBinding, SourceAssetId};
 use crate::player::PlayerControlled;
 
 /// The resolved scene objects of the current delivery site (product frame).
@@ -71,6 +72,9 @@ pub(crate) struct DeliveryObjects {
     pub(crate) bloom_timeline: Option<String>,
     /// The place view's `_playableDirector` (its component id).
     pub(crate) place_director: Option<i64>,
+    /// `_deliveryAnimationSignalReceiver` with its reaction table, or why it
+    /// cannot be followed in the scene document.
+    pub(crate) signal_receiver: Result<SignalReceiverBinding, String>,
 }
 
 #[derive(Resource, Default)]
@@ -323,6 +327,163 @@ fn read_objects(
         arrive: offset,
         bloom_timeline,
         place_director,
+        signal_receiver: signal_receiver(&doc, view),
+    })
+}
+
+/// A pointer field of an instance, followed to (file, pathId): `fileId` 0 is
+/// the referrer's own file; another file cannot be followed here, the scene
+/// document carries no external table.
+fn follow(referrer: &Value, pointer: &Value, what: &str) -> Result<Option<SourceAssetId>, String> {
+    let path_id = pointer["pathId"]
+        .as_i64()
+        .ok_or_else(|| format!("{what} has no pathId"))?;
+    if path_id == 0 {
+        return Ok(None);
+    }
+    match pointer["fileId"].as_i64() {
+        Some(0) => {}
+        other => {
+            return Err(format!(
+                "{what} points into file {other:?}, outside the referrer's"
+            ))
+        }
+    }
+    let file = referrer["file"].as_str().ok_or_else(|| {
+        "the scene document's component instances carry no identity (file, pathId); the site's scene was exported before they did".to_owned()
+    })?;
+    Ok(Some(SourceAssetId {
+        file: file.to_owned(),
+        path_id: path_id.to_string(),
+    }))
+}
+
+/// The node of the component `id` in the scene document: a particle system
+/// or any exported component instance.
+fn component_node(doc: &Value, id: &SourceAssetId) -> Option<String> {
+    let path_id: i64 = id.path_id.parse().ok()?;
+    let particle = doc["particles"].as_array().and_then(|rows| {
+        rows.iter()
+            .find(|row| row["pathId"].as_i64() == Some(path_id))
+            .and_then(|row| row["node"].as_str())
+    });
+    particle.map(str::to_owned).or_else(|| {
+        doc["components"].as_object()?.values().find_map(|entry| {
+            entry["instances"].as_array()?.iter().find_map(|instance| {
+                (instance["pathId"].as_i64() == Some(path_id)
+                    && instance["file"].as_str() == Some(id.file.as_str()))
+                .then(|| instance["node"].as_str().unwrap_or("").to_owned())
+            })
+        })
+    })
+}
+
+/// `PersistentListenerMode`: the argument a persistent call passes.
+fn call_argument(arguments: &Value, mode: i64) -> String {
+    match mode {
+        0 => "the event's argument".to_owned(),
+        1 => String::new(),
+        2 => format!("{}", arguments["m_ObjectArgument"]),
+        3 => format!("{}", arguments["m_IntArgument"]),
+        4 => format!("{}", arguments["m_FloatArgument"]),
+        5 => format!("{}", arguments["m_StringArgument"]),
+        6 => format!("{}", arguments["m_BoolArgument"].as_i64() == Some(1)),
+        other => format!("mode {other}"),
+    }
+}
+
+/// `DeliverySiteView._deliveryAnimationSignalReceiver`: the receiver's
+/// `SignalReceiver.m_Events` pairs `m_Signals[i]` with `m_Events[i]`, a
+/// UnityEvent whose persistent calls are its reaction.
+fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, String> {
+    let field = "DeliverySiteView._deliveryAnimationSignalReceiver";
+    let id = follow(
+        view,
+        &view["fields"]["_deliveryAnimationSignalReceiver"],
+        field,
+    )?
+    .ok_or_else(|| format!("{field} is null"))?;
+    let instances = doc["components"]["SignalReceiver"]["instances"]
+        .as_array()
+        .ok_or("the delivery scene has no SignalReceiver")?;
+    let hits: Vec<_> = instances
+        .iter()
+        .filter(|instance| {
+            instance["file"].as_str() == Some(id.file.as_str())
+                && instance["pathId"].as_i64().map(|n| n.to_string()) == Some(id.path_id.clone())
+        })
+        .collect();
+    let [receiver] = hits.as_slice() else {
+        return Err(format!(
+            "{field} ({}/{}) matches {} SignalReceiver instances",
+            id.file,
+            id.path_id,
+            hits.len()
+        ));
+    };
+    let events = &receiver["fields"]["m_Events"];
+    let signals = events["m_Signals"]
+        .as_array()
+        .ok_or("SignalReceiver.m_Events.m_Signals is missing")?;
+    let reactions = events["m_Events"]
+        .as_array()
+        .ok_or("SignalReceiver.m_Events.m_Events is missing")?;
+    if signals.len() != reactions.len() {
+        return Err(format!(
+            "SignalReceiver.m_Events has {} signals and {} events",
+            signals.len(),
+            reactions.len()
+        ));
+    }
+    let mut rows = Vec::with_capacity(signals.len());
+    for (signal, event) in signals.iter().zip(reactions) {
+        let signal_id = follow(receiver, signal, "SignalReceiver.m_Events.m_Signals")?
+            .ok_or("SignalReceiver.m_Events.m_Signals holds a null signal")?;
+        let calls = event["m_PersistentCalls"]["m_Calls"]
+            .as_array()
+            .ok_or("a SignalReceiver event has no m_PersistentCalls.m_Calls")?;
+        let calls = calls
+            .iter()
+            .map(|call| {
+                let type_name = call["m_TargetAssemblyTypeName"]
+                    .as_str()
+                    .and_then(|name| name.split(',').next())
+                    .and_then(|name| name.rsplit('.').next())
+                    .unwrap_or("?");
+                let target = follow(receiver, &call["m_Target"], "a persistent call's m_Target")
+                    .ok()
+                    .flatten();
+                let on = target.as_ref().map_or("no target".to_owned(), |target| {
+                    match component_node(doc, target) {
+                        Some(node) => format!("{node} ({})", target.path_id),
+                        None => format!("component {}", target.path_id),
+                    }
+                });
+                let state = match call["m_CallState"].as_i64() {
+                    Some(0) => ", off",
+                    Some(1) => ", editor and runtime",
+                    _ => "",
+                };
+                format!(
+                    "{type_name}.{}({}) on {on}{state}",
+                    call["m_MethodName"].as_str().unwrap_or("?"),
+                    call_argument(&call["m_Arguments"], call["m_Mode"].as_i64().unwrap_or(-1))
+                )
+            })
+            .collect();
+        rows.push(SignalReaction {
+            signal: signal_id,
+            signal_name: signal["name"].as_str().unwrap_or("?").to_owned(),
+            calls,
+        });
+    }
+    Ok(SignalReceiverBinding {
+        receiver: format!(
+            "SignalReceiver on {} ({})",
+            receiver["node"].as_str().unwrap_or(""),
+            id.path_id
+        ),
+        reactions: rows,
     })
 }
 

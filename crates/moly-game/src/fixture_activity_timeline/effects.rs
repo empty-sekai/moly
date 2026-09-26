@@ -46,7 +46,9 @@ fn source_binding<'a>(
 fn binds_through_director(kind: TimelineOwnerKind) -> bool {
     matches!(
         kind,
-        TimelineOwnerKind::StepItem | TimelineOwnerKind::SceneDirector
+        TimelineOwnerKind::StepItem
+            | TimelineOwnerKind::SceneDirector
+            | TimelineOwnerKind::CutScene
     )
 }
 

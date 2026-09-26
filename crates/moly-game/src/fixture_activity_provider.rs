@@ -106,6 +106,17 @@ impl FixtureActivityProvider {
             .family_definition(world, assets::TimelineFamily::SITE, package, prefab)
     }
 
+    /// One prefab's timeline from a cut-scene package's three timeline tables.
+    pub(crate) fn cutscene_definition(
+        &mut self,
+        world: &World,
+        package: &str,
+        prefab: &str,
+    ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        self.assets
+            .family_definition(world, assets::TimelineFamily::CUTSCENE, package, prefab)
+    }
+
     /// The placed instance itself is live: typed identity, formal model GLTF
     /// route and a ready scene instance. A tapped source FixtureView is always
     /// set up, so the player owner checks this before it reserves a seat.
