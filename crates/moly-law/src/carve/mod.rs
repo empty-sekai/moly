@@ -931,7 +931,8 @@ mod tests {
     /// with the carve hull: on a flat field with a harvest-sized capsule and a
     /// yawed box carved at runtime, every sample point clearly inside a hull
     /// (by the hull's own planes, which the native rows pin) is on no
-    /// navigation cell and no walk cell, every point clearly outside the
+    /// navigation cell (nor, beyond half a cell diagonal, on a walk cell),
+    /// every point clearly outside the
     /// hulls and the eroded border is on a cell, a path across the carve goes
     /// around it without entering it, and an empty carve set gives the baked
     /// field back.
@@ -984,7 +985,12 @@ mod tests {
                 let d = depth(p);
                 if d < -0.01 {
                     inside += 1;
-                    assert!(!field.on_cell(p) && !field.walkable_at(p), "{p:?} inside a hull");
+                    assert!(!field.on_cell(p), "{p:?} inside a hull is on a cell");
+                    // Walk cells are carved by their centre: allow half a
+                    // cell diagonal (0.05 m voxel).
+                    if d < -0.04 {
+                        assert!(!field.walkable_at(p), "{p:?} inside a hull is walkable");
+                    }
                 } else if d > 0.01 && baked.walkable_at(p) && baked.on_cell(p) {
                     outside += 1;
                     assert!(field.on_cell(p), "{p:?} outside the hulls lost its cell");
