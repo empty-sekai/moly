@@ -8,7 +8,8 @@ use crate::{
     action_button, alone_action_runtime, audio, balloon, birthday, camera, character,
     character_material, client_config, cloth_runtime, content_library, emoticon, fixture_attach,
     fixture_edit, fixture_talk, gesture, get_resource, harvest, inactive_nodes, info, joystick,
-    light, menu_dialog, menu_shell, npc, npc_objective, option_dialog, pick, player, player_avatar,
+    learn_phenomena_dialog, light, menu_dialog, menu_shell, notice_banner, npc, npc_objective,
+    option_dialog, pick, player, player_avatar,
     player_state, player_talk, site, site_sound, sitemap, sky, talk, talk_camera, talk_window,
     uber_particle, ui_layers, walk_face, weather, weather_fx,
 };
@@ -1112,6 +1113,37 @@ pub fn install(app: &mut App) {
                 .after(get_resource::click)
                 .after(menu_shell::place),
         );
+    // ---- Learn-phenomenon dialog (the dialog slot) and the notice layer's
+    // weather banner (appended block).
+    app.add_message::<notice_banner::SiteEnvironmentInfo>()
+        .init_resource::<notice_banner::NoticeBanner>()
+        .add_systems(Startup, learn_phenomena_dialog::load_glyphs)
+        // The phenomenon names join the shell charset before the atlas bake.
+        .add_systems(Update, learn_phenomena_dialog::parse_glyphs.before(menu_shell::parse))
+        .add_systems(Update, (learn_phenomena_dialog::spawn_when_ready, notice_banner::spawn_when_ready))
+        // Open, taps, then the tweens: the request's SEs drain this frame; the
+        // taps keep the dialog slot's order (after the action buttons' tap
+        // flag, before the shell, the other dialogs, the world pick and the
+        // layer stack).
+        .add_systems(
+            Update,
+            (
+                learn_phenomena_dialog::open,
+                learn_phenomena_dialog::autotap,
+                learn_phenomena_dialog::click.run_if(crate::game_settings::scene_input_enabled),
+                learn_phenomena_dialog::place,
+            )
+                .chain()
+                .after(action_button::click)
+                .before(menu_shell::click)
+                .before(menu_dialog::click)
+                .before(get_resource::click)
+                .before(pick::pick)
+                .before(ui_layers::advance)
+                .before(audio::SeDrainSet::Drain),
+        )
+        // The banner reads the entry's calls in the frame they are made.
+        .add_systems(Update, notice_banner::advance.after(crate::entry::advance));
     // ---- 选项对话框（追加段：设置钮的目标，Dialog 槽——音量页） ----
     // 本地档装载与进场施加（SceneMysekai.Start → SetupVolume 同律：读档
     // → 施加系统组 → 环境变量只作进场覆写）。排 Startup 链后（无跨系统
