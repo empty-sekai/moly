@@ -75,6 +75,9 @@ struct DoorProgram {
     duration: f64,
     speed: f64,
     transition_seconds: f64,
+    /// Its place in the machine's AnyState list: triggers set together are
+    /// taken in this order.
+    transition_index: usize,
     joint: NodeId,
     /// x, y, z, w of the source quaternion curve, source (Unity) frame.
     components: [Curve; 4],
@@ -282,7 +285,8 @@ fn trigger_program(
         .ok_or("trigger parameter has no id")?;
     let transitions: Vec<_> = array(machine, "anyStateTransitions")?
         .iter()
-        .filter(|transition| {
+        .enumerate()
+        .filter(|(_, transition)| {
             transition["conditions"]
                 .as_array()
                 .is_some_and(|conditions| {
@@ -292,9 +296,10 @@ fn trigger_program(
                 })
         })
         .collect();
-    let [transition] = transitions.as_slice() else {
+    let [(transition_index, transition)] = transitions.as_slice() else {
         return Err(format!("{name} has no unique AnyState transition"));
     };
+    let transition_index = *transition_index;
     if transition["hasExitTime"].as_bool() != Some(false)
         || transition["hasFixedDuration"].as_bool() != Some(true)
         || transition["raw"]["m_InterruptionSource"].as_u64() != Some(0)
@@ -422,6 +427,7 @@ fn trigger_program(
         duration,
         speed,
         transition_seconds,
+        transition_index,
         joint: joint.expect("four curves share one joint"),
         components: [x, y, z, w],
         events,
@@ -644,13 +650,86 @@ struct DoorPlayback {
     elapsed: f64,
     transition_elapsed: f64,
     next_event: usize,
+    /// The state this transition leaves when it began mid-clip: Mecanim keeps
+    /// the source state playing, events included, until the transition ends.
+    from: Option<SourceState>,
+}
+
+struct SourceState {
+    program: Arc<DoorProgram>,
+    elapsed: f64,
+    next_event: usize,
+}
+
+/// A trigger set while this house's transition runs. `Animator.SetTrigger`
+/// keeps the parameter set until a transition consumes it; the house
+/// transitions have interruption source None, so the running one finishes
+/// first and the trigger is taken at the next evaluation.
+struct PendingTrigger {
+    root: Entity,
+    uid: String,
+    trigger: HouseTrigger,
+    joint: Entity,
+    file: String,
+    program: Arc<DoorProgram>,
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct HouseDoors {
     playing: Vec<DoorPlayback>,
+    pending: Vec<PendingTrigger>,
     /// `HouseView.AddIgnoreSe` per house root.
     ignored: HashMap<Entity, Vec<String>>,
+}
+
+impl HouseDoors {
+    fn in_transition(&self, root: Entity) -> bool {
+        self.playing.iter().any(|door| {
+            door.root == root && door.transition_elapsed < door.program.transition_seconds
+        })
+    }
+
+    /// The AnyState transition starts. A state of this house still playing
+    /// past its own transition becomes the new transition's source.
+    fn begin(&mut self, start: PendingTrigger, base: Quat) {
+        let from = self
+            .playing
+            .iter()
+            .position(|door| door.root == start.root)
+            .map(|index| self.playing.remove(index))
+            .map(|previous| SourceState {
+                program: previous.program,
+                elapsed: previous.elapsed,
+                next_event: previous.next_event,
+            });
+        info!(
+            "[house-door] {} trigger={} source-clip={:?} transition={}s duration={}s joint={:?}{}",
+            start.uid,
+            start.trigger.name(),
+            start.program.clip,
+            start.program.transition_seconds,
+            start.program.duration,
+            start.joint,
+            if from.is_some() {
+                " (from the previous state, still playing)"
+            } else {
+                ""
+            }
+        );
+        self.playing.push(DoorPlayback {
+            root: start.root,
+            uid: start.uid,
+            trigger: start.trigger,
+            joint: start.joint,
+            file: start.file,
+            base,
+            program: start.program,
+            elapsed: 0.0,
+            transition_elapsed: 0.0,
+            next_event: 0,
+            from,
+        });
+    }
 }
 
 /// `HouseView.SetAnimationTrigger("PlayerOff")`.
@@ -666,7 +745,10 @@ pub(crate) fn set_trigger_player_off(
 /// this frame's animation update: the playback starts here and advances in
 /// the same frame's [`advance`]. The transition blends from the pose the
 /// current state writes: the bound pose in the default state, a finished
-/// clip's last pose otherwise (the joint holds it).
+/// clip's last pose (the joint holds it), or the previous clip still playing
+/// when the trigger comes mid-clip. While this house's transition runs the
+/// trigger stays set and is taken when that transition ends: the house
+/// transitions are uninterruptible (interruption source None in the record).
 pub(crate) fn set_trigger(
     world: &mut World,
     binding: &HouseBinding,
@@ -684,34 +766,31 @@ pub(crate) fn set_trigger(
         .get::<Transform>(joint)
         .ok_or("door joint has no Transform")?
         .rotation;
-    let mut doors = world.get_resource_or_insert_with(HouseDoors::default);
-    if doors.playing.iter().any(|door| door.root == binding.root) {
-        return Err(format!(
-            "a transition is already playing on this house; {} not taken",
-            trigger.name()
-        ));
-    }
-    info!(
-        "[house-door] {} trigger={} source-clip={:?} transition={}s duration={}s joint={:?}",
-        binding.uid,
-        trigger.name(),
-        program.clip,
-        program.transition_seconds,
-        program.duration,
-        joint
-    );
-    doors.playing.push(DoorPlayback {
+    let start = PendingTrigger {
         root: binding.root,
         uid: binding.uid.clone(),
         trigger,
         joint,
         file: binding.definition.file.clone(),
-        base,
         program,
-        elapsed: 0.0,
-        transition_elapsed: 0.0,
-        next_event: 0,
-    });
+    };
+    let mut doors = world.get_resource_or_insert_with(HouseDoors::default);
+    if doors.in_transition(binding.root) {
+        info!(
+            "[house-door] {} trigger={} set while a transition runs: taken when it ends (interruption source None)",
+            binding.uid,
+            trigger.name()
+        );
+        if !doors
+            .pending
+            .iter()
+            .any(|pending| pending.root == start.root && pending.trigger == trigger)
+        {
+            doors.pending.push(start);
+        }
+        return Ok(());
+    }
+    doors.begin(start, base);
     Ok(())
 }
 
@@ -740,6 +819,7 @@ pub(crate) fn release(world: &mut World, root: Entity) {
     if let Some(mut doors) = world.get_resource_mut::<HouseDoors>() {
         let before = doors.playing.len();
         doors.playing.retain(|door| door.root != root);
+        doors.pending.retain(|pending| pending.root != root);
         doors.ignored.remove(&root);
         if doors.playing.len() != before {
             info!("[house-door] playback ends with the site teardown");
@@ -797,45 +877,40 @@ pub(crate) fn advance(world: &mut World) {
         door.elapsed += f64::from(delta) * door.program.speed;
         door.transition_elapsed += f64::from(delta);
         let weight = transition_weight(door.transition_elapsed, door.program.transition_seconds);
-        let pose = blend(door.base, door.program.sample(door.elapsed), weight);
+        let rest = match door.from.as_mut() {
+            Some(from) => {
+                from.elapsed += f64::from(delta) * from.program.speed;
+                play_events(
+                    world,
+                    &ignored,
+                    door.root,
+                    &door.uid,
+                    &from.program,
+                    from.elapsed,
+                    &mut from.next_event,
+                );
+                from.program.sample(from.elapsed)
+            }
+            None => door.base,
+        };
+        let pose = blend(rest, door.program.sample(door.elapsed), weight);
+        if door.transition_elapsed >= door.program.transition_seconds {
+            door.from = None;
+        }
         if let Some(mut transform) = world.get_mut::<Transform>(door.joint) {
             if transform.rotation != pose {
                 transform.rotation = pose;
             }
         }
-        while let Some(event) = door
-            .program
-            .events
-            .get(door.next_event)
-            .filter(|event| event.time <= door.elapsed)
-        {
-            let muted = ignored
-                .get(&door.root)
-                .is_some_and(|list| list.contains(&event.se));
-            if muted {
-                info!(
-                    "[house-door] {} event={SE_EVENT}({}) not played: on the ignore list",
-                    door.uid, event.se
-                );
-            } else if can_play_door_se(world) {
-                world.resource_mut::<SeRequests>().0.push(SeRequest {
-                    owner: None,
-                    cue: event.se.clone(),
-                    class: SeClass::Ingame,
-                    source: "house-animation-event",
-                });
-                info!(
-                    "[house-door] {} event={SE_EVENT}({}) source-time={} clip-time={:.3}",
-                    door.uid, event.se, event.time, door.elapsed
-                );
-            } else {
-                info!(
-                    "[house-door] {} event={SE_EVENT}({}) not played: CanPlayHouseDoorSe is false",
-                    door.uid, event.se
-                );
-            }
-            door.next_event += 1;
-        }
+        play_events(
+            world,
+            &ignored,
+            door.root,
+            &door.uid,
+            &door.program,
+            door.elapsed,
+            &mut door.next_event,
+        );
         let finished = door.elapsed >= door.program.duration
             && door.transition_elapsed >= door.program.transition_seconds;
         if finished {
@@ -847,8 +922,80 @@ pub(crate) fn advance(world: &mut World) {
         }
         !finished
     });
+    let mut pending = std::mem::take(&mut doors.pending);
+    pending.sort_by_key(|start| start.program.transition_index);
+    for start in pending {
+        if world.get_entity(start.root).is_err() {
+            continue;
+        }
+        if doors.in_transition(start.root) {
+            doors.pending.push(start);
+            continue;
+        }
+        let Some(base) = world
+            .get::<Transform>(start.joint)
+            .map(|transform| transform.rotation)
+        else {
+            warn!(
+                "[house-door] {} trigger={} dropped: its door joint disappeared",
+                start.uid,
+                start.trigger.name()
+            );
+            continue;
+        };
+        info!(
+            "[house-door] {} trigger={} taken: the running transition ended",
+            start.uid,
+            start.trigger.name()
+        );
+        doors.begin(start, base);
+    }
     doors.ignored = ignored;
     world.insert_resource(doors);
+}
+
+/// The clip's `OnPlayHouseSE` events up to `elapsed`.
+fn play_events(
+    world: &mut World,
+    ignored: &HashMap<Entity, Vec<String>>,
+    root: Entity,
+    uid: &str,
+    program: &DoorProgram,
+    elapsed: f64,
+    next_event: &mut usize,
+) {
+    while let Some(event) = program
+        .events
+        .get(*next_event)
+        .filter(|event| event.time <= elapsed)
+    {
+        let muted = ignored
+            .get(&root)
+            .is_some_and(|list| list.contains(&event.se));
+        if muted {
+            info!(
+                "[house-door] {} event={SE_EVENT}({}) not played: on the ignore list",
+                uid, event.se
+            );
+        } else if can_play_door_se(world) {
+            world.resource_mut::<SeRequests>().0.push(SeRequest {
+                owner: None,
+                cue: event.se.clone(),
+                class: SeClass::Ingame,
+                source: "house-animation-event",
+            });
+            info!(
+                "[house-door] {} event={SE_EVENT}({}) source-time={} clip-time={:.3}",
+                uid, event.se, event.time, elapsed
+            );
+        } else {
+            info!(
+                "[house-door] {} event={SE_EVENT}({}) not played: CanPlayHouseDoorSe is false",
+                uid, event.se
+            );
+        }
+        *next_event += 1;
+    }
 }
 
 #[cfg(test)]
@@ -916,6 +1063,7 @@ mod tests {
             duration: 1.916_666_746_139_526_4,
             speed: 1.0,
             transition_seconds: 0.25,
+            transition_index: 0,
             joint: NodeId {
                 game_object: 1_986_495_244_691_942_711,
                 transform: 1_099_000_171_873_291_942,
