@@ -34,7 +34,8 @@ use serde_json::Value;
 
 use super::{EffectHook, HarvestEffectHooks};
 use crate::site_move::effects::{
-    authored_renderers, prepare_skipping_refused, select_all, systems_finished, Prepared,
+    authored_renderers, prepare_skipping_refused, select_all, systems_finished, PrepTiming,
+    Prepared,
 };
 use crate::site_move::{InstanceReady, PendingInstance};
 
@@ -75,6 +76,7 @@ struct Live {
     /// `ManagedEffect.Stop` ran: emission stopped, the copy is released once
     /// its live particles are gone.
     stopped: bool,
+    timing: PrepTiming,
 }
 
 /// A played harvest effect's root (removed with the site).
@@ -318,6 +320,7 @@ fn emit(effects: &mut HarvestEffects, world: &mut World, hook: EffectHook) -> Op
         planned: false,
         age: 0.0,
         stopped: false,
+        timing: PrepTiming::start(),
     });
     Some(root)
 }
@@ -364,6 +367,7 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
         if planned || world.get::<InstanceReady>(root).is_none() {
             continue;
         }
+        effects.live[index].timing.instance_ready();
         let Some(pool) = effects.pools.get(&kind) else {
             effects.live[index].planned = true;
             continue;
@@ -375,6 +379,7 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
         let Some(doc) = doc else {
             continue;
         };
+        let parse = bevy::platform::time::Instant::now();
         let doc: Value = match serde_json::from_str(&doc) {
             Ok(doc) => doc,
             Err(error) => {
@@ -383,6 +388,7 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
                 continue;
             }
         };
+        effects.live[index].timing.parsed(parse.elapsed());
         let paths = crate::site_move::node_paths(world, root);
         let mut selected = select_all(&doc, &paths);
         let label = format!("harvest {kind}");
@@ -402,6 +408,10 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
                     "[harvest-effect] type {kind} plays: {} systems prepared, {on} renderers on as authored",
                     draws.len()
                 );
+                info!(
+                    "[harvest-effect] type {kind} preparation stages after its copy was made: {}",
+                    effects.live[index].timing.report()
+                );
                 effects.live[index].planned = true;
                 // The source emits from a copy it already holds; here the
                 // copy can still be loading when its Stop runs. The Stop
@@ -414,7 +424,9 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
                     );
                 }
             }
-            Prepared::Pending => {}
+            Prepared::Pending => {
+                effects.live[index].timing.pending(world, root, selected.len());
+            }
             Prepared::Refused(error) => {
                 warn!("[harvest-effect] type {kind} particles refused: {error}");
                 effects.live[index].planned = true;

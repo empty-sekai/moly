@@ -619,6 +619,105 @@ pub(crate) fn trace_enabled() -> bool {
     })
 }
 
+/// Wall-clock stages of one copy's preparation (an instrument, reported once
+/// the copy is prepared): its scene instance ready, its first particle draw
+/// spawned (the draw's geometry and shader catalogue resolved), every draw's
+/// textures and shader programs loaded, and every draw's GPU pipeline ready
+/// (the preparation's end), with the time spent parsing the particle
+/// document.
+pub(crate) struct PrepTiming {
+    made: bevy::platform::time::Instant,
+    instance: Option<f32>,
+    first_draw: Option<f32>,
+    assets: Option<f32>,
+    parse: std::time::Duration,
+    parses: u32,
+    pending_frames: u32,
+}
+
+impl PrepTiming {
+    pub(crate) fn start() -> Self {
+        Self {
+            made: bevy::platform::time::Instant::now(),
+            instance: None,
+            first_draw: None,
+            assets: None,
+            parse: std::time::Duration::ZERO,
+            parses: 0,
+            pending_frames: 0,
+        }
+    }
+
+    fn now(&self) -> f32 {
+        self.made.elapsed().as_secs_f32()
+    }
+
+    /// The copy's scene instance is ready (first call counts).
+    pub(crate) fn instance_ready(&mut self) {
+        if self.instance.is_none() {
+            self.instance = Some(self.now());
+        }
+    }
+
+    /// One parse of the particle document.
+    pub(crate) fn parsed(&mut self, took: std::time::Duration) {
+        self.parse += took;
+        self.parses += 1;
+    }
+
+    /// A frame whose preparation is still pending, with the number of
+    /// systems it prepares.
+    pub(crate) fn pending(&mut self, world: &World, root: Entity, systems: usize) {
+        self.pending_frames += 1;
+        let server = world.resource::<AssetServer>();
+        let draws: Vec<&crate::source_particle::SourceParticle> = world
+            .get::<Children>(root)
+            .map(|children| {
+                children
+                    .iter()
+                    .filter_map(|child| world.get::<crate::source_particle::SourceParticle>(child))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if draws.is_empty() {
+            return;
+        }
+        if self.first_draw.is_none() {
+            self.first_draw = Some(self.now());
+        }
+        let loaded = draws.len() >= systems
+            && draws.iter().all(|draw| {
+                !draw.passes.is_empty()
+                    && draw
+                        .passes
+                        .iter()
+                        .all(|pass| server.load_state(&pass.program).is_loaded())
+                    && draw
+                        .textures
+                        .values()
+                        .all(|texture| server.load_state(texture).is_loaded())
+            });
+        if loaded && self.assets.is_none() {
+            self.assets = Some(self.now());
+        }
+    }
+
+    /// The stages, read when the preparation is done.
+    pub(crate) fn report(&self) -> String {
+        let stage = |at: Option<f32>| at.map_or("not seen".to_owned(), |at| format!("{at:.2}s"));
+        format!(
+            "scene instance {}, first particle draw {}, textures and shader programs {}, GPU pipelines ready {:.2}s; particle document parsed {}x in {:.1} ms; {} frames pending",
+            stage(self.instance),
+            stage(self.first_draw),
+            stage(self.assets),
+            self.now(),
+            self.parses,
+            self.parse.as_secs_f64() * 1000.0,
+            self.pending_frames
+        )
+    }
+}
+
 /// An instance whose particle systems never installed is released after
 /// this age (product housekeeping; nothing of it is drawn).
 const UNINSTALLED_RELEASE_AGE: f32 = 10.0;
