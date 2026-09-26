@@ -30,7 +30,7 @@ use crate::inactive_nodes::SiteSettled;
 use crate::site::{GroundMeshes, SiteActive, SiteSelection};
 use bevy::asset::{AssetPath, LoadState};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::ecs::system::SystemParam;
+use bevy::ecs::system::{SystemParam, SystemState};
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
@@ -2200,8 +2200,9 @@ pub(crate) fn follow_avatar(
     talk_camera: Option<Res<crate::talk_camera::TalkCamera>>,
     // 16 态面朝追迹的 0.5s 累计器（AUTOFPS 冒烟窗口内用）。
     mut face_trace: Local<f32>,
-    // The state this system saw last frame (HarvestTone's entry copy).
-    mut seen_state: Local<Option<CameraStateType>>,
+    // The state this system saw last frame (HarvestTone's entry copy, the
+    // reset instrument).
+    mut watch: Local<StateWatch>,
     // Normal's `_isCompleteCameraTween` (its OnUpdate's follow-rate gate).
     normal_complete: Option<Res<NormalCameraTweenComplete>>,
 ) {
@@ -2214,14 +2215,16 @@ pub(crate) fn follow_avatar(
     // camera system after it, before any tween or follow write this frame
     // (the harvest camera shake before it moves only the offset, which the
     // tone reset does not read from the copy).
-    if *seen_state != Some(state.0) {
+    if watch.seen != Some(state.0) {
+        watch.entered_at = time.elapsed_secs();
+        watch.reset_pressed = false;
         if state.0 == CameraStateType::HarvestTone {
             info!(
                 "[camera] HarvestTone entered: pre-camera model copied (LookAt {:.3}, pitch {:.2}, yaw {:.2}, distance {:.3}, FOV {:.2})",
                 models.look_at, models.pitch, models.yaw, models.distance, models.fov
             );
             commands.insert_resource(HarvestTonePreModel(models.clone()));
-        } else if *seen_state == Some(CameraStateType::HarvestTone) {
+        } else if watch.seen == Some(CameraStateType::HarvestTone) {
             commands.remove_resource::<HarvestTonePreModel>();
         }
         if state.0 == CameraStateType::Normal {
@@ -2234,7 +2237,20 @@ pub(crate) fn follow_avatar(
                 .is_some_and(|tween| tween.on_complete == TweenCompletion::NormalTransfer);
             commands.insert_resource(NormalCameraTweenComplete(!transfer));
         }
-        *seen_state = Some(state.0);
+        watch.seen = Some(state.0);
+    }
+    if !watch.reset_pressed
+        && autoreset_due(state.0, time.elapsed_secs() - watch.entered_at)
+    {
+        watch.reset_pressed = true;
+        let current = state.0;
+        commands.queue(move |world: &mut World| {
+            let mut system_state: SystemState<(Commands, CameraReset)> = SystemState::new(world);
+            let (mut commands, mut reset) = system_state.get_mut(world);
+            info!("[camera] instrument MOLY_CAMERA_AUTORESET: the camera reset pressed in {current:?}");
+            reset.reset_camera_setting(&mut commands);
+            system_state.apply(world);
+        });
     }
     // A player conversation owns the camera, including its entry tween.
     // Normal following resumes on the actual session's completion frame;
@@ -2444,6 +2460,30 @@ pub(crate) fn follow_avatar(
             }
         }
     }
+}
+
+/// What [`follow_avatar`] remembers about the camera state between frames.
+#[derive(Default)]
+pub(crate) struct StateWatch {
+    seen: Option<CameraStateType>,
+    entered_at: f32,
+    reset_pressed: bool,
+}
+
+/// Instrument (`MOLY_CAMERA_AUTORESET=<state>:<seconds>`, off by default,
+/// e.g. `HarvestTone:1`): once per entry into that camera state, `seconds`
+/// after it, the camera reset runs as the reset button's click runs it.
+fn autoreset_due(state: CameraStateType, since_entry: f32) -> bool {
+    let Ok(spec) = std::env::var("MOLY_CAMERA_AUTORESET") else {
+        return false;
+    };
+    let Some((name, secs)) = spec.split_once(':') else {
+        return false;
+    };
+    let Ok(secs) = secs.trim().parse::<f32>() else {
+        return false;
+    };
+    format!("{state:?}") == name.trim() && since_entry >= secs
 }
 
 /// PostUpdate（定时）：跟随模式的周期状态行。取景点、眼位与界半径随帧
