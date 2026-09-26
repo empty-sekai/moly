@@ -145,7 +145,12 @@ impl PointerUi<'_, '_> {
         if self.dialogs.blocks_field_input() { return true; }
         let editor_layer = self.layers.current() == crate::ui_layers::LayerId::MysekaiSiteEdit;
         if !self.layers.on_field() && !editor_layer { return true; }
-        if editor_layer && self.editor.as_deref().is_some_and(|edit| edit.exit_dialog) {
+        if editor_layer
+            && self
+                .editor
+                .as_deref()
+                .is_some_and(|edit| edit.exit_dialog || edit.clean_up_dialog)
+        {
             return true;
         }
         let (Some(layouts), Some(root)) = (self.layouts.as_deref(), self.root.as_deref()) else { return false; };
