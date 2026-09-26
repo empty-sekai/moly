@@ -812,7 +812,7 @@ pub(crate) struct AfterEditHold {
 /// One save receipt's reaction pass (`MysekaiAfterEditNPCUtility.OnEdit` →
 /// `ExecuteAfterEditNPCAction` → `ExecuteAfterEditLayout`). Each receipt runs
 /// its own pass; passes do not cancel each other.
-struct AfterEditPass {
+pub(crate) struct AfterEditPass {
     sequence: u32,
     /// The chosen reactors not yet reached, in the lottery's order.
     queue: std::collections::VecDeque<Entity>,
@@ -824,7 +824,7 @@ struct AfterEditPass {
 /// created on `created`, it counts no time on that frame, then adds each
 /// frame's scaled delta and completes on the first frame the sum reaches
 /// `seconds`; the pass continues on that frame.
-struct ReactionDelay {
+pub(crate) struct ReactionDelay {
     created: u32,
     elapsed: f32,
     seconds: f32,
