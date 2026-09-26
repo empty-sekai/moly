@@ -15,11 +15,16 @@
 //! and no house, so it skips the join and lifts the cover at its own scene
 //! readiness, with input as the stage has it; a native first site other than
 //! `home_site` (an explicit choice the source never makes) does the same.
+//!
+//! `MysekaiTransitioner.SafeFinish` finishes the white transitioner only when
+//! one exists; in solo play none does (`UIUtility.PlayMysekaiTransition` has
+//! one caller, the multiplay layout update), so both calls here do nothing.
+//!
 //! Named gaps: the start particle of the cover, the
-//! `ScreenLayerMysekaiNotice` weather banner (INFO lines at its steps), the
-//! `MysekaiTransitioner` (no product counterpart), and the stamina-refresh
-//! branch (`isRefreshed` is a mock that is false). The cover's loading
-//! indicator is drawn from the extracted prefab ([`indicator`]).
+//! `ScreenLayerMysekaiNotice` weather banner (INFO lines at its steps), and
+//! the stamina-refresh branch (`isRefreshed` is a mock that is false). The
+//! cover's loading indicator is drawn from the extracted prefab
+//! ([`indicator`]).
 
 pub(crate) mod cover;
 pub(crate) mod house;
@@ -351,7 +356,7 @@ fn advance_cover(world: &mut World, seq: &mut EntrySequence, dt: f32) {
 fn error_branch(world: &mut World, seq: &mut EntrySequence, reason: &str, dt: f32) {
     error!("[entry] JoinMysekaiActionCore: the room or the player does not exist ({reason}); both transitioners finish, joystick and gestures stay off");
     safe_finish(world, seq, dt);
-    info!("[entry] MysekaiTransitioner.SafeFinish(null, 1.0): no product counterpart");
+    info!("[entry] MysekaiTransitioner.SafeFinish(null, 1.0): no instance: solo play never starts one (its only player is the multiplay layout update), so it does nothing");
     end_action(world, seq, Some(0.0));
 }
 
@@ -458,7 +463,7 @@ fn join_core(world: &mut World, seq: &mut EntrySequence, dt: f32) {
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::HouseEntry;
     step(seq, "FieldCamera.ChangeState(HouseEntry)", None);
     // StartMysekaiTransition
-    info!("[entry] MysekaiTransitioner.SafeFinish: no product counterpart");
+    info!("[entry] MysekaiTransitioner.SafeFinish: no instance: solo play never starts one (its only player is the multiplay layout update), so it does nothing");
     safe_finish(world, seq, dt);
     seq.phase = Phase::AwaitTransition {
         delay: UniTaskDelay::new(law::EXIT_HOME_ANIMATION_DELAY_TIME),

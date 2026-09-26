@@ -847,9 +847,10 @@ fn parse_step(step_value: &serde_json::Value) -> TalkStep {
             who: who_field("who"),
             motion: s_field_step("motion"),
             alias: s_field_step("alias"),
-            // speed 载荷：源未传参或 null 都落 None（缺省 1.0 由律换算）。
-            speed: opt_f("speed"),
+            // Arg 3 is the delay and arg 4 the speed; an old export kept arg 3 under "speed".
+            speed: step_value.get("delay").and_then(|_| opt_f("animationSpeed")),
             playback_speed: opt_f("playbackSpeed").unwrap_or(1.0),
+            delay_seconds: opt_f(if step_value.get("delay").is_some() { "delay" } else { "speed" }).unwrap_or(0.0) as f32,
             play_end_motion: step_value
                 .get("playEndMotion")
                 .and_then(|v| v.as_bool())

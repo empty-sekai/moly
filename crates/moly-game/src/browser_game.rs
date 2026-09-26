@@ -1,7 +1,9 @@
 //! Browser game transport. The page starts one game from a seed, enqueues
 //! validated intents and polls a versioned projection; it never borrows the
-//! world. The settings document lives in the page backend of
-//! `settings_store`, and the page persists the revisions it takes.
+//! world. The settings document and the server model's `server` and `local`
+//! documents live in the page backend of `settings_store`, and the page
+//! persists the revisions it takes. `server.edit` is applied to the server
+//! model when `game_command` returns, and refused there by name.
 //!
 //! Input capture and persist acknowledgements take effect when
 //! `game_command` returns: a hidden page renders no frames, so nothing the
@@ -19,8 +21,12 @@ use std::sync::{
 };
 
 const SCHEMA: u64 = 1;
-const ABI: u64 = 1;
+const ABI: u64 = 2;
 const MAX_COMMAND_BYTES: usize = 1024;
+/// `server.edit` may carry a whole schedule.
+const MAX_SERVER_EDIT_BYTES: usize = 16 * 1024;
+/// The seed's documents, all present, each a text or null.
+const SEED_DOCUMENTS: [&str; 3] = ["settings", "server", "local"];
 const MAX_PENDING_COMMANDS: usize = 128;
 const MAX_ERRORS: usize = 32;
 
@@ -30,8 +36,8 @@ static PUBLISHED: Mutex<Option<Published>> = Mutex::new(None);
 // Set synchronously by the page, before the next input schedule.
 static INPUT_CAPTURED: AtomicBool = AtomicBool::new(false);
 
-/// One validated seed. `documents.settings` moves into the settings page
-/// backend when the storage is installed; the resource keeps the rest.
+/// One validated seed. Its documents move into the page backend and the
+/// server model when the storage is installed; the resource keeps the rest.
 #[derive(Resource, Clone, Debug)]
 pub struct GameSeed {
     pub region: String,
@@ -45,6 +51,8 @@ pub struct GameSeed {
     pub resource_origin: Option<String>,
     pub writable: bool,
     settings: Option<String>,
+    server: Option<String>,
+    local: Option<String>,
 }
 
 const SEED_FIELDS: [&str; 13] = [
@@ -120,14 +128,32 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
     let documents = field(seed, "documents")?
         .as_object()
         .ok_or("seed field documents must be an object")?;
-    if let Some(unknown) = documents.keys().find(|key| key.as_str() != "settings") {
+    if let Some(unknown) = documents
+        .keys()
+        .find(|key| !SEED_DOCUMENTS.contains(&key.as_str()))
+    {
         return Err(format!("seed document {unknown} is unknown"));
     }
-    let settings = match field(documents, "settings")? {
-        Value::Null => None,
-        Value::String(text) => Some(text.clone()),
-        _ => return Err("seed document settings must be a string or null".into()),
+    let document = |name: &str| -> Result<Option<String>, String> {
+        match documents.get(name) {
+            None => Err(format!("seed document {name} is missing")),
+            Some(Value::Null) => Ok(None),
+            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => Err(format!("seed document {name} must be a string or null")),
+        }
     };
+    let settings = document("settings")?;
+    let server = document("server")?;
+    let local = document("local")?;
+    // A stored document this engine cannot read is refused, never reset.
+    if let Some(text) = &server {
+        crate::server::check_seed_document(text)
+            .map_err(|error| format!("seed document server: {error}"))?;
+    }
+    if let Some(text) = &local {
+        crate::server::check_seed_local(text)
+            .map_err(|error| format!("seed document local: {error}"))?;
+    }
     Ok(GameSeed {
         region,
         version: text(seed, "version")?,
@@ -140,13 +166,20 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
         resource_origin: optional_text(seed, "resourceOrigin")?,
         writable: flag(seed, "writable")?,
         settings,
+        server,
+        local,
     })
 }
 
 /// Before the app is built: some plugins read the settings document while
 /// they are added. Selects the page backend and the page's storage lease.
 pub fn install_game_storage(seed: &mut GameSeed) {
-    crate::settings_store::install_page_document(seed.settings.take());
+    crate::settings_store::install_page_document(
+        seed.settings.take(),
+        seed.server.clone(),
+        seed.local.clone(),
+    );
+    crate::server::install_from_seed(seed.server.take(), seed.local.take());
     #[cfg(target_arch = "wasm32")]
     crate::settings_store::set_browser_storage_writable(seed.writable);
     ACTIVE.store(true, Ordering::Relaxed);
@@ -180,6 +213,7 @@ enum GameCommand {
     Lifecycle(Lifecycle),
     Input(bool),
     PersistAck(u32),
+    ServerEdit(Map<String, Value>),
 }
 
 fn only_fields(command: &Map<String, Value>, allowed: &[&str]) -> Result<(), String> {
@@ -190,7 +224,7 @@ fn only_fields(command: &Map<String, Value>, allowed: &[&str]) -> Result<(), Str
 }
 
 fn parse_command(input: &str) -> Result<GameCommand, String> {
-    if input.len() > MAX_COMMAND_BYTES {
+    if input.len() > MAX_SERVER_EDIT_BYTES {
         return Err("game command exceeds its length limit".into());
     }
     let value: Value =
@@ -202,7 +236,11 @@ fn parse_command(input: &str) -> Result<GameCommand, String> {
         .get("type")
         .and_then(Value::as_str)
         .ok_or("game command has no string type")?;
+    if kind != "server.edit" && input.len() > MAX_COMMAND_BYTES {
+        return Err("game command exceeds its length limit".into());
+    }
     match kind {
+        "server.edit" => Ok(GameCommand::ServerEdit(command.clone())),
         "lifecycle" => {
             only_fields(command, &["type", "value"])?;
             Ok(GameCommand::Lifecycle(
@@ -247,6 +285,11 @@ pub fn game_command(input: &str) -> Result<(), String> {
             crate::settings_store::with_page(|page| page.ack(revision))
                 .ok_or("the settings page backend is not installed")?
         }
+        // Validated and applied to the server model now; the world reads
+        // the model's live changes and responses on its next frame.
+        GameCommand::ServerEdit(command) => crate::server::with_model(|model| model.edit(&command))
+            .ok_or("the server model is not installed")?
+            .map(|_| ()),
         command => enqueue(command),
     }
 }
@@ -267,15 +310,32 @@ fn enqueue(command: GameCommand) -> Result<(), String> {
     Ok(())
 }
 
-/// `""` when nothing newer than `after_revision` exists.
+/// `""` when nothing newer than `after_revision` exists; else every page
+/// document (null when never written).
 pub fn game_take_persist(after_revision: u32) -> String {
     crate::settings_store::with_page(|page| {
-        page.take(after_revision).map(|(revision, settings)| {
-            json!({"revision": revision, "documents": {"settings": settings}}).to_string()
-        })
+        page.take(after_revision)
+            .map(|(revision, [settings, server, local])| {
+                json!({
+                    "revision": revision,
+                    "documents": {"settings": settings, "server": server, "local": local},
+                })
+                .to_string()
+            })
     })
     .flatten()
     .unwrap_or_default()
+}
+
+/// The editable fields of the server document, for the page's panel.
+pub fn game_server_schema() -> String {
+    crate::server::schema_view()
+}
+
+/// The server document, its clock, the client's copies and the pending
+/// sections.
+pub fn game_server_document() -> String {
+    crate::server::document_view()
 }
 
 /// The world's part of the projection, written by [`publish`].
@@ -324,9 +384,15 @@ pub fn game_snapshot() -> String {
             .unwrap_or_default();
     if refused > 0 {
         world.errors.push(format!(
-            "persist: {refused} settings writes refused because this tab is read-only"
+            "persist: {refused} document writes refused because this tab is read-only"
         ));
     }
+    let server_revision = crate::server::with_model(|model| {
+        for error in model.errors() {
+            world.errors.push(format!("server: {error}"));
+        }
+        model.revision()
+    });
     json!({
         "schemaVersion": SCHEMA,
         "abi": ABI,
@@ -338,6 +404,7 @@ pub fn game_snapshot() -> String {
         },
         "writable": crate::settings_store::browser_storage_writable(),
         "persist": {"revision": revision, "acked": acked},
+        "server": {"revision": server_revision},
         "memory": {"wasmBytes": wasm_bytes()},
         "errors": world.errors,
     })
@@ -413,7 +480,7 @@ fn drain_commands(mut library: ResMut<crate::content_library::ContentLibrary>) {
         match command {
             GameCommand::Lifecycle(value) => info!("[game] page lifecycle {}", value.name()),
             GameCommand::Input(captured) => library.set_host_input_capture(captured),
-            GameCommand::PersistAck(_) => {}
+            GameCommand::PersistAck(_) | GameCommand::ServerEdit(_) => {}
         }
     }
 }

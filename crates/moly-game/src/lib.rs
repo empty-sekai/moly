@@ -118,6 +118,7 @@ mod room_appearance;
 mod room_shell;
 pub mod schedule;
 mod screen_fade;
+mod server;
 mod server_panel;
 mod settings_store;
 pub mod shadowmap;
@@ -161,8 +162,9 @@ mod source_particle_render;
 use bevy::prelude::*;
 
 pub use browser_game::{
-    configure_browser_game, game_command, game_mode_active, game_snapshot, game_take_persist,
-    install_game_storage, parse_game_seed, GameSeed,
+    configure_browser_game, game_command, game_mode_active, game_server_document,
+    game_server_schema, game_snapshot, game_take_persist, install_game_storage, parse_game_seed,
+    GameSeed,
 };
 pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
 pub use content_library::library_diagnostics;
@@ -229,6 +231,7 @@ pub fn app(
     ui_layout::install(&mut app);
     app.add_plugins(site::SitePlugin(site));
     schedule::install(&mut app);
+    app.add_plugins(server::ServerPlugin);
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);

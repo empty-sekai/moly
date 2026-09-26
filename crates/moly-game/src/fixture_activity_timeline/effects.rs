@@ -2,9 +2,11 @@
 //! the actual fixture instance and its capabilities; this owner supplies the
 //! Director clock, activation, exclusion and post-playback restoration.
 //! A director that binds its Control clips through its own exposed-reference
-//! table (a step item, a site prefab's director, a cut scene) controls the
+//! table (a step item, a site prefab's director, a cut scene, and a fixture
+//! timeline view's clips that its effect list does not name) controls the
 //! spawned node its clip resolves to, read from the director's package
-//! particle document.
+//! particle document. A clip the particle host refuses is a named gap; the
+//! rest of the timeline plays.
 use super::*;
 use crate::fixture_timeline_particles::{self as particles, ParticleControlBinding};
 use moly_assets::scene_state::{SetSourceActive, SourceNodeActivity};
@@ -102,8 +104,23 @@ fn director_control_refusal(clip: &TimelineClip, source: &ExposedSource) -> Stri
     }
 }
 
+/// Whether a Control clip's source object is the director's own
+/// `ExposedReference.Resolve`: every Control clip of a director-bound owner,
+/// and a clip of a fixture timeline view that the view's effect list does not
+/// name. A view's `BindEffects` calls `SetReferenceValue` only for the clips
+/// its effect list names (and only when it finds the named ParticleSystem);
+/// the others keep the director's exposed-reference table, or the
+/// reference's default value.
 fn director_bound(request: &StartTimeline, clip: &TimelineClip) -> bool {
-    binds_through_director(request.owner.kind) && clip.exposed_source.is_some()
+    clip.exposed_source.is_some()
+        && (binds_through_director(request.owner.kind) || clip.effect_binding.is_none())
+}
+
+/// A view's `BindEffects` found no ParticleSystem with the effect's bind
+/// name under the view's parent: it sets no reference value, so the clip
+/// resolves through the director as an unnamed clip does.
+fn bind_name_absent(error: &TimelineFailure) -> bool {
+    !error.retryable && error.message.starts_with("fixture particle binding not found")
 }
 
 pub(super) fn prepare(
@@ -132,7 +149,55 @@ pub(super) fn prepare(
     // Director-bound clips already driven, by the object they control.
     let mut driven: Vec<(Entity, TimelineClip)> = Vec::new();
     for (clip, settings) in selected {
-        if binds_through_director(request.owner.kind) {
+        // A view-named clip: the view's `BindEffects` binds the first
+        // ParticleSystem with the bind name under the view's parent. A
+        // preparation still loading is retried; a missing name falls through
+        // to the director's own reference; any other refusal of the particle
+        // host leaves this clip a named gap and the rest of the timeline plays.
+        let mut view_fallback = false;
+        if !director_bound(request, &clip) {
+            let binding = source_binding(&clip, &settings)?;
+            let view = request
+                .definition
+                .fixture_view
+                .as_ref()
+                .ok_or_else(|| invalid("ControlPlayableAsset NPC view metadata is missing"))?;
+            if view
+                .effects
+                .iter()
+                .filter(|row| row.playable == clip.playable)
+                .count()
+                != 1
+            {
+                return Err(invalid("ControlPlayableAsset effect binding is duplicated"));
+            }
+            match particles::prepare(world, request.fixture, &binding.bind_name, &settings) {
+                Ok(prepared) => {
+                    request.bindings.refused_controls.remove(&clip.key);
+                    request.bindings.controls.insert(clip.key.clone(), prepared);
+                    continue;
+                }
+                Err(error) if error.retryable => return Err(error),
+                Err(error) if bind_name_absent(&error) && clip.exposed_source.is_some() => {
+                    view_fallback = true;
+                }
+                Err(error) => {
+                    let reason = format!(
+                        "{}: its effect {} is refused by the particle host: {}",
+                        clip_head(&clip),
+                        binding.bind_name,
+                        error.message
+                    );
+                    request.bindings.controls.remove(&clip.key);
+                    request
+                        .bindings
+                        .refused_controls
+                        .insert(clip.key.clone(), reason);
+                    continue;
+                }
+            }
+        }
+        if director_bound(request, &clip) || view_fallback {
             if let Some(source) = &clip.exposed_source {
                 let object = match source {
                     ExposedSource::Object(object) => exposed_object(world, request, object),
@@ -201,25 +266,6 @@ pub(super) fn prepare(
                 continue;
             }
         }
-        let binding = source_binding(&clip, &settings)?;
-        let view = request
-            .definition
-            .fixture_view
-            .as_ref()
-            .ok_or_else(|| invalid("ControlPlayableAsset NPC view metadata is missing"))?;
-        if view
-            .effects
-            .iter()
-            .filter(|row| row.playable == clip.playable)
-            .count()
-            != 1
-        {
-            return Err(invalid("ControlPlayableAsset effect binding is duplicated"));
-        }
-        request.bindings.controls.insert(
-            clip.key.clone(),
-            particles::prepare(world, request.fixture, &binding.bind_name, &settings)?,
-        );
     }
     Ok(())
 }

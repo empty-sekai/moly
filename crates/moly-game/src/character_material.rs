@@ -67,12 +67,17 @@ const SUNNY_BODY_SHADE: [f32; 4] = [
 /// 晴天现象的角色方向光色：源值纯白、混合因子 1。
 const SUNNY_LIGHT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// 球面支 edge 的具名替身。两作出处：源侧这两量是引擎全局量、提取产物
-/// 与语料都读不出值；demo（用户验收过的观感基线）取 0.0。读出真值后
-/// 改这里一处。
-const SPHERE_EDGE_STAND_IN: f32 = 0.0;
-/// 球面支 smoothness 的具名替身，同上；demo 取 1.0。
-const SPHERE_SMOOTHNESS_STAND_IN: f32 = 1.0;
+/// 球面支 edge（`_FaceSphereShadowEdge`）。源每帧从图形配置的角色档
+/// （`MysekaiGraphicsConfig._characterData`，Resources 里
+/// `graphics/data/charactersettings` 那一个 `MysekaiGraphicsConfigCharacterData`）
+/// 读 `FaceSphereShadowEdge` 推成全局量；这份档随客户端出货、不分天气
+/// 与地点，全游戏只有这一份。序列化字：`0x00000000`。
+const FACE_SPHERE_SHADOW_EDGE: f32 = f32::from_bits(0x0000_0000);
+/// 球面支 smoothness（`_FaceSphereShadowSmoothness`），同一份档的
+/// `FaceSphereShadowSmoothness`。序列化字：`0x3f800000`。另有一个嵌套类
+/// 的同名两字段（取值 0 / 0.112）不喂这个 shader：推全局量的那段只解引用
+/// `_characterData`。
+const FACE_SPHERE_SHADOW_SMOOTHNESS: f32 = f32::from_bits(0x3f80_0000);
 
 // ---- 材质参数块 ----
 
@@ -362,8 +367,8 @@ impl CharacterEnv {
                 light_color: [1.0, 1.0, 1.0, 1.0],
                 skin_shade_color: [1.0, 1.0, 1.0, 1.0],
                 body_shade_color: [1.0, 1.0, 1.0, 1.0],
-                face_sphere_shadow_edge: SPHERE_EDGE_STAND_IN,
-                face_sphere_shadow_smoothness: SPHERE_SMOOTHNESS_STAND_IN,
+                face_sphere_shadow_edge: FACE_SPHERE_SHADOW_EDGE,
+                face_sphere_shadow_smoothness: FACE_SPHERE_SHADOW_SMOOTHNESS,
                 screen_params: [1.0, 1.0, 1.0, 1.0],
                 mip_bias: [0.0, 0.0],
                 fog_params: [0.0; 4],
@@ -419,15 +424,15 @@ pub fn insert_neutral(mut commands: Commands) {
     commands.insert_resource(CharacterEnv::neutral());
 }
 
-/// Startup：晴天现象常量写入（光向、光色、双色、球面替身值）。
+/// Startup：晴天现象常量写入（光向、光色、双色），与图形配置的球面支两值。
 pub fn apply_sunny(mut env: ResMut<CharacterEnv>) {
     let toward = light::dir_toward_light(light::ANGLE_XZ, light::ANGLE_Y);
     env.globals.light_vector = [toward.x, toward.y, toward.z];
     env.globals.light_color = SUNNY_LIGHT_COLOR;
     env.globals.skin_shade_color = SUNNY_SKIN_SHADE;
     env.globals.body_shade_color = SUNNY_BODY_SHADE;
-    env.globals.face_sphere_shadow_edge = SPHERE_EDGE_STAND_IN;
-    env.globals.face_sphere_shadow_smoothness = SPHERE_SMOOTHNESS_STAND_IN;
+    env.globals.face_sphere_shadow_edge = FACE_SPHERE_SHADOW_EDGE;
+    env.globals.face_sphere_shadow_smoothness = FACE_SPHERE_SHADOW_SMOOTHNESS;
 }
 
 /// Startup：请求装载晴天雾档案（与站点共用同一份 postprocess 数据，

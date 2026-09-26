@@ -17,7 +17,7 @@ pub(crate) use source::{
 };
 
 use crate::{
-    alone_action_runtime::{apply_eye, apply_mouth_pattern},
+    alone_action_runtime::{apply_eye_pattern, apply_mouth_pattern, FacialTables},
     audio::{BusVolume, Routing, SeClass, VolumeBus},
     character_material::{CharacterMaterial, ToonMaterials},
     fixture_activity_state::FixtureActivityOwner,
@@ -34,7 +34,7 @@ use bevy::{
     prelude::*,
 };
 use moly_assets::json::JsonAsset;
-use moly_law::facial::LipPattern;
+use moly_law::blink::EyePattern;
 use serde_json::Value;
 use source::{array, asset, finite, flag, invalid, string};
 use std::{
@@ -683,6 +683,7 @@ fn prepare_actor_tracks(
                         | TimelinePayload::LipGate
                         | TimelinePayload::NpcIkTalkGate
                         | TimelinePayload::Emoticon { .. }
+                        | TimelinePayload::FadeCharacter(_)
                 )
             });
         if named_cast || single_body || single_face {
@@ -837,9 +838,9 @@ pub(crate) struct TimelineBindings {
     pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
     pub controls:
         HashMap<TimelineClipKey, crate::fixture_timeline_particles::ParticleControlBinding>,
-    /// Control clips of a director that binds them through its own
-    /// exposed-reference table (a step item, a site prefab's director) and
-    /// that this runner does not drive, each with the reason, by clip. The
+    /// Control clips this runner does not drive, each with the reason, by
+    /// clip: a source object that resolves to no spawned node, a later clip
+    /// over the same object, or an object the particle host refuses. The
     /// rest of the timeline plays; each one is a named coverage gap.
     pub refused_controls: HashMap<TimelineClipKey, String>,
     /// The `SignalReceiver` bound to a track's output (`SetGenericBinding`),
@@ -997,9 +998,12 @@ struct BoundNode {
     animator: Entity,
     node: AnimationNodeIndex,
 }
-struct PriorFace {
-    st: [f32; 4],
-    lip_pattern: Option<LipPattern>,
+/// A fade track's clip behaviour state (`FadeCharacterBehaviour`): the
+/// clip found at its `OnBehaviourPlay` and that clip's start.
+#[derive(Clone, Copy)]
+struct FadeBehaviour {
+    current: usize,
+    start: f64,
 }
 
 struct Session {
@@ -1008,7 +1012,11 @@ struct Session {
     clock: clock::Clock,
     nodes: Vec<BoundNode>,
     prior_pose: Vec<(Entity, Transform)>,
-    prior_face: HashMap<Handle<CharacterMaterial>, PriorFace>,
+    /// The eye pattern and cell this director last wrote per eye material,
+    /// so an unchanged per-frame `ChangeEyePattern` does not rewrite it.
+    eye_written: HashMap<Handle<CharacterMaterial>, (EyePattern, [f32; 4])>,
+    /// Each fade track's playing clip behaviours, by clip.
+    fades: HashMap<TimelineClipKey, FadeBehaviour>,
     prior_gates: HashMap<Entity, Option<TimelineFacialState>>,
     sound_entities: Vec<Entity>,
     emoticons: HashMap<TimelineClipKey, crate::emoticon::timeline::EmoteLease>,
@@ -1078,7 +1086,8 @@ impl FixtureActivityTimelines {
                 clock: Default::default(),
                 nodes: Vec::new(),
                 prior_pose: Vec::new(),
-                prior_face: HashMap::new(),
+                eye_written: HashMap::new(),
+                fades: HashMap::new(),
                 prior_gates: HashMap::new(),
                 sound_entities: Vec::new(),
                 emoticons: HashMap::new(),
@@ -1778,11 +1787,24 @@ fn validate(
                         return Err(invalid("source audio volume bus missing"));
                     }
                 }
-                TimelinePayload::Eye { .. } => {
-                    face_handle(world, request, &track.identity, "eye")?;
+                TimelinePayload::Eye { .. } | TimelinePayload::Lip { .. } => {
+                    let eye = matches!(clip.payload, TimelinePayload::Eye { .. });
+                    face_handle(world, request, &track.identity, if eye { "eye" } else { "mouth" })?;
+                    // The view's own eye and lip tables (`FindBy` by name).
+                    if !world.contains_resource::<FacialTables>() {
+                        return Err(TimelineFailure::loading("facial tables still loading"));
+                    }
                 }
-                TimelinePayload::Lip { .. } => {
-                    face_handle(world, request, &track.identity, "mouth")?;
+                TimelinePayload::FadeCharacter(_) => {
+                    let actor = request
+                        .bindings
+                        .actors
+                        .get(&track.identity)
+                        .ok_or_else(|| invalid("fade character track actor missing"))?;
+                    validate_track_actor(world, request, &track.identity, *actor)?;
+                    if world.get::<ToonMaterials>(*actor).is_none() {
+                        return Err(invalid("fade character track actor has no materials"));
+                    }
                 }
                 TimelinePayload::BlinkGate
                 | TimelinePayload::LipGate
@@ -2234,11 +2256,8 @@ fn initialize(
     for track in &request.definition.tracks {
         for clip in &track.clips {
             let feature = match clip.payload {
-                TimelinePayload::Eye { blink: true, open, close, .. } if close >= 0 && close != open =>
-                    Some(("SourceBlinkOscillator","selected eye preset carries distinct open/close cells and enables blinking; only its open cell is rendered")),
                 TimelinePayload::Lip { open, middle, close, .. } if world.get::<crate::player::PlayerControlled>(request.owner.activity.actor).is_some() && (open != close || (middle >= 0 && middle != close)) =>
                     Some(("SourceLipSyncOscillator","selected lip preset supplies the actor's full row; Timeline-controlled lip enable/analyzer binding is not implemented")),
-                TimelinePayload::BlinkGate => Some(("SourceBlinkOscillator","authored blink gates are retained; automatic blink cadence is not implemented")),
                 TimelinePayload::LipGate if world.get::<crate::player::PlayerControlled>(request.owner.activity.actor).is_some() => Some(("SourceLipSyncOscillator","player avatar timeline lip enable/analyzer adapter is not implemented")),
                 TimelinePayload::LipGate => Some(("SourceLipSyncArbitration","NPC mixer enable/null-analyzer reaches the existing oscillator; cross-owner voice setter ordering and final visual playback remain unverified")),
                 TimelinePayload::NpcIkTalkGate if request.owner.kind == TimelineOwnerKind::Npc => Some(("SourceTalkIK","NPC talk IK gate is exposed but its native solver is not implemented")),
@@ -2418,6 +2437,7 @@ fn tick(
     )
     .map_err(source_effect_failure)?;
     apply_events(world, session, sampled_time)?;
+    process_character_tracks(world, session, sampled_time)?;
     emit_signals(world, session, sampled_time)?;
     sample_signal_targets(world, session, sampled_time);
     update_facial_gates(world, token, session, sampled_time);
@@ -2526,8 +2546,7 @@ fn apply_events(
         .filter(|clip| {
             matches!(
                 clip.payload,
-                TimelinePayload::Eye { .. }
-                    | TimelinePayload::Lip { .. }
+                TimelinePayload::Lip { .. }
                     | TimelinePayload::Se { .. }
                     | TimelinePayload::Emoticon { .. }
             )
@@ -2561,45 +2580,28 @@ fn apply_events(
         .collect();
     for (key, _, _, payload) in entered {
         match payload {
-            TimelinePayload::Eye { .. } | TimelinePayload::Lip { .. } => {
-                let eye = matches!(payload, TimelinePayload::Eye { .. });
-                let handle = face_handle(
-                    world,
-                    &session.request,
-                    &key.track,
-                    if eye { "eye" } else { "mouth" },
-                )?;
-                let mut materials = world.resource_mut::<Assets<CharacterMaterial>>();
-                let previous = materials
-                    .get(&handle)
-                    .ok_or_else(|| invalid("face material disappeared"))?;
-                session
-                    .prior_face
-                    .entry(handle.clone())
-                    .or_insert(PriorFace {
-                        st: previous.params.main_tex_st,
-                        lip_pattern: previous.lip_pattern,
-                    });
-                match payload {
-                    TimelinePayload::Eye { open, .. } => {
-                        apply_eye(&mut materials, &handle, Some(open))
-                    }
-                    TimelinePayload::Lip {
-                        open,
-                        middle,
-                        close,
-                        ..
-                    } => apply_mouth_pattern(
-                        &mut materials,
-                        &handle,
-                        LipPattern {
-                            open: *open,
-                            middle: *middle,
-                            close: *close,
-                        },
-                    ),
-                    _ => unreachable!(),
-                };
+            // `ChangeLipSyncPresetBehaviour.OnBehaviourPlay`: the view's
+            // `ChangeLipSyncPattern` with the clip's pattern name, looked up in
+            // the view's own lip table (`FindBy`: a zero-valued row, and an
+            // error log, for an absent name); the Close cell is written. The
+            // view keeps the pattern after the director.
+            TimelinePayload::Lip { pattern, .. } => {
+                let handle = face_handle(world, &session.request, &key.track, "mouth")?;
+                let row = world
+                    .get_resource::<FacialTables>()
+                    .ok_or_else(|| TimelineFailure::loading("facial tables still loading"))?
+                    .lip_pattern(pattern);
+                if row.is_none() {
+                    warn!(
+                        "[timeline-face] {}/{}: lip pattern {pattern} is not in the lip table (FindBy's zero-valued row)",
+                        session.request.definition.package, session.request.definition.prefab
+                    );
+                }
+                apply_mouth_pattern(
+                    &mut world.resource_mut::<Assets<CharacterMaterial>>(),
+                    &handle,
+                    row.unwrap_or_default(),
+                );
             }
             TimelinePayload::Emoticon { name, use_root } => {
                 let actor = session.request.bindings.actors[&key.track];
@@ -2634,6 +2636,192 @@ fn apply_events(
     }
     session.active_events = active;
     Ok(())
+}
+
+/// The character tracks' per-frame mixers, in the director's output order
+/// (track order); within a track its clip behaviours run before its mixer
+/// (the engine's script output processes a playable tree in post order).
+/// Each acts on the view its track is bound to; a track bound to no NPC view
+/// (a player avatar, a missing member) acts on nothing, as the source's
+/// `GetBindingCharacter` returns null there.
+///
+/// - `ChangeEyePresetMixerBehaviour`: while a clip is active, every frame, the
+///   view's `ChangeEyePattern` with that clip's pattern name (the last active
+///   clip's when clips overlap: each clip's `PrepareFrame` hands its clip to
+///   the track state, in input order); with no clip active, nothing. The
+///   pattern is looked up in the view's own eye table (`FindBy`: a
+///   zero-valued row for an absent name) and its open cell is written, so an
+///   automatic blink's closed cell written earlier in the frame is replaced
+///   while such a clip is active. The view keeps the last pattern.
+/// - `ChangeBlinkStateMixerBehaviour`: every frame, the view's blink flag is
+///   whether a clip of the track is active. The flag keeps its last value
+///   after the director.
+/// - `FadeCharacterBehaviour` then `FadeCharacterMixerBehaviour`: an active
+///   clip's behaviour writes its curve at `(float)(t - start) / (float)duration`,
+///   where the clip and its start are the ones found at its
+///   `OnBehaviourPlay` (the first clip of the track with start <= t <= end).
+///   Then the mixer: while a clip has start < t < end it writes nothing;
+///   otherwise the last key value of the last clip (in end order) that ended
+///   before t, or 1 when none has. The value is the view's `SetDitherAlpha`
+///   (every material; dither off above 0.999).
+fn process_character_tracks(
+    world: &mut World,
+    session: &mut Session,
+    time: f64,
+) -> Result<(), TimelineFailure> {
+    let definition = session.request.definition.clone();
+    for track in &definition.tracks {
+        let Some(&actor) = session.request.bindings.actors.get(&track.identity) else {
+            continue;
+        };
+        let Some(first) = track.clips.first() else {
+            continue;
+        };
+        match &first.payload {
+            TimelinePayload::Eye { .. } => {
+                let active = track.clips.iter().rev().find(|clip| {
+                    matches!(clip.payload, TimelinePayload::Eye { .. }) && clip.contains(time)
+                });
+                if let Some(TimelinePayload::Eye { pattern, .. }) = active.map(|clip| &clip.payload)
+                {
+                    change_eye_pattern(world, session, &track.identity, pattern)?;
+                }
+            }
+            TimelinePayload::BlinkGate => {
+                let active = track.clips.iter().any(|clip| {
+                    matches!(clip.payload, TimelinePayload::BlinkGate) && clip.contains(time)
+                });
+                if let Some(mut blink) = world.get_mut::<crate::npc_view::NpcBlink>(actor) {
+                    blink.set_enabled(active);
+                }
+            }
+            TimelinePayload::FadeCharacter(_) => {
+                if let Some(alpha) = fade_character(session, track, time) {
+                    set_dither_alpha(world, actor, alpha);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// `NPCAvatarView.ChangeEyePattern(name)` on a track's bound view.
+fn change_eye_pattern(
+    world: &mut World,
+    session: &mut Session,
+    track: &SourceAssetId,
+    name: &str,
+) -> Result<(), TimelineFailure> {
+    let handle = face_handle(world, &session.request, track, "eye")?;
+    let row = world
+        .get_resource::<FacialTables>()
+        .ok_or_else(|| TimelineFailure::loading("facial tables still loading"))?
+        .eye_pattern(name);
+    let pattern = crate::npc_view::pattern_or_zero(row);
+    let current = world
+        .resource::<Assets<CharacterMaterial>>()
+        .get(&handle)
+        .map(|material| (material.eye_pattern, material.params.main_tex_st))
+        .ok_or_else(|| invalid("face material disappeared"))?;
+    let written = session.eye_written.get(&handle).copied();
+    // The same pattern and the cell this director wrote are still there: the
+    // write would change nothing.
+    if written.is_some_and(|(p, st)| p == pattern && current == (Some(pattern), st)) {
+        return Ok(());
+    }
+    if row.is_none() && written.map(|(p, _)| p) != Some(pattern) {
+        warn!(
+            "[timeline-face] {}/{}: eye pattern {name} is not in the eye table (FindBy's zero-valued row)",
+            session.request.definition.package, session.request.definition.prefab
+        );
+    }
+    let mut materials = world.resource_mut::<Assets<CharacterMaterial>>();
+    apply_eye_pattern(&mut materials, &handle, row);
+    let st = materials
+        .get(&handle)
+        .map(|material| material.params.main_tex_st)
+        .ok_or_else(|| invalid("face material disappeared"))?;
+    session.eye_written.insert(handle, (pattern, st));
+    Ok(())
+}
+
+/// One frame of a fade track: its clip behaviours, then its mixer. `None`
+/// when nothing is written this frame.
+fn fade_character(session: &mut Session, track: &TimelineTrack, time: f64) -> Option<f32> {
+    let clips: Vec<(&TimelineClip, &source::FadeCurve)> = track
+        .clips
+        .iter()
+        .filter_map(|clip| match &clip.payload {
+            TimelinePayload::FadeCharacter(curve) => Some((clip, &**curve)),
+            _ => None,
+        })
+        .collect();
+    let mut alpha = None;
+    for (clip, _) in &clips {
+        if !clip.contains(time) {
+            // `OnBehaviourPause`.
+            session.fades.remove(&clip.key);
+            continue;
+        }
+        let state = *session.fades.entry(clip.key.clone()).or_insert_with(|| {
+            // `OnBehaviourPlay`: `GetClips().FirstOrDefault(start <= t <= end)`.
+            let current = clips
+                .iter()
+                .position(|(other, _)| other.start <= time && time <= other.end())
+                .expect("an active clip contains t");
+            FadeBehaviour {
+                current,
+                start: clips[current].0.start,
+            }
+        });
+        let (current, curve) = clips[state.current];
+        alpha = Some(curve.evaluate((time - state.start) as f32 / current.duration as f32));
+    }
+    // The mixer's clips, ordered by end (a stable sort).
+    let mut by_end = clips.clone();
+    by_end.sort_by(|a, b| a.0.end().total_cmp(&b.0.end()));
+    if by_end
+        .iter()
+        .any(|(clip, _)| clip.start < time && time < clip.end())
+    {
+        return alpha;
+    }
+    Some(
+        by_end
+            .iter()
+            .rev()
+            .find(|(clip, _)| clip.end() < time)
+            .map_or(1.0, |(_, curve)| curve.last_value),
+    )
+}
+
+/// `NPCAvatarView.SetDitherAlpha(alpha)`: every material of the view
+/// (`MysekaiMaterialExtension.SetDitherAlpha`: the dither is off above 0.999).
+fn set_dither_alpha(world: &mut World, actor: Entity, alpha: f32) {
+    let Some(toon) = world.get::<ToonMaterials>(actor) else {
+        return;
+    };
+    let handles: Vec<_> = toon.slot_handles().cloned().collect();
+    let use_dither = if moly_law::objective::overlap::use_dither(alpha) {
+        1.0_f32
+    } else {
+        0.0
+    };
+    let mut materials = world.resource_mut::<Assets<CharacterMaterial>>();
+    for handle in &handles {
+        let changed = materials.get(handle).is_some_and(|material| {
+            material.params.dither_alpha.to_bits() != alpha.to_bits()
+                || material.params.use_dither.to_bits() != use_dither.to_bits()
+        });
+        if !changed {
+            continue;
+        }
+        if let Some(material) = materials.get_mut_untracked(handle) {
+            material.params.dither_alpha = alpha;
+            material.params.use_dither = use_dither;
+        }
+    }
 }
 
 /// `TimeNotificationBehaviour` over the tracks' signal emitters, on the
@@ -2918,17 +3106,12 @@ fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
             world.despawn(entity);
         }
     }
-    if let Some(mut materials) = world.get_resource_mut::<Assets<CharacterMaterial>>() {
-        for (handle, prior) in session.prior_face.drain() {
-            if let Some(material) = materials.get_mut(&handle) {
-                material.params.main_tex_st = prior.st;
-                if material.lip_pattern != prior.lip_pattern {
-                    material.lip_pattern = prior.lip_pattern;
-                    material.lip_pattern_revision = material.lip_pattern_revision.wrapping_add(1);
-                }
-            }
-        }
-    }
+    // The eye and lip patterns a director set stay on the view: the source's
+    // `ChangeEyePattern` / `ChangeLipSyncPattern` writers are never undone at
+    // a director's end (no caller restores them), and neither are the blink
+    // flag and the dither alpha its mixers wrote last.
+    session.eye_written.clear();
+    session.fades.clear();
     for (actor, prior) in session.prior_gates.drain() {
         if world
             .get::<TimelineFacialState>(actor)
