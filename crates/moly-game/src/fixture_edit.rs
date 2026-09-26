@@ -78,6 +78,13 @@ pub(crate) enum EditCommand {
     RotateCamera,
     /// The change-look button (`LayoutAction` 14).
     ChangeLookCamera,
+    /// The remove-all button (`SiteEditView.OnRemoveFixtureAll`): opens the
+    /// clean-up confirmation.
+    RequestCleanUp,
+    /// The confirmation's clean-up button (`CleanUpFixture`).
+    CleanUpAll,
+    /// The confirmation's cancel or close button, or a tap outside it.
+    CancelCleanUp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -153,6 +160,8 @@ pub(crate) struct EditView {
     pub site_type: String,
     pub dirty: bool,
     pub exit_dialog: bool,
+    /// The remove-all confirmation is open.
+    pub clean_up_dialog: bool,
     pub selected: Option<EditSelectionView>,
     pub placed_rows: Vec<EditItemView>,
     pub inventory: Vec<EditItemView>,
@@ -197,6 +206,7 @@ pub(crate) struct EditSession {
     inventory: Vec<EditableFixture>,
     selected: Option<Selection>,
     exit_dialog: bool,
+    clean_up_dialog: bool,
     feedback: String,
 }
 
@@ -242,6 +252,7 @@ impl EditSession {
         self.inventory.clear();
         self.selected = None;
         self.exit_dialog = false;
+        self.clean_up_dialog = false;
         self.changed();
     }
 }
@@ -1044,7 +1055,17 @@ fn return_item(session: &mut EditSession) {
         return;
     }
     let uid = selection.item.uid.clone();
-    if session.inventory.iter().any(|item| item.uid == uid) {
+    // FloorEditState.RemoveFixture: the fixtures stacked on it go to storage
+    // with it (GetStackFixtureUidList, recursively).
+    let stacked: Vec<String> = selection
+        .stacked
+        .iter()
+        .map(|row| row.uid.clone())
+        .collect();
+    if std::iter::once(&uid)
+        .chain(&stacked)
+        .any(|uid| session.inventory.iter().any(|item| &item.uid == uid))
+    {
         session.say("该UID已经在库存中，拒绝重复回收，原数据保持不变。");
         return;
     }
@@ -1056,10 +1077,78 @@ fn return_item(session: &mut EditSession) {
     // moved pose is irrelevant to ownership and is not accidentally decided.
     let item = session.rows.remove(index);
     session.inventory.push(item);
+    for child in &stacked {
+        if let Some(index) = session.rows.iter().position(|row| &row.uid == child) {
+            let row = session.rows.remove(index);
+            session.inventory.push(row);
+        }
+    }
+    if !stacked.is_empty() {
+        info!(
+            "[edit-put] RemoveFixture {uid}: the stacked fixtures {stacked:?} go to storage with it"
+        );
+    }
     session.selected = None;
     session.phase = EditPhase::Browsing;
     session.changed();
     session.say("已回收到离线库存草稿；物品UID保留，保存后可在其它地图重新摆放。");
+}
+
+/// `SiteLayoutEditor.CleanUpLayout` in the floor edit state
+/// (`FloorEditState.RemoveFixtureAll`): the selection is dropped, then every
+/// fixture of the floor and rug grids that `IsRemoveTarget` passes (not a
+/// fence or road, `CanCleanUp`) goes to storage, with what stands on it.
+fn clean_up_all(world: &World, session: &mut EditSession) {
+    let (Some(homes), Some(traits)) = (
+        world.get_resource::<crate::entry::house::HomeFixtures>(),
+        put_effect::traits_table(world),
+    ) else {
+        session.say("家具主表仍在加载，未清理家具。");
+        return;
+    };
+    session.cancel_selection();
+    let (mut kept_house, mut kept_joint, mut moved) = (0usize, 0usize, Vec::new());
+    let mut index = 0;
+    while index < session.rows.len() {
+        let row = &session.rows[index];
+        let in_grids = row.layout == layout_type::FLOOR || row.layout == layout_type::RUG;
+        let joint = traits.get(&row.fixture_id).is_some_and(|t| t.joint);
+        let can_clean_up = homes.can_clean_up(&row.package);
+        if !in_grids {
+            index += 1;
+            continue;
+        }
+        if joint {
+            kept_joint += 1;
+            index += 1;
+            continue;
+        }
+        if !can_clean_up {
+            kept_house += 1;
+            index += 1;
+            continue;
+        }
+        if session.inventory.iter().any(|item| item.uid == row.uid) {
+            index += 1;
+            continue;
+        }
+        let row = session.rows.remove(index);
+        moved.push(row.uid.clone());
+        session.inventory.push(row);
+    }
+    info!(
+        "[edit-put] RemoveFixtureAll (floor and rug grids): {} fixtures to storage {:?}; kept {} that CanCleanUp refuses, {} fences or roads; {} rows remain",
+        moved.len(),
+        moved,
+        kept_house,
+        kept_joint,
+        session.rows.len()
+    );
+    session.changed();
+    session.say(format!(
+        "已清理 {} 件家具到离线库存草稿；家与大门保留。保存后生效。",
+        moved.len()
+    ));
 }
 
 fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
@@ -1272,6 +1361,25 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             session.exit_dialog = false;
             session.changed();
         }
+        EditCommand::RequestCleanUp => {
+            if session.phase != EditPhase::Idle && !session.exit_dialog {
+                session.clean_up_dialog = true;
+                session.changed();
+            }
+        }
+        EditCommand::CancelCleanUp => {
+            if session.clean_up_dialog {
+                session.clean_up_dialog = false;
+                session.changed();
+            }
+        }
+        EditCommand::CleanUpAll => {
+            // Only the confirmation offers this action.
+            if session.clean_up_dialog {
+                session.clean_up_dialog = false;
+                clean_up_all(world, session);
+            }
+        }
         EditCommand::DiscardAndExit => {
             // Not a hotkey nor a site-switch fallback. Only the explicit exit
             // prompt offers this source action (ReloadPlayerLayoutDataAsync).
@@ -1407,6 +1515,7 @@ fn publish_view(world: &mut World) {
             .map_or_else(String::new, |rows| rows.site_type().into()),
         dirty: session.dirty(),
         exit_dialog: session.exit_dialog,
+        clean_up_dialog: session.clean_up_dialog,
         selected,
         placed_rows: session.rows.iter().map(&editable).collect(),
         inventory: session.inventory.iter().map(&editable).collect(),
