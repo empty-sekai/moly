@@ -53,11 +53,12 @@
 //!   time (the angle to turn / 60 s) with an out-quart ease, on a floor
 //!   towards the room door's forward over 0 s (it completes at its first
 //!   update, the next frame); the turn clip the presenter starts with each
-//!   and the idle clip it awaits after it are not played (the character is
-//!   hidden while it turns), and that idle clip's wait is taken as none;
+//!   plays through the motion driver while the look-at runs (the character
+//!   is hidden meanwhile), the idle clip after it is the driver's idle, and
+//!   the wait on that idle clip's change is taken as none;
 //! - the room-entry tweet's turn to the player is the same awaited look-at
 //!   (towards the player's position over the rotate time, out-quart), with
-//!   the same clips not played; the knock sound's wait and the door's open
+//!   the same clips; the knock sound's wait and the door's open
 //!   wait end at once (this host reads
 //!   neither the sound nor the door clip's length back); the brightness
 //!   fade, the tweet's eye, mouth and emoticon, and the facial reset are not
@@ -650,12 +651,15 @@ fn begin_turn(
             (towards - position).to_array(),
         ))
     });
-    world.entity_mut(actor).insert(crate::npc_look_at::NpcLookAt::new(
-        towards,
-        duration,
-        moly_law::ui::dotween::Ease::OutQuart,
-        frame,
-    ));
+    world
+        .entity_mut(actor)
+        .insert(crate::npc_look_at::NpcLookAt::new(
+            towards,
+            forward,
+            duration,
+            moly_law::ui::dotween::Ease::OutQuart,
+            frame,
+        ));
     info!(
         "[npc-change-site] unit={unit} frame={frame} DoLookAtAsync(({:.3},{:.3},{:.3}), {duration} s, out-quart), awaited",
         towards.x, towards.y, towards.z
