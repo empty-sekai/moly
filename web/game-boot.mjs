@@ -120,6 +120,7 @@ export async function bootGame({
     }
   };
   const absoluteAssets = new URL(place.assets, pageUrl).href;
+  let lastBytesReport = 0;
   const { module, backend } = await loadEngine({
     requested: renderer,
     environment,
@@ -182,6 +183,12 @@ export async function bootGame({
     contract: "game",
     onBytes(total) {
       progress.engineBytes = total;
+      // At most four download reports a second.
+      const now = performance.now();
+      if (now - lastBytesReport >= 250) {
+        lastBytesReport = now;
+        report();
+      }
     },
     waitTick() {
       if (progress.phase === "base") report();
