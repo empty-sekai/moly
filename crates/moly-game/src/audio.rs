@@ -45,16 +45,18 @@
 //! text，voice 与文本行是行内同拍，不是窗体开拍。通道单声道：真源每次
 //! 起播前 `StopVoiceAll`（在 ExistsCueName 判定之前，缺 cue 也先停旧声）；
 //! 缺 cue 真源是「不播、对话照走」，这边照做并按本仓纪律把跳过记响。
-//! 音量 = 1.0 × 面板 `vox_scenario`（talk voice 包的 ACB category 实名）。
+//! 音量 = voice 播放器 × cue 的类别（talk voice 的 cue 属 VOX_SCENARIO）与
+//! 音量命令。
 //!
 //! **一次性 SE 通道**（`SoundManager.PlaySEOneShot` 的事件族）是第五个：
 //! 事件侧入队（采集受击、对话窗点跳/步进、摆放编辑动作），通道侧起播——
 //! 平铺 2D（真源 PlaySEOneShot 走不挂 3d 源的播放器，位置不进这条链）、
 //! Requests start individually after the scene's cue-name substitutions. The
 //! ambient AudioSourceRepeater interval does not apply to button/one-shot sounds.
-//! 音量类按 cue 家族语义归
-//! 九类面板的 `se_ingame`/`se_ui` 两键（类→cue 绑定在 ACF 侧，盘上无
-//! .acf，归法具名）。
+//! Every request starts its cue on the cue engine (plain or sequence types
+//! 0-4); the volume is the SE player times the cue's own categories and
+//! volume commands. The request's class (`se_ingame`/`se_ui`) only stands in
+//! for a cue whose facts the export does not carry.
 //!
 //! cue 到音频文件的绑定是 **(cue, 路由行的 package)**，不是 cue 名单义：
 //! 同一 cue 名可以同时活在「多曲共装的包」与「自成一包的下载件」里
@@ -709,10 +711,10 @@ struct StreamRow {
 }
 
 /// (cue, package) → 流。同一键带多条流（多 subsong）时那是一个多轨序列
-/// cue，流表只留最小 subsong 一条并记下波形条数：区域环境音通道见到多波形
-/// 键具名拒绝；其余消费者（时间线 SE、一次性 SE）仍取这一条，是具名的
-/// 替身（单流键 subsong 为空值，不与编号争——空值折算为最大，必输给任何
-/// 编号）。
+/// cue，流表只留最小 subsong 一条并记下波形条数：cue 引擎（环境音、一次性
+/// SE、时间线 SE 的新入口）见到没有序列导出的多波形键具名拒绝；仍按路径
+/// 取流的 [`Routing::timeline_se_asset_path`] 取这一条，是具名的替身（单流
+/// 键 subsong 为空值，不与编号争——空值折算为最大，必输给任何编号）。
 #[derive(Default)]
 struct Streams(HashMap<(String, String), StreamRow>);
 
@@ -875,7 +877,10 @@ impl Routing {
     }
 
     /// The timeline names both package and cue. A same-name cue in another
-    /// package or the public UI sound bank is not a substitute.
+    /// package or the public UI sound bank is not a substitute. One path per
+    /// key: for a multi-track cue it is the lowest-numbered waveform, a named
+    /// stand-in; [`Self::cue_asset_paths`] with [`start_timeline_cue`] plays
+    /// the cue as the middleware does.
     pub(crate) fn timeline_se_asset_path(&self, package: &str, cue: &str) -> Option<&str> {
         self.streams
             .0
