@@ -121,6 +121,7 @@ pub(crate) mod site_move;
 pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
+pub mod site_extension;
 mod source_curve;
 mod weather_animation;
 #[cfg(test)]

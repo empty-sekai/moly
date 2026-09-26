@@ -26,7 +26,8 @@
 //!
 //! The globals are the site ones (`SiteEnvGpuBuffer`: phenomena light and
 //! shade, drop-shadow colour 1, sky-bottom colour, fog, edge pair, treasure
-//! shadows) and the main-light shadow consumer block of `shadowmap.rs`.
+//! shadows), the main-light shadow consumer block of `shadowmap.rs` and the
+//! site-extension globals (`SiteExtensionGpuBuffer`, site_extension.rs).
 use bevy::ecs::system::lifetimeless::SRes;
 use bevy::ecs::system::SystemParamItem;
 use bevy::gltf::{Gltf, GltfMesh};
@@ -42,6 +43,7 @@ use bevy::shader::ShaderRef;
 use crate::env::SiteEnvGpuBuffer;
 use crate::render::gpu::SharedSamplers;
 use crate::shadowmap::ShadowMapGpu;
+use crate::site_extension::SiteExtensionGpuBuffer;
 
 pub(crate) const OBJECT_SHADER: &str = "Mysekai/Object";
 pub(crate) const FLOOR_SHADER: &str = "Mysekai/Room/Floor";
@@ -484,6 +486,7 @@ impl AsBindGroup for RoomShellMaterial {
         SRes<ShadowMapGpu>,
         SRes<RenderAssets<GpuImage>>,
         SRes<SharedSamplers>,
+        SRes<SiteExtensionGpuBuffer>,
     );
 
     fn label() -> &'static str {
@@ -494,7 +497,11 @@ impl AsBindGroup for RoomShellMaterial {
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
-        (env_buffer, shadow, images, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
+        (env_buffer, shadow, images, samplers, site_extension): &mut SystemParamItem<
+            '_,
+            '_,
+            Self::Param,
+        >,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -540,6 +547,10 @@ impl AsBindGroup for RoomShellMaterial {
                     SamplerBindingType::Comparison,
                     shadow.cmp_sampler.clone(),
                 ),
+            ),
+            (
+                7,
+                OwnedBindingResource::Buffer(site_extension.buffer.clone()),
             ),
         ]);
         Ok(UnpreparedBindGroup { bindings })
@@ -599,6 +610,8 @@ impl AsBindGroup for RoomShellMaterial {
                 ty: BindingType::Sampler(SamplerBindingType::Comparison),
                 count: None,
             },
+            // binding 7: the site-extension globals (site_extension.rs).
+            uniform(7),
         ]
     }
 }
