@@ -1347,9 +1347,17 @@ impl std::ops::Deref for SubEmitterGraph<'_> {
 
 impl<'a> SubEmitterGraph<'a> {
     /// The one system record at `node` whose system object id is `path_id`.
+    /// The id is one 64-bit integer written two ways: the weather export and
+    /// every sub-emitter pointer carry it as a decimal string, the fixture
+    /// export's records as a JSON integer.
     fn child(&self, node: &str, path_id: &str) -> Option<&'a Value> {
+        let same = |id: &Value| match id {
+            Value::String(text) => text == path_id,
+            Value::Number(number) => number.as_i64().is_some_and(|id| id.to_string() == path_id),
+            _ => false,
+        };
         let mut found = self.records.get(node)?.iter().copied()
-            .filter(|record| record.get("systemPathId").and_then(Value::as_str) == Some(path_id));
+            .filter(|record| record.get("systemPathId").is_some_and(same));
         let child = found.next()?;
         found.next().is_none().then_some(child)
     }
