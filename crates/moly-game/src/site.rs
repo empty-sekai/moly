@@ -769,13 +769,13 @@ pub struct GroundEpoch(pub u64);
 
 /// A scene root that only navigation reads: spawned hidden, never revealed.
 #[derive(Component)]
-pub(crate) struct SiteNavigationRoot;
+pub struct SiteNavigationRoot;
 
 /// A scene root of a listed site that is not the current one: the origin of
 /// a cannon move until its end action, or a site `HideSite` has hidden.
 #[derive(Component)]
-pub(crate) struct ResidentSiteRoot {
-    pub(crate) site_type: String,
+pub struct ResidentSiteRoot {
+    pub site_type: String,
     /// The root's local transform while its site is current (it is placed
     /// at `SitePosition - current SitePosition` meanwhile).
     local: Transform,
@@ -1004,7 +1004,7 @@ impl ResidentSites {
 /// The hidden roots of the site being entered, shown again by
 /// [`spawn_when_ready`] instead of a new instance.
 #[derive(Resource)]
-pub(crate) struct SiteReuse(Vec<Entity>);
+pub struct SiteReuse(Vec<Entity>);
 
 fn despawn_roots(commands: &mut Commands, roots: &[Entity]) {
     for &root in roots {
