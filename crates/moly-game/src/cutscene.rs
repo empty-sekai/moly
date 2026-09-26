@@ -632,26 +632,34 @@ fn read_prefab(
             cameras.insert(name.to_owned(), camera.clone());
         }
     }
+    // The prefabs the effect clips instantiate (`EffectClip.template.prefab`),
+    // by the clip's playable asset.
     let mut effects = HashMap::new();
-    for row in prefabs {
-        let Some(path) = row["asset"]["pathId"].as_str() else {
+    let rows = document["effectPrefabs"]
+        .as_array()
+        .ok_or("the track table has no effect prefab records (exported before they were)")?;
+    for row in rows {
+        let prefab = &row["prefab"];
+        if prefab.is_null() {
             continue;
+        }
+        let effect = EffectPrefab {
+            name: prefab["name"].as_str().unwrap_or("?").to_owned(),
+            particle_systems: prefab["particleSystems"].as_array().map_or(0, Vec::len),
+            root_scripts: prefab["rootScripts"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|s| s.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
-        effects.insert(
-            path.to_owned(),
-            EffectPrefab {
-                name: row["name"].as_str().unwrap_or("?").to_owned(),
-                particle_systems: row["particleSystems"].as_array().map_or(0, Vec::len),
-                root_scripts: row["rootScripts"]
-                    .as_array()
-                    .map(|rows| {
-                        rows.iter()
-                            .filter_map(|s| s.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
-        );
+        for clip in row["clips"].as_array().into_iter().flatten() {
+            if let (Some(file), Some(path)) = (clip["file"].as_str(), clip["pathId"].as_str()) {
+                effects.insert(format!("{file}/{path}"), effect.clone());
+            }
+        }
     }
     let view = record["views"]
         .as_array()
@@ -1085,7 +1093,9 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
                         .as_str()
                         .unwrap_or("?");
                     if entered {
-                        let prefab = template.prefab.as_ref().and_then(|id| plan.effects.get(id));
+                        let prefab = clip.playable.as_ref().and_then(|id| {
+                            plan.effects.get(&format!("{}/{}", id.file, id.path_id))
+                        });
                         info!(
                             "[cutscene] t={t:.4} EffectClip {name} {bounds} play: template prefab {:?} ({} particle systems, root scripts {:?}; parentMode {}, characterID {}, fixed starting point {}, offset {:?}, matched duration {}, random seed {}): refused, the particle host has no API for it yet",
                             prefab.map(|p| p.name.as_str()).or(template.prefab.as_deref()),
