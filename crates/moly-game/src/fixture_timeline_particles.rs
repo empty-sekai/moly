@@ -668,11 +668,10 @@ pub(crate) fn prepare_played_object(
         }
         let modules = ParticleSourceModules::from_system(&particle["system"])
             .map_err(|error| invalid(format!("{path}: {error}")))?;
-        if modules.enabled.iter().any(|name| name == "SubModule")
-            || particle["system"]["subEmitters"].as_array().is_some_and(|rows| !rows.is_empty())
-        {
-            return Err(invalid(format!("{path}: a played sub-emitter parent is not installed by this host")));
-        }
+        // A sub-emitter parent plays with its targets installed as its
+        // children at the first Play (see
+        // [`crate::weather_fx::fixture::link_targets`]); an edge with no
+        // system hands out no sub-emitter (the engine skips a null one).
         // A system whose Emission module is off never emits; Play leaves it empty.
         if !modules.enabled.iter().any(|name| name == "EmissionModule") {
             continue;
@@ -713,10 +712,15 @@ pub(crate) fn play_object(world: &mut World, binding: &ParticlePlayBinding) -> R
         }
         // Systems that played before: Play after Stop.
         let mut played = crate::weather_fx::fixture::play(world, binding.root)?;
+        let mut first = false;
         for &draw in &binding.draws {
             if world.get_entity(draw).is_ok() && crate::weather_fx::fixture::play_pending(world, draw)? {
                 played += 1;
+                first = true;
             }
+        }
+        if first {
+            crate::weather_fx::fixture::link_targets(world, &binding.draws);
         }
         prepared.stopped = false;
         Ok(played)
@@ -796,6 +800,7 @@ pub(crate) fn seed_played_object(
         for &other in &subtree {
             crate::weather_fx::fixture::play_pending(world, other)?;
         }
+        crate::weather_fx::fixture::link_targets(world, &binding.draws);
         pass.restarted += 1;
     }
     Ok(pass)
