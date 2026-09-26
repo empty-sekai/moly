@@ -4,13 +4,17 @@
 //! returns the game to Normal. Normal's exit and entry around the move are
 //! the camera module's (`record_normal_exit` and `enter_normal` call them).
 //!
-//! Frame-rate convention (named): the source applies every lerp factor and
-//! the 1/120 grounding step once per `OnUpdate` call, and MySekai runs at
-//! 60 fps. The product's follow convention (`camera::follow_avatar`) scales a
-//! per-frame factor by `deltaTime / 0.016667` and clamps it to [0, 1]; the
-//! accumulating factors here use the same scaling, so at 60 fps they are the
-//! source values exactly. The `_s` branch's 0.4 is not a rate (the look-at is
-//! reset to the root the same frame) and is not scaled.
+//! Frame rate: the source applies every lerp factor and the 1/120 grounding
+//! step once per `OnUpdate` call (its Normal mode reads no frame time; only
+//! the unreachable Hero mode's SmoothDamp does). The frames come at
+//! `Application.targetFrameRate`, which `MysekaiQualitySettings.SetFpsQuality`
+//! sets from the player's MySekai frame option: 60 for High, 30 for Normal.
+//! The product keeps the same option and paces its frames by it
+//! (`game_settings`), so each factor is scaled by `deltaTime * frame limit`
+//! and clamped to [0, 1]: exactly the source's per-call factor while the
+//! frame limit holds, and the same per-second progress when frames drop. The
+//! `_s` branch's 0.4 is not a rate (the look-at is reset to the root the
+//! same frame) and is not scaled.
 
 use bevy::animation::AnimatedBy;
 use bevy::prelude::*;
@@ -18,7 +22,7 @@ use bevy::prelude::*;
 use super::timeline::SourceClip;
 use crate::camera::{
     perspective_fov_deg, to_rotation, view_dir, wrap180, CameraSetting, CameraStateType,
-    CameraTween, FieldCameraModel, FieldCameraState, TweenCompletion, FRAME_BASE,
+    CameraTween, FieldCameraModel, FieldCameraState, TweenCompletion,
 };
 use crate::character::AvatarRoot;
 
@@ -67,7 +71,8 @@ pub(crate) struct Model {
 /// from; the model's final look-at is where the view looks
 /// (`transform.LookAt(LookAt + Offset)` is the last call).
 ///
-/// `rate` is the product frame scale `dt / 0.016667` (1 at 60 fps).
+/// `rate` is the product frame scale `deltaTime * frame limit` (1 while the
+/// frame limit holds).
 pub(crate) fn step(
     model: &mut Model,
     grounded: &mut f32,
@@ -241,6 +246,7 @@ pub(crate) fn update(
     mut camera_state: Option<ResMut<SiteMoveCamera>>,
     model: Option<ResMut<FieldCameraModel>>,
     setting: Option<Res<CameraSetting>>,
+    settings: Option<Res<crate::game_settings::GameSettings>>,
     avatars: Query<&GlobalTransform, (With<AvatarRoot>, Without<Camera3d>)>,
     bones: Query<&GlobalTransform, (Without<AvatarRoot>, Without<Camera3d>)>,
     mut cameras: Query<(&mut Transform, &mut GlobalTransform), With<Camera3d>>,
@@ -272,7 +278,11 @@ pub(crate) fn update(
             (root, root)
         }
     };
-    let rate = time.delta_secs() / FRAME_BASE;
+    // One source OnUpdate per frame at the player's frame limit.
+    let frame_limit = settings
+        .as_deref()
+        .map_or(60, |settings| settings.graphics.frame_rate);
+    let rate = time.delta_secs() * f32::from(frame_limit);
     let mut fields = Model {
         look_at: model.look_at,
         distance: model.distance,
