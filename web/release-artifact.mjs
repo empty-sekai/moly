@@ -11,7 +11,7 @@ import {
   lstatSync,
 } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   gzipSync,
   brotliCompressSync,
@@ -22,6 +22,7 @@ import { workspaceFingerprint, sha256 } from "./build-source.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { COORDINATE_CONTRACT, requireCoordinateContract, validateCoordinatePair } from "./coordinate-contract.mjs";
 import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
+import { bundleCacheWorkerFiles } from "./cache-worker-bundle.mjs";
 
 export const STAGE_FILES = [
   "embed.mjs",
@@ -878,8 +879,12 @@ export async function publish({
   };
   mkdirSync(output, { recursive: true });
   const workerPath = path.join(output, "cache-worker.mjs");
-  const workerBytes = readFileSync(
-    path.join(workspace, "web/cache-worker.mjs"),
+  // One classic script: the worker URL is fixed and imports nothing.
+  const workerBytes = Buffer.from(
+    bundleCacheWorkerFiles(
+      "./cache-worker.mjs",
+      pathToFileURL(path.join(workspace, "web") + path.sep),
+    ),
   );
   if (
     existsSync(workerPath) &&
