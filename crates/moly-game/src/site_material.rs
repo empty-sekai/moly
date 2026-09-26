@@ -647,8 +647,18 @@ impl AsBindGroup for SiteMaterial {
                 ty: BindingType::Sampler(SamplerBindingType::Comparison),
                 count: None,
             },
-            // binding 13: the site-extension globals (site_extension.rs).
-            uniform(13),
+            // binding 13: the site-extension globals (site_extension.rs),
+            // read by the fragment stage only.
+            BindGroupLayoutEntry {
+                binding: 13,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ]
     }
 }

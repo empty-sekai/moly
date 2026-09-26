@@ -15,9 +15,9 @@
 //!   that per-frame copy; the render world writes the copy into one uniform
 //!   buffer that the site and room shell materials bind.
 //!
-//! The copy runs in `First`, as the source copies from the view manager's
-//! `Update`: a value stored by a timeline during frame N reaches the shaders
-//! in frame N + 1.
+//! The copy runs in `First`, before the frame's `Update` systems (the source
+//! copies from the view manager's `Update`), so a value stored during the
+//! `Update` of frame N is drawn from frame N + 1.
 //!
 //! Readers of the globals: the programs of `Mysekai/Object` (every usage;
 //! the edge arm only for usage 8), `Mysekai/Site/Ground`, `Mysekai/Water`,
