@@ -38,9 +38,8 @@
 //! The draw follows the anchor's visibility: a harvested stone is hidden
 //! with its whole hierarchy, and so is its glow.
 //!
-//! Reachability: harvest objects are placed only by the development preview
-//! gallery (`MOLY_HARVEST_PREVIEW=1`); ordinary play places none, so this
-//! glow is drawn only there.
+//! Reachability: harvest objects are placed at each harvest site's arrival
+//! from the user harvest map (the server mock's).
 
 use std::collections::HashMap;
 

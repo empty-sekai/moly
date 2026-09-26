@@ -17,9 +17,8 @@
 //! 目录装载（著色空间按文档声明）。`Mysekai/TreasureBox` (the base shape
 //! of the two treasure packages) resolves to the site pipeline's TreasureBox
 //! family (`resolve_treasurebox`: phenomena light and shade, drop shadow,
-//! rare overlay, treasure shadows, fog). Harvest objects are placed only by
-//! the development preview gallery (`MOLY_HARVEST_PREVIEW=1`), so this
-//! family, like the other two here, is drawn only there. 其余
+//! rare overlay, treasure shadows, fog). Harvest objects are placed at each
+//! harvest site's arrival from the user harvest map (the server mock's). 其余
 //! （`Mysekai/Effect/UberUnlit` 演出族、粒子 listen point 一族）是
 //! 范围外：按 shader 名计数保留。Particle system materials are not glb
 //! materials; the stay particles are drawn by `harvest_particles.rs`.
