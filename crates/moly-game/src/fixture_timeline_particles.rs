@@ -764,55 +764,6 @@ pub(crate) fn react(world: &mut World, reaction: &SignalReaction) -> Result<usiz
     }
 }
 
-/// A director session's Signal reactions, sent as its time passes their
-/// markers. Stand-in dispatch: a marker is sent in the first sample whose
-/// time reaches it after a sample before it (the first sample includes its
-/// own time); a time that goes back (a loop) arms the markers again, and an
-/// `emit_once` marker is sent once per session. The notification pass of the
-/// source (its interval test, retroactive markers, restore on loop) is not
-/// ported.
-#[derive(Default)]
-pub(crate) struct SignalDispatch {
-    reactions: Vec<SignalReaction>,
-    sent: Vec<bool>,
-    last: Option<f64>,
-}
-
-impl SignalDispatch {
-    pub(crate) fn new(reactions: Vec<SignalReaction>) -> Self {
-        let sent = vec![false; reactions.len()];
-        Self { reactions, sent, last: None }
-    }
-
-    pub(crate) fn advance(&mut self, world: &mut World, time: f64) -> Result<(), String> {
-        let previous = self.last.replace(time);
-        let looped = previous.is_some_and(|previous| time < previous);
-        for (index, reaction) in self.reactions.iter().enumerate() {
-            if reaction.emit_once && self.sent[index] {
-                continue;
-            }
-            let due = match previous {
-                None => reaction.time <= time,
-                Some(_) if looped => reaction.time <= time,
-                Some(previous) => previous < reaction.time && reaction.time <= time,
-            };
-            if !due {
-                continue;
-            }
-            self.sent[index] = true;
-            let count = react(world, reaction)?;
-            info!(
-                "[prefab-director] Signal {} (marker {:.4} s) at director time {time:.4}: {:?} on {count} systems of {:?}",
-                reaction.signal,
-                reaction.time,
-                reaction.call,
-                world.get::<Name>(reaction.target.root).map(Name::as_str)
-            );
-        }
-        Ok(())
-    }
-}
-
 /// Developer stand-in (DevTools only) for the Signal markers and receiver
 /// reactions the timeline tables do not carry yet. It knows one Signal
 /// track: the dewdrop step item's, which the delivery flow binds to the
