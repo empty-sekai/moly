@@ -1111,6 +1111,13 @@ mod tests {
                 Some(reason) => format!("admitted, Director legacy step: {reason}"),
             });
         }
+        // A sub-emitter target is installed at its parent's first Play by the
+        // child installer (see `install_target`), whose eligibility the
+        // judgement ran; the root path's birth owner is never installed on
+        // it, and its own emission never runs while it is a target.
+        if plan.child_owner.is_some() {
+            return Ok("admitted, sub-emitter target (child installer)".to_owned());
+        }
         let evidence = match &plan.geometry {
             PlannedGeometry::Billboard(draw) =>
                 crate::particle_runtime::ShapeEmitterEvidence { scaling: draw.scaling, mesh_renderer: false },
