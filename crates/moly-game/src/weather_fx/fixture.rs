@@ -34,10 +34,9 @@ struct Candidate {
     /// The prefab chain a Local trail's owner words are composed on.
     prefab: Option<Vec<SourceTrs>>,
     /// A control preparation saw this draw's GPU source Ready once. The
-    /// render world resets readiness to Pending at each frame's queue and
-    /// sets it again once the pipelines are confirmed, so waiting for every
-    /// candidate to read Ready at the same instant is a race it can lose for
-    /// a long time; a confirmed candidate is not asked again.
+    /// render world publishes each frame's verdict and a later frame may
+    /// read Pending again, so waiting for every candidate to read Ready at
+    /// the same instant can lose; a confirmed candidate is not asked again.
     confirmed: bool,
     /// The same for the renderer's trail draw, seen Ready once.
     trail_confirmed: bool,
