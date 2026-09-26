@@ -130,7 +130,6 @@ fn replay(results: &[Value]) -> Tally {
                 let tied = match refused {
                     Refused::SeparateAxes => separate,
                     Refused::Size3d => size_3d,
-                    Refused::WeightedKey => false,
                     Refused::UnorderedKeys => !built && unordered(&params.curve),
                 };
                 if !tied {
@@ -235,6 +234,56 @@ fn current_size_matches_native_polynomial_rows() {
         &["genericPath", "reassociated", "swapMinMax", "extraDraw", "hermite", "otherSalt", "noMultiplier"]);
     assert!(tally.polynomial_rows > 0 && tally.words > 0, "{tally:?}");
     sampler_side_tally(items(field(&receipt, "results")));
+}
+
+/// The engine's SizeModule rows on weighted keys: the fixture effect's size
+/// curve (whose first key carries the out weight) and generated one- and
+/// two-curve sizes whose keys carry either weight bit, with ages over every
+/// segment. A weighted key never lets the asset reader build the polynomial,
+/// so every such curve is evaluated key by key; its weighted segments take
+/// the evaluation's weighted branch. Every arm must turn a row red, the
+/// weighted-branch arm included, and some lane must fall in a weighted
+/// segment.
+#[test]
+#[ignore = "needs MOLY_SIZE_WEIGHTED_RECEIPT"]
+fn current_size_matches_native_weighted_rows() {
+    let path = std::env::var("MOLY_SIZE_WEIGHTED_RECEIPT").expect("MOLY_SIZE_WEIGHTED_RECEIPT");
+    let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        field(&receipt, "librarySha256").as_str(),
+        Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+    );
+    let results = items(field(&receipt, "results"));
+    let weighted = weighted_lanes(results);
+    println!("current-size weighted rows: {} rows, lanes in a weighted segment {weighted}", results.len());
+    assert!(weighted > 0, "no lane falls in a weighted segment");
+    replay_with_arms(field(&receipt, "results"), &["weightedAsCubic", "otherSalt", "noMultiplier"]);
+}
+
+/// The compared lanes whose normalized age falls inside a weighted segment
+/// of a key-by-key curve (strictly increasing key times, the clamp wraps).
+fn weighted_lanes(results: &[Value]) -> usize {
+    let mut count = 0;
+    for result in results {
+        let case = field(result, "case");
+        let curves = items(field(case, "curves"));
+        let sides: Vec<Vec<CurveKey>> = match curve(&curves[0]) {
+            MinMaxCurve::Curve { max, .. } => vec![max.keys],
+            MinMaxCurve::TwoCurves { min, max, .. } => vec![min.keys, max.keys],
+            _ => continue,
+        };
+        let ages = items(field(case, "ageBits"));
+        for i in int(field(case, "from"))..int(field(case, "to")) {
+            let t = a::max(a::mul(f32::from_bits(word(&ages[i])), AGE_FACTOR), 0.0);
+            let inside = sides.iter().any(|keys| {
+                keys.len() >= 2 && keys[0].time <= t && t < keys[keys.len() - 1].time
+                    && keys.windows(2).any(|pair| pair[0].time <= t && t < pair[1].time
+                        && crate::particle::curve::weighted_segment(pair[0], pair[1]))
+            });
+            count += usize::from(inside);
+        }
+    }
+    count
 }
 
 /// Not asserted: how the prepared curve sampler shared by the other
