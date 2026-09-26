@@ -974,7 +974,7 @@ fn live_setting_defaults() -> Map<String, Value> {
         "NoteSpeed": 6.0, "TimingAdjustData": 0.0, "Brightness": 1.0, "LaneTransparent": 1.0,
         "UseCutIn": true, "HiddenSkillAndPraise": false, "UseSimultaneousPushingLine": true,
         "UseVibration": true, "UseAllPerfectEffect": true, "LiveMode": 1, "NoteAlpha": 1.0,
-        "GuideAlpha": 0.6, "NoteSkinIndex": 0, "NoteSeIndex": 0, "IsMirror": false,
+        "GuideAlpha": 0.6f32, "NoteSkinIndex": 0, "NoteSeIndex": 0, "IsMirror": false,
         "QualityType": 0, "IsFastLateFlick": false, "Use120FPS": false, "UsedVSync": null,
         "NoteEffect": 0, "_noteShowRate": 0.0, "FeverEffectTypeIndex": 0,
         "TotalPowerUpperLimit": null, "TotalPowerLowerLimit": null,
