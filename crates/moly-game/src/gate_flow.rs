@@ -1973,8 +1973,15 @@ fn step_down(visitor: &mut Visitor, request: &mut StartTimeline, reason: &str) -
         }
         keep
     });
+    // Only a runner claim is "held by another timeline"; any other refusal
+    // (a clip that does not bind, say) steps down under its own reason.
+    let cause = if reason.contains("belongs to another") {
+        "the gate is held by another timeline here"
+    } else {
+        "the gate part steps down"
+    };
     error!(
-        "[gate] {} (unit {}): {reason}; the gate is held by another timeline here: {}",
+        "[gate] {} (unit {}): {reason}; {cause}: {}",
         visitor.timeline,
         visitor.unit,
         if se_only {
