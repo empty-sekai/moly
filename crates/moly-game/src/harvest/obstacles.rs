@@ -11,9 +11,12 @@
 //!   then depth first in child order) and sets its radius to the scale draw
 //!   times its radius. The same draw scales the transform, so that
 //!   obstacle's world radius carries the draw twice.
-//! - `NavMeshObstacle::SetRadius(v)` (the engine): `v = max(v, 1e-5)`, then
-//!   the extents' x and z both become `v`, and the obstacle is marked dirty
-//!   (its next `UpdateState` snapshots it again).
+//! - `NavMeshObstacle::SetRadius(v)` (the engine, read in the game's own
+//!   engine binary): `v = fmaxnm(v, 1e-5)`, then the extents' x and z both
+//!   become `v`, and the obstacle is marked dirty (its next `UpdateState`
+//!   snapshots it again); the radius getter reads the extents' x. Every
+//!   first obstacle of a tree or stone prefab is a capsule, where x is the
+//!   radius; a box there is refused by name.
 //! - `MysekaiAreadDriftageView.ChangeAfterObject` (and its
 //!   `ForceChangeAfterObject`, which runs it) first disables
 //!   `_navmeshObstacle`, then waits 1.0 s and turns the barrel off.
@@ -182,6 +185,10 @@ pub(crate) fn set_up(
             .insert(ObstaclesSetUp)
             .remove::<ObstacleAdoptWait>();
         match radius_node {
+            Some(Some(node)) if sources.get(node).is_ok_and(|rows| rows.0[0].shape != 0) => error!(
+                "[harvest-obstacle] {}#{} SetupScaleRandom: the first obstacle ({node:?}) is a box; the radius write is read for the capsule's extents only, not applied",
+                object.leaf, object.fixture_id
+            ),
             Some(Some(node)) => {
                 let mut records = runtime.get_mut(node).expect("adopted above");
                 match records.set_radius(0, |radius| object.scale * radius) {
