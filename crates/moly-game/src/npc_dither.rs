@@ -11,14 +11,16 @@
 //! remapped over 0.45), and takes the smaller of the two. Transforms are read
 //! as the frame's update sees them: the last propagated pose.
 //!
-//! The camera branch is not applied: it remaps the NPC's screen depth from
-//! the near clip plus the graphics config's NPC dither start offset over its
-//! fall-off, and those two config values are not in the extracted data. It
-//! is the player branch's value when the player is not visible, and it
-//! lowers the result when the player is visible and the NPC is not talking;
-//! both are left out, and the first frame that needs it says so once.
-//! Multiplayer's other players (the second near-player kind) do not exist in
-//! this host.
+//! The camera branch (`GetDitherAlpha`) remaps the NPC root's screen depth
+//! (the field camera's view-space depth of the root, what `WorldToScreenPoint`
+//! gives as z) from the camera's near clip plus the graphics config's NPC
+//! dither start offset over its fall-off (`graphics-config/npc-dither.json`;
+//! the photo-mode pair is never taken: no photo mode here). It is the player
+//! branch's value when the player is not visible, and it lowers the result
+//! when the player is visible and the NPC is not talking. Without the
+//! document or a field camera it is left out, and the first frame that needs
+//! it says so once. Multiplayer's other players (the second near-player
+//! kind) do not exist in this host.
 //!
 //! The NPC branch is off (alpha 1.0) while this NPC is talking or plays a
 //! fixture action (states FixtureAction, FixtureActionIdle and the two
@@ -30,8 +32,81 @@
 
 use bevy::prelude::*;
 
+use moly_assets::json::JsonAsset;
+
 use crate::character_material::{CharacterMaterial, ToonMaterials};
 use crate::npc::CharacterUnitId;
+
+/// The graphics configuration's NPC dither document.
+const DITHER_CONFIG_PATH: &str = "moly://graphics-config/npc-dither.json";
+
+/// The camera branch's start offset and fall-off (the non-photo pair).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DitherDistances {
+    start_offset: f32,
+    fall_off: f32,
+}
+
+/// The document's two non-photo floats, from their serialized bit words.
+fn parse_distances(text: &str) -> Result<DitherDistances, String> {
+    let document: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("does not parse: {error}"))?;
+    let word = |field: &str| -> Result<f32, String> {
+        let hex = document["bits"][field]
+            .as_str()
+            .ok_or_else(|| format!("no bits for {field}"))?;
+        u32::from_str_radix(hex, 16)
+            .map(f32::from_bits)
+            .map_err(|error| format!("{field}: {error}"))
+    };
+    Ok(DitherDistances {
+        start_offset: word("_npcDitherStartDistanceOffset")?,
+        fall_off: word("_npcDitherDistanceFallOff")?,
+    })
+}
+
+/// The document's load, kept by the dither system.
+#[derive(Default)]
+pub(crate) struct DitherConfigLoad {
+    handle: Option<Handle<JsonAsset>>,
+    settled: Option<Result<DitherDistances, String>>,
+}
+
+impl DitherConfigLoad {
+    fn poll(
+        &mut self,
+        server: &AssetServer,
+        documents: &Assets<JsonAsset>,
+    ) -> Option<DitherDistances> {
+        if let Some(settled) = &self.settled {
+            return settled.as_ref().ok().copied();
+        }
+        let handle = self
+            .handle
+            .get_or_insert_with(|| server.load(DITHER_CONFIG_PATH))
+            .clone();
+        let settled = if server.load_state(&handle).is_failed() {
+            Err(format!("{DITHER_CONFIG_PATH} did not load"))
+        } else if let Some(document) = documents.get(&handle) {
+            parse_distances(&document.0)
+        } else {
+            return None;
+        };
+        match &settled {
+            Ok(distances) => info!(
+                "[npc-dither] camera branch: start offset {} (bits {:08x}), fall-off {} (bits {:08x}) from the graphics configuration",
+                distances.start_offset,
+                distances.start_offset.to_bits(),
+                distances.fall_off,
+                distances.fall_off.to_bits()
+            ),
+            Err(reason) => warn!("[npc-dither] camera branch refused: {reason}"),
+        }
+        let distances = settled.as_ref().ok().copied();
+        self.settled = Some(settled);
+        distances
+    }
+}
 
 /// Presenter call 5.
 #[allow(clippy::type_complexity)]
@@ -51,11 +126,25 @@ pub(crate) fn update_dither(
     globals: Query<&GlobalTransform>,
     gate: crate::npc_presenter::PresenterGate,
     players: Query<(Entity, &InheritedVisibility), With<crate::player::PlayerControlled>>,
+    cameras: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    server: Res<AssetServer>,
+    documents: Res<Assets<JsonAsset>>,
+    mut config: Local<DitherConfigLoad>,
     mut camera_gap_reported: Local<bool>,
+    mut camera_lowered: Local<std::collections::HashSet<u32>>,
 ) {
     let Some(registry) = registry.as_deref() else {
         return;
     };
+    let distances = config.poll(&server, &documents);
+    // The field camera: its world-to-view transform and near clip plane.
+    let field_camera = cameras
+        .iter()
+        .find(|(camera, _, _)| camera.is_active)
+        .and_then(|(_, transform, projection)| match projection {
+            Projection::Perspective(p) => Some((transform.affine().inverse(), p.near)),
+            _ => None,
+        });
     // The avatar list's first match per unit.
     let mut positions: std::collections::HashMap<u32, Option<(Vec3, Vec3)>> =
         std::collections::HashMap::new();
@@ -68,10 +157,9 @@ pub(crate) fn update_dither(
         });
     }
     // The local player: its position and whether it is shown (TPS mode).
-    let player = players
-        .iter()
-        .next()
-        .and_then(|(entity, visible)| Some((globals.get(entity).ok()?.translation(), visible.get())));
+    let player = players.iter().next().and_then(|(entity, visible)| {
+        Some((globals.get(entity).ok()?.translation(), visible.get()))
+    });
     for (entity, unit, toon, talking, actions) in &npcs {
         if !gate.runs(entity) {
             continue;
@@ -111,17 +199,49 @@ pub(crate) fn update_dither(
         let tps = player.is_some_and(|(_, visible)| visible);
         let camera_needed =
             near_player.is_some_and(|(_, shown)| !shown) || (tps && talking.is_none());
-        if camera_needed && !*camera_gap_reported {
+        // GetDitherAlpha: the root's screen depth (view-space depth in front
+        // of the camera) against near + start offset over the fall-off.
+        let camera_alpha = match (distances, field_camera) {
+            (Some(distances), Some((to_view, near))) => {
+                let depth = -to_view.transform_point3(root.translation()).z;
+                Some(law::camera_dither_alpha(
+                    depth,
+                    near,
+                    distances.start_offset,
+                    distances.fall_off,
+                ))
+            }
+            _ => None,
+        };
+        if camera_needed && camera_alpha.is_none() && !*camera_gap_reported {
             *camera_gap_reported = true;
-            warn!("[npc-dither] unit={}: the camera branch is not applied (the graphics config's NPC dither start offset and fall-off are not extracted)", unit.0);
+            warn!(
+                "[npc-dither] unit={}: the camera branch is not applied ({})",
+                unit.0,
+                if distances.is_none() {
+                    "no NPC dither distances"
+                } else {
+                    "no field camera"
+                }
+            );
         }
         let alpha = law::update_dither_alpha(
             npc_alpha,
             near_player.map(|(position, _)| (position - root.translation()).to_array()),
             tps,
             talking.is_none(),
-            None,
+            camera_alpha,
         );
+        if camera_needed {
+            if let Some(camera_alpha) = camera_alpha.filter(|a| *a < 1.0) {
+                if camera_lowered.insert(unit.0) {
+                    info!(
+                        "[npc-dither] unit={}: camera branch alpha {camera_alpha:.3} (result {alpha:.3}), first time below 1",
+                        unit.0
+                    );
+                }
+            }
+        }
         let use_dither = if moly_law::objective::overlap::use_dither(alpha) {
             1.0_f32
         } else {

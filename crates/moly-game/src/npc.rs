@@ -39,9 +39,9 @@ use moly_assets::json::JsonAsset;
 use moly_law::objective::rest_delay_milliseconds;
 use moly_law::path::WalkState as LawWalkState;
 use moly_law::path::{
-    angle_between, build_waypoints, facing_direction, heading_yaw, rotate_time, turn_angle,
-    turn_motion, NpcPathWalkSlot, TurnMotion, WalkVerdict, Waypoint, WaypointKind,
-    ARRIVAL_DISTANCE, FORWARD_FALLBACK, WAYPOINT_SAMPLE_DISTANCE,
+    angle_between, build_waypoints, heading_yaw, rotate_time, turn_angle, turn_motion,
+    NpcPathWalkSlot, TurnMotion, WalkVerdict, Waypoint, WaypointKind, ARRIVAL_DISTANCE,
+    FORWARD_FALLBACK, WAYPOINT_SAMPLE_DISTANCE,
 };
 
 /// 名册成员身位距站点中心的半径，替身值（真源出生点的来源未接）。
@@ -1121,9 +1121,10 @@ pub(crate) fn spawn_when_ready(
             // The AI's set-up: entry-site talk data with the entry-site
             // interrupt marker, so the first decision starts the entry-site
             // objective (hidden until the gate's appearance cancels it, see
-            // `npc_gate`). A roster created away from its site, or the
-            // embedded stage's cast, keeps empty data.
-            if away || stage.is_some() {
+            // `npc_gate`). A roster created while another site is loaded
+            // gets it too and makes that first decision when home is loaded;
+            // the embedded stage's cast keeps empty data.
+            if stage.is_some() {
                 crate::npc_objective::TalkSlot::default()
             } else {
                 crate::npc_objective::TalkSlot::entry_site(*unit_id)
@@ -1395,6 +1396,20 @@ pub(crate) fn reseed(
                 transform.translation.x,
                 transform.translation.y,
                 transform.translation.z,
+            );
+            continue;
+        }
+        if away && talk_slot.kind() == Some(moly_law::objective::TalkType::EntrySite) {
+            // Created while another site was loaded and never decided: its
+            // set-up (the entry-site data) is still owed, so its first
+            // decision starts the entry-site objective here and the gate's
+            // appearance places it; it stays hidden until then.
+            commands.entity(entity).remove::<residency::Away>();
+            actions.resume_on_site(epoch.0);
+            resumed += 1;
+            info!(
+                "[npc-residency] unit={} on its site {} (epoch {}) for the first time: the entry-site set-up is still owed, hidden until the gate places it",
+                unit.0, own, epoch.0
             );
             continue;
         }
@@ -2018,14 +2033,17 @@ fn on_navigation(face: &crate::walk_face::WalkFace, p: [f32; 2]) -> bool {
 /// (`moly_law::path::crowd`): the corridor's corners and known path length,
 /// the steering, the integration, the move along the navigation cells, then
 /// the corners and known length after the move, which the move loop reads as
-/// the remaining distance next frame. The agent faces the first corner after
-/// the move. Returns that remaining distance, `None` without a corridor.
+/// the remaining distance next frame. Then the agent's own rotation step:
+/// `rotation` (the transform's) turns toward the new velocity by at most the
+/// agent's angular speed, and the walk state's forward follows it. Returns
+/// that remaining distance, `None` without a corridor.
 fn crowd_step(
     state: &mut LawWalkState,
     crowd: &mut CrowdMotion,
     speed: f32,
     walk_face: &crate::walk_face::WalkFace,
     objective_face: &crate::npc_objective::ObjectiveFace,
+    rotation: &mut Quat,
     dt: f32,
 ) -> Option<f32> {
     use moly_law::path::crowd;
@@ -2077,7 +2095,7 @@ fn crowd_step(
     let [x, z] = walk_face.field.corridor_move(corridor, moved);
     corridor.position = [x, height([x, z], moved[1]), z];
     state.position = corridor.position;
-    let (remaining, facing) = match walk_face.field.corridor_corners(corridor) {
+    let remaining = match walk_face.field.corridor_corners(corridor) {
         Some(after) => {
             let corners: Vec<[f32; 3]> = after
                 .corners
@@ -2090,16 +2108,23 @@ fn crowd_step(
                 target: corridor.target,
                 path_cells: corridor.cells.len(),
             };
-            (
-                crowd::known_path_length(state.position, &goal),
-                corners.first().copied().unwrap_or(corridor.target),
-            )
+            crowd::known_path_length(state.position, &goal)
         }
-        None => (f32::INFINITY, corridor.target),
+        None => f32::INFINITY,
     };
-    if leg_distance(state.position, facing) > moly_law::path::DIRECTION_EPSILON {
-        state.forward = facing_direction(state.position, facing);
+    // The transform update after the crowd: the agent's rotation follows its
+    // velocity (rotation updates stay on for an NPC; angular speed 256 while
+    // the view keeps the agent active, which it does while it walks).
+    if let Some(turned) = crowd::rotation_step(
+        rotation.to_array(),
+        crowd.velocity,
+        crowd::NPC_ANGULAR_SPEED,
+        dt,
+    ) {
+        *rotation = Quat::from_array(turned);
     }
+    let forward = *rotation * Vec3::Z;
+    state.forward = forward.to_array();
     crowd.remaining = Some(remaining);
     Some(remaining)
 }
@@ -2368,6 +2393,8 @@ pub fn advance(
         };
         let mut verdict = WalkVerdict::Idle;
         let mut stepped = false;
+        // The rotation the agent's transform update left this frame.
+        let mut agent_rotation: Option<Quat> = None;
         if let Some(distance) = leg_arrival {
             if route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::CheckPoint) {
                 info!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
@@ -2409,15 +2436,35 @@ pub fn advance(
                             remaining < moly_law::path::crowd::NPC_AUTO_BRAKING_DISTANCE;
                     }
                 }
+                let before = transform.rotation;
+                let mut turned = before;
                 match crowd_step(
                     &mut state.0,
                     &mut route.crowd,
                     speed.0,
                     walk_face,
                     objective_face,
+                    &mut turned,
                     dt,
                 ) {
-                    Some(remaining) => verdict = WalkVerdict::Walking(remaining),
+                    Some(remaining) => {
+                        verdict = WalkVerdict::Walking(remaining);
+                        agent_rotation = Some(turned);
+                        let yaw_of = |q: Quat| {
+                            let f = q * Vec3::Z;
+                            heading_yaw([f.x, f.y, f.z])
+                        };
+                        let (from, to) = (yaw_of(before), yaw_of(turned));
+                        let step = (to - from + 540.0).rem_euclid(360.0) - 180.0;
+                        if step.abs() >= 0.5 {
+                            let v = route.crowd.velocity;
+                            info!(
+                                "[npc-rotation] unit={} t={now:.2} yaw {from:.1} -> {to:.1} (step {step:+.2} deg, dt {dt:.3}, speed {:.3})",
+                                unit.0,
+                                (v[0] * v[0] + v[2] * v[2]).sqrt()
+                            );
+                        }
+                    }
                     None => {
                         route.stop();
                         slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
@@ -2630,7 +2677,9 @@ pub fn advance(
             (MotionPhase::FitWalking { leg, elapsed, .. }, _) => {
                 leg.sample_rotation(transform.rotation, *elapsed)
             }
-            (_, None) => Quat::from_rotation_arc(Vec3::Z, Vec3::from(state.0.forward)),
+            // A crowd step this frame: the agent's own rotation step.
+            (_, None) => agent_rotation
+                .unwrap_or_else(|| Quat::from_rotation_arc(Vec3::Z, Vec3::from(state.0.forward))),
         };
     }
 }
