@@ -1365,9 +1365,13 @@ pub(crate) fn resolve_tree_textures(
         read_module_fresnel("Tree", slot, &get, &mut params)?;
     }
     if height_fade {
-        // 渐变形：倒数长度参数算 h，Pos01/Pos12/三色做两段混合。
+        // 渐变形：倒数长度参数算 h，Pos01/Pos12/三色做两段混合。The JP
+        // program rebuilds the span from position and length above an
+        // object-space height of 3.0.
         params.height_fade_rcp_length = get("_HeightFadeRcpLength")?;
         params.height_fade_start_time_rcp_length = get("_HeightFadeStartTimeRcpLength")?;
+        params.height_fade_position = get("_HeightFadePosition")?;
+        params.height_fade_length = get("_HeightFadeLength")?;
         params.height_fade_exponent = get("_HeightFadeExponent")?;
         params.use_height_fade = get("_UseHeightFade")?;
         params.height_gradient_pos01 = get("_HeightGradientPos01")?;
