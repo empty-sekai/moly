@@ -139,6 +139,52 @@ fn clip(piece: &[Pv], tri: [u32; 3], carve: &RuntimeCarve, eps: f32) -> Option<V
     Some(kept)
 }
 
+/// A later plane splits the cut edge an earlier plane left, so a kept piece
+/// can have another piece's vertex on one of its edges: inserts every
+/// vertex of the cell's pieces that lies on a piece edge (within 0.1 mm,
+/// strictly between its ends), so neighbouring pieces pair vertex for vertex.
+fn weld_pieces(pieces: &mut [Vec<Pv>]) {
+    if pieces.len() < 2 {
+        return;
+    }
+    let mut points: Vec<Pv> = Vec::new();
+    for v in pieces.iter().flatten() {
+        if !points.iter().any(|q| q.p[0] == v.p[0] && q.p[2] == v.p[2]) {
+            points.push(*v);
+        }
+    }
+    for piece in pieces.iter_mut() {
+        let n = piece.len();
+        let mut out = Vec::with_capacity(n + 4);
+        for i in 0..n {
+            let (u, w) = (piece[i], piece[(i + 1) % n]);
+            out.push(u);
+            let d = [w.p[0] - u.p[0], w.p[2] - u.p[2]];
+            let length2 = d[0] * d[0] + d[1] * d[1];
+            if length2 == 0.0 {
+                continue;
+            }
+            let tolerance = 1e-4 * length2.sqrt();
+            let mut between: Vec<(f32, Pv)> = points
+                .iter()
+                .filter(|q| {
+                    !(q.p[0] == u.p[0] && q.p[2] == u.p[2])
+                        && !(q.p[0] == w.p[0] && q.p[2] == w.p[2])
+                })
+                .filter_map(|q| {
+                    let v = [q.p[0] - u.p[0], q.p[2] - u.p[2]];
+                    let t = (v[0] * d[0] + v[1] * d[1]) / length2;
+                    let cross = v[0] * d[1] - v[1] * d[0];
+                    (t > 0.0 && t < 1.0 && cross.abs() <= tolerance).then_some((t, *q))
+                })
+                .collect();
+            between.sort_by(|a, b| a.0.total_cmp(&b.0));
+            out.extend(between.into_iter().map(|(_, q)| q));
+        }
+        *piece = out;
+    }
+}
+
 /// Twice the signed x/z area.
 fn area2(poly: &[Pv]) -> f32 {
     let n = poly.len();
@@ -237,6 +283,9 @@ impl PolyMesh {
                 self.insert_edge_points(grid, piece, tri, &on_edge);
             }
             pieces[cell] = Some(cell_pieces);
+        }
+        for cell_pieces in pieces.iter_mut().flatten() {
+            weld_pieces(cell_pieces);
         }
         self.assemble(grid, pieces)
     }
