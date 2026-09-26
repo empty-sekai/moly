@@ -18,7 +18,7 @@ pub(crate) use source::{
 
 use crate::{
     alone_action_runtime::{apply_eye_pattern, apply_mouth_pattern, FacialTables},
-    audio::{BusVolume, Routing, SeClass, VolumeBus},
+    audio::{Routing, VolumeBus},
     character_material::{CharacterMaterial, ToonMaterials},
     fixture_activity_state::FixtureActivityOwner,
 };
@@ -29,7 +29,7 @@ use bevy::{
         AnimatedBy, AnimationClip, AnimationTargetId, RepeatAnimation,
     },
     asset::{AssetId, AssetPath},
-    audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, PlaybackSettings, Volume},
+    audio::{AudioSink, AudioSinkPlayback, AudioSource},
     ecs::change_detection::Tick,
     prelude::*,
 };
@@ -157,9 +157,7 @@ const ACTOR_CATALOG: &str = "actor-animations/index.json";
 /// whose unit is not an unsigned integer or whose source identity does not
 /// parse equals no request, so it is not indexed. A missing array is kept as
 /// the error the resolution reports at the point it first needs a route.
-struct CatalogRoutes(
-    Result<HashMap<(u64, SourceAssetId), Vec<usize>>, TimelineFailure>,
-);
+struct CatalogRoutes(Result<HashMap<(u64, SourceAssetId), Vec<usize>>, TimelineFailure>);
 
 impl CatalogRoutes {
     fn build(catalog: &Value) -> Self {
@@ -835,7 +833,9 @@ pub(crate) struct TimelineBindings {
     /// `silence_unavailable_sounds`); every other owner leaves it empty and
     /// still requires each SE.
     pub silent_sounds: HashSet<TimelineClipKey>,
-    pub sounds: HashMap<TimelineClipKey, Handle<AudioSource>>,
+    /// Every waveform an SE clip's cue can play, in the cue's track order
+    /// (`Routing::cue_asset_paths`): the cue player picks the tracks per start.
+    pub sounds: HashMap<TimelineClipKey, Vec<Handle<AudioSource>>>,
     pub controls:
         HashMap<TimelineClipKey, crate::fixture_timeline_particles::ParticleControlBinding>,
     /// Control clips this runner does not drive, each with the reason, by
@@ -1341,14 +1341,21 @@ pub(crate) fn silence_unavailable_sounds(
             if request.bindings.silent_sounds.contains(&clip.key) {
                 continue;
             }
-            let reason = if routing.timeline_se_asset_path(package, cue).is_none() {
-                "no route"
-            } else if request.bindings.sounds.get(&clip.key).is_some_and(|handle| {
-                server.is_some_and(|server| {
-                    matches!(server.load_state(handle), bevy::asset::LoadState::Failed(_))
+            let reason = if let Err(reason) = routing.cue_asset_paths(package, cue) {
+                format!("no route ({reason})")
+            } else if request
+                .bindings
+                .sounds
+                .get(&clip.key)
+                .is_some_and(|handles| {
+                    server.is_some_and(|server| {
+                        handles.iter().any(|handle| {
+                            matches!(server.load_state(handle), bevy::asset::LoadState::Failed(_))
+                        })
+                    })
                 })
-            }) {
-                "audio failed to load"
+            {
+                "audio failed to load".to_string()
             } else {
                 continue;
             };
@@ -1385,12 +1392,17 @@ pub(crate) fn prepare_source_sounds(
                 if request.bindings.silent_sounds.contains(&clip.key) {
                     continue;
                 }
-                let path = routing
-                    .timeline_se_asset_path(package, cue)
-                    .ok_or_else(|| invalid(format!("missing source SE {package}/{cue}")))?;
+                let paths = routing.cue_asset_paths(package, cue).map_err(|reason| {
+                    invalid(format!("missing source SE {package}/{cue}: {reason}"))
+                })?;
                 sounds.insert(
                     clip.key.clone(),
-                    server.load::<AudioSource>(AssetPath::from(format!("moly://{path}"))),
+                    paths
+                        .iter()
+                        .map(|path| {
+                            server.load::<AudioSource>(AssetPath::from(format!("moly://{path}")))
+                        })
+                        .collect(),
                 );
             }
         }
@@ -1755,33 +1767,39 @@ fn validate(
                     let routing = world
                         .get_resource::<Routing>()
                         .ok_or_else(|| routing_absent(world))?;
-                    let path = routing
-                        .timeline_se_asset_path(package, cue)
-                        .ok_or_else(|| invalid("source SE route unavailable"))?;
-                    let handle = request
+                    let paths = routing.cue_asset_paths(package, cue).map_err(|reason| {
+                        invalid(format!("source SE route unavailable: {reason}"))
+                    })?;
+                    let handles = request
                         .bindings
                         .sounds
                         .get(&clip.key)
                         .ok_or_else(|| invalid("source SE has not been prepared"))?;
-                    let expected_path = format!("moly://{path}");
-                    if handle.path().map(ToString::to_string).as_deref()
-                        != Some(expected_path.as_str())
-                    {
-                        return Err(invalid("SE handle does not match the exact source route"));
+                    if handles.len() != paths.len() {
+                        return Err(invalid("SE handles do not match the cue's tracks"));
                     }
-                    if let Some(server) = world.get_resource::<AssetServer>() {
-                        if let bevy::asset::LoadState::Failed(error) = server.load_state(handle) {
-                            return Err(invalid(format!(
-                                "source SE audio failed to load: {path}: {error}"
-                            )));
+                    for (path, handle) in paths.iter().zip(handles) {
+                        let expected_path = format!("moly://{path}");
+                        if handle.path().map(ToString::to_string).as_deref()
+                            != Some(expected_path.as_str())
+                        {
+                            return Err(invalid("SE handle does not match the exact source route"));
                         }
-                    }
-                    if world
-                        .get_resource::<Assets<AudioSource>>()
-                        .and_then(|a| a.get(handle))
-                        .is_none()
-                    {
-                        return Err(TimelineFailure::loading("source SE audio still loading"));
+                        if let Some(server) = world.get_resource::<AssetServer>() {
+                            if let bevy::asset::LoadState::Failed(error) = server.load_state(handle)
+                            {
+                                return Err(invalid(format!(
+                                    "source SE audio failed to load: {path}: {error}"
+                                )));
+                            }
+                        }
+                        if world
+                            .get_resource::<Assets<AudioSource>>()
+                            .and_then(|a| a.get(handle))
+                            .is_none()
+                        {
+                            return Err(TimelineFailure::loading("source SE audio still loading"));
+                        }
                     }
                     if world.get_resource::<VolumeBus>().is_none() {
                         return Err(invalid("source audio volume bus missing"));
@@ -1789,7 +1807,12 @@ fn validate(
                 }
                 TimelinePayload::Eye { .. } | TimelinePayload::Lip { .. } => {
                     let eye = matches!(clip.payload, TimelinePayload::Eye { .. });
-                    face_handle(world, request, &track.identity, if eye { "eye" } else { "mouth" })?;
+                    face_handle(
+                        world,
+                        request,
+                        &track.identity,
+                        if eye { "eye" } else { "mouth" },
+                    )?;
                     // The view's own eye and lip tables (`FindBy` by name).
                     if !world.contains_resource::<FacialTables>() {
                         return Err(TimelineFailure::loading("facial tables still loading"));
@@ -2609,26 +2632,23 @@ fn apply_events(
                     .map_err(invalid)?;
                 session.emoticons.insert(key.clone(), lease);
             }
-            TimelinePayload::Se { .. } => {
+            TimelinePayload::Se { package, cue } => {
                 // A silent SE has no sound; the timeline plays on without it.
                 if session.request.bindings.silent_sounds.contains(key) {
                     continue;
                 }
-                let handle = session
+                let handles = session
                     .request
                     .bindings
                     .sounds
                     .get(key)
                     .ok_or_else(|| invalid("unprepared source SE"))?
                     .clone();
-                let volume = world.resource::<VolumeBus>().se_ingame;
-                let entity = world
-                    .spawn((
-                        AudioPlayer::new(handle),
-                        PlaybackSettings::ONCE.with_volume(Volume::Linear(volume)),
-                        BusVolume::Se(SeClass::Ingame),
-                    ))
-                    .id();
+                // The clip starts its cue on the SE player: the cue's sequence
+                // type picks the tracks, each waits for its own delay; the
+                // playback despawns itself when it has played out.
+                let entity = crate::audio::start_timeline_cue(world, package, cue, handles)
+                    .map_err(invalid)?;
                 session.sound_entities.push(entity);
             }
             _ => unreachable!(),
