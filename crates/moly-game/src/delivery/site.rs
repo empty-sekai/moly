@@ -1,6 +1,5 @@
-//! The delivery site's scene objects, their collision circles, the requests
-//! the delivery screen sends, the keyboard stand-in and the autoplay
-//! instrument.
+//! The delivery site's scene objects, their collision circles and the
+//! autoplay instrument.
 //!
 //! Scene objects (`DeliverySiteView`, one instance in the site's scene
 //! document): `_deliveryCollisionObjects` references the place view
@@ -22,19 +21,22 @@
 //! enter or exit edge becomes event 68 (`OnCollisionDeliveryObject`), which
 //! this module publishes as [`DeliveryCollision`] for the delivery screen.
 //!
-//! Requests: the delivery screen (the UI lane's) sends
+//! Requests: the delivery screen (`super::screen`) sends
 //! [`DeliveryRequest::Start`] on the delivery button's press and
-//! [`DeliveryRequest::End`] on its release. Named stand-ins: the G key
-//! presses and releases the button while the place circle holds the player
-//! (the screen shows the button only then) and the field takes input; the
-//! Y key closes a dialog the flow awaits. `MOLY_DELIVERY_AUTOPLAY` (off by
-//! default, WARN when set) is an instrument: `hold[,close]` in seconds; it
-//! walks the player through the joystick's touch stream to each drop on
-//! the ground, then into the place circle, holds the button for `hold`
-//! seconds and releases it, and closes each awaited dialog `close` seconds
-//! (default 1.5) after it opens.
+//! [`DeliveryRequest::End`] on its release. The reward dialogs close on the
+//! screen manager's hardware back key (Escape). `MOLY_DELIVERY_AUTOPLAY`
+//! (off by default, WARN when set) is an instrument: `hold[,close]` in
+//! seconds; it walks the player through the joystick's touch stream to each
+//! drop on the ground, then into the place circle, touches the drawn
+//! delivery button through the window's touch stream (the gesture layer
+//! and the button's source handlers take it), holds it `hold` seconds and
+//! lifts the finger, and `close` seconds (default 1.5) after an awaited
+//! dialog is shown presses the back key (an Escape key press and release
+//! through the keyboard input stream).
 
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::touch::{TouchInput, TouchPhase};
+use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
@@ -42,10 +44,7 @@ use moly_assets::source_navigation::SourceObjectIdentity;
 use moly_law::action_button::inside_circle;
 use serde_json::Value;
 
-use super::{
-    CollisionEdge, DeliveryCollision, DeliveryDialogClosed, DeliveryModel, DeliveryObjectType,
-    DeliveryRequest,
-};
+use super::{CollisionEdge, DeliveryCollision, DeliveryModel, DeliveryObjectType};
 use crate::fixture_activity_timeline::{
     ReceiverCall, SignalReaction, SignalReceiverBinding, SourceAssetId,
 };
@@ -564,7 +563,9 @@ fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, S
 pub(crate) fn arrive(
     mut state: ResMut<DeliverySite>,
     mut model: ResMut<DeliveryModel>,
-    mock: Option<Res<super::server_mock::DeliveryServerMock>>,
+    client: Res<crate::server::delivery::ClientBirthdayPartyData>,
+    parties: Option<Res<crate::birthday::BirthdayParties>>,
+    tables: Option<Res<crate::server::delivery::DeliveryTables>>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     mut spawns: ResMut<super::drops::DeliveryDropSpawns>,
     mut gather_loop: ResMut<super::drops::DeliveryGatherLoop>,
@@ -580,12 +581,30 @@ pub(crate) fn arrive(
     let Some(objects) = state.objects.clone() else {
         return;
     };
-    let (Some(configs), Some(catalog)) = (configs, catalog) else {
+    let (Some(configs), Some(catalog), Some(parties)) = (configs, catalog, parties) else {
         return;
     };
+    // The login's user data: the join delivers the delivery sections.
+    if client.revision == 0 {
+        return;
+    }
     state.arrived = true;
-    let Some(mock) = mock else {
-        info!("[delivery] arrival on {}: no party in session (DeliveryServerMock off); RefreshBirthdayParty returns, no delivery", objects.scene);
+    // GetMasterBirthdayPartiesInSession.
+    let in_session = parties.in_session(crate::birthday::now_ms());
+    if in_session.is_empty() {
+        info!("[delivery] arrival on {}: no party in session; RefreshBirthdayParty returns, no delivery", objects.scene);
+        return;
+    }
+    let Some(tables) = tables else {
+        error!("[delivery] arrival on {}: the delivery tables (birthday-party-delivery.json) are absent (the server model names them among its missing masters); no delivery", objects.scene);
+        return;
+    };
+    use crate::server::delivery::{CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT};
+    let (Some(base_point), Some(drop_upper_limit)) = (
+        client.master_config_int(CONFIG_BASE_POINT),
+        client.master_config_int(CONFIG_DROP_UPPER_LIMIT),
+    ) else {
+        error!("[delivery] arrival on {}: the master configs {CONFIG_BASE_POINT} / {CONFIG_DROP_UPPER_LIMIT} were not delivered; no delivery", objects.scene);
         return;
     };
     let next_uid = model.next_uid;
@@ -595,23 +614,26 @@ pub(crate) fn arrive(
         ..DeliveryModel::default()
     };
     // SetupDeliveryData: the party rows, then the four server configs.
-    for party in &mock.parties {
-        let id = party.row.id as i32;
-        let (member_bonus, requirement) = mock.party_constants(id).expect("the panel's own party");
+    for party in &in_session {
+        let id = party.id as i32;
+        // BirthdayPartySiteData: the member bonus over the owned cards, the
+        // reward loop requirement of the last reward row.
+        let member_bonus = tables.member_bonus(party.id, client.cards());
+        let requirement = tables.reward_loop_requirement(party.id);
         model.parties.push(super::PartySite {
             id,
-            label: party.row.label.clone(),
-            item_material_id: party.row.delivery_item_material_id,
-            reward_material_id: party.row.delivery_reward_material_id,
+            label: party.label.clone(),
+            item_material_id: party.delivery_item_material_id,
+            reward_material_id: party.delivery_reward_material_id,
             tally: moly_law::delivery::PartyTally {
                 synchronized_cost_quantity: 0,
                 unsynchronized_cost: 0,
                 synchronized_points: 0,
                 unsynchronized_points: 0,
-                base_point: mock.base_point,
+                base_point,
                 member_bonus,
                 reward_loop_requirement: requirement,
-                max_drop_item_count: mock.drop_upper_limit,
+                max_drop_item_count: drop_upper_limit,
             },
             drops: Vec::new(),
             unsynced_drops: Vec::new(),
@@ -620,10 +642,7 @@ pub(crate) fn arrive(
         });
         // The reward drop's model is requested now (the source preloads the
         // site's bundles before the reveal).
-        if let Some(material) = catalog
-            .materials
-            .get(&party.row.delivery_reward_material_id)
-        {
+        if let Some(material) = catalog.materials.get(&party.delivery_reward_material_id) {
             super::drops::request(&server, &catalog, &material.package, &mut glbs, &mut docs);
         }
     }
@@ -634,7 +653,7 @@ pub(crate) fn arrive(
     );
     model.start_wait =
         moly_law::delivery::start_wait_time(configs.int(super::flow::KEY_START_WAIT_FRAME));
-    model.update_synchronized(&mock);
+    model.update_synchronized(&client);
     model.flowered = false;
     info!(
         "[delivery] DeliverySiteController.Initialize on {}: RefreshBirthdayParty {} parties {:?}; rate min {} max {} acceleration {}, start wait {} s; tallies {:?}; place view ResetView (not flowered)",
@@ -647,23 +666,44 @@ pub(crate) fn arrive(
         model.start_wait,
         model.parties.iter().map(|p| p.tally).collect::<Vec<_>>()
     );
-    super::drops::generate_unclaimed(&mut model, &mock, &mut spawns, &objects, "arrival");
+    super::drops::generate_unclaimed(&mut model, &client, &mut spawns, &objects, "arrival");
     gather_loop.start(
         frames.0 as u64,
         configs.float(super::drops::KEY_GATHER_API_INTERVAL),
     );
 }
 
-/// Update: the collision circles of the place and the board.
+/// Update: the collision circles of the place and the board, and the
+/// delivery screen's `TriggerOnEnterCollisions` (the enter callback of each
+/// object the player collides with again, whatever the game state).
 pub(crate) fn scan(
     mut state: ResMut<DeliverySite>,
     eligibility: crate::interaction::InteractionEligibility,
     players: Query<&Transform, With<PlayerControlled>>,
     mut collisions: MessageWriter<DeliveryCollision>,
+    mut retrigger: ResMut<super::DeliveryEnterRetrigger>,
 ) {
+    let again = std::mem::take(&mut retrigger.site);
     let Some(objects) = state.objects.clone() else {
         return;
     };
+    if again {
+        for (index, object) in [
+            DeliveryObjectType::DeliveryPlace,
+            DeliveryObjectType::Information,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if state.inside[index] {
+                collisions.write(DeliveryCollision {
+                    object,
+                    edge: CollisionEdge::Enter,
+                });
+                info!("[delivery] TriggerOnEnterCollisions: OnCollisionDeliveryObject Enter {object:?} again");
+            }
+        }
+    }
     if !eligibility.collision_updates() {
         return;
     }
@@ -705,36 +745,6 @@ pub(crate) fn scan(
     }
 }
 
-/// Update: the G key presses and releases the delivery button; Y closes an
-/// awaited dialog (named stand-ins for the delivery screen).
-pub(crate) fn keyboard(
-    keys: Res<ButtonInput<KeyCode>>,
-    state: Res<DeliverySite>,
-    eligibility: crate::interaction::InteractionEligibility,
-    mut requests: MessageWriter<DeliveryRequest>,
-    mut closes: MessageWriter<DeliveryDialogClosed>,
-    mut holding: Local<bool>,
-) {
-    if state.objects.is_none() {
-        *holding = false;
-        return;
-    }
-    if keys.just_pressed(KeyCode::KeyY) {
-        closes.write(DeliveryDialogClosed);
-        info!("[delivery] Y (stand-in for the dialog's close)");
-    }
-    if keys.just_pressed(KeyCode::KeyG) && state.in_place() && eligibility.field_input_open() {
-        *holding = true;
-        requests.write(DeliveryRequest::Start(None));
-        info!("[delivery] G down (stand-in for the delivery button's press)");
-    }
-    if *holding && keys.just_released(KeyCode::KeyG) {
-        *holding = false;
-        requests.write(DeliveryRequest::End);
-        info!("[delivery] G up (stand-in for the delivery button's release)");
-    }
-}
-
 /// The instrument's progress on the current visit.
 #[derive(Resource, Default)]
 pub(crate) struct DeliveryAutoplay {
@@ -743,7 +753,14 @@ pub(crate) struct DeliveryAutoplay {
     walking: bool,
     pressed_at: Option<f32>,
     released: bool,
-    dialog_since: Option<f32>,
+    /// The delivery button's window point the finger went down on.
+    tap_point: Vec2,
+    /// The wait for a drawn delivery button is logged.
+    waiting_logged: bool,
+    /// The awaited dialog and when the instrument first saw it.
+    dialog_since: Option<(crate::ui_layers::DialogId, f32)>,
+    /// The back key is down (released on the next frame).
+    back_down: bool,
     /// When the walk toward the drops began; after 30 s the instrument
     /// leaves the remaining drops and walks to the place.
     drops_since: Option<f32>,
@@ -779,8 +796,11 @@ pub(crate) fn autoplay(
     players: Query<&Transform, With<PlayerControlled>>,
     drops: Query<(&Transform, &super::drops::DeliveryDropItem), Without<PlayerControlled>>,
     mut touches: MessageWriter<TouchInput>,
-    mut requests: MessageWriter<DeliveryRequest>,
-    mut closes: MessageWriter<DeliveryDialogClosed>,
+    mut keys: MessageWriter<KeyboardInput>,
+    (screen, mut window_events): (
+        Res<super::screen::DeliveryScreen>,
+        MessageWriter<bevy::window::WindowEvent>,
+    ),
     navigation: Option<Res<crate::player_fixture_action::PlayerFixtureNavigation>>,
 ) {
     let Some((hold, close)) = autoplay_config() else {
@@ -791,43 +811,85 @@ pub(crate) fn autoplay(
         warn!("[delivery-autoplay] MOLY_DELIVERY_AUTOPLAY is set: an instrument walks the player to the drops and into the place circle, holds the delivery button {hold} s and closes each awaited dialog after {close} s");
     }
     let now = time.elapsed_secs();
-    // Dialog closes, whenever one is awaited.
-    if awaiting.open {
-        let since = *run.dialog_since.get_or_insert(now);
-        if now - since >= close {
-            run.dialog_since = None;
-            closes.write(DeliveryDialogClosed);
-            info!(
-                "[delivery-autoplay] closes the awaited dialog ({:.2} s after it opened)",
-                now - since
-            );
+    let Ok((window_entity, window)) = windows.single() else {
+        return;
+    };
+    // The back key, whenever a dialog is awaited: pressed, then released on
+    // the next frame, through the keyboard input stream the screen manager's
+    // back key reads.
+    let escape = |keys: &mut MessageWriter<KeyboardInput>, state: ButtonState| {
+        keys.write(KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state,
+            text: None,
+            repeat: false,
+            window: window_entity,
+        });
+    };
+    if run.back_down {
+        run.back_down = false;
+        escape(&mut keys, ButtonState::Released);
+    }
+    match awaiting.awaited() {
+        Some(dialog) => {
+            let since = match run.dialog_since {
+                Some((seen, since)) if seen == dialog => since,
+                _ => {
+                    run.dialog_since = Some((dialog, now));
+                    now
+                }
+            };
+            if now - since >= close && !run.back_down {
+                // Again after another `close` seconds while it stays
+                // shown (the input manager's interval gate can block a
+                // press).
+                run.dialog_since = Some((dialog, now));
+                run.back_down = true;
+                escape(&mut keys, ButtonState::Pressed);
+                info!(
+                    "[delivery-autoplay] presses the back key for the awaited dialog {dialog:?} ({:.2} s after it was shown)",
+                    now - since
+                );
+            }
         }
-    } else {
-        run.dialog_since = None;
+        None => run.dialog_since = None,
     }
     let Some(objects) = state.objects.as_ref() else {
         return;
     };
     let visit = state.seen_epoch;
     if run.visit != visit {
+        // A pressed back key keeps its release.
+        let back_down = run.back_down;
         *run = DeliveryAutoplay {
             warned: true,
             visit,
+            back_down,
             ..default()
         };
     }
     if !state.arrived || model.site_id.is_none() {
         return;
     }
-    let (Ok((window_entity, window)), Some(root_canvas), Ok(camera), Ok(player)) = (
-        windows.single(),
-        root_canvas.as_deref(),
-        cameras.single(),
-        players.single(),
-    ) else {
+    let (Some(root_canvas), Ok(camera), Ok(player)) =
+        (root_canvas.as_deref(), cameras.single(), players.single())
+    else {
         return;
     };
     const FINGER: u64 = 99031;
+    const TAP_FINGER: u64 = 99032;
+    // The joystick reads the touch messages; the gesture layer reads the
+    // window's event stream, so the button's finger goes there.
+    let mut tap = |phase: TouchPhase, position: Vec2| {
+        window_events.write(bevy::window::WindowEvent::TouchInput(TouchInput {
+            phase,
+            position,
+            window: window_entity,
+            force: None,
+            id: TAP_FINGER,
+        }));
+    };
     let base = Vec2::new(window.width() * 0.15, window.height() * 0.75);
     let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
         touches.write(TouchInput {
@@ -841,9 +903,11 @@ pub(crate) fn autoplay(
     if let Some(pressed_at) = run.pressed_at {
         if !run.released && now - pressed_at >= hold {
             run.released = true;
-            requests.write(DeliveryRequest::End);
+            tap(TouchPhase::Ended, run.tap_point);
             info!(
-                "[delivery-autoplay] releases the delivery button after {:.3} s",
+                "[delivery-autoplay] lifts the finger from the delivery button at ({:.1}, {:.1}) after {:.3} s",
+                run.tap_point.x,
+                run.tap_point.y,
                 now - pressed_at
             );
         }
@@ -867,9 +931,20 @@ pub(crate) fn autoplay(
             info!("[delivery-autoplay] inside the place circle at ({:.3}, {:.3}, {:.3}): walk finger up", player.translation.x, player.translation.y, player.translation.z);
             return;
         }
+        let Some(point) = screen.button_point() else {
+            if !run.waiting_logged {
+                run.waiting_logged = true;
+                info!("[delivery-autoplay] inside the place circle: waits for the drawn delivery button to take a press");
+            }
+            return;
+        };
         run.pressed_at = Some(now);
-        requests.write(DeliveryRequest::Start(None));
-        info!("[delivery-autoplay] presses the delivery button");
+        run.tap_point = point;
+        tap(TouchPhase::Started, point);
+        info!(
+            "[delivery-autoplay] touches the delivery button at ({:.1}, {:.1})",
+            point.x, point.y
+        );
         return;
     }
     if !joystick.enabled {
