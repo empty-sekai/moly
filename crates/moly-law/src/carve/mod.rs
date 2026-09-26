@@ -85,13 +85,14 @@
 mod contour;
 mod funnel;
 mod grid;
+pub mod obstacle;
 mod polymesh;
 mod query;
 mod region;
 
 use crate::fixture::position::{layout_type, TILE_SIZE};
 use crate::fixture::GridPosition;
-pub use polymesh::SurfaceMove;
+pub use polymesh::{RuntimeCarve, SurfaceMove};
 pub use query::SNAP_MAX_DISTANCE;
 
 /// 烘焙 agent 半径（米）：`"MysekaiCharacter"` agent 类型的表值。
@@ -276,6 +277,27 @@ fn walkable_height_world(voxel: f32) -> f32 {
     (AGENT_HEIGHT / ch).floor() * ch
 }
 
+/// A runtime NavMeshObstacle carve for [`WalkField::carve_obstacles`]: the
+/// shape's hull (`CarveNavMeshTile` with the MysekaiCharacter agent's height
+/// and radius, the build settings the carve job passes), converted to the
+/// moly frame, tested at the navigation surface height `floor` under it.
+/// `None` when the hull is degenerate (the engine skips such a shape).
+///
+/// The tile position the engine subtracts before building the hull is the
+/// tile's centre; this field is untiled and uses the origin, which changes
+/// only the rounding of the hull's coordinates.
+pub fn runtime_carve(shape: &obstacle::CarveShape, floor: f32) -> Option<RuntimeCarve> {
+    let pos = [0.0; 3];
+    let points = obstacle::carve_points(shape, pos);
+    let hull = obstacle::carve_hull(&points, shape, pos, AGENT_HEIGHT, AGENT_RADIUS)?.to_moly(pos);
+    Some(RuntimeCarve {
+        planes: hull.planes,
+        min: [hull.bounds_min[0], hull.bounds_min[2]],
+        max: [hull.bounds_max[0], hull.bounds_max[2]],
+        floor,
+    })
+}
+
 /// 一条阻挡足迹（世界系 xz 矩形，半开 [min, max)）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Obstacle {
@@ -365,6 +387,8 @@ pub struct BakeCounts {
     pub contour_verts: usize,
     /// 导航多边形网的单元数（三角形；凸合并未实现，见 polymesh 模块注释）。
     pub polygons: usize,
+    /// Walk cells runtime obstacle carving removed (0 for a plain bake).
+    pub carved: usize,
 }
 
 /// 烘好的可行走场：格面 + 分区 + 轮廓 + 账目。查询全部走它。
@@ -378,6 +402,16 @@ pub struct WalkField {
     /// Relative to the source ground, not an absolute replacement for sloped
     /// terrain sampling. Empty when no low physical support was encountered.
     height_offsets: Vec<f32>,
+    /// The baked field before runtime carving, kept once a carve is applied
+    /// (the engine rebuilds a carved tile from its baked data).
+    base: Option<std::sync::Arc<CarveBase>>,
+}
+
+/// What [`WalkField::carve_obstacles`] starts from.
+struct CarveBase {
+    walkable: Vec<bool>,
+    polys: polymesh::PolyMesh,
+    counts: BakeCounts,
 }
 
 impl WalkField {
@@ -435,12 +469,52 @@ impl WalkField {
                 contours: contours.len(),
                 contour_verts: contours.iter().map(|c| c.verts.len()).sum(),
                 polygons: polys.polygon_count(),
+                carved: 0,
             },
             regions,
             contours,
             polys,
             grid,
             height_offsets,
+            base: None,
+        }
+    }
+
+    /// This field with the runtime NavMeshObstacle carves `carves` (the
+    /// complete current set) applied to its baked state, as the engine's
+    /// carving rebuilds a tile from its baked data with every shape on it:
+    /// the navigation cells lose the part inside each hull
+    /// (`DynamicMesh::ClipPolys`, see `polymesh::carving`) and the walk cells
+    /// whose centre is inside a hull become unwalkable. An empty set gives
+    /// the baked field back. Build the carves with [`runtime_carve`].
+    pub fn carve_obstacles(&self, carves: &[RuntimeCarve]) -> WalkField {
+        let base = self.base.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(CarveBase {
+                walkable: self.grid.walkable.clone(),
+                polys: self.polys.clone(),
+                counts: self.counts,
+            })
+        });
+        let mut grid = self.grid.clone();
+        grid.walkable.clone_from(&base.walkable);
+        let carved = polymesh::carve_cells(&mut grid, carves);
+        let polys = if carves.is_empty() {
+            base.polys.clone()
+        } else {
+            base.polys.carved(&grid, carves)
+        };
+        let mut counts = base.counts;
+        counts.walkable -= carved;
+        counts.carved = carved;
+        counts.polygons = polys.polygon_count();
+        WalkField {
+            grid,
+            regions: self.regions.clone(),
+            contours: Vec::new(),
+            polys,
+            counts,
+            height_offsets: self.height_offsets.clone(),
+            base: Some(base),
         }
     }
 

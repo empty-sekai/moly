@@ -176,7 +176,9 @@ pub(crate) fn build(
 }
 
 /// 放稳行变化即重烘；会话撤销时同时撤销增量洞，保存事件仍驱动同一入口。
-#[allow(clippy::type_complexity)]
+/// The same system then runs the frame's NavMeshObstacle update
+/// ([`RuntimeCarving`]) on the face it did not replace this frame.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn rebake_on_save(
     mut commands: Commands,
     mut saved: MessageReader<LayoutSaved>,
@@ -191,31 +193,67 @@ pub(crate) fn rebake_on_save(
     collision: CollisionInputs,
     mut failure: Local<String>,
     parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    mut carving: RuntimeCarving,
 ) {
+    carving.adopt(&mut commands);
     let saved_now = !saved.is_empty();
     saved.clear();
+    let rebaked = rebake(
+        &mut commands,
+        saved_now,
+        &revision,
+        &mut pending,
+        &meshes,
+        handles.as_deref(),
+        face.as_deref(),
+        site.as_deref(),
+        source.as_deref(),
+        placements.as_deref(),
+        &collision,
+        &mut failure,
+        &parts,
+    );
+    if !rebaked {
+        carving.apply(&mut commands, face.as_deref());
+    }
+}
+
+/// The layout rebake; true when it replaced the face this frame.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn rebake(
+    commands: &mut Commands,
+    saved_now: bool,
+    revision: &crate::fixture::FixtureLayoutRevision,
+    pending: &mut bool,
+    meshes: &Assets<Mesh>,
+    handles: Option<&WalkFaceMeshes>,
+    face: Option<&WalkFace>,
+    site: Option<&SiteActive>,
+    source: Option<&NavMeshSourceRegion>,
+    placements: Option<&FixturePlacements>,
+    collision: &CollisionInputs,
+    failure: &mut String,
+    parts: &Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+) -> bool {
     // A save stays pending until the committed scene's collision graph is ready.
-    *pending |= saved_now
-        || face
-            .as_deref()
-            .is_some_and(|face| face.layout_revision != revision.0);
+    *pending |= saved_now || face.is_some_and(|face| face.layout_revision != revision.0);
     if !*pending {
-        return;
+        return false;
     }
     let (Some(site), Some(source), Some(placements), Some(handles), Some(face)) =
-        (&site, &source, &placements, &handles, &face)
+        (site, source, placements, handles, face)
     else {
-        return; // 面不在（未烘好或换站清扫中）：台账已落，build 会带上
+        return false; // 面不在（未烘好或换站清扫中）：台账已落，build 会带上
     };
-    let Some(tris) = collect_tris(&meshes, handles, &parts) else {
-        return;
+    let Some(tris) = collect_tris(meshes, handles, parts) else {
+        return false;
     };
     let voxel = site_voxel(site, source);
     let sources = match collision.collect(placements.total()) {
         Ok(sources) => sources,
         Err(reason) => {
-            record_failure(&mut commands, &mut failure, reason);
-            return;
+            record_failure(commands, failure, reason);
+            return false;
         }
     };
     failure.clear();
@@ -247,6 +285,7 @@ pub(crate) fn rebake_on_save(
         layout_revision: revision.0,
     });
     *pending = false;
+    true
 }
 
 /// QA probe state: what the last report covered, so that a report is written
@@ -494,4 +533,238 @@ fn log_bake(tag: &str, field: &WalkField, obstacles: usize) {
         counts.contour_verts,
         counts.polygons,
     );
+}
+
+// —— Runtime NavMeshObstacle carving ——
+
+/// A node's NavMeshObstacle records (the `navMeshObstacles` extras the
+/// extractor writes on runtime-spawned objects, e.g. harvest objects), each
+/// with its `NavMeshObstacle::UpdateState` state.
+#[derive(Component, Clone, Debug)]
+pub(crate) struct RuntimeObstacles(Vec<(ObstacleRecord, carve::obstacle::ObstacleState)>);
+
+/// One serialized NavMeshObstacle, centre in the moly frame (x reflected),
+/// extents as authored (a capsule's x is its radius, y its half height).
+#[derive(Clone, Debug)]
+struct ObstacleRecord {
+    kind: carve::obstacle::CarveKind,
+    center: Vec3,
+    extents: [f32; 3],
+    enabled: bool,
+    carve: bool,
+    only_stationary: bool,
+    move_threshold: f32,
+    time_to_stationary: f32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObstacleExtras {
+    nav_mesh_obstacles: Vec<ObstacleJson>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObstacleJson {
+    schema_version: u32,
+    coordinate_contract: String,
+    enabled: serde_json::Value,
+    shape: u32,
+    center: Xyz,
+    extents: Xyz,
+    carve: bool,
+    only_stationary: bool,
+    move_threshold: f32,
+    stationary_time: f32,
+}
+
+#[derive(serde::Deserialize)]
+struct Xyz {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+fn obstacle_records(value: &str) -> Result<Vec<ObstacleRecord>, String> {
+    let extras: ObstacleExtras =
+        serde_json::from_str(value).map_err(|error| format!("navMeshObstacles extras: {error}"))?;
+    extras
+        .nav_mesh_obstacles
+        .into_iter()
+        .map(|o| {
+            if o.schema_version != 2 || o.coordinate_contract != moly_assets::coordinates::CONTRACT {
+                return Err(format!(
+                    "navMeshObstacles schema {} / contract {} unsupported",
+                    o.schema_version, o.coordinate_contract
+                ));
+            }
+            let enabled = match &o.enabled {
+                serde_json::Value::Bool(b) => *b,
+                serde_json::Value::Number(n) => n.as_u64() == Some(1),
+                other => return Err(format!("NavMeshObstacle m_Enabled {other} unreadable")),
+            };
+            let kind = match o.shape {
+                0 => carve::obstacle::CarveKind::Capsule,
+                1 => carve::obstacle::CarveKind::Box,
+                other => return Err(format!("NavMeshObstacle shape {other} unknown")),
+            };
+            Ok(ObstacleRecord {
+                kind,
+                center: Vec3::new(o.center.x, o.center.y, o.center.z),
+                extents: [o.extents.x, o.extents.y, o.extents.z],
+                enabled,
+                carve: o.carve,
+                only_stationary: o.only_stationary,
+                move_threshold: o.move_threshold,
+                time_to_stationary: o.stationary_time,
+            })
+        })
+        .collect()
+}
+
+/// The carve set last applied, and the face generation it produced.
+#[derive(Default)]
+pub(crate) struct CarveApplied {
+    generation: u64,
+    carves: Vec<carve::RuntimeCarve>,
+}
+
+/// `NavMeshManager::UpdateNavMeshObstacles` for the runtime obstacles: each
+/// frame every registered obstacle runs `UpdateState`; a carving obstacle
+/// that is enabled, active and stationary contributes its carve shape, and
+/// when the set changes the walk field is rebuilt from its baked state with
+/// the whole set (`WalkField::carve_obstacles`), under a new navigation
+/// generation. An obstacle counts as active while its node is visible in
+/// the hierarchy and not source-inactive: the objects that carry these
+/// records toggle their parts with visibility, standing in for
+/// `SetActive`, which enables and disables the component.
+///
+/// Named differences: the engine applies the carve results after its carve
+/// jobs finish; here they apply in the frame the set changes. The navigation
+/// polygons are tested at the obstacle node's height (this field has no
+/// detail height). The static fixtures' obstacles are not in this set: they
+/// go through the bake (voxel null and agent-radius erosion), not this clip.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct RuntimeCarving<'w, 's> {
+    fresh: Query<
+        'w,
+        's,
+        (Entity, &'static bevy::gltf::GltfExtras, Option<&'static Name>),
+        (Added<bevy::gltf::GltfExtras>, Without<RuntimeObstacles>),
+    >,
+    obstacles: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static mut RuntimeObstacles,
+            &'static GlobalTransform,
+            Option<&'static InheritedVisibility>,
+            Has<moly_assets::scene_state::SourceInactive>,
+        ),
+    >,
+    time: Res<'w, Time>,
+    applied: Local<'s, CarveApplied>,
+}
+
+impl RuntimeCarving<'_, '_> {
+    /// Attaches the obstacle records of newly spawned nodes.
+    fn adopt(&mut self, commands: &mut Commands) {
+        for (entity, extras, name) in &self.fresh {
+            if !extras.value.contains("navMeshObstacles") {
+                continue;
+            }
+            match obstacle_records(&extras.value) {
+                Ok(records) if !records.is_empty() => {
+                    let states = records
+                        .into_iter()
+                        .map(|record| (record, carve::obstacle::ObstacleState::default()))
+                        .collect();
+                    commands.entity(entity).insert(RuntimeObstacles(states));
+                }
+                Ok(_) => {}
+                Err(reason) => error!(
+                    "[walk-face] obstacle records of {} refused: {reason}",
+                    name.map_or("<unnamed>", |name| name.as_str())
+                ),
+            }
+        }
+    }
+
+    /// One obstacle update and, when the carve set changed or the face was
+    /// replaced, the carved face.
+    fn apply(&mut self, commands: &mut Commands, face: Option<&WalkFace>) {
+        let Some(face) = face else {
+            *self.applied = CarveApplied::default();
+            return;
+        };
+        let dt = self.time.delta_secs();
+        let mut rows: Vec<_> = self.obstacles.iter_mut().collect();
+        rows.sort_by_key(|row| row.0);
+        let mut carves = Vec::new();
+        for (_, mut obstacles, global, visibility, inactive) in rows {
+            let active = !inactive && visibility.is_none_or(|v| v.get());
+            let (scale, rotation, translation) = global.to_scale_rotation_translation();
+            let axes = [rotation * Vec3::X, rotation * Vec3::Y, rotation * Vec3::Z].map(|a| a.to_array());
+            for (record, state) in obstacles.0.iter_mut() {
+                if !active || !record.enabled || !record.carve {
+                    *state = carve::obstacle::ObstacleState::default();
+                    continue;
+                }
+                let center = global.transform_point(record.center);
+                let shape = carve::obstacle::CarveShape::from_moly(
+                    record.kind,
+                    center.to_array(),
+                    axes,
+                    scale.to_array(),
+                    record.extents,
+                );
+                let pose = carve::obstacle::ObstaclePose {
+                    position: [-translation.x, translation.y, translation.z],
+                    rotation: [rotation.x, -rotation.y, -rotation.z, rotation.w],
+                    lossy_scale: scale.to_array(),
+                    world_extents: shape.extents,
+                };
+                let carving = state.update(
+                    &pose,
+                    dt,
+                    record.only_stationary,
+                    record.move_threshold,
+                    record.time_to_stationary,
+                );
+                if carving {
+                    if let Some(carve) = carve::runtime_carve(&shape, translation.y) {
+                        carves.push(carve);
+                    }
+                }
+            }
+        }
+        let replaced = face.generation != self.applied.generation;
+        if !replaced && carves == self.applied.carves {
+            return;
+        }
+        if replaced && carves.is_empty() {
+            *self.applied = CarveApplied {
+                generation: face.generation,
+                carves,
+            };
+            return;
+        }
+        let field = face.field.carve_obstacles(&carves);
+        let counts = *field.counts();
+        let generation = face.generation.checked_add(1).expect("导航代数溢出");
+        info!(
+            "[walk-face] runtime carve: {} obstacle shapes, walk cells carved {}, walkable {}, cells {} (generation {generation})",
+            carves.len(),
+            counts.carved,
+            counts.walkable,
+            counts.polygons,
+        );
+        commands.insert_resource(WalkFace {
+            field: Arc::new(field),
+            generation,
+            layout_revision: face.layout_revision,
+        });
+        *self.applied = CarveApplied { generation, carves };
+    }
 }

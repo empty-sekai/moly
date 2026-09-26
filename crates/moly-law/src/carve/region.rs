@@ -42,6 +42,7 @@ struct Sweep {
 }
 
 /// 分区结果。
+#[derive(Clone)]
 pub(crate) struct Regions {
     /// 每格的区号；0 = 不可行走或无区。长度 `cols * rows`。
     pub(crate) ids: Vec<u32>,
