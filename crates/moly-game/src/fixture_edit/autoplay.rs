@@ -29,7 +29,10 @@
 //! on the ground) reaches the edit camera's drag. With
 //! `MOLY_EDIT_AUTOPLAY_CLEAN_UP` set, before the save button the run presses
 //! the remove-all button (`RequestCleanUp`) and the confirmation's clean-up
-//! button (`CleanUpAll`). With `MOLY_EDIT_AUTOPLAY_RETURN_BASE` set, the
+//! button (`CleanUpAll`). With `MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD=<secs>` the
+//! run waits that long with the confirmation open before its clean-up
+//! button, so a drag given from outside meets the open confirmation. With
+//! `MOLY_EDIT_AUTOPLAY_RETURN_BASE` set, the
 //! base of the stack run is picked once more and sent to storage with the
 //! delete button (`ReturnToInventory`) before that.
 
@@ -98,6 +101,8 @@ pub(super) struct Run {
     held: bool,
     /// The remove-all buttons were pressed.
     cleaned: bool,
+    /// The hold with the confirmation open was taken.
+    clean_up_held: bool,
     /// The stack run's base, for the delete button.
     base_uid: Option<String>,
 }
@@ -563,6 +568,29 @@ pub(super) fn autoplay(
         Step::CleanUpAsked => {
             if elapsed < AFTER_CAMERA {
                 return;
+            }
+            if !run.clean_up_held {
+                run.clean_up_held = true;
+                let hold = std::env::var("MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD")
+                    .ok()
+                    .map(|raw| {
+                        raw.trim().parse::<f32>().unwrap_or_else(|_| {
+                            panic!("MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD is not seconds: {raw:?}")
+                        })
+                    })
+                    .unwrap_or(0.0);
+                if hold > 0.0 {
+                    info!(
+                        "[edit-autoplay] holding {hold:.1}s with the confirmation {}: no command is sent",
+                        if view.clean_up_dialog {
+                            "open"
+                        } else {
+                            "not open"
+                        }
+                    );
+                    run.at = now + hold;
+                    return;
+                }
             }
             info!(
                 "[edit-autoplay] the confirmation is {}; its clean-up button: CleanUpAll",

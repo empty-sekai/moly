@@ -488,6 +488,11 @@ pub(crate) struct SitemapData {
     textures: HashMap<String, Handle<Image>>,
     /// 贴图装载是否已全部到位（铺装前的闩）。
     textures_pending: bool,
+    /// The prefab document, kept for the UIParticle hosts under the clouds.
+    prefab: Handle<JsonAsset>,
+    /// The map root (the canvas-space root the UIParticle draws go under),
+    /// once spawned.
+    map_root: Option<Entity>,
 }
 
 impl SitemapData {
@@ -1067,6 +1072,8 @@ pub(crate) fn parse(
         screen: screen_layout,
         textures,
         textures_pending: true,
+        prefab: request.prefab.clone(),
+        map_root: None,
     });
     commands.remove_resource::<SitemapRequest>();
 }
@@ -1412,6 +1419,9 @@ pub(crate) struct UnlockRun {
     name_t: Option<f32>,
     /// Cloud sprites (entity, PosX, PosY, ColorAlpha curve indices).
     clouds: Vec<(Entity, usize, usize, usize)>,
+    /// The UIParticle hosts under the clouds (the container's CanvasGroup
+    /// alpha is theirs).
+    particles: Vec<Entity>,
     /// The cloud container's m_Alpha curve (multiplies every cloud).
     group_alpha: usize,
     flare_front: (Entity, usize),
@@ -1623,6 +1633,7 @@ pub(crate) fn spawn_when_ready(
         .id();
     commands.entity(overlay).add_child(map_root);
     commands.entity(overlay).add_child(ui_root);
+    data.map_root = Some(map_root);
 
     // 底图：世界全景图（真源装载给「サイトの球体画像」）。位置与尺寸
     // 都是屏幕层真值：2520×1140 的图在参照画布里锚中上（y+380）。
@@ -1851,6 +1862,55 @@ fn spawn_icon(
     );
 }
 
+/// The UIParticle under a cloud (`<cloud>/UI particle`, its systems' bake
+/// drawn right after the cloud image and before the next cloud): a host at
+/// the node's placement under the cloud sprite. Its own scale stays one (the
+/// source drives it); its alpha is written by the screen's CanvasGroup pass.
+fn spawn_cloud_particle(
+    commands: &mut Commands,
+    data: &SitemapData,
+    root: &str,
+    cloud_path: &str,
+    cloud: Entity,
+) -> Option<Entity> {
+    let node = format!("{cloud_path}/UI particle");
+    let Some(map_root) = data.map_root else {
+        warn!("sitemap: {root}/{node}: the map root is not spawned; no UI particle");
+        return None;
+    };
+    let Some(l) = data.layout.get(&(root.to_owned(), node.clone())) else {
+        warn!("sitemap: prefab has no RectTransform for {root}/{node}; no UI particle");
+        return None;
+    };
+    let host = commands
+        .spawn((
+            Transform {
+                translation: Vec3::new(l.anchored.x, l.anchored.y, 0.0005),
+                rotation: l.rotation,
+                scale: Vec3::ONE,
+            },
+            Visibility::Inherited,
+            crate::ui_particle::UiParticleHost {
+                document: data.prefab.clone(),
+                directory: "site/sitemap/prefab".to_owned(),
+                root: root.to_owned(),
+                node,
+                canvas: map_root,
+                layer: SITEMAP_LAYER,
+                alpha: 0.0,
+            },
+        ))
+        .id();
+    commands.entity(cloud).add_child(host);
+    Some(host)
+}
+
+/// A hide-cloud UIParticle host: its alpha is the icon root's CanvasGroup.
+#[derive(Component)]
+pub(crate) struct CloudParticle {
+    site: usize,
+}
+
 /// 铺云簇（hide_cloud 根的构图，全部直读 prefab RectTransform）：根
 /// 400×400 → cloud 容器 → 8 朵云（兄弟序即数字序）。
 fn spawn_cloud_cluster(
@@ -1934,6 +1994,9 @@ fn spawn_cloud_cluster(
             base_alpha: image.color[3],
             layer: PartLayer::Root,
         });
+        if let Some(host) = spawn_cloud_particle(commands, data, "hide_cloud", &path, cloud) {
+            commands.entity(host).insert(CloudParticle { site: site_i });
+        }
         report.push(format!(
             "{n}:{} ({:.1},{:.1}) {:.0}x{:.0} sx{:.2}",
             image.texture, l.anchored.x, l.anchored.y, l.size.x, l.size.y, l.scale.x
@@ -2089,6 +2152,8 @@ fn spawn_phenomena_text(
 /// 开云实例的可驱动实体位（曲线下标由 curve_index 绑定，缺曲线即拒）。
 struct OpenCloudParts {
     clouds: Vec<(Entity, usize, usize, usize)>,
+    /// The UIParticle hosts under the clouds.
+    particles: Vec<Entity>,
     group_alpha: usize,
     flare_front: (Entity, usize),
     flare_back: (Entity, usize),
@@ -2187,6 +2252,7 @@ fn spawn_open_cloud(
         0.02,
     );
     let mut clouds = Vec::new();
+    let mut particles = Vec::new();
     for n in 1..=8usize {
         let node = format!("cloud ({n})");
         let path = format!("cloud/{node}");
@@ -2198,6 +2264,7 @@ fn spawn_open_cloud(
             0.001 * n as f32,
             1.0,
         );
+        particles.extend(spawn_cloud_particle(commands, data, "open_cloud", &path, e));
         clouds.push((
             e,
             curve(&path, "m_AnchoredPosition.x"),
@@ -2209,6 +2276,7 @@ fn spawn_open_cloud(
 
     OpenCloudParts {
         clouds,
+        particles,
         group_alpha: curve("cloud", "m_Alpha"),
         flare_front: (flare_front_e, curve("flare_front", "m_Color.a")),
         flare_back: (flare_back_e, curve("flare_back", "m_Color.a")),
@@ -2265,6 +2333,7 @@ fn begin_unlock(
         se_played: false,
         name_t: None,
         clouds: open.clouds,
+        particles: open.particles,
         group_alpha: open.group_alpha,
         flare_front: open.flare_front,
         flare_back: open.flare_back,
@@ -2718,6 +2787,7 @@ pub(crate) fn tick_entries(
     mut transforms: Query<&mut Transform>,
     mut parts: Query<(&mut Sprite, &IconPart)>,
     runs: Query<(Entity, &UnlockRun)>,
+    mut cloud_particles: Query<(&mut crate::ui_particle::UiParticleHost, &CloudParticle)>,
     // Some(warned) while an open waits for the rank.
     mut pending: Local<Option<bool>>,
 ) {
@@ -2830,6 +2900,11 @@ pub(crate) fn tick_entries(
             PartLayer::Name => name,
         };
         sprite.color.set_alpha(part.base_alpha * group * layer);
+    }
+    for (mut host, particle) in cloud_particles.iter_mut() {
+        if let Some(&(group, _, _)) = alphas.get(&particle.site) {
+            host.alpha = group;
+        }
     }
 }
 
@@ -2953,6 +3028,7 @@ pub(crate) fn tick_unlock(
     mut sprites: Query<(&mut Transform, &mut Sprite), Without<IconPart>>,
     nodes: Query<&Transform, Without<Sprite>>,
     mut visibilities: Query<&mut Visibility>,
+    mut particle_hosts: Query<&mut crate::ui_particle::UiParticleHost>,
 ) {
     let Some(data) = data else { return };
     let dt = time.delta_secs();
@@ -2993,6 +3069,11 @@ pub(crate) fn tick_unlock(
                 sprite
                     .color
                     .set_alpha(data.curves[pa].curve.sample(ct) * group);
+            }
+        }
+        for &host in &run.particles {
+            if let Ok(mut host) = particle_hosts.get_mut(host) {
+                host.alpha = group * icon.group_alpha;
             }
         }
         for (entity, curve) in [run.flare_back, run.site_mask, run.flare_front] {
