@@ -450,6 +450,11 @@ const MODULE_ARMS: [&str; 5] = ["noVelocity", "noClamp", "clampBeforeVelocity", 
 /// Noise or the orbital velocity left out, the Noise scroll advanced on the
 /// newborn call, or left unadvanced on the catch-up steps.
 const NOISE_ARMS: [&str; 4] = ["noNoise", "noOrbital", "noiseScrollOnNewborn", "noiseCatchUpScrollFrozen"];
+/// InheritVelocity left out, its curve's random word drawn with the start
+/// speed's salt, or the command velocity taken untransformed (in world space)
+/// for a target that is not World-space.
+const INHERIT_VELOCITY_ARMS: [&str; 3] = ["inheritVelocityIgnored", "inheritVelocitySpeedSalt",
+    "inheritVelocityWorldVector"];
 
 /// The refusal the child side names for a command of `count` particles whose
 /// block carries an inherited word other than the size; None for a size-only
@@ -654,6 +659,26 @@ fn product_child_emit_matches_native_noise_rows() {
     assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
     assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0);
     for arm in NOISE_ARMS {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}
+
+/// Child commands into the 016 jellyfish foot target, which carries
+/// InheritVelocity (Local, Initial, the constant 1): synthetic commands per
+/// frame, catch-up with every flag and none, into the exported block, and
+/// variants: a two-constant curve, World space with the constant 0.5, a
+/// two-constant start speed with the constant -0.75, and Current mode in
+/// Local space (the start adds nothing). The owner matrices are harness
+/// inputs. Every InheritVelocity arm must differ from native.
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_INHERIT_VELOCITY (the native InheritVelocity child rows)"]
+fn product_child_emit_matches_native_inherit_velocity_rows() {
+    let arm_names: Vec<&'static str> = ARMS.iter().chain(INHERIT_VELOCITY_ARMS.iter()).copied().collect();
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_INHERIT_VELOCITY"], &arm_names);
+    report(&tally, &arm_red);
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0);
+    for arm in INHERIT_VELOCITY_ARMS {
         assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
     }
 }

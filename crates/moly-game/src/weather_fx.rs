@@ -1002,6 +1002,13 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
             // Collision likewise; judge() checks the module law's subset and
             // binds the effect's ground scene, or refuses by name.
             "CollisionModule" => "collision",
+            // A system's own emission inherits the emitter velocity only
+            // outside Local space (and the per-update module only in World
+            // space), which neither step ports; a child Emit inherits the
+            // command velocity in every space, which the child composition
+            // takes or refuses by name.
+            "InheritVelocityModule" if system.get("simulationSpace").and_then(Value::as_str) == Some("Local") => "inheritVelocity",
+            "InheritVelocityModule" => return Err("enabled source module InheritVelocityModule outside Local space: the emitter-velocity inheritance of the system's own emission is not ported".into()),
             _ => return Err(format!("enabled source module {module} has no runtime consumer")),
         };
         if !system.get(field).is_some_and(Value::is_object) {

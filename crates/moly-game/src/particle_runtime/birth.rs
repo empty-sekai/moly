@@ -1152,9 +1152,12 @@ fn validate_emitter(
             ))
         }
     }
-    if emitter.inherit_velocity.is_some() {
+    // A system's own emission hands StartVelocity the emitter velocity with
+    // the inheritance on only outside Local space, and the per-update module
+    // acts only in World space: a Local system inherits nothing.
+    if emitter.inherit_velocity.is_some() && emitter.simulation_space != SimulationSpace::Local {
         return Err(BirthRefused::Unsupported(
-            "birth module/event owner not installed",
+            "InheritVelocity outside Local space: the emitter-velocity inheritance of the system's own emission is not ported",
         ));
     }
     // A CollisionModule rides the native slices (its two call points are in

@@ -16,10 +16,21 @@
 //! speed modifier one; orbital, offset and radial constants or two constants,
 //! their orbital section only in a Local target), Noise (the qualified Noise
 //! law, with the target's installed owner seed and scroll), ClampVelocity (one
-//! axis group, a constant limit, zero drag), SizeOverLifetime and
+//! axis group, a constant limit, zero drag), InheritVelocity (Initial with a
+//! constant or two-constant curve; Current outside World space, which does
+//! nothing here), SizeOverLifetime and
 //! ColorOverLifetime (render-time), CustomData, no ring buffer, simulation
 //! speed one. Any other module on the target, and any other configuration of
-//! those, refuses. The newborn and catch-up pre-simulation modules run in the
+//! those, refuses.
+//!
+//! InheritVelocity: the child Emit hands its StartModules the command velocity
+//! in the target's space (the start frame's `emitter_velocity`) with the
+//! inheritance on, in every simulation space; StartVelocity multiplies each
+//! newborn's shape direction by the start speed and then, in Initial mode
+//! with a constant or two-constant curve, adds that velocity times the curve
+//! (its random word salted apart from the speed's) to the persistent
+//! velocity. In Current mode the start adds nothing and the per-update module
+//! acts only in World space. The newborn and catch-up pre-simulation modules run in the
 //! engine's order: gravity and the animated velocity cleared,
 //! RotationOverLifetime, Velocity (linear, then orbital), Noise,
 //! ClampVelocity, CustomData. The newborn call does not advance the Noise
@@ -254,7 +265,14 @@ struct ChildLaws {
     orbital: bool,
     /// ClampVelocity (one axis group, a constant limit, zero drag).
     limit: Option<moly_law::particle::LimitVelocity>,
+    /// InheritVelocity in Initial mode: the curve the start velocity adds
+    /// the command velocity (in the target's space) times.
+    inherit: Option<CurveSampler>,
 }
+
+/// The salt of the InheritVelocity curve's random word in StartVelocity (the
+/// start speed's is 0x96aa4de3).
+const INHERIT_VELOCITY_SALT: u32 = 0x0033_e627;
 
 /// Whether the target's modules are within the qualified composition.
 pub(super) fn qualify_target(emitter: &EmitterParams) -> Result<(), Refused> {
@@ -270,7 +288,6 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         return unsupported("target simulation speed other than one");
     }
     if emitter.force.is_some()
-        || emitter.inherit_velocity.is_some()
         || emitter.collision.is_some()
         || emitter.trails.is_some()
         || emitter.texture_sheet.is_some()
@@ -295,6 +312,24 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     if !scalar(&emitter.start.speed) {
         return unsupported("target start speed curve mode");
     }
+    let inherit = match &emitter.inherit_velocity {
+        None => None,
+        Some(params) => match params.mode {
+            moly_law::particle::schema::InheritVelocityMode::Initial if scalar(&params.curve) => Some(
+                CurveSampler::new(&params.curve, moly_law::particle::curve::CurveTime::Normalized)
+                    .map_err(Refused::Unsupported)?),
+            // A curve stores the velocity per particle for the per-update
+            // module, which is not ported.
+            moly_law::particle::schema::InheritVelocityMode::Initial => {
+                return unsupported("target InheritVelocity curve mode");
+            }
+            moly_law::particle::schema::InheritVelocityMode::Current
+                if emitter.simulation_space != SimulationSpace::World => None,
+            moly_law::particle::schema::InheritVelocityMode::Current => {
+                return unsupported("target InheritVelocity Current mode in World space");
+            }
+        },
+    };
     let gravity_modifier = match emitter.start.gravity_modifier {
         MinMaxCurve::Constant(value) if value.is_finite() => value,
         _ => return unsupported("target gravity modifier other than a finite constant"),
@@ -362,6 +397,7 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         velocity,
         orbital,
         limit,
+        inherit,
     })
 }
 
@@ -609,9 +645,16 @@ pub(super) fn apply_command_with_events(
             let sample = samples[index];
             let speed = laws.speed.evaluate(timing[index].curve_time,
                 ParticleRandom::sample(initial_lane.seed, 0x96aa_4de3));
+            let mut velocity = sample.direction.map(|d| speed * d);
+            if let Some(inherit) = laws.inherit.as_ref().filter(|_| !arms::on("inheritVelocityIgnored")) {
+                let salt = if arms::on("inheritVelocitySpeedSalt") { 0x96aa_4de3 } else { INHERIT_VELOCITY_SALT };
+                let k = inherit.evaluate(timing[index].curve_time, ParticleRandom::sample(initial_lane.seed, salt));
+                let inherited = if arms::on("inheritVelocityWorldVector") { command.velocity } else { frame.emitter_velocity };
+                velocity = std::array::from_fn(|a| inherited[a] * k + velocity[a]);
+            }
             lanes.push(Lane {
                 position: sample.position,
-                velocity: sample.direction.map(|d| speed * d),
+                velocity,
                 animated: [0.0; 3],
                 rotation: initial_lane.rotation.map(|v| v.unwrap_or(0.0)),
                 angular: [0.0; 3],
