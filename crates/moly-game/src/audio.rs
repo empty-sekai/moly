@@ -1721,6 +1721,108 @@ impl UserMusicPlaySettings {
     }
 }
 
+/// A `MysekaiBGMManager.StartFade` target: a volume, or the manager's
+/// `InitialVolume`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BgmFadeTarget {
+    Volume(f32),
+    Initial,
+}
+
+/// `MysekaiBGMManager`'s fade of the BGM player's volume (the value
+/// `SoundManager.SetupVolume` sets from the volume setting and
+/// `SoundManager.SetBGMVolume` overwrites; the manager is its only other
+/// writer).
+/// - Setup: `InitialVolume` = `GetCurrentBGMVolume()`, the player's volume.
+/// - `StartFade(target)`: a call in the frame the running fade started
+///   (`Mathf.Approximately(Time.time, _fadeStartTime)`) only replaces the
+///   target; otherwise the running fade is cancelled, and the target, the
+///   start time (this call's `Time.time`) and the current volume
+///   (`GetCurrentBGMVolume()`) are taken, and `FadeBGM` runs.
+/// - `FadeBGM`: from the current volume, once per frame (the first in the
+///   call's frame): `t = (Time.time - start time) * 0.5` clamped to [0, 1]
+///   (`FADE_TIME` 2 s), the volume `start + (target - start) t` clamped to
+///   [0, 1] goes to `SetBGMVolume`; when it is approximately the target the
+///   loop ends and, on the next frame, `SetBGMVolume(target)`.
+///
+/// Product mapping: the player's volume is [`VolumeBus::bgm`] until the
+/// manager writes one; a changed volume setting (`SetupVolume`) replaces the
+/// manager's value again. Named differences: a cancelled fade hands over at
+/// once (the source waits for the cancelled loop's next frame, keeping the
+/// start time of the call); `Mathf.Epsilon` is taken as the smallest normal
+/// float.
+#[derive(Resource, Default)]
+pub(crate) struct MysekaiBgmFade {
+    requests: Vec<BgmFadeTarget>,
+    initial: Option<f32>,
+    player: Option<f32>,
+    setup_value: Option<f32>,
+    start: f32,
+    target: f32,
+    fade_start: f32,
+    fading: bool,
+    final_write: bool,
+}
+
+/// `Mathf.Approximately`.
+fn approximately(a: f32, b: f32) -> bool {
+    (b - a).abs() < (1e-6 * a.abs().max(b.abs())).max(f32::MIN_POSITIVE * 8.0)
+}
+
+impl MysekaiBgmFade {
+    /// `StartFade(target)`, run in this frame's BGM update.
+    pub(crate) fn start_fade(&mut self, target: BgmFadeTarget) {
+        self.requests.push(target);
+    }
+
+    /// The BGM player's volume.
+    fn player_volume(&self, setup: f32) -> f32 {
+        self.player.unwrap_or(setup)
+    }
+
+    fn advance(&mut self, now: f32, setup: f32) {
+        if self.setup_value != Some(setup) {
+            if self.setup_value.is_some() {
+                self.player = None;
+            }
+            self.setup_value = Some(setup);
+        }
+        let initial = *self.initial.get_or_insert(setup);
+        if self.final_write {
+            self.final_write = false;
+            self.player = Some(self.target);
+        }
+        for request in std::mem::take(&mut self.requests) {
+            let target = match request {
+                BgmFadeTarget::Volume(volume) => volume,
+                BgmFadeTarget::Initial => initial,
+            };
+            self.final_write = false;
+            if self.fading && approximately(now, self.fade_start) {
+                self.target = target;
+                continue;
+            }
+            self.target = target;
+            self.fade_start = now;
+            self.start = self.player_volume(setup);
+            self.fading = true;
+            info!(
+                "[bgm-manager] StartFade({target:.3}): from {:.3} over 2 s (InitialVolume {initial:.3})",
+                self.start
+            );
+        }
+        if self.fading {
+            let t = ((now - self.fade_start) * 0.5).clamp(0.0, 1.0);
+            let current = (self.start + (self.target - self.start) * t).clamp(0.0, 1.0);
+            self.player = Some(current);
+            if approximately(current, self.target) {
+                self.fading = false;
+                self.final_write = true;
+            }
+        }
+    }
+}
+
 /// Update：BGM 逐帧——淡出旧声、推进淡入、intro→loop 交接、按档换曲。
 pub(crate) fn advance_bgm(
     mut commands: Commands,
@@ -1736,7 +1838,9 @@ pub(crate) fn advance_bgm(
     mut channel: ResMut<BgmChannel>,
     mut sinks: Query<&mut AudioSink>,
     bgm_hold: Option<Res<crate::site_move::BgmHold>>,
+    mut manager_fade: ResMut<MysekaiBgmFade>,
 ) {
+    manager_fade.advance(time.elapsed_secs(), bus.bgm);
     let Some(routing) = routing else {
         return; // 路由表未就绪
     };
@@ -1764,7 +1868,7 @@ pub(crate) fn advance_bgm(
     });
 
     // 当前声的音量与交接。
-    let target_volume = BGM_VOLUME_FACTOR * bus.bgm * gate.factor();
+    let target_volume = BGM_VOLUME_FACTOR * manager_fade.player_volume(bus.bgm) * gate.factor();
     if let Some(voice) = channel.voice.as_mut() {
         let envelope = match &mut voice.fade_in {
             Some(elapsed) => {
@@ -3408,6 +3512,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<CurrentPhenomenon>()
         .init_resource::<UserMusicPlaySettings>()
         .init_resource::<BgmChannel>()
+        .init_resource::<MysekaiBgmFade>()
         .init_resource::<AmbientChannel>()
         .init_resource::<SequenceWorkAreas>()
         .init_resource::<ProximityState>()
