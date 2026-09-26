@@ -723,12 +723,19 @@ impl Plugin for AvatarMaterialPlugin {
             MaterialPlugin::<AvatarMaterial>::default(),
             ExtractResourcePlugin::<AvatarEnv>::default(),
         ));
-        app.add_systems(Startup, (insert_neutral, crate::avatar_wear::load))
+        app.add_systems(Startup, insert_neutral)
+            // The wear lands once the server's join and the avatar masters
+            // are in; the swap chain below waits for it.
+            .add_systems(
+                Update,
+                crate::avatar_wear::load.run_if(not(resource_exists::<AvatarWear>)),
+            )
             .add_systems(
                 Update,
                 (plan_and_swap, crate::avatar_wear::attach_accessory)
                     .chain()
-                    .after(crate::player_avatar::body::wire),
+                    .after(crate::player_avatar::body::wire)
+                    .run_if(resource_exists::<AvatarWear>),
             )
             .add_systems(PostUpdate, write_frame_state);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
