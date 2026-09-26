@@ -305,6 +305,8 @@ impl GroundScene {
         }
         let mut scene = GroundScene::empty();
         scene.colliders.push(collider.share());
+        // Its one shape is the first it adds.
+        scene.add_positions = Some(vec![0]);
         Some(Arc::new(scene))
     }
 
@@ -1044,11 +1046,13 @@ impl CollisionScene for GroundQuery {
                     self.refusal.get_or_insert(LAYER_REFUSAL);
                     continue;
                 }
-                let position = scene.add_positions.as_ref().map_or(i, |positions| positions[i]);
+                // A position the scene does not carry leaves the order unknown.
+                let position = scene.add_positions.as_ref().and_then(|positions| positions.get(i).copied());
                 touched.push((at, position, scene.clone(), i));
             }
         }
         drop(entries);
+        let add_order = add_order && touched.iter().all(|&(_, position, _, _)| position.is_some());
         if add_order {
             touched.sort_by_key(|&(at, position, _, _)| (at, position));
         }

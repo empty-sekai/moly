@@ -801,7 +801,16 @@ fn product_site_scene_matches_native_multi_rows() {
             (Err(reason), false) if reason.contains("OrderDependent") => {
                 *tally.entry("unordered: cases the engine's orders differ on, refused as order dependent").or_default() += 1;
             }
-            (Ok(()), false) => mismatched.push(format!("{label}: the engine's orders differ and the product did not refuse")),
+            // A scene that knows its add order answers in it: the product
+            // installed the colliders in this run's order, so its answer
+            // must be this run's. A scene that does not know refuses above.
+            (Ok(()), false) => {
+                *tally.entry("unordered: cases the engine's orders differ on, answered in the add order, compared").or_default() += 1;
+                if !call.differs.is_empty() {
+                    mismatched.push(format!("{label}: the engine's orders differ and the add-order answer is not this run's: {:?}",
+                        call.differs));
+                }
+            }
             (Err(reason), _) => mismatched.push(format!("{label}: refused {reason}")),
         }
     }
