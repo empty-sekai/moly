@@ -4,7 +4,10 @@
 //! Sections use the source's response keys (`userMysekaiGamedata`,
 //! `userMysekaiStamina`, `userMysekaiColorfulPass`,
 //! `mysekaiPhenomenaSchedules`, `userMysekaiGateCharacterVisit`,
-//! `userMysekaiSiteHousingLayouts`). The rest are the mock's own keys and
+//! `userMysekaiSiteHousingLayouts`, and the birthday-party delivery's
+//! `userBirthdayParties`, `userMaterials`, `userMysekaiMaterials`,
+//! `userCards`, `userHonors` and `masterConfigs`, which are optional on read).
+//! The rest are the mock's own keys and
 //! name themselves as such: `clock` (the one server clock), `policies` (the
 //! server rules this mock stands in for), `phenomenaSchedulePolicy`,
 //! `talkListPolicy` and `controls`.
@@ -141,6 +144,8 @@ pub(crate) struct ServerDocument {
     pub(crate) layouts: Value,
     /// `controls`, verbatim (the server panel parses it).
     pub(crate) controls: Value,
+    /// The birthday-party delivery sections ([`super::delivery`]).
+    pub(crate) delivery: super::delivery::DeliveryDoc,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -161,43 +166,51 @@ pub(crate) const DEFAULT_TOTAL_EXP: i32 = 180_000;
 // Field readers
 // ---------------------------------------------------------------------------
 
-fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, String> {
+pub(super) fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, String> {
     value
         .as_object()
         .ok_or_else(|| format!("{at} is not an object"))
 }
 
-fn only(value: &Map<String, Value>, allowed: &[&str], at: &str) -> Result<(), String> {
+pub(super) fn only(value: &Map<String, Value>, allowed: &[&str], at: &str) -> Result<(), String> {
     match value.keys().find(|key| !allowed.contains(&key.as_str())) {
         Some(key) => Err(format!("{at} has an unknown field {key}")),
         None => Ok(()),
     }
 }
 
-fn field<'a>(value: &'a Map<String, Value>, key: &str, at: &str) -> Result<&'a Value, String> {
+pub(super) fn field<'a>(
+    value: &'a Map<String, Value>,
+    key: &str,
+    at: &str,
+) -> Result<&'a Value, String> {
     value
         .get(key)
         .ok_or_else(|| format!("{at} has no field {key}"))
 }
 
-fn int64(value: &Map<String, Value>, key: &str, at: &str) -> Result<i64, String> {
+pub(super) fn int64(value: &Map<String, Value>, key: &str, at: &str) -> Result<i64, String> {
     field(value, key, at)?
         .as_i64()
         .ok_or_else(|| format!("{at}.{key} is not an integer"))
 }
 
-fn int32(value: &Map<String, Value>, key: &str, at: &str) -> Result<i32, String> {
+pub(super) fn int32(value: &Map<String, Value>, key: &str, at: &str) -> Result<i32, String> {
     let raw = int64(value, key, at)?;
     i32::try_from(raw).map_err(|_| format!("{at}.{key} = {raw} does not fit a 32-bit integer"))
 }
 
-fn boolean(value: &Map<String, Value>, key: &str, at: &str) -> Result<bool, String> {
+pub(super) fn boolean(value: &Map<String, Value>, key: &str, at: &str) -> Result<bool, String> {
     field(value, key, at)?
         .as_bool()
         .ok_or_else(|| format!("{at}.{key} is not a boolean"))
 }
 
-fn array<'a>(value: &'a Map<String, Value>, key: &str, at: &str) -> Result<&'a Vec<Value>, String> {
+pub(super) fn array<'a>(
+    value: &'a Map<String, Value>,
+    key: &str,
+    at: &str,
+) -> Result<&'a Vec<Value>, String> {
     field(value, key, at)?
         .as_array()
         .ok_or_else(|| format!("{at}.{key} is not an array"))
@@ -508,7 +521,12 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         ));
     }
     let doc = object(&value, "the server document")?;
-    only(doc, &V2_FIELDS, "the server document")?;
+    let allowed: Vec<&str> = V2_FIELDS
+        .iter()
+        .chain(super::delivery::DOCUMENT_KEYS.iter())
+        .copied()
+        .collect();
+    only(doc, &allowed, "the server document")?;
     for key in V2_FIELDS {
         if key != "talkListPolicy" && key != "pending" && !doc.contains_key(key) {
             return Err(format!("the server document has no field {key}"));
@@ -519,7 +537,11 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .ok_or("about is not a string")?
         .to_owned();
     let policies = object(field(doc, "policies", "the server document")?, "policies")?;
-    only(policies, &["staminaRefresh"], "policies")?;
+    let allowed: Vec<&str> = std::iter::once("staminaRefresh")
+        .chain(super::delivery::POLICY_KEYS.iter().copied())
+        .collect();
+    only(policies, &allowed, "policies")?;
+    let delivery = super::delivery::DeliveryDoc::parse(doc, policies)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -579,6 +601,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         talk_list_policy,
         layouts,
         controls,
+        delivery,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -693,6 +716,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         talk_list_policy,
         layouts: field(doc, "userMysekaiSiteHousingLayouts", "the slice")?.clone(),
         controls: field(doc, "controls", "the slice")?.clone(),
+        delivery: super::delivery::DeliveryDoc::default(),
     };
     document.check_structure()?;
     Ok(document)
@@ -770,7 +794,7 @@ impl ServerDocument {
                 ));
             }
         }
-        Ok(())
+        self.delivery.check_structure()
     }
 
     fn gamedata_value(&self) -> Value {
@@ -840,6 +864,11 @@ impl ServerDocument {
         });
         if let Some(policy) = &self.talk_list_policy {
             value["talkListPolicy"] = policy.clone();
+        }
+        let mut policies = value["policies"].as_object().cloned().unwrap_or_default();
+        if let Some(top) = value.as_object_mut() {
+            self.delivery.write(top, &mut policies);
+            top.insert("policies".into(), Value::Object(policies));
         }
         value
     }
