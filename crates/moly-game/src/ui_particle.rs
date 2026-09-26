@@ -51,6 +51,14 @@
 //! spawned under the canvas entity, `(k + 1) * DRAW_STEP` above the host in
 //! canvas z for the k-th system.
 //!
+//! A screen that took over systems which played before it (the entry's
+//! cover particle, played in the previous scene and paused there) adds
+//! [`UiParticleHeadStart`]: the first baked frame steps the systems through
+//! that time first. [`UiParticlePaused`] is `ParticleSystem.Pause(true)`:
+//! while the host carries it its systems are not stepped and their
+//! particles are baked as they stand (a paused system still renders);
+//! removing it resumes them.
+//!
 //! Named gaps: trails, the particle sort, the Facing and Velocity
 //! alignments and the orthographic camera's size clamp are not wired (each
 //! refused by name); a hidden host that shows again plays afresh, the
@@ -113,6 +121,18 @@ pub(crate) struct UiParticleHost {
     pub(crate) alpha: f32,
 }
 
+/// `ParticleSystem.Pause(withChildren: true)` on a host's systems.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct UiParticlePaused;
+
+/// The simulated time a host's systems ran before it was installed, stepped
+/// on its first baked frame in frames of `frame` seconds.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct UiParticleHeadStart {
+    pub(crate) seconds: f32,
+    pub(crate) frame: f32,
+}
+
 /// The serialized UIParticle fields the bake reads.
 #[derive(Clone, Copy, Debug)]
 struct Fields {
@@ -138,6 +158,8 @@ struct Installed {
     cached_position: Vec3,
     /// `activeMeshIndices.CountFast() != 0` after the last bake.
     drawn_before: bool,
+    /// Whether the host's [`UiParticleHeadStart`] has been stepped.
+    head_started: bool,
 }
 
 /// One installed system of a UIParticle.
@@ -673,6 +695,7 @@ fn install_host(
         driven_scale: fields.local_scale,
         cached_position: Vec3::ZERO,
         drawn_before: false,
+        head_started: false,
     })
 }
 
@@ -702,7 +725,13 @@ fn uiparticle_node(
 /// each system's frame on the shared runtime, then the bake into canvas space.
 #[allow(clippy::too_many_arguments)]
 fn bake_frame(
-    mut hosts: Query<(Entity, &UiParticleHost, &mut HostState)>,
+    mut hosts: Query<(
+        Entity,
+        &UiParticleHost,
+        &mut HostState,
+        Option<&UiParticleHeadStart>,
+        Has<UiParticlePaused>,
+    )>,
     mut draws: Query<(&mut UiParticleSystem, &mut Transform, &Mesh2d)>,
     locals: Query<(&Transform, Option<&ChildOf>), Without<UiParticleSystem>>,
     globals: Query<&GlobalTransform>,
@@ -760,9 +789,15 @@ fn bake_frame(
         unscaled: unscaled.as_deref().map(|clock| clock.delta()),
         now: time.elapsed_secs_f64(),
     };
-    for (host_entity, host, mut state) in &mut hosts {
+    for (host_entity, host, mut state, head_start, paused) in &mut hosts {
         let HostState::Installed(installed) = &mut *state else {
             continue;
+        };
+        let head_steps = match head_start {
+            Some(head) if !installed.head_started && head.frame > 0.0 => {
+                (head.seconds / head.frame).round().max(0.0) as u32
+            }
+            _ => 0,
         };
         let (Ok(canvas_global), Ok(host_global)) =
             (globals.get(host.canvas), globals.get(host_entity))
@@ -845,9 +880,29 @@ fn bake_frame(
                     retired,
                     ..
                 } = &mut *system;
-                if let Err(reason) =
-                    crate::weather_fx::fixture::step_played(runtime, played, &clocks, &ctx)
-                {
+                let mut stepped = Ok(());
+                if let Some(head) = head_start.filter(|_| head_steps > 0) {
+                    // The frames the systems ran before this host: each at
+                    // `head.frame`, ending one frame before this one.
+                    for step in 0..head_steps {
+                        let before = f64::from(head_steps - step) * f64::from(head.frame);
+                        let frame = crate::weather_fx::fixture::FrameClocks {
+                            scaled: head.frame,
+                            unscaled: Some(head.frame),
+                            now: clocks.now - before,
+                        };
+                        stepped =
+                            crate::weather_fx::fixture::step_played(runtime, played, &frame, &ctx);
+                        if stepped.is_err() {
+                            break;
+                        }
+                    }
+                }
+                if stepped.is_ok() && !paused {
+                    stepped =
+                        crate::weather_fx::fixture::step_played(runtime, played, &clocks, &ctx);
+                }
+                if let Err(reason) = stepped {
                     error!(%reason, node = %runtime.node, "[ui-particle] step refused: the system is retired");
                     runtime.pool.clear();
                     runtime.side.clear();
@@ -942,5 +997,6 @@ fn bake_frame(
             }
         }
         installed.drawn_before = !groups.is_empty();
+        installed.head_started = true;
     }
 }
