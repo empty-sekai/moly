@@ -732,8 +732,9 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
         }
     }
     let command = request.command();
+    let text = serde_json::Value::Object(command.clone()).to_string();
     match crate::server::with_model(|model| model.edit(&command)) {
-        Some(Ok(receipt)) => info!("[gate] instrument request {request:?} -> server.edit {}: {receipt}; the reply comes through the server's gate replies", Value::Object(command.clone())),
+        Some(Ok(receipt)) => info!("[gate] instrument request {request:?} -> server.edit {text}: {receipt}; the reply comes through the server's gate replies"),
         Some(Err(reason)) => error!("[gate] instrument request {request:?}: the server refused it: {reason}"),
         None => error!("[gate] instrument request {request:?}: no server model is installed; nothing is requested"),
     }
@@ -1152,8 +1153,17 @@ fn stay_effect(world: &World, gate: Entity) -> Option<Entity> {
 fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
     let t = now(world);
     let Some(gate) = gate_fixture(world) else {
-        return false; // the layout reload is placing the fixtures
+        return false; // the gate's model is being placed
     };
+    // The gate shows its model (its scene is out and its materials are
+    // swapped) before its effects and parts are looked up.
+    if world
+        .get::<crate::fixture::FixtureVisualReady>(gate)
+        .is_none()
+    {
+        return false;
+    }
+
     if !appearance.spawned {
         if appearance.units.is_empty() {
             info!("[gate] PlayGateCharacterAppearTimeline: no visitor picked by the server: logged, returns");
