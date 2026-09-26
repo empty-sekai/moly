@@ -647,6 +647,12 @@ pub(crate) fn sync_fixture_colliders(
     });
 }
 
+/// A canonical-frame pose (source X reflected) in source axes: the rotation
+/// (x, y, z, w) and the translation.
+fn source_pose(rotation: Quat, translation: Vec3) -> ([f32; 4], [f32; 3]) {
+    ([rotation.x, -rotation.y, -rotation.z, rotation.w], [-translation.x, translation.y, translation.z])
+}
+
 /// A canonical-frame matrix (source X reflected) in source axes.
 fn source_matrix(world: &GlobalTransform) -> [f32; 16] {
     let m = world.to_matrix().to_cols_array();
@@ -656,6 +662,9 @@ fn source_matrix(world: &GlobalTransform) -> [f32; 16] {
 
 /// The placed fixtures' colliders in source axes: the colliders of their
 /// collision scenes, and each placed view's touch box at the placement's pose.
+/// The view receives the fixture's own (unturned) grid size for its touch box
+/// and turns its own transform to the direction, so the touch box, a child
+/// at the view's origin, turns with it.
 fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placements: &crate::fixture::FixturePlacements)
     -> Result<Vec<crate::particle_runtime::collision_scene::FixturePart>, String> {
     use crate::fixture_collision::PhysicsShape;
@@ -673,18 +682,19 @@ fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placemen
             PhysicsShape::Box { center, size } => FixtureShape::Box { center: reflect(center), half: size.map(|v| v * 0.5) },
             PhysicsShape::Other(kind) => FixtureShape::Unknown(kind),
         };
+        let (scale, rotation, translation) = collider.world.to_scale_rotation_translation();
+        let pose = (scale == Vec3::ONE).then(|| source_pose(rotation, translation));
         parts.push(FixturePart { what: format!("collider {i}"), layers: 1 << collider.layer,
-            world: source_matrix(&collider.world), shape });
+            world: source_matrix(&collider.world), pose, shape });
     }
     for row in placements.editor_rows() {
-        let world = source_matrix(&GlobalTransform::from(row.pose()?));
-        let shape = if row.direction == moly_law::fixture::Direction::Front {
-            let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
-            FixtureShape::Box { center, half }
-        } else {
-            FixtureShape::Unknown("touch box of a turned fixture (which grid size the view receives is not read)".into())
-        };
-        parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, shape });
+        let view = row.pose()?;
+        let world = source_matrix(&GlobalTransform::from(view));
+        let pose = (view.scale == Vec3::ONE).then(|| source_pose(view.rotation, view.translation));
+        let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
+        let shape = FixtureShape::Box { center, half };
+        parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, pose,
+            shape });
     }
     Ok(parts)
 }

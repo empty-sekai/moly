@@ -15,13 +15,18 @@
 //! colliders sit on layer 9 (the fixture view moves every fixture node to the
 //! navigation build layer when it attaches its components), and every placed
 //! fixture view also adds a touch BoxCollider child at its origin (see
-//! [`touch_box`]). The fixtures' authored MeshColliders are convex, whose
-//! cooking and sweep are not ported, and the box sweep is not ported: the
-//! scene carries such a collider with a bound that encloses the engine's
-//! world bounds of it, and a query whose box meets that bound refuses, so a
-//! query that answers is one the engine answers without that collider.
-//! Until the fixtures' collision scenes are loaded a placeholder refuses
-//! every query naming their layers. No character collider is in the scene.
+//! [`touch_box`]); the queries answer against a box with the ported box
+//! sweep and world bounds, at the node's pose composed with the box centre.
+//! The fixtures' authored MeshColliders are convex, whose cooking and sweep
+//! are not ported: the scene carries such a collider with a bound that
+//! encloses the engine's world bounds of it, and a query whose box meets that
+//! bound refuses, so a query that answers is one the engine answers without
+//! that collider. A touch box's layer is not read (it is created on the
+//! default layer and the view's recursive layer write may or may not reach
+//! it), so it stands on both: a query whose mask names only one of them and
+//! whose box meets it refuses. Until the fixtures' collision scenes are
+//! loaded a placeholder refuses every query naming their layers. No
+//! character collider is in the scene.
 //!
 //! What a query meets. The module asks the scene for the static shapes (and
 //! the dynamic ones when it collides with dynamic colliders) whose layer its
@@ -88,8 +93,12 @@ pub(crate) const FIXTURE_PENDING: &str = "placed fixtures: their collision scene
 /// Why a query refuses when it meets a convex MeshCollider's bound.
 const CONVEX_REFUSAL: &str = "a convex MeshCollider (convex cooking and the sphere-versus-convex sweep are not ported)";
 
-/// Why a query refuses when it meets a BoxCollider's bound.
-const BOX_REFUSAL: &str = "a BoxCollider (the sphere-versus-box sweep is not ported)";
+/// Why a query refuses when it meets a box whose pose the scene cannot hold.
+const BOX_REFUSAL: &str = "a BoxCollider at a pose the scene cannot hold (non-finite, or a scaled node)";
+
+/// Why a query refuses when its mask names only some of the layers a
+/// collider may be on and its box meets the collider.
+const LAYER_REFUSAL: &str = "a fixture's touch box whose layer is not read, for a mask naming only one of its layers";
 
 /// Why a query refuses when it meets a fixture's non-convex MeshCollider
 /// that the scene does not cook (other cooking options, or a rotated or
@@ -126,15 +135,25 @@ struct GroundCollider {
     node: String,
     geometry: String,
     cooking: u32,
-    mesh: Arc<CookedMesh>,
+    shape: ColliderShape,
     pose: Pose,
     layer: u32,
+    /// Every layer it may be on, as a mask (its one layer unless the layer
+    /// is not read).
+    layers: u32,
     /// World bounds at inflation one: min then max.
     bounds: [f32; 6],
     /// The collider's ordinal in the export. The engine reports runtime
     /// instance ids, which are not package facts; only hit records carry
     /// them and no product output reads them.
     collider_id: i32,
+}
+
+/// What the queries answer against: a cooked mesh, or a box's half extents.
+#[derive(Clone)]
+enum ColliderShape {
+    Mesh(Arc<CookedMesh>),
+    Box([f32; 3]),
 }
 
 #[derive(Clone)]
@@ -162,11 +181,24 @@ impl GroundScene {
 
     /// What the scene holds, for diagnostics.
     pub(crate) fn describe(&self) -> Value {
-        Value::Array(self.colliders.iter().map(|c| serde_json::json!({
-            "effect": c.effect, "node": c.node, "geometry": c.geometry, "cooking": c.cooking, "layer": c.layer,
-            "triangles": c.mesh.triangle_count(), "vertices": c.mesh.vertex_count(),
-            "translation": c.pose.translation(),
-        })).chain(self.unported.iter().map(|u| serde_json::json!({
+        Value::Array(self.colliders.iter().map(|c| {
+            let mut entry = serde_json::json!({
+                "effect": c.effect, "node": c.node, "geometry": c.geometry, "cooking": c.cooking, "layer": c.layer,
+                "translation": c.pose.translation(),
+            });
+            match &c.shape {
+                ColliderShape::Mesh(mesh) => {
+                    entry["triangles"] = mesh.triangle_count().into();
+                    entry["vertices"] = mesh.vertex_count().into();
+                }
+                ColliderShape::Box(half) => {
+                    entry["halfExtents"] = serde_json::json!(half);
+                    entry["rotation"] = serde_json::json!(c.pose.rotation());
+                    entry["layers"] = c.layers.into();
+                }
+            }
+            entry
+        }).chain(self.unported.iter().map(|u| serde_json::json!({
             "effect": u.effect, "node": u.node, "layers": u.layers, "unported": u.reason,
             "bounds": u.bounds,
         }))).chain(self.inert.iter().map(|u| serde_json::json!({
@@ -183,7 +215,7 @@ impl GroundScene {
     /// mask names.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn colliders_named(&self, mask: u32) -> usize {
-        self.colliders.iter().filter(|c| mask & (1u32 << c.layer) != 0).count()
+        self.colliders.iter().filter(|c| mask & c.layers != 0).count()
     }
 
     /// Why a system with this mask cannot query the scene: the first
@@ -254,13 +286,49 @@ pub(crate) fn fixture_pending() -> Arc<GroundScene> {
     Arc::new(scene)
 }
 
-/// One placed fixture collider in source axes: its shape in its node's frame
-/// and the node's world matrix (column major).
+/// One placed fixture collider in source axes: its shape in its node's frame,
+/// the node's world matrix (column major), and the node's pose (rotation
+/// x, y, z, w and translation) when the node is unscaled.
 pub(crate) struct FixturePart {
     pub(crate) what: String,
     pub(crate) layers: u32,
     pub(crate) world: [f32; 16],
+    pub(crate) pose: Option<([f32; 4], [f32; 3])>,
     pub(crate) shape: FixtureShape,
+}
+
+/// `PxQuat::operator*`.
+fn quat_mul(p: [f32; 4], q: [f32; 4]) -> [f32; 4] {
+    let [x, y, z, w] = p;
+    [
+        w * q[0] + q[3] * x + y * q[2] - q[1] * z,
+        w * q[1] + q[3] * y + z * q[0] - q[2] * x,
+        w * q[2] + q[3] * z + x * q[1] - q[0] * y,
+        w * q[3] - x * q[0] - y * q[1] - z * q[2],
+    ]
+}
+
+/// `PxQuat::rotate`.
+fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let [x, y, z, w] = q;
+    let (vx, vy, vz) = (2.0 * v[0], 2.0 * v[1], 2.0 * v[2]);
+    let w2 = w * w - 0.5;
+    let dot2 = x * vx + y * vy + z * vz;
+    [
+        vx * w2 + (y * vz - z * vy) * w + x * dot2,
+        vy * w2 + (z * vx - x * vz) * w + y * dot2,
+        vz * w2 + (x * vy - y * vx) * w + z * dot2,
+    ]
+}
+
+/// A box shape's query pose: the static actor's pose (the node's) composed
+/// with the shape's local pose (the box centre, no rotation), as
+/// `PxTransform::transform` composes them.
+fn box_pose(node: ([f32; 4], [f32; 3]), center: [f32; 3]) -> Option<Pose> {
+    let (q, t) = node;
+    let r = quat_rotate(q, center);
+    let p = [r[0] + t[0], r[1] + t[1], r[2] + t[2]];
+    Pose::rotated(quat_mul(q, [0.0, 0.0, 0.0, 1.0]), p).ok()
 }
 
 pub(crate) enum FixtureShape {
@@ -331,9 +399,20 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
             |(lo, hi), p| (std::array::from_fn(|k| lo[k].min(p[k])), std::array::from_fn(|k| hi[k].max(p[k]))));
         let entry = match &part.shape {
             FixtureShape::Box { center, half } => {
-                let lo = std::array::from_fn(|k| center[k] - half[k]);
-                let hi = std::array::from_fn(|k| center[k] + half[k]);
-                bounded(BOX_REFUSAL, enclosing_bounds(&part.world, lo, hi))
+                match part.pose.and_then(|node| box_pose(node, *center)).filter(|_| half.iter().all(|h| h.is_finite())) {
+                    Some(pose) => {
+                        let bounds = law::box_world_bounds(*half, &pose);
+                        scene.colliders.push(GroundCollider { effect: "placed fixtures".into(), node: part.what.clone(),
+                            geometry: "box".into(), cooking: 0, shape: ColliderShape::Box(*half), pose,
+                            layer: part.layers.trailing_zeros(), layers: part.layers, bounds, collider_id: i32::MAX });
+                        continue;
+                    }
+                    None => {
+                        let lo = std::array::from_fn(|k| center[k] - half[k]);
+                        let hi = std::array::from_fn(|k| center[k] + half[k]);
+                        bounded(BOX_REFUSAL, enclosing_bounds(&part.world, lo, hi))
+                    }
+                }
             }
             FixtureShape::Mesh { convex: true, positions, .. } => {
                 // The cooked hull's vertices are input points while the hull
@@ -367,8 +446,9 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                                 let layer = part.layers.trailing_zeros();
                                 if part.layers.count_ones() == 1 {
                                     scene.colliders.push(GroundCollider { effect: "placed fixtures".into(),
-                                        node: part.what.clone(), geometry: "fixture".into(), cooking, mesh, pose,
-                                        layer, bounds, collider_id: i32::MAX });
+                                        node: part.what.clone(), geometry: "fixture".into(), cooking,
+                                        shape: ColliderShape::Mesh(mesh), pose, layer, layers: part.layers, bounds,
+                                        collider_id: i32::MAX });
                                     continue;
                                 }
                                 unbounded("a fixture MeshCollider on an unsettled layer".into())
@@ -573,9 +653,10 @@ impl GroundCollider {
             node: self.node.clone(),
             geometry: self.geometry.clone(),
             cooking: self.cooking,
-            mesh: self.mesh.clone(),
+            shape: self.shape.clone(),
             pose: self.pose,
             layer: self.layer,
+            layers: self.layers,
             bounds: self.bounds,
             collider_id: self.collider_id,
         }
@@ -633,9 +714,10 @@ fn ground_collider(meshes: &mut MeshCache, document: &Value, ordinal: usize, c: 
         geometry,
         cooking,
         layer,
+        layers: 1 << layer,
         bounds,
         collider_id: i32::try_from(ordinal).unwrap_or(i32::MAX),
-        mesh,
+        shape: ColliderShape::Mesh(mesh),
         pose,
     })
 }
@@ -781,9 +863,15 @@ impl CollisionScene for GroundQuery {
                 self.refusal.get_or_insert(u.query_refusal);
             }
             for (i, c) in scene.colliders.iter().enumerate() {
-                if query.collides_with & (1u32 << c.layer) != 0 && bounds_meet(&c.bounds, query.center, query.extents) {
-                    touched.push((scene.clone(), i));
+                let named = query.collides_with & c.layers;
+                if named == 0 || !bounds_meet(&c.bounds, query.center, query.extents) {
+                    continue;
                 }
+                if named != c.layers {
+                    self.refusal.get_or_insert(LAYER_REFUSAL);
+                    continue;
+                }
+                touched.push((scene.clone(), i));
             }
         }
         drop(entries);
@@ -811,7 +899,7 @@ impl CollisionScene for GroundQuery {
                 body_id: None,
             });
             (0..scene.colliders.len())
-                .filter(|&i| collides_with & (1u32 << scene.colliders[i].layer) != 0)
+                .filter(|&i| collides_with & scene.colliders[i].layers != 0)
                 .map(|i| scene.candidate(i))
                 .chain(unported)
                 .collect::<Vec<_>>()
@@ -824,8 +912,13 @@ impl CollisionScene for GroundQuery {
             return None;
         };
         let c = &scene.colliders[*index];
-        match law::sweep_sphere(&c.mesh, &c.pose, request.origin, request.sphere_radius, request.direction,
-            request.distance, None) {
+        let swept = match &c.shape {
+            ColliderShape::Mesh(mesh) => law::sweep_sphere(mesh, &c.pose, request.origin, request.sphere_radius,
+                request.direction, request.distance, None),
+            ColliderShape::Box(half) => law::sweep_sphere_box(*half, &c.pose, request.origin, request.sphere_radius,
+                request.direction, request.distance, None),
+        };
+        match swept {
             // A hit without the position flag leaves the zeroed position.
             Ok(hit) => hit.map(|hit| SweepHit { position: hit.position.unwrap_or([0.0; 3]), normal: hit.normal,
                 distance: hit.distance }),
