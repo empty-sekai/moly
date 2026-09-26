@@ -564,6 +564,8 @@ pub(crate) struct PlayerDither {
     last: Option<crate::camera::CameraStateType>,
     value: f32,
     fade: Option<moly_law::ui::dotween::FloatTween>,
+    /// Whether the talk framing's value has been logged in this state.
+    talk_logged: bool,
 }
 
 impl Default for PlayerDither {
@@ -572,6 +574,7 @@ impl Default for PlayerDither {
             last: None,
             value: 1.0,
             fade: None,
+            talk_logged: false,
         }
     }
 }
@@ -630,6 +633,7 @@ pub(crate) fn player_dither(
             info!("[player-dither] Normal after first person: fade in over {FADE_IN_SECONDS}s");
         }
         local.last = Some(current);
+        local.talk_logged = false;
     } else {
         let this = &mut *local;
         if let Some(fade) = this.fade.as_mut() {
@@ -669,6 +673,7 @@ pub(crate) fn player_dither(
         }
         targets.extend(players.iter().next().map(GlobalTransform::translation));
         if let (Some(model), Ok(camera)) = (model.as_deref(), cameras.single()) {
+            let previous = local.value;
             local.value = talk_player_dither(
                 model.distance,
                 model.min_distance,
@@ -676,6 +681,16 @@ pub(crate) fn player_dither(
                 camera.translation(),
                 TALK_DITHER_RANGE,
             );
+            if !local.talk_logged || (previous < 1.0) != (local.value < 1.0) {
+                local.talk_logged = true;
+                info!(
+                    "[player-dither] {current:?} framing: {} targets, distance {:.3} over minimum {:.3}, dither {:.4}",
+                    targets.len(),
+                    model.distance,
+                    model.min_distance,
+                    local.value
+                );
+            }
         }
     }
     let value = local.value;
