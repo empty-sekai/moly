@@ -528,6 +528,7 @@ const DIALOG_TYPES: &[(u16, &str, DialogScope, bool)] = &[
         DialogScope::Shared,
         true,
     ),
+    (82, "OptionDialog", DialogScope::Shared, true),
     (87, "ValueShopBuyConfirmDialog", DialogScope::Shared, true),
     (99, "CommonWebviewDialog", DialogScope::Shared, true),
     (103, "ItemDetailDialog", DialogScope::Shared, true),
