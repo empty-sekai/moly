@@ -531,6 +531,9 @@ pub(crate) fn force_set_position(world: &mut World, actor: Entity, at: [f32; 3])
         &mut Transform,
         &mut MotionPhase,
     )>();
+    let generation = world
+        .get_resource::<crate::walk_face::WalkFace>()
+        .map(|face| face.generation());
     let Ok((mut path, mut walk, mut target, mut route, mut stuck, mut transform, mut phase)) =
         query.get_mut(world, actor)
     else {
@@ -540,7 +543,12 @@ pub(crate) fn force_set_position(world: &mut World, actor: Entity, at: [f32; 3])
     let forward = walk.0.forward;
     walk.0 = LawWalkState::new(at, forward);
     *target = MoveTarget(at);
+    // The placement is on the current walk face: the route keeps its
+    // generation, so the agent step does not replan (a replan would declare
+    // an idle action over the state the caller is in).
+    let kept = generation.unwrap_or(route.generation);
     *route = RouteStops::default();
+    route.generation = kept;
     *stuck = StuckBaseline::default();
     transform.translation = Vec3::from(at);
     *phase = MotionPhase::Dwelling { remaining: None };

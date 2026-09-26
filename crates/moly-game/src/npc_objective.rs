@@ -1349,6 +1349,9 @@ enum DecisionRoute {
     NoneTalk,
     /// The greeting objective on the greeting data the gate wrote.
     Greeting,
+    /// The change-site objective on the change-site data (row 8, or the
+    /// change-site interrupt); its body is `npc::change_site_state`'s.
+    ChangeSite,
 }
 
 impl DecisionRoute {
@@ -1359,6 +1362,7 @@ impl DecisionRoute {
             DecisionRoute::SubObjective(_) => "sub:interrupt",
             DecisionRoute::NoneTalk => "nonetalk",
             DecisionRoute::Greeting => "greeting",
+            DecisionRoute::ChangeSite => "change_site",
         }
     }
 }
@@ -1477,7 +1481,10 @@ pub(crate) fn decide(
         Option<Res<crate::server_panel::TalkDataStore>>,
         Option<Res<crate::fixture_activity_data::TogetherCommunicationTable>>,
     ),
-    walk_face: Option<Res<crate::walk_face::WalkFace>>,
+    (walk_face, mut change_site): (
+        Option<Res<crate::walk_face::WalkFace>>,
+        ResMut<crate::npc::change_site_state::ChangeSiteRuns>,
+    ),
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
     catalog: crate::player_talk::TalkCatalog,
@@ -2011,6 +2018,15 @@ pub(crate) fn decide(
                 objective::Decision::NoneTalk
                 | objective::Decision::Select(select::Objective::NoneTalk) => DecisionRoute::NoneTalk,
                 objective::Decision::Greeting => DecisionRoute::Greeting,
+                objective::Decision::ChangeSite => DecisionRoute::ChangeSite,
+                objective::Decision::Interrupt {
+                    dispatch: objective::InterruptDispatch::Direct(ObjectiveType::ChangeSite),
+                } => {
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                    DecisionRoute::ChangeSite
+                }
                 other => unreachable!(
                     "决策梯落到了产品不可达的档（{other:?}）：快照里摆拍/保持档的输入按构造恒假，\
                      打断标记只写对话一种，槽位与当前目标的值域里没有它们"
@@ -2019,6 +2035,7 @@ pub(crate) fn decide(
             let objective_type = match decision_route {
                 DecisionRoute::NoneTalk => ObjectiveType::NoneTalk,
                 DecisionRoute::Greeting => ObjectiveType::Greeting,
+                DecisionRoute::ChangeSite => ObjectiveType::ChangeSite,
                 DecisionRoute::SubObjective(kind) => kind,
                 _ => ObjectiveType::Talk,
             };
@@ -2027,6 +2044,7 @@ pub(crate) fn decide(
                 match objective_type {
                     ObjectiveType::NoneTalk => "none_talk",
                     ObjectiveType::Greeting => "greeting",
+                    ObjectiveType::ChangeSite => "change_site",
                     ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub => {
                         "sub_while_doing_wait"
                     }
@@ -2036,6 +2054,20 @@ pub(crate) fn decide(
             );
             record.set("lane", decision_route.word());
             record.set("phenomenon", catalog.phenomena_id());
+            if let DecisionRoute::ChangeSite = decision_route {
+                // The change-site objective draws nothing; its body runs in
+                // the change-site state's steps.
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("path", "change_site_objective");
+                record.emit("change_site", calls);
+                fixture_activities.clear_pending(entity);
+                mind.begin_objective(ObjectiveType::ChangeSite);
+                mind.executing = true;
+                change_site.decided(entity, unit.0, frame);
+                continue 'npc;
+            }
             if let DecisionRoute::Greeting = decision_route {
                 // The greeting objective: the greeting state, then a wait until
                 // the first talk is complete. It draws nothing.
@@ -2433,6 +2465,7 @@ pub(crate) fn decide(
                 }
                 DecisionRoute::NoneTalk => {}
                 DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
             }
             match halt {
                 Some(npc_talk_lottery::Halt::Fault(reason)) => {
@@ -2637,6 +2670,7 @@ pub(crate) fn decide(
                         }
                     }
                     DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
+                    DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
                     DecisionRoute::NoneTalk
                         if matches!(decision, objective::Decision::NoneTalk)
                             && forced_none_talk(&mut fixture_activities, entity, &slot) =>

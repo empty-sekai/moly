@@ -84,6 +84,9 @@ enum Stage {
     /// `MoveNPC` ran; the AI loop yields, then decides the change-site
     /// objective.
     Ordered,
+    /// The NPC's own decision built the objective (see
+    /// [`ChangeSiteRuns::decided`]); its body starts at the next step.
+    Objective,
     WaitPlayerLeaveDoor,
     WaitOtherNpcLeaveDoor,
     WaitNotMoveMode,
@@ -117,6 +120,27 @@ pub(crate) struct ChangeSiteRuns {
     /// `NPCAvatarChangeSiteState._animationStartPosition`: the state object is
     /// kept per NPC, so the value survives from one change to the next.
     start_positions: HashMap<Entity, Vec3>,
+    /// The AI model's TargetMoveSiteType, written by `MoveNPC` and kept.
+    target_sites: HashMap<Entity, i32>,
+}
+
+impl ChangeSiteRuns {
+    /// The NPC's decision built a change-site objective (row 8, or the
+    /// change-site interrupt): its body runs from the next step on, towards
+    /// the kept target site (-1 when no order ever wrote one).
+    pub(crate) fn decided(&mut self, actor: Entity, unit: u32, frame: u32) {
+        let target = self.target_sites.get(&actor).copied().unwrap_or(-1);
+        self.runs.insert(
+            actor,
+            Run {
+                unit,
+                target,
+                stage: Stage::Objective,
+                since: frame,
+                door_forward: Vec3::Z,
+            },
+        );
+    }
 }
 
 /// Marker: the change-site state plays a clip on this NPC; the locomotion
@@ -174,6 +198,10 @@ pub(crate) fn move_npc(
         mind.force_updates = 0;
         mind.skip_next_rest = true;
     }
+    world
+        .resource_mut::<ChangeSiteRuns>()
+        .target_sites
+        .insert(actor, target);
     world.resource_mut::<ChangeSiteRuns>().runs.insert(
         actor,
         Run {
@@ -311,24 +339,48 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
         world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
         return;
     }
-    if frame == since {
+    if frame == since && !matches!(stage, Stage::Objective) {
         return;
     }
-    let target_name = residency::SITE_TYPES[target as usize];
-    match stage {
-        Stage::Ordered => {
-            // The NPC's next decision: the change-site interrupt (5) builds
-            // the change-site objective, and the interrupt flag is cleared.
-            if let Some(mut slot) = world.get_mut::<TalkSlot>(actor) {
-                if let Some(marker) = slot.interrupt.as_mut() {
-                    marker.can_interrupt = false;
-                }
+    // Another owner cancelled the objective (a draft, a forced action): the
+    // change-site objective has ended; the state's steps stop with it.
+    if !matches!(stage, Stage::Ordered) {
+        let running = world.get::<ObjectiveMind>(actor).is_some_and(|mind| {
+            mind.current == Some(ObjectiveType::ChangeSite) && !mind.cancelled
+        });
+        if !running {
+            if world.get::<ChangeSiteClip>(actor).is_some() {
+                end_clip(world, actor, unit);
             }
-            if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
-                mind.yield_since = None;
-                mind.skip_next_rest = false;
-                mind.begin_objective(ObjectiveType::ChangeSite);
-                mind.executing = true;
+            if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
+                *visibility = Visibility::Inherited;
+            }
+            info!("[npc-change-site] unit={unit} frame={frame} the change-site objective was cancelled by another owner: its state steps stop");
+            world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
+            return;
+        }
+    }
+    let target_name = residency::SITE_TYPES
+        .get(target as usize)
+        .copied()
+        .unwrap_or("none");
+    match stage {
+        Stage::Ordered | Stage::Objective => {
+            if matches!(stage, Stage::Ordered) {
+                // The NPC's next decision: the change-site interrupt (5)
+                // builds the change-site objective, and the interrupt flag is
+                // cleared.
+                if let Some(mut slot) = world.get_mut::<TalkSlot>(actor) {
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                }
+                if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
+                    mind.yield_since = None;
+                    mind.skip_next_rest = false;
+                    mind.begin_objective(ObjectiveType::ChangeSite);
+                    mind.executing = true;
+                }
             }
             if player_site(world) != Some(target) {
                 info!(
@@ -340,7 +392,9 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 return;
             }
             // MoveAsync to the own door runs on the unseen site (not run
-            // here; see the module notes), then ChangeStatus(ChangeSite).
+            // here; see the module notes), then ChangeStatus(ChangeSite). An
+            // objective the NPC decided on the loaded site walks to its
+            // data's door position first; that walk is not run here either.
             change_state(world, actor, NpcAction::ChangeSite);
             let start = if target == 0 {
                 // HomeSiteEnter takes its start position before the waits.
