@@ -12,7 +12,7 @@ mod source;
 
 pub(crate) use source::{
     AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, CutScenePayload,
-    ExpansionEffect, ExposedSource, SourceAssetId, TimelineClip, TimelineClipKey,
+    ExpansionEffect, ExposedSource, InfiniteClip, SourceAssetId, TimelineClip, TimelineClipKey,
     TimelineDefinition, TimelinePackage, TimelinePayload, TimelineTrack,
 };
 
@@ -916,9 +916,15 @@ pub(crate) enum TimelineOwnerKind {
     SceneDirector,
     /// A cut-scene view's director (`CutSceneView.PlayAsync`): it plays with
     /// no timeout; its cut-scene tracks (camera, fade panel, obstacles,
-    /// expansion effect, effects) are driven by the cut-scene owner from this
-    /// clock.
+    /// expansion effect, effects, activation, recorded root clips) are driven
+    /// by the cut-scene owner from this clock. Its cast members and the
+    /// fixture it binds hold the owner's cut-scene lease.
     CutScene,
+    /// A fixture's own timeline played with no NPC
+    /// (`FixtureTimelineFactory.ImmediateCreateFixtureTimelineForWithoutNPCAsync`):
+    /// it plays with no timeout on the fixture alone, which is also its
+    /// actor.
+    FixtureOnly,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TimelineTimeoutBudget {
@@ -1593,7 +1599,8 @@ fn validate(
             TimelineOwnerKind::Player
             | TimelineOwnerKind::StepItem
             | TimelineOwnerKind::SceneDirector
-            | TimelineOwnerKind::CutScene,
+            | TimelineOwnerKind::CutScene
+            | TimelineOwnerKind::FixtureOnly,
             TimelineTimeoutBudget::PlayerWall,
         )
         | (
@@ -1623,6 +1630,17 @@ fn validate(
     let mut required_sounds = HashSet::new();
     let mut loop_count = 0;
     for track in tracks {
+        // A recorded clip is driven by the cut-scene owner on the actor its
+        // track is bound to; no other owner plays one.
+        if track.infinite.is_some() {
+            let actor = request
+                .bindings
+                .actors
+                .get(&track.identity)
+                .filter(|_| request.owner.kind == TimelineOwnerKind::CutScene)
+                .ok_or_else(|| invalid("infinite animation clip needs an explicit binding"))?;
+            validate_track_actor(world, request, &track.identity, *actor)?;
+        }
         for clip in &track.clips {
             match &clip.payload {
                 TimelinePayload::Animation { target, settings } => {
@@ -1874,6 +1892,9 @@ fn validate_track_actor(
     identity: &SourceAssetId,
     actor: Entity,
 ) -> Result<(), TimelineFailure> {
+    if request.owner.kind == TimelineOwnerKind::CutScene {
+        return validate_cut_scene_actor(world, request, identity, actor);
+    }
     if request.owner.kind != TimelineOwnerKind::Talk {
         if actor == request.owner.activity.actor {
             return Ok(());
@@ -1943,6 +1964,43 @@ fn validate_track_actor(
         });
     if !admitted {
         return Err(invalid("cast track actor is outside the admitted talk"));
+    }
+    Ok(())
+}
+
+/// A cut-scene track's bound object (`CutSceneView.BindCharacter` /
+/// `BindGateAnimator`): the cut-scene owner puts its lease on every cast
+/// member and on the fixture it binds before it asks for this check. A
+/// track named after a unit is bound to that unit's character.
+fn validate_cut_scene_actor(
+    world: &World,
+    request: &StartTimeline,
+    identity: &SourceAssetId,
+    actor: Entity,
+) -> Result<(), TimelineFailure> {
+    let track = request
+        .definition
+        .tracks
+        .iter()
+        .find(|track| &track.identity == identity)
+        .ok_or_else(|| invalid("actor track is outside the selected source director"))?;
+    match world.get::<crate::cutscene::CutSceneCastLease>(actor) {
+        None => return Err(invalid("cut-scene track object holds no cut-scene lease")),
+        Some(lease) if lease.0 != request.owner.activity => {
+            return Err(invalid(
+                "cut-scene track object's lease belongs to another cut-scene",
+            ))
+        }
+        Some(_) => {}
+    }
+    if let Ok(unit) = track.name.parse::<u32>() {
+        if world
+            .get::<crate::npc::CharacterUnitId>(actor)
+            .map(|id| id.0)
+            != Some(unit)
+        {
+            return Err(invalid("cut-scene track is bound to a different unit"));
+        }
     }
     Ok(())
 }
@@ -2935,6 +2993,8 @@ mod handoff_regressions {
                     name: "3".into(),
                     clips: vec![],
                     markers: vec![],
+                    settings: Value::Null,
+                    infinite: None,
                 }],
             }),
             bindings: TimelineBindings::default(),

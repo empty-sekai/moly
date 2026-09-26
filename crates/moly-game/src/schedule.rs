@@ -722,7 +722,11 @@ pub fn install(app: &mut App) {
                             talk_window::read_click_input
                                 .run_if(crate::game_settings::talk_input_enabled),
                             fixture_talk::discover_faces,
-                            fixture_talk::discover_animation,
+                            (
+                                fixture_talk::discover_animation,
+                                fixture_talk::discover_late_animation,
+                            )
+                                .chain(),
                             talk_window::smoke_tap,
                             talk::advance_talk,
                             player_talk::advance_session,

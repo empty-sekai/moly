@@ -732,6 +732,67 @@ pub(crate) fn discover_animation(
     }
 }
 
+/// Update, after [`discover_animation`]: a root discovered before its
+/// animation target was bound (seen after a layout reload, where the swap
+/// latch closes on the first batch of visuals) gets its player and graph
+/// once its single animation target stands without one. A root whose player
+/// holds a graph is left alone; the hierarchy walk runs only on a frame
+/// where an `AnimatedBy` was added or a known player lost its graph.
+pub(crate) fn discover_late_animation(
+    mut commands: Commands,
+    added: Query<(), Added<AnimatedBy>>,
+    mut roots: Query<(Entity, &mut FixtureAnimation, &FixturePlacement), With<FixtureRoot>>,
+    children: Query<&Children>,
+    animated_by: Query<&AnimatedBy>,
+    installed: Query<(), With<AnimationGraphHandle>>,
+) {
+    let any_added = !added.is_empty();
+    for (root, mut animation, placement) in &mut roots {
+        let lost = animation
+            .player
+            .is_some_and(|player| !installed.contains(player));
+        if animation.player.is_some() && !lost {
+            continue;
+        }
+        if !lost && !any_added {
+            continue;
+        }
+        let mut targets: Vec<Entity> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if let Ok(by) = animated_by.get(entity) {
+                if !targets.contains(&by.0) {
+                    targets.push(by.0);
+                }
+            }
+            if let Ok(kids) = children.get(entity) {
+                stack.extend(kids.iter());
+            }
+        }
+        let [target] = targets.as_slice() else {
+            continue;
+        };
+        if installed.contains(*target) {
+            continue;
+        }
+        commands.entity(*target).insert((
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(animation.graph.clone()),
+        ));
+        animation.player = Some(*target);
+        info!(
+            "[fixture-talk] fixture_id {}: animation root bound after discovery (player {})",
+            placement.fixture_id,
+            if lost {
+                "had lost its graph"
+            } else {
+                "was not bound yet"
+            }
+        );
+    }
+}
+
 /// 取（或首次补进图）一个家具动画剪辑的节点下标（角色侧共享动作库的
 /// `node_for` 同一条路径：图节点按剪辑名缓存）。
 pub(crate) fn fixture_node_for(

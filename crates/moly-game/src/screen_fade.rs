@@ -205,6 +205,54 @@ pub(crate) fn cutscene_fade_out(world: &mut World, duration: f32, label: &'stati
     start_tween(world, image, to, duration, label);
 }
 
+/// `ScreenLayerMysekaiMysekaiCutScene.FadeOut(color, duration)` as the
+/// presenter calls it with its view's end colour: a colour whose squared
+/// length (alpha included) is below 1e-10 is replaced by opaque black; the
+/// image takes the colour, its alpha included, then its alpha tweens to 0.
+pub(crate) fn cutscene_fade_out_color(
+    world: &mut World,
+    color: [f32; 4],
+    duration: f32,
+    label: &'static str,
+) {
+    let squared: f32 = color.iter().map(|c| c * c).sum();
+    let from = if squared < 9.999_999_4e-11 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        color
+    };
+    let to = [from[0], from[1], from[2], 0.0];
+    start_tween(world, from, to, duration, label);
+}
+
+/// `ScreenManager.WhiteOut(delay, duration)`: `Set(1, 1, 1, current.a)`,
+/// then `Play` to opaque white.
+pub(crate) fn white_out(world: &mut World, delay: f32, duration: f32, label: &'static str) {
+    let current = world.resource::<ScreenFader>().colour;
+    play(
+        world,
+        [1.0, 1.0, 1.0, current[3]],
+        [1.0, 1.0, 1.0, 1.0],
+        delay,
+        duration,
+        label,
+    );
+}
+
+/// `ScreenManager.WhiteIn(delay, duration)`: `Set(1, 1, 1, current.a)`,
+/// then `Play` to transparent white.
+pub(crate) fn white_in(world: &mut World, delay: f32, duration: f32, label: &'static str) {
+    let current = world.resource::<ScreenFader>().colour;
+    play(
+        world,
+        [1.0, 1.0, 1.0, current[3]],
+        [1.0, 1.0, 1.0, 0.0],
+        delay,
+        duration,
+        label,
+    );
+}
+
 fn start_tween(
     world: &mut World,
     from: [f32; 4],

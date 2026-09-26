@@ -150,6 +150,208 @@ pub(crate) enum CutScenePayload {
     SiteExpansion(ExpansionEffect),
     /// `EffectClip.template`: the effect prefab it instantiates.
     Effect(EffectTemplate),
+    /// `ActivationPlayableAsset` of an activation track: the bound object is
+    /// active while a clip of the track has weight (the track's
+    /// `m_PostPlaybackState` applies when the graph is destroyed).
+    Activation,
+    /// `PlayerActivationClip`: the player avatar is shown on the clip's play
+    /// and hidden on its pause while the director is short of its duration.
+    PlayerActivation,
+    /// `SkipNextClip`: a tap jumps the director to the clip's end (the
+    /// cut-scene screen's skip input).
+    SkipNext,
+}
+
+/// An animation track's recorded clip (`AnimationTrack.m_InfiniteClip`),
+/// decoded, with the track settings its playable reads
+/// (`AnimationTrack.CreateInfiniteTrackPlayable`: the clip plays from the
+/// director's time with the track's pre/post extrapolation, and its root
+/// transform takes the infinite-clip offset through an offset playable).
+#[derive(Clone, Debug)]
+pub(crate) struct InfiniteClip {
+    pub asset: SourceAssetId,
+    pub name: String,
+    /// `sourceStopTime - sourceStartTime` (the start is 0).
+    pub length: f64,
+    pub curves: Vec<InfiniteCurve>,
+    pub offset_position: [f64; 3],
+    pub offset_euler: [f64; 3],
+    pub pre_extrapolation: u64,
+    pub post_extrapolation: u64,
+    pub time_offset: f64,
+    /// `m_TrackOffset` (0 applies the transform offsets).
+    pub track_offset: u64,
+    pub apply_foot_ik: bool,
+    pub remove_offset: bool,
+}
+
+/// The two root-transform channels a recorded clip binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InfiniteChannel {
+    /// `m_LocalPosition` (Transform attribute 1).
+    Position,
+    /// `localEulerAngles` (Transform attribute 4), degrees.
+    Euler,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InfiniteCurve {
+    pub channel: InfiniteChannel,
+    /// x, y or z.
+    pub component: usize,
+    keys: Vec<InfiniteKey>,
+}
+
+/// A streamed key: from its time to the next key the value is
+/// `((a dt + b) dt + c) dt + d`, `dt` the time since the key; a constant
+/// curve's key holds its value.
+#[derive(Clone, Copy, Debug)]
+struct InfiniteKey {
+    time: f64,
+    coefficients: [f64; 4],
+}
+
+impl InfiniteCurve {
+    fn evaluate(&self, t: f64) -> f64 {
+        let Some(first) = self.keys.first() else {
+            return 0.0;
+        };
+        let index = self.keys.iter().rposition(|key| key.time <= t).unwrap_or(0);
+        let key = if t < first.time {
+            first
+        } else {
+            &self.keys[index]
+        };
+        let dt = (t - key.time).max(0.0);
+        let [a, b, c, d] = key.coefficients;
+        ((a * dt + b) * dt + c) * dt + d
+    }
+}
+
+impl InfiniteClip {
+    fn parse(record: &Value, fields: &Value) -> Result<Self, TimelineFailure> {
+        if flag(record, "legacy")? {
+            return Err(invalid("a legacy recorded clip is not played"));
+        }
+        let start = finite(record, "sourceStartTime")?;
+        let stop = finite(record, "sourceStopTime")?;
+        if start != 0.0 || stop <= start {
+            return Err(invalid("recorded clip bounds are not [0, stop)"));
+        }
+        for binding in array(record, "bindings")? {
+            let type_id = unsigned(binding, "typeID")?;
+            let attribute = unsigned(binding, "attribute")?;
+            if type_id != 4
+                || unsigned(binding, "path")? != 0
+                || !matches!(attribute, 1 | 4)
+                || flag(binding, "isPPtrCurve")?
+            {
+                return Err(invalid(format!(
+                    "recorded clip binds type {type_id} attribute {attribute} off the root transform; only the root position and Euler angles are played"
+                )));
+            }
+        }
+        let mut curves = Vec::new();
+        for curve in array(record, "curves")? {
+            let channel = match unsigned(curve, "attribute")? {
+                1 => InfiniteChannel::Position,
+                4 => InfiniteChannel::Euler,
+                other => return Err(invalid(format!("recorded curve attribute {other}"))),
+            };
+            let component = unsigned(curve, "component")? as usize;
+            if component > 2 || unsigned(curve, "path")? != 0 || unsigned(curve, "typeID")? != 4 {
+                return Err(invalid("recorded curve is not a root transform component"));
+            }
+            let kind = string(curve, "kind")?;
+            let mut keys = Vec::new();
+            for key in array(curve, "keys")? {
+                let row = key
+                    .as_array()
+                    .ok_or_else(|| invalid("recorded key is not an array"))?;
+                let number = |index: usize| -> Result<f64, TimelineFailure> {
+                    row.get(index)
+                        .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| invalid("recorded key value is not finite"))
+                };
+                let time = number(0)?;
+                let coefficients = match (kind, row.len()) {
+                    ("cubic", 5) => [number(1)?, number(2)?, number(3)?, number(4)?],
+                    ("const", 2) => [0.0, 0.0, 0.0, number(1)?],
+                    _ => {
+                        return Err(invalid(format!(
+                            "recorded key of kind {kind} has {} values",
+                            row.len()
+                        )))
+                    }
+                };
+                keys.push(InfiniteKey { time, coefficients });
+            }
+            if keys.is_empty() || keys.windows(2).any(|pair| pair[0].time > pair[1].time) {
+                return Err(invalid("recorded curve keys are empty or unordered"));
+            }
+            curves.push(InfiniteCurve {
+                channel,
+                component,
+                keys,
+            });
+        }
+        Ok(Self {
+            asset: asset(&record["asset"])?,
+            name: string(record, "name")?.to_owned(),
+            length: stop - start,
+            curves,
+            offset_position: vector3(&fields["m_InfiniteClipOffsetPosition"])?,
+            offset_euler: vector3(&fields["m_InfiniteClipOffsetEulerAngles"])?,
+            pre_extrapolation: unsigned(fields, "m_InfiniteClipPreExtrapolation")?,
+            post_extrapolation: unsigned(fields, "m_InfiniteClipPostExtrapolation")?,
+            time_offset: finite(fields, "m_InfiniteClipTimeOffset")?,
+            track_offset: unsigned(fields, "m_TrackOffset")?,
+            apply_foot_ik: flag(fields, "m_InfiniteClipApplyFootIK")?,
+            remove_offset: flag(fields, "m_InfiniteClipRemoveOffset")?,
+        })
+    }
+
+    /// The clip's local time at director time `t`: `t - timeOffset`, then
+    /// the track's extrapolation outside `[0, length]` (Hold clamps, Loop
+    /// wraps, PingPong reflects, None leaves the clip unplayed).
+    pub(crate) fn local_time(&self, t: f64) -> Option<f64> {
+        let local = t - self.time_offset;
+        if local < 0.0 {
+            return match self.pre_extrapolation {
+                0 => None,
+                mode => Some(extrapolate(local, self.length, mode)),
+            };
+        }
+        if local > self.length {
+            return match self.post_extrapolation {
+                0 => None,
+                mode => Some(extrapolate(local, self.length, mode)),
+            };
+        }
+        Some(local)
+    }
+
+    /// The recorded root position and Euler angles (source frame, degrees)
+    /// at clip time `local`; a channel with no curve reads 0.
+    pub(crate) fn sample(&self, local: f64) -> ([f64; 3], [f64; 3]) {
+        let mut position = [0.0; 3];
+        let mut euler = [0.0; 3];
+        for curve in &self.curves {
+            let value = curve.evaluate(local);
+            match curve.channel {
+                InfiniteChannel::Position => position[curve.component] = value,
+                InfiniteChannel::Euler => euler[curve.component] = value,
+            }
+        }
+        (position, euler)
+    }
+
+    /// Whether the clip carries a root channel (`AnimationClip.hasRootTransforms`
+    /// for a generic clip bound at the root).
+    pub(crate) fn has_root_transforms(&self) -> bool {
+        !self.curves.is_empty()
+    }
 }
 
 /// `ShowExpansionEffectClip`'s serialized fields.
@@ -392,6 +594,11 @@ pub(crate) struct TimelineTrack {
     /// The track's markers (`TrackAsset.m_Markers`); empty in documents
     /// exported before markers were.
     pub markers: Vec<TimelineMarker>,
+    /// The track class's own serialized settings, verbatim (`Null` in
+    /// documents exported before they were).
+    pub settings: Value,
+    /// The decoded recorded clip of an animation track that has one.
+    pub infinite: Option<Arc<InfiniteClip>>,
 }
 
 #[derive(Clone, Debug)]
@@ -557,13 +764,28 @@ impl TimelinePackage {
                 return Err(invalid(format!("missing selected track {identity:?}")));
             }
             let row = matches[0];
-            for key in ["m_InfiniteClip", "m_AnimClip"] {
-                if let Some(id) = row.get(key).and_then(|v| v.get("m_PathID")) {
-                    if path_id(id)? != "0" {
-                        return Err(invalid("infinite animation clip needs an explicit binding"));
-                    }
+            if let Some(id) = row.get("m_AnimClip").and_then(|v| v.get("m_PathID")) {
+                if path_id(id)? != "0" {
+                    return Err(invalid("infinite animation clip needs an explicit binding"));
                 }
             }
+            // A recorded clip is played only from its decoded record; a row
+            // that names one without the record is refused as before.
+            let infinite = match row.get("m_InfiniteClip").and_then(|v| v.get("m_PathID")) {
+                Some(id) if path_id(id)? != "0" => match row.get("infiniteClip") {
+                    Some(record) if !record.is_null() => Some(Arc::new(
+                        InfiniteClip::parse(record, &row["fields"]).map_err(|error| {
+                            invalid(format!(
+                                "track {}: recorded clip: {}",
+                                row["name"].as_str().unwrap_or("?"),
+                                error.message
+                            ))
+                        })?,
+                    )),
+                    _ => return Err(invalid("infinite animation clip needs an explicit binding")),
+                },
+                _ => None,
+            };
             let mut clips = Vec::new();
             for (index, envelope) in array(row, "clips")?.iter().enumerate() {
                 let key = TimelineClipKey {
@@ -644,6 +866,8 @@ impl TimelinePackage {
                 name: string(track, "name")?.to_owned(),
                 clips,
                 markers,
+                settings: row.get("fields").cloned().unwrap_or(Value::Null),
+                infinite,
             });
         }
         let settings = &timeline["settings"];
@@ -801,6 +1025,9 @@ impl TimelinePackage {
                     fade_color: color(&f["fadeColor"])?,
                 }))
             }
+            "ActivationPlayableAsset" => TimelinePayload::CutScene(CutScenePayload::Activation),
+            "PlayerActivationClip" => TimelinePayload::CutScene(CutScenePayload::PlayerActivation),
+            "SkipNextClip" => TimelinePayload::CutScene(CutScenePayload::SkipNext),
             "EffectClip" => {
                 let t = &f["template"];
                 let prefab = path_id(&t["prefab"]["m_PathID"])?;
