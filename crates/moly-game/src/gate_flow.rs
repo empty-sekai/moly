@@ -62,14 +62,23 @@
 //! visitors placed and the client has joined, after a 2 s settle (a product
 //! choice). A reply waits for the same readiness, without the settle.
 //!
-//! NPC-side calls that are the NPC runtime's and are named, not made, here:
-//! the created visitor's placement at the gate's first action point end
-//! location and its objective restart (`TryCancelCurrentObjective`,
-//! `ForceUpdateObjective`, `Show`), `HideAndCancelObjective`, and each
-//! visitor's forced gate timeline (`ForceUpdateObjectiveImmediatelyTimeline`,
-//! the wait for it, `ReleaseUsingFixture`). Meanwhile the visitors are
-//! created where the NPC runtime places new members, and each visitor
-//! timeline's own gate, SE and Control tracks play on the gate with no NPC.
+//! NPC-side calls go through the NPC runtime's entries (`npc::gate_entries`,
+//! `npc::dispose`): the avatar store's NPC list; DisposeNPCAll; the invited
+//! unit's CreateNPC at the gate's first action point end locator, its two
+//! waits and its TryCancelCurrentObjective, ForceUpdateObjective and Show;
+//! the go-home start callback's HideAndCancelObjective.
+//!
+//! Not routed, and named at their call sites with the source's arguments
+//! (the NPC decision ladder has no route yet for the immediately-played
+//! fixture timeline objective, 12): each visitor's
+//! `ForceUpdateObjectiveImmediatelyTimeline` with the calls around it
+//! (TryCancelCurrentObjective, SetImmediatelyExecuteNextObjective,
+//! SetCanInterruptTalkData, the waits on the NPC's fixture timeline,
+//! ReleaseUsingFixture, the second cancel) and `TryCancelIfFixtureActionGate`.
+//! Meanwhile SetupNPC's CreateNPC without a pose is the NPC runtime's member
+//! creation (`npc::spawn_temporary_units`, where new members are seated; the
+//! entries have no CreateNPC without a pose), and each visitor timeline's
+//! own gate, SE and Control tracks play on the gate with no NPC.
 
 use std::collections::HashSet;
 
@@ -99,6 +108,9 @@ const LEAVE_CONDITION: &str = "mysekai_character_talk_character_leave_game_chara
 /// The literal fixture-timeline bundle of the visitor timelines
 /// (`mysekai/fixture_timeline/mdl_non0006_gate_lon1`), whatever the skin.
 const VISIT_PACKAGE: &str = "mysekai__fixture_timeline__mdl_non0006_gate_lon1";
+/// The bundle name the gate controller passes with every visitor timeline
+/// (a string literal, whichever gate model is shown).
+const VISIT_BUNDLE: &str = "mysekai/fixture_timeline/mdl_non0006_gate_lon1";
 const FIRST_VISIT: &str = "tl_visitgate_w_001";
 const NEXT_VISIT: &str = "tl_visitgate_w_002";
 const CLOSE_GATE: &str = "tl_visitgate_w_003";
@@ -386,6 +398,10 @@ pub(crate) struct GateFlow {
     /// `OnEndCutScene`'s `CreateNPC` after its `Yield`: the units and the
     /// frame the cut-scene avatars were disposed on.
     create_after_yield: Option<(Vec<u32>, u64)>,
+    /// `OnEndCutScene` after `CreateNPC`: the created NPCs whose
+    /// `WaitUntil(IsExistNPCAll)` / `WaitWhile(CurrentObjectiveType == 0)`
+    /// are running.
+    invite_waits: Vec<(u32, Entity)>,
     /// The engine's scripting generator (`UnityEngine.Random`) as this flow
     /// draws from it.
     rand: EngineRand,
@@ -498,6 +514,7 @@ fn start(mut commands: Commands, server: Res<AssetServer>) {
         index: Some(server.load::<JsonAsset>(FIXTURE_INDEX)),
         indexed: None,
         create_after_yield: None,
+        invite_waits: Vec::new(),
         rand: EngineRand::from_state(engine_state()),
         hides: Vec::new(),
         waiting: None,
@@ -565,18 +582,10 @@ fn gate_fixture(world: &mut World) -> Option<Entity> {
         .map(|(entity, _)| entity)
 }
 
-/// The NPCs present (not the player's avatar, not a cut-scene avatar).
+/// The avatar store's NPC list (not the player's avatar, not a cut-scene
+/// avatar), in creation order.
 fn present_npcs(world: &mut World) -> Vec<(u32, Entity)> {
-    let mut npcs: Vec<(u32, Entity)> = world
-        .query_filtered::<(Entity, &CharacterUnitId), (
-            Without<crate::player::PlayerControlled>,
-            Without<crate::cutscene::CutSceneAvatar>,
-        )>()
-        .iter(world)
-        .map(|(entity, unit)| (unit.0, entity))
-        .collect();
-    npcs.sort_by_key(|(_, entity)| entity.index());
-    npcs
+    crate::npc::dispose::npc_list(world)
 }
 
 fn ready(world: &mut World) -> Result<Entity, &'static str> {
@@ -723,6 +732,7 @@ fn advance(world: &mut World) {
         return;
     }
     create_after_yield(world);
+    invite_waits(world);
     hide_effects(world);
     if matches!(
         world.resource::<GateFlow>().stage,
@@ -983,13 +993,61 @@ fn create_after_yield(world: &mut World) {
         return;
     };
     for unit in units {
-        match crate::npc::spawn_temporary_units(world, &[unit]) {
-            Ok(created) => info!("[gate] OnEndCutScene: CreateNPC(unit {unit}): {created:?}, where the NPC runtime places new members (the gate's ActionPoints[0].EndLoc placement is the NPC runtime's); WaitUntil(IsExistNPCAll); SendNpcSpawnFlagPayload (multiplayer: nothing here); TryCancelCurrentObjective, ForceUpdateObjective and Show are the NPC runtime's"),
+        // The gate's ActionPoints.First().EndLoc position, the literal
+        // rotation of pi about the up axis.
+        let created = gate_fixture(world)
+            .ok_or_else(|| "no gate is placed (GetGateFixture is null)".to_owned())
+            .and_then(|gate| crate::npc::gate_entries::gate_first_end_loc(world, gate))
+            .and_then(|position| {
+                crate::npc::gate_entries::create_npc(
+                    world,
+                    unit,
+                    position,
+                    crate::npc::gate_entries::invite_rotation(),
+                )
+            });
+        match created {
+            Ok(npc) => {
+                info!("[gate] OnEndCutScene: CreateNPC(unit {unit}, 1, the gate's first EndLoc, Euler(0, pi, 0)): {npc:?}; WaitUntil(IsExistNPCAll); SendNpcSpawnFlagPayload (multiplayer: nothing here); WaitWhile(CurrentObjectiveType == 0)");
+                world
+                    .resource_mut::<GateFlow>()
+                    .invite_waits
+                    .push((unit, npc));
+            }
             Err(reason) => error!("[gate] OnEndCutScene: CreateNPC(unit {unit}): {reason}"),
         }
     }
+    // The source whites out after the two waits and the NPC calls below,
+    // inside the end callback the cut-scene presenter awaits; this host's end
+    // callback returns at once, so the white-out stays here, before the
+    // presenter's return and its WhiteIn (named order difference: the NPC is
+    // shown a few frames later, behind the white screen).
     crate::screen_fade::white_out(world, 0.0, 0.0, "OnEndCutScene: ScreenManager.WhiteOut");
     info!("[gate] OnEndCutScene: ScreenManager.WhiteOut(0, 0)");
+}
+
+/// `OnEndCutScene` after `CreateNPC`: once the NPC exists and has decided
+/// its first objective, `TryCancelCurrentObjective`, `ForceUpdateObjective`
+/// and `Show`.
+fn invite_waits(world: &mut World) {
+    let waits = std::mem::take(&mut world.resource_mut::<GateFlow>().invite_waits);
+    let mut left = Vec::new();
+    for (unit, npc) in waits {
+        if world.get_entity(npc).is_err() {
+            error!(
+                "[gate] OnEndCutScene: unit {unit}'s created NPC is gone before its waits ended"
+            );
+            continue;
+        }
+        let (_, decided) = crate::npc::gate_entries::invite_waits(world, npc);
+        if !decided {
+            left.push((unit, npc));
+            continue;
+        }
+        let (cancelled, updated) = crate::npc::gate_entries::invite_show(world, npc);
+        info!("[gate] OnEndCutScene: unit {unit}: TryCancelCurrentObjective {cancelled}, ForceUpdateObjective {updated}, Show");
+    }
+    world.resource_mut::<GateFlow>().invite_waits = left;
 }
 
 /// `ReserveProcessAsync` after the reserve reply
@@ -1275,13 +1333,8 @@ fn restore_saved_gate(world: &mut World) {
 
 /// `AvatarDataStore.DisposeNPCAll`: every NPC's avatar is disposed.
 fn dispose_npc_all(world: &mut World, caller: &str) {
-    let npcs = present_npcs(world);
-    let entities: Vec<Entity> = npcs.iter().map(|(_, entity)| *entity).collect();
-    crate::npc::remove_temporary_units(world, &entities);
-    info!(
-        "[gate] {caller}: DisposeNPCAll: units {:?} disposed",
-        npcs.iter().map(|(unit, _)| *unit).collect::<Vec<_>>()
-    );
+    let disposed = crate::npc::dispose::dispose_npc_all(world, caller);
+    info!("[gate] {caller}: DisposeNPCAll: units {disposed:?} disposed");
 }
 
 /// `ChangeGateAction`: `BackUIScreen`, `SiteLayoutUtility.ChangeGate`, then
@@ -1355,7 +1408,7 @@ fn start_character_appearance(world: &mut World, change: Change) -> Stage {
             visitors: Some(rows),
         },
     );
-    info!("[gate] StartCharacterAppearanceAsync: MysekaiTalkDataStore.SetTalkList(the change reply's talk list) handed to the client's talk store; SetupNpcVisitingAsync(visitingFromGate true): ShowCharacterFromGate: SetVisitingCharacterFromGateStatusStart (event 65, no subscriber here); SetupNPC(units {units:?})");
+    info!("[gate] StartCharacterAppearanceAsync: MysekaiTalkDataStore.SetTalkList(the change reply's talk list) handed to the client's talk store; SetupNpcVisitingAsync(visitingFromGate true): ShowCharacterFromGate: SetVisitingCharacterFromGateStatusStart (event 65, no subscriber here); SetupNPC(units {units:?}), then PlayGateCharacterAppearTimeline (each visitor's forced gate timeline is named where it is called: not routed)");
     Stage::Appearance(Box::new(Appearance {
         units,
         next_at: 0.0,
@@ -1413,7 +1466,7 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
         match crate::npc::spawn_temporary_units(world, &appearance.units) {
             Ok(created) => {
                 appearance.spawned = true;
-                info!("[gate] SetupNPC: {} visitors created ({created:?}) where the NPC runtime places new members (the gate placement and the objective calls are the NPC runtime's)", created.len());
+                info!("[gate] SetupNPC: CreateNPC(unit, 1, visitCount) for {} visitors ({created:?}): the NPC runtime's member creation, where new members are seated (the entries have no CreateNPC without a pose)", created.len());
             }
             Err(reason) => {
                 debug!("[gate] SetupNPC waits: {reason}");
@@ -1515,7 +1568,7 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
             visitor.started = appearance.next_at;
             appearance.next_at += VISITOR_INTERVAL;
             if index > 0 {
-                info!("[gate] TryCancelIfFixtureActionGate: the gate's fixture action for unit {} is the NPC runtime's (not here)", visitor.unit);
+                warn!("[gate] TryCancelIfFixtureActionGate() before unit {}: FirstOrDefault(the NPC fixture timeline list, its controller's FixtureUID == GetGateFixture().UId), then TryCancelCurrentObjective on its presenter and, on true, ForceUpdateObjective: not routed: the NPC decision ladder has no objective 12 route (next NPC lane), and no NPC-side read gives the NPC fixture timelines on the gate", visitor.unit);
             }
         }
         index += 1;
@@ -1656,6 +1709,35 @@ fn warm(world: &mut World, gate: Entity, name: &'static str) -> bool {
     }
 }
 
+/// `PlayGateCharacterAppearTimelineInternal`'s NPC side after the chime and
+/// its delay (JP 6.8.1 native): `character = FindNPC(unit)`, then
+/// `character.ForceUpdateObjectiveImmediatelyTimeline(VISIT_BUNDLE,
+/// timeline, gate.UId, character, [FindNPC(character's unit)],
+/// [FixtureNpcActionLocateData(character's unit, index 0, slotId 0)])`;
+/// `TryCancelCurrentObjective` (false: the method returns there);
+/// `SetImmediatelyExecuteNextObjective(true)`;
+/// `SetCanInterruptTalkData(true, ImmediatelyFixtureTimeline)`;
+/// `WaitUntil`, then `WaitWhile`, the NPC fixture timeline list holds a
+/// timeline acted by the character; `FixtureManager.ReleaseUsingFixture(
+/// unit, gate)`; `TryCancelCurrentObjective`, and on true
+/// `ForceUpdateObjective` and `SetImmediatelyExecuteNextObjective(true)`.
+/// The model's call resets the AI and sets ImmediatelyFixture talk data; the
+/// NPC decision ladder has no route from that data to the timeline
+/// objective yet, so none of these calls is made and the NPC keeps its own
+/// objective. This is the one place that routing is wired from.
+fn force_update_objective_immediately_timeline(
+    world: &mut World,
+    gate: Entity,
+    visitor: &Visitor,
+    t: f64,
+) {
+    let uid = world
+        .get::<FixtureActivityIdentity>(gate)
+        .map(|identity| identity.uid.clone());
+    let character = crate::npc::gate_entries::find_npc(world, visitor.unit);
+    warn!("[gate] t={t:.3} NPCAvatarPresenter.ForceUpdateObjectiveImmediatelyTimeline(\"{VISIT_BUNDLE}\", \"{}\", gate uid {uid:?}, main character {character:?}, [{character:?}], [FixtureNpcActionLocateData {{ gameCharacterUnitId: {}, index: 0, slotId: 0 }}]) for unit {}: not routed: the NPC decision ladder has no objective 12 route (next NPC lane); TryCancelCurrentObjective, SetImmediatelyExecuteNextObjective(true), SetCanInterruptTalkData(true, 12), the waits on the NPC's fixture timeline, ReleaseUsingFixture({}, the gate) and the second cancel are not made", visitor.timeline, visitor.unit, visitor.unit, visitor.unit);
+}
+
 /// One frame of a visitor's `PlayGateCharacterAppearTimelineInternal` (or
 /// of the close timeline, which has no NPC and no chime).
 fn visitor_step(
@@ -1715,7 +1797,7 @@ fn visitor_step(
                 );
                 timeline::cancel_and_release(world, token);
                 if visitor.unit != 0 {
-                    info!("[gate] PlayGateCharacterAppearTimelineInternal(unit {}): the wait for the NPC's timeline, FixtureManager.ReleaseUsingFixture, TryCancelCurrentObjective and ForceUpdateObjective are the NPC runtime's (not here)", visitor.unit);
+                    info!("[gate] PlayGateCharacterAppearTimelineInternal(unit {}): the gate part ends; the NPC side after the forced timeline (its waits, ReleaseUsingFixture and the second cancel) is not routed with it", visitor.unit);
                 }
                 visitor.done = true;
             }
@@ -1746,7 +1828,8 @@ fn visitor_step(
             *generation += 1;
             let (kept, left_out) = gate_part(&definition, visitor.unit != 0);
             if visitor.unit != 0 {
-                info!("[gate] t={t:.3} NPCAvatarPresenter.ForceUpdateObjectiveImmediatelyTimeline(the gate, {}) for unit {} {:?}: the NPC's part is the NPC runtime's (not here); tracks left out: {:?}", visitor.timeline, visitor.unit, visitor.npc, left_out);
+                force_update_objective_immediately_timeline(world, gate, visitor, t);
+                info!("[gate] t={t:.3} {} (unit {}): the timeline's own gate, SE and Control tracks play on the gate; the NPC's tracks left out: {:?}", visitor.timeline, visitor.unit, left_out);
             }
             visitor.left_out = left_out;
             StartTimeline {
@@ -1914,8 +1997,13 @@ fn step_down(visitor: &mut Visitor, request: &mut StartTimeline, reason: &str) -
 pub(crate) fn cut_scene_started(world: &mut World, cast: &Cast) {
     match cast.play.caller {
         CastCaller::GoHome => {
-            let others = present_npcs(world);
-            info!("[gate] OnStartCutSceneAsync(unit {:?}): HideAndCancelObjective on the other NPCs {:?} (the NPC runtime's; none remain after DisposeNPCAll)", cast.play.units, others.iter().map(|(unit, _)| *unit).collect::<Vec<_>>());
+            // OnStartCutSceneAsync(targetCharacterId): the NPCs of other
+            // units (none remain after DisposeNPCAll).
+            let target = cast.play.units.first().copied().unwrap_or(0);
+            let others = crate::npc::gate_entries::on_start_cut_scene(world, target);
+            info!(
+                "[gate] OnStartCutSceneAsync(unit {target}): HideAndCancelObjective on {others:?}"
+            );
         }
         CastCaller::Invite => {
             info!("[gate] PlayInviteCutSceneAsync: no start callback");
