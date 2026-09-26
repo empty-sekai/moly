@@ -846,6 +846,7 @@ impl ServerDocument {
 
     /// The server panel's NPC slice (schemaVersion 1): the rows served now
     /// and the client's `refreshedAt`.
+    #[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
     pub(crate) fn npc_slice(&self, served: &[ScheduleRow], refreshed_at: i64) -> Value {
         let mut value = json!({
             "version": V1,

@@ -159,6 +159,7 @@ impl Masters {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) enum ResponseKind {
     Join,
     Harvest,
@@ -208,6 +209,7 @@ pub(crate) enum ReplyTalkList {
 
 /// A gate reply for the gate presenter.
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) enum GateReply {
     /// The reserve reply: the reserved row and the reply's talk list.
     Reserve {
@@ -232,6 +234,7 @@ pub(crate) struct ServerGateReplies(pub(crate) VecDeque<GateReply>);
 /// presenter, for the talk store's owner. `visitors` is the reply's gate
 /// characters when the call also changes who visits.
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) struct TalkListUpdate {
     pub(crate) caller: &'static str,
     pub(crate) talks: ReplyTalkList,
@@ -239,9 +242,11 @@ pub(crate) struct TalkListUpdate {
 }
 
 #[derive(Resource, Default, Debug)]
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) struct ClientTalkListUpdates(pub(crate) Vec<TalkListUpdate>);
 
 /// The gate presenter's `UpdateTalkList` / `SetTalkList` call.
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn client_update_talk_list(world: &mut World, update: TalkListUpdate) {
     world
         .get_resource_or_insert_with(ClientTalkListUpdates::default)
@@ -254,6 +259,7 @@ pub(crate) fn client_update_talk_list(world: &mut World, update: TalkListUpdate)
 /// The join's rank is delivered only in the browser game; natively the
 /// sites keep their offline levels until a response changes the rank.
 #[derive(Message, Clone, Copy, Debug)]
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) struct RankDelivered {
     pub(crate) previous: Option<i32>,
     pub(crate) current: i32,
@@ -308,6 +314,7 @@ impl ClientUserData {
     }
 
     /// `StaminaData.IsEmptyStamina` of the copy (an unseated copy is empty).
+    #[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
     pub(crate) fn stamina_empty(&self) -> bool {
         self.stamina
             .is_none_or(|s| s.normal <= 0 && s.boost <= 0 && s.enhance < 1)
@@ -408,10 +415,6 @@ impl ServerModel {
 
     pub(crate) fn document(&self) -> &ServerDocument {
         &self.doc
-    }
-
-    pub(crate) fn masters(&self) -> &Masters {
-        &self.masters
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -750,6 +753,7 @@ fn native_overlay(doc: &mut ServerDocument) {
 
 /// The server panel's NPC slice (schemaVersion 1) once the client has
 /// joined: the rows served at the join and the client's `refreshedAt`.
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<String> {
     with_model(|model| {
         model
@@ -760,17 +764,20 @@ pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<
 }
 
 /// The home gate as the document holds it (gate id, skin id).
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn home_gate() -> Option<(i32, i32)> {
     with_model(|model| (model.doc.gate.gate_id, model.doc.gate.skin_id))
 }
 
 /// The master normal pool maximum (the menu gauge's maximum).
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn stamina_max() -> Option<StaminaMax> {
     with_model(|model| model.masters.stamina_max).flatten()
 }
 
 /// The harvest reply's stamina (harvest stamina policy); a response. The
 /// sent rests come back when no model is installed.
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn harvest_api_stamina(rests: [i32; 3]) -> Stamina {
     let sent = Stamina {
         normal: rests[0],
@@ -794,6 +801,7 @@ pub(crate) fn harvest_api_stamina(rests: [i32; 3]) -> Stamina {
 
 /// The gather reply's stamina; a response. `None` without a model or with
 /// unseated pools.
+#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn gather_api_stamina() -> Option<Stamina> {
     with_model(|model| {
         model.respond(ResponseKind::Gather, false, &[SECTION_STAMINA]);

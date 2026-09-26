@@ -1,15 +1,23 @@
-// The page side of the game ABI (schemaVersion 1, abi 1): commands into
-// `game_command`, the published projection from `game_snapshot`, and the
-// persisted documents from `game_take_persist`. Every decision about what a
-// command does stays in the engine; this module only validates shapes.
+// The page side of the game ABI (schemaVersion 1, abi 2): commands into
+// `game_command`, the published projection from `game_snapshot`, the
+// persisted documents from `game_take_persist`, and the server model's panel
+// views from `game_server_schema` / `game_server_document`. Every decision
+// about what a command does stays in the engine; this module only validates
+// shapes.
 export const GAME_SCHEMA = 1;
-export const GAME_ABI = 1;
+export const GAME_ABI = 2;
 export const GAME_EXPORTS = Object.freeze([
   "start_game",
   "game_command",
   "game_snapshot",
   "game_take_persist",
+  "game_server_schema",
+  "game_server_document",
 ]);
+/** The page documents, in the order the engine offers them. */
+export const GAME_DOCUMENTS = Object.freeze(["settings", "server", "local"]);
+const SERVER_ACTIONS = ["gate.reserve", "gate.change", "sync"];
+const MAX_SERVER_EDIT = 16 * 1024;
 const LIFECYCLE = ["hidden", "visible", "pagehide"];
 const COVERS = ["opaque", "fading", "gone"];
 const MAX_PENDING = 64;
@@ -22,7 +30,18 @@ export function gameCommand(type, value) {
     return { type, captured: value };
   if (type === "persist.ack" && revisionOf(value))
     return { type, revision: value };
+  if (type === "server.edit" && isServerEdit(value)) return { type, ...value };
   throw new Error(`Unknown game command: ${String(type)}`);
+}
+
+/** `{path, value}` or `{action, ...fields}`; the engine validates the rest. */
+function isServerEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || "type" in value) return false;
+  if (JSON.stringify(value).length > MAX_SERVER_EDIT) return false;
+  if (typeof value.action === "string")
+    return SERVER_ACTIONS.includes(value.action) && !("path" in value);
+  return typeof value.path === "string" && value.path !== "" && "value" in value &&
+    Object.keys(value).length === 2;
 }
 
 export function isGameSnapshot(value) {
@@ -42,6 +61,8 @@ export function isGameSnapshot(value) {
     !!persist &&
     revisionOf(persist.revision) &&
     revisionOf(persist.acked) &&
+    // null until the server model is installed.
+    (value.server?.revision === null || revisionOf(value.server?.revision)) &&
     // null: the engine has not measured its memory (yet).
     (value.memory?.wasmBytes === null || Number.isSafeInteger(value.memory?.wasmBytes)) &&
     Array.isArray(value.errors) &&
@@ -61,10 +82,15 @@ export function parsePersist(text, after) {
     value.revision <= after ||
     !value.documents ||
     typeof value.documents !== "object" ||
-    typeof value.documents.settings !== "string"
+    Object.keys(value.documents).length !== GAME_DOCUMENTS.length ||
+    GAME_DOCUMENTS.some(
+      (name) => value.documents[name] !== null && typeof value.documents[name] !== "string",
+    )
   )
     throw new Error("Invalid persisted documents");
-  return { revision: value.revision, documents: { settings: value.documents.settings } };
+  const documents = {};
+  for (const name of GAME_DOCUMENTS) documents[name] = value.documents[name];
+  return { revision: value.revision, documents };
 }
 
 /**
@@ -136,6 +162,30 @@ export function createGameController({ wasm, post = () => {}, writable }) {
     },
     ack(revision) {
       return controller.command("persist.ack", revision);
+    },
+    /** The server panel's field description, parsed. */
+    serverSchema() {
+      if (closed || !verified) return null;
+      return JSON.parse(wasm.game_server_schema());
+    },
+    /** The server document with its clock, client copies and refusals. */
+    serverDocument() {
+      if (closed || !verified) return null;
+      return JSON.parse(wasm.game_server_document());
+    },
+    /**
+     * One `server.edit`, applied synchronously. Resolves to `{ ok: true }` or
+     * `{ ok: false, reason }` with the engine's named refusal.
+     */
+    serverEdit(edit) {
+      if (closed || !verified) return { ok: false, reason: "The game is not running" };
+      const item = gameCommand("server.edit", edit);
+      try {
+        wasm.game_command(JSON.stringify(item));
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: String(error) };
+      }
     },
     /** Frames the engine has measured, or null when it publishes no counter. */
     presentedFrames() {
