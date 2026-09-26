@@ -423,8 +423,16 @@ fn step(
             item.file
         );
     }
+    for reason in &request.bindings.refused_signals {
+        warn!(
+            "[step-item] {}: Signal reaction {reason}; it sends nothing",
+            item.file
+        );
+    }
     let duration = request.definition.duration;
     let bound = request.bindings.animations.len();
+    let controls = request.bindings.controls.len();
+    let signals: usize = request.bindings.signals.values().map(Vec::len).sum();
     let token = world
         .resource_mut::<FixtureActivityTimelines>()
         .request_start(request);
@@ -437,7 +445,7 @@ fn step(
         duration,
     });
     info!(
-        "[step-item] {} Play: director {token:?} started (duration {duration:.4} s, {bound} animation clips bound, {} Control clips refused)",
+        "[step-item] {} Play: director {token:?} started (duration {duration:.4} s, {bound} animation clips bound, {controls} Control clips driven, {} Control clips refused, {signals} Signal reactions)",
         item.file,
         refused.len()
     );
@@ -695,9 +703,13 @@ fn prepare(
     };
     // An SE found silent stays silent; the last attempt's SE handles come
     // along, so a load that has failed since is seen as failed.
+    let first_attempt = item.draft.is_none();
     if let Some(previous) = item.draft.take() {
         request.bindings.silent_sounds = previous.silent_sounds;
         request.bindings.sounds = previous.sounds;
+        // The Control clips an earlier attempt prepared stay prepared: a
+        // dropped binding releases its systems.
+        request.bindings.controls = previous.controls;
     }
     if let Some(receiver) = item.signal_receiver.as_ref() {
         let outputs: Vec<_> = request
@@ -707,20 +719,23 @@ fn prepare(
             .filter(|track| track.name == SIGNAL_TRACK_OUTPUT)
             .collect();
         match outputs.first() {
-            None => info!(
+            None if first_attempt => info!(
                 "[step-item] {}: BindSignalReceiver: no output named {SIGNAL_TRACK_OUTPUT:?}; nothing is bound",
                 item.file
             ),
+            None => {}
             Some(track) => {
-                info!(
-                    "[step-item] {}: BindSignalReceiver: {} bound to track {} ({}/{}, the first of {} outputs of that name)",
-                    item.file,
-                    receiver.receiver,
-                    track.name,
-                    track.identity.file,
-                    track.identity.path_id,
-                    outputs.len()
-                );
+                if first_attempt {
+                    info!(
+                        "[step-item] {}: BindSignalReceiver: {} bound to track {} ({}/{}, the first of {} outputs of that name)",
+                        item.file,
+                        receiver.receiver,
+                        track.name,
+                        track.identity.file,
+                        track.identity.path_id,
+                        outputs.len()
+                    );
+                }
                 request
                     .bindings
                     .signal_receivers
@@ -765,6 +780,7 @@ fn bind(
     prepare_prop_bindings(world, request, entry, gltf)?;
     timeline::prepare_source_sounds(world, request)?;
     timeline::prepare_source_effects(world, request)?;
+    timeline::prepare_source_signals(world, request)?;
     Ok(with_events)
 }
 
