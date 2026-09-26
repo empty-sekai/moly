@@ -1919,7 +1919,11 @@ pub(crate) fn decide(
                 }
                 // CanRunningAI after the Yield (see `npc::gate_entries`): a
                 // hidden model yields again.
-                if !crate::npc::gate_entries::can_running_ai(hidden.contains(entity), &actions, &mind) {
+                if !crate::npc::gate_entries::can_running_ai(
+                    hidden.contains(entity),
+                    &actions,
+                    &mind,
+                ) {
                     continue;
                 }
                 mind.yield_since = None;
