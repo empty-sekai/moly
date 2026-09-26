@@ -106,6 +106,10 @@ struct Collider {
     kind: String,
     enabled: Option<bool>,
     is_trigger: Option<bool>,
+    #[serde(default)]
+    convex: Option<bool>,
+    #[serde(default)]
+    cooking_options: Option<u32>,
     geometry_id: Option<String>,
     gap: Option<String>,
     center: Option<[f32; 3]>,
@@ -137,7 +141,9 @@ struct NavObstacle {
 }
 
 impl CollisionInputs<'_, '_> {
-    pub(crate) fn collect(&self, expected: usize) -> Result<Collected, String> {
+    /// The placed fixtures' collision documents and node records, with the
+    /// hierarchy both readers walk.
+    fn gather(&self, expected: usize) -> Result<Gathered, String> {
         if self.ready.is_none() {
             return Err("fixture collision scenes loading".into());
         }
@@ -228,69 +234,25 @@ impl CollisionInputs<'_, '_> {
         if documents.len() != roots.len() {
             return Err("fixture collision contract missing; re-export snapshot".into());
         }
+        Ok(Gathered { roots, owner, parents, locals, source, activities, documents })
+    }
+
+    pub(crate) fn collect(&self, expected: usize) -> Result<Collected, String> {
+        let gathered = self.gather(expected)?;
+        let Gathered { roots, owner, parents, source, documents, .. } = &gathered;
         let mut result = Collected {
             polygons: Vec::new(),
             colliders: 0,
         };
-        for (entity, (node, inactive)) in &source {
-            if *inactive {
-                continue;
-            }
-            if node.active_self.is_none() || node.active_in_hierarchy.is_none() {
-                return Err("fixture collider active state missing".into());
-            }
-            let mut current = *entity;
-            let mut active = true;
-            loop {
-                let state = activities
-                    .get(&current)
-                    .copied()
-                    .or_else(|| source.get(&current).and_then(|(node, _)| node.active_self));
-                if state == Some(false) {
-                    active = false;
-                    break;
-                }
-                let Some(parent) = parents.get(&current) else {
-                    break;
-                };
-                current = *parent;
-            }
-            if !active {
+        for (entity, (node, _)) in source {
+            if !gathered.active(*entity, node)? {
                 continue;
             }
             if !(node.fixture_nav_layer || node.authored_layer == Some(9)) {
                 continue;
             }
-            // SceneReady is raised before transform propagation. Compose the
-            // current local chain to avoid freezing the first bake at stale
-            // identity GlobalTransforms or one-frame-old editor positions.
-            let mut chain = Vec::new();
-            let mut current = *entity;
-            let mut seen = HashSet::new();
-            loop {
-                if !seen.insert(current) {
-                    return Err("fixture transform cycle".into());
-                }
-                chain.push(
-                    *locals
-                        .get(&current)
-                        .ok_or("fixture collider local transform missing")?,
-                );
-                let Some(parent) = parents.get(&current) else {
-                    break;
-                };
-                current = *parent;
-            }
-            let mut composed = GlobalTransform::IDENTITY;
-            let mut world_rotation = Quat::IDENTITY;
-            for local in chain.into_iter().rev() {
-                world_rotation *= local.rotation;
-                composed = composed.mul_transform(local);
-            }
+            let (composed, world_rotation) = gathered.world(*entity)?;
             let transform = &composed;
-            if !transform.to_matrix().is_finite() {
-                return Err("fixture collider world transform nonfinite".into());
-            }
             let mut current = *entity;
             let mut ignored = false;
             loop {
@@ -369,6 +331,147 @@ impl CollisionInputs<'_, '_> {
             }
         }
         Ok(result)
+    }
+
+    /// The placed fixtures' colliders as the physics scene holds them: every
+    /// enabled, non-trigger collider on an active node, in the canonical
+    /// frame, on the layer the fixture view leaves it on (it moves every node
+    /// of a fixture to the navigation build layer when it attaches its
+    /// components; a node outside that recursion keeps its authored layer).
+    /// A trigger is left out: the particle collision module drops a
+    /// trigger's hits and a touching trigger does not end a lane.
+    pub(crate) fn physics_colliders(&self, expected: usize) -> Result<Vec<PhysicsCollider>, String> {
+        let gathered = self.gather(expected)?;
+        let mut out = Vec::new();
+        for (entity, (node, _)) in &gathered.source {
+            if !gathered.active(*entity, node)? {
+                continue;
+            }
+            let layer = if node.fixture_nav_layer { 9 } else {
+                node.authored_layer.ok_or("fixture collider layer missing")?
+            };
+            let (world, _) = gathered.world(*entity)?;
+            let document = &gathered.documents[&gathered.owner[entity]];
+            for collider in &node.colliders {
+                if collider.enabled == Some(false) || collider.is_trigger == Some(true) {
+                    continue;
+                }
+                if collider.enabled != Some(true) || collider.is_trigger != Some(false) {
+                    return Err("collider enabled/trigger state missing".into());
+                }
+                if let Some(gap) = &collider.gap {
+                    return Err(gap.clone());
+                }
+                let shape = match collider.kind.as_str() {
+                    "MeshCollider" => {
+                        let id = collider.geometry_id.as_ref().ok_or("MeshCollider geometry missing")?;
+                        let mesh = document.geometry.iter().find(|mesh| &mesh.geometry_id == id)
+                            .ok_or("collider geometry reference unresolved")?;
+                        PhysicsShape::Mesh {
+                            convex: collider.convex.ok_or("MeshCollider convex flag missing")?,
+                            cooking: collider.cooking_options,
+                            positions: mesh.positions.clone(),
+                            triangles: mesh.triangles.clone(),
+                        }
+                    }
+                    "BoxCollider" => PhysicsShape::Box {
+                        center: collider.center.ok_or("box center missing")?,
+                        size: collider.size.ok_or("box size missing")?,
+                    },
+                    other => PhysicsShape::Other(other.to_owned()),
+                };
+                out.push(PhysicsCollider { shape, layer, world });
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// One placed fixture collider for the physics scene.
+pub(crate) struct PhysicsCollider {
+    pub(crate) shape: PhysicsShape,
+    pub(crate) layer: u32,
+    /// The node's world transform in the canonical frame.
+    pub(crate) world: GlobalTransform,
+}
+
+pub(crate) enum PhysicsShape {
+    /// The shared mesh in the canonical frame (source X reflected, winding
+    /// reversed), with the convex flag and the cooking options when known.
+    Mesh { convex: bool, cooking: Option<u32>, positions: Vec<[f32; 3]>, triangles: Vec<[usize; 3]> },
+    /// Centre and size in the node's frame (positive source magnitudes; the
+    /// centre's X reflected).
+    Box { center: [f32; 3], size: [f32; 3] },
+    Other(String),
+}
+
+/// What both readers walk: the fixture roots, each node's root, parent and
+/// local transform, the node records and activity, and each root's document.
+struct Gathered {
+    roots: HashSet<Entity>,
+    owner: HashMap<Entity, Entity>,
+    parents: HashMap<Entity, Entity>,
+    locals: HashMap<Entity, Transform>,
+    source: HashMap<Entity, (Node, bool)>,
+    activities: HashMap<Entity, bool>,
+    documents: HashMap<Entity, Arc<Document>>,
+}
+
+impl Gathered {
+    /// Whether the node is in the scene: not source-inactive, and no node up
+    /// its chain inactive.
+    fn active(&self, entity: Entity, node: &Node) -> Result<bool, String> {
+        if self.source.get(&entity).is_some_and(|(_, inactive)| *inactive) {
+            return Ok(false);
+        }
+        if node.active_self.is_none() || node.active_in_hierarchy.is_none() {
+            return Err("fixture collider active state missing".into());
+        }
+        let mut current = entity;
+        loop {
+            let state = self
+                .activities
+                .get(&current)
+                .copied()
+                .or_else(|| self.source.get(&current).and_then(|(node, _)| node.active_self));
+            if state == Some(false) {
+                return Ok(false);
+            }
+            let Some(parent) = self.parents.get(&current) else {
+                return Ok(true);
+            };
+            current = *parent;
+        }
+    }
+
+    /// The node's world transform and rotation. SceneReady is raised before
+    /// transform propagation: compose the current local chain to avoid
+    /// freezing the first bake at stale identity GlobalTransforms or
+    /// one-frame-old editor positions.
+    fn world(&self, entity: Entity) -> Result<(GlobalTransform, Quat), String> {
+        let mut chain = Vec::new();
+        let mut current = entity;
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return Err("fixture transform cycle".into());
+            }
+            chain.push(*self.locals.get(&current).ok_or("fixture collider local transform missing")?);
+            let Some(parent) = self.parents.get(&current) else {
+                break;
+            };
+            current = *parent;
+        }
+        let mut composed = GlobalTransform::IDENTITY;
+        let mut world_rotation = Quat::IDENTITY;
+        for local in chain.into_iter().rev() {
+            world_rotation *= local.rotation;
+            composed = composed.mul_transform(local);
+        }
+        if !composed.to_matrix().is_finite() {
+            return Err("fixture collider world transform nonfinite".into());
+        }
+        Ok((composed, world_rotation))
     }
 }
 

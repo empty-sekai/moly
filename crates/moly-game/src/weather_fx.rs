@@ -487,8 +487,9 @@ pub(crate) struct WeatherFxRetirements {
     retiring_colliders: Vec<(u64, f64)>,
     /// The installed site's collider entry, by site.
     site_colliders: Option<(String, u64)>,
-    /// The placed fixtures' collider entry while the active site has any.
-    fixture_colliders: Option<u64>,
+    /// The placed fixtures' collider entry while the active site has any, and
+    /// the layout revision it was built for (none: the placeholder).
+    fixture_colliders: Option<(u64, Option<u64>)>,
 }
 
 impl WeatherFxRetirements {
@@ -580,19 +581,36 @@ impl WeatherFxRetirements {
             "[weather-fx] site colliders installed in the physics scene");
     }
     /// Keeps the placed fixtures' colliders in the physics scene exactly
-    /// while the active site has placed fixtures.
-    fn sync_fixtures(&mut self, present: bool) {
-        match (present, self.fixture_colliders) {
-            (true, None) => {
-                self.fixture_colliders = Some(self.physics.install(crate::particle_runtime::collision_scene::fixture_colliders()));
-                info!("[weather-fx] placed fixtures' colliders in the physics scene: {}",
-                    crate::particle_runtime::collision_scene::FIXTURE_REFUSAL);
-            }
-            (false, Some(entry)) => {
+    /// while the active site has placed fixtures: the placeholder until their
+    /// collision scenes are loaded, then their own colliders, rebuilt when the
+    /// layout revision changes.
+    fn sync_fixtures(&mut self, present: bool, revision: u64,
+        build: impl FnOnce() -> Result<Arc<crate::particle_runtime::collision_scene::GroundScene>, String>) {
+        use crate::particle_runtime::collision_scene as scene;
+        if !present {
+            if let Some((entry, _)) = self.fixture_colliders.take() {
                 self.physics.remove(entry);
-                self.fixture_colliders = None;
             }
-            _ => {}
+            return;
+        }
+        if matches!(self.fixture_colliders, Some((_, Some(built))) if built == revision) {
+            return;
+        }
+        match build() {
+            Ok(built) => {
+                if let Some((entry, _)) = self.fixture_colliders.take() {
+                    self.physics.remove(entry);
+                }
+                info!("[weather-fx] placed fixtures' colliders in the physics scene: revision {revision}, {} answered \
+                    against, {} bounded and refused in; {}", built.collider_count(), built.bounded_count(), built.describe());
+                self.fixture_colliders = Some((self.physics.install(built), Some(revision)));
+            }
+            Err(reason) => {
+                if self.fixture_colliders.is_none() {
+                    info!("[weather-fx] placed fixtures' colliders in the physics scene: {} ({reason})", scene::FIXTURE_PENDING);
+                    self.fixture_colliders = Some((self.physics.install(scene::fixture_pending()), None));
+                }
+            }
         }
     }
     fn clear_colliders(&mut self) {
@@ -617,9 +635,58 @@ fn fixtures_placed(placements: Option<&crate::fixture::FixturePlacements>, site:
 pub(crate) fn sync_fixture_colliders(
     placements: Option<Res<crate::fixture::FixturePlacements>>,
     site: Option<Res<SiteActive>>,
+    revision: Option<Res<crate::fixture::FixtureLayoutRevision>>,
+    collision: crate::fixture_collision::CollisionInputs,
     mut retiring: ResMut<WeatherFxRetirements>,
 ) {
-    retiring.sync_fixtures(fixtures_placed(placements.as_deref(), site.as_deref()));
+    let present = fixtures_placed(placements.as_deref(), site.as_deref());
+    let revision = revision.map_or(0, |revision| revision.0);
+    retiring.sync_fixtures(present, revision, || {
+        let placements = placements.as_deref().ok_or_else(|| "no placements".to_owned())?;
+        fixture_parts(&collision, placements).map(crate::particle_runtime::collision_scene::fixture_scene)
+    });
+}
+
+/// A canonical-frame matrix (source X reflected) in source axes.
+fn source_matrix(world: &GlobalTransform) -> [f32; 16] {
+    let m = world.to_matrix().to_cols_array();
+    let sign = |i: usize| if i == 0 { -1.0 } else { 1.0 };
+    std::array::from_fn(|n| sign(n % 4) * sign(n / 4) * m[n])
+}
+
+/// The placed fixtures' colliders in source axes: the colliders of their
+/// collision scenes, and each placed view's touch box at the placement's pose.
+fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placements: &crate::fixture::FixturePlacements)
+    -> Result<Vec<crate::particle_runtime::collision_scene::FixturePart>, String> {
+    use crate::fixture_collision::PhysicsShape;
+    use crate::particle_runtime::collision_scene::{touch_box, FixturePart, FixtureShape, TOUCH_BOX_LAYERS};
+    let reflect = |p: [f32; 3]| [-p[0], p[1], p[2]];
+    let mut parts = Vec::new();
+    for (i, collider) in collision.physics_colliders(placements.total())?.into_iter().enumerate() {
+        let shape = match collider.shape {
+            PhysicsShape::Mesh { convex, cooking, positions, triangles } => FixtureShape::Mesh {
+                convex, cooking,
+                positions: positions.into_iter().map(reflect).collect(),
+                // The canonical frame reverses the winding.
+                triangles: triangles.into_iter().map(|t| [t[0], t[2], t[1]].map(|v| v as u32)).collect(),
+            },
+            PhysicsShape::Box { center, size } => FixtureShape::Box { center: reflect(center), half: size.map(|v| v * 0.5) },
+            PhysicsShape::Other(kind) => FixtureShape::Unknown(kind),
+        };
+        parts.push(FixturePart { what: format!("collider {i}"), layers: 1 << collider.layer,
+            world: source_matrix(&collider.world), shape });
+    }
+    for row in placements.editor_rows() {
+        let world = source_matrix(&GlobalTransform::from(row.pose()?));
+        let shape = if row.direction == moly_law::fixture::Direction::Front {
+            let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
+            FixtureShape::Box { center, half }
+        } else {
+            FixtureShape::Unknown("touch box of a turned fixture (which grid size the view receives is not read)".into())
+        };
+        parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, shape });
+    }
+    Ok(parts)
 }
 
 /// `IsActiveParticle`: whether any child of the instance is playing.
