@@ -122,12 +122,14 @@
 //!   world point; the scene composes that point its own way, which stands in
 //!   for the transform's arithmetic (not read).
 //!
-//! The engine's pool also holds the player avatar's box: the avatar's only
-//! collider, a BoxCollider with no body, so a static shape that moves with
-//! the avatar, and every move is a bounds update that forces a rebuild. The
-//! pruner holds neither, so its order is claimed only while the pool with
-//! that box fits one leaf (the visits then keep the pool order); the scene
-//! still feeds and queries the pruners and counts the queries they agree on.
+//! The engine's pool also holds, for a while, the local player's avatar box:
+//! the avatar's only collider, a BoxCollider with no body, which enters when
+//! the avatar is cloned, is posed once (a bounds update) and leaves when the
+//! game disables it once the avatar model has loaded, at points of the site
+//! sequence not read. The pruner does not hold it, so its order is claimed
+//! only while the pool with that box fits one leaf, on the assumption (not
+//! read) that the box left before the site was shown; the scene still feeds
+//! and queries the pruners and logs how many queries they agree on.
 //!
 //! Where the pruner cannot give the order, the query falls back to the add
 //! order: while the scene holds at most four static shapes and no shape has
@@ -1178,19 +1180,29 @@ const MAX_FIXED_STEPS: u32 = 16;
 /// pruners must have settled.
 const BOUNDARY_STEPS: usize = 64;
 
-/// The static shapes the engine's pool holds beside the ones the scene
-/// feeds: the player avatar's box. The avatar prefab's only collider is a
-/// BoxCollider on its avatar root with no body anywhere on the avatar (and
-/// the game adds none at run time), so it is a static shape that moves with
-/// the avatar; each move is a bounds update, which marks its tree node for
-/// refit and forces a rebuild. The pruner has no bounds update and does not
-/// hold that box, so its order stands only while one leaf holds the whole
-/// pool, where the visits keep the pool order whatever the box does.
-const UNFED_MOVING_SHAPES: usize = 1;
+/// The static shapes the engine's pool holds for a while beside the ones
+/// the scene feeds: the local player's avatar box. The avatar prefab's only
+/// collider is a BoxCollider on its avatar root with no body anywhere on the
+/// avatar (and the game adds none at run time), so a static shape; it enters
+/// the pool when the avatar is cloned, moves once when the clone is posed (a
+/// bounds update, which forces a rebuild), and leaves when the game disables
+/// it for the local player once the avatar model has loaded. Where those
+/// three fall in the site sequence is not read, and the pruner does not hold
+/// the box. Its add and removal restart the rebuild, and a removal while
+/// shapes added after it are in the pool moves the pool's last shape into
+/// its slot. While one leaf holds the whole pool and the box has left before
+/// the site is shown, the visits keep the fed pool order; the scene claims
+/// the order only there, and that the box has left before the showing is an
+/// assumption (not read).
+const UNFED_TRANSIENT_SHAPES: usize = 1;
 
 /// Why the pruner's order is not claimed while the pool is more than a leaf.
-const MOVING_SHAPE: &str = "the player avatar's box, a static shape that moves with the avatar, is in the engine's \
-    pool beside more than a leaf of other shapes, and the pruner holds neither that box nor its bounds updates";
+const TRANSIENT_SHAPE: &str = "the local player's avatar box enters and leaves the engine's pool at points of the \
+    site sequence not read, beside more than a leaf of other shapes, and the pruner does not hold it";
+
+/// The assumption the order stands on where it is claimed.
+const TRANSIENT_ASSUMED: &str = "orders claimed on the assumption (not read) that the local player's avatar box \
+    left the pool before the site was shown";
 
 /// The engine's static pruner for the scene's static shapes, fed the
 /// engine's add and remove sequence for the site and the placed fixtures
@@ -1487,14 +1499,14 @@ impl PrunerScene {
         }
         self.queries += 1;
         self.agreed += u64::from(!split);
-        let moving = self.variants[0].pool_order().len() + UNFED_MOVING_SHAPES > LEAF_SHAPES;
+        let beside = self.variants[0].pool_order().len() + UNFED_TRANSIENT_SHAPES > LEAF_SHAPES;
         if self.queries.is_power_of_two() {
-            let line = format!("{} queries; the pruners agree on {}{}", self.queries, self.agreed,
-                if moving { format!("; no order claimed: {MOVING_SHAPE}") } else { String::new() });
+            let line = format!("{} queries; the pruners agree on {}; {}", self.queries, self.agreed,
+                if beside { format!("no order claimed: {TRANSIENT_SHAPE}") } else { TRANSIENT_ASSUMED.to_owned() });
             self.report(line);
         }
-        if moving {
-            return Err(MOVING_SHAPE.to_owned());
+        if beside {
+            return Err(TRANSIENT_SHAPE.to_owned());
         }
         if split {
             let why = format!("the pruners of the unread step counts disagree on this query ({})",
