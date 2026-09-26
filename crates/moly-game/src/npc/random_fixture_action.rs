@@ -47,10 +47,10 @@
 //! then `ForceUpdateReadTalkFixtureTalk` resets the AI model and builds the
 //! data (see `npc_talk_lottery::force_update_read_talk_fixture_talk`; the
 //! tweet id is the pre-action's tweet), the next rest is skipped and the
-//! talk interrupt (4) raised; `TrySetTalkDataSubCharacter` hands a data of
-//! two or more characters to the others (objective 8); then every member is
-//! placed within 0.25 of its locate row's StartLoc. Its next decision re-runs
-//! the talk objective on that data.
+//! talk interrupt (4) raised; `TrySetTalkDataSubCharacter` does nothing for
+//! a data of one character; then the member is placed within 0.25 of its
+//! locate row's StartLoc. Its next decision re-runs the talk objective on
+//! that data.
 //!
 //! Not ported (named):
 //! - the talk's some-character branch (a some-character row names the talk
@@ -344,7 +344,13 @@ fn read_talk_unported(world: &mut World, unit: u32, talk: i32) -> Option<String>
     let (factory, extras) = params.get_mut(world);
     let tables = factory.tables()?;
     let master = tables.talk_master(talk)?;
-    if let Some(Ok(rows)) = extras.as_deref().map(|extras| &extras.some_character_talks) {
+    // Which data builder runs is the some-character table's to say.
+    let rows = match extras.as_deref().map(|extras| &extras.some_character_talks) {
+        Some(Ok(rows)) => rows,
+        Some(Err(reason)) => return Some(format!("host gap: {reason}")),
+        None => return Some("host gap: the some-character talk table is not loaded".into()),
+    };
+    {
         if let Some(row) = crate::npc_talk_lottery::read_talk_some_character_row(rows, talk, unit) {
             return Some(format!(
                 "not ported: some-character row {} names talk {talk} with main unit {unit} (CreateSomeCharacterFixtureTimelineAITalkData)",
