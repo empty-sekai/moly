@@ -3808,7 +3808,7 @@ impl CascadeScene<'_, '_> {
         let outcome = match result {
             Err(npc_talk_lottery::Halt::Gap(reason)) => {
                 record.set("host_gap", reason.as_str());
-                Ok(())
+                Ok(false)
             }
             Err(npc_talk_lottery::Halt::Fault(reason)) => {
                 record.set("reason", reason.as_str());
@@ -3822,7 +3822,7 @@ impl CascadeScene<'_, '_> {
                     "host_gap",
                     format!("general talk {talk_id} is not in the loaded talk scripts"),
                 );
-                Ok(())
+                Ok(false)
             }
             Ok(npc_talk_lottery::TalkPlan::General { talk_id, .. }) => {
                 record.set("talk_id", talk_id);
@@ -3841,34 +3841,64 @@ impl CascadeScene<'_, '_> {
                     &mut record,
                 );
                 record.set("talk_target", serde_json::json!(target));
-                Ok(())
+                Ok(true)
             }
             Ok(npc_talk_lottery::TalkPlan::Null { reason, .. }) => {
                 record.set("null_reason", reason.as_str());
-                Ok(())
+                Ok(false)
             }
             Ok(npc_talk_lottery::TalkPlan::Fixture(data)) => {
+                // The decision pass's fields for fixture talk data.
                 record.set("talk_id", data.talk_id);
-                Ok(())
+                record.set(
+                    "fixture_talk",
+                    serde_json::json!({
+                        "kind": data.kind as u8,
+                        "fixture": data.fixture,
+                        "timeline": data.timeline,
+                        "target": data.target_position,
+                        "target_found": data.target_found,
+                        "rotation": data.rotation,
+                        "members": data.members,
+                    }),
+                );
+                Ok(true)
             }
-            Ok(npc_talk_lottery::TalkPlan::CommonFixture { talk_id, .. }) => {
+            Ok(npc_talk_lottery::TalkPlan::CommonFixture {
+                talk_id,
+                fixture,
+                target_position,
+                target_found,
+                common_id,
+            }) => {
                 record.set("talk_id", talk_id);
-                Ok(())
+                record.set(
+                    "fixture_common_talk",
+                    serde_json::json!({
+                        "fixture": fixture,
+                        "target": target_position,
+                        "target_found": target_found,
+                        "common_id": common_id,
+                    }),
+                );
+                Ok(true)
             }
         };
         let calls = trial.calls() - calls_before;
         *rng = trial;
         *self.seeder.seeder() = trial_seeder;
+        // Outcome words: "discarded" for built data the caller's reset
+        // drops, "discarded_empty" for null data (a host gap included).
         record.emit_as(
             "npc-cascade",
-            if outcome.is_ok() {
-                "discarded"
-            } else {
-                "source_exception"
+            match outcome {
+                Ok(true) => "discarded",
+                Ok(false) => "discarded_empty",
+                Err(_) => "source_exception",
             },
             calls,
         );
-        Ok(outcome)
+        Ok(outcome.map(|_| ()))
     }
 }
 
