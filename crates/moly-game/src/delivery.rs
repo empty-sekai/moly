@@ -9,9 +9,10 @@
 //!   enter / exit message, the start / end requests the delivery screen
 //!   sends, the named keyboard stand-in and the `MOLY_DELIVERY_AUTOPLAY`
 //!   instrument.
-//! - `server_mock`: `DeliveryServerMock`, the one panel for what the server
-//!   decides (user rows, the two master configs not on disk, the API
-//!   replies).
+//! - The server's side is the server model's delivery section
+//!   (`crate::server::delivery`): the user rows and the two master configs
+//!   the client reads as its copies (`ClientBirthdayPartyData`), the two API
+//!   replies, and the delivery master tables (`DeliveryTables`).
 //! - `flow`: `OnStartDelivery` / `ExecuteDelivery`: the approach, the start
 //!   wait, the hold loop, the release window, the end action and the API.
 //! - `drops`: `OnDropItem`, the drop hop, auto-gather above the limit, the
@@ -36,7 +37,6 @@ pub(crate) mod bloom;
 pub(crate) mod drops;
 pub(crate) mod flow;
 pub(crate) mod honor;
-pub(crate) mod server_mock;
 pub(crate) mod site;
 
 use bevy::prelude::*;
@@ -200,6 +200,20 @@ impl PartySite {
     /// the delivery points come back from the user data, the unsynchronized
     /// cost and points clear; unsynchronized drops join the synchronized
     /// list; the auto-gather list clears and the range is the full circle.
+    /// The user rows `UpdateSynchronizedData` reads: the delivery item's
+    /// have-quantity and the party's `deliveryTotalPoint` (0 without a row).
+    pub(crate) fn user_rows(
+        &self,
+        client: &crate::server::delivery::ClientBirthdayPartyData,
+    ) -> (i32, i32) {
+        (
+            i32::try_from(self.item_material_id).map_or(0, |id| client.have_quantity(id)),
+            client
+                .user_birthday_party(self.id)
+                .map_or(0, |row| row.delivery_total_point),
+        )
+    }
+
     pub(crate) fn update_synchronized(&mut self, have_quantity: i32, delivery_total_point: i32) {
         self.tally.synchronized_cost_quantity = have_quantity;
         self.tally.unsynchronized_cost = 0;
@@ -288,10 +302,14 @@ impl DeliveryModel {
     }
 
     /// `DeliverySiteModel.UpdateSynchronizedData`: every party, from the
-    /// user rows the panel last replied.
-    pub(crate) fn update_synchronized(&mut self, mock: &server_mock::DeliveryServerMock) {
+    /// client's copies of the user data (`GetHaveQuantity` of the delivery
+    /// item, `GetUserBirthdayParty(id).deliveryTotalPoint`, 0 without a row).
+    pub(crate) fn update_synchronized(
+        &mut self,
+        client: &crate::server::delivery::ClientBirthdayPartyData,
+    ) {
         for party in &mut self.parties {
-            let (have, points) = mock.user_rows(party.id, party.item_material_id);
+            let (have, points) = party.user_rows(client);
             party.update_synchronized(have, points);
         }
     }
@@ -429,12 +447,9 @@ impl Plugin for DeliveryPlugin {
             .init_resource::<honor::DialogAwait>()
             .init_resource::<crate::delivery_camera::DeliveryHonorCamera>()
             .init_resource::<bloom::DeliveryBloom>()
-            .add_systems(Startup, server_mock::load)
             .add_systems(
                 Update,
                 (
-                    server_mock::parse,
-                    server_mock::open_panel,
                     site::resolve,
                     site::arrive,
                     site::scan,

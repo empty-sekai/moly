@@ -564,7 +564,9 @@ fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, S
 pub(crate) fn arrive(
     mut state: ResMut<DeliverySite>,
     mut model: ResMut<DeliveryModel>,
-    mock: Option<Res<super::server_mock::DeliveryServerMock>>,
+    client: Res<crate::server::delivery::ClientBirthdayPartyData>,
+    parties: Option<Res<crate::birthday::BirthdayParties>>,
+    tables: Option<Res<crate::server::delivery::DeliveryTables>>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     mut spawns: ResMut<super::drops::DeliveryDropSpawns>,
     mut gather_loop: ResMut<super::drops::DeliveryGatherLoop>,
@@ -580,12 +582,30 @@ pub(crate) fn arrive(
     let Some(objects) = state.objects.clone() else {
         return;
     };
-    let (Some(configs), Some(catalog)) = (configs, catalog) else {
+    let (Some(configs), Some(catalog), Some(parties)) = (configs, catalog, parties) else {
         return;
     };
+    // The login's user data: the join delivers the delivery sections.
+    if client.revision == 0 {
+        return;
+    }
     state.arrived = true;
-    let Some(mock) = mock else {
-        info!("[delivery] arrival on {}: no party in session (DeliveryServerMock off); RefreshBirthdayParty returns, no delivery", objects.scene);
+    // GetMasterBirthdayPartiesInSession.
+    let in_session = parties.in_session(crate::birthday::now_ms());
+    if in_session.is_empty() {
+        info!("[delivery] arrival on {}: no party in session; RefreshBirthdayParty returns, no delivery", objects.scene);
+        return;
+    }
+    let Some(tables) = tables else {
+        error!("[delivery] arrival on {}: the delivery tables (birthday-party-delivery.json) are absent (the server model names them among its missing masters); no delivery", objects.scene);
+        return;
+    };
+    use crate::server::delivery::{CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT};
+    let (Some(base_point), Some(drop_upper_limit)) = (
+        client.master_config_int(CONFIG_BASE_POINT),
+        client.master_config_int(CONFIG_DROP_UPPER_LIMIT),
+    ) else {
+        error!("[delivery] arrival on {}: the master configs {CONFIG_BASE_POINT} / {CONFIG_DROP_UPPER_LIMIT} were not delivered; no delivery", objects.scene);
         return;
     };
     let next_uid = model.next_uid;
@@ -595,23 +615,26 @@ pub(crate) fn arrive(
         ..DeliveryModel::default()
     };
     // SetupDeliveryData: the party rows, then the four server configs.
-    for party in &mock.parties {
-        let id = party.row.id as i32;
-        let (member_bonus, requirement) = mock.party_constants(id).expect("the panel's own party");
+    for party in &in_session {
+        let id = party.id as i32;
+        // BirthdayPartySiteData: the member bonus over the owned cards, the
+        // reward loop requirement of the last reward row.
+        let member_bonus = tables.member_bonus(party.id, client.cards());
+        let requirement = tables.reward_loop_requirement(party.id);
         model.parties.push(super::PartySite {
             id,
-            label: party.row.label.clone(),
-            item_material_id: party.row.delivery_item_material_id,
-            reward_material_id: party.row.delivery_reward_material_id,
+            label: party.label.clone(),
+            item_material_id: party.delivery_item_material_id,
+            reward_material_id: party.delivery_reward_material_id,
             tally: moly_law::delivery::PartyTally {
                 synchronized_cost_quantity: 0,
                 unsynchronized_cost: 0,
                 synchronized_points: 0,
                 unsynchronized_points: 0,
-                base_point: mock.base_point,
+                base_point,
                 member_bonus,
                 reward_loop_requirement: requirement,
-                max_drop_item_count: mock.drop_upper_limit,
+                max_drop_item_count: drop_upper_limit,
             },
             drops: Vec::new(),
             unsynced_drops: Vec::new(),
@@ -620,10 +643,7 @@ pub(crate) fn arrive(
         });
         // The reward drop's model is requested now (the source preloads the
         // site's bundles before the reveal).
-        if let Some(material) = catalog
-            .materials
-            .get(&party.row.delivery_reward_material_id)
-        {
+        if let Some(material) = catalog.materials.get(&party.delivery_reward_material_id) {
             super::drops::request(&server, &catalog, &material.package, &mut glbs, &mut docs);
         }
     }
@@ -634,7 +654,7 @@ pub(crate) fn arrive(
     );
     model.start_wait =
         moly_law::delivery::start_wait_time(configs.int(super::flow::KEY_START_WAIT_FRAME));
-    model.update_synchronized(&mock);
+    model.update_synchronized(&client);
     model.flowered = false;
     info!(
         "[delivery] DeliverySiteController.Initialize on {}: RefreshBirthdayParty {} parties {:?}; rate min {} max {} acceleration {}, start wait {} s; tallies {:?}; place view ResetView (not flowered)",
@@ -647,7 +667,7 @@ pub(crate) fn arrive(
         model.start_wait,
         model.parties.iter().map(|p| p.tally).collect::<Vec<_>>()
     );
-    super::drops::generate_unclaimed(&mut model, &mock, &mut spawns, &objects, "arrival");
+    super::drops::generate_unclaimed(&mut model, &client, &mut spawns, &objects, "arrival");
     gather_loop.start(
         frames.0 as u64,
         configs.float(super::drops::KEY_GATHER_API_INTERVAL),

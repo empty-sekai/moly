@@ -50,11 +50,11 @@
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 
-use super::server_mock::{Reward, HONOR};
 use super::{publish, DeliveryActionState, DeliveryHold, DeliveryModel, DeliveryProgress};
 use crate::player::PlayerControlled;
 use crate::player_avatar::item_timeline::PlayerStepItem;
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
+use crate::server::delivery::{Reward, HONOR};
 use crate::site_move::timeline::Delay;
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,

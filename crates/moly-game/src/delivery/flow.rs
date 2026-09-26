@@ -59,7 +59,8 @@
 //! Named stand-ins and gaps: the AutoMove state's run clip plays as
 //! the locomotion's dash gait (the harvest AutoMove's stand-in).
 //! `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog the root has
-//! no prefab for; the panel never replies refreshed.
+//! no prefab for; the server replies refreshed by its birthday plant
+//! refresh policy (`crate::server::delivery`).
 
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::SystemParam;
@@ -258,8 +259,7 @@ pub(crate) struct FlowWorld<'w, 's> {
     spawns: ResMut<'w, super::drops::DeliveryDropSpawns>,
     runs: ResMut<'w, RewardRuns>,
     face: ResMut<'w, DeliveryFace>,
-    mock: Option<ResMut<'w, super::server_mock::DeliveryServerMock>>,
-    tables: Option<Res<'w, super::server_mock::DeliveryTables>>,
+    client: ResMut<'w, crate::server::delivery::ClientBirthdayPartyData>,
     catalog: Option<Res<'w, crate::harvest::catalog::HarvestCatalog>>,
     navigation: Option<Res<'w, crate::player_fixture_action::PlayerFixtureNavigation>>,
     game_state: Option<Res<'w, DeliveryGameState>>,
@@ -922,52 +922,70 @@ fn delivery_api(
     );
     let mut rewards = Vec::new();
     let mut is_refreshed = false;
-    match (world.mock.as_deref_mut(), world.tables.as_deref(), party) {
-        (Some(mock), Some(tables), Some(party)) => {
-            let obtained_before = mock.obtained_count(party_id);
+    match party {
+        Some(party) => {
+            let obtained = |client: &crate::server::delivery::ClientBirthdayPartyData| {
+                client
+                    .user_birthday_party(party_id)
+                    .map_or(0, |row| row.obtained_mysekai_material_count)
+            };
+            let obtained_before = obtained(&world.client);
             let auto_count = party.auto_gathered.len() as i32;
             let unsynced = party.unsynced_drops.len() as i32;
             let cost = party.tally.unsynchronized_cost;
-            let reply = mock.deliver(party_id, cost, tables);
-            let mut regenerate = false;
-            if let Some(reply) = reply.as_ref() {
-                if reply.dropped_reward_count != unsynced {
-                    error!(
-                        "[delivery] the reply's dropped reward count {} is not the client's {unsynced} unsynchronized drops (party {party_id})",
-                        reply.dropped_reward_count
-                    );
-                    regenerate = true;
-                }
-            }
-            let (have, points) = mock.user_rows(party_id, party.item_material_id);
-            if let Some(site_party) = world.model.party_mut(party_id) {
-                site_party.update_synchronized(have, points);
-            }
-            let obtained_after = mock.obtained_count(party_id);
-            if auto_count != obtained_after - obtained_before {
-                error!(
-                    "[delivery] party {party_id}: {auto_count} drops flew to the player, the reply's obtained count moved {obtained_before} -> {obtained_after}"
-                );
-            }
-            match reply {
-                Some(reply) => {
+            // PutUserMysekaiBirthdayPartyDeliveryApi; its updatedResources are
+            // in the client's copies when it returns.
+            match crate::server::delivery::put_birthday_party_delivery(
+                &mut world.client,
+                party_id,
+                cost,
+            ) {
+                Ok(reply) => {
+                    let regenerate = reply.dropped_reward_count != unsynced;
+                    if regenerate {
+                        error!(
+                            "[delivery] the reply's dropped reward count {} is not the client's {unsynced} unsynchronized drops (party {party_id})",
+                            reply.dropped_reward_count
+                        );
+                    }
+                    let (have, points) = party.user_rows(&world.client);
+                    if let Some(site_party) = world.model.party_mut(party_id) {
+                        site_party.update_synchronized(have, points);
+                    }
+                    let obtained_after = obtained(&world.client);
+                    if auto_count != obtained_after - obtained_before {
+                        error!(
+                            "[delivery] party {party_id}: {auto_count} drops flew to the player, the reply's obtained count moved {obtained_before} -> {obtained_after}"
+                        );
+                    }
                     info!(
-                        "[delivery] DeliveryExecuteApiAsync party {party_id}: sent {cost}; dropped {} (client {unsynced}), auto-gathered {auto_count} (obtained {obtained_before} -> {obtained_after}); synchronized: have {have}, points {points}; {} total rewards",
+                        "[delivery] DeliveryExecuteApiAsync party {party_id}: sent {cost}; dropped {} (client {unsynced}), auto-gathered {auto_count} (obtained {obtained_before} -> {obtained_after}); synchronized: have {have}, points {points}; {} total rewards; isRefreshed {}",
                         reply.dropped_reward_count,
-                        reply.total_rewards.len()
+                        reply.obtained_delivery_total_rewards.len(),
+                        reply.is_refreshed
                     );
-                    rewards = reply.total_rewards;
+                    rewards = reply.obtained_delivery_total_rewards;
                     is_refreshed = reply.is_refreshed;
+                    if regenerate {
+                        if let Some(objects) = world.site.objects.clone() {
+                            super::drops::generate_unclaimed(
+                                &mut world.model,
+                                &world.client,
+                                &mut world.spawns,
+                                &objects,
+                                "reply mismatch",
+                            );
+                        }
+                    }
                 }
-                None => error!("[delivery] the delivery API replied nothing: the error dialog (UI lane)"),
-            }
-            if regenerate {
-                if let Some(objects) = world.site.objects.clone() {
-                    super::drops::generate_unclaimed(&mut world.model, mock, &mut world.spawns, &objects, "reply mismatch");
+                Err(reason) => {
+                    error!("[delivery] {reason}: the error dialog (UI lane)")
                 }
             }
         }
-        _ => error!("[delivery] DeliveryExecuteApiAsync without the panel or the tables: the error dialog (UI lane)"),
+        None => error!(
+            "[delivery] DeliveryExecuteApiAsync without the party's site data: the error dialog (UI lane)"
+        ),
     }
     world.states.can_intercept = true;
     world.states.change_status(PlayerActionState::Idle);

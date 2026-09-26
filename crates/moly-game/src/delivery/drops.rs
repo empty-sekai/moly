@@ -33,9 +33,11 @@
 //! The gather loop, from the arrival while the site is on: every
 //! `DeliveryGatherAPIInterval` (FloatConfigs 169), in state Gather with a
 //! non-empty stack: state InGathering (published), the gather API with a
-//! copy of the stack, those items leave the stack, every party synchronizes,
-//! the total reward animation of the reply, then state Gather while the
-//! stack still holds items, else Idle (published).
+//! copy of the stack (`contents`: per party of the stack, its gathered
+//! count; `crate::server::delivery::put_birthday_party_gather`), those items
+//! leave the stack, every party synchronizes, the total reward animation of
+//! the reply, then state Gather while the stack still holds items, else Idle
+//! (published).
 //!
 //! Named stand-ins and gaps: the landing height is the walk field's height,
 //! else the highest ground vertex within 2 m (the harvest drops' stand-in
@@ -52,12 +54,12 @@ use moly_law::action_button::inside_circle;
 use moly_law::delivery as law;
 
 use super::honor::{RewardOwner, RewardRuns};
-use super::server_mock::DeliveryServerMock;
 use super::site::{DeliveryObjects, DeliverySite};
 use super::{publish, DeliveryActionState, DeliveryModel, DeliveryProgress, DropModel};
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::harvest::{HarvestDocs, HarvestGltfs, Rng};
 use crate::player::PlayerControlled;
+use crate::server::delivery::{ClientBirthdayPartyData, GatherContent};
 use crate::site_move::timeline::{delay_seconds, Delay};
 
 /// `DeliveryGatherAPIInterval` (FloatConfigs 169).
@@ -224,7 +226,7 @@ pub(crate) fn on_drop_item(
 /// more removes the surplus synchronized drops.
 pub(crate) fn generate_unclaimed(
     model: &mut DeliveryModel,
-    mock: &DeliveryServerMock,
+    client: &ClientBirthdayPartyData,
     spawns: &mut DeliveryDropSpawns,
     objects: &DeliveryObjects,
     reason: &str,
@@ -235,7 +237,9 @@ pub(crate) fn generate_unclaimed(
         .map(|p| (p.id, p.reward_material_id))
         .collect();
     for (id, _) in ids {
-        let dropped = mock.dropped_count(id);
+        let dropped = client
+            .user_birthday_party(id)
+            .map_or(0, |row| row.dropped_mysekai_material_count);
         let Some(party) = model.party(id) else {
             continue;
         };
@@ -658,7 +662,7 @@ pub(crate) fn gather_loop(
     time: Res<Time>,
     mut gather: ResMut<DeliveryGatherLoop>,
     mut model: ResMut<DeliveryModel>,
-    mock: Option<ResMut<DeliveryServerMock>>,
+    mut client: ResMut<ClientBirthdayPartyData>,
     mut runs: ResMut<RewardRuns>,
     mut progress: MessageWriter<DeliveryProgress>,
 ) {
@@ -678,9 +682,6 @@ pub(crate) fn gather_loop(
     }
     let interval = gather.interval;
     gather.delay = Some(Delay::new(delay_seconds(interval as f64), frame));
-    let Some(mut mock) = mock else {
-        return;
-    };
     if model.state != DeliveryActionState::Gather || model.gather_stack.is_empty() {
         return;
     }
@@ -694,11 +695,32 @@ pub(crate) fn gather_loop(
         0.0,
         model.rate,
     );
-    let rewards = mock.gather(&items);
+    // UserBirthdayPartyGatherRequest.contents: per party of the stack, in
+    // stack order, its gathered count.
+    let mut contents: Vec<GatherContent> = Vec::new();
+    for item in &items {
+        match contents
+            .iter_mut()
+            .find(|content| content.birthday_party_id == item.party_id)
+        {
+            Some(content) => content.gathered_count += 1,
+            None => contents.push(GatherContent {
+                birthday_party_id: item.party_id,
+                gathered_count: 1,
+            }),
+        }
+    }
+    let rewards = match crate::server::delivery::put_birthday_party_gather(&mut client, &contents) {
+        Ok(reply) => reply.obtained_delivery_total_rewards,
+        Err(reason) => {
+            error!("[delivery-drop] {reason}: the error dialog (UI lane)");
+            Vec::new()
+        }
+    };
     for item in &items {
         model.gather_stack.retain(|d| d != item);
     }
-    model.update_synchronized(&mock);
+    model.update_synchronized(&client);
     if rewards.is_empty() {
         after_gather(&mut gather, &mut model, &mut progress, frame);
     } else {
