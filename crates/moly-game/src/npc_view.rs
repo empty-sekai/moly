@@ -7,9 +7,13 @@
 //!   of the last update, not the live transform.
 //! - Blink: [`moly_law::blink`]; the eye cells go through the view's eye
 //!   material (the pattern's open and close cells, read from the material's
-//!   current pattern at each write). The view's blink flag starts true and
-//!   only photo mode and a timeline's blink-state track write it; neither
-//!   runs in this host yet (named below).
+//!   current pattern at each write). The view's blink flag starts true;
+//!   `SetBlinkEnabled(bool)` only stores it. Its writers are a timeline's
+//!   blink-state mixer (every evaluated frame: whether a clip of the track
+//!   is active, see `fixture_activity_timeline`) and photo mode (not in
+//!   this host). A timeline's eye-preset mixer changes the view's pattern
+//!   (`ChangeEyePattern`: the eye table row by name, then its open cell),
+//!   which the next blink write reads.
 //! - Mouth: `UpdateMouth` starts a lip-sync cycle when none is playing. Its
 //!   inputs are the view's lip-sync flag (set by the talk engine and a
 //!   timeline's lip track), the attached voice's output analyzer level
@@ -17,12 +21,14 @@
 //!   lip pattern (open, middle, close cells). It is driven by the voice
 //!   meter in [`crate::voice_mouth`], which runs after the voice chain.
 //!
-//! Named gaps: a timeline's blink-state track (enable while one of its clips
-//! is active, disable otherwise, on every evaluated frame) and its eye-preset
-//! track (a pattern change) do not reach the view yet (the timeline side);
-//! until then a blink during a fixture timeline uses the view's own flag and
-//! the last pattern set outside the timeline. The draws are this host's
-//! presentation stream, not the engine's shared generator.
+//! Frame order: the presenter's update runs among the scripts' updates and
+//! a game-time director evaluates after them, so the blink reads the flag
+//! the director wrote on the previous frame, and an eye-preset clip's open
+//! cell replaces a closed cell the blink wrote earlier in the same frame.
+//! This host does not order the view update against the timeline's
+//! advance (named gap; the order is declared where the presenter's calls
+//! are scheduled). The draws are this host's presentation stream, not the
+//! engine's shared generator.
 
 use bevy::prelude::*;
 use moly_law::blink::{Blink, EyePattern, RangeDraw};
@@ -55,8 +61,7 @@ impl Default for NpcBlink {
 }
 
 impl NpcBlink {
-    /// `SetBlinkEnabled(bool)`.
-    #[allow(dead_code, reason = "photo mode and the timeline blink track call it")]
+    /// `SetBlinkEnabled(bool)`: stores the flag, nothing else.
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
