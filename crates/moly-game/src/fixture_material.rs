@@ -10,6 +10,17 @@
 //! 拒绝语义：族门（shader 名闭集 + 具名拒绝 URP/Lit）不过、必需浮点
 //! 缺失、(usage, blend) 二维选择越界或与混合模式矛盾、glb 材质没有
 //! 主贴图——都按材质名具名拒绝，该实体保留原材质，不用默认值近似。
+//! Exception for the main texture: when the source slot is empty (the
+//! extras carry no `_MainTex` key), the engine binds the shader's declared
+//! default, and a `white` default is bound as a 1x1 white image. A key with a
+//! null value is a texture bound in a dependency package that the extractor
+//! did not export; that stays a named refusal.
+//!
+//! JP 6.8.1 crystal variant (`_ENABLE_CRYSTAL_FIXTURE`, with the JP
+//! normal-map block): see `FIXTURE_CRYSTAL` / `FIXTURE_NORMAL_MAP` in the
+//! WGSL. Its second colour target (the colour-picker emission, the
+//! normal-driven emission and the centre damp) belongs to the emission pass
+//! and is not drawn there yet.
 //! 闭集内但非 Basic 的族（ShadowMesh / Road / Object 等）是本单范围外：
 //! 具名记数保留原材质，不是拒绝。两个例外，都按「源里像素贡献恒 0」
 //! 隐藏而不是保留原材质：
@@ -243,6 +254,44 @@ pub struct FixtureMaterial {
     /// 里的常数（见 [`FixtureMaterialKey::reflection`]）。
     pub reflection_power: f32,
     pub reflection_intensity: f32,
+    /// JP `_ENABLE_CRYSTAL_FIXTURE` variant (main pass only). Kept outside
+    /// [`FixtureMaterialKey`]: that key is shared with the emission pass.
+    pub crystal: Option<CrystalParams>,
+}
+
+/// The crystal variant's material values, read by the main pass only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrystalParams {
+    pub light_influence_scale: f32,
+    /// `_UseNormalDrivenEmission` (an int compared with 0.5 at run time).
+    pub use_normal_driven_emission: f32,
+    pub normal_dark_to_color: f32,
+    pub normal_bright_to_emission: f32,
+    /// `_UseBrightFresnelAdd` (an int compared with 0.5 at run time).
+    pub use_bright_fresnel_add: f32,
+    pub bright_fresnel_add_intensity: f32,
+    /// The normal-map block (`_UseNormalMap` > 0.5) with its texture.
+    pub normal_map: Option<NormalMap>,
+}
+
+/// `_NormalMap` and the block's four values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalMap {
+    pub texture: Handle<Image>,
+    pub bump_scale: f32,
+    pub exaggeration: f32,
+    /// `_UseNormalParallaxShift` (an int compared with 0.5 at run time).
+    pub use_parallax_shift: f32,
+    pub parallax_shift: f32,
+}
+
+/// Pipeline key of the main pass: the shared key plus the two crystal
+/// switches (compiled only into this pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FixturePipelineKey {
+    pub base: FixtureMaterialKey,
+    pub crystal: bool,
+    pub normal_map: bool,
 }
 
 impl FixtureMaterial {
@@ -251,7 +300,9 @@ impl FixtureMaterial {
     /// pass 的片元里读，可以扩。槽序与 WGSL 的 `FixtureShadingBranch`
     /// 是契约，两边同改。
     fn shading_branch_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(48);
+        let mut bytes = Vec::with_capacity(96);
+        let crystal = self.crystal.as_ref();
+        let normal_map = crystal.and_then(|crystal| crystal.normal_map.as_ref());
         for component in [
             self.fresnel_power,
             0.0,
@@ -265,16 +316,41 @@ impl FixtureMaterial {
             self.reflection_intensity,
             0.0,
             0.0,
+            // Crystal slots (read only by the crystal variant; zero otherwise).
+            crystal.map_or(0.0, |c| c.light_influence_scale),
+            crystal.map_or(0.0, |c| c.use_normal_driven_emission),
+            crystal.map_or(0.0, |c| c.normal_dark_to_color),
+            crystal.map_or(0.0, |c| c.normal_bright_to_emission),
+            crystal.map_or(0.0, |c| c.use_bright_fresnel_add),
+            crystal.map_or(0.0, |c| c.bright_fresnel_add_intensity),
+            0.0,
+            0.0,
+            normal_map.map_or(0.0, |n| n.bump_scale),
+            normal_map.map_or(0.0, |n| n.exaggeration),
+            normal_map.map_or(0.0, |n| n.use_parallax_shift),
+            normal_map.map_or(0.0, |n| n.parallax_shift),
         ] {
             bytes.extend_from_slice(&component.to_le_bytes());
         }
         bytes
     }
+
+    fn pipeline_key(&self) -> FixturePipelineKey {
+        FixturePipelineKey {
+            base: self.key,
+            crystal: self.crystal.is_some(),
+            normal_map: self.crystal.as_ref().is_some_and(|c| c.normal_map.is_some()),
+        }
+    }
 }
 
 impl AsBindGroup for FixtureMaterial {
-    type Data = FixtureMaterialKey;
-    type Param = (SRes<SiteEnvGpuBuffer>, SRes<RenderAssets<GpuImage>>);
+    type Data = FixturePipelineKey;
+    type Param = (
+        SRes<SiteEnvGpuBuffer>,
+        SRes<RenderAssets<GpuImage>>,
+        SRes<bevy::render::texture::FallbackImage>,
+    );
 
     fn label() -> &'static str {
         "fixture_material"
@@ -284,12 +360,21 @@ impl AsBindGroup for FixtureMaterial {
         &self,
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
-        (env_buffer, images): &mut SystemParamItem<'_, '_, Self::Param>,
+        (env_buffer, images, fallback): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
+        // The normal map is bound only for the normal-map variant; every
+        // other variant binds the engine fallback, which no compiled program
+        // reads (the layout is shared).
+        let normal = match self.crystal.as_ref().and_then(|c| c.normal_map.as_ref()) {
+            Some(normal_map) => images
+                .get(&normal_map.texture)
+                .ok_or(AsBindGroupError::RetryNextUpdate)?,
+            None => &fallback.d2,
+        };
         // 唯一的纹理槽永远有真实贴图——缺主贴图的材质在建计划时已拒，
         // 不需要 fallback 绑定。
         let bindings = BindingResources(vec![
@@ -308,12 +393,20 @@ impl AsBindGroup for FixtureMaterial {
             // binding 4：两条质感分支的参数（分支关着的变体不读它，照绑
             // ——布局是全变体共享的，多的绑定合法）。
             (4, OwnedBindingResource::Data(OwnedData(self.shading_branch_bytes()))),
+            (
+                5,
+                OwnedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    normal.texture_view.clone(),
+                ),
+            ),
+            (6, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, normal.sampler.clone())),
         ]);
         Ok(UnpreparedBindGroup { bindings })
     }
 
     fn bind_group_data(&self) -> Self::Data {
-        self.key
+        self.pipeline_key()
     }
 
     fn bind_group_layout_entries(
@@ -363,6 +456,8 @@ impl AsBindGroup for FixtureMaterial {
             texture(2),
             sampler(3),
             fragment_uniform(4),
+            texture(5),
+            sampler(6),
         ]
     }
 }
@@ -406,10 +501,12 @@ impl Material for FixtureMaterial {
         _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        let pipeline_key = key.bind_group_data;
+        let base = pipeline_key.base;
         let mut defs: Vec<&str> = Vec::new();
-        if key.bind_group_data.fence { defs.push("FIXTURE_FENCE"); }
-        crate::material_order::set_queue(descriptor, key.bind_group_data.render_queue);
-        if let Some(blended) = key.bind_group_data.rug {
+        if base.fence { defs.push("FIXTURE_FENCE"); }
+        crate::material_order::set_queue(descriptor, base.render_queue);
+        if let Some(blended) = base.rug {
             defs.push("FIXTURE_RUG");
             if let Some(depth) = descriptor.depth_stencil.as_mut() {
                 depth.depth_write_enabled = false;
@@ -420,27 +517,36 @@ impl Material for FixtureMaterial {
                 target.blend = blended.then_some(BlendState::ALPHA_BLENDING);
             }
         }
-        if key.bind_group_data.alpha_clip {
+        if base.alpha_clip {
             defs.push("FIXTURE_ALPHA_CLIP");
         }
-        if key.bind_group_data.dither {
+        if base.dither {
             defs.push("FIXTURE_DITHER");
         }
-        if key.bind_group_data.window_clip {
+        if base.window_clip {
             defs.push("FIXTURE_WINDOW_CLIP");
         }
-        if key.bind_group_data.fresnel {
+        if base.fresnel {
             defs.push("FIXTURE_MODULE_FRESNEL");
         }
-        if key.bind_group_data.reflection {
+        if base.reflection {
             defs.push("FIXTURE_MODULE_REFLECTION");
         }
         // 视线方向的顶点输出：两条质感分支读的是同一个输出，任一开着就
         // 要它。**从那两个键派生而不是另设一个开关**——漏推它时着色器会
         // 引用一个不存在的标识符，那是运行期才喊的一条管线错误，而
         // `cargo build` 一个 wgsl 字节都不校验。
-        if key.bind_group_data.fresnel || key.bind_group_data.reflection {
+        if base.fresnel || base.reflection {
             defs.push("FIXTURE_VIEW_DIR");
+        }
+        // The crystal variant is only resolved together with both texture
+        // branches (every crystal program in the source carries them), so it
+        // never needs FIXTURE_VIEW_DIR on its own.
+        if pipeline_key.crystal {
+            defs.push("FIXTURE_CRYSTAL");
+        }
+        if pipeline_key.normal_map {
+            defs.push("FIXTURE_NORMAL_MAP");
         }
         for def in defs {
             descriptor.vertex.shader_defs.push(def.into());
@@ -529,6 +635,30 @@ fn extras_valid_keywords(extras: &serde_json::Value) -> Option<&Vec<serde_json::
         .and_then(|value| value.as_array())
 }
 
+/// A material whose glb has no base colour texture: Ok when the source slot
+/// is empty and the shader declares the `white` default (Unity then binds its
+/// built-in white texture). The extractor writes a `textures` key with a null
+/// value for a texture bound in a dependency package it did not export, and
+/// no key for an empty slot; the defaults come from the shader's property
+/// declarations (`shaderTextureDefaults`).
+fn empty_main_tex_default(extras: &serde_json::Value) -> Result<(), String> {
+    let bound = extras
+        .get("textures")
+        .and_then(|textures| textures.as_object())
+        .is_some_and(|textures| textures.contains_key("_MainTex"));
+    if bound {
+        return Err("_MainTex 绑定的贴图不在本包（依赖包贴图未导出）".into());
+    }
+    match extras
+        .get("shaderTextureDefaults")
+        .and_then(|defaults| defaults.get("_MainTex"))
+        .and_then(|value| value.as_str())
+    {
+        Some("white") => Ok(()),
+        other => Err(format!("_MainTex 槽为空且 shader 默认贴图 {other:?} 未建模")),
+    }
+}
+
 /// 解析一条 Basic 家具材质的产出：GPU 材质、二维表落点（日志对账用）、
 /// 自发光三 int（挂账日志用——本管线没有第二颜色目标，不进材质）、
 /// 变体开关盘对账件（日志用）。
@@ -548,6 +678,9 @@ struct ResolvedBasic {
     /// 本管线没有真采样那条路 ⇒ 不开分支，按名字入账（keyword 也留在
     /// `unported_keywords` 里）。live 数据里是载具那 3 个材质，全未摆放。
     reflection_needs_cubemap: bool,
+    /// The crystal keyword is on but its branch cannot be drawn (named
+    /// reason). The keyword then stays in `unported_keywords`.
+    crystal_blocked: Option<String>,
     /// extras 纹理表里 `_EmissionMaskTex` 的 glTF 纹理下标；缺键 None
     /// （门 int 全零的材质无所谓；非零的组合按零贡献具名告警）。
     mask_index: Option<u32>,
@@ -638,6 +771,7 @@ fn resolve_basic(
     extras: &serde_json::Value,
     main_tex: Handle<Image>,
     clip_quad: Option<&Result<[Vec3; 4], String>>,
+    normal_map_texture: Option<Handle<Image>>,
 ) -> Result<ResolvedBasic, String> {
     // 二维选择表：(usage, blend) → ShaderAttribute。越界即拒；落点的
     // 低位（5/26 不透明、6/27 混合）必须与 blend 模式一致——不一致说明
@@ -718,6 +852,83 @@ fn resolve_basic(
         .is_some_and(|textures| textures.contains_key("_ReflectionCubeMap"));
     let reflection = reflection_keyword && !cube_bound;
     let reflection_needs_cubemap = reflection_keyword && cube_bound;
+    // JP `_ENABLE_CRYSTAL_FIXTURE`. Every crystal program of the source
+    // carries the fresnel and reflection keywords, and the JP normal-map
+    // block (`_UseNormalMap`, an int read at run time in every JP Basic
+    // program) is used by the data only together with it; any other
+    // combination is a program this port has not read, and is refused.
+    let crystal_keyword = keyword_on("_ENABLE_CRYSTAL_FIXTURE");
+    let use_normal_map = extras_float(extras, "_UseNormalMap").is_some_and(|value| value > 0.5);
+    if use_normal_map && !crystal_keyword {
+        return Err(format!(
+            "家具材质 {name} 的 _UseNormalMap 开着但没有 _ENABLE_CRYSTAL_FIXTURE：\
+             这个组合的源程序未移植"
+        ));
+    }
+    let (crystal, crystal_blocked) = if crystal_keyword {
+        if !(fresnel && reflection_keyword) {
+            return Err(format!(
+                "家具材质 {name} 开着 _ENABLE_CRYSTAL_FIXTURE 却缺菲涅尔或反射 keyword：\
+                 源程序表里没有这个组合"
+            ));
+        }
+        let crystal_get = |key: &str| -> Result<f32, String> {
+            extras_float(extras, key)
+                .map(|value| value as f32)
+                .ok_or_else(|| format!("家具材质 {name} 开着 crystal 却缺浮点属性 {key}"))
+        };
+        let normal_map = if use_normal_map {
+            // Key present with a null value: the material binds a texture that
+            // lives in a dependency package and was not exported into this
+            // glb. Key absent: the slot is empty and the engine would bind the
+            // shader's default, which this port does not model. Both keep the
+            // crystal branch off, by name.
+            let bound = extras
+                .get("textures")
+                .and_then(|textures| textures.as_object())
+                .is_some_and(|textures| textures.contains_key("_NormalMap"));
+            match (normal_map_texture, bound) {
+                (Some(texture), _) => Ok(Some(NormalMap {
+                    texture,
+                    bump_scale: crystal_get("_BumpScale")?,
+                    exaggeration: crystal_get("_NormalExaggeration")?,
+                    use_parallax_shift: crystal_get("_UseNormalParallaxShift")?,
+                    parallax_shift: crystal_get("_NormalParallaxShift")?,
+                })),
+                (None, true) => Err(format!(
+                    "{name}: _NormalMap is bound in the source but its texture is not in this \
+                     package (dependency texture not exported)"
+                )),
+                (None, false) => Err(format!(
+                    "{name}: _UseNormalMap is on with an empty _NormalMap slot (engine default \
+                     texture not modelled)"
+                )),
+            }
+        } else {
+            Ok(None)
+        };
+        match normal_map {
+            Ok(normal_map) if reflection => (
+                Some(CrystalParams {
+                    light_influence_scale: crystal_get("_LightInfluenceScale")?,
+                    use_normal_driven_emission: crystal_get("_UseNormalDrivenEmission")?,
+                    normal_dark_to_color: crystal_get("_NormalDarkToColor")?,
+                    normal_bright_to_emission: crystal_get("_NormalBrightToEmission")?,
+                    use_bright_fresnel_add: crystal_get("_UseBrightFresnelAdd")?,
+                    bright_fresnel_add_intensity: crystal_get("_BrightFresnelAddIntensity")?,
+                    normal_map,
+                }),
+                None,
+            ),
+            Ok(_) => (
+                None,
+                Some(format!("{name}: crystal needs the reflection branch, whose cube map is bound")),
+            ),
+            Err(reason) => (None, Some(reason)),
+        }
+    } else {
+        (None, None)
+    };
     let unported_keywords: Vec<String> = valid
         .iter()
         .filter_map(|item| item.as_str())
@@ -726,6 +937,9 @@ fn resolve_basic(
                 // 折叠形接上的那 16 条不再算未实现；绑了真立方图的那几条
                 // 仍然算——对它们这条分支确实没实现。
                 return !reflection;
+            }
+            if *keyword == "_ENABLE_CRYSTAL_FIXTURE" {
+                return crystal.is_none();
             }
             !matches!(
                 *keyword,
@@ -820,12 +1034,14 @@ fn resolve_basic(
             fresnel_color,
             reflection_power,
             reflection_intensity,
+            crystal,
         },
         attribute,
         emission,
         receive_shadows_off,
         unported_keywords,
         reflection_needs_cubemap,
+        crystal_blocked,
         mask_index,
     })
 }
@@ -859,11 +1075,12 @@ fn resolve_fence(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>
                 uv_v_flip: 1.0, clip_corners: [[0.0; 3]; 4],
             },
             main_tex, blend: false, fresnel_power: 0.0, fresnel_color: [0.0; 4], reflection_power: 0.0, reflection_intensity: 0.0,
+            crystal: None,
         },
         // GetAttribute maps Fence directly to 5, without the Basic usage/blend table.
         attribute: 5, emission: EmissionInts { bright: Some(0.0), dark: Some(0.0) },
         force_emission: false, mask_index: None, receive_shadows_off: true,
-        reflection_needs_cubemap: false,
+        reflection_needs_cubemap: false, crystal_blocked: None,
         unported_keywords: keywords.iter().filter(|k| !["_DISABLE_DITHER", "_RECEIVE_SHADOWS_OFF",
             "_USE_ALPHA_CLIP", "_USE_MYSEKAI_FOG", "_USE_MYSEKAI_SITE_EXTENSION", "INSTANCING_ON"].contains(k))
             .map(|k| k.to_string()).collect(),
@@ -899,12 +1116,13 @@ fn resolve_rug(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) 
                 override_shading_parameter: 0.0, local_shading_intensity: 0.0,
                 local_edge_threshold: 0.0, local_edge_smoothness: 0.0, uv_v_flip: 1.0, clip_corners: [[0.0; 3]; 4] },
             main_tex, blend, fresnel_power: 0.0, fresnel_color: [0.0; 4], reflection_power: 0.0, reflection_intensity: 0.0,
+            crystal: None,
         },
         attribute: if blend { 29 } else { 28 },
         emission: EmissionInts { bright: extras_float(extras, "_BrightPhenomenaEmission"), dark: extras_float(extras, "_DarkPhenomenaEmission") },
         force_emission: get("_EnableManualEmission")? == 1.0 || get("_DebugEmission")? == 1.0,
         receive_shadows_off: get("_ReceiveShadow")? == 0.0,
-        unported_keywords, reflection_needs_cubemap: false,
+        unported_keywords, reflection_needs_cubemap: false, crystal_blocked: None,
         mask_index: extras.get("textures").and_then(|v| v.get("_EmissionMaskTex")).and_then(|v| v.as_u64()).map(|v| v as u32),
     })
 }
@@ -1308,6 +1526,13 @@ struct Planned {
     unported_keywords: Vec<String>,
     /// 反射分支开着但材质绑了真立方图（折叠形对它是错的，分支未开）。
     reflection_needs_cubemap: bool,
+    /// Crystal keyword on, branch off (named reason).
+    crystal_blocked: Option<String>,
+    /// JP `_UseEmissionColorPicker` > 0.5.
+    emission_colour_picker: bool,
+    /// The main texture is the shader's declared default (`white`) because
+    /// the material's `_MainTex` slot is empty.
+    default_main_tex: bool,
     /// 自发射遮罩句柄：build 阶段按 extras 的纹理下标从同一 glb 装载。
     /// None = 材质没有遮罩（门 int 全零时无贡献损失；非零组合按零贡献
     /// 具名告警，fail-closed）。
@@ -1366,6 +1591,12 @@ struct SwapTally {
     /// 反射分支开着但绑了真立方图的材质名：折叠形对它们是错的，本管线
     /// 不开分支（keyword 同时留在未实现账里）。
     reflection_needs_cubemap_names: Vec<String>,
+    /// Materials drawing the crystal branch.
+    crystal_materials: usize,
+    /// Crystal keyword on, branch off: named reasons.
+    crystal_blocked: Vec<String>,
+    /// Materials whose empty `_MainTex` slot takes the shader default.
+    default_main_tex_materials: usize,
 }
 
 /// Update：全部家具 scene 展开后（`FixtureScenesReady`，fixture 模块的闩）
@@ -1392,6 +1623,7 @@ fn switch_materials(
     mut plan: Local<Option<SwapPlan>>,
     layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
         MessageWriter<crate::gpu_image_release::ImageTextureReplaced>),
+    mut default_white: Local<Option<Handle<Image>>>,
 ) {
     let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced) = layout;
     let mut pending_roots: Vec<_> = roots.iter().map(|(entity, _)| entity).collect();
@@ -1411,6 +1643,20 @@ fn switch_materials(
         return;
     }
     if !surfaces_ready.0 { return; }
+    // The shader's declared `white` default for an empty `_MainTex` slot:
+    // Unity binds its built-in white texture, (1, 1, 1, 1) in the stored
+    // domain. One shared 1x1 image, created once.
+    let white = default_white
+        .get_or_insert_with(|| {
+            images.add(Image::new_fill(
+                Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                &[255, 255, 255, 255],
+                TextureFormat::Rgba8UnormSrgb,
+                bevy::asset::RenderAssetUsages::default(),
+            ))
+        })
+        .clone();
     let Some(mut state) = plan.take().or_else(|| {
         build_swap_plan(
             &roots,
@@ -1420,27 +1666,32 @@ fn switch_materials(
             &meshes,
             &std_materials,
             &source_textures,
+            &white,
         )
     }) else {
         return;
     };
 
     // 等贴图到齐：换装早于贴图到位会让实体闪回默认材质。装载失败具名 panic。
+    // The shared default image is added directly to the assets, so the asset
+    // server has no load state for it; it counts as loaded once it exists.
     let mut all_loaded = true;
     for item in &state.planned {
-        match server.load_state(&item.material.main_tex) {
-            LoadState::Failed(err) => {
-                panic!("家具材质 {} 的贴图装载失败：{err:?}", item.name)
-            }
-            LoadState::Loaded => {}
-            _ => all_loaded = false,
-        }
-        if let Some(mask) = &item.mask {
-            match server.load_state(mask) {
-                LoadState::Failed(err) => {
-                    panic!("家具材质 {} 的自发光遮罩装载失败：{err:?}", item.name)
+        let normal_map = item.material.crystal.as_ref()
+            .and_then(|crystal| crystal.normal_map.as_ref())
+            .map(|normal_map| &normal_map.texture);
+        for (texture, what) in [
+            (Some(&item.material.main_tex), "贴图"),
+            (item.mask.as_ref(), "自发光遮罩"),
+            (normal_map, "normal map"),
+        ] {
+            let Some(texture) = texture else { continue };
+            match server.get_load_state(texture.id()) {
+                Some(LoadState::Failed(err)) => {
+                    panic!("家具材质 {} 的{what}装载失败：{err:?}", item.name)
                 }
-                LoadState::Loaded => {}
+                Some(LoadState::Loaded) => {}
+                None if images.contains(texture.id()) => {}
                 _ => all_loaded = false,
             }
         }
@@ -1448,6 +1699,26 @@ fn switch_materials(
     if !all_loaded {
         *plan = Some(state);
         return;
+    }
+
+    // Interlock: the shader re-encodes the sampled normal map into the stored
+    // domain unconditionally, which is the identity round trip only for an
+    // sRGB-format texture (how bevy_gltf loads an extras-only texture). A
+    // linear one would be encoded once too often; keep its crystal branch off
+    // by name instead of drawing a bent normal.
+    for item in &mut state.planned {
+        let format = item.material.crystal.as_ref()
+            .and_then(|crystal| crystal.normal_map.as_ref())
+            .and_then(|normal_map| images.get(&normal_map.texture))
+            .map(|image| image.texture_descriptor.format);
+        if let Some(format) = format.filter(|format| *format != TextureFormat::Rgba8UnormSrgb) {
+            item.material.crystal = None;
+            item.crystal_blocked = Some(format!(
+                "{}: _NormalMap loaded as {format:?}, not sRGB; the stored-domain re-encode would be wrong",
+                item.name
+            ));
+            item.unported_keywords.push("_ENABLE_CRYSTAL_FIXTURE".into());
+        }
     }
 
     // mip 链补齐（换装前的同一步）：demo 侧对这批 2 的幂贴图由 GPU 生成
@@ -1465,13 +1736,25 @@ fn switch_materials(
     let mut mip_skipped: Vec<(&str, MipSkip)> = Vec::new();
     for item in &state.planned {
         let name = item.name.as_str();
-        match chain_and_release(&mut images, &mut replaced, &item.material.main_tex) {
-            Ok(levels) => mipped.push((name, levels)),
-            Err(MipSkip::AlreadyChained) => shared_chains += 1,
-            Err(reason) => mip_skipped.push((name, reason)),
+        // The shared 1x1 default has a single level already.
+        if !item.default_main_tex {
+            match chain_and_release(&mut images, &mut replaced, &item.material.main_tex) {
+                Ok(levels) => mipped.push((name, levels)),
+                Err(MipSkip::AlreadyChained) => shared_chains += 1,
+                Err(reason) => mip_skipped.push((name, reason)),
+            }
         }
         if let Some(mask) = &item.mask {
             match chain_and_release(&mut images, &mut replaced, mask) {
+                Ok(_) => {}
+                Err(MipSkip::AlreadyChained) => shared_chains += 1,
+                Err(reason) => mip_skipped.push((name, reason)),
+            }
+        }
+        // The normal map is sampled with the global mip bias like the main
+        // texture, so it needs the same full chain.
+        if let Some(normal_map) = item.material.crystal.as_ref().and_then(|c| c.normal_map.as_ref()) {
+            match chain_and_release(&mut images, &mut replaced, &normal_map.texture) {
                 Ok(_) => {}
                 Err(MipSkip::AlreadyChained) => shared_chains += 1,
                 Err(reason) => mip_skipped.push((name, reason)),
@@ -1505,7 +1788,16 @@ fn switch_materials(
         }
         // 门 int 非零而遮罩缺失：fail-closed 零贡献（不静默取空白遮罩），
         // 具名告警——这类组合的实体不插自发光组件。
-        if item.mask.is_none() {
+        if item.mask.is_none() && item.emission_colour_picker {
+            // JP `_UseEmissionColorPicker`: the second target takes
+            // `_EmissionColor * _EmissionIntensity` instead of the mask. The
+            // emission pass samples only the mask, so nothing is drawn.
+            warn!(
+                "Fixture material {}: colour-picker emission (_UseEmissionColorPicker) is not \
+                 drawn by the emission pass; zero contribution",
+                item.name
+            );
+        } else if item.mask.is_none() {
             warn!(
                 "家具材质 {} 的门 int 非零但 extras 缺 _EmissionMaskTex：\
                  自发光按零贡献处理（fail-closed，不取空白遮罩）",
@@ -1642,6 +1934,15 @@ fn switch_materials(
                 .tally
                 .reflection_needs_cubemap_names
                 .push(item.name.clone());
+        }
+        if item.material.crystal.is_some() {
+            state.tally.crystal_materials += 1;
+        }
+        if let Some(reason) = &item.crystal_blocked {
+            state.tally.crystal_blocked.push(reason.clone());
+        }
+        if item.default_main_tex {
+            state.tally.default_main_tex_materials += 1;
         }
         if !item.unported_keywords.is_empty() {
             state.tally.unported_keyword_materials.push(format!(
@@ -1827,6 +2128,17 @@ fn switch_materials(
             state.tally.reflection_needs_cubemap_names
         );
     }
+    info!(
+        "Fixture crystal branch: {} materials drawn; empty _MainTex slots on the shader's white default: {} materials",
+        state.tally.crystal_materials, state.tally.default_main_tex_materials,
+    );
+    if !state.tally.crystal_blocked.is_empty() {
+        warn!(
+            "Fixture crystal branch off for {} materials (named): {:?}",
+            state.tally.crystal_blocked.len(),
+            state.tally.crystal_blocked
+        );
+    }
     // 账本入册：天气系统切档时按材质名逐行报自发光贡献（贡献行从这份
     // 账本现算——各臂可由日志推导）。
     if swapped.is_none() {
@@ -1853,6 +2165,7 @@ fn build_swap_plan(
     meshes: &Assets<Mesh>,
     std_materials: &Assets<StandardMaterial>,
     source_textures: &Query<&SourceMaterialTextures>,
+    default_white: &Handle<Image>,
 ) -> Option<SwapPlan> {
     // 首见句柄 → (材质名, extras 原文, 所在根)。同句柄的实体共享同一次
     // 解析；根记录给窗外观门四角定位写零面用。
@@ -2002,24 +2315,31 @@ fn build_swap_plan(
     } in pending_basic
     {
         // 主贴图：glb 材质的 baseColorTexture（提取侧把 _MainTex 写进它）。
-        let main_tex = match std_materials
+        // Without one, the extras say why: a `_MainTex` key with a null value
+        // is a bound texture that is not in this package (refused by name);
+        // no key is an empty slot, which the engine fills with the shader's
+        // declared default. Only the `white` default is modelled.
+        let (main_tex, default_main_tex) = match std_materials
             .get(&source)
             .and_then(|material| material.base_color_texture.clone())
         {
-            Some(handle) => handle,
-            None => {
-                tally.refused.push(format!(
-                    "家具材质 {name} 的 glb 材质没有 baseColorTexture"
-                ));
-                continue;
-            }
+            Some(handle) => (handle, false),
+            None => match empty_main_tex_default(&extras) {
+                Ok(()) => (default_white.clone(), true),
+                Err(reason) => {
+                    tally.refused.push(format!("家具材质 {name}：{reason}"));
+                    continue;
+                }
+            },
         };
+        let normal_map = source_textures.get(entity).ok()
+            .and_then(|textures| textures.0.get("_NormalMap")).cloned();
         let resolved = if extras.get("shader").and_then(|v| v.as_str()) == Some(FENCE_SHADER) {
             resolve_fence(&name, &extras, main_tex.clone())
         } else if extras.get("shader").and_then(|v| v.as_str()) == Some(RUG_SHADER) {
             resolve_rug(&name, &extras, main_tex.clone())
         } else {
-            resolve_basic(&name, &extras, main_tex.clone(), clip_quads.get(&root))
+            resolve_basic(&name, &extras, main_tex.clone(), clip_quads.get(&root), normal_map)
         };
         match resolved {
             Ok(resolved) => {
@@ -2052,6 +2372,10 @@ fn build_swap_plan(
                     receive_shadows_off: resolved.receive_shadows_off,
                     unported_keywords: resolved.unported_keywords,
                     reflection_needs_cubemap: resolved.reflection_needs_cubemap,
+                    crystal_blocked: resolved.crystal_blocked,
+                    emission_colour_picker: extras_float(&extras, "_UseEmissionColorPicker")
+                        .is_some_and(|value| value > 0.5),
+                    default_main_tex,
                     mask,
                     main_tex_st: extras
                         .get("textureScaleOffset")
