@@ -128,7 +128,10 @@ test("publication verifies every GLB/root/collision metadata, not only index lab
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });
 test("stage invokes source preflight before importing or initializing WASM", () => {
-  const source = fs.readFileSync(new URL("./stage.mjs",import.meta.url),"utf8");
-  assert.ok(source.indexOf("await preflightCoordinates(") < source.indexOf("await import(path.href)"));
-  assert.ok(source.indexOf("await preflightCoordinates(") < source.indexOf("await module.default("));
+  const stage = fs.readFileSync(new URL("./stage.mjs",import.meta.url),"utf8");
+  const loader = fs.readFileSync(new URL("./engine-loader.mjs",import.meta.url),"utf8");
+  assert.ok(stage.indexOf("async prepare(") < stage.indexOf("await preflightCoordinates("));
+  assert.ok(stage.indexOf("await preflightCoordinates(") < stage.indexOf("resolve: (selected)"));
+  assert.ok(loader.indexOf("await prepare(") < loader.indexOf("await importModule(path.href)"));
+  assert.ok(loader.indexOf("await prepare(") < loader.indexOf("await module.default("));
 });
