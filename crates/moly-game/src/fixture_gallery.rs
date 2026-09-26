@@ -169,6 +169,9 @@ fn selection() -> Option<String> {
 }
 
 pub(super) fn append_preview(rows: &mut Vec<PlacementMock>) {
+    if !crate::dev_tools::installed() {
+        return;
+    }
     let Some(selection) = selection() else {
         return;
     };

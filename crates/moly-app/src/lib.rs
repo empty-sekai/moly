@@ -34,6 +34,7 @@ fn run_app(
     let mut app = moly_game::app(source, site, web_render_settings);
     #[cfg(not(target_arch = "wasm32"))]
     let mut app = moly_game::app(source, site);
+    moly_game::insert_dev_tools(&mut app);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(directory) = std::env::var_os("MOLY_PORTRAITS_OUT") {
         let directory = std::path::PathBuf::from(directory);

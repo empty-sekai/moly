@@ -1199,13 +1199,16 @@ fn switch_phenomenon(
     // 无行可打）。
     emission: Option<Res<EmissionAccount>>,
     mut schedule_edits: MessageWriter<crate::server_panel::PhenomenaScheduleEdit>,
+    // The C key is a developer shortcut; host requests are not gated by it.
+    dev: Option<Res<crate::dev_tools::DevTools>>,
 ) {
     if run.phenomena.is_empty() {
         return;
     }
     // 按键只改面板日程（下一档），面板下一帧写出目标档请求。
     let requested = requests.read().last().map(|request| request.0);
-    let pressed = crate::game_settings::scene_input_enabled(panel, library)
+    let pressed = dev.is_some()
+        && crate::game_settings::scene_input_enabled(panel, library)
         && keys.just_pressed(KeyCode::KeyC);
     if pressed {
         schedule_edits.write(crate::server_panel::PhenomenaScheduleEdit::Next);
