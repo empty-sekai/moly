@@ -265,6 +265,10 @@ struct LoadCounts {
     /// Emitters whose limitVelocity construction refuses; likewise refused,
     /// not drawn unclamped.
     acc_lim_refused: u32,
+    /// Emitters whose texture sheet the source kernels refuse (a mode, time
+    /// mode, row animation or frame curve shape outside them, or a field the
+    /// export lacks); likewise refused, not drawn with a guessed tile.
+    acc_sheet_refused: u32,
     /// Emitters refused because a module the source runs cannot be evaluated
     /// (the two counts above, once per emitter).
     gate_module_refused: u32,
@@ -476,10 +480,137 @@ struct VolDef {
     speed_modifier: MinMaxCurve,
 }
 
+/// The texture-sheet module, sampled as the source's UV module samples it
+/// when it builds the particle geometry: the table position of each particle
+/// from its seed (and, for a frame curve, its current age percent), expanded
+/// into the grid rectangle that every corner UV maps through.
 struct TexSheetDef {
-    tiles_x: u32,
-    tiles_y: u32,
-    frame_over_time: MinMaxCurve,
+    tiles: [u32; 2],
+    law: SheetLaw,
+}
+
+/// Which source kernel the frame value takes: constant or two-constant frames
+/// do not advance with age; a curve or two curves take the Lifetime
+/// curve-time kernel. What either kernel refuses refuses the emitter.
+enum SheetLaw {
+    Constant(moly_law::particle::texture_sheet::TextureSheet),
+    Curve(moly_law::particle::texture_sheet::CurveTimeSheet),
+}
+
+impl TexSheetDef {
+    /// The rectangle of one particle's table position (applied to each
+    /// authored corner UV).
+    fn rect(&self, seed: u32, age_percent: f32) -> moly_law::particle::texture_sheet::UvRect {
+        match &self.law {
+            SheetLaw::Constant(sheet) => sheet.rect(seed),
+            SheetLaw::Curve(sheet) => sheet.rect(seed, age_percent),
+        }
+    }
+
+    /// The kernel's name in the log lines.
+    fn kernel(&self) -> &'static str {
+        match self.law {
+            SheetLaw::Constant(_) => "constant frames",
+            SheetLaw::Curve(_) => "curve-time kernel",
+        }
+    }
+
+    /// The tile a rectangle shows, counted row by row from the top (for the
+    /// log lines only).
+    fn tile(&self, rect: moly_law::particle::texture_sheet::UvRect) -> i64 {
+        let [dx, dy] = rect.scale;
+        let column = (rect.offset[0] / dx).round() as i64;
+        let row = ((1.0 - dy - rect.offset[1]) / dy).round() as i64;
+        row * i64::from(self.tiles[0]) + column
+    }
+
+    /// The tiles a particle with `seed` shows over its life, as (age percent,
+    /// tile) at each change, sampled every 0.5 percent from 0 to 100.
+    fn path(&self, seed: u32) -> Vec<(f32, i64)> {
+        let mut path: Vec<(f32, i64)> = Vec::new();
+        for step in 0..=200u32 {
+            let age = step as f32 * 0.5;
+            let tile = self.tile(self.rect(seed, age));
+            if path.last().is_none_or(|(_, last)| *last != tile) {
+                path.push((age, tile));
+            }
+        }
+        path
+    }
+}
+
+/// A tile path as one log field: `age%->tile` at each change.
+fn format_tile_path(path: &[(f32, i64)]) -> String {
+    path.iter()
+        .map(|(age, tile)| format!("{age:.1}%->{tile}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The texture-sheet controls as the particle law types them. A field the
+/// export lacks is refused by name, not given a default.
+fn texture_sheet_params(
+    t: &Value,
+    modes: &mut ModeNote,
+) -> Result<moly_law::particle::schema::TextureSheetParams, String> {
+    let integer = |key: &str| -> Result<f64, String> {
+        t.get(key)
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && n.fract() == 0.0)
+            .ok_or_else(|| format!("textureSheet.{key}: integer expected"))
+    };
+    let unsigned = |key: &str| -> Result<u32, String> {
+        let n = integer(key)?;
+        if (0.0..=u32::MAX as f64).contains(&n) {
+            Ok(n as u32)
+        } else {
+            Err(format!("textureSheet.{key}: unsigned integer expected"))
+        }
+    };
+    let signed = |key: &str| -> Result<i32, String> {
+        let n = integer(key)?;
+        if (i32::MIN as f64..=i32::MAX as f64).contains(&n) {
+            Ok(n as i32)
+        } else {
+            Err(format!("textureSheet.{key}: signed integer expected"))
+        }
+    };
+    let number = |key: &str| -> Result<f32, String> {
+        t.get(key)
+            .and_then(Value::as_f64)
+            .map(|n| n as f32)
+            .ok_or_else(|| format!("textureSheet.{key} not exported"))
+    };
+    let speed_range = match t.get("speedRange").and_then(Value::as_array) {
+        Some(a) if a.len() == 2 && a.iter().all(Value::is_number) => [
+            a[0].as_f64().unwrap_or(0.0) as f32,
+            a[1].as_f64().unwrap_or(0.0) as f32,
+        ],
+        _ => return Err("textureSheet.speedRange not exported".into()),
+    };
+    let frame = t
+        .get("frameOverTime")
+        .map(|v| modes.curve(v))
+        .ok_or("textureSheet.frameOverTime not exported")?;
+    let start = t
+        .get("startFrame")
+        .map(|v| modes.curve(v))
+        .ok_or("textureSheet.startFrame not exported")?;
+    Ok(moly_law::particle::schema::TextureSheetParams {
+        mode: unsigned("mode")?,
+        time_mode: unsigned("timeMode")?,
+        animation_type: unsigned("animationType")?,
+        tiles: [unsigned("tilesX")?, unsigned("tilesY")?],
+        row_mode: unsigned("rowMode")?,
+        row_index: signed("rowIndex")?,
+        cycles: number("cycles")?,
+        fps: number("fps")?,
+        speed_range,
+        uv_channel_mask: signed("uvChannelMask")?,
+        flip: [number("flipU")?, number("flipV")?],
+        frame,
+        start,
+    })
 }
 
 struct SubEmitterDef {
@@ -582,69 +713,93 @@ fn quat_field(obj: &Value) -> Quat {
     }
 }
 
-/// 空曲线（twoCurves 模式缺某一侧键表时的兜底：乘子 1、无键）。
-fn empty_curve() -> Curve {
-    Curve {
-        multiplier: 1.0,
-        keys: Vec::new(),
-        pre_wrap: None,
-        post_wrap: None,
-    }
-}
-
-/// 解一根键曲线。斜率缺省（null）按 0 处理——片表那一族实测如此；
-/// 加权键按位解析（求值走律的加权 Bezier 路），激活位的权重缺失即拒
-/// （缺会左右结果的键不当默认值）。
-fn parse_curve(obj: &Value) -> Curve {
-    // The wrap modes, when the export carries them; the particle law refuses
-    // an unoptimized lane without them rather than assuming clamp.
-    let wrap = |key: &str| {
-        obj.get(key)
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
+/// One key lane, decoded as the particle law's curve reader decodes it.
+///
+/// - An infinite tangent is a step and keeps its sign (`"Infinity"`,
+///   `"-Infinity"`). A null or missing tangent is an older export that lost
+///   that sign: refused (re-extract), not read as zero. Reading it as zero
+///   turns a stepped lane into a smooth one.
+/// - Key time, value and weighted mode are required. The active weights are
+///   required; an inactive one is inert (1/3).
+/// - Keys out of time order are refused (the evaluator does not sort).
+/// - The wrap modes stay unknown when the export lacks them (an absent or null
+///   field); the engine curve evaluator refuses an unknown wrap on a lane it
+///   reads. A present wrap that is not a non-negative integer is refused.
+///
+/// `keys` is the key array itself: `keys` of a curve, `minKeys` / `maxKeys` of
+/// two curves, each with its own wrap fields.
+fn parse_curve(
+    keys: Option<&Value>,
+    pre: Option<&Value>,
+    post: Option<&Value>,
+) -> Result<Curve, String> {
+    let wrap = |field: Option<&Value>, name: &str| -> Result<Option<u32>, String> {
+        match field {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .and_then(|w| u32::try_from(w).ok())
+                .map(Some)
+                .ok_or_else(|| format!("curve {name} wrap is not a non-negative integer: {v}")),
+        }
     };
-    Curve {
-        pre_wrap: wrap("preInfinity"),
-        post_wrap: wrap("postInfinity"),
-        multiplier: f_field(obj, "multiplier", 1.0),
-        keys: obj
-            .get("keys")
-            .and_then(Value::as_array)
-            .map(|keys| {
-                keys.iter()
-                    .map(|k| {
-                        let weighted = i_field(k, "weightedMode", 0) as u8;
-                        let inert = f32::from_bits(0x3eaa_aaab);
-                        let in_weight = if weighted & 1 != 0 {
-                            k.get("inWeight")
-                                .and_then(Value::as_f64)
-                                .unwrap_or_else(|| panic!("加权键缺 inWeight（入权位激活）：{k}"))
-                                as f32
-                        } else {
-                            inert
-                        };
-                        let out_weight = if weighted & 2 != 0 {
-                            k.get("outWeight")
-                                .and_then(Value::as_f64)
-                                .unwrap_or_else(|| panic!("加权键缺 outWeight（出权位激活）：{k}"))
-                                as f32
-                        } else {
-                            inert
-                        };
-                        CurveKey {
-                            time: f_field(k, "time", 0.0),
-                            value: f_field(k, "value", 0.0),
-                            in_slope: f_field(k, "inSlope", 0.0),
-                            out_slope: f_field(k, "outSlope", 0.0),
-                            weighted_mode: weighted,
-                            in_weight,
-                            out_weight,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+    let keys = keys
+        .and_then(Value::as_array)
+        .ok_or("curve key array missing")?;
+    let number = |k: &Value, name: &str| -> Result<f32, String> {
+        k.get(name)
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .ok_or_else(|| format!("curve key {name} missing: {k}"))
+    };
+    let slope = |k: &Value, name: &str| -> Result<f32, String> {
+        match k.get(name) {
+            Some(Value::String(s)) if s == "Infinity" => Ok(f32::INFINITY),
+            Some(Value::String(s)) if s == "-Infinity" => Ok(f32::NEG_INFINITY),
+            Some(v) if v.is_number() => Ok(v.as_f64().unwrap_or(0.0) as f32),
+            _ => Err(format!(
+                "curve key {name} is missing or null (an export that lost the step sign; re-extract): {k}"
+            )),
+        }
+    };
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        let weighted = k
+            .get("weightedMode")
+            .and_then(Value::as_u64)
+            .and_then(|w| u8::try_from(w).ok())
+            .ok_or_else(|| format!("curve key weightedMode missing: {k}"))?;
+        let inert = f32::from_bits(0x3eaa_aaab);
+        let in_weight = if weighted & 1 != 0 {
+            number(k, "inWeight")?
+        } else {
+            inert
+        };
+        let out_weight = if weighted & 2 != 0 {
+            number(k, "outWeight")?
+        } else {
+            inert
+        };
+        out.push(CurveKey {
+            time: number(k, "time")?,
+            value: number(k, "value")?,
+            in_slope: slope(k, "inSlope")?,
+            out_slope: slope(k, "outSlope")?,
+            weighted_mode: weighted,
+            in_weight,
+            out_weight,
+        });
     }
+    if out.windows(2).any(|w| w[0].time > w[1].time) {
+        return Err("curve keys not sorted by time".into());
+    }
+    Ok(Curve {
+        // The min-max value carries the multiplier; no evaluator reads this one.
+        multiplier: 1.0,
+        keys: out,
+        pre_wrap: wrap(pre, "pre")?,
+        post_wrap: wrap(post, "post")?,
+    })
 }
 
 /// 模式标签不认识就响亮拒绝：值域是数据决定的，猜一个默认会静默错整族。
@@ -661,18 +816,25 @@ fn parse_min_max_curve(obj: &Value) -> Result<MinMaxCurve, String> {
         },
         "curve" => MinMaxCurve::Curve {
             multiplier: f_field(obj, "multiplier", 1.0),
-            max: parse_curve(obj),
+            max: parse_curve(
+                obj.get("keys"),
+                obj.get("preInfinity"),
+                obj.get("postInfinity"),
+            )?,
         },
+        // Each side is its own key array with its own wrap fields.
         "twoCurves" => MinMaxCurve::TwoCurves {
             multiplier: f_field(obj, "multiplier", 1.0),
-            min: obj
-                .get("minKeys")
-                .map(parse_curve)
-                .unwrap_or_else(empty_curve),
-            max: obj
-                .get("maxKeys")
-                .map(parse_curve)
-                .unwrap_or_else(empty_curve),
+            min: parse_curve(
+                obj.get("minKeys"),
+                obj.get("minPreInfinity"),
+                obj.get("minPostInfinity"),
+            )?,
+            max: parse_curve(
+                obj.get("maxKeys"),
+                obj.get("maxPreInfinity"),
+                obj.get("maxPostInfinity"),
+            )?,
         },
         other => return Err(format!("particle value mode {other} is not modelled")),
     })
@@ -1194,6 +1356,18 @@ fn build_item(
                 }
             }
         };
+        if let (Some(sheet), true) = (params.texture_sheet.as_ref(), draw.is_some()) {
+            // The frame path the law gives a particle over its life (seed 0:
+            // a curve's kernel draws nothing; two curves and random constant
+            // frames vary by seed).
+            info!(
+                "[emoticon] {name}/{node_path}: texture sheet {}x{} through the {}; tile by age percent (seed 0): {}",
+                sheet.tiles[0],
+                sheet.tiles[1],
+                sheet.kernel(),
+                format_tile_path(&sheet.path(0))
+            );
+        }
         emitter_by_node.insert(node_path, emitters.len());
         emitters.push(EmitterDef {
             node,
@@ -1512,13 +1686,31 @@ fn build_emitter(
             }
         }
     });
-    let texture_sheet = system.get("textureSheet").map(|t| TexSheetDef {
-        tiles_x: i_field(t, "tilesX", 1),
-        tiles_y: i_field(t, "tilesY", 1),
-        frame_over_time: t
-            .get("frameOverTime")
-            .map(|v| modes.curve(v))
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
+    // The texture sheet through the source's kernels (constant frames or the
+    // curve-time kernel); what the law refuses refuses the emitter.
+    let texture_sheet = system.get("textureSheet").and_then(|t| {
+        let built = texture_sheet_params(t, &mut modes).and_then(|p| {
+            let law = match p.frame {
+                MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. } => {
+                    moly_law::particle::texture_sheet::CurveTimeSheet::from_params(&p)
+                        .map(SheetLaw::Curve)
+                }
+                _ => moly_law::particle::texture_sheet::TextureSheet::from_params(&p)
+                    .map(SheetLaw::Constant),
+            }?;
+            Ok(TexSheetDef {
+                tiles: p.tiles,
+                law,
+            })
+        });
+        match built {
+            Ok(sheet) => Some(sheet),
+            Err(reason) => {
+                counts.acc_sheet_refused += 1;
+                refusal.get_or_insert(format!("textureSheet: {reason}"));
+                None
+            }
+        }
     });
     // 自旋：构造拒绝（separateAxes 开而 x/y 键缺 = 提取面缺键，或曲线道
     // 在引擎曲线分派之外，如缺导出的 wrap 模式、ping-pong wrap）时整个发射器被拒，
@@ -1542,10 +1734,11 @@ fn build_emitter(
         }
     });
 
-    // 片表真的分格时才进采样链（1×1 的片表声明不进，与演示件同判）。
+    // 片表真的分格时，下面的 ST 折算前提才需要成立（1×1 的片表把每个
+    // 角 UV 原样映回自身）。
     let sheet_tiled = texture_sheet
         .as_ref()
-        .is_some_and(|t| t.tiles_x > 1 || t.tiles_y > 1);
+        .is_some_and(|t| t.tiles[0] > 1 || t.tiles[1] > 1);
     let mut curve_or = |key: &str, default: f32| {
         start
             .get(key)
@@ -1880,7 +2073,7 @@ pub(crate) fn spawn_when_ready(
         c.drawn_stretch,
     );
     info!(
-        "[emoticon] 挂账（能力在数据里、本管线无对应开关或消费面，逐项计数）：noise {} · customData {} · sortingOrder {} · ZWrite {} · ZTest=2 {} · ZOffset {} · 软粒子 {} · uv 旋转 {} · loopEndFlag {} · soundInput {} · 发射器因自旋模块被拒 {} · 发射器因限速模块被拒 {}",
+        "[emoticon] 挂账（能力在数据里、本管线无对应开关或消费面，逐项计数）：noise {} · customData {} · sortingOrder {} · ZWrite {} · ZTest=2 {} · ZOffset {} · 软粒子 {} · uv 旋转 {} · loopEndFlag {} · soundInput {} · 发射器因自旋模块被拒 {} · 发射器因限速模块被拒 {} · 发射器因片表模块被拒 {}",
         c.acc_noise,
         c.acc_custom_data,
         c.acc_sorting_order,
@@ -1893,6 +2086,7 @@ pub(crate) fn spawn_when_ready(
         c.acc_sound_input,
         c.acc_rol_refused,
         c.acc_lim_refused,
+        c.acc_sheet_refused,
     );
     // unsupported 归并：键 × 理由 →（条数、去重条目名），按条数降序（键是
     // attribute 的整哈希或对象类型名；原始记录在源档案按条目名可复查）。
@@ -1987,6 +2181,18 @@ struct EmitterRun {
     refused: u64,
     /// 本帧死亡的粒子世界位（死亡路由用，帧末清空）。
     deaths: Vec<Vec3>,
+    /// The texture-sheet tiles of this run's first particle (log only).
+    sheet_trace: SheetTrace,
+}
+
+/// The tiles one particle showed at draw time, as (age percent, tile) at
+/// each change, logged once when it dies.
+#[derive(Default)]
+struct SheetTrace {
+    seed: Option<u32>,
+    path: Vec<(f32, i64)>,
+    frames: u32,
+    logged: bool,
 }
 
 impl EmitterRun {
@@ -2002,6 +2208,43 @@ impl EmitterRun {
             spawned_total: 0,
             refused: 0,
             deaths: Vec::new(),
+            sheet_trace: SheetTrace::default(),
+        }
+    }
+}
+
+/// Follows the first particle of a texture-sheet emitter through its life
+/// and logs, once, when it dies, the tiles the law gave it at the age percent
+/// it is drawn with this frame: the frame path observed on the product path
+/// (once per shown instance).
+fn trace_sheet(item: &Item, def: usize, sheet: &TexSheetDef, run: &mut EmitterRun) {
+    let trace = &mut run.sheet_trace;
+    if trace.logged {
+        return;
+    }
+    let seed = match (trace.seed, run.particles.first()) {
+        (Some(seed), _) => seed,
+        (None, Some(first)) => *trace.seed.insert(first.seed),
+        (None, None) => return,
+    };
+    match run.particles.iter().find(|p| p.seed == seed) {
+        Some(p) => {
+            let tile = sheet.tile(sheet.rect(p.seed, p.core.age_percent));
+            if trace.path.last().is_none_or(|(_, last)| *last != tile) {
+                trace.path.push((p.core.age_percent, tile));
+            }
+            trace.frames += 1;
+        }
+        None => {
+            trace.logged = true;
+            let node = item.emitters[def].node;
+            info!(
+                "[emoticon] {}/{}: texture sheet frame path of the first particle (seed {seed:#010x}, {} frames drawn): {}",
+                item.name,
+                item.nodes[node].anim_path.as_deref().unwrap_or("?"),
+                trace.frames,
+                format_tile_path(&trace.path)
+            );
         }
     }
 }
@@ -2027,8 +2270,6 @@ struct PRt {
     gravity: f32,
     /// 逐粒子色（colorOverLifetime 每帧整组覆写；无模块则恒出生色）。
     color: [f32; 4],
-    /// 片表帧（无模块恒 0）。
-    frame: u32,
     /// 世界位（局部空间粒子是「节点本地坐标 + 本帧节点世界系」的绘制量）。
     world: Vec3,
     /// Current size (birth size times sizeOverLifetime), before the screen
@@ -2753,7 +2994,6 @@ fn spawn_particle(
         size_y,
         gravity,
         color,
-        frame: 0,
         world,
         size: Vec3::new(size_x, size_y, size_z),
         velocity: Vec3::ZERO,
@@ -2787,8 +3027,8 @@ fn emit_burst_zero(
 
 /// 一条发射器的一帧（演示件 update 的转录）。发射环（率 + burst 游标 +
 /// 循环回绕复位）只在自主播放时跑；粒子环按「寿限判定 → 重力 → 速度
-/// 钳制 → 有效速度合成 → 积分 → 世界位 → 尺寸/截断/颜色/自旋/片表」
-/// 的次序推进。年寿与发射钟走仿真速度，重力/积分/自旋走原始 dt——
+/// 钳制 → 有效速度合成 → 积分 → 世界位 → 尺寸/截断/颜色/自旋」
+/// 的次序推进（片表格位不在这里：绘制时按粒子当时的寿命百分比取）。年寿与发射钟走仿真速度，重力/积分/自旋走原始 dt——
 /// 演示件就是这么分的。
 #[allow(clippy::too_many_arguments)]
 fn advance_emitter(
@@ -2969,15 +3209,6 @@ fn advance_emitter(
         if let Some(col) = &params.color_over_lifetime {
             p.color = col.evaluate(u, p.r);
         }
-        // 片表帧。
-        if let Some(sheet) = &params.texture_sheet {
-            let total = sheet.tiles_x * sheet.tiles_y;
-            if total > 0 {
-                p.frame = (sheet.frame_over_time.evaluate(u, p.r) * total as f32)
-                    .floor()
-                    .clamp(0.0, (total - 1) as f32) as u32;
-            }
-        }
         i += 1;
     }
     if run.particles.len() > run.peak {
@@ -3058,6 +3289,9 @@ fn advance_instance(
             auto,
             dt,
         );
+        if let Some(sheet) = item.emitters[def].params.texture_sheet.as_ref() {
+            trace_sheet(item, def, sheet, &mut inst.emitters[ri]);
+        }
         // 死亡路由（演示件 onDeath 内联）：记录概率门 → 目标的第一发
         // burst。目标没建运行时（被别的门摘掉）就不触发。
         let deaths = std::mem::take(&mut inst.emitters[ri].deaths);
@@ -3271,13 +3505,7 @@ fn fill_emitter_buffer(
     else {
         return;
     };
-    let sheet = e
-        .params
-        .texture_sheet
-        .as_ref()
-        .filter(|t| t.tiles_x > 0 && t.tiles_y > 0);
-    let tx = sheet.map(|t| t.tiles_x as f32).unwrap_or(1.0);
-    let ty = sheet.map(|t| t.tiles_y as f32).unwrap_or(1.0);
+    let sheet = e.params.texture_sheet.as_ref();
     for (k, p) in run.particles.iter().enumerate() {
         // The writer's four corners per particle, placed by their UV into
         // this buffer's corner order [TL, TR, BL, BR] (v=1 is the top edge).
@@ -3291,18 +3519,19 @@ fn fill_emitter_buffer(
             };
             pos[slot] = positions[c];
         }
+        // The texture sheet: the rectangle of this particle's table position,
+        // from its seed and its age percent now (the source samples the UV
+        // module when it builds the geometry).
+        let rect = sheet.map(|s| s.rect(p.seed, p.core.age_percent));
         let mut uv = [[0.0f32; 2]; 4];
         for (c, (u, v)) in [(0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
             .into_iter()
             .enumerate()
         {
-            // 片表：格内 (u,v) 折到该帧的格位（帧号行优先、从上往下）。
-            let (mut ux, mut uy) = match sheet {
-                Some(s) => (
-                    u / tx + (p.frame % s.tiles_x) as f32 / tx,
-                    v / ty + (1.0 - 1.0 / ty - (p.frame / s.tiles_x) as f32 / ty),
-                ),
-                None => (u, v),
+            // Each authored corner UV maps through the sheet rectangle.
+            let [mut ux, mut uy] = match rect {
+                Some(rect) => rect.apply([u, v]),
+                None => [u, v],
             };
             if e.material.uv_turns != 0.0 {
                 // 基础图旋转：轴心 (0.5, 0.5) 的整圈数旋转（装载侧已断言与

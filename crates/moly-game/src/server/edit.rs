@@ -10,8 +10,8 @@
 //! - `{"type": "server.edit", "action": "sync"}`
 //!
 //! Delivery: `clock`, `policies` and the schedule apply live; the game data,
-//! the stamina and the pass apply as the next server response; the gate
-//! actions are server replies at once. Visitors and layouts are not edited
+//! the stamina, the pass and the birthday-party sections apply as the next
+//! server response; the gate actions are server replies at once. Visitors and layouts are not edited
 //! here (they apply on re-entry, a later milestone).
 
 use bevy::log::info;
@@ -24,7 +24,17 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 3] = [SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
+pub(crate) const PENDING_SECTIONS: [&str; 9] = [
+    SECTION_GAMEDATA,
+    SECTION_STAMINA,
+    SECTION_PASS,
+    super::delivery::SECTION_BIRTHDAY_PARTIES,
+    super::delivery::SECTION_MATERIALS,
+    super::delivery::SECTION_MYSEKAI_MATERIALS,
+    super::delivery::SECTION_CARDS,
+    super::delivery::SECTION_HONORS,
+    super::delivery::SECTION_MASTER_CONFIGS,
+];
 
 /// How an accepted edit reaches the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +146,12 @@ fn edit_path(
     value: &Value,
 ) -> Result<Delivery, String> {
     let parts: Vec<&str> = path.split('.').collect();
+    if let Some(result) = super::delivery::edit_path(&mut doc.delivery, &parts, path, value) {
+        return result.map(|section| match section {
+            Some(section) => Delivery::NextResponse(section),
+            None => Delivery::Live,
+        });
+    }
     match parts.as_slice() {
         ["clock"] => {
             doc.clock = document::parse_clock(value)?;
@@ -637,13 +653,25 @@ fn policies() -> Value {
     ])
 }
 
+/// Two JSON arrays as one.
+fn concat(first: Value, second: Value) -> Value {
+    let mut out = match first {
+        Value::Array(rows) => rows,
+        other => vec![other],
+    };
+    if let Value::Array(rows) = second {
+        out.extend(rows);
+    }
+    Value::Array(out)
+}
+
 pub(crate) fn schema(model: &ServerModel) -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": sections(&model.masters),
+        "sections": concat(sections(&model.masters), super::delivery::schema_sections(Some(model))),
         "actions": actions(),
-        "policies": policies(),
+        "policies": concat(policies(), super::delivery::schema_policies()),
         "masters": masters_value(&model.masters),
         "joined": model.joined,
     })
@@ -653,9 +681,9 @@ pub(crate) fn schema_without_model() -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": sections(&Masters::default()),
+        "sections": concat(sections(&Masters::default()), super::delivery::schema_sections(None)),
         "actions": actions(),
-        "policies": policies(),
+        "policies": concat(policies(), super::delivery::schema_policies()),
         "masters": null,
         "joined": false,
     })

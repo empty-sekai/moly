@@ -28,14 +28,24 @@
 //! FixtureExist and HidedFixture as n = the state's bit index + 1 in its red,
 //! green and blue bits (4, 2, 1); `_TileSize` is set to the tile size.
 //!
-//! The fill on entry (`GridModel.SetFocus` for the floor): FixtureExist over
-//! the bounding box of every site fixture placed in the floor layout; for
-//! every fixture placed in exactly the floor layout its motion-area cells as
-//! MotionDisableArea when any of them is off the grid or on another fixture
-//! (`HasBoundBoxListOtherFixture`), else as MotionArea; then every tile that
-//! has Highlight or FixtureExist together with MotionArea or
-//! MotionDisableArea becomes MotionConflictArea alone. A selected fixture's
-//! footprint is Highlight.
+//! The fill (`GridModel.SetFocus` on entry, `UpdateFillDataForLayout` with
+//! a selection), first `GetDeadZoneBounds`: FixtureExist over the floor
+//! layout's unavailable zones (`GetUnavailableZone`, room levels only) and,
+//! for every site fixture placed in the floor layout, its bounding box and
+//! its add-using bounds (one cell each). Then `SetFillCore`: the
+//! selection's own motion area (`GetInteractiveAreaBound` with the edit
+//! fixture itself) as MotionDisableArea when any of its cells is off the
+//! grid or on another fixture (`HasBoundBoxListOtherFixture`), else as
+//! MotionArea; every other fixture placed in exactly the floor layout the
+//! same, except that with a selection a fixture whose bounding box or one of
+//! whose motion bounds meets the highlight (`IsOverlappingBounds`, both ends
+//! inclusive) is MotionDisableArea too (`AddInteractiveAreaStatesToTable`);
+//! the highlight (`CalculateHighlightGridBounds`: the selection's add-using
+//! bounds and its bounding box) as Highlight; then every tile that has
+//! Highlight or FixtureExist together with MotionArea or MotionDisableArea
+//! becomes MotionConflictArea alone. The selection and the fixtures stacked
+//! on it are drawn where they are being dragged; the other checks read the
+//! decided tiles, as the source's model keeps them until the decide.
 //!
 //! Colours: the site environment's configuration names a colour profile
 //! (`gridColorKey`); the profile table returns the first row with that key,
@@ -61,14 +71,14 @@
 //! index keep the source's values.
 //!
 //! Named gaps: the wall grid, the floating faces and the light poles are not
-//! built; the unavailable zones (room levels only), the fixtures' extra used
-//! bounds, the birthday cutscene areas and the hidden-fixture state are not
-//! filled; with a fixture selected the fill keeps the entry rule for the
-//! others and the selection's own motion area is not drawn; the line and the
-//! tile renderers share queue 2025 and their order within it is not the
-//! source's (the source sorts them with the engine's opaque criteria);
-//! blending happens in the target's linear space, where the source (a gamma
-//! space player) blends stored values.
+//! built; the birthday cutscene areas (drawn only inside the fixture's
+//! birthday party period, `IsWithinBirthdayTimeByFixtureId`) and the
+//! hidden-fixture state are not filled; while the unavailable zone table is not read the zones are not
+//! filled (the fill log says so, and the put check refuses floor puts then);
+//! the line and the tile renderers share queue 2025 and their order within
+//! it is not the source's (the source sorts them with the engine's opaque
+//! criteria); blending happens in the target's linear space, where the
+//! source (a gamma space player) blends stored values.
 
 use std::marker::PhantomData;
 
@@ -84,16 +94,15 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use moly_assets::json::JsonAsset;
 use moly_assets::material_passes::SourceRenderState;
-use moly_law::fixture::areas::motion_area_bounds;
+use moly_law::fixture::areas::{motion_area_bounds, GridBound};
 use moly_law::fixture::position::layout_type;
 use moly_law::fixture::GridPosition;
 use serde_json::Value;
 
 use super::assets::FixtureAreas;
-use super::placement::TileBox;
-use super::{validation, EditSession, FixtureEditSystems, PutStatus};
+use super::tile_rules::{self, TileBox};
+use super::{EditSession, FixtureEditSystems, PutStatus};
 use crate::fixture::{EditableFixture, FixturePlacements};
-use crate::site::FloorGridLayout;
 
 const GRID: &str = "moly://layout-grid/grid.json";
 const PHENOMENA: &str = "moly://phenomena/index.json";
@@ -952,23 +961,70 @@ struct Fill {
     counts: [usize; 7],
     motion_fixtures: usize,
     disabled_fixtures: usize,
+    /// Others made MotionDisableArea because they or their motion area meet
+    /// the selection's highlight.
+    highlight_disabled: usize,
+    /// The selection's own motion area: `Some(true)` when disabled.
+    selection_motion: Option<bool>,
     /// Fixture views in the floor layout, and their footprints' cell count
     /// (before clipping and overlap), for the FixtureExist count.
     floor_views: usize,
     footprint_cells: usize,
+    /// Add-using cells of those views, and the unavailable zones' cells
+    /// (`None` while the zone table is not read).
+    add_using_cells: usize,
+    zone_cells: Option<usize>,
 }
 
 fn footprint_cells(item: &EditableFixture) -> Option<(GridPosition, GridPosition)> {
     item.footprint().ok()
 }
 
-/// `GridModel.SetFocus` for the floor (and the selection's highlight).
+/// A source-frame rectangle of cells, `(x0, z0, x1, z1)` inclusive
+/// (`Grid2DBound`).
+type Rect = (i32, i32, i32, i32);
+
+/// `SiteLayoutUtility.IsOverlappingBounds`: the rectangles share a cell
+/// (both ends inclusive).
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.0.max(b.0) <= a.2.min(b.2) && a.1.max(b.1) <= a.3.min(b.3)
+}
+
+/// A product footprint's rectangle in the source frame.
+fn footprint_rect(item: &EditableFixture) -> Option<Rect> {
+    let (min, max) = footprint_cells(item)?;
+    let (a, b) = (
+        source_cell_x(i32::from(min.x)),
+        source_cell_x(i32::from(max.x)),
+    );
+    Some((a.min(b), i32::from(min.z), a.max(b), i32::from(max.z)))
+}
+
+fn rect_of(bound: &GridBound) -> Rect {
+    (
+        i32::from(bound.min.x),
+        i32::from(bound.min.z),
+        i32::from(bound.max.x),
+        i32::from(bound.max.z),
+    )
+}
+
+/// What the fill reads besides the rows.
+struct FillInputs<'a> {
+    areas: &'a FixtureAreas,
+    /// The floor layout's unavailable zones, `None` while not read.
+    zones: Option<&'a [tile_rules::Zone]>,
+}
+
+/// `GridModel.SetFocus` (entry) and `UpdateFillDataForLayout` (with a
+/// selection) for the floor: `GetDeadZoneBounds`, then `SetFillCore`.
 fn fill(
     tiles: &TileBox,
     rows: &[EditableFixture],
-    selected: Option<&EditableFixture>,
-    areas: &FixtureAreas,
+    selection: Option<(&EditableFixture, &[EditableFixture])>,
+    inputs: &FillInputs,
 ) -> Fill {
+    let areas = inputs.areas;
     let (width, height) = table_size(tiles);
     let mut states = vec![0u8; width * height];
     // `Grid2DTileTable.AddState`: cells outside the table are skipped.
@@ -978,18 +1034,43 @@ fn fill(
             states[i as usize + width * j as usize] |= flag;
         }
     };
+    let selected = selection.map(|(item, _)| item);
     let selected_uid = selected.map(|item| item.uid.as_str());
-    // The fixtures' views: the selection is where it is being edited.
-    let mut views: Vec<&EditableFixture> = rows
+    // The fixtures' views: the selection and the fixtures stacked on it are
+    // where they are being edited (they move with it). A new selection is
+    // not a placed fixture yet.
+    let drafts: Vec<&EditableFixture> = selection
+        .map(|(item, stacked)| std::iter::once(item).chain(stacked.iter()).collect())
+        .unwrap_or_default();
+    let views: Vec<&EditableFixture> = rows
         .iter()
-        .filter(|row| Some(row.uid.as_str()) != selected_uid)
+        .map(|row| {
+            drafts
+                .iter()
+                .copied()
+                .find(|draft| draft.uid == row.uid)
+                .unwrap_or(row)
+        })
         .collect();
-    if let Some(item) = selected {
-        if rows.iter().any(|row| row.uid == item.uid) {
-            views.push(item);
+    let add_using = |item: &EditableFixture| {
+        tile_rules::add_using_cells(item, &areas.stack).unwrap_or_default()
+    };
+    // `GetDeadZoneBounds`: the layout's unavailable zones, then every
+    // fixture placed in the layout, its bounding box and its add-using
+    // bounds, all as FixtureExist.
+    let zone_cells = inputs.zones.map(|zones| {
+        let mut cells = 0;
+        for zone in zones {
+            for x in i32::from(zone.min.x)..=i32::from(zone.max.x) {
+                for z in i32::from(zone.min.z)..=i32::from(zone.max.z) {
+                    add(x, z, FIXTURE_EXIST);
+                    cells += 1;
+                }
+            }
         }
-    }
-    let (mut floor_views, mut footprint_total) = (0, 0);
+        cells
+    });
+    let (mut floor_views, mut footprint_total, mut add_using_total) = (0, 0, 0);
     for view in &views {
         if view.layout & layout_type::FLOOR == 0 {
             continue;
@@ -1004,31 +1085,42 @@ fn fill(
                 }
             }
         }
+        for cell in add_using(view) {
+            add(i32::from(cell.x), i32::from(cell.z), FIXTURE_EXIST);
+            add_using_total += 1;
+        }
     }
+    // `CalculateHighlightGridBounds`: the selection's add-using bounds and
+    // its bounding box.
+    let highlight: Vec<Rect> = selected
+        .filter(|item| item.layout == layout_type::FLOOR)
+        .map(|item| {
+            let mut rects: Vec<Rect> = add_using(item)
+                .into_iter()
+                .map(|cell| {
+                    let (x, z) = (i32::from(cell.x), i32::from(cell.z));
+                    (x, z, x, z)
+                })
+                .collect();
+            rects.extend(footprint_rect(item));
+            rects
+        })
+        .unwrap_or_default();
     // The model's floor tiles (the decided draft), for the motion check.
     let occupied: Vec<(&str, GridPosition, GridPosition)> = rows
         .iter()
         .filter(|row| row.layout == layout_type::FLOOR)
         .filter_map(|row| footprint_cells(row).map(|(a, b)| (row.uid.as_str(), a, b)))
         .collect();
-    let (mut motion_fixtures, mut disabled_fixtures) = (0, 0);
-    for row in rows {
-        if row.layout != layout_type::FLOOR || Some(row.uid.as_str()) == selected_uid {
-            continue;
-        }
-        let Some(meta) = areas.motion.get(&row.package) else {
-            continue;
-        };
-        let Ok((source_center, source_direction, _)) =
-            moly_assets::player_data::mirror_fixture_layout(
-                row.center,
-                row.grid_size,
-                row.direction,
-                row.layout,
-            )
-        else {
-            continue;
-        };
+    let motion_bounds = |row: &EditableFixture| -> Option<Vec<GridBound>> {
+        let meta = areas.motion.get(&row.package)?;
+        let (source_center, source_direction, _) = moly_assets::player_data::mirror_fixture_layout(
+            row.center,
+            row.grid_size,
+            row.direction,
+            row.layout,
+        )
+        .ok()?;
         let bounds = motion_area_bounds(
             meta.rows,
             meta.cols,
@@ -1037,12 +1129,11 @@ fn fill(
             row.grid_size,
             source_direction,
         );
-        if bounds.is_empty() {
-            continue;
-        }
-        motion_fixtures += 1;
-        // `HasBoundBoxOtherFixture` per bound: every cell a tile and empty or
-        // this fixture's.
+        (!bounds.is_empty()).then_some(bounds)
+    };
+    // `HasBoundBoxListOtherFixture`: some cell of a bound is off the grid or
+    // on another fixture.
+    let blocked = |row: &EditableFixture, bounds: &[GridBound]| {
         let clear = |cell: GridPosition| {
             let (sx, y, z) = (i32::from(cell.x), i32::from(cell.y), i32::from(cell.z));
             let tile = (tiles.min[0]..=tiles.max[0]).contains(&sx)
@@ -1056,32 +1147,74 @@ fn fill(
                     && (i32::from(a.z)..=i32::from(b.z)).contains(&z)
             })
         };
-        let blocked = bounds.iter().any(|bound| {
+        bounds.iter().any(|bound| {
             (i32::from(bound.min.x)..=i32::from(bound.max.x)).any(|x| {
                 (i32::from(bound.min.z)..=i32::from(bound.max.z))
                     .any(|z| !clear(GridPosition::new(x as i8, bound.min.y, z as i8)))
             })
-        });
-        let flag = if blocked {
+        })
+    };
+    let (mut motion_fixtures, mut disabled_fixtures, mut highlight_disabled) = (0, 0, 0);
+    let mut selection_motion = None;
+    let mut area_fills: Vec<(Vec<GridBound>, u8)> = Vec::new();
+    // `GetInteractiveAreaBounds`: the selection's own motion area first
+    // (MotionDisableArea when blocked, else MotionArea).
+    if let Some(item) = selected.filter(|item| item.layout == layout_type::FLOOR) {
+        if let Some(bounds) = motion_bounds(item) {
+            motion_fixtures += 1;
+            let disabled = blocked(item, &bounds);
+            if disabled {
+                disabled_fixtures += 1;
+            }
+            selection_motion = Some(disabled);
+            let flag = if disabled {
+                MOTION_DISABLE
+            } else {
+                MOTION_AREA
+            };
+            area_fills.push((bounds, flag));
+        }
+    }
+    // Then every other fixture placed in exactly the floor layout
+    // (`AddInteractiveAreaStatesToTable`): blocked, or (with a selection)
+    // its bounding box or one of its motion bounds meets the highlight,
+    // MotionDisableArea; else MotionArea.
+    for view in &views {
+        if view.layout != layout_type::FLOOR || Some(view.uid.as_str()) == selected_uid {
+            continue;
+        }
+        let Some(bounds) = motion_bounds(view) else {
+            continue;
+        };
+        motion_fixtures += 1;
+        let meets_highlight = |rect: Rect| highlight.iter().any(|h| overlaps(rect, *h));
+        let flag = if blocked(view, &bounds) {
             disabled_fixtures += 1;
+            MOTION_DISABLE
+        } else if footprint_rect(view).is_some_and(meets_highlight)
+            || bounds.iter().any(|bound| meets_highlight(rect_of(bound)))
+        {
+            disabled_fixtures += 1;
+            highlight_disabled += 1;
             MOTION_DISABLE
         } else {
             MOTION_AREA
         };
-        for bound in &bounds {
+        area_fills.push((bounds, flag));
+    }
+    for (bounds, flag) in &area_fills {
+        for bound in bounds {
             for x in i32::from(bound.min.x)..=i32::from(bound.max.x) {
                 for z in i32::from(bound.min.z)..=i32::from(bound.max.z) {
-                    add(x, z, flag);
+                    add(x, z, *flag);
                 }
             }
         }
     }
-    if let Some(item) = selected.filter(|item| item.layout == layout_type::FLOOR) {
-        if let Some((min, max)) = footprint_cells(item) {
-            for x in i32::from(min.x)..=i32::from(max.x) {
-                for z in i32::from(min.z)..=i32::from(max.z) {
-                    add(source_cell_x(x), z, HIGHLIGHT);
-                }
+    for (x0, z0, x1, z1) in &highlight {
+        for x in *x0..=*x1 {
+            for z in *z0..=*z1 {
+                add(x, z, HIGHLIGHT);
             }
         }
     }
@@ -1116,9 +1249,34 @@ fn fill(
         counts,
         motion_fixtures,
         disabled_fixtures,
+        highlight_disabled,
+        selection_motion,
         floor_views,
         footprint_cells: footprint_total,
+        add_using_cells: add_using_total,
+        zone_cells,
     }
+}
+
+/// The fill of the session's current draft, with its inputs from the world.
+fn current_fill(world: &World, tiles: &TileBox) -> Option<(Fill, bool)> {
+    let session = world.get_resource::<EditSession>()?;
+    let floor = world
+        .get_resource::<FixturePlacements>()
+        .and_then(FixturePlacements::floor_grid)?;
+    let empty = FixtureAreas::default();
+    let areas = world.get_resource::<FixtureAreas>();
+    let areas_loaded = areas.is_some_and(|a| a.loaded);
+    let zones = tile_rules::zones_of(world, floor.layout_id);
+    let inputs = FillInputs {
+        areas: areas.unwrap_or(&empty),
+        zones: zones.as_deref(),
+    };
+    let selection = session
+        .selected
+        .as_ref()
+        .map(|selection| (&selection.item, selection.stacked.as_slice()));
+    Some((fill(tiles, &session.rows, selection, &inputs), areas_loaded))
 }
 
 fn state_image(tiles: &TileBox, texels: Vec<u8>) -> Image {
@@ -1248,15 +1406,13 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
     let Some(session) = world.get_resource::<EditSession>() else {
         return waiting(grid, "the edit session is not published yet".into());
     };
-    let rows = session.rows.clone();
-    let selected = session.selected.as_ref().map(|s| s.item.clone());
     let revision = session.revision;
     let tiles = TileBox::of(floor, layout_type::FLOOR);
     let origin = super::put_effect::site_origin(world);
     let offset = Vec3::new(0.0, 2.0 * doc.position_y, 0.0);
     let transform = Transform::from_translation(origin + offset);
     let profile = profile_of(grid, &doc);
-    let can_place = can_place(selected.as_ref(), &rows, floor);
+    let can_place = can_place(world);
     let colours = match colours(&doc, &profile, can_place) {
         Ok(colours) => colours,
         Err(error) => {
@@ -1272,10 +1428,9 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
         error!("[edit-grid] ShowGrid({mode}): a line material lacks _LineRepeat or _LineFill; not drawn");
         return;
     };
-    let areas = world.get_resource::<FixtureAreas>();
-    let empty = FixtureAreas::default();
-    let areas_loaded = areas.is_some_and(|a| a.loaded);
-    let filled = fill(&tiles, &rows, selected.as_ref(), areas.unwrap_or(&empty));
+    let Some((filled, areas_loaded)) = current_fill(world, &tiles) else {
+        return;
+    };
     let lines = line_meshes(&tiles, doc.vertical_line_size, doc.horizontal_line_size);
     let (width, height) = table_size(&tiles);
     let ((min_x, min_z), (max_x, max_z)) = corners(&tiles);
@@ -1387,13 +1542,18 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
 
 fn log_fill(revision: u64, filled: &Fill, areas_loaded: bool) {
     let flagged = |flag: u8| filled.states.iter().filter(|s| **s & flag != 0).count();
+    let zones = match filled.zone_cells {
+        Some(cells) => format!("unavailable zones cover {cells} cells"),
+        None => "the unavailable zone table is not read (no zone cells)".to_owned(),
+    };
     info!(
-        "[edit-grid] fill (session revision {revision}): packed n counts [empty {}, highlight {}, fixture exist {}, hided {}, motion area {}, motion disable {}, conflict {}]; flags fixture exist {} motion area {} motion disable {} conflict {}; {} floor fixtures whose footprints cover {} cells; {} fixtures with motion areas ({} disabled){}",
+        "[edit-grid] fill (session revision {revision}): packed n counts [empty {}, highlight {}, fixture exist {}, hided {}, motion area {}, motion disable {}, conflict {}]; flags fixture exist {} motion area {} motion disable {} conflict {}; {} floor fixtures whose footprints cover {} cells and add-using {} cells; {zones}; {} fixtures with motion areas ({} disabled, {} of them by the highlight); selection's own motion area {:?}{}",
         filled.counts[0], filled.counts[1], filled.counts[2], filled.counts[3],
         filled.counts[4], filled.counts[5], filled.counts[6],
         flagged(FIXTURE_EXIST), flagged(MOTION_AREA), flagged(MOTION_DISABLE), flagged(MOTION_CONFLICT),
-        filled.floor_views, filled.footprint_cells,
-        filled.motion_fixtures, filled.disabled_fixtures,
+        filled.floor_views, filled.footprint_cells, filled.add_using_cells,
+        filled.motion_fixtures, filled.disabled_fixtures, filled.highlight_disabled,
+        filled.selection_motion.map(|disabled| if disabled { "disabled" } else { "area" }),
         if areas_loaded { "" } else { "; the fixture area table is not loaded (no motion areas)" }
     );
 }
@@ -1418,13 +1578,16 @@ fn profile_of(grid: &EditGrid, doc: &GridDoc) -> Result<Profile, String> {
     }
 }
 
-/// `CanPlaceFixture`: true on entry, else the selection's put check.
-fn can_place(
-    selected: Option<&EditableFixture>,
-    rows: &[EditableFixture],
-    floor: FloorGridLayout,
-) -> bool {
-    selected.is_none_or(|item| validation::put(item, rows, Some(floor)) == PutStatus::Ok)
+/// `CanPlaceFixture`: true on entry, else the selection's put check
+/// (`SiteLayoutUtility.CanPutFloor`, the one `SetFocus` is given).
+fn can_place(world: &World) -> bool {
+    let Some(session) = world.get_resource::<EditSession>() else {
+        return true;
+    };
+    session
+        .selected
+        .as_ref()
+        .is_none_or(|selection| super::put_status(world, session, selection) == PutStatus::Ok)
 }
 
 /// Rewrite the fill and the colours when the session or the profile changed.
@@ -1444,29 +1607,22 @@ fn refresh(world: &mut World, grid: &mut EditGrid) {
     if shown.written == Some((revision, generation)) {
         return;
     }
-    let rows = session.rows.clone();
-    let selected = session.selected.as_ref().map(|s| s.item.clone());
-    let Some(floor) = world
+    if world
         .get_resource::<FixturePlacements>()
         .and_then(FixturePlacements::floor_grid)
-    else {
+        .is_none()
+    {
         return;
-    };
+    }
     let profile_changed = shown.written.is_none_or(|(_, g)| g != generation);
     shown.written = Some((revision, generation));
-    let can_place = can_place(selected.as_ref(), &rows, floor);
+    let can_place = can_place(world);
     let Ok(colours) = colours(&doc, &profile, can_place) else {
         return;
     };
-    let empty = FixtureAreas::default();
-    let areas = world.get_resource::<FixtureAreas>();
-    let areas_loaded = areas.is_some_and(|a| a.loaded);
-    let filled = fill(
-        &shown.tiles,
-        &rows,
-        selected.as_ref(),
-        areas.unwrap_or(&empty),
-    );
+    let Some((filled, areas_loaded)) = current_fill(world, &shown.tiles) else {
+        return;
+    };
     let image = world
         .resource_mut::<Assets<Image>>()
         .add(state_image(&shown.tiles, filled.texels.clone()));

@@ -13,21 +13,21 @@
 //!
 //! The cannon:
 //!
-//! One site is loaded at a time. The source keeps every site at its master
-//! `SitePosition` in one world; here the loaded site is the origin. The Core
-//! therefore runs in the old site's frame, where the destination sits at
-//! `O_new - O_old`, and the swap re-origins everything the move carries
-//! (player, camera, its tween, the cannon, world-space particles) by that
-//! offset on the frame the player's flight tween ends. The destination is
-//! preloaded in the pre-action (the source awaits `SiteManager.AddSite`), so
-//! the swap only instantiates it, and it stays hidden until the Core's
-//! `SetRenderingEnabled(nextSite, true)` step.
+//! The source keeps every site at its master `SitePosition` in one world;
+//! here the current site is the origin. The Core therefore runs in the old
+//! site's frame, where the destination sits at `O_new - O_old`, and the swap
+//! re-origins everything the move carries (player, camera, its tween, the
+//! cannon, world-space particles) by that offset on the frame the player's
+//! flight tween ends. The destination is preloaded in the pre-action (the
+//! source awaits `SiteManager.AddSite`; a listed site such as home is still
+//! loaded, and its hidden instance is shown again), and it stays hidden until
+//! the Core's `SetRenderingEnabled(nextSite, true)` step. The old site stays
+//! shown at `O_old - O_new` after the swap
+//! ([`crate::site::queue_cannon_swap`]); the end action removes it
+//! (`CanRemoveSite`: a harvest or delivery site) or leaves it listed and
+//! hidden (home), [`crate::site::end_departure`].
 //!
-//! Named differences, each a consequence of the one-site structure:
-//! - The old site is torn down at the swap, not in the end action, so it is
-//!   not visible behind the player during the last part of the flight and
-//!   the landing (the source removes a harvest site in the end action and
-//!   never removes home).
+//! Named differences:
 //! - The environment follow (`environmentRoot.position = Step.position`
 //!   during the flight, then its y restored at landing) has no product
 //!   counterpart: the sky dome and the weather sky anchor already follow the
@@ -1053,10 +1053,13 @@ impl SiteMove {
     /// `OnSiteMoveEndAction`. Returns true when the home summary wait follows.
     fn end_action(&mut self, world: &mut World, frame: u64) -> bool {
         self.record(Step::EndAction, frame);
-        // Cleanup, OnExitSite, RemoveSite and ChangeCurrentSiteOnlyData ran
-        // at the swap; SetupLockAtCameraBounds ran when the destination
-        // settled. next.OnEnterSite: a harvest or the delivery site changes
-        // the UI screen to its field screen here.
+        // prev.OnExitSite, then RemoveSite when CanRemoveSite, else it stays
+        // listed and next.OnEnterSite's HideOtherSite hides it. Cleanup and
+        // ChangeCurrentSiteOnlyData ran at the swap; SetupLockAtCameraBounds
+        // ran when the destination settled.
+        crate::site::end_departure(world);
+        // next.OnEnterSite: a harvest or the delivery site changes the UI
+        // screen to its field screen here.
         if matches!(self.to_category.as_str(), "harvest" | "delivery") {
             world.write_message(LayerCommand::Change(LayerId::HomeField));
         }
@@ -1233,7 +1236,7 @@ impl SiteMove {
         let roots = site_roots(world);
         {
             let mut commands = world.commands();
-            crate::site::queue_transition(&mut commands, roots, next);
+            crate::site::queue_cannon_swap(&mut commands, roots, next);
         }
         world.flush();
         world.insert_resource(RevealHold);
@@ -1277,7 +1280,7 @@ impl SiteMove {
         self.swapped = true;
         self.record(Step::PlayerArrive, frame);
         info!(
-            "[site-move] swap: {} torn down, {} requested from its preload; re-origin by {:.1}",
+            "[site-move] swap: {} left shown at its offset, {} requested from its preload; re-origin by {:.1}",
             self.from, self.to, -delta
         );
     }

@@ -8,8 +8,10 @@
 //!
 //! Existing world roots can display draft poses, but FixturePlacements and
 //! returned inventory are published only after the shared store succeeds.
-//! Walls, multi-selection, stacks and full account inventory remain separate
-//! source branches; they are not converted into guessed ground behavior.
+//! The put check, the drag's clamp and height, stacking and the rotation of
+//! stacked fixtures follow `FloorEditState` and `SiteLayoutUtility`
+//! (`tile_rules`). Walls, fences and roads have their own edit states and
+//! are not converted into guessed ground behaviour.
 
 mod actors;
 mod assets;
@@ -20,6 +22,7 @@ mod input;
 mod placement;
 mod presentation;
 mod put_effect;
+mod tile_rules;
 mod validation;
 
 #[cfg(test)]
@@ -56,7 +59,11 @@ pub(crate) enum EditCommand {
     SelectCatalog { index: usize },
     SelectPlaced { uid: String },
     SelectInventory { uid: String },
+    /// A drag's touched tile (product frame, `GetSelectTile`): the drag puts
+    /// the selection's source center there, clamped into the grid and
+    /// raised by the column.
     MoveTo { center: GridPosition },
+    /// The desktop arrow keys: one tile from the source center.
     Nudge { x: i8, z: i8 },
     Rotate,
     Decide,
@@ -71,6 +78,13 @@ pub(crate) enum EditCommand {
     RotateCamera,
     /// The change-look button (`LayoutAction` 14).
     ChangeLookCamera,
+    /// The remove-all button (`SiteEditView.OnRemoveFixtureAll`): opens the
+    /// clean-up confirmation.
+    RequestCleanUp,
+    /// The confirmation's clean-up button (`CleanUpFixture`).
+    CleanUpAll,
+    /// The confirmation's cancel or close button, or a tap outside it.
+    CancelCleanUp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,12 +124,12 @@ impl From<&EditableFixture> for EditItemView {
     }
 }
 
+/// `SiteLayoutUtility.CanPutFloor` of the selection at its draft place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PutStatus {
     Ok,
-    OutOfBounds { cells: usize },
-    Overlap { cells: usize },
-    Unsupported,
+    /// The first check it failed.
+    Refused(tile_rules::Refusal),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +160,8 @@ pub(crate) struct EditView {
     pub site_type: String,
     pub dirty: bool,
     pub exit_dialog: bool,
+    /// The remove-all confirmation is open.
+    pub clean_up_dialog: bool,
     pub selected: Option<EditSelectionView>,
     pub placed_rows: Vec<EditItemView>,
     pub inventory: Vec<EditItemView>,
@@ -164,6 +180,10 @@ enum SelectionOrigin {
 #[derive(Clone)]
 struct Selection {
     item: EditableFixture,
+    /// `LayoutEditData._stackedFixtures`: the fixtures stacked on the
+    /// selected one (`GetStackedFixtures` at selection), at their draft
+    /// places; they move and rotate with it and are decided with it.
+    stacked: Vec<EditableFixture>,
     origin: SelectionOrigin,
     /// `FixtureController.CanCleanUp` of the selected fixture: not a gate and
     /// not the player's house. Only a placed fixture offers the store action.
@@ -186,6 +206,7 @@ pub(crate) struct EditSession {
     inventory: Vec<EditableFixture>,
     selected: Option<Selection>,
     exit_dialog: bool,
+    clean_up_dialog: bool,
     feedback: String,
 }
 
@@ -231,6 +252,7 @@ impl EditSession {
         self.inventory.clear();
         self.selected = None;
         self.exit_dialog = false;
+        self.clean_up_dialog = false;
         self.changed();
     }
 }
@@ -363,7 +385,80 @@ fn begin(world: &mut World, session: &mut EditSession) {
     crate::fixture_scene_inputs::invalidate_for_site_change(world);
     play_se(world, "se_change_layout", "edit-enter");
     game_state::enter(world);
+    if std::env::var("MOLY_EDIT_AUTOPLAY").is_ok() {
+        census(world, session);
+    }
     session.say("已进入家具编辑：点击家具或清单选中；决定后仍是草稿，保存才写入本地图。");
+}
+
+/// Instrument: the placed floor and rug rows with the master predicates the
+/// put rules read, the fixtures stacked on each, and what the rules miss.
+fn census(world: &World, session: &EditSession) {
+    let floor = session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid);
+    let rules = match tile_rules::rules(world, floor) {
+        Ok(rules) => rules,
+        Err(missing) => {
+            warn!("[edit-put] census: the put rules miss {missing:?}");
+            return;
+        }
+    };
+    let Some(floor) = floor else {
+        return;
+    };
+    let board = match tile_rules::Board::new(&session.rows, floor, &rules) {
+        Ok(board) => board,
+        Err(missing) => {
+            warn!("[edit-put] census: the tile data misses {missing:?}");
+            return;
+        }
+    };
+    info!(
+        "[edit-put] census: floor layout {} ({}x{}x{}), {} unavailable zones, {} rows",
+        floor.layout_id,
+        floor.width,
+        floor.height,
+        floor.depth,
+        rules.zones.as_ref().map_or(0, |zones| zones.len()),
+        session.rows.len()
+    );
+    for row in &session.rows {
+        let Some(piece) = board.piece(&row.uid) else {
+            continue;
+        };
+        let stacked = board.stacked_on(&row.uid);
+        info!(
+            "[edit-put] census {} fixture {} layout {} product center ({}, {}, {}) source box ({}, {}, {})..=({}, {}, {}) {:?} stack cells {} add-using {} stacked on it {:?} refusal {:?}",
+            row.uid,
+            row.fixture_id,
+            row.layout,
+            row.center.x,
+            row.center.y,
+            row.center.z,
+            piece.min.x,
+            piece.min.y,
+            piece.min.z,
+            piece.max.x,
+            piece.max.y,
+            piece.max.z,
+            piece.traits,
+            piece.stack_cell_count(),
+            piece.add_using_count(),
+            stacked,
+            board
+                .can_put_floor(
+                    piece,
+                    &stacked
+                        .iter()
+                        .filter_map(|uid| board.piece(uid).cloned())
+                        .collect::<Vec<_>>()
+                )
+                .err()
+                .map(tile_rules::refusal_label)
+        );
+    }
 }
 
 /// `FocusOnLayoutEdit` (event 36) for a fixture: its view position, its
@@ -432,12 +527,23 @@ fn place_new(
     // The look-at relative to the site, in the source frame (X mirrored).
     let relative = look_at - site_origin(world);
     let relative = Vec3::new(-relative.x, relative.y, relative.z);
+    let board = match tile_rules::rules(world, Some(floor))
+        .and_then(|rules| Ok((tile_rules::Board::new(&session.rows, floor, &rules)?, rules)))
+    {
+        Ok(found) => found,
+        Err(missing) => {
+            warn!("[edit-put] PutFixture {} ({source}): the put check's input {missing:?} is missing; not put", item.uid);
+            session.say(format!("摆放检查的输入尚未就绪（{missing:?}），暂时不能摆放新家具。"));
+            return false;
+        }
+    };
+    let (board, rules) = board;
     let found = placement::place(
         item,
         source_direction,
         relative,
-        &session.rows,
-        floor,
+        &board,
+        &rules,
         put_type.as_deref(),
     );
     let mut counts: Vec<(String, usize)> = Vec::new();
@@ -495,6 +601,290 @@ fn place_new(
     true
 }
 
+/// The committed rows stacked on `uid` (`GetStackedFixtures`), in the
+/// source's depth-first order.
+fn stacked_rows(
+    world: &World,
+    session: &EditSession,
+    uid: &str,
+) -> Result<Vec<EditableFixture>, tile_rules::Missing> {
+    let floor = session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid);
+    let rules = tile_rules::rules(world, floor)?;
+    let board = tile_rules::Board::new(
+        &session.rows,
+        floor.ok_or(tile_rules::Missing::FloorGrid)?,
+        &rules,
+    )?;
+    Ok(board
+        .stacked_on(uid)
+        .iter()
+        .filter_map(|stacked| session.rows.iter().find(|row| row.uid == *stacked).cloned())
+        .collect())
+}
+
+/// The selection's put check against the committed rows.
+fn put_status(world: &World, session: &EditSession, selection: &Selection) -> PutStatus {
+    let floor = session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid);
+    let rules = tile_rules::rules(world, floor);
+    validation::put(
+        &selection.item,
+        &selection.stacked,
+        &session.rows,
+        floor,
+        rules.as_ref().map_err(|missing| *missing),
+    )
+}
+
+/// A source-frame place of a draft row, back in the product frame.
+fn product_row(
+    item: &EditableFixture,
+    center: GridPosition,
+    direction: Direction,
+    layout: u8,
+) -> Result<EditableFixture, String> {
+    let (center, direction, layout) =
+        moly_assets::player_data::mirror_fixture_layout(center, item.grid_size, direction, layout)?;
+    Ok(EditableFixture {
+        center,
+        direction,
+        layout,
+        ..item.clone()
+    })
+}
+
+/// Where a drag puts the selection.
+#[derive(Clone, Copy, Debug)]
+enum DragTarget {
+    /// The touched tile, in the product frame (`GetSelectTile`).
+    Touched(GridPosition),
+    /// The desktop arrow keys: one tile from the source center.
+    Step { x: i8, z: i8 },
+}
+
+/// `FloorEditState.UpdateEditTargetPosition` and
+/// `UpdateEditTargetStackFixture`: the center goes to the target clamped so
+/// the box stays in the grid (`ClampPosition`), its y to the column height
+/// at the new minimum corner (`AdjustSelectTileHeight`), and the stacked
+/// fixtures move by the same offset.
+fn drag(world: &mut World, session: &mut EditSession, target: DragTarget) {
+    let Some(selected) = session.selected.as_ref() else {
+        return;
+    };
+    let floor = session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid);
+    let prepared = tile_rules::rules(world, floor).and_then(|rules| {
+        let floor = floor.ok_or(tile_rules::Missing::FloorGrid)?;
+        let board = tile_rules::Board::new(&session.rows, floor, &rules)?;
+        let piece = tile_rules::Piece::new(&selected.item, &rules)?;
+        Ok((rules, board, piece))
+    });
+    let (rules, board, piece) = match prepared {
+        Ok(prepared) => prepared,
+        Err(missing) => {
+            session.say(format!("摆放检查的输入尚未就绪（{missing:?}），未移动家具。"));
+            return;
+        }
+    };
+    let target = match target {
+        DragTarget::Touched(tile) => {
+            GridPosition::new((-i16::from(tile.x) - 1) as i8, tile.y, tile.z)
+        }
+        DragTarget::Step { x, z } => piece.center + GridPosition::new(x.wrapping_neg(), 0, z),
+    };
+    let clamped = board.clamp(&piece, target);
+    let moved = match tile_rules::Piece::at(
+        &selected.item,
+        &rules,
+        clamped,
+        piece.direction,
+        piece.layout,
+    ) {
+        Ok(moved) => moved,
+        Err(missing) => {
+            session.say(format!("目标位置超出网格（{missing:?}），未移动家具。"));
+            return;
+        }
+    };
+    let y = board.column_height(piece.layout, moved.min, &piece.uid);
+    let center = GridPosition::new(clamped.x, y, clamped.z);
+    let offset = center - piece.center;
+    let result =
+        product_row(&selected.item, center, piece.direction, piece.layout).and_then(|item| {
+            let stacked = selected
+                .stacked
+                .iter()
+                .map(|child| {
+                    let child_piece = tile_rules::Piece::new(child, &rules)
+                        .map_err(|missing| format!("{missing:?}"))?;
+                    product_row(
+                        child,
+                        child_piece.center + offset,
+                        child_piece.direction,
+                        child_piece.layout,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((item, stacked))
+        });
+    let (item, stacked) = match result {
+        Ok(found) => found,
+        Err(error) => {
+            session.say(format!("目标位置超出网格（{error}），未移动家具。"));
+            return;
+        }
+    };
+    let selected = session.selected.as_mut().expect("checked selection");
+    if selected.item == item && selected.stacked == stacked {
+        return;
+    }
+    info!(
+        "[edit-put] drag {}: target ({}, {}, {}) -> clamped ({}, {}, {}) -> column height {y} at min ({}, {}); source center ({}, {}, {}) -> ({}, {}, {}); product center ({}, {}, {}); {} stacked moved by ({}, {}, {})",
+        item.uid,
+        target.x,
+        target.y,
+        target.z,
+        clamped.x,
+        clamped.y,
+        clamped.z,
+        moved.min.x,
+        moved.min.z,
+        piece.center.x,
+        piece.center.y,
+        piece.center.z,
+        center.x,
+        center.y,
+        center.z,
+        item.center.x,
+        item.center.y,
+        item.center.z,
+        stacked.len(),
+        offset.x,
+        offset.y,
+        offset.z
+    );
+    selected.item = item;
+    selected.stacked = stacked;
+    session.changed();
+}
+
+/// `FloorEditState.OnPushRotationButton`.
+fn rotate(world: &mut World, session: &mut EditSession) {
+    use moly_law::fixture::areas::layout_square_min;
+    let Some(selected) = session.selected.as_ref() else {
+        return;
+    };
+    let floor = session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid);
+    let prepared = tile_rules::rules(world, floor).and_then(|rules| {
+        let floor = floor.ok_or(tile_rules::Missing::FloorGrid)?;
+        let board = tile_rules::Board::new(&session.rows, floor, &rules)?;
+        let piece = tile_rules::Piece::new(&selected.item, &rules)?;
+        let stacked = selected
+            .stacked
+            .iter()
+            .map(|child| tile_rules::Piece::new(child, &rules))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((rules, board, piece, stacked))
+    });
+    let (rules, board, piece, stacked) = match prepared {
+        Ok(prepared) => prepared,
+        Err(missing) => {
+            session.say(format!("摆放检查的输入尚未就绪（{missing:?}），未旋转家具。"));
+            return;
+        }
+    };
+    if board.crossing_multiple_bases(&piece, &stacked) {
+        info!(
+            "[edit-put] OnPushRotationButton {}: a fixture on it crosses more than this base; not rotated",
+            piece.uid
+        );
+        return;
+    }
+    // RotationSquareToRight (source direction + 1), then
+    // UpdateEditRotateTargetPosition at the grid position.
+    let direction =
+        Direction::from_u8((piece.direction as u8 + 1) % 4).expect("four source directions");
+    let turned =
+        match tile_rules::Piece::at(&selected.item, &rules, piece.center, direction, piece.layout) {
+            Ok(turned) => turned,
+            Err(missing) => {
+                session.say(format!("旋转后超出网格（{missing:?}），未旋转家具。"));
+                return;
+            }
+        };
+    let clamped = board.clamp(&turned, piece.center);
+    let placed =
+        match tile_rules::Piece::at(&selected.item, &rules, clamped, direction, piece.layout) {
+            Ok(placed) => placed,
+            Err(missing) => {
+                session.say(format!("旋转后超出网格（{missing:?}），未旋转家具。"));
+                return;
+            }
+        };
+    let y = board.column_height(piece.layout, placed.min, &piece.uid);
+    let center = GridPosition::new(clamped.x, y, clamped.z);
+    // UpdateStackedFixturesPositions(clamped - grid position), then
+    // RotationToRightStackedFixture about the base's square minimum.
+    let offset = clamped - piece.center;
+    let base_square = layout_square_min(center, selected.item.grid_size);
+    let base_size = selected.item.grid_size;
+    let result = product_row(&selected.item, center, direction, piece.layout).and_then(|item| {
+        let rows = selected
+            .stacked
+            .iter()
+            .zip(&stacked)
+            .map(|(row, child)| {
+                let at = child.center + offset;
+                let own = tile_rules::rotate_right(
+                    at,
+                    layout_square_min(at, row.grid_size),
+                    row.grid_size,
+                );
+                let d = own - at;
+                let about_base = tile_rules::rotate_right(at, base_square, base_size);
+                let moved = about_base - GridPosition::new(d.x, 0, d.z);
+                let turned = Direction::from_u8((child.direction as u8 + 1) % 4)
+                    .expect("four source directions");
+                product_row(row, moved, turned, child.layout)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((item, rows))
+    });
+    let (item, rows) = match result {
+        Ok(found) => found,
+        Err(error) => {
+            session.say(format!("旋转后超出网格（{error}），未旋转家具。"));
+            return;
+        }
+    };
+    info!(
+        "[edit-put] OnPushRotationButton {}: source direction {:?} -> {direction:?}; center ({}, {}, {}) -> clamped ({}, {}, {}) height {y}; {} stacked rotated with it",
+        item.uid,
+        piece.direction,
+        piece.center.x,
+        piece.center.y,
+        piece.center.z,
+        clamped.x,
+        clamped.y,
+        clamped.z,
+        rows.len()
+    );
+    let selected = session.selected.as_mut().expect("checked selection");
+    selected.item = item;
+    selected.stacked = rows;
+    session.changed();
+}
+
 fn select(
     session: &mut EditSession,
     item: EditableFixture,
@@ -502,8 +892,41 @@ fn select(
     world: &mut World,
 ) {
     if !validation::is_ground(&item) {
-        session.say("该家具需要墙面、道路或堆叠编辑分支，当前地面编辑不会改动它。");
+        session.say("该家具属于墙面编辑分支，当前地面编辑不会改动它。");
         return;
+    }
+    // FloorEditState.GetTouchedFixture skips fences and roads: they belong to
+    // the fence and road edit states.
+    match put_effect::traits_table(world) {
+        None => {
+            session.say("家具主表仍在加载，暂时不能选中家具。");
+            return;
+        }
+        Some(traits) if traits.get(&item.fixture_id).is_some_and(|t| t.joint) => {
+            session.say("围栏与道路属于各自的编辑分支，当前地面编辑不会改动它。");
+            return;
+        }
+        Some(_) => {}
+    }
+    // `GetStackedFixtures`: a placed fixture carries the fixtures stacked on
+    // it (a new or inventory fixture has none).
+    let stacked = if origin == SelectionOrigin::Placed {
+        match stacked_rows(world, session, &item.uid) {
+            Ok(stacked) => stacked,
+            Err(missing) => {
+                session.say(format!("摆放检查的输入尚未就绪（{missing:?}），暂时不能选中家具。"));
+                return;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if !stacked.is_empty() {
+        info!(
+            "[edit-put] SelectFixture {}: stacked fixtures {:?} move with it",
+            item.uid,
+            stacked.iter().map(|row| row.uid.as_str()).collect::<Vec<_>>()
+        );
     }
     // Selecting another item is an explicit Reset of an unfinished operation,
     // never an implicit Decide or an inventory debit.
@@ -516,6 +939,7 @@ fn select(
     let put = (origin != SelectionOrigin::Placed).then(|| item.clone());
     session.selected = Some(Selection {
         item,
+        stacked,
         origin,
         can_clean_up,
     });
@@ -547,11 +971,17 @@ fn decide(session: &mut EditSession, world: &mut World) {
     let Some(selection) = session.selected.as_ref() else {
         return;
     };
-    let Some(base) = session.baseline.as_ref() else {
+    if session.baseline.is_none() {
         return;
-    };
-    let status = validation::put(&selection.item, &session.rows, base.floor_grid());
+    }
+    // IsEnableDecideButton: CanPutFloor of the selection.
+    let status = put_status(world, session, selection);
     if status != PutStatus::Ok {
+        info!(
+            "[edit-put] Decide {} refused: {}",
+            selection.item.uid,
+            validation::put_label(status)
+        );
         session.say(format!(
             "这里不能放置：{}。草稿仍然保留。",
             validation::put_label(status)
@@ -560,6 +990,7 @@ fn decide(session: &mut EditSession, world: &mut World) {
     }
     let selection = session.selected.take().expect("checked selection");
     let decided = selection.item.clone();
+    let stacked = selection.stacked.clone();
     match selection.origin {
         SelectionOrigin::Placed => {
             let Some(row) = session
@@ -587,6 +1018,13 @@ fn decide(session: &mut EditSession, world: &mut World) {
             session.rows.push(selection.item);
         }
         SelectionOrigin::Mock => session.rows.push(selection.item),
+    }
+    // UpdateTileData: the stacked fixtures moved with the base keep their
+    // new places too.
+    for child in &stacked {
+        if let Some(row) = session.rows.iter_mut().find(|row| row.uid == child.uid) {
+            *row = child.clone();
+        }
     }
     session.phase = EditPhase::Browsing;
     session.changed();
@@ -617,7 +1055,17 @@ fn return_item(session: &mut EditSession) {
         return;
     }
     let uid = selection.item.uid.clone();
-    if session.inventory.iter().any(|item| item.uid == uid) {
+    // FloorEditState.RemoveFixture: the fixtures stacked on it go to storage
+    // with it (GetStackFixtureUidList, recursively).
+    let stacked: Vec<String> = selection
+        .stacked
+        .iter()
+        .map(|row| row.uid.clone())
+        .collect();
+    if std::iter::once(&uid)
+        .chain(&stacked)
+        .any(|uid| session.inventory.iter().any(|item| &item.uid == uid))
+    {
         session.say("该UID已经在库存中，拒绝重复回收，原数据保持不变。");
         return;
     }
@@ -629,10 +1077,78 @@ fn return_item(session: &mut EditSession) {
     // moved pose is irrelevant to ownership and is not accidentally decided.
     let item = session.rows.remove(index);
     session.inventory.push(item);
+    for child in &stacked {
+        if let Some(index) = session.rows.iter().position(|row| &row.uid == child) {
+            let row = session.rows.remove(index);
+            session.inventory.push(row);
+        }
+    }
+    if !stacked.is_empty() {
+        info!(
+            "[edit-put] RemoveFixture {uid}: the stacked fixtures {stacked:?} go to storage with it"
+        );
+    }
     session.selected = None;
     session.phase = EditPhase::Browsing;
     session.changed();
     session.say("已回收到离线库存草稿；物品UID保留，保存后可在其它地图重新摆放。");
+}
+
+/// `SiteLayoutEditor.CleanUpLayout` in the floor edit state
+/// (`FloorEditState.RemoveFixtureAll`): the selection is dropped, then every
+/// fixture of the floor and rug grids that `IsRemoveTarget` passes (not a
+/// fence or road, `CanCleanUp`) goes to storage, with what stands on it.
+fn clean_up_all(world: &World, session: &mut EditSession) {
+    let (Some(homes), Some(traits)) = (
+        world.get_resource::<crate::entry::house::HomeFixtures>(),
+        put_effect::traits_table(world),
+    ) else {
+        session.say("家具主表仍在加载，未清理家具。");
+        return;
+    };
+    session.cancel_selection();
+    let (mut kept_house, mut kept_joint, mut moved) = (0usize, 0usize, Vec::new());
+    let mut index = 0;
+    while index < session.rows.len() {
+        let row = &session.rows[index];
+        let in_grids = row.layout == layout_type::FLOOR || row.layout == layout_type::RUG;
+        let joint = traits.get(&row.fixture_id).is_some_and(|t| t.joint);
+        let can_clean_up = homes.can_clean_up(&row.package);
+        if !in_grids {
+            index += 1;
+            continue;
+        }
+        if joint {
+            kept_joint += 1;
+            index += 1;
+            continue;
+        }
+        if !can_clean_up {
+            kept_house += 1;
+            index += 1;
+            continue;
+        }
+        if session.inventory.iter().any(|item| item.uid == row.uid) {
+            index += 1;
+            continue;
+        }
+        let row = session.rows.remove(index);
+        moved.push(row.uid.clone());
+        session.inventory.push(row);
+    }
+    info!(
+        "[edit-put] RemoveFixtureAll (floor and rug grids): {} fixtures to storage {:?}; kept {} that CanCleanUp refuses, {} fences or roads; {} rows remain",
+        moved.len(),
+        moved,
+        kept_house,
+        kept_joint,
+        session.rows.len()
+    );
+    session.changed();
+    session.say(format!(
+        "已清理 {} 件家具到离线库存草稿；家与大门保留。保存后生效。",
+        moved.len()
+    ));
 }
 
 fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
@@ -664,7 +1180,13 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
     let Some(areas) = world.get_resource::<FixtureAreas>() else {
         return;
     };
-    if let Err(error) = validation::save(&session.rows, base.floor_grid(), areas) {
+    let rules = tile_rules::rules(world, base.floor_grid());
+    if let Err(error) = validation::save(
+        &session.rows,
+        base.floor_grid(),
+        areas,
+        rules.as_ref().map_err(|missing| *missing),
+    ) {
         session.say(format!(
             "保存未完成：{error}。未自动回收家具，原布局与草稿均保留。"
         ));
@@ -805,41 +1327,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             }
             select(session, item, SelectionOrigin::Inventory, world);
         }
-        EditCommand::MoveTo { center } => {
-            if let Some(selected) = session.selected.as_mut() {
-                if center.y != 0 {
-                    session.say("抬高与堆叠编辑尚未接入，未改变家具高度。");
-                    return;
-                }
-                if selected.item.center != center {
-                    selected.item.center = center;
-                    session.changed();
-                }
-            }
-        }
-        EditCommand::Nudge { x, z } => {
-            if let Some(selected) = session.selected.as_mut() {
-                let Some(x) = selected.item.center.x.checked_add(x) else {
-                    return;
-                };
-                let Some(z) = selected.item.center.z.checked_add(z) else {
-                    return;
-                };
-                let center = GridPosition::new(x, 0, z);
-                if selected.item.center != center {
-                    selected.item.center = center;
-                    session.changed();
-                }
-            }
-        }
-        EditCommand::Rotate => {
-            if let Some(selected) = session.selected.as_mut() {
-                selected.item.direction =
-                    Direction::from_u8((selected.item.direction as u8 + 1) % 4)
-                        .expect("four source direction values");
-                session.changed();
-            }
-        }
+        EditCommand::MoveTo { center } => drag(world, session, DragTarget::Touched(center)),
+        EditCommand::Nudge { x, z } => drag(world, session, DragTarget::Step { x, z }),
+        EditCommand::Rotate => rotate(world, session),
         EditCommand::Decide => decide(session, world),
         EditCommand::RotateCamera => crate::floor_edit_camera::rotate(world),
         EditCommand::ChangeLookCamera => crate::floor_edit_camera::change_look(world),
@@ -870,6 +1360,25 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
         EditCommand::KeepEditing => {
             session.exit_dialog = false;
             session.changed();
+        }
+        EditCommand::RequestCleanUp => {
+            if session.phase != EditPhase::Idle && !session.exit_dialog {
+                session.clean_up_dialog = true;
+                session.changed();
+            }
+        }
+        EditCommand::CancelCleanUp => {
+            if session.clean_up_dialog {
+                session.clean_up_dialog = false;
+                session.changed();
+            }
+        }
+        EditCommand::CleanUpAll => {
+            // Only the confirmation offers this action.
+            if session.clean_up_dialog {
+                session.clean_up_dialog = false;
+                clean_up_all(world, session);
+            }
         }
         EditCommand::DiscardAndExit => {
             // Not a hotkey nor a site-switch fallback. Only the explicit exit
@@ -961,14 +1470,16 @@ fn advance_recovery(world: &mut World) {
     world.insert_resource(session);
 }
 
-fn publish_view(session: Res<EditSession>, mut view: ResMut<EditView>) {
+fn publish_view(world: &mut World) {
+    let (Some(session), Some(view)) = (
+        world.get_resource::<EditSession>(),
+        world.get_resource::<EditView>(),
+    ) else {
+        return;
+    };
     if view.revision == session.revision {
         return;
     }
-    let floor = session
-        .baseline
-        .as_ref()
-        .and_then(FixturePlacements::floor_grid);
     let selected = session
         .selected
         .as_ref()
@@ -977,10 +1488,20 @@ fn publish_view(session: Res<EditSession>, mut view: ResMut<EditView>) {
             from_inventory: selection.origin == SelectionOrigin::Inventory,
             is_new_mock: selection.origin == SelectionOrigin::Mock,
             can_clean_up: selection.can_clean_up,
-            put_status: validation::put(&selection.item, &session.rows, floor),
+            put_status: put_status(world, session, selection),
         });
     let active = session.phase != EditPhase::Idle;
-    *view = EditView {
+    // A fence or a road is edited by its own state (the floor editor's
+    // touch skips it).
+    let traits = put_effect::traits_table(world);
+    let editable = |item: &EditableFixture| {
+        let mut view = EditItemView::from(item);
+        view.editable &= !traits
+            .as_ref()
+            .is_some_and(|traits| traits.get(&item.fixture_id).is_some_and(|t| t.joint));
+        view
+    };
+    let next = EditView {
         revision: session.revision,
         active,
         phase: session.phase,
@@ -994,9 +1515,10 @@ fn publish_view(session: Res<EditSession>, mut view: ResMut<EditView>) {
             .map_or_else(String::new, |rows| rows.site_type().into()),
         dirty: session.dirty(),
         exit_dialog: session.exit_dialog,
+        clean_up_dialog: session.clean_up_dialog,
         selected,
-        placed_rows: session.rows.iter().map(EditItemView::from).collect(),
-        inventory: session.inventory.iter().map(EditItemView::from).collect(),
+        placed_rows: session.rows.iter().map(&editable).collect(),
+        inventory: session.inventory.iter().map(&editable).collect(),
         catalog: CANDIDATES
             .iter()
             .enumerate()
@@ -1011,6 +1533,7 @@ fn publish_view(session: Res<EditSession>, mut view: ResMut<EditView>) {
         can_save: active && session.selected.is_none() && session.pending_reload.is_none(),
         feedback: session.feedback.clone(),
     };
+    world.insert_resource(next);
 }
 
 pub struct FixtureEditPlugin;
@@ -1023,11 +1546,19 @@ impl Plugin for FixtureEditPlugin {
             .init_resource::<EditView>()
             .init_resource::<PendingCommands>()
             .add_message::<EditCommand>()
-            .add_systems(Startup, (assets::load, put_effect::request_tables))
+            .add_systems(
+                Startup,
+                (
+                    assets::load,
+                    put_effect::request_tables,
+                    tile_rules::request_zones,
+                ),
+            )
             .add_systems(
                 Update,
                 (assets::parse_areas, assets::plan_candidates).chain(),
             )
+            .add_systems(Update, tile_rules::read_zones)
             .add_systems(
                 Update,
                 read_keyboard
