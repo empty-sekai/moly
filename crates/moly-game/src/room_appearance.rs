@@ -385,6 +385,9 @@ fn format_pattern(pattern: &str, bundle: &str, color_id: u32) -> Result<String, 
 /// name does not match. A pattern the regex engine here does not accept
 /// (.NET-only syntax such as backreferences or lookaround) is refused.
 fn match_single_group<'a>(name: &'a str, pattern: &str) -> Result<Option<&'a str>, String> {
+    // .NET syntax the regex crate lacks (lookaround, backreferences, some
+    // inline options) fails here and is refused by name: the caller logs the
+    // error and the room keeps its module materials.
     let regex = regex::Regex::new(pattern)
         .map_err(|error| format!("房间外观贴图名模式 {pattern} 不是可移植的正则：{error}"))?;
     Ok(regex
