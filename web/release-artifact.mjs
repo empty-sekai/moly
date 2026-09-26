@@ -23,6 +23,7 @@ import { isDeepStrictEqual } from "node:util";
 import { COORDINATE_CONTRACT, requireCoordinateContract, validateCoordinatePair } from "./coordinate-contract.mjs";
 import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
 import { bundleCacheWorkerFiles } from "./cache-worker-bundle.mjs";
+import { GAME_ABI, GAME_EXPORTS } from "./game-controller.mjs";
 
 export const STAGE_FILES = [
   "embed.mjs",
@@ -47,6 +48,35 @@ export const STAGE_FILES = [
   "engine-loader.mjs",
 ];
 
+/** The game loader a product page imports, and every module it imports. */
+export const GAME_FILES = [
+  "game-boot.mjs",
+  "game-controller.mjs",
+  "engine-loader.mjs",
+  "boot.mjs",
+  "base-resources.mjs",
+  "coordinate-contract.mjs",
+  "asset-pack-client.mjs",
+  "embed-contract.mjs",
+  "stage-audio.mjs",
+];
+
+export const PROFILES = Object.freeze({
+  stage: Object.freeze({
+    files: STAGE_FILES,
+    abi: [
+      "start_stage",
+      "library_snapshot",
+      "library_command",
+      "library_catalog",
+      "library_diagnostics",
+    ],
+  }),
+  game: Object.freeze({ files: GAME_FILES, abi: GAME_EXPORTS }),
+});
+export const PUBLIC_PREFIX = "/moly/";
+const PREFIX = /^\/(?:[a-z0-9][a-z0-9._-]*\/)*$/;
+
 /**
  * Convert the host-mounted `/moly/` manifest addresses to object-store
  * logical keys.  The S3 uploader uses this immutable projection when it puts
@@ -70,6 +100,8 @@ export function toLogicalResourceManifest(manifest) {
       logical.release.module = logicalPath(logical.release.module);
     if (logical.release.stage !== undefined)
       logical.release.stage = logicalPath(logical.release.stage);
+    if (logical.release.game?.module !== undefined)
+      logical.release.game.module = logicalPath(logical.release.game.module);
   }
   if (Array.isArray(logical.snapshots)) {
     for (const snapshot of logical.snapshots) {
@@ -226,7 +258,7 @@ export const DETAIL_STORE = "/moly/catalog-store/";
 export function detailBundle(key) {
   return parseInt(sha256(Buffer.from(key)).slice(0, 8), 16) % DETAIL_BUNDLES;
 }
-export function splitCatalog(raw, snapshotId, publishImage = (image) => image) {
+export function splitCatalog(raw, snapshotId, publishImage = (image) => image, detailStore = DETAIL_STORE) {
   if (
     raw.schemaVersion !== 1 ||
     raw.ready !== true ||
@@ -290,7 +322,7 @@ export function splitCatalog(raw, snapshotId, publishImage = (image) => image) {
       );
       const name = `${sha256(bytes)}.json`;
       details.set(name, bytes);
-      return DETAIL_STORE + name;
+      return detailStore + name;
     });
   const index = {
     schemaVersion: 2,
@@ -348,7 +380,22 @@ export async function publish({
   reuseEngine = false,
   developmentLinks = false,
   packageRoot,
+  profiles = ["stage"],
+  publicPrefix = PUBLIC_PREFIX,
 }) {
+  if (
+    !Array.isArray(profiles) ||
+    profiles.length < 1 ||
+    new Set(profiles).size !== profiles.length ||
+    profiles.some((profile) => !Object.hasOwn(PROFILES, profile))
+  )
+    throw new Error("Publish one or more of the profiles: stage, game");
+  if (typeof publicPrefix !== "string" || !PREFIX.test(publicPrefix))
+    throw new Error("The public prefix must be a canonical absolute directory");
+  // The stage page, its preflight and its worker are served below /moly/.
+  if (profiles.includes("stage") && publicPrefix !== PUBLIC_PREFIX)
+    throw new Error(`The stage profile is served only below ${PUBLIC_PREFIX}`);
+  const prefix = publicPrefix;
   workspace = realpathSync(workspace);
   output = path.resolve(output);
   if (!reuseEngine)
@@ -366,8 +413,8 @@ export async function publish({
           !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshot.id) ||
           !["cn", "jp"].includes(snapshot.region) ||
           !/^\d+\.\d+\.\d+$/.test(snapshot.version) ||
-          snapshot.catalog !== `/moly/snapshots/${snapshot.id}/catalog/index.json` ||
-          snapshot.assets !== (snapshot.packs ? "/moly/asset-store/" : `/moly/snapshots/${snapshot.id}/assets/`)))
+          snapshot.catalog !== `${prefix}snapshots/${snapshot.id}/catalog/index.json` ||
+          snapshot.assets !== (snapshot.packs ? `${prefix}asset-store/` : `${prefix}snapshots/${snapshot.id}/assets/`)))
       throw new Error("Cannot reuse an unverified source-qualified publication");
     const regions = new Set();
     for (const snapshot of retained.snapshots) {
@@ -417,8 +464,10 @@ export async function publish({
     : workspaceFingerprint(workspace);
   const files = new Map(),
     engines = {};
-  for (const relative of STAGE_FILES)
-    files.set(relative, readFileSync(path.join(workspace, "web", relative)));
+  for (const profile of profiles)
+    for (const relative of PROFILES[profile].files)
+      if (!files.has(relative))
+        files.set(relative, readFileSync(path.join(workspace, "web", relative)));
   for (const backend of ["webgpu", "webgl2"]) {
     const directory = reused
       ? path.join(reusedRoot, "pkg", backend)
@@ -456,15 +505,10 @@ export async function publish({
         const exports = WebAssembly.Module.exports(after).map(
           (value) => value.name,
         );
-        for (const entry of [
-          "start_stage",
-          "library_snapshot",
-          "library_command",
-          "library_catalog",
-          "library_diagnostics",
-        ])
-          if (!exports.includes(entry))
-            throw new Error(`Missing stage ABI: ${entry}`);
+        for (const profile of profiles)
+          for (const entry of PROFILES[profile].abi)
+            if (!exports.includes(entry))
+              throw new Error(`Missing ${profile} ABI: ${entry}`);
         const gzipBytes = gzipSync(bytes, { level: 9 }).length;
         const brotliBytes = brotliCompressSync(bytes, {
           params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 9 },
@@ -737,9 +781,10 @@ export async function publish({
             const entry = packed.entries.get(image);
             if (entry?.codec !== "identity")
               throw new Error(`Pinned pack cannot serve catalog image: ${image}`);
-            return `/moly/asset-store/blobs/${entry.blob}`;
+            return `${prefix}asset-store/blobs/${entry.blob}`;
           }
         : undefined,
+      `${prefix}catalog-store/`,
     );
     for (const [name, bytes] of catalogFiles)
       compressedPut(path.join(directory, "catalog", name), bytes);
@@ -775,7 +820,7 @@ export async function publish({
           process.platform === "win32" ? "junction" : "dir",
         );
     } else mkdirSync(mount, { recursive: true });
-    const root = `/moly/snapshots/${id}/`;
+    const root = `${prefix}snapshots/${id}/`;
     snapshots.push({
       id,
       coordinateContract: COORDINATE_CONTRACT,
@@ -784,7 +829,7 @@ export async function publish({
       available: true,
       region: source.region,
       version: catalog.version,
-      assets: packed ? "/moly/asset-store/" : `${root}assets/`,
+      assets: packed ? `${prefix}asset-store/` : `${root}assets/`,
       ...(packed
         ? {
             packs: true,
@@ -869,37 +914,83 @@ export async function publish({
     schemaVersion: EMBED_VERSION,
     release: {
       id: releaseId,
-      module: `/moly/releases/${releaseId}/embed.mjs`,
-      stage: `/moly/releases/${releaseId}/stage.html`,
+      ...(profiles.includes("stage")
+        ? {
+            module: `${prefix}releases/${releaseId}/embed.mjs`,
+            stage: `${prefix}releases/${releaseId}/stage.html`,
+          }
+        : {}),
       contractVersion: EMBED_VERSION,
       coordinateContract: COORDINATE_CONTRACT,
       engines,
+      ...(profiles.includes("game")
+        ? {
+            game: {
+              module: `${prefix}releases/${releaseId}/game-boot.mjs`,
+              abi: GAME_ABI,
+              engines,
+            },
+          }
+        : {}),
     },
     snapshots,
   };
   mkdirSync(output, { recursive: true });
-  const workerPath = path.join(output, "cache-worker.mjs");
-  // One classic script: the worker URL is fixed and imports nothing.
-  const workerBytes = Buffer.from(
-    bundleCacheWorkerFiles(
-      "./cache-worker.mjs",
-      pathToFileURL(path.join(workspace, "web") + path.sep),
-    ),
-  );
-  if (
-    existsSync(workerPath) &&
-    !existsSync(manifestPath) &&
-    !readFileSync(workerPath).equals(workerBytes)
-  )
-    throw new Error("Output contains an unrelated cache worker");
-  const workerTemporary = `${workerPath}.${process.pid}.tmp`;
-  writeFileSync(workerTemporary, workerBytes, { flag: "wx" });
-  renameSync(workerTemporary, workerPath);
+  // The retention worker belongs to the stage and its /moly/ scope.
+  if (profiles.includes("stage")) {
+    const workerPath = path.join(output, "cache-worker.mjs");
+    // One classic script: the worker URL is fixed and imports nothing.
+    const workerBytes = Buffer.from(
+      bundleCacheWorkerFiles(
+        "./cache-worker.mjs",
+        pathToFileURL(path.join(workspace, "web") + path.sep),
+      ),
+    );
+    if (
+      existsSync(workerPath) &&
+      !existsSync(manifestPath) &&
+      !readFileSync(workerPath).equals(workerBytes)
+    )
+      throw new Error("Output contains an unrelated cache worker");
+    const workerTemporary = `${workerPath}.${process.pid}.tmp`;
+    writeFileSync(workerTemporary, workerBytes, { flag: "wx" });
+    renameSync(workerTemporary, workerPath);
+  }
   const temporary = path.join(output, `manifest.${process.pid}.tmp`);
   writeFileSync(temporary, JSON.stringify(manifest, null, 2) + "\n", {
     flag: "wx",
   });
   renameSync(temporary, manifestPath);
+  if (profiles.includes("game")) {
+    // The product site reads only this pointer; manifest.json stays the
+    // stage host's record.
+    const pointer = {
+      publisher: "moly-release-artifact-v1",
+      schemaVersion: 1,
+      prefix,
+      release: {
+        id: releaseId,
+        module: manifest.release.game.module,
+        abi: GAME_ABI,
+        coordinateContract: COORDINATE_CONTRACT,
+      },
+      snapshots: snapshots.map(({ id, region, version, assets, packs, assetCatalog }) => ({
+        id,
+        region,
+        version,
+        assets,
+        packs: packs === true,
+        assetCatalog: packs === true ? assetCatalog : null,
+      })),
+    };
+    const pointerPath = path.join(output, "game", "manifest.json");
+    mkdirSync(path.dirname(pointerPath), { recursive: true });
+    const pointerTemporary = `${pointerPath}.${process.pid}.tmp`;
+    writeFileSync(pointerTemporary, JSON.stringify(pointer, null, 2) + "\n", {
+      flag: "wx",
+    });
+    renameSync(pointerTemporary, pointerPath);
+  }
   return manifest;
 }
 
