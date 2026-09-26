@@ -60,6 +60,21 @@ pub(crate) fn prepare_control(
     prepare(world, root, doc, selected, Stepping::Played)
 }
 
+/// The same for an owner that plays the systems with `ParticleSystem.Play`
+/// later (a timeline Signal reaction): the systems are prepared and admitted
+/// as [`prepare_control`]'s, but wait stopped and out of the manager, drawing
+/// nothing, until [`play_pending`] runs their first Play (its seed reset and
+/// birth owner install). `Ok(None)` while geometry or GPU preparation is
+/// pending.
+pub(crate) fn prepare_play_later(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::PlayLater)
+}
+
 /// The same for a Director's ControlPlayable: the systems wait for its paused
 /// clock and step by its `ParticleSystem.Simulate` time; each restart installs
 /// the birth owner from the manual seed (see
@@ -147,6 +162,16 @@ fn prepare(
                             doc["emitters"][candidate.plan.ordinal]["node"]))?;
                     world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system), played));
                 }
+                // Stopped and out of the manager until its owner's first Play:
+                // the host skips a stopped system (it draws nothing), and only
+                // that Play installs the birth owner.
+                Stepping::PlayLater => {
+                    let inactive = world.get::<moly_assets::scene_state::SourceInactive>(candidate.anchor).is_some();
+                    world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system),
+                        PendingPlay { route: candidate.plan.route.clone(), event_edges: candidate.plan.event_edges.clone(),
+                            culling: candidate.plan.culling.clone() },
+                        crate::fixture_timeline_particles::StoppedByDirector { was_inactive: inactive }));
+                }
             }
             draws.push(draw);
         }
@@ -197,13 +222,43 @@ pub(crate) enum Path {
 
 /// Who steps an admitted system. `Played`: its own per-frame update after a
 /// `ParticleSystem.Play` (play on awake or explicit), which this host runs as
-/// the weather host does, with the native birth owner. `Director`:
+/// the weather host does, with the native birth owner. `PlayLater`: the same
+/// once its owner's Play arrives; stopped until then. `Director`:
 /// `ParticleSystem.Simulate` from a ControlPlayable, whose restarts install
 /// the birth owner from the manual seed and whose chunks run the same update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stepping {
     Played,
+    PlayLater,
     Director,
+}
+
+/// A system prepared for a later `ParticleSystem.Play` (see
+/// [`prepare_play_later`]): what its first Play installs.
+#[derive(Component)]
+pub(crate) struct PendingPlay {
+    route: crate::particle_runtime::SourceRoute,
+    event_edges: Option<crate::particle_runtime::EventEdges>,
+    culling: lifecycle::Culling,
+}
+
+/// The first `ParticleSystem.Play` of a system [`prepare_play_later`] left
+/// stopped: the seed reset and birth owner install of [`install`], then the
+/// per-frame update as any played system. `Ok(false)` for a draw with no
+/// pending Play (it played already, or is not this host's).
+pub(crate) fn play_pending(world: &mut World, draw: Entity) -> Result<bool, String> {
+    let Some(pending) = world.entity_mut(draw).take::<PendingPlay>() else { return Ok(false) };
+    world.entity_mut(draw).remove::<crate::fixture_timeline_particles::StoppedByDirector>();
+    world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
+        let mut entity = world.entity_mut(draw);
+        let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() else {
+            return Err("pending system has no simulation".to_owned());
+        };
+        let played = install_with(&mut live.0, &pending.route, pending.event_edges.clone(), pending.culling.clone(), &mut seeds)
+            .map_err(|reason| format!("{}: first Play refused: {reason}", live.0.node))?;
+        entity.insert(played);
+        Ok(true)
+    })
 }
 
 /// The source route of a system a Director prepared, which its restarts read.
@@ -271,7 +326,7 @@ fn admit(
     if plan.trail.is_some() {
         return Err(refuse("trails need a trail draw, which the fixture host does not spawn".into()));
     }
-    if stepping == Stepping::Played {
+    if stepping != Stepping::Director {
         // Noise, sub-emitter events and emission over distance run with the
         // native birth owner this host installs (a sub-emitter target is
         // refused by the judgement: its owner words exist only for a site
