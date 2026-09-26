@@ -419,6 +419,12 @@ impl Plugin for PlayerPlugin {
                         .after(crate::action_button::click)
                         .before(crate::pick::pick),
                 ),
+            )
+            .add_systems(
+                PostUpdate,
+                crate::avatar_material::player_dither
+                    .after(crate::talk_camera::advance)
+                    .after(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
