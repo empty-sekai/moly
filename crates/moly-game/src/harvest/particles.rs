@@ -42,10 +42,18 @@
 //! there). `SetActive` of the stone's rare system is its node's visibility.
 //!
 //! Named gaps: a package the index does not list draws none of its
-//! particles (named once per package); a system with `playOnAwake` that no
-//! view field reaches is not played; `ForceChangeAfterObject`'s stops are
-//! not reached (the mock places no harvested object that keeps particles).
-//! None of this is verified on an exported archive yet.
+//! particles (named once per package); a system the host refuses at its
+//! preparation is named by the host and not drawn (the rare stone glow's
+//! `fake_light`, a Hidden/particle_circle system, is one); a system with
+//! `playOnAwake` that no view field reaches is not played;
+//! `ForceChangeAfterObject`'s stops are not reached (the mock places no
+//! harvested object that keeps particles).
+//!
+//! Checked on a root whose index lists the field-object packages: the Setup
+//! plays, the treasure box's `PlayDamageEffect` play and the
+//! `OnPlayerActionStart` / `ChangeAfterObject` stops reach the host, and the
+//! account (every 4 s, per object: the host's systems under its played
+//! fields, live particles and births) shows them emitting and stopping.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
