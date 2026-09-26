@@ -211,6 +211,71 @@ impl FixtureActivityProvider {
         Ok(())
     }
 
+    /// A fixture's own timeline played with no NPC: its fixture tracks on
+    /// the placed instance, its SE and its Control clips.
+    pub(crate) fn prepare_fixture_only_bindings(
+        &mut self,
+        world: &mut World,
+        request: &mut StartTimeline,
+    ) -> Result<(), ProviderPending> {
+        let identity = world
+            .get::<FixtureActivityIdentity>(request.fixture)
+            .ok_or_else(|| {
+                ProviderPending::new(
+                    "fixture-identity",
+                    "binding request has no typed fixture identity",
+                )
+            })?
+            .clone();
+        let target = FixtureTarget {
+            entity: request.fixture,
+            uid: identity.uid.clone(),
+        };
+        assets::require_live_fixture(&mut self.assets, world, &target, &identity.model_package)?;
+        self.assets.prepare_fixture_bindings(world, request)?;
+        timeline::prepare_source_sounds(world, request)
+            .map_err(|error| ProviderPending::timeline("source-sounds", error))?;
+        timeline::prepare_source_effects(world, request)
+            .map_err(|error| ProviderPending::timeline("source-effects", error))?;
+        Ok(())
+    }
+
+    /// A cut-scene track bound to a placed fixture's own Animator
+    /// (`CutSceneView.BindGateAnimator`: the `Gate` output on the start
+    /// transform's Animator). Its clips are resolved from the fixture's own
+    /// model file and bind its animator, as a fixture timeline's fixture
+    /// track does; the track is then bound to that fixture.
+    pub(crate) fn prepare_cut_scene_fixture_track(
+        &mut self,
+        world: &mut World,
+        request: &mut StartTimeline,
+        track: &timeline::SourceAssetId,
+        fixture: Entity,
+    ) -> Result<(), ProviderPending> {
+        let mut single = request.clone();
+        single.fixture = fixture;
+        single.bindings.animations.clear();
+        // Only this track is resolved on the fixture: every other animation
+        // track stands as bound so the fixture pass leaves it alone.
+        for other in &request.definition.tracks {
+            if other.class == "AnimationTrack" && &other.identity != track {
+                single
+                    .bindings
+                    .actors
+                    .insert(other.identity.clone(), fixture);
+            }
+        }
+        single.bindings.actors.remove(track);
+        self.assets.prepare_fixture_bindings(world, &mut single)?;
+        for (key, binding) in single.bindings.animations {
+            if &key.track == track {
+                request.bindings.animations.insert(key, binding);
+            }
+        }
+        request.bindings.actors.insert(track.clone(), fixture);
+        Ok(())
+    }
+
     pub(crate) fn prepare_bindings(
         &mut self,
         world: &mut World,

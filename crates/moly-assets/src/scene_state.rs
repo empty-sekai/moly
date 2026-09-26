@@ -15,6 +15,13 @@ impl SourceNodeActivity {
     pub fn active_self(&self) -> bool {
         self.0
     }
+
+    /// The authored activity of a node being spawned from a source record
+    /// (not a glTF node). Apply [`RefreshSourceActivity`] to the spawned
+    /// root once its hierarchy stands, so the inherited state follows.
+    pub fn authored(active: bool) -> Self {
+        Self(active)
+    }
 }
 
 /// Derived activity in the source hierarchy, not camera/frustum visibility.

@@ -59,6 +59,7 @@ mod footstep;
 mod frame_capture;
 pub mod game_settings;
 mod game_state;
+mod gate_flow;
 pub mod gesture;
 pub mod get_resource;
 pub mod learn_phenomena_dialog;
@@ -236,6 +237,7 @@ pub fn app(
     site_expansion::install(&mut app);
     cutscene_camera::install(&mut app);
     cutscene::install(&mut app);
+    gate_flow::install(&mut app);
     footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);

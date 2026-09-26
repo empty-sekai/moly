@@ -65,6 +65,11 @@
 //! the mission screen and the housing competition step are logged only; the
 //! current site keeps its floor grid until it next loads (the displayed
 //! level is written for that load).
+//!
+//! The same presenter plays the gate's cut-scenes ([`play_async`]): the view
+//! at the gate's transform, a cast bound to the unit tracks, the gate's own
+//! clips, the view's Control clips and the fade colours of the view; see
+//! [`cast`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -87,6 +92,12 @@ use crate::game_state::{self, GameStateType};
 use crate::site::{HomeObstacleLevel, HomeObstacleRing, SiteActive, SiteSelection};
 use crate::site_expansion::law::SiteLevelRow;
 use crate::site_expansion::{ExpansionMasters, MysekaiLocalSettings, UserMysekaiRank};
+
+mod cast;
+
+pub(crate) use cast::{
+    dispose_avatar, Cast, CastCaller, CastPlay, CutSceneAvatar, CutSceneCastLease,
+};
 
 const PACKAGE_PREFIX: &str = "mysekai__cut_scene__";
 /// `PlayableDirector.Play` has no timeout.
@@ -177,9 +188,28 @@ enum EffectSlot {
     Refused,
 }
 
+/// Who asked `CutSceneExecutor.PlayAsync` for the cut-scene.
+enum Caller {
+    /// `MysekaiUtility.PlayUnlockSiteLevelCutScene` of the home site perform.
+    SiteLevel { unlock: SiteLevelRow, rank: i32 },
+    /// A caller with a cast at a fixture's transform.
+    Cast(Box<cast::Cast>),
+    /// The caller has moved on to the next stage's record.
+    Moved,
+}
+
+impl Caller {
+    /// The site level and rank of a site-level caller.
+    fn site_level(&self) -> Option<(i32, i32)> {
+        match self {
+            Self::SiteLevel { unlock, rank } => Some((unlock.site_id, *rank)),
+            _ => None,
+        }
+    }
+}
+
 struct Load {
-    unlock: SiteLevelRow,
-    rank: i32,
+    caller: Caller,
     package: String,
     prefab: String,
     tracks: Handle<JsonAsset>,
@@ -198,8 +228,7 @@ struct Load {
 }
 
 struct Plan {
-    unlock: SiteLevelRow,
-    rank: i32,
+    caller: Caller,
     prefab: String,
     root: Entity,
     request: Option<StartTimeline>,
@@ -211,12 +240,12 @@ struct Plan {
     hide_distance: i64,
     white: Vec<String>,
     black: Vec<String>,
-    /// The start transform's position (source frame).
-    start: Vec3,
     /// SE clips that play silent.
     silent: HashSet<TimelineClipKey>,
     /// The effect clips' prepared instances.
     instances: HashMap<TimelineClipKey, EffectInstance>,
+    /// The Control clips the runner drives.
+    controls: HashSet<TimelineClipKey>,
 }
 
 #[derive(Default)]
@@ -245,13 +274,65 @@ enum Stage {
     Load(Box<Load>),
     PresenterFadeIn(Box<Plan>),
     Play(Box<Plan>, Box<Play>),
-    PresenterFadeOut,
+    PresenterFadeOut(Caller),
 }
 
 /// `PlayHomeSitePerformAsync` in flight (the home screen's `_isExecuting`).
 #[derive(Resource)]
 pub(crate) struct HomePerform {
     stage: Stage,
+}
+
+/// A cast caller's `CutSceneExecutor.PlayAsync` in flight.
+#[derive(Resource)]
+pub(crate) struct CastPerform {
+    stage: Stage,
+}
+
+/// `CutSceneExecutor.PlayAsync` for a cast caller: finds the cut-scene root,
+/// `MysekaiMagicaClothManager.RequestReset` (logged only), then
+/// `FadeAndSetUpAsync` loads the package's view. The caller hears back
+/// through [`crate::gate_flow`] when the presenter's fade out has finished
+/// (or the load was refused).
+pub(crate) fn play_async(world: &mut World, play: CastPlay) -> Result<(), String> {
+    if world.contains_resource::<HomePerform>() || world.contains_resource::<CastPerform>() {
+        return Err("another cut-scene is being played".into());
+    }
+    info!(
+        "[cutscene] {}: CutSceneExecutor.PlayAsync(characterUnitIds {:?}, cutSceneId {}, startTransform {:?}, useAlreadyExistCharacter {}, hidePlayer {}, showUI {}): CutSceneRoot found (its own pose taken as identity); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync: bundle mysekai/cut_scene/{}",
+        play.caller.name(),
+        play.units,
+        play.cut_scene_id,
+        play.start,
+        play.use_already_exist_character,
+        play.hide_player,
+        play.show_ui,
+        play.timeline
+    );
+    let package = format!("{PACKAGE_PREFIX}{}", play.timeline);
+    let server = world.resource::<AssetServer>().clone();
+    let tracks =
+        server.load::<JsonAsset>(format!("moly://cutscene-timeline/tracks/{package}.json"));
+    let particle_index = server.load::<JsonAsset>("moly://fixture-particles-v2/index.json");
+    let load = Load {
+        prefab: play.timeline.clone(),
+        caller: Caller::Cast(Box::new(cast::Cast::new(play))),
+        package,
+        tracks,
+        particle_index,
+        particle_document: None,
+        particles: None,
+        effects: HashMap::new(),
+        root: None,
+        draft: None,
+        waiting: None,
+        since_real: now_real(world),
+        reported: 0,
+    };
+    world.insert_resource(CastPerform {
+        stage: Stage::Load(Box::new(load)),
+    });
+    Ok(())
 }
 
 fn now_real(world: &World) -> f64 {
@@ -329,17 +410,23 @@ fn after_cutscene_step(world: &mut World) {
 
 /// Update (exclusive), after the timeline runner.
 pub(crate) fn advance(world: &mut World) {
-    let Some(mut perform) = world.remove_resource::<HomePerform>() else {
-        return;
-    };
-    let done = step(world, &mut perform);
-    if !done {
-        world.insert_resource(perform);
+    if let Some(mut perform) = world.remove_resource::<HomePerform>() {
+        let done = step(world, &mut perform.stage);
+        if !done {
+            world.insert_resource(perform);
+        }
+    }
+    if let Some(mut perform) = world.remove_resource::<CastPerform>() {
+        let done = step(world, &mut perform.stage);
+        if !done {
+            world.insert_resource(perform);
+        }
     }
 }
 
-fn step(world: &mut World, perform: &mut HomePerform) -> bool {
-    let stage = std::mem::replace(&mut perform.stage, Stage::PresenterFadeOut);
+fn step(world: &mut World, slot: &mut Stage) -> bool {
+    let stage = std::mem::replace(slot, Stage::PresenterFadeOut(Caller::Moved));
+    let perform = &mut *slot;
     match stage {
         Stage::WaitUi {
             unlock,
@@ -353,7 +440,7 @@ fn step(world: &mut World, perform: &mut HomePerform) -> bool {
                 if !logged {
                     info!("[cutscene] WaitUntil(!IsUILayerWorking): a UI layer is working");
                 }
-                perform.stage = Stage::WaitUi {
+                *perform = Stage::WaitUi {
                     unlock,
                     rank,
                     logged: true,
@@ -362,7 +449,7 @@ fn step(world: &mut World, perform: &mut HomePerform) -> bool {
             }
             let site_id = unlock.site_id;
             match unlock_cutscene(world, unlock, rank) {
-                Some(load) => perform.stage = Stage::Load(Box::new(load)),
+                Some(load) => *perform = Stage::Load(Box::new(load)),
                 None => {
                     level_release_dialog(world, site_id, rank);
                     after_cutscene_step(world);
@@ -374,20 +461,32 @@ fn step(world: &mut World, perform: &mut HomePerform) -> bool {
         Stage::Load(mut load) => match try_load(world, &mut load) {
             Ok(Some(plan)) => {
                 presenter_fade_in(world, &plan);
-                perform.stage = Stage::PresenterFadeIn(Box::new(plan));
+                *perform = Stage::PresenterFadeIn(Box::new(plan));
                 false
             }
             Ok(None) => {
-                perform.stage = Stage::Load(load);
+                *perform = Stage::Load(load);
                 false
             }
             Err(reason) => {
                 error!("[cutscene] {}/{}: refused: {reason}; the cut-scene does not play (the fixtures are shown again)", load.package, load.prefab);
-                if let Some(root) = load.root {
+                let Load { caller, root, .. } = *load;
+                if let Caller::Cast(mut cast) = caller {
+                    cast::release_refused(world, &mut cast);
+                    if let Some(root) = root {
+                        world.despawn(root);
+                    }
+                    cast.outcome = Some(Err(reason));
+                    crate::gate_flow::cut_scene_returned(world, *cast);
+                    return true;
+                }
+                if let Some(root) = root {
                     world.despawn(root);
                 }
                 show_all_fixtures(world);
-                level_release_dialog(world, load.unlock.site_id, load.rank);
+                if let Some((site_id, rank)) = caller.site_level() {
+                    level_release_dialog(world, site_id, rank);
+                }
                 after_cutscene_step(world);
                 true
             }
@@ -397,37 +496,42 @@ fn step(world: &mut World, perform: &mut HomePerform) -> bool {
                 .resource::<crate::screen_fade::CutSceneFadeImage>()
                 .finished()
             {
-                perform.stage = Stage::PresenterFadeIn(plan);
+                *perform = Stage::PresenterFadeIn(plan);
                 return false;
             }
             let play = setup_internal(world, &mut plan);
-            perform.stage = Stage::Play(plan, Box::new(play));
+            *perform = Stage::Play(plan, Box::new(play));
             false
         }
-        Stage::Play(plan, mut play) => {
-            if play_frame(world, &plan, &mut play) {
-                end_async(world, &plan, &play);
-                perform.stage = Stage::PresenterFadeOut;
-                // Keep the plan's data for the dialog step.
-                world.insert_resource(PendingDialog {
-                    site_id: plan.unlock.site_id,
-                    rank: plan.rank,
-                });
+        Stage::Play(mut plan, mut play) => {
+            if play_frame(world, &mut plan, &mut play) {
+                end_async(world, &mut plan, &play);
+                let caller = std::mem::replace(&mut plan.caller, Caller::Moved);
+                if let Some((site_id, rank)) = caller.site_level() {
+                    // Keep the plan's data for the dialog step.
+                    world.insert_resource(PendingDialog { site_id, rank });
+                }
+                *perform = Stage::PresenterFadeOut(caller);
             } else {
-                perform.stage = Stage::Play(plan, play);
+                *perform = Stage::Play(plan, play);
             }
             false
         }
-        Stage::PresenterFadeOut => {
+        Stage::PresenterFadeOut(caller) => {
             if !world
                 .resource::<crate::screen_fade::CutSceneFadeImage>()
                 .finished()
             {
-                perform.stage = Stage::PresenterFadeOut;
+                *perform = Stage::PresenterFadeOut(caller);
                 return false;
             }
             let hold = world.remove_resource::<game_state::UiHold>();
             info!("[cutscene] CutScenePresenter.FadeOutAsync done; CutSceneExecutor.PlayAsync: Dispose; the cut-scene screen closes (UI interactable again; hold {:?} released)", hold.map(|hold| hold.0));
+            if let Caller::Cast(mut cast) = caller {
+                cast.outcome = Some(Ok(()));
+                crate::gate_flow::cut_scene_returned(world, *cast);
+                return true;
+            }
             let pending = world.remove_resource::<PendingDialog>();
             level_release_dialog(
                 world,
@@ -488,8 +592,7 @@ fn unlock_cutscene(world: &mut World, unlock: SiteLevelRow, rank: i32) -> Option
         server.load::<JsonAsset>(format!("moly://cutscene-timeline/tracks/{package}.json"));
     let particle_index = server.load::<JsonAsset>("moly://fixture-particles-v2/index.json");
     Some(Load {
-        unlock,
-        rank,
+        caller: Caller::SiteLevel { unlock, rank },
         prefab: row.bundle.clone(),
         package,
         tracks,
@@ -829,9 +932,14 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
             }
             Err(pending) => return Err(format!("{}: {}", pending.stage, pending.reason)),
         };
-    let start = world
-        .get_resource::<SiteActive>()
-        .map_or(Vec3::ZERO, |site| Vec3::from_array(site.position));
+    let start = match &load.caller {
+        Caller::Cast(cast) => world
+            .get::<GlobalTransform>(cast.start())
+            .map_or(Vec3::ZERO, GlobalTransform::translation),
+        _ => world
+            .get_resource::<SiteActive>()
+            .map_or(Vec3::ZERO, |site| Vec3::from_array(site.position)),
+    };
     // The view's frame is the product frame: every pose read from the
     // prefab (the virtual cameras) is converted explicitly on read.
     let root = *load.root.get_or_insert_with(|| {
@@ -859,10 +967,51 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         timeout_secs: NO_TIMEOUT,
         timeout_budget: TimelineTimeoutBudget::PlayerWall,
     };
+    let cast_caller = matches!(load.caller, Caller::Cast(_));
     if let Some(previous) = load.draft.take() {
         request.bindings.silent_sounds = previous.silent_sounds;
         request.bindings.sounds = previous.sounds;
+        if cast_caller {
+            // The Control clips an earlier attempt prepared stay prepared.
+            request.bindings.controls = previous.controls;
+        }
     }
+    // A cast: the view placed at the start transform, its nodes, the
+    // characters and the gate bound; tracks it cannot bind are left out.
+    if cast_caller {
+        let particles = match particle_document(world, load) {
+            Ok(Some(document)) => Some(document),
+            Ok(None) => {
+                wait(load, "the package's particle document is loading");
+                return Ok(None);
+            }
+            Err(reason) => {
+                warn!("[cutscene] {}/{}: the package's particle document: {reason}; the view's nodes are not spawned", load.package, load.prefab);
+                None
+            }
+        };
+        let prefab = load.prefab.clone();
+        let Caller::Cast(cast) = &mut load.caller else {
+            unreachable!()
+        };
+        match cast::prepare(
+            world,
+            cast,
+            &mut request,
+            root,
+            &document,
+            particles.as_deref(),
+            &prefab,
+        )? {
+            cast::Step::Ready => {}
+            cast::Step::Wait(reason) => {
+                load.draft = Some(request.bindings.clone());
+                wait(load, &reason);
+                return Ok(None);
+            }
+        }
+    }
+    let definition = request.definition.clone();
     // An SE with no audio route plays silent (the runner's player-owner
     // rule); the cut-scene logs its play edge either way.
     for silenced in timeline::silence_unavailable_sounds(world, &mut request) {
@@ -878,6 +1027,13 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         return Err(error.to_string());
     }
     if let Err(error) = timeline::prepare_source_effects(world, &mut request) {
+        // A particle host still preparing its shaders or geometry is an
+        // asset in flight: the load waits for it, as for any other.
+        if error.retryable {
+            load.draft = Some(request.bindings.clone());
+            wait(load, &error.to_string());
+            return Ok(None);
+        }
         return Err(error.to_string());
     }
     if !prepare_effects(world, load, &definition, &effects, root) {
@@ -890,8 +1046,16 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         }
         return Err(error.to_string());
     }
+    if let Caller::Cast(cast) = &load.caller {
+        info!(
+            "[cutscene] {}/{}: {}",
+            load.package,
+            load.prefab,
+            cast::describe(cast, &definition)
+        );
+    }
     info!(
-        "[cutscene] {}/{}: Factory: view instantiated, CutSceneView.Setup(CutSceneRoot, the site transform at ({:.1},{:.1},{:.1})); director {} (duration {:.4} s, {} tracks, {} virtual cameras by exposed name, {} Control clips driven, {} Control clips refused, {} effect clip instances prepared); CutScenePresenter: SetIsNeedLowHeightDither (logged only); LoadAssetAndSetUpAsync done",
+        "[cutscene] {}/{}: Factory: view instantiated, CutSceneView.Setup(CutSceneRoot, the start transform at ({:.1},{:.1},{:.1})); director {} (duration {:.4} s, {} tracks, {} virtual cameras by exposed name, {} Control clips driven, {} Control clips refused, {} effect clip instances prepared); CutScenePresenter: SetIsNeedLowHeightDither (logged only); LoadAssetAndSetUpAsync done",
         load.package,
         load.prefab,
         start.x,
@@ -909,6 +1073,7 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
             .count()
     );
     let silent = request.bindings.silent_sounds.clone();
+    let controls = request.bindings.controls.keys().cloned().collect();
     let instances = std::mem::take(&mut load.effects)
         .into_iter()
         .filter_map(|(key, slot)| match slot {
@@ -919,8 +1084,8 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
     Ok(Some(Plan {
         instances,
         silent,
-        unlock: load.unlock.clone(),
-        rank: load.rank,
+        controls,
+        caller: std::mem::replace(&mut load.caller, Caller::Moved),
         prefab: load.prefab.clone(),
         root,
         request: Some(request),
@@ -930,7 +1095,6 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         hide_distance,
         white,
         black,
-        start,
     }))
 }
 
@@ -1543,16 +1707,25 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
         "[cutscene] {}: CutScenePresenter.FadeInAsync: PushUIScreen(MysekaiCutScene) (the field UI is not interactable); ScreenLayerMysekaiMysekaiCutScene.FadeIn({LAYER_FADE} s)",
         plan.prefab
     );
-    crate::screen_fade::cutscene_fade_in(
-        world,
-        [0.0; 4],
-        LAYER_FADE,
-        "CutScenePresenter.FadeInAsync",
-    );
+    let color = match &plan.caller {
+        Caller::Cast(cast) => {
+            let (start, _) = cast.fade_colors();
+            info!(
+                "[cutscene] {}: CutScenePresenter.FadeInAsync(_startFadeColor ({:.2},{:.2},{:.2},{:.2}))",
+                plan.prefab, start[0], start[1], start[2], start[3]
+            );
+            start
+        }
+        _ => [0.0; 4],
+    };
+    crate::screen_fade::cutscene_fade_in(world, color, LAYER_FADE, "CutScenePresenter.FadeInAsync");
 }
 
 /// `SetupInternal`, then `CutSceneView.PlayAsync` starts the director.
 fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
+    if let Caller::Cast(cast) = &plan.caller {
+        crate::gate_flow::cut_scene_started(world, cast);
+    }
     // Setup: ChangeState(CutScene) -> CutSceneGameState.OnEnter.
     game_state::enter(world, GameStateType::CutScene, "CutScenePresenter.Setup");
     if let Some(mut gate) =
@@ -1563,10 +1736,15 @@ fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
     info!("[cutscene] AloneExecutionGate.cutscene_active = true (GameState CutScene): NPC alone actions and greetings yield");
     info!("[cutscene] CutSceneGameState.OnEnter: PushUIScreen(MysekaiCutScene); FieldCamera.ChangeState(CutScene)");
     cutscene_camera::enter(world);
-    info!(
-        "[cutscene] Setup: EnableTapScreen; no cut-scene characters to take over; HideNearFixtures({}) (the fixtures within it are already hidden); white list {:?}, black list {:?}",
-        plan.hide_distance, plan.white, plan.black
-    );
+    if let Caller::Cast(cast) = &mut plan.caller {
+        info!("[cutscene] Setup: EnableTapScreen (the tap input is the cut-scene screen's)");
+        cast::setup(world, cast, plan.hide_distance, &plan.white, &plan.black);
+    } else {
+        info!(
+            "[cutscene] Setup: EnableTapScreen; no cut-scene characters to take over; HideNearFixtures({}) (the fixtures within it are already hidden); white list {:?}, black list {:?}",
+            plan.hide_distance, plan.white, plan.black
+        );
+    }
     info!("[cutscene] SetupInternal: SetupCamera; HideEffects (no hidden effect list); UI shown; SetupSkipEvent; BindComopnents: the brain on the field camera, the fade panel on the cut-scene screen, the obstacle tracks on the home site controller; DisableIK; LoadBgms; LoadVoice; PlayPreprocess");
     let request = plan.request.take().expect("prepared request");
     let token = world
@@ -1702,7 +1880,7 @@ fn rings_at(world: &mut World, level: u32) -> (Vec<u32>, Vec<u32>) {
 
 /// One frame of the director: returns true once its time reached its
 /// duration (or the session ended).
-fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
+fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
     let Some(token) = play.token else {
         return true;
     };
@@ -1865,7 +2043,11 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
                         .as_str()
                         .unwrap_or("?");
                     if entered {
-                        info!("[cutscene] t={t:.4} Control clip {name} {bounds} play: refused by name (see the runner's coverage)");
+                        if plan.controls.contains(&clip.key) {
+                            info!("[cutscene] t={t:.4} Control clip {name} {bounds} play: driven by the runner through the particle host");
+                        } else {
+                            info!("[cutscene] t={t:.4} Control clip {name} {bounds} play: refused by name (see the runner's coverage)");
+                        }
                     } else if exited {
                         info!("[cutscene] t={t:.4} Control clip {name} {bounds} stop");
                     }
@@ -1875,6 +2057,9 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
         }
     }
     play.active = active;
+    if let Caller::Cast(cast) = &mut plan.caller {
+        cast::frame(world, cast, &definition, t);
+    }
     // The fade panel.
     let wrote = fade_panel_at(&fade_clips, t);
     let mut ended: Vec<_> = fade_clips
@@ -1905,7 +2090,11 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
     play.fade_index = index;
     // The brain.
     if let Some(camera) = shot {
-        let shot = product_shot(&camera, plan.start);
+        let root = world
+            .get::<Transform>(plan.root)
+            .copied()
+            .unwrap_or_default();
+        let shot = product_shot(&camera, root);
         if t - play.camera_logged >= 0.5 {
             info!(
                 "[cutscene-camera] t={t:.4} live camera {}: source position ({:.3},{:.3},{:.3}) rotation ({:.4},{:.4},{:.4},{:.4}) -> eye ({:.3},{:.3},{:.3}); fov {} near {} far {}",
@@ -2069,14 +2258,15 @@ fn effect_pause(world: &mut World, instance: &EffectInstance, t: f64) {
     );
 }
 
-/// A virtual camera's state in the product frame: the start transform is
-/// the loaded site's own origin, the x axis reflects.
-fn product_shot(camera: &VirtualCamera, start: Vec3) -> Shot {
-    let _ = start;
-    let eye = moly_assets::coordinates::source_position(camera.position);
+/// A virtual camera's state in the product frame: its pose relative to the
+/// view root (the x axis reflects), placed by the view root's pose (the
+/// identity for the site-level cut-scenes, whose start transform is the
+/// loaded site's own origin; the start transform's pose for a cast).
+fn product_shot(camera: &VirtualCamera, root: Transform) -> Shot {
     let reflect = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
-    let forward = reflect(camera.rotation * Vec3::Z);
-    let up = reflect(camera.rotation * Vec3::Y);
+    let eye = root.transform_point(moly_assets::coordinates::source_position(camera.position));
+    let forward = root.rotation * reflect(camera.rotation * Vec3::Z);
+    let up = root.rotation * reflect(camera.rotation * Vec3::Y);
     let rotation = Transform::IDENTITY.looking_to(forward, up).rotation;
     Shot {
         name: camera.name.clone(),
@@ -2089,7 +2279,7 @@ fn product_shot(camera: &VirtualCamera, start: Vec3) -> Shot {
 }
 
 /// `CutScenePresenter.EndAsync`, up to its fade out.
-fn end_async(world: &mut World, plan: &Plan, play: &Play) {
+fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
     let time = play.token.and_then(|token| {
         world
             .resource::<FixtureActivityTimelines>()
@@ -2110,7 +2300,12 @@ fn end_async(world: &mut World, plan: &Plan, play: &Play) {
     }
     info!("[cutscene] AloneExecutionGate.cutscene_active = false (GameState Normal): NPC alone actions and greetings resume");
     cutscene_camera::exit(world);
-    info!("[cutscene] RestoreStates (no cut-scene characters); ChangeParentCharacters; CutSceneView.Dispose: the director's graph stops");
+    if let Caller::Cast(cast) = &mut plan.caller {
+        cast::restore_states(world, cast);
+        info!("[cutscene] CutSceneView.Dispose: the director's graph stops");
+    } else {
+        info!("[cutscene] RestoreStates (no cut-scene characters); ChangeParentCharacters; CutSceneView.Dispose: the director's graph stops");
+    }
     for (level, value) in &play.dither {
         let (_, below) = rings_at(world, (*level).max(0) as u32);
         info!(
@@ -2131,6 +2326,21 @@ fn end_async(world: &mut World, plan: &Plan, play: &Play) {
         );
     }
     world.despawn(plan.root);
+    if let Caller::Cast(cast) = &mut plan.caller {
+        let definition = plan.definition.clone();
+        cast::after_dispose(world, cast, &definition);
+        info!("[cutscene] BGM restored (no cut-scene BGM)");
+        show_all_fixtures(world);
+        let (_, end) = cast.fade_colors();
+        info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync(_endFadeColor ({:.2},{:.2},{:.2},{:.2})): ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)", end[0], end[1], end[2], end[3]);
+        crate::screen_fade::cutscene_fade_out_color(
+            world,
+            end,
+            LAYER_FADE,
+            "CutScenePresenter.FadeOutAsync",
+        );
+        return;
+    }
     info!("[cutscene] BGM restored (no cut-scene BGM); NPC Show; player Show");
     show_all_fixtures(world);
     info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync: ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)");

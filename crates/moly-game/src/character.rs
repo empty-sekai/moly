@@ -553,6 +553,8 @@ pub fn drive(
         (
             Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
             Without<crate::npc::change_site_state::ChangeSiteClip>,
+            // A cut-scene's cast member: its director owns the animator.
+            Without<crate::cutscene::CutSceneCastLease>,
         ),
     >,
     mut players: Query<&mut AnimationPlayer>,
