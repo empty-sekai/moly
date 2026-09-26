@@ -1253,7 +1253,7 @@ pub(crate) fn select_all(
 /// activity. Neither the scene root nor the scene's own root entity between
 /// it and the prefab's objects is a source node, and `SetSourceActive` does
 /// nothing on an entity without that activity. Returns how many were set.
-fn set_source_nodes_active(world: &mut World, root: Entity, active: bool) -> usize {
+pub(crate) fn set_source_nodes_active(world: &mut World, root: Entity, active: bool) -> usize {
     let mut nodes = Vec::new();
     let mut stack: Vec<Entity> = world
         .get::<Children>(root)

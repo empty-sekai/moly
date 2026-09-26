@@ -15,6 +15,7 @@ mod actors;
 mod assets;
 mod input;
 mod presentation;
+mod put_effect;
 mod validation;
 
 #[cfg(test)]
@@ -371,6 +372,8 @@ fn select(
     let can_clean_up = world
         .get_resource::<crate::entry::house::HomeFixtures>()
         .is_some_and(|homes| homes.can_clean_up(&item.package));
+    let fixture_id = item.fixture_id;
+    let put = (origin != SelectionOrigin::Placed).then(|| item.clone());
     session.selected = Some(Selection {
         item,
         origin,
@@ -378,7 +381,17 @@ fn select(
     });
     session.phase = EditPhase::Placing;
     session.changed();
-    play_se(world, "se_pick_furniture", "edit-pick");
+    match put {
+        // FloorEditState.PutFixture (a selector cell): the new fixture shows
+        // the put effect with its put sound; the pick sound is not played.
+        Some(item) => put_effect::show(world, &item, "edit-put"),
+        // FloorEditState.SelectFixture: the pick sound, then (after the
+        // focus and scale animation) FixtureController.PlayPutSound.
+        None => {
+            play_se(world, "se_pick_furniture", "edit-pick");
+            put_effect::play_put_sound(world, fixture_id, "edit-pick");
+        }
+    }
     session.say("已选中家具：拖动或方向键移动，R旋转，决定或取消。");
 }
 
@@ -398,6 +411,7 @@ fn decide(session: &mut EditSession, world: &mut World) {
         return;
     }
     let selection = session.selected.take().expect("checked selection");
+    let decided = selection.item.clone();
     match selection.origin {
         SelectionOrigin::Placed => {
             let Some(row) = session
@@ -428,6 +442,9 @@ fn decide(session: &mut EditSession, world: &mut World) {
     }
     session.phase = EditPhase::Browsing;
     session.changed();
+    // FloorEditState.OnClickDecideButton: ShowPutEffect (effect and put
+    // sound), then the finish sound.
+    put_effect::show(world, &decided, "edit-decide");
     play_se(world, "se_housing_finish", "edit-decide");
     session.say("已决定摆放，尚未保存。");
 }
@@ -840,7 +857,7 @@ impl Plugin for FixtureEditPlugin {
             .init_resource::<EditView>()
             .init_resource::<PendingCommands>()
             .add_message::<EditCommand>()
-            .add_systems(Startup, assets::load)
+            .add_systems(Startup, (assets::load, put_effect::request_tables))
             .add_systems(
                 Update,
                 (assets::parse_areas, assets::plan_candidates).chain(),
@@ -874,6 +891,12 @@ impl Plugin for FixtureEditPlugin {
                     .chain()
                     .in_set(FixtureEditSystems::View)
                     .after(FixtureEditSystems::Commands),
+            )
+            .add_systems(
+                Update,
+                put_effect::advance
+                    .after(FixtureEditSystems::Commands)
+                    .before(crate::audio::SeDrainSet::Drain),
             )
             .add_systems(
                 PostUpdate,
