@@ -8,7 +8,7 @@ mod sub_events;
 mod trails;
 mod collision;
 pub(crate) mod collision_scene;
-pub(crate) use collision::{collision_eligible, current_size_source_gate};
+pub(crate) use collision::{collision_eligible, current_size_source_gate, is_planes};
 pub(crate) use trails::{
     attach_owner as attach_trail_owner, draw_eligible as trail_draw_eligible, owner_ready as trail_owner_ready,
     write_mesh as write_trail_mesh, TrailState,
@@ -1679,6 +1679,14 @@ pub(crate) struct CollisionInstall {
     pub(crate) owner: Option<moly_law::particle::collision_query::OwnerPair>,
 }
 
+impl CollisionInstall {
+    /// A Planes-type module's install: it reads its plane slots and never
+    /// the physics scene; a Local system still needs its owner words.
+    pub(crate) fn planes(owner: Option<moly_law::particle::collision_query::OwnerPair>) -> Self {
+        Self { scene: Box::new(collision::NoScene), owner }
+    }
+}
+
 pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     route: &SourceRoute, collision: Option<CollisionInstall>)
     -> Result<BirthPath, seed::SeedError> {
@@ -1711,6 +1719,9 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
     let collision = match (system.emitter.collision.is_some(), collision) {
         (false, _) => None,
         (true, Some(install)) => Some(install),
+        // A Planes module reads no scene; without owner words a Local one
+        // is refused inside.
+        (true, None) if collision::is_planes(&system.emitter) => Some(CollisionInstall::planes(None)),
         (true, None) => return Ok(BirthPath::Legacy("CollisionModule without its ground scene".to_owned())),
     };
     let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;

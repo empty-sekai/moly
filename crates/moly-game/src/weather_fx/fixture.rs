@@ -363,6 +363,9 @@ pub(crate) fn plan(
 }
 
 #[cfg(test)]
+mod planes_samples;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

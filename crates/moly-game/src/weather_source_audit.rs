@@ -644,10 +644,15 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     system.color_law = e.color_over_lifetime.as_ref().map(moly_law::particle::color::ColorOverLifetime::from_params);
     system.custom_law = e.custom_data.as_ref().map(|p| crate::particle_runtime::custom_data_law(p).expect("curves validated during admission"));
     system.sub_emitter_max_lifetime = planned.sub_emitter_max_lifetime;
-    let collision = planned.collision_scene.clone().map(|scene| crate::particle_runtime::CollisionInstall {
-        scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
-        owner: planned.collision_owner,
-    });
+    let collision = match planned.collision_scene.clone() {
+        Some(scene) => Some(crate::particle_runtime::CollisionInstall {
+            scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::new(scene)),
+            owner: planned.collision_owner,
+        }),
+        None if crate::particle_runtime::is_planes(&planned.emitter) =>
+            Some(crate::particle_runtime::CollisionInstall::planes(planned.collision_owner)),
+        None => None,
+    };
     let path = match crate::particle_runtime::install_native_birth(&mut system, seeds, &planned.route, collision) {
         Ok(crate::particle_runtime::BirthPath::Native) => {
             // A sub-emitter parent warms with its event owner, as installed:

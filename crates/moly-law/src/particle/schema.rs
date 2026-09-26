@@ -20,7 +20,7 @@ mod texture_sheet;
 pub use noise::{NoiseParams, NoiseQuality};
 pub use texture_sheet::TextureSheetParams;
 pub use events::{CollisionMode, CollisionParams, CollisionQuality, CollisionType,
-    ForceParams, InheritVelocityMode, InheritVelocityParams, SubEmitterParams, SubEmitterSourcePointer,
+    ForceParams, InheritVelocityMode, InheritVelocityParams, PlaneLink, PlaneSource, SubEmitterParams, SubEmitterSourcePointer,
     SubEmitterTrigger, TrailMode, TrailParams, TrailTextureMode};
 
 use crate::particle::buffer::RingBufferMode;

@@ -2601,6 +2601,8 @@ fn judge_in_host(
     // installs, bound here or refused by name.
     let collision_scene = match (emitter.collision.as_ref(), ground) {
         (None, _) => None,
+        // A Planes module tests its plane slots and never queries the scene.
+        (Some(params), _) if params.kind == moly_law::particle::schema::CollisionType::Planes => None,
         (Some(params), Ok(scene)) => match scene.refusal_for(params.collides_with) {
             None => Some(scene.clone()),
             Some(reason) => {
@@ -3249,10 +3251,15 @@ pub(crate) fn spawn_when_ready(
                 // The plan's verdict bound the scene; the module queries the
                 // host's live physics scene, which holds the installed and
                 // the retiring effects' colliders.
-                let collision = collision_scene.map(|_| crate::particle_runtime::CollisionInstall {
-                    scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
-                    owner: collision_owner,
-                });
+                let collision = match collision_scene {
+                    Some(_) => Some(crate::particle_runtime::CollisionInstall {
+                        scene: Box::new(crate::particle_runtime::collision_scene::GroundQuery::live(retiring.physics.clone())),
+                        owner: collision_owner,
+                    }),
+                    None if crate::particle_runtime::is_planes(&live.runtime.emitter) =>
+                        Some(crate::particle_runtime::CollisionInstall::planes(collision_owner)),
+                    None => None,
+                };
                 match crate::particle_runtime::install_native_birth(&mut live.runtime, &mut seed_manager, &route, collision) {
                     Ok(crate::particle_runtime::BirthPath::Native) if has_collision && live.runtime.collision.is_none() => {
                         error!(node=%live.node, "collision system installed without its collision state");
