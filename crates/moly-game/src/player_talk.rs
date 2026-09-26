@@ -42,6 +42,7 @@ use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::npc::{CharacterUnitId, MotionPhase, Registry, WalkState};
 use crate::player::PlayerControlled;
+use crate::player_avatar::AvatarDriver;
 use crate::talk::{TalkEmoteReqs, TalkHold};
 use crate::talk_window::{TalkSession, TalkWindowRoot, TalkWindowState};
 
@@ -437,6 +438,7 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
         sites: server.load::<JsonAsset>(AssetPath::from(SITES_DATA.to_owned())),
     });
     commands.init_resource::<PlayerTalkLedger>();
+    commands.init_resource::<PlayerTalkAnimations>();
 }
 
 /// Update：两表到齐即解析。装载失败响亮 panic（资产边界的拒绝点）；
@@ -1210,13 +1212,19 @@ impl PlayerTalkSession {
 }
 
 /// NPC 参演者身上的运行时（同配对对话侧的形状）：眼/口材质句柄、动作
-/// 节点缓存、在播动作。玩家不挂（本语料玩家只有转身步）。
+/// 节点缓存、对话动作的段链与当前动作基名。玩家不挂：玩家的对话动作
+/// 走玩家自己的动画驱动。
 #[derive(Component)]
 pub(crate) struct PlayerTalkRuntime {
     eye_handle: Handle<CharacterMaterial>,
     mouth_handle: Handle<CharacterMaterial>,
     nodes: HashMap<String, AnimationNodeIndex>,
-    anim_node: Option<AnimationNodeIndex>,
+    /// The segment a talk motion is in (None: the movement driver has the
+    /// animator).
+    segment: Option<TalkSegment>,
+    /// The view's current original animation name: the base name of the last
+    /// motion crossfaded in. Unknown at the talk's start.
+    original: Option<String>,
 }
 
 /// 玩家的转身（会话期间）：玩家域不写转体相位（玩家动画驱动的转体
@@ -1860,7 +1868,8 @@ pub(crate) fn consume_trigger(
                 eye_handle,
                 mouth_handle,
                 nodes: HashMap::new(),
-                anim_node: None,
+                segment: None,
+                original: None,
             })
             .insert(MotionPhase::Dwelling { remaining: None });
         commands
@@ -1904,6 +1913,8 @@ pub(crate) fn consume_trigger(
         // 开窗要会话作保（归属构造，见窗体模块注释）——先建会话再开窗，
         // 随后入资源。
         crate::delayed_faces::start_loop(&mut commands);
+        commands
+            .queue(|world: &mut World| world.resource_mut::<PlayerTalkAnimations>().start_loop());
         window.open(TalkSession::Player(&mut session));
         info!(
             "[talkwin] 对话窗体开场：玩家对话段 {}（即时在场，α=1；名字栏/正文已清）",
@@ -2142,7 +2153,7 @@ pub(crate) fn advance_session(
     >,
     mut runtimes: Query<&mut PlayerTalkRuntime>,
     live_entities: Query<()>,
-    mut ledger: ResMut<PlayerTalkLedger>,
+    (mut ledger, mut motion): (ResMut<PlayerTalkLedger>, PlayerTalkMotion),
 ) {
     let explicit_cancel = drain_talk_cancellation(&mut playback.cancel);
     let Some(mut session) = session else {
@@ -2167,6 +2178,7 @@ pub(crate) fn advance_session(
             ..
         } = playback;
         delayed_faces.cancel_talk(session.talk_id);
+        motion.queue.cancel_talk(session.talk_id);
         if let (Some(tables), Ok(runtime)) = (tables.as_deref(), runtimes.get(session.npc)) {
             reset_default_face(
                 session.unit,
@@ -2187,6 +2199,7 @@ pub(crate) fn advance_session(
             &mut npcs,
             &mut players,
             &mut transitions,
+            &mut motion,
             &mut ledger,
             time.elapsed_secs(),
         );
@@ -2213,6 +2226,18 @@ pub(crate) fn advance_session(
     for command in delayed_faces.advance(dt) {
         apply_delayed_face(session, command, &tables, &mut materials, &runtimes);
     }
+    let due = motion.queue.advance(dt);
+    run_talk_animations(
+        session,
+        due,
+        lib,
+        &mut graphs,
+        &mut npcs,
+        &mut runtimes,
+        &mut players,
+        &mut transitions,
+        &mut motion.avatars,
+    );
 
     // 发起点按的闩耗尽：输入系统按会话在场置闩（见窗体模块），发起帧
     // 会话尚未入资源、闩不会置——此块是发起击不进首个点跳门的语义
@@ -2266,6 +2291,18 @@ pub(crate) fn advance_session(
         for command in delayed_faces.wait_clicked() {
             apply_delayed_face(session, command, &tables, &mut materials, &runtimes);
         }
+        let flushed = motion.queue.wait_clicked();
+        run_talk_animations(
+            session,
+            flushed,
+            lib,
+            &mut graphs,
+            &mut npcs,
+            &mut runtimes,
+            &mut players,
+            &mut transitions,
+            &mut motion.avatars,
+        );
         // 该击即耗尽：WaitClicked 放行后清闩（真源同款）。
         window.consume_click(TalkSession::Player(&mut *session));
         session.click_releases += 1;
@@ -2339,19 +2376,23 @@ pub(crate) fn advance_session(
             &step,
             index,
             &store,
-            lib,
-            &mut graphs,
             &mut delayed_faces,
+            &mut motion.queue,
             &mut window,
             &mut emote_reqs,
             &mut npcs,
-            &mut runtimes,
-            &mut players,
-            &mut transitions,
         );
     }
 
-    release_finished_animations(session, &mut npcs, &mut runtimes, &players);
+    advance_talk_segments(
+        session,
+        lib,
+        &mut graphs,
+        &mut npcs,
+        &mut runtimes,
+        &mut players,
+        &mut transitions,
+    );
 
     if is_finished(session.row.steps.len(), &session.state) {
         // OnComplete is due-only; Dispose below stops the clock but retains
@@ -2359,6 +2400,18 @@ pub(crate) fn advance_session(
         for command in delayed_faces.on_complete() {
             apply_delayed_face(session, command, &tables, &mut materials, &runtimes);
         }
+        let due = motion.queue.on_complete();
+        run_talk_animations(
+            session,
+            due,
+            lib,
+            &mut graphs,
+            &mut npcs,
+            &mut runtimes,
+            &mut players,
+            &mut transitions,
+            &mut motion.avatars,
+        );
         emote_reqs.hides.push(session.npc);
         if let Ok(runtime) = runtimes.get(session.npc) {
             reset_default_face(
@@ -2385,6 +2438,7 @@ pub(crate) fn advance_session(
             &mut npcs,
             &mut players,
             &mut transitions,
+            &mut motion,
             &mut ledger,
             now,
         );
@@ -2492,9 +2546,8 @@ fn dispatch_step(
     step: &TalkStep,
     index: usize,
     store: &PlayerTalkStore,
-    lib: &Gltf,
-    graphs: &mut Assets<AnimationGraph>,
     delayed_faces: &mut DelayedFaces,
+    animations: &mut PlayerTalkAnimations,
     window: &mut TalkWindowState,
     emote_reqs: &mut TalkEmoteReqs,
     npcs: &mut Query<
@@ -2506,9 +2559,6 @@ fn dispatch_step(
         ),
         Without<PlayerControlled>,
     >,
-    runtimes: &mut Query<&mut PlayerTalkRuntime>,
-    players: &mut Query<&mut AnimationPlayer>,
-    transitions: &mut Query<&mut AnimationTransitions>,
 ) {
     let talk_id = session.talk_id;
     let step_word = step.op();
@@ -2655,87 +2705,43 @@ fn dispatch_step(
             speed,
             playback_speed,
             play_end_motion,
+            delay_seconds,
             ..
         } => {
-            match participant_of(session, who) {
-                Some(Participant::Npc) => {}
-                Some(Participant::Player) => {
-                    info!(
-                        "[player-talk] 段 {} 步 {} animation who={} motion={}：玩家剧情动作接口尚未接此步，不起播",
-                        talk_id, index, who, ascii_or(motion),
-                    );
-                    return;
-                }
-                None => {
-                    info!(
-                        "[player-talk] 段 {} 步 {} animation who={} motion={}：悬空指称，不起播",
-                        talk_id,
-                        index,
-                        who,
-                        ascii_or(motion),
-                    );
-                    return;
-                }
-            }
-            // 缺段按真源：动作段名为空/悬空时 `ChangeAnimationAsync` 整步
-            // 短路（在播段保持）。本侧段名非空但不在共享动作库（含产物
-            // 未解析的常量指称形——动作常量表非恒等映射，装载期不剥），
-            // 同形降级：记警告不起播。
-            let clip = format!("{motion}_S");
-            if !lib.named_animations.contains_key(clip.as_str()) {
+            // The engine's ChangeAnimation: the id is taken now and the cast
+            // is looked up when the command runs; a zero speed reads as 1; the
+            // closure goes into the delay table at elapsed + delay (a zero
+            // delay too, running on the next LoopUpdate). The script library
+            // fills an omitted blend with 0.5 (the step carries none).
+            let Some(unit) = delayed_face_unit(store, who) else {
                 warn!(
-                    "[player-talk] 段 {} 步 {} animation motion={} 不在共享动作库：不起播（在播段保持，真源空段名同形跳过）",
-                    talk_id, index, ascii_or(motion),
-                );
-                return;
-            }
-            if *play_end_motion {
-                warn!(
-                    "[player-talk] 段 {} 步 {} 动作步带 playEndMotion=true：End 段跟随未实现，本步只播主段",
-                    talk_id, index,
-                );
-            }
-            let Ok(mut runtime) = runtimes.get_mut(session.npc) else {
-                return;
-            };
-            let Ok((_, _, mut driver, _)) = npcs.get_mut(session.npc) else {
-                warn!(
-                    "[player-talk] 段 {} 步 {} animation who={}：成员不在名册驱动里，不起播",
-                    talk_id, index, who
+                    "[player-talk] source={talk_id} step={index} animation who={who} has an unresolved character id"
                 );
                 return;
             };
-            // 起播段取 `_S` 变体（段族约定同待机动作族：基名＋后缀）；
-            // 缺段已在上方拦截，此处必命中。
-            let node = node_for(
-                &mut runtime.nodes,
-                graphs,
-                lib,
-                &driver.graph,
-                &clip,
-                session.unit,
-            );
-            let mut player = players
-                .get_mut(driver.player)
-                .expect("装配系统应已插上播放器");
-            let player = &mut *player;
-            let transitions = transitions
-                .get_mut(driver.player)
-                .expect("装配系统应已插上过渡组件")
-                .into_inner();
-            let animation = transitions.play(player, node, SEGMENT_BLEND);
-            // 速度换算走律（0 哨值读作 1.0）；playbackSpeed 载荷当前不
-            // 进换算（源里它与 speed 并存、语义未取证），记日志对账。
-            let effective = effective_animation_speed(*speed);
-            animation.set_speed(effective as f32);
-            runtime.anim_node = Some(node);
-            driver.playing = None;
-            driver.alone_holds = true;
+            let command = TalkAnimation {
+                unit,
+                motion: motion.clone(),
+                speed: effective_animation_speed(*speed) as f32,
+                blend: SEGMENT_BLEND.as_secs_f32(),
+                play_end_motion: *play_end_motion,
+                source_talk: talk_id,
+                source_step: index,
+            };
             info!(
-                "[player-talk] 段 {} 步 {} animation who={} motion={}：起播（速度 {:.2}（载荷 speed {:?}），混合 {:.2}s，playbackSpeed 载荷 {:.2}）",
-                talk_id, index, who, ascii_or(motion), effective, speed,
-                SEGMENT_BLEND.as_secs_f32(), playback_speed,
+                "[player-talk] 段 {} 步 {} animation who={} motion={}：入延迟表 {:.2}s（速度 {:.2}（载荷 speed {:?}），混合 {:.2}s，playEndMotion {}，playbackSpeed 载荷 {:.2}）",
+                talk_id,
+                index,
+                who,
+                ascii_or(motion),
+                delay_seconds,
+                command.speed,
+                speed,
+                command.blend,
+                play_end_motion,
+                playback_speed,
             );
+            animations.enqueue(*delay_seconds, command);
         }
         TalkStep::Text { text } => {
             session.texts += 1;
@@ -2892,9 +2898,153 @@ fn begin_player_turn(
     to
 }
 
-/// 对话动作播完交还播放器（位移驱动接管，回待机段）。
-fn release_finished_animations(
-    session: &mut PlayerTalkSession,
+// ---------------------------------------------------------------------------
+// change_animation: the delay table and the segment chain
+// ---------------------------------------------------------------------------
+
+/// One `ChangeAnimation` call as the engine queues it (the closure's
+/// arguments): the logical character id taken at the call (0 is the
+/// player), the motion base name, the speed with a zero read as 1, the
+/// crossfade and `playEndMotion`.
+#[derive(Debug, Clone)]
+struct TalkAnimation {
+    unit: i64,
+    motion: String,
+    speed: f32,
+    blend: f32,
+    play_end_motion: bool,
+    source_talk: i32,
+    source_step: usize,
+}
+
+/// The NPC view's `ChangeAnimationAsync` chain: `_S` to its end (clip length
+/// over speed), then the same name's `_L` looping until the next change;
+/// with `playEndMotion` the previous motion's `_E` plays at speed 1 first.
+#[derive(Debug, Clone)]
+enum TalkSegment {
+    Start {
+        node: AnimationNodeIndex,
+        motion: String,
+        speed: f32,
+        blend: f32,
+    },
+    Loop,
+    End {
+        node: AnimationNodeIndex,
+        next: TalkAnimation,
+    },
+}
+
+/// The talk engine's delay table, change_animation family, on this backend.
+/// `ChangeAnimation` appends `elapsed + delay` (a zero delay queues too and
+/// runs on the next LoopUpdate); LoopUpdate yields once before its first
+/// increment and then runs what is due each frame; the resumed WaitClick runs
+/// everything in deadline order; OnComplete runs only what is due; Dispose
+/// stops the clock and keeps the rest. The faces of the same table are
+/// [`DelayedFaces`], on the same start and stop edges.
+#[derive(Resource, Default)]
+pub(crate) struct PlayerTalkAnimations {
+    elapsed: f32,
+    running: bool,
+    awaiting_first_yield: bool,
+    pending: Vec<(f32, TalkAnimation)>,
+}
+
+impl PlayerTalkAnimations {
+    fn start_loop(&mut self) {
+        self.elapsed = 0.0;
+        self.running = true;
+        self.awaiting_first_yield = true;
+    }
+
+    fn stop_loop(&mut self) {
+        self.running = false;
+        self.awaiting_first_yield = false;
+    }
+
+    /// A cancelled talk takes its own future commands with it (as the faces).
+    fn cancel_talk(&mut self, talk_id: i32) {
+        self.pending
+            .retain(|(_, command)| command.source_talk != talk_id);
+        self.stop_loop();
+    }
+
+    fn enqueue(&mut self, delay_seconds: f32, command: TalkAnimation) {
+        self.pending.push((self.elapsed + delay_seconds, command));
+    }
+
+    fn advance(&mut self, delta_seconds: f32) -> Vec<TalkAnimation> {
+        if !self.running {
+            return Vec::new();
+        }
+        if self.awaiting_first_yield {
+            self.awaiting_first_yield = false;
+            return Vec::new();
+        }
+        self.elapsed += delta_seconds;
+        self.due()
+    }
+
+    fn on_complete(&mut self) -> Vec<TalkAnimation> {
+        self.due()
+    }
+
+    fn wait_clicked(&mut self) -> Vec<TalkAnimation> {
+        let mut all = std::mem::take(&mut self.pending);
+        all.sort_by(|a, b| compare_deadlines(a.0, b.0));
+        all.into_iter().map(|(_, command)| command).collect()
+    }
+
+    fn due(&mut self) -> Vec<TalkAnimation> {
+        let elapsed = self.elapsed;
+        let (mut due, future): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|(deadline, _)| elapsed >= *deadline);
+        self.pending = future;
+        due.sort_by(|a, b| compare_deadlines(a.0, b.0));
+        due.into_iter().map(|(_, command)| command).collect()
+    }
+}
+
+/// `Single.CompareTo`: NaN first, signed zeroes equal; the stable sort keeps
+/// the enqueue order of equal deadlines.
+fn compare_deadlines(a: f32, b: f32) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else if a == b {
+        Ordering::Equal
+    } else {
+        match (a.is_nan(), b.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Less,
+            _ => Ordering::Greater,
+        }
+    }
+}
+
+/// The delay table and the player's animator driver, for the step loop.
+#[derive(SystemParam)]
+pub(crate) struct PlayerTalkMotion<'w, 's> {
+    queue: ResMut<'w, PlayerTalkAnimations>,
+    avatars: Query<'w, 's, &'static mut AvatarDriver, With<PlayerControlled>>,
+}
+
+/// Runs the commands the table released, in its order (a later command of
+/// the same frame replaces the earlier one on the same character).
+/// * Character 0 is the player: `PlayerAvatarPresenter.PlayAnimation` with
+///   the lower-cased name.
+/// * Otherwise `FindNPCCharacter`: the session's NPC when the id is its unit,
+///   else nothing. A request for the base name already playing does nothing
+///   (`IsCurrentPlayingAnimationSameAs`).
+#[allow(clippy::too_many_arguments)]
+fn run_talk_animations(
+    session: &PlayerTalkSession,
+    due: Vec<TalkAnimation>,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
     npcs: &mut Query<
         (
             &mut MotionPhase,
@@ -2905,38 +3055,293 @@ fn release_finished_animations(
         Without<PlayerControlled>,
     >,
     runtimes: &mut Query<&mut PlayerTalkRuntime>,
-    players: &Query<&mut AnimationPlayer>,
+    players: &mut Query<&mut AnimationPlayer>,
+    transitions: &mut Query<&mut AnimationTransitions>,
+    avatars: &mut Query<&mut AvatarDriver, With<PlayerControlled>>,
+) {
+    for command in due {
+        if command.unit == 0 {
+            let clip = command.motion.to_lowercase();
+            let Ok(mut driver) = avatars.get_mut(session.player) else {
+                warn!(
+                    "[player-talk] source={} step={} animation {}: the player has no animator driver",
+                    command.source_talk,
+                    command.source_step,
+                    ascii_or(&clip),
+                );
+                continue;
+            };
+            let animator = driver.player;
+            let (Ok(mut player), Ok(mut transition)) =
+                (players.get_mut(animator), transitions.get_mut(animator))
+            else {
+                continue;
+            };
+            match driver.play_conversation_motion(&clip, graphs, &mut player, &mut transition) {
+                Ok(()) => info!(
+                    "[player-talk] source={} step={} player PlayAnimation({}, fade 0.25s, speed reset to 1)",
+                    command.source_talk,
+                    command.source_step,
+                    ascii_or(&clip),
+                ),
+                Err(error) => warn!(
+                    "[player-talk] source={} step={} player PlayAnimation({}) refused: {error}",
+                    command.source_talk,
+                    command.source_step,
+                    ascii_or(&clip),
+                ),
+            }
+            continue;
+        }
+        if command.unit != session.unit as i64 {
+            info!(
+                "[player-talk] source={} step={} animation unit={}: not in the current talk's cast, nothing plays",
+                command.source_talk, command.source_step, command.unit,
+            );
+            continue;
+        }
+        let Ok(mut runtime) = runtimes.get_mut(session.npc) else {
+            continue;
+        };
+        if runtime.original.as_deref() == Some(command.motion.as_str()) {
+            info!(
+                "[player-talk] source={} step={} animation motion={}: already the current motion, nothing replays",
+                command.source_talk,
+                command.source_step,
+                ascii_or(&command.motion),
+            );
+            continue;
+        }
+        let Ok((_, _, mut driver, _)) = npcs.get_mut(session.npc) else {
+            continue;
+        };
+        let (Ok(mut player), Ok(transition)) = (
+            players.get_mut(driver.player),
+            transitions.get_mut(driver.player),
+        ) else {
+            continue;
+        };
+        begin_talk_animation(
+            session.unit,
+            &mut runtime,
+            command,
+            lib,
+            graphs,
+            &mut driver,
+            &mut player,
+            transition.into_inner(),
+        );
+    }
+}
+
+/// The start of `ChangeAnimationAsync`: with `playEndMotion` and the library
+/// holding `<previous>_E`, that end segment plays first at speed 1 and the new
+/// motion follows it; otherwise the new motion's `_S` starts. The previous
+/// base name is unknown at the talk's start, where no end segment plays.
+#[allow(clippy::too_many_arguments)]
+fn begin_talk_animation(
+    unit: u32,
+    runtime: &mut PlayerTalkRuntime,
+    command: TalkAnimation,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    driver: &mut MotionDriver,
+    player: &mut AnimationPlayer,
+    transitions: &mut AnimationTransitions,
+) {
+    if command.play_end_motion {
+        if let Some(previous) = runtime.original.clone() {
+            let end_clip = format!("{previous}_E");
+            if lib.named_animations.contains_key(end_clip.as_str()) {
+                let node = node_for(
+                    &mut runtime.nodes,
+                    graphs,
+                    lib,
+                    &driver.graph,
+                    &end_clip,
+                    unit,
+                );
+                transitions
+                    .play(
+                        player,
+                        node,
+                        std::time::Duration::from_secs_f32(command.blend.max(0.0)),
+                    )
+                    .set_speed(1.0);
+                driver.playing = None;
+                driver.alone_holds = true;
+                info!(
+                    "[player-talk] source={} step={} unit={unit}: end segment {} of the previous motion at speed 1, then {}",
+                    command.source_talk,
+                    command.source_step,
+                    ascii_or(&end_clip),
+                    ascii_or(&command.motion),
+                );
+                runtime.segment = Some(TalkSegment::End {
+                    node,
+                    next: command,
+                });
+                return;
+            }
+        }
+    }
+    start_talk_motion(
+        unit,
+        runtime,
+        command,
+        lib,
+        graphs,
+        driver,
+        player,
+        transitions,
+    );
+}
+
+/// A motion's `_S` (crossfade `blend`, animator speed `speed`). Without that
+/// segment in the library the view's crossfade finds nothing and nothing
+/// plays; the segment playing stays.
+#[allow(clippy::too_many_arguments)]
+fn start_talk_motion(
+    unit: u32,
+    runtime: &mut PlayerTalkRuntime,
+    command: TalkAnimation,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    driver: &mut MotionDriver,
+    player: &mut AnimationPlayer,
+    transitions: &mut AnimationTransitions,
+) {
+    let clip = format!("{}_S", command.motion);
+    if !lib.named_animations.contains_key(clip.as_str()) {
+        warn!(
+            "[player-talk] source={} step={} motion={}: the shared library has no start segment, nothing plays",
+            command.source_talk,
+            command.source_step,
+            ascii_or(&command.motion),
+        );
+        return;
+    }
+    let node = node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+    transitions
+        .play(
+            player,
+            node,
+            std::time::Duration::from_secs_f32(command.blend.max(0.0)),
+        )
+        .set_speed(command.speed);
+    driver.playing = None;
+    driver.alone_holds = true;
+    runtime.original = Some(command.motion.clone());
+    info!(
+        "[player-talk] source={} step={} unit={unit} motion={}: start segment (speed {:.2}, blend {:.2}s)",
+        command.source_talk,
+        command.source_step,
+        ascii_or(&command.motion),
+        command.speed,
+        command.blend,
+    );
+    runtime.segment = Some(TalkSegment::Start {
+        node,
+        motion: command.motion,
+        speed: command.speed,
+        blend: command.blend,
+    });
+}
+
+/// Each frame: a finished `_S` hands over to the same name's `_L`, looping
+/// until the next change or the talk's end (without `_L` the animator goes
+/// back to the NPC's movement driver); a finished `_E` starts the motion
+/// queued behind it.
+#[allow(clippy::too_many_arguments)]
+fn advance_talk_segments(
+    session: &PlayerTalkSession,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    npcs: &mut Query<
+        (
+            &mut MotionPhase,
+            &mut WalkState,
+            &mut MotionDriver,
+            &Transform,
+        ),
+        Without<PlayerControlled>,
+    >,
+    runtimes: &mut Query<&mut PlayerTalkRuntime>,
+    players: &mut Query<&mut AnimationPlayer>,
+    transitions: &mut Query<&mut AnimationTransitions>,
 ) {
     let Ok(mut runtime) = runtimes.get_mut(session.npc) else {
         return;
     };
-    let Some(node) = runtime.anim_node else {
+    let node = match &runtime.segment {
+        Some(TalkSegment::Start { node, .. }) | Some(TalkSegment::End { node, .. }) => *node,
+        Some(TalkSegment::Loop) | None => return,
+    };
+    let Ok((_, _, mut driver, _)) = npcs.get_mut(session.npc) else {
         return;
     };
-    let player_entity = npcs
-        .get(session.npc)
-        .map(|(_, _, driver, _)| driver.player)
-        .expect("参演者的驱动应已装配");
-    let done = players
-        .get(player_entity)
-        .map(|player| {
-            player
-                .playing_animations()
-                .any(|(n, animation)| *n == node && animation.is_finished())
-        })
-        .unwrap_or(false);
-    if !done {
+    let (Ok(mut player), Ok(transition)) = (
+        players.get_mut(driver.player),
+        transitions.get_mut(driver.player),
+    ) else {
+        return;
+    };
+    let finished = player
+        .playing_animations()
+        .any(|(n, animation)| *n == node && animation.is_finished());
+    if !finished {
         return;
     }
-    runtime.anim_node = None;
-    if let Ok((_, _, mut driver, _)) = npcs.get_mut(session.npc) {
-        driver.alone_holds = false;
-        driver.playing = None;
+    let transition = transition.into_inner();
+    let unit = session.unit;
+    match runtime.segment.take() {
+        Some(TalkSegment::End { next, .. }) => {
+            start_talk_motion(
+                unit,
+                &mut runtime,
+                next,
+                lib,
+                graphs,
+                &mut driver,
+                &mut player,
+                transition,
+            );
+        }
+        Some(TalkSegment::Start {
+            motion,
+            speed,
+            blend,
+            ..
+        }) => {
+            let clip = format!("{motion}_L");
+            if lib.named_animations.contains_key(clip.as_str()) {
+                let node = node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+                transition
+                    .play(
+                        &mut player,
+                        node,
+                        std::time::Duration::from_secs_f32(blend.max(0.0)),
+                    )
+                    .set_speed(speed)
+                    .repeat();
+                runtime.segment = Some(TalkSegment::Loop);
+                info!(
+                    "[player-talk] talk {} unit={unit}: start segment done, loop segment {}",
+                    session.talk_id,
+                    ascii_or(&clip)
+                );
+            } else {
+                driver.alone_holds = false;
+                driver.playing = None;
+                info!(
+                    "[player-talk] talk {} unit={unit}: start segment done, no loop segment {}: the animator goes back to the movement driver",
+                    session.talk_id,
+                    ascii_or(&clip)
+                );
+            }
+        }
+        other => runtime.segment = other,
     }
-    info!(
-        "[player-talk] 段 {} unit={} 对话动作播完：播放器交还位移驱动（回待机）",
-        session.talk_id, session.unit
-    );
 }
 
 /// 段收口：撤持留与运行时、撤窗体（层弹出无淡出）、相位回驻留、待机
@@ -2958,10 +3363,22 @@ fn finish_session(
     >,
     players: &mut Query<&mut AnimationPlayer>,
     transitions: &mut Query<&mut AnimationTransitions>,
+    motion: &mut PlayerTalkMotion,
     _ledger: &mut PlayerTalkLedger,
     now: f32,
 ) {
     crate::delayed_faces::stop_loop(commands);
+    motion.queue.stop_loop();
+    // The player: a clip a talk step played keeps playing (the Talk state
+    // stays until the next move); locomotion takes the animator back.
+    if let Ok(mut driver) = motion.avatars.get_mut(session.player) {
+        if driver.end_conversation_motion() {
+            info!(
+                "[player-talk] talk {}: the player's talk motion keeps playing, locomotion has the animator again",
+                session.talk_id
+            );
+        }
+    }
     crate::audio::dispose_talk_voice(commands);
     // NPC：转体未完钉到终点（律状态 forward 同步——撤持留后行走不
     // 回跳），回驻留 + 待机归位。
