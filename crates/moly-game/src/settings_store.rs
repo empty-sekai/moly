@@ -1,8 +1,14 @@
 //! Shared local settings document. Every writer merges its own fields into the
 //! latest document, so an audio save cannot erase graphics preferences.
+//!
+//! The browser game keeps the document in the page backend ([`PageDocument`]):
+//! the page seeds it, every committed write bumps its revision, and the page
+//! stores the revision it takes. Writers are the same in every backend.
 
 use bevy::prelude::*;
 use serde_json::{Map, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 #[derive(Resource, Default)]
 pub(crate) struct SettingsStore {
@@ -133,7 +139,7 @@ fn path() -> Result<std::path::PathBuf, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn read_text() -> Result<Option<String>, String> {
+fn platform_read_text() -> Result<Option<String>, String> {
     match std::fs::read_to_string(path()?) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -142,7 +148,7 @@ pub(crate) fn read_text() -> Result<Option<String>, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn transaction_guard() -> Result<std::fs::File, String> {
+fn platform_guard() -> Result<std::fs::File, String> {
     let destination = path()?;
     let parent = destination
         .parent()
@@ -164,26 +170,31 @@ fn transaction_guard() -> Result<std::fs::File, String> {
     Ok(file)
 }
 
-#[cfg(target_arch = "wasm32")]
-static BROWSER_WRITABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BROWSER_WRITABLE: AtomicBool = AtomicBool::new(false);
+
+const READ_ONLY: &str = "This tab is read-only. Exclusive browser storage access is unavailable; close other moly tabs and reload to save.";
 
 /// The browser host sets this only while it holds the exclusive storage lock.
 #[cfg(target_arch = "wasm32")]
 pub fn set_browser_storage_writable(writable: bool) {
-    BROWSER_WRITABLE.store(writable, std::sync::atomic::Ordering::Relaxed);
+    BROWSER_WRITABLE.store(writable, Ordering::Relaxed);
+}
+
+pub(crate) fn browser_storage_writable() -> bool {
+    BROWSER_WRITABLE.load(Ordering::Relaxed)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn transaction_guard() -> Result<(), String> {
-    if BROWSER_WRITABLE.load(std::sync::atomic::Ordering::Relaxed) {
+fn platform_guard() -> Result<(), String> {
+    if browser_storage_writable() {
         Ok(())
     } else {
-        Err("This tab is read-only. Exclusive browser storage access is unavailable; close other moly tabs and reload to save.".into())
+        Err(READ_ONLY.into())
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_text(text: &str) -> Result<(), String> {
+fn platform_write_text(text: &str) -> Result<(), String> {
     use std::io::Write;
     let destination = path()?;
     let parent = destination
@@ -218,20 +229,23 @@ fn storage() -> Result<web_sys::Storage, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn read_text() -> Result<Option<String>, String> {
+fn platform_read_text() -> Result<Option<String>, String> {
     storage()?
         .get_item("moly-settings")
         .map_err(|error| format!("Read localStorage: {error:?}"))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn write_text(text: &str) -> Result<(), String> {
+fn platform_write_text(text: &str) -> Result<(), String> {
     storage()?
         .set_item("moly-settings", text)
         .map_err(|error| format!("Write localStorage: {error:?}"))
 }
 
 pub(crate) fn location() -> String {
+    if page_installed() {
+        return "page settings document".into();
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         path()
@@ -243,3 +257,121 @@ pub(crate) fn location() -> String {
         "localStorage[moly-settings]".into()
     }
 }
+
+/// The page backend's document, or the platform store when none is installed.
+pub(crate) fn read_text() -> Result<Option<String>, String> {
+    match with_page(|page| page.text.clone()) {
+        Some(text) => Ok(text),
+        None => platform_read_text(),
+    }
+}
+
+fn write_text(text: &str) -> Result<(), String> {
+    match with_page(|page| page.write(text)) {
+        Some(result) => result,
+        None => platform_write_text(text),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type PlatformGuard = std::fs::File;
+#[cfg(target_arch = "wasm32")]
+type PlatformGuard = ();
+
+/// The page backend keeps the exclusive-writer rule of the browser store: a
+/// tab without the storage lease commits nothing and counts the refusal.
+fn transaction_guard() -> Result<Option<PlatformGuard>, String> {
+    let writable = browser_storage_writable();
+    match with_page(|page| {
+        if !writable {
+            page.refused = page.refused.saturating_add(1);
+        }
+        writable
+    }) {
+        Some(true) => Ok(None),
+        Some(false) => Err(READ_ONLY.into()),
+        None => platform_guard().map(Some),
+    }
+}
+
+/// In-memory settings document of the browser game. Revision 0 is the seed;
+/// each committed write is the next revision. `acked` is the newest revision
+/// the page reported as stored.
+#[derive(Debug, Default)]
+pub(crate) struct PageDocument {
+    text: Option<String>,
+    revision: u32,
+    acked: u32,
+    refused: u32,
+}
+
+impl PageDocument {
+    pub(crate) fn seeded(text: Option<String>) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+
+    fn write(&mut self, text: &str) -> Result<(), String> {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or("Settings revision is exhausted")?;
+        self.text = Some(text.to_owned());
+        Ok(())
+    }
+
+    /// The newest document when it is newer than `after`.
+    pub(crate) fn take(&self, after: u32) -> Option<(u32, &str)> {
+        if self.revision <= after {
+            return None;
+        }
+        Some((self.revision, self.text.as_deref()?))
+    }
+
+    /// The page may only acknowledge a revision it was offered.
+    pub(crate) fn ack(&mut self, revision: u32) -> Result<(), String> {
+        if revision > self.revision {
+            return Err(format!(
+                "persist.ack revision {revision} was never offered (newest is {})",
+                self.revision
+            ));
+        }
+        self.acked = self.acked.max(revision);
+        Ok(())
+    }
+
+    pub(crate) fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    pub(crate) fn acked(&self) -> u32 {
+        self.acked
+    }
+
+    /// Writes refused because this tab holds no storage lease.
+    pub(crate) fn refused(&self) -> u32 {
+        self.refused
+    }
+}
+
+static PAGE: Mutex<Option<PageDocument>> = Mutex::new(None);
+
+/// Selects the page backend before the app is built; the platform store is
+/// never read or written afterwards.
+pub(crate) fn install_page_document(text: Option<String>) {
+    if let Ok(mut page) = PAGE.lock() {
+        *page = Some(PageDocument::seeded(text));
+    }
+}
+
+fn page_installed() -> bool {
+    with_page(|_| ()).is_some()
+}
+
+/// `None` when no page backend is installed.
+pub(crate) fn with_page<R>(operation: impl FnOnce(&mut PageDocument) -> R) -> Option<R> {
+    PAGE.lock().ok()?.as_mut().map(operation)
+}
+

@@ -1264,7 +1264,11 @@ pub(crate) fn read_switch(
         Res<crate::game_settings::SettingsPanel>,
         Option<Res<crate::entry::EntrySequence>>,
     ),
-    library: Res<crate::content_library::ContentLibrary>,
+    // Paired: this system is at the parameter-count limit.
+    (library, dev): (
+        Res<crate::content_library::ContentLibrary>,
+        Option<Res<crate::dev_tools::DevTools>>,
+    ),
 ) {
     // GameState SiteMove: the move owns the site until it returns to Normal.
     // Its input lock covers the keys and the tour; a request queued by
@@ -1282,7 +1286,8 @@ pub(crate) fn read_switch(
     let manual_input = !panel.blocks_world_input()
         && !library.blocks_world_input()
         && crate::entry::site_input_open(entry);
-    let mut requested = manual_input
+    // Tab and the digit keys are developer shortcuts; the tour is not a key.
+    let mut requested = (manual_input && dev.is_some())
         .then(|| key_request(&keys, active.as_deref()))
         .flatten();
     if requested.is_none() && manual_input {
