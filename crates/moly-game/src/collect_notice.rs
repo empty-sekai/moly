@@ -41,7 +41,10 @@ pub(crate) struct NoticeCollectItem {
     pub(crate) is_limit: bool,
     /// The item is collected for the first time.
     pub(crate) is_new: bool,
-    /// The item is rare.
+    /// The item is rare. For a material the opener sets it from the master's
+    /// `MysekaiMaterialRarityType` (rarity_1 = 0, rarity_2 = 1, rarity_3 = 2,
+    /// rarity_4 = 3) with one unsigned compare, `rarity - 1 < 3`: rarity_2 to
+    /// rarity_4 are rare, rarity_1 wraps and is not.
     pub(crate) is_rare: bool,
 }
 
