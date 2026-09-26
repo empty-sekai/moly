@@ -85,6 +85,8 @@ mod npc_clock;
 mod npc_dither;
 mod npc_fixture_activity;
 mod npc_fixture_talk;
+mod npc_gate;
+mod npc_look_at;
 #[cfg(test)]
 mod npc_harness;
 pub mod npc_objective;
@@ -126,6 +128,7 @@ pub(crate) mod site_move;
 pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
+pub mod site_extension;
 mod source_curve;
 mod weather_animation;
 #[cfg(test)]

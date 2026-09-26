@@ -539,6 +539,52 @@ impl PolyMesh {
         Some((self.straighten(grid, &corridor, start, end)?, false))
     }
 
+    /// The cells of an agent corridor from `from` (the cell the agent stands
+    /// on) to the cell of `goal`, with the corridor's end: `goal` when the two
+    /// cells are connected, else (as [`Self::path_or_partial`]) the closest
+    /// point of the cell of `from`'s component nearest to `goal`. The flag
+    /// tells which. `goal` must already be mapped onto the walk cells.
+    pub(crate) fn corridor_from(
+        &self,
+        grid: &Grid,
+        regions: &Regions,
+        from: u32,
+        goal: [f32; 2],
+        half_extent: f32,
+    ) -> Option<(Vec<u32>, [f32; 2], bool)> {
+        if from as usize >= self.tris.len() {
+            return None;
+        }
+        let to = self.locate(grid, regions, goal, half_extent)?;
+        if self.components[from as usize] == self.components[to as usize] {
+            return Some((self.find_corridor(grid, from, to)?, goal, true));
+        }
+        let component = self.components[from as usize];
+        let best = (0..self.tris.len() as u32)
+            .filter(|index| self.components[*index as usize] == component)
+            .min_by(|a, b| {
+                distance2(self.centre(grid, *a), goal).total_cmp(&distance2(self.centre(grid, *b), goal))
+            })?;
+        let cells = self.find_corridor(grid, from, best)?;
+        let end = self.partial_end(grid, best, goal);
+        Some((cells, end, false))
+    }
+
+    /// The straight path from `start` to `end` through the shared edges of
+    /// `cells`, start and end included (the funnel of [`Self::path`]).
+    pub(crate) fn straight_through(
+        &self,
+        grid: &Grid,
+        cells: &[u32],
+        start: [f32; 2],
+        end: [f32; 2],
+    ) -> Option<Vec<[f32; 2]>> {
+        if cells.iter().any(|cell| *cell as usize >= self.tris.len()) {
+            return None;
+        }
+        self.straighten(grid, cells, start, end)
+    }
+
     fn straighten(
         &self,
         grid: &Grid,

@@ -42,6 +42,10 @@
 //                         mask-ramped drop shadow, treasure shadows, fog.
 //   SITE_TREASURE_RARE    _USE_RARE: rare base colour lerp plus the
 //                         screen-space rare overlay behind a fract fresnel.
+// The global keyword _USE_MYSEKAI_SITE_EXTENSION is not a pipeline key: it
+// flips at run time, so it is the flag in binding 13 and every arm whose
+// source program changes with it tests that flag (see "Site expansion
+// dissolve" below). With the flag off those arms run exactly as before.
 // 顶点属性键由引擎按网格布局注入：VERTEX_COLORS / VERTEX_UVS_A /
 // VERTEX_UVS_B；网格没有顶点色时按源语义回白色 (1,1,1,1)。SKINNED (a
 // skinned mesh renderer, e.g. a lid) deforms the position and normal by the
@@ -187,6 +191,32 @@ struct SiteShadow {
 @group(3) @binding(10) var<uniform> shadow: SiteShadow;
 @group(3) @binding(11) var shadow_tex: texture_depth_2d;
 @group(3) @binding(12) var shadow_cmp: sampler_comparison;
+
+// ---- Site expansion dissolve (group 3 binding 13) ----
+// The keyword `_USE_MYSEKAI_SITE_EXTENSION` and its globals, written once a
+// frame for every site material (site_extension.rs; slot order is the
+// contract with its gpu_bytes, the same struct as in room_shell.wgsl).
+// Channel counts of the source declarations: Radius, InnerRadius,
+// Smoothness, FadeMinRadius and FadeMaxRadius are floats; Center is a vec3
+// of which the programs read x and z; EdgeColor and FadeColor are vec4 (rgb
+// and w read). Ground, Water, Ground-Birthday and TreasureBox declare six of
+// them (no Smoothness, no EdgeColor); Object declares eight. LimitLineWidth
+// is declared by no program.
+
+struct SiteExtension {
+    // (_SiteExtensionRadius, _SiteExtensionInnerRadius,
+    //  _SiteExtensionSmoothness, keyword: 1 enabled, 0 disabled)
+    radii: vec4<f32>,
+    // _SiteExtensionCenter in this pipeline's world (xz read).
+    center: vec4<f32>,
+    edge_color: vec4<f32>,
+    fade_color: vec4<f32>,
+    // (_SiteExtensionFadeMinRadius, _SiteExtensionFadeMaxRadius,
+    //  _SiteExtensionLimitLineWidth, 0)
+    fade_range: vec4<f32>,
+}
+
+@group(3) @binding(13) var<uniform> site_extension: SiteExtension;
 
 // ---- 色彩域（改这个文件里任何一条算术之前先读）----
 //
@@ -535,6 +565,35 @@ fn apply_fog(rgb: vec3<f32>, world_y: f32, fog_ramp: f32) -> vec3<f32> {
     let delta = distance_blended - rgb;
     let height = min(exp2(-world_y * env.fog_params.z), 1.0) * fog_color.w;
     return clamp(height * delta + rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Whether this frame's programs are the `_USE_MYSEKAI_SITE_EXTENSION` ones.
+fn site_extension_on() -> bool {
+    return site_extension.radii.w > 0.5;
+}
+
+// Horizontal distance of a world position from _SiteExtensionCenter:
+// sqrt(dot(p.xz - C.xz, p.xz - C.xz)).
+fn site_extension_distance(world_xz: vec2<f32>) -> f32 {
+    let delta = world_xz + -site_extension.center.xz;
+    return sqrt(dot(delta, delta));
+}
+
+// The fade band every keyword program applies, in the source's operation
+// order: t = clamp((d - Ri) / (R - Ri), 0, 1); c moves toward the fade colour
+// by t * F.w where 0.999 >= t, FadeMax >= d and d >= FadeMin, and stays c
+// elsewhere.
+fn site_extension_band(c: vec3<f32>, d: f32) -> vec3<f32> {
+    let toward = -c + site_extension.fade_color.rgb;
+    let span = -site_extension.radii.y + site_extension.radii.x;
+    var t = d + -site_extension.radii.y;
+    t = t / span;
+    t = clamp(t, 0.0, 1.0);
+    let w = t * site_extension.fade_color.w;
+    let mixed = vec3<f32>(w) * toward + c;
+    var o = select(c, mixed, 0.999000013 >= t);
+    o = select(c, o, site_extension.fade_range.y >= d);
+    return select(c, o, d >= site_extension.fade_range.x);
 }
 
 // 源像素坐标是 GL 约定：原点左下、y 向上、半像素偏移。本管线的帧缓冲
@@ -968,6 +1027,35 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
         rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
     }
 
+    // Site expansion dissolve (the _USE_MYSEKAI_SITE_EXTENSION program):
+    // after the phenomena gate, before the additive colour, on the gate's
+    // output. Every usage takes the fade band; usage 8 then takes the edge:
+    // h = smoothstep of clamp(clamp(d - R, 0, 1) / Smoothness, 0, 1);
+    // discarded where d < FadeMax and h < 0.001 (inside the radius), the edge
+    // colour mixed in by (1 - h) * E.w where FadeMax >= d and 0.999 >= h.
+    if site_extension_on() {
+        let d = site_extension_distance(in.world_position.xz);
+        rgb = site_extension_band(rgb, d);
+        if params.object_texture_mapping.y == 8.0 {
+            var e = d + -site_extension.radii.x;
+            e = clamp(e, 0.0, 1.0);
+            let inverse = 1.0 / site_extension.radii.z;
+            e = inverse * e;
+            e = clamp(e, 0.0, 1.0);
+            let k = e * -2.0 + 3.0;
+            let e2 = e * e;
+            let h = e2 * k;
+            if d < site_extension.fade_range.y && h < 0.00100000005 {
+                discard;
+            }
+            var w = -k * e2 + 1.0;
+            w = w * site_extension.edge_color.w;
+            var edged = vec3<f32>(w) * (-rgb + site_extension.edge_color.rgb) + rgb;
+            edged = select(rgb, edged, site_extension.fade_range.y >= d);
+            rgb = select(rgb, edged, 0.999000013 >= h);
+        }
+    }
+
     // 门后无条件加色：rgb += _AdditiveColor.rgb · .w。
     rgb = rgb + params.additive_color.rgb * params.additive_color.w;
     // emission（SV_Target1）块放弃：本管线单颜色目标。
@@ -1109,6 +1197,11 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_0.xz, env.treasure_shadow_intensity.x);
     rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_1.xz, env.treasure_shadow_intensity.y);
     rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+    // Site expansion dissolve: the fade band on the fogged colour (apply_fog
+    // returns it clamped to [0, 1], the value the source program reads).
+    if site_extension_on() {
+        rgb = site_extension_band(rgb, site_extension_distance(in.world_position.xz));
+    }
     return vec4<f32>(srgb_format_decode(rgb), alpha * params.base_opacity.x);
 #endif
 #ifdef SITE_SCROLL
@@ -1202,6 +1295,15 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
 #endif
 
     rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+
+    // Site expansion dissolve: the fade band on the fogged colour (apply_fog
+    // returns it clamped to [0, 1], the value the source program reads),
+    // before the height fade. The admitted Ground/Water/Birthday materials
+    // carry no _SKIP_PHENOMENA_LIGHT, the one variant family the keyword
+    // leaves unchanged.
+    if site_extension_on() {
+        rgb = site_extension_band(rgb, site_extension_distance(in.world_position.xz));
+    }
 
 #ifdef SITE_GROUND_HEIGHT_FADE
     // Ground 高度淡出：倒数长度形，雾后、臂末（runtime 0.5<_UseHeightFade）。

@@ -14,8 +14,10 @@
 mod actors;
 mod assets;
 mod autoplay;
+mod edit_grid;
 mod game_state;
 mod input;
+mod placement;
 mod presentation;
 mod put_effect;
 mod validation;
@@ -383,6 +385,116 @@ fn focus(world: &mut World, item: &EditableFixture, source: &'static str) {
     crate::floor_edit_camera::focus(world, position, size, zoom_support, source);
 }
 
+/// `FloorEditState.PutFixture` before the new fixture is shown: its
+/// direction from the camera yaw and its tile from the spiral around the
+/// camera look-at (`placement`). `false` is `CantPutFixture` (no tile), or a
+/// refusal while an input the search reads is missing; `item` is unchanged
+/// then and nothing is selected.
+fn place_new(
+    world: &mut World,
+    session: &mut EditSession,
+    item: &mut EditableFixture,
+    source: &'static str,
+) -> bool {
+    if !validation::is_ground(item) {
+        // `select` names the branch this editor does not build.
+        return true;
+    }
+    let Some(floor) = session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid)
+    else {
+        session.say("地图等级尺寸尚未就绪，暂时不能摆放新家具。");
+        return false;
+    };
+    let put_type = match put_effect::put_type(world, item.fixture_id) {
+        Ok(put_type) => put_type,
+        Err(error) => {
+            warn!("[edit-put] PutFixture {} ({source}): {error}; not put", item.uid);
+            session.say("家具主表仍在加载，暂时不能摆放新家具。");
+            return false;
+        }
+    };
+    let Some(camera) = world
+        .get_resource::<crate::camera::FieldCameraModel>()
+        .map(|model| (model.look_at, model.yaw))
+    else {
+        session.say("相机尚未就绪，暂时不能摆放新家具。");
+        return false;
+    };
+    let (look_at, yaw) = camera;
+    let Some(source_direction) = placement::rotation_to_direction(yaw) else {
+        warn!("[edit-put] PutFixture {} ({source}): camera yaw {yaw} names no direction; not put", item.uid);
+        session.say("相机朝向无效，暂时不能摆放新家具。");
+        return false;
+    };
+    // The look-at relative to the site, in the source frame (X mirrored).
+    let relative = look_at - site_origin(world);
+    let relative = Vec3::new(-relative.x, relative.y, relative.z);
+    let found = placement::place(
+        item,
+        source_direction,
+        relative,
+        &session.rows,
+        floor,
+        put_type.as_deref(),
+    );
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (_, reason) in &found.rejected {
+        let label = placement::reject_label(reason);
+        match counts.iter_mut().find(|(known, _)| *known == label) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((label, 1)),
+        }
+    }
+    info!(
+        "[edit-put] PutFixture {} (fixture {}, {source}): camera look-at {:.3} (source frame, site-relative) -> grid ({}, {}, {}) -> start tile ({}, {}, {}); camera yaw {yaw:.2} -> direction {:?}; put type {:?} ({}); radius cap {}; {} candidates rejected {:?}",
+        item.uid,
+        item.fixture_id,
+        found.look_at,
+        found.look_at_grid.x,
+        found.look_at_grid.y,
+        found.look_at_grid.z,
+        found.start.x,
+        found.start.y,
+        found.start.z,
+        found.source_direction,
+        put_type,
+        if found.search_raised { "raised rings searched" } else { "rings at y 0" },
+        found.max_radius,
+        found.rejected.len(),
+        counts
+    );
+    if std::env::var("MOLY_EDIT_AUTOPLAY").is_ok() {
+        for (index, (tile, reason)) in found.rejected.iter().enumerate().take(400) {
+            info!(
+                "[edit-put]   rejected #{index} tile ({}, {}, {}): {}",
+                tile.x,
+                tile.y,
+                tile.z,
+                placement::reject_label(reason)
+            );
+        }
+    }
+    let Some((tile, center, direction)) = found.chosen else {
+        warn!("[edit-put] PutFixture {} ({source}): no placeable tile within the radius cap; CantPutFixture", item.uid);
+        session.say("附近没有可以摆放的空间。");
+        return false;
+    };
+    item.center = center;
+    item.direction = direction;
+    match item.footprint() {
+        Ok((min, max)) => info!(
+            "[edit-put] PutFixture {} ({source}): tile ({}, {}, {}) (source frame) -> product center ({}, {}, {}) direction {direction:?}; footprint ({}, {}, {})..=({}, {}, {})",
+            item.uid, tile.x, tile.y, tile.z, center.x, center.y, center.z,
+            min.x, min.y, min.z, max.x, max.y, max.z
+        ),
+        Err(error) => warn!("[edit-put] PutFixture {} ({source}): chosen tile has no footprint ({error})", item.uid),
+    }
+    true
+}
+
 fn select(
     session: &mut EditSession,
     item: EditableFixture,
@@ -651,9 +763,7 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
                 session.say("离线UID冲突，未覆盖已有物品。");
                 return;
             }
-            session.next_fixture_uid = next_serial;
-            session.catalog_index = index;
-            let item = EditableFixture { texture_id: 1,
+            let mut item = EditableFixture { texture_id: 1,
                 uid,
                 package: row.package.to_owned(),
                 fixture_id: row.fixture_id,
@@ -662,6 +772,11 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
                 layout: layout_type::FLOOR,
                 direction: Direction::Front,
             };
+            if !place_new(world, session, &mut item, "catalog") {
+                return;
+            }
+            session.next_fixture_uid = next_serial;
+            session.catalog_index = index;
             select(session, item, SelectionOrigin::Mock, world);
         }
         EditCommand::SelectPlaced { uid } => {
@@ -685,6 +800,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
                 return;
             };
             item.center = GridPosition::ZERO;
+            if !place_new(world, session, &mut item, "inventory") {
+                return;
+            }
             select(session, item, SelectionOrigin::Inventory, world);
         }
         EditCommand::MoveTo { center } => {
@@ -899,6 +1017,7 @@ pub struct FixtureEditPlugin;
 
 impl Plugin for FixtureEditPlugin {
     fn build(&self, app: &mut App) {
+        edit_grid::install(app);
         app.init_resource::<EditSession>()
             .init_resource::<EditSessionActive>()
             .init_resource::<EditView>()

@@ -91,11 +91,12 @@ pub(crate) fn effect_scale(size: Vector3Int) -> Vec3 {
     )
 }
 
-/// The put sound id and the handle type of each fixture, and the cue of each
-/// put sound row.
+/// The put sound id, the handle type and the put type of each fixture, and
+/// the cue of each put sound row.
 struct SoundTables {
     put_sound_of: HashMap<i32, i64>,
     handle_of: HashMap<i32, String>,
+    put_type_of: HashMap<i32, String>,
     cue_of: HashMap<i64, String>,
 }
 
@@ -106,6 +107,7 @@ impl SoundTables {
             .ok_or("the fixture table has no fixtures array")?;
         let mut put_sound_of = HashMap::with_capacity(rows.len());
         let mut handle_of = HashMap::with_capacity(rows.len());
+        let mut put_type_of = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row["id"].as_i64().ok_or("a fixture row has no id")?;
             let Some(sound) = row["putSoundId"].as_i64() else {
@@ -116,8 +118,12 @@ impl SoundTables {
             let handle = row["handleType"]
                 .as_str()
                 .ok_or_else(|| format!("fixture row {id} carries no handleType"))?;
+            let put_type = row["putType"]
+                .as_str()
+                .ok_or_else(|| format!("fixture row {id} carries no putType"))?;
             put_sound_of.insert(id as i32, sound);
             handle_of.insert(id as i32, handle.to_owned());
+            put_type_of.insert(id as i32, put_type.to_owned());
         }
         let entries = sounds["entries"]
             .as_object()
@@ -135,6 +141,7 @@ impl SoundTables {
         Ok(Self {
             put_sound_of,
             handle_of,
+            put_type_of,
             cue_of,
         })
     }
@@ -352,6 +359,19 @@ pub(crate) fn is_block(world: &World, fixture_id: i32) -> Option<bool> {
     };
     let handle = tables.handle_of.get(&fixture_id)?;
     Some(matches!(handle.as_str(), "block" | "block_transparent"))
+}
+
+/// The master put type (`mysekaiFixturePutType`) of a fixture: `Err` while
+/// the fixture table is not read (or failed), `Ok(None)` when it has no row.
+pub(crate) fn put_type(world: &World, fixture_id: i32) -> Result<Option<String>, String> {
+    let effect = world
+        .get_resource::<FixturePutEffect>()
+        .ok_or("the fixture table owner is not installed")?;
+    match &effect.tables {
+        Tables::Requested { .. } => Err("the fixture table is still loading".into()),
+        Tables::Read(Err(error)) => Err(format!("the fixture table failed: {error}")),
+        Tables::Read(Ok(tables)) => Ok(tables.put_type_of.get(&fixture_id).cloned()),
+    }
 }
 
 /// `FixtureController.PlayPutSound`: the put sound alone.
