@@ -732,7 +732,7 @@ fn info_field_set(doc: &UiPrefab) -> InfoFieldSet {
     }
 }
 
-fn referenced_component<'a>(
+pub(crate) fn referenced_component<'a>(
     doc: &'a UiPrefab,
     reference: &Value,
     class: &str,
