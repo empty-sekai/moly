@@ -711,11 +711,21 @@ pub(crate) fn install(app: &mut App) {
     app.add_systems(Update, update.before(crate::fixture::FixtureLayoutSet));
     app.add_systems(
         PreUpdate,
-        crate::player_data_ui::input.after(crate::game_settings::input),
+        crate::player_data_ui::input
+            .after(crate::game_settings::input)
+            .run_if(crate::dev_tools::dev_tools),
     );
-    app.add_systems(Update, crate::player_data_ui::refresh.after(update));
+    app.add_systems(
+        Update,
+        crate::player_data_ui::refresh
+            .after(update)
+            .run_if(crate::dev_tools::dev_tools),
+    );
     #[cfg(not(target_arch = "wasm32"))]
-    app.add_systems(Update, drop_files.before(update));
+    app.add_systems(
+        Update,
+        drop_files.before(update).run_if(crate::dev_tools::dev_tools),
+    );
 }
 
 #[cfg(test)]

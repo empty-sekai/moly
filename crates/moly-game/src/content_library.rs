@@ -456,6 +456,11 @@ impl ContentLibrary {
     pub(crate) fn owns_scene(&self) -> bool {
         self.scene_owned
     }
+    /// The browser game's DOM surfaces own input through the same gate as the
+    /// library host's focus command.
+    pub(crate) fn set_host_input_capture(&mut self, captured: bool) {
+        self.external_input_capture = captured;
+    }
 
     /// The original editor info button is a reading entry, not permission to
     /// discard a placement draft, start playback or move the player. Reuse the

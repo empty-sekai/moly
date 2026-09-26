@@ -13,6 +13,7 @@ pub mod avatar_wear;
 pub mod balloon;
 pub mod billboard;
 pub mod birthday;
+mod browser_game;
 mod browser_stage;
 #[cfg(target_arch = "wasm32")]
 mod browser_log;
@@ -27,6 +28,7 @@ mod content_library;
 mod delayed_faces;
 pub mod delivery;
 mod delivery_camera;
+mod dev_tools;
 pub mod emoticon;
 mod entry;
 pub mod env;
@@ -147,8 +149,13 @@ mod source_particle_render;
 
 use bevy::prelude::*;
 
+pub use browser_game::{
+    configure_browser_game, game_command, game_mode_active, game_snapshot, game_take_persist,
+    install_game_storage, parse_game_seed, GameSeed,
+};
 pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
 pub use content_library::library_diagnostics;
+pub use dev_tools::{insert_dev_tools, DevTools};
 
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
