@@ -138,6 +138,53 @@ pub const FIXTURE_ACTION_REACH_THRESHOLD: f32 = 0.01;
 /// `GeneratePath` 重试时 `SamplePosition` 的 maxDistance（源字面量）。
 pub const GENERATE_PATH_SAMPLE_DISTANCE: f32 = 500.0;
 
+/// A navigation agent's corridor (`PathCorridor`): the cells from the one
+/// the agent stands on to the target's, the agent's position and the
+/// target (whose heights are the caller's), and whether the corridor reaches
+/// the requested target (a partial corridor ends at the nearest reachable
+/// point).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Corridor {
+    pub cells: Vec<u32>,
+    pub position: [f32; 3],
+    pub target: [f32; 3],
+    pub complete: bool,
+}
+
+impl Corridor {
+    /// `PathCorridor::SetToEnd`: the agent stands at the target, on the
+    /// corridor's last cell.
+    pub fn set_to_end(&mut self) {
+        self.position = self.target;
+        if let Some(&last) = self.cells.last() {
+            self.cells = vec![last];
+        }
+    }
+}
+
+/// One frame's corners of a corridor ([`WalkField::corridor_corners`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorridorCorners {
+    pub corners: Vec<[f32; 2]>,
+    pub last_is_end: bool,
+}
+
+/// `ReplacePathStartReverse`: from the end of `path`, the first cell the
+/// visited chain holds (the chain searched from its end); the chain beyond
+/// that cell, reversed, replaces the path up to it. No shared cell leaves the
+/// path as it is.
+pub fn replace_path_start_reverse(path: &mut Vec<u32>, visited: &[u32]) -> bool {
+    for i in (0..path.len()).rev() {
+        if let Some(j) = (0..visited.len()).rev().find(|j| visited[*j] == path[i]) {
+            let mut head: Vec<u32> = visited[j + 1..].iter().rev().copied().collect();
+            head.extend_from_slice(&path[i..]);
+            *path = head;
+            return true;
+        }
+    }
+    false
+}
+
 /// 引擎路径查询结果（`NavMeshPath` 的拐点与完整性）：首拐点是映射后的
 /// 起点；`complete` 为假时末拐点是起点分量里离目标最近的点。
 #[derive(Debug, Clone, PartialEq)]
@@ -660,6 +707,109 @@ impl WalkField {
         self.polys
             .nearest_cell(&self.grid, p, RELOCATE_EXTENT_PER_RADIUS * agent_radius)
             .map(|(_, point)| point)
+    }
+
+    /// The corridor a navigation agent at `from` gets for a destination at
+    /// `target` (the path the crowd sets up after `SetDestination`): the
+    /// cells from the one the agent stands on (`from_cell` when it names a
+    /// cell, the corridor's first cell after its last move; else the cell
+    /// found at `from`, [`Self::agent_cell`]) to the target's cell, the target
+    /// mapped in the agent's query box. A target in another component gives
+    /// the partial corridor to the nearest reachable point. The heights are
+    /// the caller's. `None` when the agent or the target maps onto no cell.
+    pub fn corridor(&self, from: [f32; 3], from_cell: Option<u32>, target: [f32; 3]) -> Option<Corridor> {
+        if !from.into_iter().chain(target).all(f32::is_finite) {
+            return None;
+        }
+        let start = match from_cell.filter(|cell| (*cell as usize) < self.polys.cell_count()) {
+            Some(cell) => cell,
+            None => self.agent_cell([from[0], from[2]])?,
+        };
+        let goal = query::nearest_walkable_in_box(&self.grid, [target[0], target[2]], AGENT_QUERY_HALF_EXTENT)?;
+        let (cells, end, complete) =
+            self.polys
+                .corridor_from(&self.grid, &self.regions, start, goal, AGENT_QUERY_HALF_EXTENT)?;
+        Some(Corridor {
+            cells,
+            position: from,
+            target: [end[0], target[1], end[1]],
+            complete,
+        })
+    }
+
+    /// The whole straight path of a corridor, from its position to its
+    /// target through its cells (start and end included; no corner limit).
+    pub fn corridor_path(&self, corridor: &Corridor) -> Option<Vec<[f32; 2]>> {
+        if corridor.cells.is_empty() {
+            return None;
+        }
+        self.polys.straight_through(
+            &self.grid,
+            &corridor.cells,
+            [corridor.position[0], corridor.position[2]],
+            [corridor.target[0], corridor.target[2]],
+        )
+    }
+
+    /// Whether `p` lies on a navigation cell (the engine's inside test,
+    /// edges included), whatever the walk cells under it say.
+    pub fn on_cell(&self, p: [f32; 2]) -> bool {
+        p.into_iter().all(f32::is_finite)
+            && self
+                .polys
+                .nearest_cell(&self.grid, p, 0.0)
+                .is_some_and(|(_, point)| point == p)
+    }
+
+    /// `PathCorridor::FindCorners`: the straight path from the corridor's
+    /// position to its target through its cells, cut to
+    /// [`FIND_CORNERS_MAX`](crate::path::crowd::FIND_CORNERS_MAX) points (the
+    /// start point is the first), with the leading points within the crowd's
+    /// small distance of the position dropped. `last_is_end` tells whether
+    /// the target itself survived the cut. `None` when the corridor has no
+    /// cell or its cells share no edge.
+    pub fn corridor_corners(&self, corridor: &Corridor) -> Option<CorridorCorners> {
+        let straight = self.corridor_path(corridor)?;
+        let (corners, last_is_end) = crate::path::crowd::find_corners(
+            [corridor.position[0], corridor.position[2]],
+            &straight,
+        );
+        Some(CorridorCorners {
+            corners,
+            last_is_end,
+        })
+    }
+
+    /// `PathCorridor::MovePosition` of a corridor asked to move its agent to
+    /// `npos`: an unchanged request keeps the position; otherwise
+    /// `NavMeshQuery::MoveAlongSurface` from the corridor's first cell gives
+    /// the new x/z, and the cells it visited replace the corridor's start
+    /// (`ReplacePathStartReverse`: from the end of the corridor, the first
+    /// cell that the visited chain also holds, searched from the chain's end;
+    /// the chain beyond it, reversed, becomes the corridor's head). The
+    /// position keeps `npos`'s height (the caller projects it). Returns the
+    /// new x/z.
+    pub fn corridor_move(&self, corridor: &mut Corridor, npos: [f32; 3]) -> [f32; 2] {
+        let held = [corridor.position[0], corridor.position[2]];
+        if npos == corridor.position || !npos.into_iter().all(f32::is_finite) {
+            return held;
+        }
+        let Some(&start) = corridor.cells.first() else {
+            return held;
+        };
+        if start as usize >= self.polys.cell_count() {
+            return held;
+        }
+        let step = self.polys.move_along_surface(
+            &self.grid,
+            start,
+            corridor.position,
+            npos,
+            polymesh::MOVE_MAX_VISITED,
+        );
+        replace_path_start_reverse(&mut corridor.cells, &step.visited);
+        corridor.position = [step.position[0], npos[1], step.position[2]];
+        [step.position[0], step.position[2]]
     }
 
     /// `NavMeshQuery::MoveAlongSurface` from `start` on navigation cell `cell`

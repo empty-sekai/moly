@@ -687,6 +687,24 @@ pub struct RouteStops {
     /// neither completes nor fails while the state is Talk, and a local fit
     /// (a timed lerp and its rotate) runs to its end regardless of the state.
     suspended: Option<MotionPhase>,
+    /// The NPC's navigation agent in the engine's crowd.
+    crowd: CrowdMotion,
+}
+
+/// A navigation agent's crowd state (see `moly_law::path::crowd`): its
+/// velocity, its corridor for the current leg, the auto braking switch the
+/// move loop writes, and the remaining distance the last crowd step left.
+#[derive(Default)]
+pub(crate) struct CrowdMotion {
+    velocity: [f32; 3],
+    corridor: Option<moly_law::carve::Corridor>,
+    /// The agent's auto braking. The agent setup turns it off; after that
+    /// only the move loop writes it, so it outlives a stopped move.
+    auto_braking: bool,
+    remaining: Option<f32>,
+    /// A leg was submitted since the last crowd step: the pass that submits
+    /// a leg sets no auto braking.
+    fresh_leg: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -721,8 +739,10 @@ impl RouteStops {
     }
     pub(crate) fn cancel(&mut self) {
         let reentry = self.reentry;
+        let auto_braking = self.crowd.auto_braking;
         *self = Self::default();
         self.reentry = reentry;
+        self.crowd.auto_braking = auto_braking;
     }
 
     pub(crate) fn navigation_origin(
@@ -730,11 +750,11 @@ impl RouteStops {
         position: [f32; 3],
         face: &crate::walk_face::WalkFace,
     ) -> [f32; 3] {
-        if face.walkable_at([position[0], position[2]]) {
+        if on_navigation(face, [position[0], position[2]]) {
             return position;
         }
         self.reentry
-            .filter(|p| face.walkable_at([p[0], p[2]]))
+            .filter(|p| on_navigation(face, [p[0], p[2]]))
             .unwrap_or(position)
     }
 
@@ -1610,16 +1630,22 @@ fn reenter_navigation(
     walk_face: &crate::walk_face::WalkFace,
 ) -> Option<[f32; 2]> {
     let mut start = [state.position[0], state.position[2]];
-    if !walk_face.walkable_at(start) {
+    if !on_navigation(walk_face, start) {
         let reentry = route.reentry?;
-        if !walk_face.walkable_at([reentry[0], reentry[2]]) {
+        if !on_navigation(walk_face, [reentry[0], reentry[2]]) {
             return None;
         }
         state.position = reentry;
         start = [reentry[0], reentry[2]];
     }
-    // 出生与重烘修复由各自生命周期处理；不把不可走起点插进路线制造穿洞首腿。
-    walk_face.walkable_at(start).then_some(start)
+    // An agent stands on the navigation cells, which may leave the walk
+    // cells along their simplified edges; the route queries map it onto the
+    // walk cells within the agent's query box.
+    if walk_face.walkable_at(start) {
+        Some(start)
+    } else {
+        walk_face.sample(start, moly_law::carve::AGENT_QUERY_HALF_EXTENT)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1756,40 +1782,28 @@ fn start_waypoint(
         waypoint.position = target;
         route.stops[route.next] = waypoint;
     }
+    // SetDestination: the crowd gives the agent a corridor from the cell it
+    // stands on (its corridor's first cell after the last move) to the
+    // leg's target; a target out of reach gives the partial corridor, which
+    // the agent walks until the move stalls.
+    let from_cell = route
+        .crowd
+        .corridor
+        .as_ref()
+        .filter(|corridor| corridor.position == state.position)
+        .and_then(|corridor| corridor.cells.first().copied());
+    let corridor = walk_face.field.corridor(state.position, from_cell, target)?;
     let corners =
         if Vec3::from(waypoint.position).distance(Vec3::from(state.position)) < ARRIVAL_DISTANCE {
             // Even a coincident CheckPoint is an execution leg; the next update
             // observes arrival without inventing a Rest delay.
             vec![state.position]
         } else {
-            let points = walk_face
-                .path_exact(
-                    [state.position[0], state.position[2]],
-                    [target[0], target[2]],
-                )
-                .or_else(|| {
-                    // The previous polygon checkpoint was accepted within
-                    // ARRIVAL_DISTANCE, so the integrated position can still
-                    // be a few centimetres from the corridor portal. Retry
-                    // only a furniture approach from that authored checkpoint,
-                    // and only if the exact polygon path accepts the next leg.
-                    let previous = route.stops.get(route.next.checked_sub(1)?)?;
-                    if route.fit.is_none()
-                        || previous.kind != WaypointKind::CheckPoint
-                        || Vec3::from(previous.position).distance(Vec3::from(state.position))
-                            >= ARRIVAL_DISTANCE
-                    {
-                        return None;
-                    }
-                    let path = walk_face.path_exact(
-                        [previous.position[0], previous.position[2]],
-                        [target[0], target[2]],
-                    )?;
-                    state.position = previous.position;
-                    Some(path)
-                })?;
+            let points = walk_face.field.corridor_path(&corridor)?;
             lift_navigation_path(unit, objective_face, points)
         };
+    route.crowd.corridor = Some(corridor);
+    route.crowd.fresh_leg = true;
     // Keep nearby corners, including the query's start. Removing every corner
     // inside the arrival radius can cut a short but necessary obstacle turn.
     *slot = NpcPathWalkSlot::from_corners(corners);
@@ -1976,6 +1990,111 @@ fn yaw_only(rotation: Quat) -> Quat {
     Quat::from_rotation_y(heading_yaw([forward.x, forward.y, forward.z]).to_radians())
 }
 
+/// The presenter's per-leg test distance from `position` to the leg's
+/// `target`, in the source's operand order.
+fn leg_distance(position: [f32; 3], target: [f32; 3]) -> f32 {
+    let dx = position[0] - target[0];
+    let dy = position[1] - target[1];
+    let dz = position[2] - target[2];
+    (dz * dz + (dx * dx + dy * dy)).sqrt()
+}
+
+/// Whether `p` lies on a navigation cell, where the crowd keeps its agents
+/// (the walk cells only decide the route queries' start mapping).
+fn on_navigation(face: &crate::walk_face::WalkFace, p: [f32; 2]) -> bool {
+    face.field.on_cell(p)
+}
+
+/// One frame of the engine's crowd for a walking NPC
+/// (`moly_law::path::crowd`): the corridor's corners and known path length,
+/// the steering, the integration, the move along the navigation cells, then
+/// the corners and known length after the move, which the move loop reads as
+/// the remaining distance next frame. The agent faces the first corner after
+/// the move. Returns that remaining distance, `None` without a corridor.
+fn crowd_step(
+    state: &mut LawWalkState,
+    crowd: &mut CrowdMotion,
+    speed: f32,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    dt: f32,
+) -> Option<f32> {
+    use moly_law::path::crowd;
+    let height = |p: [f32; 2], fallback: f32| {
+        objective_face
+            .navigation_surface_sample([p[0], objective_face.ref_y(), p[1]], WAYPOINT_SAMPLE_DISTANCE)
+            .map_or(fallback, |surface| surface[1])
+    };
+    let corridor = crowd.corridor.as_mut()?;
+    corridor.position = state.position;
+    let found = walk_face.field.corridor_corners(corridor)?;
+    let corners: Vec<[f32; 3]> = found
+        .corners
+        .iter()
+        .map(|p| [p[0], height(*p, corridor.target[1]), p[1]])
+        .collect();
+    let goal = crowd::Goal {
+        corners: &corners,
+        last_is_end: found.last_is_end,
+        target: corridor.target,
+        path_cells: corridor.cells.len(),
+    };
+    let known = crowd::known_path_length(state.position, &goal);
+    let params = crowd::AgentParams {
+        radius: crowd::NPC_AGENT_RADIUS,
+        max_speed: speed,
+        acceleration: crowd::NPC_MOVE_ACCELERATION,
+        stopping_distance: crowd::NPC_STOPPING_DISTANCE,
+        auto_braking: crowd.auto_braking,
+        halted: false,
+    };
+    let steering = crowd::steer(&params, state.position, crowd.velocity, &goal, known, dt);
+    let (mut npos, mut velocity) = (state.position, crowd.velocity);
+    if steering.arrived {
+        corridor.set_to_end();
+        npos = corridor.target;
+        velocity = [0.0; 3];
+    }
+    let (moved, next) = crowd::integrate(
+        npos,
+        velocity,
+        steering.dvel,
+        steering.dvel,
+        steering.braking,
+        params.acceleration,
+        dt,
+    );
+    crowd.velocity = next;
+    let [x, z] = walk_face.field.corridor_move(corridor, moved);
+    corridor.position = [x, height([x, z], moved[1]), z];
+    state.position = corridor.position;
+    let (remaining, facing) = match walk_face.field.corridor_corners(corridor) {
+        Some(after) => {
+            let corners: Vec<[f32; 3]> = after
+                .corners
+                .iter()
+                .map(|p| [p[0], height(*p, corridor.target[1]), p[1]])
+                .collect();
+            let goal = crowd::Goal {
+                corners: &corners,
+                last_is_end: after.last_is_end,
+                target: corridor.target,
+                path_cells: corridor.cells.len(),
+            };
+            (
+                crowd::known_path_length(state.position, &goal),
+                corners.first().copied().unwrap_or(corridor.target),
+            )
+        }
+        None => (f32::INFINITY, corridor.target),
+    };
+    if leg_distance(state.position, facing) > moly_law::path::DIRECTION_EPSILON {
+        state.forward = facing_direction(state.position, facing);
+    }
+    crowd.remaining = Some(remaining);
+    Some(remaining)
+}
+
 /// Called only by the movement producer when it starts a new execution leg.
 /// Conversation-script turns never use this entry point.
 pub(crate) fn declare_navigation_action(
@@ -2126,8 +2245,15 @@ pub fn advance(
             continue;
         }
         if route.generation != walk_face.generation() {
-            if !walk_face.walkable_at([state.0.position[0], state.0.position[2]]) {
-                let (x, z) = walk_face.seat(state.0.position[0], state.0.position[2]);
+            // The rebuilt field has none of the agent's cells: the crowd's
+            // reconnection keeps an agent standing on a cell where it is and
+            // puts one off the cells at the nearest cell point within its
+            // query box, or leaves it where it is when there is none.
+            let at = [state.0.position[0], state.0.position[2]];
+            if let Some([x, z]) = walk_face
+                .relocate(at, moly_law::path::crowd::NPC_AGENT_RADIUS)
+                .filter(|point| *point != at)
+            {
                 state.0.position = objective_face
                     .navigation_surface_sample(
                         [x, objective_face.ref_y(), z],
@@ -2190,121 +2316,50 @@ pub fn advance(
         // 原生代理的再附着由本地格场的记录点承担，不能猜一条穿洞的首腿。
         if matches!(*phase, MotionPhase::Dwelling { remaining: None }) {
             if let Some(reentry) = route.reentry.take() {
-                if !walk_face.walkable_at([state.0.position[0], state.0.position[2]])
-                    && walk_face.walkable_at([reentry[0], reentry[2]])
+                if !on_navigation(walk_face, [state.0.position[0], state.0.position[2]])
+                    && on_navigation(walk_face, [reentry[0], reentry[2]])
                 {
                     state.0.position = reentry;
                     transform.translation = Vec3::from(reentry);
                 }
             }
         }
-        let prior = state.0.position;
-        let prior_forward = state.0.forward;
-        let prior_corner = state.0.next_corner;
-        let mut verdict = if route.agent_stopped && matches!(*phase, MotionPhase::Walking) {
-            WalkVerdict::Walking(0.0)
-        } else {
-            moly_law::path::advance(&mut state.0, &slot.0, speed.0, dt)
-        };
-        // Source frame order: the agent moves; the presenter's per-leg loop
-        // resumes (its yield continuation runs ahead of the player-loop
-        // runner) and, on reaching a CheckPoint within its per-leg test,
-        // submits the next entry as the destination at once; after the last
-        // entry and at a Rest entry the destination stays. Then MoveAsync's
-        // WaitUntil polls IsCompleted against the destination submitted by
-        // then, before its IsStacked check, whichever leg or Rest wait the
-        // presenter is on; the poll pauses while the NPC's state is Talk.
-        // This host judges a leg's arrival at the start of the next frame
-        // (path::advance), so it polls there too: on the frame-start
-        // position, after that arrival has handed a CheckPoint on, and before
-        // this frame's step, which a completion takes back. At the end of a
-        // Rest wait the next leg is submitted after the poll: the source's
-        // wait and poll share one runner, in an order this host cannot
-        // observe, so that leg is read from the following frame. A
+        // Source frame order: the presenter's per-leg loop resumes (its
+        // yield continuation runs ahead of the player-loop runner) and tests
+        // the leg on the position the last crowd step left: within
+        // ARRIVAL_DISTANCE of the leg's target a CheckPoint submits the next
+        // entry as the destination at once; a Rest entry keeps its
+        // destination and starts its wait below. Then MoveAsync's WaitUntil
+        // polls IsCompleted against the destination submitted by then, before
+        // its IsStacked check, whichever leg or Rest wait the presenter is on;
+        // the poll pauses while the NPC's state is Talk. Then the engine's
+        // crowd steps the agent toward its destination (`crowd_step`), which
+        // a completion does not reach: the objective stops the agent first.
+        // At the end of a Rest wait the next leg is submitted after the poll:
+        // the source's wait and poll share one runner, in an order this host
+        // cannot observe, so that leg is read from the following frame. A
         // completion ends the move where the NPC stands or starts the local
-        // fit from there. That fit spans at most the switch tolerance plus the
-        // goal distance, plus the fit position's height above the target
+        // fit from there. That fit spans at most the switch tolerance plus
+        // the goal distance, plus the fit position's height above the target
         // where they differ (a fixture talk cast member's fit keeps the
         // action point's height while its target sits at the site floor).
-        let polls = actions.current != NpcAction::Talk;
-        let arrived = matches!(verdict, WalkVerdict::Arrived(_));
-        let mut completed = polls && !arrived && route.completed(prior);
-        if completed {
-            state.0.position = prior;
-            state.0.forward = prior_forward;
-            state.0.next_corner = prior_corner;
-        } else if matches!(*phase, MotionPhase::Walking) {
-            // Validate the travelled polyline, not the chord spanning several
-            // valid corners crossed in one frame. A chord can cross a hole even
-            // though every actually traversed segment stays on the field.
-            let corners = slot.0.corners();
-            let begin = (prior_corner as usize).min(corners.len());
-            let end = (state.0.next_corner as usize).min(corners.len());
-            let mut from = prior;
-            let mut valid = true;
-            for to in corners[begin..end]
-                .iter()
-                .copied()
-                .chain(std::iter::once(state.0.position))
-            {
-                valid &= walk_face.segment_walkable([from[0], from[2]], [to[0], to[2]]);
-                from = to;
-            }
-            // Both ordinary and furniture routes come from the polygon
-            // corridor. The voxel supercover is an additional, stricter
-            // admission check, not a license to rebuild the same rejected
-            // corridor every frame. Until corridor coverage is retained as
-            // evidence, fail this move explicitly and let the objective layer
-            // choose the next action; never turn this into a wall shortcut.
-            if !valid && route.fit.is_none() {
-                state.0.position = prior;
-                state.0.forward = prior_forward;
-                state.0.next_corner = prior_corner;
-                route.stop();
-                slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
-                state.0.next_corner = 0;
-                stuck.0 = None;
-                *phase = MotionPhase::Dwelling { remaining: None };
-                actions.change(NpcAction::Idle, &mut rest);
-                warn!(
-                    "[npc unit={}] polygon corridor failed strict walk-cell validation; movement stopped",
-                    unit.0
-                );
-                continue;
-            }
-            // A low step may lie between two flat route corners. Re-evaluate
-            // navigation height at the travelled x/z, not only at endpoints.
-            // Local furniture fitting is a different phase and bypasses this.
-            if let Some(surface) = objective_face.navigation_surface_sample(
-                state.0.position, WAYPOINT_SAMPLE_DISTANCE,
-            ) {
-                state.0.position[1] = surface[1];
-            }
-            if let (WalkVerdict::Walking(_), false) = (verdict, route.agent_stopped) {
-                if let Some(corner) = corners.get(end).or_else(|| corners.last()) {
-                    state.0.forward = facing_direction(state.0.position, *corner);
-                }
-            }
-            if let WalkVerdict::Arrived(_) = verdict {
-                let waypoint = route
-                    .stops
-                    .get(route.next)
-                    .expect("active navigation leg retains its waypoint");
-                let distance = Vec3::from(waypoint.position).distance(Vec3::from(state.0.position));
-                // A sampled endpoint is not proof that the unsnapped waypoint
-                // was reached. Keep the movement/watchdog alive when it was not.
-                verdict = if distance < ARRIVAL_DISTANCE {
-                    WalkVerdict::Arrived(distance)
-                } else {
-                    WalkVerdict::Walking(0.0)
-                };
-            }
+        if !matches!(*phase, MotionPhase::Walking) {
+            route.crowd.velocity = [0.0; 3];
         }
-        // The presenter's per-leg step for an arrival found at the frame
-        // start. A reached Rest entry keeps its destination and starts its
-        // wait below unless the move completes first.
+        let polls = actions.current != NpcAction::Talk;
+        // The leg's target is the destination submitted, not the corridor's
+        // end: a partial corridor's end is no arrival.
+        let leg_arrival = if matches!(*phase, MotionPhase::Walking) && !slot.0.is_empty() {
+            route
+                .navigation_destination
+                .map(|target| leg_distance(state.0.position, target))
+                .filter(|distance| *distance < ARRIVAL_DISTANCE)
+        } else {
+            None
+        };
+        let mut verdict = WalkVerdict::Idle;
         let mut stepped = false;
-        if let WalkVerdict::Arrived(distance) = verdict {
+        if let Some(distance) = leg_arrival {
             if route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::CheckPoint) {
                 info!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
                     unit.0, route.next + 1, route.stops.len());
@@ -2321,12 +2376,54 @@ pub fn advance(
                 );
                 declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                 stepped = true;
+            } else {
+                verdict = WalkVerdict::Arrived(distance);
             }
         }
-        if arrived {
-            // An arrival found at the frame start moves nothing: poll that
-            // position against the destination submitted by now.
-            completed = polls && route.completed(state.0.position);
+        let completed = polls && route.completed(state.0.position);
+        if !completed
+            && matches!(*phase, MotionPhase::Walking)
+            && !matches!(verdict, WalkVerdict::Arrived(_))
+        {
+            if route.agent_stopped {
+                // A stopped agent (velocity, speed and acceleration 0) does
+                // not step; the move's poll still runs.
+                route.crowd.velocity = [0.0; 3];
+                verdict = WalkVerdict::Walking(0.0);
+            } else {
+                // A leg submitted in an earlier frame: the loop's resumed
+                // pass sets auto braking from the remaining distance the
+                // last crowd step left; the pass that submits a leg does not.
+                if !std::mem::take(&mut route.crowd.fresh_leg) {
+                    if let Some(remaining) = route.crowd.remaining {
+                        route.crowd.auto_braking =
+                            remaining < moly_law::path::crowd::NPC_AUTO_BRAKING_DISTANCE;
+                    }
+                }
+                match crowd_step(
+                    &mut state.0,
+                    &mut route.crowd,
+                    speed.0,
+                    walk_face,
+                    objective_face,
+                    dt,
+                ) {
+                    Some(remaining) => verdict = WalkVerdict::Walking(remaining),
+                    None => {
+                        route.stop();
+                        slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
+                        state.0.next_corner = 0;
+                        stuck.0 = None;
+                        *phase = MotionPhase::Dwelling { remaining: None };
+                        actions.change(NpcAction::Idle, &mut rest);
+                        warn!(
+                            "[npc unit={}] the navigation agent has no corridor for its leg; movement stopped",
+                            unit.0
+                        );
+                        continue;
+                    }
+                }
+            }
         }
         // 转体完成帧的旋转：完成时相位已离开 Turning、`forward` 还是旧值，
         // 尾写需要一个不回跳的终点朝向。
