@@ -21,6 +21,12 @@
 //! WGSL. Its second colour target (the colour-picker emission, the
 //! normal-driven emission and the centre damp) belongs to the emission pass
 //! and is not drawn there yet.
+//!
+//! JP `_ENABLE_MULTI_UV_SCROLL` variant: the base colour is not `_MainTex`
+//! but up to three `_LayerTex*` layers. `_LayerTex1` is always on;
+//! `_UseLayerTex2/3` gate the other two, and a gated-off layer's slot is
+//! never read, so it binds the engine fallback. The ST comes from the
+//! material's own `textureScaleOffset`.
 //! 闭集内但非 Basic 的族（ShadowMesh / Road / Object 等）是本单范围外：
 //! 具名记数保留原材质，不是拒绝。两个例外，都按「源里像素贡献恒 0」
 //! 隐藏而不是保留原材质：
@@ -262,6 +268,23 @@ pub struct FixtureMaterial {
     /// the shared trilinear repeat sampler (the sidecar carries no sampler
     /// settings). Furniture keeps the sampler the glb authored.
     pub site_sampler: bool,
+    /// JP `_ENABLE_MULTI_UV_SCROLL` variant (main pass only).
+    pub multi_uv: Option<MultiUvParams>,
+}
+
+/// The multi-UV variant's layers: `_LayerTex1` always, `_LayerTex2/3` when
+/// their int gates are on (a gated-off layer binds nothing and is never read).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiUvParams {
+    pub textures: [Option<Handle<Image>>; 3],
+    /// `_LayerTex{1,2,3}_ST` (scale xy, offset zw).
+    pub st: [[f32; 4]; 3],
+    /// `_LayerTex{1,2,3}_UVScrollX/Y`.
+    pub scroll: [[f32; 2]; 3],
+    /// `_UseLayerTex2`, `_UseLayerTex3` (ints compared with 0.5 at run time).
+    pub use_layer: [f32; 2],
+    /// `_LayerTex{1,2,3}_ParallaxStrength`.
+    pub parallax: [f32; 3],
 }
 
 /// The crystal variant's material values, read by the main pass only.
@@ -297,6 +320,7 @@ pub struct FixturePipelineKey {
     pub base: FixtureMaterialKey,
     pub crystal: bool,
     pub normal_map: bool,
+    pub multi_uv: bool,
 }
 
 impl FixtureMaterial {
@@ -305,7 +329,7 @@ impl FixtureMaterial {
     /// pass 的片元里读，可以扩。槽序与 WGSL 的 `FixtureShadingBranch`
     /// 是契约，两边同改。
     fn shading_branch_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(96);
+        let mut bytes = Vec::with_capacity(192);
         let crystal = self.crystal.as_ref();
         let normal_map = crystal.and_then(|crystal| crystal.normal_map.as_ref());
         for component in [
@@ -337,6 +361,19 @@ impl FixtureMaterial {
         ] {
             bytes.extend_from_slice(&component.to_le_bytes());
         }
+        // Multi-UV slots (zero unless the variant is on).
+        let multi = self.multi_uv.as_ref();
+        let st = |i: usize| multi.map_or([0.0; 4], |m| m.st[i]);
+        let scroll = |i: usize| multi.map_or([0.0; 2], |m| m.scroll[i]);
+        let use_layer = multi.map_or([0.0; 2], |m| m.use_layer);
+        let parallax = multi.map_or([0.0; 3], |m| m.parallax);
+        for component in st(0).into_iter().chain(st(1)).chain(st(2))
+            .chain(scroll(0)).chain(scroll(1))
+            .chain(scroll(2)).chain(use_layer)
+            .chain(parallax).chain([0.0])
+        {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
         bytes
     }
 
@@ -345,6 +382,7 @@ impl FixtureMaterial {
             base: self.key,
             crystal: self.crystal.is_some(),
             normal_map: self.crystal.as_ref().is_some_and(|c| c.normal_map.is_some()),
+            multi_uv: self.multi_uv.is_some(),
         }
     }
 }
@@ -383,7 +421,7 @@ impl AsBindGroup for FixtureMaterial {
         };
         // 唯一的纹理槽永远有真实贴图——缺主贴图的材质在建计划时已拒，
         // 不需要 fallback 绑定。
-        let bindings = BindingResources(vec![
+        let mut bindings = BindingResources(vec![
             // binding 0：材质自己的参数块。
             (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
             // binding 1：全局量，与站点材质共用同一个 buffer。
@@ -411,6 +449,21 @@ impl AsBindGroup for FixtureMaterial {
             ),
             (6, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, normal.sampler.clone())),
         ]);
+        // Bindings 7..12: the three multi-UV layers, fallback when absent.
+        for (layer, slot) in [(0usize, 7u32), (1, 9), (2, 11)] {
+            let image = match self.multi_uv.as_ref().and_then(|m| m.textures[layer].as_ref()) {
+                Some(handle) => images.get(handle).ok_or(AsBindGroupError::RetryNextUpdate)?,
+                None => &fallback.d2,
+            };
+            bindings.0.push((
+                slot,
+                OwnedBindingResource::TextureView(TextureViewDimension::D2, image.texture_view.clone()),
+            ));
+            bindings.0.push((
+                slot + 1,
+                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, image.sampler.clone()),
+            ));
+        }
         Ok(UnpreparedBindGroup { bindings })
     }
 
@@ -467,6 +520,12 @@ impl AsBindGroup for FixtureMaterial {
             fragment_uniform(4),
             texture(5),
             sampler(6),
+            texture(7),
+            sampler(8),
+            texture(9),
+            sampler(10),
+            texture(11),
+            sampler(12),
         ]
     }
 }
@@ -556,6 +615,9 @@ impl Material for FixtureMaterial {
         }
         if pipeline_key.normal_map {
             defs.push("FIXTURE_NORMAL_MAP");
+        }
+        if pipeline_key.multi_uv {
+            defs.push("FIXTURE_MULTI_UV");
         }
         for def in defs {
             descriptor.vertex.shader_defs.push(def.into());
@@ -780,8 +842,10 @@ fn resolve_basic(
     extras: &serde_json::Value,
     main_tex: Handle<Image>,
     clip_quad: Option<&Result<[Vec3; 4], String>>,
-    normal_map_texture: Option<Handle<Image>>,
+    source_textures: Option<&SourceMaterialTextures>,
 ) -> Result<ResolvedBasic, String> {
+    let source_texture = |key: &str| source_textures.and_then(|textures| textures.0.get(key)).cloned();
+    let normal_map_texture = source_texture("_NormalMap");
     // 二维选择表：(usage, blend) → ShaderAttribute。越界即拒；落点的
     // 低位（5/26 不透明、6/27 混合）必须与 blend 模式一致——不一致说明
     // 两列数据互相矛盾，响亮拒绝。
@@ -938,6 +1002,53 @@ fn resolve_basic(
     } else {
         (None, None)
     };
+    // JP `_ENABLE_MULTI_UV_SCROLL`: its programs carry no fresnel, reflection,
+    // clip or crystal keyword; a material combining them names a program this
+    // port has not read.
+    let multi_uv = if keyword_on("_ENABLE_MULTI_UV_SCROLL") {
+        if fresnel || reflection_keyword || alpha_clip || crystal_keyword {
+            return Err(format!(
+                "家具材质 {name} 的 _ENABLE_MULTI_UV_SCROLL 与菲涅尔/反射/clip/crystal 同开：\
+                 源程序表里没有这个组合"
+            ));
+        }
+        let multi_get = |key: &str| -> Result<f32, String> {
+            extras_float(extras, key)
+                .map(|value| value as f32)
+                .ok_or_else(|| format!("家具材质 {name} 开着 multi-UV 却缺浮点属性 {key}"))
+        };
+        let use_layer = [multi_get("_UseLayerTex2")?, multi_get("_UseLayerTex3")?];
+        let mut textures: [Option<Handle<Image>>; 3] = [None, None, None];
+        let mut st = [[0.0f32; 4]; 3];
+        let mut scroll = [[0.0f32; 2]; 3];
+        let mut parallax = [0.0f32; 3];
+        for layer in 0..3 {
+            let property = format!("_LayerTex{}", layer + 1);
+            let used = layer == 0 || use_layer[layer - 1] > 0.5;
+            if used {
+                textures[layer] = Some(source_texture(&property).ok_or_else(|| {
+                    format!("家具材质 {name} 的 {property} 未装载（槽为空或贴图不在本包）")
+                })?);
+            }
+            let scale_offset = extras
+                .get("textureScaleOffset")
+                .and_then(|table| table.get(&property))
+                .and_then(|value| value.as_array())
+                .filter(|array| array.len() == 4)
+                .ok_or_else(|| format!("家具材质 {name} 缺 {property} 的 ST"))?;
+            for (slot, value) in st[layer].iter_mut().zip(scale_offset) {
+                *slot = value.as_f64().ok_or_else(|| format!("家具材质 {name} 的 {property} ST 非数值"))? as f32;
+            }
+            scroll[layer] = [
+                multi_get(&format!("{property}_UVScrollX"))?,
+                multi_get(&format!("{property}_UVScrollY"))?,
+            ];
+            parallax[layer] = multi_get(&format!("{property}_ParallaxStrength"))?;
+        }
+        Some(MultiUvParams { textures, st, scroll, use_layer, parallax })
+    } else {
+        None
+    };
     let unported_keywords: Vec<String> = valid
         .iter()
         .filter_map(|item| item.as_str())
@@ -949,6 +1060,9 @@ fn resolve_basic(
             }
             if *keyword == "_ENABLE_CRYSTAL_FIXTURE" {
                 return crystal.is_none();
+            }
+            if *keyword == "_ENABLE_MULTI_UV_SCROLL" {
+                return multi_uv.is_none();
             }
             !matches!(
                 *keyword,
@@ -1045,6 +1159,7 @@ fn resolve_basic(
             reflection_intensity,
             crystal,
             site_sampler: false,
+            multi_uv,
         },
         attribute,
         emission,
@@ -1148,6 +1263,7 @@ fn resolve_fence(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>
             main_tex, blend: false, fresnel_power: 0.0, fresnel_color: [0.0; 4], reflection_power: 0.0, reflection_intensity: 0.0,
             crystal: None,
             site_sampler: false,
+            multi_uv: None,
         },
         // GetAttribute maps Fence directly to 5, without the Basic usage/blend table.
         attribute: 5, emission: EmissionInts { bright: Some(0.0), dark: Some(0.0) },
@@ -1190,6 +1306,7 @@ fn resolve_rug(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) 
             main_tex, blend, fresnel_power: 0.0, fresnel_color: [0.0; 4], reflection_power: 0.0, reflection_intensity: 0.0,
             crystal: None,
             site_sampler: false,
+            multi_uv: None,
         },
         attribute: if blend { 29 } else { 28 },
         emission: EmissionInts { bright: extras_float(extras, "_BrightPhenomenaEmission"), dark: extras_float(extras, "_DarkPhenomenaEmission") },
@@ -1752,11 +1869,14 @@ fn switch_materials(
         let normal_map = item.material.crystal.as_ref()
             .and_then(|crystal| crystal.normal_map.as_ref())
             .map(|normal_map| &normal_map.texture);
+        let layers = item.material.multi_uv.as_ref()
+            .map(|multi| multi.textures.iter().flatten().collect::<Vec<_>>())
+            .unwrap_or_default();
         for (texture, what) in [
             (Some(&item.material.main_tex), "贴图"),
             (item.mask.as_ref(), "自发光遮罩"),
             (normal_map, "normal map"),
-        ] {
+        ].into_iter().chain(layers.into_iter().map(|layer| (Some(layer), "multi-UV layer"))) {
             let Some(texture) = texture else { continue };
             match server.get_load_state(texture.id()) {
                 Some(LoadState::Failed(err)) => {
@@ -1825,8 +1945,12 @@ fn switch_materials(
         }
         // The normal map is sampled with the global mip bias like the main
         // texture, so it needs the same full chain.
-        if let Some(normal_map) = item.material.crystal.as_ref().and_then(|c| c.normal_map.as_ref()) {
-            match chain_and_release(&mut images, &mut replaced, &normal_map.texture) {
+        let normal_map = item.material.crystal.as_ref()
+            .and_then(|c| c.normal_map.as_ref())
+            .map(|normal_map| &normal_map.texture);
+        let layers = item.material.multi_uv.iter().flat_map(|multi| multi.textures.iter().flatten());
+        for texture in normal_map.into_iter().chain(layers) {
+            match chain_and_release(&mut images, &mut replaced, texture) {
                 Ok(_) => {}
                 Err(MipSkip::AlreadyChained) => shared_chains += 1,
                 Err(reason) => mip_skipped.push((name, reason)),
@@ -2404,14 +2528,13 @@ fn build_swap_plan(
                 }
             },
         };
-        let normal_map = source_textures.get(entity).ok()
-            .and_then(|textures| textures.0.get("_NormalMap")).cloned();
+        let entity_textures = source_textures.get(entity).ok();
         let resolved = if extras.get("shader").and_then(|v| v.as_str()) == Some(FENCE_SHADER) {
             resolve_fence(&name, &extras, main_tex.clone())
         } else if extras.get("shader").and_then(|v| v.as_str()) == Some(RUG_SHADER) {
             resolve_rug(&name, &extras, main_tex.clone())
         } else {
-            resolve_basic(&name, &extras, main_tex.clone(), clip_quads.get(&root), normal_map)
+            resolve_basic(&name, &extras, main_tex.clone(), clip_quads.get(&root), entity_textures)
         };
         match resolved {
             Ok(resolved) => {

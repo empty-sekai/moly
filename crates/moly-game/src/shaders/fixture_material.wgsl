@@ -53,6 +53,15 @@
 //                       texel, the normal-driven colour remap and the bright
 //                       fresnel add. Its programs always carry the fresnel and
 //                       reflection keywords too.
+//   FIXTURE_MULTI_UV    `_ENABLE_MULTI_UV_SCROLL` (JP 6.8.1): the base colour is
+//                       not `_MainTex` but up to three `_LayerTex*` layers,
+//                       sampled at world-planar coordinates (the position
+//                       projected on a horizontal tangent frame built in the
+//                       vertex stage) with per-layer tiling, scroll and a
+//                       view-dependent parallax offset, and composited over
+//                       each other by layer alpha. The rest of the chain is
+//                       the plain Basic one; its programs carry no clip,
+//                       dither or texture-branch keywords.
 // 两条质感分支的参数（菲涅尔两参 + 反射两参）合用 binding 4 的那一块，
 // 不并进 FixtureParams（那份 12 槽序与自发光 pass 的对象池布局共用）。
 // 顶点属性键由引擎按网格布局注入：VERTEX_NORMALS / VERTEX_UVS_A。
@@ -158,6 +167,16 @@ struct FixtureShadingBranch {
     // Normal map: (_BumpScale, _NormalExaggeration, _UseNormalParallaxShift,
     // _NormalParallaxShift).
     normal_map: vec4<f32>,
+    // Multi-UV layers: `_LayerTex1_ST`, `_LayerTex2_ST`, `_LayerTex3_ST`.
+    layer1_st: vec4<f32>,
+    layer2_st: vec4<f32>,
+    layer3_st: vec4<f32>,
+    // (_LayerTex1_UVScrollX, _LayerTex1_UVScrollY, _LayerTex2_UVScrollX, _LayerTex2_UVScrollY).
+    layer_scroll_12: vec4<f32>,
+    // (_LayerTex3_UVScrollX, _LayerTex3_UVScrollY, _UseLayerTex2, _UseLayerTex3).
+    layer_scroll_3_use: vec4<f32>,
+    // (_LayerTex1/2/3_ParallaxStrength, 0).
+    layer_parallax: vec4<f32>,
 }
 
 @group(3) @binding(4) var<uniform> branch_params: FixtureShadingBranch;
@@ -165,6 +184,13 @@ struct FixtureShadingBranch {
 // no compiled variant reads (the layout is shared by every variant).
 @group(3) @binding(5) var normal_tex: texture_2d<f32>;
 @group(3) @binding(6) var normal_sampler: sampler;
+// `_LayerTex1/2/3` of the multi-UV variant (fallbacks elsewhere, unread).
+@group(3) @binding(7) var layer1_tex: texture_2d<f32>;
+@group(3) @binding(8) var layer1_sampler: sampler;
+@group(3) @binding(9) var layer2_tex: texture_2d<f32>;
+@group(3) @binding(10) var layer2_sampler: sampler;
+@group(3) @binding(11) var layer3_tex: texture_2d<f32>;
+@group(3) @binding(12) var layer3_sampler: sampler;
 
 // 未绑定的立方图采样器采出来的常数（每通道 128/255）。引擎按纹理**维度**
 // 索引它的内建默认贴图表顶上去，而立方图那一格是六面各自整面清成同一个
@@ -271,6 +297,13 @@ struct FixtureVertexOutput {
     // (no offset). The cotangent frame differentiates it as is; only the
     // texture fetch converts the row origin.
     @location(11) uv1: vec2<f32>,
+#endif
+#ifdef FIXTURE_MULTI_UV
+    // The source's TEXCOORD7 / TEXCOORD8 / TEXCOORD6: the horizontal tangent,
+    // the bitangent and the view direction in that frame.
+    @location(12) layer_tangent: vec3<f32>,
+    @location(13) layer_bitangent: vec3<f32>,
+    @location(14) layer_view: vec3<f32>,
 #endif
 }
 
@@ -390,6 +423,29 @@ fn vertex(mesh: Vertex) -> FixtureVertexOutput {
 #endif
 #endif
 
+#ifdef FIXTURE_MULTI_UV
+    // Source: T = normalize_xz(N.z, 0, -N.x), B = cross(N, T), with N the
+    // renormalised world normal and V the normalised direction to the camera;
+    // TEXCOORD6 = (dot(V.xz, T.xz), dot(V, B), dot(V, N)). The constant axes in
+    // T do not reflect with the world, so in this pipeline's x-reflected world
+    // the reflected source frame is T = (-N.z, 0, N.x), B = cross(T, N); every
+    // dot product (and the planar coordinates in the fragment) then equals the
+    // source's.
+    let layer_normal = normalize(out.world_normal);
+    let layer_to_camera = env.camera_position.xyz - world_position.xyz;
+    let layer_view_dir = inverseSqrt(dot(layer_to_camera, layer_to_camera)) * layer_to_camera;
+    var layer_tangent = vec3<f32>(-layer_normal.z, 0.0, layer_normal.x);
+    layer_tangent = inverseSqrt(dot(layer_tangent.xz, layer_tangent.xz)) * layer_tangent;
+    let layer_bitangent = cross(layer_tangent, layer_normal);
+    out.layer_view = vec3<f32>(
+        dot(layer_view_dir.xz, layer_tangent.xz),
+        dot(layer_view_dir, layer_bitangent),
+        dot(layer_view_dir, layer_normal),
+    );
+    out.layer_tangent = layer_tangent;
+    out.layer_bitangent = layer_bitangent;
+#endif
+
     return out;
 }
 
@@ -449,6 +505,64 @@ fn fixture_bayer_value(pixel: vec2<f32>) -> f32 {
     return value * 0.0618750006 + 0.00999999978;
 }
 
+#ifdef FIXTURE_MULTI_UV
+// One layer's sample point: planar coordinates tiled by the layer's ST, the
+// scroll subtracted with `_Time.y`, then the parallax offset along `dir`.
+fn multi_uv_layer_uv(planar: vec2<f32>, st: vec4<f32>, scroll: vec2<f32>, strength: f32,
+                     weight: f32, dir: vec2<f32>) -> vec2<f32> {
+    var uv = planar * st.xy + st.zw;
+    uv = vec2<f32>(-env.time.y) * scroll + uv;
+    let offset = weight * strength * 0.5;
+    uv = vec2<f32>(offset) * dir + uv;
+    // Source uv space -> exported image rows (top first).
+    return vec2<f32>(uv.x, select(uv.y, 1.0 - uv.y, params.uv_v_flip.x > 0.5));
+}
+
+// The multi-UV base colour (rgb in the stored domain) and alpha, statement by
+// statement: layer 1 always, layers 2 and 3 behind their int gates, each
+// composited over the result by its own alpha.
+fn multi_uv_base(in: FixtureVertexOutput) -> vec4<f32> {
+    let planar = vec2<f32>(
+        dot(in.world_position, in.layer_tangent),
+        dot(in.world_position, in.layer_bitangent),
+    );
+    // Parallax weight: z = sat(V.N), t = sat((z - 0.5) * 2.50000024),
+    // w = smoothstep(t) * (z^3 - 1) + 1.
+    let z = clamp(in.layer_view.z, 0.0, 1.0);
+    let t = clamp((z + -0.5) * 2.50000024, 0.0, 1.0);
+    let smooth_t = t * t * (t * -2.0 + 3.0);
+    let weight = smooth_t * (z * z * z + -1.0) + 1.0;
+    // Offset direction: normalize(TEXCOORD6).xy / (normalize(TEXCOORD6).z + 0.42).
+    let view_scale = inverseSqrt(dot(in.layer_view, in.layer_view));
+    let dir = (view_scale * in.layer_view.xy) / (in.layer_view.z * view_scale + 0.419999987);
+    let uv1 = multi_uv_layer_uv(planar, branch_params.layer1_st,
+        branch_params.layer_scroll_12.xy, branch_params.layer_parallax.x, weight, dir);
+    let uv2 = multi_uv_layer_uv(planar, branch_params.layer2_st,
+        branch_params.layer_scroll_12.zw, branch_params.layer_parallax.y, weight, dir);
+    let uv3 = multi_uv_layer_uv(planar, branch_params.layer3_st,
+        branch_params.layer_scroll_3_use.xy, branch_params.layer_parallax.z, weight, dir);
+    // All three fetches run in uniform control flow; the int gates then select
+    // (the source fetches only behind the gates, the selected values are equal).
+    let l1 = textureSampleBias(layer1_tex, layer1_sampler, uv1, env.mip_bias.x);
+    let l2 = textureSampleBias(layer2_tex, layer2_sampler, uv2, env.mip_bias.x);
+    let l3 = textureSampleBias(layer3_tex, layer3_sampler, uv3, env.mip_bias.x);
+    let c1 = srgb_format_encode(l1.rgb);
+    let c2 = srgb_format_encode(l2.rgb);
+    let c3 = srgb_format_encode(l3.rgb);
+    var rgb = c1;
+    var alpha = l1.a;
+    if branch_params.layer_scroll_3_use.z > 0.5 {
+        rgb = vec3<f32>(l2.a) * (c2 - c1) + c1;
+        alpha = (1.0 - l1.a) * l2.a + l1.a;
+    }
+    if branch_params.layer_scroll_3_use.w > 0.5 {
+        rgb = vec3<f32>(l3.a) * (c3 - rgb) + rgb;
+        alpha = (1.0 - alpha) * l3.a + alpha;
+    }
+    return vec4<f32>(rgb, alpha);
+}
+#endif
+
 #ifdef FIXTURE_NORMAL_MAP
 // The JP Basic normal-map block, statement by statement. `n` is the
 // normalised interpolated normal, the result is the perturbed normal.
@@ -503,6 +617,16 @@ fn crystal_normal(n: vec3<f32>, world_position: vec3<f32>, uv1: vec2<f32>) -> ve
 fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
     // Sample before per-fragment clipping so implicit derivatives remain uniform.
     let base = textureSampleBias(main_tex, main_sampler, in.uv, env.mip_bias.x);
+#ifdef FIXTURE_MULTI_UV
+    // The layers replace the main texture as the base colour and alpha (the
+    // main texture is still sampled above; nothing reads it in this variant).
+    let multi_base = multi_uv_base(in);
+    let base_stored = multi_base.rgb;
+    let base_alpha = multi_base.a;
+#else
+    let base_stored = srgb_format_encode(base.rgb);
+    let base_alpha = base.a;
+#endif
 #ifdef FIXTURE_NORMAL_MAP
     // The source runs the normal-map block before its discard as well; the
     // screen derivatives and the fetch stay in uniform control flow here.
@@ -565,7 +689,7 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
     // `base_rgb` 是编回存储域的主贴图色（见上方「色彩域」）——现象色、
     // 阴影色、菲涅尔色、雾色、`UNBOUND_CUBE_SAMPLE` 全在存储域，同域才
     // 是源的那个函数。
-    let base_rgb = srgb_format_encode(base.rgb);
+    let base_rgb = base_stored;
     var rgb = base_rgb;
     if params.use_phenomena_lighting.x > 0.5 {
         let lit = phenomena_light_blend(base_rgb);
@@ -688,5 +812,5 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
     // 注释；`_BaseOpacity` 在 Base 程序里不被消费）。
     // 源末行那次 `clamp(rgb, 0, 1)` 由 `srgb_format_decode` 里的钳承接
     // （它先钳后解，与「钳在存储域」逐值等价）——不是把 clamp 删了。
-    return vec4<f32>(srgb_format_decode(rgb), base.a);
+    return vec4<f32>(srgb_format_decode(rgb), base_alpha);
 }
