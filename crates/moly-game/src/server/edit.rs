@@ -14,6 +14,7 @@
 //! actions are server replies at once. Visitors and layouts are not edited
 //! here (they apply on re-entry, a later milestone).
 
+use bevy::log::info;
 use serde_json::{json, Map, Value};
 
 use super::document::{self, Clock, GateCharacter, SchedulePolicy, ServerDocument, Stamina};
