@@ -28,6 +28,18 @@ use crate::particle::step::{advance_lifetime, Particle};
 /// emission rate, plus the largest burst count within one lifetime. With a
 /// positive maximum and a positive estimate the first 32 slots always lie in
 /// that reservation, so no birth writing below them grows the storage.
+///
+/// A birth past the reservation grows it. StartParticles reserves the new
+/// end (the live count rounded up to four plus the accepted count rounded up
+/// to four) rounded up to 32, then resizes the arrays to that end. The
+/// reserve reallocates each array whose capacity is smaller, and the
+/// reallocation keeps the old block's bytes (the memory manager's fallback
+/// allocates, copies the smaller of the old block's size and the new size,
+/// and frees; the allocators' own reallocations are reallocations too), so
+/// every slot below the old capacity keeps its content. The slots from the old
+/// capacity on are new memory, and the birth writes each of them it reaches
+/// before any group reads it: the padding a later call reads lies below the
+/// end the birth wrote. So a growth changes no slot the tail holds.
 pub const RESERVED_SLOTS: usize = 32;
 
 /// Slots `count, count + 1, ..` of the engine's particle storage, where
@@ -38,7 +50,8 @@ pub struct SlotTail {
     slots: VecDeque<Particle>,
     /// The live count the operations left.
     live: usize,
-    /// The slots known to lie in the storage Play reserved.
+    /// The storage reservation as far as it is known: the slots Play reserved,
+    /// raised by each birth that grows it.
     capacity: usize,
 }
 
@@ -52,9 +65,6 @@ pub enum TailRefused {
     /// follows, or its live count is not the one the operations left (the
     /// caller changed its storage without reporting it).
     Order,
-    /// A birth writes past the slots known to be reserved: the storage may
-    /// grow there, and what a growth keeps past the live count is not read.
-    Capacity,
 }
 
 fn same(a: &Particle, b: &Particle) -> bool {
@@ -72,6 +82,11 @@ impl SlotTail {
     /// slots ([`RESERVED_SLOTS`]).
     pub fn new(capacity: usize) -> Self {
         Self { slots: VecDeque::new(), live: 0, capacity }
+    }
+
+    /// The storage reservation as far as it is known.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// The slot `count + k`, as far as it was written.
@@ -145,8 +160,11 @@ impl SlotTail {
         if old != self.live {
             return Err(TailRefused::Order);
         }
-        if old.next_multiple_of(4) + lanes.len() > self.capacity {
-            return Err(TailRefused::Capacity);
+        // A birth past the reservation grows it; the growth keeps every
+        // slot the tail holds ([`RESERVED_SLOTS`]).
+        let end = old.next_multiple_of(4) + lanes.len();
+        if end > self.capacity {
+            self.capacity = end.next_multiple_of(32);
         }
         let gap = old.next_multiple_of(4) - old;
         if self.slots.len() < gap {

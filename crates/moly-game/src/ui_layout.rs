@@ -204,6 +204,8 @@ const DOCUMENTS: &[(&str, &str)] = &[
     ("EditorCell", "editor/FixtureSelectCell.json"),
     ("EditorCategory", "editor/UIPartsLeftTabListMysekaiContentCell.json"),
     ("EditorHeader", "editor/ScreenLayerHeader.json"),
+    ("LearnPhenomena", "menu/LearnPhenomenaSubWindowDialog.json"),
+    ("Notice", "hud/ScreenLayerMysekaiNotice.json"),
 ];
 
 #[derive(Resource, Default)]
@@ -676,6 +678,11 @@ impl UiLayouts {
 
     /// The runtime Sprite metrics document of the UI root, once loaded
     /// (none for the stage).
+    /// Whether the root's runtime texture inventory (or a host) carries `alias`.
+    pub(crate) fn has_runtime_texture(&self, alias: &str) -> bool {
+        self.runtime_textures.contains_key(alias)
+    }
+
     pub(crate) fn runtime_sprites(&self) -> Option<&Value> {
         self.runtime_sprites.as_ref()
     }

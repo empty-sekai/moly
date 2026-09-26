@@ -262,12 +262,15 @@ pub(crate) struct ShellDialogState {
     pub(crate) menu_closing: bool,
     pub(crate) option_open: bool,
     pub(crate) get_resource_open: bool,
+    /// The learn-phenomenon dialog, from its request to the end of its close animation.
+    pub(crate) learn_phenomena_open: bool,
     leave_context: Option<LeaveContext>,
 }
 
 impl ShellDialogState {
     pub(crate) fn blocks_field_input(&self) -> bool {
         self.leave_confirm || self.menu_open || self.menu_closing || self.option_open || self.get_resource_open
+            || self.learn_phenomena_open
     }
 }
 
@@ -501,6 +504,7 @@ pub(crate) fn parse(
     handle: Option<Res<ShellNamesHandle>>,
     layouts: Res<UiLayouts>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
 ) {
     let Some(handle) = handle else { return; };
     // A stage does not render prefab-based menus or their fixed button labels.
@@ -520,14 +524,19 @@ pub(crate) fn parse(
         || layouts.document("Common2").is_none() {
         return;
     }
+    // The phenomenon names the learn dialog and the notice banner print.
+    let Some(phenomenon_names) = phenomena.as_deref().and_then(|p| p.texts.as_ref()) else { return; };
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
     for row in rows {
         chars.extend(row["name"].as_str().expect("site name").chars());
     }
+    for name in phenomenon_names {
+        chars.extend(name.chars());
+    }
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
-        "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION"]
+        "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wordings.get(wording).unwrap_or_else(|| panic!("UI wording missing: {wording}")).chars());
     }
@@ -769,7 +778,8 @@ pub(crate) fn click(
     if taps.is_empty() || consumed.0 { return; }
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let size = root_canvas.size(window);
-    if dialog.menu_open || dialog.menu_closing || dialog.option_open || dialog.get_resource_open { return; }
+    if dialog.menu_open || dialog.menu_closing || dialog.option_open || dialog.get_resource_open
+        || dialog.learn_phenomena_open { return; }
     if dialog.leave_confirm {
         // Read ownership before closing. A close must not replay against the
         // field controls later in this gesture dispatch.

@@ -903,7 +903,7 @@ fn start_common(
             .map(|shape| {
                 let state = shape_state.expect("a Shape block has its validated emitter state");
                 shape
-                    .sample_group(
+                    .sample_group_with_mesh(
                         shape_batch.as_mut().expect("a Shape law has its batch"),
                         next_shape
                             .as_mut()
@@ -912,8 +912,14 @@ fn start_common(
                         system.emitter.simulation_space == SimulationSpace::World,
                         state.emitter_scale,
                         state.uses_axis_of_rotation,
+                        system.emission_surface.as_deref().map(|surface| surface.native()),
                     )
-                    .map_err(|_| BirthRefused::Unsupported("unqualified native Shape owner/output"))
+                    .map_err(|refused| match refused {
+                        moly_law::particle::shape_birth::Refused::MeshCacheMissing => {
+                            BirthRefused::Unsupported("Mesh shape without its emission surface")
+                        }
+                        _ => BirthRefused::Unsupported("unqualified native Shape owner/output"),
+                    })
             })
             .transpose()?;
         for (index, lane) in group.lanes.into_iter().enumerate() {
@@ -976,12 +982,19 @@ fn start_common(
                     "nonfinite birth position or velocity",
                 ));
             }
+            // A Mesh shape's Store multiplies each lane's colour by its
+            // triangle's material colour, and a lane whose alpha byte is then
+            // zero is given an age past the newborn kill.
+            let (colour, dead) = match shaped.as_ref().and_then(|shaped| shaped.mesh_colour) {
+                Some(mesh) => moly_law::particle::shape_mesh::MeshShapeCache::store_colour(lane.color, mesh[index]),
+                None => (lane.color, false),
+            };
             particles.push(Particle {
                 position,
                 velocity,
                 start_lifetime: lane.lifetime,
                 inverse_lifetime: lane.inverse_lifetime,
-                age_percent: 0.0,
+                age_percent: if dead { moly_law::particle::shape_mesh::DEAD_AGE_PERCENT } else { 0.0 },
             });
             sides.push(Side {
                 rand: 0.0,
@@ -991,7 +1004,7 @@ fn start_common(
                     .size
                     .map(|v| v.unwrap_or(lane.size[0].expect("initial X size"))),
                 gravity: 0.0,
-                colour: moly_law::particle::gradient::rgba8_to_float(lane.color),
+                colour: moly_law::particle::gradient::rgba8_to_float(colour),
                 total_velocity: velocity,
                 custom_data: [[0.0; 4]; 2],
                 emit_carry: [0.0; 2],

@@ -52,6 +52,7 @@ mod frame_capture;
 pub mod game_settings;
 pub mod gesture;
 pub mod get_resource;
+pub mod learn_phenomena_dialog;
 mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
@@ -65,6 +66,7 @@ mod material_order;
 mod mesh_buffer_release;
 pub mod menu_dialog;
 pub mod menu_shell;
+pub mod notice_banner;
 mod mysekai_rank;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;

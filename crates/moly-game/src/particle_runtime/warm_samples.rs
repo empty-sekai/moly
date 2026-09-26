@@ -532,7 +532,7 @@ fn warm_target(doc: &Value, seq: &Value, image: &Value) -> Result<Runtime, Strin
             .map(|v| v.as_f64().unwrap() as f32).collect();
         Geometry::Mesh(crate::particle_geometry::MeshDraw {
             source: std::sync::Arc::new(crate::particle_geometry::SourceMesh { positions: Vec::new(), normals: Vec::new(),
-                uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
+                uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), submesh_ends: Vec::new(), bounds_size: Vec3::ZERO }),
             scaling,
             alignment: crate::particle_geometry::Alignment::from_source(record["renderer"]["alignment"].as_i64().unwrap())
                 .expect("source mesh alignment"),

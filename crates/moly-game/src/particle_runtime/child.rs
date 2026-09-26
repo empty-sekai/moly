@@ -1037,6 +1037,11 @@ pub(crate) fn child_target_eligible(emitter: &EmitterParams, evidence: Option<Sh
     qualify_target(emitter).map_err(|refused| format!("{refused:?}"))?;
     if let Some(params) = &emitter.shape {
         let law = ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?;
+        // A Mesh target reads its module's mesh cache, which the child path
+        // does not carry.
+        if law.reads_mesh_cache() {
+            return Err("target Mesh shape: the child path carries no emission surface".into());
+        }
         // The BurstSpread edge and circle and the Loop, PingPong and
         // BurstSpread cone read the birth call's batch (accepted count, arc
         // clock, emission spacing and offset); a child command's batch is not
