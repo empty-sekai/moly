@@ -4,9 +4,13 @@
 //! Every visiting NPC is created on the entry-site objective, hidden. When
 //! every one of them runs it, the controller draws the gathering and places
 //! the members one after another on the home site: each placement is the
-//! agent's warp to the position, the show, and the cancel of the entry-site
-//! objective with its ForceUpdateObjective (a reset and a new talk data);
-//! a member at a random cell also raises the flag that skips its next Rest.
+//! agent's warp to the position, the show, and the presenter's
+//! TryCancelCurrentObjective on its current objective (normally the
+//! entry-site one, whose cancel does nothing; a member a group talk drafted
+//! meanwhile holds its sub objective, whose cancel changes to Idle and makes
+//! one ForceUpdateObjective) followed, when that reports true, by the
+//! presenter's ForceUpdateObjective (a reset and a new talk data); a member
+//! at a random cell also raises the flag that skips its next Rest.
 //!
 //! Frames follow the controller's awaits: a member placed at a random cell
 //! waits one frame for its character (the pick is made then) and one more
@@ -56,7 +60,7 @@ use crate::client_config::{
 };
 use crate::npc::{CharacterUnitId, WalkState};
 use crate::npc_objective::{
-    cell_of, owe_force_updates, platform_seed, BodyWait, MemberRng, ObjectiveFace, ObjectiveMind,
+    cell_of, platform_seed, BodyWait, MemberRng, ObjectiveFace, ObjectiveMind,
 };
 
 /// Which part of the plan a member belongs to.
@@ -502,11 +506,11 @@ fn near_position(world: &mut World, run: &mut Run, unit: u32, frame: u32) -> Opt
     (!none).then_some(answer)
 }
 
-/// ForceSetPosition (the agent's warp), Show, then the cancel of the
-/// current objective: when it reports true, ForceUpdateObjective (owed to
-/// the next AI pass; the objective ends on the next frame), and for a
-/// random-cell member SetImmediatelyExecuteNextObjective. Returns the
-/// placed position.
+/// ForceSetPosition (the agent's warp), Show, then
+/// TryCancelCurrentObjective: when it reports true, the presenter's
+/// ForceUpdateObjective (owed to the next AI pass; the objective ends on the
+/// next frame), and for a random-cell member
+/// SetImmediatelyExecuteNextObjective. Returns the placed position.
 fn place(
     world: &mut World,
     unit: u32,
@@ -545,15 +549,22 @@ fn place(
     if let Some(mut visibility) = world.get_mut::<Visibility>(entity) {
         *visibility = Visibility::Inherited;
     }
-    let cancelled = world
+    // TryCancelCurrentObjective with the cancelled objective's own OnCancel
+    // (the entry-site objective's does nothing; a drafted member's
+    // while-doing-wait sub objective changes to Idle and makes one
+    // ForceUpdateObjective), then on true the presenter's ForceUpdateObjective
+    // (its own cancel reports true again on the cancelled objective, then one
+    // more ForceUpdateObjective) and, for a random-cell member,
+    // SetImmediatelyExecuteNextObjective.
+    let current = world
         .get::<ObjectiveMind>(entity)
-        .is_some_and(ObjectiveMind::cancel_reports);
+        .and_then(|mind| mind.current)
+        .map(|kind| kind as u8);
+    let cancelled = crate::npc::gate_entries::try_cancel_current_objective(world, entity);
     if cancelled {
-        if let Some(mut mind) = world.get_mut::<ObjectiveMind>(entity) {
-            owe_force_updates(&mut mind, frame.wrapping_add(1), 1);
-            if immediate {
-                mind.skip_next_rest = true;
-            }
+        crate::npc::gate_entries::force_update_objective(world, entity);
+        if immediate {
+            crate::npc::gate_entries::set_immediately_execute_next_objective(world, entity, true);
         }
     }
     let placed = world.get::<WalkState>(entity).map(|walk| walk.0.position);
@@ -565,6 +576,7 @@ fn place(
         "position": position,
         "warped": warped,
         "placed": placed,
+        "current": current,
         "cancelled": cancelled,
         "immediate": cancelled && immediate,
     }));

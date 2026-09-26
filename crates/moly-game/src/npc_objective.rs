@@ -2167,6 +2167,7 @@ pub(crate) fn decide(
                     objective::Decision::Greeting => "greeting",
                     objective::Decision::NoneTalk => "none_talk_data",
                     objective::Decision::Interrupt { .. } => "interrupt",
+                    objective::Decision::WaitCommunication => "wait_communication",
                     _ => "select_objective",
                 },
                 &percents,
@@ -2232,9 +2233,41 @@ pub(crate) fn decide(
                     }
                     DecisionRoute::EntrySite
                 }
+                // The current objective is still the wait-communication sub
+                // objective (a cancelled one stays current until the next Rest
+                // or decision replaces it). The row does not continue it: it
+                // constructs a new one of the same class the marker-9
+                // interrupt builds, on whatever data the slot holds now, and
+                // clears no marker. Its body is the sub objective's: a move to
+                // that data's target, Idle, then the wait for the
+                // communication state.
+                objective::Decision::WaitCommunication => DecisionRoute::SubObjective(
+                    ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub,
+                ),
+                // The remaining rows cannot occur in this host:
+                // - PhotoShot: the view's photo flag is the constant false
+                //   (there is no photo mode here).
+                // - HighPriorityTalkReaction, AfterEditLayoutReaction: no talk
+                //   data of the high-priority or after-edit type is built here
+                //   (the kinds written are common, the two character fixture
+                //   kinds, change-site, common fixture, while-doing wait,
+                //   no-talk, greeting, entry-site and cut-scene).
+                // - Interrupt to the main or sub communication, the immediate
+                //   fixture timeline, the random walk, the birthday wait, or
+                //   the invalid fallback: the markers written here are 4, 5,
+                //   6, 9 and 14, all routed above.
+                // - CutScene: a current objective of the cut-scene type is
+                //   constructed only by this row itself (the source's one other
+                //   constructor is in the tutorial, which is finished here),
+                //   so no first one exists.
+                // - SubCharacterFixtureAction: it needs a current objective of
+                //   type 6, and no objective has type 6 (every constructor
+                //   passes its own type and none passes 6; the type is never
+                //   written again).
                 other => unreachable!(
-                    "决策梯落到了产品不可达的档（{other:?}）：快照里摆拍/保持档的输入按构造恒假，\
-                     打断标记只写对话一种，槽位与当前目标的值域里没有它们"
+                    "the decision ladder reached a row with no route here ({other:?}): \
+                     no photo mode, no high-priority or after-edit talk data, markers \
+                     only 4, 5, 6, 9 and 14, no current cut-scene or type-6 objective"
                 ),
             };
             let objective_type = match decision_route {
@@ -3129,6 +3162,7 @@ pub(crate) fn decide(
                 objective::Decision::RefuelAndTalk => "空槽补位",
                 objective::Decision::NoneTalk => "无对话槽",
                 objective::Decision::Interrupt { .. } => "对话打断",
+                objective::Decision::WaitCommunication => "等待通信档",
                 _ => "梯末抽签",
             };
             let objective_word = decision_route.word();
