@@ -198,9 +198,100 @@ pub(crate) fn start_cue(
     )
 }
 
-/// Spawn a started cue; the entity is the playback's handle (despawn stops it).
-pub(crate) fn spawn_playback(commands: &mut Commands, playback: CuePlayback) -> Entity {
-    commands.spawn(playback).id()
+/// One sounding track as spawned: player, settings, volume, parent.
+pub(crate) type TrackBundle = (
+    AudioPlayer<AudioSource>,
+    PlaybackSettings,
+    BusVolume,
+    ChildOf,
+);
+
+/// Spawn a started cue; the entity is the playback's handle (despawn stops
+/// it). Tracks whose delay has already passed start at once, in the update of
+/// the call (the middleware starts a cue's undelayed tracks in the call).
+pub(crate) fn spawn_playback(
+    commands: &mut Commands,
+    mut playback: CuePlayback,
+    bus: &VolumeBus,
+    gate: &AudioGate,
+    now: f64,
+) -> Entity {
+    let entity = commands.spawn_empty().id();
+    start_due_tracks(&mut playback, entity, bus, gate, now, &mut |track| {
+        commands.spawn(track).id()
+    });
+    commands.entity(entity).insert(playback);
+    entity
+}
+
+/// [`spawn_playback`] on the world (a caller that holds the world).
+pub(crate) fn spawn_playback_in_world(
+    world: &mut World,
+    mut playback: CuePlayback,
+    now: f64,
+) -> Entity {
+    let bus = world.resource::<VolumeBus>().clone();
+    let gate = *world.resource::<AudioGate>();
+    let entity = world.spawn_empty().id();
+    start_due_tracks(&mut playback, entity, &bus, &gate, now, &mut |track| {
+        world.spawn(track).id()
+    });
+    world.entity_mut(entity).insert(playback);
+    entity
+}
+
+/// Start every waiting track of the round whose delay has passed.
+fn start_due_tracks(
+    playback: &mut CuePlayback,
+    entity: Entity,
+    bus: &VolumeBus,
+    gate: &AudioGate,
+    now: f64,
+    spawn: &mut dyn FnMut(TrackBundle) -> Entity,
+) {
+    for index in 0..playback.voices.len() {
+        let RoundVoice::Waiting { slot, due } = playback.voices[index] else {
+            continue;
+        };
+        if now < due {
+            continue;
+        }
+        let voice = &playback.plan.voices[slot];
+        let settings = if voice.stream.loops {
+            PlaybackSettings::LOOP
+                .with_start_position(Duration::from_secs_f64(voice.stream.loop_start))
+                .with_duration(Duration::from_secs_f64(
+                    voice.stream.loop_end - voice.stream.loop_start,
+                ))
+        } else {
+            PlaybackSettings::ONCE
+        };
+        let mut volume = track_volume(
+            playback.plan.gain.as_ref(),
+            playback.player,
+            playback.fallback_slot,
+            slot,
+        );
+        volume.gain *= playback.scale;
+        let linear = volume.linear(bus) * gate.factor();
+        let sound = spawn((
+            AudioPlayer::new(playback.handles[slot].clone()),
+            settings.with_volume(Volume::Linear(linear)),
+            BusVolume::Cue(volume),
+            ChildOf(entity),
+        ));
+        if playback.plan.work_key.is_some() {
+            info!(
+                "[audio-seq] 序列轨起声：{} · cue={} round={} track={} due={due:.6} t={now:.6} 音量 {linear:.3}{}",
+                playback.channel,
+                label(&playback.cue),
+                playback.round,
+                voice.track_index,
+                if voice.stream.loops { "（波形带循环：这一轮不会自己收）" } else { "" }
+            );
+        }
+        playback.voices[index] = RoundVoice::Sounding { entity: sound };
+    }
 }
 
 /// [`start_cue`] with waveforms the caller already requested (in plan track
@@ -320,49 +411,11 @@ pub(crate) fn advance_cue_playbacks(
         let playback = &mut *playback;
         let mut restarted = false;
         loop {
+            start_due_tracks(playback, entity, &bus, &gate, now, &mut |track| {
+                commands.spawn(track).id()
+            });
             for index in 0..playback.voices.len() {
                 match playback.voices[index] {
-                    RoundVoice::Waiting { slot, due } if now >= due => {
-                        let voice = &playback.plan.voices[slot];
-                        let settings = if voice.stream.loops {
-                            PlaybackSettings::LOOP
-                                .with_start_position(Duration::from_secs_f64(
-                                    voice.stream.loop_start,
-                                ))
-                                .with_duration(Duration::from_secs_f64(
-                                    voice.stream.loop_end - voice.stream.loop_start,
-                                ))
-                        } else {
-                            PlaybackSettings::ONCE
-                        };
-                        let mut volume = track_volume(
-                            playback.plan.gain.as_ref(),
-                            playback.player,
-                            playback.fallback_slot,
-                            slot,
-                        );
-                        volume.gain *= playback.scale;
-                        let linear = volume.linear(&bus) * gate.factor();
-                        let sound = commands
-                            .spawn((
-                                AudioPlayer::new(playback.handles[slot].clone()),
-                                settings.with_volume(Volume::Linear(linear)),
-                                BusVolume::Cue(volume),
-                                ChildOf(entity),
-                            ))
-                            .id();
-                        if playback.plan.work_key.is_some() {
-                            info!(
-                                "[audio-seq] 序列轨起声：{} · cue={} round={} track={} due={due:.6} t={now:.6} 音量 {linear:.3}{}",
-                                playback.channel,
-                                label(&playback.cue),
-                                playback.round,
-                                voice.track_index,
-                                if voice.stream.loops { "（波形带循环：这一轮不会自己收）" } else { "" }
-                            );
-                        }
-                        playback.voices[index] = RoundVoice::Sounding { entity: sound };
-                    }
                     RoundVoice::Sounding { entity: sound, .. } => {
                         if one_shot_finished_or_failed(sound, &server, &players, &sinks) {
                             if let Ok(mut sound_commands) = commands.get_entity(sound) {

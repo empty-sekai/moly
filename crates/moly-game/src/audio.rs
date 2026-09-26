@@ -210,7 +210,7 @@ impl Default for LocalVolumeSettings {
 /// `acf_slots` maps the configuration's own category index (what a cue sheet
 /// names) to a field by name. `player` is the **player layer**, written by
 /// [`apply_system_volume`].
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub(crate) struct VolumeBus {
     pub se_ingame: f32,
     pub se_ui: f32,
@@ -2331,6 +2331,8 @@ pub(crate) fn advance_ambient(
     mut commands: Commands,
     server: Res<AssetServer>,
     time: Res<Time<Real>>,
+    bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     transition: Option<Res<WeatherTransition>>,
     site: Option<Res<SiteActive>>,
     routing: Option<Res<Routing>>,
@@ -2449,6 +2451,9 @@ pub(crate) fn advance_ambient(
             RngSlot::Ambient,
             "ambient",
         ),
+        &bus,
+        &gate,
+        now,
     ));
     channel.playing = Some(route.cue.clone());
 }
@@ -2495,7 +2500,7 @@ pub(crate) fn start_timeline_cue(
             "timeline SE",
         )
     });
-    Ok(world.spawn(playback).id())
+    Ok(cue::spawn_playback_in_world(world, playback, now))
 }
 
 // ---- A 套邻近环境音管理器 -----------------------------------------------------
@@ -3279,6 +3284,8 @@ pub(crate) fn advance_se(
     mut commands: Commands,
     server: Res<AssetServer>,
     time: Res<Time<Real>>,
+    bus: Res<VolumeBus>,
+    gate: Res<AudioGate>,
     routing: Option<Res<Routing>>,
     mut queue: ResMut<SeRequests>,
     mut channel: ResMut<SeChannel>,
@@ -3360,7 +3367,13 @@ pub(crate) fn advance_se(
             "option preview",
         )
         .scaled(fixed.unwrap_or(1.0));
-        let entity = cue::spawn_playback(&mut commands, playback);
+        let entity = cue::spawn_playback(
+            &mut commands,
+            playback,
+            &bus,
+            &gate,
+            time.elapsed_secs_f64(),
+        );
         if on_voice {
             if let Some(old) = voice.preview.replace(entity) {
                 if let Ok(mut entity_commands) = commands.get_entity(old) {
@@ -3433,7 +3446,13 @@ pub(crate) fn advance_se(
             RngSlot::OneShot,
             "one-shot SE",
         );
-        let entity = cue::spawn_playback(&mut commands, playback);
+        let entity = cue::spawn_playback(
+            &mut commands,
+            playback,
+            &bus,
+            &gate,
+            time.elapsed_secs_f64(),
+        );
         if let Some(owner) = request.owner {
             commands.entity(entity).insert(ScopedSe(owner));
         }
