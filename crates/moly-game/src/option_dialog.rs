@@ -2049,9 +2049,9 @@ pub(crate) fn place(
         }
     }
 }
-/// 延时预览到点的一拍（b__1）：cue 空（BGM 两杆）静默返回；cue 非空先
-/// `StopVoiceAll` 再按型播——型 1 走真 SE 队列，型 2/3/4 无渠道对应物
-/// 具名不播（见模块头）。
+/// The delayed preview's call (b__1): an empty cue (the two BGM sliders)
+/// returns; otherwise `StopVoiceAll`, then the slider's sound type through
+/// `SoundManager`. The four cues are in the common menu bank.
 fn fire_preview(
     commands: &mut Commands,
     which: VolumeSlider,
@@ -2060,48 +2060,32 @@ fn fire_preview(
     se_requests: &mut SeRequests,
 ) {
     let Some(cue) = which.cue() else {
-        return; // 型 0（BGM 两杆）：cue 空 ⇒ 预览静默返回（真源同支）
+        return;
     };
-    // StopVoiceAll 先于预览声（真源序：cue 非空即先停语音，型别在后）。
     stop_voice_all(voice, commands);
-    let who = format!("{}·{}", which.group().header(), which.kind_label());
+    let who = format!("{} {}", which.group().header(), which.kind_label());
+    let volume = value as f32 * 0.01;
     match which.preview_kind() {
         PreviewKind::Se => {
-            // 型 1（PlaySEOneShot）⇒ 真 SE 请求队列。cue 未提取 ⇒ 通道侧
-            // 每 cue 一次的缺流告警就是它的诚实行（ExistsCueName
-            // fail-closed 同款）。
+            // Type 1, PlaySEOneShot: the UI SE player.
             se_requests.0.push(SeRequest {
                 owner: None,
                 cue: cue.into(),
                 class: SeClass::Ui,
                 source: "option_preview",
             });
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 1 PlaySEOneShot({cue}) 入 SE 队列\
-                 （值 {value}；cue 未提取 ⇒ 通道侧具名跳过）"
-            );
+            info!("[option] preview (0.15 s, b__1): {who} -> type 1 PlaySEOneShot({cue})");
         }
         PreviewKind::Voice => {
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 2 PlayVoice({cue}, 1.0)——voice 通道\
-                 词表只有对话行（talk voice/partvoice），无对应渠道，具名不播（值 {value}）"
-            );
+            info!("[option] preview (0.15 s, b__1): {who} -> type 2 PlayVoice({cue}, 1): the audio channel has no volume preview player; not played");
         }
         PreviewKind::IngameSe => {
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 3 SamplePlaySE({cue}, {:.2})——SE 请求\
-                 无逐请求音量位，无对应渠道，具名不播",
-                value as f32 * 0.01
-            );
+            info!("[option] preview (0.15 s, b__1): {who} -> type 3 SamplePlaySE({cue}, {volume:.2}): the audio channel has no volume preview player; not played");
         }
         PreviewKind::IngameVoice => {
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 4 PlayVoiceFixedVolume({cue}, {:.2})——\
-                 同型 3，无对应渠道，具名不播",
-                value as f32 * 0.01
-            );
+            info!("[option] preview (0.15 s, b__1): {who} -> type 4 PlayVoiceFixedVolume({cue}, {volume:.2}): the audio channel has no volume preview player; not played");
         }
-        PreviewKind::Bgm => unreachable!("cue 非空的滑杆不会落在型 0"),
+        PreviewKind::Bgm => unreachable!("a slider with a cue is not type 0"),
     }
 }
 
