@@ -12,15 +12,15 @@ use serde_json::{json, Value};
 
 const SOURCE_SHA256: &str = "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9";
 
-fn f(bits: &Value) -> f32 {
+pub(super) fn f(bits: &Value) -> f32 {
     f32::from_bits(bits.as_u64().expect("native f32 bits") as u32)
 }
 
-fn word(value: &Value) -> u32 {
+pub(super) fn word(value: &Value) -> u32 {
     value.as_u64().expect("native word") as u32
 }
 
-fn read(key: &str) -> Value {
+pub(super) fn read(key: &str) -> Value {
     let path = std::env::var_os(key).unwrap_or_else(|| panic!("{key} is not set"));
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
@@ -109,25 +109,25 @@ fn replace_streams(system: &mut Runtime, seeds: &Value) {
 
 /// Runtime X is the reflection of source X. A zero reflects to the other
 /// signed zero, so X zeros compare by value and everything else by bits.
-fn same_x(runtime: f32, native: &Value) -> bool {
+pub(super) fn same_x(runtime: f32, native: &Value) -> bool {
     let native = f(native);
     if native == 0.0 { runtime == 0.0 } else { (-runtime).to_bits() == native.to_bits() }
 }
 
-fn same(runtime: f32, native: &Value) -> bool {
+pub(super) fn same(runtime: f32, native: &Value) -> bool {
     runtime.to_bits() == f(native).to_bits()
 }
 
 #[derive(Default)]
-struct Tally {
-    frames: usize,
-    mismatched_frames: usize,
-    fields: std::collections::BTreeMap<&'static str, (usize, usize)>,
-    first: Vec<String>,
+pub(super) struct Tally {
+    pub(super) frames: usize,
+    pub(super) mismatched_frames: usize,
+    pub(super) fields: std::collections::BTreeMap<&'static str, (usize, usize)>,
+    pub(super) first: Vec<String>,
 }
 
 impl Tally {
-    fn check(&mut self, field: &'static str, ok: bool, frame_ok: &mut bool, label: &str) {
+    pub(super) fn check(&mut self, field: &'static str, ok: bool, frame_ok: &mut bool, label: &str) {
         let entry = self.fields.entry(field).or_default();
         entry.0 += 1;
         if !ok {
@@ -142,7 +142,7 @@ impl Tally {
 
 /// Compare the product state after one frame with the native row.
 /// `frame_state` false skips the fields only the per-frame driver keeps.
-fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, label: &str) {
+pub(super) fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, label: &str) {
     // A host that left the system without the native owner has none of the
     // owner state to compare: the frame mismatches as a whole.
     let Some(state) = system.native_birth.as_ref() else {
@@ -221,7 +221,7 @@ fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, 
     }
 }
 
-fn frame_context(input: &Value) -> Context {
+pub(super) fn frame_context(input: &Value) -> Context {
     let t: [f32; 3] = std::array::from_fn(|a| f(&input["positionBits"][a]));
     Context {
         sky: GlobalTransform::from_translation(Vec3::new(-t[0], t[1], t[2])),

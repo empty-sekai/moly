@@ -1109,6 +1109,8 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
         frame: birth::FrameState::default(),
         events: None,
         target: Some(ChildTarget { owner, commands: 0, births: 0, refused: 0, last_refusal: None }),
+        procedural: false,
+        replays: Vec::new(),
     });
     Ok(())
 }

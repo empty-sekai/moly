@@ -263,6 +263,8 @@ fn normal_update_recomputes_birth_capacity_after_existing_deaths() {
             frame: Default::default(),
             events: None,
             target: None,
+            procedural: false,
+            replays: Vec::new(),
         };
         let initial_before = state.initial;
         super::birth::step_explicit(&mut system, &mut state, dt, false, &context).unwrap();
@@ -609,6 +611,8 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
         frame: Default::default(),
         events: None,
         target: None,
+        procedural: false,
+        replays: Vec::new(),
     };
     let runtime_before = mutable_runtime_snapshot(&system);
     let initial_before = state.initial;

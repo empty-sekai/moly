@@ -369,6 +369,12 @@ pub fn initial_reciprocal(lifetime: f32) -> Option<f32> {
         // ARM FRECPE(+inf)=+0; FRECPS(+inf,+0)=2, so both steps retain +0.
         return Some(0.0);
     }
+    Some(reciprocal_chain(lifetime))
+}
+
+/// The FRECPE estimate and its two FRECPS refinements for a positive normal
+/// input (the callers clamp their lifetime at a positive normal floor first).
+fn reciprocal_chain(lifetime: f32) -> f32 {
     let bits = lifetime.to_bits();
     let exponent = ((bits >> 23) & 0xff) as i32;
     let index = 256 + ((bits & 0x007f_ffff) >> 15);
@@ -392,7 +398,171 @@ pub fn initial_reciprocal(lifetime: f32) -> Option<f32> {
     let c0 = (2.0_f64 - (lifetime as f64) * (r0 as f64)) as f32;
     let r1 = ((r0 as f64) * (c0 as f64)) as f32;
     let c1 = (2.0_f64 - (lifetime as f64) * (r1 as f64)) as f32;
-    Some(((r1 as f64) * (c1 as f64)) as f32)
+    ((r1 as f64) * (c1 as f64)) as f32
+}
+
+/// InitialModule::GenerateProcedural's lifetime reciprocal: the same FRECPE
+/// estimate and two FRECPS refinements, of the lifetime clamped by `fmax` at
+/// 1e-6, so a positive normal value, +inf or NaN (a NaN lifetime passes the
+/// clamp). A zero input would select the bare estimate; the clamp excludes it.
+pub fn procedural_reciprocal(lifetime: f32) -> f32 {
+    if lifetime.is_nan() {
+        return f32::NAN;
+    }
+    if lifetime == f32::INFINITY {
+        return 0.0;
+    }
+    reciprocal_chain(lifetime)
+}
+
+/// ARM FMAX: a NaN operand gives NaN, and +0 is above -0.
+fn arm_fmax(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() && b.is_sign_negative() { -0.0 } else { 0.0 };
+    }
+    if a > b { a } else { b }
+}
+
+/// ARM FMIN: a NaN operand gives NaN, and -0 is below +0.
+fn arm_fmin(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() || b.is_sign_negative() { -0.0 } else { 0.0 };
+    }
+    if a < b { a } else { b }
+}
+
+/// GenerateProcedural's lifetime floor, 1e-6 (not Start's 1e-5).
+pub const PROCEDURAL_MIN_LIFETIME: f32 = f32::from_bits(0x3586_37bd);
+
+/// One four-lane group of `InitialModule::GenerateProcedural`: the replay's
+/// scalars and the group's first lane index within the replay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProceduralGroupInput {
+    /// The replay time times the duration reciprocal: every lane's curve time.
+    pub curve_time: f32,
+    pub alive_time: f32,
+    pub offset: f32,
+    pub gap: f32,
+    /// The replay's continuous count converted to a float.
+    pub continuous: f32,
+    /// The group's first lane index within the replay (0, 4, 8, ...), as the
+    /// float lane vector the module advances by 4 per group.
+    pub first_lane: f32,
+    pub storage_size_3d: bool,
+    pub storage_rotation_3d: bool,
+}
+
+/// One lane a generated group writes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProceduralLane {
+    pub seed: u32,
+    /// The lifetime after the 1e-6 floor.
+    pub lifetime: f32,
+    pub inverse_lifetime: f32,
+    pub age_percent: f32,
+    /// XYZ; Y and Z only with 3D size storage.
+    pub size: [Option<f32>; 3],
+    /// XYZ; X and Y only with 3D rotation storage.
+    pub rotation: [Option<f32>; 3],
+    pub color: [u8; 4],
+}
+
+impl InitialLaw {
+    /// `InitialModule::GenerateProcedural` for one four-lane group of a
+    /// replay. The lifetime draw comes first: each lane's time left is the
+    /// floored lifetime less the replay's alive time less the lane's own age
+    /// (its offset from the replay, `(offset + lane) * gap`, for a lane index
+    /// below the continuous count), and a group whose four lanes all have no
+    /// time left is skipped after that one draw (`Ok(None)`, the stream
+    /// advanced). Otherwise the seed (the raw word of the next draw), the
+    /// sizes, the rotations and the colour follow in Start's order with a draw
+    /// each; the age is `min(max(1 - left * inverse, 0), 1) * 100`, and the
+    /// rotation is the sign times the value, without Start's `+0`. Every
+    /// curve is evaluated at the replay's normalized time.
+    pub fn generate_group(&self, random: &mut ModuleRandom, input: ProceduralGroupInput)
+        -> Result<Option<[ProceduralLane; 4]>, Refused> {
+        let source = &self.source;
+        let lifetime = prepare(&source.lifetime, InitialField::Lifetime)?;
+        let sx = prepare(&source.size, InitialField::SizeX)?;
+        let rz = prepare(&source.rotation, InitialField::RotationZ)?;
+        let size_yz = if input.storage_size_3d && source.size3d {
+            Some([
+                prepare_axis(source.size_y.as_ref(), InitialField::SizeY)?,
+                prepare_axis(source.size_z.as_ref(), InitialField::SizeZ)?,
+            ])
+        } else {
+            None
+        };
+        let rotation_xy = if input.storage_rotation_3d && source.rotation3d {
+            Some([
+                prepare_axis(source.rotation_x.as_ref(), InitialField::RotationX)?,
+                prepare_axis(source.rotation_y.as_ref(), InitialField::RotationY)?,
+            ])
+        } else {
+            None
+        };
+        validate_color(&source.color)?;
+        let time = [input.curve_time; 4];
+        let mut next = *random;
+        let life = evaluate4(&lifetime, &mut next, time).map(|v| arm_fmax(v, PROCEDURAL_MIN_LIFETIME));
+        let left: [f32; 4] = std::array::from_fn(|lane| {
+            let index = input.first_lane + lane as f32;
+            let lane_age = if input.continuous > index { input.gap * (input.offset + index) } else { 0.0 };
+            (life[lane] - input.alive_time) - lane_age
+        });
+        if left.iter().all(|v| *v <= 0.0) {
+            *random = next;
+            return Ok(None);
+        }
+        let seeds = next.next4_u32();
+        let size_x = evaluate4(&sx, &mut next, time).map(|v| arm_fmax(v, 0.0));
+        let sizes_yz = size_yz.as_ref().map(|axes| {
+            [evaluate4(&axes[0], &mut next, time), evaluate4(&axes[1], &mut next, time)]
+        });
+        let signs = seeds.map(|seed| {
+            if ParticleRandom::sample(seed, 0xff2b_b1a4) > self.randomize_rotation_direction { 1.0 } else { -1.0 }
+        });
+        let rotation_z = evaluate4(&rz, &mut next, time);
+        let rotations_xy = rotation_xy.as_ref().map(|axes| {
+            [evaluate4(&axes[0], &mut next, time), evaluate4(&axes[1], &mut next, time)]
+        });
+        let color_draw = next.next4_u32().map(unit);
+        let colours = initial_rgba8x4(&source.color, time, color_draw);
+        let lanes = std::array::from_fn(|lane| {
+            let inverse = procedural_reciprocal(life[lane]);
+            let age = arm_fmin(arm_fmax(1.0 - left[lane] * inverse, 0.0), 1.0) * 100.0;
+            let mut size = [Some(size_x[lane]), None, None];
+            if input.storage_size_3d {
+                let (y, z) = sizes_yz.as_ref().map_or((size_x[lane], size_x[lane]), |v| (v[0][lane], v[1][lane]));
+                size[1] = Some(arm_fmax(y, 0.0));
+                size[2] = Some(arm_fmax(z, 0.0));
+            }
+            let mut rotation = [None, None, Some(signs[lane] * rotation_z[lane])];
+            if input.storage_rotation_3d {
+                let (x, y) = rotations_xy.as_ref()
+                    .map_or((0.0, 0.0), |v| (signs[lane] * v[0][lane], signs[lane] * v[1][lane]));
+                rotation[0] = Some(x);
+                rotation[1] = Some(y);
+            }
+            ProceduralLane {
+                seed: seeds[lane],
+                lifetime: life[lane],
+                inverse_lifetime: inverse,
+                age_percent: age,
+                size,
+                rotation,
+                color: colours[lane],
+            }
+        });
+        *random = next;
+        Ok(Some(lanes))
+    }
 }
 
 #[cfg(test)]

@@ -234,6 +234,11 @@ impl CustomData {
         self.follow(|storage| storage.birth(old, lanes, live, after));
     }
 
+    /// See [`SlotTail::regenerate`].
+    pub fn regenerate(&mut self, previous: usize, live: usize, tail: &[Particle], reserve: usize) {
+        self.follow(|storage| storage.regenerate(previous, live, tail, reserve));
+    }
+
     /// See [`SlotTail::clear`].
     pub fn clear(&mut self, live: &[Particle]) {
         self.follow(|storage| storage.clear(live));

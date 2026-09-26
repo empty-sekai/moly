@@ -69,6 +69,7 @@ pub mod owner;
 pub mod placement;
 pub mod child_emit;
 pub mod prewarm;
+pub mod procedural;
 pub mod frame_time;
 pub mod culling;
 mod armf;

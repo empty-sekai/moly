@@ -425,6 +425,8 @@ fn source_snow_full_prewarm_matches_current_native() {
         frame: Default::default(),
         events: None,
         target: None,
+        procedural: false,
+        replays: Vec::new(),
     };
     state.emission.distribution.spacing = f(&initial["carry"][0]);
     state.emission.distribution.offset = f(&initial["carry"][1]);

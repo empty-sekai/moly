@@ -158,6 +158,10 @@ pub struct IncrementalSlices {
     duration: f32,
     /// UpdateData flags bit 2 clear: the backlog widening applies.
     widen: bool,
+    /// UpdateData flags bit 0 set (the procedural warm's `Update` flags 3):
+    /// the loop runs while the pending time is at least the last slice (the
+    /// step on entry) instead of at least 1e-6 s.
+    fixed: bool,
     budget: usize,
 }
 
@@ -189,8 +193,20 @@ impl IncrementalSlices {
             prior_step: step,
             duration,
             widen: entry != IncrementalEntry::ScriptSimulate,
+            fixed: false,
             budget: SLICE_BUDGET,
         })
+    }
+
+    /// The loop of an update entered with UpdateData flags bit 0 set, whose
+    /// step is GetTimeStep's fixed step: Update1Incremental enters while the
+    /// pending time is at least that step and continues while it is at least
+    /// the slice just taken (after a widened slice, the widened length). The
+    /// slices are the ordinary ones, the backlog widening included.
+    pub fn fixed(total: f32, step: f32, duration: f32) -> Result<Self, &'static str> {
+        let mut slices = Self::new(total, step, IncrementalEntry::ExplicitDt, duration)?;
+        slices.fixed = true;
+        Ok(slices)
     }
 
     /// Time still pending: below 1e-6 s once the loop has ended, carried into
@@ -206,7 +222,8 @@ impl IncrementalSlices {
 impl Iterator for IncrementalSlices {
     type Item = Result<Slice, &'static str>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining < INCREMENTAL_EPSILON {
+        let threshold = if self.fixed { self.prior_step } else { INCREMENTAL_EPSILON };
+        if self.remaining < threshold {
             return None;
         }
         if self.budget == 0 {

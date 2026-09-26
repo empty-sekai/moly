@@ -1043,9 +1043,13 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
 ///
 /// A looping prewarm system warms at its first Play before any frame; with
 /// supportsProcedural that warm is Update with the procedural flag, otherwise
-/// BeginUpdate over the ordinary slices. Neither warm has been executed for a
-/// ring system, so both stay refused here. The authored loop range is admitted
-/// inside the inspector domain 0 <= lo <= hi <= 1, where the executed cases lie.
+/// BeginUpdate over the ordinary slices. The procedural warm reads the ring
+/// mode once, doubling the capacity its emit replays may hold, and its
+/// regeneration never packs at the ring cursor; the native birth path takes
+/// or refuses it by name. The warm over the ordinary slices has not been
+/// executed for a ring system, so it stays refused here. The authored loop
+/// range is admitted inside the inspector domain 0 <= lo <= hi <= 1, where the
+/// executed cases lie.
 fn source_ring_buffer_admission(system: &Value) -> Result<(), String> {
     match system.get("ringBufferMode").and_then(Value::as_u64) {
         Some(0) => return Ok(()),
@@ -1066,8 +1070,7 @@ fn source_ring_buffer_admission(system: &Value) -> Result<(), String> {
     };
     if prewarm && looping {
         return Err(match crate::particle_runtime::source_route(system) {
-            crate::particle_runtime::SourceRoute::Procedural =>
-                "ring buffer first-Play warm runs Update with the procedural flag; not transcribed".into(),
+            crate::particle_runtime::SourceRoute::Procedural => return Ok(()),
             crate::particle_runtime::SourceRoute::Ordinary =>
                 "ring buffer first-Play warm over the ordinary slices has not been executed".into(),
             crate::particle_runtime::SourceRoute::Undecided(control) =>

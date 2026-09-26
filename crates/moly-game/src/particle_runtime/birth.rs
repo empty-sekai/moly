@@ -32,6 +32,14 @@ pub(crate) struct NativeBirthState {
     /// The child side when this system is an installed sub-emitter target;
     /// `None` for every other system.
     pub target: Option<super::child::ChildTarget>,
+    /// The system state's supports-procedural byte, as the first Play's warm
+    /// reads it: set for a looping prewarm system on the procedural route,
+    /// whose warm is `Update` with the procedural flag.
+    pub procedural: bool,
+    /// The state's emit replays (`StartParticlesProcedural` appends them,
+    /// `UpdateProcedural` removes the trailing empty ones, Clear empties
+    /// them). Play does not clear them.
+    pub replays: Vec<moly_law::particle::procedural::EmitReplay>,
 }
 
 /// Per-system state the engine's per-frame update head keeps between frames.
@@ -828,6 +836,23 @@ fn start_common(
     );
     if accepted == 0 {
         system.full_total += batch.count as u64;
+        // StartParticles returns at once for a request of none, but packs
+        // when it accepts none of a request. A ring pool is past its maximum
+        // only after a procedural warm, whose replays may hold twice the
+        // maximum: Pause then copies the particles past the maximum onto the
+        // cursor slots and truncates, Loop moves nothing.
+        if batch.count > 0 && system.emitter.ring_buffer_mode != RingBufferMode::Disabled
+            && system.pool.len() > system.emitter.max_particles as usize {
+            let maximum = system.emitter.max_particles as usize;
+            let mut replaced = 0_u64;
+            match system.trail.as_mut() {
+                Some(trail) => finish_births_with(&mut system.pool, &mut system.side, &mut trail.rings,
+                    &mut system.ring_cursor, system.emitter.ring_buffer_mode, maximum, old_count, |_, _| replaced += 1),
+                None => finish_births(&mut system.pool, &mut system.side, &mut system.ring_cursor,
+                    system.emitter.ring_buffer_mode, maximum, old_count, |_, _| replaced += 1),
+            }
+            system.died_total += replaced;
+        }
         return Ok(());
     }
     // One ShapeBatch per StartParticles call: the accepted count after the
@@ -1293,6 +1318,275 @@ fn validate_unshaped_owner(
         return Err(BirthRefused::Unsupported(
             "nonfinite birth position or velocity",
         ));
+    }
+    Ok(())
+}
+
+/// The modules the procedural first-Play warm runs besides Initial and the
+/// emission: `UpdateProcedural` calls Shape, Lights, Rotation, Velocity,
+/// Force, Size, SizeBySpeed and Noise over the regenerated particles. The
+/// source route admits only Local space, no Noise, collision, sub-emitter,
+/// clamp or rotation-by-speed module and no per-particle trail; of the rest,
+/// Shape and the RotationOverLifetime constant and two-constant integrals are
+/// transcribed. The per-frame update after the warm is the ordinary one.
+pub(super) fn qualify_procedural_warm(emitter: &EmitterParams) -> Result<(), BirthRefused> {
+    use moly_law::particle::MinMaxCurve;
+    let refuse = |reason| Err(BirthRefused::Unsupported(reason));
+    if emitter.simulation_space != SimulationSpace::Local {
+        return refuse("procedural warm outside Local space");
+    }
+    if emitter.velocity_over_lifetime.is_some() {
+        return refuse("procedural warm: VelocityModule::UpdateProcedural is not transcribed");
+    }
+    if emitter.force.is_some() {
+        return refuse("procedural warm: ForceModule::UpdateProcedural is not transcribed");
+    }
+    if emitter.trails.is_some() {
+        return refuse("procedural warm: a ribbon trail over the regenerated particles is not transcribed");
+    }
+    if super::size_over_lifetime_law(emitter).and_then(Result::ok).is_some_and(|size| size.calls().is_some()) {
+        return refuse("procedural warm: the SizeModule call over the regenerated particles is not followed");
+    }
+    if !matches!(emitter.start.gravity_modifier, MinMaxCurve::Constant(v) if v.is_finite()) {
+        return refuse("procedural warm: gravity modifier other than a finite constant");
+    }
+    // Only a Mesh shape's vertex colour marks a regenerated lane dead (the
+    // generated age word is at most 100), so only it reaches the kill pass;
+    // that composition has not been executed against the engine.
+    if emitter.shape.as_ref().is_some_and(|shape| shape.shape_type == "Mesh") {
+        return refuse("procedural warm over a Mesh shape has not been executed");
+    }
+    if let Some(rotation) = &emitter.rotation_over_lifetime {
+        let scalar = |curve: Option<&MinMaxCurve>| matches!(curve,
+            Some(MinMaxCurve::Constant(_) | MinMaxCurve::TwoConstants { .. }));
+        let axes_ok = scalar(Some(&rotation.curve))
+            && (!rotation.separate_axes || (scalar(rotation.x.as_ref()) && scalar(rotation.y.as_ref())));
+        if !axes_ok {
+            return refuse("procedural warm: a RotationOverLifetime curve integral is not transcribed");
+        }
+    }
+    Ok(())
+}
+
+/// Play's warm of a procedural system: `Update` with flags 3 over the warm
+/// plan's fixed-step slices. Each slice ticks the clock as ordinary, ages
+/// every emit replay by the slice and, while emitting, counts the start
+/// delay down, runs EmitOverTime and records its births as replays
+/// (`StartParticlesProcedural`); then `UpdateProcedural` regenerates the
+/// particles from the replays. Nothing is committed to the pool when the
+/// regeneration refuses.
+pub(super) fn run_warm_procedural(
+    system: &mut Runtime,
+    state: &mut NativeBirthState,
+    mut plan: moly_law::particle::prewarm::PrewarmPlan,
+    ctx: &Context,
+) -> Result<(), BirthRefused> {
+    use moly_law::particle::procedural;
+    qualify_procedural_warm(&system.emitter)?;
+    let emission = system.emitter.emission.as_ref().ok_or(BirthRefused::Unsupported("missing emission"))?;
+    let (law, _) = ConstantAutonomousEmission::from_params_with_distance(
+        &system.emitter.start_delay, system.emitter.duration, system.emitter.looping, emission)
+        .map_err(BirthRefused::Emission)?;
+    let ring = system.emitter.ring_buffer_mode != RingBufferMode::Disabled;
+    let maximum = system.emitter.max_particles as i32;
+    let entry_clock = system.playback_head;
+    for slice in plan.by_ref() {
+        let dt = slice.map_err(|_| BirthRefused::InvalidTiming)?.duration;
+        // The start delay word as the ordinary slice reads it.
+        let delay = state.frame.start_delay;
+        let tick = (delay < dt).then(|| dt - delay);
+        let (birth_dt, next_delay) = if entry_clock == 0.0 && delay > 0.0 {
+            let left = delay - dt;
+            (Some(-left).filter(|b| left <= 0.0 && *b > 0.0), if left > 0.0 { left } else { 0.0 })
+        } else {
+            (Some(dt), delay)
+        };
+        let clock = law.prepare_slice_parts(system.playback_head, dt, tick, birth_dt, false)
+            .map_err(BirthRefused::Emission)?;
+        let mut pending = state.emission;
+        let batch = law.schedule(clock, &mut pending, moly_law::particle::initial::initial_reciprocal)
+            .map_err(BirthRefused::Emission)?;
+        if !clock.simulate {
+            continue;
+        }
+        system.previous_head = clock.previous;
+        system.playback_head = clock.current;
+        if !clock.stopped_after {
+            state.frame.start_delay = next_delay;
+        }
+        if !super::child::arms::on("proceduralReplaysNotAged") {
+            procedural::age(&mut state.replays, dt);
+        }
+        if let Some(batch) = batch {
+            state.emission = pending;
+            system.emission.to_emit_accumulator = pending.distribution.offset;
+            procedural::record(&mut state.replays, clock.current, batch.dt, pending.distribution.spacing,
+                pending.distribution.offset, u64::from(batch.rate_count), u64::from(batch.total), maximum,
+                ring && !super::child::arms::on("proceduralCapNotDoubled"));
+        }
+    }
+    system.pending = plan.remaining();
+    update_procedural(system, state, ctx)
+}
+
+/// `UpdateProcedural` of a Local system from an empty pool (the first Play):
+/// see [`moly_law::particle::procedural`]. Shape runs over every slot of the
+/// four-lane groups below the count with the module's own stream and the
+/// empty emission state the engine builds for it; its Store adds the shape
+/// point to the generated position (the identity translation) and replaces
+/// the direction. The pool takes the live slots, reflected into runtime
+/// coordinates, and a law that follows the storage past the count is told
+/// the slots the regeneration determined there.
+fn update_procedural(system: &mut Runtime, state: &mut NativeBirthState, ctx: &Context) -> Result<(), BirthRefused> {
+    use moly_law::particle::procedural::{self, Emitter, Rotation, Storage};
+    use moly_law::particle::MinMaxCurve;
+    if state.replays.is_empty() {
+        return Ok(());
+    }
+    if !system.pool.is_empty() {
+        return Err(BirthRefused::Unsupported("procedural regeneration over live particles is not transcribed"));
+    }
+    let law = validate(system, &state.initial)?;
+    let modifier = match system.emitter.start.gravity_modifier {
+        MinMaxCurve::Constant(v) => v,
+        _ => return Err(BirthRefused::Unsupported("procedural warm: gravity modifier other than a constant")),
+    };
+    // InitialModule::GetGravity times the modifier, turned into the Local
+    // space by the columns of the world-to-local matrix.
+    let g = GRAVITY.map(|v| v * modifier);
+    let owner = compose_to_world(system, ctx);
+    let source_owner = source_owner_matrix(&owner);
+    // Zero entries of the world-to-local matrix are taken as +0 (the
+    // reflection into source coordinates leaves -0 where an unrotated owner's
+    // matrix holds +0); with a zero gravity modifier those signs reach only
+    // the sign of a zero velocity. A rotated owner's zero signs are not
+    // followed.
+    let inverse = Mat4::from_cols_array(&source_owner).inverse().to_cols_array().map(|v| v + 0.0);
+    let gravity: [f32; 3] = std::array::from_fn(|a| g[0] * inverse[a] + (g[1] * inverse[4 + a] + g[2] * inverse[8 + a]));
+    let shape_law = system.emitter.shape.as_ref()
+        .map(|params| moly_law::particle::shape_birth::ShapeBirthLaw::from_params(params).map_err(shape_refusal))
+        .transpose()?;
+    let shape_state = shape_emitter_state(&system.emitter, system.geometry.shape_evidence())?;
+    let rotation_3d = crate::particle_runtime::uses_rotation_3d(&system.emitter, true) == Some(true);
+    let storage_axis = system.geometry.shape_evidence().is_some_and(|e| e.mesh_renderer) && !rotation_3d;
+    let emitter = Emitter {
+        initial: &law,
+        speed: &system.emitter.start.speed,
+        duration: system.emitter.duration,
+        gravity,
+        storage_size_3d: system.emitter.start.size3d,
+        storage_rotation_3d: rotation_3d,
+        storage_axis,
+        translation: [0.0; 3],
+        direction: procedural::direction([0.0, 0.0, 1.0]),
+    };
+    let reserve = {
+        let sum = state.replays.iter().fold(0_i32, |sum, r| r.count.wrapping_add(sum));
+        ((sum as i64 + 0x22) as usize) & !0x1f
+    };
+    let mut initial = state.initial;
+    let mut shape_stream = state.shape;
+    let mut replays = state.replays.clone();
+    let mut storage = Storage::default();
+    let offsets = procedural::generate(&mut storage, &replays, &emitter, &mut initial)
+        .map_err(|_| BirthRefused::Unsupported("procedural generation refused"))?;
+    let count = storage.live;
+    let end = (count + 3) & !3;
+    if let (Some(shape), Some(shape_state), true) = (shape_law.as_ref(), shape_state, count > 0) {
+        let accepted = u32::try_from(count).ok().and_then(std::num::NonZeroU32::new).ok_or(BirthRefused::InvalidTiming)?;
+        let mut batch = moly_law::particle::shape_birth::ShapeBatch::new(accepted, 0.0, 0.0, Default::default());
+        for group in (0..end).step_by(4) {
+            let shaped = shape.sample_group_with_mesh(&mut batch, &mut shape_stream, source_owner, false,
+                shape_state.emitter_scale, shape_state.uses_axis_of_rotation,
+                system.emission_surface.as_deref().map(|surface| surface.native()))
+                .map_err(|refused| match refused {
+                    moly_law::particle::shape_birth::Refused::MeshCacheMissing =>
+                        BirthRefused::Unsupported("Mesh shape without its emission surface"),
+                    _ => BirthRefused::Unsupported("unqualified native Shape owner/output"),
+                })?;
+            for lane in 0..4 {
+                let slot = &mut storage.slots[group + lane];
+                let sample = &shaped.samples[lane];
+                for a in 0..3 {
+                    slot.position[a] = sample.position[a] + slot.position[a];
+                    slot.velocity[a] = sample.direction[a];
+                }
+                if let Some(axes) = shaped.axis_of_rotation {
+                    slot.axis = axes[lane];
+                }
+                if let Some(mesh) = shaped.mesh_colour {
+                    let (colour, dead) = moly_law::particle::shape_mesh::MeshShapeCache::store_colour(slot.color, mesh[lane]);
+                    slot.color = colour;
+                    if dead {
+                        slot.age_percent = moly_law::particle::shape_mesh::DEAD_AGE_PERCENT;
+                    }
+                    // The colour of a slot only the padding reached is not known.
+                    slot.age_known &= slot.written;
+                }
+            }
+        }
+    }
+    let (normalized, ages) = if super::child::arms::on("proceduralAgeNoStagger") {
+        let mut flat: Vec<_> = replays.iter().map(|r| procedural::EmitReplay { gap: 0.0, ..*r }).collect();
+        let times = procedural::times(&mut flat, &offsets, count, system.emitter.duration);
+        let _ = procedural::times(&mut replays, &offsets, count, system.emitter.duration);
+        times
+    } else {
+        procedural::times(&mut replays, &offsets, count, system.emitter.duration)
+    };
+    procedural::motion(&mut storage, &normalized, &ages, &emitter)
+        .map_err(|_| BirthRefused::Unsupported("procedural start speed refused"))?;
+    let killed = procedural::kill(&mut storage);
+    if let Some(rotation) = system.emitter.rotation_over_lifetime.as_ref()
+        .filter(|_| !super::child::arms::on("proceduralRotationSkipped")) {
+        let zero = MinMaxCurve::Constant(0.0);
+        let curves = [rotation.x.as_ref().unwrap_or(&zero), rotation.y.as_ref().unwrap_or(&zero), &rotation.curve];
+        procedural::rotate(&mut storage, &Rotation { separate_axes: rotation.separate_axes, curves,
+            randomize_direction: 0.0 })
+            .map_err(|_| BirthRefused::Unsupported("procedural RotationOverLifetime refused"))?;
+    }
+    let reflect = |v: [f32; 3]| crate::particle_geometry::reflect(Vec3::from_array(v)).to_array();
+    let particle = |slot: &procedural::Slot| Particle {
+        position: reflect(slot.position),
+        velocity: reflect(slot.velocity),
+        start_lifetime: slot.lifetime,
+        age_percent: slot.age_percent,
+        inverse_lifetime: slot.inverse_lifetime,
+    };
+    let live = &storage.slots[..storage.live];
+    if live.iter().any(|slot| slot.position.iter().chain(&slot.velocity).any(|v| !v.is_finite())) {
+        return Err(BirthRefused::Unsupported("nonfinite procedural position or velocity"));
+    }
+    // Commit: the streams, the replays and the regenerated particles.
+    state.initial = initial;
+    state.shape = shape_stream;
+    state.replays = replays;
+    system.pool.extend(live.iter().map(particle));
+    // As at an ordinary birth, the runtime side keeps a 1D size in all three
+    // axes and the +Z axis of rotation where the arrays carry no such channel.
+    let size_3d = system.emitter.start.size3d;
+    system.side.extend(live.iter().map(|slot| Side {
+        rand: 0.0,
+        seed: slot.seed,
+        rot: slot.rotation,
+        size: if size_3d { slot.size } else { [slot.size[0]; 3] },
+        gravity: 0.0,
+        colour: moly_law::particle::gradient::rgba8_to_float(slot.color),
+        total_velocity: reflect(slot.velocity),
+        custom_data: [[0.0; 4]; 2],
+        emit_carry: [0.0; 2],
+        animated: [0.0; 3],
+        current_size: 0.0,
+        axis: if storage_axis { slot.axis } else { [0.0, 0.0, 1.0] },
+    }));
+    system.born_total += (storage.live + killed) as u64;
+    system.died_total += killed as u64;
+    if let Some(custom) = system.custom_law.as_mut() {
+        let tail: Vec<Particle> = storage.known_tail().iter().map(particle).collect();
+        custom.regenerate(0, storage.live, &tail, reserve);
+        if let Some(reason) = custom.refused() {
+            return Err(BirthRefused::Unsupported(reason));
+        }
     }
     Ok(())
 }
