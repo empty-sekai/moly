@@ -33,8 +33,8 @@
 //! carry only the keyword `_USE_ALPHA_CLIP` and no dither toggle property, so
 //! none of those switches selects anything: the bayer discard runs on every
 //! fragment with `_DitherAlpha` as its threshold, which is what this shader
-//! does. The records read are the CN 6.0.0 bundle's (the JP 6.8.1 avatar
-//! shader bundle is not on disk). The writers of `_DitherAlpha` are ported in
+//! does. The records read are an earlier client build's shader bundle; the
+//! current build's was not read. The writers of `_DitherAlpha` are ported in
 //! [`player_dither`].
 
 use bevy::asset::LoadState;
