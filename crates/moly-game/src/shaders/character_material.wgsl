@@ -252,7 +252,7 @@ fn fragment(in: CharacterVertexOutput) -> @location(0) vec4<f32> {
 
     // 球面支因子：头周 XZ 距离场，normalize 无地板（头正上方是源自带的
     // NaN 缺口）；光源 .xz 不归一化。edge/smoothness 是引擎全局量
-    // （读不出值的具名替身，见 Rust 侧注释）。
+    // （图形配置角色档的两值，见 Rust 侧注释）。
     let dx = in.world_position.x - params.head_position.x;
     let dz = in.world_position.z - params.head_position.z;
     let inv = inverseSqrt(dx * dx + dz * dz);
