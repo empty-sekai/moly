@@ -112,6 +112,7 @@ use bevy::prelude::*;
 
 use crate::sitemap::SitemapRoot;
 
+pub(crate) mod harvest_summary;
 pub(crate) mod registry;
 
 use registry::HeaderDisplay;
@@ -1702,4 +1703,5 @@ pub(crate) fn install(app: &mut App) {
         )
         .add_systems(Update, registry::load.before(advance))
         .add_systems(Update, back_key.before(advance));
+    harvest_summary::install(app);
 }
