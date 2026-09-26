@@ -71,6 +71,12 @@ impl WalkFace {
         self.field.constrain_move(start, goal)
     }
 
+    /// One agent move on the navigation cells (`WalkField::move_position`,
+    /// the engine's per-frame corridor move); returns the new x/z.
+    pub fn move_position(&self, start: [f32; 3], goal: [f32; 3]) -> [f32; 2] {
+        self.field.move_position(start, goal)
+    }
+
     /// Local low-step elevation above the original site surface. The raw
     /// surface remains responsible for continuous terrain height.
     pub(crate) fn height_offset(&self, point: [f32; 2]) -> f32 {

@@ -298,11 +298,14 @@ impl ObjectiveFace {
             .collect()
     }
 
+    /// One agent move on the navigation cells (the engine's corridor move,
+    /// see `WalkField::move_position`), the cells `fixture_path` corners come
+    /// from; the height is the navigation surface's at the answer.
     pub(crate) fn fixture_move(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
         if !from.is_finite() || !to.is_finite() {
             return None;
         }
-        let point = self.field.constrain_move([from.x, from.z], [to.x, to.z]);
+        let point = self.field.move_position(from.to_array(), to.to_array());
         self.navigation_point_at(point).map(Vec3::from)
     }
 
