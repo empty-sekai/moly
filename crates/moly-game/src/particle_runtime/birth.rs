@@ -1054,17 +1054,18 @@ fn start_common(
     if let Some(mut collision) = system.collision.take() {
         // One collision call per new four-lane group with its birth times,
         // after the group's modules, age and integration and before its
-        // sub-emitter call and the newborn deaths. Slots past the group end
-        // are not known here (the engine reads the next group's unfinished
-        // lanes or stale memory there). The pending time and emission word
-        // are read only by collision sub-emitter commands; a parent with such
-        // edges always has its event owner (the slice refuses otherwise).
+        // sub-emitter call and the newborn deaths, over the engine's slots:
+        // the groups start at the live count rounded up to four. The pending
+        // time and emission word are read only by collision sub-emitter
+        // commands; a parent with such edges always has its event owner (the
+        // slice refuses otherwise).
         let (pending, word) = events.as_ref().map_or((f32::NAN, 0), |e| (e.accumulated, e.emission_word));
+        let base = old_count.next_multiple_of(4);
         let mut result = Ok(());
         for offset in (0..accepted).step_by(4) {
             let dts = std::array::from_fn(|lane| partial_dts.get(offset + lane).copied().unwrap_or(f32::NAN));
-            result = super::collision::newborn_block(system, &mut collision, old_count + offset,
-                old_count + (offset + 4).min(accepted), dts, pending, word);
+            result = super::collision::newborn_block(system, &mut collision, base + offset,
+                base + (offset + 4).min(accepted), base - old_count, dts, pending, word);
             if result.is_err() {
                 break;
             }

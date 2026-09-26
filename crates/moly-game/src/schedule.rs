@@ -60,6 +60,7 @@ pub fn install(app: &mut App) {
     .add_systems(
         Update,
         content_library::qa_open
+            .run_if(crate::dev_tools::dev_tools)
             .after(content_library::retire_scene)
             .after(content_library::build_talk_catalog)
             .before(content_library::refresh),
@@ -263,7 +264,8 @@ pub fn install(app: &mut App) {
         PreUpdate,
         crate::game_settings::input
             .after(bevy::ui::UiSystems::Focus)
-            .run_if(crate::browser_stage::standalone),
+            .run_if(crate::browser_stage::standalone)
+            .run_if(crate::dev_tools::dev_tools),
     )
     .add_systems(
         PreUpdate,
@@ -275,7 +277,7 @@ pub fn install(app: &mut App) {
         Update,
         (
             crate::game_settings::apply_graphics.after(info::click),
-            crate::game_settings::refresh_ui,
+            crate::game_settings::refresh_ui.run_if(crate::dev_tools::dev_tools),
         )
             .chain(),
     )

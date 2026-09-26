@@ -296,6 +296,7 @@ pub(crate) fn read_input(
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
     learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
+    held: Option<Res<crate::game_state::HeldGameState>>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
@@ -307,6 +308,8 @@ pub(crate) fn read_input(
         || site_move.is_some()
         // GameState LearnSiteEnvironment hides the stick.
         || learn.is_some()
+        // GameState CutScene / LevelUpMyRoomSite disable the stick.
+        || held.is_some()
         || !crate::entry::control_open(entry.as_deref())
     {
         for (mut input, _) in &mut players {
@@ -501,6 +504,7 @@ pub(crate) fn advance(
         ),
     >,
     mut boundary: Local<Boundary>,
+    mut relocated: Local<Option<(Option<u64>, u64)>>,
 ) {
     let dt = time.delta_secs();
     let (Some(configs), Some(site), Some(ground), Some(face)) = (configs, site, ground, face)
@@ -523,10 +527,19 @@ pub(crate) fn advance(
         // fallback before sampling, then apply the destination's offset once.
         let raw_y = transform.translation.y
             - face.height_offset([transform.translation.x, transform.translation.z]);
-        // 新烘焙可能在脚下挖洞；仅修复无效起点，正常位移永不跨洞吸附。
-        if !face.walkable_at([transform.translation.x, transform.translation.z]) {
-            let (x, z) = face.seat(transform.translation.x, transform.translation.z);
-            transform.translation = Vec3::new(x, navigation_y_at(x, z, raw_y), z);
+        // The source's crowd moves an agent only when its navigation polygon
+        // is gone, that is once per build of the navigation cells (site and
+        // generation): to the closest point of the nearest cell in its query
+        // box. A player on a cell, edges included, stays.
+        let build = (epoch.as_deref().map(|epoch| epoch.0), face.generation());
+        if *relocated != Some(build) {
+            *relocated = Some(build);
+            let at = [transform.translation.x, transform.translation.z];
+            let radius =
+                crate::fixture_scene_inputs::PlayerFixtureAgentParameters::default().radius();
+            if let Some([x, z]) = face.relocate(at, radius).filter(|point| *point != at) {
+                transform.translation = Vec3::new(x, navigation_y_at(x, z, raw_y), z);
+            }
         }
         // Rebuilds can remove a rug without invalidating x/z. A resting
         // navigation-owned player must settle onto that new floor as well.
@@ -537,7 +550,10 @@ pub(crate) fn advance(
             let mut position = transform.translation + input.direction * speed * dt;
             let requested = position;
             let start = [transform.translation.x, transform.translation.z];
-            let accepted = face.constrain_move(start, [position.x, position.z]);
+            // The source's move state moves the agent by NavMeshAgent.Move,
+            // the engine's corridor move on the navigation cells.
+            let accepted =
+                face.move_position(transform.translation.to_array(), position.to_array());
             position.x = accepted[0];
             position.z = accepted[1];
             let next_boundary = if accepted == [requested.x, requested.z] {

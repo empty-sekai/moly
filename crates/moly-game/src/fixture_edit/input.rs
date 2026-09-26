@@ -54,6 +54,14 @@ pub(crate) fn read_keyboard(
     if keys.just_pressed(KeyCode::KeyR) {
         actions.write(EditCommand::Rotate);
     }
+    // Desktop stand-ins for the edit screen's camera rotate and change-look
+    // buttons, which send the same commands.
+    if keys.just_pressed(KeyCode::KeyQ) {
+        actions.write(EditCommand::RotateCamera);
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        actions.write(EditCommand::ChangeLookCamera);
+    }
     if keys.just_pressed(KeyCode::KeyD) || keys.just_pressed(KeyCode::Enter) {
         actions.write(EditCommand::Decide);
     }

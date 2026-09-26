@@ -13,6 +13,7 @@ pub mod avatar_wear;
 pub mod balloon;
 pub mod billboard;
 pub mod birthday;
+mod browser_game;
 mod browser_stage;
 #[cfg(target_arch = "wasm32")]
 mod browser_log;
@@ -21,12 +22,16 @@ pub mod camera;
 pub mod canvas;
 pub mod character;
 pub mod character_material;
+mod character_silhouette;
 pub mod client_config;
 pub mod cloth_runtime;
 mod content_library;
+mod cutscene;
+mod cutscene_camera;
 mod delayed_faces;
 pub mod delivery;
 mod delivery_camera;
+mod dev_tools;
 pub mod emoticon;
 mod entry;
 pub mod env;
@@ -41,6 +46,7 @@ pub mod fixture_attach;
 mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
+mod floor_edit_camera;
 pub mod fixture_emission;
 mod fixture_clock;
 mod fixture_gimmick;
@@ -52,6 +58,7 @@ mod fixture_tiles;
 mod footstep;
 mod frame_capture;
 pub mod game_settings;
+mod game_state;
 pub mod gesture;
 pub mod get_resource;
 pub mod learn_phenomena_dialog;
@@ -109,12 +116,14 @@ mod render;
 mod room_appearance;
 mod room_shell;
 pub mod schedule;
+mod screen_fade;
 mod server_panel;
 mod settings_store;
 pub mod shadowmap;
 pub mod site;
 pub mod site_material;
 pub mod site_sound;
+mod site_expansion;
 pub(crate) mod site_move;
 pub mod sitemap;
 pub mod sitemap_phenomena;
@@ -149,8 +158,13 @@ mod source_particle_render;
 
 use bevy::prelude::*;
 
+pub use browser_game::{
+    configure_browser_game, game_command, game_mode_active, game_snapshot, game_take_persist,
+    install_game_storage, parse_game_seed, GameSeed,
+};
 pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
 pub use content_library::library_diagnostics;
+pub use dev_tools::{insert_dev_tools, DevTools};
 
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -216,6 +230,11 @@ pub fn app(
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);
+    screen_fade::install(&mut app);
+    game_state::install(&mut app);
+    site_expansion::install(&mut app);
+    cutscene_camera::install(&mut app);
+    cutscene::install(&mut app);
     footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);
@@ -229,6 +248,7 @@ pub fn app(
         fixture_material::FixtureMaterialPlugin,
         fixture_emission::FixtureEmissionPlugin,
     ));
+    app.add_plugins(character_silhouette::CharacterSilhouettePlugin);
     app.add_plugins(fixture_edit::FixtureEditPlugin);
     app.add_plugins((source_color::SourceColorPlugin, source_particle_render::SourceParticlePlugin));
     app.add_plugins((

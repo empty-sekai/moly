@@ -205,7 +205,7 @@ fn product_collision_calls_match_native_rows() {
             post_simulation(&mut system, &mut collision, f32::from_bits(dt[0]), pending, emission_word)
         } else {
             tally.newborn += 1;
-            newborn_block(&mut system, &mut collision, from, to, std::array::from_fn(|l| f32::from_bits(dt[l])),
+            newborn_block(&mut system, &mut collision, from, to, 0, std::array::from_fn(|l| f32::from_bits(dt[l])),
                 pending, emission_word)
         };
         let label = format!("{} {} {}", row["receipt"], row["config"], row["scenario"]);
@@ -472,7 +472,7 @@ fn product_call(row: &Value, scene: Box<dyn CollisionScene + Send + Sync>) -> Pr
     let result = if post {
         post_simulation(&mut system, &mut collision, f32::from_bits(dt[0]), pending, emission_word)
     } else {
-        newborn_block(&mut system, &mut collision, from, to, std::array::from_fn(|l| f32::from_bits(dt[l])),
+        newborn_block(&mut system, &mut collision, from, to, 0, std::array::from_fn(|l| f32::from_bits(dt[l])),
             pending, emission_word)
     };
     let mut call = ProductCall { post, result, differs: Vec::new(), commands: 0 };

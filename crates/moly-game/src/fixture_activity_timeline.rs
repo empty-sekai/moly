@@ -11,9 +11,9 @@ mod effects;
 mod source;
 
 pub(crate) use source::{
-    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, ExposedSource,
-    SourceAssetId, TimelineClip, TimelineClipKey, TimelineDefinition, TimelinePackage,
-    TimelinePayload, TimelineTrack,
+    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, CutScenePayload,
+    ExpansionEffect, ExposedSource, SourceAssetId, TimelineClip, TimelineClipKey,
+    TimelineDefinition, TimelinePackage, TimelinePayload, TimelineTrack,
 };
 
 use crate::{
@@ -842,6 +842,26 @@ pub(crate) struct TimelineBindings {
     /// that this runner does not drive, each with the reason, by clip. The
     /// rest of the timeline plays; each one is a named coverage gap.
     pub refused_controls: HashMap<TimelineClipKey, String>,
+    /// The `SignalReceiver` bound to a track's output (`SetGenericBinding`),
+    /// by track: its markers' signals go to this receiver's reactions.
+    pub signal_receivers: HashMap<SourceAssetId, SignalReceiverBinding>,
+}
+
+/// A `SignalReceiver` bound to a track: its name and its reaction table.
+#[derive(Clone, Debug)]
+pub(crate) struct SignalReceiverBinding {
+    /// The receiver's GameObject, for the logs.
+    pub receiver: String,
+    pub reactions: Vec<SignalReaction>,
+}
+
+/// One row of a receiver's table: a signal asset and the persistent calls
+/// its UnityEvent makes, each as `Type.Method(argument) on target`.
+#[derive(Clone, Debug)]
+pub(crate) struct SignalReaction {
+    pub signal: SourceAssetId,
+    pub signal_name: String,
+    pub calls: Vec<String>,
 }
 #[derive(Clone)]
 pub(crate) struct TimelineCompanionTrack {
@@ -863,6 +883,11 @@ pub(crate) enum TimelineOwnerKind {
     /// plays with no timeout and its view holds it paused at a time
     /// (`Pause`, then evaluated every frame).
     SceneDirector,
+    /// A cut-scene view's director (`CutSceneView.PlayAsync`): it plays with
+    /// no timeout; its cut-scene tracks (camera, fade panel, obstacles,
+    /// expansion effect, effects) are driven by the cut-scene owner from this
+    /// clock.
+    CutScene,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TimelineTimeoutBudget {
@@ -959,6 +984,11 @@ struct Session {
     timeout_requested: bool,
     completion: Option<TimelineCompletionReason>,
     active_events: HashSet<TimelineClipKey>,
+    /// The sampled time of the previous tick (the notification behaviour's
+    /// previous time).
+    signal_time: Option<f64>,
+    /// The signal emitters whose notification has fired and is not re-armed.
+    signals_fired: HashSet<SourceAssetId>,
 }
 #[derive(Resource, Default)]
 pub(crate) struct FixtureActivityTimelines {
@@ -1019,6 +1049,8 @@ impl FixtureActivityTimelines {
                 timeout_requested: false,
                 completion: None,
                 active_events: HashSet::new(),
+                signal_time: None,
+                signals_fired: HashSet::new(),
             },
         );
         token
@@ -1361,7 +1393,8 @@ fn validate(
         (
             TimelineOwnerKind::Player
             | TimelineOwnerKind::StepItem
-            | TimelineOwnerKind::SceneDirector,
+            | TimelineOwnerKind::SceneDirector
+            | TimelineOwnerKind::CutScene,
             TimelineTimeoutBudget::PlayerWall,
         )
         | (
@@ -1577,6 +1610,13 @@ fn validate(
                 TimelinePayload::LoopFlag { .. } => loop_count += 1,
                 TimelinePayload::NoPresetChange => {}
                 TimelinePayload::Control(_) => {}
+                TimelinePayload::CutScene(payload) => {
+                    if request.owner.kind != TimelineOwnerKind::CutScene {
+                        return Err(invalid(format!(
+                            "cut-scene track payload outside a cut-scene owner: {payload:?}"
+                        )));
+                    }
+                }
                 TimelinePayload::Unsupported { class, .. } => {
                     return Err(invalid(format!(
                         "nonempty unsupported track payload: {class}"
@@ -2055,6 +2095,7 @@ fn tick(
     )
     .map_err(source_effect_failure)?;
     apply_events(world, session, sampled_time)?;
+    emit_signals(session, sampled_time);
     update_facial_gates(world, token, session, sampled_time);
     session.sound_entities.retain(|entity| {
         if !world.entities().contains(*entity) {
@@ -2271,6 +2312,102 @@ fn apply_events(
     Ok(())
 }
 
+/// `TimeNotificationBehaviour` over the tracks' signal emitters, on the
+/// sampled time. `OnGraphStart` (the first tick) takes the start time as the
+/// previous time. Each `PrepareFrame` (a playback frame, not a looped one:
+/// this director never wraps, its backward jumps are loop-flag subtractions
+/// and `MoveEndTime` writes) runs `TriggerNotificationsInRange(previous,
+/// current, checkState true)`: nothing when current < previous; otherwise an
+/// emitter not yet fired fires when previous <= time <= current (both ends
+/// included), or, when retroactive, when time < current. Then every fired
+/// emitter that is not emit-once is re-armed when current < previous and
+/// current <= its time. `OnBehaviourPause` on a done playable fires the
+/// unfired ones in [previous, duration]; the runner's last frame samples
+/// the clamped duration, so that range is already covered.
+/// Each signal goes to the receiver bound to its track; the reactions are
+/// logged by name (the particle calls they make are not driven here).
+fn emit_signals(session: &mut Session, time: f64) {
+    let previous = session.signal_time.replace(time).unwrap_or(time);
+    let definition = session.request.definition.clone();
+    let emitters = || {
+        definition.tracks.iter().flat_map(|track| {
+            track
+                .markers
+                .iter()
+                .filter(|marker| marker.class == "SignalEmitter")
+                .map(move |marker| (track, marker))
+        })
+    };
+    for (track, marker) in emitters() {
+        let due = previous <= time
+            && ((previous <= marker.time && marker.time <= time)
+                || (marker.retroactive && marker.time < time));
+        if !due || !session.signals_fired.insert(marker.asset.clone()) {
+            continue;
+        }
+        let name = marker.signal_name.as_deref().unwrap_or("?");
+        let head = format!(
+            "[timeline-signal] {}/{} track {} t={:.4}: SignalEmitter {} ({}, retroactive {}, emitOnce {})",
+            definition.package,
+            definition.prefab,
+            track.name,
+            marker.time,
+            name,
+            marker
+                .signal
+                .as_ref()
+                .map_or("no signal asset".to_owned(), |s| s.path_id.clone()),
+            marker.retroactive,
+            marker.emit_once
+        );
+        match session
+            .request
+            .bindings
+            .signal_receivers
+            .get(&track.identity)
+        {
+            None => info!("{head}: the track is bound to no receiver; nothing is notified"),
+            Some(binding) => {
+                let rows: Vec<_> = binding
+                    .reactions
+                    .iter()
+                    .filter(|reaction| Some(&reaction.signal) == marker.signal.as_ref())
+                    .collect();
+                if rows.is_empty() {
+                    info!(
+                        "{head}: receiver {} has no reaction to it",
+                        binding.receiver
+                    );
+                }
+                for reaction in rows {
+                    info!(
+                        "{head}: receiver {} reacts with {}; not driven: the particle calls wait for the particle host's API",
+                        binding.receiver,
+                        reaction.calls.join(", ")
+                    );
+                }
+            }
+        }
+    }
+    if time < previous {
+        for (track, marker) in emitters() {
+            if !marker.emit_once
+                && time <= marker.time
+                && session.signals_fired.remove(&marker.asset)
+            {
+                info!(
+                    "[timeline-signal] {}/{} track {} t={:.4}: SignalEmitter {} re-armed (the director went back from {previous:.4} to {time:.4})",
+                    definition.package,
+                    definition.prefab,
+                    track.name,
+                    marker.time,
+                    marker.signal_name.as_deref().unwrap_or("?")
+                );
+            }
+        }
+    }
+}
+
 fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Session, time: f64) {
     let mut gates: HashMap<Entity, (bool, Option<bool>, bool)> = HashMap::new();
     for track in &session.request.definition.tracks {
@@ -2450,6 +2587,7 @@ mod handoff_regressions {
                     class: "AnimationTrack".into(),
                     name: "3".into(),
                     clips: vec![],
+                    markers: vec![],
                 }],
             }),
             bindings: TimelineBindings::default(),

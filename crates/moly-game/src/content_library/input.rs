@@ -36,6 +36,8 @@ pub(crate) struct LibraryInput<'w, 's> {
     paste: Res<'w, PasteInbox>,
     /// GameState SiteMove: site commands wait for the move to end.
     pub(super) site_move: Option<Res<'w, crate::site_move::SiteMoveActive>>,
+    /// F9 opens the catalogue only where developer scaffolding is installed.
+    dev: Option<Res<'w, crate::dev_tools::DevTools>>,
 }
 
 pub(crate) fn input(
@@ -80,7 +82,7 @@ pub(crate) fn input(
         if event.state != ButtonState::Pressed || event.repeat {
             continue;
         }
-        if event.key_code == KeyCode::F9 && state.fixture_dialog.is_none() {
+        if event.key_code == KeyCode::F9 && state.fixture_dialog.is_none() && io.dev.is_some() {
             actions.push(LibraryAction::Toggle);
         }
         if !state.external_ui && state.fixture_dialog.is_some() && event.key_code == KeyCode::Escape

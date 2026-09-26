@@ -36,9 +36,9 @@
 //!   (in the source the player's closed intercept gate and the HouseEntry
 //!   camera hold the same span).
 //! - `CullingWallFixture` (home to room, 0.03 s after HouseEntry),
-//!   `MysekaiTransitioner.SafeFinish`, the player's render layer and the
-//!   room's expansion performance in `OnFinishEnterAsync` have no product
-//!   counterpart; each is logged at its step.
+//!   `MysekaiTransitioner.SafeFinish` and the player's render layer have no
+//!   product counterpart; each is logged at its step. The room's expansion
+//!   performance in `OnFinishEnterAsync` is `site_expansion`.
 //! - Normal's private camera model is written on its exit only while no
 //!   camera tween is in flight: the source clears that flag only during its
 //!   own transfer tween.
@@ -1064,10 +1064,18 @@ impl DoorMove {
         world.remove_resource::<super::SiteMoveActive>();
         world.write_message(LayerCommand::Change(LayerId::HomeField));
         match self.kind {
-            DoorKind::RoomToHome => info!(
-                "[site-move] HomeSiteController.OnFinishEnterAsync: SetupScreenLayerMysekaiHome"
-            ),
-            _ => info!("[site-move] MyRoomSiteController.OnFinishEnterAsync: the field screen; its expansion performance has no product counterpart"),
+            DoorKind::RoomToHome => {
+                info!(
+                    "[site-move] HomeSiteController.OnFinishEnterAsync: SetupScreenLayerMysekaiHome"
+                );
+                world.write_message(crate::cutscene::HomeScreenStartAnimation {
+                    caller: "a door arrival at home",
+                });
+            }
+            _ => {
+                info!("[site-move] MyRoomSiteController.OnFinishEnterAsync: the field screen; PlayRoomSiteExpansionPerformAsync");
+                crate::site_expansion::room_finish_enter(world);
+            }
         }
     }
 
@@ -1448,7 +1456,7 @@ fn navigation_ready(world: &World) -> Result<(), String> {
 }
 
 /// What the destination still lacks before `ChangeSite` returns.
-fn destination_blocker(world: &mut World, to: &str, kind: DoorKind) -> Option<String> {
+pub(crate) fn destination_blocker(world: &mut World, to: &str, kind: DoorKind) -> Option<String> {
     let active = world
         .get_resource::<crate::site::SiteActive>()
         .map(|site| site.site_type.clone());
