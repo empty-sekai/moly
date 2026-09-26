@@ -1024,6 +1024,7 @@ mod tests {
             files.entry(file.to_owned()).or_default().push(package.clone());
         }
         let mut reasons: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        let mut sub_reasons: std::collections::BTreeMap<(&str, &str, String), usize> = Default::default();
         let (mut rows, mut legacy, mut admitted, mut unplayed) = (0usize, 0usize, 0usize, 0usize);
         for (file, names) in &files {
             let doc: Value = serde_json::from_slice(&std::fs::read(root.join("fixture-particles-v2").join(file)).unwrap()).unwrap();
@@ -1065,12 +1066,31 @@ mod tests {
                     Err(reason) => census_reason(&reason, &particle["node"]),
                 };
                 println!("fixture-host-census | {host} | {file} | {node} | {path:?} | {reason}");
+                // Sub-emitter rows: a parent (its own edges) or a target (named
+                // by an edge), with the verdict of the played route too, whose
+                // host composes a target's owner words from its instance, so
+                // the law behind the owner-words refusal shows.
+                let target = owners.get(node).is_some();
+                let parent = particle["system"]["subEmitters"].as_array().is_some_and(|edges| !edges.is_empty());
+                if target || parent {
+                    let role = match (parent, target) { (true, true) => "parent+target", (true, false) => "parent", _ => "target" };
+                    let played = match census_admit(package, particle, &by_path, nodes, &owners, server, Path::Control, Stepping::PlayLater) {
+                        Ok(label) => label,
+                        Err(reason) => census_reason(&reason, &particle["node"]),
+                    };
+                    println!("fixture-host-census-sub | {role} | {file} | {node} | first: {reason} | played: {played}");
+                    *sub_reasons.entry((role, "first", reason.clone())).or_default() += 1;
+                    *sub_reasons.entry((role, "played", played)).or_default() += 1;
+                }
                 let label = if host == "fixture" { format!("fixture {path:?}") } else { host.clone() };
                 *reasons.entry((label, reason)).or_default() += 1;
             }
         }
         for ((host, reason), count) in &reasons {
             println!("fixture-host-census count {count} | {host} | {reason}");
+        }
+        for ((role, column, reason), count) in &sub_reasons {
+            println!("fixture-host-census-sub count {count} | {role} | {column} | {reason}");
         }
         println!("fixture-host-census documents {} packages {} judged {rows} admitted {admitted} legacy-summary {legacy} not-played {unplayed}",
             files.len(), packages.len());
