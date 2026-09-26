@@ -171,6 +171,7 @@ impl EntrySequence {
             (_, Phase::WaitCharacters { .. }) => "wait-character-spawned",
             (_, Phase::AwaitTransition { .. }) => "start-mysekai-transition",
             (_, Phase::AwaitExit { .. }) => "play-exit-my-room-action",
+            (_, Phase::Refresh { .. }) => "refresh",
             (_, Phase::Ended) => "ended",
         }
     }
