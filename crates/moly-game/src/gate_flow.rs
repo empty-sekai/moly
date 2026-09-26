@@ -299,7 +299,6 @@ impl Tables {
 /// One visitor's `PlayGateCharacterAppearTimelineInternal`.
 struct Visitor {
     unit: u32,
-    npc: Option<Entity>,
     timeline: &'static str,
     started: f64,
     chimed: bool,
@@ -1543,7 +1542,6 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
         for (index, unit) in appearance.units.iter().enumerate() {
             appearance.visitors.push(Visitor {
                 unit: *unit,
-                npc: npcs.iter().find(|(id, _)| id == unit).map(|(_, npc)| *npc),
                 timeline: if index == 0 { FIRST_VISIT } else { NEXT_VISIT },
                 started: f64::INFINITY,
                 chimed: false,
@@ -1618,7 +1616,6 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
         info!("[gate] t={t:.3} gate.HideEffect({STAY_EFFECT}).Forget(): Stop(withChildren, StopEmitting) on {stopped:?} systems; SetActive(false) once IsAlive(false) is false, checked on the Update loop from the next frame; PlayCloseGateAsync(mysekai/fixture_timeline/mdl_non0006_gate_lon1, {CLOSE_GATE}) at once");
         appearance.close = Some(Visitor {
             unit: 0,
-            npc: None,
             timeline: CLOSE_GATE,
             started: t,
             chimed: true,
@@ -1658,7 +1655,6 @@ impl Visitor {
     fn placeholder() -> Self {
         Self {
             unit: 0,
-            npc: None,
             timeline: "",
             started: f64::INFINITY,
             chimed: true,
