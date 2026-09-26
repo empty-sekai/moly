@@ -9,6 +9,7 @@ use super::{ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT};
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
 /// 高度场的原点取自烘焙体包围盒，同为「任意相位」，足迹对格的相位
 /// 误差按一格计（与原生同形状的量化噪声）。
+#[derive(Clone)]
 pub(crate) struct Grid {
     pub(crate) origin: [f32; 2],
     pub(crate) voxel: f32,

@@ -209,6 +209,7 @@ pub(crate) fn appear(world: &mut World) {
         State::Ended => State::Ended,
     };
     world.resource_mut::<GateAppearance>().state = state;
+    crate::npc::entry_probe::step(world);
 }
 
 /// The entry-site objective's start: hidden (the host has no cut-scene

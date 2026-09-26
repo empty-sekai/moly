@@ -27,7 +27,11 @@
 //! and death edges to distinct children it is not observable per child: each
 //! edge owns its own carry (a death edge has none), every event of a particle
 //! reseeds from the same words, and the children receive their own command
-//! streams. Authored order is used.
+//! streams. Authored order is used. A birth edge in the third or a later slot
+//! owns no carry: its events start from a carry computed at the call and keep
+//! none (see `BirthEdgeLaw::record_unkept`), so with more than two birth edges
+//! the order decides which edges keep a carry; the admission refuses such a
+//! parent while the order is not known.
 //!
 //! Commands go to the edge's child system. When the child is an installed
 //! target of the same effect instance the edge is marked delivered and its
@@ -163,16 +167,15 @@ pub(crate) struct DeathTraceCall {
 }
 
 impl BirthEvents {
-    /// `edges` in slot order; the admission keeps one or two. Only two carry
-    /// slots exist per particle, so a longer list records nothing.
+    /// `edges` in slot order. The first two slots keep a per-particle carry;
+    /// later slots record from a carry computed at each call.
     pub(crate) fn new(edges: Vec<BirthEdge>) -> Self {
         Self::with_edges(EventEdges { births: edges, ..EventEdges::default() })
     }
 
     /// Birth and death edges, each in slot order.
     pub(crate) fn with_edges(edges: EventEdges) -> Self {
-        let broken = (edges.births.len() > 2)
-            .then(|| format!("{} birth edges: only two own a carry", edges.births.len()));
+        let broken = None;
         let slots = edges.births.into_iter()
             .map(|edge| EdgeSlot { edge, delivered: false, tally: EdgeTally::default() })
             .collect();
@@ -325,11 +328,19 @@ impl BirthEvents {
             let edge = &edge_slot.edge;
             for index in start..end {
                 let particle = read(&*system, index);
-                let mut carry = system.side[index].emit_carry[slot];
-                match edge.law.record(&particle, &mut carry, dt(index), &owner) {
+                let kept = slot < 2;
+                let mut carry = if kept { system.side[index].emit_carry[slot] } else { 0.0 };
+                let recorded = if kept {
+                    edge.law.record(&particle, &mut carry, dt(index), &owner)
+                } else {
+                    edge.law.record_unkept(&particle, dt(index), &owner)
+                };
+                match recorded {
                     Ok(None) => {}
                     Ok(Some(record)) => {
-                        system.side[index].emit_carry[slot] = carry;
+                        if kept {
+                            system.side[index].emit_carry[slot] = carry;
+                        }
                         let tally = &mut edge_slot.tally;
                         tally.records += 1;
                         if let Some(commands) = &record.commands {
@@ -413,11 +424,19 @@ impl BirthEvents {
         'edges: for (slot, edge_slot) in self.slots.iter_mut().enumerate() {
             for index in start..end {
                 let lane = &mut lanes[index];
-                let mut carry = lane.carry[slot];
-                match edge_slot.edge.law.record(&lane.particle, &mut carry, dt4[index - start], &owner) {
+                let kept = slot < 2;
+                let mut carry = if kept { lane.carry[slot] } else { 0.0 };
+                let recorded = if kept {
+                    edge_slot.edge.law.record(&lane.particle, &mut carry, dt4[index - start], &owner)
+                } else {
+                    edge_slot.edge.law.record_unkept(&lane.particle, dt4[index - start], &owner)
+                };
+                match recorded {
                     Ok(None) => {}
                     Ok(Some(record)) => {
-                        lane.carry[slot] = carry;
+                        if kept {
+                            lane.carry[slot] = carry;
+                        }
                         let tally = &mut edge_slot.tally;
                         tally.records += 1;
                         if let Some(commands) = &record.commands {

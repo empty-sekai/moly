@@ -1118,10 +1118,9 @@ pub(crate) fn validate(
             return Err(invalid("prepared particle simulation is missing"));
         }
         // Preparation returned this draw only once its GPU source was Ready.
-        // The render world resets readiness to Pending at each frame's queue
-        // and sets Ready again once the pipelines are confirmed, so a later
-        // read may see that window (or a dormant draw it did not queue):
-        // after preparation only a failure refuses.
+        // The render world publishes each frame's verdict, so a later frame
+        // may read Pending (a dormant draw it did not queue, a frame whose
+        // packet was not built): after preparation only a failure refuses.
         if let Some(source) = world.get::<SourceParticle>(draw) {
             if let ParticleReadiness::Failed(error) = &*source.readiness.lock().unwrap() {
                 return Err(invalid(format!("particle source GPU: {error}")));

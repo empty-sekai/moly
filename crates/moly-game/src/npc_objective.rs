@@ -1653,9 +1653,10 @@ pub(crate) fn decide(
         Option<Res<npc_talk_lottery::TalkExtraTables>>,
         Option<Res<npc_talk_lottery::TalkExtraRequests>>,
     ),
-    (walk_face, mut change_site): (
+    (walk_face, mut change_site, hidden): (
         Option<Res<crate::walk_face::WalkFace>>,
         ResMut<crate::npc::change_site_state::ChangeSiteRuns>,
+        Query<(), With<crate::npc::gate_entries::ModelHidden>>,
     ),
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
@@ -2049,6 +2050,15 @@ pub(crate) fn decide(
         if mind.force_updates == 0 {
             if let Some(since) = mind.yield_since {
                 if frame == since {
+                    continue;
+                }
+                // CanRunningAI after the Yield (see `npc::gate_entries`): a
+                // hidden model yields again.
+                if !crate::npc::gate_entries::can_running_ai(
+                    hidden.contains(entity),
+                    &actions,
+                    &mind,
+                ) {
                     continue;
                 }
                 mind.yield_since = None;

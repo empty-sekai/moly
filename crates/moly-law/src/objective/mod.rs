@@ -42,6 +42,7 @@ pub mod approach;
 pub mod change_site;
 pub mod ladder;
 pub mod overlap;
+pub mod presenter;
 pub mod random_fixture_action;
 pub mod rest;
 pub mod social;

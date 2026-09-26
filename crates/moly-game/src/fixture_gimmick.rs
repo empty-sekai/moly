@@ -212,6 +212,7 @@ pub(crate) fn parse(
     );
     let mut catalog = Catalog::default();
     let mut houses = house_door::HouseCatalog::default();
+    let mut without_controller = 0usize;
     for package in document["packages"]
         .as_array()
         .expect("fixture controller packages")
@@ -220,16 +221,26 @@ pub(crate) fn parse(
             .as_str()
             .expect("fixture controller package name");
         houses.insert(name, package);
-        let definition = definition(package).map(Arc::new);
-        if let Err(reason) = &definition {
-            warn!("[fixture-gimmick] {name} preparation: {reason}");
-        }
+        let definition = match definition(package) {
+            Ok(definition) => Ok(Arc::new(definition)),
+            Err(_) if without_source_controller(package) => {
+                without_controller += 1;
+                Err("the source gives this package no controller".to_owned())
+            }
+            Err(reason) => {
+                warn!("[fixture-gimmick] {name} preparation: {reason}");
+                Err(reason)
+            }
+        };
         assert!(
             catalog.0.insert(name.to_owned(), definition).is_none(),
             "duplicate fixture controller package"
         );
     }
-    info!("[fixture-gimmick] source controller catalog loaded");
+    info!(
+        "[fixture-gimmick] source controller catalog loaded: {} packages, {without_controller} without a source controller",
+        catalog.0.len()
+    );
     commands.insert_resource(catalog);
     commands.insert_resource(houses);
     commands.remove_resource::<CatalogLoad>();
@@ -274,6 +285,27 @@ fn referenced<'a>(items: &'a [Value], reference: &Value) -> Result<&'a Value, St
         [item] => Ok(item),
         _ => Err("source reference is missing or ambiguous".into()),
     }
+}
+
+/// Whether the source gives this package no controller: it has no FixtureView,
+/// its single FixtureView holds a null animator reference, or that Animator
+/// holds a null controller reference. The source plays nothing for such a
+/// package, so it is counted rather than reported. An unresolved (non-null)
+/// reference is not this case.
+fn without_source_controller(package: &Value) -> bool {
+    let views = package["fixtureViews"].as_array().map(Vec::as_slice);
+    if views.is_some_and(<[Value]>::is_empty) {
+        return true;
+    }
+    let Some([view]) = views else {
+        return false;
+    };
+    if view["animator"]["status"].as_str() == Some("null") {
+        return true;
+    }
+    array(package, "animators")
+        .and_then(|animators| referenced(animators, &view["animator"]["source"]))
+        .is_ok_and(|animator| animator["controller"]["status"].as_str() == Some("null"))
 }
 
 fn number(value: &Value, key: &str) -> Result<f64, String> {
