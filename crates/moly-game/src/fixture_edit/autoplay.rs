@@ -23,7 +23,10 @@
 //! fixture's source center (a drag onto it), then the same decide and drag
 //! back; then the second fixture is picked (it carries what stands on it), a
 //! one-cell drag, the fixture rotate button (`Rotate`), the decide button,
-//! and the same drag back and decide.
+//! and the same drag back and decide. With `MOLY_EDIT_AUTOPLAY_HOLD=<secs>`
+//! the run waits that long after the camera buttons, with nothing selected
+//! and no command sent, so a drag given from outside (a real pointer drag
+//! on the ground) reaches the edit camera's drag.
 
 use bevy::prelude::*;
 use moly_law::fixture::GridPosition;
@@ -83,6 +86,8 @@ pub(super) struct Run {
     base_next: Option<String>,
     /// The fixture rotate button is pressed once before the next decide.
     rotate_pending: bool,
+    /// The hold after the camera buttons was taken.
+    held: bool,
 }
 
 /// The catalog indices, each with whether its put is decided (a trailing
@@ -227,6 +232,25 @@ pub(super) fn autoplay(
         Step::LookedBack | Step::CatalogCancelled => {
             if elapsed < AFTER_CAMERA {
                 return;
+            }
+            if run.step == Step::LookedBack && !run.held {
+                run.held = true;
+                let hold = std::env::var("MOLY_EDIT_AUTOPLAY_HOLD")
+                    .ok()
+                    .map(|raw| {
+                        raw.trim().parse::<f32>().unwrap_or_else(|_| {
+                            panic!("MOLY_EDIT_AUTOPLAY_HOLD is not seconds: {raw:?}")
+                        })
+                    })
+                    .unwrap_or(0.0);
+                if hold > 0.0 {
+                    info!(
+                        "[edit-autoplay] holding {hold:.1}s with nothing selected ({}): no command is sent",
+                        if view.selected.is_none() { "selection none" } else { "a selection is open" }
+                    );
+                    run.at = now + hold;
+                    return;
+                }
             }
             let queue = run.catalog.get_or_insert_with(catalog_indices);
             if queue.is_empty() {
