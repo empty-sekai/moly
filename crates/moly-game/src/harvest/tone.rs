@@ -45,9 +45,10 @@
 //! manager after its last attack gets no exit (the manager skips its remove
 //! targets), so after a harvest the BGM comes back with `ChangeAfterObject`.
 //!
-//! Named gaps: the field effect's particles are not drawn; the SE plays
-//! through the ordinary one-shot path (the environment SE's own parameters
-//! are logged).
+//! Named gaps: the field effect's particles (stopped through
+//! [`super::particles`]) are not drawn until the package's archive is
+//! exported; the SE plays through the ordinary one-shot path (the
+//! environment SE's own parameters are logged).
 
 use bevy::prelude::*;
 

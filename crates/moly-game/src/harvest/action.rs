@@ -474,6 +474,7 @@ pub(crate) struct ActionWorld<'w> {
     shakes: ResMut<'w, HarvestCameraShakes>,
     animator_calls: ResMut<'w, PropAnimatorCalls>,
     start_hides: ResMut<'w, super::damage::HarvestStartHides>,
+    particles: ResMut<'w, super::particles::HarvestParticleCalls>,
     effect_only: ResMut<'w, super::damage::HarvestEffectOnly>,
     turns: ResMut<'w, super::damage::HarvestTurnRequests>,
     navigation: Option<Res<'w, PlayerFixtureNavigation>>,
@@ -1423,7 +1424,23 @@ fn swing(
                     .start_hides
                     .0
                     .push((target, crate::site_move::timeline::Delay::new(1.0, frame)));
+                world.particles.queue_after(
+                    target,
+                    "_junkNormalCutEffect",
+                    super::particles::ParticleOp::Stop,
+                    super::particles::NullRef::Unchecked,
+                    "OnPlayerActionStart",
+                    1.0,
+                    frame,
+                );
             }
+            "MysekaiBirthdayPlantView" => world.particles.queue(
+                target,
+                "_objectParticle",
+                super::particles::ParticleOp::Stop,
+                super::particles::NullRef::Checked,
+                "OnPlayerActionStart",
+            ),
             "MysekaiAreaTreasureBoxView" => {
                 calls.push((target, PropCall::Speed(current.speed)));
             }

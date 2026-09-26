@@ -33,8 +33,9 @@
 //!   radius, the driftage and treasure switches); the obstacles carve through
 //!   the walk field's runtime carving.
 //!
-//! Named gaps: the particle systems the driftage, toolbox and treasure views
-//! play and stop are not drawn (their particle archives are not exported).
+//! Named gaps: the views' particle systems are played and stopped through
+//! the particle host ([`particles`]), but the harvest packages' particle
+//! archives are not exported yet, so none is drawn.
 
 pub(crate) mod action;
 mod airplane;
@@ -52,6 +53,7 @@ pub(crate) mod server_mock;
 mod learn;
 mod notice;
 mod obstacles;
+pub(crate) mod particles;
 mod possession;
 mod tone;
 mod tool_model;
@@ -747,6 +749,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
             .init_resource::<pickup::HarvestDropManager>()
+            .init_resource::<particles::HarvestParticleCalls>()
             .init_resource::<possession::PossessionMock>()
             .add_message::<notice::CollectNotice>()
             .init_resource::<effects::HarvestEffects>()
@@ -824,6 +827,7 @@ impl Plugin for HarvestPlugin {
                     effects::advance
                         .after(HarvestActionSet)
                         .after(crate::home_action::HomeActionSet),
+                    particles::advance.after(HarvestActionSet),
                 ),
             )
             .add_systems(

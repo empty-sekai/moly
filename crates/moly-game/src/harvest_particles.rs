@@ -203,6 +203,7 @@ fn install_stay_particles(
     docs: Option<Res<HarvestDocs>>,
     json: Res<Assets<JsonAsset>>,
     roots: Query<(Entity, &HarvestObject), (With<HarvestRoot>, Without<HarvestStayResolved>)>,
+    archive: Res<crate::harvest::particles::HarvestParticleCalls>,
     children: Query<&Children>,
     views: Query<&SourceHarvestView>,
     identities: Query<&SourceObjectIdentity>,
@@ -219,6 +220,21 @@ fn install_stay_particles(
         return;
     };
     for (root, object) in &roots {
+        // A package the source particle archive lists is drawn by the views'
+        // played-object path (all its rows, this glow included); wait until
+        // the index is read.
+        match archive.listed(&object.package) {
+            None => continue,
+            Some(true) => {
+                info!(
+                    "[harvest-stay] {}#{}: the particle archive lists the package; its stay particles are the archive path's",
+                    object.leaf, object.fixture_id
+                );
+                commands.entity(root).insert(HarvestStayResolved);
+                continue;
+            }
+            Some(false) => {}
+        }
         // Stone views live on the prefab root node; component ids name the
         // node of each particle system's GameObject.
         let mut stone_views = Vec::new();
