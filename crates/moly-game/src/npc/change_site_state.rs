@@ -176,6 +176,14 @@ impl ChangeSiteRuns {
             },
         );
     }
+
+    /// The NPC was disposed: its state object and its model's target go
+    /// with it.
+    pub(crate) fn forget(&mut self, actor: Entity) {
+        self.runs.remove(&actor);
+        self.start_positions.remove(&actor);
+        self.target_sites.remove(&actor);
+    }
 }
 
 /// Marker: the change-site state plays a clip on this NPC; the locomotion
