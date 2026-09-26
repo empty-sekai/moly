@@ -421,7 +421,7 @@ pub fn install(app: &mut App) {
                     // 装载请求。
                     player_talk::load,
                     content_library::load,
-                    // 对话窗体的纹源（面板页 + 尾标替身）与常驻状态机。
+                    // 对话窗体的常驻状态机（绘制输入等布局文档到了再读）。
                     talk_window::load,
                     // 摇杆两件（底盘 + 手柄）的纹源（UI atlas 整页，两件
                     // 共用一次装载）。
