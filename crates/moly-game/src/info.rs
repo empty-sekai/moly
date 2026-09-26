@@ -11,9 +11,11 @@
 //!
 //! ## 两页结构（页数 = 2，SetupPage 九步装配序定谳）
 //!
-//! - **页 0 排名页**（`MysekaiInfoRankPage.Setup`，显示件五件）：排名
-//!   文本 · 排名量表 · 家具摆放上限 · 连接家具上限 · 相片钮（回调
-//!   `OnSelectedPhoto` + `SetupPhotoAsync`，用户相片域 ⇒ 响亮未接）。
+//! - **页 0 排名页**（`MysekaiInfoRankPage.Setup`）：rank text, rank gauge,
+//!   and on the JP client the home and my-room put-cost limits
+//!   (`FixtureHomePutLimitPutCost` as the number, `FixtureMyRoomPutLimitPutCost`
+//!   through `MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST`), then the photo button
+//!   and `SetupPhotoAsync`. See the rank page section below.
 //! - **页 1 设置页**（`MysekaiInfoOption1Page.Setup`）：四组单选档 +
 //!   语音下载钮。
 //! - 页、页签与各单选组的次序直接读预制体 PPtr 数组：页 0=排名页、
@@ -95,31 +97,55 @@
 //! 环境变量覆写，非法值响亮告警回默认）
 //!
 //! - **排名页显示件**：`MysekaiRankModel` 读用户态（服务端）⇒ mock：
-//!   等级 · 量表比率 · 家具摆放上限 · 连接家具上限。
-//! - **排名详情对话框**（`Show1ButtonDialog` 342，Dialog 槽不入层栈，允许
-//!   框外关）：对话框体 = 主表 `MasterMysekaiRanks` 的逐等级解锁条件清单
-//!   + 用户态排名。主表镜像不在提取管线、用户态在服务端 ⇒ 连同走 mock，
-//!   框内文案具名「面板下发」。
-//! - **语音下载**（`ShowVoiceDownloadDialog` 58 二钮框）：确认即开组包
-//!   下载——**下载是服务端功能，响亮具名未接**；容量文字走面板下发
-//!   （真源从组包清单累计字节数换 MB，清单不在提取管线）。
+//!   等级 · 量表比率；the CN client's put-limit count and joint count are
+//!   mock values too.
+//! - **排名详情对话框**（`Show1ButtonDialog<MysekaiRankListDialog>`,
+//!   dialog type 345, shown through the screen manager with the back key
+//!   closing it; 允许框外关）：对话框体 = 主表 `MasterMysekaiRanks` 的逐等级
+//!   解锁条件清单 + 用户态排名 ⇒ 连同走 mock，框内文案具名「面板下发」。
 //! - **访问许可现值**：面板下发 mock（档名用真源枚举名）。
 //! - **排名页的等级与等级量表**：`TryMoveScreenLayerMysekaiInfo` 以
 //!   `new MysekaiRankModel()`（用户总经验，与菜单共读的同一份 mock，见
 //!   [`crate::mysekai_rank::UserTotalExp`]）建 `MysekaiRankGaugeViewDataModel`
-//!   作排名页模型；量表走菜单同一条 `UIPartsMysekaiRankGauge.Setup`。排名页类
-//!   未解码，量表按文档里唯一的 `UIPartsMysekaiRankGauge` 组件取（区域布局
-//!   上它的引用都已解码）；排名页自己的等级文字仍是路径字面量（具名缺口）。
+//!   作排名页模型；量表走菜单同一条 `UIPartsMysekaiRankGauge.Setup`。量表按
+//!   文档里唯一的 `UIPartsMysekaiRankGauge` 组件取（区域布局上它的引用都已解码）。
 //!
 //! 环境变量：`MOLY_INFO_MOCK_ACCESS_PERMISSION`（all/friend_only/reject/
 //! review）· `MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT` ·
-//! `MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT` ·
-//! `MOLY_INFO_MOCK_VOICE_BUNDLE_MB`。
+//! `MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT`。
+//!
+//! ## Rank page costs, photo and voice download
+//!
+//! - **Put-cost limits** (JP): `GetFixturePutLimitCost` asks
+//!   `GetMasterMysekaiFixturePutLimitLevelFromMysekaiRankRelease(rank,
+//!   category)` (read natively): the `externalId`s of the
+//!   `mysekai_fixture_put_limit` rank releases at or below the rank; among
+//!   the put-limit level rows of the site category whose id is one of them,
+//!   the first with the highest level; its `putCostLimit`, else 0. Both
+//!   tables are master data from the runtime root
+//!   (`mysekai-rank-releases.json`, `mysekai-fixture-put-limit-levels.json`);
+//!   a root without them leaves the two texts as the prefab has them, named
+//!   once.
+//! - The rank page binds through `MysekaiInfoRankPage`'s serialized
+//!   references when the layout decodes them, else through the same nodes'
+//!   prefab paths.
+//! - **Photo**: the user's MySekai photo is server state, none here, so
+//!   `SetupPhotoAsync` takes its null branch, `_photoFramePreview.Hide()`
+//!   (its root CanvasGroup alpha 0). The photo selection it would open is not
+//!   in this product, so the photo button stands disabled the way the
+//!   tutorial branch disables it (`CustomButton.enabled = false`).
+//! - **Voice download**: `SetVoiceDLButtonState(IsMysekaiVoice)`. The bulk
+//!   download that sets the flag is a server feature; the runtime root
+//!   carries the MySekai talk voice banks themselves, so the flag stands set:
+//!   `WORD_DOWNLOADED`, the button disabled (its cover shown), and the
+//!   download dialog is never reached.
 //!
 //! ## 我方选值与具名缺口（改这里之前先读）
 //!
-//! - 视图和点击共用源预制体布局：Info 主层、Common1 排名详情、Common2
-//!   语音确认。动态档位和用户数据显示写入各自的 UiPrefabView。
+//! - 视图和点击共用源预制体布局：Info 主层、Common1 排名详情。动态档位和
+//!   用户数据显示写入各自的 UiPrefabView。
+//! - The back key: the screen manager gives it to the rank list dialog when
+//!   it is open, else to the header back button (the screen pops there).
 //! - 层开着时**本层吃掉全部点按**（全屏层阻断世界射线，真源
 //!   blockRaycasts 同形）；世界输入让位由共享层态与指针归属处理。
 
@@ -132,7 +158,10 @@ use serde_json::Value;
 use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureState};
 use crate::sitemap::SITEMAP_LAYER;
-use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
+use crate::ui_layers::{
+    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, LayerId, UiLayerStack,
+};
+use moly_assets::json::JsonAsset;
 
 /// 页数（真源 SetupPage 装配序定谳：排名页 + 设置页）。
 const PAGE_COUNT: usize = 2;
@@ -167,10 +196,6 @@ pub(crate) const FIXED_TEXTS: &[&str] = &[
     "语音下载",
     "上一页",
     "下一页",
-    "下载语音数据?",
-    "容量 0.0MB",
-    "确认",
-    "取消",
     "0123456789.MB?（）",
 ];
 
@@ -458,7 +483,6 @@ pub(crate) struct InfoMock {
     access_permission: AccessPermission,
     fixture_put_limit: u32,
     fixture_joint_put_limit: u32,
-    voice_bundle_mb: f32,
 }
 
 fn env_u32(name: &str, default: u32) -> u32 {
@@ -467,19 +491,6 @@ fn env_u32(name: &str, default: u32) -> u32 {
             Ok(value) => value,
             Err(_) => {
                 warn!("[info] mock 面板：{name}={raw:?} 不是非负整数，回默认 {default}");
-                default
-            }
-        },
-        Err(_) => default,
-    }
-}
-
-fn env_f32_range(name: &str, default: f32, lo: f32, hi: f32) -> f32 {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().parse::<f32>() {
-            Ok(value) if (lo..=hi).contains(&value) => value,
-            _ => {
-                warn!("[info] mock 面板：{name}={raw:?} 不是 {lo}..={hi} 的数，回默认 {default}");
                 default
             }
         },
@@ -506,7 +517,6 @@ impl Default for InfoMock {
             access_permission,
             fixture_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT", 20),
             fixture_joint_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT", 10),
-            voice_bundle_mb: env_f32_range("MOLY_INFO_MOCK_VOICE_BUNDLE_MB", 0.0, 0.0, 9999.0),
         }
     }
 }
@@ -527,15 +537,19 @@ impl Default for InfoPageState {
 /// 层内点按）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InfoDialog {
-    /// 语音下载确认（真源二钮框 58）。
-    VoiceConfirm,
-    /// 排名清单（真源单钮框 342，允许框外关）。
+    /// The rank list (`MysekaiRankListDialog`, a one-button dialog, closes on
+    /// a tap outside).
     RankList,
 }
+
+/// `Show1ButtonDialog<MysekaiRankListDialog>(DialogType.MysekaiRankListDialog)`.
+const RANK_LIST_DIALOG: DialogType = DialogType(345);
 
 #[derive(Resource, Default)]
 pub(crate) struct InfoDialogState {
     open: Option<InfoDialog>,
+    /// The screen manager's handle of the open dialog.
+    id: Option<DialogId>,
 }
 
 /// 铺装闩（视图一次铺成后置）。
@@ -568,10 +582,6 @@ pub(crate) enum InfoItem {
     VoiceDownload,
     ArrowPrev,
     ArrowNext,
-    VoiceDialogMessage,
-    VoiceDialogSize,
-    VoiceOk,
-    VoiceCancel,
     RankDialogClose,
 }
 
@@ -582,8 +592,6 @@ impl InfoItem {
             InfoItem::RankLevelText => format!("等级 {}", rank),
             InfoItem::FixturePutText => format!("家具摆放上限 {}", mock.fixture_put_limit),
             InfoItem::FixtureJointText => format!("连接家具上限 {}", mock.fixture_joint_put_limit),
-            InfoItem::VoiceDialogMessage => "下载语音数据?".to_owned(),
-            InfoItem::VoiceDialogSize => format!("容量 {:.1}MB", mock.voice_bundle_mb),
             _ => return None,
         })
     }
@@ -610,7 +618,7 @@ pub(crate) struct InfoDialogRoot {
 
 /// Startup：资源落位 + 启动施加律（进场即按存量档全量施加：画质与刷新率
 /// 两档读自本地设置档，无档取构造默认）。
-pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_settings::GameSettings>) {
+pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_settings::GameSettings>, server: Res<AssetServer>) {
     let (settings, origin) = match crate::settings_store::read_document() {
         Ok(document) => InfoSettings::from_document(&document),
         Err(error) => {
@@ -632,6 +640,7 @@ pub(crate) fn init(mut commands: Commands, mut graphics: ResMut<crate::game_sett
     commands.init_resource::<InfoMock>();
     commands.init_resource::<InfoPageState>();
     commands.init_resource::<InfoDialogState>();
+    commands.insert_resource(PutLimitHandles([RANK_RELEASES, PUT_LIMIT_LEVELS].map(|path| server.load::<JsonAsset>(path))));
 }
 
 /// `SceneMysekai.Start` applies the stored pair with forceUpdate. The product
@@ -670,6 +679,8 @@ fn apply_fps(graphics: &mut crate::game_settings::GameSettings, next: FpsQuality
 pub(crate) struct InfoPresentation {
     bindings: InfoBindings,
     elapsed: f32,
+    /// The put-cost limit tables, or why the root has none.
+    put_limit: Result<PutLimitTables, String>,
 }
 
 struct InfoPageBinding {
@@ -700,7 +711,12 @@ struct InfoBindings {
     /// The rank page's put-limit count and joint count texts; None where the
     /// rank page class declares neither.
     put_limit_counts: Option<[String; 2]>,
+    rank_page: RankPageBinding,
     voice_download: String,
+    /// `_voiceDLText`.
+    voice_download_text: String,
+    /// The voice download button's covers (its `ShowCover` when disabled).
+    voice_download_covers: Vec<String>,
     rank_info: String,
     arrow_prev: String,
     arrow_next: String,
@@ -715,19 +731,19 @@ struct InfoBindings {
 /// The JP classes of the region root declare none of the three: the option
 /// page has six serialized references without the review tip, and the rank
 /// page serializes `_fixtureMyRoomPutLimitCostText` and
-/// `_fixtureHomePutLimitCostText` in their place (not bound here: the rank
-/// page class is not decoded and those cost values have no presenter). On a
+/// `_fixtureHomePutLimitCostText` in their place. On a
 /// region whose class lacks an element, the element is not built; a declared
 /// field the layout lacks is an error.
 struct InfoFieldSet {
     review_tip: bool,
     put_limit_counts: bool,
+    put_limit_costs: bool,
 }
 
 fn info_field_set(doc: &UiPrefab) -> InfoFieldSet {
     match doc.source.region.as_deref() {
-        None => InfoFieldSet { review_tip: true, put_limit_counts: true },
-        Some("jp") => InfoFieldSet { review_tip: false, put_limit_counts: false },
+        None => InfoFieldSet { review_tip: true, put_limit_counts: true, put_limit_costs: false },
+        Some("jp") => InfoFieldSet { review_tip: false, put_limit_counts: false, put_limit_costs: true },
         Some(region) => panic!("Info: no declared page field set for region {region}"),
     }
 }
@@ -826,13 +842,18 @@ impl InfoBindings {
                 path.to_owned()
             })
         });
+        let (voice_download, voice_button) = referenced_component(doc, &option.fields["_voiceDLButton"], "Sekai.UI.CustomButton");
+        let rank_page = rank_page_binding(doc, &declared);
         Self {
             pages,
             tabs,
             toggles,
             review_tip,
             put_limit_counts,
-            voice_download: referenced_component(doc, &option.fields["_voiceDLButton"], "Sekai.UI.CustomButton").0,
+            rank_page,
+            voice_download,
+            voice_download_text: referenced_component(doc, &option.fields["_voiceDLText"], "Sekai.UI.CustomTextMesh").0,
+            voice_download_covers: button_covers(doc, voice_button),
             rank_info: referenced_component(doc, &root.fields["_rankInfoButton"], "Sekai.UI.CustomButton").0,
             arrow_prev: referenced_component(doc, &root.fields["_leftArrowButton"], "Sekai.UI.CustomButton").0,
             arrow_next: referenced_component(doc, &root.fields["_rightArrowButton"], "Sekai.UI.CustomButton").0,
@@ -844,17 +865,195 @@ impl InfoBindings {
     }
 }
 
+/// `CustomButton.ShowCover`'s graphics (the cover and the optional covers),
+/// shown only when the button greys out.
+fn button_covers(doc: &UiPrefab, button: &UiComponent) -> Vec<String> {
+    if button.fields["disableActionType"].as_i64() != Some(1) {
+        return Vec::new();
+    }
+    let mut covers = Vec::new();
+    let cover = &button.fields["coverImage"];
+    if cover[1].as_i64().is_some_and(|id| id != 0) {
+        covers.push(format!("@{}", cover[1]));
+    }
+    for cover in button.fields["optionalCoverImages"].as_array().expect("Info optional cover references") {
+        covers.push(format!("@{}", cover[1]));
+    }
+    for cover in &covers {
+        doc.find(cover).unwrap_or_else(|e| panic!("Info button cover: {e}"));
+    }
+    covers
+}
+
+/// The rank page's serialized references (`MysekaiInfoRankPage`). A layout
+/// that does not decode the class reaches the same nodes by their prefab
+/// paths (a decoded layout places each reference on exactly these).
+struct RankPageBinding {
+    rank_text: String,
+    /// `_fixtureHomePutLimitCostText`, `_fixtureMyRoomPutLimitCostText`; None
+    /// where the client's class declares neither.
+    put_limit_costs: Option<[String; 2]>,
+    /// `_photoFramePreview._rootCanvasGroup`: the CanvasGroup on the
+    /// preview's own node (the preview class is not decoded).
+    photo_preview: Option<String>,
+}
+
+fn rank_page_binding(doc: &UiPrefab, declared: &InfoFieldSet) -> RankPageBinding {
+    let decoded = doc.nodes.iter().flat_map(|node| node.components.iter())
+        .find(|c| c.class == "Sekai.Mysekai.MysekaiInfoRankPage" && c.fields.get("_mysekaiRankText").is_some());
+    let text = |field: &str, path: &str| -> String {
+        match decoded {
+            Some(page) => referenced_component(doc, &page.fields[field], "Sekai.UI.CustomTextMesh").0,
+            None => {
+                doc.find(path).unwrap_or_else(|e| panic!("Info rank page {field}: {e}"));
+                path.to_owned()
+            }
+        }
+    };
+    let rank_text = text("_mysekaiRankText", "RankPage/Right/Rank/CustomTextMesh (2)");
+    let put_limit_costs = declared.put_limit_costs.then(|| [
+        text("_fixtureHomePutLimitCostText", "RankPage/Right/HomePutLimitCost/Value"),
+        text("_fixtureMyRoomPutLimitCostText", "RankPage/Right/MyRoomPutLimitCost/Value"),
+    ]);
+    let preview_node = match decoded {
+        Some(page) => {
+            let reference = &page.fields["_photoFramePreview"];
+            Some(doc.find(&format!("@{}", reference[1])).expect("Info photo frame preview node"))
+        }
+        None => doc.nodes.iter().position(|node| node.components.iter().any(|c| c.class.ends_with(".UIPartsPhotoFramePreview"))),
+    };
+    let photo_preview = preview_node.and_then(|node| {
+        doc.nodes[node].components.iter().find(|c| c.class == "UnityEngine.CanvasGroup").map(|c| format!("@{}", c.path_id))
+    });
+    RankPageBinding { rank_text, put_limit_costs, photo_preview }
+}
+
+/// The photo button (`_selectedPhotoButton`) stands disabled; see the module
+/// header.
+const PHOTO_BUTTON_ENABLED: bool = false;
+
+/// `ApplicationLocalSettings.IsMysekaiVoice`; see the module header.
+const MYSEKAI_VOICE_DOWNLOADED: bool = true;
+
+/// The wording keys this screen writes (the atlas charset takes their glyphs
+/// from here).
+pub(crate) const WORDINGS: &[&str] = &["WORD_DOWNLOADED", "WORD_BULK_DOWNLOAD", MYROOM_COST_WORDING];
+
+const MYROOM_COST_WORDING: &str = "MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST";
+
+const RANK_RELEASES: &str = "moly://mysekai-rank-releases.json";
+const PUT_LIMIT_LEVELS: &str = "moly://mysekai-fixture-put-limit-levels.json";
+
+/// The two tables' load requests; removed once they resolve.
+#[derive(Resource)]
+pub(crate) struct PutLimitHandles([Handle<JsonAsset>; 2]);
+
+/// `MysekaiSiteCategory` of a put-limit level row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiteCategory {
+    HousingHome,
+    HousingRoom,
+    Other,
+}
+
+struct PutLimitLevel {
+    id: i64,
+    level: i64,
+    put_cost_limit: i64,
+    category: SiteCategory,
+}
+
+/// The master rows `GetMasterMysekaiFixturePutLimitLevelFromMysekaiRankRelease`
+/// reads, in master row order.
+struct PutLimitTables {
+    /// (mysekaiRank, externalId) of the `mysekai_fixture_put_limit` releases.
+    releases: Vec<(i64, i64)>,
+    levels: Vec<PutLimitLevel>,
+}
+
+/// The rows of a keyed master table document, in its `rowOrder`.
+fn master_rows<'a>(value: &'a Value, table: &str) -> Result<Vec<&'a Value>, String> {
+    if value["version"].as_i64() != Some(1) || value["semantics"]["table"].as_str() != Some(table) {
+        return Err(format!("it is not version 1 of the {table} table"));
+    }
+    let entries = value["entries"].as_object().ok_or("no entries")?;
+    value["rowOrder"].as_array().ok_or("no rowOrder")?.iter().map(|id| {
+        entries.get(&id.to_string()).ok_or_else(|| format!("rowOrder id {id} has no entry"))
+    }).collect()
+}
+
+impl PutLimitTables {
+    fn parse(releases: &Value, levels: &Value) -> Result<Self, String> {
+        let int = |row: &Value, field: &str| row[field].as_i64().ok_or_else(|| format!("{field} of {row} is not an int"));
+        let text = |row: &Value, field: &str| row[field].as_str().map(str::to_owned).ok_or_else(|| format!("{field} of {row} is not a string"));
+        let mut release_rows = Vec::new();
+        for row in master_rows(releases, "mysekaiRankReleases")? {
+            if text(row, "mysekaiRankRelaseType")? == "mysekai_fixture_put_limit" {
+                release_rows.push((int(row, "mysekaiRank")?, int(row, "externalId")?));
+            }
+        }
+        let mut level_rows = Vec::new();
+        for row in master_rows(levels, "mysekaiFixturePutLimitLevels")? {
+            let category = match text(row, "mysekaiSiteCategory")?.as_str() {
+                "housing_home" => SiteCategory::HousingHome,
+                "housing_room" => SiteCategory::HousingRoom,
+                _ => SiteCategory::Other,
+            };
+            level_rows.push(PutLimitLevel { id: int(row, "id")?, level: int(row, "level")?, put_cost_limit: int(row, "putCostLimit")?, category });
+        }
+        Ok(PutLimitTables { releases: release_rows, levels: level_rows })
+    }
+
+    /// `GetFixturePutLimitCost(category)` at `rank`.
+    fn cost(&self, rank: i64, category: SiteCategory) -> i64 {
+        let ids: Vec<i64> = self.releases.iter().filter(|(release_rank, _)| *release_rank <= rank).map(|(_, id)| *id).collect();
+        let mut best: Option<&PutLimitLevel> = None;
+        for level in &self.levels {
+            if level.category == category && ids.contains(&level.id) && best.is_none_or(|b| b.level < level.level) {
+                best = Some(level);
+            }
+        }
+        best.map_or(0, |level| level.put_cost_limit)
+    }
+}
+
+/// The two tables once both requests settle; None while one still loads.
+fn resolve_put_limit(server: &AssetServer, jsons: &Assets<JsonAsset>, handles: &PutLimitHandles) -> Option<Result<PutLimitTables, String>> {
+    let mut values = Vec::new();
+    for (handle, path) in handles.0.iter().zip([RANK_RELEASES, PUT_LIMIT_LEVELS]) {
+        if let bevy::asset::LoadState::Failed(error) = server.load_state(handle) {
+            return Some(Err(format!("{path} is not in this runtime root ({error})")));
+        }
+        let json = jsons.get(handle)?;
+        let value: Value = serde_json::from_str(&json.0).unwrap_or_else(|e| panic!("{path} is not JSON: {e}"));
+        values.push(value);
+    }
+    Some(Ok(PutLimitTables::parse(&values[0], &values[1]).unwrap_or_else(|e| panic!("Info put-limit tables: {e}"))))
+}
+
 // ScreenLayerMysekaiInfo's constructor sets the page fade duration to 0.1s.
 const PAGE_FADE_SECONDS: f32 = 0.1;
 
 pub(crate) fn spawn_when_ready(
     mut commands: Commands, layouts: Res<crate::ui_layout::UiLayouts>, server: Res<AssetServer>, spawned: Option<Res<InfoSpawned>>,
+    jsons: Res<Assets<JsonAsset>>, handles: Option<Res<PutLimitHandles>>,
 ) {
-    if spawned.is_some() || !["Info","Common1","Common2"].iter().all(|key|layouts.ready(key,&server)) {return;}
+    if spawned.is_some() || !["Info","Common1"].iter().all(|key|layouts.ready(key,&server)) {return;}
+    let Some(handles) = handles else { return; };
+    let Some(put_limit) = resolve_put_limit(&server, &jsons, &handles) else { return; };
+    commands.remove_resource::<PutLimitHandles>();
+    match &put_limit {
+        Ok(tables) => info!("[info] put-limit tables: {} put-limit releases, {} level rows", tables.releases.len(), tables.levels.len()),
+        Err(reason) => warn!("[info] {reason}; the rank page's put-cost texts keep the prefab's text"),
+    }
+    let missing: Vec<&str> = WORDINGS.iter().copied().filter(|key| !layouts.wordings.contains_key(*key)).collect();
+    if !missing.is_empty() {
+        warn!("[info] wordings missing from this root: {missing:?}; a text writing one of them refuses");
+    }
     let doc = layouts.document("Info").expect("ready Info prefab");
-    commands.insert_resource(InfoPresentation { bindings: InfoBindings::from_prefab(doc), elapsed: 0. });
+    commands.insert_resource(InfoPresentation { bindings: InfoBindings::from_prefab(doc), elapsed: 0., put_limit });
     commands.spawn((InfoRoot,Visibility::Hidden,Transform::default(),RenderLayers::layer(SITEMAP_LAYER),crate::ui_layout::UiPrefabView::new("Info",SITEMAP_LAYER)));
-    for (which,key) in [(InfoDialog::RankList,"Common1"),(InfoDialog::VoiceConfirm,"Common2")] {
+    for (which,key) in [(InfoDialog::RankList,"Common1")] {
         commands.spawn((InfoDialogRoot{which},Visibility::Hidden,Transform::from_xyz(0.,0.,100.),RenderLayers::layer(SITEMAP_LAYER),crate::ui_layout::UiPrefabView::new(key,SITEMAP_LAYER)));
     }
     commands.insert_resource(InfoSpawned);
@@ -1025,6 +1224,7 @@ pub(crate) fn place(
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let scale = root_canvas.scale(window); let page=page_state.current;
     let bindings = &presentation.bindings;
+    let put_limit = &presentation.put_limit;
     let reviewing = settings.access == AccessPermission::Review;
     for (mut visible,mut transform,mut view) in &mut roots {
         *visible=if open {Visibility::Inherited}else{Visibility::Hidden};transform.scale=Vec3::splat(scale);
@@ -1038,9 +1238,31 @@ pub(crate) fn place(
         }
         view.set_visible(&bindings.arrow_prev,page>0);view.set_visible(&bindings.arrow_next,page+1<PAGE_COUNT);
         if let Some(rank) = rank.as_ref() {
-            view.set_text("RankPage/Right/Rank/CustomTextMesh (2)", rank.mysekai_rank.to_string());
+            view.set_text(&bindings.rank_page.rank_text, rank.mysekai_rank.to_string());
             let doc = layouts.document(view.key).expect("info layout is loaded");
             crate::menu_dialog::apply_rank_gauge(&mut view, &layouts, &info_rank_gauge_targets(doc), rank);
+            // FixtureHomePutLimitPutCost.ToString() and
+            // GetFormat(MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST, room cost).
+            if let (Some([home, room]), Ok(tables)) = (&bindings.rank_page.put_limit_costs, &put_limit) {
+                let rank = i64::from(rank.mysekai_rank);
+                view.set_text(home, tables.cost(rank, SiteCategory::HousingHome).to_string());
+                let format = layouts.wordings.get(MYROOM_COST_WORDING).unwrap_or_else(|| panic!("UI wording missing: {MYROOM_COST_WORDING}"));
+                let room_cost = tables.cost(rank, SiteCategory::HousingRoom).to_string();
+                let text = moly_law::text::custom_text_mesh::format_wording(format, &[room_cost])
+                    .unwrap_or_else(|e| panic!("UI wording {MYROOM_COST_WORDING}: {e}"));
+                view.set_text(room, text);
+            }
+        }
+        // SetupPhotoAsync with no user photo: _photoFramePreview.Hide().
+        if let Some(preview) = &bindings.rank_page.photo_preview {
+            view.set_alpha(preview, 0.);
+        }
+        // SetVoiceDLButtonState(IsMysekaiVoice).
+        let voice_key = if MYSEKAI_VOICE_DOWNLOADED { "WORD_DOWNLOADED" } else { "WORD_BULK_DOWNLOAD" };
+        let voice_text = layouts.wordings.get(voice_key).unwrap_or_else(|| panic!("UI wording missing: {voice_key}"));
+        view.set_text(&bindings.voice_download_text, voice_text.clone());
+        for cover in &bindings.voice_download_covers {
+            view.set_visible(cover, MYSEKAI_VOICE_DOWNLOADED);
         }
         if let Some([count, joint]) = &bindings.put_limit_counts {
             view.set_text(count, mock.fixture_put_limit.to_string());
@@ -1068,8 +1290,6 @@ pub(crate) fn place(
             InfoDialog::RankList=>{view.set_text("Content/MessageBody",format!("{}
 {}
 {}",InfoItem::RankLevelText.current_label(&mock, rank.as_ref().map_or(0, |r| r.mysekai_rank)).unwrap(),InfoItem::FixturePutText.current_label(&mock, 0).unwrap(),InfoItem::FixtureJointText.current_label(&mock, 0).unwrap()));}
-            InfoDialog::VoiceConfirm=>{view.set_text("Content/MessageBody",format!("{}
-{}",InfoItem::VoiceDialogMessage.current_label(&mock, 0).unwrap(),InfoItem::VoiceDialogSize.current_label(&mock, 0).unwrap()));}
         }
     }
 }
@@ -1089,7 +1309,7 @@ fn item_path(item:InfoItem, bindings:&InfoBindings)->Option<&str> {
         InfoItem::ArrowPrev=>&bindings.arrow_prev,InfoItem::ArrowNext=>&bindings.arrow_next,
         InfoItem::Photo=>"RankPage/Left/Photo/SelectButton",InfoItem::RankInfo=>&bindings.rank_info,
         InfoItem::VoiceDownload=>&bindings.voice_download,InfoItem::Toggle(group,index)=>&bindings.toggle(group,index)?.control,
-        InfoItem::VoiceCancel=>"@113613",InfoItem::VoiceOk=>"@137046",InfoItem::RankDialogClose=>"FooterButtons/UIPartsCommonButton",
+        InfoItem::RankDialogClose=>"FooterButtons/UIPartsCommonButton",
         _=>return None,
     })
 }
@@ -1127,6 +1347,16 @@ fn change_page(page_state: &mut InfoPageState, next: usize, via: &str) {
          淡出 + 两枚页签粒子 + 新页方向性淡入（粒子绘制路径未并 · 淡变与节拍未提取 ⇒ 当帧落位，\
          具名挂账）"
     );
+}
+
+/// Close the open dialog: `DialogBase.Close` and the destroy after it (no
+/// close animation here).
+fn close_dialog(dialog: &mut InfoDialogState, screens: &mut UiLayerStack) {
+    dialog.open = None;
+    if let Some(id) = dialog.id.take() {
+        screens.close_dialog(id);
+        screens.dialog_destroyed(id);
+    }
 }
 
 /// 档位切换（切换律见模块头：两组立即施加、两组只写档位）。
@@ -1213,16 +1443,15 @@ pub(crate) fn click(
     layouts: Res<crate::ui_layout::UiLayouts>,
     presentation: Option<Res<InfoPresentation>>,
     views: Query<(&crate::ui_layout::UiPrefabView,Option<&InfoDialogRoot>)>,
-    keys: Res<ButtonInput<KeyCode>>,
+    mut back_keys: MessageReader<DialogBackKeyEvent>,
     mut gestures: MessageReader<GestureEvent>,
     mut graphics: ResMut<crate::game_settings::GameSettings>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    stack: Res<UiLayerStack>,
+    mut stack: ResMut<UiLayerStack>,
     mut settings: ResMut<InfoSettings>,
     mut page_state: ResMut<InfoPageState>,
     mut dialog: ResMut<InfoDialogState>,
     mut consumed: ResMut<ActionTapConsumed>,
-    mut layer_commands: MessageWriter<LayerCommand>,
     mut sounds: ResMut<crate::audio::SeRequests>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
@@ -1231,8 +1460,13 @@ pub(crate) fn click(
         .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
         .map(|event| event.position)
         .collect();
-    if stack.current()==LayerId::MysekaiInfo && keys.just_pressed(KeyCode::Escape) {
-        if dialog.open.is_some() {dialog.open=None;} else {layer_commands.write(LayerCommand::Pop);}
+    // The back key reaches the open rank list first (SubWindowDialog: close);
+    // with no dialog the screen manager's header back pops the screen.
+    for event in back_keys.read() {
+        if dialog.id == Some(event.id) {
+            info!("[info] back key: the rank list closes");
+            close_dialog(&mut dialog, &mut stack);
+        }
     }
     if taps.is_empty() || stack.current() != LayerId::MysekaiInfo {
         return;
@@ -1257,16 +1491,9 @@ pub(crate) fn click(
         if let Some(which) = dialog.open {
             let Some((dialog_view,_))=views.iter().find(|(_,r)|r.is_some_and(|r|r.which==which)) else {continue;};
             let buttons: &[InfoItem] = match which {
-                InfoDialog::VoiceConfirm => &[InfoItem::VoiceOk, InfoItem::VoiceCancel],
                 InfoDialog::RankList => &[InfoItem::RankDialogClose],
             };
             match buttons.iter().copied().find(|item| hit_test(canvas, *item,&layouts,dialog_view,size,bindings)) {
-                Some(InfoItem::VoiceOk) => info!(
-                    "[info] 语音下载·确认按下 → 组包下载是服务端功能（响亮具名未接），确认沿到此"
-                ),
-                Some(InfoItem::VoiceCancel) => {
-                    info!("[info] 语音下载·取消按下 → 关框")
-                }
                 Some(InfoItem::RankDialogClose) => {
                     info!("[info] 排名清单·关闭按下 → 关框")
                 }
@@ -1274,7 +1501,7 @@ pub(crate) fn click(
                     "[info] 对话框开着，框外点按收框（模态；排名清单框真源允许框外关，同形）"
                 ),
             }
-            dialog.open = None;
+            close_dialog(&mut dialog, &mut stack);
             continue;
         }
         // ---- 层件 ----
@@ -1285,6 +1512,9 @@ pub(crate) fn click(
                     (group == ToggleGroup::Access && settings.access == AccessPermission::Review)
                         || selected_option(group, &settings) == index
                 }
+                // A disabled CustomButton takes no click.
+                InfoItem::Photo => !PHOTO_BUTTON_ENABLED,
+                InfoItem::VoiceDownload => MYSEKAI_VOICE_DOWNLOADED,
                 _ => false,
             };
             if disabled_or_selected {
@@ -1307,23 +1537,27 @@ pub(crate) fn click(
                     select_option(group, index, &mut graphics, &mut settings)
                 }
                 InfoItem::Photo => info!(
-                    "[info] 相片钮按下 → OnSelectedPhoto / SetupPhotoAsync——用户相片域未建\
-                     （具名挂账），按下沿到此"
+                    "[info] photo button: OnSelectedPhoto opens the photo selection, which is not in this product"
                 ),
                 InfoItem::RankInfo => {
                     info!(
                         "[info] 排名详情钮按下 → Show1ButtonDialog(排名清单 342)——Dialog 槽，\
                          不入层栈；清单体 = 主表清单 + 用户态 ⇒ 面板下发 mock"
                     );
+                    match stack.show_dialog(RANK_LIST_DIALOG, DisplayLayerType::LayerDialog, DialogBackKey::Close, "ScreenLayerMysekaiInfo (rank info)") {
+                        Ok(id) => {
+                            // Shown without an open animation here.
+                            stack.open_dialog(id);
+                            stack.dialog_open_finished(id);
+                            dialog.id = Some(id);
+                        }
+                        Err(error) => warn!("[info] {error}; the rank list shows outside the screen manager"),
+                    }
                     dialog.open = Some(InfoDialog::RankList);
                 }
-                InfoItem::VoiceDownload => {
-                    info!(
-                        "[info] 语音下载钮按下 → ShowVoiceDownloadDialog(58)——Dialog 槽二钮框；\
-                         确认即开下载（服务端功能，响亮具名未接），容量走面板下发"
-                    );
-                    dialog.open = Some(InfoDialog::VoiceConfirm);
-                }
+                InfoItem::VoiceDownload => info!(
+                    "[info] voice download: ShowVoiceDownloadDialog; the bulk download is a server feature not in this product"
+                ),
                 _ => {}
             }
         } else {
