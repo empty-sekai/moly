@@ -189,8 +189,6 @@ impl CustomData {
                     "customData curve cache: a four-lane group reads a slot no storage operation wrote",
                 TailRefused::Order =>
                     "customData curve cache: the runtime's storage operations are not the ones the slot model follows",
-                TailRefused::Capacity =>
-                    "customData curve cache: a birth writes past the reserved storage; what its growth keeps is not read",
             });
         }
     }
