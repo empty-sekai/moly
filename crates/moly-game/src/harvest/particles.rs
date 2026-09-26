@@ -62,6 +62,8 @@ use crate::fixture_timeline_particles::{
 use crate::site_move::timeline::Delay;
 
 const INDEX: &str = "moly://fixture-particles-v2/index.json";
+/// Seconds between two accounts of the played systems.
+const ACCOUNT_SECONDS: f64 = 4.0;
 
 /// `Play()` or `Stop()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +118,9 @@ pub(crate) struct HarvestParticleCalls {
     unlisted_named: HashSet<String>,
     /// Frames a call has waited on a retryable preparation.
     waited: u32,
+    /// The next account's time and each object's births at the last one.
+    next_account: f64,
+    accounted: HashMap<Entity, u64>,
 }
 
 impl HarvestParticleCalls {
@@ -458,6 +463,7 @@ fn archive_listed(world: &mut World, package: &str) -> Option<bool> {
 /// Exclusive, Update: the due delayed calls join the queue; then the queue
 /// runs in order until a call waits.
 pub(crate) fn advance(world: &mut World) {
+    account(world);
     let frame = u64::from(world.resource::<bevy::diagnostic::FrameCount>().0);
     let dt = world.resource::<Time>().delta_secs();
     {
@@ -526,6 +532,78 @@ pub(crate) fn advance(world: &mut World) {
 enum Step {
     Done,
     Wait,
+}
+
+/// Every [`ACCOUNT_SECONDS`], per object with played fields: the host's
+/// systems under those fields, their live particles and births (a line while
+/// any particle lives or the births moved since the last line).
+fn account(world: &mut World) {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    if now < world.resource::<HarvestParticleCalls>().next_account {
+        return;
+    }
+    world.resource_mut::<HarvestParticleCalls>().next_account = now + ACCOUNT_SECONDS;
+    let mut owner: HashMap<Entity, Entity> = HashMap::new();
+    let mut objects = world.query::<(Entity, &HarvestParticleBindings)>();
+    for (root, bindings) in objects.iter(world) {
+        for binding in bindings.0.values() {
+            owner.insert(binding.root, root);
+        }
+    }
+    if owner.is_empty() {
+        return;
+    }
+    let mut rows: HashMap<Entity, Vec<(String, usize, u64)>> = HashMap::new();
+    let mut draws = world.query::<&crate::uber_particle::FixtureParticleLive>();
+    for live in draws.iter(world) {
+        let mut at = live.0.anchor;
+        let mut depth = 0;
+        while let Some(entity) = at {
+            if let Some(&root) = owner.get(&entity) {
+                rows.entry(root).or_default().push((
+                    live.0.node.clone(),
+                    live.0.pool.len(),
+                    live.0.born_total,
+                ));
+                break;
+            }
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            at = world.get::<ChildOf>(entity).map(ChildOf::parent);
+        }
+    }
+    let mut roots: Vec<Entity> = owner.values().copied().collect();
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        let Some(object) = world.get::<HarvestObject>(root) else {
+            continue;
+        };
+        let (leaf, id) = (object.leaf.clone(), object.fixture_id);
+        let mut systems = rows.remove(&root).unwrap_or_default();
+        systems.sort();
+        let live: usize = systems.iter().map(|system| system.1).sum();
+        let born: u64 = systems.iter().map(|system| system.2).sum();
+        let last = world
+            .resource_mut::<HarvestParticleCalls>()
+            .accounted
+            .insert(root, born);
+        if live == 0 && last == Some(born) {
+            continue;
+        }
+        let list: Vec<String> = systems
+            .iter()
+            .take(8)
+            .map(|(node, live, born)| format!("{node} {live}/{born}"))
+            .collect();
+        info!(
+            "[harvest-particle] account t {now:.1}: {leaf}#{id}: {} host systems, live {live}, born {born} [{}]",
+            systems.len(),
+            list.join("; ")
+        );
+    }
 }
 
 fn run(world: &mut World, entry: &Call) -> Step {
