@@ -1,16 +1,22 @@
-//! 菜单对话框（真源 `MysekaiMenuDialog`，DialogType 309，Dialog 槽）——
+//! 菜单对话框（真源 `MysekaiMenuDialog`，DialogType 312（JP 6.8.1 的枚举值），Dialog 槽）——
 //! 场地屏外壳菜单钮的目标：体力/等级两格 + 12 个可按件的导航中枢。
 //!
 //! ## 入口与身份（Dialog 槽，不是层栈）
 //!
 //! 外壳菜单钮 `ShowMenu` → `DialogUtility.ShowMysekaiMenu(onChangeSite)`：
 //! 先 `TryGetActiveDialog(MysekaiMenuDialog, Layer_Dialog)`（已开 ⇒ 只
-//! 重新 Setup，不重复实例化），否则 `InstantiateDialog(309, Layer_Dialog)`
+//! 重新 Setup，不重复实例化），否则 `InstantiateDialog(312, Layer_Dialog)`
 //! → `Initialize(messageBody=null, onClose=null, allowCloseExternal=true)`
 //! → SetActive(false) → `Setup(ViewData)` → `Open`。**框外点按收框成立**
 //! （allowCloseExternal = true，Initialize 第三参原生核过）。ViewData 的
 //! `OnChangeSite` 在本对话框体内从不被调用（仅存字段，构造点穷举：仅
 //! 两处读都是 ShouldEnable 两格）——本仓不设对应物，具名。
+//!
+//! 本仓经屏幕管理器走这条生命周期：开框 `show_dialog(MysekaiMenuDialog,
+//! LayerDialog, DialogBackKey::Close)` + `open_dialog`，滑入结束
+//! `dialog_open_finished`；收框 `close_dialog`，滑出结束
+//! `dialog_destroyed`；管理器交来的返回键（`SubWindowDialog` 的
+//! `OnHardwareBackKeyProcess` = `CloseProcess`）收框。
 //!
 //! ViewData 派生（原生 `ShowMysekaiMenu`）：`IsOwner()` ·
 //! `ShouldEnableInventoryButton = !IsVisiting()` ·
@@ -40,12 +46,19 @@
 //!
 //! ## 两格取值链（+ 一处普查修正）
 //!
-//! - **体力格**：`HarvestUtility.GetStaminaData()` 读
+//! - **体力格**（`UpdateStaminaGateView`，见 [`update_stamina_gate_view`]）：
+//!   `HarvestUtility.GetStaminaData(0)` 读
 //!   `UserDataManager.UserMysekaiStamina{normal,enhance,boost}`（**服务端
-//!   用户态**）→ `MysekaiStaminaView.UpdateStaminaView` + 量表率
-//!   `GetStaminaGageRate`（`MasterMysekaiStaminas`；已提取，完整量表消费
-//!   尚未接入）。体力空 ⇒ `_recoverStaminaLabel` 亮（`IsEmptyStamina`
-//!   = normal ≤ 0 且 boost ≤ 0 且 enhance < 1）。
+//!   用户态**，本仓为服务端模型的客户端副本）并算出 boost 存量
+//!   `GetBoostStaminaStockCount`；`GetStaminaGageRate` 读 master 三池上限；
+//!   `MysekaiStaminaView.UpdateStaminaView(体力, 存量, false)` 定量表色、
+//!   渐变开关、图标精灵与色、存量底板与存量数字精灵；
+//!   `UpdateStaminaGageRate(体力, 三率, false)` 定量表填充。体力空 ⇒
+//!   `_recoverStaminaLabel` 亮（`IsEmptyStamina` = normal ≤ 0 且 boost ≤ 0
+//!   且 enhance < 1）。缺口：`icon_stamina_boost_h40` 与
+//!   `txt_stamina_2..9` 不在 UI 根的运行时精灵里（提取缺口，逐名报一次，
+//!   保留序列化精灵）；`SetNativeSize` 随之未接；渐变图是量表图
+//!   `Coffee.UISoftMask.SoftMask` 的子图形，软遮罩未移植，开着时画整张。
 //! - **等级格**：`MysekaiRankModel` 读 `UserMysekaiGamedata.totalExp`
 //!   （**服务端用户态**，mock 面板下发）→ 查 master 等级表（运行时根的
 //!   `mysekai-ranks.json`，移植见 `moly_law::ui::mysekai_rank`）得等级、
@@ -57,9 +70,10 @@
 //!   `SetWordingText("WORD_MAX")`；写进的是 `restTextMesh`（`restText` 为空
 //!   时）。两区的客户端都是这两个键。量表 `UIPartsGauge.Setup(总经验 -
 //!   本级累计, 下级累计 - 本级累计)`（到最高等级时 `(0, 1)`）把比值写进
-//!   `fillImage` 的 fillAmount。⚠ 那张图是一个 stencil Mask 的图形，量表
-//!   条是它的子节点；本仓不画 stencil 裁切，所以填充量写进去了、画面上的
-//!   量表条仍是整条（具名缺口）。
+//!   `fillImage` 的 fillAmount。那张图是一个 stencil `Mask` 的图形，量表
+//!   条是它的子节点：由 UI 渲染器的 stencil 消费者按遮罩图形的覆盖裁切
+//!   （`ui_layout/stencil_mask.rs`）。量表条上的 `UiEffect.GradientColor`
+//!   未解码（提取缺口），条仍是白色。
 //! - ⚠ **普查的「宝石余额」一格在真源里不存在**：字段表穷举无 jewel
 //!   字段、原生树本文件 `grep -ic jewel` = 0 ⇒ 三格修正为两格。宝石是
 //!   恢复对话框的消耗货币，不在本对话框的显示面。
@@ -94,18 +108,19 @@
 //! OutQuart；收场期间视图保留并占用输入。SE_SUBWINDOW_CLOSE 尚缺可播放
 //! 的源 cue，资产包 Dispose 尚无独立对应物。
 //!
-//! ## 服务端域与 mock 面板（照音频/情报面板的形：具名资源 + 默认 +
-//! 环境变量覆写，非法值响亮告警回默认）
+//! ## Server state
 //!
-//! 体力三值 · 体力量表上限（master）· 总经验（`UserMysekaiGamedata.totalExp`，
-//! 服务端用户态；等级与剩余经验由它查 master 等级表现算）· 访客态（使能
-//! 输入）· 拍照许可 · 水晶商店许可 · 写生可用 ⇒ 全部具名 mock。环境变量：
-//! `MOLY_MENU_MOCK_STAMINA_NORMAL` ·
-//! `MOLY_MENU_MOCK_STAMINA_ENHANCE` · `MOLY_MENU_MOCK_STAMINA_BOOST` ·
-//! `MOLY_MENU_MOCK_STAMINA_MAX` · `MOLY_MENU_MOCK_TOTAL_EXP` ·
-//! `MOLY_MENU_MOCK_VISITING` ·
-//! `MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED` · `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`
-//! · `MOLY_MENU_MOCK_SKETCH_AVAILABLE`。
+//! The stamina triple is the client's copy of `UserMysekaiStamina`
+//! (`crate::server::ClientUserData`, set by the server model's responses:
+//! the join, the harvest and gather replies), the same copy the harvest
+//! login reads; the gauge maximum is the master normal `maxStamina`. Total
+//! experience (`UserMysekaiGamedata.totalExp`) comes from the same server
+//! document through `crate::mysekai_rank::UserTotalExp`. The visiting state
+//! and the photo, crystal-shop and sketch permissions stay named mock values
+//! of this module (native instruments `MOLY_MENU_MOCK_VISITING`,
+//! `MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED`, `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`,
+//! `MOLY_MENU_MOCK_SKETCH_AVAILABLE`; game mode reads none). The stamina
+//! and total-experience instruments land in the native server document.
 //!
 //! ## 我方选值与具名缺口（改这里之前先读）
 //!
@@ -124,8 +139,9 @@
 //!   注入，与真实点按同一条分派路。
 //!
 //! 具名挂账（本模块不实现，收工报里重列）：
-//! - 恢复体力对话框 `MysekaiRecoverBoostStaminaDialog`（自发结算 API 族，
-//!   判 mock）——体力回写回调 `onRecoverFinish` 的消费者。
+//! - 恢复体力对话框 `MysekaiRecoverBoostStaminaDialog`（DialogType 321）：
+//!   预制体不在任何 UI 根里（提取缺口）；钮保持置灰。建它时由它的
+//!   `onRecoverFinish` 调 [`update_stamina_gate_view`]。
 //! - 层栈目标未建的 5 钮（宝箱/换装/水晶商店/写生/素材交换）+ 相册
 //!   （PhotoAlbum 域非层栈）+ 场景迁移 2 钮（回标题/退出）。
 //! - SE_SUBWINDOW_CLOSE · 教程/生日置灰覆盖。
@@ -140,7 +156,9 @@ use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureState};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
-use crate::ui_layers::{LayerCommand, LayerId};
+use crate::ui_layers::{
+    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, LayerCommand, LayerId, ScreenManager,
+};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 const MENU_SLIDE_DURATION: f32 = 0.2;
@@ -298,21 +316,12 @@ pub(crate) const FIXED_TEXTS: &[&str] = &[
 // mock 面板（服务端态，具名「mock 值」；照情报层面板的形）
 // ---------------------------------------------------------------------------
 
-/// 菜单对话框的具名 mock 服务端状态（体力三值 + 量表上限 + 四个使能
-/// 输入）。真值住在 `UserMysekaiStamina`（服务端用户态）里，本仓读不到
-/// ⇒ 面板下发；默认值全部是我方选值。总经验
-/// （`UserMysekaiGamedata.totalExp`）是菜单与情报层共读的同一份用户态，
-/// 见 [`crate::mysekai_rank::UserTotalExp`]；等级表是 master 数据，从运行时根读。
+/// The menu dialog's named mock enable inputs. The stamina is the client's
+/// copy of the server model (`crate::server::ClientUserData`); total
+/// experience is [`crate::mysekai_rank::UserTotalExp`]; the rank table is
+/// master data from the runtime root.
 #[derive(Resource)]
 pub(crate) struct MenuMock {
-    /// `UserMysekaiStamina.normalStamina`（服务端）。
-    stamina_normal: i32,
-    /// `UserMysekaiStamina.enhanceStamina`（服务端）。
-    stamina_enhance: i32,
-    /// `UserMysekaiStamina.boostStamina`（服务端）。
-    stamina_boost: i32,
-    /// 体力量表上限（`MasterMysekaiStaminas`，master 镜像不在管线）。
-    stamina_max: u32,
     /// `MysekaiMultiplayController.IsVisiting()`——多人访客态（使能输入；
     /// 本仓无多人域，默认 false）。
     visiting: bool,
@@ -325,44 +334,248 @@ pub(crate) struct MenuMock {
     sketch_available: bool,
 }
 
-impl MenuMock {
-    /// 体力合计（真源 `StaminaData.SumStamina` = normal + enhance + boost）。
-    fn stamina_sum(&self) -> i32 {
-        self.stamina_normal.wrapping_add(self.stamina_enhance).wrapping_add(self.stamina_boost)
-    }
+/// `StaminaData.SumStamina` of the client's copy (normal + enhance + boost).
+fn stamina_sum(stamina: crate::server::Stamina) -> i32 {
+    stamina
+        .normal
+        .wrapping_add(stamina.enhance)
+        .wrapping_add(stamina.boost)
+}
 
-    /// 三池均空才亮恢复提示；增强池也参与，并保留原有符号整数语义。
-    fn stamina_empty(&self) -> bool {
-        self.stamina_normal <= 0 && self.stamina_boost <= 0 && self.stamina_enhance < 1
+// ---------------------------------------------------------------------------
+// The stamina cell: `MysekaiMenuDialog.UpdateStaminaGateView`
+// ---------------------------------------------------------------------------
+
+/// The menu's one read of the stamina: the client's copy of
+/// `UserMysekaiStamina` (`HarvestUtility.GetStaminaData` reads
+/// `UserDataManager.UserMysekaiStamina`) and the master pool maxima
+/// (`GetStaminaGageRate` and `GetBoostStaminaStockCount` read
+/// `mysekaiStaminas`). Both come from the server model; this is the seam the
+/// model switches.
+fn menu_stamina(
+    user: Option<&crate::server::ClientUserData>,
+) -> Result<(crate::server::Stamina, crate::server::StaminaMax), &'static str> {
+    let stamina = user
+        .ok_or("the server model has made no response yet")?
+        .stamina
+        .ok_or("the server model has not seated the stamina pools")?;
+    let max = crate::server::stamina_max().ok_or("the stamina masters are not loaded")?;
+    Ok((stamina, max))
+}
+
+/// The processor's signed division: a zero divisor gives zero (`sdiv`), the
+/// one overflow wraps.
+fn sdiv(a: i32, b: i32) -> i32 {
+    if b == 0 { 0 } else { a.wrapping_div(b) }
+}
+
+/// `HarvestUtility.GetBoostStaminaStockCount(boost)`: the boost pool over a
+/// tenth of the boost master's `maxStamina` (C# integer division, both).
+fn boost_stamina_stock_count(boost: i32, max: crate::server::StaminaMax) -> i32 {
+    sdiv(boost, max.boost / 10)
+}
+
+/// `HarvestUtility.GetStaminaGageRate(staminaData)`: (normal / normal
+/// maximum, enhance / enhance maximum, (boost mod the boost stock unit) /
+/// unit), each quotient in single precision. The unit is a tenth of the boost
+/// maximum (integer), the remainder is `boost - sdiv(boost, unit) * unit`.
+fn stamina_gage_rate(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> (f32, f32, f32) {
+    let unit = max.boost / 10;
+    let rest = stamina.boost.wrapping_sub(sdiv(stamina.boost, unit).wrapping_mul(unit));
+    (
+        stamina.normal as f32 / max.normal as f32,
+        stamina.enhance as f32 / max.enhance as f32,
+        rest as f32 / unit as f32,
+    )
+}
+
+/// What `MysekaiStaminaView.UpdateStaminaView(staminaData, stockCount,
+/// isForceBoostView)` and `UpdateStaminaGageRate(staminaData, rates,
+/// isBoostMode)` leave on the view.
+#[derive(Debug, Clone, PartialEq)]
+struct StaminaViewState {
+    /// `_staminaGageImage.color`: white, or the palette entry
+    /// [`STAMINA_GAUGE_COLOR_ENTRY`] when neither enhance nor boost is held.
+    gauge_palette: bool,
+    /// `_staminaGradiantImage.enabled`.
+    gradient: bool,
+    /// `_staminaIcon.SpriteName`.
+    icon: &'static str,
+    /// `_staminaIcon.color`: the palette entry
+    /// [`STAMINA_EMPTY_ICON_COLOR_ENTRY`] when the stamina is empty, else white.
+    icon_palette: bool,
+    /// `_staminaGageImageOnStock.enabled`; `_staminaGageImageOnNoStock` is
+    /// its opposite.
+    on_stock: bool,
+    /// `_boostStaminaCount`: enabled with sprite `txt_stamina_{n}`, or disabled.
+    boost_count: Option<i32>,
+    /// `_staminaGageImage.fillAmount`.
+    fill: f32,
+}
+
+/// `SetStaminaGaugeColor`'s palette entry of a gauge without enhance or boost.
+const STAMINA_GAUGE_COLOR_ENTRY: usize = 55;
+/// `SetStaminaGaugeColor`'s palette entry of the icon of an empty stamina.
+const STAMINA_EMPTY_ICON_COLOR_ENTRY: usize = 5;
+
+/// `UpdateStaminaGateView`'s two view calls: `UpdateStaminaView(staminaData,
+/// GetStaminaData's stock count, false)` and `UpdateStaminaGageRate(
+/// staminaData, GetStaminaGageRate(staminaData), false)`.
+fn stamina_view_state(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> StaminaViewState {
+    let force_boost_view = false;
+    let is_boost_mode = false;
+    let stock = boost_stamina_stock_count(stamina.boost, max);
+    // SetStaminaGaugeColor.
+    let held = stamina.enhance > 0 || stamina.boost > 0 || force_boost_view;
+    let empty = stamina.normal <= 0 && stamina.boost <= 0 && stamina.enhance < 1;
+    let icon = if stamina.boost > 0 || force_boost_view {
+        "icon_stamina_boost_h40"
+    } else {
+        "icon_stamina_normal_h40"
+    };
+    // UpdateStaminaView: the stock backs, then the count image, whose sprite
+    // number stops at 9.
+    let on_stock = stock >= 1;
+    let boost_count = on_stock.then(|| stock.min(9));
+    // UpdateStaminaGageRate: the stock count again from the boost pool; above
+    // 9 the gauge is full, else the boost rate while boost is held, else the
+    // enhance rate with enhance of at least 1, else the normal rate.
+    let (normal, enhance, boost) = stamina_gage_rate(stamina, max);
+    let boosted = stamina.boost > 0 || is_boost_mode;
+    let fill = if boost_stamina_stock_count(stamina.boost, max) > 9 {
+        1.0
+    } else if boosted {
+        boost
+    } else if stamina.enhance >= 1 {
+        enhance
+    } else {
+        normal
+    };
+    StaminaViewState {
+        gauge_palette: !held,
+        gradient: held,
+        icon,
+        icon_palette: empty && !force_boost_view,
+        on_stock,
+        boost_count,
+        fill,
     }
 }
 
-fn env_i32(name: &str, default: i32) -> i32 {
-    match std::env::var(name) {
-        Ok(raw) => raw.trim().parse().unwrap_or_else(|_| {
-            warn!("[menu_dialog] mock 面板：{name}={raw:?} 不是有符号整数，回默认 {default}");
-            default
-        }),
-        Err(_) => default,
+/// The `MysekaiStaminaView` the dialog's `_staminaView` references, and the
+/// dialog's `_recoverStaminaLabel`, as view selectors.
+struct StaminaTargets {
+    gauge: i64,
+    gradient: String,
+    icon: i64,
+    on_stock: String,
+    on_no_stock: String,
+    boost_count: i64,
+    boost_count_node: String,
+    recover_label: String,
+}
+
+impl StaminaTargets {
+    fn from_document(doc: &UiPrefab) -> Self {
+        let dialog = doc.nodes.iter().flat_map(|node| node.components.iter())
+            .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuDialog")
+            .unwrap_or_else(|| panic!("{}: no MysekaiMenuDialog component", doc.prefab));
+        let view_id = reference(doc, &dialog.fields, "_staminaView");
+        let view = doc.nodes.iter().flat_map(|node| node.components.iter())
+            .find(|c| c.path_id == view_id && c.class == "Sekai.Mysekai.MysekaiStaminaView")
+            .unwrap_or_else(|| panic!("{}: _staminaView {view_id} is not a MysekaiStaminaView", doc.prefab));
+        // A Graphic's `enabled` as its GameObject's active flag: each of
+        // these nodes carries only that Graphic and has no children.
+        let graphic_node = |field: &str| -> String {
+            let id = reference(doc, &view.fields, field);
+            let index = doc.find(&format!("@{id}")).unwrap_or_else(|error| panic!("{error}"));
+            let node = &doc.nodes[index];
+            assert!(
+                doc.nodes.iter().all(|n| n.parent_transform_id != node.transform_id),
+                "{}: MysekaiStaminaView {field} is not a leaf node", doc.prefab
+            );
+            format!("@{}", node.game_object_id)
+        };
+        StaminaTargets {
+            gauge: reference(doc, &view.fields, "_staminaGageImage"),
+            gradient: graphic_node("_staminaGradiantImage"),
+            icon: reference(doc, &view.fields, "_staminaIcon"),
+            on_stock: graphic_node("_staminaGageImageOnStock"),
+            on_no_stock: graphic_node("_staminaGageImageOnNoStock"),
+            boost_count: reference(doc, &view.fields, "_boostStaminaCount"),
+            boost_count_node: graphic_node("_boostStaminaCount"),
+            recover_label: format!("@{}", reference(doc, &dialog.fields, "_recoverStaminaLabel")),
+        }
     }
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().parse::<u32>() {
-            Ok(value) => value,
-            Err(_) => {
-                warn!("[menu_dialog] mock 面板：{name}={raw:?} 不是非负整数，回默认 {default}");
-                default
-            }
-        },
-        Err(_) => default,
+/// `CustomImage.SpriteName = name` on an image: the runtime sprite of that
+/// name when the UI root carries it; nothing to do when the serialized sprite
+/// already is that sprite. Any other name is a sprite the root does not
+/// carry, reported once.
+fn set_sprite_name(view: &mut UiPrefabView, layouts: &UiLayouts, doc: &UiPrefab, image: i64, name: &str) {
+    let path = format!("@{image}");
+    if layouts.has_runtime_texture(name) {
+        view.set_texture(&path, name);
+        return;
+    }
+    let index = doc.find(&path).unwrap_or_else(|error| panic!("{error}"));
+    let serialized = doc.nodes[index].components.iter().find(|c| c.path_id == image)
+        .and_then(|c| c.sprite.as_ref()).and_then(|s| s["name"].as_str());
+    if serialized != Some(name) {
+        error_once!(
+            "[menu_dialog] {}: SpriteName {name} on image @{image} is not among the UI root's runtime sprites; the serialized {serialized:?} stays",
+            doc.prefab
+        );
     }
 }
 
+/// `UpdateStaminaGateView` on the view (Setup; the recover dialog's finish
+/// callback once that dialog exists).
+fn update_stamina_gate_view(
+    view: &mut UiPrefabView,
+    layouts: &UiLayouts,
+    doc: &UiPrefab,
+    user: Option<&crate::server::ClientUserData>,
+) {
+    let targets = StaminaTargets::from_document(doc);
+    let (stamina, max) = match menu_stamina(user) {
+        Ok(read) => read,
+        Err(reason) => {
+            error!("[menu_dialog] UpdateStaminaGateView: {reason}; the stamina cell keeps its serialized state");
+            return;
+        }
+    };
+    let state = stamina_view_state(stamina, max);
+    info!(
+        "[menu_dialog] UpdateStaminaGateView: {stamina:?} over maxima {max:?}, stock {} -> {state:?}",
+        boost_stamina_stock_count(stamina.boost, max)
+    );
+    let palette = |entry: usize| {
+        layouts.palette_color(entry)
+            .unwrap_or_else(|| panic!("[menu_dialog] palette entry {entry} is not on this UI root"))
+    };
+    let gauge_color = if state.gauge_palette { palette(STAMINA_GAUGE_COLOR_ENTRY) } else { [1.0; 4] };
+    view.set_graphic_color(targets.gauge, gauge_color);
+    view.set_visible(&targets.gradient, state.gradient);
+    set_sprite_name(view, layouts, doc, targets.icon, state.icon);
+    let icon_color = if state.icon_palette { palette(STAMINA_EMPTY_ICON_COLOR_ENTRY) } else { [1.0; 4] };
+    view.set_graphic_color(targets.icon, icon_color);
+    view.set_visible(&targets.on_stock, state.on_stock);
+    view.set_visible(&targets.on_no_stock, !state.on_stock);
+    view.set_visible(&targets.boost_count_node, state.boost_count.is_some());
+    if let Some(count) = state.boost_count {
+        set_sprite_name(view, layouts, doc, targets.boost_count, &format!("txt_stamina_{count}"));
+    }
+    view.set_fill(&format!("@{}", targets.gauge), state.fill);
+    // _recoverStaminaLabel.SetActive(staminaData.IsEmptyStamina).
+    view.set_visible(&targets.recover_label, stamina.normal <= 0 && stamina.boost <= 0 && stamina.enhance < 1);
+}
+
+/// A native instrument (game mode reads none).
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim() {
+    match crate::server::instrument_env(name) {
+        Some(raw) => match raw.trim() {
             "true" | "1" => true,
             "false" | "0" => false,
             _ => {
@@ -370,17 +583,13 @@ fn env_bool(name: &str, default: bool) -> bool {
                 default
             }
         },
-        Err(_) => default,
+        None => default,
     }
 }
 
 impl Default for MenuMock {
     fn default() -> Self {
         MenuMock {
-            stamina_normal: env_i32("MOLY_MENU_MOCK_STAMINA_NORMAL", 120),
-            stamina_enhance: env_i32("MOLY_MENU_MOCK_STAMINA_ENHANCE", 0),
-            stamina_boost: env_i32("MOLY_MENU_MOCK_STAMINA_BOOST", 0),
-            stamina_max: env_u32("MOLY_MENU_MOCK_STAMINA_MAX", 240),
             visiting: env_bool("MOLY_MENU_MOCK_VISITING", false),
             photo_shot_allowed: env_bool("MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED", true),
             crystal_shop_allowed: env_bool("MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED", true),
@@ -402,6 +611,9 @@ pub(crate) struct MenuDialogRoot {
     elapsed: f32,
     slide_width: f32,
     canvas: Option<Vec2>,
+    /// The screen manager's instance of this dialog, from `ShowDialog` to
+    /// its destruction after the close animation.
+    dialog: Option<DialogId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -511,7 +723,7 @@ pub(crate) fn spawn_when_ready(
     let binding = MenuSlideBinding::from_document(layouts.document("Menu").expect("menu layout missing"));
     commands.spawn((MenuDialogRoot {
             binding, phase: MenuSlidePhase::Hidden, requested_open: false,
-            elapsed: 0., slide_width: 0., canvas: None,
+            elapsed: 0., slide_width: 0., canvas: None, dialog: None,
         }, Visibility::Hidden, Transform::default(),
         RenderLayers::layer(SITEMAP_LAYER), crate::ui_layout::UiPrefabView::new("Menu", SITEMAP_LAYER)));
     commands.insert_resource(MenuDialogSpawned);
@@ -523,10 +735,14 @@ pub(crate) fn spawn_when_ready(
 
 /// 开框沿（Setup 装配序的日志同形：八钮 Setup → exit 置亮 → 图标/等级/
 /// 体力三读数 → 三监听）。逐钮报源使能与目标已建两层门——不合成一个数。
-fn on_open(mock: &MenuMock, rank: &moly_law::ui::mysekai_rank::MysekaiRankModel) {
+fn on_open(
+    mock: &MenuMock,
+    user: Option<&crate::server::ClientUserData>,
+    rank: &moly_law::ui::mysekai_rank::MysekaiRankModel,
+) {
     info!(
         "[menu_dialog] 开框：DialogUtility.ShowMysekaiMenu → TryGetActiveDialog(菜单对话框) 未开 \
-         ⇒ InstantiateDialog(309, Dialog 槽) → Initialize(allowCloseExternal=true) → Setup(ViewData)"
+         ⇒ InstantiateDialog(312, Dialog 槽) → Initialize(allowCloseExternal=true) → Setup(ViewData)"
     );
     info!(
         "[menu_dialog] Setup·ViewData 派生：IsOwner()=true（单机恒站主）· \
@@ -546,18 +762,15 @@ fn on_open(mock: &MenuMock, rank: &moly_law::ui::mysekai_rank::MysekaiRankModel)
             which.route_target()
         );
     }
+    let stamina = user.and_then(|user| user.stamina);
     info!(
-        "[menu_dialog] Setup·两格读值（服务端态，mock 面板下发）：体力格 \
-         UserMysekaiStamina{{normal={}, enhance={}, boost={}}} 合计 {}/{}（量表上限为 master 派生 \
-         mock）· 恢复提示={}（IsEmptyStamina 律）· 等级格 UserMysekaiGamedata.totalExp={}（mock）\
-         查 master 等级表：rank {} / max {} · 本级累计 {} · 下级累计 {} · 距下一级 {}exp——普查记的\
-         「宝石余额」一格在真源字段表里不存在（具名修正，见模块头）",
-        mock.stamina_normal,
-        mock.stamina_enhance,
-        mock.stamina_boost,
-        mock.stamina_sum(),
-        mock.stamina_max,
-        mock.stamina_empty(),
+        "[menu_dialog] Setup: the stamina cell reads the client copy of UserMysekaiStamina {:?} (sum {:?}, gauge maximum = master normal maxStamina {:?}); \
+         recover label (IsEmptyStamina) = {}; the rank cell reads UserMysekaiGamedata.totalExp={} \
+         through the master rank table: rank {} / max {} · this rank {} · next rank {} · {} exp to go",
+        stamina,
+        stamina.map(stamina_sum),
+        crate::server::stamina_max().map(|max| max.normal),
+        user.is_some_and(crate::server::ClientUserData::stamina_empty),
         rank.total_exp,
         rank.mysekai_rank,
         rank.max_mysekai_rank,
@@ -622,7 +835,17 @@ pub(crate) fn place(
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
     total_exp: Res<crate::mysekai_rank::UserTotalExp>,
+    user: Option<Res<crate::server::ClientUserData>>,
+    (mut screens, mut back_keys): (ResMut<ScreenManager>, MessageReader<DialogBackKeyEvent>),
 ) {
+    // SubWindowDialog.OnHardwareBackKeyProcess is CloseProcess: the back key
+    // the screen manager hands this dialog closes it.
+    for key in back_keys.read() {
+        if roots.iter().any(|(root, ..)| root.dialog == Some(key.id)) && dialog.menu_open {
+            info!("[menu_dialog] back key (SubWindowDialog.OnHardwareBackKeyProcess -> CloseProcess)");
+            dialog.menu_open = false;
+        }
+    }
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let size = Vec2::new(window.width(), window.height());
     if !size.is_finite() || size.min_element() <= 0. { return; }
@@ -635,10 +858,37 @@ pub(crate) fn place(
             root.requested_open = open;
             root.elapsed = 0.;
             root.phase = if open {
+                // A request while the previous instance is still closing:
+                // that instance is destroyed first.
+                if let Some(old) = root.dialog.take() {
+                    screens.dialog_destroyed(old);
+                }
+                // DialogUtility.ShowMysekaiMenu: InstantiateDialog(type 312,
+                // Layer_Dialog), Initialize, Setup, Open.
+                match screens.show_dialog(
+                    DialogType::MysekaiMenuDialog,
+                    DisplayLayerType::LayerDialog,
+                    DialogBackKey::Close,
+                    "DialogUtility.ShowMysekaiMenu",
+                ) {
+                    Ok(id) => {
+                        screens.open_dialog(id);
+                        root.dialog = Some(id);
+                    }
+                    Err(error) => {
+                        error!("[menu_dialog] {error}: the menu does not open");
+                        dialog.menu_open = false;
+                        root.requested_open = false;
+                        continue;
+                    }
+                }
                 dialog.menu_closing = false;
                 MenuSlidePhase::Opening
             } else {
                 on_close();
+                if let Some(id) = root.dialog {
+                    screens.close_dialog(id);
+                }
                 dialog.menu_closing = true;
                 MenuSlidePhase::Closing
             };
@@ -656,7 +906,18 @@ pub(crate) fn place(
         if !changed && matches!(root.phase, MenuSlidePhase::Opening | MenuSlidePhase::Closing) {
             root.elapsed = (root.elapsed + time.delta_secs()).min(MENU_SLIDE_DURATION);
             if root.elapsed >= MENU_SLIDE_DURATION {
-                root.phase = if open { MenuSlidePhase::Open } else { MenuSlidePhase::Hidden };
+                // OnFinishOpenAnimation, or Destroy after the close animation.
+                root.phase = if open {
+                    if let Some(id) = root.dialog {
+                        screens.dialog_open_finished(id);
+                    }
+                    MenuSlidePhase::Open
+                } else {
+                    if let Some(id) = root.dialog.take() {
+                        screens.dialog_destroyed(id);
+                    }
+                    MenuSlidePhase::Hidden
+                };
                 dialog.menu_closing = false;
             }
         }
@@ -682,16 +943,17 @@ pub(crate) fn place(
             view.set_visible(&format!("{}/Cover",button.source_path()),!button.source_enabled(&mock)||!button.target_built());
         }
         view.set_visible("MenuRoot/TitleCell",false);
-        view.set_visible("MenuHeader/bg/info",mock.stamina_empty());
-        // SetupMysekaiRankGauge: the rank model from the user's total
-        // experience, through the gauge the dialog references.
+        // SetupMysekaiRankGauge, then UpdateStaminaGateView: the rank model
+        // from the user's total experience through the gauge the dialog
+        // references, then the stamina cell.
         if changed && open {
             let doc = layouts.document(view.key).expect("menu dialog layout is loaded");
             let model = ranks.as_deref()
                 .unwrap_or_else(|| panic!("rank model: the master rank table has not resolved when the menu opens"))
                 .model(total_exp.0);
-            on_open(&mock, &model);
+            on_open(&mock, user.as_deref(), &model);
             apply_rank_gauge(&mut view, &layouts, &rank_gauge_targets(doc), &model);
+            update_stamina_gate_view(&mut view, &layouts, doc, user.as_deref());
         }
     }
 }
@@ -708,23 +970,35 @@ pub(crate) struct RankGaugeTargets {
 }
 
 /// The menu dialog's rank gauge targets: `MysekaiMenuDialog.
-/// _mysekaiRankGauge` and the references under it. A region layout carries
-/// these references; the shared root's layouts leave the gauge classes
-/// undecoded, so there the three nodes those references name in the prefab
-/// are addressed by path, a named gap of that root.
+/// _mysekaiRankGauge` and the references under it. Both roots decode the
+/// dialog's reference. A shared-root layout extracted before the extractor
+/// decoded the three gauge classes (`UIPartsMysekaiRankGauge`,
+/// `UIPartsGaugeExp`, `UIPartsGauge`; the CN class declares the same fields)
+/// keeps them as raw bytes; only there are the three nodes the references
+/// name addressed by their path under the referenced gauge, reported once.
 fn rank_gauge_targets(doc: &moly_assets::ui_layout::UiPrefab) -> RankGaugeTargets {
-    if doc.source.region.is_none() {
-        let rank = "MenuHeader/bg/UIPartsMySekaiRankGauge";
+    let dialog = doc.nodes.iter().flat_map(|node| node.components.iter())
+        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuDialog")
+        .unwrap_or_else(|| panic!("{}: no MysekaiMenuDialog component", doc.prefab));
+    let gauge = reference(doc, &dialog.fields, "_mysekaiRankGauge");
+    let decoded = doc.nodes.iter().flat_map(|node| node.components.iter())
+        .find(|c| c.path_id == gauge)
+        .is_some_and(|c| c.fields.get("_rankText").is_some());
+    if !decoded {
+        assert!(doc.source.region.is_none(), "{}: a region layout leaves the rank gauge undecoded", doc.prefab);
+        error_once!(
+            "[menu_dialog] {}: the shared root's rank gauge classes are raw bytes (re-extract the shared root with the gauge decoders); the gauge texts and fill are addressed by path",
+            doc.prefab
+        );
+        let index = doc.find(&format!("@{gauge}")).unwrap_or_else(|error| panic!("{error}"));
+        let rank = doc.nodes[index].path.as_str();
         return RankGaugeTargets {
             rank_text: format!("{rank}/CustomTextMesh (2)"),
             rest_text: format!("{rank}/CustomTextMesh (3)"),
             fill_image: format!("{rank}/UIPartsGauge/GaugeBase/Mask"),
         };
     }
-    let dialog = doc.nodes.iter().flat_map(|node| node.components.iter())
-        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuDialog")
-        .unwrap_or_else(|| panic!("{}: no MysekaiMenuDialog component", doc.prefab));
-    rank_gauge_references(doc, reference(doc, &dialog.fields, "_mysekaiRankGauge"))
+    rank_gauge_references(doc, gauge)
 }
 
 /// A serialized reference inside the layout file: its path id.
