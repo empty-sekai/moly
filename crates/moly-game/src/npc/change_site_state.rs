@@ -33,8 +33,9 @@
 //! - Entering home (`HomeSiteEnter`): the start position is the house's
 //!   outside door action point before the waits; after them the leaving leg,
 //!   the placement there on home, hidden, a turn to the door's forward, the
-//!   house's `NPCOn` trigger, and `mov_cw_all_house_open_011_O` with the NPC
-//!   shown one frame after it starts. No tweet.
+//!   house's `NPCOn` trigger (played by the house lane, see
+//!   `fixture_gimmick::house_door`), and `mov_cw_all_house_open_011_O` with
+//!   the NPC shown one frame after it starts. No tweet.
 //!
 //! Host shape. This host holds one site at a time, and every order targets
 //! the site the player has just entered, so the walk to the door and the
@@ -54,11 +55,13 @@
 //!   update, the next frame); the turn clip the presenter starts with each
 //!   and the idle clip it awaits after it are not played (the character is
 //!   hidden while it turns), and that idle clip's wait is taken as none;
-//! - the room-entry tweet's turn to the player completes at once; the knock
-//!   sound's wait and the door's open wait end at once (this host reads
+//! - the room-entry tweet's turn to the player is the same awaited look-at
+//!   (towards the player's position over the rotate time, out-quart), with
+//!   the same clips not played; the knock sound's wait and the door's open
+//!   wait end at once (this host reads
 //!   neither the sound nor the door clip's length back); the brightness
-//!   fade, the house's `NPCOn` trigger, the tweet's eye, mouth and emoticon,
-//!   and the facial reset are not played.
+//!   fade, the tweet's eye, mouth and emoticon, and the facial reset are not
+//!   played.
 
 use std::collections::HashMap;
 
@@ -93,6 +96,8 @@ enum AfterTurn {
     HomeClip,
     /// FloorEnter: the knock, the door, the entry clip.
     FloorKnock,
+    /// ShowTweet: the tweet after the turn to the player.
+    EntryTweet,
 }
 
 /// The floor entry clip.
@@ -550,6 +555,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             match next {
                 AfterTurn::HomeClip => home_clip(world, actor, unit, frame),
                 AfterTurn::FloorKnock => floor_knock(world, actor, unit, frame),
+                AfterTurn::EntryTweet => entry_tweet(world, actor, unit, frame),
             }
         }
         Stage::EntryClip { node, shown } => {
@@ -572,10 +578,18 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 return;
             }
             crate::site_move::room_door::close(world);
-            // OnEntrySite: ShowTweet.
-            match show_entry_tweet(world, actor, unit, frame) {
-                Some(delay) => set_stage(world, actor, Stage::Tweet { delay }, frame),
+            // OnEntrySite: ShowTweet, which first turns to the player.
+            match begin_entry_tweet(world, actor, unit, frame) {
                 None => on_entry_site_end(world, actor, unit, frame),
+                Some(true) => set_stage(
+                    world,
+                    actor,
+                    Stage::Turning {
+                        next: AfterTurn::EntryTweet,
+                    },
+                    frame,
+                ),
+                Some(false) => entry_tweet(world, actor, unit, frame),
             }
         }
         Stage::Tweet { mut delay } => {
@@ -649,10 +663,21 @@ fn begin_turn(
     true
 }
 
-/// HomeSiteEnter after its turn: the house's NPCOn trigger (not played
-/// here), then the clip and the show one frame after it starts.
+/// HomeSiteEnter after its turn: `HouseView.SetAnimationTrigger("NPCOn")`
+/// on the house (`FixtureManager.GetHouseView`), then the clip and the show
+/// one frame after it starts.
 fn home_clip(world: &mut World, actor: Entity, unit: u32, frame: u32) {
-    info!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn): not played (the house controller here drives the player's triggers only)");
+    use crate::fixture_gimmick::house_door::{self, HouseLookup, HouseTrigger};
+    match house_door::find_house(world) {
+        HouseLookup::Found(house) => match house_door::set_trigger(world, &house, HouseTrigger::NpcOn) {
+            Ok(()) => info!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn)"),
+            Err(reason) => warn!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn) refused: {reason}"),
+        },
+        HouseLookup::Absent => info!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn): no house placed"),
+        HouseLookup::Pending(reason) | HouseLookup::Failed(reason) => {
+            warn!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn) not set: {reason}")
+        }
+    }
     start_clip(world, actor, unit, HOME_ENTER_CLIP, frame, false);
 }
 
@@ -732,20 +757,6 @@ fn place_on_target(world: &mut World, actor: Entity, target: i32, position: Vec3
         actions.resume_on_site(epoch);
     }
     change_state(world, actor, NpcAction::ChangeSite);
-}
-
-/// Face `direction` (horizontal) at once.
-fn face(world: &mut World, actor: Entity, direction: Vec3) {
-    let flat = Vec3::new(direction.x, 0.0, direction.z).normalize_or_zero();
-    if flat == Vec3::ZERO {
-        return;
-    }
-    if let Some(mut walk) = world.get_mut::<WalkState>(actor) {
-        walk.0.forward = flat.to_array();
-    }
-    if let Some(mut transform) = world.get_mut::<Transform>(actor) {
-        transform.rotation = Quat::from_rotation_arc(Vec3::Z, flat);
-    }
 }
 
 fn push_se(world: &mut World, cue: &str) {
@@ -831,28 +842,39 @@ fn end_clip(world: &mut World, actor: Entity, unit: u32) {
     }
 }
 
-/// `ShowTweet` of the change-site state: the entry reaction's gate, the
-/// turn to the player, the pick and the show. Returns the display delay
-/// when a tweet is shown.
+/// ShowTweet's first part: `CanShowEntryReaction` (`None` when it fails),
+/// `Stop`, then `DoLookAtAsync(player position, GetRotateTime(presenter,
+/// player position), out-quart)`, awaited: `Some(true)` while it turns,
+/// `Some(false)` when there is no turn (no player, or a target at the world
+/// origin).
+fn begin_entry_tweet(world: &mut World, actor: Entity, unit: u32, frame: u32) -> Option<bool> {
+    if !can_show_entry_reaction(world) {
+        return None;
+    }
+    crate::npc::stop_for_external_activity(world, actor);
+    let Some(player) = player_position(world) else {
+        return Some(false);
+    };
+    Some(begin_turn(world, actor, unit, player, None, frame))
+}
+
+/// ShowTweet after its turn: the tweet, then the 3000 ms wait; OnEntrySite's
+/// end when there is none.
+fn entry_tweet(world: &mut World, actor: Entity, unit: u32, frame: u32) {
+    match show_entry_tweet(world, actor, unit, frame) {
+        Some(delay) => set_stage(world, actor, Stage::Tweet { delay }, frame),
+        None => on_entry_site_end(world, actor, unit, frame),
+    }
+}
+
+/// ShowTweet's pick and show. Returns the display delay when a tweet is
+/// shown.
 fn show_entry_tweet(
     world: &mut World,
     actor: Entity,
     unit: u32,
     frame: u32,
 ) -> Option<moly_law::objective::DelayPromise> {
-    if !can_show_entry_reaction(world) {
-        return None;
-    }
-    crate::npc::stop_for_external_activity(world, actor);
-    if let (Some(player), Some(own)) = (
-        player_position(world),
-        world
-            .get::<Transform>(actor)
-            .map(|transform| transform.translation),
-    ) {
-        // DoLookAtAsync(player, GetRotateTime(...)): done at once here.
-        face(world, actor, player - own);
-    }
     let tables = world.get_resource::<crate::npc_tweet::TweetTables>()?;
     let entries = &tables.site_entries;
     let rows: Vec<(i32, i32)> = tables

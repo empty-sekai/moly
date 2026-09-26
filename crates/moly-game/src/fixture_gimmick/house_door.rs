@@ -1,13 +1,14 @@
-//! The house controller's `PlayerOn` and `PlayerOff` lanes, bounded to what
-//! the entry and the door moves play.
+//! The house controller's `PlayerOn`, `PlayerOff` and `NPCOn` lanes, bounded
+//! to what the entry, the door moves and an NPC's entry to home play.
 //!
 //! `HouseView` is a separate component on the house's FixtureView object: it
 //! holds the two door locators and the house Animator. Its controller
 //! (`HouseAnimationController`) has four AnyState trigger transitions on
 //! layer 0 and an empty second layer (no states, weight 0), so only layer 0
 //! can write a pose. The entry and the room-to-home move set `PlayerOff`,
-//! the home-to-room move sets `PlayerOn`; this lane plays exactly those
-//! transitions: 0.25 s fixed, from the state the controller is in (the
+//! the home-to-room move sets `PlayerOn`, an NPC's change-site entry to home
+//! (`HomeSiteEnter`, after its turn) sets `NPCOn`; this lane plays exactly
+//! those transitions: 0.25 s fixed, from the state the controller is in (the
 //! default state `None` has no motion and writes defaults, so its pose is
 //! the bound pose; a finished clip holds its last pose), into a
 //! four-component quaternion clip on the door joint. The clip's
@@ -39,6 +40,7 @@ const SE_EVENT: &str = "OnPlayHouseSE";
 pub(crate) enum HouseTrigger {
     PlayerOn,
     PlayerOff,
+    NpcOn,
 }
 
 impl HouseTrigger {
@@ -46,6 +48,7 @@ impl HouseTrigger {
         match self {
             Self::PlayerOn => "PlayerOn",
             Self::PlayerOff => "PlayerOff",
+            Self::NpcOn => "NPCOn",
         }
     }
 }
@@ -108,6 +111,8 @@ pub(crate) struct HouseDefinition {
     player_off: Arc<DoorProgram>,
     /// Refused on its own: the entry needs only `PlayerOff`.
     player_on: Result<Arc<DoorProgram>, String>,
+    /// Refused on its own, like `PlayerOn`.
+    npc_on: Result<Arc<DoorProgram>, String>,
 }
 
 /// Packages that carry a `HouseView`, keyed by package name. A package whose
@@ -238,6 +243,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
     };
     let player_off = program(HouseTrigger::PlayerOff)?;
     let player_on = program(HouseTrigger::PlayerOn).map(Arc::new);
+    let npc_on = program(HouseTrigger::NpcOn).map(Arc::new);
     Ok(HouseDefinition {
         file,
         view_game_object: view_object
@@ -253,6 +259,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         outside_door: locator(view, transforms, "outsideDoorActionPoint")?,
         player_off: Arc::new(player_off),
         player_on,
+        npc_on,
     })
 }
 
@@ -441,6 +448,8 @@ pub(crate) struct HouseBinding {
     /// program was accepted.
     joint: Entity,
     joint_on: Option<Entity>,
+    /// The `NPCOn` clip's joint when that program was accepted.
+    joint_npc_on: Option<Entity>,
     definition: Arc<HouseDefinition>,
 }
 
@@ -549,8 +558,8 @@ fn bind(
         return Err("bound FixtureView is not the HouseView/Animator object".into());
     }
     let mut stack = vec![view];
-    let (mut outside, mut inside, mut joints, mut joints_on) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut outside, mut inside, mut joints, mut joints_on, mut joints_npc_on) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     while let Some(entity) = stack.pop() {
         if let Some(children) = world.get::<Children>(entity) {
             stack.extend(children.iter());
@@ -582,6 +591,13 @@ fn bind(
         {
             joints_on.push(entity);
         }
+        if definition
+            .npc_on
+            .as_ref()
+            .is_ok_and(|program| program.joint.matches(&definition.file, id))
+        {
+            joints_npc_on.push(entity);
+        }
     }
     let single = |found: &[Entity], label: &str| -> Result<Entity, String> {
         match found {
@@ -607,7 +623,11 @@ fn bind(
         Ok(_) => Some(single(&joints_on, "PlayerOn door joint")?),
         Err(_) => None,
     };
-    for joint in std::iter::once(joint).chain(joint_on) {
+    let joint_npc_on = match &definition.npc_on {
+        Ok(_) => Some(single(&joints_npc_on, "NPCOn door joint")?),
+        Err(_) => None,
+    };
+    for joint in std::iter::once(joint).chain(joint_on).chain(joint_npc_on) {
         if world.get::<Transform>(joint).is_none() {
             return Err("door joint has no Transform".into());
         }
@@ -628,6 +648,7 @@ fn bind(
         inside_door,
         joint,
         joint_on,
+        joint_npc_on,
         definition,
     })
 }
@@ -678,6 +699,11 @@ pub(crate) fn set_trigger(
             (Ok(program), Some(joint)) => (program.clone(), joint),
             (Err(reason), _) => return Err(format!("PlayerOn refused: {reason}")),
             (Ok(_), None) => return Err("PlayerOn joint not bound".into()),
+        },
+        HouseTrigger::NpcOn => match (&binding.definition.npc_on, binding.joint_npc_on) {
+            (Ok(program), Some(joint)) => (program.clone(), joint),
+            (Err(reason), _) => return Err(format!("NPCOn refused: {reason}")),
+            (Ok(_), None) => return Err("NPCOn joint not bound".into()),
         },
     };
     let base = world
