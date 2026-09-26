@@ -88,24 +88,27 @@ pub enum DeliveryActionState {
     Gather = 6,
 }
 
-/// `PublishBirthdayPartyProgressView(state, party, beforePoint, dt)`: what
-/// the screen's gauge reads (the UI lane's).
+/// Event 66 (`UpdateBirthdayPartyProgressView`,
+/// `UpdateBirthdayPartyProgressViewEventData`) as
+/// `PublishBirthdayPartyProgressView(state, siteData, beforeDeliveryPoint,
+/// deltaTime)` builds it (see [`publish`]); the delivery screen reads it.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct DeliveryProgress {
     pub state: DeliveryActionState,
     pub party_id: Option<i32>,
-    pub current_points: i32,
-    /// `CurrentDeliveryPoint - beforeDeliveryPoint`.
-    pub gained_points: i32,
-    pub remaining_items: i32,
-    pub dt: f32,
+    /// `IsProgressUpdate`: state InDelivery and some point added.
+    pub is_progress_update: bool,
+    /// `CurrentMaterialQuantity`: the have-quantity minus the spent count.
+    pub current_material_quantity: i32,
+    /// `BeforeBirthdayDeliveryPoint`: the synchronized points.
+    pub before_point: i32,
+    /// `CurrentBirthdayDeliveryPoint`: synchronized plus unsynchronized.
+    pub current_point: i32,
+    /// `AddBirthdayDeliveryPoint`: `CurrentDeliveryPoint - beforeDeliveryPoint`.
+    pub add_point: i32,
+    /// `AnimationTime`: the frame time, or the first item's animation time.
+    pub animation_time: f32,
 }
-
-/// The screen closed a dialog the flow awaits: the get-resource dialog of a
-/// reward or the honor reward chain. The dialogs are the UI lane's; this
-/// message is their close.
-#[derive(Message, Clone, Copy, Debug)]
-pub struct DeliveryDialogClosed;
 
 /// GameState Delivery (12): set by the pre-action of a visit's first press,
 /// gone with the site.
@@ -299,29 +302,61 @@ impl DeliveryModel {
     }
 }
 
-/// `PublishBirthdayPartyProgressView`.
+/// `DeliverySiteModel.GetFirstAnimationTime`: `(sqrt(v * v + a * 4) - v) /
+/// a` with `v` the minimum rate and `a` the acceleration, in single
+/// precision.
+pub(crate) fn first_animation_time(min: f32, acceleration: f32) -> f32 {
+    ((min * min + acceleration * 4.0).sqrt() - min) / acceleration
+}
+
+/// `PublishBirthdayPartyProgressView(state, siteData, beforeDeliveryPoint,
+/// deltaTime)`: with site data the added points are `CurrentDeliveryPoint -
+/// beforeDeliveryPoint`, the event is a progress update when the state is
+/// InDelivery and the added points are above 0, and the first item of a
+/// delivery (the spent count is 1) of a progress update carries
+/// `GetFirstAnimationTime` instead of the frame time. The event's quantity
+/// and points are filled only for a progress update with site data.
 pub(crate) fn publish(
     progress: &mut MessageWriter<DeliveryProgress>,
     state: DeliveryActionState,
     party: Option<&PartySite>,
     before_points: i32,
     dt: f32,
+    rate: moly_law::delivery::DeliveryRate,
 ) {
-    let (party_id, current, remaining) = match party {
-        Some(p) => (Some(p.id), p.tally.current_points(), p.tally.remaining()),
-        None => (None, 0, 0),
+    let (add, is_progress_update, first) = match party {
+        Some(p) => {
+            let add = p.tally.current_points() - before_points;
+            (
+                add,
+                state == DeliveryActionState::InDelivery && add > 0,
+                p.tally.unsynchronized_cost == 1,
+            )
+        }
+        None => (0, false, false),
+    };
+    let animation_time = if first && is_progress_update {
+        first_animation_time(rate.min, rate.acceleration)
+    } else {
+        dt
+    };
+    let (quantity, before, current) = match (is_progress_update, party) {
+        (true, Some(p)) => (
+            p.tally.remaining(),
+            p.tally.synchronized_points,
+            p.tally.current_points(),
+        ),
+        _ => (0, 0, 0),
     };
     progress.write(DeliveryProgress {
         state,
-        party_id,
-        current_points: current,
-        gained_points: if party.is_some() {
-            current - before_points
-        } else {
-            0
-        },
-        remaining_items: remaining,
-        dt,
+        party_id: party.map(|p| p.id),
+        is_progress_update,
+        current_material_quantity: quantity,
+        before_point: before,
+        current_point: current,
+        add_point: if is_progress_update { add } else { 0 },
+        animation_time,
     });
 }
 
@@ -352,8 +387,16 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     world.resource_mut::<flow::DeliveryFace>().0 = None;
     world.resource_mut::<drops::DeliveryGatherLoop>().cancel();
     world.resource_mut::<drops::DeliveryDropSpawns>().clear();
-    world.resource_mut::<honor::RewardRuns>().cancel();
-    world.resource_mut::<honor::DialogAwait>().open = false;
+    let shown = world.resource_mut::<honor::RewardRuns>().cancel();
+    if !shown.is_empty() {
+        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        for id in &shown {
+            screens.close_dialog(*id);
+            screens.dialog_destroyed(*id);
+        }
+        info!("[delivery] site change: the reward dialogs {shown:?} close with their run");
+    }
+    world.resource_mut::<honor::DialogAwait>().open = None;
     world.resource_mut::<site::DeliverySite>().clear();
     if count > 0 || had_state || was_executing {
         info!(
@@ -375,7 +418,6 @@ impl Plugin for DeliveryPlugin {
         app.add_message::<DeliveryCollision>()
             .add_message::<DeliveryRequest>()
             .add_message::<DeliveryProgress>()
-            .add_message::<DeliveryDialogClosed>()
             .init_resource::<DeliveryModel>()
             .init_resource::<site::DeliverySite>()
             .init_resource::<site::DeliveryAutoplay>()

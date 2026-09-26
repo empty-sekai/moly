@@ -51,11 +51,15 @@
 //! clock, and its reactions (the tree effect's `ParticleSystem.Play()` and
 //! `Stop()`) run through the particle host.
 //!
+//! The pre-action's `MysekaiUtility.ForceResetJoyStick` is the joystick's
+//! forced pointer-up ([`crate::joystick::ForceResetJoystick`]). The
+//! joystick's GameState Delivery arm is unreachable: `DeliveryGameState.
+//! OnEnter` publishes no game-state change.
+//!
 //! Named stand-ins and gaps: the AutoMove state's run clip plays as
-//! the locomotion's dash gait (the harvest AutoMove's stand-in). The
-//! joystick's forced reset and its GameState Delivery arm are the joystick's
-//! (not wired). `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog
-//! of the UI lane's; the panel never replies refreshed.
+//! the locomotion's dash gait (the harvest AutoMove's stand-in).
+//! `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog the root has
+//! no prefab for; the panel never replies refreshed.
 
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::SystemParam;
@@ -352,6 +356,7 @@ pub(crate) fn advance(
                     party.as_ref(),
                     current,
                     0.0,
+                    world.model.rate,
                 );
                 info!(
                     "[delivery] release window: {release_elapsed:.4} s since the release (not below {}) at {:.3} s since the press: EndDeliveryLoop",
@@ -418,8 +423,19 @@ pub(crate) fn advance(
                     "[delivery] ExecuteHarvestSiteRefresh: the refreshed reply's dialog (UI lane)"
                 );
             }
+            // The end action's last publish carries the party with its
+            // current points (nothing added).
             world.model.state = DeliveryActionState::Idle;
-            publish(&mut world.progress, DeliveryActionState::Idle, None, 0, 0.0);
+            let party = world.model.party(party_id).cloned();
+            let current = party.as_ref().map_or(0, |p| p.tally.current_points());
+            publish(
+                &mut world.progress,
+                DeliveryActionState::Idle,
+                party.as_ref(),
+                current,
+                0.0,
+                world.model.rate,
+            );
             world.model.executing = false;
             flow.party = None;
             info!(
@@ -548,15 +564,15 @@ fn execute_delivery(
     };
     world.model.executing = true;
     world.model.rate.start();
-    // ExecuteDeliveryPreAction.
+    // ExecuteDeliveryPreAction: the publish carries no site data.
     world.model.state = DeliveryActionState::InDelivery;
-    let party = world.model.party(party_id).cloned();
     publish(
         &mut world.progress,
         DeliveryActionState::InDelivery,
-        party.as_ref(),
+        None,
         0,
         0.0,
+        world.model.rate,
     );
     if world.game_state.is_none() {
         world.commands.insert_resource(DeliveryGameState);
@@ -822,7 +838,7 @@ fn loop_step(world: &mut FlowWorld, objects: &DeliveryObjects, party_id: i32, dt
     let before_drops = party.tally.total_drop_count();
     let count = rate.step_count(party.tally.unsynchronized_cost, dt);
     let spent = party.tally.spend(count);
-    publish(&mut world.progress, state, Some(party), before_points, dt);
+    publish(&mut world.progress, state, Some(party), before_points, dt, *rate);
     let after_drops = party.tally.total_drop_count();
     if spent > 0 {
         debug!(
@@ -895,12 +911,14 @@ fn delivery_api(
 ) {
     world.model.state = DeliveryActionState::Pending;
     let party = world.model.party(party_id).cloned();
+    let current = party.as_ref().map_or(0, |p| p.tally.current_points());
     publish(
         &mut world.progress,
         DeliveryActionState::Pending,
         party.as_ref(),
-        0,
+        current,
         0.0,
+        world.model.rate,
     );
     let mut rewards = Vec::new();
     let mut is_refreshed = false;

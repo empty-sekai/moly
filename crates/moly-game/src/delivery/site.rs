@@ -22,19 +22,22 @@
 //! enter or exit edge becomes event 68 (`OnCollisionDeliveryObject`), which
 //! this module publishes as [`DeliveryCollision`] for the delivery screen.
 //!
-//! Requests: the delivery screen (the UI lane's) sends
-//! [`DeliveryRequest::Start`] on the delivery button's press and
-//! [`DeliveryRequest::End`] on its release. Named stand-ins: the G key
-//! presses and releases the button while the place circle holds the player
-//! (the screen shows the button only then) and the field takes input; the
-//! Y key closes a dialog the flow awaits. `MOLY_DELIVERY_AUTOPLAY` (off by
+//! Requests: the delivery screen sends [`DeliveryRequest::Start`] on the
+//! delivery button's press and [`DeliveryRequest::End`] on its release.
+//! Named stand-in: the G key presses and releases the button while the
+//! place circle holds the player (the screen shows the button only then)
+//! and the field takes input. The reward dialogs close on the screen
+//! manager's hardware back key (Escape). `MOLY_DELIVERY_AUTOPLAY` (off by
 //! default, WARN when set) is an instrument: `hold[,close]` in seconds; it
 //! walks the player through the joystick's touch stream to each drop on
 //! the ground, then into the place circle, holds the button for `hold`
-//! seconds and releases it, and closes each awaited dialog `close` seconds
-//! (default 1.5) after it opens.
+//! seconds and releases it, and `close` seconds (default 1.5) after an
+//! awaited dialog is shown presses the back key (an Escape key press and
+//! release through the keyboard input stream).
 
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::touch::{TouchInput, TouchPhase};
+use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
@@ -42,10 +45,7 @@ use moly_assets::source_navigation::SourceObjectIdentity;
 use moly_law::action_button::inside_circle;
 use serde_json::Value;
 
-use super::{
-    CollisionEdge, DeliveryCollision, DeliveryDialogClosed, DeliveryModel, DeliveryObjectType,
-    DeliveryRequest,
-};
+use super::{CollisionEdge, DeliveryCollision, DeliveryModel, DeliveryObjectType, DeliveryRequest};
 use crate::fixture_activity_timeline::{
     ReceiverCall, SignalReaction, SignalReceiverBinding, SourceAssetId,
 };
@@ -705,23 +705,18 @@ pub(crate) fn scan(
     }
 }
 
-/// Update: the G key presses and releases the delivery button; Y closes an
-/// awaited dialog (named stand-ins for the delivery screen).
+/// Update: the G key presses and releases the delivery button (the named
+/// stand-in for the delivery screen).
 pub(crate) fn keyboard(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<DeliverySite>,
     eligibility: crate::interaction::InteractionEligibility,
     mut requests: MessageWriter<DeliveryRequest>,
-    mut closes: MessageWriter<DeliveryDialogClosed>,
     mut holding: Local<bool>,
 ) {
     if state.objects.is_none() {
         *holding = false;
         return;
-    }
-    if keys.just_pressed(KeyCode::KeyY) {
-        closes.write(DeliveryDialogClosed);
-        info!("[delivery] Y (stand-in for the dialog's close)");
     }
     if keys.just_pressed(KeyCode::KeyG) && state.in_place() && eligibility.field_input_open() {
         *holding = true;
@@ -743,7 +738,10 @@ pub(crate) struct DeliveryAutoplay {
     walking: bool,
     pressed_at: Option<f32>,
     released: bool,
-    dialog_since: Option<f32>,
+    /// The awaited dialog and when the instrument first saw it.
+    dialog_since: Option<(crate::ui_layers::DialogId, f32)>,
+    /// The back key is down (released on the next frame).
+    back_down: bool,
     /// When the walk toward the drops began; after 30 s the instrument
     /// leaves the remaining drops and walks to the place.
     drops_since: Option<f32>,
@@ -779,8 +777,8 @@ pub(crate) fn autoplay(
     players: Query<&Transform, With<PlayerControlled>>,
     drops: Query<(&Transform, &super::drops::DeliveryDropItem), Without<PlayerControlled>>,
     mut touches: MessageWriter<TouchInput>,
+    mut keys: MessageWriter<KeyboardInput>,
     mut requests: MessageWriter<DeliveryRequest>,
-    mut closes: MessageWriter<DeliveryDialogClosed>,
     navigation: Option<Res<crate::player_fixture_action::PlayerFixtureNavigation>>,
 ) {
     let Some((hold, close)) = autoplay_config() else {
@@ -791,40 +789,70 @@ pub(crate) fn autoplay(
         warn!("[delivery-autoplay] MOLY_DELIVERY_AUTOPLAY is set: an instrument walks the player to the drops and into the place circle, holds the delivery button {hold} s and closes each awaited dialog after {close} s");
     }
     let now = time.elapsed_secs();
-    // Dialog closes, whenever one is awaited.
-    if awaiting.open {
-        let since = *run.dialog_since.get_or_insert(now);
-        if now - since >= close {
-            run.dialog_since = None;
-            closes.write(DeliveryDialogClosed);
-            info!(
-                "[delivery-autoplay] closes the awaited dialog ({:.2} s after it opened)",
-                now - since
-            );
+    let Ok((window_entity, window)) = windows.single() else {
+        return;
+    };
+    // The back key, whenever a dialog is awaited: pressed, then released on
+    // the next frame, through the keyboard input stream the screen manager's
+    // back key reads.
+    let escape = |keys: &mut MessageWriter<KeyboardInput>, state: ButtonState| {
+        keys.write(KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state,
+            text: None,
+            repeat: false,
+            window: window_entity,
+        });
+    };
+    if run.back_down {
+        run.back_down = false;
+        escape(&mut keys, ButtonState::Released);
+    }
+    match awaiting.open {
+        Some(dialog) => {
+            let since = match run.dialog_since {
+                Some((seen, since)) if seen == dialog => since,
+                _ => {
+                    run.dialog_since = Some((dialog, now));
+                    now
+                }
+            };
+            if now - since >= close && !run.back_down {
+                // Again after another `close` seconds while it stays
+                // shown (the input manager's interval gate can block a
+                // press).
+                run.dialog_since = Some((dialog, now));
+                run.back_down = true;
+                escape(&mut keys, ButtonState::Pressed);
+                info!(
+                    "[delivery-autoplay] presses the back key for the awaited dialog {dialog:?} ({:.2} s after it was shown)",
+                    now - since
+                );
+            }
         }
-    } else {
-        run.dialog_since = None;
+        None => run.dialog_since = None,
     }
     let Some(objects) = state.objects.as_ref() else {
         return;
     };
     let visit = state.seen_epoch;
     if run.visit != visit {
+        // A pressed back key keeps its release.
+        let back_down = run.back_down;
         *run = DeliveryAutoplay {
             warned: true,
             visit,
+            back_down,
             ..default()
         };
     }
     if !state.arrived || model.site_id.is_none() {
         return;
     }
-    let (Ok((window_entity, window)), Some(root_canvas), Ok(camera), Ok(player)) = (
-        windows.single(),
-        root_canvas.as_deref(),
-        cameras.single(),
-        players.single(),
-    ) else {
+    let (Some(root_canvas), Ok(camera), Ok(player)) =
+        (root_canvas.as_deref(), cameras.single(), players.single())
+    else {
         return;
     };
     const FINGER: u64 = 99031;

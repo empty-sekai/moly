@@ -477,7 +477,15 @@ pub(crate) fn scan(
         if inside {
             model.collision_drops.push(uid);
             model.state = DeliveryActionState::Gather;
-            publish(&mut progress, DeliveryActionState::Gather, None, 0, 0.0);
+            let rate = model.rate;
+            publish(
+                &mut progress,
+                DeliveryActionState::Gather,
+                None,
+                0,
+                0.0,
+                rate,
+            );
             info!(
                 "[delivery-drop] OnCollisionEnterDropItem uid {uid}: player {:.3} m away (radius {}); state Gather",
                 player.translation.distance(transform.translation),
@@ -684,6 +692,7 @@ pub(crate) fn gather_loop(
         None,
         0,
         0.0,
+        model.rate,
     );
     let rewards = mock.gather(&items);
     for item in &items {
@@ -711,7 +720,7 @@ fn after_gather(
         DeliveryActionState::Gather
     };
     model.state = state;
-    publish(progress, state, None, 0, 0.0);
+    publish(progress, state, None, 0, 0.0, model.rate);
     info!(
         "[delivery-drop] gather loop: state {state:?}; tallies {:?}",
         model
