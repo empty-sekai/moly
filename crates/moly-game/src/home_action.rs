@@ -255,7 +255,9 @@ struct Sequence {
     action: HomeAction,
     target: Option<FixtureTarget>,
     phase: Phase,
-    /// The phase began this frame (a delay counts from the next frame).
+    /// The sequence started in this frame's call, before the phase check:
+    /// its wait does not count this frame's delta. (A later phase is made
+    /// after the check and counts from the next frame by itself.)
     fresh: bool,
     started: f32,
     epoch: u64,
@@ -836,8 +838,8 @@ fn end(world: &mut World, actions: &mut HomeActions, sequence: &mut Sequence) ->
             info!("[home-action] t={t:.3} SetInterceptFlag(true), ChangeState(Idle); SetNoticeWait: no counterpart");
             info!("[home-action] t={t:.3} SketchUtility.ShowSketchResultDialog and UpdateInfo: the screen's owner; no time passes here");
             camera_back(world, sequence);
+            // Created after this frame's check: counts from the next frame.
             sequence.phase = Phase::ClearDelay(Delay::new(SKETCH_CLEAR_DELAY));
-            sequence.fresh = true;
             false
         }
     }
@@ -915,8 +917,12 @@ pub(crate) fn advance(world: &mut World) {
             Phase::Wait(_) => {
                 if delay_done {
                     begin_motion(world, &mut sequence);
+                    // Created in this frame after this frame's check: it
+                    // counts from the next frame's delta.
                     sequence.phase = Phase::Hold(Delay::new(sequence.action.hold()));
-                    sequence.fresh = true;
+                    // The clip's events at its start time fire in the frame
+                    // it starts.
+                    dispatch_events(world, actions, &mut sequence);
                 }
             }
             Phase::Hold(_) => {
