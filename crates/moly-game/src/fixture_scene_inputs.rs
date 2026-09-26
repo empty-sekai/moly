@@ -142,6 +142,16 @@ struct Signature {
     rows: Vec<ObservedRow>,
 }
 
+/// The extractor's mark for a fixture bundle that holds no FixtureBundleMeta
+/// at all (as opposed to one it could not read).
+const NO_META: &str = "no fixture_metadata asset in this bundle";
+
+/// A bundle with no FixtureBundleMeta. FixtureFactory then creates a fresh
+/// meta whose stack, motion, cutscene and using-grid arrays are all 0 x 0.
+pub(crate) fn bundle_has_no_meta(row: &Value) -> bool {
+    row["hasMeta"].as_bool() == Some(false) && row["readError"].as_str() == Some(NO_META)
+}
+
 /// Populated by the existing fixture-areas parser. It neither reloads the
 /// document nor substitutes motion/cutscene arrays for AddUsingGrid.
 #[derive(Resource, Default)]
@@ -158,6 +168,9 @@ impl FixtureFloorAreas {
         let mut entries = HashMap::new();
         for (name, row) in packages {
             let parsed = (|| {
+                if bundle_has_no_meta(row) {
+                    return Ok(GridAreaData::from_meta(0, 0, |_, _| false));
+                }
                 if row["hasMeta"].as_bool() != Some(true) {
                     return Err("fixture metadata has not been supplied".to_owned());
                 }

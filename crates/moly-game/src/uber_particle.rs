@@ -1327,14 +1327,17 @@ pub(crate) fn advance_fixture_particles(
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
     time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut camera_speed: Local<billboard::CameraVelocity>,
 ) {
     let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
     };
+    let camera_velocity = camera_speed.update(camera_transform.translation(), crate::particle_runtime::source_delta_time(time.delta()));
     let Some(viewport) = camera.physical_viewport_size() else {
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
     };
-    let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32, projection.near);
+    let mut basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32, projection.near);
+    basis.velocity = camera_velocity;
     // Time.deltaTime (clamped at Time.maximumDeltaTime, floored at 1e-5 s,
     // rounded once to float) and Time.unscaledDeltaTime, as the weather host
     // reads them.

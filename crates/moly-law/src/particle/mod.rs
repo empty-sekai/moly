@@ -74,6 +74,7 @@ mod armf;
 pub mod trail;
 pub mod trail_geometry;
 pub mod mesh_transform;
+pub mod stretch_geometry;
 
 #[cfg(test)]
 mod corpus;

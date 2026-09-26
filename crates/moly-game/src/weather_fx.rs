@@ -316,6 +316,7 @@ impl WeatherFxState {
                         crate::source_billboard::Mode::Billboard => "source_billboard",
                         crate::source_billboard::Mode::Horizontal => "source_horizontal_billboard",
                         crate::source_billboard::Mode::Vertical => "source_vertical_billboard",
+                        crate::source_billboard::Mode::Stretch(_) => "source_stretch",
                     },
                     crate::particle_runtime::Geometry::Mesh(_) => "source_mesh",
                     crate::particle_runtime::Geometry::Billboard { .. } => "legacy_billboard",
@@ -1851,7 +1852,7 @@ fn judge_in_host(
         },
     };
     let render_mode = renderer.get("renderMode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "VerticalBillboard" | "Mesh") {
+    if !matches!(render_mode, "Billboard" | "HorizontalBillboard" | "VerticalBillboard" | "Stretch" | "Mesh") {
         tally.render_mode.push(format!("unsupported source render mode {render_mode}"));
         return None;
     }
@@ -2262,7 +2263,8 @@ fn judge_in_host(
     let max_particle_size = renderer.get("maxParticleSize").and_then(Value::as_f64);
     let min_particle_size = renderer.get("minParticleSize").and_then(Value::as_f64);
     let allow_roll = renderer.get("allowRoll").and_then(Value::as_bool);
-    if renderer.get("normalDirection").and_then(Value::as_f64) != Some(1.0) {
+    let normal_direction = renderer.get("normalDirection").and_then(Value::as_f64);
+    if render_mode != "Stretch" && normal_direction != Some(1.0) {
         tally.render_mode.push("source billboard normalDirection other than one is not yet verified".into()); return None;
     }
     if render_mode != "Mesh" && renderer.get("flip").and_then(Value::as_array)
@@ -2289,6 +2291,31 @@ fn judge_in_host(
         || max_particle_size > f32::MAX as f64 || pivot.iter().any(|v| !v.is_finite()) {
         tally.clamp_missing += 1; return None;
     }
+    // The Stretch body reads its three scales, the normal direction and the
+    // freeform flag (it reads no pivot). The freeform path, with its
+    // rotate-with-stretch flag, is not transcribed; and the engine multiplies
+    // the drawn velocity by the velocity module's speed modifier where that is
+    // not the constant one, which the drawn instances here do not carry.
+    let stretch = if render_mode == "Stretch" {
+        let finite = |key: &str| renderer.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v as f32);
+        let (Some(velocity_scale), Some(length_scale), Some(camera_velocity_scale), Some(normal_direction)) =
+            (finite("velocityScale"), finite("lengthScale"), finite("cameraVelocityScale"), normal_direction.filter(|v| v.is_finite())) else {
+            tally.render_mode.push("Stretch renderer scales or normal direction not exported".into()); return None;
+        };
+        match renderer.get("freeformStretching").and_then(Value::as_bool) {
+            Some(false) => {}
+            Some(true) => { tally.render_mode.push("Stretch freeform stretching is not transcribed".into()); return None; }
+            None => { tally.render_mode.push("Stretch freeform flag not exported".into()); return None; }
+        }
+        if emitter.velocity_over_lifetime.as_ref()
+            .is_some_and(|v| v.speed_modifier != moly_law::particle::MinMaxCurve::Constant(1.0)) {
+            tally.render_mode.push("Stretch with a velocity speed modifier other than the constant one: the drawn velocity carries it and is not transcribed".into());
+            return None;
+        }
+        Some(crate::source_billboard::Stretch { velocity_scale, length_scale, camera_velocity_scale, normal_direction: normal_direction as f32 })
+    } else {
+        None
+    };
     // The typed contract owns authored cone parameters for both cone modes.
     let cone_angle = if matches!(shape_type, "Cone" | "ConeVolume") {
         match emitter.shape.as_ref().and_then(|s| s.controls.angle) {
@@ -2537,9 +2564,10 @@ fn judge_in_host(
             PlannedGeometry::EmptyMesh { alignment: mesh_alignment.expect("validated Mesh alignment"), scaling, pivot: Vec3::from_array(pivot) }
         } else {
             PlannedGeometry::Billboard(crate::source_billboard::Draw {
-                mode: match render_mode {
-                    "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
-                    "VerticalBillboard" => crate::source_billboard::Mode::Vertical,
+                mode: match (render_mode, stretch) {
+                    ("HorizontalBillboard", _) => crate::source_billboard::Mode::Horizontal,
+                    ("VerticalBillboard", _) => crate::source_billboard::Mode::Vertical,
+                    ("Stretch", Some(stretch)) => crate::source_billboard::Mode::Stretch(stretch),
                     _ => crate::source_billboard::Mode::Billboard,
                 },
                 alignment: mesh_alignment.expect("validated source Billboard alignment"),
@@ -3637,6 +3665,7 @@ pub(crate) fn advance(
     site: Option<Res<SiteActive>>,
     mut environment_root: ResMut<EnvironmentRoot>,
     cannon: Option<Res<crate::site_move::CannonEnvironmentWrite>>,
+    mut camera_speed: Local<billboard::CameraVelocity>,
 ) {
     // Follow every site change, also on frames that draw nothing, so the root
     // sees each move the source would make.
@@ -3660,6 +3689,8 @@ pub(crate) fn advance(
             animator.advance_frame(frame.0, dt);
         }
     }
+    // The camera's velocity follows every render, whether or not a system draws.
+    let camera_velocity = cameras.iter().next().map_or(Vec3::ZERO, |(t, ..)| camera_speed.update(t.translation(), dt));
     if state.as_ref().is_none_or(|s| s.live.is_empty()) && retiring.live.is_empty() { return; }
     // 相机拿不到就整帧跳过：不造替身机位（上一帧的属性池还在，几何
     // 不会闪成错的）。
@@ -3672,13 +3703,14 @@ pub(crate) fn advance(
     let Some(viewport) = camera.physical_viewport_size() else {
         return;
     };
-    let basis = billboard::basis_from_matrix(
+    let mut basis = billboard::basis_from_matrix(
         camera_transform.affine().matrix3.into(),
         camera_transform.translation(),
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
         perspective.near,
     );
+    basis.velocity = camera_velocity;
     // Without an active site the frame the anchors are expressed in does not
     // exist (a site switch is in progress); skip the frame like a missing camera.
     let Some(active_site) = site.as_deref() else {

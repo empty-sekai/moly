@@ -53,7 +53,7 @@ fn setup(mut commands:Commands, mut meshes:ResMut<Assets<Mesh>>,
     let tex=images.add(Image::new_fill(Extent3d {width:1,height:1,depth_or_array_layers:1},
         TextureDimension::D2,&[255u8;4],TextureFormat::Rgba8UnormSrgb,RenderAssetUsages::all()));
     let basis=crate::billboard::CameraBasis {position:Vec3::ZERO,forward:Vec3::NEG_Z,right:Vec3::X,
-        up:Vec3::Y,fov_y:std::f32::consts::FRAC_PI_2,aspect:1.0,near:0.3};
+        up:Vec3::Y,fov_y:std::f32::consts::FRAC_PI_2,aspect:1.0,near:0.3,velocity:Vec3::ZERO};
     // Columns: soft+emission, hard+HDR emission (source ARGB32 clamps to 1),
     // soft+NO emission area, occluded. A half-float effect target fails this test.
     for (i,(x,z,soft,area)) in [(-1.5,-2.0,true,true),(-0.5,-2.0,false,true),
