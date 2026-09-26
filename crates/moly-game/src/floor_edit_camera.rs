@@ -64,9 +64,14 @@
 //!   moves the fixture (the edit pointer's rule), so the camera drag runs
 //!   only without a selection.
 //! - Pinch comes from the mouse wheel, the product's pinch input.
-//! - The focus completion callback (`onFocusCompleted`) is not ported; the
-//!   tutorial focus (`FocusOnTutorialLayoutEdit`) is out of scope (the
-//!   product has no tutorial).
+//! - The focus tween's completion callback: `OnFocusOnLayoutEdit` passes the
+//!   event's `OnFocusCompleted` to `DoTweenCameraSetting`, and both of the
+//!   floor editor's pick and put events (`SelectFixture` and `PutFixture`)
+//!   are built with no callback, so [`focus`] takes none. The callers that
+//!   do pass one are the house selector (`OnReceiveHouseSelectorEvent`, which
+//!   waits until the focus completes), the fence and road planning states
+//!   and the tutorial; none of them is in the product (the tutorial is out of
+//!   scope), and a caller that ports one needs the completion added here.
 //! - The private model lives for the app run (the source's lives as long as
 //!   its field camera object).
 
