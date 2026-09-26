@@ -257,6 +257,11 @@ pub struct FixtureMaterial {
     /// JP `_ENABLE_CRYSTAL_FIXTURE` variant (main pass only). Kept outside
     /// [`FixtureMaterialKey`]: that key is shared with the emission pass.
     pub crystal: Option<CrystalParams>,
+    /// A Basic material on a site scene: its textures come from the site
+    /// sidecar as plain images and are sampled like every site material, with
+    /// the shared trilinear repeat sampler (the sidecar carries no sampler
+    /// settings). Furniture keeps the sampler the glb authored.
+    pub site_sampler: bool,
 }
 
 /// The crystal variant's material values, read by the main pass only.
@@ -350,6 +355,7 @@ impl AsBindGroup for FixtureMaterial {
         SRes<SiteEnvGpuBuffer>,
         SRes<RenderAssets<GpuImage>>,
         SRes<bevy::render::texture::FallbackImage>,
+        SRes<crate::render::gpu::SharedSamplers>,
     );
 
     fn label() -> &'static str {
@@ -360,7 +366,7 @@ impl AsBindGroup for FixtureMaterial {
         &self,
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
-        (env_buffer, images, fallback): &mut SystemParamItem<'_, '_, Self::Param>,
+        (env_buffer, images, fallback, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -389,7 +395,10 @@ impl AsBindGroup for FixtureMaterial {
                     main.texture_view.clone(),
                 ),
             ),
-            (3, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, main.sampler.clone())),
+            (3, OwnedBindingResource::Sampler(
+                SamplerBindingType::Filtering,
+                if self.site_sampler { samplers.repeat_linear.clone() } else { main.sampler.clone() },
+            )),
             // binding 4：两条质感分支的参数（分支关着的变体不读它，照绑
             // ——布局是全变体共享的，多的绑定合法）。
             (4, OwnedBindingResource::Data(OwnedData(self.shading_branch_bytes()))),
@@ -1035,6 +1044,7 @@ fn resolve_basic(
             reflection_power,
             reflection_intensity,
             crystal,
+            site_sampler: false,
         },
         attribute,
         emission,
@@ -1043,6 +1053,67 @@ fn resolve_basic(
         reflection_needs_cubemap,
         crystal_blocked,
         mask_index,
+    })
+}
+
+/// A `Mysekai/Fixture/Basic` material authored on a site scene: the site
+/// sidecar slot instead of glb extras, the same resolution as the furniture
+/// path. The slot is rewritten into the extras shape `resolve_basic` reads
+/// (floats, colours, the valid keywords, the usage float, the non-empty
+/// texture slots); the window-outside arm has no stencil writer on a site and
+/// is refused there by the same rule. Site textures keep the site family's
+/// texture handling (see [`FixtureMaterial::site_sampler`]).
+pub(crate) struct SiteBasic {
+    pub material: FixtureMaterial,
+    /// `_EmissionMaskTex` is a non-empty slot of the material.
+    pub has_mask: bool,
+    pub bright: f32,
+    pub dark: f32,
+}
+
+pub(crate) fn resolve_site_basic(
+    slot: &moly_law::material::MaterialSlot,
+    main_tex: Handle<Image>,
+) -> Result<SiteBasic, String> {
+    let floats: serde_json::Map<String, serde_json::Value> = slot
+        .floats
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::json!(*value as f64)))
+        .collect();
+    let colors: serde_json::Map<String, serde_json::Value> = slot
+        .colors
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::json!((*value).map(|c| c as f64))))
+        .collect();
+    let textures: serde_json::Map<String, serde_json::Value> = slot
+        .textures
+        .iter()
+        .map(|(key, index)| (key.clone(), serde_json::json!(*index)))
+        .collect();
+    let mut extras = serde_json::json!({
+        "floats": floats,
+        "colors": colors,
+        "validKeywords": slot.keywords,
+        "textures": textures,
+    });
+    if let Some(usage) = slot.floats.get("_FixtureShaderUsage") {
+        extras["fixtureShaderUsage"] = serde_json::json!(*usage as f64);
+    }
+    let resolved = resolve_basic(&slot.name, &extras, main_tex, None, None)?;
+    if !resolved.unported_keywords.is_empty() {
+        return Err(format!(
+            "站点上的家具材质 {} 带未移植 keyword {:?}",
+            slot.name, resolved.unported_keywords
+        ));
+    }
+    let mut material = resolved.material;
+    material.site_sampler = true;
+    Ok(SiteBasic {
+        material,
+        has_mask: resolved.mask_index.is_some(),
+        // Missing ints take the shader default 0, as on the furniture path.
+        bright: resolved.emission.bright.unwrap_or(0.0) as f32,
+        dark: resolved.emission.dark.unwrap_or(0.0) as f32,
     })
 }
 
@@ -1076,6 +1147,7 @@ fn resolve_fence(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>
             },
             main_tex, blend: false, fresnel_power: 0.0, fresnel_color: [0.0; 4], reflection_power: 0.0, reflection_intensity: 0.0,
             crystal: None,
+            site_sampler: false,
         },
         // GetAttribute maps Fence directly to 5, without the Basic usage/blend table.
         attribute: 5, emission: EmissionInts { bright: Some(0.0), dark: Some(0.0) },
@@ -1117,6 +1189,7 @@ fn resolve_rug(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) 
                 local_edge_threshold: 0.0, local_edge_smoothness: 0.0, uv_v_flip: 1.0, clip_corners: [[0.0; 3]; 4] },
             main_tex, blend, fresnel_power: 0.0, fresnel_color: [0.0; 4], reflection_power: 0.0, reflection_intensity: 0.0,
             crystal: None,
+            site_sampler: false,
         },
         attribute: if blend { 29 } else { 28 },
         emission: EmissionInts { bright: extras_float(extras, "_BrightPhenomenaEmission"), dark: extras_float(extras, "_DarkPhenomenaEmission") },
@@ -2410,6 +2483,7 @@ pub struct FixtureMaterialPlugin;
 impl Plugin for FixtureMaterialPlugin {
     fn build(&self, app: &mut App) {
         crate::gpu_image_release::install(app);
+        crate::render::gpu::install_shared_samplers(app);
         crate::gpu_image_release::prepare_after_images::<FixtureMaterial>(app);
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)

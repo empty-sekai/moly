@@ -113,6 +113,9 @@ pub const DROPITEM_SHADER_NAME: &str = "Mysekai/DropItem";
 pub const UI_UBER_SHADER_NAME: &str = "Mysekai/Effect/UI-Uber";
 /// TreasureBox family (the base shape of the two treasure harvest objects).
 pub const TREASUREBOX_SHADER_NAME: &str = "Mysekai/TreasureBox";
+/// The furniture Basic shader, also authored on site props (the festival
+/// garden's birthday tree). Drawn with the furniture material.
+pub const FIXTURE_BASIC_SHADER_NAME: &str = "Mysekai/Fixture/Basic";
 
 /// 材质 uniform 的槽数与字节数。槽序是本文件与
 /// `shaders/site_material.wgsl` 里 `SiteParams` 结构体之间的契约，两边同改。
@@ -1857,6 +1860,29 @@ fn resolve_ui_uber(
     })
 }
 
+/// A furniture Basic material on a site: the furniture resolution on the
+/// sidecar slot, textures by the sidecar's URIs. With `_EmissionMaskTex`, the
+/// entity also joins the furniture emission pass (the program's second target).
+fn resolve_fixture_basic(
+    sidecar: &SiteSidecar,
+    slot: &MaterialSlot,
+    load_texture: &dyn Fn(&str) -> Handle<Image>,
+) -> Result<PlannedMaterial, String> {
+    let main_tex = read_main_tex("Fixture/Basic", sidecar, slot, load_texture)?;
+    let basic = crate::fixture_material::resolve_site_basic(slot, main_tex)?;
+    let emission = if basic.has_mask {
+        let index = texture_slot(slot, "_EmissionMaskTex")
+            .ok_or_else(|| format!("Fixture/Basic 材质 {} 缺 _EmissionMaskTex 槽", slot.name))?;
+        let uri = sidecar.texture_uris.get(index).ok_or_else(|| {
+            format!("Fixture/Basic 材质 {} 的 _EmissionMaskTex 下标越界", slot.name)
+        })?;
+        Some((load_texture(uri), basic.bright, basic.dark))
+    } else {
+        None
+    };
+    Ok(PlannedMaterial::FixtureBasic { material: basic.material, emission })
+}
+
 // ---- 换装 ----
 
 /// 已请求装载的站点 sidecar。
@@ -1879,7 +1905,34 @@ pub struct SiteMaterialsSwapped;
 /// 一条换装计划：解析好的站点材质与逐实体要求。
 struct Planned {
     name: String,
-    material: SiteMaterial,
+    material: PlannedMaterial,
+}
+
+/// A site material is drawn by its family's material; a furniture Basic
+/// material authored on a site is drawn by the furniture material, with its
+/// second colour target in the furniture emission pass when it has a mask.
+enum PlannedMaterial {
+    Site(SiteMaterial),
+    FixtureBasic {
+        material: crate::fixture_material::FixtureMaterial,
+        /// `(_EmissionMaskTex, bright int, dark int)` when the slot is bound.
+        emission: Option<(Handle<Image>, f32, f32)>,
+    },
+}
+
+impl PlannedMaterial {
+    fn textures(&self) -> Vec<&Handle<Image>> {
+        match self {
+            Self::Site(material) => std::iter::once(&material.main_tex)
+                .chain(material.overlay_tex.iter())
+                .chain(material.overlay2nd_tex.iter())
+                .chain(material.leaf_mask_tex.iter())
+                .collect(),
+            Self::FixtureBasic { material, emission } => std::iter::once(&material.main_tex)
+                .chain(emission.as_ref().map(|(mask, _, _)| mask))
+                .collect(),
+        }
+    }
 }
 
 /// glb 材质句柄的归类：换装的指向 plan 下标，其余保留原材质、按桶计数。
@@ -1923,6 +1976,8 @@ struct SwapTally {
     dropitem_entities: usize,
     ui_uber_materials: usize,
     ui_uber_entities: usize,
+    fixture_basic_materials: usize,
+    fixture_basic_entities: usize,
     other_entities: usize,
     /// 具名拒绝：族门/必需槽/keyword 域/值域不过。
     refused: Vec<String>,
@@ -1962,6 +2017,7 @@ fn switch_materials(
     gltfs: Res<Assets<Gltf>>,
     json: Res<Assets<MolyJson>>,
     mut materials: ResMut<Assets<SiteMaterial>>,
+    mut fixture_materials: ResMut<Assets<crate::fixture_material::FixtureMaterial>>,
     site: Option<Res<SiteAssets>>,
     parts: Query<(Entity, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
     mut plan: Local<Option<(bevy::asset::AssetId<Gltf>, String, SwapPlan)>>,
@@ -1998,11 +2054,7 @@ fn switch_materials(
     // 等贴图到齐：换装早于贴图到位会让实体闪回默认材质。装载失败具名 panic。
     let mut all_loaded = true;
     for item in &state.planned {
-        let textures = std::iter::once(&item.material.main_tex)
-            .chain(item.material.overlay_tex.iter())
-            .chain(item.material.overlay2nd_tex.iter())
-            .chain(item.material.leaf_mask_tex.iter());
-        for texture in textures {
+        for texture in item.material.textures() {
             match server.load_state(texture) {
                 LoadState::Failed(err) => {
                     panic!("材质 {} 的贴图装载失败：{err:?}", item.name)
@@ -2035,7 +2087,36 @@ fn switch_materials(
         match classification.map(|entry| entry.colour) {
             Some(GltfClass::Swap(index)) => {
                 let item = &state.planned[index];
-                let site_handle = materials.add(item.material.clone());
+                let site_material = match &item.material {
+                    PlannedMaterial::Site(material) => material,
+                    PlannedMaterial::FixtureBasic { material, emission } => {
+                        let handle = fixture_materials.add(material.clone());
+                        for entity in entities {
+                            let mut target = commands.entity(*entity);
+                            target
+                                .remove::<MeshMaterial3d<StandardMaterial>>()
+                                .insert(MeshMaterial3d(handle.clone()));
+                            if let Some((mask, bright, dark)) = emission {
+                                target.insert(crate::fixture_emission::FixtureEmission {
+                                    force_emission: false,
+                                    mask: mask.clone(),
+                                    main_tex: material.main_tex.clone(),
+                                    params: material.params,
+                                    key: material.key,
+                                    blend: material.blend,
+                                    bright: *bright,
+                                    dark: *dark,
+                                });
+                            }
+                        }
+                        if !entities.is_empty() {
+                            state.tally.fixture_basic_materials += 1;
+                            state.tally.fixture_basic_entities += entities.len();
+                        }
+                        continue;
+                    }
+                };
+                let site_handle = materials.add(site_material.clone());
                 let mut swapped_entities = 0;
                 for entity in entities {
                     commands
@@ -2046,7 +2127,7 @@ fn switch_materials(
                 }
                 if swapped_entities > 0 {
                     let tally = &mut state.tally;
-                    let (materials_count, entities_count) = match item.material.key.family {
+                    let (materials_count, entities_count) = match site_material.key.family {
                         SiteFamily::FieldObject => {
                             let r = (&mut tally.fieldobject_materials, &mut tally.fieldobject_entities);
                             r
@@ -2080,8 +2161,8 @@ fn switch_materials(
     info!(
         "{scene} 材质换装：FieldObject {} 材质 {} 实体，Ground {} 材质 {} 实体，\
          Tree {} 材质 {} 实体，Water {} 材质 {} 实体，Ground-Birthday {} 材质 {} 实体，\
-         Object {} 材质 {} 实体，DropItem {} 材质 {} 实体，UI-Uber {} 材质 {} 实体；\
-         其他 {} 实体",
+         Object {} 材质 {} 实体，DropItem {} 材质 {} 实体，UI-Uber {} 材质 {} 实体，\
+         Fixture/Basic {} 材质 {} 实体；其他 {} 实体",
         state.tally.fieldobject_materials,
         state.tally.fieldobject_entities,
         state.tally.ground_materials,
@@ -2098,6 +2179,8 @@ fn switch_materials(
         state.tally.dropitem_entities,
         state.tally.ui_uber_materials,
         state.tally.ui_uber_entities,
+        state.tally.fixture_basic_materials,
+        state.tally.fixture_basic_entities,
         state.tally.other_entities,
     );
     if !state.tally.refused.is_empty() {
@@ -2176,7 +2259,7 @@ fn build_swap_plan(
                         Ok(material) => {
                             planned.push(Planned {
                                 name: slot.name.clone(),
-                                material,
+                                material: PlannedMaterial::Site(material),
                             });
                             GltfClass::Swap(planned.len() - 1)
                         }
@@ -2227,6 +2310,16 @@ fn build_swap_plan(
                         &mut planned,
                         &mut tally,
                     ),
+                    FIXTURE_BASIC_SHADER_NAME => match resolve_fixture_basic(sidecar, slot, &load) {
+                        Ok(material) => {
+                            planned.push(Planned { name: slot.name.clone(), material });
+                            GltfClass::Swap(planned.len() - 1)
+                        }
+                        Err(reason) => {
+                            tally.refused.push(reason);
+                            GltfClass::Retain
+                        }
+                    },
                     // 其他（URP/Lit、粒子族等）：保留。
                     _ => GltfClass::Retain,
                 }
