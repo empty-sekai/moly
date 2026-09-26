@@ -907,7 +907,7 @@ fn lifetime_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsEr
     min_max_curve(v, ctx)
 }
 
-fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsError> {
+pub(crate) fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: MinMaxCurve object missing")))?;

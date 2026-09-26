@@ -466,7 +466,8 @@ fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Run
         "startDelay": {"mode": "constant", "value": config.get("start_delay").cloned().unwrap_or(json!(0.0))},
         "ringBufferMode": 0, "ringBufferLoopRange": [0.0, 1.0],
         "maxParticles": config["maximum"], "start": start.clone(),
-        "emission": {"rateOverTime": {"mode": "constant", "value": config["rate_time"]},
+        "emission": {"rateOverTime": config.get("rateOverTime").cloned()
+                .unwrap_or_else(|| json!({"mode": "constant", "value": config["rate_time"]})),
             "rateOverDistance": {"mode": "constant", "value": config["rate_distance"]},
             "bursts": config.get("bursts").cloned().unwrap_or(json!([]))},
         "shapeEnabled": false,
@@ -676,6 +677,37 @@ fn births_receipt_matches_native_rows() {
             println!("control {path}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
             assert!(tally.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
         }
+    }
+}
+
+/// A curve-mode rate over time (the gate-flash emission blocks and three
+/// synthetic ones: the optimized polynomial, two curves, a non-looping end)
+/// against the native Update1b frames: every frame through the product frame
+/// entry, the emission state and every particle compared. The native control
+/// rows prove the curve is consumed (the constant rate 45 changes the rows)
+/// and that the rows read a static initializer (the identity cleared changes
+/// them); a bit-flipped receipt must mismatch.
+#[test]
+#[ignore = "MOLY_EMISSION_CURVE_RECEIPT must identify the JP curve-rate receipt"]
+fn emission_curve_receipt_matches_native_rows() {
+    let receipt = read("MOLY_EMISSION_CURVE_RECEIPT");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_EMISSION_CURVE_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0, "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    assert!(receipt["k1VersusE1DifferingFrames"].as_u64().unwrap() > 0);
+    assert!(receipt["staticInitializers"]["e1VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    if let Some(path) = std::env::var_os("MOLY_EMISSION_CURVE_BITFLIP") {
+        let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let (_, tally, rotation) = replay_modules(&control, None);
+        println!("bitflip: {} mismatched frames", tally.mismatched_frames + rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "the bit-flipped receipt must mismatch");
     }
 }
 
