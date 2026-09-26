@@ -300,13 +300,15 @@ impl Default for Published {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+/// Null until a game has started (and on native, which has no linear
+/// memory); then the linear memory size, at most 4 GiB on wasm32.
 fn wasm_bytes() -> Value {
-    json!(core::arch::wasm32::memory_size::<0>() as u64 * 65_536)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn wasm_bytes() -> Value {
+    if !game_mode_active() {
+        return Value::Null;
+    }
+    #[cfg(target_arch = "wasm32")]
+    return json!(core::arch::wasm32::memory_size::<0>() as u64 * 65_536);
+    #[cfg(not(target_arch = "wasm32"))]
     Value::Null
 }
 
