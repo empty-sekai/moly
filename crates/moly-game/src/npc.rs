@@ -695,6 +695,10 @@ pub struct RouteStops {
     /// neither completes nor fails while the state is Talk, and a local fit
     /// (a timed lerp and its rotate) runs to its end regardless of the state.
     suspended: Option<MotionPhase>,
+    /// A route Rest ended under a player talk: the next leg changed the state
+    /// from Talk to AutoMove and started the agent again, so the talk's hold
+    /// no longer holds this move (see [`advance`]).
+    released_from_talk: bool,
     /// The NPC's navigation agent in the engine's crowd.
     crowd: CrowdMotion,
 }
@@ -2169,9 +2173,13 @@ pub(crate) fn declare_navigation_action(
 /// A player talk does not end the move: the talk state stops a navigation
 /// agent, the move's poll pauses while the state is Talk and resumes after
 /// it (a stopped agent then ends Stacked by the stuck rule), and a local fit
-/// runs to its end during the talk. A route Rest's countdown pauses during
-/// the talk (named gap: the source's delay runs on and its next leg changes
-/// the state to AutoMove). The talk's turns own the rotation meanwhile.
+/// runs to its end during the talk. A route Rest's wait is an Update-timed
+/// delay on the scaled clock that no state reads, so it runs on under the
+/// talk; when it ends, the per-leg loop submits the next leg as it would
+/// otherwise: the state changes to AutoMove (the change has no Talk guard,
+/// so the Talk state ends), the agent's setup starts it again and the leg is
+/// walked while the talk goes on. The talk's turns own the rotation while
+/// the state is Talk.
 #[allow(clippy::type_complexity)]
 pub fn advance(
     time: Res<Time>,
@@ -2245,14 +2253,34 @@ pub fn advance(
             );
         }
         let player_talking = actions.current == NpcAction::Talk;
+        if talk_hold.is_none() {
+            route.released_from_talk = false;
+        }
+        let mut rest_ended_under_talk = false;
         if (talk_hold.is_some() || player_talking)
             && !talk_lease.is_some_and(|lease| lease.approaching)
+            && !route.released_from_talk
         {
+            // A route Rest's delay runs on under the talk (Update timing,
+            // scaled time). Its end falls through to the Rest's end below,
+            // which submits the next leg on this frame.
+            if player_talking {
+                if let Some(MotionPhase::Dwelling {
+                    remaining: Some(remaining),
+                }) = route.suspended
+                {
+                    let left = remaining - dt;
+                    route.suspended = Some(MotionPhase::Dwelling {
+                        remaining: Some(left),
+                    });
+                    rest_ended_under_talk = left <= 0.0;
+                }
+            }
             // A local fit under a player talk runs to its end: the lerp reads
             // the scaled clock and its rotate is a tween, neither reads the
             // state. The talk's own turns own the rotation meanwhile; the fit
             // writes the position only.
-            if player_talking {
+            if player_talking && !rest_ended_under_talk {
                 if let Some(
                     fit @ (MotionPhase::FitWalking { .. } | MotionPhase::FitTurning { .. }),
                 ) = route.suspended
@@ -2271,13 +2299,22 @@ pub fn advance(
                     }
                 }
             }
-            continue; // 对话持留：位移推进整名让位（相位与变换都不写）
+            if !rest_ended_under_talk {
+                continue; // 对话持留：位移推进整名让位（相位与变换都不写）
+            }
         }
         // The talk has ended: the move goes on from its own phase. A stopped
         // agent stays stopped; the poll below resumes with the stuck
         // reference taken before the talk.
         if let Some(suspended) = route.suspended.take() {
             *phase = suspended;
+        }
+        if rest_ended_under_talk {
+            route.released_from_talk = true;
+            info!(
+                "[npc unit={}] t={now:.1} route Rest ended under a player talk: the next leg changes the state to AutoMove and starts the agent",
+                unit.0
+            );
         }
         let (Some(walk_face), Some(objective_face)) =
             (walk_face.as_deref(), objective_face.as_deref())
