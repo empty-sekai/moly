@@ -11,15 +11,15 @@
 //! lifetime, size (one axis or three), speed and rotation, a constant start colour source the
 //! Initial law takes, a constant gravity modifier, Shape through the target's
 //! own Shape law (or no Shape with zero speed), RotationOverLifetime with
-//! constant or two-constant axes, VelocityOverLifetime (constant or
+//! constant, two-constant or single-curve axes, VelocityOverLifetime (constant or
 //! two-constant linear axes of one mode, not in world space, the constant
 //! speed modifier one; orbital, offset and radial constants or two constants,
 //! their orbital section only in a Local target), Noise (the qualified Noise
 //! law, with the target's installed owner seed and scroll), ClampVelocity (one
 //! axis group, a constant limit, zero drag), InheritVelocity (Initial with a
 //! constant or two-constant curve; Current outside World space, which does
-//! nothing here), SizeOverLifetime and
-//! ColorOverLifetime (render-time), CustomData, no ring buffer, simulation
+//! nothing here), SizeOverLifetime,
+//! ColorOverLifetime and the texture sheet (render-time), CustomData, no ring buffer, simulation
 //! speed one. Any other module on the target, and any other configuration of
 //! those, refuses.
 //!
@@ -287,10 +287,15 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     if emitter.simulation_speed != 1.0 {
         return unsupported("target simulation speed other than one");
     }
+    // The texture sheet (UV module) takes no part in the birth: the child
+    // Emit's start pass and its newborn and catch-up module passes read none
+    // of it, and it adds no per-particle storage; the renderer derives each
+    // particle's sheet cell from the particle's own seed (and age, for a
+    // curve), which the child Emit writes as any birth does. A target's
+    // sheet is drawn as any system's.
     if emitter.force.is_some()
         || emitter.collision.is_some()
         || emitter.trails.is_some()
-        || emitter.texture_sheet.is_some()
     {
         return unsupported("target module outside the child composition");
     }
@@ -349,10 +354,14 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         MinMaxCurve::TwoConstants { max, .. } => max,
         _ => return unsupported("target start lifetime curve mode"),
     };
+    // RotationOverLifetime runs in the newborn pass as in any update: each
+    // axis is sampled at the lane's age before the step (a keyed curve
+    // through the same evaluation as the root path). A two-curve axis was
+    // not replayed in a child Emit.
     if let Some(rol) = &emitter.rotation_over_lifetime {
         let axes = [Some(&rol.curve), rol.x.as_ref(), rol.y.as_ref()];
-        if axes.iter().flatten().any(|curve| !scalar(curve)) {
-            return unsupported("target RotationOverLifetime curve mode");
+        if axes.iter().flatten().any(|curve| matches!(curve, MinMaxCurve::TwoCurves { .. })) {
+            return unsupported("target RotationOverLifetime two-curve mode");
         }
     }
     match (emitter.shape_enabled, emitter.shape.as_ref()) {
@@ -555,6 +564,10 @@ pub(super) fn apply_command_with_events(
     command.validate()?;
     let inherit = inherited_size(&command.inherited_words)?;
     let laws = child_laws(&system.emitter)?;
+    // Replay arm: a sheet word drawn at birth from the Initial stream.
+    if system.emitter.texture_sheet.is_some() && arms::on("uvDrawsInitialWord") {
+        let _ = initial.next4_u32();
+    }
     if system.emitter.noise.is_some() != system.noise.is_some() {
         return Err(Refused::Unsupported("target Noise without its installed owner seed and scroll"));
     }
@@ -953,7 +966,9 @@ fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32,
     lane.animated = [0.0; 3];
     if let Some(rol) = &system.rol {
         lane.angular = [0.0; 3];
-        let speed = rol.angular_velocity(lane.seed, 0.0, lane.age);
+        // Replay arm: a keyed curve sampled at age zero.
+        let age = if arms::on("rolCurveAtAgeZero") { 0.0 } else { lane.age };
+        let speed = rol.angular_velocity(lane.seed, 0.0, age);
         lane.angular = std::array::from_fn(|a| lane.angular[a] + speed[a]);
     }
     if arms::on("clampBeforeVelocity") {
@@ -1075,15 +1090,33 @@ fn own_clock_emitter(emitter: &EmitterParams) -> EmitterParams {
 }
 
 /// Called once when an admitted sub-emitter target is installed: its seed
-/// owner and streams as any system's first Play makes them, and the child
-/// owner words its commands read.
+/// owner and streams as any system's first Play makes them, the start delay
+/// word that Play writes, and the child owner words its commands read.
+///
+/// The target stays stopped every frame (the engine marks every cached
+/// sub-emitter stopped), and a stopped update never counts the word down; it
+/// ticks the clock only by the part of a slice beyond the word. A target
+/// with a start delay therefore keeps its clock at zero while the frame's
+/// slices stay at or below the word, for as long as it lives. A random delay
+/// is Play's evaluation with the system seed's hash, which is not
+/// transcribed, and is refused.
 pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     owner: ChildOwner) -> Result<(), String> {
     if system.native_birth.is_some() {
         return Err("target already has a birth owner".into());
     }
     child_target_eligible(&system.emitter, system.geometry.shape_evidence())?;
+    let start_delay = if arms::on("targetDelayWordZero") {
+        0.0
+    } else {
+        super::play_start_delay(&system.emitter)
+            .ok_or("random start delay on a sub-emitter target: Play's seed-hash evaluation is not transcribed")?
+    };
     system.emitter = own_clock_emitter(&system.emitter);
+    // Replay arm: the target's texture sheet lost at install.
+    if arms::on("uvDroppedAtInstall") {
+        system.texture_sheet = None;
+    }
     // Qualified by child_target_eligible above; built before the owner draw.
     let noise_law = system.emitter.noise.as_ref()
         .map(|params| moly_law::particle::noise::NoiseLaw::from_params(params).map_err(str::to_owned))
@@ -1106,7 +1139,7 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
         shape_clock: moly_law::particle::shape::ArcLoopClock::default(),
         emission: moly_law::particle::autonomous_emission::AutonomousEmissionState::initialized(
             streams.scalar_birth),
-        frame: birth::FrameState::default(),
+        frame: birth::FrameState { start_delay, ..birth::FrameState::default() },
         events: None,
         target: Some(ChildTarget { owner, commands: 0, births: 0, refused: 0, last_refusal: None }),
         procedural: false,

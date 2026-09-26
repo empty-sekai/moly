@@ -16,10 +16,15 @@
 //! in a coroutine callback, after DOTween's update of that frame, so its
 //! first update is on the next frame; that order is kept.
 //!
-//! Named gaps: the circles' colour comes from the uPalette asset (entry
-//! `base_wh`, written by `UpdateView` and by each circle's
-//! `GraphicColorSynchronizer`), and the pack carries no palette document;
-//! [`BASE_WH`] stands in for it. Whether `UIPartsImageOutline.Update` runs
+//! The circles' colour comes from the uPalette asset: entry `base_wh`, written
+//! by `UpdateView` and by each circle's `GraphicColorSynchronizer`. It is read
+//! from the UI root's palette ([`crate::ui_layout::UiLayouts::palette_color`]);
+//! until the root's palette is parsed the circles show the prefab's own
+//! serialized colour and take the palette value on the first frame it is
+//! there. A root without a palette (the shared root) keeps the serialized
+//! colour and names it when the indicator goes off.
+//!
+//! Named gap: whether `UIPartsImageOutline.Update` runs
 //! before or after DOTween's update in a frame is not fixed by the source
 //! (script order); here the outline reads the tween value of the same frame.
 
@@ -46,9 +51,6 @@ const CIRCLE_SPRITE: &str = "bg_base_circle_h96_wh";
 /// type above 3 takes entry 2.
 const COLOR_TYPE_ENTRIES: [u32; 4] = [3, 0, 2, 8];
 const BASE_WH_ENTRY: u32 = 2;
-/// The palette asset's `base_wh` in its active theme: a named mock of the
-/// palette document the pack does not carry.
-const BASE_WH: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// Same overlay layer as the cover; the indicator sorts above the quad
 /// (`ContentRoot` draws `Cover` before `ButtomRight`).
 const LAYER: usize = 29;
@@ -226,6 +228,10 @@ struct Running {
     matching: f32,
     circles: Vec<Circle>,
     updates: u32,
+    /// The canvas group alpha the circle colours are multiplied by.
+    alpha: f32,
+    /// The palette's `base_wh` has been written into the circles.
+    palette_applied: bool,
 }
 
 enum State {
@@ -255,6 +261,11 @@ pub(crate) fn hide(world: &mut World) {
         std::mem::replace(&mut indicator.0, State::Off)
     };
     if let State::Created(running) | State::Running(running) = previous {
+        if !running.palette_applied {
+            warn!(
+                "[entry-indicator] the UI root's palette was not there while the indicator ran: the circles drew the prefab's serialized colour, not base_wh"
+            );
+        }
         info!(
             "[entry-indicator] LoadingContent off after {} tween updates",
             running.updates
@@ -538,7 +549,7 @@ impl Indicator {
             .unwrap_or(BASE_WH_ENTRY);
         if entry != BASE_WH_ENTRY {
             return Err(format!(
-                "colorType {color_type} selects palette entry {entry}; only base_wh has a stand-in value"
+                "colorType {color_type} selects palette entry {entry}; the circles' synchronizers are read for base_wh only"
             ));
         }
 
@@ -620,11 +631,6 @@ impl Indicator {
             if sprite != CIRCLE_SPRITE {
                 return Err(format!(
                     "{node:?} names sprite {sprite}, UpdateView writes {CIRCLE_SPRITE}"
-                ));
-            }
-            if serialized != BASE_WH {
-                return Err(format!(
-                    "{node:?}: serialized colour {serialized:?} is not the palette stand-in"
                 ));
             }
             let sync = prefab.fields("GraphicColorSynchronizer", &node)?;
@@ -719,7 +725,7 @@ impl Indicator {
                 sibling: sibling(&node)?,
                 rect,
                 law,
-                colour: BASE_WH,
+                colour: serialized,
                 sprite,
                 outline,
             });
@@ -856,9 +862,33 @@ fn spawn(world: &mut World, read: Indicator) -> Running {
         matching: read.matching,
         circles,
         updates: 0,
+        alpha: read.alpha,
+        palette_applied: false,
     };
+    apply_palette(world, &mut running);
     layout(world, &mut running);
     running
+}
+
+/// `UpdateView` / `GraphicColorSynchronizer`: the circles take the palette's
+/// `base_wh` once the UI root's palette is there.
+fn apply_palette(world: &mut World, running: &mut Running) {
+    if running.palette_applied {
+        return;
+    }
+    let Some(colour) = world
+        .get_resource::<crate::ui_layout::UiLayouts>()
+        .and_then(|layouts| layouts.palette_color(BASE_WH_ENTRY as usize))
+    else {
+        return;
+    };
+    for circle in &running.circles {
+        if let Some(mut sprite) = world.get_mut::<Sprite>(circle.entity) {
+            sprite.color = Color::srgba(colour[0], colour[1], colour[2], colour[3] * running.alpha);
+        }
+    }
+    running.palette_applied = true;
+    info!("[entry-indicator] circles coloured with palette base_wh {colour:?}");
 }
 
 /// Places every part for the current window size.
@@ -923,6 +953,7 @@ fn step(world: &mut World, running: &mut Running, dt: f32) {
         }
     }
     running.updates += 1;
+    apply_palette(world, running);
     layout(world, running);
     let scales: Vec<String> = running
         .circles

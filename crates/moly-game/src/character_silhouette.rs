@@ -57,6 +57,10 @@
 //! - The source's silhouette writes the avatar's depth into the camera depth;
 //!   here the camera depth is only read.
 //! - Face morphs are not applied to the replayed meshes.
+//! - The source's pipeline renders MySekai single-sample (its asset's MSAA
+//!   quality is Disabled) and the engine's 3D view depth is one format, so a
+//!   multisampled or non-Depth32 3D view has no source counterpart and stops
+//!   the frame instead of being skipped.
 //! - Opaque draws of one queue are ordered front to back by the distance of
 //!   their origins, transparent ones back to front; the source sorts by its
 //!   own criteria within a queue.
@@ -68,6 +72,7 @@ use std::sync::Mutex;
 
 use bevy::asset::uuid::Uuid;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::query::QueryItem;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
@@ -1158,31 +1163,40 @@ fn prepare_silhouette(
         &ViewDepthTexture,
         Has<SilhouetteTarget>,
     )>,
-    mut refused_logged: Local<bool>,
 ) {
     let list = &mut *list;
     let mut view_bytes = Vec::new();
     let mut format = None;
     for (entity, camera, view, target, depth, had) in &views {
-        let compatible = target.main_texture().sample_count() == 1
-            && depth.texture.sample_count() == 1
-            && depth.texture.format() == TextureFormat::Depth32Float
-            && depth
-                .texture
-                .usage()
-                .contains(TextureUsages::TEXTURE_BINDING);
-        if !list.active || camera.render_graph != Core3d.intern() || !compatible {
-            if list.active && camera.render_graph == Core3d.intern() && !*refused_logged {
-                *refused_logged = true;
-                warn!(
-                    "character silhouette refused on a view: it needs single-sample colour and a single-sample Depth32Float depth readable as a texture"
-                );
-            }
+        if !list.active || camera.render_graph != Core3d.intern() {
             if had {
                 commands.entity(entity).remove::<SilhouetteTarget>();
             }
             continue;
         }
+        // Single-sample views only, by the source: the MySekai render
+        // pipeline asset serializes its MSAA quality as Disabled (1), and the
+        // pipeline gives every camera it renders that sample count, so the
+        // source never draws this pass into a multisampled view. A
+        // multisampled 3D view here contradicts the source's pipeline; it is a
+        // camera set-up error of this product, not a case with a source
+        // answer, and it stops the frame loudly.
+        assert!(
+            target.main_texture().sample_count() == 1 && depth.texture.sample_count() == 1,
+            "character silhouette: a multisampled 3D view ({} colour samples, {} depth samples); the source pipeline renders MySekai single-sample",
+            target.main_texture().sample_count(),
+            depth.texture.sample_count(),
+        );
+        // The pass reads the camera depth as a texture (the depth test Greater
+        // against what the camera holds, see the module comment), so the view
+        // must allow depth sampling; the field camera does.
+        assert!(
+            depth
+                .texture
+                .usage()
+                .contains(TextureUsages::TEXTURE_BINDING),
+            "character silhouette: the 3D view's depth texture is not bound for sampling; the camera must list TEXTURE_BINDING in its depth texture usages"
+        );
         // The colour pass's clip-from-world matrix, derived the engine's way.
         let clip_from_world = view
             .clip_from_world
@@ -1271,6 +1285,10 @@ fn prepare_silhouette(
     inner.silhouette_draws = list.silhouette.len();
     inner.colour = list.colour;
 }
+
+// The camera depth this pass samples is the engine's 3D view depth, whose
+// format is one constant: every 3D view's depth is Depth32Float.
+const _: () = assert!(matches!(CORE_3D_DEPTH_FORMAT, TextureFormat::Depth32Float));
 
 /// The first read-back comes on this replayed frame, then one every
 /// `MOLY_SILHOUETTE_PROBE_INTERVAL` replayed frames (default below).

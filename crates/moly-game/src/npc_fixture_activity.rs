@@ -1146,7 +1146,12 @@ impl Factory<'_, '_> {
                 let master = tables.fixture_master(identity.master_id).ok_or_else(|| {
                     Gap(format!("missing fixture master {}", identity.master_id))
                 })?;
-                if identity.model_package != format!("mysekai__fixture__{}", master.model_name) {
+                // A gate shows its gate's or its skin's model
+                // (`MysekaiGateModel.AssetBundleName`), not its master's.
+                if !master.is_gate
+                    && identity.model_package
+                        != format!("mysekai__fixture__{}", master.model_name)
+                {
                     return Err(Gap("source action's instance model/master disagree".into()));
                 }
                 let Some(playable) = self.playable_point(

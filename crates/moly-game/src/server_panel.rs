@@ -27,8 +27,11 @@
 //!   default places the home gate (the visit block says it stands on the home
 //!   site), so gate-dependent talk gates read a placed gate.
 //! - **Phenomenon of the day.** The client picks the schedule row whose
-//!   refresh window holds the server-stamped clock, once, when the schedule
-//!   is written; no wall clock advances it. An empty schedule writes nothing,
+//!   refresh window holds the server-stamped clock (its copy of
+//!   `refreshedAt`), when the schedule is written: at the join, and again
+//!   whenever the server model hands the client a new schedule or a new
+//!   `refreshedAt` (a panel edit of the clock or the schedule, or a refresh
+//!   when the server clock enters a new window). An empty schedule writes nothing,
 //!   and a clock outside every window logs an error and keeps the previous
 //!   phenomenon. This module is the only writer of the phenomenon request;
 //!   the weather key, the browser weather dial and the document's optional
@@ -56,29 +59,28 @@
 //!   three days of windows with the same phenomenon, so every offset from
 //!   UTC-12 to UTC+14 resolves to it.
 //!
-//! The document comes from the asset source at `server-panel/npc.json` when
-//! one is there (harness and owner states), else from the checked-in default
-//! beside this module. The file is read through the asset source's own
-//! reader, so its absence is the ordinary default case and reports nothing;
-//! any other read failure is refused. A document that fails to parse, names
-//! an unknown refresh window, or lists a talk the talk table does not hold is
-//! refused loudly; no field has a silent default.
+//! The document is the server model's NPC slice (`crate::server`), taken
+//! once the client has joined: the rows the join served and the client's
+//! `refreshedAt`. The server model reads the asset source's
+//! `server-panel/npc.json` when one is there (harness and owner states; a
+//! schemaVersion 1 slice keeps its fixed clock and stated rows, so replays
+//! see the same values), else the checked-in default beside this module
+//! (device clock, daily schedule), or the browser game's saved document. A
+//! document that fails to parse, names an unknown refresh window, or lists a
+//! talk the talk table does not hold is refused loudly; no field has a
+//! silent default.
+//!
+//! Gate replies: the gate presenter's `UpdateTalkList` / `SetTalkList` calls
+//! arrive as `crate::server::ClientTalkListUpdates`; each replaces the talk
+//! list (the reply's stated rows, or the talk-list policy's list for the
+//! booted site) and, with a change reply, the visitors.
 
 use std::collections::HashSet;
 
-use bevy::asset::io::{AssetReaderError, AssetSourceId, Reader};
 use bevy::asset::LoadState;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
 use moly_assets::json::JsonAsset;
 use serde_json::Value;
-
-/// Asset source and path of a panel document that replaces the checked-in one.
-const DOCUMENT_SOURCE: &str = "moly";
-const DOCUMENT_FILE: &str = "server-panel/npc.json";
-
-/// The checked-in default document.
-const DEFAULT_DOCUMENT: &str = include_str!("server_panel/npc.json");
 
 /// The phenomena index carries the refresh windows of the master table.
 const PHENOMENA_INDEX: &str = "moly://phenomena/index.json";
@@ -150,8 +152,8 @@ enum TalkListSource {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocumentOrigin {
-    AssetSource,
-    CheckedIn,
+    /// The server model's NPC slice.
+    ServerModel,
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +178,8 @@ pub(crate) struct ServerPanel {
     home_starter: Vec<Value>,
     /// Control: advance the current schedule row every this many seconds.
     schedule_advance_seconds: Option<f32>,
+    /// The server model's schedule revision this panel last wrote.
+    live_revision: u64,
 }
 
 impl ServerPanel {
@@ -505,6 +509,7 @@ fn parse_document(text: &str, origin: DocumentOrigin) -> Result<ServerPanel, Str
         reported_reads: Vec::new(),
         home_starter,
         schedule_advance_seconds,
+        live_revision: 0,
     })
 }
 
@@ -704,39 +709,7 @@ fn policy_talk_list(
 
 #[derive(Resource)]
 struct PanelRequests {
-    document: DocumentRequest,
     periods: Handle<JsonAsset>,
-}
-
-/// The panel document: being read, or its text and origin.
-enum DocumentRequest {
-    Reading(Task<Result<Option<String>, String>>),
-    Ready(String, DocumentOrigin),
-}
-
-/// Reads the document file from the asset source: `Ok(None)` when the source
-/// has no such file.
-async fn read_document(server: AssetServer) -> Result<Option<String>, String> {
-    let source = server
-        .get_source(AssetSourceId::from(DOCUMENT_SOURCE))
-        .map_err(|error| error.to_string())?;
-    let mut reader = match source
-        .reader()
-        .read(std::path::Path::new(DOCUMENT_FILE))
-        .await
-    {
-        Ok(reader) => reader,
-        Err(AssetReaderError::NotFound(_)) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|error| error.to_string())?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|error| error.to_string())
 }
 
 /// The refresh windows, parsed once from the phenomena index.
@@ -744,45 +717,32 @@ async fn read_document(server: AssetServer) -> Result<Option<String>, String> {
 struct RefreshTimePeriods(Vec<RefreshTimePeriod>);
 
 fn load(mut commands: Commands, server: Res<AssetServer>) {
-    let reader = server.clone();
     commands.insert_resource(PanelRequests {
-        document: DocumentRequest::Reading(
-            IoTaskPool::get().spawn(async move { read_document(reader).await }),
-        ),
         periods: server.load::<JsonAsset>(PHENOMENA_INDEX),
     });
 }
 
-/// The document from the asset source when it is there, else the checked-in
-/// one; then the refresh windows; then the first schedule write.
+/// The server model's NPC slice once the client has joined; then the
+/// refresh windows; then the first schedule write.
 fn parse(
     mut commands: Commands,
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
-    requests: Option<ResMut<PanelRequests>>,
+    requests: Option<Res<PanelRequests>>,
+    client: Option<Res<crate::server::ClientUserData>>,
+    live: Res<crate::server::LiveSchedule>,
     mut today: ResMut<TodayPhenomena>,
 ) {
-    let Some(mut requests) = requests else {
+    let Some(requests) = requests else {
         return;
     };
-    if let DocumentRequest::Reading(task) = &mut requests.document {
-        let Some(read) = block_on(future::poll_once(task)) else {
-            return;
-        };
-        requests.document = match read {
-            Ok(Some(text)) => DocumentRequest::Ready(text, DocumentOrigin::AssetSource),
-            Ok(None) => {
-                DocumentRequest::Ready(DEFAULT_DOCUMENT.to_owned(), DocumentOrigin::CheckedIn)
-            }
-            Err(error) => panic!(
-                "server panel document {DOCUMENT_SOURCE}://{DOCUMENT_FILE} failed to load: {error}"
-            ),
-        };
-    }
-    let DocumentRequest::Ready(text, origin) = &requests.document else {
+    let Some(client) = client else {
+        return; // the join has not answered yet
+    };
+    let Some(text) = crate::server::npc_slice(&client, &live) else {
         return;
     };
-    let (text, origin) = (text.clone(), *origin);
+    let origin = DocumentOrigin::ServerModel;
     if let LoadState::Failed(error) = server.load_state(&requests.periods) {
         panic!("phenomena index {PHENOMENA_INDEX} failed to load: {error:?}");
     }
@@ -791,14 +751,14 @@ fn parse(
     };
     let periods = parse_periods(&index.0)
         .unwrap_or_else(|reason| panic!("phenomena index refresh windows: {reason}"));
-    let panel = parse_document(&text, origin).unwrap_or_else(|reason| {
+    let mut panel = parse_document(&text, origin).unwrap_or_else(|reason| {
         panic!("server panel document ({origin:?}) is refused: {reason}")
     });
+    panel.live_revision = live.revision;
     info!(
         "[server-panel] document ready ({}): gate {} level {} (home {}, visit count {}, refreshed {}), {} visitor rows, talk list {}, {} schedule rows, server clock {}, tutorial finished {}",
         match panel.origin {
-            DocumentOrigin::AssetSource => "asset source",
-            DocumentOrigin::CheckedIn => "checked-in default",
+            DocumentOrigin::ServerModel => "the server model's NPC slice",
         },
         panel.gate.gate_id,
         panel.gate.level,
@@ -952,6 +912,167 @@ fn boot_talk_list(
     commands.insert_resource(store);
 }
 
+/// A new schedule or `refreshedAt` from the server model: the schedule is
+/// written again. The panel's own row edits since the last one are replaced.
+fn follow_live_schedule(
+    live: Res<crate::server::LiveSchedule>,
+    panel: Option<ResMut<ServerPanel>>,
+    periods: Option<Res<RefreshTimePeriods>>,
+    mut today: ResMut<TodayPhenomena>,
+) {
+    let (Some(mut panel), Some(periods)) = (panel, periods) else {
+        return;
+    };
+    if panel.live_revision == live.revision {
+        return;
+    }
+    panel.live_revision = live.revision;
+    panel.schedules = live
+        .schedules
+        .iter()
+        .map(|row| PhenomenaSchedule {
+            refresh_time_period_id: row.refresh_time_period_id,
+            schedule_date: row.schedule_date,
+            phenomena_id: row.phenomena_id,
+        })
+        .collect();
+    panel.refreshed_at = live.refreshed_at;
+    info!(
+        "[server-panel] the server model's schedule revision {}: {} rows, refreshedAt {}; the schedule is written again",
+        live.revision,
+        panel.schedules.len(),
+        panel.refreshed_at
+    );
+    write_schedule(&panel, &periods.0, &mut today);
+}
+
+/// The gate presenter's talk-list calls: a change reply's visitors first,
+/// then the talk list (stated rows, or the talk-list policy's list for the
+/// booted site and the new visitors).
+#[allow(clippy::too_many_arguments)]
+fn apply_talk_list_updates(
+    mut commands: Commands,
+    mut updates: ResMut<crate::server::ClientTalkListUpdates>,
+    panel: Option<ResMut<ServerPanel>>,
+    tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
+    visitors: Option<Res<VisitingCharacters>>,
+    store: Option<ResMut<TalkDataStore>>,
+    selection: Res<crate::site::SiteSelection>,
+    placements: Res<crate::fixture::FixturePlacements>,
+) {
+    if updates.0.is_empty() {
+        return;
+    }
+    let (Some(mut panel), Some(tables), Some(visitors), Some(mut store)) =
+        (panel, tables, visitors, store)
+    else {
+        return; // the boot has not set the list yet; the updates wait
+    };
+    let mut current = VisitingCharacters {
+        units: visitors.units.clone(),
+        groups: visitors.groups.clone(),
+    };
+    for update in std::mem::take(&mut updates.0) {
+        if let Some(rows) = &update.visitors {
+            panel.gate_characters = rows
+                .iter()
+                .map(|row| GateCharacter {
+                    gate_id: row.gate_id,
+                    unit_group_id: row.unit_group_id,
+                    is_reservation: row.is_reservation,
+                    visit_count: row.visit_count,
+                })
+                .collect();
+            let mut groups = Vec::with_capacity(rows.len());
+            let mut units = Vec::new();
+            for row in rows {
+                match tables.unit_ids_of_group(row.unit_group_id) {
+                    Ok(expanded) => {
+                        for unit in &expanded {
+                            if !units.contains(unit) {
+                                units.push(*unit);
+                            }
+                        }
+                        groups.push((row.unit_group_id, expanded));
+                    }
+                    Err(reason) => {
+                        error!("[server-panel] {}: visitor row refused: {reason}", update.caller);
+                        groups.push((row.unit_group_id, Vec::new()));
+                    }
+                }
+            }
+            info!(
+                "[server-panel] {}: visitors -> units {units:?}",
+                update.caller
+            );
+            current = VisitingCharacters { units, groups };
+        }
+        let rows = match &update.talks {
+            crate::server::ReplyTalkList::Stated(rows) => {
+                let absent: Vec<i32> = rows
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .filter(|id| !tables.has_talk(*id))
+                    .collect();
+                if !absent.is_empty() {
+                    error!(
+                        "[server-panel] {}: the reply names talks the talk table does not hold: {absent:?}; the talk list is not replaced",
+                        update.caller
+                    );
+                    continue;
+                }
+                rows.iter()
+                    .map(|(talk_id, is_read)| TalkWithReadHistory {
+                        talk_id: *talk_id,
+                        is_read: *is_read,
+                    })
+                    .collect::<Vec<_>>()
+            }
+            crate::server::ReplyTalkList::Policy => {
+                let TalkListSource::Policy { read_event_stories } = &panel.talk_list else {
+                    error!(
+                        "[server-panel] {}: the reply asks for the talk-list policy but the document states its list; the talk list is not replaced",
+                        update.caller
+                    );
+                    continue;
+                };
+                if placements.site_id() == 0 || placements.site_type() != selection.site_type() {
+                    error!(
+                        "[server-panel] {}: the booted site's layout is not restored; the talk list is not replaced",
+                        update.caller
+                    );
+                    continue;
+                }
+                let site_id = i32::try_from(placements.site_id()).expect("site id fits i32");
+                let placed = placements.fixture_ids();
+                match policy_talk_list(
+                    &tables,
+                    &PolicyInputs {
+                        visitors: &current,
+                        panel: &panel,
+                        site_id,
+                        placed_fixture_ids: &placed,
+                        read_event_stories,
+                    },
+                ) {
+                    Ok(rows) => rows,
+                    Err(reason) => {
+                        error!("[server-panel] {}: talk-list policy: {reason}", update.caller);
+                        continue;
+                    }
+                }
+            }
+        };
+        store.set_talk_list(&rows);
+        let (n, unread, digest) = store.digest();
+        info!(
+            "[server-panel] {}: talk list set: {n} rows, {unread} unread, digest {digest:016x}",
+            update.caller
+        );
+    }
+    commands.insert_resource(current);
+}
+
 /// The document's advance control: every period, one edit of the current
 /// schedule row to the next phenomenon.
 fn advance_schedule_control(
@@ -1052,6 +1173,7 @@ impl Plugin for ServerPanelPlugin {
                     load,
                     crate::fixture::region::load,
                     crate::fixture_activity_data::load_together,
+                    crate::npc_talk_lottery::load_talk_extras,
                 ),
             )
             .add_systems(
@@ -1059,6 +1181,7 @@ impl Plugin for ServerPanelPlugin {
                 (
                     crate::fixture::region::install,
                     crate::fixture_activity_data::parse_together,
+                    crate::npc_talk_lottery::parse_talk_extras,
                 ),
             )
             // The group fixture talks (types 3 and 6) after the frame's
@@ -1085,6 +1208,8 @@ impl Plugin for ServerPanelPlugin {
                     parse,
                     boot_visitors,
                     boot_talk_list,
+                    follow_live_schedule,
+                    apply_talk_list_updates,
                     advance_schedule_control,
                     apply_schedule_edits,
                     publish_today_phenomena,

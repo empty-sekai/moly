@@ -812,7 +812,13 @@ pub fn install(app: &mut App) {
                 crate::player_fixture_action::advance,
                 crate::fixture_gimmick::advance,
                 crate::player_avatar::item_timeline::advance,
-                crate::fixture_activity_timeline::advance,
+                // The director's script outputs evaluate after the NPC
+                // presenter's update in the source frame (the avatar store's
+                // Update, then the director update): its character mixers
+                // (eye preset, blink state, fade) write after the view's blink
+                // and dither of the same frame.
+                crate::fixture_activity_timeline::advance
+                    .after(crate::npc_state::NpcPresenterSet),
             )
                 .chain()
                 .after(action_button::click)
@@ -909,6 +915,13 @@ pub fn install(app: &mut App) {
                     .run_if(common_conditions::on_timer(cloth_runtime::REPORT_PERIOD)),
             ),
         )
+        // The weather's physics scene: the site's readiness and the local
+        // player's avatar, after the transforms propagate and before the
+        // weather particles query it.
+        .add_systems(
+            PostUpdate,
+            crate::particle_runtime::collision_scene::observe_product.after(TransformSystems::Propagate),
+        )
         // TransformPropagate 之后：scene 实体当帧展开，取景要读已传播的全局变换。
         // 追角色再排在取景之后：角色就位当帧起，追角色每帧覆盖机位。
         // 天空钉位收尾：读玩家视变换当帧（传播之后）的世界位置。
@@ -936,7 +949,8 @@ pub fn install(app: &mut App) {
                 // 机位都要当帧值。
                 weather_fx::advance
                     .after(TransformSystems::Propagate)
-                    .after(camera::follow_avatar),
+                    .after(camera::follow_avatar)
+                    .after(crate::particle_runtime::collision_scene::observe_product),
                 // 角色侧相机态（屏幕/投影参数）与站点取景同拍；头参考点在
                 // TransformPropagate 之后回写——动画在 Propagate 之前推进，
                 // 读到的是当帧姿势。
@@ -981,6 +995,8 @@ pub fn install(app: &mut App) {
     // ---- 场地屏外壳 · 屏幕层栈（追加段：以下全部为新增，未动上面既有行） ----
     // 层栈命令与外壳对话框请求两条消息沿；层栈资源常驻（栈底场地屏起步，
     // 真源主场地屏常驻同形）。
+    // The screen manager's registry, hook events and back key.
+    ui_layers::install(app);
     app.add_message::<ui_layers::LayerCommand>()
         .add_message::<menu_shell::ShellDialogRequest>()
         .init_resource::<ui_layers::UiLayerStack>()
@@ -1160,9 +1176,11 @@ pub fn install(app: &mut App) {
                 learn_phenomena_dialog::open,
                 learn_phenomena_dialog::autotap,
                 learn_phenomena_dialog::click.run_if(crate::game_settings::scene_input_enabled),
+                learn_phenomena_dialog::back_key,
                 learn_phenomena_dialog::place,
             )
                 .chain()
+                .after(ui_layers::back_key)
                 .after(action_button::click)
                 .before(menu_shell::click)
                 .before(menu_dialog::click)

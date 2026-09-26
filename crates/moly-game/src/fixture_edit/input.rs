@@ -111,7 +111,11 @@ pub(crate) fn read_pointer(
     mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
 ) {
-    if session.phase == EditPhase::Idle || session.exit_dialog || consumed.0 {
+    if session.phase == EditPhase::Idle
+        || session.exit_dialog
+        || session.clean_up_dialog
+        || consumed.0
+    {
         return;
     }
     let Ok(window) = windows.single() else {
