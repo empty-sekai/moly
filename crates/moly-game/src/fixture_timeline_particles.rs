@@ -1147,15 +1147,14 @@ pub(crate) fn validate(
         if world.get::<FixtureParticleLive>(draw).is_none() {
             return Err(invalid("prepared particle simulation is missing"));
         }
+        // Preparation returned this draw only once its GPU source was Ready.
+        // The render world resets readiness to Pending at each frame's queue
+        // and sets Ready again once the pipelines are confirmed, so a later
+        // read may see that window (or a dormant draw it did not queue):
+        // after preparation only a failure refuses.
         if let Some(source) = world.get::<SourceParticle>(draw) {
-            match &*source.readiness.lock().unwrap() {
-                ParticleReadiness::Ready => {}
-                ParticleReadiness::Pending => {
-                    return Err(loading("particle source GPU is preparing"));
-                }
-                ParticleReadiness::Failed(error) => {
-                    return Err(invalid(format!("particle source GPU: {error}")));
-                }
+            if let ParticleReadiness::Failed(error) = &*source.readiness.lock().unwrap() {
+                return Err(invalid(format!("particle source GPU: {error}")));
             }
         }
     }

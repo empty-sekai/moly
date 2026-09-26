@@ -25,6 +25,12 @@ use super::*;
 struct Candidate {
     anchor: Entity,
     plan: Planned,
+    /// A control preparation saw this draw's GPU source Ready once. The
+    /// render world resets readiness to Pending at each frame's queue and
+    /// sets it again once the pipelines are confirmed, so waiting for every
+    /// candidate to read Ready at the same instant is a race it can lose for
+    /// a long time; a confirmed candidate is not asked again.
+    confirmed: bool,
 }
 
 #[derive(Component)]
@@ -148,38 +154,72 @@ fn prepare(
             let mut candidates = Vec::new();
             for &(anchor, ordinal) in selected {
                 let particle = &particles[ordinal];
-                let mut plan = admit(package, particle, &by_path, &owners, &server, Path::Control, stepping)?;
+                let mut plan = match admit(package, particle, &by_path, &owners, &server, Path::Control, stepping) {
+                    Ok(plan) => plan,
+                    // A director owner steps each system of its object by its
+                    // own playable (or plays it by its own Play): one this host
+                    // refuses is left undrawn, by name, and the others play.
+                    Err(reason) if activity == Activity::Runtime => {
+                        warn!("[prefab-director] {reason}; this system is not drawn, the object's other systems play");
+                        continue;
+                    }
+                    Err(reason) => return Err(reason),
+                };
                 plan.ordinal = ordinal;
                 // A Control-driven emitter is a renderer of the fixture prefab
                 // too, so the fixture setup forced its material (see `plan`).
                 plan.source.force_phenomena_lighting();
-                candidates.push(Candidate { anchor, plan });
+                candidates.push(Candidate { anchor, plan, confirmed: false });
             }
             ControlPreparation(candidates, 0.0)
         }
     };
     preparation.1 = crate::fixture_timeline_particles::realtime(world);
     let result = (|| {
-        for candidate in &mut preparation.0 {
+        let mut refused = Vec::new();
+        let mut pending = false;
+        for (index, candidate) in preparation.0.iter_mut().enumerate() {
+            if candidate.confirmed {
+                continue;
+            }
             let plan = &mut candidate.plan;
-            let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
-                world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
-                world.resource::<Assets<Mesh>>())?;
-            if !ready { return Ok(None); }
-            if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
-                return Ok(None);
+            let step = (|| -> Result<bool, String> {
+                let ready = prepare_geometry(plan, &server, world.resource::<Assets<Gltf>>(),
+                    world.resource::<Assets<GltfNode>>(), world.resource::<Assets<GltfMesh>>(),
+                    world.resource::<Assets<Mesh>>())?;
+                if !ready { return Ok(false); }
+                if !plan.source.resolve(&server, world.resource::<Assets<SourceShaderCatalogue>>()).map_err(|e| e.0)? {
+                    return Ok(false);
+                }
+                if plan.draw.is_none() {
+                    let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                    let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
+                        NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
+                    plan.draw = Some((draw, mesh));
+                }
+                let readiness = plan.source.readiness.lock().unwrap().clone();
+                match readiness {
+                    ParticleReadiness::Pending => Ok(false),
+                    ParticleReadiness::Failed(error) => Err(error),
+                    ParticleReadiness::Ready => Ok(true),
+                }
+            })();
+            match step {
+                Ok(true) => candidate.confirmed = true,
+                Ok(false) => pending = true,
+                // As at admission: a director owner's other systems play.
+                Err(error) if activity == Activity::Runtime => refused.push((index, error)),
+                Err(error) => return Err(error),
             }
-            if plan.draw.is_none() {
-                let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
-                let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
-                    NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
-                plan.draw = Some((draw, mesh));
-            }
-            match plan.source.readiness.lock().unwrap().clone() {
-                ParticleReadiness::Pending => return Ok(None),
-                ParticleReadiness::Failed(error) => return Err(error),
-                ParticleReadiness::Ready => {}
-            }
+        }
+        for (index, error) in refused.into_iter().rev() {
+            let candidate = preparation.0.remove(index);
+            warn!("[prefab-director] {}: source particle preparation failed: {error}; this system is not drawn, the object's other systems play",
+                doc["emitters"][candidate.plan.ordinal]["node"]);
+            if let Some((draw, _)) = candidate.plan.draw { world.despawn(draw); }
+        }
+        if pending {
+            return Ok(None);
         }
         let mut draws = Vec::new();
         for candidate in &preparation.0 {
@@ -447,7 +487,7 @@ pub(crate) fn plan(
                 // particle renderers are forced like meshes. Authored flags of
                 // fixture particle materials therefore never reach the draw.
                 plan.source.force_phenomena_lighting();
-                candidates.push(Candidate { anchor, plan });
+                candidates.push(Candidate { anchor, plan, confirmed: false });
             }
         }
     }
@@ -991,7 +1031,7 @@ pub(crate) fn spawn_when_ready(
                 }
                 ParticleReadiness::Ready => {}
             }
-            let Candidate { anchor, plan: planned } = candidate;
+            let Candidate { anchor, plan: planned, .. } = candidate;
             let (draw, mesh) = planned.draw.clone().expect("prepared source draw");
             let mut runtime = runtime(&planned, anchor, mesh);
             runtime.geometry.keep_unit_chain(unit_ancestry(anchor,
