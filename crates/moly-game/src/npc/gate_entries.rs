@@ -1,8 +1,8 @@
 //! The gate's and the cut-scene's calls into the NPC runtime (JP 6.8.1): the
 //! presenter's objective calls (TryCancelCurrentObjective,
 //! ForceUpdateObjective, Show, Hide, HideAndCancelObjective,
-//! SetImmediatelyExecuteNextObjective, SetCanInterruptTalkData,
-//! ForceUpdateCutSceneObjective, ChangeState), the invite's CreateNPC at the
+//! SetImmediatelyExecuteNextObjective, ForceUpdateCutSceneObjective,
+//! ChangeState), the invite's CreateNPC at the
 //! gate and its show after the two waits, the cut-scene presenter's takeover
 //! of a present NPC and its RestoreStates, and the go-home cut-scene's start
 //! callback.
@@ -23,8 +23,10 @@
 //!   running goes on. Show's teleport check (the view flag and the
 //!   nearest-movable-position search) is not modelled.
 //! - SetImmediatelyExecuteNextObjective(enable) writes the flag that skips
-//!   the next rest; SetCanInterruptTalkData(enable, type) writes a new
-//!   interrupt marker; the model's reset clears both.
+//!   the next rest; the model's reset clears it. SetCanInterruptTalkData is
+//!   not here: its only caller is the gate visitor's forced timeline, whose
+//!   interrupt (the immediately-played timeline objective, 12) has no
+//!   decision route in this host yet.
 //! - ForceUpdateCutSceneObjective makes no cancel: the model resets twice and
 //!   takes a cut-scene talk data (type 17, no character, no fixture, no
 //!   interrupt marker). The decision ladder has no row for that data: outside
@@ -49,7 +51,7 @@
 
 use bevy::prelude::*;
 use moly_law::objective::presenter::{self as law, CancelFlags};
-use moly_law::objective::{InterruptMarker, ObjectiveType, TalkType};
+use moly_law::objective::TalkType;
 
 use crate::npc::{CharacterUnitId, NpcAction, NpcActions, RestLifecycle};
 use crate::npc_objective::{AiTalkData, ObjectiveMind, TalkSlot};
@@ -204,27 +206,6 @@ pub(crate) fn set_immediately_execute_next_objective(
     info!(
         "[npc-entry] unit={unit} frame={} SetImmediatelyExecuteNextObjective({enable})",
         frame(world)
-    );
-}
-
-/// Presenter.SetCanInterruptTalkData(enable, type): a new marker.
-pub(crate) fn set_can_interrupt_talk_data(
-    world: &mut World,
-    entity: Entity,
-    enable: bool,
-    objective: ObjectiveType,
-) {
-    if let Some(mut slot) = world.get_mut::<TalkSlot>(entity) {
-        slot.interrupt = Some(InterruptMarker {
-            marker_type: objective as i32,
-            can_interrupt: enable,
-        });
-    }
-    let unit = unit_of(world, entity).unwrap_or(0);
-    info!(
-        "[npc-entry] unit={unit} frame={} SetCanInterruptTalkData({enable}, {})",
-        frame(world),
-        objective as i32
     );
 }
 
