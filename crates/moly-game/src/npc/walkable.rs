@@ -12,9 +12,11 @@
 //!
 //! The source's cells run in source grid coordinates; this host's grid
 //! mirrors x (a source cell x is this host's cell -x-1). The list is built
-//! in the source's cell order and handed out as this host's cells, whose
-//! corner positions the consumers already use (the named corner difference
-//! of the mirrored frame stays as it was).
+//! in the source's cell order and handed out as this host's cells. The
+//! navigation mesh test samples the source cell's own corner (mirrored, the
+//! high-x corner of the host cell); the consumers keep placing at the host
+//! cell's low corner (the named corner difference of the mirrored frame
+//! stays as it was).
 //!
 //! Named assumptions: the rug grid has the floor grid's size; a rug holds
 //! the cells of its bounding box at the heights of its master's grid height
@@ -290,9 +292,12 @@ impl WalkableSource<'_, '_> {
         let excluded = law::excluded_cells(&system);
         let origin = floor.site_origin;
         let cells = law::walkable_cells(&movable, &rugs, &excluded, |cell| {
+            // The source cell's own corner (x * 0.25 from the site position)
+            // in this host's mirrored frame: the high-x corner of the host
+            // cell -x-1.
             let at = host(cell.x, cell.z);
             let corner = [
-                at.x as f32 * moly_law::objective::TILE_SCALE + origin.x,
+                (at.x as f32 + 1.0) * moly_law::objective::TILE_SCALE + origin.x,
                 origin.y,
                 at.z as f32 * moly_law::objective::TILE_SCALE + origin.z,
             ];
