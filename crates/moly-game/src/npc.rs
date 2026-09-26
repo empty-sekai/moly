@@ -1121,9 +1121,10 @@ pub(crate) fn spawn_when_ready(
             // The AI's set-up: entry-site talk data with the entry-site
             // interrupt marker, so the first decision starts the entry-site
             // objective (hidden until the gate's appearance cancels it, see
-            // `npc_gate`). A roster created away from its site, or the
-            // embedded stage's cast, keeps empty data.
-            if away || stage.is_some() {
+            // `npc_gate`). A roster created while another site is loaded
+            // gets it too and makes that first decision when home is loaded;
+            // the embedded stage's cast keeps empty data.
+            if stage.is_some() {
                 crate::npc_objective::TalkSlot::default()
             } else {
                 crate::npc_objective::TalkSlot::entry_site(*unit_id)

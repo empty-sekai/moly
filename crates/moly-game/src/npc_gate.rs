@@ -34,9 +34,15 @@
 //! Not modelled: the room notification and the first-visit callback after
 //! the placements, the player entry's wait for every NPC to be reported
 //! appeared, the return-from-another-room flag (the panel does not carry
-//! it, so the greeting stays owed), the show's teleport check (its view flag
-//! is not read), and a roster created away from the home site (it keeps
-//! empty talk data and is not placed here).
+//! it, so the greeting stays owed), and the show's teleport check (its view
+//! flag is not read).
+//!
+//! Every start places on the home site: the roster is created on home (see
+//! `npc::residency::spawn_site`), so on a floor or harvest-map start nobody
+//! is placed on the loaded site and the roster waits away from it; the
+//! appearance runs when home is first loaded (named gap: the source places
+//! them at the start, on the unloaded home, and their AI runs there
+//! meanwhile).
 
 use std::collections::HashSet;
 
@@ -212,9 +218,19 @@ fn hide_entry_site_starts(world: &mut World, frame: u32) {
     }
 }
 
-/// The start: every visiting unit exists and runs its entry-site objective.
+/// The start: every visiting unit exists and runs its entry-site objective,
+/// on the home site (the appearance takes the home site model whatever site
+/// the player starts on; this host holds that ground only while home is
+/// loaded, so a floor start's appearance runs when home is first loaded).
 fn start(world: &mut World, frame: u32) -> Begin {
     if world.get_resource::<crate::npc::Spawned>().is_none() {
+        return Begin::NotYet;
+    }
+    let home = crate::npc::residency::SITE_TYPES[0];
+    if !world
+        .get_resource::<crate::site::SiteActive>()
+        .is_some_and(|site| site.site_type == home)
+    {
         return Begin::NotYet;
     }
     // The roster: the visiting units in the panel's expansion order (the
@@ -257,6 +273,7 @@ fn start(world: &mut World, frame: u32) -> Begin {
     emit(json!({
         "step": "start",
         "frame": frame,
+        "site": home,
         "units": units,
         "walkable": walkable,
         "range": [appearance::GATHER_MIN, max],
