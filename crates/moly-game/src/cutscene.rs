@@ -44,8 +44,8 @@
 //!   stops; logged (named render gap: the ring dither is not drawn);
 //! - site expansion: `SetSiteExtension` each frame with the clip's centre,
 //!   colours and radius `start + t (end - start)`, and `ResetGlobalDissolve`
-//!   when the graph stops; logged (named render gap: the site shaders'
-//!   global dissolve is not drawn);
+//!   when the graph stops, through [`crate::site_extension`] (the site
+//!   shaders' global dissolve);
 //! - effect and control clips: refused by name with their source, bounds and
 //!   play and stop edges (the particle host has no API for them yet);
 //! - SE: played by the runner; an SE with no audio route plays silent.
@@ -1082,8 +1082,23 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
                 TimelinePayload::CutScene(CutScenePayload::SiteExpansion(effect)) => {
                     if now {
                         play.dissolve = true;
+                        crate::site_extension::set_site_extension(
+                            world,
+                            crate::site_extension::SiteExtensionData::expansion_frame(
+                                effect.center,
+                                effect.start_radius,
+                                effect.end_radius,
+                                effect.min_radius,
+                                effect.max_radius,
+                                effect.gradient_range,
+                                effect.edge_color,
+                                effect.fade_color,
+                                local,
+                                clip.duration,
+                            ),
+                        );
                         info!(
-                            "[cutscene] t={t:.4} ShowExpansionEffectBehaviour.ProcessFrame {bounds}: SetSiteExtension({}) (not drawn: the site shaders' global dissolve is a named render gap)",
+                            "[cutscene] t={t:.4} ShowExpansionEffectBehaviour.ProcessFrame {bounds}: SetSiteExtension({})",
                             site_extension(effect, local, clip.duration)
                         );
                     }
@@ -1251,9 +1266,8 @@ fn end_async(world: &mut World, plan: &Plan, play: &Play) {
         );
     }
     if play.dissolve {
-        info!(
-            "[cutscene] ShowExpansionEffectBehaviour.OnGraphStop: ResetGlobalDissolve (not drawn)"
-        );
+        crate::site_extension::reset_global_dissolve(world);
+        info!("[cutscene] ShowExpansionEffectBehaviour.OnGraphStop: ResetGlobalDissolve");
     }
     if let Some(token) = play.token {
         timeline::cancel_and_release(world, token);
