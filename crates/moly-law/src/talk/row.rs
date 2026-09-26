@@ -159,6 +159,8 @@ pub enum TalkStep {
         speed: Option<f64>,
         playback_speed: f64,
         play_end_motion: bool,
+        /// The script's third argument, seconds after the call (nil reads 0).
+        delay_seconds: f32,
     },
     Text { text: String },
     /// 挂起直至点击。
@@ -365,6 +367,7 @@ mod tests {
                     speed: None,
                     playback_speed: 1.0,
                     play_end_motion: false,
+                    delay_seconds: 0.0,
                 },
                 TalkStep::Emoticon {
                     who: "Characters.A".to_string(),

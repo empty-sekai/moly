@@ -621,6 +621,7 @@ mod tests {
                 speed: None,
                 playback_speed: 1.0,
                 play_end_motion: false,
+                delay_seconds: 0.0,
             },
             talk_text(),
             TalkStep::WaitClick,
