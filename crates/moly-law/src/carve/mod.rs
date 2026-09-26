@@ -81,6 +81,19 @@
 //!   变换，不读 convex；物理凸包不是导航输入）；Box/Sphere/Capsule
 //!   仍是实心体。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
+//! * **NavMeshObstacle carving, two treatments.** The engine carves every
+//!   carving obstacle after the bake, per tile (`CarveNavMeshTile`: the
+//!   shape's hull pushed out by the agent radius, then `ClipPolys`). Runtime
+//!   obstacles (objects spawned after the bake, e.g. harvest objects) follow
+//!   that path here ([`obstacle`], [`WalkField::carve_obstacles`]); the hull
+//!   is pinned to the engine library by native rows. The placed fixtures'
+//!   obstacles still go through this bake as colliders (voxel null, then the
+//!   agent-radius erosion), so their carved edge is the eroded raster rather
+//!   than the hull's planes; moving them onto the runtime clip is the
+//!   remaining step. The runtime clip keeps this mesh's triangles: the
+//!   engine's `Subtract`/`MergePolygons` rebuild of the kept part into merged
+//!   convex polygons is not ported (same family as the missing convex merge),
+//!   and the tile position the engine subtracts is the origin here.
 
 mod contour;
 mod funnel;
