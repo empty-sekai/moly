@@ -94,14 +94,15 @@
 //! （宿主换站重置）立即撤。每名成员只有一只 HUD 气泡：新的 Show 替换
 //! 在屏那只（入场从 0 起；真源 HUD 重入的形状未读）。
 //! 摆设编辑链走真源域链——保存回执
-//! （`crate::fixture_edit::LayoutSaved`）→ 池选取
-//! （[`moly_law::tweet::pick_after_edit_tweet`]）→ 同一呈现链上屏 →
-//! 5.0s 驻留（[`AFTER_EDIT_REACTION_DELAY_SECONDS`]）后收场。
-//! 驻留在上屏**之后**（真源 objective 的序：选取 → 看向玩家 →
-//! 上屏 → 延迟等待 → 收场；反应者抽签与逐角色 500–1000ms 错峰挂账，
-//! 这里全员同帧替身）；驻留内新回执取消旧反应、重抽重上屏。这条反应
-//! 不在 NPC 的目标循环里（真源是一个目标，与问候、对话目标互斥），
-//! 具名缺口。
+//! （`crate::fixture_edit::LayoutSaved`）→ 反应者抽签（编辑站点上的成员按
+//! 到玩家距离排序，取最近的 `Random.Range(1, ceil(n/2)+1)` 名）→ 逐名
+//! 放行（取消判定为真才放行，放行后等 `Random.Range(500, 1000)` 毫秒再
+//! 轮下一名）→ 池选取（[`moly_law::tweet::pick_after_edit_tweet`]）→
+//! 同一呈现链上屏 → 5.0s 驻留（[`AFTER_EDIT_REACTION_DELAY_SECONDS`]）后
+//! 收场。驻留在上屏**之后**（真源 objective 的序：选取 → 看向玩家 →
+//! 上屏 → 延迟等待 → 收场）。反应目标本身仍在 NPC 目标循环之外跑（真源
+//! 是目标 2，取消当前目标并置 after-edit 对话数据），具名缺口，见
+//! [`after_edit_reaction`]。
 //! 定位 = avatar 根位 + 世界偏移
 //! (0,1,0) → 主相机投影到屏幕像素 → 盖到只画气泡层的 2D 相机（世界
 //! 单位 = 逻辑像素），每帧跟随。日志只打 id、行数、量法、参数实际值——文本内容不进日志
@@ -799,9 +800,7 @@ pub(crate) fn hud_event(
 }
 
 /// after-edit 反应驻留：上屏后的保持段（真源 objective 的静态
-/// `_waitTime` 5.0s，乘 1000 入延迟等待）。驻留内该成员的 objective
-/// 槽位被这条反应占用；新保存回执取消它重启
-/// （真源 `TryCancelCurrentObjective`，本 objective 恒可取消）。
+/// `_waitTime` 5.0s，乘 1000 入延迟等待）。
 #[derive(Component)]
 pub(crate) struct AfterEditHold {
     /// 剩余驻留（秒）。
@@ -810,40 +809,147 @@ pub(crate) struct AfterEditHold {
     sequence: u32,
 }
 
-/// Update：摆设编辑保存回执 → after-edit 池选取 → tweet 上屏 → 5.0s
-/// 驻留收场（呈现复用 [`spawn_balloon`]，与问候链同一管线）。真源链 =
-/// 保存回执进 `MysekaiAfterEditNPCUtility.OnEdit`（每张回执都进，不看
-/// 载荷）→ 逐角色挂反应 objective（反应者抽签与 500–1000ms 错峰挂账，
-/// 全员同帧替身）→ objective `ExecuteAsync`：**开始即选取**
-/// （`RandomPick` 恰一次，律 [`pick_after_edit_tweet`] 逐条对齐）→
-/// 看向玩家（挂账）→ 上屏（`SetTweetId`/`SetTweetType`/进 tweet 状态）
-/// → 5.0s 驻留 → 收场（`ForceUpdateObjective`）。**驻留在上屏之后**
-/// ——不是先等 5.0s 再显示。池空真源静默收场（不显示也不驻留，
-/// objective 直接收场），这里同语义具名一行。驻留内新回执：真源取消
-/// 旧 objective 重挂新链——这里同形，重抽、重上屏、驻留重起；上屏前
-/// 该成员头上的在屏气泡先关（objective 槽位只有一个，新反应进场等于
-/// 旧状态出场，跨链的 HUD 气泡同一条让位门——HUD 事件消费与本链在
-/// schedule 里链式定序加显式同步点，同帧铺出的 HUD 气泡当帧可见、
-/// 当帧让位，不定序并发时这一格是盲的）。成员集为非玩家、非对话
-/// 参演者（对话持留头上不叠气泡是一条呈现门；
-/// 真源会对对话中成员取消对话强挂反应，跨域让位门是本侧替身，具名）。
-#[allow(clippy::type_complexity)]
+/// One save receipt's reaction pass (`MysekaiAfterEditNPCUtility.OnEdit` →
+/// `ExecuteAfterEditNPCAction` → `ExecuteAfterEditLayout`). Each receipt runs
+/// its own pass; passes do not cancel each other.
+struct AfterEditPass {
+    sequence: u32,
+    /// The chosen reactors not yet reached, in the lottery's order.
+    queue: std::collections::VecDeque<Entity>,
+    /// The Delay after the last released reactor.
+    delay: Option<ReactionDelay>,
+}
+
+/// `UniTask.Delay(ms, ignoreTimeScale: false, PlayerLoopTiming.Update)`:
+/// created on `created`, it counts no time on that frame, then adds each
+/// frame's scaled delta and completes on the first frame the sum reaches
+/// `seconds`; the pass continues on that frame.
+struct ReactionDelay {
+    created: u32,
+    elapsed: f32,
+    seconds: f32,
+}
+
+/// The engine generator the reaction draws come from (`UnityEngine.Random`):
+/// the reactor count and each stagger. Seeded from the platform, as the
+/// other engine-draw sites of this host are; the engine's single shared
+/// state across every caller is not modelled.
+#[derive(Default)]
+pub(crate) struct AfterEditRand(Option<moly_law::objective::appearance::EngineRand>);
+
+impl AfterEditRand {
+    fn get(&mut self) -> &mut moly_law::objective::appearance::EngineRand {
+        self.0.get_or_insert_with(|| {
+            let (a, b) = (
+                crate::npc_objective::platform_seed(),
+                crate::npc_objective::platform_seed(),
+            );
+            let state = [a as u32, (a >> 32) as u32, b as u32, (b >> 32) as u32];
+            moly_law::objective::appearance::EngineRand::from_state(if state == [0; 4] {
+                [1, 0, 0, 0]
+            } else {
+                state
+            })
+        })
+    }
+}
+
+/// `LotteryAfterEditReactionCharacters(siteType)`: the NPCs whose own site is
+/// the edited one, ordered by distance to the player (a stable sort, as
+/// `OrderBy` is), cut to `Random.Range(1, CeilToInt(n * 0.5) + 1)` of the
+/// nearest. No NPC on the site: no draw and nobody.
+fn lottery_after_edit_reactors(
+    candidates: &[(Entity, Vec3)],
+    player: Vec3,
+    rand: &mut moly_law::objective::appearance::EngineRand,
+) -> (Vec<Entity>, Option<i32>) {
+    if candidates.is_empty() {
+        return (Vec::new(), None);
+    }
+    let mut ordered: Vec<(Entity, f32)> = candidates
+        .iter()
+        .map(|(npc, position)| (*npc, position.distance(player)))
+        .collect();
+    ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let half = ordered.len() as f32 * 0.5;
+    let max_exclusive = if half.ceil() == f32::INFINITY {
+        -2_147_483_647
+    } else {
+        half.ceil() as i32 + 1
+    };
+    let count = rand.range_int(1, max_exclusive);
+    let take = usize::try_from(count).unwrap_or(0).min(ordered.len());
+    (
+        ordered[..take].iter().map(|(npc, _)| *npc).collect(),
+        Some(count),
+    )
+}
+
+/// Update：摆设编辑保存回执 → 反应者抽签 → 逐名错峰 → after-edit 池选取
+/// → tweet 上屏 → 5.0s 驻留收场（呈现复用 [`spawn_balloon`]，与问候链
+/// 同一管线）。
+///
+/// The source pass, per receipt (read in the game's native code):
+/// 1. `LotteryHighPriorityReactionTalk(updateFixtures)` first; a talk there
+///    takes the high-priority path (not ported: the updated-fixture list and
+///    the condition-type-2 talk lookup are not carried here, named).
+/// 2. Otherwise [`lottery_after_edit_reactors`] on the edited site; if any
+///    chosen NPC is in the tutorial wait objective (19) the pass ends with no
+///    reaction.
+/// 3. `ExecuteAfterEditLayout`: for each chosen NPC in order, outside a
+///    tutorial, `TryCancelCurrentObjective`; only when it reports true: the
+///    after-edit talk data (type 12 at the NPC's position), the flag that
+///    skips its next Rest, then `Random.Range(500, 1000)` milliseconds of
+///    Delay before the next NPC. A refused cancel (talking, no live
+///    objective) moves to the next NPC with no delay.
+/// 4. After the pass, every NPC not chosen (outside a tutorial) gets
+///    `ForceUpdateObjective`.
+///
+/// Here steps 2 and 3 run as the source orders and times them, with the
+/// cancel answer read from the objective model ([`crate::npc_objective::ObjectiveMind::cancel_reports`]).
+/// The released NPC's reaction objective (type 2: pick → look at the player →
+/// tweet → 5.0 s → end) runs beside its objective loop, not inside it: the
+/// objective is not cancelled, no after-edit talk data is set, step 4 is not
+/// made, and the look at the player is not carried. Those need the objective
+/// loop's after-edit route, named as a gap.
+///
+/// The objective body: **开始即选取**（`RandomPick` 恰一次，律
+/// [`pick_after_edit_tweet`] 逐条对齐）→ 上屏 → 5.0s 驻留 → 收场。驻留在上屏
+/// 之后。池空真源静默收场（不显示也不驻留），这里同语义具名一行。上屏前该
+/// 成员头上的在屏气泡先关（objective 槽位只有一个——HUD 事件消费与本链在
+/// schedule 里链式定序加显式同步点，同帧铺出的 HUD 气泡当帧可见、当帧让位）。
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn after_edit_reaction(
     mut commands: Commands,
     time: Res<Time>,
+    frames: Res<bevy::diagnostic::FrameCount>,
+    clock: Option<Res<crate::npc_clock::NpcClock>>,
+    site: Option<Res<crate::site::SiteActive>>,
+    tutorial: Option<Res<crate::server_panel::ServerPanel>>,
     mut saves: MessageReader<crate::fixture_edit::LayoutSaved>,
     tables: Option<Res<crate::npc_tweet::TweetTables>>,
     art: Option<Res<BalloonArt>>,
-    mut sequence: Local<u32>,
-    mut after_edit: Local<Option<Vec<AfterEditRow>>>,
+    (mut sequence, mut after_edit, mut passes, mut rand): (
+        Local<u32>,
+        Local<Option<Vec<AfterEditRow>>>,
+        Local<Vec<AfterEditPass>>,
+        Local<AfterEditRand>,
+    ),
     npcs: Query<
-        (Entity, &CharacterUnitId),
+        (
+            Entity,
+            &CharacterUnitId,
+            &GlobalTransform,
+            &crate::npc::NpcActions,
+            Option<&crate::npc_objective::ObjectiveMind>,
+            Has<crate::talk::TalkHold>,
+        ),
         (
             With<CharacterShell>,
             Without<crate::player::PlayerControlled>,
-            Without<crate::talk::TalkHold>,
         ),
     >,
+    players: Query<&GlobalTransform, With<crate::player::PlayerControlled>>,
     mut holds: Query<(Entity, &CharacterUnitId, &mut AfterEditHold)>,
     balloons: Query<(Entity, &BalloonAnchor)>,
 ) {
@@ -854,10 +960,17 @@ pub(crate) fn after_edit_reaction(
             *after_edit = Some(after_edit_rows(tables));
         }
     }
+    // The engine's scaled frame delta (the Delay's clock), once the NPC clock
+    // runs; before that the host's.
+    let dt = clock
+        .as_deref()
+        .filter(|clock| clock.ready())
+        .map_or_else(|| time.delta_secs(), |clock| clock.delta());
+    let frame = frames.0;
     // 驻留收段先走（真源延迟等待到点 → ForceUpdateObjective）：到点
-    // 让位；同帧新回执的驻留从满值重起。
+    // 让位；同帧新反应的驻留从满值重起。
     for (npc, unit, mut hold) in &mut holds {
-        hold.remaining -= time.delta_secs();
+        hold.remaining -= dt;
         if hold.remaining <= 0.0 {
             info!(
                 "[tweet] after-edit unit={} 保存 #{}：驻留满 {:.1}s，反应收场（objective 让位）",
@@ -866,67 +979,146 @@ pub(crate) fn after_edit_reaction(
             commands.entity(npc).remove::<AfterEditHold>();
         }
     }
+    let in_tutorial = tutorial.as_deref().is_some_and(|panel| panel.is_tutorial());
     let receipts = saves.read().count();
-    if receipts == 0 {
-        return;
+    if receipts > 0 {
+        let edited = site.as_deref().map(|site| site.site_type.clone());
+        let player = players.iter().next().map(|g| g.translation());
+        for _ in 0..receipts {
+            *sequence += 1;
+            let (Some(edited), Some(player)) = (edited.as_deref(), player) else {
+                info!(
+                    "[tweet] after-edit 保存 #{}：无在场站点或玩家，反应者抽签无输入，跳过",
+                    *sequence
+                );
+                continue;
+            };
+            let candidates: Vec<(Entity, Vec3)> = npcs
+                .iter()
+                .filter(|(_, _, _, actions, _, _)| actions.site_type == edited)
+                .map(|(npc, _, global, _, _, _)| (npc, global.translation()))
+                .collect();
+            let (chosen, count) = lottery_after_edit_reactors(&candidates, player, rand.get());
+            let tutorial_wait = chosen.iter().any(|npc| {
+                npcs.get(*npc).is_ok_and(|(_, _, _, _, mind, _)| {
+                    mind.and_then(|mind| mind.current)
+                        == Some(moly_law::objective::ObjectiveType::TutorialWait)
+                })
+            });
+            info!(
+                "[tweet] after-edit 保存 #{}：站点 {edited} 在站 {} 名 → Random.Range(1, ceil(n/2)+1) = {count:?} → 反应者 {:?}{}",
+                *sequence,
+                candidates.len(),
+                chosen
+                    .iter()
+                    .filter_map(|npc| npcs.get(*npc).ok().map(|(_, unit, ..)| unit.0))
+                    .collect::<Vec<_>>(),
+                if tutorial_wait {
+                    "；其中有教学等待目标，整次不反应"
+                } else {
+                    ""
+                }
+            );
+            if tutorial_wait {
+                continue;
+            }
+            passes.push(AfterEditPass {
+                sequence: *sequence,
+                queue: chosen.into(),
+                delay: None,
+            });
+        }
     }
-    *sequence += receipts as u32;
-    let sequence = *sequence;
     let (Some(tables), Some(after_edit), Some(art)) = (tables, after_edit.as_ref(), art) else {
         return;
     };
-    info!(
-        "[tweet] after-edit：保存回执 {} 张（第 {} 次）→ 逐成员反应（同帧替身）",
-        receipts, sequence
-    );
-    let mut reacted = 0usize;
-    for (npc, unit) in &npcs {
-        let unit_id = unit.0 as i32;
-        let mut draw = CountedDraw::new((unit_id as u64) << 32 | sequence as u64);
-        let picked = pick_after_edit_tweet(
-            after_edit,
-            &tables.wrt,
-            tables.tweets(),
-            unit_id,
-            &mut draw,
-        );
-        let Some(row) = picked else {
-            info!(
-                "[tweet] after-edit unit={} 保存 #{sequence}：可解析池空（角色无池条目=数据缺席），不抽签跳过（真源 objective 直接收场同语义）",
-                unit.0
-            );
-            continue;
-        };
-        reacted += 1;
-        // 新反应进场：头上的在屏气泡先关（驻留内重抽、跨链的问候
-        // 气泡，同一条让位门——槽位只有一个）。
-        for (balloon_entity, anchor) in &balloons {
-            if anchor.npc == npc {
-                info!(
-                    "[tweet] after-edit unit={} 保存 #{sequence}：在屏 tweet={} 让位（objective 槽位互斥，重抽）",
-                    unit.0, anchor.tweet
-                );
-                commands.entity(balloon_entity).despawn();
+    // Each pass walks its queue: past a finished Delay, release the next NPC
+    // whose cancel reports true, then start that NPC's Delay.
+    for pass in passes.iter_mut() {
+        loop {
+            if let Some(delay) = pass.delay.as_mut() {
+                if delay.created == frame {
+                    break;
+                }
+                delay.elapsed += dt;
+                if delay.elapsed < delay.seconds {
+                    break;
+                }
+                pass.delay = None;
             }
+            let Some(npc) = pass.queue.pop_front() else {
+                break;
+            };
+            // CanUpdateObjectiveInTutorial: always true outside a tutorial;
+            // the tutorial branches are not carried (the host runs none).
+            if in_tutorial {
+                continue;
+            }
+            let Ok((_, unit, _, actions, mind, held)) = npcs.get(npc) else {
+                continue;
+            };
+            // TryCancelCurrentObjective: false while talking, without a
+            // current objective, or on one that completed.
+            // A dialogue hold is this host's talking presentation.
+            let cancels = actions.current != crate::npc::NpcAction::Talk
+                && !held
+                && mind.is_some_and(|mind| mind.cancel_reports());
+            if !cancels {
+                info!(
+                    "[tweet] after-edit unit={} 保存 #{}：TryCancelCurrentObjective 为假（对话中或无在行目标），不反应、无错峰",
+                    unit.0, pass.sequence
+                );
+                continue;
+            }
+            let ms = rand.get().range_int(500, 1000);
+            pass.delay = Some(ReactionDelay {
+                created: frame,
+                elapsed: 0.0,
+                seconds: ms as f32 / 1000.0,
+            });
+            info!(
+                "[tweet] after-edit unit={} 保存 #{}：放行，下一名在 Random.Range(500, 1000) = {ms} ms 之后",
+                unit.0, pass.sequence
+            );
+            let unit_id = unit.0 as i32;
+            let mut draw = CountedDraw::new((unit_id as u64) << 32 | pass.sequence as u64);
+            let picked =
+                pick_after_edit_tweet(after_edit, &tables.wrt, tables.tweets(), unit_id, &mut draw);
+            let Some(row) = picked else {
+                info!(
+                    "[tweet] after-edit unit={} 保存 #{}：可解析池空（角色无池条目=数据缺席），不抽签跳过（真源 objective 直接收场同语义）",
+                    unit.0, pass.sequence
+                );
+                continue;
+            };
+            // 新反应进场：头上的在屏气泡先关（驻留内重抽、跨链的问候
+            // 气泡，同一条让位门——槽位只有一个）。
+            for (balloon_entity, anchor) in &balloons {
+                if anchor.npc == npc {
+                    info!(
+                        "[tweet] after-edit unit={} 保存 #{}：在屏 tweet={} 让位（objective 槽位互斥，重抽）",
+                        unit.0, pass.sequence, anchor.tweet
+                    );
+                    commands.entity(balloon_entity).despawn();
+                }
+            }
+            info!(
+                "[tweet] after-edit unit={} 保存 #{}：池 {} 条 → tweet={} 入选（抽签恰 {} 次）→ 上屏，驻留 {:.1}s 起",
+                unit.0,
+                pass.sequence,
+                draw.last_len,
+                row.id,
+                draw.calls,
+                AFTER_EDIT_REACTION_DELAY_SECONDS
+            );
+            spawn_balloon(&mut commands, &art, npc, unit.0, row);
+            commands.entity(npc).insert(AfterEditHold {
+                remaining: AFTER_EDIT_REACTION_DELAY_SECONDS,
+                sequence: pass.sequence,
+            });
         }
-        info!(
-            "[tweet] after-edit unit={} 保存 #{sequence}：池 {} 条 → tweet={} 入选（抽签恰 {} 次）→ 上屏，驻留 {:.1}s 起",
-            unit.0,
-            draw.last_len,
-            row.id,
-            draw.calls,
-            AFTER_EDIT_REACTION_DELAY_SECONDS
-        );
-        spawn_balloon(&mut commands, &art, npc, unit.0, row);
-        commands.entity(npc).insert(AfterEditHold {
-            remaining: AFTER_EDIT_REACTION_DELAY_SECONDS,
-            sequence,
-        });
     }
-    info!(
-        "[tweet] after-edit 保存 #{sequence}：在场 {} 名、入选 {reacted}",
-        npcs.iter().count()
-    );
+    passes.retain(|pass| pass.delay.is_some() || !pass.queue.is_empty());
 }
 
 /// 池的 join 形 → 律的 AEH 行形：每条池内 tweet 反查同角色同 tweet 的
