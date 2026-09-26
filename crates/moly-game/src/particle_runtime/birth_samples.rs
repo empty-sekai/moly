@@ -263,6 +263,8 @@ fn normal_update_recomputes_birth_capacity_after_existing_deaths() {
             frame: Default::default(),
             events: None,
             target: None,
+            procedural: false,
+            replays: Vec::new(),
         };
         let initial_before = state.initial;
         super::birth::step_explicit(&mut system, &mut state, dt, false, &context).unwrap();
@@ -569,11 +571,13 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
     use moly_law::particle::seed_owner::ScalarRandom;
     use moly_law::particle::{Curve, CurveKey};
     let mut system = test_support::runtime();
+    // Four keys leave the curve to the engine evaluator, which needs the
+    // serialized wraps this curve lacks.
     system.emitter.start.lifetime = MinMaxCurve::Curve {
         multiplier: 1.0,
         max: Curve {
             multiplier: 1.0,
-            keys: [0.0, 1.0]
+            keys: [0.0, 0.3, 0.6, 1.0]
                 .map(|time| CurveKey {
                     time,
                     value: 2.0,
@@ -584,8 +588,8 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
                     out_weight: 0.0,
                 })
                 .to_vec(),
-            pre_wrap: Some(2),
-            post_wrap: Some(2),
+            pre_wrap: None,
+            post_wrap: None,
         },
     };
     system.playback_head = 0.75;
@@ -609,6 +613,8 @@ fn unqualified_initial_curve_refuses_before_any_normal_step_state_changes() {
         frame: Default::default(),
         events: None,
         target: None,
+        procedural: false,
+        replays: Vec::new(),
     };
     let runtime_before = mutable_runtime_snapshot(&system);
     let initial_before = state.initial;

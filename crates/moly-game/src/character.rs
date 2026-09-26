@@ -549,6 +549,7 @@ pub fn drive(
             &MotionPhase,
             &mut MotionDriver,
             Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
+            Option<&crate::npc_look_at::NpcLookAt>,
         ),
         (
             Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
@@ -558,11 +559,26 @@ pub fn drive(
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,
 ) {
-    for (unit, phase, mut driver, talk_lease) in &mut npcs {
+    for (unit, phase, mut driver, talk_lease, look_at) in &mut npcs {
         if driver.alone_holds || talk_lease.is_some_and(|lease| !lease.approaching) {
             continue; // 演出侧占着播放器：位移相位换段让位
         }
+        // A look-at in flight on a standing character: the presenter's turn
+        // clip (started with the tween); its end hands back to the idle clip.
+        let look_turn = match (look_at, phase) {
+            (Some(look), MotionPhase::Dwelling { .. }) => Some(look.clip()),
+            _ => None,
+        };
         let mut kind = match phase {
+            _ if look_turn.is_some() => {
+                let motion = look_turn.expect("checked");
+                match driver.playing {
+                    Some(MotionKind::TurnL(playing)) if playing == motion => {
+                        MotionKind::TurnL(motion)
+                    }
+                    _ => MotionKind::TurnS(motion),
+                }
+            }
             MotionPhase::Walking | MotionPhase::FitWalking { .. } => MotionKind::Walk,
             MotionPhase::Dwelling { .. } => MotionKind::Idle,
             MotionPhase::Turning { motion, .. } | MotionPhase::FitTurning { motion, .. } => {

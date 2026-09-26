@@ -157,6 +157,9 @@ struct EffectInstance {
     not_played: Vec<String>,
     /// How many systems `GetComponentsInChildren<ParticleSystem>()` lists.
     listed: usize,
+    /// The nodes of those systems, in that order (`SetEffectInstance`'s
+    /// seed pass walks them).
+    listed_nodes: Vec<Entity>,
     /// The listed systems whose serialized seed is not the manual seed 0
     /// (automatic, or another manual seed).
     auto_seeded: Vec<String>,
@@ -1153,6 +1156,7 @@ fn prepare_effects(
                 played,
                 not_played,
                 listed: read.listed,
+                listed_nodes: read.listed_nodes,
                 auto_seeded: read.auto_seeded,
                 awake: read.awake,
                 included_loop: read.included_loop,
@@ -1324,6 +1328,7 @@ struct InstanceRead {
     /// The listed systems outside those subtrees, each with the reason.
     not_played: Vec<String>,
     listed: usize,
+    listed_nodes: Vec<Entity>,
     auto_seeded: Vec<String>,
     awake: usize,
     included_loop: bool,
@@ -1424,111 +1429,18 @@ fn read_effect_instance(
         }
         included_loop |= flag(emitter, "looping")?;
     }
-    // The particle host plays an object's whole subtree and refuses a
-    // sub-emitter parent in it (its sub-emitters would be played by their
-    // parent's events, which it does not install); a sub-emitter played as
-    // its own object would emit without them. So the root particle is played
-    // as its maximal subtrees free of both; every other listed system is
-    // left unplayed by name, as the host leaves a refused system of a
-    // director owner undrawn while the others play.
-    let by_path: HashMap<&str, &Value> = emitters
-        .iter()
-        .filter_map(|emitter| Some((emitter["node"].as_str()?, emitter)))
-        .collect();
-    let mut targets: HashMap<String, String> = HashMap::new();
-    let mut parents: HashSet<String> = HashSet::new();
-    for emitter in emitters {
-        let system = &emitter["system"];
-        let rows = system["subEmitters"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let sub_module = system["sourceModules"]["enabled"]
-            .as_array()
-            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some("SubModule")));
-        if sub_module || !rows.is_empty() {
-            parents.insert(path(emitter));
-        }
-        for row in rows {
-            if let Some(target) = row["emitter"].as_str() {
-                targets.insert(target.to_owned(), path(emitter));
-            }
-        }
-    }
-    let node_path = |entity: Entity| -> Option<String> {
-        let id = world
-            .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)?
-            .game_object;
-        Some(path(by_id.get(&id)?))
-    };
-    let children_of = |entity: Entity| -> Vec<Entity> {
-        world
-            .get::<Children>(entity)
-            .map(|children| children.iter().collect())
-            .unwrap_or_default()
-    };
-    // Whether a node's subtree holds no sub-emitter parent or target.
-    fn clean(
-        entity: Entity,
-        node_path: &dyn Fn(Entity) -> Option<String>,
-        children_of: &dyn Fn(Entity) -> Vec<Entity>,
-        parents: &HashSet<String>,
-        targets: &HashMap<String, String>,
-    ) -> bool {
-        if let Some(path) = node_path(entity) {
-            if parents.contains(&path) || targets.contains_key(&path) {
-                return false;
-            }
-        }
-        children_of(entity)
-            .into_iter()
-            .all(|child| clean(child, node_path, children_of, parents, targets))
-    }
-    let mut subtrees = Vec::new();
-    let mut not_played = Vec::new();
-    let mut stack = vec![root_particle];
-    while let Some(entity) = stack.pop() {
-        let own = node_path(entity);
-        if own.is_some() && clean(entity, &node_path, &children_of, &parents, &targets) {
-            subtrees.push((entity, own.unwrap_or_default()));
-            continue;
-        }
-        if let Some(own) = own {
-            let emitter = by_path.get(own.as_str()).copied();
-            let emits = emitter.is_some_and(|emitter| {
-                emitter["system"]["sourceModules"]["enabled"]
-                    .as_array()
-                    .is_some_and(|names| {
-                        names
-                            .iter()
-                            .any(|name| name.as_str() == Some("EmissionModule"))
-                    })
-            });
-            let listed_here = listed
-                .iter()
-                .any(|&(listed_entity, _)| listed_entity == entity);
-            if listed_here {
-                not_played.push(if let Some(parent) = targets.get(&own) {
-                    format!("{own} (a sub-emitter of {parent})")
-                } else if parents.contains(&own) {
-                    format!("{own} (a sub-emitter parent)")
-                } else if !emits {
-                    format!("{own} (its Emission module is off: it emits nothing)")
-                } else {
-                    format!("{own} (above a sub-emitter parent)")
-                });
-            }
-        }
-        let mut children = children_of(entity);
-        children.reverse();
-        stack.extend(children);
-    }
+    // The particle host plays an object's whole subtree, a sub-emitter
+    // parent with its targets installed as its children, so the root
+    // particle plays as one object.
+    let subtrees = vec![(root_particle, path(root_emitter))];
+    let not_played = Vec::new();
     Ok(InstanceRead {
         nodes: nodes.len(),
         root_path: path(root_emitter),
         subtrees,
         not_played,
         listed: listed.len(),
+        listed_nodes: listed.iter().map(|&(entity, _)| entity).collect(),
         auto_seeded,
         awake,
         included_loop,
@@ -1950,14 +1862,8 @@ fn set_effect_instances(world: &mut World, plan: &Plan, t: f64) {
     for instance in instances {
         let seed = if instance.random_seed {
             "isEnabledRandomSeed: the systems keep their seeds".to_owned()
-        } else if instance.auto_seeded.is_empty() {
-            "randomSeed = 0 on each: every listed system's serialized seed is already the manual seed 0".to_owned()
         } else {
-            format!(
-                "randomSeed = 0 on each: not written (the particle host has no seed write; named gap): {} listed systems keep their own seed ({})",
-                instance.auto_seeded.len(),
-                instance.auto_seeded.join(", ")
-            )
+            seed_pass(world, instance)
         };
         if let Some(mut visibility) = world.get_mut::<Visibility>(instance.root) {
             *visibility = Visibility::Inherited;
@@ -1974,6 +1880,51 @@ fn set_effect_instances(world: &mut World, plan: &Plan, t: f64) {
             instance.not_played.len()
         );
     }
+}
+
+/// `SetEffectInstance`'s seed pass on each played object: `randomSeed = 0` on
+/// every listed system under it (a playing one is stopped and cleared with
+/// its children, seeded and played again), before the activation plays
+/// them. Returns what it did, for the log.
+fn seed_pass(world: &mut World, instance: &EffectInstance) -> String {
+    let mut done = Vec::new();
+    let mut covered = 0;
+    for (path, binding) in &instance.played {
+        let under: Vec<Entity> = instance
+            .listed_nodes
+            .iter()
+            .copied()
+            .filter(|&node| {
+                let mut current = Some(node);
+                while let Some(entity) = current {
+                    if entity == binding.root {
+                        return true;
+                    }
+                    current = world.get::<ChildOf>(entity).map(ChildOf::parent);
+                }
+                false
+            })
+            .collect();
+        covered += under.len();
+        match particles::seed_played_object(world, binding, &under) {
+            Ok(pass) => done.push(format!(
+                "{path}: {} seeded, {} restarted, {} not simulated",
+                pass.seeded, pass.restarted, pass.unsimulated
+            )),
+            Err(error) => error!(
+                "[cutscene] EffectClip {}: {path}: seed pass refused by the particle host: {error}",
+                instance.name
+            ),
+        }
+    }
+    format!(
+        "randomSeed = 0 on each ({} of {} listed systems under a played object; {} were not the manual seed 0: {}): {}",
+        covered,
+        instance.listed,
+        instance.auto_seeded.len(),
+        instance.auto_seeded.join(", "),
+        done.join("; ")
+    )
 }
 
 /// The live particles of the effect instances' played subtrees, four times
@@ -2052,9 +2003,14 @@ fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64)
 /// clears the root particle, any other stops its emission (`Stop()`).
 fn effect_pause(world: &mut World, instance: &EffectInstance, t: f64) {
     if instance.included_loop && instance.matched_duration {
-        error!(
-            "[cutscene] t={t:.4} EffectClip {}: OnBehaviourPause: Stop(true, StopEmittingAndClear) is not in the particle host's API (named gap); not stopped",
-            instance.name
+        let stopped: usize = instance
+            .played
+            .iter()
+            .map(|(_, binding)| particles::stop_and_clear_object(world, binding))
+            .sum();
+        info!(
+            "[cutscene] t={t:.4} EffectClip {}: OnBehaviourPause: rootParticle {}.Stop(true, StopEmittingAndClear): {stopped} systems stopped and cleared",
+            instance.name, instance.root_particle
         );
         return;
     }

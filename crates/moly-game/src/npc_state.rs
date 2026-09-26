@@ -525,12 +525,15 @@ pub(crate) fn on_update(
                     actions.locals.greeting.looking_at_player = player.is_some();
                     // DoLookAtAsync(player position, 1.0, Linear), not awaited.
                     if let Some(player) = player {
-                        commands.entity(entity).insert(crate::npc_look_at::NpcLookAt::new(
-                            player,
-                            crate::npc_look_at::GREETING_LOOK_AT_SECONDS,
-                            moly_law::ui::dotween::Ease::Linear,
-                            frame,
-                        ));
+                        commands
+                            .entity(entity)
+                            .insert(crate::npc_look_at::NpcLookAt::new(
+                                player,
+                                walk.0.forward,
+                                crate::npc_look_at::GREETING_LOOK_AT_SECONDS,
+                                moly_law::ui::dotween::Ease::Linear,
+                                frame,
+                            ));
                     }
                     info!(
                         "[npc-state] unit={unit} frame={frame} greeting enter: visit={visits} phenomenon={phenomena} greeting={} tweet={tweet_id}; call=SetIKTarget(player) call=DoLookAt(player, 1.0, Linear)",

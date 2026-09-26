@@ -121,8 +121,13 @@ pub fn turn_angle(current_yaw_deg: f32, target_yaw_deg: f32) -> f32 {
 /// 六段链选段。真源比较链直译：首段 `[0,60]` 上下都含等号；其余各段
 /// 下开上闭（卫兵写的是「排除下界及以下、或上界以上」，读法即下开上
 /// 闭）；大于 300 与**负角**同落 45° 左段——负角走的是内段的左转臂；
-/// NaN 过不了首卫兵，落 45° 右段。
+/// NaN: every guard of the compiled chain branches on an unordered compare
+/// (`b.lt` / `b.hi` / `b.le` all take it), so NaN runs to the last band,
+/// whose select sees the equal flag set and gives the left 45° clip.
 pub fn turn_motion(angle: f32) -> TurnMotion {
+    if angle.is_nan() {
+        return TurnMotion::Turn45L;
+    }
     if angle < 0.0 || 60.0 < angle {
         if angle <= 60.0 || 120.0 < angle {
             if angle <= 120.0 || 180.0 < angle {
@@ -253,10 +258,10 @@ mod tests {
     }
 
     #[test]
-    fn nan_falls_to_the_right_45_band() {
-        // 锚：NaN 与任何比较都为假，首卫兵（`< 0 || > 60`）取假直接进
-        // 右 45 段。钉住它：内段的 NaN 重组臂永远不可达。
-        assert_eq!(turn_motion(f32::NAN), TurnMotion::Turn45R);
+    fn nan_falls_to_the_left_45_band() {
+        // The compiled chain branches on unordered compares down to the
+        // last band, which selects the left 45° clip.
+        assert_eq!(turn_motion(f32::NAN), TurnMotion::Turn45L);
     }
 
     // ---- make_positive_yaw：引擎包装的手算锚 --------------------------

@@ -3,7 +3,8 @@
 //! Hemisphere: the Random arc mode of StartHemiSphere over the envelope the
 //! native receipts execute: any finite radius, shape rotation, scale and
 //! position, arc of zero or more degrees, arc spread of zero or more, position
-//! jitter of zero or more, thickness exactly zero or one. ConeVolume: the
+//! jitter of zero or more, any thickness in [0, 1] (the shell's inner radius
+//! cubed through the device log2f and exp2f). ConeVolume: the
 //! Random arc mode of StartConeVolume over any finite radius, thickness, cone
 //! angle and length, arc, arc spread, shape rotation, scale, position and
 //! position jitter. SingleSidedEdge: the Random radius mode of
@@ -23,7 +24,10 @@
 //! when positive), and the PingPong and BurstSpread arc modes with the same
 //! lane body: PingPong sweeps the arc clock up and down the arc, BurstSpread
 //! spreads the lanes over the accepted batch count. Sphere: the Random arc
-//! mode of StartSphere, thickness exactly zero or one. SingleSidedEdge also in
+//! mode of StartSphere, any thickness in [0, 1]. BoxShell and BoxEdge (inline
+//! in ShapeModule::Start): seven draws per lane (three coordinates, the face
+//! word, three shell draws), any finite box thickness, emitted along +Z like
+//! Box. SingleSidedEdge also in
 //! its BurstSpread radius mode (no draw; the lanes are spread over the accepted
 //! batch count), and Circle in its BurstSpread arc mode (one radial draw). The
 //! Loop, PingPong and BurstSpread kernels read the batch inputs a `ShapeBatch`
@@ -41,7 +45,7 @@
 //! No later renormalization follows the outer owner's direction multiplication.
 use super::schema::{ShapeMode, ShapeParams, ShapeTexture};
 use super::seed_owner::ModuleRandom;
-use super::shape::{native_rsqrt, ArcLoopClock, ConeJitter, Shell};
+use super::shape::{native_rsqrt, ArcLoopClock, BoxSurface, ConeJitter, Shell};
 use super::shape_mesh::MeshShapeCache;
 use std::num::NonZeroU32;
 
@@ -106,6 +110,7 @@ enum Kernel {
     SingleSidedEdge { spread: f32 },
     Donut { thickness: f32, donut_radius: f32, arc_spread: f32 },
     Box,
+    BoxSurface { surface: BoxSurface, thickness: [f32; 3] },
     SingleSidedEdgeBurst { spread: f32 },
     CircleBurst { thickness: f32, arc_spread: f32 },
     Cone { thickness: f32, angle: f32, arc_spread: f32, random_direction: f32, arc: ConeArc },
@@ -196,6 +201,8 @@ impl ShapeBirthLaw {
             },
             "Donut" => Self::donut(params),
             "Box" => Self::box_volume(params),
+            "BoxShell" => Self::box_surface(params, BoxSurface::Shell),
+            "BoxEdge" => Self::box_surface(params, BoxSurface::Edge),
             "Cone" => Self::cone(params),
             "Sphere" => Self::sphere(params),
             "Mesh" => Self::mesh(params),
@@ -292,6 +299,21 @@ impl ShapeBirthLaw {
         Ok(Self::with_kernel(params, Kernel::Box, scale, random_position))
     }
 
+    /// BoxShell and BoxEdge read the Store path controls, the source affine
+    /// and the box thickness (any finite value: plain f32 arithmetic whose
+    /// overflow the output refusal reports); radius, arc, angle, thickness and
+    /// both modes are never loaded, so none of them gates them.
+    fn box_surface(params: &ShapeParams, surface: BoxSurface) -> Result<Self, Refused> {
+        let (scale, random_position) = Self::store_controls(params)?;
+        let Some(thickness) = params.controls.box_thickness.filter(|v| v.iter().all(|x| x.is_finite())) else {
+            return Err(Refused::UnsupportedSourceShape);
+        };
+        if params.controls.random_direction != Some(0.0) {
+            return Err(Refused::UnsupportedSourceShape);
+        }
+        Ok(Self::with_kernel(params, Kernel::BoxSurface { surface, thickness }, scale, random_position))
+    }
+
     /// BurstSpread single-sided edge: any finite radius and radius spread. It
     /// draws nothing; the lanes are spread over the accepted batch count.
     fn single_sided_edge_burst(params: &ShapeParams) -> Result<Self, Refused> {
@@ -373,9 +395,9 @@ impl ShapeBirthLaw {
         ))
     }
 
-    /// Sphere in its Random arc mode: the Hemisphere envelope (thickness exactly
-    /// zero or one, any finite radius, arc of zero or more, arc spread of zero
-    /// or more).
+    /// Sphere in its Random arc mode: the Hemisphere envelope (any thickness in
+    /// [0, 1], any finite radius, arc of zero or more, arc spread of zero or
+    /// more).
     fn sphere(params: &ShapeParams) -> Result<Self, Refused> {
         let (scale, random_position) = Self::store_controls(params)?;
         let c = &params.controls;
@@ -766,15 +788,22 @@ impl ShapeBirthLaw {
             source_affine(self.rotation, self.scale, self.position, emitter_scale)
         };
         let before_rng = random;
-        let mut next = random;
+        let stream = std::cell::Cell::new(random);
         // Draws per group, in order: Hemisphere, Sphere, ConeVolume, Donut and
-        // Box 3; Circle 2 (arc, then radial fraction); SingleSidedEdge 1;
+        // Box 3; BoxShell and BoxEdge 7 (three coordinates, the face word,
+        // three shell draws); Circle 2 (arc, then radial fraction); SingleSidedEdge 1;
         // Cone Random 2 (arc, radial) and Cone Loop, PingPong and BurstSpread 1
         // (radial), each plus 2 (angle, area) when its random direction is
         // positive; the BurstSpread circle 1 (radial); the BurstSpread edge none;
         // Mesh 3 (the table pick, then the two barycentric weights).
         let mut mesh_colour = None;
-        let mut draw = || next.next4_u32().map(super::shape::u01_from_bits);
+        let draw_word = || {
+            let mut random = stream.get();
+            let word = random.next4_u32();
+            stream.set(random);
+            word
+        };
+        let draw = || draw_word().map(super::shape::u01_from_bits);
         let lanes = |f: &dyn Fn(usize) -> ([f32; 3], [f32; 3])| -> [([f32; 3], [f32; 3]); 4] { std::array::from_fn(|i| f(i)) };
         let raw: [([f32; 3], [f32; 3]); 4] = match self.kernel {
             Kernel::Hemisphere { shell, arc_spread } => {
@@ -826,6 +855,12 @@ impl ShapeBirthLaw {
             Kernel::Box => {
                 let (x, y, z) = (draw(), draw(), draw());
                 lanes(&|i| super::shape::box_volume(x[i], y[i], z[i]))
+            }
+            Kernel::BoxSurface { surface, thickness } => {
+                let (x, y, z) = (draw(), draw(), draw());
+                let face = draw_word();
+                let (sx, sy, sz) = (draw(), draw(), draw());
+                lanes(&|i| super::shape::box_surface(surface, thickness, [x[i], y[i], z[i]], face[i], [sx[i], sy[i], sz[i]]))
             }
             Kernel::MeshTriangle { normal_offset, .. } => {
                 let mesh = mesh.expect("checked above");
@@ -898,6 +933,7 @@ impl ShapeBirthLaw {
                 })
             }
         };
+        let mut next = stream.get();
         let before_store = next;
         let (arc, polar) = if self.random_position > 0.0 {
             (
@@ -1207,6 +1243,11 @@ pub struct ReplayCount {
     /// Rows refused as a non-finite output, each one a row whose native
     /// stored position or direction is itself non-finite.
     pub output_refused: usize,
+    /// Rows whose native run answered the shell preparation's log2f and
+    /// exp2f with the harness's own libm rather than the device's (a
+    /// thickness other than 0 or 1): they record no device value, so they
+    /// are not replayed. The device shell is replayed from its own receipt.
+    pub harness_libm: usize,
 }
 
 /// Diagnostic replay of native Hemisphere groups in the widened 174-word
@@ -1219,11 +1260,11 @@ pub struct ReplayCount {
 /// radius, arc, arc spread, position jitter, scale, rotation and position.
 /// Of those, only the thickness is flagged from the row: the shell's inner
 /// radius is exp2f(log2f(1 - thickness) * 3) through the device libm, which
-/// libunity does not carry, and whose result is fixed only at a thickness of
-/// 0 or 1. So a gate refusal must fall on a row of another thickness, and
-/// such a row records the harness's libm, not the device's, so it cannot
-/// vouch for an admission either. A refusal by any other gate (a non-finite
-/// radius, scale, rotation or position; a negative or non-finite arc, arc
+/// libunity does not carry, and the runs behind these rows answered it
+/// exactly only at a thickness of 0 or 1. A row of another thickness records
+/// the harness's libm, not the device's, so it is counted and not replayed. A
+/// refusal by any gate (a non-finite radius, scale, rotation or position; a
+/// negative or non-finite arc, arc
 /// spread or jitter) turns the replay red, whichever side moved: a gate
 /// narrowed below the recorded inputs, or a row file carrying an input past
 /// those gates, which the native call executed and which the port must then
@@ -1279,22 +1320,14 @@ pub fn replay_native_rows_v2(text: &str) -> ReplayCount {
             },
         };
         let thickness = f32::from_bits(v[2]);
-        let libm_dependent = thickness != 0.0 && thickness != 1.0;
+        if thickness != 0.0 && thickness != 1.0 {
+            count.harness_libm += 1;
+            continue;
+        }
         let law = match ShapeBirthLaw::from_params(&source) {
             Ok(law) => law,
-            Err(refused) => {
-                assert!(
-                    libm_dependent,
-                    "case {case}: gate refused {refused:?} a row inside the native envelope"
-                );
-                count.gate_refused += 1;
-                continue;
-            }
+            Err(refused) => panic!("case {case}: gate refused {refused:?} a row inside the native envelope"),
         };
-        assert!(
-            !libm_dependent,
-            "case {case}: admitted a thickness whose shell radius the device libm decides"
-        );
         let world = v[89] == 1;
         let uses_axis = v[159] == 1;
         let owner = std::array::from_fn(|i| f32::from_bits(v[90 + i]));
@@ -2090,10 +2123,11 @@ pub fn replay_donut_rows_v2(text: &str) -> ReplayCount {
     count
 }
 
-/// The Shape block of one native row of the batch kernels (139-word layout): the
-/// kernel's own controls from the row, the mode the row's kind names, and
-/// fixed non-zero values for every member the kernel does not read (the
-/// gates must not depend on them).
+/// The Shape block of one native row of the batch kernels (139-word layout,
+/// or 142 words whose last three are the box thickness): the kernel's own
+/// controls from the row, the mode the row's kind names, and fixed non-zero
+/// values for every member the kernel does not read (the gates must not
+/// depend on them).
 #[cfg(test)]
 fn residual_row_source(v: &[u32]) -> ShapeParams {
     use super::schema::ShapeControls;
@@ -2107,8 +2141,12 @@ fn residual_row_source(v: &[u32]) -> ShapeParams {
         42 => ("Cone", ShapeMode::PingPong, ShapeMode::Loop),
         43 => ("Cone", ShapeMode::BurstSpread, ShapeMode::Loop),
         1 => ("Sphere", ShapeMode::Random, ShapeMode::Loop),
+        2 => ("Hemisphere", ShapeMode::Random, ShapeMode::Loop),
+        15 => ("BoxShell", ShapeMode::Loop, ShapeMode::PingPong),
+        16 => ("BoxEdge", ShapeMode::PingPong, ShapeMode::Loop),
         other => panic!("residual row kind {other}"),
     };
+    let box_thickness = if v.len() == 142 { f3(139) } else { [0.25, 0.5, 0.75] };
     ShapeParams {
         shape_type: shape_type.into(),
         radius: f(1),
@@ -2122,7 +2160,7 @@ fn residual_row_source(v: &[u32]) -> ShapeParams {
             length: Some(7.5),
             donut_radius: Some(0.375),
             scale: Some(f3(12)),
-            box_thickness: Some([0.25, 0.5, 0.75]),
+            box_thickness: Some(box_thickness),
             arc_mode: Some(arc_mode),
             arc_spread: Some(f(5)),
             arc_speed: Some(super::value::MinMaxCurve::Constant(0.05)),
@@ -2215,6 +2253,72 @@ pub fn replay_residual_rows(text: &str) -> ReplayCount {
         }
     }
     count
+}
+
+/// Mismatches of the shell and box-surface native rows (142-word layout: the
+/// batch-kernel row plus the box thickness) under the active arm, without
+/// stopping at the first: rows compared, rows with any differing channel
+/// (kernel output, RNG at and after the Store, stored position and
+/// direction), rows the output refusal took, and rows the gates refused.
+/// A refusal must fall exactly where native stored a non-finite value.
+#[cfg(test)]
+pub fn shell_row_mismatches(text: &str) -> [usize; 4] {
+    let nonfinite = |w: &u32| (w >> 23) & 0xff == 0xff;
+    let mut out = [0usize; 4];
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let v: Vec<u32> = line.split_whitespace().map(|x| x.parse().unwrap()).collect();
+        assert_eq!(v.len(), 142, "row width");
+        out[0] += 1;
+        let words = |at: usize| ModuleRandom {
+            words: std::array::from_fn(|w| std::array::from_fn(|l| v[at + w * 4 + l])),
+        };
+        let same = |actual: f32, at: usize| {
+            actual.to_bits() == v[at] || (actual.is_nan() && f32::from_bits(v[at]).is_nan())
+        };
+        let Ok(law) = ShapeBirthLaw::from_params(&residual_row_source(&v)) else {
+            out[3] += 1;
+            continue;
+        };
+        let clock = ArcLoopClock {
+            current: f64::from_bits(u64::from(v[39]) | (u64::from(v[40]) << 32)),
+            previous: f64::from_bits(u64::from(v[41]) | (u64::from(v[42]) << 32)),
+        };
+        let mut batch = ShapeBatch::new(NonZeroU32::new(v[35]).expect("accepted"), f32::from_bits(v[37]),
+            f32::from_bits(v[38]), clock);
+        for _ in 0..v[36] {
+            batch.advance();
+        }
+        let world = v[18] == 1;
+        let owner = std::array::from_fn(|i| f32::from_bits(v[19 + i]));
+        let Ok(group) = law.evaluate_group(&batch, words(43), owner, world, [1.0; 3], false) else {
+            out[1] += 1;
+            continue;
+        };
+        let mut equal = group.before_store == words(83) && group.after_rng == words(99);
+        for lane in 0..4 {
+            for axis in 0..3 {
+                let at = axis * 4 + lane;
+                equal &= same(group.raw_position[lane][axis], 59 + at)
+                    && same(group.raw_direction[lane][axis], 71 + at)
+                    && same(group.samples[lane].position[axis], 115 + at)
+                    && same(group.samples[lane].direction[axis], 127 + at);
+            }
+        }
+        let native_nonfinite = v[115..139].iter().any(nonfinite);
+        let mut random = words(43);
+        match law.sample_group(&mut batch, &mut random, owner, world, [1.0; 3], false) {
+            Ok(_) => equal &= !native_nonfinite && random == words(99),
+            Err(Refused::NonfiniteOutput) => {
+                equal &= native_nonfinite && random == words(43);
+                out[2] += 1;
+            }
+            Err(_) => equal = false,
+        }
+        if !equal {
+            out[1] += 1;
+        }
+    }
+    out
 }
 
 /// The Circle BurstSpread native rows (150-word layout):
@@ -2404,6 +2508,67 @@ mod tests {
             assert_eq!(count.gate_refused, 0);
         }
     }
+    /// The device log2f and exp2f (sweeps over every path, rows `0 x out` and
+    /// `1 x out`), the shell preparation each native sphere kernel call made
+    /// (`2 thickness inner`), and every native group of Sphere and Hemisphere
+    /// with a thickness inside (0, 1) and of BoxShell and BoxEdge (142-word
+    /// rows), bit for bit through the Store; each named mutant turns some part
+    /// red, and so does a bit-flipped copy of the rows.
+    #[test]
+    #[ignore = "set MOLY_SHAPE_SHELL_LIBM, MOLY_SHAPE_SHELL_ROWS and MOLY_SHAPE_SHELL_BITFLIP (the native shell receipt)"]
+    fn current_shell_and_box_surface_rows_bit_exact() {
+        use super::super::device_libm::{exp2f, log2f};
+        use super::super::shape::{shell_arms, shell_inner_cube};
+        let libm = rows("MOLY_SHAPE_SHELL_LIBM");
+        let shape_rows = rows("MOLY_SHAPE_SHELL_ROWS");
+        let flipped_rows = rows("MOLY_SHAPE_SHELL_BITFLIP");
+        let libm_rows: Vec<[u32; 3]> = libm.lines().filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let v: Vec<u32> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
+                [v[0], v[1], v[2]]
+            })
+            .collect();
+        let same = |a: f32, b: u32| a.to_bits() == b || (a.is_nan() && f32::from_bits(b).is_nan());
+        let parts = |shape_text: &str| -> [usize; 4] {
+            let mut out = [0usize; 4];
+            for &[f, x, native] in &libm_rows {
+                let ours = match f {
+                    0 => log2f(f32::from_bits(x)),
+                    1 => exp2f(f32::from_bits(x)),
+                    2 => shell_inner_cube(f32::from_bits(x)),
+                    other => panic!("libm row function {other}"),
+                };
+                if !same(ours, native) {
+                    out[f as usize] += 1;
+                }
+            }
+            let rows = super::shell_row_mismatches(shape_text);
+            assert_eq!(rows[3], 0, "a gate refused a row inside the executed envelope");
+            out[3] = rows[1];
+            out
+        };
+        let counts = [0u32, 1, 2].map(|f| libm_rows.iter().filter(|r| r[0] == f).count());
+        let row_counts = super::shell_row_mismatches(&shape_rows);
+        let mut kinds = std::collections::BTreeMap::new();
+        for line in shape_rows.lines().filter(|l| !l.trim().is_empty()) {
+            *kinds.entry(line.split_whitespace().next().unwrap().to_owned()).or_insert(0usize) += 1;
+        }
+        let base = parts(&shape_rows);
+        println!("shell receipt: log2f {} / exp2f {} / prep {} rows, shape rows {} by kind {kinds:?} (output refused {}); \
+            mismatched [log2f, exp2f, prep, rows] {base:?}", counts[0], counts[1], counts[2], row_counts[0], row_counts[2]);
+        assert!(counts.iter().all(|&c| c > 0) && row_counts[0] > 0);
+        assert_eq!(base, [0; 4]);
+        for arm in shell_arms::ALL {
+            shell_arms::set(Some(arm));
+            let red = parts(&shape_rows);
+            shell_arms::set(None);
+            println!("arm {arm}: mismatched {red:?}");
+            assert!(red.iter().sum::<usize>() > 0, "arm {arm} stays green");
+        }
+        let flipped = super::shell_row_mismatches(&flipped_rows);
+        println!("bit-flipped rows: mismatched {}", flipped[1]);
+        assert!(flipped[1] > 0);
+    }
     /// Every Circle BurstSpread native group.
     #[test]
     #[ignore = "set MOLY_SHAPE_CIRCLE_BURST_ROWS to the Circle BurstSpread native rows, 150-word layout"]
@@ -2440,17 +2605,16 @@ mod tests {
         let total = text.lines().filter(|l| !l.trim().is_empty()).count();
         let count = super::replay_native_rows_v2(&text);
         println!("{count:?} of {total}");
-        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused + count.harness_libm, total);
         assert!(count.replayed > 0);
     }
     /// Independent native edge executions and finite inputs whose f32
     /// intermediates overflow or underflow: every row either reproduces the
     /// native bits (NaN where native wrote NaN in the axis channel) or,
     /// exactly where native writes a non-finite position or direction, is
-    /// refused as a non-finite output without consuming the stream; a gate
-    /// refusal must fall on a row whose thickness is neither 0 nor 1 (its
-    /// shell radius comes from the device libm), and a refusal by any other
-    /// gate is red. The counts are reported.
+    /// refused as a non-finite output without consuming the stream; a row
+    /// whose thickness is neither 0 nor 1 recorded the harness's libm and is
+    /// counted, not replayed; a gate refusal is red. The counts are reported.
     #[test]
     #[ignore = "set MOLY_SHAPE_HEMISPHERE_ROWS_V3 to the current native Hemisphere edge rows, 174-word layout"]
     fn current_hemisphere_edge_rows_bit_exact_or_refused() {
@@ -2458,7 +2622,7 @@ mod tests {
         let total = text.lines().filter(|l| !l.trim().is_empty()).count();
         let count = super::replay_native_rows_v2(&text);
         println!("{count:?} of {total}");
-        assert_eq!(count.replayed + count.gate_refused + count.output_refused, total);
+        assert_eq!(count.replayed + count.gate_refused + count.output_refused + count.harness_libm, total);
         assert!(count.replayed > 0);
     }
     /// Every native ConeVolume group of the first recorded native run: all

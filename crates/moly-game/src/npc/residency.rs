@@ -63,16 +63,16 @@ pub(crate) fn loaded_site_runs(site: Option<&crate::site::SiteActive>) -> bool {
     site.is_some_and(|site| npc_update_runs(&site.site_type))
 }
 
-/// The site an NPC is created on. The source creates the visitors through
-/// the home gate, and an AI model's site type starts at 0 (home); a floor as
-/// the first loaded site is a host entry the source does not have, and there
-/// the roster is created on that floor.
-pub(crate) fn spawn_site(loaded: &str) -> String {
-    if npc_update_runs(loaded) {
-        loaded.to_owned()
-    } else {
-        SITE_TYPES[0].to_owned()
-    }
+/// The site an NPC is created on: home, whatever site is loaded first. The
+/// gate creates the visitors, an AI model's site type starts at 0 (home), and
+/// the gate's appearance places them on the home site model on every start,
+/// a floor start included (it takes the home site before it places anyone).
+/// Only the multiplayer instantiation of a guest's copy of an NPC sets
+/// another site at creation (from the room's NPC site table); the gate path
+/// never does. So on a floor start no visitor stands in the room: the whole
+/// roster is on home, away from the loaded floor.
+pub(crate) fn spawn_site(_loaded: &str) -> String {
+    SITE_TYPES[0].to_owned()
 }
 
 /// A member whose own site is not the loaded site: suspended while it is

@@ -11,7 +11,7 @@ pub(crate) mod collision_scene;
 pub(crate) use collision::{collision_eligible, current_size_source_gate, is_planes};
 pub(crate) use trails::{
     attach_owner as attach_trail_owner, draw_eligible as trail_draw_eligible, owner_ready as trail_owner_ready,
-    write_mesh as write_trail_mesh, TrailState,
+    write_mesh as write_trail_mesh, TrailOwner, TrailState,
 };
 pub(crate) use sub_events::{BirthEdge, BirthEvents, CollisionEdge, DeathEdge, EventEdges};
 pub(crate) use child::{child_target_eligible, deliver_command, install_child_target};
@@ -66,6 +66,8 @@ mod warm_samples;
 mod mesh_axis_samples;
 #[cfg(test)]
 mod custom_cache_samples;
+#[cfg(test)]
+mod procedural_samples;
 use moly_law::particle::schema::SimulationSpace;
 use moly_law::particle::shape::{circle_base, cone_base, cone_volume, donut_position, hemisphere_position, single_sided_edge, sphere_position};
 use moly_law::particle::{accumulate_rate, advance_lifetime, burst_check,
@@ -514,11 +516,16 @@ pub(crate) fn play_after_stop(system: &mut Runtime, seeds: &mut seed::SystemSeed
         return Err("CollisionModule: Play's seed reset re-installs the collision law without its ground scene".into());
     }
     let velocity = system.native_birth.as_ref().map(|native| native.frame.velocity);
+    // Play does not clear the emit replays a procedural warm left.
+    let replays = system.native_birth.as_mut().map(|native| std::mem::take(&mut native.replays));
     reset_for_first_play(system);
     install_native_birth(system, seeds, route, None).map_err(|error| format!("source seed owner unavailable: {error}"))?;
     if let Some(native) = system.native_birth.as_mut() {
         if let Some(velocity) = velocity {
             native.frame.velocity = velocity;
+        }
+        if let Some(replays) = replays {
+            native.replays = replays;
         }
         if let Some(edges) = edges {
             native.events = Some(BirthEvents::with_edges(edges));
@@ -570,6 +577,10 @@ pub(crate) fn has_start_delay(emitter: &EmitterParams) -> bool {
 /// The laws that follow the engine's storage (a CustomData or size law with
 /// its slot tail) keep the cleared particles' slots, as the storage does.
 pub(crate) fn clear_particles(system: &mut Runtime) {
+    // Clear also empties the state's emit replays.
+    if let Some(native) = system.native_birth.as_mut() {
+        native.replays.clear();
+    }
     if let Some(custom) = system.custom_law.as_mut() {
         custom.clear(&system.pool);
     }
@@ -603,6 +614,9 @@ pub(crate) fn first_play_plan(system: &Runtime) -> Result<PrewarmPlan, &'static 
 
 fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx: &Context)
     -> Result<(), &'static str> {
+    if state.procedural {
+        return prewarm_procedural(system, state, ctx);
+    }
     let plan = first_play_plan(system)?;
     system.playback_head = plan.initial_clock();
     // One ordinary update of the warm length: its slices record the
@@ -618,6 +632,23 @@ fn prewarm_native(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx
         system.refused_total += 1;
         error!(%reason, effect=%system.effect, node=%system.node, "native prewarm size call refused");
         return Err("native prewarm size call refused");
+    }
+    Ok(())
+}
+
+/// Play's warm on the procedural route: Compute as for the ordinary warm,
+/// then `Update` with flags 3 (the fixed-step slices recording emit replays,
+/// then `UpdateProcedural`). Its Update1Incremental ends with the size call
+/// over the particles present then, none at the first Play.
+fn prewarm_procedural(system: &mut Runtime, state: &mut birth::NativeBirthState, ctx: &Context)
+    -> Result<(), &'static str> {
+    let warm = FirstPlayWarm::from_source(first_play_lifetime(&system.emitter)?, PLAYER_TIME, first_play_state(system))?;
+    let plan = moly_law::particle::prewarm::PrewarmPlan::procedural(warm, PLAYER_TIME, system.emitter.duration)?;
+    system.playback_head = plan.initial_clock();
+    if let Err(error) = birth::run_warm_procedural(system, state, plan, ctx) {
+        system.refused_total += 1;
+        error!(?error, effect=%system.effect, node=%system.node, "procedural prewarm refused");
+        return Err("procedural prewarm refused");
     }
     Ok(())
 }
@@ -1351,7 +1382,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             let source_position = crate::particle_geometry::reflect(
                 Vec3::from_array(system.pool[index].position)).to_array();
             crate::particle_geometry::reflect(Vec3::from_array(
-                noise.law.sample(noise.state, source_position, noise.owner_seed,
+                noise.law.sample(noise.state, source_position, noise.owner_seed, system.side[index].seed,
                     system.pool[index].age_percent),
             )).to_array()
         });
@@ -1499,10 +1530,11 @@ pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute
         // The per-frame update never evaluates a system in time: the manager's
         // step carries no procedural flag, so a procedural system steps
         // incrementally exactly as an ordinary one. Only Play's first warm of a
-        // looping prewarm system takes the time-evaluated update.
+        // looping prewarm system takes the procedural update, whose
+        // composition is qualified here.
         SourceRoute::Procedural if !(emitter.prewarm && emitter.looping) => {}
-        SourceRoute::Procedural => return Err(
-            "procedural source route: time-evaluated simulation and Update(flags=3) prewarm are not transcribed".into()),
+        SourceRoute::Procedural => birth::qualify_procedural_warm(emitter)
+            .map_err(|refused| format!("procedural first-Play warm: {refused:?}"))?,
         SourceRoute::Undecided(control) => return Err(format!("source route undecided: {control}")),
     }
     birth::qualify_frame_emitter(emitter).map_err(|refused| format!("{refused:?}"))
@@ -1607,7 +1639,10 @@ pub(crate) fn arm(name: &str) -> bool {
 /// widening, and any other system's update has no time and skips, as does the
 /// restart's own zero-time update after it. The birth path is decided as at a
 /// first Play. The emitter velocity survives, as Play does not clear it.
-pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, ctx: &Context)
+/// A sub-emitter parent's birth events (`edges`) are installed with the
+/// owner, as Play installs them; the legacy step records none, so a parent
+/// the native installer leaves there is refused.
+pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, edges: Option<&EventEdges>, ctx: &Context)
     -> Result<BirthPath, String> {
     if system.emitter.auto_random_seed != Some(false) {
         return Err("Simulate restart needs the manual owner the playable's Initialize sets".into());
@@ -1623,6 +1658,14 @@ pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, ctx: &
     // shared manager, so an empty one stands in.
     let path = install_native_birth(system, &mut seed::SystemSeedManager::default(), route, None)
         .map_err(|error| error.to_string())?;
+    if let Some(edges) = edges {
+        match (&path, system.native_birth.as_mut()) {
+            (BirthPath::Native, Some(native)) => native.events = Some(BirthEvents::with_edges(edges.clone())),
+            (BirthPath::Legacy(reason), _) =>
+                return Err(format!("sub-emitter parent refused by the native birth installer: {reason}")),
+            (BirthPath::Native, None) => return Err("native birth owner missing after its install".into()),
+        }
+    }
     system.prewarmed = true;
     let mut warm_dt = None;
     if let Some(warm) = warm {
@@ -1756,6 +1799,8 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
         frame: birth::FrameState { start_delay, ..birth::FrameState::default() },
         events: None,
         target: None,
+        procedural: matches!(route, SourceRoute::Procedural) && system.emitter.prewarm && system.emitter.looping,
+        replays: Vec::new(),
     });
     if let Some(law) = noise_law {
         system.noise = Some(NoiseRuntime {

@@ -7,14 +7,18 @@
 //! the duration; a later look-at on the same character replaces it. The
 //! character stands while it turns; a move that starts meanwhile ends it.
 //!
-//! Not played here: the turn clip the presenter starts with the tween and
-//! the idle clip (with the cloth reset) it plays when the tween ends; the
-//! greeting's own clip starts on the state's first update, and what the idle
-//! clip then does to it is not read.
+//! The presenter starts a turn clip with the tween, chosen from the signed
+//! angle between the character's forward and the target point itself
+//! (`look_at_turn_motion`), and plays the idle clip (the character's talk
+//! motion idle) when the tween ends: the motion driver plays the turn clip
+//! while the look-at is in flight and the idle clip after it. Not played
+//! here: the cloth reset after the idle clip, and the wait on that idle
+//! clip's change (taken as none); the greeting's own clip starts on the
+//! state's first update, and what the idle clip then does to it is not read.
 
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
-use moly_law::path::look_at;
+use moly_law::path::{look_at, TurnMotion};
 use moly_law::ui::dotween::Ease;
 
 use crate::npc::{CharacterUnitId, MotionPhase, WalkState};
@@ -32,10 +36,20 @@ pub(crate) struct NpcLookAt {
     started: Option<(f32, f32)>,
     elapsed: f32,
     created: u32,
+    /// The turn clip the presenter started with the tween.
+    clip: TurnMotion,
 }
 
 impl NpcLookAt {
-    pub(crate) fn new(towards: Vec3, duration: f32, ease: Ease, frame: u32) -> Self {
+    /// A look-at towards `towards` by a character facing `forward` when it
+    /// is called (the turn clip is chosen then).
+    pub(crate) fn new(
+        towards: Vec3,
+        forward: [f32; 3],
+        duration: f32,
+        ease: Ease,
+        frame: u32,
+    ) -> Self {
         Self {
             towards,
             duration,
@@ -43,7 +57,13 @@ impl NpcLookAt {
             started: None,
             elapsed: 0.0,
             created: frame,
+            clip: look_at::look_at_turn_motion(forward, towards.to_array()),
         }
+    }
+
+    /// The turn clip the motion driver plays while the look-at runs.
+    pub(crate) fn clip(&self) -> TurnMotion {
+        self.clip
     }
 }
 
@@ -86,11 +106,12 @@ pub(crate) fn step(
                 let started = (start, look_at::fast_change(start, end));
                 look.started = Some(started);
                 info!(
-                    "[npc unit={}] frame={frame} DoLookAt start: yaw {start:.3} -> {end:.3} (change {:.3}) over {} s, ease {}",
+                    "[npc unit={}] frame={frame} DoLookAt start: yaw {start:.3} -> {end:.3} (change {:.3}) over {} s, ease {}, turn clip {}",
                     unit.0,
                     started.1,
                     look.duration,
-                    look.ease.value()
+                    look.ease.value(),
+                    look.clip.base_name()
                 );
                 started
             }

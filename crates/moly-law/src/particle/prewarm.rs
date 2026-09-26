@@ -396,6 +396,18 @@ impl PrewarmPlan {
         Ok(plan)
     }
 
+    /// The slices of Play's warm on the procedural route: `Update` with
+    /// flags 3, whose bit 0 makes GetTimeStep return the fixed timestep and
+    /// the loop run while the pending time is at least the last slice
+    /// ([`IncrementalSlices::fixed`]), over the warm's total from its clock.
+    pub fn procedural(warm: FirstPlayWarm, time: TimeManagerSnapshot, duration: f32) -> Result<Self, &'static str> {
+        Ok(Self {
+            slices: IncrementalSlices::fixed(warm.total, time.fixed_timestep, duration)?,
+            compute_out: warm.compute_out,
+            initial_clock: warm.initial_clock,
+        })
+    }
+
     /// Boundary after native Compute/GetTimeStep. Input step and entry must
     /// come from those source paths; the extra current-native matrix probes
     /// this function without pretending each step came from GetTimeStep.

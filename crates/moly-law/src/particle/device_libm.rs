@@ -1,5 +1,7 @@
 //! The four C library functions the engine's weighted curve segment calls on the
-//! device (`logf`, `exp`, `cosf` and `atan2f`), in plain Rust.
+//! device (`logf`, `exp`, `cosf` and `atan2f`), in plain Rust, the `sincosf` of the
+//! engine's Euler-angle conversion (see [`super::placement`]), and the `log2f` and
+//! `exp2f` of the sphere kernels' shell preparation (see [`super::shape::Shell`]).
 //!
 //! The Bezier time solve of a weighted AnimationCurve segment calls them through the
 //! dynamic linker, so its value is whatever the phone's libm returns. On Android that is
@@ -20,10 +22,13 @@
 //! How this is known: the AOSP arm64 emulator images for API 29, 31, 33, 35 and 36 carry
 //! these functions with these table values; executed in an emulator they give the same
 //! bits as this module. The API 24 and 28 images carry the msun `logf`, `exp` and
-//! `cosf`; this module does not reproduce those.
+//! `cosf`; this module does not reproduce those. `sincosf`, `log2f` and `exp2f` are the
+//! API 29 image's, executed in an emulator over every path of each function.
 //!
 //! Ported from Arm Optimized Routines (`math/logf.c`, `math/logf_data.c`, `math/exp.c`,
-//! `math/exp_data.c`, `math/cosf.c`, `math/sincosf.h`, `math/sincosf_data.c`),
+//! `math/exp_data.c`, `math/cosf.c`, `math/sincosf.c`, `math/sincosf.h`,
+//! `math/sincosf_data.c`, `math/log2f.c`, `math/log2f_data.c`, `math/exp2f.c`,
+//! `math/exp2f_data.c`),
 //! Copyright (c) 2017-2018 Arm Limited, MIT licence, and from FreeBSD msun
 //! (`e_atan2f.c`, `s_atanf.c`), Copyright (C) 1993 by Sun Microsystems, Inc.; see the
 //! repository's third-party notices.
@@ -211,6 +216,66 @@ pub fn cosf(y: f32) -> f32 {
     }
 }
 
+/// `sincosf(y)`: `(sin y, cos y)`.
+///
+/// Fused on the device, on every path: the fast reduction `x - kd * pi/2` and every
+/// polynomial term, the last sine term `s + x5 (S2 + x2 S3)` and the last cosine term
+/// `c + x6 (C3 + x2 C4)` included (unlike `cosf`, whose last terms after a reduction are
+/// a multiply and an add). Below 2^-12 the pair is `(y, 1)`. After a reduction the
+/// sine polynomial takes the signed reduced argument and an odd quadrant swaps the pair.
+pub fn sincosf(y: f32) -> (f32, f32) {
+    let ix = y.to_bits();
+    let top = (ix >> 20) & 0x7ff;
+    let x = y as f64;
+    if top < 0x3f4 {
+        // |y| < pi/4.
+        if top < 0x398 {
+            return (y, 1.0); // |y| < 2^-12
+        }
+        let t = &SINCOSF[0];
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let c2 = x2.mul_add(t.c[4], t.c[3]);
+        let s1 = x2.mul_add(t.s[2], t.s[1]);
+        let s = x3.mul_add(t.s[0], x);
+        let x4 = x2 * x2;
+        let x5 = x2 * x3;
+        let c1 = x2.mul_add(t.c[1], t.c[0]);
+        let x6 = x2 * x4;
+        let c = x4.mul_add(t.c[2], c1);
+        return (x5.mul_add(s1, s) as f32, x6.mul_add(c2, c) as f32);
+    }
+    let (r, n, sign_n) = if top < 0x42f {
+        // |y| < 120.
+        let t = &SINCOSF[0];
+        let z = t.hpi_inv * x;
+        let n = round_half_away_to_i64(z) as i32;
+        let r = (-t.hpi).mul_add(round_half_away(z), x);
+        (r, n, n)
+    } else if top < 0x7f8 {
+        let (r, n) = reduce_large(ix);
+        (r, n, n.wrapping_add((ix >> 31) as i32))
+    } else {
+        let nan = y - y;
+        return (nan, nan);
+    };
+    let t = if sign_n & 2 == 0 { &SINCOSF[0] } else { &SINCOSF[1] };
+    let x2 = r * r;
+    let xs = SINCOSF[0].sign[(sign_n & 3) as usize] * r;
+    let c2 = x2.mul_add(t.c[4], t.c[3]);
+    let s1 = x2.mul_add(t.s[2], t.s[1]);
+    let x4 = x2 * x2;
+    let c1 = x2.mul_add(t.c[1], t.c[0]);
+    let x3 = xs * x2;
+    let s = x3.mul_add(t.s[0], xs);
+    let x6 = x2 * x4;
+    let x5 = x2 * x3;
+    let c = x4.mul_add(t.c[2], c1);
+    let sine = x5.mul_add(s1, s) as f32;
+    let cosine = x6.mul_add(c2, c) as f32;
+    if n & 1 == 0 { (sine, cosine) } else { (cosine, sine) }
+}
+
 /// The large-argument reduction of `cosf` (120 <= |y| < inf): `y * 2/pi` in fixed point
 /// from 96 bits of 2/pi, then the quadrant and the remainder times pi/2^63.
 fn reduce_large(ix: u32) -> (f64, i32) {
@@ -256,6 +321,100 @@ const SINCOSF: [SinCosTable; 2] = [
         s: [b(0xbfc555545995a603), b(0x3f81107605230bc4), b(0xbf2994eb3774cf24)],
     },
 ];
+
+/// `log2f(x)`.
+///
+/// Fused on the device: `invc * z - 1`, `A1 * r + A2`, `A0 * r2 + y`, `A3 * r + y0`
+/// and `r2 * y + p`; `logc + k` is a separate add. No errno is set (the image is built
+/// without it): +-0 gives -inf, a negative or NaN argument NaN.
+pub fn log2f(x: f32) -> f32 {
+    let mut ix = x.to_bits();
+    if ix.wrapping_sub(0x0080_0000) >= 0x7f80_0000 - 0x0080_0000 {
+        // x below the smallest normal, inf or NaN.
+        if ix.wrapping_mul(2) == 0 {
+            return f32::NEG_INFINITY; // -1 / 0
+        }
+        if ix == 0x7f80_0000 {
+            return x;
+        }
+        if ix & 0x8000_0000 != 0 || ix.wrapping_mul(2) >= 0xff00_0000 {
+            return f32::NAN; // (x - x) / (x - x)
+        }
+        // A positive subnormal: normalize it.
+        #[cfg(test)]
+        let skip = super::shape::shell_arms::on("log2fSubnormalUnscaled");
+        #[cfg(not(test))]
+        let skip = false;
+        if !skip {
+            ix = (x * f32::from_bits(0x4b00_0000)).to_bits().wrapping_sub(23 << 23);
+        }
+    }
+    const OFF: u32 = 0x3f33_0000;
+    let tmp = ix.wrapping_sub(OFF);
+    let i = ((tmp >> 19) & 15) as usize;
+    let iz = ix.wrapping_sub(tmp & 0xff80_0000);
+    let k = (tmp as i32) >> 23;
+    let invc = f64::from_bits(LOG2F_T[2 * i]);
+    let logc = f64::from_bits(LOG2F_T[2 * i + 1]);
+    let z = f32::from_bits(iz) as f64;
+    let r = invc.mul_add(z, -1.0);
+    let y0 = logc + k as f64;
+    let [a0, a1, a2, a3] = LOG2F_A.map(f64::from_bits);
+    let y = a1.mul_add(r, a2);
+    let r2 = r * r;
+    let y = a0.mul_add(r2, y);
+    let p = a3.mul_add(r, y0);
+    r2.mul_add(y, p) as f32
+}
+
+const LOG2F_A: [u64; 4] = [0xbfd712b6f70a7e4d, 0x3fdecabf496832e0, 0xbfe715479ffae3de, 0x3ff715475f35c8b8];
+
+/// `exp2f(x)`.
+///
+/// Fused on the device: `C0 * r + C1`, `r * C2 + 1` and `r2 * z + y`; the shift, the
+/// reduction and the final scaling are separate operations. -inf gives +0, x at or
+/// below -150 gives +0 and a positive x at or above 128 gives +inf (no errno); inf and
+/// NaN give `x + x`.
+pub fn exp2f(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let abstop = (bits >> 20) & 0x7ff;
+    if abstop >= 0x430 {
+        // |x| >= 128, or x is NaN.
+        if bits == 0xff80_0000 {
+            return 0.0;
+        }
+        if abstop >= 0x7f8 {
+            return x + x;
+        }
+        if x > 0.0 {
+            return f32::INFINITY; // 0x1p97 * 0x1p97
+        }
+        if x <= -150.0 {
+            return 0.0; // 0x1p-95 * 0x1p-95
+        }
+        #[cfg(test)]
+        if super::shape::shell_arms::on("exp2fUnderflowBelow149") && x < -149.0 {
+            return 0.0;
+        }
+    }
+    let xd = x as f64;
+    let shift = f64::from_bits(EXP2F_SHIFT);
+    let kd = shift + xd;
+    let ki = kd.to_bits();
+    let kd = kd - shift;
+    let r = xd - kd;
+    let [c0, c1, c2] = EXP2F_C.map(f64::from_bits);
+    let t = EXP2F_T[(ki & 31) as usize].wrapping_add(ki << 47);
+    let z = c0.mul_add(r, c1);
+    let r2 = r * r;
+    let y = r.mul_add(c2, 1.0);
+    let y = r2.mul_add(z, y);
+    (y * f64::from_bits(t)) as f32
+}
+
+/// `0x1.8p+52 / 32`.
+const EXP2F_SHIFT: u64 = 0x42e8000000000000;
+const EXP2F_C: [u64; 3] = [0x3fac6af84b912394, 0x3fcebfce50fac4f3, 0x3fe62e42ff0c52d6];
 
 /// `atan2f(y, x)` (msun: nothing fused, every constant single precision).
 pub fn atan2f(y: f32, x: f32) -> f32 {
@@ -383,6 +542,35 @@ const LOGF_T: [u64; 32] = [
     0x3fe9c2d163a1aa2d, 0x3fcbc2860d224770,
     0x3fe886e6037841ed, 0x3fd1058bc8a07ee1,
     0x3fe767dcf5534862, 0x3fd4043057b6ee09,
+];
+const LOG2F_T: [u64; 32] = [
+    0x3ff661ec79f8f3be, 0xbfdefec65b963019,
+    0x3ff571ed4aaf883d, 0xbfdb0b6832d4fca4,
+    0x3ff49539f0f010b0, 0xbfd7418b0a1fb77b,
+    0x3ff3c995b0b80385, 0xbfd39de91a6dcf7b,
+    0x3ff30d190c8864a5, 0xbfd01d9bf3f2b631,
+    0x3ff25e227b0b8ea0, 0xbfc97c1d1b3b7af0,
+    0x3ff1bb4a4a1a343f, 0xbfc2f9e393af3c9f,
+    0x3ff12358f08ae5ba, 0xbfb960cbbf788d5c,
+    0x3ff0953f419900a7, 0xbfaa6f9db6475fce,
+    0x3ff0000000000000, 0x0000000000000000,
+    0x3fee608cfd9a47ac, 0x3fb338ca9f24f53d,
+    0x3feca4b31f026aa0, 0x3fc476a9543891ba,
+    0x3feb2036576afce6, 0x3fce840b4ac4e4d2,
+    0x3fe9c2d163a1aa2d, 0x3fd40645f0c6651c,
+    0x3fe886e6037841ed, 0x3fd88e9c2c1b9ff8,
+    0x3fe767dcf5534862, 0x3fdce0a44eb17bcc,
+];
+/// `2^(i/32)` with the low exponent bits cleared for the `ki << 47` addition.
+const EXP2F_T: [u64; 32] = [
+    0x3ff0000000000000, 0x3fefd9b0d3158574, 0x3fefb5586cf9890f, 0x3fef9301d0125b51,
+    0x3fef72b83c7d517b, 0x3fef54873168b9aa, 0x3fef387a6e756238, 0x3fef1e9df51fdee1,
+    0x3fef06fe0a31b715, 0x3feef1a7373aa9cb, 0x3feedea64c123422, 0x3feece086061892d,
+    0x3feebfdad5362a27, 0x3feeb42b569d4f82, 0x3feeab07dd485429, 0x3feea47eb03a5585,
+    0x3feea09e667f3bcd, 0x3fee9f75e8ec5f74, 0x3feea11473eb0187, 0x3feea589994cce13,
+    0x3feeace5422aa0db, 0x3feeb737b0cdc5e5, 0x3feec49182a3f090, 0x3feed503b23e255d,
+    0x3feee89f995ad3ad, 0x3feeff76f2fb5e47, 0x3fef199bdd85529c, 0x3fef3720dcef9069,
+    0x3fef5818dcfba487, 0x3fef7c97337b9b5f, 0x3fefa4afa2a490da, 0x3fefd0765b6e4540,
 ];
 const EXP_TAB: [u64; 256] = [
     0x0000000000000000, 0x3ff0000000000000,

@@ -168,9 +168,10 @@ struct Planned {
     /// The owner words a Local collision system's query and hits read (its
     /// authored chain on the site anchor); `None` for every other system.
     collision_owner: Option<moly_law::particle::collision_query::OwnerPair>,
-    /// The owner local-to-world words a Local system's trail job composes
-    /// with the view (the same chain); `None` for every other system.
-    trail_owner: Option<[f32; 16]>,
+    /// The owner words a Local system's trail job reads (the same chain);
+    /// `None` for every other system and for an instance's system, whose host
+    /// composes them from the instance's placement.
+    trail_owner: Option<crate::particle_runtime::TrailOwner>,
     /// A sky system with owner words (child, collision or trail): its authored
     /// chain from the prefab root down, which the environment root's chain
     /// carries. The words above are composed with the root at the site
@@ -1143,9 +1144,13 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
 ///
 /// A looping prewarm system warms at its first Play before any frame; with
 /// supportsProcedural that warm is Update with the procedural flag, otherwise
-/// BeginUpdate over the ordinary slices. Neither warm has been executed for a
-/// ring system, so both stay refused here. The authored loop range is admitted
-/// inside the inspector domain 0 <= lo <= hi <= 1, where the executed cases lie.
+/// BeginUpdate over the ordinary slices. The procedural warm reads the ring
+/// mode once, doubling the capacity its emit replays may hold, and its
+/// regeneration never packs at the ring cursor; the native birth path takes
+/// or refuses it by name. The warm over the ordinary slices has not been
+/// executed for a ring system, so it stays refused here. The authored loop
+/// range is admitted inside the inspector domain 0 <= lo <= hi <= 1, where the
+/// executed cases lie.
 fn source_ring_buffer_admission(system: &Value) -> Result<(), String> {
     match system.get("ringBufferMode").and_then(Value::as_u64) {
         Some(0) => return Ok(()),
@@ -1166,8 +1171,7 @@ fn source_ring_buffer_admission(system: &Value) -> Result<(), String> {
     };
     if prewarm && looping {
         return Err(match crate::particle_runtime::source_route(system) {
-            crate::particle_runtime::SourceRoute::Procedural =>
-                "ring buffer first-Play warm runs Update with the procedural flag; not transcribed".into(),
+            crate::particle_runtime::SourceRoute::Procedural => return Ok(()),
             crate::particle_runtime::SourceRoute::Ordinary =>
                 "ring buffer first-Play warm over the ordinary slices has not been executed".into(),
             crate::particle_runtime::SourceRoute::Undecided(control) =>
@@ -1196,15 +1200,16 @@ fn source_emission_disabled(system: &Value) -> bool {
         .is_ok_and(|source| source.enabled.len() == 1 && source.enabled[0] == "InitialModule")
 }
 
-/// Shapes whose kernels exist only on the native birth path: Box, the
-/// BurstSpread circle and single-sided edge, and the cone in its Loop,
-/// PingPong and BurstSpread arc modes. Their births read the accepted count
-/// of the StartParticles call, the lane index within it or the arc clock,
-/// none of which the legacy step carries.
+/// Shapes whose kernels exist only on the native birth path: Box, BoxShell
+/// and BoxEdge, the BurstSpread circle and single-sided edge, and the cone in
+/// its Loop, PingPong and BurstSpread arc modes. Their births read the
+/// accepted count of the StartParticles call, the lane index within it or the
+/// arc clock, none of which the legacy step carries (the three boxes have no
+/// legacy kernel at all).
 fn shape_needs_native_birth(shape: &moly_law::particle::schema::ShapeParams) -> bool {
     use moly_law::particle::schema::ShapeMode;
     match shape.shape_type.as_str() {
-        "Box" => true,
+        "Box" | "BoxShell" | "BoxEdge" => true,
         "Circle" => shape.controls.arc_mode == Some(ShapeMode::BurstSpread),
         "SingleSidedEdge" => shape.controls.radius_mode == Some(ShapeMode::BurstSpread),
         "Cone" => matches!(shape.controls.arc_mode, Some(ShapeMode::Loop | ShapeMode::PingPong | ShapeMode::BurstSpread)),
@@ -1226,7 +1231,7 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
         return Some("missing/invalid authored shape scale".into());
     }
     let mode = if kind == "SingleSidedEdge" { "radiusMode" } else { "arcMode" };
-    // Box reads no mode. The BurstSpread circle and edge and the cone's Loop,
+    // The three boxes read no mode. The BurstSpread circle and edge and the cone's Loop,
     // PingPong and BurstSpread modes have native kernels; they are admitted
     // only on the native birth path, which the judge checks once the route is
     // known.
@@ -1235,7 +1240,8 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
         ("Circle", Some("BurstSpread")) | ("SingleSidedEdge", Some("BurstSpread"))
             | ("Cone", Some("Loop" | "PingPong" | "BurstSpread"))
     );
-    if !matches!(kind, "Mesh" | "Box") && !native_only_mode && shape.get(mode).and_then(Value::as_str) != Some("Random") {
+    if !matches!(kind, "Mesh" | "Box" | "BoxShell" | "BoxEdge") && !native_only_mode
+        && shape.get(mode).and_then(Value::as_str) != Some("Random") {
         return Some(format!("{mode} {:?} consumer pending", shape.get(mode)));
     }
     if shape.get("alignToDirection").and_then(Value::as_bool) != Some(false) {
@@ -2091,7 +2097,8 @@ fn judge_in_host(
             return None;
         }
         let shape_type = shape.get("type").and_then(Value::as_str).unwrap_or("");
-        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut" | "Mesh" | "Box") {
+        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut" | "Mesh"
+            | "Box" | "BoxShell" | "BoxEdge") {
             tally.shape.push(shape_type.to_owned()); return None;
         }
         if let Some(reason) = source_shape_admission(shape) {
@@ -2579,19 +2586,26 @@ fn judge_in_host(
     let mut sky_owner_chain = None;
     let local_owner = match emitter.simulation_space {
         moly_law::particle::schema::SimulationSpace::Local if emitter.collision.is_some() || emitter.trails.is_some() => {
-            if instance_anchor.is_some() {
+            if instance_anchor.is_some() && emitter.collision.is_some() {
                 tally.law_reject.push(format!(
                     "{node}: owner words of a Local collision or trail are composed only for a site effect on its authored chain"));
                 return None;
             }
-            match chain_owner(by_path, node, kind, owner_scaling(scaling)) {
-                Ok((owner, chain)) => {
-                    sky_owner_chain = chain;
-                    Some(owner)
-                }
-                Err(reason) => {
-                    tally.law_reject.push(format!("{node}: owner words of a Local collision or trail: {reason}"));
-                    return None;
+            // A Local trail of an instance: its host composes the owner words
+            // from the instance's placement (the fixture host for a placed
+            // fixture's prefab) and refuses the rest.
+            if instance_anchor.is_some() {
+                None
+            } else {
+                match chain_owner(by_path, node, kind, owner_scaling(scaling)) {
+                    Ok((owner, chain)) => {
+                        sky_owner_chain = chain;
+                        Some(owner)
+                    }
+                    Err(reason) => {
+                        tally.law_reject.push(format!("{node}: owner words of a Local collision or trail: {reason}"));
+                        return None;
+                    }
                 }
             }
         }
@@ -2604,7 +2618,8 @@ fn judge_in_host(
             world_to_local: QueryAffine::from_columns(&owner.world_to_local),
         }
     });
-    let trail_owner = local_owner.filter(|_| emitter.trails.is_some()).map(|owner| owner.local_to_world);
+    let trail_owner = local_owner.filter(|_| emitter.trails.is_some())
+        .map(|owner| crate::particle_runtime::TrailOwner::from_matrices(&owner));
     // The collision calls are in the native slices only; a collision system
     // is never admitted to the legacy step without them. (A sub-emitter
     // target with a CollisionModule is refused by the child composition.)
@@ -3168,7 +3183,7 @@ pub(crate) fn spawn_when_ready(
                         local_to_world: QueryAffine::from_columns(&owner.local_to_world),
                         world_to_local: QueryAffine::from_columns(&owner.world_to_local),
                     });
-                    planned.trail_owner = planned.trail_owner.map(|_| owner.local_to_world);
+                    planned.trail_owner = planned.trail_owner.map(|_| crate::particle_runtime::TrailOwner::from_matrices(&owner));
                     Some(SkyOwner { chain, anchor: anchor.map(f32::to_bits) })
                 }
                 Err(reason) => {
@@ -3826,7 +3841,8 @@ fn write_owner_words(runtime: &mut Runtime, owner: &moly_law::particle::owner::O
         });
     }
     if runtime.trail.as_ref().is_some_and(|trail| trail.owner.is_some()) {
-        crate::particle_runtime::attach_trail_owner(runtime, owner.local_to_world).map_err(str::to_owned)?;
+        crate::particle_runtime::attach_trail_owner(runtime, crate::particle_runtime::TrailOwner::from_matrices(owner))
+            .map_err(str::to_owned)?;
     }
     if let Some(target) = runtime.native_birth.as_mut().and_then(|native| native.target.as_mut()) {
         target.owner = moly_law::particle::child_emit::ChildOwner::from_owner(owner);

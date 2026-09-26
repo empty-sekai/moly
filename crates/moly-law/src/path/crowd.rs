@@ -12,6 +12,11 @@
 //! navigation cells (the corridor move in `carve`). The move loop reads the
 //! known path length back as the agent's remaining distance.
 //!
+//! After the crowd step the engine updates each agent's transform with the
+//! same `dt`; with rotation updates on (the NPC's view never turns them off)
+//! the transform turns toward the agent's velocity by at most its angular
+//! speed ([`rotation_step`]).
+//!
 //! Every comparison and every operation order here follows the engine body;
 //! the float order matters because the answers are compared bit for bit.
 //!
@@ -264,6 +269,132 @@ pub fn integrate(
     (moved, next)
 }
 
+/// The NPC agent's angular speed while its view keeps the agent active
+/// (degrees per second; the view's activation writes it, the engine's own
+/// default is 120). An inactive agent has 0.
+pub const NPC_ANGULAR_SPEED: f32 = 256.0;
+
+/// The squared horizontal speed, in the agent's own frame, at or under which
+/// the agent does not turn this frame (f32 bits `0x3a83126f`).
+pub const ROTATION_MIN_SPEED_SQ: f32 = 0.001;
+
+/// Squared length of the turned rotation under which it is not normalised
+/// but reset to the identity (f32 bits `0x0da24260`).
+const ROTATION_NORMALISE_FLOOR: f32 = f32::from_bits(0x0da2_4260);
+
+fn lanes(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]]
+}
+
+fn scaled(a: [f32; 4], k: f32) -> [f32; 4] {
+    [a[0] * k, a[1] * k, a[2] * k, a[3] * k]
+}
+
+fn minus(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
+}
+
+fn plus(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+}
+
+/// `v` in the frame of a root transform rotated by `q` (x, y, z, w): the
+/// engine's inverse direction transform, `v + a·x + (b·y + c·z)` with the
+/// columns built from the conjugate rotation, lane for lane.
+pub fn inverse_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    const C1: [f32; 4] = [-2.0, 2.0, -2.0, 0.0];
+    const C2: [f32; 4] = [2.0, -2.0, -2.0, 0.0];
+    const C3: [f32; 4] = [-2.0, -2.0, 2.0, 0.0];
+    let a = [-q[0], -q[1], -q[2], q[3]];
+    let swapped = [a[1], a[0], a[3], a[2]];
+    let turned = [a[2], a[3], a[0], a[1]];
+    let reversed = [a[3], a[2], a[1], a[0]];
+    let column_x = minus(
+        lanes(swapped, scaled(C1, a[1])),
+        lanes(turned, scaled(C2, a[2])),
+    );
+    let column_y = minus(
+        lanes(reversed, scaled(C3, a[2])),
+        lanes(swapped, scaled(C1, a[0])),
+    );
+    let column_z = minus(
+        lanes(turned, scaled(C2, a[0])),
+        lanes(reversed, scaled(C3, a[1])),
+    );
+    let first = plus([v[0], v[1], v[2], 0.0], scaled(column_x, v[0]));
+    let out = plus(first, plus(scaled(column_y, v[1]), scaled(column_z, v[2])));
+    [out[0], out[1], out[2]]
+}
+
+/// The engine's product of a rotation `q` with a yaw `(0, s, 0, c)`,
+/// lane for lane (the sign mask flips lanes 0, 2 and 3 before the final
+/// swap).
+fn times_yaw(q: [f32; 4], s: f32, c: f32) -> [f32; 4] {
+    let zero = scaled(q, 0.0);
+    let rolled = [zero[3], zero[0], zero[1], zero[2]];
+    let v2 = lanes([c, 0.0, 0.0, s], [q[2], q[2], q[3], q[3]]);
+    let v3 = lanes([0.0, c, s, 0.0], [q[1], q[3], q[2], q[0]]);
+    let v1 = minus(minus(v3, rolled), v2);
+    let v0 = minus(v1, lanes([s, s, c, c], [q[0], q[1], q[0], q[1]]));
+    let signed = [-v0[0], v0[1], -v0[2], -v0[3]];
+    [signed[2], signed[3], signed[0], signed[1]]
+}
+
+/// The agent's rotation step (the engine's transform update with
+/// `updateRotation` on, run after the crowd step with the same `dt`): the
+/// agent's velocity in its own frame gives the yaw to turn,
+/// `atan2(x, z)`; nothing turns at or under [`ROTATION_MIN_SPEED_SQ`]; the
+/// turn per frame is `dt` times the lesser of the angular speed (degrees per
+/// second, taken to radians) and `(horizontal speed + 1) × |angle|`, never
+/// past the angle; the rotation is multiplied by that yaw and normalised.
+/// Returns the new rotation (x, y, z, w), `None` when the agent does not
+/// turn this frame. `q` is the root transform's rotation.
+pub fn rotation_step(
+    q: [f32; 4],
+    velocity: [f32; 3],
+    angular_speed: f32,
+    dt: f32,
+) -> Option<[f32; 4]> {
+    rotation_step_by(q, velocity, angular_speed, dt, f32::atan2, f32::sin_cos)
+}
+
+/// [`rotation_step`] with the two library functions it calls (the arc
+/// tangent of `x` over `z`, and the sine and cosine of the half step) given
+/// by the caller; the engine calls the platform's single-precision library.
+pub fn rotation_step_by(
+    q: [f32; 4],
+    velocity: [f32; 3],
+    angular_speed: f32,
+    dt: f32,
+    atan2: impl Fn(f32, f32) -> f32,
+    sin_cos: impl Fn(f32) -> (f32, f32),
+) -> Option<[f32; 4]> {
+    let local = inverse_rotate(q, velocity);
+    let len2 = local[0] * local[0] + local[2] * local[2];
+    if !(len2 > ROTATION_MIN_SPEED_SQ) {
+        return None;
+    }
+    let angle = atan2(local[0], local[2]);
+    let magnitude = if angle < 0.0 { -angle } else { angle };
+    let turns = angular_speed / 360.0;
+    let rate = (turns + turns) * std::f32::consts::PI;
+    let follow = (len2.sqrt() + 1.0) * magnitude;
+    let limit = if rate < follow { rate } else { follow };
+    let reach = limit * dt;
+    let size = if reach < magnitude { reach } else { magnitude };
+    let step = if angle < 0.0 { -size } else { size };
+    let (s, c) = sin_cos(step * 0.5);
+    let turned = times_yaw(q, s, c);
+    let len2 = (turned[0] * turned[0] + turned[1] * turned[1])
+        + (turned[2] * turned[2] + turned[3] * turned[3]);
+    if len2 > ROTATION_NORMALISE_FLOOR {
+        let length = len2.sqrt();
+        Some(turned.map(|lane| lane / length))
+    } else {
+        Some([0.0, 0.0, 0.0, 1.0])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +405,8 @@ mod tests {
         assert_eq!(NPC_AGENT_RADIUS.to_bits(), 0x3e99_999a);
         assert_eq!(NPC_AGENT_HEIGHT.to_bits(), 0x3f7a_e148);
         assert_eq!(NPC_STOPPING_DISTANCE.to_bits(), 0x3dcc_cccd);
+        assert_eq!(NPC_ANGULAR_SPEED.to_bits(), 0x4380_0000);
+        assert_eq!(ROTATION_MIN_SPEED_SQ.to_bits(), 0x3a83_126f);
+        assert_eq!(std::f32::consts::PI.to_bits(), 0x4049_0fdb);
     }
 }

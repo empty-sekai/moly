@@ -208,6 +208,22 @@ impl SlotTail {
         Ok(())
     }
 
+    /// `UpdateProcedural`'s regeneration after `previous` live particles:
+    /// it reserves `reserve` slots and rewrites the arrays from slot 0,
+    /// leaving `live` particles and past them `tail`, the slots whose age and
+    /// inverse lifetime it determined (the procedural law's known tail).
+    /// Slots past those are no longer known to this model.
+    pub fn regenerate(&mut self, previous: usize, live: usize, tail: &[Particle], reserve: usize)
+        -> Result<(), TailRefused> {
+        if previous != self.live {
+            return Err(TailRefused::Order);
+        }
+        self.capacity = self.capacity.max(reserve);
+        self.slots = tail.iter().copied().collect();
+        self.live = live;
+        Ok(())
+    }
+
     /// Clear: the count returns to zero and the live particles' slots keep
     /// their content.
     pub fn clear(&mut self, live: &[Particle]) -> Result<(), TailRefused> {
