@@ -17,6 +17,13 @@
 //!   .SetDelay(delay)`, `DOAnchorPosY(root, 256, duration).SetDelay(delay)
 //!   .SetEase(OutQuart)`, awaited, then both objects inactive.
 //!
+//! Opener: the notice layer (`MysekaiNotice`, 633) is one of the three
+//! layers `SceneMysekai` adds at its setup; the screen manager
+//! ([`crate::ui_layers`]) adds it, and this view draws only while that layer
+//! is active. The calls reach the layer component (`GetLayerComponent`),
+//! which exists once the layer is instantiated; before that a call is
+//! reported and not drawn.
+//!
 //! Neither call kills the other's tweens: each frame the running tweens of a
 //! channel step in creation order and the last write stands. A tween created
 //! in a frame takes its first step in that frame, with that frame's delta.
@@ -259,9 +266,16 @@ pub(crate) fn advance(
     catalogue: Res<crate::weather::PhenomenonCatalogue>,
     layouts: Res<UiLayouts>,
     mut banner: ResMut<NoticeBanner>,
-    mut roots: Query<(&mut Transform, &mut UiPrefabView), With<NoticeRoot>>,
+    mut roots: Query<(&mut Transform, &mut UiPrefabView, &mut Visibility), With<NoticeRoot>>,
+    screens: Res<crate::ui_layers::ScreenManager>,
 ) {
-    let calls: Vec<SiteEnvironmentInfo> = calls.read().copied().collect();
+    let mut calls: Vec<SiteEnvironmentInfo> = calls.read().copied().collect();
+    let layer = crate::ui_layers::MenuScreenType::MysekaiNotice;
+    if !screens.is_active(layer) {
+        for call in calls.drain(..) {
+            error!("[notice] {call:?}: GetLayerComponent<ScreenLayerMysekaiNotice> finds no active {layer:?} layer: not drawn");
+        }
+    }
     let banner = &mut *banner;
     let Some(bindings) = banner.bindings.as_ref() else {
         for call in calls {
@@ -269,9 +283,13 @@ pub(crate) fn advance(
         }
         return;
     };
-    let Ok((mut transform, mut view)) = roots.single_mut() else {
+    let Ok((mut transform, mut view, mut visibility)) = roots.single_mut() else {
         return;
     };
+    let shown = if screens.is_active(layer) { Visibility::Inherited } else { Visibility::Hidden };
+    if *visibility != shown {
+        *visibility = shown;
+    }
     if let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) {
         transform.scale = Vec3::splat(root_canvas.scale(window));
     }

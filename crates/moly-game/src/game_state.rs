@@ -1,34 +1,149 @@
-//! The `GameStateManager` states the expansion performances enter:
-//! `LevelUpMyRoomSite` (11) and `CutScene` (5).
+//! `GameStateManager`: the MySekai game state machine.
 //!
-//! The product has no game-state object; each performance holds its state
-//! as this one resource, and its readers stop what the source's
-//! `ChangeGameState` subscribers stop: the joystick (its table disables on
-//! 5 and 11) and the keyboard stand-in that follows it.
+//! The source (`Sekai.Mysekai.GameStateManager`, `GameStateMachine`,
+//! `Sekai.FSM.StateMachine<GameStateType>`):
+//! - `GameStateType` has 13 values, None 0 to Delivery 12. The machine is
+//!   built with one state object for each of the twelve values from Normal
+//!   (1) to Delivery (12); None has no state.
+//! - `ChangeState(type)` does nothing when the machine's current key is
+//!   already `type`; otherwise `ChangeTo(type)`: the current state's `OnExit`,
+//!   the lookup (an unknown key logs "Not find state" and leaves no state),
+//!   the current key set to `type`, the new state's `OnEnter`. It is
+//!   synchronous.
+//! - `CurrentType` is the machine's current key.
+//! - Every state's `OnEnter` publishes `ChangeGameState`; the screen calls a
+//!   state makes on entering are listed by [`GameStateType::screen_call`].
 //!
-//! Leaving: `CutScene` ends in `CutScenePresenter.ResetCameraState`
-//! (`ChangeState(Normal)`). `LevelUpMyRoomSite` has no exit of its own: the
-//! current room's performance never returns the game to Normal, so the state
-//! holds until the next `ChangeState` call. Here that is the next product
-//! game state that begins (a site move, an edit session, a player talk, the
-//! harvest learning), each of which the source enters through `ChangeState`.
+//! The product's performances enter `LevelUpMyRoomSite` (11) and `CutScene`
+//! (5) through [`enter`]; their readers stop what the source's
+//! `ChangeGameState` subscribers stop: the joystick (its table disables on 5
+//! and 11) and the keyboard stand-in that follows it. `CutScene` ends in
+//! `CutScenePresenter.ResetCameraState` (`ChangeState(Normal)`).
+//! `LevelUpMyRoomSite` has no exit of its own: the state holds until the next
+//! `ChangeState`, which here is the next product game state that begins (a
+//! site move, an edit session, a player talk, the harvest learning).
+//!
+//! The states' screen calls are not issued by this module: each is made by
+//! the flow that owns the screen (the cut-scene presenter pushes and backs its
+//! screen, the site move changes to and from its screen), and this module
+//! names them in its log.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-/// `GameStateType` values these performances enter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Sekai.Mysekai.GameStateType`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GameStateType {
+    None = 0,
+    Normal = 1,
+    Edit = 2,
+    Talk = 3,
+    Harvest = 4,
     CutScene = 5,
+    LearnSiteEnvironment = 6,
+    SomeCharacterTalk = 7,
+    PhotoShot = 8,
+    Sketch = 9,
+    SiteMove = 10,
     LevelUpMyRoomSite = 11,
+    Delivery = 12,
 }
 
 impl GameStateType {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::None => "None",
+            Self::Normal => "Normal",
+            Self::Edit => "Edit",
+            Self::Talk => "Talk",
+            Self::Harvest => "Harvest",
             Self::CutScene => "CutScene",
+            Self::LearnSiteEnvironment => "LearnSiteEnvironment",
+            Self::SomeCharacterTalk => "SomeCharacterTalk",
+            Self::PhotoShot => "PhotoShot",
+            Self::Sketch => "Sketch",
+            Self::SiteMove => "SiteMove",
             Self::LevelUpMyRoomSite => "LevelUpMyRoomSite",
+            Self::Delivery => "Delivery",
         }
+    }
+
+    /// The machine has a state object for the value (`GameStateMachine.SetUp`).
+    fn has_state(self) -> bool {
+        self != Self::None
+    }
+
+    /// The UI calls of the state's `OnEnter` / `OnExit`.
+    pub(crate) fn screen_call(self) -> &'static str {
+        match self {
+            Self::Normal | Self::Harvest => {
+                "OnEnter: MysekaiCommon.SetClickDetectorActive(true); OnExit: (false)"
+            }
+            Self::SiteMove => {
+                "OnEnter: MysekaiCommon.EnableGestureLayer(false), ChangeUIScreen(MysekaiSiteMove), DisableTapScreen; OnExit: EnableGestureLayer(true), EnableTapScreen"
+            }
+            Self::LearnSiteEnvironment => {
+                "OnEnter: MysekaiCommon.EnableGestureLayer(false); OnExit: (true)"
+            }
+            Self::CutScene => "OnEnter: PushUIScreen(MysekaiCutScene) unless active",
+            Self::Sketch => "OnEnter: PushUIScreen(MysekaiSketchUI)",
+            Self::PhotoShot => "OnEnter: PushUIScreen(MysekaiPhotoShot, bootArg)",
+            Self::Edit => {
+                "OnEnter: ShowGrid, HideTweets, FieldCamera FloorEdit; OnExit: HideGrid, ShowTweets"
+            }
+            Self::Talk
+            | Self::SomeCharacterTalk
+            | Self::LevelUpMyRoomSite
+            | Self::Delivery
+            | Self::None => "no screen call",
+        }
+    }
+}
+
+/// `GameStateManager`: the machine's current key.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct GameStateManager {
+    current: Option<GameStateType>,
+}
+
+impl GameStateManager {
+    /// `CurrentType` (None before any change).
+    pub(crate) fn current_type(&self) -> GameStateType {
+        self.current.unwrap_or(GameStateType::None)
+    }
+
+    /// `ChangeState(type)`. Returns false when the machine is already there.
+    pub(crate) fn change_state(&mut self, state: GameStateType, caller: &str) -> bool {
+        if self.current == Some(state) {
+            info!(
+                "[game-state] {caller}: ChangeState({} {}): already the current state; nothing",
+                state as i32,
+                state.name()
+            );
+            return false;
+        }
+        let previous = self.current_type();
+        if previous.has_state() {
+            info!(
+                "[game-state]   {} OnExit ({})",
+                previous.name(),
+                previous.screen_call()
+            );
+        }
+        self.current = Some(state);
+        if state.has_state() {
+            info!(
+                "[game-state] {caller}: ChangeTo({} {}) from {}: OnEnter publishes ChangeGameState ({}; issued by the flow that owns the screen)",
+                state as i32,
+                state.name(),
+                previous.name(),
+                state.screen_call()
+            );
+        } else {
+            error!("[game-state] {caller}: Not find state = {}", state.name());
+        }
+        true
     }
 }
 
@@ -68,6 +183,9 @@ impl PerformanceHolds<'_> {
 pub(crate) fn enter(world: &mut World, state: GameStateType, caller: &str) {
     let previous = world.get_resource::<HeldGameState>().map(|held| held.0);
     world.insert_resource(HeldGameState(state));
+    world
+        .resource_mut::<GameStateManager>()
+        .change_state(state, caller);
     let joystick = world
         .get_resource::<crate::joystick::JoystickState>()
         .map(|joystick| joystick.enabled);
@@ -80,14 +198,22 @@ pub(crate) fn enter(world: &mut World, state: GameStateType, caller: &str) {
     );
 }
 
-/// `ChangeState(Normal)` or another state that replaces the held one.
+/// `ChangeState(Normal)`: the held state is left.
 pub(crate) fn leave(world: &mut World, caller: &str) {
+    leave_to(world, GameStateType::Normal, caller);
+}
+
+/// `ChangeState(next)` replacing the held state.
+fn leave_to(world: &mut World, next: GameStateType, caller: &str) {
     if let Some(held) = world.remove_resource::<HeldGameState>() {
         info!(
             "[game-state] {caller}: {} {} left",
             held.0 as i32,
             held.0.name()
         );
+        world
+            .resource_mut::<GameStateManager>()
+            .change_state(next, caller);
     }
 }
 
@@ -101,24 +227,45 @@ pub(crate) fn release_level_up(world: &mut World) {
         return;
     }
     let next = if world.contains_resource::<crate::site_move::SiteMoveActive>() {
-        Some("ChangeState(10 SiteMove) at the site move's admission")
+        Some((
+            GameStateType::SiteMove,
+            "ChangeState(10 SiteMove) at the site move's admission",
+        ))
     } else if world
         .get_resource::<crate::fixture_edit::EditSessionActive>()
         .is_some_and(|edit| edit.is_active())
     {
-        Some("ChangeState(2 Edit)")
+        Some((GameStateType::Edit, "ChangeState(2 Edit)"))
     } else if world.contains_resource::<crate::player_talk::PlayerTalkSession>() {
-        Some("ChangeState(3 Talk)")
+        Some((GameStateType::Talk, "ChangeState(3 Talk)"))
     } else if world.contains_resource::<crate::harvest::LearnSiteEnvironmentActive>() {
-        Some("ChangeState(6 LearnSiteEnvironment)")
+        Some((
+            GameStateType::LearnSiteEnvironment,
+            "ChangeState(6 LearnSiteEnvironment)",
+        ))
     } else {
         None
     };
-    if let Some(next) = next {
-        leave(world, next);
+    if let Some((state, caller)) = next {
+        leave_to(world, state, caller);
+    }
+}
+
+/// Update: the scene's first state. `SceneMysekai` changes to Normal when the
+/// field is ready; here, when the field screen first mounts.
+pub(crate) fn scene_normal(
+    screens: Res<crate::ui_layers::ScreenManager>,
+    mut manager: ResMut<GameStateManager>,
+) {
+    if manager.current.is_none() && screens.on_field() {
+        manager.change_state(
+            GameStateType::Normal,
+            "SceneMysekai (the field screen mounted)",
+        );
     }
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.add_systems(Update, release_level_up);
+    app.init_resource::<GameStateManager>()
+        .add_systems(Update, (release_level_up, scene_normal));
 }

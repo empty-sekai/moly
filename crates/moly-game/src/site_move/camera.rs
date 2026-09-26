@@ -1,16 +1,20 @@
 //! The cannon move's two camera states: `PreSiteMoveActionCameraState` (7),
 //! entered and left in the same frame with empty hooks, and
 //! `SiteMoveActionCameraState` (6), which the move holds until the executor
-//! returns the game to Normal. Normal's exit snapshot and its inherit-branch
-//! re-entry around the move are here as well.
+//! returns the game to Normal. Normal's exit and entry around the move are
+//! the camera module's (`record_normal_exit` and `enter_normal` call them).
 //!
-//! Frame-rate convention (named): the source applies every lerp factor and
-//! the 1/120 grounding step once per `OnUpdate` call, and MySekai runs at
-//! 60 fps. The product's follow convention (`camera::follow_avatar`) scales a
-//! per-frame factor by `deltaTime / 0.016667` and clamps it to [0, 1]; the
-//! accumulating factors here use the same scaling, so at 60 fps they are the
-//! source values exactly. The `_s` branch's 0.4 is not a rate (the look-at is
-//! reset to the root the same frame) and is not scaled.
+//! Frame rate: the source applies every lerp factor and the 1/120 grounding
+//! step once per `OnUpdate` call (its Normal mode reads no frame time; only
+//! the unreachable Hero mode's SmoothDamp does). The frames come at
+//! `Application.targetFrameRate`, which `MysekaiQualitySettings.SetFpsQuality`
+//! sets from the player's MySekai frame option: 60 for High, 30 for Normal.
+//! The product keeps the same option and paces its frames by it
+//! (`game_settings`), so each factor is scaled by `deltaTime * frame limit`
+//! and clamped to [0, 1]: exactly the source's per-call factor while the
+//! frame limit holds, and the same per-second progress when frames drop. The
+//! `_s` branch's 0.4 is not a rate (the look-at is reset to the root the
+//! same frame) and is not scaled.
 
 use bevy::animation::AnimatedBy;
 use bevy::prelude::*;
@@ -18,8 +22,7 @@ use bevy::prelude::*;
 use super::timeline::SourceClip;
 use crate::camera::{
     perspective_fov_deg, to_rotation, view_dir, wrap180, CameraSetting, CameraStateType,
-    CameraTween, FieldCameraModel, FieldCameraState, NormalCameraMemory, TweenCompletion,
-    FRAME_BASE,
+    CameraTween, FieldCameraModel, FieldCameraState, TweenCompletion,
 };
 use crate::character::AvatarRoot;
 
@@ -33,14 +36,6 @@ pub(crate) struct SiteMoveCamera {
     head: Option<Entity>,
     missing_logged: bool,
 }
-
-/// Normal's exit snapshots per site (`NormalCameraState._cameraTransferData`,
-/// a dictionary keyed by site id). The product's single-slot
-/// `NormalCameraMemory` keeps serving the FPS and talk paths; the cannon move
-/// writes both. Every Normal exit at a site is followed by the cannon exit
-/// that leaves it, so the entry read at a cannon arrival equals the source's.
-#[derive(Resource, Default)]
-pub(crate) struct CannonCameraTransfer(std::collections::HashMap<String, NormalCameraMemory>);
 
 /// The camera branch `SiteMoveActionCameraState.OnUpdate` takes for the
 /// player's current animation name.
@@ -76,7 +71,8 @@ pub(crate) struct Model {
 /// from; the model's final look-at is where the view looks
 /// (`transform.LookAt(LookAt + Offset)` is the last call).
 ///
-/// `rate` is the product frame scale `dt / 0.016667` (1 at 60 fps).
+/// `rate` is the product frame scale `deltaTime * frame limit` (1 while the
+/// frame limit holds).
 pub(crate) fn step(
     model: &mut Model,
     grounded: &mut f32,
@@ -144,26 +140,11 @@ pub(crate) fn enter_pre_site_move(world: &mut World, site: &str) {
     info!("[site-move] camera Normal -> PreSiteMoveAction (Normal exit snapshot for {site})");
 }
 
-/// `NormalCameraState.OnExit`'s transfer snapshot for `site` (every Normal
-/// exit writes it, whichever state follows). False without a camera model.
+/// `NormalCameraState.OnExit` at `site` ([`crate::camera::normal_on_exit`]),
+/// for the callers that switch the camera state themselves. False without a
+/// camera model.
 pub(crate) fn record_normal_exit(world: &mut World, site: &str) -> bool {
-    let Some(model) = world.get_resource::<FieldCameraModel>().cloned() else {
-        return false;
-    };
-    let snapshot = NormalCameraMemory {
-        site: site.to_owned(),
-        look_at: model.look_at,
-        distance: model.distance,
-        yaw: model.yaw,
-        pitch: model.pitch,
-        fov: model.fov,
-    };
-    world.insert_resource(snapshot.clone());
-    world
-        .get_resource_or_insert_with(CannonCameraTransfer::default)
-        .0
-        .insert(site.to_owned(), snapshot);
-    true
+    crate::camera::normal_on_exit(world, site)
 }
 
 /// `ChangeState(SiteMoveAction)`: `OnEnter` opens the pitch range (0, 360),
@@ -216,71 +197,20 @@ pub(crate) fn enter_site_move(world: &mut World) {
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::SiteMoveAction;
 }
 
-/// `NormalGameState.OnEnter` -> `ChangeState(Normal)` -> `NormalCameraState.OnEnter`:
-/// the bounds and offset come back from Normal's private model (the setting
-/// values), then the inherit branch tweens to this site's snapshot, or to the
-/// source's fallback (setting `initPitch`, current yaw, FOV and distance).
-/// Every cannon arrival takes the inherit branch: the destination is a
-/// harvest or delivery site, or home entered from an outdoor site.
-pub(crate) fn enter_normal(world: &mut World, site: &str, category: &str, prev_site: &str) {
+/// `NormalGameState.OnEnter` -> `ChangeState(Normal)` from the current
+/// camera state, whose own exit the caller has run:
+/// `NormalCameraState.OnEnter` ([`crate::camera::normal_on_enter`]). A cannon
+/// arrival takes the inherit branch (a harvest or delivery destination, or
+/// home after an outdoor site); home after any other site takes
+/// `TransferCameraSettings`, whose case 6 (from SiteMoveAction) tweens 0.6 s
+/// to Normal's private model with its LookAt taken from the live one. The
+/// site, category and previous site type the callers pass are the ones the
+/// entry reads from the world.
+pub(crate) fn enter_normal(world: &mut World, site: &str, _category: &str, _prev_site: &str) {
     world.remove_resource::<SiteMoveCamera>();
-    let inherit = crate::camera::is_inherit_camera_setting(category, prev_site);
-    let setting = world.get_resource::<CameraSetting>().copied();
-    let snapshot = world
-        .get_resource::<CannonCameraTransfer>()
-        .and_then(|table| table.0.get(site).cloned());
-    let fov_now = {
-        let mut cameras = world.query_filtered::<&Projection, With<Camera3d>>();
-        cameras.single(world).map(perspective_fov_deg).ok()
-    };
-    world.resource_mut::<FieldCameraState>().0 = CameraStateType::Normal;
-    let Some(setting) = setting else {
-        warn!("[site-move] camera setting missing at Normal re-entry");
-        return;
-    };
-    let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() else {
-        warn!("[site-move] camera model missing at Normal re-entry");
-        return;
-    };
-    model.min_distance = setting.min_distance;
-    model.max_distance = setting.max_distance;
-    model.min_pitch = setting.min_pitch;
-    model.max_pitch = setting.max_pitch;
-    model.offset = setting.offset;
-    if !inherit {
-        // TransferCameraSettings is not reachable from a cannon arrival.
-        error!("[site-move] Normal re-entry at {site} after {prev_site} is not the inherit branch; TransferCameraSettings is not ported");
-        return;
-    }
-    let (pitch, yaw, fov, distance, hit) = match &snapshot {
-        Some(m) => (m.pitch, m.yaw, m.fov, m.distance, true),
-        None => (
-            setting.init_pitch,
-            model.yaw,
-            model.fov,
-            model.distance,
-            false,
-        ),
-    };
-    let prev_pitch = wrap180(model.pitch);
-    let prev_yaw = wrap180(model.yaw);
-    let tween = CameraTween {
-        look_at: (model.look_at, model.look_at),
-        fov: (fov_now.unwrap_or(model.fov), fov),
-        pitch: (prev_pitch, to_rotation(prev_pitch, pitch)),
-        yaw: (prev_yaw, to_rotation(prev_yaw, yaw)),
-        distance: (model.distance, distance),
-        duration: crate::camera::FPS_EXIT_TWEEN_SECS_INHERIT,
-        elapsed: 0.0,
-        on_complete: TweenCompletion::None,
-    };
-    info!(
-        "[site-move] camera -> Normal at {site} (inherit, {}): distance {:.2} -> {:.2}, pitch {:.1} -> {:.1}, yaw {:.1} -> {:.1}",
-        if hit { "site snapshot" } else { "fallback initPitch + current" },
-        model.distance, distance, prev_pitch, tween.pitch.1, prev_yaw, tween.yaw.1
-    );
-    drop(model);
-    world.insert_resource(tween);
+    let prev = world.resource::<FieldCameraState>().0;
+    crate::camera::normal_on_enter(world, prev, "site-move");
+    debug!("[site-move] camera -> Normal at {site} from {prev:?}");
 }
 
 fn find_bones(world: &mut World) -> (Option<Entity>, Option<Entity>) {
@@ -316,6 +246,7 @@ pub(crate) fn update(
     mut camera_state: Option<ResMut<SiteMoveCamera>>,
     model: Option<ResMut<FieldCameraModel>>,
     setting: Option<Res<CameraSetting>>,
+    settings: Option<Res<crate::game_settings::GameSettings>>,
     avatars: Query<&GlobalTransform, (With<AvatarRoot>, Without<Camera3d>)>,
     bones: Query<&GlobalTransform, (Without<AvatarRoot>, Without<Camera3d>)>,
     mut cameras: Query<(&mut Transform, &mut GlobalTransform), With<Camera3d>>,
@@ -347,7 +278,11 @@ pub(crate) fn update(
             (root, root)
         }
     };
-    let rate = time.delta_secs() / FRAME_BASE;
+    // One source OnUpdate per frame at the player's frame limit.
+    let frame_limit = settings
+        .as_deref()
+        .map_or(60, |settings| settings.graphics.frame_rate);
+    let rate = time.delta_secs() * f32::from(frame_limit);
     let mut fields = Model {
         look_at: model.look_at,
         distance: model.distance,

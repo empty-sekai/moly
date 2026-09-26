@@ -12,13 +12,14 @@ import {
 import { loadEngine, releaseEnginePath } from "./engine-loader.mjs";
 import {
   GAME_ABI,
+  GAME_DOCUMENTS,
   GAME_EXPORTS,
   GAME_SCHEMA,
   createGameController,
 } from "./game-controller.mjs";
 import { audioActivation } from "./stage-audio.mjs";
 
-export { GAME_ABI, GAME_EXPORTS, GAME_SCHEMA };
+export { GAME_ABI, GAME_DOCUMENTS, GAME_EXPORTS, GAME_SCHEMA };
 const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
 const CATALOG = /^[a-f0-9]{64}$/;
 const SEED_IDENTITY = [
@@ -201,13 +202,13 @@ export async function bootGame({
     identity,
     timings,
     resumeAudio,
-    /** The ABI seed of this boot; the page supplies only its own facts. */
-    seed({ writable, settings }) {
-      return {
-        ...identity,
-        writable: writable === true,
-        documents: { settings: typeof settings === "string" ? settings : null },
-      };
+    /** The ABI seed of this boot; the page supplies only its own facts:
+     * the lease and the stored documents (each text, or null on a first run). */
+    seed({ writable, documents = {} }) {
+      const seeded = {};
+      for (const name of GAME_DOCUMENTS)
+        seeded[name] = typeof documents[name] === "string" ? documents[name] : null;
+      return { ...identity, writable: writable === true, documents: seeded };
     },
     /** Synchronous: call it inside the trusted tap, after the page's own
      * fullscreen, wake-lock and audio requests. */
@@ -219,7 +220,10 @@ export async function bootGame({
         SEED_IDENTITY.some((key) => seed[key] !== identity[key]) ||
         typeof seed.writable !== "boolean" ||
         !seed.documents ||
-        (seed.documents.settings !== null && typeof seed.documents.settings !== "string")
+        Object.keys(seed.documents).length !== GAME_DOCUMENTS.length ||
+        GAME_DOCUMENTS.some(
+          (name) => seed.documents[name] !== null && typeof seed.documents[name] !== "string",
+        )
       )
         throw new Error("Seed does not match the booted release and snapshot");
       started = true;

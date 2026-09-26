@@ -159,6 +159,8 @@ pub enum TalkStep {
         speed: Option<f64>,
         playback_speed: f64,
         play_end_motion: bool,
+        /// The script's third argument, seconds after the call (nil reads 0).
+        delay_seconds: f32,
     },
     Text { text: String },
     /// 挂起直至点击。
@@ -213,11 +215,16 @@ pub enum FixtureStep {
         who: f64,
         motion: String,
         alias: String,
+        /// 源脚本的第四参 `animation_speed`（缺参/nil 为 None；0 与缺参
+        /// 同按 1.0 播，见 `effective_animation_speed`）。
         speed: Option<f64>,
         playback_speed: f64,
         play_end_motion: bool,
         /// 家具侧提取形多带的混合时长（秒）；单角色形无此键。
         blend: Option<f64>,
+        /// 源脚本的第三参 `delay`（秒）：引擎把这次换动作排进延迟命令表，
+        /// 到「已过时间 + delay」才执行（缺参/nil 读作 0）。
+        delay_seconds: f32,
     },
     Text { text: String },
     WaitClick,
@@ -360,6 +367,7 @@ mod tests {
                     speed: None,
                     playback_speed: 1.0,
                     play_end_motion: false,
+                    delay_seconds: 0.0,
                 },
                 TalkStep::Emoticon {
                     who: "Characters.A".to_string(),
@@ -496,6 +504,7 @@ mod tests {
                     playback_speed: 1.0,
                     play_end_motion: true,
                     blend: Some(0.5),
+                    delay_seconds: 0.0,
                 },
             ],
         };
