@@ -334,8 +334,9 @@ fn stop(effects: &mut HarvestEffects, world: &mut World, ticket: u64) {
     live.stopped = true;
     let systems = crate::weather_fx::fixture::stop_emitting(world, root);
     info!(
-        "[harvest-effect] ManagedEffect.Stop type {} {root:?}: emission stopped on {systems} systems; the copy is released when its particles are gone",
-        live.kind
+        "[harvest-effect] ManagedEffect.Stop type {} {root:?}: emission stopped on {systems} systems{}; the copy is released when its particles are gone",
+        live.kind,
+        if live.planned { "" } else { " (not prepared yet: the stop applies when it is)" }
     );
 }
 
@@ -402,6 +403,16 @@ fn prepare(effects: &mut HarvestEffects, world: &mut World, dt: f32) {
                     draws.len()
                 );
                 effects.live[index].planned = true;
+                // The source emits from a copy it already holds; here the
+                // copy can still be loading when its Stop runs. The Stop
+                // then takes effect as the systems are prepared.
+                if effects.live[index].stopped {
+                    let systems = crate::weather_fx::fixture::stop_emitting(world, root);
+                    info!(
+                        "[harvest-effect] type {kind} {root:?}: its ManagedEffect.Stop ran {:.2} s before it was prepared; emission stopped on {systems} systems now",
+                        effects.live[index].age
+                    );
+                }
             }
             Prepared::Pending => {}
             Prepared::Refused(error) => {
