@@ -591,6 +591,17 @@ pub(crate) fn open(world: &mut World) {
     }
 }
 
+/// Whether an awaited `OpenDoorAsync` would have returned: the open clip of
+/// the current room's door has reached its end. True without a door (the
+/// await has nothing to wait on); false while the open clip plays or a close
+/// clip is playing.
+pub(crate) fn open_finished(world: &World) -> bool {
+    match current(world).and_then(|door| door.playback.as_ref()) {
+        Some(playback) => playback.clip == Clip::Open && playback.ended,
+        None => current(world).is_none_or(|door| door.instance.is_none()),
+    }
+}
+
 /// `RoomController.CloseDoorAsync().Forget()`.
 pub(crate) fn close(world: &mut World) {
     let frame = u64::from(world.resource::<FrameCount>().0);
