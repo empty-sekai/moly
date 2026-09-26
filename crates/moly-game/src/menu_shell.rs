@@ -581,6 +581,13 @@ pub(crate) fn parse(
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wordings.get(wording).unwrap_or_else(|| panic!("UI wording missing: {wording}")).chars());
     }
+    // The option dialog and the info screen write these wordings; a root
+    // without one is named by the screen that writes it.
+    for wording in crate::option_dialog::WORDINGS.iter().chain(crate::info::WORDINGS) {
+        if let Some(text) = layouts.wordings.get(*wording) {
+            chars.extend(text.chars());
+        }
+    }
     for texts in [
         crate::info::FIXED_TEXTS, crate::menu_dialog::FIXED_TEXTS,
         crate::get_resource::FIXED_TEXTS, crate::option_dialog::FIXED_TEXTS,
