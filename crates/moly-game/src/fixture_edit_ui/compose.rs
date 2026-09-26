@@ -21,6 +21,8 @@ pub(super) struct Cell {
     pub selected: String,
     pub placed: String,
     pub hide: Vec<String>,
+    /// The thumbnail's `frameMask`, which `SetupMysekaiFixture` disables.
+    pub frame_mask: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -236,6 +238,18 @@ pub(super) fn compose(
                 &thumb_fields,
                 &["disableCover", "labelImage", "_subThumbnailImage"],
             )?);
+            // UIPartsItemThumbnail.SetupMysekaiFixture hides thumbnailBase and
+            // ends with VisibleFrame = false: the frame image's GameObject off
+            // and frameMask disabled, so a fixture thumbnail is not masked.
+            hide.extend(optional_cloned(
+                instance,
+                &thumb_fields,
+                &["thumbnailBase", "frameImage"],
+            )?);
+            let frame_mask = match pointer(&thumb_fields["frameMask"])? {
+                0 => None,
+                id => Some(instance.identity(id)?),
+            };
             // Loading/failed-state graphics belong to the source texture loader;
             // the host hides them once the real catalog image is registered.
             let loader = component(
@@ -257,6 +271,7 @@ pub(super) fn compose(
                 selected: cloned_field(instance, &cell_fields, "selected")?,
                 placed: cloned_field(instance, &cell_fields, "_inPlacedLabel")?,
                 hide,
+                frame_mask,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -484,6 +499,9 @@ pub(super) fn apply_static(
         view.set_visible(&cell.placed, cell.choice.is_placed());
         for path in &cell.hide {
             view.set_visible(path, false);
+        }
+        if let Some(mask) = cell.frame_mask {
+            view.set_behaviour_enabled(mask, false);
         }
         enabled(view, doc, &cell.button, cell.choice.editable);
     }

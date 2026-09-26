@@ -20,11 +20,24 @@
 //! which cuts the quad and its uvs by the same amount); a fragment passes
 //! where one of those quads covers it and the masking graphic's texture there
 //! times its vertex alpha is not below 0.001. That is the stencil's content.
+//!
+//! Under a RectMask2D the masking graphic is a clippable like any other
+//! (`MaskableGraphic.UpdateClipParent` does not look at `isMaskingGraphic`),
+//! so its stencil-writing draw has the rectangle clip: UI/Default multiplies
+//! the alpha by the RectMask2D softness factor before the alpha clip, and a
+//! culled masking graphic (`MaskableGraphic.Cull`) draws nothing, so nothing
+//! under it is drawn. The Graphics under the mask keep their own RectMask2D
+//! clip as well; the two tests compose per fragment.
+//!
 //! Other masking graphics (radial fills, Tiled images, raw images, text, a
-//! rotated quad), a mask inside another mask, and a mask under a RectMask2D
-//! are refused with one error each and leave their Graphics untested.
+//! rotated quad, a shader other than UI/Default) and a mask inside another
+//! mask are refused with one error each and leave their Graphics untested.
 
-use super::{image_rule_mesh_data, Override, UiLayouts, clip_render::Stencil, image_path};
+use super::{
+    Override, UiLayouts,
+    clip_render::{self, MaskingClip, Stencil},
+    image_path, image_rule_mesh_data,
+};
 use bevy::prelude::*;
 use moly_assets::ui_layout::{UiComponent, UiNode, UiPrefab, UiRect};
 use serde_json::Value;
@@ -78,20 +91,30 @@ pub(super) fn resolve(
         let mut next = own.clone();
         let mask = node.components.iter().find(|c| c.class == "UnityEngine.UI.Mask");
         if let (Some(mask), Some(graphic)) = (mask, graphic(node)) {
-            if rects[index].active && mask.enabled {
+            // Behaviour.enabled as code last set it, else as serialized.
+            let enabled = overrides.get(&index)
+                .and_then(|change| change.behaviour_enabled)
+                .filter(|(id, _)| *id == mask.path_id)
+                .map_or(mask.enabled, |(_, value)| value);
+            if rects[index].active && enabled {
                 if mask.fields["m_ShowMaskGraphic"].as_bool() == Some(false) {
                     unshown[index] = Some(graphic.path_id);
                 }
                 if graphic.enabled {
                     let shape = if own.is_some() {
                         Err("a mask inside another mask".to_owned())
-                    } else if rects[index].clipping.rect.is_some() {
-                        Err("a mask under a RectMask2D".to_owned())
                     } else {
                         shape(layouts, doc, index, graphic, &rects[index], overrides.get(&index).copied(), alphas[index])
                     };
                     match shape {
-                        Ok(stencil) => next = Some(stencil),
+                        Ok(mut stencil) => {
+                            match clip_render::masking_clip(graphic, &rects[index]) {
+                                MaskingClip::None => {}
+                                MaskingClip::Culled => stencil.quads.clear(),
+                                MaskingClip::Rect(clip) => stencil.clip = Some(clip),
+                            }
+                            next = Some(stencil);
+                        }
                         Err(reason) => layouts.note_stencil_refusal(doc, mask, &reason),
                     }
                 }
@@ -125,6 +148,11 @@ fn shape(
     let f = &graphic.fields;
     let image_type = f.get("m_Type").and_then(Value::as_i64)
         .ok_or_else(|| format!("masking graphic {} is not an Image", graphic.class))?;
+    // The written alpha below is UI/Default's fragment alpha.
+    match clip_render::shader(graphic) {
+        Some("UI/Default") => {}
+        other => return Err(format!("a masking graphic with shader {other:?}")),
+    }
     let world = rect.world;
     let (sx, sy) = (world.x_axis.x, world.y_axis.y);
     let skew = world.x_axis.y.abs().max(world.y_axis.x.abs());
@@ -222,5 +250,5 @@ fn shape(
     };
     let vertex_alpha = (alpha.clamp(0., 1.) * 255.).round() / 255. * group_alpha;
     let texture = image_path(layouts, graphic, change).map(|path| layouts.images[path].clone());
-    Ok(Stencil { quads, vertex_alpha, texture })
+    Ok(Stencil { quads, vertex_alpha, texture, clip: None })
 }
