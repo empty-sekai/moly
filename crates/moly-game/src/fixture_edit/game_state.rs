@@ -22,8 +22,9 @@
 //!   meshes, tile faces, floating faces and light poles built from its own
 //!   prefabs and grid settings). It is not built here: the events are
 //!   recorded and nothing is drawn (named gap).
-//! - Fog: the fog flag's reader is the post-process host, which this module
-//!   does not own; the flag is recorded, the fog is not changed (named gap).
+//! - Fog: the weather host disables the fog while the edit session is active
+//!   (it reads the session's active flag, which is set and cleared on the
+//!   same frames as this entry and exit); the flag here is the record.
 //! - `ShowAll`: the site object manager shows the site objects that other
 //!   states hid; the product hides none, so there is nothing to show.
 
@@ -58,7 +59,7 @@ pub(super) fn enter(world: &mut World) {
         Err(reason) => warn!("[edit-state] FieldCamera.ChangeState(FloorEdit) not taken: {reason}"),
     }
     set(world, |state| state.fog_disabled = true);
-    info!("[edit-state] PostProcess.IsDisableFog = true: recorded; the fog reader is not wired");
+    info!("[edit-state] PostProcess.IsDisableFog = true: the weather host reads the active edit session");
 }
 
 /// `EditGameState.OnExit`, after the session ended (actors restored), and
@@ -78,7 +79,7 @@ pub(super) fn exit(world: &mut World) {
     info!("[edit-state] ShowTweets (event 26): the overlay gave back the balloons' visibility");
     info!("[edit-state] SiteObjectManager.ShowAll: no site object is hidden in the product; nothing to show");
     set(world, |state| state.fog_disabled = false);
-    info!("[edit-state] PostProcess.IsDisableFog = false: recorded");
+    info!("[edit-state] PostProcess.IsDisableFog = false: the edit session is no longer active");
     crate::floor_edit_camera::leave(world);
 }
 

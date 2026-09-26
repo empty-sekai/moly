@@ -270,11 +270,13 @@ impl FixturePutEffect {
             return;
         };
         info!("[fixture-put] PlayPutSound({id}) for fixture {fixture_id} ({source}): SE one-shot {cue}");
+        // The same one-shot call as the editor's other sounds; the product's
+        // class mapping puts layout-edit cues in the UI class.
         if let Some(mut se) = world.get_resource_mut::<SeRequests>() {
             se.0.push(SeRequest {
                 owner: None,
                 cue: cue.clone(),
-                class: SeClass::Ingame,
+                class: SeClass::Ui,
                 source,
             });
         }
