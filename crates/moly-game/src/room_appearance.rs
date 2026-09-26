@@ -20,6 +20,11 @@
 //! carries, which the engine's glTF loader does not map
 //! (`room_shell::attach_source_uv_sets`).
 //!
+//! Which skin and colour: [`RoomAppearance`] is resolved per room load from
+//! the account's housing layout rows (the site's own, then the first
+//! floor's), else the ClientConfig default fixtures with colour 1; the skin is
+//! the surface fixture's master `assetbundleName`.
+//!
 //! What cannot be computed from a module file is refused piece by piece, not
 //! room by room. A wall mesh without the fourth set (a module file exported
 //! before the uv-set export) is drawn without the edge factor, and one error
@@ -45,30 +50,281 @@ use std::collections::HashMap;
 const WALL_SLOT: &str = "mat_wall_main";
 const FLOOR_SLOT: &str = "mat_floor_main";
 
-/// The colour id the skin texture pattern is formatted with. The chosen
-/// colour is the account's housing layout (server data); the product has no
-/// colour choice yet and shows colour 1, the skin's first colour.
-const COLOR_ID: u32 = 1;
+/// `ClientConfig.Mysekai.MyRoomDefaultFloorAppearanceId` (IntConfigs 105) and
+/// `MyRoomDefaultWallAppearanceId` (IntConfigs 106): the fixture ids
+/// `SiteLayoutUtility.SetDefaultFloorAppearanceId` /
+/// `SetDefaultWallAppearanceId` give a room without a saved surface.
+const KEY_MY_ROOM_DEFAULT_FLOOR_APPEARANCE_ID: i32 = 105;
+const KEY_MY_ROOM_DEFAULT_WALL_APPEARANCE_ID: i32 = 106;
+/// `ClientConfig.Mysekai.DefaultMyRoomAssetBundleName` (StringConfigs 98):
+/// `MysekaiFixtureUtility.GetSurfaceAppearanceAssetBundleName` returns it
+/// when the fixture master has no row for the id.
+const KEY_DEFAULT_MY_ROOM_ASSET_BUNDLE_NAME: i32 = 98;
+/// The colour (texture) id both `SetDefault*AppearanceId` pass.
+const DEFAULT_COLOR_ID: u32 = 1;
+/// `MysekaiFixtureSurfaceAppearanceType`: wall_appearance 0,
+/// floor_appearance 1. `OnAfterDeserialize` parses the row's string with
+/// `TryGetEnum(ignoreCase: true, default 1)`.
+const WALL_APPEARANCE: u8 = 0;
+const FLOOR_APPEARANCE: u8 = 1;
+const FIXTURE_MASTER: &str = "moly://mysekai-fixtures.json";
 
+/// The room's two surface appearances: the skin bundle names (the surface
+/// fixture's master `assetbundleName`) and the colour ids (the texture id)
+/// the room is drawn with.
+///
+/// Source (`MyRoomSiteController.SetCurrentFloorAppearanceId` /
+/// `SetCurrentWallAppearanceId`, run when a room site is set up): the site's
+/// own housing layout row of the channel (`GetFloorAppearanceData` /
+/// `GetWallAppearanceData`: the first `mysekaiFixtureSurfaceAppearances`
+/// entry of that type), else the first floor's, else the ClientConfig
+/// default fixture with colour 1. The layout rows are the account's server
+/// data; the product keeps them in the local layout document (an imported
+/// account carries them), read here on every room load.
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RoomAppearance {
     pub(crate) wall: String,
     pub(crate) floor: String,
+    pub(crate) wall_color: u32,
+    pub(crate) floor_color: u32,
+    /// The room load (ground epoch) the values were resolved for.
+    resolved: Option<u64>,
+    /// The skins the resolution last wrote: a different value at the next
+    /// room load was written by another owner (the content library's
+    /// surface preview) and is kept.
+    written: Option<(String, String)>,
 }
 impl Default for RoomAppearance {
     fn default() -> Self {
         Self {
-            wall: "mis0001".into(),
-            floor: "mis0001".into(),
+            wall: String::new(),
+            floor: String::new(),
+            wall_color: DEFAULT_COLOR_ID,
+            floor_color: DEFAULT_COLOR_ID,
+            resolved: None,
+            written: None,
         }
     }
+}
+impl RoomAppearance {
+    /// The surfaces of the room loaded for `epoch` are resolved.
+    pub(crate) fn resolved_for(&self, epoch: u64) -> bool {
+        self.resolved == Some(epoch)
+    }
+}
+
+/// The fixture master's `assetbundleName` by fixture id, for
+/// `GetSurfaceAppearanceAssetBundleName`.
+#[derive(Resource)]
+struct SurfaceMaster {
+    handle: Handle<JsonAsset>,
+    bundles: Option<HashMap<i64, String>>,
+}
+
+fn load_master(mut commands: Commands, server: Res<AssetServer>) {
+    commands.insert_resource(SurfaceMaster {
+        handle: server.load(FIXTURE_MASTER),
+        bundles: None,
+    });
+}
+
+fn parse_master(text: &str) -> Result<HashMap<i64, String>, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("fixture master: {error}"))?;
+    let rows = doc["fixtures"]
+        .as_array()
+        .ok_or("fixture master has no fixtures array")?;
+    rows.iter()
+        .map(|row| {
+            let id = row["id"].as_i64().ok_or("fixture master row without id")?;
+            let bundle = row["assetbundleName"]
+                .as_str()
+                .ok_or_else(|| format!("fixture master row {id} without assetbundleName"))?;
+            Ok((id, bundle.to_owned()))
+        })
+        .collect()
+}
+
+/// `TryGetEnum(ignoreCase: true, default floor_appearance)` over the row's
+/// type string. Whether `TryGetEnum` also accepts the numeric form was not
+/// read; the names are what the server sends.
+fn surface_type(value: &serde_json::Value) -> u8 {
+    match value.as_str() {
+        Some(text) if text.eq_ignore_ascii_case("wall_appearance") => WALL_APPEARANCE,
+        _ => FLOOR_APPEARANCE,
+    }
+}
+
+/// `GetFloorAppearanceData` / `GetWallAppearanceData` of one saved site
+/// record: the first row of the channel's type, as (fixture id, texture id).
+fn saved_surface(record: &serde_json::Value, channel: u8) -> Result<Option<(i64, u32)>, String> {
+    let rows = match record.get("mysekaiFixtureSurfaceAppearances") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(rows) => rows
+            .as_array()
+            .ok_or("mysekaiFixtureSurfaceAppearances is not an array")?,
+    };
+    let Some(row) = rows
+        .iter()
+        .find(|row| surface_type(&row["mysekaiFixtureSurfaceAppearanceType"]) == channel)
+    else {
+        return Ok(None);
+    };
+    let id = row["mysekaiFixtureId"]
+        .as_i64()
+        .ok_or("surface appearance row without mysekaiFixtureId")?;
+    let texture = row["textureId"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or("surface appearance row without textureId")?;
+    Ok(Some((id, texture)))
+}
+
+/// The saved site record of `site_id` in the local layout document, if any.
+fn saved_record(document: &serde_json::Value, site_id: u32) -> Option<&serde_json::Value> {
+    document
+        .get(crate::fixture::layouts::SECTION)?
+        .get("sites")?
+        .get(site_id.to_string())
+}
+
+/// One channel: the site's own row, else the first floor's, else the
+/// ClientConfig default with colour 1; then the bundle name of the fixture.
+fn resolve_channel(
+    document: &serde_json::Value,
+    site_id: u32,
+    first_floor: Option<u32>,
+    channel: u8,
+    configs: &ClientConfigs,
+    bundles: &HashMap<i64, String>,
+) -> Result<(String, u32, &'static str), String> {
+    let mut chosen = None;
+    for (site, origin) in [
+        (Some(site_id), "the room's layout"),
+        (first_floor, "the first floor's layout"),
+    ] {
+        let Some(record) = site.and_then(|site| saved_record(document, site)) else {
+            continue;
+        };
+        if let Some(row) = saved_surface(record, channel)? {
+            chosen = Some((row, origin));
+            break;
+        }
+    }
+    let ((id, color), origin) = chosen.unwrap_or_else(|| {
+        let key = if channel == WALL_APPEARANCE {
+            KEY_MY_ROOM_DEFAULT_WALL_APPEARANCE_ID
+        } else {
+            KEY_MY_ROOM_DEFAULT_FLOOR_APPEARANCE_ID
+        };
+        (
+            (configs.int(key) as i64, DEFAULT_COLOR_ID),
+            "the ClientConfig default",
+        )
+    });
+    let bundle = bundles.get(&id).cloned().unwrap_or_else(|| {
+        configs
+            .string(KEY_DEFAULT_MY_ROOM_ASSET_BUNDLE_NAME)
+            .to_owned()
+    });
+    Ok((bundle, color, origin))
+}
+
+/// Update: resolve the room's surfaces once per room load.
+fn resolve(
+    active: Option<Res<crate::site::SiteActive>>,
+    epoch: Option<Res<GroundEpoch>>,
+    sites: Option<Res<crate::site::Sites>>,
+    configs: Option<Res<ClientConfigs>>,
+    master: Option<ResMut<SurfaceMaster>>,
+    json: Res<Assets<JsonAsset>>,
+    mut appearance: ResMut<RoomAppearance>,
+) {
+    let (Some(active), Some(epoch), Some(sites), Some(configs), Some(mut master)) =
+        (active, epoch, sites, configs, master)
+    else {
+        return;
+    };
+    if !active.is_indoor() || appearance.resolved == Some(epoch.0) {
+        return;
+    }
+    if master.bundles.is_none() {
+        let Some(text) = json.get(&master.handle) else {
+            return;
+        };
+        match parse_master(&text.0) {
+            Ok(bundles) => master.bundles = Some(bundles),
+            Err(reason) => panic!("[room-shell] {reason}"),
+        }
+    }
+    let bundles = master.bundles.as_ref().expect("parsed above");
+    let document = crate::settings_store::read_document().unwrap_or_else(|reason| {
+        error!("[room-shell] the local layout document cannot be read ({reason}): the room surfaces take the defaults");
+        serde_json::Value::Object(Default::default())
+    });
+    let first_floor = sites.site_id("first_floor");
+    let mut resolved = Vec::new();
+    for channel in [WALL_APPEARANCE, FLOOR_APPEARANCE] {
+        match resolve_channel(
+            &document,
+            active.site_id,
+            first_floor,
+            channel,
+            &configs,
+            bundles,
+        ) {
+            Ok(value) => resolved.push(value),
+            Err(reason) => {
+                error!("[room-shell] {}: a saved surface appearance row is malformed ({reason}): the room takes the defaults", active.site_type);
+                resolved = [WALL_APPEARANCE, FLOOR_APPEARANCE]
+                    .into_iter()
+                    .map(|channel| {
+                        resolve_channel(
+                            &serde_json::Value::Null,
+                            active.site_id,
+                            None,
+                            channel,
+                            &configs,
+                            bundles,
+                        )
+                        .expect("the default chain reads no document")
+                    })
+                    .collect();
+                break;
+            }
+        }
+    }
+    let [(wall, wall_color, wall_origin), (floor, floor_color, floor_origin)] =
+        <[_; 2]>::try_from(resolved).expect("two channels");
+    let current = (appearance.wall.clone(), appearance.floor.clone());
+    let overridden = appearance
+        .written
+        .as_ref()
+        .is_some_and(|written| *written != current);
+    if overridden {
+        info!(
+            "[room-shell] {}: surfaces {} / {} were set by another owner; kept (colours {} / {})",
+            active.site_type, current.0, current.1, appearance.wall_color, appearance.floor_color
+        );
+    } else {
+        info!(
+            "[room-shell] {}: wall {wall} colour {wall_color} from {wall_origin}; floor {floor} colour {floor_color} from {floor_origin}",
+            active.site_type
+        );
+        appearance.wall = wall;
+        appearance.floor = floor;
+        appearance.wall_color = wall_color;
+        appearance.floor_color = floor_color;
+    }
+    appearance.written = Some((appearance.wall.clone(), appearance.floor.clone()));
+    appearance.resolved = Some(epoch.0);
 }
 #[derive(Resource, Default)]
 pub(crate) struct RoomAppearanceState {
     pub(crate) ready: bool,
     pub(crate) phase: String,
     pub(crate) error: Option<String>,
-    key: Option<(u64, String, String)>,
+    key: Option<(u64, String, String, u32, u32)>,
     /// Wall skin, floor skin, then the module's own sidecar.
     sources: Vec<Handle<JsonAsset>>,
     images: Vec<Handle<Image>>,
@@ -243,12 +499,12 @@ fn build(
     let wall_pattern = format_pattern(
         configs.string(KEY_MY_ROOM_WALL_APPEARANCE_ASSET_NAME),
         &appearance.wall,
-        COLOR_ID,
+        appearance.wall_color,
     )?;
     let floor_pattern = format_pattern(
         configs.string(KEY_MY_ROOM_FLOOR_ASSET_NAME),
         &appearance.floor,
-        COLOR_ID,
+        appearance.floor_color,
     )?;
     let (wall_uri, wall_uv) = skin_surface(wall_doc, &wall_pattern)?;
     let (floor_uri, floor_uv) = skin_surface(floor_doc, &floor_pattern)?;
@@ -381,7 +637,17 @@ fn apply(
         state.error = Some(format!("房间模块路径 {module_path} 不是 .glb"));
         return;
     };
-    let key = (epoch.0, appearance.wall.clone(), appearance.floor.clone());
+    if !appearance.resolved_for(epoch.0) {
+        state.phase = "surface appearances".into();
+        return;
+    }
+    let key = (
+        epoch.0,
+        appearance.wall.clone(),
+        appearance.floor.clone(),
+        appearance.wall_color,
+        appearance.floor_color,
+    );
     if state.key.as_ref() != Some(&key) {
         *state = RoomAppearanceState {
             key: Some(key),
@@ -580,7 +846,13 @@ pub(crate) fn install(app: &mut App) {
     app.add_plugins(MaterialPlugin::<RoomShellMaterial>::default())
         .init_resource::<RoomAppearance>()
         .init_resource::<RoomAppearanceState>()
-        .add_systems(Update, apply.after(crate::site::spawn_when_ready));
+        .add_systems(Startup, load_master)
+        .add_systems(
+            Update,
+            (resolve, apply)
+                .chain()
+                .after(crate::site::spawn_when_ready),
+        );
 }
 
 #[cfg(test)]
