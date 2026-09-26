@@ -1399,6 +1399,20 @@ pub(crate) fn reseed(
             );
             continue;
         }
+        if away && talk_slot.kind() == Some(moly_law::objective::TalkType::EntrySite) {
+            // Created while another site was loaded and never decided: its
+            // set-up (the entry-site data) is still owed, so its first
+            // decision starts the entry-site objective here and the gate's
+            // appearance places it; it stays hidden until then.
+            commands.entity(entity).remove::<residency::Away>();
+            actions.resume_on_site(epoch.0);
+            resumed += 1;
+            info!(
+                "[npc-residency] unit={} on its site {} (epoch {}) for the first time: the entry-site set-up is still owed, hidden until the gate places it",
+                unit.0, own, epoch.0
+            );
+            continue;
+        }
         if away {
             // Back on its own site: it resumes where it stood.
             commands.entity(entity).remove::<residency::Away>();
