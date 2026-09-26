@@ -190,6 +190,7 @@ pub(super) fn source_culling(system: &Value, renderer: &Value, emitter: &Emitter
         Some("Billboard") => BoundsRenderMode::Billboard,
         Some("HorizontalBillboard") => BoundsRenderMode::HorizontalBillboard,
         Some("VerticalBillboard") => BoundsRenderMode::VerticalBillboard,
+        Some("Stretch") => BoundsRenderMode::Stretch,
         Some("Mesh") => BoundsRenderMode::Mesh,
         _ => return refused("render mode outside the bounds law's executed domain"),
     };
@@ -443,12 +444,14 @@ impl PlayState {
     /// first-Play warm.
     pub(super) fn update_bounds(&mut self, system: &Runtime, emitter_to_world: &GlobalTransform) {
         let Some(cullable) = self.cullable() else { return; };
-        // Only a stretched render mode reads velocity and size, and the gate
-        // admits none; positions go back to the engine's frame.
+        // Only the Stretch render mode reads velocity, animated velocity and
+        // size: the persistent velocity, the last pre-simulation pass's
+        // animated velocity and the X size array. Everything goes back to the
+        // engine's frame.
         let unreflect = |v: [f32; 3]| [-v[0], v[1], v[2]];
         let position: Vec<[f32; 3]> = system.pool.iter().map(|p| unreflect(p.position)).collect();
         let velocity: Vec<[f32; 3]> = system.pool.iter().map(|p| unreflect(p.velocity)).collect();
-        let animated = vec![[0.0f32; 3]; position.len()];
+        let animated: Vec<[f32; 3]> = system.side.iter().map(|s| unreflect(s.animated)).collect();
         let size_x: Vec<f32> = system.side.iter().map(|s| s.size[0]).collect();
         let local_to_world = engine_matrix(emitter_to_world.to_matrix());
         let world_to_local = Mat4::from_cols_array(&local_to_world).inverse().to_cols_array();
