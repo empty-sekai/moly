@@ -1120,8 +1120,41 @@ fn detach(world: &mut World, roots: &[Entity], site: &str, hide: bool) {
 
 /// `MysekaiSiteView.HideSite`: `SetActive(false)` on the site's object, so
 /// nothing under it renders or sounds. The loader's sound sources are put on
-/// again when the site is entered.
+/// again when the site is entered. What other owners attached under the
+/// site's own instance (a room's door prefab under `Loc_door`) goes: each
+/// owner attaches it again at the next entry, as it does to a new instance.
 fn hide_site(world: &mut World, roots: &[Entity]) {
+    let mut attached = Vec::new();
+    {
+        let spawner = world.resource::<bevy::scene::SceneSpawner>();
+        for &root in roots {
+            let Some(instance) = world.get::<bevy::scene::SceneInstance>(root) else {
+                continue;
+            };
+            let own: std::collections::HashSet<Entity> =
+                spawner.iter_instance_entities(**instance).collect();
+            let mut stack = vec![root];
+            while let Some(entity) = stack.pop() {
+                let Some(children) = world.get::<Children>(entity) else {
+                    continue;
+                };
+                for child in children.iter() {
+                    if own.contains(&child) {
+                        stack.push(child);
+                    } else {
+                        attached.push(child);
+                    }
+                }
+            }
+        }
+    }
+    if !attached.is_empty() {
+        info!(
+            "[site] HideSite: {} entities other owners attached under the site are dropped",
+            attached.len()
+        );
+    }
+    despawn_now(world, &attached);
     let mut stack: Vec<Entity> = roots.to_vec();
     while let Some(entity) = stack.pop() {
         let Ok(mut node) = world.get_entity_mut(entity) else {
