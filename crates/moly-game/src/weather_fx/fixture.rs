@@ -57,7 +57,7 @@ pub(crate) fn prepare_control(
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::Played)
+    prepare(world, root, doc, selected, Stepping::Played, Activity::Authored)
 }
 
 /// The same for an owner that plays the systems with `ParticleSystem.Play`
@@ -65,14 +65,14 @@ pub(crate) fn prepare_control(
 /// as [`prepare_control`]'s, but wait stopped and out of the manager, drawing
 /// nothing, until [`play_pending`] runs their first Play (its seed reset and
 /// birth owner install). `Ok(None)` while geometry or GPU preparation is
-/// pending.
+/// pending. Activity is the run time's (see [`Activity::Runtime`]).
 pub(crate) fn prepare_play_later(
     world: &mut World,
     root: Entity,
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::PlayLater)
+    prepare(world, root, doc, selected, Stepping::PlayLater, Activity::Runtime)
 }
 
 /// The same for a Director's ControlPlayable: the systems wait for its paused
@@ -85,7 +85,34 @@ pub(crate) fn prepare_director_control(
     doc: &Value,
     selected: &[(Entity, usize)],
 ) -> Result<Option<Vec<Entity>>, String> {
-    prepare(world, root, doc, selected, Stepping::Director)
+    prepare(world, root, doc, selected, Stepping::Director, Activity::Authored)
+}
+
+/// [`prepare_director_control`] for a prefab's director owner (a step item,
+/// a site scene's director): activity is the run time's (see
+/// [`Activity::Runtime`]).
+pub(crate) fn prepare_owner_director_control(
+    world: &mut World,
+    root: Entity,
+    doc: &Value,
+    selected: &[(Entity, usize)],
+) -> Result<Option<Vec<Entity>>, String> {
+    prepare(world, root, doc, selected, Stepping::Director, Activity::Runtime)
+}
+
+/// Whether a selected system's authored activity gates its admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activity {
+    /// An inactive authored object refuses the system (the fixture routes).
+    Authored,
+    /// The owner's own activation decides at run time: a Control clip's
+    /// ActivationControlPlayable activates its object for the clip, and
+    /// ControlPlayableAsset takes every system of the object's Transform
+    /// subtree whether its object is active or not (a Signal target's
+    /// inactive children likewise). An object authored inactive is admitted
+    /// and the host leaves its system dormant, drawing nothing, while its
+    /// anchor is inactive.
+    Runtime,
 }
 
 fn prepare(
@@ -94,6 +121,7 @@ fn prepare(
     doc: &Value,
     selected: &[(Entity, usize)],
     stepping: Stepping,
+    activity: Activity,
 ) -> Result<Option<Vec<Entity>>, String> {
     let server = world.resource::<AssetServer>().clone();
     let mut preparation = match world.entity_mut(root).take::<ControlPreparation>() {
@@ -101,8 +129,20 @@ fn prepare(
         None => {
             let particles = doc["emitters"].as_array().ok_or("missing source emitter list")?;
             let nodes = doc["nodes"].as_array().ok_or("missing source node list")?;
-            let by_path = nodes.iter().filter_map(|node|
+            // Runtime activity: the selected systems' own node rows, as active.
+            let released: Vec<Value> = match activity {
+                Activity::Authored => Vec::new(),
+                Activity::Runtime => selected.iter()
+                    .filter_map(|&(_, ordinal)| particles[ordinal]["node"].as_str())
+                    .filter_map(|path| nodes.iter().find(|node| node["node"].as_str() == Some(path)))
+                    .map(|node| { let mut node = node.clone(); node["active"] = Value::Bool(true); node })
+                    .collect(),
+            };
+            let mut by_path: HashMap<String, &Value> = nodes.iter().filter_map(|node|
                 Some((node["node"].as_str()?.to_owned(), node))).collect();
+            for node in &released {
+                if let Some(path) = node["node"].as_str() { by_path.insert(path.to_owned(), node); }
+            }
             let owners = source_sub_emitter_owners(particles);
             let package = doc["name"].as_str().unwrap_or("fixture");
             let mut candidates = Vec::new();

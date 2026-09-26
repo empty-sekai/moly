@@ -1088,7 +1088,11 @@ fn prepare_root(
         .copied()
         .filter(|(anchor, _)| !existing.iter().any(|(_, old)| old == anchor))
         .collect();
-    let created = crate::weather_fx::fixture::prepare_director_control(world, root, doc, &new)
+    let created = if fixture_host {
+        crate::weather_fx::fixture::prepare_director_control(world, root, doc, &new)
+    } else {
+        crate::weather_fx::fixture::prepare_owner_director_control(world, root, doc, &new)
+    }
         .map_err(invalid)?
         .ok_or_else(|| loading("source particle shader/geometry is preparing"))?;
     let draws: Vec<_> = existing
