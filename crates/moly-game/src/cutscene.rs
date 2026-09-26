@@ -100,9 +100,10 @@ const DEFAULT_LIMIT_LINE_WIDTH: f32 = 0.0;
 /// `FadePanelBehaviour.UpdateAlpha`: past this progress the clip holds its
 /// end value.
 const FADE_HOLD: f32 = 0.95;
-/// Product guard, not a source value: a load that has not resolved after
-/// this many real seconds is refused by name.
-const LOAD_WAIT_REAL: f64 = 30.0;
+/// Product report interval, not a source value: a load still waiting is
+/// named every this many real seconds (the source awaits it with no
+/// timeout).
+const LOAD_REPORT_REAL: f64 = 30.0;
 
 /// `ScreenLayerMysekaiHome.OnFinishStartAnimation`: the home screen became
 /// current (the entry's home setup, a door or cannon arrival at home).
@@ -192,6 +193,8 @@ struct Load {
     draft: Option<TimelineBindings>,
     waiting: Option<String>,
     since_real: f64,
+    /// How many report intervals the wait has passed.
+    reported: u32,
 }
 
 struct Plan {
@@ -498,6 +501,7 @@ fn unlock_cutscene(world: &mut World, unlock: SiteLevelRow, rank: i32) -> Option
         draft: None,
         waiting: None,
         since_real: now_real(world),
+        reported: 0,
     })
 }
 
@@ -780,11 +784,19 @@ fn read_prefab(
 /// `FadeAndSetUpAsync`: the view is instantiated and placed, its assets and
 /// the director's tables load and the session is prepared.
 fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> {
-    if now_real(world) - load.since_real > LOAD_WAIT_REAL {
-        return Err(format!(
-            "still waiting after {LOAD_WAIT_REAL} s: {}",
+    // `LoadAssetAndSetUpAsync` is awaited with no timeout, and the fixtures
+    // stay hidden meanwhile, as in the source. Only the product's own
+    // preparation (the effect clips' particle programs) takes this long; a
+    // failed load refuses at once below.
+    let waited = now_real(world) - load.since_real;
+    if waited >= LOAD_REPORT_REAL * f64::from(load.reported + 1) {
+        load.reported += 1;
+        warn!(
+            "[cutscene] {}/{} still waiting after {waited:.0} s: {}",
+            load.package,
+            load.prefab,
             load.waiting.as_deref().unwrap_or("?")
-        ));
+        );
     }
     let server = world.resource::<AssetServer>().clone();
     if let LoadState::Failed(error) = server.load_state(&load.tracks) {
