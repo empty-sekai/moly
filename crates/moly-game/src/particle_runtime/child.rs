@@ -11,7 +11,7 @@
 //! lifetime, size (one axis or three), speed and rotation, a constant start colour source the
 //! Initial law takes, a constant gravity modifier, Shape through the target's
 //! own Shape law (or no Shape with zero speed), RotationOverLifetime with
-//! constant or two-constant axes, VelocityOverLifetime (constant or
+//! constant, two-constant or single-curve axes, VelocityOverLifetime (constant or
 //! two-constant linear axes of one mode, not in world space, the constant
 //! speed modifier one; orbital, offset and radial constants or two constants,
 //! their orbital section only in a Local target), Noise (the qualified Noise
@@ -354,10 +354,14 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         MinMaxCurve::TwoConstants { max, .. } => max,
         _ => return unsupported("target start lifetime curve mode"),
     };
+    // RotationOverLifetime runs in the newborn pass as in any update: each
+    // axis is sampled at the lane's age before the step (a keyed curve
+    // through the same evaluation as the root path). A two-curve axis was
+    // not replayed in a child Emit.
     if let Some(rol) = &emitter.rotation_over_lifetime {
         let axes = [Some(&rol.curve), rol.x.as_ref(), rol.y.as_ref()];
-        if axes.iter().flatten().any(|curve| !scalar(curve)) {
-            return unsupported("target RotationOverLifetime curve mode");
+        if axes.iter().flatten().any(|curve| matches!(curve, MinMaxCurve::TwoCurves { .. })) {
+            return unsupported("target RotationOverLifetime two-curve mode");
         }
     }
     match (emitter.shape_enabled, emitter.shape.as_ref()) {
@@ -962,7 +966,9 @@ fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32,
     lane.animated = [0.0; 3];
     if let Some(rol) = &system.rol {
         lane.angular = [0.0; 3];
-        let speed = rol.angular_velocity(lane.seed, 0.0, lane.age);
+        // Replay arm: a keyed curve sampled at age zero.
+        let age = if arms::on("rolCurveAtAgeZero") { 0.0 } else { lane.age };
+        let speed = rol.angular_velocity(lane.seed, 0.0, age);
         lane.angular = std::array::from_fn(|a| lane.angular[a] + speed[a]);
     }
     if arms::on("clampBeforeVelocity") {

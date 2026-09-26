@@ -795,3 +795,31 @@ fn product_child_emit_matches_native_uv_target_rows() {
     }
     assert!(dropped_red > 0, "arm uvDroppedAtInstall never differs from native");
 }
+
+/// A keyed RotationOverLifetime curve sampled at age zero.
+const ROL_ARMS: [&str; 1] = ["rolCurveAtAgeZero"];
+
+/// Child commands into the two wave targets with their exported keyed
+/// RotationOverLifetime curve (three keys and a multiplier; the x and y axes
+/// constant zero) and a variant whose curve changes inside the newborns'
+/// first ages: every row compared through the product's child Emit, the
+/// rotation of every lane included. The arm samples the curve at age zero.
+#[test]
+#[ignore = "needs MOLY_CHILD_EMIT_ROL (the native child rows of keyed-curve RotationOverLifetime targets)"]
+fn product_child_emit_matches_native_rol_curve_target_rows() {
+    let receipt = read("MOLY_CHILD_EMIT_ROL");
+    let seqs = receipt["childSynthetic"].as_array().unwrap();
+    for seq in seqs {
+        let rol = &target_block(seq, &Value::Null)["rotationOverLifetime"];
+        assert_eq!(rol["curve"]["mode"], "curve", "{}", seq["label"]);
+        assert_eq!(rol["separateAxes"], false, "{}", seq["label"]);
+    }
+    let arm_names: Vec<&'static str> = ARMS.iter().chain(ROL_ARMS.iter()).copied().collect();
+    let (tally, arm_red) = replay(&Value::Null, &["MOLY_CHILD_EMIT_ROL"], &arm_names);
+    report(&tally, &arm_red);
+    assert!(tally.mismatched.is_empty(), "{} rows differ from native", tally.mismatched.len());
+    assert!(tally.compared > 0 && tally.emitted > 0 && tally.catch_up_rows > 0);
+    for arm in ROL_ARMS {
+        assert!(arm_red.get(arm).copied().unwrap_or(0) > 0, "arm {arm} never differs from native");
+    }
+}
