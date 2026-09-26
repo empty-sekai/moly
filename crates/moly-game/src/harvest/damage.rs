@@ -361,6 +361,12 @@ fn change_after_object(
             effects.pending.push(EffectHook::at(131, position));
         }
         "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView" => {
+            // The driftage view first disables `_navmeshObstacle`.
+            if object.class == "MysekaiAreadDriftageView" {
+                commands.queue(move |world: &mut World| {
+                    super::obstacles::switch(world, root, "_navmeshObstacle", false, "ChangeAfterObject");
+                });
+            }
             commands.entity(root).insert(HarvestAfterForm::DelayedHide {
                 delay: Delay::new(DELAYED_HIDE, frame),
             });
@@ -377,8 +383,11 @@ fn change_after_object(
             });
         }
         "MysekaiAreaTreasureBoxView" => {
+            commands.queue(move |world: &mut World| {
+                super::obstacles::switch(world, root, "_treasureBoxLidNavMeshObstacle", true, "ChangeAfterObject");
+            });
             info!(
-                "[harvest] {}#{} ChangeAfterObject: the opened box stays (lid obstacle and cut particle not modelled)",
+                "[harvest] {}#{} ChangeAfterObject: the opened box stays (lid obstacle enabled; cut particle not modelled)",
                 object.leaf, object.fixture_id
             );
         }

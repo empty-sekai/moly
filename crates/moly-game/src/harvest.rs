@@ -29,10 +29,12 @@
 //! - `tone`: the HarvestTone camera (state 14) and the tone view's SE.
 //! - `learn`: learning today's phenomenon on arrival (GameState 6, camera
 //!   state 17, `ReleaseApiMock`).
+//! - `obstacles`: the objects' NavMeshObstacles (the Setup radius, the
+//!   driftage and treasure switches, the engine's stationary rule), published
+//!   as the walk field's carve input (`HarvestNavObstacles`).
 //!
-//! Named gaps: harvest objects do not carve the walk field (the source's
-//! NavMeshObstacle, also the ones the driftage and treasure views switch);
-//! the particle systems the driftage, toolbox and treasure views play and
+//! Named gaps: the walk field does not read `HarvestNavObstacles` yet (the
+//! carve is the navigation package's); the particle systems the driftage, toolbox and treasure views play and
 //! stop are not drawn; drop models keep their glb materials.
 
 pub(crate) mod action;
@@ -49,6 +51,7 @@ mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod learn;
+pub(crate) mod obstacles;
 mod tone;
 mod tool_model;
 mod ui;
@@ -671,6 +674,7 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
         .clear();
     world.resource_mut::<HarvestGroundVerts>().0 = None;
     world.resource_mut::<arrival::HarvestArrival>().clear();
+    obstacles::clear_for_site_change(world);
     if count > 0 {
         info!("[harvest] site change: {count} harvest objects and drops removed with the site");
     }
@@ -749,6 +753,8 @@ impl Plugin for HarvestPlugin {
             .init_resource::<airplane::PaperAirplanes>()
             .init_resource::<tone::HarvestToneCamera>()
             .init_resource::<learn::LearnEnvironment>()
+            .init_resource::<obstacles::HarvestNavObstacles>()
+            .init_resource::<obstacles::ObstacleStates>()
             .add_message::<learn::LearnPhenomenaDialogRequest>()
             .add_message::<learn::LearnPhenomenaDialogClosed>()
             .add_systems(
@@ -764,6 +770,7 @@ impl Plugin for HarvestPlugin {
                     tool_model::parse,
                     arrival::place,
                     arrival::bind_views,
+                    obstacles::set_up,
                     prop_animator::bind,
                     airplane::advance,
                     // The learn flow's dialog request is read the frame it
@@ -809,6 +816,7 @@ impl Plugin for HarvestPlugin {
                     effects::advance
                         .after(HarvestActionSet)
                         .after(crate::home_action::HomeActionSet),
+                    obstacles::publish.after(HarvestActionSet),
                 ),
             )
             .add_systems(
