@@ -423,7 +423,12 @@ impl PolyMesh {
         if self.centre_grid == Some((grid.origin, grid.voxel)) && self.world.len() == self.verts.len() {
             return self.world[v as usize];
         }
-        self.vertex(grid, v)
+        let cell = self.verts[v as usize];
+        assert!(
+            cell != CARVED_VERTEX,
+            "carved vertex {v} read for a grid the mesh was not cached for"
+        );
+        to_world(grid, cell)
     }
 
     fn centre(&self, grid: &Grid, index: u32) -> [f32; 2] {
