@@ -1003,6 +1003,13 @@ fn source_simulation_admission(system: &Value) -> Result<(), String> {
             // Collision likewise; judge() checks the module law's subset and
             // binds the effect's ground scene, or refuses by name.
             "CollisionModule" => "collision",
+            // A system's own emission inherits the emitter velocity only
+            // outside Local space (and the per-update module only in World
+            // space), which neither step ports; a child Emit inherits the
+            // command velocity in every space, which the child composition
+            // takes or refuses by name.
+            "InheritVelocityModule" if system.get("simulationSpace").and_then(Value::as_str) == Some("Local") => "inheritVelocity",
+            "InheritVelocityModule" => return Err("enabled source module InheritVelocityModule outside Local space: the emitter-velocity inheritance of the system's own emission is not ported".into()),
             _ => return Err(format!("enabled source module {module} has no runtime consumer")),
         };
         if !system.get(field).is_some_and(Value::is_object) {
@@ -1795,8 +1802,9 @@ fn judge_in_archive(
 
 /// [`judge_in_archive`] for a host that says whether it installs the native
 /// birth owner and keeps both frame clocks: the weather host and the fixture
-/// host's played systems do; the fixture host's Director-driven systems
-/// (`ParticleSystem.Simulate` from a ControlPlayable) run the legacy step.
+/// host do (its Director-driven systems install the owner at each
+/// `ParticleSystem.Simulate` restart and step by the Director's time, which
+/// reads neither frame clock).
 #[allow(clippy::too_many_arguments)]
 fn judge_in_host(
     effect_name: &str,
@@ -2722,8 +2730,10 @@ fn authored_chain(by_path: &HashMap<String, &Value>, path: &str) -> Option<NodeC
 
 /// Authored MainModule scaling mode of one emitter. Local keeps this node's
 /// own scale for the renderer and whether the node chain carries unit scale
-/// throughout; an instance anchor replaces the authored chain, so it gives no
-/// such evidence.
+/// throughout. With an instance anchor the document's own chain (its nodes
+/// by game object id, up to the prefab root) is the evidence here, and the
+/// host checks the instance's ancestry when it places the system (see
+/// [`crate::particle_runtime::Geometry::keep_unit_chain`]).
 pub(crate) fn source_scaling(system: &Value, by_path: &HashMap<String, &Value>, node: &str,
     authored_chain: bool) -> Result<crate::particle_geometry::Scaling, String> {
     match system.get("scalingMode").and_then(Value::as_u64) {
@@ -2736,7 +2746,7 @@ pub(crate) fn source_scaling(system: &Value, by_path: &HashMap<String, &Value>, 
             Ok(crate::particle_geometry::Scaling::Local {
                 scale: Vec3::new(values[0].as_f64().unwrap() as f32,
                     values[1].as_f64().unwrap() as f32, values[2].as_f64().unwrap() as f32),
-                unit_chain: authored_chain && unit_scale_chain(by_path, node),
+                unit_chain: if authored_chain { unit_scale_chain(by_path, node) } else { document_unit_chain(by_path, node) },
             })
         }
         value => Err(format!("unconsumed source particle scalingMode {value:?}")),
@@ -2758,6 +2768,29 @@ fn unit_scale_chain(by_path: &HashMap<String, &Value>, path: &str) -> bool {
         current = parent;
     }
     true
+}
+
+/// Whether the node and every ancestor of a prefab document (linked by
+/// `parentGameObjectId`, up to the root, whose parent is 0) carry scale
+/// exactly one. A parent the document does not hold is no evidence.
+fn document_unit_chain(by_path: &HashMap<String, &Value>, path: &str) -> bool {
+    let by_id: HashMap<i64, &Value> = by_path.values()
+        .filter_map(|node| Some((node.get("gameObjectId")?.as_i64()?, *node))).collect();
+    let Some(mut node) = by_path.get(path).copied() else { return false; };
+    for _ in 0..=by_id.len() {
+        if triple(node.get("scale")) != Some([1.0; 3]) {
+            return false;
+        }
+        match node.get("parentGameObjectId").and_then(Value::as_i64) {
+            Some(0) => return true,
+            Some(parent) => match by_id.get(&parent) {
+                Some(next) => node = next,
+                None => return false,
+            },
+            None => return false,
+        }
+    }
+    false
 }
 
 fn triple(value: Option<&Value>) -> Option<[f32; 3]> {

@@ -27,6 +27,23 @@ pub(crate) struct TimelineEffectBinding {
     pub exposed_name: String,
 }
 
+/// A Control clip's `sourceGameObject` as its director resolves it
+/// (`ExposedReference.Resolve`): the director's exposed-reference table
+/// holds the clip's exposed name -> that value (null included); otherwise the
+/// reference's default value. Read for a director whose prefab root carries
+/// no fixture timeline view; a view binds its Control clips through its own
+/// effect list instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ExposedSource {
+    /// The document carries no exposed-reference table for this director, or
+    /// the value names an object in another serialized file.
+    Unreadable(String),
+    /// The reference resolves to no object.
+    Null,
+    /// The GameObject the clip controls.
+    Object(SourceAssetId),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FixtureTimelineViewBinding {
     pub identity: SourceAssetId,
@@ -216,6 +233,9 @@ pub(crate) struct TimelineClip {
     /// None is retained for legacy metadata or an authored null reference.
     pub playable: Option<SourceAssetId>,
     pub effect_binding: Option<TimelineEffectBinding>,
+    /// A Control clip of a director with no fixture timeline view: its source
+    /// object through the director's exposed-reference table.
+    pub exposed_source: Option<ExposedSource>,
     pub start: f64,
     pub duration: f64,
     pub clip_in: f64,
@@ -437,6 +457,7 @@ impl TimelinePackage {
             return Err(invalid("prefab director selection is not unique"));
         }
         let director = directors[0];
+        let exposed = exposed_table(director);
         let identity = asset(&director["timeline"])?;
         let timelines: Vec<_> = array(&self.tracks, "timelines")?
             .iter()
@@ -502,10 +523,20 @@ impl TimelinePackage {
                         .find(|binding| binding.playable.as_ref() == Some(playable))
                         .cloned()
                 });
+                let exposed_source = match (&body, &fixture_view) {
+                    (TimelinePayload::Control(settings), None) => Some(resolve_exposed(
+                        &exposed,
+                        &settings.exposed_name,
+                        &payload["fields"]["sourceGameObject"]["defaultValue"],
+                        playable.as_ref(),
+                    )),
+                    _ => None,
+                };
                 let result = TimelineClip {
                     key,
                     playable,
                     effect_binding,
+                    exposed_source,
                     start: finite(envelope, "m_Start")?,
                     duration: finite(envelope, "m_Duration")?,
                     clip_in: finite(envelope, "m_ClipIn")?,
@@ -675,6 +706,73 @@ impl TimelinePackage {
                 fields: f.clone(),
             },
         })
+    }
+}
+
+/// The director's `m_ExposedReferences` as read by the track table: exposed
+/// name -> the object (None for an authored null). `Err` when the document
+/// has no table for this director.
+type ExposedTable = Result<Vec<(String, Result<Option<SourceAssetId>, String>)>, String>;
+
+fn exposed_table(director: &Value) -> ExposedTable {
+    let rows = director
+        .get("exposedReferences")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "the director's exposed-reference table is not in the track table".to_owned()
+        })?;
+    rows.iter()
+        .map(|row| {
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "an exposed-reference row has no name".to_owned())?
+                .to_owned();
+            let value = match row.get("value") {
+                None | Some(Value::Null) => Ok(None),
+                Some(value) if value.get("unresolved").is_some() => Err(format!(
+                    "exposed reference {name} names an object outside this package"
+                )),
+                Some(value) => asset(value).map(Some).map_err(|error| error.to_string()),
+            };
+            Ok((name, value))
+        })
+        .collect()
+}
+
+/// `ExposedReference<GameObject>.Resolve(director)`: a name the table holds
+/// resolves to its value, null included; any other name to the default value
+/// (`m_FileID` 0 is the playable asset's own file).
+fn resolve_exposed(
+    table: &ExposedTable,
+    name: &str,
+    default: &Value,
+    playable: Option<&SourceAssetId>,
+) -> ExposedSource {
+    let rows = match table {
+        Ok(rows) => rows,
+        Err(reason) => return ExposedSource::Unreadable(reason.clone()),
+    };
+    if let Some((_, value)) = rows.iter().find(|(key, _)| key == name) {
+        return match value {
+            Ok(Some(object)) => ExposedSource::Object(object.clone()),
+            Ok(None) => ExposedSource::Null,
+            Err(reason) => ExposedSource::Unreadable(reason.clone()),
+        };
+    }
+    let path = match path_id(&default["m_PathID"]) {
+        Ok(path) => path,
+        Err(_) => return ExposedSource::Unreadable("the default value is unreadable".into()),
+    };
+    if path == "0" {
+        return ExposedSource::Null;
+    }
+    match (default["m_FileID"].as_i64(), playable) {
+        (Some(0), Some(playable)) => ExposedSource::Object(SourceAssetId {
+            file: playable.file.clone(),
+            path_id: path,
+        }),
+        _ => ExposedSource::Unreadable("the default value names another serialized file".into()),
     }
 }
 

@@ -164,10 +164,18 @@ pub(crate) fn advance_unscaled_clock(real: Res<Time<Real>>, mut unscaled: ResMut
 /// clock and particles advance and its births come only from its parents'
 /// commands. `emitting` false is Stop.
 pub(crate) fn advance_frame(system: &mut Runtime, dt: f32, emitting: bool, ctx: &Context,
-    mut slice_start: impl FnMut(&Runtime)) -> Result<bool, String> {
+    slice_start: impl FnMut(&Runtime)) -> Result<bool, String> {
+    advance_frame_entry(system, dt, emitting, ctx, slice_start,
+        moly_law::particle::frame_time::IncrementalEntry::PerFrame)
+}
+
+/// [`advance_frame`] for an update entered as `entry`.
+fn advance_frame_entry(system: &mut Runtime, dt: f32, emitting: bool, ctx: &Context,
+    mut slice_start: impl FnMut(&Runtime), entry: moly_law::particle::frame_time::IncrementalEntry)
+    -> Result<bool, String> {
     if let Some(mut native) = system.native_birth.take() {
         let stopped = !emitting || native.target.is_some();
-        let result = birth::advance_frame(system, &mut native, dt, stopped, ctx, &mut slice_start);
+        let result = birth::advance_frame(system, &mut native, dt, stopped, entry, ctx, &mut slice_start);
         system.native_birth = Some(native);
         let result = result.map_err(|error| format!("{error:?}"))
             .and_then(|ran| if ran { end_of_update_size(system).map(|()| ran) } else { Ok(ran) });
@@ -176,8 +184,9 @@ pub(crate) fn advance_frame(system: &mut Runtime, dt: f32, emitting: bool, ctx: 
             error
         });
     }
-    use moly_law::particle::frame_time::{frame_step, FrameStep};
-    match frame_step(system.pending, dt, system.emitter.simulation_speed, PLAYER_TIME, system.emitter.duration) {
+    use moly_law::particle::frame_time::{frame_step_entry, FrameStep};
+    match frame_step_entry(system.pending, dt, system.emitter.simulation_speed, PLAYER_TIME, system.emitter.duration,
+        entry) {
         Ok(FrameStep::Skipped) => Ok(false),
         Ok(FrameStep::Slices(mut slices)) => {
             let mut refused = None;
@@ -213,10 +222,11 @@ pub(crate) fn advance_frame(system: &mut Runtime, dt: f32, emitting: bool, ctx: 
 
 /// Native update route the source selects for a system. Ordinary systems
 /// advance through the incremental Update1 path this runtime transcribes.
-/// Procedural systems (DetermineSupportsProcedural true) are evaluated from
-/// time and prewarm through Update(flags=3); neither is transcribed, so they
-/// stay on the legacy step. `Undecided` names the control the exported block
-/// cannot settle.
+/// Procedural systems (DetermineSupportsProcedural true) take the same
+/// incremental update every frame; only their warm (Play's, Update flags 3,
+/// and a script Simulate restart's, flags 2) evaluates them from time, which
+/// is not transcribed, so a system that warms that way stays on the legacy
+/// step. `Undecided` names the control the exported block cannot settle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceRoute {
     Ordinary,
@@ -483,6 +493,40 @@ pub(crate) fn later_play_with_particles(system: &mut Runtime) {
     }
 }
 
+/// `ParticleSystem.Play()` on a system its host stopped (Stop set the restart
+/// flag). With particles alive it is [`later_play_with_particles`]: seeds and
+/// emission carry stay. With none alive the same Play also resets the seeds
+/// (an automatic owner takes the next shared-manager word), which re-expands
+/// the module streams and zeroes the emission carry, as the first Play did.
+/// Neither branch clears the emitter velocity; both set the emitter reset, so
+/// the next frame takes its own translation as the previous one and its
+/// emission over distance sees no motion. A CollisionModule system with none
+/// alive is refused unchanged: its law is re-installed with the reset and the
+/// host passes no ground scene here. A looping prewarm system's second warm
+/// is the host's (the reset leaves it unwarmed).
+pub(crate) fn play_after_stop(system: &mut Runtime, seeds: &mut seed::SystemSeedManager, route: &SourceRoute,
+    edges: Option<EventEdges>) -> Result<(), String> {
+    if !system.pool.is_empty() {
+        later_play_with_particles(system);
+        return Ok(());
+    }
+    if system.emitter.collision.is_some() && system.native_birth.is_some() {
+        return Err("CollisionModule: Play's seed reset re-installs the collision law without its ground scene".into());
+    }
+    let velocity = system.native_birth.as_ref().map(|native| native.frame.velocity);
+    reset_for_first_play(system);
+    install_native_birth(system, seeds, route, None).map_err(|error| format!("source seed owner unavailable: {error}"))?;
+    if let Some(native) = system.native_birth.as_mut() {
+        if let Some(velocity) = velocity {
+            native.frame.velocity = velocity;
+        }
+        if let Some(edges) = edges {
+            native.events = Some(BirthEvents::with_edges(edges));
+        }
+    }
+    Ok(())
+}
+
 /// The start delay word ParticleSystem::Play writes when it restarts a
 /// stopped system: with prewarm on it writes nothing (the word keeps its
 /// construction zero), otherwise the start delay curve evaluated at time zero
@@ -501,6 +545,20 @@ pub(crate) fn play_start_delay(emitter: &EmitterParams) -> Option<f32> {
 /// Whether the system's Play leaves a start delay word other than zero.
 pub(crate) fn has_start_delay(emitter: &EmitterParams) -> bool {
     play_start_delay(emitter) != Some(0.0)
+}
+
+/// `ParticleSystem.Clear` of the particles: the live count returns to zero.
+/// The laws that follow the engine's storage (a CustomData or size law with
+/// its slot tail) keep the cleared particles' slots, as the storage does.
+pub(crate) fn clear_particles(system: &mut Runtime) {
+    if let Some(custom) = system.custom_law.as_mut() {
+        custom.clear(&system.pool);
+    }
+    if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+        calls.clear(&system.pool);
+    }
+    system.pool.clear();
+    system.side.clear();
 }
 
 /// `ParticleSystem.Play` on a system that holds no particle: it plays as at
@@ -646,6 +704,20 @@ pub(crate) struct ShapeEmitterEvidence {
 }
 impl Geometry {
     /// The legacy billboard carries no authored scaling mode or render mode.
+    /// A host that places the system under run-time ancestors: Local
+    /// scaling's unit-chain evidence stands only when every ancestor the
+    /// document does not hold carries scale one too (`ancestry_unit`).
+    pub(crate) fn keep_unit_chain(&mut self, ancestry_unit: bool) {
+        let scaling = match self {
+            Self::Billboard { .. } => return,
+            Self::Mesh(draw) => &mut draw.scaling,
+            Self::SourceBillboard(draw) => &mut draw.scaling,
+        };
+        if let crate::particle_geometry::Scaling::Local { unit_chain, .. } = scaling {
+            *unit_chain &= ancestry_unit;
+        }
+    }
+
     pub(crate) fn shape_evidence(&self) -> Option<ShapeEmitterEvidence> {
         match self {
             Self::Billboard { .. } => None,
@@ -1239,9 +1311,15 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             for axis in 0..3 { angular[axis] += w[axis]; }
         }
         let batch_seed = system.side[start + ((index - start) & !3)].seed;
+        // Velocity, Force and ClampVelocity evaluate their curves at
+        // `fmax(age * 0.01, 0)` of the stored age-percent word, as
+        // RotationOverLifetime does; the word taken back from the normalized
+        // age rounds twice and is not the one they read.
+        let module_age = if child::arms::on("moduleAgeFromNormalized") { age_pre * 100.0 }
+            else { system.pool[index].age_percent };
         let (velocity_anim, modifier) = match velocity_over_lifetime {
             Some(value) => motion::velocity_at_age(value, &system.pool[index], &side, batch_seed,
-                system.emitter.simulation_space, &owner, age_pre, dt),
+                system.emitter.simulation_space, &owner, module_age, dt, birth_dts.is_some()),
             None => ([0.0; 3], 1.0),
         };
         // Noise contributes transient animated velocity after authored
@@ -1263,7 +1341,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         // Force modifies persistent velocity before velocity limiting. Animated
         // velocity is still transient and shares the final integration modifier.
         if let Some(force) = &system.force_law {
-            let acceleration = motion::module_vector(force.sample(side.seed, age_pre * 100.0),
+            let acceleration = motion::module_vector(force.sample(side.seed, module_age),
                 force.in_world_space, system.emitter.simulation_space, &owner);
             for axis in 0..3 {
                 system.pool[index].velocity[axis] += acceleration[axis] * dt;
@@ -1275,7 +1353,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
                 &mut velocity,
                 anim,
                 side.seed,
-                age_pre * 100.0,
+                module_age,
                 dt,
                 DragSize {
                     components: motion::size_at_age_percent(system, &side, system.pool[index].age_percent),
@@ -1399,11 +1477,161 @@ pub(crate) enum BirthPath {
 pub(crate) fn native_birth_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
     match route {
         SourceRoute::Ordinary => {}
+        // The per-frame update never evaluates a system in time: the manager's
+        // step carries no procedural flag, so a procedural system steps
+        // incrementally exactly as an ordinary one. Only Play's first warm of a
+        // looping prewarm system takes the time-evaluated update.
+        SourceRoute::Procedural if !(emitter.prewarm && emitter.looping) => {}
         SourceRoute::Procedural => return Err(
             "procedural source route: time-evaluated simulation and Update(flags=3) prewarm are not transcribed".into()),
         SourceRoute::Undecided(control) => return Err(format!("source route undecided: {control}")),
     }
     birth::qualify_frame_emitter(emitter).map_err(|refused| format!("{refused:?}"))
+}
+
+/// One time update of `ParticleSystem.Simulate(t, restart: false)` from
+/// script (a ControlPlayable's chunk): Update1b with UpdateData flags 4, the
+/// per-frame update's head and slices without the backlog widening, `dt` the
+/// chunk's raw seconds (the head scales it by the simulation speed). The
+/// Simulate leaves the system paused, so nothing else steps it.
+pub(crate) fn director_chunk(system: &mut Runtime, dt: f32, emitting: bool, ctx: &Context,
+    slice_start: impl FnMut(&Runtime)) -> Result<bool, String> {
+    use moly_law::particle::frame_time::IncrementalEntry;
+    let entry = if child::arms::on("scriptSimulateWidens") { IncrementalEntry::PerFrame }
+        else { IncrementalEntry::ScriptSimulate };
+    advance_frame_entry(system, dt, emitting, ctx, slice_start, entry)
+}
+
+/// What `ParticleSystem.Simulate`'s restart needs besides the birth decision.
+/// A prewarm system warms at every restart, looping or not: through the
+/// procedural update when its route is procedural (flag 2, not transcribed),
+/// with the ring laws when it keeps a ring buffer (that warm has not been
+/// executed against the engine), and over the start lifetime range, which a
+/// curve lifetime takes through a range evaluation that is not transcribed.
+pub(crate) fn director_restart_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
+    if !emitter.prewarm {
+        return Ok(());
+    }
+    if *route != SourceRoute::Ordinary {
+        return Err("Simulate restart warm of a prewarm system off the ordinary route: the procedural update is not transcribed".into());
+    }
+    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
+        return Err("ring buffer Simulate restart warm over the ordinary slices has not been executed".into());
+    }
+    first_play_lifetime(emitter).map(|_| ()).map_err(str::to_owned)
+}
+
+/// The warm of `ParticleSystem.Simulate`'s restart: ComputePrewarmStartParameters
+/// with time zero, then one update of its out value. `Ok(None)`: a system with
+/// prewarm off, whose update has no time and skips (its clock is zero);
+/// `Ok(Some)`: the warm of a prewarm system, from its mid-cycle clock;
+/// `Err`: what [`director_restart_eligible`] refuses, and a Compute that
+/// fails (a non-looping system that ends before time zero, a warm window that
+/// does not advance by the fixed step), after which the engine leaves the
+/// system stopped and cleared, which is not ported.
+pub(crate) fn director_restart_warm(emitter: &EmitterParams, route: &SourceRoute, sub_emitter_max_lifetime: f32)
+    -> Result<Option<FirstPlayWarm>, String> {
+    // The lifetime range's upper lane (+Infinity read as the duration).
+    let upper = first_play_lifetime(emitter).ok().map(|lifetime| lifetime.first_play_upper(emitter.duration));
+    // Compute's first test, for a non-looping system: the duration plus that
+    // upper lane below time zero (a NaN sum passes).
+    if let Some(upper) = upper.filter(|_| !emitter.looping) {
+        if emitter.duration + upper < 0.0 {
+            return Err("Simulate restart: Compute stops a non-looping system that ends before time zero; not ported".into());
+        }
+    }
+    if !emitter.prewarm {
+        return Ok(None);
+    }
+    // The warm length: that lane, or the sub-emitter term when it is longer.
+    // A length of zero or less gives Compute an out value of zero from a
+    // start of zero: the warm update has no time and skips, and the clock is
+    // zero, whatever route the system takes.
+    if let Some(upper) = upper {
+        let reach = if sub_emitter_max_lifetime < upper { upper } else { sub_emitter_max_lifetime };
+        if !(reach > 0.0) {
+            return Ok(None);
+        }
+    }
+    director_restart_eligible(emitter, route)?;
+    let play = PlayState {
+        elapsed: 0.0,
+        live_count: 0,
+        native_play_bool_argument: false,
+        world_playing: true,
+        ordinary_incremental: *route == SourceRoute::Ordinary,
+        sub_emitter_max_lifetime,
+        prewarm: emitter.prewarm,
+        looping: emitter.looping,
+        simulation_speed: emitter.simulation_speed,
+        duration: emitter.duration,
+    };
+    FirstPlayWarm::simulate_restart(first_play_lifetime(emitter)?, PLAYER_TIME, play)
+        .map(Some)
+        .map_err(|error| format!("Simulate restart warm: {error}"))
+}
+
+/// Whether the one-rule arm `name` is on (test builds only; always off
+/// otherwise).
+pub(crate) fn arm(name: &str) -> bool {
+    child::arms::on(name)
+}
+
+/// `ParticleSystem.Simulate(0, withChildren: false, restart: true)` from
+/// script, on a system whose owner is manual (a ControlPlayable's Initialize
+/// made it so): ResetSeeds from the serialized seed, which draws nothing from
+/// the shared manager; Clear; `Play(false)`, which returns the clock, the
+/// pending time and the loop count to zero, writes the start delay word and
+/// sets the emitter reset; then ComputePrewarmStartParameters with time zero
+/// and its update: a prewarm system (looping or not) warms over its lifetime
+/// range from the mid-cycle clock as one ordinary update with the backlog
+/// widening, and any other system's update has no time and skips, as does the
+/// restart's own zero-time update after it. The birth path is decided as at a
+/// first Play. The emitter velocity survives, as Play does not clear it.
+pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, ctx: &Context)
+    -> Result<BirthPath, String> {
+    if system.emitter.auto_random_seed != Some(false) {
+        return Err("Simulate restart needs the manual owner the playable's Initialize sets".into());
+    }
+    let warm = director_restart_warm(&system.emitter, route, system.sub_emitter_max_lifetime)?;
+    let velocity = system.native_birth.as_ref().map_or([0.0; 3], |native| native.frame.velocity);
+    clear_particles(system);
+    system.born_total = 0;
+    system.died_total = 0;
+    system.full_total = 0;
+    reset_for_first_play(system);
+    // A manual owner's reset expands its serialized seed and never reads the
+    // shared manager, so an empty one stands in.
+    let path = install_native_birth(system, &mut seed::SystemSeedManager::default(), route, None)
+        .map_err(|error| error.to_string())?;
+    system.prewarmed = true;
+    let mut warm_dt = None;
+    if let Some(warm) = warm {
+        let plan = PrewarmPlan::from_warm(warm, PLAYER_TIME, system.emitter.duration)?;
+        warm_dt = Some(plan.compute_out());
+        system.playback_head = plan.initial_clock();
+        match system.native_birth.take() {
+            Some(mut state) => {
+                let result = birth::run_warm(system, &mut state, plan, ctx);
+                system.native_birth = Some(state);
+                result.map_err(|error| format!("Simulate restart warm refused: {error:?}"))?;
+                end_of_update_size(system)?;
+            }
+            None => {
+                let mut plan = plan;
+                for slice in plan.by_ref() {
+                    let slice = slice.map_err(|error| format!("Simulate restart warm refused: {error}"))?;
+                    step_frame(system, slice.duration, ctx, true)?;
+                }
+                system.pending = plan.remaining();
+            }
+        }
+    }
+    let translation = compose_to_world(system, ctx).translation().to_array();
+    if let Some(native) = system.native_birth.as_mut() {
+        native.frame = birth::FrameState::after_restart(velocity, warm_dt, translation, native.frame.start_delay);
+    }
+    Ok(path)
 }
 
 /// Whether the emitter authors a distance rate other than zero; only the
