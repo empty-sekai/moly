@@ -124,10 +124,71 @@ pub(crate) enum TimelinePayload {
         use_root: bool,
     },
     Control(ControlSettings),
+    /// A cut-scene track's clip. The runner keeps its clock; the cut-scene
+    /// owner drives these tracks (any other owner refuses them by name).
+    CutScene(CutScenePayload),
     Unsupported {
         class: String,
         fields: Value,
     },
+}
+
+/// The clip assets of the cut-scene tracks, as serialized.
+#[derive(Clone, Debug)]
+pub(crate) enum CutScenePayload {
+    /// `CinemachineShot`: the virtual camera the brain shows, by the
+    /// director's exposed name.
+    CinemachineShot { exposed_name: String },
+    /// `FadeInClip` / `FadeOutClip` of the fade panel track: the cut-scene
+    /// screen's `SetAlpha(alpha, Color)`.
+    Fade { fade_in: bool, color: [f32; 4] },
+    /// `UpdateObstacleClip._siteLevel`.
+    UpdateObstacle { level: i32 },
+    /// `HideSiteObstacleClip._siteLevel`.
+    HideSiteObstacle { level: i32 },
+    /// `ShowExpansionEffectClip`.
+    SiteExpansion(ExpansionEffect),
+    /// `EffectClip.template`: the effect prefab it instantiates.
+    Effect(EffectTemplate),
+}
+
+/// `ShowExpansionEffectClip`'s serialized fields.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExpansionEffect {
+    pub center: [f32; 3],
+    pub start_radius: f32,
+    pub end_radius: f32,
+    pub min_radius: f32,
+    pub max_radius: f32,
+    pub gradient_range: f32,
+    pub edge_color: [f32; 4],
+    pub fade_color: [f32; 4],
+}
+
+/// `EffectClip.template` (`EffectTemplate`).
+#[derive(Clone, Debug)]
+pub(crate) struct EffectTemplate {
+    /// The prefab pointer; `None` for an authored null.
+    pub prefab: Option<String>,
+    pub parent_mode: i64,
+    pub character_id: i64,
+    pub fixed_starting_point: bool,
+    pub offset: [f64; 3],
+    pub matched_duration: bool,
+    pub random_seed: bool,
+}
+
+/// A marker of a track, in serialized order. Only `SignalEmitter` carries
+/// the fields below; other marker classes keep their class name.
+#[derive(Clone, Debug)]
+pub(crate) struct TimelineMarker {
+    pub class: String,
+    pub asset: SourceAssetId,
+    pub time: f64,
+    pub retroactive: bool,
+    pub emit_once: bool,
+    pub signal: Option<SourceAssetId>,
+    pub signal_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -328,6 +389,9 @@ pub(crate) struct TimelineTrack {
     pub class: String,
     pub name: String,
     pub clips: Vec<TimelineClip>,
+    /// The track's markers (`TrackAsset.m_Markers`); empty in documents
+    /// exported before markers were.
+    pub markers: Vec<TimelineMarker>,
 }
 
 #[derive(Clone, Debug)]
@@ -567,11 +631,19 @@ impl TimelinePackage {
                 }
                 clips.push(result);
             }
+            let markers = match row.get("markers") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(rows)) => {
+                    rows.iter().map(marker).collect::<Result<Vec<_>, _>>()?
+                }
+                Some(_) => return Err(invalid("markers is not an array")),
+            };
             tracks.push(TimelineTrack {
                 identity,
                 class,
                 name: string(track, "name")?.to_owned(),
                 clips,
+                markers,
             });
         }
         let settings = &timeline["settings"];
@@ -701,6 +773,51 @@ impl TimelinePackage {
             "EnableIKTalkClip" => TimelinePayload::NpcIkTalkGate,
             "EmoticonClip" => emoticon_payload(f)?,
             "ControlPlayableAsset" => TimelinePayload::Control(control_payload(f)?),
+            "CinemachineShot" => TimelinePayload::CutScene(CutScenePayload::CinemachineShot {
+                exposed_name: string(&f["VirtualCamera"], "exposedName")?.to_owned(),
+            }),
+            "FadeInClip" | "FadeOutClip" => TimelinePayload::CutScene(CutScenePayload::Fade {
+                fade_in: class == "FadeInClip",
+                color: color(&f["Color"])?,
+            }),
+            "UpdateObstacleClip" => TimelinePayload::CutScene(CutScenePayload::UpdateObstacle {
+                level: integer(f, "_siteLevel")?,
+            }),
+            "HideSiteObstacleClip" => {
+                TimelinePayload::CutScene(CutScenePayload::HideSiteObstacle {
+                    level: integer(f, "_siteLevel")?,
+                })
+            }
+            "ShowExpansionEffectClip" => {
+                let center = vector3(&f["centerPosition"])?;
+                TimelinePayload::CutScene(CutScenePayload::SiteExpansion(ExpansionEffect {
+                    center: [center[0] as f32, center[1] as f32, center[2] as f32],
+                    start_radius: finite(f, "startRadius")? as f32,
+                    end_radius: finite(f, "endRadius")? as f32,
+                    min_radius: finite(f, "minRadius")? as f32,
+                    max_radius: finite(f, "maxRadius")? as f32,
+                    gradient_range: finite(f, "gradientRange")? as f32,
+                    edge_color: color(&f["edgeColor"])?,
+                    fade_color: color(&f["fadeColor"])?,
+                }))
+            }
+            "EffectClip" => {
+                let t = &f["template"];
+                let prefab = path_id(&t["prefab"]["m_PathID"])?;
+                TimelinePayload::CutScene(CutScenePayload::Effect(EffectTemplate {
+                    prefab: (prefab != "0").then_some(prefab),
+                    parent_mode: t["parentMode"]
+                        .as_i64()
+                        .ok_or_else(|| invalid("missing integer parentMode"))?,
+                    character_id: t["characterID"]
+                        .as_i64()
+                        .ok_or_else(|| invalid("missing integer characterID"))?,
+                    fixed_starting_point: flag(t, "fixedStartingPoint")?,
+                    offset: vector3(&t["offset"])?,
+                    matched_duration: flag(t, "isMatchedDuration")?,
+                    random_seed: flag(t, "isEnabledRandomSeed")?,
+                }))
+            }
             _ => TimelinePayload::Unsupported {
                 class: class.into(),
                 fields: f.clone(),
@@ -934,6 +1051,45 @@ pub(super) fn flag(v: &Value, key: &str) -> Result<bool, TimelineFailure> {
 }
 fn vector3(v: &Value) -> Result<[f64; 3], TimelineFailure> {
     Ok([finite(v, "x")?, finite(v, "y")?, finite(v, "z")?])
+}
+fn color(v: &Value) -> Result<[f32; 4], TimelineFailure> {
+    Ok([
+        finite(v, "r")? as f32,
+        finite(v, "g")? as f32,
+        finite(v, "b")? as f32,
+        finite(v, "a")? as f32,
+    ])
+}
+fn marker(row: &Value) -> Result<TimelineMarker, TimelineFailure> {
+    let class = string(row, "class")?.to_owned();
+    let asset = asset(&row["asset"])?;
+    if class != "SignalEmitter" {
+        return Ok(TimelineMarker {
+            class,
+            asset,
+            time: f64::NAN,
+            retroactive: false,
+            emit_once: false,
+            signal: None,
+            signal_name: None,
+        });
+    }
+    Ok(TimelineMarker {
+        class,
+        asset,
+        time: finite(row, "time")?,
+        retroactive: flag(row, "retroactive")?,
+        emit_once: flag(row, "emitOnce")?,
+        signal: if row["signal"].is_null() || row["signal"].get("unresolved").is_some() {
+            None
+        } else {
+            Some(asset_of(&row["signal"])?)
+        },
+        signal_name: row["signalName"].as_str().map(str::to_owned),
+    })
+}
+fn asset_of(v: &Value) -> Result<SourceAssetId, TimelineFailure> {
+    asset(v)
 }
 pub(super) fn path_id(v: &Value) -> Result<String, TimelineFailure> {
     if let Some(s) = v.as_str() {
