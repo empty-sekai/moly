@@ -115,10 +115,12 @@
 //!   pruners settle and of a query's commit without a step, and an order is
 //!   known only where all of them agree; the showing may be committed by a
 //!   query of its frame before the next step, and both stand;
-//! - a pruner box is the engine's scene-query bounds of the shape; the scene
-//!   takes the collider's world bounds at inflation one grown by 1.01 about
-//!   their centre, an approximation (the tree's splits read only the box
-//!   centres, but a query meets a box by its extents).
+//! - a pruner box is what the engine hands the pruner for a static shape:
+//!   the shape's world bounds at inflation one, at the actor's pose composed
+//!   with the shape's identity local pose, grown on every side by a
+//!   two-hundredth of their size. A touch box's actor stands at its centre's
+//!   world point; the scene composes that point its own way, which stands in
+//!   for the transform's arithmetic (not read).
 //!
 //! Where the pruner cannot give the order, the query falls back to the add
 //! order: while the scene holds at most four static shapes and no shape has
@@ -233,6 +235,9 @@ struct GroundCollider {
     layers: u32,
     /// World bounds at inflation one: min then max.
     bounds: [f32; 6],
+    /// The static pruner's box for it (see [`GroundScene::pool_box`]), or
+    /// why the scene cannot give it.
+    pool: Result<[f32; 6], &'static str>,
     /// The collider's ordinal in the export. The engine reports runtime
     /// instance ids, which are not package facts; only hit records carry
     /// them and no product output reads them.
@@ -538,9 +543,17 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                 match part.pose.and_then(|node| box_pose(node, *center)).filter(|_| half.iter().all(|h| h.is_finite())) {
                     Some(pose) => {
                         let bounds = law::box_world_bounds(*half, &pose);
+                        // A static BoxCollider's actor stands at its centre's
+                        // world point (the node's transform of the centre) with
+                        // the node's rotation and an identity shape pose; the
+                        // query pose above composes that point the scene's way,
+                        // which stands in for the transform's own arithmetic.
+                        let pool = law::shape_world_pose(&pose, [0.0, 0.0, 0.0, 1.0], [0.0; 3])
+                            .map(|shape| law::pool_bounds_box(*half, &shape)).map_err(|refused| refused.0);
                         scene.colliders.push(GroundCollider { effect: "placed fixtures".into(), node: part.what.clone(),
                             geometry: "box".into(), cooking: 0, shape: ColliderShape::Box(*half), pose,
-                            layer: part.layers.trailing_zeros(), layers: part.layers, bounds, collider_id: i32::MAX });
+                            layer: part.layers.trailing_zeros(), layers: part.layers, bounds, pool,
+                            collider_id: i32::MAX });
                         record_slot(&mut order, ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 },
                             part.slot, part.touch);
                         continue;
@@ -564,9 +577,14 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                 });
                 match cooked {
                     Some(Ok((cooking, pose, hull, bounds))) if part.layers.count_ones() == 1 => {
+                        let pool = part.pose.ok_or("a convex collider on a scaled node")
+                            .and_then(|(q, t)| Pose::rotated(q, t).map_err(|refused| refused.0))
+                            .and_then(|node| law::shape_world_pose(&node, [0.0, 0.0, 0.0, 1.0], [0.0; 3])
+                                .map_err(|refused| refused.0))
+                            .and_then(|shape| law::pool_bounds_convex(&hull, &shape).map_err(|refused| refused.0));
                         scene.colliders.push(GroundCollider { effect: "placed fixtures".into(), node: part.what.clone(),
                             geometry: "fixture convex".into(), cooking, shape: ColliderShape::Convex(Arc::new(hull)),
-                            pose, layer: part.layers.trailing_zeros(), layers: part.layers, bounds,
+                            pose, layer: part.layers.trailing_zeros(), layers: part.layers, bounds, pool,
                             collider_id: i32::MAX });
                         record_slot(&mut order, ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 },
                             part.slot, part.touch);
@@ -620,12 +638,14 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                             Ok(pose) => {
                                 let mesh = Arc::new(mesh);
                                 let bounds = law::world_bounds(&mesh, &pose);
+                                let pool = law::shape_world_pose(&pose, [0.0, 0.0, 0.0, 1.0], [0.0; 3])
+                                    .map(|shape| law::pool_bounds_mesh(&mesh, &shape)).map_err(|refused| refused.0);
                                 let layer = part.layers.trailing_zeros();
                                 if part.layers.count_ones() == 1 {
                                     scene.colliders.push(GroundCollider { effect: "placed fixtures".into(),
                                         node: part.what.clone(), geometry: "fixture".into(), cooking,
                                         shape: ColliderShape::Mesh(mesh), pose, layer, layers: part.layers, bounds,
-                                        collider_id: i32::MAX });
+                                        pool, collider_id: i32::MAX });
                                     record_slot(&mut order,
                                         ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 },
                                         part.slot, part.touch);
@@ -885,6 +905,7 @@ impl GroundCollider {
             layer: self.layer,
             layers: self.layers,
             bounds: self.bounds,
+            pool: self.pool,
             collider_id: self.collider_id,
         }
     }
@@ -935,6 +956,9 @@ fn ground_collider(meshes: &mut MeshCache, document: &Value, ordinal: usize, c: 
     };
     let mesh = mesh.map_err(|reason| format!("geometry {geometry} (cooking options {cooking}): {reason}"))?;
     let bounds = law::world_bounds(&mesh, &pose);
+    // The actor's pose composed with the shape's identity local pose.
+    let pool = law::shape_world_pose(&pose, [0.0, 0.0, 0.0, 1.0], [0.0; 3])
+        .map(|shape| law::pool_bounds_mesh(&mesh, &shape)).map_err(|refused| refused.0);
     Ok(GroundCollider {
         effect: owner.to_owned(),
         node,
@@ -943,6 +967,7 @@ fn ground_collider(meshes: &mut MeshCache, document: &Value, ordinal: usize, c: 
         layer,
         layers: 1 << layer,
         bounds,
+        pool,
         collider_id: i32::try_from(ordinal).unwrap_or(i32::MAX),
         shape: ColliderShape::Mesh(mesh),
         pose,
@@ -1380,9 +1405,8 @@ impl PrunerScene {
         self.fed_fixtures = Some(key);
         self.fed = true;
         let pool: Vec<String> = self.variants[0].pool_order().iter().map(|id| format!("{id:x}")).collect();
-        self.report(format!("fed: {} site shapes, {} placed fixture shapes; {} pruners over {}; pool [{}]; \
-            pool boxes are the world bounds grown by 1.01 about their centre (an approximation of the engine's \
-            scene-query bounds)", by_preload.len(), fixture_shapes.len(), self.variants.len(),
+        self.report(format!("fed: {} site shapes, {} placed fixture shapes; {} pruners over {}; pool [{}]",
+            by_preload.len(), fixture_shapes.len(), self.variants.len(),
             self.boundaries.join("; "), pool.join(", ")));
     }
 
@@ -1445,8 +1469,7 @@ impl PrunerScene {
         }
         let seq = agreed.unwrap_or_default();
         if seq.len() != touched.len() {
-            return Err("a collider the query meets that the pruner does not visit (the pool boxes are an \
-                approximation)".to_owned());
+            return Err("a collider the query meets that the pruner does not visit".to_owned());
         }
         self.report(format!("orders given ({} pruners agree)", self.variants.len()));
         Ok(seq)
@@ -1473,26 +1496,18 @@ impl ShapeAt {
     }
 }
 
-/// How much a shape's world bounds grow into its pruner box.
-const POOL_INFLATION: f32 = 1.01;
-
 impl GroundScene {
     /// A static shape's pruner box, or why the scene cannot place it. The
-    /// box is the collider's world bounds at inflation one grown by 1.01
-    /// about their centre: an approximation of the engine's scene-query
-    /// bounds (the same shape bounds at inflation 1.01), which the tree's
-    /// splits read only through the box centres.
+    /// engine hands the pruner the shape's simulation bounds (its world
+    /// bounds at inflation one at the actor's pose composed with the shape's
+    /// local pose) and the pruner grows them on every side by a two-hundredth
+    /// of their size: the law's `pool_bounds_*`.
     fn pool_box(&self, at: ShapeAt) -> Result<[f32; 6], &'static str> {
-        let b = match at.list {
-            ShapeAt::COLLIDERS => self.colliders[at.index].bounds,
-            ShapeAt::INERT | ShapeAt::UNPORTED => {
-                return Err("a static shape the scene holds only an enclosing bound for, or none")
-            }
-            _ => return Err("an unknown shape list"),
-        };
-        let c: [f32; 3] = std::array::from_fn(|k| (b[k] + b[k + 3]) * 0.5);
-        let e: [f32; 3] = std::array::from_fn(|k| (b[k + 3] - b[k]) * 0.5 * POOL_INFLATION);
-        Ok([c[0] - e[0], c[1] - e[1], c[2] - e[2], c[0] + e[0], c[1] + e[1], c[2] + e[2]])
+        match at.list {
+            ShapeAt::COLLIDERS => self.colliders[at.index].pool,
+            ShapeAt::INERT | ShapeAt::UNPORTED => Err("a static shape the scene holds only an enclosing bound for, or none"),
+            _ => Err("an unknown shape list"),
+        }
     }
 }
 

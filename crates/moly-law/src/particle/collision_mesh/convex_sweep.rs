@@ -29,6 +29,7 @@
 //! leaves the face index as the caller set it (the flags ask for no face
 //! index).
 use super::box_sweep::{self as bs, BoxSweepTrace, Capsule, SweptShape};
+use super::overlap::{pool_box, UNBUFFERED_INFLATION};
 use super::sweep::{MeshSweepHit, FLAG_NORMAL, FLAG_POSITION};
 use super::vector::{add, neg, scale, sub, v3neg_scale_sub, v3scale_add, Matrix34};
 use super::{arms, finite3, Pose, Refused};
@@ -294,6 +295,22 @@ pub fn sweep_sphere_convex(hull: &HullSupport, pose: &Pose, center: [f32; 3], ra
 /// half extent. The mesh scale is the identity (the colliders' nodes carry
 /// unit scales).
 pub fn convex_world_bounds(hull: &HullSupport, pose: &Pose) -> Result<[f32; 6], Refused> {
+    convex_bounds(hull, pose, 1.0)
+}
+
+/// The static pruner's box for a convex shape at `pose`, the composed pose
+/// of `shape_world_pose`: the tight world bounds at inflation one grown as
+/// `pool_box` does.
+pub fn pool_bounds_convex(hull: &HullSupport, pose: &Pose) -> Result<[f32; 6], Refused> {
+    if arms::on("poolUnbufferedRecipe") {
+        return convex_bounds(hull, pose, UNBUFFERED_INFLATION);
+    }
+    convex_world_bounds(hull, pose).map(pool_box)
+}
+
+/// The tight bounds at an inflation: the re-centred half extent times half
+/// the inflation.
+fn convex_bounds(hull: &HullSupport, pose: &Pose, inflation: f32) -> Result<[f32; 6], Refused> {
     validate(hull)?;
     let [c0, c1, c2] = Matrix34::from_pose(pose.rotation(), pose.translation()).columns;
     let rotate = |v: V3| add(add(scale(c0, v[0]), scale(c1, v[1])), scale(c2, v[2]));
@@ -308,7 +325,8 @@ pub fn convex_world_bounds(hull: &HullSupport, pose: &Pose) -> Result<[f32; 6], 
     let max = add(add(max, ZERO3), t);
     let min = add(sub(min, ZERO3), t);
     let center = scale(add(max, min), 0.5);
-    let half = if arms::on("convexBoundsNoRecentre") { None } else { Some(scale(sub(max, min), a::mul(0.5, 1.0))) };
+    let half =
+        if arms::on("convexBoundsNoRecentre") { None } else { Some(scale(sub(max, min), a::mul(0.5, inflation))) };
     Ok(match half {
         Some(e) => {
             let (lo, hi) = (sub(center, e), add(center, e));
@@ -467,6 +485,21 @@ mod tests {
             let (o, c) = red[arm];
             assert!(o + c > 0, "arm {arm} stays green");
         }
+    }
+
+    /// The engine's pool boxes of the natively cooked hulls (the home
+    /// fixtures' first, the tight-bounds flag the MeshCollider sets) at
+    /// identity, signed-zero, quarter-turn and random actor poses and
+    /// identity local poses of either zero sign.
+    #[test]
+    #[ignore = "needs MOLY_POOL_BOUNDS_ROWS"]
+    fn pool_bounds_convex_match_native_bits() {
+        use super::super::overlap::pool_replay::{load, replay};
+        let doc = load();
+        let hulls: Vec<HullSupport> = field(&doc, "hulls").as_array().expect("hulls").iter().map(hull_of).collect();
+        let at = |c: &Value| word(field(c, "index")) as usize;
+        replay(&doc, "convex", &|c, p| convex_world_bounds(&hulls[at(c)], p).ok(),
+            &|c, p| pool_bounds_convex(&hulls[at(c)], p).ok());
     }
 
     /// The engine's world bounds (`PxGeometryQuery::getWorldBounds`,

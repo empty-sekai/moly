@@ -20,6 +20,7 @@
 //! carry three lanes.
 use super::sweep::MeshSweepHit;
 use super::vector::{add, cross, fclamp, neg, rsqrt_n, scale, sub, v3dot, v3neg_scale_sub, v3scale_add, Matrix34, EPS};
+use super::overlap::{pool_box, UNBUFFERED_INFLATION};
 use super::{arms, finite3, Pose, Refused};
 use crate::particle::armf as a;
 
@@ -1206,6 +1207,24 @@ pub fn sweep_sphere_box(half_extents: [f32; 3], pose: &Pose, center: [f32; 3], r
 /// extents (the rotation's columns scaled by the half extents; no contact
 /// offset).
 pub fn box_world_bounds(half_extents: [f32; 3], pose: &Pose) -> [f32; 6] {
+    box_bounds(half_extents, pose, 1.0)
+}
+
+/// The static pruner's box for a box shape at `pose`, the composed pose of
+/// `shape_world_pose` (a static BoxCollider's actor already sits at its
+/// centre, the shape's local pose is the identity): the world bounds at
+/// inflation one grown as `pool_box` does.
+pub fn pool_bounds_box(half_extents: [f32; 3], pose: &Pose) -> [f32; 6] {
+    if arms::on("poolUnbufferedRecipe") {
+        return box_bounds(half_extents, pose, UNBUFFERED_INFLATION);
+    }
+    pool_box(box_world_bounds(half_extents, pose))
+}
+
+/// `Gu::computeBounds` of a box with no contact offset at an inflation: the
+/// half extents through the absolute rotation columns, then times the
+/// inflation, about the translation.
+fn box_bounds(half_extents: [f32; 3], pose: &Pose, inflation: f32) -> [f32; 6] {
     let m = Matrix34::from_pose(pose.rotation(), pose.translation());
     let [r0, r1, r2] = if arms::on("boxBoundsRows") {
         let c = m.columns;
@@ -1217,7 +1236,7 @@ pub fn box_world_bounds(half_extents: [f32; 3], pose: &Pose) -> [f32; 6] {
     let h = half_extents;
     let e: V3 = std::array::from_fn(|k| {
         let e = a::add(a::add(a::abs(a::mul(r0[k], h[0])), a::abs(a::mul(r1[k], h[1]))), a::abs(a::mul(r2[k], h[2])));
-        a::mul(a::add(e, 0.0), 1.0)
+        a::mul(a::add(e, 0.0), inflation)
     });
     [a::sub(t[0], e[0]), a::sub(t[1], e[1]), a::sub(t[2], e[2]), a::add(t[0], e[0]), a::add(t[1], e[1]), a::add(t[2], e[2])]
 }
@@ -1314,6 +1333,19 @@ mod tests {
         println!("box bounds replay: {} rows, mismatched {bad}; arm boxBoundsRows red on {red}", rows.len());
         assert_eq!(bad, 0, "box bounds rows differ from native");
         assert!(!rows.is_empty() && red > 0);
+    }
+
+    /// The engine's pool boxes of box shapes (random half extents at an
+    /// identity local pose; touch-box half extents at local poses other
+    /// than the identity, which exercise the composition only), at
+    /// identity, signed-zero, quarter-turn and random actor poses.
+    #[test]
+    #[ignore = "needs MOLY_POOL_BOUNDS_ROWS"]
+    fn pool_bounds_box_match_native_bits() {
+        use super::super::overlap::pool_replay::{load, replay};
+        let doc = load();
+        let half = |c: &Value| v3(&words(field(c, "halfBits")));
+        replay(&doc, "box", &|c, p| Some(box_world_bounds(half(c), p)), &|c, p| Some(pool_bounds_box(half(c), p)));
     }
 
     /// The engine's sphere-versus-box sweeps (hit flags normal and MTD,
