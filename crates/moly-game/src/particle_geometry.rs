@@ -215,6 +215,8 @@ pub(crate) struct SourceMesh {
     pub colours: Vec<Vec4>,
     /// GLB triangle winding is already reflected by the producer. Keep it.
     pub indices: Vec<u32>,
+    /// Where each source submesh (one GLB primitive) ends in `indices`.
+    pub submesh_ends: Vec<usize>,
     /// Authored source Mesh.m_LocalAABB size, not a guessed sphere/quad size.
     pub bounds_size: Vec3,
 }
@@ -224,7 +226,7 @@ impl SourceMesh {
             return Err("invalid authored source mesh bounds".into());
         }
         let mut out = Self { positions: Vec::new(), normals: Vec::new(), uv: Vec::new(),
-            colours: Vec::new(), indices: Vec::new(), bounds_size };
+            colours: Vec::new(), indices: Vec::new(), submesh_ends: Vec::new(), bounds_size };
         for mesh in meshes {
             if mesh.primitive_topology() != bevy::mesh::PrimitiveTopology::TriangleList {
                 return Err("particle source primitive is not a triangle list".into());
@@ -262,6 +264,7 @@ impl SourceMesh {
                 return Err("source mesh index stream is malformed".into());
             }
             out.indices.extend(indices.into_iter().map(|i| i + offset));
+            out.submesh_ends.push(out.indices.len());
         }
         if out.positions.is_empty() || out.indices.is_empty() { return Err("source mesh has no geometry".into()); }
         Ok(out)
@@ -288,7 +291,7 @@ impl MeshDraw {
     pub(crate) fn empty(alignment: Alignment, scaling: Scaling, pivot: Vec3) -> Self {
         Self {
             source: Arc::new(SourceMesh { positions: Vec::new(), normals: Vec::new(), uv: Vec::new(),
-                colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
+                colours: Vec::new(), indices: Vec::new(), submesh_ends: Vec::new(), bounds_size: Vec3::ZERO }),
             scaling, alignment, pivot, flip: Vec3::ZERO, axis_body: None,
         }
     }

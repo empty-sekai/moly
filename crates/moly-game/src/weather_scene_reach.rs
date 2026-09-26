@@ -158,7 +158,7 @@ fn runtime_for(planned: &Planned, seeds: &mut crate::particle_runtime::seed::Sys
         PlannedGeometry::Mesh { alignment, scaling, pivot, flip, axis_body, .. } => crate::particle_runtime::Geometry::Mesh(
             crate::particle_geometry::MeshDraw {
                 source: Arc::new(crate::particle_geometry::SourceMesh { positions: Vec::new(), normals: Vec::new(),
-                    uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), bounds_size: Vec3::ZERO }),
+                    uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), submesh_ends: Vec::new(), bounds_size: Vec3::ZERO }),
                 alignment: *alignment, scaling: *scaling, pivot: *pivot, flip: *flip, axis_body: *axis_body,
             }),
         PlannedGeometry::EmptyMesh { alignment, scaling, pivot } => crate::particle_runtime::Geometry::Mesh(
