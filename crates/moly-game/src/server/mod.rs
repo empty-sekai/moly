@@ -63,7 +63,8 @@
 //! with its fixed clock and stated rows), else the checked-in slice migrated
 //! as the product default. A native-only overlay applies the menu mock's
 //! instruments (`MOLY_MENU_MOCK_TOTAL_EXP`, `MOLY_MENU_MOCK_STAMINA_NORMAL`,
-//! `_ENHANCE`, `_BOOST`) to the native document; game mode reads no
+//! `_ENHANCE`, `_BOOST`) and the birthday gate's `MOLY_BIRTHDAY_NOW_MS` (a
+//! fixed server clock) to the native document; game mode reads no
 //! environment variable ([`instrument_env`]).
 
 pub(crate) mod clock;
@@ -742,6 +743,20 @@ fn native_overlay(doc: &mut ServerDocument) {
         );
         doc.stamina = Some(stamina);
     }
+    if let Some(raw) = instrument_env("MOLY_BIRTHDAY_NOW_MS") {
+        let at_ms = raw
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|at| *at > 0)
+            .unwrap_or_else(|| {
+                panic!("MOLY_BIRTHDAY_NOW_MS={raw:?} is not a positive epoch millisecond")
+            });
+        info!(
+            "[server] native overlay: MOLY_BIRTHDAY_NOW_MS -> the server clock is fixed at {at_ms}"
+        );
+        doc.clock = document::Clock::Fixed { at_ms };
+    }
     if instrument_env("MOLY_MENU_MOCK_STAMINA_MAX").is_some() {
         warn!("[server] MOLY_MENU_MOCK_STAMINA_MAX is not applied: the gauge maximum is the master maxStamina");
     }
@@ -761,6 +776,11 @@ pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<
             .npc_slice(&live.schedules, client.gamedata.refreshed_at)
             .to_string()
     })
+}
+
+/// The server clock's epoch millisecond, once a model is installed.
+pub(crate) fn server_now_ms() -> Option<i64> {
+    with_model(|model| model.now_ms())
 }
 
 /// The home gate as the document holds it (gate id, skin id).
