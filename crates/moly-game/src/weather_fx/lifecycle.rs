@@ -430,6 +430,16 @@ impl PlayState {
         None
     }
 
+    /// `Stop(StopEmittingAndClear)`: the same stop, then Clear whatever the
+    /// system holds (the engine's per-system stop block calls Clear on this
+    /// behaviour without looking at the live count or the emit-replay
+    /// records), so the play ends at once.
+    pub(super) fn stop_and_clear(&mut self, system: &mut Runtime, now: f64) {
+        self.stop_emitting = true;
+        self.stop_time = now;
+        self.clear(system);
+    }
+
     /// Start of one incremental slice: a non-looping system whose time has
     /// reached its duration stops emitting. (Its Clear, when it holds no
     /// particle, and the end of the frame give the same final state.)

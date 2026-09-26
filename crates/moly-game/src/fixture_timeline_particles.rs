@@ -736,6 +736,93 @@ pub(crate) fn stop_object(world: &mut World, binding: &ParticlePlayBinding) -> u
     stopped
 }
 
+/// What the seed pass of [`seed_played_object`] did.
+// Its caller is the cut-scene effect clip's player, which calls it from its
+// own module.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeedPass {
+    /// Listed systems that took `randomSeed = 0` alone (not playing).
+    pub seeded: usize,
+    /// Listed systems that were playing: stopped and cleared with their
+    /// subtree, seeded, and played again with it.
+    pub restarted: usize,
+    /// Listed systems this host does not simulate (not prepared: no Emission
+    /// module, or refused by admission); the seed they take shows nowhere.
+    pub unsimulated: usize,
+}
+
+/// The seed pass of `EffectBehaviour.SetEffectInstance` on a played object,
+/// unless the clip keeps its seeds (`isEnabledRandomSeed`). `listed` are the
+/// nodes of the systems `GetComponentsInChildren<ParticleSystem>()` lists on
+/// the instance, in that order; each is `object` or lies under it. In order,
+/// a listed system that is playing takes `Stop(withChildren: true,
+/// StopEmittingAndClear)`, `randomSeed = 0` and `Play()` (withChildren), and
+/// any other takes `randomSeed = 0` alone. The seed write makes the system a
+/// manual owner (useAutoRandomSeed false, even for an unchanged seed) and
+/// resets nothing (see [`crate::particle_runtime::set_random_seed`]), so the
+/// seed shows at the next seed reset: the Play after the stop and clear
+/// above, or the first Play of the activation that follows the pass. A
+/// system's Play reaches the systems below it, so in the playing branch a
+/// later listed system of the same subtree is playing again when its turn
+/// comes, and it restarts in turn.
+#[allow(dead_code)] // called by the cut-scene effect clip's player
+pub(crate) fn seed_played_object(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+    listed: &[Entity],
+) -> Result<SeedPass, String> {
+    let anchor_of = |world: &World, draw: Entity| world.get::<FixtureParticleLive>(draw).and_then(|live| live.0.anchor);
+    let mut pass = SeedPass::default();
+    for &node in listed {
+        if !instance_descends(world, node, binding.root) {
+            return Err("a listed system lies outside its played object".into());
+        }
+        let Some(draw) = binding.draws.iter().copied().find(|&draw| anchor_of(world, draw) == Some(node)) else {
+            pass.unsimulated += 1;
+            continue;
+        };
+        if !crate::weather_fx::fixture::system_playing(world, draw) {
+            crate::weather_fx::fixture::set_random_seed(world, draw, 0);
+            pass.seeded += 1;
+            continue;
+        }
+        let subtree: Vec<Entity> = binding.draws.iter().copied()
+            .filter(|&other| anchor_of(world, other).is_some_and(|anchor| instance_descends(world, anchor, node)))
+            .collect();
+        crate::weather_fx::fixture::stop_and_clear(world, &subtree);
+        crate::weather_fx::fixture::set_random_seed(world, draw, 0);
+        crate::weather_fx::fixture::play_draws(world, &subtree)?;
+        for &other in &subtree {
+            crate::weather_fx::fixture::play_pending(world, other)?;
+        }
+        pass.restarted += 1;
+    }
+    Ok(pass)
+}
+
+/// `ParticleSystem.Stop(withChildren: true, StopEmittingAndClear)` on the
+/// object's system (the looping matched-duration branch of
+/// `EffectBehaviour.OnBehaviourPause`): every system it reaches stops
+/// emitting and is cleared at once, and its play ends. Returns how many
+/// played systems it stopped.
+#[allow(dead_code)] // called by the cut-scene effect clip's player
+pub(crate) fn stop_and_clear_object(world: &mut World, binding: &ParticlePlayBinding) -> usize {
+    let stopped = crate::weather_fx::fixture::stop_and_clear(world, &binding.draws);
+    if let Some(mut prepared) = world.get_mut::<PreparedPlay>(binding.root) {
+        prepared.stopped = true;
+    }
+    stopped
+}
+
+/// A played object over draws a replay built itself (no document, no GPU
+/// preparation), already playing.
+#[cfg(test)]
+pub(crate) fn played_object_for_replay(world: &mut World, root: Entity, draws: Vec<Entity>) -> ParticlePlayBinding {
+    world.entity_mut(root).insert(PreparedPlay { draws: draws.clone(), stopped: false });
+    ParticlePlayBinding { root, draws }
+}
+
 /// The call a SignalReceiver reaction makes on a ParticleSystem: its
 /// persistent call with no argument (`ParticleSystem.Play()`, `Stop()`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

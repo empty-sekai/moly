@@ -1261,6 +1261,46 @@ pub(crate) fn stop_emitting(world: &mut World, root: Entity) -> usize {
     draws.len()
 }
 
+/// `ParticleSystem.Stop(withChildren: true, StopEmittingAndClear)` reaching
+/// the played systems among `draws`: each stops emitting and is cleared at
+/// once, live particles included, and its play ends (see
+/// [`lifecycle::PlayState::stop_and_clear`]). A system that never played is
+/// left waiting for its first Play. Returns how many systems stopped.
+pub(crate) fn stop_and_clear(world: &mut World, draws: &[Entity]) -> usize {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    let mut stopped = 0;
+    for &draw in draws {
+        let mut entity = world.entity_mut(draw);
+        let mut played = match entity.take::<Played>() { Some(played) => played, None => continue };
+        played.emitting = false;
+        if let Some(mut live) = entity.get_mut::<crate::uber_particle::FixtureParticleLive>() {
+            played.play.stop_and_clear(&mut live.0, now);
+        }
+        entity.insert(played);
+        stopped += 1;
+    }
+    stopped
+}
+
+/// `ParticleSystem.randomSeed = value` on one admitted system (see
+/// [`crate::particle_runtime::set_random_seed`]). `false` for a draw with no
+/// simulation.
+pub(crate) fn set_random_seed(world: &mut World, draw: Entity, value: u32) -> bool {
+    let Some(mut live) = world.get_mut::<crate::uber_particle::FixtureParticleLive>(draw) else { return false };
+    crate::particle_runtime::set_random_seed(&mut live.0, value);
+    true
+}
+
+/// `ParticleSystem.isPlaying` of one admitted system; a system that never
+/// played is not playing.
+pub(crate) fn system_playing(world: &World, draw: Entity) -> bool {
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    match (world.get::<crate::uber_particle::FixtureParticleLive>(draw), world.get::<Played>(draw)) {
+        (Some(live), Some(played)) => played.playing(&live.0, now),
+        _ => false,
+    }
+}
+
 /// `ParticleSystem.Play()` again on the root system of an instance (children
 /// included). A system that still holds particles keeps its seeds and warm
 /// and restarts its clock (`later_play`); one that holds none plays as at its
@@ -1268,6 +1308,13 @@ pub(crate) fn stop_emitting(world: &mut World, root: Entity) -> usize {
 /// looping prewarm system warms again.
 pub(crate) fn play(world: &mut World, root: Entity) -> Result<usize, String> {
     let draws = played_draws(world, root);
+    play_draws(world, &draws)
+}
+
+/// [`play`] on the played systems among `draws` (a system that never played
+/// is left to [`play_pending`]). Returns how many it played.
+pub(crate) fn play_draws(world: &mut World, draws: &[Entity]) -> Result<usize, String> {
+    let draws: Vec<Entity> = draws.iter().copied().filter(|&draw| world.get::<Played>(draw).is_some()).collect();
     world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
         for &draw in &draws {
             let mut entity = world.entity_mut(draw);
