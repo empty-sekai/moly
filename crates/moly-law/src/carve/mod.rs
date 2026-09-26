@@ -927,6 +927,90 @@ impl WalkField {
 mod tests {
     use super::*;
 
+    /// `DynamicMesh::ClipPolys` removes exactly each polygon's intersection
+    /// with the carve hull: on a flat field with a harvest-sized capsule and a
+    /// yawed box carved at runtime, every sample point clearly inside a hull
+    /// (by the hull's own planes, which the native rows pin) is on no
+    /// navigation cell and no walk cell, every point clearly outside the
+    /// hulls and the eroded border is on a cell, a path across the carve goes
+    /// around it without entering it, and an empty carve set gives the baked
+    /// field back.
+    #[test]
+    fn runtime_carve_removes_the_hull_and_nothing_else() {
+        let surface: Vec<[[f32; 3]; 3]> = vec![
+            [[-6.0, 0.0, -6.0], [6.0, 0.0, -6.0], [6.0, 0.0, 6.0]],
+            [[-6.0, 0.0, -6.0], [6.0, 0.0, 6.0], [-6.0, 0.0, 6.0]],
+        ];
+        let baked = WalkField::bake_colliders(&surface, &[], 0.05);
+        let yaw = |a: f32| {
+            let (s, c) = a.sin_cos();
+            [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]]
+        };
+        let capsule = obstacle::CarveShape::from_moly(
+            obstacle::CarveKind::Capsule,
+            [-1.2, 0.456, 0.3],
+            yaw(0.4),
+            [1.1, 1.1, 1.1],
+            [0.479, 0.98, 0.479],
+        );
+        let cube = obstacle::CarveShape::from_moly(
+            obstacle::CarveKind::Box,
+            [1.5, 0.3, -0.7],
+            yaw(0.9),
+            [1.0, 1.0, 1.0],
+            [0.6, 0.3, 0.25],
+        );
+        let carves: Vec<_> = [capsule, cube]
+            .iter()
+            .map(|shape| runtime_carve(shape, 0.0).expect("hull"))
+            .collect();
+        let field = baked.carve_obstacles(&carves);
+        let eps = 0.05 * 0.015625;
+        let depth = |p: [f32; 2]| {
+            carves
+                .iter()
+                .map(|c| {
+                    c.planes
+                        .iter()
+                        .map(|plane| obstacle::plane_distance(plane, [p[0], 0.0, p[1]], eps))
+                        .fold(f32::MIN, f32::max)
+                })
+                .fold(f32::MAX, f32::min)
+        };
+        let (mut inside, mut outside) = (0, 0);
+        for i in 0..160 {
+            for j in 0..160 {
+                let p = [-4.0 + i as f32 * 0.05 + 0.013, -4.0 + j as f32 * 0.05 + 0.007];
+                let d = depth(p);
+                if d < -0.01 {
+                    inside += 1;
+                    assert!(!field.on_cell(p) && !field.walkable_at(p), "{p:?} inside a hull");
+                } else if d > 0.01 && baked.walkable_at(p) && baked.on_cell(p) {
+                    outside += 1;
+                    assert!(field.on_cell(p), "{p:?} outside the hulls lost its cell");
+                }
+            }
+        }
+        assert!(inside > 100 && outside > 10_000, "{inside} {outside}");
+        let path = field
+            .calculate_path([-3.0, 0.3], [3.0, -0.6], STATIC_QUERY_HALF_EXTENT)
+            .expect("path");
+        assert!(path.complete);
+        for pair in path.corners.windows(2) {
+            for k in 0..=50 {
+                let t = k as f32 / 50.0;
+                let p = [
+                    pair[0][0] + (pair[1][0] - pair[0][0]) * t,
+                    pair[0][1] + (pair[1][1] - pair[0][1]) * t,
+                ];
+                assert!(depth(p) > -1e-3, "path enters a hull at {p:?}");
+            }
+        }
+        let restored = field.carve_obstacles(&[]);
+        assert_eq!(restored.counts().walkable, baked.counts().walkable);
+        assert_eq!(restored.counts().polygons, baked.counts().polygons);
+    }
+
     #[test]
     fn source_triangle_does_not_turn_into_its_occupancy_rectangle() {
         let surface = vec![
