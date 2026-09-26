@@ -11,9 +11,28 @@
 //!
 //! 主世界全部带 [`Mesh3d`] 且层级启用的实体，除了：天空壳（巨大的相机跟随球，
 //! 从光源看是一整圈挡板）、表情绘制位（逐帧重建的世界系 billboard，顶点
-//! 属性即世界坐标，不承载投影语义）、蒙皮网格（角色/玩家——深度 pass
-//! 不做蒙皮，绑定位姿深度是「错影」；缺影好过错影）、
+//! 属性即世界坐标，不承载投影语义）、
 //! 雨粒子（[`NoShadowCast`]，真源粒子不进主光 shadowmap）。
+//!
+//! Skinned meshes take a second route. A skinned mesh casts only when it is a
+//! character renderer: an NPC mesh with the character material or a mesh of
+//! the player's body with the avatar material. It is drawn with the joint
+//! matrices of the current frame (each joint's world transform times its
+//! inverse bind pose, the same palette the colour pass skins with), so the
+//! shadow follows the playing animation. The rules are the source's:
+//! - the player's body renderer comes from the avatar prefab, whose
+//!   serialized cast-shadows mode is On, and nothing at runtime changes it;
+//! - every NPC renderer is set On each frame, except Off while the NPC's
+//!   dither alpha is exactly 0 (read here from the material the dither writes);
+//! - the NPC accessory program declares no ShadowCaster pass, so its meshes
+//!   carry [`NoShadowCast`];
+//! - the character ShadowCaster programs cull nothing (their cull state is
+//!   bound to a property no character material or global sets, which leaves it
+//!   Off), move each vertex by the pipeline's caster bias along the light and
+//!   along the normal, clamp to the near plane, and are drawn under the
+//!   pipeline's global raster bias of the shadow slice (see
+//!   [`CHARACTER_RASTER_BIAS`]).
+//! Other skinned meshes (skinned fixtures) stay out, as before, and are counted.
 //!
 //! # 数值口径（真源档已读出，本单替换自选值）
 //!
@@ -49,18 +68,20 @@ use std::sync::Mutex;
 use bevy::asset::uuid::Uuid;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::math::bounding::Aabb3d;
-use bevy::mesh::skinning::SkinnedMesh;
+use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::prelude::*;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
-use bevy::render::render_resource::binding_types::uniform_buffer;
+use bevy::render::render_resource::binding_types::{uniform_buffer, uniform_buffer_sized};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
+use crate::avatar_material::AvatarMaterial;
+use crate::character_material::CharacterMaterial;
 use crate::emoticon::EmoteDraw;
 use crate::env::SiteEnv;
 use crate::render::gpu::{Bound, SharedBindGroupCache};
@@ -106,13 +127,57 @@ const SHADOW_FADE_BIAS: f32 = -506.25 / 118.75;
 const PROBE_FIRST_FRAME: u64 = 60;
 const PROBE_INTERVAL: u64 = 600;
 
+/// The read-back interval: `MOLY_SHADOW_PROBE_INTERVAL` (frames, at least 1)
+/// overrides [`PROBE_INTERVAL`] for a diagnosis run; read once.
+fn probe_interval() -> u64 {
+    static INTERVAL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var("MOLY_SHADOW_PROBE_INTERVAL")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(PROBE_INTERVAL)
+    })
+}
+
 /// 深度图读回里判「非空」的阈值：clear 是 1.0，光栅深度只会更小。
 /// 只在 native 读回路径用（wasm 只落计数行，不读图）。
 #[cfg(not(target_arch = "wasm32"))]
 const PROBE_CLEAR_EPS: f32 = 0.9999;
 
-/// 深度 pass 帧块的 GPU 字节数：两个 4×4（裁剪矩阵 + 采样矩阵）。
-const FRAME_BYTES: usize = 128;
+/// 深度 pass 帧块的 GPU 字节数：两个 4×4（裁剪矩阵 + 采样矩阵）+ 两个
+/// vec4（角色 caster 偏置 + 向光方向）。
+const FRAME_BYTES: usize = 160;
+
+/// The site pipeline asset's shadow depth bias and normal bias (both 1.0).
+/// The main light's caster bias takes them when the light defers to the
+/// pipeline settings, which is the light data's default; the site light's own
+/// light data is not read here.
+const PIPELINE_SHADOW_DEPTH_BIAS: f32 = 1.0;
+const PIPELINE_SHADOW_NORMAL_BIAS: f32 = 1.0;
+
+/// The soft-shadow kernel radius the pipeline scales both caster biases by
+/// when soft shadows are supported and the light is soft: 2.5 for the medium
+/// quality, which is also the value when the light defers to the pipeline.
+const SOFT_SHADOW_KERNEL_RADIUS: f32 = 2.5;
+
+/// The raster bias the pipeline sets globally around the shadow slice's draw
+/// (units 1.0, slope 2.5). The character ShadowCaster passes declare no
+/// offset of their own, so this is their whole raster bias.
+const CHARACTER_RASTER_BIAS: DepthBiasState = DepthBiasState {
+    constant: 1,
+    slope_scale: 2.5,
+    clamp: 0.0,
+};
+
+/// Joints one palette window holds (the engine's skinning limit), and the
+/// window's byte size: the dynamic uniform binding of the skinned entry point.
+const MAX_JOINTS: usize = 256;
+const PALETTE_WINDOW: u64 = (MAX_JOINTS * 64) as u64;
+
+/// Palettes start at this alignment (the dynamic-offset alignment that every
+/// device supports).
+const PALETTE_ALIGN: usize = 256;
 
 /// 消费块（`SiteShadow`）的 GPU 字节数：4×4 + 两个 vec4。
 const CONSUMER_BYTES: usize = 96;
@@ -133,6 +198,11 @@ struct ShadowFrame {
     light_view_proj: [Vec4; 4],
     /// 采样矩阵：xy 图内 uv（含 y 翻转），z 比较深度。
     world_to_shadow: [Vec4; 4],
+    /// The character caster bias in world units: x along the light, y along
+    /// the normal (both negative, as the pipeline computes them).
+    shadow_bias: Vec4,
+    /// xyz: the direction towards the light.
+    light_direction: Vec4,
 }
 
 fn mat4_cols(matrix: Mat4) -> [Vec4; 4] {
@@ -195,6 +265,9 @@ pub struct ShadowMapGpu {
     object_buffer: Buffer,
     /// 深度管线的 group 0 布局（描述符经 PipelineCache 缓存）。
     depth_layout: BindGroupLayoutDescriptor,
+    /// The skinned entry point's group 1 layout: one palette window, bound at
+    /// a dynamic offset.
+    skin_layout: BindGroupLayoutDescriptor,
     /// 动态 offset 槽距：按设备对齐取，≥ 64 字节。
     object_stride: u32,
     /// 单个矩阵的绑定尺寸（动态 offset 校验用）。
@@ -209,6 +282,35 @@ struct ShadowDraw {
     two_sided: bool,
 }
 
+/// One skinned depth draw: a character renderer and the byte offset of its
+/// joint palette (this frame's) in the palette buffer.
+struct SkinnedShadowDraw {
+    mesh: AssetId<Mesh>,
+    palette_offset: u32,
+    pipeline: CachedRenderPipelineId,
+    /// Whether the renderer is a mesh of the player's body.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    player: bool,
+    /// World bounds of the skinned vertices: the mesh's bind-pose box carried
+    /// by every joint matrix of its palette (a superset of every blend). Read
+    /// by the read-back's player window only.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    bounds: (Vec3, Vec3),
+}
+
+/// Skinned-caster tallies of one extraction, for the account line.
+#[derive(Default, Clone, Copy)]
+struct SkinnedTally {
+    player: usize,
+    npc: usize,
+    /// NPC renderers set Off because the NPC's dither alpha is 0.
+    npc_off_by_dither: usize,
+    /// Skinned meshes that are no character renderer (not casting).
+    other_skinned: usize,
+    palettes: usize,
+    joints: usize,
+}
+
 /// 抽取与解算结果：本帧的 caster 名单 + 内容世界包围盒。
 #[derive(Resource, Default)]
 struct ShadowDrawList {
@@ -218,6 +320,11 @@ struct ShadowDrawList {
     /// mesh, world matrix bit, winding flag or count. The object matrix pool
     /// holds the previous draws' matrices, so it is rewritten only then.
     changed: bool,
+    /// The skinned character casters of this extraction.
+    skinned: Vec<SkinnedShadowDraw>,
+    /// Their joint palettes, each at a [`PALETTE_ALIGN`]-aligned offset.
+    palette_bytes: Vec<u8>,
+    skinned_tally: SkinnedTally,
 }
 
 /// The world-space bounds corners of each draw in [`ShadowDrawList`], at the
@@ -245,6 +352,12 @@ struct AccountInner {
     casters_invalid: usize,
     /// 最近一帧节点实际录进 pass 的 draw 数。
     draws_recorded: usize,
+    /// The latest prepare's skinned casters, those whose layout has no
+    /// position/normal/joint streams, and the skinned draws last recorded.
+    skinned_casters: usize,
+    skinned_invalid: usize,
+    skinned_recorded: usize,
+    skinned_tally: SkinnedTally,
     /// 最近一次解出的光框几何与消费矩阵。
     light_box: Option<(f32, f32, f32)>,
     world_to_shadow: Option<Mat4>,
@@ -255,6 +368,20 @@ struct AccountInner {
     probe_pending: bool,
     /// 下一次读回的帧序（frames_drawn 口径）。
     next_probe_frame: u64,
+    /// The previous read-back's texels and player window (native diagnosis).
+    #[cfg(not(target_arch = "wasm32"))]
+    previous_map: Option<Vec<u8>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    previous_window: Option<(usize, usize, usize, usize)>,
+}
+
+/// The joint palette buffer of the skinned casters: replaced by a larger one
+/// when a frame's palettes do not fit, so the node's bind group is looked up
+/// by this buffer's id.
+#[derive(Resource)]
+struct ShadowPaletteGpu {
+    buffer: Buffer,
+    capacity: u64,
 }
 
 /// 管线特化键：同一顶点布局 + 图元拓扑共用一条深度管线。
@@ -263,13 +390,16 @@ struct DepthPipelineKey {
     layout: MeshVertexBufferLayoutRef,
     topology: PrimitiveTopology,
     two_sided: bool,
+    /// The skinned character entry point instead of the rigid one.
+    skinned: bool,
 }
 
-fn depth_pipeline_key(mesh: &RenderMesh, two_sided: bool) -> DepthPipelineKey {
+fn depth_pipeline_key(mesh: &RenderMesh, two_sided: bool, skinned: bool) -> DepthPipelineKey {
     DepthPipelineKey {
         layout: mesh.layout.clone(),
         topology: mesh.primitive_topology(),
         two_sided,
+        skinned,
     }
 }
 
@@ -438,6 +568,171 @@ fn extract_shadow_casters(
     list.changed = changed;
 }
 
+/// Extract, after [`extract_shadow_casters`]: the skinned character casters
+/// (module comment, "Caster 集") and their joint palettes of this frame.
+///
+/// The light box stays the rigid casters' box. A skinned draw's box here is
+/// conservative (every joint's image of the bind-pose box), so folding it in
+/// would move the light box, and with it every texel of the map, whenever a
+/// character animates. The characters stand inside the site's world box, which
+/// the rigid box contains; a vertex nearer than the near plane is clamped to it
+/// by the skinned entry point.
+///
+/// Renderers that share one skin (the same joints and inverse bind poses)
+/// share one palette. A palette is the joint's global transform times its
+/// inverse bind pose, joint by joint, exactly as the colour pass builds it.
+#[allow(clippy::type_complexity)]
+fn extract_skinned_casters(
+    mut list: ResMut<ShadowDrawList>,
+    skinned: Extract<
+        Query<
+            (
+                &Mesh3d,
+                &SkinnedMesh,
+                &InheritedVisibility,
+                Option<&MeshMaterial3d<CharacterMaterial>>,
+                Option<&MeshMaterial3d<AvatarMaterial>>,
+                Option<&ChildOf>,
+            ),
+            (
+                Without<NoShadowCast>,
+                Without<moly_assets::scene_state::SourceInactive>,
+                Without<bevy::light::NotShadowCaster>,
+            ),
+        >,
+    >,
+    joints: Extract<Query<&GlobalTransform>>,
+    names: Extract<Query<&Name>>,
+    bindposes: Extract<Res<Assets<SkinnedMeshInverseBindposes>>>,
+    character_materials: Extract<Res<Assets<CharacterMaterial>>>,
+    meshes: Extract<Res<Assets<Mesh>>>,
+    mut local_bounds: Local<HashMap<AssetId<Mesh>, Aabb3d>>,
+    mut too_many_warned: Local<bool>,
+    mut others_logged: Local<bool>,
+) {
+    let list = &mut *list;
+    let mut other_names: Vec<String> = Vec::new();
+    local_bounds.retain(|id, _| meshes.contains(*id));
+    list.skinned.clear();
+    list.palette_bytes.clear();
+    let mut tally = SkinnedTally::default();
+    // Skin -> (palette byte offset, index into `palette_matrices`).
+    let mut palettes: HashMap<(AssetId<SkinnedMeshInverseBindposes>, Vec<Entity>), (u32, usize)> =
+        HashMap::new();
+    let mut palette_matrices: Vec<Vec<Mat4>> = Vec::new();
+    for (mesh, skin, visibility, character, avatar, parent) in &skinned {
+        let player = avatar.is_some();
+        if !player && character.is_none() {
+            tally.other_skinned += 1;
+            if !*others_logged && other_names.len() < 12 {
+                let name = parent
+                    .and_then(|parent| names.get(parent.parent()).ok())
+                    .map(|name| name.as_str().to_owned())
+                    .unwrap_or_else(|| "?".to_owned());
+                other_names.push(name);
+            }
+            continue;
+        }
+        if !visibility.get() {
+            continue;
+        }
+        if let Some(character) = character {
+            // The NPC's renderers are Off exactly while its dither alpha is 0.
+            if character_materials
+                .get(&character.0)
+                .is_some_and(|material| material.params.dither_alpha == 0.0)
+            {
+                tally.npc_off_by_dither += 1;
+                continue;
+            }
+        }
+        let key = (skin.inverse_bindposes.id(), skin.joints.clone());
+        let (palette_offset, palette_index) = match palettes.get(&key) {
+            Some(found) => *found,
+            None => {
+                let Some(inverse) = bindposes.get(&skin.inverse_bindposes) else {
+                    continue;
+                };
+                if skin.joints.len() > MAX_JOINTS {
+                    if !*too_many_warned {
+                        *too_many_warned = true;
+                        warn!(
+                            "主光阴影：蒙皮网格关节数 {} 超过调色板上限 {MAX_JOINTS}，该网格不投影（仅告警一次）",
+                            skin.joints.len()
+                        );
+                    }
+                    continue;
+                }
+                let mut matrices = Vec::with_capacity(skin.joints.len());
+                for (joint, inverse_bindpose) in skin.joints.iter().zip(inverse.iter()) {
+                    let Ok(global) = joints.get(*joint) else {
+                        break;
+                    };
+                    matrices.push(Mat4::from(global.affine()) * *inverse_bindpose);
+                }
+                if matrices.is_empty() || matrices.len() != skin.joints.len() {
+                    continue;
+                }
+                let offset = list.palette_bytes.len().next_multiple_of(PALETTE_ALIGN);
+                list.palette_bytes.resize(offset, 0);
+                for matrix in &matrices {
+                    mat4_bytes(*matrix, &mut list.palette_bytes);
+                }
+                tally.palettes += 1;
+                tally.joints += matrices.len();
+                let entry = (offset as u32, palette_matrices.len());
+                palette_matrices.push(matrices);
+                palettes.insert(key, entry);
+                entry
+            }
+        };
+        let id = mesh.0.id();
+        let local = *local_bounds.entry(id).or_insert_with(|| {
+            meshes
+                .get(&mesh.0)
+                .and_then(|mesh| mesh.final_aabb)
+                .unwrap_or(Aabb3d::new(Vec3A::ZERO, Vec3A::ZERO))
+        });
+        // Every skinned vertex is a convex blend of its joints' images of the
+        // bind-pose vertex, so the box of every joint's image of the bind-pose
+        // box holds it.
+        let mut min = Vec3::INFINITY;
+        let mut max = Vec3::NEG_INFINITY;
+        for matrix in &palette_matrices[palette_index] {
+            for sx in [local.min.x, local.max.x] {
+                for sy in [local.min.y, local.max.y] {
+                    for sz in [local.min.z, local.max.z] {
+                        let corner = matrix.transform_point3(Vec3::new(sx, sy, sz));
+                        min = min.min(corner);
+                        max = max.max(corner);
+                    }
+                }
+            }
+        }
+        if player {
+            tally.player += 1;
+        } else {
+            tally.npc += 1;
+        }
+        list.skinned.push(SkinnedShadowDraw {
+            mesh: id,
+            palette_offset,
+            pipeline: CachedRenderPipelineId::INVALID,
+            player,
+            bounds: (min, max),
+        });
+    }
+    list.skinned_tally = tally;
+    if !*others_logged && !other_names.is_empty() {
+        *others_logged = true;
+        info!(
+            "shadow casters: {} skinned meshes are no character renderer and cast no shadow (first seen, by parent node: {})",
+            tally.other_skinned,
+            other_names.join(", ")
+        );
+    }
+}
+
 /// 光源向正交的一对矩阵：深度 pass 用裁剪矩阵，消费侧用采样矩阵
 /// （xy 已折进 [0,1] 且带 y 翻转——WebGPU 帧缓冲原点在左上而 NDC y 向上，
 /// 纹理 v=0 对应 NDC y=+1；z 是 [0,1] 比较深度，近 0 远 1，
@@ -449,6 +744,8 @@ struct LightMatrices {
     width: f32,
     height: f32,
     depth: f32,
+    /// The unit direction towards the light.
+    to_light: Vec3,
 }
 
 fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> {
@@ -498,6 +795,7 @@ fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> 
         width: light_max.x - light_min.x,
         height: light_max.y - light_min.y,
         depth: far - near,
+        to_light,
     })
 }
 
@@ -510,6 +808,93 @@ struct ShadowUploads {
     objects: bool,
 }
 
+/// Queues the depth pipeline of one key, or INVALID when the mesh layout lacks
+/// a stream the entry point reads (counted, and skipped by the node).
+fn queue_depth_pipeline(
+    pipeline_cache: &PipelineCache,
+    gpu: &ShadowMapGpu,
+    key: &DepthPipelineKey,
+) -> CachedRenderPipelineId {
+    if key.skinned {
+        let Ok(vertex) = key.layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            Mesh::ATTRIBUTE_JOINT_INDEX.at_shader_location(2),
+            Mesh::ATTRIBUTE_JOINT_WEIGHT.at_shader_location(3),
+        ]) else {
+            return CachedRenderPipelineId::INVALID;
+        };
+        return pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+            label: Some("site_shadow_depth_skinned_pipeline".into()),
+            layout: vec![gpu.depth_layout.clone(), gpu.skin_layout.clone()],
+            vertex: VertexState {
+                shader: SHADOW_DEPTH_SHADER.clone(),
+                shader_defs: vec![],
+                entry_point: Some("shadow_depth_skinned_vertex".into()),
+                buffers: vec![vertex],
+            },
+            fragment: None,
+            primitive: PrimitiveState {
+                topology: key.topology,
+                front_face: FrontFace::Ccw,
+                // The character ShadowCaster passes cull nothing.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                stencil: StencilState::default(),
+                bias: CHARACTER_RASTER_BIAS,
+            }),
+            multisample: Default::default(),
+            ..Default::default()
+        });
+    }
+    // 位置属性的偏移由网格布局自身给出；缺位置的网格按 INVALID
+    // 记账，节点侧跳过。
+    match key
+        .layout
+        .0
+        .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])
+    {
+        Ok(vertex) => pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+            label: Some("site_shadow_depth_pipeline".into()),
+            layout: vec![gpu.depth_layout.clone()],
+            vertex: VertexState {
+                shader: SHADOW_DEPTH_SHADER.clone(),
+                shader_defs: vec![],
+                entry_point: Some("shadow_depth_vertex".into()),
+                buffers: vec![vertex],
+            },
+            fragment: None,
+            primitive: PrimitiveState {
+                topology: key.topology,
+                front_face: FrontFace::Ccw,
+                cull_mode: if key.two_sided { None } else { Some(Face::Back) },
+                ..Default::default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                // normal-Z：保留离光最近（深度最小）的面。光栅偏置抵
+                // acne；源偏置值读不出，取正交常规档（模块注释）。
+                depth_compare: CompareFunction::Less,
+                stencil: StencilState::default(),
+                bias: DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: Default::default(),
+            ..Default::default()
+        }),
+        Err(_) => CachedRenderPipelineId::INVALID,
+    }
+}
+
 /// PrepareResources：特化管线、解光源正交框、写三块 uniform。
 ///
 /// 挂 PrepareResources 而非 Prepare：与引擎的网格资产 prepare（Prepare 集）
@@ -518,10 +903,12 @@ fn prepare_shadow_draws(
     mut draws: ResMut<ShadowDrawList>,
     mut pipelines: ResMut<DepthPipelines>,
     pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     meshes: Res<RenderAssets<RenderMesh>>,
     env: Option<Res<SiteEnv>>,
     gpu: Res<ShadowMapGpu>,
+    mut palette: ResMut<ShadowPaletteGpu>,
     account: Res<ShadowAccount>,
     mut readiness_logged: Local<bool>,
     mut prepare_frames: Local<u64>,
@@ -549,51 +936,39 @@ fn prepare_shadow_draws(
         let Some(render_mesh) = meshes.get(item.mesh) else {
             continue;
         };
-        let key = depth_pipeline_key(render_mesh, item.two_sided);
-        let topology = key.topology;
-        item.pipeline = *pipelines.queued.entry(key).or_insert_with(|| {
-            // 位置属性的偏移由网格布局自身给出；缺位置的网格按 INVALID
-            // 记账，节点侧跳过。
-            match render_mesh
-                .layout
-                .0
-                .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])
-            {
-                Ok(vertex) => pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-                    label: Some("site_shadow_depth_pipeline".into()),
-                    layout: vec![gpu.depth_layout.clone()],
-                    vertex: VertexState {
-                        shader: SHADOW_DEPTH_SHADER.clone(),
-                        shader_defs: vec![],
-                        entry_point: Some("shadow_depth_vertex".into()),
-                        buffers: vec![vertex],
-                    },
-                    fragment: None,
-                    primitive: PrimitiveState {
-                        topology,
-                        front_face: FrontFace::Ccw,
-                        cull_mode: if item.two_sided { None } else { Some(Face::Back) },
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(DepthStencilState {
-                        format: TextureFormat::Depth32Float,
-                        depth_write_enabled: true,
-                        // normal-Z：保留离光最近（深度最小）的面。光栅偏置抵
-                        // acne；源偏置值读不出，取正交常规档（模块注释）。
-                        depth_compare: CompareFunction::Less,
-                        stencil: StencilState::default(),
-                        bias: DepthBiasState {
-                            constant: 1,
-                            slope_scale: 1.0,
-                            clamp: 0.0,
-                        },
-                    }),
-                    multisample: Default::default(),
-                    ..Default::default()
-                }),
-                Err(_) => CachedRenderPipelineId::INVALID,
-            }
-        });
+        let key = depth_pipeline_key(render_mesh, item.two_sided, false);
+        item.pipeline = *pipelines
+            .queued
+            .entry(key)
+            .or_insert_with_key(|key| queue_depth_pipeline(&pipeline_cache, &gpu, key));
+    }
+    // The skinned character casters: their own entry point and state (module
+    // comment, "Caster 集"); a mesh without normals or joint streams is
+    // counted as a layout that cannot be drawn.
+    for item in draws.skinned.iter_mut() {
+        item.pipeline = match meshes.get(item.mesh) {
+            Some(render_mesh) => *pipelines
+                .queued
+                .entry(depth_pipeline_key(render_mesh, true, true))
+                .or_insert_with_key(|key| queue_depth_pipeline(&pipeline_cache, &gpu, key)),
+            None => CachedRenderPipelineId::INVALID,
+        };
+    }
+    // This frame's joint palettes; a larger buffer replaces the old one when
+    // they do not fit (the window read at the last offset must fit too).
+    if !draws.palette_bytes.is_empty() {
+        let needed = draws.palette_bytes.len() as u64 + PALETTE_WINDOW;
+        if needed > palette.capacity {
+            let capacity = needed.next_power_of_two();
+            palette.buffer = render_device.create_buffer(&BufferDescriptor {
+                label: Some("site_shadow_palettes"),
+                size: capacity,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            palette.capacity = capacity;
+        }
+        render_queue.write_buffer(&palette.buffer, 0, &draws.palette_bytes);
     }
 
     // 光源框与采样矩阵：现象/内容不齐的帧写强度 0——律的强度门把 atten
@@ -608,11 +983,21 @@ fn prepare_shadow_draws(
         Some(matrices) => {
             let clip = matrices.clip;
             let consumer_matrix = matrices.consumer;
+            // The pipeline's caster bias: both biases in shadow-map texels of
+            // world size (the orthographic width over the resolution, as the
+            // pipeline derives it from the projection), negated, and scaled by
+            // the soft-shadow kernel radius.
+            let texel = matrices.width / SHADOWMAP_SIZE as f32;
+            let depth_bias = -PIPELINE_SHADOW_DEPTH_BIAS * texel * SOFT_SHADOW_KERNEL_RADIUS;
+            let normal_bias = -PIPELINE_SHADOW_NORMAL_BIAS * texel * SOFT_SHADOW_KERNEL_RADIUS;
+            let to_light = matrices.to_light;
             let _ = resolved.insert(matrices);
             (
                 ShadowFrame {
                     light_view_proj: mat4_cols(clip),
                     world_to_shadow: mat4_cols(consumer_matrix),
+                    shadow_bias: Vec4::new(depth_bias, normal_bias, 0.0, 0.0),
+                    light_direction: to_light.extend(0.0),
                 },
                 ShadowConsumer {
                     world_to_shadow: consumer_matrix,
@@ -635,6 +1020,8 @@ fn prepare_shadow_draws(
             ShadowFrame {
                 light_view_proj: [Vec4::ZERO; 4],
                 world_to_shadow: [Vec4::ZERO; 4],
+                shadow_bias: Vec4::ZERO,
+                light_direction: Vec4::ZERO,
             },
             ShadowConsumer {
                 world_to_shadow: Mat4::ZERO,
@@ -655,6 +1042,13 @@ fn prepare_shadow_draws(
         inner.frames_prepared += resolved.is_some() as u64;
         inner.casters = draws.draws.len();
         inner.casters_invalid = invalid_now;
+        inner.skinned_casters = draws.skinned.len();
+        inner.skinned_invalid = draws
+            .skinned
+            .iter()
+            .filter(|item| item.pipeline == CachedRenderPipelineId::INVALID)
+            .count();
+        inner.skinned_tally = draws.skinned_tally;
         if let Some(matrices) = &resolved {
             inner.light_box = Some((matrices.width, matrices.height, matrices.depth));
             inner.world_to_shadow = Some(matrices.consumer);
@@ -668,6 +1062,12 @@ fn prepare_shadow_draws(
             }
         }
     }
+    for slot in [frame.shadow_bias, frame.light_direction] {
+        for component in slot.to_array() {
+            frame_bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(frame_bytes.len(), FRAME_BYTES);
     // Both blocks keep their last contents; a write of the same bytes is
     // skipped.
     if uploaded.frame.as_deref() != Some(frame_bytes.as_slice()) {
@@ -802,6 +1202,22 @@ impl Node for ShadowDepthNode {
                 frame,
             )
         };
+        // The palette window of the skinned casters, bound at each draw's
+        // palette offset.
+        let skin_group = (!draws.skinned.is_empty()).then(|| {
+            let palette = world.resource::<ShadowPaletteGpu>();
+            let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+            self.bind_groups.lock().get(
+                render_context.render_device(),
+                "site_shadow_skin_bind_group",
+                &pipeline_cache.get_bind_group_layout(&gpu.skin_layout),
+                &[(
+                    0,
+                    Bound::Buffer(&palette.buffer, 0, std::num::NonZeroU64::new(PALETTE_WINDOW)),
+                )],
+                frame,
+            )
+        });
 
         let mut pass = render_context
             .command_encoder()
@@ -869,6 +1285,59 @@ impl Node for ShadowDepthNode {
             }
             drawn += 1;
         }
+
+        // The skinned character casters, after the rigid ones (the depth test
+        // makes the order irrelevant). A skinned pipeline still compiling
+        // leaves only its own draws out, not the frame.
+        let mut skinned_drawn: usize = 0;
+        if let Some(skin_group) = &skin_group {
+            for item in &draws.skinned {
+                if item.pipeline == CachedRenderPipelineId::INVALID {
+                    continue;
+                }
+                let (Some(pipeline), Some(render_mesh)) = (
+                    pipeline_cache.get_render_pipeline(item.pipeline),
+                    meshes.get(item.mesh),
+                ) else {
+                    continue;
+                };
+                let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
+                    continue;
+                };
+                if bound_pipeline != Some(item.pipeline) {
+                    pass.set_pipeline(pipeline);
+                    bound_pipeline = Some(item.pipeline);
+                }
+                // The rigid object window is not read by the skinned entry
+                // point; offset 0 is a valid window of the pool.
+                pass.set_bind_group(0, &bind_group, &[0]);
+                pass.set_bind_group(1, skin_group, &[item.palette_offset]);
+                if bound_vertex != Some(vertex_slice.buffer.id()) {
+                    pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+                    bound_vertex = Some(vertex_slice.buffer.id());
+                }
+                match &render_mesh.buffer_info {
+                    RenderMeshBufferInfo::Indexed { index_format, count } => {
+                        let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
+                            continue;
+                        };
+                        if bound_index != Some((index_slice.buffer.id(), *index_format)) {
+                            pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
+                            bound_index = Some((index_slice.buffer.id(), *index_format));
+                        }
+                        pass.draw_indexed(
+                            index_slice.range.start..(index_slice.range.start + *count),
+                            vertex_slice.range.start as i32,
+                            0..1,
+                        );
+                    }
+                    RenderMeshBufferInfo::NonIndexed => {
+                        pass.draw(vertex_slice.range, 0..1);
+                    }
+                }
+                skinned_drawn += 1;
+            }
+        }
         drop(pass);
 
         // 阴影账目（节点侧）：帧数与实录 draw 数；到档的帧顺手录一次深度
@@ -877,6 +1346,7 @@ impl Node for ShadowDepthNode {
             let mut inner = world.resource::<ShadowAccount>().0.lock().unwrap();
             inner.frames_drawn += 1;
             inner.draws_recorded = drawn;
+            inner.skinned_recorded = skinned_drawn;
             if drawn == 0 {
                 inner.frames_empty_pass += 1;
             }
@@ -902,7 +1372,7 @@ fn frames_drawn_due(inner: &mut AccountInner) -> bool {
         inner.next_probe_frame = PROBE_FIRST_FRAME;
     }
     if inner.frames_drawn >= inner.next_probe_frame {
-        inner.next_probe_frame = inner.frames_drawn + PROBE_INTERVAL;
+        inner.next_probe_frame = inner.frames_drawn + probe_interval();
         true
     } else {
         false
@@ -1047,8 +1517,107 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     }
     let (box_w, box_h, box_d) = inner.light_box.unwrap_or((0.0, 0.0, 0.0));
     let total_texels = (SHADOWMAP_SIZE * SHADOWMAP_SIZE) as f32;
+
+    // The player's caster window: the texel rectangle the player's skinned
+    // bounds project to. Its texels are compared with the previous read-back
+    // over the union of this and the previous window, and the rest of the map
+    // is compared too, so a change inside the window with the player's bounds
+    // centre in place is the animation moving the caster.
+    let size = SHADOWMAP_SIZE as usize;
+    let draws = world.resource::<ShadowDrawList>();
+    let player_bounds = draws
+        .skinned
+        .iter()
+        .filter(|item| item.player)
+        .map(|item| item.bounds)
+        .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+    let window = player_bounds.zip(inner.world_to_shadow).map(|((low, high), to_shadow)| {
+        let (mut x0, mut y0, mut x1, mut y1) = (size, size, 0usize, 0usize);
+        for sx in [low.x, high.x] {
+            for sy in [low.y, high.y] {
+                for sz in [low.z, high.z] {
+                    let uv = to_shadow.transform_point3(Vec3::new(sx, sy, sz));
+                    let tx = ((uv.x * size as f32) as i64).clamp(0, size as i64 - 1) as usize;
+                    let ty = ((uv.y * size as f32) as i64).clamp(0, size as i64 - 1) as usize;
+                    x0 = x0.min(tx);
+                    y0 = y0.min(ty);
+                    x1 = x1.max(tx);
+                    y1 = y1.max(ty);
+                }
+            }
+        }
+        (x0, y0, x1, y1)
+    });
+    let mut window_nonclear = 0usize;
+    let mut window_min = 1.0f32;
+    if let Some((x0, y0, x1, y1)) = window {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let d = texel(x, y);
+                if d < PROBE_CLEAR_EPS {
+                    window_nonclear += 1;
+                    window_min = window_min.min(d);
+                }
+            }
+        }
+    }
+    let union = match (window, inner.previous_window) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
+        (a, b) => a.or(b),
+    };
+    let (mut changed_in, mut changed_out) = (None, None);
+    if let Some(previous) = inner.previous_map.as_deref() {
+        let (mut inside, mut outside) = (0usize, 0usize);
+        for (index, (now, before)) in data.chunks_exact(4).zip(previous.chunks_exact(4)).enumerate() {
+            if now != before {
+                let (x, y) = (index % size, index / size);
+                let within = union.is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
+                if within {
+                    inside += 1;
+                } else {
+                    outside += 1;
+                }
+            }
+        }
+        changed_in = Some(inside);
+        changed_out = Some(outside);
+    }
+    let mut copy = inner.previous_map.take().unwrap_or_default();
+    copy.clear();
+    copy.extend_from_slice(&data);
+    inner.previous_map = Some(copy);
+    inner.previous_window = window;
     drop(data);
     buffer.unmap();
+    let tally = inner.skinned_tally;
+    let (centre, extent) = player_bounds
+        .map(|(low, high)| ((low + high) * 0.5, high - low))
+        .unwrap_or((Vec3::ZERO, Vec3::ZERO));
+    info!(
+        "shadow account, skinned casters: {} drawn {} (player {}, NPC {}; NPC Off at dither alpha 0: {}; other skinned meshes not casting: {}; layout without normal/joint streams {}); palettes {}, joints {} (joint world transform x inverse bind pose, this frame); rigid casters {}, total casters {}; player window {:?}: nonclear {} texels, min depth {:.4}, changed since last read-back {:?} (rest of map {:?}); player bounds centre ({:.3}, {:.3}, {:.3}) size ({:.3}, {:.3}, {:.3}); caster bias from pipeline 1.0/1.0 x texel x 2.5, raster bias 1 / 2.5",
+        inner.skinned_casters,
+        inner.skinned_recorded,
+        tally.player,
+        tally.npc,
+        tally.npc_off_by_dither,
+        tally.other_skinned,
+        inner.skinned_invalid,
+        tally.palettes,
+        tally.joints,
+        inner.casters,
+        inner.casters + inner.skinned_casters,
+        window,
+        window_nonclear,
+        window_min,
+        changed_in,
+        changed_out,
+        centre.x,
+        centre.y,
+        centre.z,
+        extent.x,
+        extent.y,
+        extent.z,
+    );
     info!(
         "主光阴影账目：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；光框 {box_w:.1}×{box_h:.1} m 深 {box_d:.1} m（texel {:.2} cm）；深度图非清 {} texel（{:.2}%）、最小深度 {min_depth:.4}；caster 原点：投影 {origins}、出框 {out_of_range}、邻域有图 {near_nonclear}；单 texel 比较 lit {lit} vs 影 {shadowed}、最大深度差 {max_gap:.4}",
         inner.frames_prepared,
@@ -1070,7 +1639,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
 fn log_counter_line(world: &World) {
     let inner = world.resource::<ShadowAccount>().0.lock().unwrap();
     info!(
-        "主光阴影账目（wasm 计数行）：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）",
+        "主光阴影账目（wasm 计数行）：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；skinned casters {} drawn {} (player {}, NPC {}, NPC Off at dither 0 {}, other skinned {}, layout invalid {}; palettes {}, joints {})",
         inner.frames_prepared,
         inner.frames_drawn,
         inner.frames_skipped_not_ready,
@@ -1078,6 +1647,15 @@ fn log_counter_line(world: &World) {
         inner.casters,
         inner.casters_invalid,
         inner.draws_recorded,
+        inner.skinned_casters,
+        inner.skinned_recorded,
+        inner.skinned_tally.player,
+        inner.skinned_tally.npc,
+        inner.skinned_tally.npc_off_by_dither,
+        inner.skinned_tally.other_skinned,
+        inner.skinned_invalid,
+        inner.skinned_tally.palettes,
+        inner.skinned_tally.joints,
     );
 }
 
@@ -1142,6 +1720,22 @@ fn init_shadow_resources(mut commands: Commands, render_device: Res<RenderDevice
             ),
         ),
     );
+    let skin_layout = BindGroupLayoutDescriptor::new(
+        "site_shadow_skin_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::VERTEX,
+            ((0, uniform_buffer_sized(true, std::num::NonZeroU64::new(PALETTE_WINDOW))),),
+        ),
+    );
+    commands.insert_resource(ShadowPaletteGpu {
+        buffer: render_device.create_buffer(&BufferDescriptor {
+            label: Some("site_shadow_palettes"),
+            size: PALETTE_WINDOW,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }),
+        capacity: PALETTE_WINDOW,
+    });
     commands.insert_resource(ShadowMapGpu {
         depth_texture: texture,
         depth_view,
@@ -1152,6 +1746,7 @@ fn init_shadow_resources(mut commands: Commands, render_device: Res<RenderDevice
         object_stride: align,
         object_binding_size: std::mem::size_of::<[Vec4; 4]>() as u64,
         depth_layout,
+        skin_layout,
     });
 }
 
@@ -1182,7 +1777,10 @@ impl Plugin for ShadowmapPlugin {
             .init_resource::<DepthPipelines>()
             .init_resource::<ShadowAccount>()
             .add_systems(RenderStartup, init_shadow_resources)
-            .add_systems(ExtractSchedule, extract_shadow_casters)
+            .add_systems(
+                ExtractSchedule,
+                (extract_shadow_casters, extract_skinned_casters).chain(),
+            )
             .add_systems(
                 Render,
                 prepare_shadow_draws.in_set(RenderSystems::PrepareResources),
