@@ -37,6 +37,26 @@ struct Package {
     definitions: AssetCache<Arc<TimelineDefinition>, 32>,
 }
 
+/// A directory of three-table timeline documents and its package keys.
+#[derive(Clone, Copy)]
+pub(crate) struct TimelineFamily {
+    root: &'static str,
+    prefix: &'static str,
+}
+
+impl TimelineFamily {
+    /// Furniture timelines (`mysekai/fixture_timeline/...` bundles).
+    pub(crate) const FIXTURE: Self = Self {
+        root: "fixture-timeline",
+        prefix: "mysekai__fixture_timeline__",
+    };
+    /// Timelines of site packages, such as a site's step items.
+    pub(crate) const SITE: Self = Self {
+        root: "site-timeline",
+        prefix: "mysekai__site__",
+    };
+}
+
 #[derive(Default)]
 pub(super) struct ActivityAssets {
     json: AssetCache<Handle<JsonAsset>, 96>,
@@ -158,10 +178,22 @@ impl ActivityAssets {
         package: &str,
         prefab: &str,
     ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        self.family_definition(world, TimelineFamily::FIXTURE, package, prefab)
+    }
+
+    /// One prefab's timeline from the three tables of `family`.
+    pub(super) fn family_definition(
+        &mut self,
+        world: &World,
+        family: TimelineFamily,
+        package: &str,
+        prefab: &str,
+    ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        let root = family.root;
         if package.contains('/')
             || package.contains('\\')
             || package.contains(':')
-            || !package.starts_with("mysekai__fixture_timeline__")
+            || !package.starts_with(family.prefix)
         {
             return Err(ProviderPending::new(
                 "timeline-route",
@@ -169,7 +201,7 @@ impl ActivityAssets {
             ));
         }
         for kind in ["tracks", "clips", "clip-targets"] {
-            self.json.get(&format!("fixture-timeline/{kind}/{package}.json"));
+            self.json.get(&format!("{root}/{kind}/{package}.json"));
         }
         let generation = Self::json_generation(world);
         // 快路：这份套件在当前代校验过 ⇒ 三份 json 都没被动过，不必再取、
@@ -182,15 +214,12 @@ impl ActivityAssets {
             // Request all three tables before reading the first, so a cold
             // package costs one load round instead of three in sequence.
             for kind in ["tracks", "clips", "clip-targets"] {
-                self.request_json(world, &format!("fixture-timeline/{kind}/{package}.json"));
+                self.request_json(world, &format!("{root}/{kind}/{package}.json"));
             }
             let text = [
-                self.json_text(world, &format!("fixture-timeline/tracks/{package}.json"))?,
-                self.json_text(world, &format!("fixture-timeline/clips/{package}.json"))?,
-                self.json_text(
-                    world,
-                    &format!("fixture-timeline/clip-targets/{package}.json"),
-                )?,
+                self.json_text(world, &format!("{root}/tracks/{package}.json"))?,
+                self.json_text(world, &format!("{root}/clips/{package}.json"))?,
+                self.json_text(world, &format!("{root}/clip-targets/{package}.json"))?,
             ];
             let unchanged = self.packages.get(package).is_some_and(|cached| {
                 cached

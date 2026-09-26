@@ -18,11 +18,23 @@ pub(super) struct Clock {
     player_end_applied: bool,
     previous_loop_active: bool,
     entered_end: Option<f64>,
+    /// A step item view turned its loop flag off (`ChangeLoopFlag(false)`).
+    /// No other owner sets it.
+    loop_flag_off: bool,
 }
 
 impl Clock {
     pub fn request_end(&mut self) {
         self.end_requested = true;
+    }
+
+    pub fn set_loop_flag(&mut self, state: bool) {
+        self.loop_flag_off = !state;
+    }
+
+    /// The next frame samples `time` (a view's `MoveEndTime`).
+    pub fn move_to(&mut self, time: f64) {
+        self.time = time;
     }
 
     pub fn advance(
@@ -64,7 +76,7 @@ impl Clock {
             unreachable!()
         };
         let active = clip.contains(self.sampled_time);
-        let loop_flag = looping && !self.end_requested;
+        let loop_flag = looping && !self.end_requested && !self.loop_flag_off;
 
         // TimelinePlayable only disables elements active on the previous frame
         // and evaluates the current point's intersection. A frame that jumps
