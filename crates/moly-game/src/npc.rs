@@ -23,6 +23,8 @@
 pub(crate) mod change_site;
 pub(crate) mod change_site_state;
 pub(crate) mod dispose;
+pub(crate) mod entry_probe;
+pub(crate) mod gate_entries;
 pub(crate) mod random_fixture_action;
 pub(crate) mod residency;
 
