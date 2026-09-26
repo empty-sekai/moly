@@ -49,13 +49,19 @@ pub(crate) struct CueVolume {
 
 impl CueVolume {
     pub(crate) fn linear(&self, bus: &VolumeBus) -> f32 {
+        self.linear_at(bus, bus.player_volume(self.player))
+    }
+
+    /// The same product with the player's volume given (the BGM manager's
+    /// fade writes the BGM player's volume).
+    pub(crate) fn linear_at(&self, bus: &VolumeBus, player_volume: f32) -> f32 {
         let category: f32 = match &self.categories {
             CategoryRefs::Cue(indices) => {
                 indices.iter().map(|index| bus.acf_volume(*index)).product()
             }
             CategoryRefs::Class(slot) => bus.slot_volume(*slot),
         };
-        bus.player_volume(self.player) * category * self.gain
+        player_volume * category * self.gain
     }
 }
 
