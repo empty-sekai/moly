@@ -923,7 +923,7 @@ fn advanced_scroll(system: &Runtime, scroll: f32, dt: f32) -> f32 {
 fn add_noise(system: &Runtime, lane: &mut Lane, scroll: f32) {
     if let Some(noise) = &system.noise {
         let state = moly_law::particle::noise::NoiseState { scroll };
-        let value = noise.law.sample(state, lane.position, noise.owner_seed, lane.age);
+        let value = noise.law.sample(state, lane.position, noise.owner_seed, lane.seed, lane.age);
         lane.animated = std::array::from_fn(|a| lane.animated[a] + value[a]);
     }
 }

@@ -1,4 +1,4 @@
-//! Qualified single-octave 3D/high particle Noise with a constant or curve strength.
+//! Qualified single-octave 3D/high particle Noise, one strength or separate axes, in any strength mode.
 //!
 //! Pure law: the consumer supplies owner seed, scroll and source simulation inputs.
 //! Transcribed from the current JP 6.8.1 libunity, along the call chain
@@ -17,20 +17,47 @@
 
 pub use super::schema::{NoiseParams, NoiseQuality};
 use super::curve::{curve_time_fmax, CurveSampler, CurveTime};
+use super::random::ParticleRandom;
 use super::MinMaxCurve;
 
 #[derive(Clone, Debug)]
 pub struct NoiseLaw {
     frequency: f32,
-    /// A finite constant or a mode 1 curve. `CalculateNoiseJob` evaluates the
-    /// strength per particle through `EvaluateThreaded` at the particle's age
-    /// (see [`NoiseLaw::sample`]); the two-constant and two-curve modes read
-    /// the job's own per-particle random stream, which is not compared, and
-    /// stay refused.
-    strength: CurveSampler,
+    /// The strength per output axis: x, y, z with separate axes, otherwise
+    /// the one strength (index 0) for all three. `CalculateNoiseJob`
+    /// evaluates each through `EvaluateThreaded` at the particle's age (see
+    /// [`NoiseLaw::sample`]), in any mode; the two-constant and two-curve
+    /// modes blend with the particle's own draws of the strength stream.
+    strength: [CurveSampler; 3],
+    separate_axes: bool,
     scroll_speed: f32,
     position_amount: f32,
     damping: bool,
+}
+
+/// The salt of the Noise strength stream: the job draws from
+/// `Rand(particle seed + salt)`, the first draw for one strength and the
+/// first three (x, y, z) with separate axes.
+const STRENGTH_SALT: u32 = 0x3edc_ba94;
+
+/// Test instrumentation: one named change to the law per replay arm.
+#[cfg(test)]
+pub(crate) mod arms {
+    use std::cell::Cell;
+    thread_local! { static ARM: Cell<Option<&'static str>> = const { Cell::new(None) }; }
+    pub fn set(arm: Option<&'static str>) {
+        ARM.with(|a| a.set(arm));
+    }
+    pub fn on(name: &str) -> bool {
+        ARM.with(|a| a.get() == Some(name))
+    }
+}
+#[cfg(not(test))]
+pub(crate) mod arms {
+    #[inline(always)]
+    pub fn on(_: &str) -> bool {
+        false
+    }
 }
 
 /// One instance per actual source particle system; survives individual births.
@@ -44,8 +71,8 @@ impl NoiseLaw {
         if p.dimensions != 3 || p.quality != NoiseQuality::High {
             return Err("noise dimensions/quality outside qualified 3D/high subset");
         }
-        if p.separate_axes || p.octaves != 1 || p.remap_enabled {
-            return Err("noise separate axes, octaves, or remap outside qualified subset");
+        if p.octaves != 1 || p.remap_enabled {
+            return Err("noise octaves or remap outside qualified subset");
         }
         let constant = |x: &MinMaxCurve| match x {
             MinMaxCurve::Constant(v) if v.is_finite() => Ok(*v),
@@ -57,13 +84,22 @@ impl NoiseLaw {
         if !p.frequency.is_finite() || p.frequency <= 0.0 {
             return Err("noise nonpositive/nonfinite frequency outside qualified subset");
         }
-        let strength = match &p.strength {
-            MinMaxCurve::Curve { .. } => CurveSampler::new(&p.strength, CurveTime::Normalized)?,
-            other => CurveSampler::Constant(constant(other)?),
+        let strength = |curve: &MinMaxCurve| match curve {
+            MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. } => CurveSampler::new(curve, CurveTime::Normalized),
+            MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite() =>
+                Ok(CurveSampler::TwoConstants { min: *min, max: *max }),
+            other => constant(other).map(CurveSampler::Constant),
+        };
+        let x = strength(&p.strength)?;
+        let (y, z) = if p.separate_axes {
+            (strength(&p.strength_y)?, strength(&p.strength_z)?)
+        } else {
+            (x.clone(), x.clone())
         };
         Ok(Self {
             frequency: p.frequency.max(f32::from_bits(0x3586_37bd)),
-            strength,
+            strength: [x, y, z],
+            separate_axes: p.separate_axes,
             scroll_speed: constant(&p.scroll_speed)?,
             position_amount: constant(&p.position_amount)?,
             damping: p.damping,
@@ -84,13 +120,18 @@ impl NoiseLaw {
     /// Contribution added to the particles' animated velocity arrays (x, y
     /// and z), before native motion integration. Position is in particle
     /// simulation space. owner_seed is the source system's random seed from
-    /// its read-only state, never the individual birth seed. Constant curves
-    /// ignore individual particle seeds.
+    /// its read-only state, never the individual birth seed; particle_seed is
+    /// the particle's own seed, which only a two-constant or two-curve
+    /// strength reads.
     /// `age_percent` is the particle's age before this frame's lifetime
     /// advance (the job reads the age array before SimulateParticles writes
     /// it; a newborn reads 0). A strength curve is evaluated at
     /// `fmax(age_percent * 0.01, +0)`; a constant ignores it.
-    pub fn sample(&self, state: NoiseState, position: [f32; 3], owner_seed: u32,
+    /// With separate axes each output axis takes its own strength (the
+    /// job's separate-axes instantiation evaluates the three strengths with
+    /// the particle's first three strength draws); otherwise one strength
+    /// scales all three.
+    pub fn sample(&self, state: NoiseState, position: [f32; 3], owner_seed: u32, particle_seed: u32,
         age_percent: f32) -> [f32; 3] {
         let shift = owner_offset(owner_seed);
         let [x, y, z] = std::array::from_fn(|i| position[i] + shift[i] * 100.0);
@@ -99,17 +140,31 @@ impl NoiseLaw {
         let c = perlin_xy([y, x + 100.0, z + state.scroll], self.frequency);
         // CalculateNoiseJob: damping uses the refined ARM
         // reciprocal estimate of the clamped frequency, not host division.
-        let scale = if self.damping {
+        let damping = if self.damping {
             super::velocity::orbital_reciprocal(self.frequency)
         } else {
             1.0
-        } * self.strength.evaluate(curve_time_fmax(age_percent), 0.0);
+        };
+        let time = curve_time_fmax(age_percent);
+        let salt = if arms::on("strengthSaltZero") { 0 } else { STRENGTH_SALT };
+        let scale: [f32; 3] = if self.separate_axes && !arms::on("separateUsesX") {
+            let random = if arms::on("strengthSharedDraw") {
+                [ParticleRandom::sample(particle_seed, salt); 3]
+            } else {
+                ParticleRandom::sample3(particle_seed, salt)
+            };
+            let axis_of = |axis: usize| if arms::on("strengthAxesRotated") { (axis + 1) % 3 } else { axis };
+            std::array::from_fn(|axis| damping * self.strength[axis_of(axis)].evaluate(time, random[axis]))
+        } else {
+            let random = ParticleRandom::sample(particle_seed, salt);
+            [damping * self.strength[0].evaluate(time, random); 3]
+        };
         // Source derivative pairing is deliberate; neither three independent
         // scalar noise calls nor a random displacement has this curl law.
         [
-            (c[0] - b[1]) * scale * self.position_amount,
-            (a[0] - c[1]) * scale * self.position_amount,
-            (b[0] - a[1]) * scale * self.position_amount,
+            (c[0] - b[1]) * scale[0] * self.position_amount,
+            (a[0] - c[1]) * scale[1] * self.position_amount,
+            (b[0] - a[1]) * scale[2] * self.position_amount,
         ]
     }
 }
@@ -325,7 +380,7 @@ mod tests {
             for row in call.get("particles").unwrap().as_array().unwrap() {
                 let row: Vec<u32> = row.as_array().unwrap().iter().map(word).collect();
                 let position = [1, 2, 3].map(|i| f32::from_bits(row[i]));
-                let sample = law.sample(state, position, owner, f32::from_bits(row[0]));
+                let sample = law.sample(state, position, owner, 0, f32::from_bits(row[0]));
                 for axis in 0..3 {
                     // The job adds onto a zeroed animated lane.
                     assert!(same(sample[axis] + 0.0, row[5 + axis]),
@@ -371,6 +426,80 @@ mod tests {
         assert_eq!((cases.len(), optimized), (1500, 411));
     }
 
+    /// Separate-axes and blended strengths against the native NoiseModule::Update
+    /// (the separate-axes and single-strength job instantiations, selected by
+    /// the module's byte): every particle's three animated lanes bit for bit.
+    /// Each named change of the strength reading must change a lane, and so
+    /// must the bit-flipped receipt; the native byte-clear control must differ
+    /// and the jobs read nothing a static initializer writes.
+    #[test]
+    #[ignore = "MOLY_NOISE_AXES_NATIVE must identify the current JP separate-axes Noise receipt"]
+    fn separate_axes_noise_matches_native_update() {
+        let receipt = read("MOLY_NOISE_AXES_NATIVE");
+        assert_eq!(receipt.get("sourceSha256").unwrap().as_str(), Some(SOURCE));
+        let replay = |receipt: &Value| -> (usize, usize) {
+            let (mut lanes, mut red) = (0, 0);
+            for case in receipt.get("cases").unwrap().as_array().unwrap() {
+                let block = case.get("block").unwrap();
+                let curve = |key: &str| crate::particle::schema::min_max_curve(block.get(key), key).unwrap();
+                let constant = MinMaxCurve::Constant;
+                let params = NoiseParams {
+                    separate_axes: case.get("separateByte").unwrap().as_f64().unwrap() != 0.0,
+                    strength: curve("strength"),
+                    strength_y: curve("strengthY"),
+                    strength_z: curve("strengthZ"),
+                    frequency: number(block.get("frequency").unwrap()),
+                    damping: block.get("damping").unwrap().as_bool().unwrap(),
+                    octaves: 1,
+                    octave_multiplier: 0.5,
+                    octave_scale: 2.0,
+                    quality: NoiseQuality::High,
+                    dimensions: 3,
+                    scroll_speed: constant(number(block.get("scrollSpeed").unwrap())),
+                    remap_enabled: false,
+                    remap: constant(1.0),
+                    remap_y: constant(1.0),
+                    remap_z: constant(1.0),
+                    position_amount: constant(number(block.get("positionAmount").unwrap())),
+                    rotation_amount: constant(0.0),
+                    size_amount: constant(0.0),
+                };
+                let law = NoiseLaw::from_params(&params).expect("receipt block admitted");
+                for call in case.get("calls").unwrap().as_array().unwrap() {
+                    let owner = word(call.get("owner").unwrap());
+                    let state = NoiseState { scroll: f32::from_bits(word(call.get("scroll").unwrap())) };
+                    for row in call.get("particles").unwrap().as_array().unwrap() {
+                        let row: Vec<u32> = row.as_array().unwrap().iter().map(word).collect();
+                        let position = [1, 2, 3].map(|i| f32::from_bits(row[i]));
+                        let sample = law.sample(state, position, owner, row[4], f32::from_bits(row[0]));
+                        lanes += 1;
+                        red += usize::from((0..3).any(|axis| !same(sample[axis] + 0.0, row[5 + axis])));
+                    }
+                }
+            }
+            (lanes, red)
+        };
+        let (lanes, red) = replay(&receipt);
+        let mut arms_red = Vec::new();
+        for arm in ["strengthSharedDraw", "strengthAxesRotated", "strengthSaltZero", "separateUsesX"] {
+            arms::set(Some(arm));
+            arms_red.push((arm, replay(&receipt).1));
+            arms::set(None);
+        }
+        let flipped = std::env::var_os("MOLY_NOISE_AXES_BITFLIP").map(|_| replay(&read("MOLY_NOISE_AXES_BITFLIP")).1);
+        let controls = receipt.get("controls").unwrap();
+        let control = |key: &str| controls.get(key).unwrap().as_f64().unwrap() as u64;
+        eprintln!("separate-axes noise: {lanes} lanes, {red} mismatched; arms red {arms_red:?}; bit-flipped receipt {flipped:?}; \
+            byte-clear control {} lanes differ; writable-section reads {}, rodata reads {}",
+            control("k1SeparateByteClearDifferingLanes"), control("writableSectionReads"), control("rodataReads"));
+        assert!(lanes > 0);
+        assert_eq!(red, 0);
+        assert!(arms_red.iter().all(|(_, n)| *n > 0), "every arm must mismatch: {arms_red:?}");
+        assert!(flipped.is_none_or(|n| n > 0), "the bit-flipped receipt must mismatch");
+        assert!(control("k1SeparateByteClearDifferingLanes") > 0 && control("rodataReads") > 0);
+        assert_eq!(control("writableSectionReads"), 0);
+    }
+
     #[test]
     #[ignore = "MOLY_SNOW_NOISE_NATIVE_REPLAY must identify the current JP snow Noise job receipt"]
     fn current_snow_noise_job_matches_bits() {
@@ -379,7 +508,9 @@ mod tests {
         // Serialized snow_pt_01 subset: high 3D, one octave, damping, no remap.
         let law = NoiseLaw {
             frequency: 0.5,
-            strength: CurveSampler::Constant(f32::from_bits(0x3e4c_cccd)),
+            strength: [CurveSampler::Constant(f32::from_bits(0x3e4c_cccd)), CurveSampler::Constant(f32::from_bits(0x3e4c_cccd)),
+                CurveSampler::Constant(f32::from_bits(0x3e4c_cccd))],
+            separate_axes: false,
             scroll_speed: 1.0,
             position_amount: 1.0,
             damping: true,
@@ -397,7 +528,7 @@ mod tests {
             let animated = output.get("animated").unwrap().as_array().unwrap();
             for (lane, (position, expected)) in positions.iter().zip(animated).enumerate() {
                 let position = position.as_array().unwrap();
-                let sample = law.sample(state, [0, 1, 2].map(|i| number(&position[i])), owner, 0.0);
+                let sample = law.sample(state, [0, 1, 2].map(|i| number(&position[i])), owner, 0, 0.0);
                 let expected = expected.as_array().unwrap();
                 for axis in 0..3 {
                     // Job adds positionAmount * noise onto the zeroed animated lane.

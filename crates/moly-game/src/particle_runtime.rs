@@ -1332,7 +1332,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             let source_position = crate::particle_geometry::reflect(
                 Vec3::from_array(system.pool[index].position)).to_array();
             crate::particle_geometry::reflect(Vec3::from_array(
-                noise.law.sample(noise.state, source_position, noise.owner_seed,
+                noise.law.sample(noise.state, source_position, noise.owner_seed, system.side[index].seed,
                     system.pool[index].age_percent),
             )).to_array()
         });

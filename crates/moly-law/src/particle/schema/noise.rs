@@ -131,16 +131,11 @@ mod tests {
     #[test]
     fn unsupported_authored_controls_survive_decoding_and_fail_only_the_law_gate() {
         for source in [
-            SOURCE.replace("\"separateAxes\":false", "\"separateAxes\":true"),
             SOURCE.replace("\"remapEnabled\":false", "\"remapEnabled\":true"),
             SOURCE.replace("\"octaves\":1", "\"octaves\":3"),
             SOURCE.replace(
                 "\"quality\":\"high\",\"dimensions\":3",
                 "\"quality\":\"low\",\"dimensions\":1",
-            ),
-            SOURCE.replace(
-                "\"strength\":{\"mode\":\"constant\",\"value\":0.3}",
-                "\"strength\":{\"mode\":\"twoConstants\",\"min\":0.1,\"max\":0.9}",
             ),
         ] {
             let params = decode(&source).expect("authored unsupported input must remain decodable");
