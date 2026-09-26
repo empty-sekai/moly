@@ -1,5 +1,6 @@
 //! 资产根的解析——全树唯一允许的拒绝点。
-//! native 读 `MOLY_ASSET_ROOT`；web 没有 env，读页面的 `?assets=` URL 前缀。
+//! native 读 `MOLY_ASSET_ROOT`；web 没有 env，读页面的 `?assets=` URL 前缀，
+//! 浏览器游戏读启动种子里的同名字段，两条路走同一套准入。
 //!
 //! web 选「URL 参数」不选「同目录约定」：约定无法同步判「缺」——要探测就得
 //! 发请求，失败会散成逐资产 404，唯一拒绝点就没了；参数缺了当场拒绝。
@@ -204,7 +205,7 @@ pub fn resolve() -> Result<AssetSource, String> {
     }
 }
 
-/// Admission of the page query's asset inputs.
+/// One admission for the page query and the game seed.
 #[cfg(target_arch = "wasm32")]
 fn resolve_selection(
     base: String,
@@ -271,5 +272,18 @@ pub fn resolve() -> Result<AssetSource, String> {
         params.get("asset_catalog"),
         params.get("resource_origin").as_deref(),
         params.get("resource_base").as_deref(),
+    )
+}
+
+/// The browser game's asset source: the seed's fields mean what the
+/// same-named page parameters mean, and pass the same admission.
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_seed(seed: &moly_game::GameSeed) -> Result<AssetSource, String> {
+    resolve_selection(
+        seed.assets.clone(),
+        seed.packs,
+        seed.asset_catalog.clone(),
+        seed.resource_origin.as_deref(),
+        seed.resource_base.as_deref(),
     )
 }

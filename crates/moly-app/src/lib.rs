@@ -13,13 +13,35 @@ use bevy::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
+/// What one start installs. The native window and the legacy browser pages
+/// read their inputs from env or the page URL and carry developer tools; the
+/// browser game reads only its seed and carries none.
+enum StartMode {
+    Library,
+    #[cfg(target_arch = "wasm32")]
+    Stage,
+    #[cfg(target_arch = "wasm32")]
+    Game(GameStart),
+}
+
+/// A seed already admitted by `start_game`, with its asset source.
+#[cfg(target_arch = "wasm32")]
+struct GameStart {
+    seed: moly_game::GameSeed,
+    source: moly_assets::AssetSource,
+}
+
 /// 起一次 app。资产源与站点选择在这里解析、经 `moly_game::app` 装上——
 /// 消费方读资源，不要再各自去读 env 或 URL（拒绝点全树只在 `asset_source`
 /// 与 `site_request` 两处入口）。
 fn run_app(
     #[cfg(target_arch = "wasm32")] web_render_settings: bevy::render::settings::WgpuSettings,
-    #[cfg(target_arch = "wasm32")] stage: bool,
+    mode: StartMode,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    if let StartMode::Game(start) = mode {
+        return run_game(web_render_settings, start);
+    }
     let source = match asset_source::resolve() {
         Ok(source) => source,
         Err(message) => fail_loud(&message),
@@ -53,22 +75,40 @@ fn run_app(
     #[cfg(target_arch = "wasm32")]
     {
         moly_game::configure_browser_library(&mut app);
-        if stage { moly_game::configure_browser_stage(&mut app); }
+        if matches!(mode, StartMode::Stage) { moly_game::configure_browser_stage(&mut app); }
         attach_canvas(&mut app);
-        app.add_systems(Startup, || {
-            if let Some(window) = web_sys::window() {
-                if let Ok(event) = web_sys::Event::new("moly-ready") {
-                    let _ = window.dispatch_event(&event);
-                }
-            }
-        });
+        announce_ready(&mut app);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let StartMode::Library = mode;
     app.run();
+}
+
+/// The browser game: seed inputs only, no library or stage configuration,
+/// no player-data import parameters and no developer tools.
+#[cfg(target_arch = "wasm32")]
+fn run_game(web_render_settings: bevy::render::settings::WgpuSettings, start: GameStart) {
+    let mut app = moly_game::app(start.source, site_request::game(), web_render_settings);
+    moly_game::configure_browser_game(&mut app, start.seed);
+    attach_canvas(&mut app);
+    announce_ready(&mut app);
+    app.run();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn announce_ready(app: &mut App) {
+    app.add_systems(Startup, || {
+        if let Some(window) = web_sys::window() {
+            if let Ok(event) = web_sys::Event::new("moly-ready") {
+                let _ = window.dispatch_event(&event);
+            }
+        }
+    });
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run() {
-    run_app();
+    run_app(StartMode::Library);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -107,18 +147,33 @@ fn attach_canvas(app: &mut App) {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue> {
-    start_browser(backend, writable, false)
+    start_browser(backend, writable, StartMode::Library)
 }
 
 /// Read-only stage entry; no second player/runtime is installed.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn start_stage(backend: &str) -> Result<(), wasm_bindgen::JsValue> {
-    start_browser(backend, false, true)
+    start_browser(backend, false, StartMode::Stage)
+}
+
+/// Starts the browser game from its seed, synchronously inside the trusted
+/// click. A seed refusal returns before anything is installed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn start_game(backend: &str, seed: &str) -> Result<(), wasm_bindgen::JsValue> {
+    let refuse = |error: String| wasm_bindgen::JsValue::from_str(&error);
+    let mut seed = moly_game::parse_game_seed(seed).map_err(refuse)?;
+    let source = asset_source::resolve_seed(&seed).map_err(refuse)?;
+    let settings = render_backend::settings(backend).map_err(refuse)?;
+    install_panic_hook();
+    moly_game::install_game_storage(&mut seed);
+    run_app(settings, StartMode::Game(GameStart { seed, source }));
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
-fn start_browser(backend: &str, writable: bool, stage: bool) -> Result<(), wasm_bindgen::JsValue> {
+fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         // Disable writes before notifying JavaScript; the host may release its lease.
         moly_game::set_browser_storage_writable(false);
@@ -137,10 +192,15 @@ fn start_browser(backend: &str, writable: bool, stage: bool) -> Result<(), wasm_
         }
         console_error_panic_hook::hook(info);
     }));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_browser(backend: &str, writable: bool, mode: StartMode) -> Result<(), wasm_bindgen::JsValue> {
+    install_panic_hook();
     let settings = render_backend::settings(backend)
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
     set_storage_writable(writable);
-    run_app(settings, stage);
+    run_app(settings, mode);
     Ok(())
 }
 
@@ -150,10 +210,22 @@ pub fn set_storage_writable(writable: bool) {
     moly_game::set_browser_storage_writable(writable);
 }
 
+/// Library and player-data intents belong to the legacy pages.
+#[cfg(target_arch = "wasm32")]
+fn refuse_in_game() -> Result<(), wasm_bindgen::JsValue> {
+    if moly_game::game_mode_active() {
+        return Err(wasm_bindgen::JsValue::from_str(
+            "This command belongs to the content library pages, not to the game",
+        ));
+    }
+    Ok(())
+}
+
 /// Enqueue one validated browser intent; the normal Bevy input phase owns it.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn library_command(command: &str) -> Result<(), wasm_bindgen::JsValue> {
+    refuse_in_game()?;
     moly_game::library_command(command).map_err(|error| wasm_bindgen::JsValue::from_str(&error))
 }
 
@@ -178,6 +250,7 @@ pub fn library_diagnostics() -> String { moly_game::library_diagnostics() }
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn player_data_command(operation: &str, region: &str, json: &str) -> Result<(), wasm_bindgen::JsValue> {
+    refuse_in_game()?;
     moly_game::player_data::browser_command(operation, region, json)
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
 }
@@ -194,4 +267,28 @@ pub fn player_data_snapshot() -> String { moly_game::player_data::browser_snapsh
 #[wasm_bindgen]
 pub fn perf_snapshot(frames: Option<u32>) -> String {
     moly_perf::snapshot_json(frames.map_or(moly_perf::DEFAULT_RECENT, |frames| frames as usize))
+}
+
+/// Enqueue one validated game intent (lifecycle, input capture, persist
+/// acknowledgement); refused before `start_game`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn game_command(json: &str) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::game_command(json).map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+/// The game's versioned projection: entry, storage lease, persistence,
+/// memory and named refusals.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn game_snapshot() -> String {
+    moly_game::game_snapshot()
+}
+
+/// The settings document of the newest revision above `after_revision`, or
+/// an empty string when there is none.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn game_take_persist(after_revision: u32) -> String {
+    moly_game::game_take_persist(after_revision)
 }
