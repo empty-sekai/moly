@@ -81,11 +81,11 @@ const FPS_MAX_PITCH: f32 = 75.0;
 /// 与模型 offset（照常作用于取景点与眼位）是两个量。
 const FPS_CAMERA_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 0.1, 0.0);
 
-/// 转场补间时长（源字面量）：FPS 进入 0.2s；退出按站点类目分两支——
-/// 采集/配送走继承支 0.5s，住宅走搬运 case 16 支 0.1s。缓动一律
-/// OutQuad（源 EASE_BASIC = 6，DG.Tweening.Ease 枚举位序）。
+/// 转场补间时长（源字面量）：FPS 进入 0.2s；退出是 Normal 的 OnEnter——
+/// 继承支 0.5s（[`INHERIT_TWEEN_SECS`]），否则 TransferCameraSettings case
+/// 16 支 0.1s。缓动一律 OutQuad（源 EASE_BASIC = 6，DG.Tweening.Ease 枚举
+/// 位序）。
 const FPS_ENTER_TWEEN_SECS: f32 = 0.2;
-pub(crate) const FPS_EXIT_TWEEN_SECS_INHERIT: f32 = 0.5;
 const FPS_EXIT_TWEEN_SECS_CASE16: f32 = 0.1;
 
 /// 真源场地相机的态（`FieldCamera.CurrentState` 的类型，闭集 21 值，
@@ -154,12 +154,12 @@ impl Default for FpsViewMemory {
     }
 }
 
-/// Normal 态的转场记忆（源 NormalCameraState 的两份存储并一）：Normal 态
-/// OnExit 把私有镜像 {LookAt, Distance, Yaw, Pitch} 与站点转场表
-/// `cameraTransferData[siteId]` 的 {pitch, yaw, fov, distance} **同刻同值**
-/// 地写走，本仓单槽承载两语义。site 键等价源字典的站点分槽——继承支读侧
-/// 按站点命中，miss 走源 fallback 形状（构造体 initPitch + 当前模型值）；
-/// 住宅 case 16 支读的是不分站的私有镜像，同一槽不看键。
+/// The transfer entry the last `NormalCameraState.OnExit` wrote (with the
+/// live LookAt), under the site it left. Normal's own state is
+/// [`NormalCameraPrivate`], [`NormalTransferData`] (every site's entry) and
+/// [`NormalCameraTweenComplete`]; this single slot stays for its readers
+/// outside the camera (the first-person lens baseline, the talk and entry
+/// flows, the library's camera snapshot).
 #[derive(Resource, Debug, Clone)]
 pub struct NormalCameraMemory {
     pub site: String,
@@ -201,6 +201,13 @@ pub enum TweenCompletion {
     /// distance. It writes neither the shared model nor Normal's mirror, and
     /// the tone state has no reset flag.
     HarvestToneReset { distance: f32 },
+    /// The callback of `NormalCameraState.OnEnter`'s inherit branch: Normal's
+    /// private distance ([`FieldCameraModel::gestured_distance`]) takes the
+    /// transfer entry's distance.
+    NormalInherit { distance: f32 },
+    /// The callback of `NormalCameraState.TransferCameraSettings`:
+    /// `_isCompleteCameraTween` is set again ([`NormalCameraTweenComplete`]).
+    NormalTransfer,
 }
 
 /// `HarvestToneCameraState._model`: the tone state's private copy of the
@@ -572,8 +579,11 @@ pub(crate) fn parse(
         setting.rot_sensitivity
     );
     // The state machine is built right after SetupModel: the tone state's
-    // private model is a copy of the model the setting just built.
+    // and Normal's private models are copies of the model the setting just
+    // built. The product starts in Normal as if its OnEnter had run.
     commands.insert_resource(HarvestToneModel(FieldCameraModel::from_setting(&setting)));
+    commands.insert_resource(NormalCameraPrivate::from_setting(&setting));
+    commands.insert_resource(NormalCameraTweenComplete(true));
     commands.insert_resource(setting);
     commands.insert_resource(params);
     commands.remove_resource::<CameraJsonHandle>();
@@ -915,7 +925,9 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// 即回 Normal，源 `FPSCameraState.OnPinch` 没有缩放支——FPS 态下的
 /// 「继续放大」就是进入转场本身：距离 1.7→0.15 的位置前移，FOV 不动）。
 /// Moly 的近距查看扩展允许进入 FPS 后继续滚轮缩小 FOV，先还原 FOV 再退出。
-/// 进出迁移仍逐行对源（[`enter_fps`] / [`exit_fps`]）。
+/// 进出迁移走 [`change_state`]：Normal 的 OnExit + [`fps_on_enter`]，
+/// [`fps_on_exit`] + [`normal_on_enter`]（TransferCameraSettings case 16 或
+/// 继承支）。
 ///
 /// 不迁（逐条挂账）：双拖手势源两态本身就是空方法；源 FPS OnEnter 的 `SetLock(0)` /
 /// `SetActiveUI(0)` / `SiteObjectManager.ShowAll(0)` / `ResetHouseDither(1)`
@@ -927,8 +939,8 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// 进入靠的是相机态自身切到 Talk，而对话相机不在本仓的态集里。FPS 态下
 /// 站点切换未定义（源里站点搬运走相机态 6/7 结构性地先退出 FPS；本仓
 /// `frame_site` 会重建模型而态不回退——本单不处理，具名在案）。
-/// FPS 进出迁移的取数面（相机面板 · 站点选/当前站 · 玩家可见性 · 相机
-/// 投影 · 玩家行为态——进入守卫的第二条读它）打包成一个参数：
+/// FPS 进出迁移的取数面（玩家 · 相机投影 · 玩家行为态——进入守卫的第二条
+/// 读它）打包成一个参数：
 /// `apply_input` 的裸参数已到 `SystemParam` 元组的
 /// 上限（16），逐个展开会让整个系统静默失去 `IntoSystem`（错误只在
 /// schedule 的 `.chain()` 处冒出来）。仅进入/退出支消费；拖拽/缩放的
@@ -938,9 +950,6 @@ pub struct FpsTransitionCtx<'w, 's> {
     dialogs: Res<'w, crate::menu_shell::ShellDialogState>,
     layers: Res<'w, crate::ui_layers::UiLayerStack>,
     library: Res<'w, crate::content_library::ContentLibrary>,
-    setting: Option<Res<'w, CameraSetting>>,
-    site: Option<Res<'w, SiteSelection>>,
-    active: Option<Res<'w, SiteActive>>,
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,
     players: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
@@ -957,9 +966,8 @@ pub(crate) fn apply_input(
     edits: Res<crate::fixture_edit::EditSessionActive>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     tween: Option<Res<CameraTween>>,
-    mut state: ResMut<FieldCameraState>,
+    state: Res<FieldCameraState>,
     mut fps_view: ResMut<FpsViewMemory>,
-    prev_site: Res<PrevSiteType>,
     memory: Option<Res<NormalCameraMemory>>,
     mut transition: FpsTransitionCtx,
     mut smoke_entered: Local<bool>,
@@ -1082,27 +1090,12 @@ pub(crate) fn apply_input(
             CameraStateType::Normal => {
                 if can_switch_to_fps(model, player.is_some(), v13, &transition.avatar) {
                     // 进入支：当帧不再缩放（源 ChangeState 后直接 return）。
-                    // 写面 = 当前站（快照键 + 室内判）· 玩家可见性 · 相机投影
-                    // （FOV 起值捕获）；进入界来自 FPS 常量，不读面板。
-                    let (Some(site), Some(active), Some((pg, pv)), Some(projection)) = (
-                        transition.site.as_deref(),
-                        transition.active.as_deref(),
-                        player,
-                        transition.cameras.single_mut().ok(),
-                    ) else {
-                        return; // 站点/相机未立：FPS 迁移的写面不全，让位下帧
-                    };
-                    enter_fps(
-                        &mut commands,
-                        model,
-                        &mut state,
-                        active,
-                        site.is_room(),
-                        pg.translation(),
-                        pv,
-                        &mut fps_view,
-                        perspective_fov_deg(&projection),
-                    );
+                    // ChangeState(FPS): Normal's OnExit, then FPS's OnEnter
+                    // ([`change_state`]), applied before this frame's follow.
+                    commands.queue(|world: &mut World| {
+                        change_state(world, CameraStateType::Fps, "camera-fps");
+                    });
+                    return;
                 } else {
                     pinch_zoom(model, pinch, config);
                 }
@@ -1129,27 +1122,13 @@ pub(crate) fn apply_input(
                     }
                 }
                 if v13 > 0.0 {
-                    // 退出支（捏合张开方向）。FPS OnPinch 仅此一支。
-                    let (Some(setting), Some(active), Some((pg, pv)), Some(projection)) = (
-                        transition.setting.as_deref(),
-                        transition.active.as_deref(),
-                        player,
-                        transition.cameras.single_mut().ok(),
-                    ) else {
-                        return;
-                    };
-                    exit_fps(
-                        &mut commands,
-                        model,
-                        &mut state,
-                        setting,
-                        active,
-                        &prev_site.0,
-                        pg.translation(),
-                        pv,
-                        memory.as_deref(),
-                        perspective_fov_deg(&projection),
-                    );
+                    // 退出支（捏合张开方向）。FPS OnPinch 仅此一支:
+                    // ChangeState(Normal), FPS's OnExit then Normal's OnEnter
+                    // (TransferCameraSettings case 16 or the inherit branch).
+                    commands.queue(|world: &mut World| {
+                        change_state(world, CameraStateType::Normal, "camera-fps");
+                    });
+                    return;
                 } else {
                     info!(
                         "[camera-fps] FPS 态捏合 Δ{:.1}px：无缩放支（源 OnPinch 仅反向退出支），距离保持 {:.2}",
@@ -1504,50 +1483,369 @@ fn fps_drag(model: &mut FieldCameraModel, fps: &mut FpsViewMemory, dx: f32, dy: 
     }
 }
 
-/// 源 `FPSCameraState.OnEnter`（配上前一刻的 `NormalCameraState.OnExit`）
-/// 的进入帧全序：快照双写 → 玩家隐 → 私有偏航捕获 → 取景点直写 →
-/// 界钳 → 进入补间 → 换态。
-///
-/// 不迁（挂账，逐条见 [`apply_input`] 文档）：SetLock、SetActiveUI、
-/// ShowAll、ResetHouseDither；玩家隐用可见性直写替代 dither 淡出。
-#[allow(clippy::too_many_arguments)]
-fn enter_fps(
-    commands: &mut Commands,
-    model: &mut FieldCameraModel,
-    state: &mut FieldCameraState,
-    active: &SiteActive,
-    is_room: bool,
-    player_pos: Vec3,
-    mut player_visibility: Mut<Visibility>,
-    fps: &mut FpsViewMemory,
-    camera_fov_deg: f32,
-) {
-    // 进入帧快照 = 源 OnExit 的两份同刻双写：私有镜像 {LookAt, Distance,
-    // Yaw, Pitch}（flag 置位时同步）与转场表 {pitch, yaw, fov, distance}
-    // （无条件写）。距离此刻已钳在下界（进入条件的位精确相等）。
-    commands.insert_resource(NormalCameraMemory {
-        site: active.site_type.clone(),
+/// `NormalCameraState._model`: Normal's private copy of the field camera's
+/// model, taken when the camera's state machine is built (the setting's
+/// values, LookAt zero). Its distance is the shared model's
+/// [`FieldCameraModel::gestured_distance`] (the pinch writes it there and the
+/// drag coupling reads it); the other fields the state writes back and reads
+/// are here. Its distance and pitch bounds and its offset are never written
+/// after the copy, so Normal's OnEnter restores them from the setting.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct NormalCameraPrivate {
+    pub(crate) look_at: Vec3,
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+    pub(crate) fov: f32,
+}
+
+impl NormalCameraPrivate {
+    fn from_setting(setting: &CameraSetting) -> Self {
+        Self {
+            look_at: Vec3::ZERO,
+            yaw: setting.init_yaw,
+            pitch: setting.init_pitch,
+            fov: setting.fov,
+        }
+    }
+}
+
+/// `NormalCameraState._isCompleteCameraTween`: set by Normal's OnEnter,
+/// cleared when `TransferCameraSettings` starts its tween and set again by
+/// that tween's callback. A newer camera tween kills the transfer tween
+/// without its callback, so the flag then stays clear until the next OnEnter.
+/// Normal's OnExit keeps the private model while it is clear, and Normal's
+/// follow runs at the fixed per-frame factor while it is clear.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct NormalCameraTweenComplete(pub(crate) bool);
+
+/// `NormalCameraState._cameraTransferData`: Normal's OnExit stores the live
+/// pitch, yaw, FOV and distance under the current site; the inherit branch
+/// of its OnEnter reads the current site's entry. Keyed by site type (one
+/// site per type here; the source keys by site id).
+#[derive(Resource, Default)]
+pub(crate) struct NormalTransferData(pub(crate) std::collections::HashMap<String, NormalCameraMemory>);
+
+fn camera_fov(world: &mut World) -> Option<f32> {
+    let mut cameras = world.query_filtered::<&Projection, With<Camera3d>>();
+    cameras.single(world).ok().map(perspective_fov_deg)
+}
+
+fn player_view_position(world: &mut World) -> Option<Vec3> {
+    let mut players = world.query_filtered::<&GlobalTransform, With<AvatarRoot>>();
+    players.single(world).ok().map(GlobalTransform::translation)
+}
+
+/// `NormalCameraState.IsInheritCameraSetting` with the previous camera
+/// state: a harvest or delivery site inherits unless the camera comes back
+/// from LearnSiteEnvironment (17); a housing site inherits after one of the
+/// five outdoor harvest site types ([`is_inherit_camera_setting`]).
+pub(crate) fn is_inherit(category: &str, prev_site_type: &str, prev: CameraStateType) -> bool {
+    if matches!(category, "harvest" | "delivery") {
+        prev != CameraStateType::LearnSiteEnvironment
+    } else {
+        is_inherit_camera_setting(category, prev_site_type)
+    }
+}
+
+/// `NormalCameraState.IsInheritCameraSetting` for a caller whose previous
+/// camera state is never LearnSiteEnvironment (17): a harvest or delivery
+/// site inherits; a housing site inherits after one of the five outdoor
+/// harvest site types (the source compares 4 <= PrevSiteType <= 8). The
+/// category and site type strings are the source enum names. [`is_inherit`]
+/// takes the previous state as well.
+pub(crate) fn is_inherit_camera_setting(category: &str, prev_site_type: &str) -> bool {
+    if matches!(category, "harvest" | "delivery") {
+        true
+    } else {
+        matches!(
+            prev_site_type,
+            "grassland" | "shore" | "flower_garden" | "memorial_place" | "festival_garden"
+        )
+    }
+}
+
+/// `NormalCameraState.OnExit` at `site`: while `_isCompleteCameraTween` is
+/// set, the private model takes the live LookAt, distance, yaw and pitch;
+/// the transfer entry of the site takes the live pitch, yaw, FOV and
+/// distance (always). The reset flag it clears is the reset tween's kind
+/// here ([`CameraTween::is_normal_reset`]); the player's dither value has no
+/// counterpart. False without a camera model.
+pub(crate) fn normal_on_exit(world: &mut World, site: &str) -> bool {
+    let complete = world
+        .get_resource::<NormalCameraTweenComplete>()
+        .map_or(true, |flag| flag.0);
+    let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() else {
+        return false;
+    };
+    if complete {
+        model.gestured_distance = model.distance;
+    }
+    let model = model.clone();
+    if complete {
+        if let Some(mut private) = world.get_resource_mut::<NormalCameraPrivate>() {
+            private.look_at = model.look_at;
+            private.yaw = model.yaw;
+            private.pitch = model.pitch;
+        }
+    }
+    let snapshot = NormalCameraMemory {
+        site: site.to_owned(),
         look_at: model.look_at,
         distance: model.distance,
         yaw: model.yaw,
         pitch: model.pitch,
         fov: model.fov,
+    };
+    info!(
+        "[camera] Normal.OnExit at {site}: private model {} (tween complete {complete}); transfer entry pitch {:.2} yaw {:.2} FOV {:.2} distance {:.3}",
+        if complete { "takes the live LookAt, distance, yaw and pitch" } else { "kept" },
+        model.pitch, model.yaw, model.fov, model.distance
+    );
+    world.insert_resource(snapshot.clone());
+    world
+        .get_resource_or_insert_with(NormalTransferData::default)
+        .0
+        .insert(site.to_owned(), snapshot);
+    true
+}
+
+/// `FieldCamera.ChangeState(Normal)` after `prev`'s OnExit:
+/// `NormalCameraState.OnEnter`. The flag is set, the distance and pitch
+/// bounds and the offset come back from the private copy (the setting's),
+/// then either the inherit branch (0.5 s to the site's transfer entry, or to
+/// the setting's initial pitch with the live yaw, FOV and distance; its
+/// callback writes the entry's distance into the private model) or
+/// [`transfer_camera_settings`]. The tutorial branch is not in the product
+/// (tutorials are out of scope). `FadeInPlayerIfNeeded` (a 0.2 s dither
+/// fade-in after the first-person state) has no dither to drive: FPS's exit
+/// shows the player at once.
+pub(crate) fn normal_on_enter(world: &mut World, prev: CameraStateType, tag: &str) {
+    world.resource_mut::<FieldCameraState>().0 = CameraStateType::Normal;
+    world.insert_resource(NormalCameraTweenComplete(true));
+    let Some(setting) = world.get_resource::<CameraSetting>().copied() else {
+        warn!("[{tag}] Normal.OnEnter from {prev:?} without the camera setting: no tween");
+        return;
+    };
+    let site = world.get_resource::<SiteActive>().cloned();
+    let prev_site = world.resource::<PrevSiteType>().0.clone();
+    let fov_now = camera_fov(world);
+    let player = player_view_position(world);
+    let mut private = world
+        .get_resource::<NormalCameraPrivate>()
+        .copied()
+        .unwrap_or_else(|| NormalCameraPrivate::from_setting(&setting));
+    let entry = site.as_ref().and_then(|site| {
+        world
+            .get_resource::<NormalTransferData>()
+            .and_then(|table| table.0.get(&site.site_type).cloned())
     });
+    let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() else {
+        warn!("[{tag}] Normal.OnEnter from {prev:?} without a camera model: no tween");
+        return;
+    };
+    model.min_distance = setting.min_distance;
+    model.max_distance = setting.max_distance;
+    model.min_pitch = setting.min_pitch;
+    model.max_pitch = setting.max_pitch;
+    model.offset = setting.offset;
+    let fov_now = fov_now.unwrap_or(model.fov);
+    let site_name = site.as_ref().map_or("?", |site| site.site_type.as_str());
+    let inherit = site
+        .as_ref()
+        .is_some_and(|site| is_inherit(&site.category, &prev_site, prev));
+    let (tween, transfer) = if inherit {
+        let (pitch, yaw, fov, distance, hit) = match &entry {
+            Some(m) => (m.pitch, m.yaw, m.fov, m.distance, true),
+            None => (setting.init_pitch, model.yaw, model.fov, model.distance, false),
+        };
+        let prev_pitch = wrap180(model.pitch);
+        let prev_yaw = wrap180(model.yaw);
+        let tween = CameraTween {
+            look_at: (model.look_at, model.look_at),
+            fov: (fov_now, fov),
+            pitch: (prev_pitch, to_rotation(prev_pitch, pitch)),
+            yaw: (prev_yaw, to_rotation(prev_yaw, yaw)),
+            distance: (model.distance, distance),
+            duration: INHERIT_TWEEN_SECS,
+            elapsed: 0.0,
+            on_complete: TweenCompletion::NormalInherit { distance },
+        };
+        info!(
+            "[{tag}] ChangeState({prev:?} -> Normal) at {site_name} after {prev_site}: inherit branch ({}), {INHERIT_TWEEN_SECS}s: distance {:.3} -> {:.3}, pitch {:.2} -> {:.2}, yaw {:.2} -> {:.2}, FOV {:.2} -> {:.2}",
+            if hit { "site transfer entry" } else { "fallback: initPitch + live yaw, FOV, distance" },
+            tween.distance.0, tween.distance.1, tween.pitch.0, tween.pitch.1,
+            tween.yaw.0, tween.yaw.1, tween.fov.0, tween.fov.1
+        );
+        (Some(tween), false)
+    } else {
+        let (tween, case) = transfer_camera_settings(&mut model, &mut private, prev, player, fov_now);
+        match &tween {
+            Some(tween) => info!(
+                "[{tag}] ChangeState({prev:?} -> Normal) at {site_name} after {prev_site}: TransferCameraSettings {case}, {}s to Normal's private model: LookAt {:.3} -> {:.3}, distance {:.3} -> {:.3}, pitch {:.2} -> {:.2}, yaw {:.2} -> {:.2}, FOV {:.2} -> {:.2}",
+                tween.duration, tween.look_at.0, tween.look_at.1, tween.distance.0, tween.distance.1,
+                tween.pitch.0, tween.pitch.1, tween.yaw.0, tween.yaw.1, tween.fov.0, tween.fov.1
+            ),
+            None => info!(
+                "[{tag}] ChangeState({prev:?} -> Normal) at {site_name}: TransferCameraSettings {case}: the live model takes Normal's private model at once (LookAt {:.3}, distance {:.3}, pitch {:.2}, yaw {:.2}), no tween",
+                model.look_at, model.distance, model.pitch, model.yaw
+            ),
+        }
+        let transfer = tween.is_some();
+        (tween, transfer)
+    };
+    drop(model);
+    world.insert_resource(private);
+    if transfer {
+        world.insert_resource(NormalCameraTweenComplete(false));
+    }
+    if let Some(tween) = tween {
+        world.insert_resource(tween);
+    }
+}
+
+/// `NormalCameraState.OnEnter`'s inherit branch passes this duration.
+pub(crate) const INHERIT_TWEEN_SECS: f32 = 0.5;
+
+/// `NormalCameraState.TransferCameraSettings`: `_doTweenCameraTime` = 1.0,
+/// then the previous-state switch:
+/// - FloorEdit, WallEdit: the private yaw takes the live yaw;
+/// - LookAtPlayer: the live distance, yaw and pitch take the private ones,
+///   and it returns without a tween;
+/// - SiteMoveAction: 0.6 s, the private LookAt takes the live LookAt;
+/// - HouseEntry: the private yaw and LookAt take the live ones;
+/// - SomeCharacterTalk, ScreenshotCapture, ScreenshotCaptureFPS: the live
+///   LookAt, distance, yaw and pitch take the private ones, no tween;
+/// - FPS: 0.1 s, the private LookAt is the player's view position and the
+///   private yaw the live yaw;
+/// - LearnSiteEnvironment: 0.3 s, the private LookAt takes the live one and
+///   the private distance is 8.0;
+/// - every other state: nothing.
+///
+/// Then the flag clears and the camera tweens to the private model (LookAt,
+/// pitch and yaw, FOV, distance) over `_doTweenCameraTime`; the callback
+/// sets the flag again. Returns the tween (None for the no-tween cases) and
+/// the case taken, for the log.
+fn transfer_camera_settings(
+    model: &mut FieldCameraModel,
+    private: &mut NormalCameraPrivate,
+    prev: CameraStateType,
+    player: Option<Vec3>,
+    fov_now: f32,
+) -> (Option<CameraTween>, &'static str) {
+    use CameraStateType as S;
+    let mut seconds = TRANSFER_TWEEN_SECS;
+    let case = match prev {
+        S::FloorEdit | S::WallEdit => {
+            private.yaw = model.yaw;
+            "case 2/3 (private yaw = live yaw)"
+        }
+        S::LookAtPlayer => {
+            model.distance = model.gestured_distance;
+            model.yaw = private.yaw;
+            model.pitch = private.pitch;
+            return (None, "case 5");
+        }
+        S::SiteMoveAction => {
+            seconds = 0.6;
+            private.look_at = model.look_at;
+            "case 6 (private LookAt = live LookAt)"
+        }
+        S::HouseEntry => {
+            private.yaw = model.yaw;
+            private.look_at = model.look_at;
+            "case 8 (private yaw and LookAt = live)"
+        }
+        S::SomeCharacterTalk | S::ScreenshotCapture | S::ScreenshotCaptureFps => {
+            model.look_at = private.look_at;
+            model.distance = model.gestured_distance;
+            model.yaw = private.yaw;
+            model.pitch = private.pitch;
+            return (None, "case 11/18/19");
+        }
+        S::Fps => {
+            match player {
+                Some(player) => private.look_at = player,
+                None => warn!("[camera] TransferCameraSettings case 16 without a player: private LookAt kept"),
+            }
+            private.yaw = model.yaw;
+            seconds = FPS_EXIT_TWEEN_SECS_CASE16;
+            "case 16 (private LookAt = player, private yaw = live yaw)"
+        }
+        S::LearnSiteEnvironment => {
+            private.look_at = model.look_at;
+            seconds = 0.3;
+            model.gestured_distance = 8.0;
+            "case 17 (private LookAt = live LookAt, private distance 8)"
+        }
+        _ => "default path",
+    };
+    let prev_pitch = wrap180(model.pitch);
+    let prev_yaw = wrap180(model.yaw);
+    let tween = CameraTween {
+        look_at: (model.look_at, private.look_at),
+        fov: (fov_now, private.fov),
+        pitch: (prev_pitch, to_rotation(prev_pitch, private.pitch)),
+        yaw: (prev_yaw, to_rotation(prev_yaw, private.yaw)),
+        distance: (model.distance, model.gestured_distance),
+        duration: seconds,
+        elapsed: 0.0,
+        on_complete: TweenCompletion::NormalTransfer,
+    };
+    (Some(tween), case)
+}
+
+/// `NormalCameraState.TransferCameraSettings`' `_doTweenCameraTime` before
+/// the previous-state switch.
+const TRANSFER_TWEEN_SECS: f32 = 1.0;
+
+/// `FPSCameraState.OnEnter` after `prev`'s OnExit: the camera unlocks, the
+/// player is hidden (the product has visibility where the source has
+/// `SetVisible`), the private yaw takes the camera's euler yaw (the camera
+/// looks along the model's yaw, folded into [0, 360)), the shared LookAt is
+/// the player's position plus `CAMERA_HEIGHT_OFFSET`, the private minimum
+/// pitch is set by the site (indoor floors -17, elsewhere -8), and the
+/// shared distance bounds (both 0.15) and pitch bounds take the private
+/// ones. Then 0.2 s to (shared LookAt, private pitch and yaw, shared FOV,
+/// 0.15). The private pitch is not reset on entry: it is what the last
+/// first-person drag left. `SetActiveUI(false)` (the screenshot mode),
+/// `SiteObjectManager.ShowAll` and `ResetHouseDither` have no counterpart.
+pub(crate) fn fps_on_enter(world: &mut World, prev: CameraStateType) {
+    world.resource_mut::<FieldCameraState>().0 = CameraStateType::Fps;
+    let is_room = world
+        .get_resource::<SiteSelection>()
+        .is_some_and(|site| site.is_room());
+    let fov_now = camera_fov(world);
+    let player = {
+        let mut players =
+            world.query_filtered::<(&GlobalTransform, &mut Visibility), With<AvatarRoot>>();
+        match players.single_mut(world) {
+            Ok((global, mut visibility)) => {
+                *visibility = Visibility::Hidden;
+                Some(global.translation())
+            }
+            Err(_) => None,
+        }
+    };
+    let Some(player) = player else {
+        warn!("[camera-fps] FPS.OnEnter from {prev:?} without a player: no tween");
+        return;
+    };
+    let mut fps = world
+        .get_resource::<FpsViewMemory>()
+        .copied()
+        .unwrap_or_default();
+    let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() else {
+        warn!("[camera-fps] FPS.OnEnter from {prev:?} without a camera model: no tween");
+        return;
+    };
     let before = (
         model.min_distance,
         model.max_distance,
         model.min_pitch,
         model.max_pitch,
     );
-    *player_visibility = Visibility::Hidden;
-    // 偏航捕获：源读**相机本体** eulerAngles.y——相机朝向由模型偏航派生，
-    // 取其 [0,360) 归一形在方向上是恒等操作（补间终点经最短有向角，差值
-    // 被 floor-mod 归零）。俯仰**不重置**：源常驻单例的私有模型只在构造
-    // 时写一次 0，再次进入的目标俯仰是上一会话拖拽后的残留值。
     fps.yaw = normalize360(model.yaw);
-    // 取景点直写玩家位 + 高度偏移；界钳 = FPS 私有模型的四界（距离三界
-    // 同值 0.15，俯仰按楼层室内/户外分 −17/−8，上界 75）。
-    model.look_at = player_pos + FPS_CAMERA_HEIGHT_OFFSET;
+    model.look_at = player + FPS_CAMERA_HEIGHT_OFFSET;
     model.min_distance = FPS_DISTANCE;
     model.max_distance = FPS_DISTANCE;
     model.min_pitch = if is_room {
@@ -1556,13 +1854,10 @@ fn enter_fps(
         FPS_MIN_PITCH
     };
     model.max_pitch = FPS_MAX_PITCH;
-    // 进入补间（源 DoTweenCameraSetting，0.2s 四分量 OutQuad）：起值构造
-    // 时捕获——LookAt 已直写故首尾同值（不动），FOV 起自相机本体、终于
-    // 模型 FOV（本次不动），旋转经最短有向角到私有镜像，距离 →0.15。
-    // 这就是「FPS 态下继续放大」的全部：位置前移，FOV 不变。
+    let camera_fov_deg = fov_now.unwrap_or(model.fov);
     let prev_pitch = wrap180(model.pitch);
     let prev_yaw = wrap180(model.yaw);
-    commands.insert_resource(CameraTween {
+    let tween = CameraTween {
         look_at: (model.look_at, model.look_at),
         fov: (camera_fov_deg, model.fov),
         pitch: (prev_pitch, to_rotation(prev_pitch, fps.pitch)),
@@ -1571,10 +1866,9 @@ fn enter_fps(
         duration: FPS_ENTER_TWEEN_SECS,
         elapsed: 0.0,
         on_complete: TweenCompletion::None,
-    });
-    state.0 = CameraStateType::Fps;
+    };
     info!(
-        "[camera-fps] 进入 FPS：距离 {:.2}→{:.2}（界 [{:.2},{:.2}]→[{:.2},{:.2}]，俯仰界 [{:.1},{:.1}]→[{:.1},{:.1}]），取景点 {}, 捕获偏航 {:.1}°→{:.1}°（残俯仰目标 {:.1}°），FOV {:.1}°→{:.1}°（不动），玩家隐",
+        "[camera-fps] ChangeState({prev:?} -> FPS): distance {:.2}->{:.2} (bounds [{:.2},{:.2}]->[{:.2},{:.2}], pitch bounds [{:.1},{:.1}]->[{:.1},{:.1}]), LookAt {}, yaw {:.1}->{:.1} (pitch target {:.1} left by the last drag), FOV {:.1}->{:.1}, player hidden",
         model.distance,
         FPS_DISTANCE,
         before.0,
@@ -1592,134 +1886,76 @@ fn enter_fps(
         camera_fov_deg,
         model.fov,
     );
+    drop(model);
+    world.insert_resource(fps);
+    world.insert_resource(tween);
 }
 
-/// 源 `NormalCameraState.IsInheritCameraSetting`（退出分道判据）：
-/// 站点类目 > 1（harvest/delivery）⇒ 前态 ≠ 17；类目 ≤ 1（住宅）⇒
-/// 前站点类型 ∈ {grassland, shore, flower_garden, memorial_place,
-/// festival_garden}（源判 4 ≤ PrevSiteType ≤ 8，即五户外采集类站）。
-///
-/// 两条化简都由构造保证：本仓进入 Normal 的唯一写者是 FPS 退出（前态
-/// 恒 16 ≠ 17 ⇒ 类目 > 1 时恒继承）；类目与站点类型串就是源枚举名
-/// （主表照抄，产物核过）。住宅分叉不化简——它读的是站点搬迁史。
-pub(crate) fn is_inherit_camera_setting(category: &str, prev_site_type: &str) -> bool {
-    if matches!(category, "harvest" | "delivery") {
-        true
-    } else {
-        matches!(
-            prev_site_type,
-            "grassland" | "shore" | "flower_garden" | "memorial_place" | "festival_garden"
-        )
+/// `FPSCameraState.OnExit`: the player is shown again; `SetActiveUI(true)`
+/// (leaving the screenshot mode) has no counterpart.
+pub(crate) fn fps_on_exit(world: &mut World) {
+    let mut players = world.query_filtered::<&mut Visibility, With<AvatarRoot>>();
+    if let Ok(mut visibility) = players.single_mut(world) {
+        *visibility = Visibility::Visible;
+    }
+    info!("[camera-fps] FPS.OnExit: player shown");
+}
+
+/// The OnExit of `state` as `FieldCamera.ChangeState` runs it before the
+/// next state's OnEnter. Normal and FPS exits are here. ZoomPlayer's and
+/// PreSiteMoveAction's are empty, FloorEdit's only removes its event
+/// registrations, HarvestTone's (showing its head-up display) runs in the
+/// tone module when it sees the state change. Any other state's exit belongs
+/// to its own module; leaving it from here is logged and its exit is not
+/// run.
+pub(crate) fn exit_state(world: &mut World, state: CameraStateType, tag: &str) {
+    use CameraStateType as S;
+    match state {
+        S::Normal => {
+            let site = world
+                .get_resource::<SiteActive>()
+                .map(|active| active.site_type.clone());
+            match site {
+                Some(site) => {
+                    normal_on_exit(world, &site);
+                }
+                None => warn!("[{tag}] Normal.OnExit without an active site: no transfer entry"),
+            }
+        }
+        S::Fps => fps_on_exit(world),
+        S::ZoomPlayer | S::PreSiteMoveAction | S::FloorEdit | S::HarvestTone | S::None => {}
+        other => warn!("[{tag}] {other:?}.OnExit is not run from here (its own module runs it)"),
     }
 }
 
-/// 源 `FPSCameraState.OnExit`（配 `NormalCameraState.OnEnter`）的退出帧
-/// 全序：玩家显 → 界钳/offset 从面板恢复 → 按站点分道的退出补间 →
-/// 换态。继承支（0.5s）到转场表快照或 fallback；case 16 支（住宅常规，
-/// 0.1s）取景点到玩家位、俯仰/距离回进入帧快照、偏航保持当前、FOV 回
-/// 面板值。源教程分岔（IsTutorial）不迁——本仓无教程态，构造上恒走
-/// TransferCameraSettings 等价支。
-///
-/// ⚠ 单槽快照的已知边界：源 OnExit 的私有镜像同步是 flag 门的（case 16
-/// 转场补间在飞时 flag=0，跳过同步），转场表写则无条件——本仓单槽承载
-/// 两语义、恒写。退出补间未完就再次进入的窗口（≤0.5s）内，下一次 case
-/// 16 支读到的是「当刻模型值」而非「上一补间的目标值」，具名在案。
-#[allow(clippy::too_many_arguments)]
-fn exit_fps(
-    commands: &mut Commands,
-    model: &mut FieldCameraModel,
-    state: &mut FieldCameraState,
-    setting: &CameraSetting,
-    active: &SiteActive,
-    prev_site_type: &str,
-    player_pos: Vec3,
-    mut player_visibility: Mut<Visibility>,
-    memory: Option<&NormalCameraMemory>,
-    camera_fov_deg: f32,
+/// The OnEnter of `next` after `prev`'s OnExit, for the states whose entry
+/// is here (Normal and FPS). Any other state is set without its OnEnter,
+/// which belongs to its own module, and that is logged.
+pub(crate) fn enter_state(
+    world: &mut World,
+    next: CameraStateType,
+    prev: CameraStateType,
+    tag: &str,
 ) {
-    *player_visibility = Visibility::Visible;
-    // 界钳与 offset 恢复：源读 Normal 私有模型的界——该模型构造时整份
-    // 拷贝共享模型后再无写点 ⇒ 恒为面板值（Setting）。
-    model.min_distance = setting.min_distance;
-    model.max_distance = setting.max_distance;
-    model.min_pitch = setting.min_pitch;
-    model.max_pitch = setting.max_pitch;
-    model.offset = setting.offset;
-    let prev_pitch = wrap180(model.pitch);
-    let prev_yaw = wrap180(model.yaw);
-    let inherit = is_inherit_camera_setting(&active.category, prev_site_type);
-    if inherit {
-        // 继承支：站点命中的快照，否则源 fallback 形状（俯仰回构造体
-        // initPitch，偏航/FOV/距离保持当前——不猜值）。取景点目标 = 当前
-        // 值（源取 OnEnter 时刻的模型值，恒等）。
-        let (pitch, yaw, fov, distance, hit) = match memory {
-            Some(m) if m.site == active.site_type => (m.pitch, m.yaw, m.fov, m.distance, true),
-            _ => (
-                setting.init_pitch,
-                model.yaw,
-                model.fov,
-                model.distance,
-                false,
-            ),
-        };
-        commands.insert_resource(CameraTween {
-            look_at: (model.look_at, model.look_at),
-            fov: (camera_fov_deg, fov),
-            pitch: (prev_pitch, to_rotation(prev_pitch, pitch)),
-            yaw: (prev_yaw, to_rotation(prev_yaw, yaw)),
-            distance: (model.distance, distance),
-            duration: FPS_EXIT_TWEEN_SECS_INHERIT,
-            elapsed: 0.0,
-            on_complete: TweenCompletion::None,
-        });
-        info!(
-            "[camera-fps] 退出 FPS（继承支 {}s）：距离 {:.2}→{:.2}，俯仰 {:.1}°→{:.1}°，偏航 {:.1}°→{:.1}°，FOV {:.1}°→{:.1}°（{}），取景点不动 {}",
-            FPS_EXIT_TWEEN_SECS_INHERIT,
-            model.distance,
-            distance,
-            prev_pitch,
-            to_rotation(prev_pitch, pitch),
-            prev_yaw,
-            to_rotation(prev_yaw, yaw),
-            camera_fov_deg,
-            fov,
-            if hit { "转场表快照" } else { "fallback：initPitch+当前值" },
-            model.look_at
-        );
-    } else {
-        // case 16 支（住宅常规）：偏航目标 = 当前 FPS 偏航（源 private.Yaw
-        // ← owner.Model.Yaw，恒等不动），取景点到玩家位（无高度偏移），
-        // 俯仰/距离回进入帧快照（源私有镜像的 OnExit 双写），FOV 回面板
-        // 值（源私有 FOV 自构造起未再写 = Setting）。快照缺席在构造上不可
-        // 达（进入必写；站点切换在 Normal 态才发生）——响亮拒绝，不静默
-        // 取默认。
-        let Some(m) = memory else {
-            panic!("FPS 退出缺转场快照：进入必写、站点切换不进 FPS，不可达");
-        };
-        commands.insert_resource(CameraTween {
-            look_at: (model.look_at, player_pos),
-            fov: (camera_fov_deg, setting.fov),
-            pitch: (prev_pitch, to_rotation(prev_pitch, m.pitch)),
-            yaw: (prev_yaw, to_rotation(prev_yaw, model.yaw)),
-            distance: (model.distance, m.distance),
-            duration: FPS_EXIT_TWEEN_SECS_CASE16,
-            elapsed: 0.0,
-            on_complete: TweenCompletion::None,
-        });
-        info!(
-            "[camera-fps] 退出 FPS（case16 支 {}s）：距离 {:.2}→{:.2}，俯仰 {:.1}°→{:.1}°，偏航 {:.1}°（保持），FOV {:.1}°→{:.1}°，取景点 →玩家位 {}",
-            FPS_EXIT_TWEEN_SECS_CASE16,
-            model.distance,
-            m.distance,
-            prev_pitch,
-            to_rotation(prev_pitch, m.pitch),
-            prev_yaw,
-            camera_fov_deg,
-            setting.fov,
-            player_pos
-        );
+    match next {
+        CameraStateType::Normal => normal_on_enter(world, prev, tag),
+        CameraStateType::Fps => fps_on_enter(world, prev),
+        other => {
+            warn!("[{tag}] {other:?}.OnEnter is not run from here (its own module runs it); the state is set");
+            world.resource_mut::<FieldCameraState>().0 = other;
+        }
     }
-    state.0 = CameraStateType::Normal;
+}
+
+/// `FieldCamera.ChangeState(next)`: nothing when `next` is the current
+/// state; otherwise the current state's OnExit, then `next`'s OnEnter.
+pub(crate) fn change_state(world: &mut World, next: CameraStateType, tag: &str) {
+    let prev = world.resource::<FieldCameraState>().0;
+    if prev == next {
+        return;
+    }
+    exit_state(world, prev, tag);
+    enter_state(world, next, prev, tag);
 }
 
 /// The field camera's reset inputs, bundled so a UI system stays within the
@@ -1966,6 +2202,8 @@ pub(crate) fn follow_avatar(
     mut face_trace: Local<f32>,
     // The state this system saw last frame (HarvestTone's entry copy).
     mut seen_state: Local<Option<CameraStateType>>,
+    // Normal's `_isCompleteCameraTween` (its OnUpdate's follow-rate gate).
+    normal_complete: Option<Res<NormalCameraTweenComplete>>,
 ) {
     let Some(mut models) = models else {
         return; // 站点未取景（或 JSON 未装）：模型未立，等下一帧
@@ -1985,6 +2223,16 @@ pub(crate) fn follow_avatar(
             commands.insert_resource(HarvestTonePreModel(models.clone()));
         } else if *seen_state == Some(CameraStateType::HarvestTone) {
             commands.remove_resource::<HarvestTonePreModel>();
+        }
+        if state.0 == CameraStateType::Normal {
+            // Normal.OnEnter sets `_isCompleteCameraTween`; only its
+            // TransferCameraSettings clears it, together with starting its
+            // tween. Entries that other modules run without
+            // [`normal_on_enter`] get the same flag from the tween in flight.
+            let transfer = tween
+                .as_deref()
+                .is_some_and(|tween| tween.on_complete == TweenCompletion::NormalTransfer);
+            commands.insert_resource(NormalCameraTweenComplete(!transfer));
         }
         *seen_state = Some(state.0);
     }
@@ -2019,6 +2267,10 @@ pub(crate) fn follow_avatar(
         if e >= 1.0 {
             match tw.on_complete {
                 TweenCompletion::NormalReset { distance } => models.gestured_distance = distance,
+                TweenCompletion::NormalInherit { distance } => models.gestured_distance = distance,
+                TweenCompletion::NormalTransfer => {
+                    commands.insert_resource(NormalCameraTweenComplete(true));
+                }
                 TweenCompletion::HarvestToneReset { distance } => {
                     commands.queue(move |world: &mut World| {
                         if let Some(mut private) = world.get_resource_mut::<HarvestToneModel>() {
@@ -2137,8 +2389,12 @@ pub(crate) fn follow_avatar(
         }
         _ => {
             // 源式的时间归一：补间在飞 ⇒ v13 = 1.0（t 恒 0.1/帧），补间
-            // 走完且空闲才 dt / 0.016667，再乘 0.1 钳 [0,1]。
-            let raw = if tween_active {
+            // 走完且空闲才 dt / 0.016667，再乘 0.1 钳 [0,1]。The source gate
+            // is `_isCompleteCameraTween && !CurrentAction.IsPlaying`: a
+            // transfer tween killed before its callback keeps the fixed
+            // factor until Normal's next OnEnter.
+            let complete = normal_complete.as_deref().map_or(true, |flag| flag.0);
+            let raw = if tween_active || !complete {
                 1.0
             } else {
                 time.delta_secs() / FRAME_BASE

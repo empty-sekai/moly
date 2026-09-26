@@ -45,11 +45,18 @@
 //! 0.5 s OutQuad (`ROTATE_CAMERA_DURATION`). `OnExit` only removes the
 //! event registrations.
 //!
+//! Entering runs the current state's `OnExit` first (`FieldCamera.ChangeState`
+//! through `camera::exit_state`): Normal's writes its private model and the
+//! site's transfer entry; the first-person state's shows the player. The
+//! yaw switch then reads that previous state: Normal and the site
+//! environment editor snap, the wall editor copies, any other state keeps
+//! the private yaw and direction from the last session.
+//!
 //! Leaving: the edit game state's exit hands the camera to Normal
-//! (`NormalGameState.OnEnter`); Normal's `TransferCameraSettings` takes the
-//! live yaw into its private model for a previous state 2 and tweens 1.0 s
-//! to that model, unless its inherit branch applies (see
-//! `zoom_player_camera::normal_enter`).
+//! (`NormalGameState.OnEnter`, `camera::change_state`); Normal's
+//! `TransferCameraSettings` takes the live yaw into its private model for a
+//! previous state 2 and tweens 1.0 s to that model, unless its inherit
+//! branch applies.
 //!
 //! Named differences:
 //! - The camera lock (`FieldCamera` lock flag): the floor editor locks the
@@ -57,11 +64,9 @@
 //!   moves the fixture (the edit pointer's rule), so the camera drag runs
 //!   only without a selection.
 //! - Pinch comes from the mouse wheel, the product's pinch input.
-//! - The focus completion callback (`onFocusCompleted`) and the tutorial
-//!   focus (`FocusOnTutorialLayoutEdit`) are not ported.
-//! - Entering from a state other than Normal is refused: the first-person
-//!   and other states' exits are not reachable from here; the editor runs
-//!   with the camera where it is.
+//! - The focus completion callback (`onFocusCompleted`) is not ported; the
+//!   tutorial focus (`FocusOnTutorialLayoutEdit`) is out of scope (the
+//!   product has no tutorial).
 //! - The private model lives for the app run (the source's lives as long as
 //!   its field camera object).
 
@@ -229,7 +234,8 @@ fn in_state(world: &World) -> bool {
 }
 
 /// `FieldCamera.ChangeState(FloorEdit)` from the edit game state's entry:
-/// the current state's exit (Normal's), then this state's `OnEnter`.
+/// the current state's exit (`camera::exit_state`), then this state's
+/// `OnEnter`.
 pub(crate) fn enter(world: &mut World) -> Result<(), String> {
     let Some(previous) = world
         .get_resource::<FieldCameraState>()
@@ -240,16 +246,12 @@ pub(crate) fn enter(world: &mut World) -> Result<(), String> {
     if previous == CameraStateType::FloorEdit {
         return Ok(());
     }
-    if previous != CameraStateType::Normal {
-        return Err(format!(
-            "the camera is in {previous:?}; only Normal's exit is reachable from the floor edit camera"
-        ));
-    }
-    let Some(model) = world.get_resource::<FieldCameraModel>().cloned() else {
+    if world.get_resource::<FieldCameraModel>().is_none() {
         return Err("the field camera model is not built yet".into());
-    };
+    }
+    crate::camera::exit_state(world, previous, "edit-camera");
+    let model = world.resource::<FieldCameraModel>().clone();
     let fov_now = camera_fov(world).unwrap_or(model.fov);
-    crate::zoom_player_camera::normal_exit(world, &model, "edit-camera");
     let site_y = crate::fixture_edit::site_origin(world).y;
     let mut private = world
         .remove_resource::<FloorEditCamera>()
@@ -310,7 +312,7 @@ pub(crate) fn leave(world: &mut World) {
         return;
     }
     info!("[edit-camera] FloorEdit.OnExit (event registrations removed); Normal's entry follows");
-    crate::zoom_player_camera::normal_enter(world, CameraStateType::FloorEdit, "edit-camera");
+    crate::camera::change_state(world, CameraStateType::Normal, "edit-camera");
 }
 
 /// A site change while editing: the site loader rebuilds the camera for the
