@@ -48,7 +48,8 @@ const ZOOM_DISTANCE: f32 = 6.0;
 /// `ZoomPlayerCameraState.OnEnter`'s tween duration literal.
 const ZOOM_SECONDS: f32 = 0.25;
 /// `NormalCameraState.TransferCameraSettings`: `_doTweenCameraTime` is set to
-/// 1.0 before the previous-state switch, and state 12 has no case of its own.
+/// 1.0 before the previous-state switch; state 12 has no case of its own and
+/// cases 2 and 3 leave it.
 const TRANSFER_SECONDS: f32 = 1.0;
 
 /// The state's private model (only the fields the state reads).
@@ -121,32 +122,7 @@ pub(crate) fn enter(world: &mut World) -> Result<CameraStateType, String> {
     };
     let fov_now = camera_fov(world).unwrap_or(model.fov);
     if previous == CameraStateType::Normal {
-        // NormalCameraState.OnExit.
-        let transfer_in_flight = world
-            .get_resource::<CameraTween>()
-            .is_some_and(|tween| !tween.is_normal_reset());
-        if transfer_in_flight {
-            info!("[zoom-camera] Normal.OnExit: its transfer tween is in flight; its private model is kept");
-        } else {
-            let fov = world
-                .get_resource::<NormalPrivate>()
-                .map(|private| private.fov)
-                .or_else(|| world.get_resource::<CameraSetting>().map(|setting| setting.fov))
-                .unwrap_or(model.fov);
-            world.insert_resource(NormalPrivate {
-                look_at: model.look_at,
-                distance: model.distance,
-                yaw: model.yaw,
-                pitch: model.pitch,
-                fov,
-            });
-        }
-        let site = world
-            .get_resource::<crate::site::SiteActive>()
-            .map(|active| active.site_type.clone());
-        if let Some(site) = site {
-            crate::site_move::camera::record_normal_exit(world, &site);
-        }
+        normal_exit(world, &model, "zoom-camera");
     }
     // ZoomPlayerCameraState.OnEnter.
     snapshot.yaw = model.yaw;
@@ -172,6 +148,37 @@ pub(crate) fn enter(world: &mut World) -> Result<CameraStateType, String> {
     Ok(previous)
 }
 
+/// `NormalCameraState.OnExit` with the live `model`: Normal's private model
+/// takes the live LookAt, distance, yaw and pitch unless its own transfer
+/// tween is in flight, and the per-site transfer entry is written.
+pub(crate) fn normal_exit(world: &mut World, model: &FieldCameraModel, tag: &str) {
+    let transfer_in_flight = world
+        .get_resource::<CameraTween>()
+        .is_some_and(|tween| !tween.is_normal_reset());
+    if transfer_in_flight {
+        info!("[{tag}] Normal.OnExit: its transfer tween is in flight; its private model is kept");
+    } else {
+        let fov = world
+            .get_resource::<NormalPrivate>()
+            .map(|private| private.fov)
+            .or_else(|| world.get_resource::<CameraSetting>().map(|setting| setting.fov))
+            .unwrap_or(model.fov);
+        world.insert_resource(NormalPrivate {
+            look_at: model.look_at,
+            distance: model.distance,
+            yaw: model.yaw,
+            pitch: model.pitch,
+            fov,
+        });
+    }
+    let site = world
+        .get_resource::<crate::site::SiteActive>()
+        .map(|active| active.site_type.clone());
+    if let Some(site) = site {
+        crate::site_move::camera::record_normal_exit(world, &site);
+    }
+}
+
 /// `FieldCamera.ChangeState(remembered)` from ZoomPlayer (its `OnExit` is
 /// empty). Only Normal is accepted by [`enter`], so only Normal comes back.
 pub(crate) fn leave(world: &mut World, remembered: CameraStateType) {
@@ -185,6 +192,17 @@ pub(crate) fn leave(world: &mut World, remembered: CameraStateType) {
     if remembered != CameraStateType::Normal {
         error!("[zoom-camera] return to {remembered:?} refused: only Normal's entry is reachable; the camera goes to Normal");
     }
+    normal_enter(world, CameraStateType::ZoomPlayer, "zoom-camera");
+}
+
+/// `FieldCamera.ChangeState(Normal)` from `from` (whose `OnExit` already
+/// ran): `NormalCameraState.OnEnter`. The inherit branch first; otherwise
+/// the bounds and offset come back from the setting and
+/// `TransferCameraSettings` runs. Its previous-state switch copies the live
+/// yaw into Normal's private model for the floor and wall editors (2, 3);
+/// the zoom state (12) has no case of its own. Both then take the default
+/// path, a 1.0 s tween to Normal's private model.
+pub(crate) fn normal_enter(world: &mut World, from: CameraStateType, tag: &str) {
     let site = world.get_resource::<crate::site::SiteActive>().cloned();
     let prev_site = world.resource::<PrevSiteType>().0.clone();
     let inherit = site
@@ -193,7 +211,7 @@ pub(crate) fn leave(world: &mut World, remembered: CameraStateType) {
     if inherit {
         let site = site.expect("inherit needs the active site");
         info!(
-            "[zoom-camera] ChangeState(ZoomPlayer -> Normal) at {} after {prev_site}: the inherit branch",
+            "[{tag}] ChangeState({from:?} -> Normal) at {} after {prev_site}: the inherit branch",
             site.site_type
         );
         crate::site_move::camera::enter_normal(world, &site.site_type, &site.category, &prev_site);
@@ -201,15 +219,23 @@ pub(crate) fn leave(world: &mut World, remembered: CameraStateType) {
     }
     // NormalCameraState.OnEnter: bounds and offset from the private model.
     let setting = world.get_resource::<CameraSetting>().copied();
-    let private = world.get_resource::<NormalPrivate>().copied();
+    let mut private = world.get_resource::<NormalPrivate>().copied();
     let fov_now = camera_fov(world);
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::Normal;
+    // TransferCameraSettings' previous-state switch, cases 2 and 3: Normal's
+    // private model takes the live yaw.
+    let edit_yaw = matches!(from, CameraStateType::FloorEdit | CameraStateType::WallEdit);
+    let live_yaw = world.get_resource::<FieldCameraModel>().map(|model| model.yaw);
+    if let (true, Some(private), Some(yaw)) = (edit_yaw, private.as_mut(), live_yaw) {
+        private.yaw = yaw;
+        world.insert_resource(*private);
+    }
     let (Some(setting), Some(private)) = (setting, private) else {
-        warn!("[zoom-camera] ChangeState(ZoomPlayer -> Normal) without its tween: no camera setting or Normal private model");
+        warn!("[{tag}] ChangeState({from:?} -> Normal) without its tween: no camera setting or Normal private model");
         return;
     };
     let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() else {
-        warn!("[zoom-camera] ChangeState(ZoomPlayer -> Normal) without its tween: no camera model");
+        warn!("[{tag}] ChangeState({from:?} -> Normal) without its tween: no camera model");
         return;
     };
     model.min_distance = setting.min_distance;
@@ -232,7 +258,8 @@ pub(crate) fn leave(world: &mut World, remembered: CameraStateType) {
     };
     drop(model);
     info!(
-        "[zoom-camera] ChangeState(ZoomPlayer -> Normal): TransferCameraSettings default path, {TRANSFER_SECONDS}s to Normal's private model: distance {:.2} -> {:.2}, pitch {:.2} -> {:.2}, yaw {:.2} -> {:.2}, FOV {:.2} -> {:.2}",
+        "[{tag}] ChangeState({from:?} -> Normal): TransferCameraSettings {}default path, {TRANSFER_SECONDS}s to Normal's private model: distance {:.2} -> {:.2}, pitch {:.2} -> {:.2}, yaw {:.2} -> {:.2}, FOV {:.2} -> {:.2}",
+        if edit_yaw { "case 2/3 (private yaw = live yaw), then the " } else { "" },
         tween.distance.0,
         tween.distance.1,
         tween.pitch.0,

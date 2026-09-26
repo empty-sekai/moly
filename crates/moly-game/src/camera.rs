@@ -61,7 +61,7 @@ const MIN_PITCH_AT_MAX_ZOOM_TO: f32 = 24.0;
 
 /// 滚轮一档折算的捏合像素数。源手势层是触屏、单位是像素；滚轮是 PC
 /// 独有输入，此值是手感常量，非真源量。
-const WHEEL_PINCH_PIXELS: f32 = 50.0;
+pub(crate) const WHEEL_PINCH_PIXELS: f32 = 50.0;
 // Product extension requested for close inspection: after entering FPS the
 // wheel narrows the lens down to 20 degrees. Reverse first restores the source
 // field of view, then the next outward gesture exits to the source Normal view.
@@ -1965,6 +1965,16 @@ pub(crate) fn follow_avatar(
         // DeliveryHonorRewardCameraState: its OnUpdate is `delivery_camera`,
         // which runs right after this system.
         CameraStateType::DeliveryHonorReward => {}
+        // FloorEditCameraState.OnUpdate: FieldCamera.UpdatePosition places
+        // the eye from the model, then the camera looks at LookAt without
+        // the offset. Its drag and pinch are `floor_edit_camera::input`.
+        CameraStateType::FloorEdit => {
+            let pivot = models.look_at + models.offset;
+            let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
+            if let Ok((mut camera, _)) = cameras.single_mut() {
+                *camera = Transform::from_translation(eye).looking_at(models.look_at, Vec3::Y);
+            }
+        }
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，

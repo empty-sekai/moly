@@ -43,6 +43,7 @@ pub mod fixture_attach;
 mod fixture_colors;
 pub mod fixture_edit;
 mod fixture_edit_ui;
+mod floor_edit_camera;
 pub mod fixture_emission;
 mod fixture_clock;
 mod fixture_gimmick;
