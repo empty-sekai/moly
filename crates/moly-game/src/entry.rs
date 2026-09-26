@@ -124,6 +124,28 @@ impl EntrySequence {
             waiting_reported: false,
         }
     }
+
+    /// The cover as the source's `LiveTransitioner` holds it, for host
+    /// projections: lifting covers the fade delay, the fade and its hold.
+    pub(crate) fn cover_state(&self) -> &'static str {
+        match self.cover {
+            Cover::Opaque => "opaque",
+            Cover::Lifting { .. } => "fading",
+            Cover::Gone => "gone",
+        }
+    }
+
+    /// The await the entry is in, for host projections.
+    pub(crate) fn phase_name(&self) -> &'static str {
+        match (&self.mode, &self.phase) {
+            (Mode::CoverOnly(_), Phase::Loading) => "cover-only",
+            (Mode::Join, Phase::Loading) => "loading",
+            (_, Phase::WaitCharacters { .. }) => "wait-character-spawned",
+            (_, Phase::AwaitTransition { .. }) => "start-mysekai-transition",
+            (_, Phase::AwaitExit { .. }) => "play-exit-my-room-action",
+            (_, Phase::Ended) => "ended",
+        }
+    }
 }
 
 /// `MysekaiUtility.EnableJoyStick` / `EnableGestureLayer`: false until the

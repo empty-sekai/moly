@@ -360,6 +360,7 @@ impl FootEffects {
                 let live: usize = live_counts(world, &instance.draws).iter().sum();
                 if restarted {
                     restart(world, &draws);
+                    if !first { crate::weather_fx::fixture::play_moved::<FootParticle>(world, &draws, |particle| &mut particle.0); }
                 }
                 let flags = instance.draws.clone();
                 shared::enable_renderers(world, kind, &flags);
