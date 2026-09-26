@@ -148,6 +148,8 @@ pub(crate) struct Cast {
     active_clips: HashSet<TimelineClipKey>,
     /// Real time of the last recorded-pose report, by member.
     pose_logged: HashMap<u32, f64>,
+    /// Real time of the last character-clip report, by member.
+    clips_logged: HashMap<u32, f64>,
     /// The director time of the last frame.
     last_time: f64,
     pub(crate) outcome: Option<Result<(), String>>,
@@ -171,6 +173,7 @@ impl Cast {
             active_tracks: HashSet::new(),
             active_clips: HashSet::new(),
             pose_logged: HashMap::new(),
+            clips_logged: HashMap::new(),
             last_time: f64::NEG_INFINITY,
             outcome: None,
         }
@@ -917,9 +920,70 @@ fn recorded_pose(clip: &InfiniteClip, t: f64) -> Option<(Vec3, Quat, f64)> {
 }
 
 /// One director frame of the tracks this owner drives.
+/// Every 0.5 s of real time, per member: the character clips its unit's
+/// animation tracks hold at `t` and what its animator is playing.
+fn report_character_clips(
+    world: &mut World,
+    cast: &mut Cast,
+    definition: &TimelineDefinition,
+    t: f64,
+    now: f64,
+) {
+    for member in &cast.members {
+        let logged = cast
+            .clips_logged
+            .get(&member.unit)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY);
+        if now - logged < 0.5 {
+            continue;
+        }
+        let unit = member.unit.to_string();
+        let clips: Vec<String> = definition
+            .tracks
+            .iter()
+            .filter(|track| track.class == "AnimationTrack" && track.name == unit)
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.contains(t))
+            .filter_map(|clip| match &clip.payload {
+                TimelinePayload::Animation { target, .. } => Some(format!(
+                    "{} [{:.3}, {:.3})",
+                    target.clip_name,
+                    clip.start,
+                    clip.end()
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut stack = vec![member.entity];
+        let mut playing = Vec::new();
+        while let Some(entity) = stack.pop() {
+            if let Some(player) = world.get::<AnimationPlayer>(entity) {
+                for (node, active) in player.playing_animations() {
+                    playing.push(format!(
+                        "node {} t={:.3} w={:.2}",
+                        node.index(),
+                        active.seek_time(),
+                        active.weight()
+                    ));
+                }
+            }
+            if let Some(children) = world.get::<Children>(entity) {
+                stack.extend(children.iter());
+            }
+        }
+        cast.clips_logged.insert(member.unit, now);
+        info!(
+            "[cutscene-cast] t={t:.4} unit {} character clips {:?}; animator playing {:?}",
+            member.unit, clips, playing
+        );
+    }
+}
+
 pub(super) fn frame(world: &mut World, cast: &mut Cast, definition: &TimelineDefinition, t: f64) {
     let duration = definition.duration;
     let now = world.resource::<Time<Real>>().elapsed_secs_f64();
+    report_character_clips(world, cast, definition, t, now);
     let mut active_tracks = HashSet::new();
     let mut active_clips = HashSet::new();
     for track in &definition.tracks {
