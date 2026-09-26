@@ -1965,6 +1965,9 @@ pub(crate) fn follow_avatar(
         // DeliveryHonorRewardCameraState: its OnUpdate is `delivery_camera`,
         // which runs right after this system.
         CameraStateType::DeliveryHonorReward => {}
+        // CutSceneCameraState: the brain drives the camera
+        // (`cutscene_camera`, right after this system).
+        CameraStateType::CutScene => {}
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，

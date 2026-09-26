@@ -42,12 +42,23 @@ pub(crate) struct RankReleaseRow {
     pub(crate) external_id: i32,
 }
 
+/// A `mysekaiCutScenes` row.
+#[derive(Clone, Debug)]
+pub(crate) struct CutSceneRow {
+    pub(crate) id: i32,
+    pub(crate) external_id: i32,
+    pub(crate) condition: String,
+    pub(crate) bundle: String,
+}
+
 /// The master rows the expansion reads, in master order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Masters {
     pub(crate) site_types: Vec<(i32, String)>,
     pub(crate) levels: Vec<SiteLevelRow>,
     pub(crate) releases: Vec<RankReleaseRow>,
+    /// `mysekaiCutScenes`; `None` when the catalog carries no such table.
+    pub(crate) cutscenes: Option<Vec<CutSceneRow>>,
 }
 
 fn int(row: &Value, field: &str) -> Result<i32, String> {
@@ -93,7 +104,41 @@ impl Masters {
                 external_id: int(row, "externalId")?,
             });
         }
+        if let Some(rows) = tables["mysekaiCutScenes"].as_array() {
+            let mut cutscenes = Vec::new();
+            for row in rows {
+                cutscenes.push(CutSceneRow {
+                    id: int(row, "id")?,
+                    external_id: int(row, "externalId")?,
+                    condition: row["mysekaiCutSceneConditionType"]
+                        .as_str()
+                        .ok_or("mysekaiCutSceneConditionType is not a string")?
+                        .to_owned(),
+                    bundle: row["timelineAssetbundleName"]
+                        .as_str()
+                        .ok_or("timelineAssetbundleName is not a string")?
+                        .to_owned(),
+                });
+            }
+            masters.cutscenes = Some(cutscenes);
+        }
         Ok(masters)
+    }
+
+    /// `MasterDataManager.GetMasterMysekaiCutScene(externalId, conditionType)`
+    /// for the site-level condition: the first row with that external id and
+    /// condition. `Err` when the catalog has no cut-scene table.
+    pub(crate) fn site_level_cutscene(
+        &self,
+        external_id: i32,
+    ) -> Result<Option<&CutSceneRow>, String> {
+        let rows = self
+            .cutscenes
+            .as_ref()
+            .ok_or("player-data.json has no mysekaiCutScenes table")?;
+        Ok(rows
+            .iter()
+            .find(|row| row.external_id == external_id && row.condition == SITE_LEVEL))
     }
 
     pub(crate) fn site_id(&self, site_type: &str) -> Option<i32> {

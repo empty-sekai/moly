@@ -24,6 +24,8 @@ pub mod character_material;
 pub mod client_config;
 pub mod cloth_runtime;
 mod content_library;
+mod cutscene;
+mod cutscene_camera;
 mod delayed_faces;
 pub mod delivery;
 mod delivery_camera;
@@ -220,6 +222,8 @@ pub fn app(
     screen_fade::install(&mut app);
     game_state::install(&mut app);
     site_expansion::install(&mut app);
+    cutscene_camera::install(&mut app);
+    cutscene::install(&mut app);
     footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
     room_appearance::install(&mut app);

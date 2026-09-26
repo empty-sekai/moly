@@ -71,10 +71,6 @@ impl ScreenFader {
     pub(crate) fn finished(&self) -> bool {
         self.finished
     }
-
-    pub(crate) fn alpha(&self) -> f32 {
-        self.colour[3]
-    }
 }
 
 /// The cutscene screen's fade image and its tween.
@@ -102,10 +98,6 @@ impl Default for CutSceneFadeImage {
 impl CutSceneFadeImage {
     pub(crate) fn finished(&self) -> bool {
         self.finished
-    }
-
-    pub(crate) fn alpha(&self) -> f32 {
-        self.colour[3]
     }
 }
 
@@ -249,10 +241,6 @@ pub(crate) fn set_cutscene_image(world: &mut World, colour: [f32; 4]) {
     image.finished = true;
     image.colour = colour;
     write_cover::<CutSceneCover>(world, colour);
-}
-
-pub(crate) fn cutscene_image(world: &World) -> [f32; 4] {
-    world.resource::<CutSceneFadeImage>().colour
 }
 
 fn alpha_colour(colour: [f32; 4]) -> [f32; 4] {

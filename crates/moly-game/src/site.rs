@@ -683,9 +683,25 @@ pub struct SiteAssets {
     pub(crate) module: Option<Handle<Gltf>>,
     walkable: Option<Handle<Gltf>>,
     navmesh: Option<Handle<Gltf>>,
-    /// Source HomeSiteObstacleController.UpdateView: rank >= site level.
+    /// `HomeSiteObstacleController.AddObstacle` instantiates every ring up
+    /// to the site's greatest level; `UpdateView` keeps the rings whose
+    /// level is at least the site's level active ([`HomeObstacleLevel`]).
     home_obstacle_levels: Vec<u32>,
+    /// The site level the rings start at.
+    home_obstacle_site_level: u32,
 }
+
+/// One authored obstacle ring root of the home site (`rank<level>`).
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct HomeObstacleRing {
+    pub(crate) level: u32,
+}
+
+/// `HomeSiteObstacleController`'s current level: a ring is active when its
+/// level is at least this one (`UpdateView`). `UpdateObstacle(level)` of a
+/// cut-scene writes it.
+#[derive(Resource, Clone, Copy, Debug)]
+pub(crate) struct HomeObstacleLevel(pub(crate) u32);
 
 /// 地表网格的全部 primitive；站点展开后常驻——它同时是「站点已展开」
 /// 的闩（换站撤下它，闩在下一站重新起跳）。
@@ -951,14 +967,11 @@ pub(crate) fn plan_family(
         walkable,
         navmesh,
         home_obstacle_levels: if row.site_type == "home_site" {
-            row.levels
-                .iter()
-                .copied()
-                .filter(|rank| *rank >= site_level)
-                .collect()
+            row.levels.clone()
         } else {
             Vec::new()
         },
+        home_obstacle_site_level: site_level,
     };
     SitePlanned { active, assets }
 }
@@ -1070,14 +1083,20 @@ pub fn spawn_when_ready(
     // cannot leave a partial expansion to be spawned again next frame.
     let mut scenes = vec![(scene, false)];
     // These are the original authored obstacle prefabs, not scaled terrain or
-    // generated fences. Default home L5 adds only the authored-empty rank5 root.
+    // generated fences. Every ring is spawned; the site level decides which
+    // are active (default home L5 shows only the authored-empty rank5 root).
+    let mut rings = Vec::new();
     for rank in &assets.home_obstacle_levels {
         let name = format!("rank{rank}");
         let obstacle = gltf
             .named_scenes
             .get(name.as_str())
             .unwrap_or_else(|| panic!("home glTF lacks authored obstacle scene {name}"));
+        rings.push((scenes.len(), *rank));
         scenes.push((obstacle.clone(), false));
+    }
+    if !assets.home_obstacle_levels.is_empty() {
+        commands.insert_resource(HomeObstacleLevel(assets.home_obstacle_site_level));
     }
     let (ground, face) = match (&assets.module, &assets.walkable) {
         // 场景包站点：地表是主 glTF 里承载地表的网格（相机取景的锚，名
@@ -1174,6 +1193,9 @@ pub fn spawn_when_ready(
         if scene_index == 0 {
             root.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin);
         }
+        if let Some((_, level)) = rings.iter().find(|(index, _)| *index == scene_index) {
+            root.insert(HomeObstacleRing { level: *level });
+        }
         if !hidden {
             root.insert(SiteVisualPending);
         }
@@ -1181,6 +1203,30 @@ pub fn spawn_when_ready(
     commands.insert_resource(GroundMeshes(ground));
     commands.insert_resource(WalkFaceMeshes(face));
     commands.insert_resource(SiteScenePending(pending));
+}
+
+/// Update: `HomeSiteObstacleController.UpdateView` on the revealed rings: a
+/// ring is active when its level is at least the current level.
+pub(crate) fn apply_obstacle_level(
+    level: Option<Res<HomeObstacleLevel>>,
+    mut rings: Query<
+        (&HomeObstacleRing, &mut Visibility),
+        (With<SiteRoot>, Without<SiteVisualPending>),
+    >,
+) {
+    let Some(level) = level else {
+        return;
+    };
+    for (ring, mut visibility) in &mut rings {
+        let wanted = if ring.level >= level.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
 }
 
 /// 一条网格柄的全部 primitive 地表。
@@ -1458,6 +1504,7 @@ pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next
         commands.entity(root).despawn();
     }
     commands.remove_resource::<SiteAssets>();
+    commands.remove_resource::<HomeObstacleLevel>();
     commands.remove_resource::<GroundMeshes>();
     commands.remove_resource::<SiteReady>();
     commands.remove_resource::<SiteScenesReady>();

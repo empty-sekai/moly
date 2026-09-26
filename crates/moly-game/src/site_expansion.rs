@@ -544,8 +544,8 @@ pub(crate) fn advance_room(world: &mut World) {
                     perform.site_id
                 );
                 info!("[site-expansion] the other floors: {}", other_floors_note());
-                world.remove_resource::<game_state::UiHold>();
-                info!("[site-expansion] PlayRoomSiteExpansionPerformAsync ends: AddCollisionSensorEvent; SetLayerCanvasGroup(UI, interactable true); game state 11 holds until the next ChangeState");
+                let hold = world.remove_resource::<game_state::UiHold>();
+                info!("[site-expansion] PlayRoomSiteExpansionPerformAsync ends: AddCollisionSensorEvent; SetLayerCanvasGroup(UI, interactable true; hold {:?} released); game state 11 holds until the next ChangeState", hold.map(|hold| hold.0));
                 true
             } else {
                 false

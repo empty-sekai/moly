@@ -1064,9 +1064,14 @@ impl DoorMove {
         world.remove_resource::<super::SiteMoveActive>();
         world.write_message(LayerCommand::Change(LayerId::HomeField));
         match self.kind {
-            DoorKind::RoomToHome => info!(
-                "[site-move] HomeSiteController.OnFinishEnterAsync: SetupScreenLayerMysekaiHome"
-            ),
+            DoorKind::RoomToHome => {
+                info!(
+                    "[site-move] HomeSiteController.OnFinishEnterAsync: SetupScreenLayerMysekaiHome"
+                );
+                world.write_message(crate::cutscene::HomeScreenStartAnimation {
+                    caller: "a door arrival at home",
+                });
+            }
             _ => {
                 info!("[site-move] MyRoomSiteController.OnFinishEnterAsync: the field screen; PlayRoomSiteExpansionPerformAsync");
                 crate::site_expansion::room_finish_enter(world);
