@@ -493,6 +493,40 @@ pub(crate) fn later_play_with_particles(system: &mut Runtime) {
     }
 }
 
+/// `ParticleSystem.Play()` on a system its host stopped (Stop set the restart
+/// flag). With particles alive it is [`later_play_with_particles`]: seeds and
+/// emission carry stay. With none alive the same Play also resets the seeds
+/// (an automatic owner takes the next shared-manager word), which re-expands
+/// the module streams and zeroes the emission carry, as the first Play did.
+/// Neither branch clears the emitter velocity; both set the emitter reset, so
+/// the next frame takes its own translation as the previous one and its
+/// emission over distance sees no motion. A CollisionModule system with none
+/// alive is refused unchanged: its law is re-installed with the reset and the
+/// host passes no ground scene here. A looping prewarm system's second warm
+/// is the host's (the reset leaves it unwarmed).
+pub(crate) fn play_after_stop(system: &mut Runtime, seeds: &mut seed::SystemSeedManager, route: &SourceRoute,
+    edges: Option<EventEdges>) -> Result<(), String> {
+    if !system.pool.is_empty() {
+        later_play_with_particles(system);
+        return Ok(());
+    }
+    if system.emitter.collision.is_some() && system.native_birth.is_some() {
+        return Err("CollisionModule: Play's seed reset re-installs the collision law without its ground scene".into());
+    }
+    let velocity = system.native_birth.as_ref().map(|native| native.frame.velocity);
+    reset_for_first_play(system);
+    install_native_birth(system, seeds, route, None).map_err(|error| format!("source seed owner unavailable: {error}"))?;
+    if let Some(native) = system.native_birth.as_mut() {
+        if let Some(velocity) = velocity {
+            native.frame.velocity = velocity;
+        }
+        if let Some(edges) = edges {
+            native.events = Some(BirthEvents::with_edges(edges));
+        }
+    }
+    Ok(())
+}
+
 /// The start delay word ParticleSystem::Play writes when it restarts a
 /// stopped system: with prewarm on it writes nothing (the word keeps its
 /// construction zero), otherwise the start delay curve evaluated at time zero

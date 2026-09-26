@@ -1144,21 +1144,35 @@ pub(crate) fn play(world: &mut World, root: Entity) -> Result<usize, String> {
             let system = &mut live.0;
             played.emitting = true;
             played.play = lifecycle::PlayState::played(played.culling.clone(), played.procedural_warm);
-            if system.pool.is_empty() {
-                crate::particle_runtime::reset_for_first_play(system);
-                if let Err(error) = crate::particle_runtime::install_native_birth(system, &mut seeds, &played.route, None) {
-                    return Err(format!("{}: source seed owner unavailable: {error}", system.node));
-                }
-                if let (Some(edges), Some(birth)) = (played.event_edges.clone(), system.native_birth.as_mut()) {
-                    birth.events = Some(crate::particle_runtime::BirthEvents::with_edges(edges));
-                }
-            } else {
-                crate::particle_runtime::later_play_with_particles(system);
+            if let Err(error) = crate::particle_runtime::play_after_stop(system, &mut seeds, &played.route,
+                played.event_edges.clone()) {
+                return Err(format!("{}: {error}", system.node));
             }
             entity.insert(played);
         }
         Ok(draws.len())
     })
+}
+
+/// `ParticleSystem.Play()` after Stop on played systems a host moved out of
+/// [`crate::uber_particle::FixtureParticleLive`] into its own component `C`
+/// (their [`Played`] record stays on the draw), as [`play`] plays its own:
+/// see [`crate::particle_runtime::play_after_stop`]. A refused system is
+/// named at ERROR and left as it was.
+pub(crate) fn play_moved<C: Component<Mutability = bevy::ecs::component::Mutable>>(world: &mut World,
+    draws: &[Entity], runtime: impl Fn(&mut C) -> &mut Runtime) {
+    world.resource_scope(|world, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>| {
+        for &draw in draws {
+            let mut entity = world.entity_mut(draw);
+            let Some(played) = entity.get::<Played>() else { continue };
+            let (route, edges) = (played.route.clone(), played.event_edges.clone());
+            let Some(mut component) = entity.get_mut::<C>() else { continue };
+            let system = runtime(&mut *component);
+            if let Err(error) = crate::particle_runtime::play_after_stop(system, &mut seeds, &route, edges) {
+                error!("[fixture-source] {}: Play after Stop refused: {error}", system.node);
+            }
+        }
+    });
 }
 
 /// Whether any played system under `root` is playing (`None` when it has
