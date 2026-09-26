@@ -17,10 +17,10 @@
 //! drawn before `Cover`, so while the cover is opaque nothing of it shows.
 //! The MySekai scene starts with the cover already white, so the systems are
 //! installed paused with the 2 s they ran before the pause
-//! ([`crate::ui_particle::UiParticleHeadStart`]). Named differences: the
-//! outgame frames are not known and the head start is stepped at 60 frames a
-//! second (the systems seed themselves at random, as the source's
-//! `autoRandomSeed` ones do); the transitioner canvas is a screen-space
+//! ([`crate::ui_particle::UiParticleHeadStart`]), stepped frame by frame at
+//! the default target frame rate. Named differences: the outgame's real frame
+//! times are not known, so every head-start step is 1/60 s (the systems seed
+//! themselves at random, as the source's `autoRandomSeed` ones do); the transitioner canvas is a screen-space
 //! overlay canvas with its own scaler (1920 x 1080, match width), and the
 //! particle bakes against the root canvas as every UIParticle host here does.
 
@@ -69,7 +69,10 @@ const CONTENT_ROOT_SCALE: f32 = 0.999;
 /// fade-in whose `onDone` pauses the particle.
 const PLAY_FADE_DELAY: f32 = 1.0;
 const PLAY_FADE_DURATION: f32 = 1.0;
-/// Named: the frame of the outgame scene the head start is stepped in.
+/// The frame dt the head start is stepped in (120 steps to the pause):
+/// `FramerateUtility.SetFrameRate` targets 60 frames a second, or 120 with
+/// the user's live setting `Use120FPS`, fitted to the display's refresh
+/// rate; the default 60 is taken. Real frame times vary around the target.
 const HEAD_START_FRAME: f32 = 1.0 / 60.0;
 /// `ContentRoot`'s CanvasGroup alpha times the root's (both serialized 1).
 const START_PARTICLE_ALPHA: f32 = 1.0;
