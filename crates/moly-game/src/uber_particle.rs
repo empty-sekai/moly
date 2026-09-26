@@ -1646,7 +1646,16 @@ mod billboard_native {
     /// the vertex writer's entry, over sampled cameras, World (identity) and
     /// rigid Local owners, unit and non-unit renderer scale, pivots and roll on
     /// and off. Local runs with both states of the temp-data flag that picks
-    /// the owner basis (rotation quaternion or matrix columns). Each row goes
+    /// the owner basis: set, the owner matrix columns with the owner's scale
+    /// in them and the renderer scale not applied (the source construction's
+    /// Local-simulation order, basis x scale x rotation); clear, the emitter
+    /// rotation quaternion with the renderer scale applied first (its
+    /// World-simulation order). The replay reads the flag as Local simulation,
+    /// the same pairing the independent engine cases in tests/data carry for
+    /// every alignment and simulation space; the two fields the renderer's
+    /// preparation derives the flag from are not yet named. Rows must lie in
+    /// the caller's dispatch domain: the pivot-less instantiations are taken
+    /// only for a zero pivot and a uniform (not 3D) size. Each row goes
     /// through this path's own construction (`billboard_geometry`, then the
     /// renderer scale through the Draw's scaling as the host applies it) and
     /// every corner must match within the billboard receipts' 2.5e-5. The View
@@ -1670,14 +1679,30 @@ mod billboard_native {
             let owner = Mat3::from_cols(Vec3::new(o[0], o[1], o[2]), Vec3::new(o[4], o[5], o[6]), Vec3::new(o[8], o[9], o[10]));
             let translation = Vec3::new(o[12], o[13], o[14]);
             let c: Vec<f32> = row["cameraRotation"].as_array().unwrap().iter().map(word).collect();
-            let scale = v3(&row["rendererScale"]);
+            let e: Vec<f32> = row["emitterRotation"].as_array().expect("rows from the domain-checked harness").iter().map(word).collect();
+            let bit28 = row["flagBit28"].as_i64().unwrap() == 1;
+            // With the flag set the owner columns carry the scale; clear, the
+            // renderer scale word does.
+            let scale = if bit28 {
+                Vec3::new(owner.x_axis.length(), owner.y_axis.length(), owner.z_axis.length())
+            } else {
+                v3(&row["rendererScale"])
+            };
             let frame = Frame {
-                rotation: owner,
+                rotation: Mat3::from_cols_slice(&e),
                 scale: Vec3::ONE,
                 camera_rotation: Mat3::from_cols_slice(&c),
                 camera_position: v3(&row["cameraPosition"]),
             };
-            let local = row["simulation"] == "Local";
+            let local = bit28;
+            let entry = row["entry"].as_str().unwrap();
+            if entry == "0xfa5300" || entry == "0xfa2860" {
+                let size = v3(&row["size"]);
+                assert!(
+                    row["size3D"] == 0 && v3(&row["pivot"]) == Vec3::ZERO && size.x == size.y && size.y == size.z,
+                    "row {index}: pivot-less instantiation {entry} called outside its dispatch domain"
+                );
+            }
             let p = Instance {
                 position: owner * v3(&row["position"]) + translation,
                 velocity: Vec3::ZERO,
