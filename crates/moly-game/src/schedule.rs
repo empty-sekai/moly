@@ -981,6 +981,8 @@ pub fn install(app: &mut App) {
     // ---- 场地屏外壳 · 屏幕层栈（追加段：以下全部为新增，未动上面既有行） ----
     // 层栈命令与外壳对话框请求两条消息沿；层栈资源常驻（栈底场地屏起步，
     // 真源主场地屏常驻同形）。
+    // The screen manager's registry, hook events and back key.
+    ui_layers::install(app);
     app.add_message::<ui_layers::LayerCommand>()
         .add_message::<menu_shell::ShellDialogRequest>()
         .init_resource::<ui_layers::UiLayerStack>()
@@ -1160,9 +1162,11 @@ pub fn install(app: &mut App) {
                 learn_phenomena_dialog::open,
                 learn_phenomena_dialog::autotap,
                 learn_phenomena_dialog::click.run_if(crate::game_settings::scene_input_enabled),
+                learn_phenomena_dialog::back_key,
                 learn_phenomena_dialog::place,
             )
                 .chain()
+                .after(ui_layers::back_key)
                 .after(action_button::click)
                 .before(menu_shell::click)
                 .before(menu_dialog::click)

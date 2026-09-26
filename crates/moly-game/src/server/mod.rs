@@ -476,12 +476,15 @@ impl ServerModel {
 
     /// The server's refresh check at `now`: a new refresh window since
     /// `refreshedAt` refreshes the user.
+    /// A clock set behind the last refresh counts as entering a new window
+    /// too (the server's record is never in its own future).
     pub(super) fn refresh_due(&self, now: i64) -> bool {
         let Some(periods) = &self.masters.periods else {
             return false;
         };
-        clock::window_start(now, periods, clock::device_utc_offset_ms)
-            .is_some_and(|start| self.doc.gamedata.refreshed_at < start)
+        now < self.doc.gamedata.refreshed_at
+            || clock::window_start(now, periods, clock::device_utc_offset_ms)
+                .is_some_and(|start| self.doc.gamedata.refreshed_at < start)
     }
 
     /// The refresh: `refreshedAt` := now; the stamina refresh policy.
@@ -1279,8 +1282,8 @@ fn persist_local(
     if written.as_deref() == Some(text.as_str()) {
         return;
     }
-    if written.is_none() && !local.is_changed() {
-        // The seeded state needs no write.
+    if written.is_none() {
+        // The seeded state (or a first run's empty lists) needs no write.
         *written = Some(text);
         return;
     }
@@ -1405,6 +1408,20 @@ mod tests {
         server.join();
         assert!(!server.responses.last().unwrap().is_refreshed);
         assert_eq!(server.doc.gamedata.refreshed_at, 1_790_218_800_000);
+    }
+
+    #[test]
+    fn a_clock_set_behind_the_last_refresh_refreshes() {
+        let mut model = model();
+        model.doc.clock = document::Clock::Fixed {
+            at_ms: 1_790_000_000_000,
+        };
+        model.join();
+        assert!(model.responses.last().unwrap().is_refreshed);
+        assert_eq!(model.doc.gamedata.refreshed_at, 1_790_000_000_000);
+        model.responses.clear();
+        model.tick();
+        assert!(model.responses.is_empty());
     }
 
     #[test]
