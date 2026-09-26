@@ -14,6 +14,7 @@
 mod actors;
 mod assets;
 mod autoplay;
+mod edit_grid;
 mod game_state;
 mod input;
 mod placement;
@@ -1016,6 +1017,7 @@ pub struct FixtureEditPlugin;
 
 impl Plugin for FixtureEditPlugin {
     fn build(&self, app: &mut App) {
+        edit_grid::install(app);
         app.init_resource::<EditSession>()
             .init_resource::<EditSessionActive>()
             .init_resource::<EditView>()
