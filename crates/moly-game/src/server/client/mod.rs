@@ -12,10 +12,13 @@
 //! - [`home_action`]: the craft, canvas and sketch requests.
 //! - [`instrument_env`]: the native instruments' environment variables,
 //!   which game mode never reads.
+//! - [`music_play`]: the owned `UserMysekaiMusicRecord` rows and the music
+//!   player's set and eject requests.
 
 pub(crate) mod avatar;
 pub(crate) mod home_action;
 pub(crate) mod music;
+pub(crate) mod music_play;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

@@ -24,7 +24,7 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 11] = [
+pub(crate) const PENDING_SECTIONS: [&str; 12] = [
     super::music::SECTION,
     super::avatar::SECTION,
     SECTION_GAMEDATA,
@@ -36,6 +36,7 @@ pub(crate) const PENDING_SECTIONS: [&str; 11] = [
     super::delivery::SECTION_CARDS,
     super::delivery::SECTION_HONORS,
     super::delivery::SECTION_MASTER_CONFIGS,
+    super::music_play::RECORDS_SECTION,
 ];
 
 /// How an accepted edit reaches the client.
@@ -124,6 +125,7 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(
     }
     super::music::check_records(&doc.music_settings, masters.music_records.as_deref())?;
     super::avatar::check(&masters.avatar, &doc.avatar)?;
+    super::music_play::check_owned(&doc.music_records, masters.music_records.as_deref())?;
     if let Some((gates, skins)) = &masters.gates {
         if !gates.contains(&doc.gate.gate_id) {
             return Err(format!(
@@ -164,6 +166,12 @@ fn edit_path(
     }
     if let Some(result) = super::avatar::edit_path(&mut doc.avatar, &parts, path, value) {
         return result.map(|()| Delivery::NextResponse(super::avatar::SECTION));
+    }
+    if let Some(result) = super::music_play::edit_policy(&mut doc.music_play_reply, &parts, value) {
+        return result.map(|()| Delivery::Live);
+    }
+    if let Some(result) = super::music_play::edit_records(&mut doc.music_records, &parts, value) {
+        return result.map(|()| Delivery::NextResponse(super::music_play::RECORDS_SECTION));
     }
     match parts.as_slice() {
         ["clock"] => {
@@ -682,6 +690,7 @@ fn other_sections(core: Value, delivery: Value) -> Value {
         super::home_action::schema_sections(),
         super::music::schema_sections(),
         super::avatar::schema_sections(),
+        super::music_play::schema_sections(),
     ]
     .into_iter()
     .fold(core, concat)
@@ -705,7 +714,7 @@ pub(crate) fn schema(model: &ServerModel) -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(&model.masters), super::delivery::schema_sections(Some(model))),
         "actions": actions(),
-        "policies": concat(concat(policies(), super::delivery::schema_policies()), super::home_action::schema_policies()),
+        "policies": concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())),
         "masters": masters_value(&model.masters),
         "joined": model.joined,
     })
@@ -717,7 +726,7 @@ pub(crate) fn schema_without_model() -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(&Masters::default()), super::delivery::schema_sections(None)),
         "actions": actions(),
-        "policies": concat(concat(policies(), super::delivery::schema_policies()), super::home_action::schema_policies()),
+        "policies": concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())),
         "masters": null,
         "joined": false,
     })
