@@ -61,6 +61,7 @@ pub(crate) struct InteractionEligibility<'w, 's> {
     pair_talk: Option<Res<'w, ActiveTalk>>,
     entry: Option<Res<'w, crate::entry::EntrySequence>>,
     delivery: Option<Res<'w, crate::delivery::DeliveryGameState>>,
+    holds: crate::game_state::PerformanceHolds<'w>,
 }
 
 impl InteractionEligibility<'_, '_> {
@@ -73,6 +74,7 @@ impl InteractionEligibility<'_, '_> {
             && self.player_state.can_intercept
             && self.player_talk.is_none()
             && self.pair_talk.is_none()
+            && !self.holds.ui_blocked()
     }
 
     /// The field accepts a button tap, without any reading of the player's
@@ -85,6 +87,7 @@ impl InteractionEligibility<'_, '_> {
             && !self.edits.is_active()
             && !self.dialogs.blocks_field_input()
             && !self.player_in_talk()
+            && !self.holds.ui_blocked()
     }
 
     /// The GameState Talk equivalent: a conversation that includes the player.
@@ -102,7 +105,10 @@ impl InteractionEligibility<'_, '_> {
     /// press, until the next site move); a harvest, a gimmick switch, a
     /// timeline, a shell dialog or a pushed layer stay in Normal or Harvest.
     pub(crate) fn collision_updates(&self) -> bool {
-        !self.edits.is_active() && !self.player_in_talk() && self.delivery.is_none()
+        !self.edits.is_active()
+            && !self.player_in_talk()
+            && self.delivery.is_none()
+            && !self.holds.collision_stopped()
     }
 
     /// ScreenLayerMysekaiHome, which holds the action buttons, is the current

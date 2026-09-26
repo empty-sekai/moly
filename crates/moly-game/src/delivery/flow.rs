@@ -781,9 +781,24 @@ fn play_avatar_delivery_animation(world: &mut FlowWorld, objects: &DeliveryObjec
     let bundle = format!("{STEP_ITEM_BUNDLE_PREFIX}{}", objects.bundle);
     step.update_step_item_object(&bundle, DEWDROP_TIMELINE);
     step.setup(Some(StepItemOnStop::MoveEndTime));
-    info!(
-        "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): BindSignalReceiver(the site's delivery signal receiver): the step item's Signal track markers are not exported, so its signals are not sent (named gap)"
-    );
+    match &objects.signal_receiver {
+        Ok(receiver) => {
+            for reaction in &receiver.reactions {
+                info!(
+                    "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): {} reacts to {} ({}/{}) with {}",
+                    receiver.receiver,
+                    reaction.signal_name,
+                    reaction.signal.file,
+                    reaction.signal.path_id,
+                    reaction.calls.join(", ")
+                );
+            }
+            step.bind_signal_receiver(receiver.clone());
+        }
+        Err(reason) => error!(
+            "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): BindSignalReceiver is not made: {reason}; the step item's signals reach no receiver"
+        ),
+    }
     step.play();
 }
 

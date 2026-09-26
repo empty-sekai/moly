@@ -164,6 +164,7 @@ pub(crate) fn advance(
     entry: Option<Res<crate::entry::EntrySequence>>,
     root_canvas: Option<Res<RootCanvas>>,
     learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
+    held: Option<Res<crate::game_state::HeldGameState>>,
 ) {
     let Some(window) = windows.single().ok() else {
         return;
@@ -173,6 +174,7 @@ pub(crate) fn advance(
     // → 禁用。环境配对对话不改游戏态（SomeCharacterTalk=7 不在摇杆的
     // 分派表里），不算禁用源。
     // MysekaiUtility.EnableJoyStick(true) runs in the entry's Finish.
+    let was_enabled = state.enabled;
     state.enabled = !edits.is_active()
         && player_talk.is_none()
         && !settings_panel.blocks_world_input()
@@ -181,7 +183,25 @@ pub(crate) fn advance(
         && site_move.is_none()
         // GameState LearnSiteEnvironment: the stick resets and hides.
         && learn.is_none()
+        // GameState CutScene (5) and LevelUpMyRoomSite (11): the stick's
+        // table disables it.
+        && held.is_none()
         && crate::entry::control_open(entry.as_deref());
+    if let Some(held) = held.as_ref() {
+        if held.is_changed() {
+            info!(
+                "[joystick] OnChangeGameState({} {:?}): disabled",
+                held.0 as i32, held.0
+            );
+        }
+    }
+    if was_enabled != state.enabled {
+        info!(
+            "[joystick] enabled {was_enabled} -> {} (held game state {:?})",
+            state.enabled,
+            held.as_ref().map(|held| held.0)
+        );
+    }
     if !state.enabled {
         touches.clear();
         if state.captured.take().is_some() {

@@ -498,7 +498,15 @@ pub(crate) fn plan(
 
     let mut tally = Tally::default();
     let mut plans = Vec::new();
+    let mut not_play_on_awake = 0usize;
     for system in &doc.particles {
+        // A system that does not play on awake runs only when its owner plays
+        // it (a director's Control clip, a Signal reaction's Play), never from
+        // the scene's load.
+        if system.system.as_ref().and_then(|v| v.get("playOnAwake")).and_then(serde_json::Value::as_bool) == Some(false) {
+            not_play_on_awake += 1;
+            continue;
+        }
         match judge(
             system,
             doc,
@@ -526,6 +534,10 @@ pub(crate) fn plan(
             .filter(|node| node.contains("fx_env_site_")).collect();
         info!("[uber-particle] {} scene-embedded environment effect rows {:?}; admitted {:?}",
             active.scene, embedded, admitted);
+    }
+    if not_play_on_awake > 0 {
+        info!("[uber-particle] {}: {not_play_on_awake} systems do not play on awake; their owners play them, so they are not run from load",
+            active.scene);
     }
     if tally.records == 0 {
         // 这个站点包里没有这一族的粒子系统：不留资源，也不每帧重扫。
@@ -1015,6 +1027,7 @@ pub(crate) fn advance(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     anchors: Query<&GlobalTransform>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
+    taken: Query<(), With<crate::fixture_timeline_particles::DrivenByPrefabOwner>>,
 ) {
     let Some(mut state) = state else {
         return;
@@ -1047,7 +1060,9 @@ pub(crate) fn advance(
     let dt = crate::particle_runtime::source_delta_time(time.delta());
     let state = &mut *state;
     for system in &mut state.live {
-        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
+        // A system a prefab's director owner took over is the owner's, drawn
+        // by the fixture host.
+        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok() || taken.get(entity).is_ok()) {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
