@@ -642,6 +642,7 @@ pub(crate) fn install(app: &mut App) {
     let craft = app.world_mut().register_system(handle_craft);
     let sketch = app.world_mut().register_system(handle_sketch);
     app.insert_resource(CraftEndpoints { craft, sketch });
+    super::talk_read::install(app);
     app.add_systems(
         PreUpdate,
         super::inventory::mirror_materials.after(super::deliver),

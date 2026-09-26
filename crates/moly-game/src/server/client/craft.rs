@@ -21,6 +21,9 @@
 //! The checks below are the client's; the server model applies the same
 //! checks to refuse a request the craft screen would not have sent.
 
+// The craft, canvas and sketch screens read these.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
 use bevy::ecs::system::SystemId;

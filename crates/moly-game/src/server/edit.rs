@@ -24,7 +24,7 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 15] = [
+pub(crate) const PENDING_SECTIONS: [&str; 16] = [
     super::music::SECTION,
     super::avatar::SECTION,
     SECTION_GAMEDATA,
@@ -40,6 +40,7 @@ pub(crate) const PENDING_SECTIONS: [&str; 15] = [
     super::inventory::SECTION_CANVASES,
     super::inventory::SECTION_BLUEPRINTS,
     super::inventory::SECTION_ITEMS,
+    super::inventory::SECTION_CHARACTER_TALKS,
 ];
 
 /// How an accepted edit reaches the client.

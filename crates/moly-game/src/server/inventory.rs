@@ -12,13 +12,19 @@
 //!   is `stated`.
 //! - `userMysekaiItems`: `UserMysekaiItem` rows (`mysekaiItemId`, `quantity`,
 //!   `lastObtainedAt`).
+//! - `userMysekaiCharacterTalks`: `UserMysekaiCharacterTalk` rows
+//!   (`mysekaiCharacterTalkId`, `isRead`), the talks' read records; the talk
+//!   read report sets them ([`super::talk_read`]).
 //! - `userMysekaiGamedata.mysekaiMaterialPossessionLevel` and
 //!   `.mysekaiFixturePossessionLevel`: the two possession levels.
 //!
 //! `userMysekaiMaterials` is the birthday-party delivery's section; this part
 //! reads and changes the same rows.
 //!
-//! **Named defaults**: no fixture, canvas or item row; both possession
+//! The mock's own key: `policies.talkReadObtainedResources` (what every talk
+//! read report grants; none by default).
+//!
+//! **Named defaults**: no fixture, canvas, item or talk row; both possession
 //! levels [`DEFAULT_POSSESSION_LEVEL`] (the first master level); the owned
 //! blueprints policy [`OWNED_EVERY_BLUEPRINT`].
 //!
@@ -46,12 +52,13 @@ use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
 use super::client::craft::MasterBlueprint;
+use super::client::inventory::character_talks_value;
 use super::client::inventory::{
     blueprints_value, canvases_value, fixtures_value, items_value, ClientMysekaiInventory,
-    PossessionMasters, PossessionRow, SuiteUserSections, UserMysekaiBlueprint, UserMysekaiCanvas,
-    UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
-    UserMysekaiMaterialPossession,
+    PossessionRow, SuiteUserSections, UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiFixture,
+    UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial, UserMysekaiMaterialPossession,
 };
+use super::client::talk_read::{UserMysekaiCharacterTalk, UserResource};
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
 use super::document::{boolean, int32, int64, object, only};
 use super::{Masters, ServerModel, SECTION_GAMEDATA};
@@ -60,22 +67,24 @@ pub(crate) const SECTION_FIXTURES: &str = "userMysekaiFixtures";
 pub(crate) const SECTION_CANVASES: &str = "userMysekaiCanvases";
 pub(crate) const SECTION_BLUEPRINTS: &str = "userMysekaiBlueprints";
 pub(crate) const SECTION_ITEMS: &str = "userMysekaiItems";
+pub(crate) const SECTION_CHARACTER_TALKS: &str = "userMysekaiCharacterTalks";
 /// The sections of this part a response carries (the document keys).
-pub(crate) const SECTIONS: [&str; 4] = [
+pub(crate) const SECTIONS: [&str; 5] = [
     SECTION_FIXTURES,
     SECTION_CANVASES,
     SECTION_BLUEPRINTS,
     SECTION_ITEMS,
+    SECTION_CHARACTER_TALKS,
 ];
 /// The document keys this part reads at the top level.
-pub(crate) const DOCUMENT_KEYS: [&str; 4] = SECTIONS;
+pub(crate) const DOCUMENT_KEYS: [&str; 5] = SECTIONS;
 /// The keys this part reads under `userMysekaiGamedata`.
 pub(crate) const GAMEDATA_KEYS: [&str; 2] = [
     "mysekaiMaterialPossessionLevel",
     "mysekaiFixturePossessionLevel",
 ];
 /// The keys this part reads under `policies`.
-pub(crate) const POLICY_KEYS: [&str; 1] = ["ownedBlueprints"];
+pub(crate) const POLICY_KEYS: [&str; 2] = ["ownedBlueprints", "talkReadObtainedResources"];
 
 pub(crate) const DEFAULT_POSSESSION_LEVEL: i32 = 1;
 pub(crate) const OWNED_EVERY_BLUEPRINT: &str = "everyBlueprint";
@@ -102,6 +111,11 @@ pub(crate) struct InventoryDoc {
     pub(crate) material_possession_level: i32,
     pub(crate) fixture_possession_level: i32,
     pub(crate) owned_blueprints: OwnedBlueprints,
+    /// `userMysekaiCharacterTalks`: the talks' read records.
+    pub(crate) character_talks: Vec<UserMysekaiCharacterTalk>,
+    /// `policies.talkReadObtainedResources`: what every talk read report
+    /// grants (none by default).
+    pub(crate) talk_read_resources: Vec<UserResource>,
 }
 
 impl Default for InventoryDoc {
@@ -114,6 +128,8 @@ impl Default for InventoryDoc {
             material_possession_level: DEFAULT_POSSESSION_LEVEL,
             fixture_possession_level: DEFAULT_POSSESSION_LEVEL,
             owned_blueprints: OwnedBlueprints::EveryBlueprint,
+            character_talks: Vec::new(),
+            talk_read_resources: Vec::new(),
         }
     }
 }
@@ -217,6 +233,67 @@ pub(crate) fn parse_items(value: &Value) -> Result<Vec<UserMysekaiItem>, String>
         .collect()
 }
 
+pub(crate) fn parse_character_talks(
+    value: &Value,
+) -> Result<Vec<UserMysekaiCharacterTalk>, String> {
+    rows(value, SECTION_CHARACTER_TALKS)?
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{SECTION_CHARACTER_TALKS}[{i}]");
+            let row = object(row, &at)?;
+            only(row, &["mysekaiCharacterTalkId", "isRead"], &at)?;
+            Ok(UserMysekaiCharacterTalk {
+                mysekai_character_talk_id: int32(row, "mysekaiCharacterTalkId", &at)?,
+                is_read: boolean(row, "isRead", &at)?,
+            })
+        })
+        .collect()
+}
+
+/// `policies.talkReadObtainedResources`: `UserResource` rows.
+pub(crate) fn parse_resources(value: &Value) -> Result<Vec<UserResource>, String> {
+    const AT: &str = "policies.talkReadObtainedResources";
+    rows(value, AT)?
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{AT}[{i}]");
+            let row = object(row, &at)?;
+            only(
+                row,
+                &["resourceType", "resourceId", "resourceLevel", "quantity"],
+                &at,
+            )?;
+            Ok(UserResource {
+                resource_type: row
+                    .get("resourceType")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("{at}.resourceType is not a string"))?
+                    .to_owned(),
+                resource_id: int32(row, "resourceId", &at)?,
+                resource_level: int32(row, "resourceLevel", &at)?,
+                quantity: int32(row, "quantity", &at)?,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn resources_value(rows: &[UserResource]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "resourceType": row.resource_type,
+                    "resourceId": row.resource_id,
+                    "resourceLevel": row.resource_level,
+                    "quantity": row.quantity,
+                })
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn parse_owned_blueprints(value: &Value) -> Result<OwnedBlueprints, String> {
     match value.as_str() {
         Some(OWNED_EVERY_BLUEPRINT) => Ok(OwnedBlueprints::EveryBlueprint),
@@ -266,6 +343,12 @@ impl InventoryDoc {
         }
         if let Some(value) = policies.get(POLICY_KEYS[0]) {
             out.owned_blueprints = parse_owned_blueprints(value)?;
+        }
+        if let Some(value) = doc.get(SECTION_CHARACTER_TALKS) {
+            out.character_talks = parse_character_talks(value)?;
+        }
+        if let Some(value) = policies.get(POLICY_KEYS[1]) {
+            out.talk_read_resources = parse_resources(value)?;
         }
         out.check_structure()?;
         Ok(out)
@@ -322,6 +405,23 @@ impl InventoryDoc {
                 return Err(format!("{at} repeats item {}", row.mysekai_item_id));
             }
         }
+        let mut ids = BTreeSet::new();
+        for (i, row) in self.character_talks.iter().enumerate() {
+            if !ids.insert(row.mysekai_character_talk_id) {
+                return Err(format!(
+                    "{SECTION_CHARACTER_TALKS}[{i}] repeats talk {}",
+                    row.mysekai_character_talk_id
+                ));
+            }
+        }
+        for (i, row) in self.talk_read_resources.iter().enumerate() {
+            if row.quantity < 1 {
+                return Err(format!(
+                    "policies.talkReadObtainedResources[{i}].quantity = {} is below 1",
+                    row.quantity
+                ));
+            }
+        }
         for (key, value) in [
             (GAMEDATA_KEYS[0], self.material_possession_level),
             (GAMEDATA_KEYS[1], self.fixture_possession_level),
@@ -343,6 +443,14 @@ impl InventoryDoc {
             blueprints_value(&self.blueprints),
         );
         doc.insert(SECTION_ITEMS.into(), items_value(&self.items));
+        doc.insert(
+            SECTION_CHARACTER_TALKS.into(),
+            character_talks_value(&self.character_talks),
+        );
+        policies.insert(
+            POLICY_KEYS[1].into(),
+            resources_value(&self.talk_read_resources),
+        );
         if let Some(gamedata) = doc.get_mut(SECTION_GAMEDATA).and_then(Value::as_object_mut) {
             gamedata.insert(
                 GAMEDATA_KEYS[0].into(),
@@ -504,6 +612,8 @@ impl ServerModel {
             user_mysekai_blueprints: has(SECTION_BLUEPRINTS).then(|| self.owned_blueprint_rows()),
             user_mysekai_items: has(SECTION_ITEMS).then(|| inventory.items.clone()),
             user_mysekai_gamedata: has(SECTION_GAMEDATA).then(|| self.gamedata_row()),
+            user_mysekai_character_talks: has(SECTION_CHARACTER_TALKS)
+                .then(|| inventory.character_talks.clone()),
         }
     }
 }
@@ -688,6 +798,14 @@ pub(crate) fn edit_path(
                 Some(SECTION_GAMEDATA)
             })
         }
+        [SECTION_CHARACTER_TALKS] => parse_character_talks(value).map(|rows| {
+            doc.character_talks = rows;
+            Some(SECTION_CHARACTER_TALKS)
+        }),
+        ["policies", "talkReadObtainedResources"] => parse_resources(value).map(|rows| {
+            doc.talk_read_resources = rows;
+            None
+        }),
         ["policies", "ownedBlueprints"] => parse_owned_blueprints(value).map(|policy| {
             doc.owned_blueprints = policy;
             // The client's blueprint copy follows the policy.
@@ -718,6 +836,8 @@ pub(crate) fn schema_sections() -> Value {
                     "note": "the white blueprint (the first white_blueprint item of the items master) pays for a sketch"},
                 {"path": "userMysekaiMaterials.<mysekaiMaterialId>", "type": "int", "min": 0,
                     "note": "the birthday-party section's rows; the craft reply spends them"},
+                {"path": SECTION_CHARACTER_TALKS, "type": "rows", "row": {"mysekaiCharacterTalkId": "int", "isRead": "bool"},
+                    "note": "the talks' read records (the character archive reads them); the talk read report sets isRead"},
             ],
         },
         {
@@ -743,6 +863,9 @@ pub(crate) fn schema_sections() -> Value {
                     {"value": OWNED_EVERY_BLUEPRINT, "label": "the user owns every master blueprint"},
                     {"value": OWNED_STATED, "label": "the userMysekaiBlueprints rows"},
                 ]},
+                {"path": "policies.talkReadObtainedResources", "type": "rows",
+                    "row": {"resourceType": "text", "resourceId": "int", "resourceLevel": "int", "quantity": "int"},
+                    "note": "what every talk read report grants (obtainedResources); no master names talk rewards, so the default is none; mysekai_material, material and mysekai_item rows join the owned tables, other types are carried in the reply only"},
             ],
         },
     ])
@@ -754,5 +877,7 @@ pub(crate) fn schema_policies() -> Value {
         {"name": "owned blueprints", "key": "policies.ownedBlueprints", "rule": "everyBlueprint: every master blueprint is owned; stated: the userMysekaiBlueprints rows. The craft list shows a blueprint only when it is available without possession or owned (UserResourceFactory)"},
         {"name": "material possession (inference)", "rule": "userMysekaiMaterialPossession.quantity = the sum of userMysekaiMaterials quantities except the game_character and birthday_party types (the types IsMaterialReceivableOverPossessionLimit lets over the limit), derived whenever a response carries the materials"},
         {"name": "possession levels", "rule": format!("both default to {DEFAULT_POSSESSION_LEVEL}, the first master level; the panel sets them")},
+        {"name": "talk read record", "rule": "PutUserMysekaiCharacterTalkReadApi sets the talk's userMysekaiCharacterTalks row to isRead true (the character archive reads these rows); the talk id is taken as stated"},
+        {"name": "talk read resources", "key": "policies.talkReadObtainedResources", "rule": "obtainedResources is the policy's rows (none by default: no master names a talk reward); mysekai_material, material and mysekai_item rows join the owned tables, other types are carried in the reply only"},
     ])
 }

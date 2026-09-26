@@ -91,6 +91,7 @@ pub(crate) mod home_action;
 pub(crate) mod inventory;
 pub(crate) mod local;
 pub(crate) mod music;
+pub(crate) mod talk_read;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -219,6 +220,7 @@ pub(crate) enum ResponseKind {
     HomeActionCraft,
     HomeActionCanvas,
     HomeActionSketch,
+    CharacterTalkRead,
 }
 
 impl ResponseKind {
@@ -236,6 +238,7 @@ impl ResponseKind {
             Self::HomeActionCraft => "PostUserMysekaiCraftApi (craft)",
             Self::HomeActionCanvas => "PostUserMysekaiCraftApi (canvas)",
             Self::HomeActionSketch => "PostUserMysekaiHousingSketchApi",
+            Self::CharacterTalkRead => "PutUserMysekaiCharacterTalkReadApi",
             Self::BirthdayPartySeat => {
                 "user data (the rows of the birthday parties now in session)"
             }

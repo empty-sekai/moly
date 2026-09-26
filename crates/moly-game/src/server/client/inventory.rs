@@ -5,7 +5,9 @@
 //! (`UserMysekaiFixture`), `userMysekaiCanvases` (`UserMysekaiCanvas`),
 //! `userMysekaiBlueprints` (`UserMysekaiBlueprint`), `userMysekaiItems`
 //! (`UserMysekaiItem`), `userMysekaiMaterials` (`UserMysekaiMaterial`, the
-//! id and quantity the server document holds), `userMysekaiMaterialPossession`
+//! id and quantity the server document holds), `userMysekaiCharacterTalks`
+//! (`UserMysekaiCharacterTalk`, the talks' read records),
+//! `userMysekaiMaterialPossession`
 //! (`UserMysekaiMaterialPossession`) and the `userMysekaiGamedata` fields the
 //! two screens read (rank, total experience and the two possession levels).
 //! `UserDataManager.UpdateAll` replaces each table a reply carries as a whole,
@@ -18,8 +20,13 @@
 //! the birthday-party delivery also reads; the server model keeps the two
 //! equal.
 
+// The inventory and craft screens read these.
+#![allow(dead_code)]
+
 use bevy::prelude::*;
 use serde_json::{json, Value};
+
+use super::talk_read::UserMysekaiCharacterTalk;
 
 /// `UserMysekaiFixture`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +89,7 @@ pub(crate) struct UserMysekaiGamedata {
 /// does not carry. Applying it replaces each carried table whole.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SuiteUserSections {
+    pub(crate) user_mysekai_character_talks: Option<Vec<UserMysekaiCharacterTalk>>,
     pub(crate) user_mysekai_materials: Option<Vec<UserMysekaiMaterial>>,
     pub(crate) user_mysekai_material_possession: Option<UserMysekaiMaterialPossession>,
     pub(crate) user_mysekai_fixtures: Option<Vec<UserMysekaiFixture>>,
@@ -142,6 +150,7 @@ pub(crate) struct ClientMysekaiInventory {
     materials: Vec<UserMysekaiMaterial>,
     material_possession: Option<UserMysekaiMaterialPossession>,
     gamedata: Option<UserMysekaiGamedata>,
+    character_talks: Vec<UserMysekaiCharacterTalk>,
     /// Applications that carried a table (0: none yet).
     pub(crate) revision: u64,
 }
@@ -165,6 +174,18 @@ impl ClientMysekaiInventory {
 
     pub(crate) fn materials(&self) -> &[UserMysekaiMaterial] {
         &self.materials
+    }
+
+    /// `userMysekaiCharacterTalks`: the talks' read records.
+    pub(crate) fn character_talks(&self) -> &[UserMysekaiCharacterTalk] {
+        &self.character_talks
+    }
+
+    /// Whether a talk's read record says it has been read.
+    pub(crate) fn is_talk_read(&self, mysekai_character_talk_id: i32) -> bool {
+        self.character_talks
+            .iter()
+            .any(|row| row.mysekai_character_talk_id == mysekai_character_talk_id && row.is_read)
     }
 
     /// `userMysekaiGamedata` as last carried (`None` before the join).
@@ -258,6 +279,7 @@ impl ClientMysekaiInventory {
             return;
         }
         let SuiteUserSections {
+            user_mysekai_character_talks,
             user_mysekai_materials,
             user_mysekai_material_possession,
             user_mysekai_fixtures,
@@ -287,6 +309,9 @@ impl ClientMysekaiInventory {
         if let Some(gamedata) = user_mysekai_gamedata {
             self.gamedata = Some(gamedata);
         }
+        if let Some(rows) = user_mysekai_character_talks {
+            self.character_talks = rows;
+        }
         self.revision += 1;
     }
 
@@ -300,6 +325,7 @@ impl ClientMysekaiInventory {
             "userMysekaiMaterials": materials_value(&self.materials),
             "userMysekaiMaterialPossession": self.material_possession.map(|row| json!({"quantity": row.quantity})),
             "userMysekaiGamedata": self.gamedata.map(gamedata_value),
+            "userMysekaiCharacterTalkReadCount": self.character_talks.iter().filter(|row| row.is_read).count(),
             "revision": self.revision,
         })
     }
@@ -383,6 +409,16 @@ pub(crate) fn materials_value(rows: &[UserMysekaiMaterial]) -> Value {
     Value::Array(
         rows.iter()
             .map(|row| json!({"mysekaiMaterialId": row.mysekai_material_id, "quantity": row.quantity}))
+            .collect(),
+    )
+}
+
+pub(crate) fn character_talks_value(rows: &[UserMysekaiCharacterTalk]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({"mysekaiCharacterTalkId": row.mysekai_character_talk_id, "isRead": row.is_read})
+            })
             .collect(),
     )
 }
