@@ -32,6 +32,7 @@
 //! `moly_law::delivery` take source-frame positions, converted here at the
 //! call.
 
+pub(crate) mod bloom;
 pub(crate) mod drops;
 pub(crate) mod flow;
 pub(crate) mod honor;
@@ -385,6 +386,7 @@ impl Plugin for DeliveryPlugin {
             .init_resource::<honor::RewardRuns>()
             .init_resource::<honor::DialogAwait>()
             .init_resource::<crate::delivery_camera::DeliveryHonorCamera>()
+            .init_resource::<bloom::DeliveryBloom>()
             .add_systems(Startup, server_mock::load)
             .add_systems(
                 Update,
@@ -410,6 +412,12 @@ impl Plugin for DeliveryPlugin {
                     .before(crate::player_state::drive_from_input)
                     .before(crate::player::advance)
                     .before(crate::audio::SeDrainSet::Drain),
+            )
+            .add_systems(
+                Update,
+                bloom::advance
+                    .after(crate::player_avatar::item_timeline::advance)
+                    .before(crate::fixture_activity_timeline::advance),
             )
             .add_systems(
                 PostUpdate,

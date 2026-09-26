@@ -36,15 +36,24 @@
 //!   goes Idle; the total reward animation (`honor`); state Idle, published,
 //!   and `IsExecuteDelivery` clears.
 //!
-//! Named stand-ins and gaps: the step items (the dewdrop timeline on the
-//! avatar, the tree's bloom director) are the player-timeline lane's
-//! step-item service: each is logged where it plays and the flow continues
-//! on the source's timings; `WaitForTimelineEnd` waits the length of the
-//! step item's avatar clip. The AutoMove state's run clip plays as the
-//! locomotion's dash gait (the harvest AutoMove's stand-in). The joystick's
-//! forced reset and its GameState Delivery arm are the joystick's (not
-//! wired). `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog of
-//! the UI lane's; the panel never replies refreshed.
+//! The avatar's delivery animation is the step item
+//! `tl_site_prop_common_dewdrop01` of the site's bundle, played on the
+//! player's step item service (`PlayerStepItem`): `PlayAvatarDeliveryAnimation`
+//! updates the step item, sets it up with `MoveEndTime` as its stop callback
+//! and plays it; the end action turns its loop flag off, waits while its
+//! director plays, stops it and clears it. A step item the service refuses
+//! leaves no object, and the end action then goes on at once, as the source
+//! does when the avatar has no step object. The tree's bloom is the place
+//! view's director (`bloom`).
+//!
+//! Named stand-ins and gaps: `BindSignalReceiver` binds the step item's
+//! Signal track to the site's delivery signal receiver; no exporter reads a
+//! Signal track's markers, so the two signals it sends (the tree effect's
+//! play and stop) are not emitted. The AutoMove state's run clip plays as
+//! the locomotion's dash gait (the harvest AutoMove's stand-in). The
+//! joystick's forced reset and its GameState Delivery arm are the joystick's
+//! (not wired). `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog
+//! of the UI lane's; the panel never replies refreshed.
 
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::SystemParam;
@@ -58,6 +67,7 @@ use super::{
     DeliveryRequest,
 };
 use crate::player::PlayerControlled;
+use crate::player_avatar::item_timeline::{PlayerStepItem, StepItemOnStop};
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 use crate::site_move::timeline::{delay_seconds, Delay, TweenClock};
 
@@ -72,8 +82,8 @@ pub(crate) const KEY_START_WAIT_FRAME: i32 = 177;
 
 /// The avatar's delivery step item (`PlayAvatarDeliveryAnimation`).
 pub(crate) const DEWDROP_TIMELINE: &str = "tl_site_prop_common_dewdrop01";
-/// Its avatar clip, whose length stands in for `WaitForTimelineEnd`.
-const DEWDROP_CLIP: &str = "mov_u000_site_droplet01_e";
+/// The step items' bundle: `"mysekai/site/field/" + ` the site's assetbundle name.
+pub(crate) const STEP_ITEM_BUNDLE_PREFIX: &str = "mysekai/site/field/";
 
 /// DOTween eases the flow uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,7 +203,10 @@ enum Phase {
     Loop {
         release_elapsed: f32,
     },
-    EndTimeline(Delay),
+    /// `WaitForTimelineEnd` on the step item, since this time.
+    EndTimeline {
+        since: f64,
+    },
     Reward {
         is_refreshed: bool,
     },
@@ -204,8 +217,6 @@ pub(crate) struct DeliveryFlow {
     phase: Phase,
     party: Option<i32>,
     started_at: f64,
-    /// The step item's clip length the end action waits for.
-    step_item_length: f32,
     /// The motion state before the AutoMove (the dash flag).
     dash_before: bool,
     /// The last half second the trace line was written for.
@@ -223,7 +234,7 @@ impl DeliveryFlow {
             Phase::Approach(_) => "approach",
             Phase::StartWait(_) => "start wait",
             Phase::Loop { .. } => "loop",
-            Phase::EndTimeline(_) => "end action (step item run-out)",
+            Phase::EndTimeline { .. } => "end action (step item run-out)",
             Phase::Reward { .. } => "reward",
         }
     }
@@ -247,6 +258,9 @@ pub(crate) struct FlowWorld<'w, 's> {
     navigation: Option<Res<'w, crate::player_fixture_action::PlayerFixtureNavigation>>,
     game_state: Option<Res<'w, DeliveryGameState>>,
     joystick_resets: MessageWriter<'w, crate::joystick::ForceResetJoystick>,
+    step: Option<ResMut<'w, PlayerStepItem>>,
+    timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
+    bloom: ResMut<'w, super::bloom::DeliveryBloom>,
 }
 
 type PlayerQuery<'w, 's> = Query<
@@ -342,7 +356,7 @@ pub(crate) fn advance(
                     law::RELEASE_WINDOW,
                     now - flow.started_at
                 );
-                start_end_action(&mut world, &mut flow, &players, now);
+                start_end_action(&mut world, &mut flow, now);
                 return;
             }
             release_elapsed += dt;
@@ -363,18 +377,33 @@ pub(crate) fn advance(
                     "[delivery] nothing left to deliver at {:.3} s since the press: EndDeliveryExecute",
                     now - flow.started_at
                 );
-                start_end_action(&mut world, &mut flow, &players, now);
+                start_end_action(&mut world, &mut flow, now);
             }
         }
-        Phase::EndTimeline(mut delay) => {
-            if delay.tick(frame, dt) {
-                info!(
-                    "[delivery-timeline] {DEWDROP_TIMELINE}: run out after {:.3} s (the stand-in wait); Stop, ClearStepItemObject",
-                    delay.target
-                );
-                delivery_api(&mut world, &mut flow, &mut players, party_id, now);
+        Phase::EndTimeline { since } => {
+            let playing = world
+                .step
+                .as_deref()
+                .is_some_and(|step| step.is_playing_on(world.timelines.as_deref()));
+            if playing {
+                flow.phase = Phase::EndTimeline { since };
             } else {
-                flow.phase = Phase::EndTimeline(delay);
+                if let Some(step) = world.step.as_deref_mut() {
+                    let end = step
+                        .director_time_on(world.timelines.as_deref())
+                        .map_or("no director".into(), |(time, duration)| {
+                            format!("director time {time:.4} of {duration:.4} s")
+                        });
+                    info!(
+                        "[delivery-timeline] {DEWDROP_TIMELINE}: WaitForTimelineEnd returned {:.3} s after ChangeLoopFlag(false) ({:.3} s since the press; step object {:?}, {end}); Stop, ClearStepItemObject",
+                        now - since,
+                        now - flow.started_at,
+                        step.step_item_object()
+                    );
+                    step.stop();
+                    step.clear_step_item_object();
+                }
+                delivery_api(&mut world, &mut flow, &mut players, party_id, now);
             }
         }
         Phase::Reward { is_refreshed } => {
@@ -714,7 +743,7 @@ fn finish_pre_action(
     );
     let player = transform.translation;
     world.face.0 = Some(face);
-    log_step_item(objects, "PlayAvatarDeliveryAnimation (1st)");
+    play_avatar_delivery_animation(world, objects, "1st");
     world.states.change_status(PlayerActionState::Delivery);
     world.states.can_intercept = false;
     let base = law::base_angle([-player.x, player.z], [-objects.place.x, objects.place.z]);
@@ -724,7 +753,7 @@ fn finish_pre_action(
     } else {
         None
     };
-    log_step_item(objects, "PlayAvatarDeliveryAnimation (2nd, restarts it)");
+    play_avatar_delivery_animation(world, objects, "2nd, restarts it");
     flow.phase = Phase::StartWait(Delay::new(
         delay_seconds(world.model.start_wait as f64),
         u64::from(world.frames.0),
@@ -741,11 +770,21 @@ fn finish_pre_action(
     );
 }
 
-fn log_step_item(objects: &DeliveryObjects, call: &str) {
+/// `PlayAvatarDeliveryAnimation`: the avatar's step item is the dewdrop,
+/// set up with `MoveEndTime` as its stop callback, its Signal track bound to
+/// the site's delivery signal receiver, and played.
+fn play_avatar_delivery_animation(world: &mut FlowWorld, objects: &DeliveryObjects, call: &str) {
+    let Some(step) = world.step.as_deref_mut() else {
+        error!("[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): the player's step item service is not installed");
+        return;
+    };
+    let bundle = format!("{STEP_ITEM_BUNDLE_PREFIX}{}", objects.bundle);
+    step.update_step_item_object(&bundle, DEWDROP_TIMELINE);
+    step.setup(Some(StepItemOnStop::MoveEndTime));
     info!(
-        "[delivery-timeline] {call}: UpdateStepItemObject(mysekai/site/field/{}, {DEWDROP_TIMELINE}), Setup, BindSignalReceiver(the site's delivery signal receiver), Play — would play here on the player's step-item service (player-timeline lane); continuing on the source's timings",
-        objects.bundle
+        "[delivery-timeline] PlayAvatarDeliveryAnimation ({call}): BindSignalReceiver(the site's delivery signal receiver): the step item's Signal track markers are not exported, so its signals are not sent (named gap)"
     );
+    step.play();
 }
 
 /// `ExecuteDeliveryLoopAction`.
@@ -791,9 +830,10 @@ fn loop_step(world: &mut FlowWorld, objects: &DeliveryObjects, party_id: i32, dt
     if !model.flowered {
         model.flowered = true;
         info!(
-            "[delivery-timeline] DeliveryPlaceObjectView.PlayAnimation: the place's director would play {} now (the first bloom of the visit, not awaited; it pauses at its end) on the timeline service (player-timeline lane)",
+            "[delivery-timeline] DeliveryPlaceObjectView.PlayAnimation: the first bloom of the visit, {} (not awaited)",
             objects.bloom_timeline.as_deref().unwrap_or("(no bound timeline found)")
         );
+        world.bloom.play_animation();
     }
     for _ in before_drops..after_drops {
         super::drops::on_drop_item(
@@ -809,31 +849,23 @@ fn loop_step(world: &mut FlowWorld, objects: &DeliveryObjects, party_id: i32, dt
     }
 }
 
-/// The start of `ExecuteDeliveryEndAction`: the rate, the step item's run-out.
-fn start_end_action(
-    world: &mut FlowWorld,
-    flow: &mut DeliveryFlow,
-    players: &PlayerQuery,
-    now: f64,
-) {
+/// The start of `ExecuteDeliveryEndAction`: the rate, the step item's
+/// loop flag off, then `WaitForTimelineEnd`. With no step object the source
+/// goes straight to `ClearStepItemObject`; the wait then ends at once.
+fn start_end_action(world: &mut FlowWorld, flow: &mut DeliveryFlow, now: f64) {
     world.model.rate.stop();
-    let length = players
-        .single()
-        .ok()
-        .and_then(|(_, _, _, _, driver)| driver.and_then(|d| d.clip_length(DEWDROP_CLIP)));
-    let wait = match length {
-        Some(length) => length,
-        None => {
-            warn!("[delivery-timeline] the avatar has no clip {DEWDROP_CLIP}: WaitForTimelineEnd waits 0 s (stand-in)");
-            0.0
-        }
-    };
-    flow.step_item_length = wait;
+    let object = world
+        .step
+        .as_deref()
+        .and_then(PlayerStepItem::step_item_object);
+    if let Some(step) = world.step.as_deref_mut() {
+        step.change_loop_flag(false);
+    }
     info!(
-        "[delivery] ExecuteDeliveryEndAction at {:.3} s since the press: rate 0; {DEWDROP_TIMELINE}: ChangeLoopFlag(false), WaitForTimelineEnd (stand-in: its avatar clip {DEWDROP_CLIP}, {wait:.3} s)",
+        "[delivery] ExecuteDeliveryEndAction at {:.3} s since the press: rate 0; {DEWDROP_TIMELINE}: ChangeLoopFlag(false) on step object {object:?}, WaitForTimelineEnd",
         now - flow.started_at
     );
-    flow.phase = Phase::EndTimeline(Delay::new(wait, u64::from(world.frames.0)));
+    flow.phase = Phase::EndTimeline { since: now };
 }
 
 /// `DeliveryExecuteApiAsync`, the gate and Idle, then the reward animation.
