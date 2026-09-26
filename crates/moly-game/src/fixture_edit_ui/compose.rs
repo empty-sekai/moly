@@ -59,6 +59,8 @@ pub(super) struct Bindings {
     pub camera_rotate: String,
     /// SiteEditView's change-look button (`LayoutAction` 14).
     pub change_look: String,
+    /// SiteEditView's remove-all button (`OnRemoveFixtureAll`).
+    pub remove_all: String,
     pub unsupported_buttons: Vec<String>,
     pub panel: String,
     pub panel_y: f32,
@@ -344,7 +346,7 @@ pub(super) fn compose(
         &fixture_fields,
         "_hashTagFilteredBalloon",
     )?);
-    let mut unsupported = vec!["_removeAllButton", "_presetSaveButton"];
+    let mut unsupported = vec!["_presetSaveButton"];
     if declares_report_tip_button(&doc)? {
         unsupported.push("_reportTipButton");
     } else if action.get("_reportTipButton").is_some() {
@@ -412,6 +414,7 @@ pub(super) fn compose(
         decide: field(&hud, "decideButton")?,
         camera_rotate: field(&action, "_rotateButton")?,
         change_look: field(&action, "_changeLookButton")?,
+        remove_all: field(&action, "_removeAllButton")?,
         unsupported_buttons,
         panel,
         panel_y: panel_rect.anchored_position[1],
