@@ -571,11 +571,13 @@ impl WeatherFxRetirements {
         });
     }
     /// Installs the site's own colliders (static, for the whole visit), in
-    /// place of another site's.
-    fn install_site(&mut self, site: &str, scene: &Arc<crate::particle_runtime::collision_scene::GroundScene>) {
+    /// place of another site's; `layout` when the site loads the player's
+    /// layout (the home site).
+    fn install_site(&mut self, site: &str, scene: &Arc<crate::particle_runtime::collision_scene::GroundScene>,
+        layout: bool) {
         if self.site_colliders.as_ref().is_some_and(|(installed, _)| installed == site) { return; }
         if let Some((_, entry)) = self.site_colliders.take() { self.physics.remove(entry); }
-        let entry = self.physics.install(scene.clone());
+        let entry = self.physics.install_site(scene.clone(), layout);
         self.site_colliders = Some((site.to_owned(), entry));
         info!(site=%site, colliders=scene.collider_count(), scene=%scene.describe(),
             "[weather-fx] site colliders installed in the physics scene");
@@ -603,12 +605,12 @@ impl WeatherFxRetirements {
                 }
                 info!("[weather-fx] placed fixtures' colliders in the physics scene: revision {revision}, {} answered \
                     against, {} bounded and refused in; {}", built.collider_count(), built.bounded_count(), built.describe());
-                self.fixture_colliders = Some((self.physics.install(built), Some(revision)));
+                self.fixture_colliders = Some((self.physics.install_fixtures(built), Some(revision)));
             }
             Err(reason) => {
                 if self.fixture_colliders.is_none() {
                     info!("[weather-fx] placed fixtures' colliders in the physics scene: {} ({reason})", scene::FIXTURE_PENDING);
-                    self.fixture_colliders = Some((self.physics.install(scene::fixture_pending()), None));
+                    self.fixture_colliders = Some((self.physics.install_fixtures(scene::fixture_pending()), None));
                 }
             }
         }
@@ -671,6 +673,25 @@ fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placemen
     use crate::particle_runtime::collision_scene::{touch_box, FixturePart, FixtureShape, TOUCH_BOX_LAYERS};
     let reflect = |p: [f32; 3]| [-p[0], p[1], p[2]];
     let mut parts = Vec::new();
+    // Each row's slot in the site view's fixture list (layout type and the
+    // footprint's minimum y, in the placement mock's row order); a collider
+    // finds its row by its fixture's package when no other row shares it.
+    let rows = placements.editor_rows();
+    let keys: Vec<Option<(u8, i32)>> =
+        rows.iter().map(|row| row.footprint().ok().map(|(min, _)| (row.layout, i32::from(min.y)))).collect();
+    let slots: Vec<Option<usize>> = if keys.iter().all(Option::is_some) {
+        let keys: Vec<(u8, i32)> = keys.iter().flatten().copied().collect();
+        crate::particle_runtime::collision_scene::fixture_slots(&keys).into_iter().map(Some).collect()
+    } else {
+        vec![None; rows.len()]
+    };
+    let slot_of = |package: &str| {
+        let mut found = rows.iter().enumerate().filter(|(_, row)| row.package == package);
+        match (found.next(), found.next()) {
+            (Some((r, _)), None) => slots[r],
+            _ => None,
+        }
+    };
     for (i, collider) in collision.physics_colliders(placements.total())?.into_iter().enumerate() {
         let shape = match collider.shape {
             PhysicsShape::Mesh { convex, cooking, positions, triangles } => FixtureShape::Mesh {
@@ -684,17 +705,18 @@ fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placemen
         };
         let (scale, rotation, translation) = collider.world.to_scale_rotation_translation();
         let pose = (scale == Vec3::ONE).then(|| source_pose(rotation, translation));
+        let slot = collider.package.as_deref().and_then(slot_of);
         parts.push(FixturePart { what: format!("collider {i}"), layers: 1 << collider.layer,
-            world: source_matrix(&collider.world), pose, shape });
+            world: source_matrix(&collider.world), pose, shape, slot, touch: false });
     }
-    for row in placements.editor_rows() {
+    for (r, row) in rows.iter().enumerate() {
         let view = row.pose()?;
         let world = source_matrix(&GlobalTransform::from(view));
         let pose = (view.scale == Vec3::ONE).then(|| source_pose(view.rotation, view.translation));
         let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
         let shape = FixtureShape::Box { center, half };
         parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, pose,
-            shape });
+            shape, slot: slots[r], touch: true });
     }
     Ok(parts)
 }
@@ -720,6 +742,8 @@ pub(crate) fn expire_retirements(
     let now = time.elapsed_secs_f64();
     let delta = crate::particle_runtime::source_delta_time(time.delta());
     let WeatherFxRetirements { live, instances, despawn, physics, .. } = &mut *retiring;
+    // The frame's physics steps come before its scripts and particle update.
+    physics.advance(delta);
     for entity in despawn.drain(..) { commands.entity(entity).try_despawn(); }
     let mut destroyed: Vec<Arc<crate::weather_animation::EffectClock>> = Vec::new();
     instances.retain_mut(|instance| {
@@ -3100,8 +3124,9 @@ pub(crate) fn spawn_when_ready(
     // The site's own colliders are in the scene from the first install of
     // this site's plan on (a global effect kept across the change included).
     if install_site || install_global || preserve_global {
+        let layout = site.as_deref().is_some_and(|active| active.site_type == "home_site");
         let (site, scene) = (plan.env_site.clone(), plan.site_colliders.clone());
-        retiring.install_site(&site, &scene);
+        retiring.install_site(&site, &scene, layout);
     }
     if plan.global_installed && phase.can_commit_global_fx(&plan.selection) {
         commands.insert_resource(crate::weather_transition::WeatherGlobalFxCommitted(plan.request_serial));

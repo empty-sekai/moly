@@ -41,7 +41,11 @@ pub(crate) struct CollisionInputs<'w, 's> {
     roots: Query<
         'w,
         's,
-        (Entity, Option<&'static crate::fixture::FixtureSource>),
+        (
+            Entity,
+            Option<&'static crate::fixture::FixtureSource>,
+            Option<&'static crate::fixture_colors::FixtureColorChoice>,
+        ),
         With<crate::fixture::FixtureRoot>,
     >,
     gltfs: Res<'w, Assets<Gltf>>,
@@ -147,7 +151,7 @@ impl CollisionInputs<'_, '_> {
         if self.ready.is_none() {
             return Err("fixture collision scenes loading".into());
         }
-        let roots: HashSet<_> = self.roots.iter().map(|(entity, _)| entity).collect();
+        let roots: HashSet<_> = self.roots.iter().map(|(entity, ..)| entity).collect();
         if roots.len() != expected {
             return Err(format!(
                 "fixture collision root count {}/{}",
@@ -209,7 +213,7 @@ impl CollisionInputs<'_, '_> {
                     .roots
                     .get(root)
                     .ok()
-                    .and_then(|(_, source)| source)
+                    .and_then(|(_, source, _)| source)
                     .ok_or("fixture collision reference has no source asset owner")?;
                 Some(documents::resolve(
                     &reference,
@@ -342,6 +346,10 @@ impl CollisionInputs<'_, '_> {
     /// trigger's hits and a touching trigger does not end a lane.
     pub(crate) fn physics_colliders(&self, expected: usize) -> Result<Vec<PhysicsCollider>, String> {
         let gathered = self.gather(expected)?;
+        // Each fixture root's package, which names its placement row.
+        let packages: HashMap<Entity, &str> = self.roots.iter()
+            .filter_map(|(entity, _, choice)| choice.map(|choice| (entity, choice.package.as_str())))
+            .collect();
         let mut out = Vec::new();
         for (entity, (node, _)) in &gathered.source {
             if !gathered.active(*entity, node)? {
@@ -380,7 +388,8 @@ impl CollisionInputs<'_, '_> {
                     },
                     other => PhysicsShape::Other(other.to_owned()),
                 };
-                out.push(PhysicsCollider { shape, layer, world });
+                let package = gathered.owner.get(entity).and_then(|root| packages.get(root)).map(|p| (*p).to_owned());
+                out.push(PhysicsCollider { shape, layer, world, package });
             }
         }
         Ok(out)
@@ -393,6 +402,8 @@ pub(crate) struct PhysicsCollider {
     pub(crate) layer: u32,
     /// The node's world transform in the canonical frame.
     pub(crate) world: GlobalTransform,
+    /// The package of the fixture it belongs to.
+    pub(crate) package: Option<String>,
 }
 
 pub(crate) enum PhysicsShape {

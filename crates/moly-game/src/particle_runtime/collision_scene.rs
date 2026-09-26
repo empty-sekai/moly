@@ -76,30 +76,67 @@
 //! The order of several touches. The broadphase returns the shapes in the
 //! order its static pruner visits them: every static shape of the scene
 //! (colliders, triggers and the ones the queries cannot answer against,
-//! whatever their layer) sits in one pool, in the order the shapes were
-//! added, with a tree over it of at most four shapes per leaf and a bucket
-//! for the shapes added since that tree was built; a query visits the tree
-//! and then the bucket, and a leaf's shapes in pool order. A removal moves
-//! the pool's last shape into the gap. So while the scene holds at most four
-//! static shapes and no shape has left it since it was last empty, every
-//! query meets its shapes in the order they were added, whatever the rebuild
-//! timing and the pool boxes. A collider adds itself to the scene when it
-//! wakes and leaves it when its node is deactivated. The game instantiates a
-//! site prefab under an active parent (a prefab clone wakes its colliders in
-//! ascending instance id of the originals, the order the package's preload
-//! table first names them), hides the site at once, which removes them, and
-//! shows it when the player enters, which adds them again children first,
-//! each node's children before its own components (the export's
-//! `activationOrder`); the installed things are added in the order
-//! installed. Whether an effect's colliders go through a site's hide and
-//! show is not read, so an effect's add order is unknown. The query reports
-//! that order known in that state, when every installed shape carries its
-//! add rank; otherwise (more shapes, a removal, the placed fixtures, whose
-//! add order is not read) it reports the order unknown whenever the overlap
-//! returns more than one collider, and the module law then selects over
-//! every order and refuses a lane the order decides. Residual: the scene
-//! holds no character collider and no harvest item, so a source scene that
-//! has such static shapes beside the site's has more shapes than this one.
+//! whatever their layer) sits in one pool, with a tree over it that is
+//! rebuilt one physics step at a time and a bucket for the shapes added
+//! since that tree was built. The scene keeps that pruner (the law's
+//! `StaticPruner`), fed the engine's add and remove sequence, and a query
+//! meets its colliders in the pruner's visit order:
+//!
+//! - a collider adds itself when it wakes and leaves when its node is
+//!   deactivated; every physics step is one rebuild step and a commit, and
+//!   every query commits first. The fixed step is 0.02 s and a frame runs at
+//!   most 16 of them, before its scripts and its particle update;
+//! - the game instantiates a site prefab under an active parent (a prefab
+//!   clone wakes its colliders in ascending instance id of the originals,
+//!   the order the package's preload table first names them: the export's
+//!   `preloadFirst`), hides the site in the same run, which removes them in
+//!   hierarchy post-order (children first, each node's children before its
+//!   own components: the export's `activationOrder`), and shows it when the
+//!   player enters, which adds them again in post-order;
+//! - the home site loads the player's layout between its instantiation and
+//!   its hiding, a frame after the instantiation at the earliest. Each placed
+//!   fixture's load adds its own colliders and removes them again at once
+//!   (the clone wakes active at the prefab's saved root pose, whose boxes
+//!   there are not read: the placed box and the same box about the world
+//!   origin stand in); then the site view shows the fixtures in its list
+//!   order, each view's own colliders and then its touch box, and in the
+//!   same run the site hides. The fixtures sit outside the site view, so
+//!   they stay through its hide and show. The list order is the layout
+//!   load's: the layouts in the server's order (the placement mock's, one
+//!   layout per layout type, placed where its first row stands), each
+//!   layout's rows sorted by their position's y with equal keys in order;
+//!   the special floor cases, which follow a layout's normal rows, are not
+//!   told apart, and each load is taken to finish in its call (a package on
+//!   disk);
+//! - where the sequence has a frame between two calls (the instantiation and
+//!   the layout load at home; the hiding and the showing on entry at every
+//!   site), the number of physics steps there is the frame timing's, so the
+//!   scene holds one pruner per distinct outcome of every count until the
+//!   pruners settle and of a query's commit without a step, and an order is
+//!   known only where all of them agree; the showing may be committed by a
+//!   query of its frame before the next step, and both stand;
+//! - a pruner box is the engine's scene-query bounds of the shape; the scene
+//!   takes the collider's world bounds at inflation one grown by 1.01 about
+//!   their centre, an approximation (the tree's splits read only the box
+//!   centres, but a query meets a box by its extents).
+//!
+//! Where the pruner cannot give the order, the query falls back to the add
+//! order: while the scene holds at most four static shapes and no shape has
+//! left it since it was last empty, every query meets its shapes in the order
+//! they were added. The pruner cannot give it when an installed effect adds
+//! static shapes (whether they go through the site's hide and show is not
+//! read), when the site changes or the placed fixtures change after entry
+//! (neither sequence is read), when a shape has only an enclosing bound,
+//! when a site's colliders carry no preload or activation order, when a
+//! fixture has more than one collider of its own, before the home site's
+//! placed fixtures are loaded, and on a query the pruners disagree on or
+//! that meets a collider the pruner does not visit. Otherwise the query
+//! reports the order unknown whenever the overlap returns more than one
+//! collider, and the module law then selects over every order and refuses a
+//! lane the order decides. Residual: the scene holds no character collider
+//! and no harvest item, so a source scene that has such static shapes beside
+//! the site's has more shapes than this one.
+use moly_law::particle::collision_mesh::static_pruner::StaticPruner;
 use moly_law::particle::collision_mesh::{self as law, CookedMesh, Pose};
 use moly_law::particle::collision_query::{Candidate, CollisionScene, OverlapQuery, SweepHit, SweepRequest};
 use serde_json::Value;
@@ -170,6 +207,17 @@ pub(crate) struct GroundScene {
     /// shapes to the physics scene, when that order is established for every
     /// shape it adds (see the module notes).
     add_positions: Option<Vec<usize>>,
+    /// A site's static shapes with their first position in the site
+    /// package's preload table and their position in the site's hierarchy
+    /// post-order, when both are carried for every shape.
+    site_order: Option<Vec<(ShapeAt, u64, u64)>>,
+    /// The placed fixtures' static shapes with their fixture's slot in the
+    /// site view's fixture list and whether each is its touch box, when
+    /// every shape carries its slot.
+    fixture_order: Option<Vec<(ShapeAt, usize, bool)>>,
+    /// The placeholder the placed fixtures stand in with until their
+    /// collision scenes load.
+    pending_layout: bool,
 }
 
 struct GroundCollider {
@@ -220,7 +268,8 @@ struct Unported {
 
 impl GroundScene {
     fn empty() -> Self {
-        Self { colliders: Vec::new(), unported: Vec::new(), inert: Vec::new(), add_positions: Some(Vec::new()) }
+        Self { colliders: Vec::new(), unported: Vec::new(), inert: Vec::new(), add_positions: Some(Vec::new()),
+            site_order: None, fixture_order: None, pending_layout: false }
     }
 
     /// The static shapes it adds to the physics scene.
@@ -333,6 +382,8 @@ impl GroundScene {
         self.colliders.extend(other.colliders.iter().map(GroundCollider::share));
         self.unported.extend(other.unported.iter().cloned());
         self.inert.extend(other.inert.iter().cloned());
+        self.site_order = None;
+        self.fixture_order = None;
     }
 }
 
@@ -346,6 +397,7 @@ pub(crate) const TOUCH_BOX_LAYERS: u32 = (1 << 0) | (1 << FIXTURE_LAYER);
 pub(crate) fn fixture_pending() -> Arc<GroundScene> {
     let mut scene = GroundScene::empty();
     scene.add_positions = None;
+    scene.pending_layout = true;
     scene.unported.push(Unported { effect: "placed fixtures".into(), node: "*".into(),
         layers: TOUCH_BOX_LAYERS, reason: FIXTURE_PENDING.into(), query_refusal: FIXTURE_PENDING, bounds: None });
     Arc::new(scene)
@@ -360,6 +412,21 @@ pub(crate) struct FixturePart {
     pub(crate) world: [f32; 16],
     pub(crate) pose: Option<([f32; 4], [f32; 3])>,
     pub(crate) shape: FixtureShape,
+    /// The fixture's slot in the site view's fixture list (the order the
+    /// views are shown in), when known.
+    pub(crate) slot: Option<usize>,
+    /// Whether this is the view's touch box, which is shown after the view's
+    /// own colliders (the touch node is the view's last child).
+    pub(crate) touch: bool,
+}
+
+/// Records a placed fixture shape's slot, or forgets the order when a shape
+/// has none.
+fn record_slot(order: &mut Option<Vec<(ShapeAt, usize, bool)>>, at: ShapeAt, slot: Option<usize>, touch: bool) {
+    match (order.as_mut(), slot) {
+        (Some(order), Some(slot)) => order.push((at, slot, touch)),
+        _ => *order = None,
+    }
 }
 
 /// `PxQuat::operator*`.
@@ -452,8 +519,10 @@ fn enclosing_bounds(world: &[f32; 16], lo: [f32; 3], hi: [f32; 3]) -> Option<[f3
 /// The placed fixtures' colliders as the physics scene carries them.
 pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
     let mut scene = GroundScene::empty();
-    // The fixture views add their colliders at run time, in an order not read.
+    // The fixture views add their colliders at run time; the static pruner
+    // takes their order from each fixture's slot.
     scene.add_positions = None;
+    let mut order = Some(Vec::new());
     for part in parts {
         let unbounded = |reason: String| Unported { effect: "placed fixtures".into(), node: part.what.clone(),
             layers: part.layers, reason, query_refusal: FIXTURE_UNBOUNDED, bounds: None };
@@ -472,6 +541,8 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                         scene.colliders.push(GroundCollider { effect: "placed fixtures".into(), node: part.what.clone(),
                             geometry: "box".into(), cooking: 0, shape: ColliderShape::Box(*half), pose,
                             layer: part.layers.trailing_zeros(), layers: part.layers, bounds, collider_id: i32::MAX });
+                        record_slot(&mut order, ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 },
+                            part.slot, part.touch);
                         continue;
                     }
                     None => {
@@ -497,6 +568,8 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                             geometry: "fixture convex".into(), cooking, shape: ColliderShape::Convex(Arc::new(hull)),
                             pose, layer: part.layers.trailing_zeros(), layers: part.layers, bounds,
                             collider_id: i32::MAX });
+                        record_slot(&mut order, ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 },
+                            part.slot, part.touch);
                         continue;
                     }
                     Some(Ok(_)) => unbounded("a fixture MeshCollider on an unsettled layer".into()),
@@ -553,6 +626,9 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
                                         node: part.what.clone(), geometry: "fixture".into(), cooking,
                                         shape: ColliderShape::Mesh(mesh), pose, layer, layers: part.layers, bounds,
                                         collider_id: i32::MAX });
+                                    record_slot(&mut order,
+                                        ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 },
+                                        part.slot, part.touch);
                                     continue;
                                 }
                                 unbounded("a fixture MeshCollider on an unsettled layer".into())
@@ -569,7 +645,10 @@ pub(crate) fn fixture_scene(parts: Vec<FixturePart>) -> Arc<GroundScene> {
             FixtureShape::Unknown(kind) => unbounded(format!("a {kind}")),
         };
         scene.unported.push(entry);
+        record_slot(&mut order, ShapeAt { list: ShapeAt::UNPORTED, index: scene.unported.len() - 1 }, part.slot,
+            part.touch);
     }
+    scene.fixture_order = order;
     Arc::new(scene)
 }
 
@@ -726,6 +805,9 @@ impl SceneBuilder {
         // Each shape's add rank (the export's activationOrder): colliders,
         // then the other shapes, in the order pushed.
         let (mut collider_ranks, mut other_ranks) = (Vec::new(), Vec::new());
+        // Each shape's first preload-table position and activation rank, for
+        // the static pruner's sequence.
+        let mut site_ranks: Vec<(ShapeAt, Option<u64>, Option<u64>)> = Vec::new();
         for (ordinal, c) in records.iter().enumerate() {
             if !selects(c)
                 || c.get("enabled").and_then(Value::as_bool) != Some(true)
@@ -742,28 +824,37 @@ impl SceneBuilder {
             // an effect's colliders go through that cycle is not read.
             let rank = (c.get("kind").and_then(Value::as_str) == Some("scene"))
                 .then(|| c.get("activationOrder").and_then(Value::as_u64)).flatten();
+            let preload = (c.get("kind").and_then(Value::as_str) == Some("scene"))
+                .then(|| c.get("preloadFirst").and_then(Value::as_u64)).flatten();
             if let Some(reason) = c.get("reason").and_then(Value::as_str) {
                 scene.unported.push(unported(format!("not placed by the export: {reason}")));
                 other_ranks.push(rank);
+                site_ranks.push((ShapeAt { list: ShapeAt::UNPORTED, index: scene.unported.len() - 1 }, preload, rank));
                 continue;
             }
             if c.get("isTrigger").and_then(Value::as_bool) == Some(true) {
                 scene.inert.push(unported("a trigger: the module drops its hits".into()));
                 other_ranks.push(rank);
+                site_ranks.push((ShapeAt { list: ShapeAt::INERT, index: scene.inert.len() - 1 }, preload, rank));
                 continue;
             }
             match ground_collider(&mut self.meshes, document, ordinal, c, owner, layer) {
                 Ok(collider) => {
                     scene.colliders.push(collider);
                     collider_ranks.push(rank);
+                    site_ranks.push((ShapeAt { list: ShapeAt::COLLIDERS, index: scene.colliders.len() - 1 }, preload,
+                        rank));
                 }
                 Err(reason) => {
                     scene.unported.push(unported(reason));
                     other_ranks.push(rank);
+                    site_ranks.push((ShapeAt { list: ShapeAt::UNPORTED, index: scene.unported.len() - 1 }, preload,
+                        rank));
                 }
             }
         }
         scene.add_positions = add_positions(&collider_ranks, &other_ranks);
+        scene.site_order = site_ranks.into_iter().map(|(at, preload, rank)| Some((at, preload?, rank?))).collect();
         Ok(scene)
     }
 }
@@ -906,7 +997,8 @@ fn bounds_meet(bounds: &[f32; 6], center: [f32; 3], extents: [f32; 3]) -> bool {
 /// The site's physics scene as the weather host keeps it: the colliders of
 /// every installed thing (effects, the site, the placed fixtures), in the
 /// order installed, a stopped effect's until the host destroys that effect.
-/// Every installed system's query shares it.
+/// Every installed system's query shares it, and so does the static pruner
+/// that gives the order of several touches (see the module notes).
 #[derive(Clone, Default)]
 pub(crate) struct SiteScene(Arc<RwLock<SiteEntries>>);
 
@@ -918,6 +1010,7 @@ struct SiteEntries {
     /// the pool (the removed thing's shapes were not the pool's last) or left
     /// a split tree behind (the scene held more than one leaf of shapes).
     reshuffled: bool,
+    pruner: PrunerScene,
 }
 
 /// The most static shapes a pruner leaf holds: a scene of at most this many
@@ -936,6 +1029,18 @@ impl SiteEntries {
         !self.reshuffled && self.shape_count() <= LEAF_SHAPES
             && self.entries.iter().all(|(_, scene)| scene.add_positions.is_some())
     }
+
+    fn push(&mut self, scene: Arc<GroundScene>) -> u64 {
+        self.next += 1;
+        let id = self.next;
+        self.entries.push((id, scene));
+        id
+    }
+
+    fn feed(&mut self) {
+        let SiteEntries { entries, pruner, .. } = self;
+        pruner.feed(entries);
+    }
 }
 
 impl SiteScene {
@@ -947,12 +1052,39 @@ impl SiteScene {
         self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Adds an installed thing's colliders; the id removes them.
+    /// Adds an installed effect's colliders; the id removes them. Where an
+    /// effect's static shapes enter the pruner's pool is not read (see the
+    /// module notes), so an effect that adds any leaves the pruner unable to
+    /// give the order.
     pub(crate) fn install(&self, scene: Arc<GroundScene>) -> u64 {
         let mut entries = self.entries_mut();
-        entries.next += 1;
-        let id = entries.next;
-        entries.entries.push((id, scene));
+        let shapes = scene.shape_count();
+        let id = entries.push(scene);
+        if shapes > 0 {
+            entries.pruner.refuse("an installed effect's colliders: whether they go through the site's hide and \
+                show, and so where they enter the pruner's pool, is not read");
+        }
+        id
+    }
+
+    /// Adds the site's own colliders; `layout` when the site loads the
+    /// player's layout (the home site), whose placed fixtures enter the
+    /// scene before the site is hidden.
+    pub(crate) fn install_site(&self, scene: Arc<GroundScene>, layout: bool) -> u64 {
+        let mut entries = self.entries_mut();
+        let id = entries.push(scene);
+        entries.pruner.site = Some((id, layout));
+        entries.feed();
+        id
+    }
+
+    /// Adds the placed fixtures' colliders (or the placeholder that stands
+    /// in for them until their collision scenes load).
+    pub(crate) fn install_fixtures(&self, scene: Arc<GroundScene>) -> u64 {
+        let mut entries = self.entries_mut();
+        let id = entries.push(scene);
+        entries.pruner.fixtures = Some(id);
+        entries.feed();
         id
     }
 
@@ -969,6 +1101,17 @@ impl SiteScene {
                 entries.reshuffled = true;
             }
             entries.entries.remove(at);
+            if entries.pruner.site.is_some_and(|(site, _)| site == id) {
+                entries.pruner.site = None;
+                entries.pruner.refuse("the site's colliders left the scene (a site change): the order they leave \
+                    in and the frames between that and the next site's entry are not modelled");
+            } else if entries.pruner.fixtures == Some(id) {
+                // The replacement is compared with the fixtures fed.
+                entries.pruner.fixtures = None;
+            } else if removed > 0 {
+                entries.pruner.refuse("an installed effect's colliders left the scene: the order they leave in \
+                    is not read");
+            }
         }
         if entries.shape_count() == 0 {
             entries.reshuffled = false;
@@ -979,12 +1122,400 @@ impl SiteScene {
         let mut entries = self.entries_mut();
         entries.entries.clear();
         entries.reshuffled = false;
+        entries.pruner = PrunerScene::default();
+    }
+
+    /// The frame's physics steps, before the frame's particle queries: one
+    /// pruner step per fixed step of the frame's delta time.
+    pub(crate) fn advance(&self, dt: f32) {
+        self.entries_mut().pruner.advance(dt);
     }
 
     /// The colliders the scene holds now that the queries answer against.
     pub(crate) fn collider_count(&self) -> usize {
         self.entries().entries.iter().map(|(_, scene)| scene.colliders.len()).sum()
     }
+}
+
+/// The fixed timestep (the time manager's Fixed Timestep).
+const FIXED_STEP: f64 = 0.02;
+/// The most fixed steps one frame runs: the time manager's Maximum Allowed
+/// Timestep (1/3 s) over the fixed timestep.
+const MAX_FIXED_STEPS: u32 = 16;
+/// The most physics steps a boundary is followed through before the
+/// pruners must have settled.
+const BOUNDARY_STEPS: usize = 64;
+
+/// The engine's static pruner for the scene's static shapes, fed the
+/// engine's add and remove sequence for the site and the placed fixtures
+/// (see the module notes). Where that sequence has an unread number of
+/// physics steps between two calls, it holds one pruner per distinct
+/// outcome, and an order is known only where they all agree.
+#[derive(Default)]
+struct PrunerScene {
+    /// The installed site's entry, and whether it loads the player's layout.
+    site: Option<(u64, bool)>,
+    /// The placed fixtures' entry.
+    fixtures: Option<u64>,
+    /// The placed fixtures the sequence was fed: slot, touch box, pool box.
+    fed_fixtures: Option<Vec<(usize, bool, [u32; 6])>>,
+    /// One pruner per distinct outcome of the unread step counts.
+    variants: Vec<StaticPruner>,
+    /// The unread boundaries the pruners span.
+    boundaries: Vec<String>,
+    fed: bool,
+    /// Why the pruner cannot give the order, for good.
+    unmodeled: Option<String>,
+    /// Time toward the next fixed step.
+    clock: f64,
+    /// The lines already reported to the log.
+    reported: Vec<String>,
+}
+
+/// Each distinct pruner once (a pruner's future answers are a function of
+/// its state).
+fn distinct(pruners: Vec<StaticPruner>) -> Vec<StaticPruner> {
+    let mut out: Vec<StaticPruner> = Vec::new();
+    for p in pruners {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// The pruners after a boundary whose physics step count is not read: every
+/// count from none until each pruner settles, and a query's commit without
+/// a step (the other queries of a frame without a fixed step).
+fn boundary(pruners: Vec<StaticPruner>, name: &str, spans: &mut Vec<String>) -> Result<Vec<StaticPruner>, String> {
+    let mut out = Vec::new();
+    let mut longest = 0usize;
+    for p in pruners {
+        let mut committed = p.clone();
+        committed.commit();
+        out.push(committed);
+        let mut stepped = p.clone();
+        out.push(p);
+        let mut settled = false;
+        for k in 1..=BOUNDARY_STEPS {
+            let before = stepped.clone();
+            stepped.step();
+            if stepped == before {
+                settled = true;
+                longest = longest.max(k - 1);
+                break;
+            }
+            out.push(stepped.clone());
+        }
+        if !settled {
+            return Err(format!("{name}: the pruner does not settle within {BOUNDARY_STEPS} physics steps"));
+        }
+    }
+    let out = distinct(out);
+    spans.push(format!("{name}: 0 to {longest} steps, {} distinct", out.len()));
+    Ok(out)
+}
+
+impl PrunerScene {
+    fn refuse(&mut self, why: &str) {
+        if self.unmodeled.is_none() {
+            self.unmodeled = Some(why.to_owned());
+            self.variants.clear();
+            self.fed = false;
+            self.report(format!("the static pruner cannot give the order: {why}"));
+        }
+    }
+
+    /// Logs each distinct line once.
+    fn report(&mut self, line: String) {
+        if !self.reported.contains(&line) {
+            bevy::log::info!("[weather-fx] static pruner: {line}");
+            self.reported.push(line);
+        }
+    }
+
+    fn unfed(&mut self) {
+        self.fed = false;
+        self.variants.clear();
+    }
+
+    /// Feeds the engine's sequence once the site (and, at the home site, the
+    /// placed fixtures) are in the scene.
+    fn feed(&mut self, entries: &[(u64, Arc<GroundScene>)]) {
+        if self.unmodeled.is_some() {
+            return;
+        }
+        let find = |id: u64| entries.iter().find(|(entry, _)| *entry == id).map(|(_, scene)| scene.clone());
+        let Some((site_entry, layout)) = self.site else {
+            return self.unfed();
+        };
+        let Some(site) = find(site_entry) else {
+            return self.unfed();
+        };
+        let Some(site_order) = site.site_order.clone() else {
+            return self.refuse("the site's colliders carry no preload-table or activation order");
+        };
+        let mut site_shapes = Vec::new();
+        for (at, preload, activation) in site_order {
+            match site.pool_box(at) {
+                Ok(pool) => site_shapes.push((at.id(site_entry), pool, preload, activation)),
+                Err(why) => return self.refuse(&format!("the site: {why}")),
+            }
+        }
+        // The placed fixtures, in the view's list order, each view's own
+        // colliders before its touch box.
+        let mut fixture_shapes = Vec::new();
+        if layout {
+            let Some(entry) = self.fixtures else {
+                return self.unfed();
+            };
+            let Some(placed) = find(entry) else {
+                return self.unfed();
+            };
+            if placed.pending_layout {
+                return self.unfed();
+            }
+            let Some(order) = placed.fixture_order.clone() else {
+                return self.refuse("a placed fixture collider whose fixture's place in the view's list is not known");
+            };
+            for (at, slot, touch) in order {
+                match placed.pool_box(at) {
+                    Ok(pool) => fixture_shapes.push((slot, touch, at, at.id(entry), pool)),
+                    Err(why) => return self.refuse(&format!("the placed fixtures: {why}")),
+                }
+            }
+            fixture_shapes.sort_by_key(|&(slot, touch, ..)| (slot, touch));
+            if fixture_shapes.windows(2).any(|w| w[0].0 == w[1].0 && w[0].1 == w[1].1) {
+                return self.refuse("a fixture with more than one collider of its own or more than one touch box: \
+                    their order in its hierarchy is not carried");
+            }
+        }
+        let key: Vec<(usize, bool, [u32; 6])> =
+            fixture_shapes.iter().map(|&(slot, touch, _, _, pool)| (slot, touch, pool.map(f32::to_bits))).collect();
+        if self.fed {
+            if self.fed_fixtures.as_ref() == Some(&key) {
+                return;
+            }
+            return self.refuse("the placed fixtures changed after entry: a layout change's add and remove order \
+                is not read");
+        }
+        let mut by_preload = site_shapes.clone();
+        by_preload.sort_by_key(|&(_, _, preload, _)| preload);
+        let mut post_order = site_shapes;
+        post_order.sort_by_key(|&(_, _, _, activation)| activation);
+        let mut spans = Vec::new();
+        // The site prefab's clone under the active parent: its colliders in
+        // preload-table order.
+        let mut first = StaticPruner::new();
+        for &(id, pool, ..) in &by_preload {
+            first.add(id, pool);
+        }
+        let mut pruners = vec![first];
+        if layout {
+            pruners = match boundary(pruners, "from the site's instantiation to the layout load", &mut spans) {
+                Ok(p) => p,
+                Err(why) => return self.refuse(&why),
+            };
+            // Each fixture's load adds its own colliders at the prefab's
+            // saved root pose and removes them again at once; their boxes
+            // there are not read, so both the placed box and the same box
+            // about the world origin stand in.
+            let mut loaded = Vec::new();
+            for p in pruners {
+                for about_origin in [false, true] {
+                    let mut q = p.clone();
+                    for &(_, touch, at, _, pool) in &fixture_shapes {
+                        if touch {
+                            continue;
+                        }
+                        let id = ShapeAt { list: ShapeAt::TRANSIENT, ..at }.id(self.fixtures.unwrap_or(0));
+                        let pool = if about_origin {
+                            let half: [f32; 3] = std::array::from_fn(|k| (pool[k + 3] - pool[k]) * 0.5);
+                            [-half[0], -half[1], -half[2], half[0], half[1], half[2]]
+                        } else {
+                            pool
+                        };
+                        q.add(id, pool);
+                        q.remove(id);
+                    }
+                    loaded.push(q);
+                }
+            }
+            pruners = distinct(loaded);
+            // ShowFixtureAll, then in the same run the site hides.
+            for p in &mut pruners {
+                for &(_, _, _, id, pool) in &fixture_shapes {
+                    p.add(id, pool);
+                }
+                for &(id, ..) in &post_order {
+                    p.remove(id);
+                }
+            }
+        } else {
+            // The site hides in the same run as its instantiation.
+            for p in &mut pruners {
+                for &(id, ..) in &post_order {
+                    p.remove(id);
+                }
+            }
+        }
+        pruners = match boundary(pruners, "from the site's hiding to its showing on entry", &mut spans) {
+            Ok(p) => p,
+            Err(why) => return self.refuse(&why),
+        };
+        // ShowSite: the colliders again, in hierarchy post-order; a query of
+        // the entry frame may commit them before the next physics step.
+        let mut shown = Vec::new();
+        for mut p in pruners {
+            for &(id, pool, ..) in &post_order {
+                p.add(id, pool);
+            }
+            let mut committed = p.clone();
+            committed.commit();
+            shown.push(p);
+            shown.push(committed);
+        }
+        self.variants = distinct(shown);
+        self.boundaries = spans;
+        self.fed_fixtures = Some(key);
+        self.fed = true;
+        let pool: Vec<String> = self.variants[0].pool_order().iter().map(|id| format!("{id:x}")).collect();
+        self.report(format!("fed: {} site shapes, {} placed fixture shapes; {} pruners over {}; pool [{}]; \
+            pool boxes are the world bounds grown by 1.01 about their centre (an approximation of the engine's \
+            scene-query bounds)", by_preload.len(), fixture_shapes.len(), self.variants.len(),
+            self.boundaries.join("; "), pool.join(", ")));
+    }
+
+    fn advance(&mut self, dt: f32) {
+        if !self.fed {
+            return;
+        }
+        self.clock += f64::from(dt);
+        let mut steps = 0;
+        while self.clock >= FIXED_STEP && steps < MAX_FIXED_STEPS {
+            self.clock -= FIXED_STEP;
+            steps += 1;
+        }
+        if steps == MAX_FIXED_STEPS {
+            self.clock = self.clock.min(FIXED_STEP);
+        }
+        if steps == 0 {
+            return;
+        }
+        for p in &mut self.variants {
+            for _ in 0..steps {
+                p.step();
+            }
+        }
+        if self.variants.len() > 1 {
+            self.variants = distinct(std::mem::take(&mut self.variants));
+        }
+    }
+
+    /// The pruner's visit order of the touched shapes (pruner ids), or why
+    /// it cannot be given. Every pruner is queried, and so committed, as
+    /// the engine's query flushes the pruner first.
+    fn order(&mut self, touched: &[u64], center: [f32; 3], extents: [f32; 3]) -> Result<Vec<u64>, String> {
+        if let Some(why) = &self.unmodeled {
+            return Err(why.clone());
+        }
+        if !self.fed {
+            return Err(match self.site {
+                None => "no site is in the scene".to_owned(),
+                Some((_, true)) => "the home site's entry sequence waits for the placed fixtures".to_owned(),
+                Some(_) => "the site's entry sequence is not fed".to_owned(),
+            });
+        }
+        let mut agreed: Option<Vec<u64>> = None;
+        let mut split = false;
+        for p in &mut self.variants {
+            let visits = p.overlap(center, extents).map_err(|why| why.0.to_owned())?;
+            let seq: Vec<u64> = visits.into_iter().filter(|id| touched.contains(id)).collect();
+            match &agreed {
+                None => agreed = Some(seq),
+                Some(first) if *first == seq => {}
+                Some(_) => split = true,
+            }
+        }
+        if split {
+            let why = format!("the pruners of the unread step counts disagree on this query ({})",
+                self.boundaries.join("; "));
+            self.report(why.clone());
+            return Err(why);
+        }
+        let seq = agreed.unwrap_or_default();
+        if seq.len() != touched.len() {
+            return Err("a collider the query meets that the pruner does not visit (the pool boxes are an \
+                approximation)".to_owned());
+        }
+        self.report(format!("orders given ({} pruners agree)", self.variants.len()));
+        Ok(seq)
+    }
+}
+
+/// Where a shape sits in its installed thing: which list, which index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShapeAt {
+    list: u8,
+    index: usize,
+}
+
+impl ShapeAt {
+    const COLLIDERS: u8 = 0;
+    const INERT: u8 = 1;
+    const UNPORTED: u8 = 2;
+    /// A fixture collider's add and removal at its load.
+    const TRANSIENT: u8 = 3;
+
+    /// The pruner id of this shape of the installed thing `entry`.
+    fn id(self, entry: u64) -> u64 {
+        (entry << 32) | (u64::from(self.list) << 24) | (self.index as u64 & 0xff_ffff)
+    }
+}
+
+/// How much a shape's world bounds grow into its pruner box.
+const POOL_INFLATION: f32 = 1.01;
+
+impl GroundScene {
+    /// A static shape's pruner box, or why the scene cannot place it. The
+    /// box is the collider's world bounds at inflation one grown by 1.01
+    /// about their centre: an approximation of the engine's scene-query
+    /// bounds (the same shape bounds at inflation 1.01), which the tree's
+    /// splits read only through the box centres.
+    fn pool_box(&self, at: ShapeAt) -> Result<[f32; 6], &'static str> {
+        let b = match at.list {
+            ShapeAt::COLLIDERS => self.colliders[at.index].bounds,
+            ShapeAt::INERT | ShapeAt::UNPORTED => {
+                return Err("a static shape the scene holds only an enclosing bound for, or none")
+            }
+            _ => return Err("an unknown shape list"),
+        };
+        let c: [f32; 3] = std::array::from_fn(|k| (b[k] + b[k + 3]) * 0.5);
+        let e: [f32; 3] = std::array::from_fn(|k| (b[k + 3] - b[k]) * 0.5 * POOL_INFLATION);
+        Ok([c[0] - e[0], c[1] - e[1], c[2] - e[2], c[0] + e[0], c[1] + e[1], c[2] + e[2]])
+    }
+}
+
+/// Each placement row's slot in the site view's fixture list, from each
+/// row's layout type and the y of its layout position. The layout load walks
+/// the layouts in the server's order, one per layout type, and puts each
+/// layout's rows sorted by that y (equal keys keep their order); so the
+/// rows' own order is the server's (the placement mock gives it) and a
+/// layout type's place is where its first row stands.
+pub(crate) fn fixture_slots(rows: &[(u8, i32)]) -> Vec<usize> {
+    let mut groups: Vec<u8> = Vec::new();
+    for &(layout, _) in rows {
+        if !groups.contains(&layout) {
+            groups.push(layout);
+        }
+    }
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&r| (groups.iter().position(|&g| g == rows[r].0), rows[r].1));
+    let mut slots = vec![0; rows.len()];
+    for (slot, r) in order.into_iter().enumerate() {
+        slots[r] = slot;
+    }
+    slots
 }
 
 /// One system's view of the physics scene: the last overlap's colliders
@@ -1024,15 +1555,16 @@ impl GroundQuery {
 impl CollisionScene for GroundQuery {
     /// The scene overlap of the module's box: the static colliders whose
     /// layer the mask names and whose world bounds meet the box (see the
-    /// module notes), at most `max_shapes`. A collider the queries cannot
-    /// answer against, on a layer the mask names, refuses the call.
+    /// module notes), at most `max_shapes`, in the static pruner's visit
+    /// order when the pruner gives it. A collider the queries cannot answer
+    /// against, on a layer the mask names, refuses the call.
     fn overlap(&mut self, query: &OverlapQuery) -> Vec<Candidate> {
         self.last.clear();
         self.refusal = None;
-        let entries = self.scene.entries();
+        let mut entries = self.scene.entries_mut();
         let add_order = entries.add_order_holds();
         let mut touched = Vec::new();
-        for (at, (_, scene)) in entries.entries.iter().enumerate() {
+        for (at, (entry, scene)) in entries.entries.iter().enumerate() {
             if let Some(u) = scene.unported.iter().find(|u| query.collides_with & u.layers != 0
                 && u.bounds.as_ref().map_or(true, |bounds| bounds_meet(bounds, query.center, query.extents))) {
                 self.refusal.get_or_insert(u.query_refusal);
@@ -1048,17 +1580,31 @@ impl CollisionScene for GroundQuery {
                 }
                 // A position the scene does not carry leaves the order unknown.
                 let position = scene.add_positions.as_ref().and_then(|positions| positions.get(i).copied());
-                touched.push((at, position, scene.clone(), i));
+                let id = ShapeAt { list: ShapeAt::COLLIDERS, index: i }.id(*entry);
+                touched.push((at, position, scene.clone(), i, id));
             }
         }
+        // Every query flushes the pruner, whatever it meets.
+        let ids: Vec<u64> = touched.iter().map(|&(.., id)| id).collect();
+        let pruned = entries.pruner.order(&ids, query.center, query.extents);
         drop(entries);
-        let add_order = add_order && touched.iter().all(|&(_, position, _, _)| position.is_some());
-        if add_order {
-            touched.sort_by_key(|&(at, position, _, _)| (at, position));
-        }
-        let mut touched: Vec<(Arc<GroundScene>, usize)> = touched.into_iter().map(|(_, _, scene, i)| (scene, i)).collect();
+        let order_known = match pruned {
+            Ok(order) => {
+                touched.sort_by_key(|&(.., id)| order.iter().position(|&o| o == id));
+                true
+            }
+            Err(_) => {
+                let add_order = add_order && touched.iter().all(|&(_, position, ..)| position.is_some());
+                if add_order {
+                    touched.sort_by_key(|&(at, position, ..)| (at, position));
+                }
+                touched.len() <= 1 || add_order
+            }
+        };
+        let mut touched: Vec<(Arc<GroundScene>, usize)> =
+            touched.into_iter().map(|(_, _, scene, i, _)| (scene, i)).collect();
         let limit = usize::try_from(query.max_shapes.max(0)).unwrap_or(0);
-        self.order_known = touched.len() <= 1 || add_order;
+        self.order_known = order_known;
         if touched.len() > limit && !self.order_known {
             self.refusal.get_or_insert("more touches than the shape limit keeps, in an unknown order");
         }
