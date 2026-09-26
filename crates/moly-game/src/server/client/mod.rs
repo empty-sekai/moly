@@ -10,12 +10,17 @@
 //! - [`music`]: `UserMysekaiMusicPlayFixtureSetting` rows.
 //! - [`avatar`]: `UserAvatar` and the avatar wear masters.
 //! - [`home_action`]: the craft, canvas and sketch requests.
+//! - [`craft`]: the craft masters, the client's craft checks and the craft
+//!   and sketch requests with their `SuiteUser` replies.
+//! - [`inventory`]: the owned MySekai tables and the possession masters.
 //! - [`instrument_env`]: the native instruments' environment variables,
 //!   which game mode never reads.
 
 pub(crate) mod avatar;
 pub(crate) mod home_action;
 pub(crate) mod music;
+pub(crate) mod craft;
+pub(crate) mod inventory;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
