@@ -45,6 +45,7 @@
 //! 的语义作主，所以宁可响。
 
 pub mod crowd;
+pub mod look_at;
 pub mod slot;
 pub mod turn;
 pub mod walk;

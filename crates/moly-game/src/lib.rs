@@ -79,6 +79,7 @@ mod npc_dither;
 mod npc_fixture_activity;
 mod npc_fixture_talk;
 mod npc_gate;
+mod npc_look_at;
 #[cfg(test)]
 mod npc_harness;
 pub mod npc_objective;

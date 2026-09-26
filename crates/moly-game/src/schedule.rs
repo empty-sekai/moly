@@ -553,6 +553,9 @@ pub fn install(app: &mut App) {
                         crate::npc_gate::appear
                             .after(npc_objective::decide)
                             .before(npc::sync_rest_lifecycle),
+                        // The look-at tweens after the agent step writes the
+                        // standing rotation.
+                        crate::npc_look_at::step.after(npc::advance),
                         npc::report
                             .after(npc::advance)
                             .run_if(common_conditions::on_timer(Duration::from_secs(2))),
