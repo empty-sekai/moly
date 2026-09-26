@@ -20,6 +20,17 @@
 //! 局部移动遵循先位移后转向；导航再附着仍非原生代理，不能当作完整还原。
 //! 换站保留实体/装配，由 reseed 在新面定案后重置落位与目标机。
 
+pub(crate) mod change_site;
+pub(crate) mod random_fixture_action;
+pub(crate) mod residency;
+
+// The door move inserts the pending resource and orders itself after the
+// answer set (see `random_fixture_action`).
+#[allow(unused_imports)]
+pub(crate) use random_fixture_action::{
+    DoorAnswerSet, RandomFixtureActionPending, RandomFixtureActionReader,
+};
+
 use crate::site::GroundMeshes;
 use bevy::asset::LoadState;
 use bevy::prelude::*;
@@ -133,8 +144,35 @@ impl Default for NpcActions {
 }
 
 impl NpcActions {
+    /// A new member's model, placed on `site_type` (the AI model's own site
+    /// type; see [`residency`]).
+    pub(crate) fn placed_on(site_type: String) -> Self {
+        Self {
+            site_type,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn ready(&self) -> bool {
         self.registered
+    }
+
+    /// A suspended member back on its own site: the state machine returns to
+    /// Idle without the change's exit work (a tweet or greeting it held is
+    /// retired), and its registration and model flags are kept.
+    pub(crate) fn resume_on_site(&mut self, scene: u64) {
+        if matches!(self.current, NpcAction::Tweet | NpcAction::Greeting) {
+            self.effects.push(crate::npc_state::StateEffect::Retire);
+        }
+        if self.registered {
+            self.before = self.current;
+            self.current = NpcAction::Idle;
+            self.elapsed = 0.0;
+            self.scene = scene;
+        }
+        self.tweet_state = crate::npc_state::TweetState::Valid;
+        self.is_tweeting = false;
+        self.talk_owner = None;
     }
 
     /// The state machine's change. It refuses a change to the current state
@@ -282,6 +320,12 @@ impl RestLifecycle {
             self.epoch = self.epoch.wrapping_add(1);
         }
     }
+
+    /// A suspended member's Rest ends where it stands (its idle script and
+    /// emoticon stop; see [`residency`]).
+    pub(crate) fn leave_for_residency(&mut self) {
+        self.leave();
+    }
 }
 
 /// Registration/retirement edges only. The route and objective producers enter
@@ -296,6 +340,7 @@ pub(crate) fn sync_rest_lifecycle(
         Option<&crate::talk::TalkHold>,
         Option<&crate::balloon::AfterEditHold>,
         &mut RestLifecycle,
+        Has<residency::Away>,
     )>,
 ) {
     // SiteActive removal is the current host's scene-retirement signal.
@@ -304,7 +349,7 @@ pub(crate) fn sync_rest_lifecycle(
         .as_deref()
         .filter(|_| site.is_some())
         .map(|epoch| epoch.0);
-    for (mut actions, driver, toon, talk, reaction, mut rest) in &mut npcs {
+    for (mut actions, driver, toon, talk, reaction, mut rest, away) in &mut npcs {
         let Some(scene) = scene else {
             rest.leave();
             continue;
@@ -312,11 +357,16 @@ pub(crate) fn sync_rest_lifecycle(
         if !actions.registered && driver.is_some() && toon.is_some() {
             actions.registered = true;
             actions.scene = scene;
-            actions.site_type = site.as_ref().unwrap().site_type.clone();
+            // The AI model's own site type is written where the member is
+            // placed (spawn, site change); a member spawned without one takes
+            // the loaded site.
+            if actions.site_type.is_empty() {
+                actions.site_type = site.as_ref().unwrap().site_type.clone();
+            }
             actions.enable_talk = true;
             actions.initialize_status();
         }
-        if actions.current != NpcAction::Rest || talk.is_some() || reaction.is_some() {
+        if away || actions.current != NpcAction::Rest || talk.is_some() || reaction.is_some() {
             rest.leave();
         }
     }
@@ -913,6 +963,7 @@ pub(crate) fn spawn_when_ready(
     spawned: Option<Res<Spawned>>,
     selection: Res<crate::site::SiteSelection>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    site: Option<Res<crate::site::SiteActive>>,
     panel: (
         Option<Res<crate::server_panel::ServerPanel>>,
         Option<Res<crate::server_panel::VisitingCharacters>>,
@@ -945,6 +996,13 @@ pub(crate) fn spawn_when_ready(
     let Some(config) = configs.as_deref() else {
         return;
     };
+    let Some(site) = site.as_deref() else {
+        return;
+    };
+    // The roster's own site (see `residency::spawn_site`); a roster created
+    // while another site is loaded starts suspended.
+    let own_site = residency::spawn_site(&site.site_type);
+    let away = own_site != site.site_type;
 
     // 名册行：访客 unit 按展开序逐个取角色清单行（落位随人数摊）。访客
     // 不在清单里即响亮失败——静默丢一名会让名册悄悄变短。
@@ -978,18 +1036,22 @@ pub(crate) fn spawn_when_ready(
         pause_min = pause_min.min(*pause_seconds);
         pause_max = pause_max.max(*pause_seconds);
         let unit = CharacterUnitId(*unit_id);
-        commands.spawn((
+        let mut member = commands.spawn((
             unit,
             Transform::from_translation(Vec3::from(seed)),
             // 成员是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
             // 不带它时子实体的可见性只能靠引擎的回退（视为可见）并告警。
-            Visibility::default(),
+            if away {
+                Visibility::Hidden
+            } else {
+                Visibility::default()
+            },
             PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
             WalkSpeed(*walk_speed),
             (
                 PauseSeconds(*pause_seconds),
                 RestLifecycle::default(),
-                NpcActions::default(),
+                NpcActions::placed_on(own_site.clone()),
             ),
             WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
             MoveTarget(seed),
@@ -1006,6 +1068,9 @@ pub(crate) fn spawn_when_ready(
             crate::npc_objective::MemberRng::from_platform(),
             MotionPhase::Dwelling { remaining: None },
         ));
+        if away {
+            member.insert(residency::Away);
+        }
         ids.push(*unit_id);
     }
     commands.insert_resource(Registry {
@@ -1034,6 +1099,12 @@ pub(crate) fn spawn_when_ready(
     } else {
         format!("{pause_min:.1}-{pause_max:.1}s/员")
     };
+    info!(
+        "[npc-residency] roster created on {own_site} (site type {:?}) while {} is loaded{}",
+        residency::site_type_value(&own_site),
+        site.site_type,
+        if away { ": suspended until its site is loaded" } else { "" },
+    );
     info!(
         "npc 名册就绪：{count} 名（unit {ids:?}，{roster_word}），目标驱动：目标层抽签门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0}（面板 FloatConfigs），停顿 {pause_word}，锚定对话家具 {} 件，可行走 {} 格，出生即首判",
         KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
@@ -1153,27 +1224,46 @@ pub(crate) fn remove_temporary_units(world: &mut World, entities: &[Entity]) {
 
 /// Update：换站后的名册重播种。吃站点定案代数（见 `site::GroundEpoch`）：
 /// 首代只记录不重排——名册刚以同式落位；代数翻新（换站）时成员实体原样
-/// 保留（角色装配链不参与换站），按新目标面重新落位：路径清空进驻留、
-/// 位置落新面的可行走格、目标机复位到出生态（换站 = 新一轮起动装配，
-/// 首判旗再立）。目标面没跟上代数（重建窗）时本帧不记代数，下一帧整个
-/// 重来——代数记了却不重排，这一代的重播种会被永久跳过。
+/// 保留（角色装配链不参与换站）。目标面没跟上代数（重建窗）时本帧不记代
+/// 数，下一帧整个重来——代数记了却不重排，这一代的重播种会被永久跳过。
+///
+/// Each member is handled by its own site (see [`residency`]):
+/// - its own site is not the loaded one: it is suspended where it stood
+///   (hidden, route and Rest ended, objective kept) and not placed here;
+/// - it was suspended and the loaded site is its own again: it resumes where
+///   it stood (the source never re-places an NPC on entering a site) if that
+///   point is on the rebuilt walk face, else at a seed point; its current
+///   objective restarts, since the fixtures it referred to were rebuilt with
+///   the site, and its state machine registration and model flags are kept;
+/// - it was on the loaded site before and still is (the same site rebuilt):
+///   the host's re-placement, as before: path cleared, placed on the face's
+///   walkable cells, the objective machine back at its spawn state.
+#[allow(clippy::type_complexity)]
 pub(crate) fn reseed(
+    mut commands: Commands,
     epoch: Option<Res<crate::site::GroundEpoch>>,
+    site: Option<Res<crate::site::SiteActive>>,
     mut last: Local<u64>,
     face: Option<Res<crate::npc_objective::ObjectiveFace>>,
     mut npcs: Query<(
+        Entity,
         &CharacterUnitId,
-        &mut PathSlot,
-        &mut WalkState,
-        &mut MoveTarget,
-        &mut RouteStops,
-        &mut StuckBaseline,
-        &mut Transform,
-        &mut MotionPhase,
-        &mut crate::npc_objective::TalkSlot,
-        &mut crate::npc_objective::ObjectiveMind,
-        &mut NpcActions,
-        &mut RestLifecycle,
+        (
+            &mut PathSlot,
+            &mut WalkState,
+            &mut MoveTarget,
+            &mut RouteStops,
+            &mut StuckBaseline,
+            &mut Transform,
+            &mut MotionPhase,
+        ),
+        (
+            &mut crate::npc_objective::TalkSlot,
+            &mut crate::npc_objective::ObjectiveMind,
+            &mut NpcActions,
+            &mut RestLifecycle,
+        ),
+        (Has<residency::Away>, &mut Visibility),
     )>,
 ) {
     let Some(epoch) = epoch else {
@@ -1186,6 +1276,9 @@ pub(crate) fn reseed(
     if !face.is_fresh(epoch.0) {
         return;
     }
+    let Some(site) = site.as_deref() else {
+        return;
+    };
     if epoch.0 == *last {
         return;
     }
@@ -1196,27 +1289,91 @@ pub(crate) fn reseed(
     }
     // 落位按身份列稳定编号（查询序不定，重播种的位置要可复算）。
     let mut members: Vec<_> = npcs.iter_mut().collect();
-    members.sort_by_key(|(unit, ..)| unit.0);
-    let count = members.len();
+    members.sort_by_key(|(_, unit, ..)| unit.0);
+    let resident = members
+        .iter()
+        .filter(|(_, _, _, (_, _, actions, _), (away, _))| {
+            !*away && (actions.site_type.is_empty() || actions.site_type == site.site_type)
+        })
+        .count();
+    let (mut index, mut suspended, mut resumed) = (0usize, 0usize, 0usize);
     for (
-        index,
-        (
-            unit,
-            mut slot,
-            mut state,
-            mut target,
-            mut route,
-            mut stuck,
-            mut transform,
-            mut phase,
-            mut talk_slot,
-            mut mind,
-            mut actions,
-            mut rest,
-        ),
-    ) in members.into_iter().enumerate()
+        entity,
+        unit,
+        (mut slot, mut state, mut target, mut route, mut stuck, mut transform, mut phase),
+        (mut talk_slot, mut mind, mut actions, mut rest),
+        (away, mut visibility),
+    ) in members.into_iter()
     {
-        let seed = crate::npc_objective::seed_position(face, index, count);
+        let own = actions.site_type.clone();
+        if !own.is_empty() && own != site.site_type {
+            // Away from the loaded site: suspended where it stands.
+            if !away {
+                commands.entity(entity).insert(residency::Away);
+                *visibility = Visibility::Hidden;
+                *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
+                *route = RouteStops::default();
+                *stuck = StuckBaseline::default();
+                *phase = MotionPhase::Dwelling { remaining: None };
+                rest.leave();
+            }
+            suspended += 1;
+            info!(
+                "[npc-residency] unit={} stays on {} (site type {:?}); {} (site type {:?}, epoch {}) is loaded: suspended at ({:.2},{:.2},{:.2}), not placed here",
+                unit.0,
+                own,
+                residency::site_type_value(&own),
+                site.site_type,
+                residency::site_type_value(&site.site_type),
+                epoch.0,
+                transform.translation.x,
+                transform.translation.y,
+                transform.translation.z,
+            );
+            continue;
+        }
+        if away {
+            // Back on its own site: it resumes where it stood.
+            commands.entity(entity).remove::<residency::Away>();
+            *visibility = Visibility::Inherited;
+            let kept = face.sample(
+                transform.translation.to_array(),
+                moly_law::objective::TILE_SCALE,
+            );
+            let at = kept.unwrap_or_else(|| {
+                crate::npc_objective::seed_position(face, resumed % resident.max(1), resident.max(1))
+            });
+            *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
+            let forward = state.0.forward;
+            state.0 = LawWalkState::new(at, forward);
+            *target = MoveTarget(at);
+            *route = RouteStops::default();
+            *stuck = StuckBaseline::default();
+            transform.translation = Vec3::from(at);
+            *phase = MotionPhase::Dwelling { remaining: None };
+            talk_slot.reset_ai_talk_data();
+            rest.leave();
+            actions.resume_on_site(epoch.0);
+            *mind = crate::npc_objective::ObjectiveMind::at_spawn();
+            resumed += 1;
+            info!(
+                "[npc-residency] unit={} back on its site {} (epoch {}): resumes at ({:.2},{:.2},{:.2}) ({}), objective restarted",
+                unit.0,
+                own,
+                epoch.0,
+                at[0],
+                at[1],
+                at[2],
+                if kept.is_some() {
+                    "where it stood"
+                } else {
+                    "its stand point is off the rebuilt face, a seed point"
+                },
+            );
+            continue;
+        }
+        let seed = crate::npc_objective::seed_position(face, index, resident.max(1));
+        index += 1;
         *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
         state.0 = LawWalkState::new(seed, FORWARD_FALLBACK);
         *target = MoveTarget(seed);
@@ -1227,20 +1384,27 @@ pub(crate) fn reseed(
         talk_slot.reset_ai_talk_data();
         rest.leave();
         let retire = matches!(actions.current, NpcAction::Tweet | NpcAction::Greeting);
-        *actions = NpcActions::default();
+        *actions = NpcActions::placed_on(own);
         if retire {
             actions.effects.push(crate::npc_state::StateEffect::Retire);
         }
-        // 目标机复位到出生态：换站对成员是新一次起动（旗再立、停顿清零、
+        // 目标机复位到出生态：同站重建对成员是新一次起动（旗再立、停顿清零、
         // 槽位清空）。抽签引擎不复位——成员自己的跨站连续性没有真源
         // 依据可断，保留序列比假装重抽更诚实。
         *mind = crate::npc_objective::ObjectiveMind::at_spawn();
         info!(
-            "[npc unit={}] 换站重播种：位次 {index}，落位 ({:.2},{:.2},{:.2})，出生即首判",
-            unit.0, seed[0], seed[1], seed[2]
+            "[npc unit={}] 换站重播种：位次 {}，落位 ({:.2},{:.2},{:.2})，出生即首判",
+            unit.0,
+            index - 1,
+            seed[0],
+            seed[1],
+            seed[2]
         );
     }
-    info!("npc 名册重播种：{count} 名（换站代数 {}）", epoch.0);
+    info!(
+        "npc 名册重播种：{resident} 名留站重排，{resumed} 名回站续行，{suspended} 名不在本站（换站代数 {}，{}）",
+        epoch.0, site.site_type
+    );
 }
 
 /// 地表网格的世界顶点集合（站点 scene 未展开完成为空表）。
@@ -1833,7 +1997,10 @@ pub fn advance(
             &mut RestLifecycle,
             Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
         ),
-        Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
+        (
+            Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
+            Without<residency::Away>,
+        ),
     >,
 ) {
     if editor.is_active() {

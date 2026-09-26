@@ -74,6 +74,7 @@ pub(crate) fn try_greeting(
     talk_list: Option<Res<crate::server_panel::TalkDataStore>>,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
     configs: Option<Res<ClientConfigs>>,
+    site: Option<Res<crate::site::SiteActive>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
     mut npcs: Query<
         (
@@ -90,9 +91,16 @@ pub(crate) fn try_greeting(
             &mut MotionPhase,
             &mut RestLifecycle,
         ),
-        Without<crate::player::PlayerControlled>,
+        (
+            Without<crate::player::PlayerControlled>,
+            Without<crate::npc::residency::Away>,
+        ),
     >,
 ) {
+    // The avatar store's per-frame NPC update, of which this is call 10.
+    if !crate::npc::residency::loaded_site_runs(site.as_deref()) {
+        return;
+    }
     let frame = frame.0;
     let (Some(panel), Some(talk_list), Some(tables), Some(configs)) = (
         panel.as_deref(),
@@ -321,11 +329,23 @@ pub(crate) struct PresenterGate<'w, 's> {
         (&'static CharacterUnitId, &'static InheritedVisibility),
         With<crate::character::MotionDriver>,
     >,
-    npcs: Query<'w, 's, (&'static CharacterUnitId, &'static NpcActions)>,
+    npcs: Query<
+        'w,
+        's,
+        (&'static CharacterUnitId, &'static NpcActions),
+        Without<crate::npc::residency::Away>,
+    >,
+    site: Option<Res<'w, crate::site::SiteActive>>,
 }
 
 impl PresenterGate<'_, '_> {
+    /// The avatar store runs the presenter's per-frame update for every NPC
+    /// only while the current site is home or a floor; a suspended member
+    /// has no presenter frame here (see `npc::residency`).
     pub(crate) fn runs(&self, entity: Entity) -> bool {
+        if !crate::npc::residency::loaded_site_runs(self.site.as_deref()) {
+            return false;
+        }
         let Ok((unit, actions)) = self.npcs.get(entity) else {
             return false;
         };
@@ -374,6 +394,10 @@ pub(crate) fn try_cancel_if_overlap(world: &mut World) {
     use crate::client_config::{KEY_CHARACTER_OVERLAP_DISTANCE, KEY_CHARACTER_OVERLAP_TIME};
     let frame = world.resource::<FrameCount>().0;
     let dt = world.resource::<crate::npc_clock::NpcClock>().delta();
+    // The avatar store's per-frame NPC update, of which this is call 8.
+    if !crate::npc::residency::loaded_site_runs(world.get_resource::<crate::site::SiteActive>()) {
+        return;
+    }
     let Some((limit, reach)) = world.get_resource::<ClientConfigs>().map(|configs| {
         (
             configs.float(KEY_CHARACTER_OVERLAP_TIME),
@@ -392,6 +416,7 @@ pub(crate) fn try_cancel_if_overlap(world: &mut World) {
         .query_filtered::<(Entity, &CharacterUnitId, &Transform), (
             With<ObjectiveMind>,
             Without<crate::player::PlayerControlled>,
+            Without<crate::npc::residency::Away>,
         )>()
         .iter(world)
         .map(|(entity, unit, transform)| (entity, unit.0, transform.translation))

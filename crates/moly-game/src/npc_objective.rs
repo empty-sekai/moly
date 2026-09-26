@@ -1482,22 +1482,25 @@ pub(crate) fn decide(
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
     catalog: crate::player_talk::TalkCatalog,
     mut fixture_activities: crate::npc_fixture_activity::Factory,
-    mut npcs: Query<(
-        Entity,
-        &CharacterUnitId,
-        &PauseSeconds,
-        Option<&crate::talk::TalkHold>,
-        &mut TalkSlot,
-        &mut ObjectiveMind,
-        &mut MemberRng,
-        &mut PathSlot,
-        &mut WalkState,
-        &mut MoveTarget,
-        &mut RouteStops,
-        &mut MotionPhase,
-        &mut crate::npc::NpcActions,
-        &mut crate::npc::RestLifecycle,
-    )>,
+    mut npcs: Query<
+        (
+            Entity,
+            &CharacterUnitId,
+            &PauseSeconds,
+            Option<&crate::talk::TalkHold>,
+            &mut TalkSlot,
+            &mut ObjectiveMind,
+            &mut MemberRng,
+            &mut PathSlot,
+            &mut WalkState,
+            &mut MoveTarget,
+            &mut RouteStops,
+            &mut MotionPhase,
+            &mut crate::npc::NpcActions,
+            &mut crate::npc::RestLifecycle,
+        ),
+        Without<crate::npc::residency::Away>,
+    >,
 ) {
     // The site controllers clear every NPC's UnmovableFixtureList when a
     // layout edit is saved. Read before the editor return below: the save is
@@ -1704,6 +1707,14 @@ pub(crate) fn decide(
             continue;
         };
         if !actions.ready() {
+            continue;
+        }
+        // A member whose own site is not the selected site is not on it (see
+        // `npc::residency`), even on the frame before its suspension lands.
+        if selection
+            .as_deref()
+            .is_some_and(|selection| selection.site_type() != actions.site_type)
+        {
             continue;
         }
         if mind.ai_stopped.is_some() {
