@@ -126,6 +126,18 @@ const WAITS_FOR_EARLIER: &str = "waits for the earlier gate part";
 #[derive(Resource, Default, Debug)]
 pub(crate) struct GateModelPackages(pub(crate) HashSet<String>);
 
+/// The home gate's model as the server document states it
+/// (`userMysekaiGates`: the gate set at the home site and its skin), which
+/// the home site's layout shows on its gate rows. `package` is none when the
+/// server document or the gate tables are not available, or when the
+/// fixture index lacks the model; the layout's own row stands then.
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HomeGateModel {
+    pub(crate) package: Option<String>,
+    /// The fixture masters whose type is gate.
+    pub(crate) masters: HashSet<i32>,
+}
+
 /// A request of the native instruments (the gate screens' requests).
 #[derive(Clone, Debug)]
 enum Request {
@@ -614,6 +626,65 @@ fn joystick(world: &World) -> Option<bool> {
         .map(|joystick| joystick.enabled)
 }
 
+/// Publishes [`HomeGateModel`] from the server document once the gate
+/// tables and the fixture index are read, and again when the document's
+/// home gate changes.
+fn publish_home_gate(world: &mut World) {
+    let (masters, bundle) = {
+        let flow = world.resource::<GateFlow>();
+        match flow.parsed.as_ref() {
+            Some(tables) => {
+                // The server model is present but its document is still
+                // loading.
+                if world.contains_resource::<crate::server::ServerGateReplies>()
+                    && !crate::server::installed()
+                {
+                    return;
+                }
+                let bundle = crate::server::home_gate().map(|(gate, skin)| {
+                    (
+                        (gate, skin),
+                        tables.gate_bundle(i64::from(gate), i64::from(skin)),
+                    )
+                });
+                (tables.gate_masters.clone(), bundle)
+            }
+            // The gate tables could not be read.
+            None if flow.tables.is_none() => (HashSet::new(), None),
+            None => return,
+        }
+    };
+    let (package, note) = match bundle {
+        None => (
+            None,
+            "no server document: the layout's gate row stands".to_owned(),
+        ),
+        Some((gate, Err(reason))) => (
+            None,
+            format!("userMysekaiGates {gate:?}: {reason}; the layout's gate row stands"),
+        ),
+        Some((gate, Ok(bundle))) => {
+            let package = format!("mysekai__fixture__{bundle}");
+            match indexed(world, &package) {
+                Ok(true) => (Some(package), format!("userMysekaiGates {gate:?}")),
+                Ok(false) => (
+                    None,
+                    format!("userMysekaiGates {gate:?}: the gate model mysekai/fixture/{bundle} is not in the fixture index (not extracted); the layout's gate row stands"),
+                ),
+                Err(_) => return, // the index is loading
+            }
+        }
+    };
+    let model = HomeGateModel { package, masters };
+    if world.get_resource::<HomeGateModel>() != Some(&model) {
+        info!(
+            "[gate] home gate model {:?} for the gate masters {:?} ({note})",
+            model.package, model.masters
+        );
+        world.insert_resource(model);
+    }
+}
+
 /// The fixture index lists `package` (read once).
 fn indexed(world: &mut World, package: &str) -> Result<bool, String> {
     if world.resource::<GateFlow>().indexed.is_none() {
@@ -659,6 +730,7 @@ fn advance(world: &mut World) {
     ) {
         watch_cast_space(world);
     }
+    publish_home_gate(world);
     if tables(world).is_none() {
         return;
     }
@@ -1228,7 +1300,7 @@ fn change_gate(world: &mut World, id: i64, skin: i64, change: Change) -> Stage {
                 Ok(true) => match swap_gate_model(world, &package) {
                     Ok(old) => {
                         se(world, SE_CHANGE, "gate change");
-                        info!("[gate] SiteLayoutUtility.ChangeGate -> HomeSiteController.UpdateGateModelAsync: RemovePutData; SiteView.UpdateFixture(the gate, model {old} -> {package}); AddTileData; PlaySEOneShot({SE_CHANGE}); ObjectCollisionManager.ForceUpdate (the layout reload rebuilds the collisions); the room update");
+                        info!("[gate] SiteLayoutUtility.ChangeGate -> HomeSiteController.UpdateGateModelAsync: RemovePutData; SiteView.UpdateFixture(the gate, model {old} -> {package}): the gate's root alone is replaced; AddTileData (the footprint is unchanged); PlaySEOneShot({SE_CHANGE}); ObjectCollisionManager.ForceUpdate and the room update: not modelled here");
                     }
                     Err(reason) => error!(
                         "[gate] SiteLayoutUtility.ChangeGate: {reason}; the gate keeps its model"
@@ -1251,9 +1323,8 @@ fn change_gate(world: &mut World, id: i64, skin: i64, change: Change) -> Stage {
     }
 }
 
-/// The gate's placement row shows the new model; the layout's instances are
-/// reloaded (the product has no single-fixture model swap). Returns the old
-/// package.
+/// `SiteView.UpdateFixture` on the gate: its placement row shows the new
+/// model and its root alone is replaced. Returns the old package.
 fn swap_gate_model(world: &mut World, package: &str) -> Result<String, String> {
     let masters = world
         .resource::<GateFlow>()
@@ -1261,22 +1332,15 @@ fn swap_gate_model(world: &mut World, package: &str) -> Result<String, String> {
         .as_ref()
         .map(|tables| tables.gate_masters.clone())
         .unwrap_or_default();
-    let placements = world
+    let uid = world
         .get_resource::<crate::fixture::FixturePlacements>()
-        .cloned()
-        .ok_or("the layout is not installed")?;
-    let mut rows = placements.editor_rows();
-    let mut old = None;
-    for row in &mut rows {
-        if masters.contains(&row.fixture_id) {
-            old = Some(std::mem::replace(&mut row.package, package.to_owned()));
-        }
-    }
-    let old = old.ok_or("the layout has no gate row")?;
-    let next = placements.with_editor_rows(&rows, placements.next_edit_uid())?;
-    world.insert_resource(next);
-    crate::fixture::reload_after_save(world);
-    Ok(old)
+        .ok_or("the layout is not installed")?
+        .editor_rows()
+        .into_iter()
+        .find(|row| masters.contains(&row.fixture_id))
+        .map(|row| row.uid)
+        .ok_or("the layout has no gate row")?;
+    crate::fixture::replace_instance_model(world, &uid, package)
 }
 
 /// `StartCharacterAppearanceAsync`: `MysekaiTalkDataStore.SetTalkList`, then
