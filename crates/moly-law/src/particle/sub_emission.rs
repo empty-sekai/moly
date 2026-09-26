@@ -541,9 +541,9 @@ impl DistanceRate {
 
 impl BirthEdgeLaw {
     /// `cached_birth_edges` counts the parent's resolved birth edges. Only the
-    /// first two own a persistent per-particle carry; a third would use a
-    /// carry computed inside the call, which is not transcribed, so a parent
-    /// with more than two is refused.
+    /// first two slots of the birth table own a persistent per-particle carry
+    /// ([`Self::record`]); every later slot reads a carry computed in the call
+    /// and keeps nothing ([`Self::record_unkept`]).
     pub fn from_params(
         edge: &SubEmitterParams,
         cached_birth_edges: usize,
@@ -559,7 +559,7 @@ impl BirthEdgeLaw {
         if edge.trigger != SubEmitterTrigger::Birth
             || edge.probability != 1.0
             || edge.emitter.as_ref().is_none_or(|s| s.is_empty())
-            || !(1..=2).contains(&cached_birth_edges)
+            || cached_birth_edges == 0
             || !duration.is_finite()
             || duration <= 0.0
         {
@@ -578,6 +578,29 @@ impl BirthEdgeLaw {
             distance: DistanceRate::from_curve(&emission.rate_over_distance)?,
             bursts,
         })
+    }
+
+    /// [`Self::record`] for an edge in the third or a later slot of the
+    /// birth table, which owns no per-particle carry: the event starts from
+    /// the fractional part of the window's current end in child seconds
+    /// times (the rate-over-time word plus the particle's speed times the
+    /// rate-over-distance word), the speed taken from the particle's
+    /// simulation-space velocity as `sqrt(x*x + (y*y + z*z))`, and the carry
+    /// the event leaves is dropped. The words are the same stored words the
+    /// distance emission gates on, not evaluated curves.
+    pub fn record_unkept(
+        &self,
+        particle: &EventParticle,
+        dt: f32,
+        owner: &EventOwner,
+    ) -> Result<Option<BirthEventRecord>, Refused> {
+        let Some(interval) =
+            birth_interval(self.delay, self.duration, particle.age_percent, particle.inverse_lifetime, dt)?
+        else {
+            return Ok(None);
+        };
+        let mut carry = unkept_carry(interval.current, particle.velocity, self.time_rate, self.distance.gate);
+        self.record_window(particle, &mut carry, interval, owner).map(Some)
     }
 
     /// The child duration the window closes at (f32::MAX when looping).
@@ -724,6 +747,20 @@ fn world_particle(particle: &EventParticle, owner: &EventOwner) -> ([f32; 3], [f
         std::array::from_fn(|a| m[12 + a] + local[a]),
         linear(particle.velocity),
     )
+}
+
+/// The carry an edge without a per-particle carry starts its event from: the
+/// fractional part of `current * (time_word + speed * distance_word)`, the
+/// floor taken through a truncating conversion and back, one less where the
+/// truncation rounded up (a negative value). A value past the 32-bit range
+/// saturates in the conversion, as the engine's does.
+fn unkept_carry(current: f32, velocity: [f32; 3], time_word: f32, distance_word: f32) -> f32 {
+    let [x, y, z] = velocity;
+    let speed = (x * x + (y * y + z * z)).sqrt();
+    let scaled = current * (time_word + speed * distance_word);
+    let truncated = (scaled as i32) as f32;
+    let floor = if truncated > scaled { truncated - 1.0 } else { truncated };
+    scaled - floor
 }
 
 /// The larger of the value and +0, with a NaN or a negative value (or -0)
@@ -1122,10 +1159,14 @@ mod tests {
     /// The same per-call replay against native calls of parents whose child
     /// blocks are exported ones: two parents whose second birth edge names a
     /// child with a rate over distance in curve mode (about one half at time 0
-    /// rising to one at time 1, one of the two children delayed 0.3 s). The
-    /// parent's own motion is an input, read back per call. Arms: the curve
-    /// evaluated at the window's previous end, at child seconds not divided
-    /// by the duration, or replaced by its stored word.
+    /// rising to one at time 1, one of the two children delayed 0.3 s), and a
+    /// parent with four birth edges, run in the authored order and in two
+    /// permutations so that children with nonzero rates sit in the slots that
+    /// own no carry. The parent's own motion is an input, read back per call.
+    /// Arms: the curve evaluated at the window's previous end, at child
+    /// seconds not divided by the duration, or replaced by its stored word;
+    /// the carry of a slot without one taken as zero, or computed at the
+    /// window's previous end.
     #[test]
     #[ignore = "MOLY_SUBEMITTER_EDGE_RECEIPT must identify the native birth-edge law receipt"]
     fn replays_native_birth_edge_laws() {
@@ -1134,7 +1175,7 @@ mod tests {
             println!("birth-edge laws: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
             assert_eq!(mismatched, 0);
             assert!(calls > 0 && newborn > 0 && records > 0 && commands > 0);
-            for arm in ["previousEnd", "unnormalized", "multiplierRate"] {
+            for arm in ["previousEnd", "unnormalized", "multiplierRate", "zeroCarry", "previousCarry"] {
                 let wrong = run(Some(arm)).4;
                 println!("arm {arm}: {wrong} records differ");
                 assert!(wrong > 0, "{arm} arm matched every native record");
@@ -1201,7 +1242,8 @@ mod tests {
         let newborn_call = receipt.get("callSites").and_then(|sites| sites.get("newbornCall")).and_then(Value::as_str)
             .expect("the receipt names no callSites.newbornCall: it cannot classify its calls");
         // arm: None = the law; "catchUpZero", "sliceDt", "burstLow", "burstHigh", "noRepeats",
-        // "previousEnd", "unnormalized", "multiplierRate" one rule each.
+        // "previousEnd", "unnormalized", "multiplierRate", "zeroCarry", "previousCarry" one rule each.
+        // Slots 0 and 1 carry from the call's carry arrays; later slots own no carry.
         let run = |arm: Option<&str>| -> (usize, usize, usize, usize, usize) {
             let (mut calls, mut records, mut commands, mut mismatched, mut newborn) = (0, 0, 0, 0, 0);
             super::set_no_repeats_arm(arm == Some("noRepeats"));
@@ -1297,11 +1339,37 @@ mod tests {
                                 velocity: [("vx", "ax"), ("vy", "ay"), ("vz", "az")]
                                     .map(|(v, a)| bits(lane(p, v, local)) + bits(lane(p, a, local))),
                             };
-                            let mut carry = carries[slot][local];
-                            let Some(record) = law.record(&particle, &mut carry, dt4[local & 3], &owner).unwrap() else {
-                                continue;
+                            let dt = dt4[local & 3];
+                            let recorded = if slot < 2 {
+                                let mut carry = carries[slot][local];
+                                let recorded = law.record(&particle, &mut carry, dt, &owner);
+                                carries[slot][local] = carry;
+                                recorded
+                            } else {
+                                match arm {
+                                    Some("zeroCarry") => law.record(&particle, &mut 0.0, dt, &owner),
+                                    Some("previousCarry") => super::birth_interval(law.delay, law.duration,
+                                        particle.age_percent, particle.inverse_lifetime, dt).and_then(|window| match window {
+                                        None => Ok(None),
+                                        Some(interval) => {
+                                            let mut carry = super::unkept_carry(interval.previous, particle.velocity,
+                                                law.time_rate, law.distance.gate);
+                                            law.record_window(&particle, &mut carry, interval, &owner).map(Some)
+                                        }
+                                    }),
+                                    _ => law.record_unkept(&particle, dt, &owner),
+                                }
                             };
-                            carries[slot][local] = carry;
+                            let record = match recorded {
+                                Ok(Some(record)) => record,
+                                Ok(None) => continue,
+                                // An arm may leave the law's input range; that is a difference, not a crash.
+                                Err(_) if arm.is_some() => {
+                                    mismatched += 1;
+                                    continue;
+                                }
+                                Err(refused) => panic!("the law refused a native record: {refused:?}"),
+                            };
                             records += 1;
                             let Some(native) = native_records.get(cursor).filter(|_| cursor < last) else {
                                 mismatched += 1;
@@ -1361,9 +1429,9 @@ mod tests {
     /// bytes, but not the particle's age or the call's time vector, so the
     /// window is taken from the record. This is the replay that carries the
     /// persistent carry (children with a nonzero rate or distance rate).
-    /// Records of children outside the law (curve rates, several bursts,
-    /// repeating bursts, start delays) are counted per configuration and
-    /// skipped; each of those configurations is one the law refuses.
+    /// Records of children outside the law (curve rates over time) are
+    /// counted per configuration and skipped; each of those configurations is
+    /// one the law refuses.
     #[test]
     #[ignore = "MOLY_SUBEMITTER_EVENT_RECEIPT and MOLY_SUBEMITTER_EVENT_CENSUS must identify the current native sub-emitter receipt and its edge census"]
     fn replays_current_native_birth_events_from_the_recorded_window() {
@@ -1541,9 +1609,9 @@ mod tests {
         println!("birth events from the recorded window: {compared} records compared ({repeat_records} of children with repeating bursts), {mismatched} mismatched, refused configurations {refused:?}");
         assert_eq!(mismatched, 0);
         assert!(compared > 0);
-        // Only configurations outside the law may be refused: curve rates (5, 8), and the edges of the
-        // one parent with three cached birth edges (7, 8, 9), whose third carry is not transcribed.
-        assert!(refused.keys().all(|config| [5, 7, 8, 9].contains(config)), "{refused:?}");
+        // Only configurations outside the law may be refused: curve rates over time (5, 8). The edges of
+        // the one parent with three cached birth edges (7, 9 besides 8) are inside it.
+        assert!(refused.keys().all(|config| [5, 8].contains(config)), "{refused:?}");
         assert!(repeat_records > 0);
         let wrong = run(Some("noRepeats")).1;
         println!("arm noRepeats: {wrong} records differ");

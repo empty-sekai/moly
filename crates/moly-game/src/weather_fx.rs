@@ -1421,6 +1421,14 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
     -> Result<crate::particle_runtime::EventEdges, String> {
     use moly_law::particle::schema::SubEmitterTrigger;
     let cached = emitter.sub_emitters.iter().filter(|edge| edge.trigger == SubEmitterTrigger::Birth).count();
+    // The engine sorts its birth table by the children's instance ids at run
+    // time and only the first two slots keep a per-particle carry; with more
+    // than two birth edges that order decides which children's emission
+    // carries over between calls, and the export holds neither the clones'
+    // hierarchy order nor their ids.
+    if cached > 2 {
+        return Err(format!("{cached} birth edges: which two keep a per-particle carry follows the birth table's run-time instance-id order, which the export does not carry"));
+    }
     let mut edges = crate::particle_runtime::EventEdges::default();
     for edge in &emitter.sub_emitters {
         let target = edge.emitter.as_deref().filter(|name| !name.is_empty())
