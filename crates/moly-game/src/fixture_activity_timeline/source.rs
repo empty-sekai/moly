@@ -30,9 +30,9 @@ pub(crate) struct TimelineEffectBinding {
 /// A Control clip's `sourceGameObject` as its director resolves it
 /// (`ExposedReference.Resolve`): the director's exposed-reference table
 /// holds the clip's exposed name -> that value (null included); otherwise the
-/// reference's default value. Read for a director whose prefab root carries
-/// no fixture timeline view; a view binds its Control clips through its own
-/// effect list instead.
+/// reference's default value. A fixture timeline view's `BindEffects` sets
+/// the reference value of the clips its effect list names, when it finds the
+/// named ParticleSystem; every other clip keeps this resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ExposedSource {
     /// The document carries no exposed-reference table for this director, or
@@ -95,11 +95,11 @@ pub(crate) enum TimelinePayload {
         target: ClipTarget,
         settings: AnimationPlayableSettings,
     },
+    /// `ChangeEyePresetClip`: the selected row's pattern name. The view
+    /// looks the name up in its own eye table (`ChangeEyePattern`); the row's
+    /// cells in the clip are not read.
     Eye {
         pattern: String,
-        open: i32,
-        close: i32,
-        blink: bool,
     },
     Lip {
         pattern: String,
@@ -123,6 +123,9 @@ pub(crate) enum TimelinePayload {
         name: String,
         use_root: bool,
     },
+    /// `FadeCharacterClip`: the bound NPC's dither alpha follows the clip's
+    /// curve over the clip's normalized time.
+    FadeCharacter(Arc<FadeCurve>),
     Control(ControlSettings),
     /// A cut-scene track's clip. The runner keeps its clock; the cut-scene
     /// owner drives these tracks (any other owner refuses them by name).
@@ -131,6 +134,61 @@ pub(crate) enum TimelinePayload {
         class: String,
         fields: Value,
     },
+}
+
+/// `FadeCharacterClip.AnimationCurve`, evaluated as the engine's
+/// `AnimationCurve.Evaluate` does, and the value of its last key (what the
+/// track mixer writes after the clip has ended).
+#[derive(Clone, Debug)]
+pub(crate) struct FadeCurve {
+    curve: moly_law::particle::curve::EngineCurve,
+    /// `keys.LastOrDefault().value`: 0 for a curve with no key.
+    pub last_value: f32,
+}
+
+impl FadeCurve {
+    fn parse(value: &Value) -> Result<Self, TimelineFailure> {
+        let keys = array(value, "m_Curve")?
+            .iter()
+            .map(|key| {
+                Ok(moly_law::particle::CurveKey {
+                    time: finite(key, "time")? as f32,
+                    value: finite(key, "value")? as f32,
+                    in_slope: number(key, "inSlope")? as f32,
+                    out_slope: number(key, "outSlope")? as f32,
+                    weighted_mode: u8::try_from(unsigned(key, "weightedMode")?)
+                        .map_err(|_| invalid("fade curve weightedMode out of range"))?,
+                    in_weight: finite(key, "inWeight")? as f32,
+                    out_weight: finite(key, "outWeight")? as f32,
+                })
+            })
+            .collect::<Result<Vec<_>, TimelineFailure>>()?;
+        let wrap = |field: &str| -> Result<Option<u32>, TimelineFailure> {
+            Ok(Some(
+                u32::try_from(unsigned(value, field)?)
+                    .map_err(|_| invalid(format!("fade curve {field} out of range")))?,
+            ))
+        };
+        let last_value = keys.last().map_or(0.0, |key| key.value);
+        let curve = moly_law::particle::Curve {
+            multiplier: 1.0,
+            keys,
+            pre_wrap: wrap("m_PreInfinity")?,
+            post_wrap: wrap("m_PostInfinity")?,
+        };
+        // The clip's time is normalized to [0, 1] (`(t - start) / duration`).
+        let curve = moly_law::particle::curve::EngineCurve::new(
+            &curve,
+            moly_law::particle::curve::CurveTime::Normalized,
+        )
+        .map_err(|reason| invalid(format!("FadeCharacterClip curve: {reason}")))?;
+        Ok(Self { curve, last_value })
+    }
+
+    /// `AnimationCurve.Evaluate(time)`.
+    pub(crate) fn evaluate(&self, time: f32) -> f32 {
+        self.curve.evaluate(time)
+    }
 }
 
 /// The clip assets of the cut-scene tracks, as serialized.
@@ -496,8 +554,9 @@ pub(crate) struct TimelineClip {
     /// None is retained for legacy metadata or an authored null reference.
     pub playable: Option<SourceAssetId>,
     pub effect_binding: Option<TimelineEffectBinding>,
-    /// A Control clip of a director with no fixture timeline view: its source
-    /// object through the director's exposed-reference table.
+    /// A Control clip's source object through the director's exposed-reference
+    /// table (`ExposedReference.Resolve`). A fixture timeline view replaces it
+    /// only for the clips its effect list names (`BindEffects`).
     pub exposed_source: Option<ExposedSource>,
     pub start: f64,
     pub duration: f64,
@@ -809,8 +868,10 @@ impl TimelinePackage {
                         .find(|binding| binding.playable.as_ref() == Some(playable))
                         .cloned()
                 });
-                let exposed_source = match (&body, &fixture_view) {
-                    (TimelinePayload::Control(settings), None) => Some(resolve_exposed(
+                // Every Control clip keeps its director's resolution: a view
+                // overrides it only for the clips its effect list names.
+                let exposed_source = match &body {
+                    TimelinePayload::Control(settings) => Some(resolve_exposed(
                         &exposed,
                         &settings.exposed_name,
                         &payload["fields"]["sourceGameObject"]["defaultValue"],
@@ -967,9 +1028,6 @@ impl TimelinePackage {
                         .ok_or_else(|| invalid("eye SelectIndex out of range"))?;
                     TimelinePayload::Eye {
                         pattern: string(row, "PatternName")?.into(),
-                        open: integer(row, "OpenEyeIndex")?,
-                        close: integer(row, "CloseEyeIndex")?,
-                        blink: flag(row, "BlinkEnabled")?,
                     }
                 } else {
                     let row = rows
@@ -996,6 +1054,9 @@ impl TimelinePackage {
             "ChangeLipSyncStateClip" => TimelinePayload::LipGate,
             "EnableIKTalkClip" => TimelinePayload::NpcIkTalkGate,
             "EmoticonClip" => emoticon_payload(f)?,
+            "FadeCharacterClip" => {
+                TimelinePayload::FadeCharacter(Arc::new(FadeCurve::parse(&f["AnimationCurve"])?))
+            }
             "ControlPlayableAsset" => TimelinePayload::Control(control_payload(f)?),
             "CinemachineShot" => TimelinePayload::CutScene(CutScenePayload::CinemachineShot {
                 exposed_name: string(&f["VirtualCamera"], "exposedName")?.to_owned(),
