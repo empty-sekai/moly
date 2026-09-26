@@ -1793,6 +1793,24 @@ pub(crate) fn place_change_ui(
     *visibility = Visibility::Visible;
 }
 
+/// The click wrapper's IsResetJoyStick, then ForceResetJoyStick. The
+/// prefabs' own reset flags are not exported; for every type the stack
+/// shows the answer is the same either way (the type's bit resets).
+fn reset_joystick(
+    button: ButtonType,
+    resets: &mut MessageWriter<crate::joystick::ForceResetJoystick>,
+) {
+    match button.resets_joystick(false) {
+        Some(true) => {
+            resets.write(crate::joystick::ForceResetJoystick {
+                reason: "action button press",
+            });
+        }
+        Some(false) => {}
+        None => error!("[action_button] IsResetJoyStick: type {button:?} is not in the check's table"),
+    }
+}
+
 /// Update（拾取之前）：点按落在按钮上就分派动作并吃掉这一帧的点按。
 ///
 /// 节流照源：两次输入之间至少隔 [`ACTION_BUTTON_INPUT_INTERVAL`] 秒。
@@ -1817,6 +1835,7 @@ pub(crate) fn click(
     mut talk_requests: MessageWriter<PlayerTalkRequest>,
     mut fixture_requests: MessageWriter<crate::player_fixture_action::PlayerFixtureRequest>,
     mut layer_commands: MessageWriter<LayerCommand>,
+    mut joystick_resets: MessageWriter<crate::joystick::ForceResetJoystick>,
 ) {
     consumed.0 = false;
     let Ok((_, window)) = screen.windows.single() else {
@@ -1878,6 +1897,7 @@ pub(crate) fn click(
         if state.change_shown() && screen.change_hit(position, window, button) {
             let now = time.elapsed_secs();
             consumed.0 = true;
+            reset_joystick(ButtonType::ChangeActionTarget, &mut joystick_resets);
             if now - state.last_input < ACTION_BUTTON_INPUT_INTERVAL {
                 continue;
             }
@@ -1889,6 +1909,9 @@ pub(crate) fn click(
         if !screen.hit(position, window, button) {
             continue;
         }
+        // The button's click wrapper lets the joystick go before the
+        // action runs, and the action's own input interval comes after.
+        reset_joystick(button, &mut joystick_resets);
         let now = time.elapsed_secs();
         if button != ButtonType::Talk && now - state.last_input < ACTION_BUTTON_INPUT_INTERVAL {
             info!(
@@ -2227,6 +2250,12 @@ pub(crate) fn smoke_autowalk(
             .is_some_and(|(button, _)| button == ButtonType::Talk)
     {
         let (_, target) = button_state.current().expect("上面刚查过栈首");
+        // The press lets the stick go (ForceResetJoyStick); the walk
+        // finger lifts and presses again on its next step.
+        if *pressing {
+            write(&mut touches, TouchPhase::Ended, base);
+            *pressing = false;
+        }
         write_tap(&mut touches, TouchPhase::Started, button_pos);
         *tap_pressing = true;
         *tap_pressed_at = now;
@@ -2255,10 +2284,12 @@ pub(crate) fn smoke_autowalk(
     if targets.is_empty() {
         return;
     }
-    // 驻足中：站在锚旁等，触摸回底盘心（方向零 → 站定）。
+    // Lingering at the anchor: the finger lifts. Resting on the pad centre
+    // would keep the input on with a zero vector, facing yaw 0.
     if now < *linger_until {
         if *pressing {
-            write(&mut touches, TouchPhase::Moved, base);
+            write(&mut touches, TouchPhase::Ended, base);
+            *pressing = false;
         }
         return;
     }
@@ -2377,6 +2408,9 @@ pub(crate) struct DoorWalk {
     tapped: Option<u64>,
     /// When that tap was sent.
     tap_at: Option<f32>,
+    /// The door's button was at the head when the finger lifted: tap on a
+    /// later frame if it still is.
+    lifted_at: Option<f32>,
     /// The site generation this walk runs on, and when it began.
     since: Option<(u64, f32)>,
     /// The walk stopped on this generation (reached or timed out).
@@ -2486,16 +2520,19 @@ pub(crate) fn smoke_door_walk(
         Some((sensor, _)) => points
             .get(sensor)
             .ok()
-            .map(|at| (at.translation(), ButtonType::GoHomeSite)),
+            .map(|at| (at.translation(), ButtonType::GoHomeSite, None)),
         // The house: half a metre past the inside-door point towards the
         // house, so the player arrives facing it (the player box is ahead).
+        // That point is past the walls, so near it the finger pushes
+        // straight at the house, as a player would, instead of steering at
+        // the point while the walk slides along the wall.
         None => houses.iter().next().and_then(|(point, house)| {
             let at = points.get(point.0).ok()?.translation();
             let inward = (house.translation() - at).with_y(0.0).normalize_or_zero();
-            Some((at + inward * 0.5, ButtonType::HouseEntry))
+            Some((at + inward * 0.5, ButtonType::HouseEntry, Some(inward)))
         }),
     };
-    let Some((target, expected)) = target else {
+    let Some((target, expected, push)) = target else {
         return;
     };
     let offset = std::env::var("MOLY_DOOR_WALK_OFFSET")
@@ -2535,7 +2572,14 @@ pub(crate) fn smoke_door_walk(
     if head.is_some_and(|(button, _)| button == expected)
         && now - walk.last_change >= ACTION_BUTTON_INPUT_INTERVAL + 0.05
     {
-        release(walk, &mut touch);
+        // Lift the finger first and tap on a later frame, if the button
+        // is still there once the player stands.
+        if walk.pressing || walk.lifted_at.is_none() {
+            release(walk, &mut touch);
+            walk.lifted_at = Some(now);
+            return;
+        }
+        walk.lifted_at = None;
         let Some(position) = screen.button_position(window, expected) else {
             return;
         };
@@ -2581,6 +2625,9 @@ pub(crate) fn smoke_door_walk(
             return;
         }
     }
+    if walk.lifted_at.take().is_some() {
+        info!("[door-walk] the {expected:?} button left the head when the finger lifted; head {head:?}; walking on");
+    }
     // At the door: stand and wait for the head (another entry that joined
     // first keeps it until its object leaves).
     if distance < 0.2 {
@@ -2588,7 +2635,10 @@ pub(crate) fn smoke_door_walk(
         return;
     }
     // The joystick's inverse, as the action button walk writes it.
-    let dir_world = Vec2::new(delta.x, delta.z).normalize_or(Vec2::X);
+    let dir_world = match push {
+        Some(inward) if distance < 1.0 => Vec2::new(inward.x, inward.z).normalize_or(Vec2::X),
+        _ => Vec2::new(delta.x, delta.z).normalize_or(Vec2::X),
+    };
     let forward = camera.forward();
     let forward_flat = Vec2::new(forward.x, forward.z).normalize_or_zero();
     let right = camera.right();

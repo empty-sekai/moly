@@ -65,9 +65,12 @@ use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
 pub(crate) use action::HarvestAutoMoveHeld;
+pub(crate) use arrival::snap_from;
+pub(crate) use drops::HarvestDropAnimation;
 pub(crate) use learn::{
     LearnPhenomenaDialogClosed, LearnPhenomenaDialogRequest, LearnSiteEnvironmentActive,
 };
+pub(crate) use pickup::move_towards;
 pub(crate) use arrival::HarvestViewNodes;
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
@@ -477,6 +480,11 @@ impl EffectHook {
 pub(crate) struct HarvestEffectHooks {
     pub(crate) pending: Vec<EffectHook>,
     pub(crate) total: usize,
+    /// Emits whose copy the caller keeps (`ManagedEffect` held by its
+    /// emitter), by the caller's ticket.
+    pub(crate) kept: Vec<(u64, EffectHook)>,
+    /// `ManagedEffect.Stop` on a kept copy, by ticket.
+    pub(crate) stops: Vec<u64>,
 }
 
 /// Counters for the periodic status line (control flow only).
@@ -761,7 +769,9 @@ impl Plugin for HarvestPlugin {
                     arrival::bind_views,
                     prop_animator::bind,
                     airplane::advance,
-                    learn::advance,
+                    // The learn flow's dialog request is read the frame it
+                    // is written.
+                    learn::advance.before(crate::learn_phenomena_dialog::open),
                 )
                     .chain(),
             )
@@ -799,7 +809,9 @@ impl Plugin for HarvestPlugin {
                     report.run_if(bevy::time::common_conditions::on_timer(
                         std::time::Duration::from_secs(2),
                     )),
-                    effects::advance.after(HarvestActionSet),
+                    effects::advance
+                        .after(HarvestActionSet)
+                        .after(crate::home_action::HomeActionSet),
                 ),
             )
             .add_systems(

@@ -246,9 +246,10 @@ impl MenuButton {
     }
 
     /// 路由目标是否已建（本仓叠加门：未建 ⇒ 置灰；真源没有这层门——
-    /// 它的全部目标都在）。已建目标当前唯一：情报层。
+    /// 它的全部目标都在）。已建目标：情报层、白图写生（写生态由
+    /// `home_action` 承接）。
     fn target_built(self) -> bool {
-        matches!(self, MenuButton::Info)
+        matches!(self, MenuButton::Info | MenuButton::WhiteBlueprintSketch)
     }
 
     /// 路由目标名（开框行与点按行用）。
@@ -782,6 +783,7 @@ pub(crate) fn click(
     layouts: Res<crate::ui_layout::UiLayouts>,
     mut consumed: ResMut<ActionTapConsumed>,
     mut layer_commands: MessageWriter<LayerCommand>,
+    mut sketch_modes: MessageWriter<crate::home_action::SketchModeRequest>,
     views: Query<&crate::ui_layout::UiPrefabView, With<MenuDialogRoot>>,
     mut sounds: ResMut<crate::audio::SeRequests>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
@@ -830,7 +832,7 @@ pub(crate) fn click(
                 let built = which.target_built();
                 if source && built {
                     sounds.source_button(&layouts, view.key, which.source_path());
-                    // 已建目标：走真路由（当前唯一：情报层）。
+                    // 已建目标：走真路由（情报层、白图写生）。
                     match which {
                         MenuButton::Info => {
                             // 真源 OnClickMysekaiInfoButton：先查已开 622
@@ -842,8 +844,18 @@ pub(crate) fn click(
                             layer_commands.write(LayerCommand::Push(LayerId::MysekaiInfo));
                             close_requested = true;
                         }
-                        // 已建目标路由臂当前唯一：情报（见 target_built）。
-                        _ => unreachable!("已建目标路由臂唯一：情报"),
+                        MenuButton::WhiteBlueprintSketch => {
+                            // 真源白图写生钮：Player.ChangeState(SelectSketchItem)
+                            // + ChangeState(GameStateType.Sketch) → Close。他人编辑
+                            // 中的警告子窗单机不可达（恒站主、无他人）。
+                            info!(
+                                "[menu_dialog] 白图写生钮按下 → Player.ChangeState(SelectSketchItem)                                  + ChangeState(GameStateType.Sketch) → 关框"
+                            );
+                            sketch_modes.write(crate::home_action::SketchModeRequest::Enter);
+                            close_requested = true;
+                        }
+                        // 已建目标路由臂只有这两条（见 target_built）。
+                        _ => unreachable!("已建目标路由臂：情报、白图写生"),
                     }
                 } else {
                     // 置灰钮点按不响应（真源里 enabled=false 的钮同样不

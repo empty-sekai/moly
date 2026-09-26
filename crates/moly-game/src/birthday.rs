@@ -66,6 +66,12 @@ pub(crate) fn parse(
                 .get("assetbundleName")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
+            // The delivery site reads these two columns of the parties in
+            // session; the gate does not.
+            delivery_item_material_id: row.get("deliveryItemMaterialId").and_then(|v| v.as_i64()),
+            delivery_reward_material_id: row
+                .get("deliveryRewardMysekaiMaterialId")
+                .and_then(|v| v.as_i64()),
         });
     }
     let now = now_ms();
@@ -105,12 +111,26 @@ fn int_field(row: &serde_json::Value, field: &str) -> i64 {
 // 数据面与档期律
 // ---------------------------------------------------------------------------
 
-/// 一行派对（门读 id 与档期；其余列属门后的投递域，暂不建模）。
+/// 一行派对（门读 id 与档期；配送站另读两列物料 id）。
 struct PartyRow {
     id: i64,
     start_at: i64,
     closed_at: i64,
     assetbundle_name: Option<String>,
+    /// `deliveryItemMaterialId`: the material the delivery spends.
+    delivery_item_material_id: Option<i64>,
+    /// `deliveryRewardMysekaiMaterialId`: the mysekai material a reward
+    /// drop is.
+    delivery_reward_material_id: Option<i64>,
+}
+
+/// One party in session as the delivery site reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InSessionParty {
+    pub(crate) id: i64,
+    pub(crate) label: String,
+    pub(crate) delivery_item_material_id: i64,
+    pub(crate) delivery_reward_material_id: i64,
 }
 
 impl PartyRow {
@@ -140,6 +160,27 @@ impl BirthdayParties {
             .iter()
             .filter(|row| is_within_time(now_ms, row.start_at, row.closed_at))
             .map(|row| row.label())
+            .collect()
+    }
+
+    /// GetMasterBirthdayPartiesInSession for the delivery site: the rows in
+    /// session, in master order, with the two material columns. A row in
+    /// session without them is refused by name: the delivery cannot spend
+    /// or drop without them.
+    pub(crate) fn in_session(&self, now_ms: i64) -> Vec<InSessionParty> {
+        self.rows
+            .iter()
+            .filter(|row| is_within_time(now_ms, row.start_at, row.closed_at))
+            .map(|row| InSessionParty {
+                id: row.id,
+                label: row.label(),
+                delivery_item_material_id: row.delivery_item_material_id.unwrap_or_else(|| {
+                    panic!("生日派对主表行 {} 缺 deliveryItemMaterialId", row.label())
+                }),
+                delivery_reward_material_id: row.delivery_reward_material_id.unwrap_or_else(|| {
+                    panic!("生日派对主表行 {} 缺 deliveryRewardMysekaiMaterialId", row.label())
+                }),
+            })
             .collect()
     }
 }

@@ -149,6 +149,7 @@ impl TimelineAssetLoads {
     }
 }
 
+const ACTOR_ROOT: &str = "actor-animations/";
 const ACTOR_CATALOG: &str = "actor-animations/index.json";
 
 /// The catalogue's `clipBindings` rows grouped by the (unitId, sourceClip)
@@ -294,6 +295,249 @@ pub(crate) fn prepare_cast_actor_bindings(
     prepare_actor_tracks(world, request, unit_id, actor, animator, graph, true)
 }
 
+/// The player's own fixture timelines keep their CharacterAnimator clips in
+/// one avatar-rig file per timeline package, listed in this manifest.
+const AVATAR_CLIP_ROOT: &str = "fixture-timeline/avatar-clips/";
+const AVATAR_CLIP_MANIFEST: &str = "fixture-timeline/avatar-clips/manifest.json";
+
+fn require_avatar_clip_path(path: &str) -> Result<(), TimelineFailure> {
+    require_rooted(
+        path,
+        AVATAR_CLIP_ROOT,
+        "avatar clip path is not asset-root-relative",
+    )
+}
+
+/// The CharacterAnimator tracks of a definition and their animation clips.
+fn character_clips(
+    definition: &TimelineDefinition,
+) -> Result<(Vec<SourceAssetId>, Vec<(TimelineClipKey, ClipTarget)>), TimelineFailure> {
+    let mut tracks = Vec::new();
+    let mut clips = Vec::new();
+    for track in &definition.tracks {
+        if track.class != "AnimationTrack" || track.name != "CharacterAnimator" {
+            continue;
+        }
+        tracks.push(track.identity.clone());
+        for clip in &track.clips {
+            let TimelinePayload::Animation { target, .. } = &clip.payload else {
+                return Err(invalid(
+                    "character animation track has another payload type",
+                ));
+            };
+            clips.push((clip.key.clone(), target.clone()));
+        }
+    }
+    Ok((tracks, clips))
+}
+
+/// `PlayerFixtureTimelineView.BindPlayer`: the timeline's CharacterAnimator
+/// stream plays on the player avatar's own animator. The source clips of
+/// that stream ship in the fixture bundles and bind the avatar skeleton; the
+/// extractor exports them, for each timeline package, into one file against
+/// that skeleton. A clip is taken from that file by its name and its source
+/// identity. A clip the file lacks refuses the timeline, by name.
+pub(crate) fn prepare_player_avatar_bindings(
+    world: &mut World,
+    request: &mut StartTimeline,
+    animator: Entity,
+    graph: Handle<AnimationGraph>,
+) -> Result<(), TimelineFailure> {
+    let prefab = request.definition.prefab.clone();
+    let package = request.definition.package.clone();
+    let (tracks, clips) = character_clips(&request.definition)?;
+    if !clips.is_empty() {
+        world.init_resource::<TimelineAssetLoads>();
+        let server = world.resource::<AssetServer>().clone();
+        let manifest = load_json(
+            world,
+            &server,
+            AVATAR_CLIP_MANIFEST,
+            require_avatar_clip_path,
+        )?;
+        if manifest["version"].as_u64() != Some(1) {
+            return Err(invalid("unsupported avatar clip manifest"));
+        }
+        let entry = manifest["packages"].get(package.as_str()).ok_or_else(|| {
+            invalid(format!(
+                "timeline {prefab}: package {package} has no avatar clip file"
+            ))
+        })?;
+        let file = |key: &str| -> Result<String, TimelineFailure> {
+            let name = string(entry, key)?;
+            if name.contains('/') {
+                return Err(invalid("avatar clip manifest names a nested file"));
+            }
+            let path = format!("{AVATAR_CLIP_ROOT}{name}");
+            require_avatar_clip_path(&path)?;
+            Ok(path)
+        };
+        let glb = file("glb")?;
+        let index_path = file("index")?;
+        let index = load_json(world, &server, &index_path, require_avatar_clip_path)?;
+        if index["version"].as_u64() != Some(1)
+            || index["package"].as_str() != Some(package.as_str())
+        {
+            return Err(invalid(format!(
+                "avatar clip index {index_path} does not describe {package}"
+            )));
+        }
+        // The loader keys every curve by the names on its path from the
+        // file's scene root, so that root must be the animator's own node.
+        let root = string(&index, "bindingRootName")?;
+        if world.get::<Name>(animator).map(Name::as_str) != Some(root) {
+            return Err(invalid(format!(
+                "avatar clip file {glb} binds root {root}, not the player's animator"
+            )));
+        }
+        let handle = {
+            let mut loads = world.resource_mut::<TimelineAssetLoads>();
+            loads
+                .gltf
+                .get_or_insert_with(&glb, || server.load(format!("moly://{glb}")))
+                .clone()
+        };
+        if let bevy::asset::LoadState::Failed(error) = server.load_state(&handle) {
+            return Err(invalid(format!(
+                "avatar clip file failed to load: {glb}: {error}"
+            )));
+        }
+        let rows = array(&index, "clips")?;
+        let gltf = world
+            .resource::<Assets<Gltf>>()
+            .get(&handle)
+            .ok_or_else(|| {
+                TimelineFailure::loading(format!("avatar clip file still loading: {glb}"))
+            })?;
+        let mut prepared = Vec::new();
+        for (key, target) in &clips {
+            let expected = SourceAnimationEvidence::from_clip_target(target)?;
+            let found: Vec<&Value> = rows
+                .iter()
+                .filter(|row| {
+                    row["name"].as_str() == Some(target.clip_name.as_str())
+                        && asset(&row["sourceClip"]).ok().as_ref() == Some(&expected.asset)
+                })
+                .collect();
+            let [row] = found.as_slice() else {
+                return Err(invalid(format!(
+                    "timeline {prefab}: clip {} is {} in its avatar clip file {glb}",
+                    target.clip_name,
+                    if found.is_empty() {
+                        "absent"
+                    } else {
+                        "duplicated"
+                    }
+                )));
+            };
+            if row["sourcePackage"].as_str() != Some(target.target_package.as_str()) {
+                return Err(invalid(format!(
+                    "timeline {prefab}: clip {} in {glb} comes from another source package",
+                    target.clip_name
+                )));
+            }
+            let source = SourceAnimationEvidence::from_index_entry(row, &target.target_package)?;
+            if source.asset != expected.asset
+                || source.clip_name != expected.clip_name
+                || source.start_time != expected.start_time
+                || source.stop_time != expected.stop_time
+                || source.looping != expected.looping
+            {
+                return Err(invalid(format!(
+                    "timeline {prefab}: clip {} in {glb} disagrees with the timeline's source clip",
+                    target.clip_name
+                )));
+            }
+            let animation = gltf
+                .named_animations
+                .get(target.clip_name.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "timeline {prefab}: clip {} is listed but not in {glb}",
+                        target.clip_name
+                    ))
+                })?;
+            prepared.push((
+                key.clone(),
+                TimelineAnimationBinding {
+                    animator,
+                    graph: graph.clone(),
+                    clip: animation,
+                    source,
+                    coverage: AnimationCoverage::sampled_pose(),
+                },
+            ));
+        }
+        for (key, binding) in prepared {
+            request.bindings.animations.insert(key, binding);
+        }
+    }
+    let actor = request.owner.activity.actor;
+    for identity in tracks {
+        request.bindings.actors.insert(identity, actor);
+    }
+    Ok(())
+}
+
+/// `PlayerAvatarItemTimelineView.BindPlayer`: a step item's CharacterAnimator
+/// stream plays clips of the avatar's own motion group, taken from the group
+/// by name. The group's own length and loop flag of each clip must agree
+/// with the timeline's clip. A clip the group lacks refuses the timeline, by
+/// name. Returns each bound clip that carries animation events, with their
+/// count; the runner does not dispatch them.
+pub(crate) fn prepare_player_group_bindings(
+    request: &mut StartTimeline,
+    animator: Entity,
+    graph: Handle<AnimationGraph>,
+    group: &crate::player_avatar::BodyClips,
+) -> Result<Vec<(String, usize)>, TimelineFailure> {
+    let prefab = request.definition.prefab.clone();
+    let (tracks, clips) = character_clips(&request.definition)?;
+    let mut prepared = Vec::new();
+    let mut with_events = Vec::new();
+    for (key, target) in &clips {
+        let expected = SourceAnimationEvidence::from_clip_target(target)?;
+        let clip = group.get(&target.clip_name).ok_or_else(|| {
+            invalid(format!(
+                "timeline {prefab}: clip {} is not in the avatar motion group",
+                target.clip_name
+            ))
+        })?;
+        let authored_length = (expected.stop_time - expected.start_time) as f32;
+        if clip.name != target.clip_name
+            || clip.looping != expected.looping
+            || clip.length != authored_length
+        {
+            return Err(invalid(format!(
+                "timeline {prefab}: clip {} differs from the group's {} ({} s, loop {}; the timeline's {} s, loop {})",
+                target.clip_name, clip.name, clip.length, clip.looping, authored_length, expected.looping
+            )));
+        }
+        if !clip.events.is_empty() {
+            with_events.push((clip.name.clone(), clip.events.len()));
+        }
+        prepared.push((
+            key.clone(),
+            TimelineAnimationBinding {
+                animator,
+                graph: graph.clone(),
+                clip: clip.handle.clone(),
+                source: expected,
+                coverage: AnimationCoverage::sampled_pose(),
+            },
+        ));
+    }
+    for (key, binding) in prepared {
+        request.bindings.animations.insert(key, binding);
+    }
+    let actor = request.owner.activity.actor;
+    for identity in tracks {
+        request.bindings.actors.insert(identity, actor);
+    }
+    Ok(with_events)
+}
+
 fn prepare_actor_tracks(
     world: &mut World,
     request: &mut StartTimeline,
@@ -305,7 +549,7 @@ fn prepare_actor_tracks(
 ) -> Result<(), TimelineFailure> {
     world.init_resource::<TimelineAssetLoads>();
     let server = world.resource::<AssetServer>().clone();
-    let catalog = load_json(world, &server, ACTOR_CATALOG)?;
+    let catalog = load_json(world, &server, ACTOR_CATALOG, require_actor_path)?;
     if catalog["version"].as_u64() != Some(1) {
         return Err(invalid("unsupported actor animation catalog"));
     }
@@ -356,7 +600,7 @@ fn prepare_actor_tracks(
                 return Err(invalid("actor library unit mismatch"));
             }
             let index_path = string(library, "index")?;
-            let index = load_json(world, &server, index_path)?;
+            let index = load_json(world, &server, index_path, require_actor_path)?;
             if index["version"].as_u64() != Some(2) {
                 return Err(invalid("source-qualified v2 actor index required"));
             }
@@ -452,38 +696,32 @@ fn prepare_actor_tracks(
 }
 
 fn require_actor_path(path: &str) -> Result<(), TimelineFailure> {
-    if !path.starts_with("actor-animations/")
+    require_rooted(
+        path,
+        ACTOR_ROOT,
+        "actor catalog path is not asset-root-relative",
+    )
+}
+
+/// A path the runner loads itself: asset-root-relative and under `root`.
+fn require_rooted(path: &str, root: &str, refusal: &str) -> Result<(), TimelineFailure> {
+    if !path.starts_with(root)
         || path.contains(':')
         || path.contains('\\')
         || path.split('/').any(|part| part == ".." || part.is_empty())
     {
-        return Err(invalid("actor catalog path is not asset-root-relative"));
+        return Err(invalid(refusal));
     }
     Ok(())
-}
-
-/// Start loading the actor catalogue without reading it, for a caller that
-/// knows it will resolve actor clips once its own tables arrive. It requests
-/// exactly the handle `load_json` requests for the catalogue.
-pub(crate) fn request_actor_catalog(world: &mut World) {
-    let Some(server) = world.get_resource::<AssetServer>().cloned() else {
-        return;
-    };
-    world.init_resource::<TimelineAssetLoads>();
-    world
-        .resource_mut::<TimelineAssetLoads>()
-        .json
-        .get_or_insert_with(ACTOR_CATALOG, || {
-            server.load(format!("moly://{ACTOR_CATALOG}"))
-        });
 }
 
 fn load_json(
     world: &mut World,
     server: &AssetServer,
     path: &str,
+    check: fn(&str) -> Result<(), TimelineFailure>,
 ) -> Result<Arc<Value>, TimelineFailure> {
-    require_actor_path(path)?;
+    check(path)?;
     let handle = {
         let mut loads = world.resource_mut::<TimelineAssetLoads>();
         loads
@@ -611,6 +849,10 @@ pub(crate) enum TimelineOwnerKind {
     Player,
     /// The selected fixture-talk cast owns one shared source Director clock.
     Talk,
+    /// A step item of the player avatar (`PlayerAvatarItemTimelineView`):
+    /// its director plays with no timeout, and its view sets the loop flag
+    /// (`LoopFlagClip.ChangeLoopFlagState`) instead of skipping the loop.
+    StepItem,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TimelineTimeoutBudget {
@@ -822,6 +1064,41 @@ impl FixtureActivityTimelines {
             return false;
         }
         s.clock.request_end();
+        true
+    }
+    /// A step item view's `ChangeLoopFlag(state)`: the loop flag alone is set,
+    /// so with `false` the current loop still plays to its end before the
+    /// rest of the axis, and `true` loops again.
+    pub(crate) fn set_loop_flag(&mut self, token: TimelineToken, state: bool) -> bool {
+        let Some(s) = self.sessions.get_mut(&token) else {
+            return false;
+        };
+        if s.request.owner.kind != TimelineOwnerKind::StepItem
+            || !matches!(
+                s.status,
+                TimelineStatus::Preparing | TimelineStatus::Playing { .. }
+            )
+        {
+            return false;
+        }
+        s.clock.set_loop_flag(state);
+        true
+    }
+    /// A step item view's `MoveEndTime`: the director's time is put at its
+    /// duration, where the view holds the last frame.
+    pub(crate) fn move_end_time(&mut self, token: TimelineToken) -> bool {
+        let Some(s) = self.sessions.get_mut(&token) else {
+            return false;
+        };
+        if s.request.owner.kind != TimelineOwnerKind::StepItem
+            || !matches!(
+                s.status,
+                TimelineStatus::Preparing | TimelineStatus::Playing { .. }
+            )
+        {
+            return false;
+        }
+        s.clock.move_to(s.request.definition.duration);
         true
     }
     /// A conversation can own a new Director or join an existing NPC activity.
@@ -1053,7 +1330,10 @@ fn validate(
         return Err(invalid("invalid activity timeout budget"));
     }
     match (request.owner.kind, request.timeout_budget) {
-        (TimelineOwnerKind::Player, TimelineTimeoutBudget::PlayerWall)
+        (
+            TimelineOwnerKind::Player | TimelineOwnerKind::StepItem,
+            TimelineTimeoutBudget::PlayerWall,
+        )
         | (
             TimelineOwnerKind::Npc | TimelineOwnerKind::Talk,
             TimelineTimeoutBudget::OwnerGated { advance: Some(_) },
