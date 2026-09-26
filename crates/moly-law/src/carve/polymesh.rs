@@ -722,13 +722,25 @@ impl PolyMesh {
     /// nearest within the square of half-width `half_extent` around `p`
     /// (`FindNearestPoly`). No walk-cell gate: an agent lives on the cells.
     pub(crate) fn agent_cell(&self, grid: &Grid, p: [f32; 2], half_extent: f32) -> Option<u32> {
+        self.nearest_cell(grid, p, half_extent)
+            .map(|(index, _)| index)
+    }
+
+    /// [`Self::agent_cell`] with the point it gives: `p` itself on the cell
+    /// that contains it, else the closest point of the nearest cell.
+    pub(crate) fn nearest_cell(
+        &self,
+        grid: &Grid,
+        p: [f32; 2],
+        half_extent: f32,
+    ) -> Option<(u32, [f32; 2])> {
         let point = [p[0], 0.0, p[1]];
         if let Some(inside) = (0..self.tris.len() as u32)
             .find(|index| engine_inside(&self.engine_cell(grid, *index).0, point))
         {
-            return Some(inside);
+            return Some((inside, p));
         }
-        let mut best: Option<(u32, f32)> = None;
+        let mut best: Option<(u32, [f32; 2], f32)> = None;
         for index in 0..self.tris.len() as u32 {
             let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
             let q = closest_on_triangle(p, corners);
@@ -736,11 +748,11 @@ impl PolyMesh {
                 continue;
             }
             let d = distance2(q, p);
-            if best.map_or(true, |(_, bd)| d < bd) {
-                best = Some((index, d));
+            if best.map_or(true, |(_, _, bd)| d < bd) {
+                best = Some((index, q, d));
             }
         }
-        best.map(|(index, _)| index)
+        best.map(|(index, q, _)| (index, q))
     }
 
     /// `NavMeshQuery::MoveAlongSurface` from `start` on cell `start_cell`

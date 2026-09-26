@@ -77,6 +77,13 @@ impl WalkFace {
         self.field.move_position(start, goal)
     }
 
+    /// Where the engine's crowd keeps an agent standing at `p`
+    /// (`WalkField::relocate`): `p` on a navigation cell, else the closest
+    /// point of the nearest cell in its query box, `None` when there is none.
+    pub fn relocate(&self, p: [f32; 2], agent_radius: f32) -> Option<[f32; 2]> {
+        self.field.relocate(p, agent_radius)
+    }
+
     /// Local low-step elevation above the original site surface. The raw
     /// surface remains responsible for continuous terrain height.
     pub(crate) fn height_offset(&self, point: [f32; 2]) -> f32 {

@@ -126,6 +126,12 @@ pub const STATIC_QUERY_HALF_EXTENT: f32 = 0.5;
 /// 没有可选的层，不参与。
 pub const AGENT_QUERY_HALF_EXTENT: f32 = AGENT_RADIUS;
 
+/// The crowd's re-location query box (`ValidateOrReconnectPath`) has the
+/// half-extents of the source literal pair (20, 15) times the agent's radius:
+/// 20 radii in x and z, 15 in height. Only the horizontal half-extent applies
+/// to this single-layer field.
+pub const RELOCATE_EXTENT_PER_RADIUS: f32 = 20.0;
+
 /// 家具动作点出发门里 `CanNavmeshMoveTargetPosition` 的阈值（源字面量）。
 pub const FIXTURE_ACTION_REACH_THRESHOLD: f32 = 0.01;
 
@@ -637,6 +643,23 @@ impl WalkField {
     pub fn agent_cell(&self, p: [f32; 2]) -> Option<u32> {
         self.polys
             .agent_cell(&self.grid, p, AGENT_QUERY_HALF_EXTENT)
+    }
+
+    /// Where the engine's crowd keeps an agent standing at `p`
+    /// (`ValidateOrReconnectPath`, run when the agent's corridor no longer
+    /// starts on a live polygon). An agent on a navigation cell is not moved:
+    /// the answer is `p` itself, edges included, whatever the walk cells under
+    /// it say. Otherwise `FindNearestPoly` in the box of horizontal half-width
+    /// [`RELOCATE_EXTENT_PER_RADIUS`] × `agent_radius` gives the closest point
+    /// of the nearest cell, where the agent is put. `None` when no cell lies in
+    /// that box: the engine then leaves the agent where it is, off the mesh.
+    pub fn relocate(&self, p: [f32; 2], agent_radius: f32) -> Option<[f32; 2]> {
+        if !p.into_iter().all(f32::is_finite) || !agent_radius.is_finite() || agent_radius < 0.0 {
+            return None;
+        }
+        self.polys
+            .nearest_cell(&self.grid, p, RELOCATE_EXTENT_PER_RADIUS * agent_radius)
+            .map(|(_, point)| point)
     }
 
     /// `NavMeshQuery::MoveAlongSurface` from `start` on navigation cell `cell`
