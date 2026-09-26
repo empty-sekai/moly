@@ -9,6 +9,19 @@
 //! `moly_law::particle::collision_query`; this file maps the pool into it in
 //! source axes and commits what it writes.
 //!
+//! Both calls start at a multiple of four in the engine's storage. The
+//! post-simulation call covers the pool from slot 0. A birth writes its
+//! newborns from the live count rounded up to four (the newborn death pass
+//! and the packing into the gap below come after every group's modules), and
+//! its groups start there, four lanes apart. The module's packing rewrites
+//! the lanes of the last pack from the range end on with that pack's first
+//! lane whenever the end is not a multiple of four, so with an aligned start
+//! every lane it reads past the end is such a copy: it never reads a slot
+//! past the end as the storage holds it. The pool here is packed (the
+//! newborns follow the live particles directly), so a newborn call is made
+//! over the engine's slot indices and each slot is read from, and written
+//! to, the pool particle the alignment gap below it.
+//!
 //! The module's scene is the site's physics scene (see `collision_scene`):
 //! the MeshColliders of every installed weather effect (a stopped effect's
 //! until it is destroyed), the site's own colliders and the placed fixtures'.
@@ -219,11 +232,15 @@ pub(crate) fn install(system: &mut Runtime, scene: Box<dyn CollisionScene + Send
     Ok(())
 }
 
-/// The pool in source axes; slots at or past `end` are not known.
+/// The pool in source axes, indexed by the engine's slots: slot `i` below
+/// `end` is the pool particle `i - gap`; slots at or past `end` are not known.
 struct PoolView<'a> {
     pool: &'a [Particle],
     side: &'a [Side],
     end: usize,
+    /// The engine's slots below a newborn group that the pool does not hold
+    /// (the live count rounded up to four, less the live count).
+    gap: usize,
     /// The size read is the current-size stream (else the start size).
     current_size: bool,
 }
@@ -237,6 +254,7 @@ impl CollisionParticles for PoolView<'_> {
         if index >= self.end {
             return None;
         }
+        let index = index.checked_sub(self.gap)?;
         let (particle, side) = (self.pool.get(index)?, self.side.get(index)?);
         Some(ParticleLane {
             position: source(particle.position),
@@ -253,7 +271,7 @@ impl CollisionParticles for PoolView<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize, dt: [f32; 4],
+fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize, gap: usize, dt: [f32; 4],
     pending: f32, emission_word: u32) -> Result<(), String> {
     // Every collision edge must be attached: a missing one would drop its
     // events without a trace.
@@ -262,7 +280,7 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
     if collision.edges.len() != authored {
         return Err(format!("collision: {} of {authored} collision sub-emitter edges attached", collision.edges.len()));
     }
-    let view = PoolView { pool: &system.pool, side: &system.side, end: to,
+    let view = PoolView { pool: &system.pool, side: &system.side, end: to, gap,
         current_size: collision.law.reads_current_size() };
     let edges: Vec<CollisionEmitEdge> = collision.edges.iter().map(|slot| slot.law).collect();
     let input = UpdateInput { from, to, dt, owner: collision.owner, edges: &edges, emission_word, pending };
@@ -279,7 +297,7 @@ fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to:
     }.map_err(|refused| format!("collision {refused:?}"))?;
     collision.order_free += outcome.order_free as u64;
     for written in &outcome.written {
-        let particle = &mut system.pool[written.index];
+        let particle = &mut system.pool[written.index - gap];
         particle.position = source(written.position);
         particle.velocity = source(written.velocity);
         particle.age_percent = written.age_percent;
@@ -337,15 +355,18 @@ fn write_current_size(system: &mut Runtime, collision: &CollisionRuntime, from: 
 pub(super) fn post_simulation(system: &mut Runtime, collision: &mut CollisionRuntime, dt: f32, pending: f32,
     emission_word: u32) -> Result<(), String> {
     let count = system.pool.len();
-    call(system, collision, 0, count, [dt; 4], pending, emission_word)?;
+    call(system, collision, 0, count, 0, [dt; 4], pending, emission_word)?;
     write_current_size(system, collision, 0, system.pool.len());
     Ok(())
 }
 
-/// One newborn group's current-size write and call over `[from, to)` with the
-/// group's birth times.
+/// One newborn group's current-size write and call over the engine's slots
+/// `[from, to)` with the group's birth times; `gap` is how many engine slots
+/// below the group the pool does not hold (see the module notes).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn newborn_block(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize,
-    dt: [f32; 4], pending: f32, emission_word: u32) -> Result<(), String> {
-    write_current_size(system, collision, from, to);
-    call(system, collision, from, to, dt, pending, emission_word)
+    gap: usize, dt: [f32; 4], pending: f32, emission_word: u32) -> Result<(), String> {
+    let start = from.checked_sub(gap).ok_or("collision: a newborn group starts inside the alignment gap")?;
+    write_current_size(system, collision, start, to - gap);
+    call(system, collision, from, to, gap, dt, pending, emission_word)
 }
