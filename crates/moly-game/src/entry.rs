@@ -35,10 +35,10 @@
 //! `Init`, `DelayFrame(53)`, `Show`, `RefreshStaminaViewAsync(0, 1)`,
 //! `Hide`) is not built, so the await waits for the player alone.
 //!
-//! Named gaps: the start particle of the cover (the cover's particle host is
-//! not built) and the `ScreenLayerMysekaiNotice` weather banner steps (INFO
+//! Named gap: the `ScreenLayerMysekaiNotice` weather banner steps (INFO
 //! lines). The cover's loading indicator is drawn from the extracted prefab
-//! ([`indicator`]).
+//! ([`indicator`]), its start particle through the UIParticle host
+//! ([`cover`]).
 
 pub(crate) mod cover;
 pub(crate) mod house;
@@ -326,6 +326,7 @@ fn safe_finish(world: &mut World, seq: &mut EntrySequence, dt: f32) {
     }
     seq.since_finish = Some((0, 0.0));
     indicator::hide(world);
+    cover::resume_start_particle(world);
     let (fade, written) = ColorFade::start(
         law::WHITE_ALPHA_1,
         law::WHITE_ALPHA_0,
@@ -341,7 +342,7 @@ fn safe_finish(world: &mut World, seq: &mut EntrySequence, dt: f32) {
         destroy: UniTaskDelay::new(law::COVER_DESTROY_DELAY),
     };
     step(seq, "LiveTransitioner.SafeFinish", Some(0.0));
-    info!("[entry] LiveTransitioner.Finish: loadingContent off, start particle resume (not drawn), ColorFader.Play(WHITE_ALPHA_0, delay 1.0, duration 1.0)");
+    info!("[entry] LiveTransitioner.Finish: loadingContent off, start particle resume, ColorFader.Play(WHITE_ALPHA_0, delay 1.0, duration 1.0)");
 }
 
 fn advance_cover(world: &mut World, seq: &mut EntrySequence, dt: f32) {
@@ -682,6 +683,7 @@ pub(crate) fn advance(world: &mut World) {
     };
     let dt = world.resource::<Time>().delta_secs();
     let real = world.resource::<Time<Real>>().elapsed_secs_f64();
+    cover::fit_start_particle(world);
     seq.frame += 1;
     if seq.frame == 1 {
         seq.started_real = real;
