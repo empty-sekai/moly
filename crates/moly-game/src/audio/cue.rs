@@ -12,7 +12,7 @@
 //! SE or voice player), the volume of every category the cue belongs to, the
 //! cue's own volume commands and the track's and synth's volume commands.
 
-use super::cue_law::{self, SequenceKind};
+use super::cue_law;
 use super::*;
 use crate::audio_sequence::{SequenceRng, ShuffleWork};
 use bevy::prelude::*;

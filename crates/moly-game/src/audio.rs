@@ -357,6 +357,7 @@ fn volume_fields(bus: &mut VolumeBus) -> [&mut f32; 9] {
         vox_scenario,
         vox_ingame,
         bgm,
+        ..
     } = bus;
     [
         se_ingame,
