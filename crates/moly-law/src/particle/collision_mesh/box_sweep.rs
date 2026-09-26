@@ -35,7 +35,7 @@ const MAX_SUPPORT_POINTS: usize = 64;
 const MAX_EDGES: usize = 32;
 
 /// `FRecip`: the estimate and four refinements (three on the mutant).
-fn recip(x: f32) -> f32 {
+pub(super) fn recip(x: f32) -> f32 {
     let mut e = a::recip_estimate(x);
     for _ in 0..if arms::on("boxRecipThree") { 3 } else { 4 } {
         e = a::mul(e, a::recip_step(x, e));
@@ -44,7 +44,7 @@ fn recip(x: f32) -> f32 {
 }
 
 /// `FSqrt`.
-fn fsqrt(x: f32) -> f32 {
+pub(super) fn fsqrt(x: f32) -> f32 {
     if x == 0.0 { x } else { a::mul(x, rsqrt_n(x, 4)) }
 }
 
@@ -54,17 +54,17 @@ fn fdiv(x: f32, y: f32) -> f32 {
 }
 
 /// `V3Length`.
-fn length(v: V3) -> f32 {
+pub(super) fn length(v: V3) -> f32 {
     fsqrt(v3dot(v, v))
 }
 
 /// `V3ScaleInv`.
-fn scale_inv(v: V3, s: f32) -> V3 {
+pub(super) fn scale_inv(v: V3, s: f32) -> V3 {
     scale(v, recip(s))
 }
 
 /// `V3Normalize`.
-fn normalize(v: V3) -> V3 {
+pub(super) fn normalize(v: V3) -> V3 {
     scale_inv(v, length(v))
 }
 
@@ -75,7 +75,7 @@ fn normalize_safe(v: V3, unsafe_value: V3) -> V3 {
 }
 
 /// `QuatRotate`: `((v*(w*w - 1/2) + (u x v)*w) + u*(u.v))*2`.
-fn quat_rotate(q: [f32; 4], v: V3) -> V3 {
+pub(super) fn quat_rotate(q: [f32; 4], v: V3) -> V3 {
     let u = [q[0], q[1], q[2]];
     let w2 = a::add(-0.5, a::mul(q[3], q[3]));
     let temp = v3scale_add(cross(u, v), q[3], scale(v, w2));
@@ -83,7 +83,7 @@ fn quat_rotate(q: [f32; 4], v: V3) -> V3 {
 }
 
 /// `QuatRotateInv`: the cross term subtracted.
-fn quat_rotate_inv(q: [f32; 4], v: V3) -> V3 {
+pub(super) fn quat_rotate_inv(q: [f32; 4], v: V3) -> V3 {
     let u = [q[0], q[1], q[2]];
     let w2 = a::add(-0.5, a::mul(q[3], q[3]));
     let temp = v3neg_scale_sub(cross(u, v), q[3], scale(v, w2));
@@ -91,7 +91,7 @@ fn quat_rotate_inv(q: [f32; 4], v: V3) -> V3 {
 }
 
 /// `QuatTransform`: `p + rotated*2` with the doubling folded into the sum.
-fn quat_transform(q: [f32; 4], p: V3, v: V3) -> V3 {
+pub(super) fn quat_transform(q: [f32; 4], p: V3, v: V3) -> V3 {
     let u = [q[0], q[1], q[2]];
     let w2 = a::add(-0.5, a::mul(q[3], q[3]));
     let temp = v3scale_add(cross(u, v), q[3], scale(v, w2));
@@ -99,7 +99,7 @@ fn quat_transform(q: [f32; 4], p: V3, v: V3) -> V3 {
 }
 
 /// `QuatMul`.
-fn quat_mul(x: [f32; 4], y: [f32; 4]) -> [f32; 4] {
+pub(super) fn quat_mul(x: [f32; 4], y: [f32; 4]) -> [f32; 4] {
     let (ix, iy) = ([x[0], x[1], x[2]], [y[0], y[1], y[2]]);
     let real = a::sub(a::mul(x[3], y[3]), v3dot(ix, iy));
     let imag = add(add(scale(ix, y[3]), scale(iy, x[3])), cross(ix, iy));
@@ -107,7 +107,7 @@ fn quat_mul(x: [f32; 4], y: [f32; 4]) -> [f32; 4] {
 }
 
 /// `QuatGetMat33V`: the three columns.
-fn quat_columns(q: [f32; 4]) -> [V3; 3] {
+pub(super) fn quat_columns(q: [f32; 4]) -> [V3; 3] {
     let [x, y, z, w] = q;
     let (x2, y2, z2) = (a::add(x, x), a::add(y, y), a::add(z, z));
     let (xx, yy, zz) = (a::mul(x2, x), a::mul(y2, y), a::mul(z2, z));
@@ -122,17 +122,17 @@ fn quat_columns(q: [f32; 4]) -> [V3; 3] {
 }
 
 /// `M33MulV3`.
-fn columns_mul(c: &[V3; 3], v: V3) -> V3 {
+pub(super) fn columns_mul(c: &[V3; 3], v: V3) -> V3 {
     add(add(scale(c[0], v[0]), scale(c[1], v[1])), scale(c[2], v[2]))
 }
 
 /// The sphere as the capsule-box sweep builds it, in the box's frame: both
 /// segment ends at the centre (plus and minus the rotated zero half axis),
 /// the radius as its margin and minimum margin, and a sweep margin of zero.
-struct Capsule {
-    p0: V3,
-    p1: V3,
-    radius: f32,
+pub(super) struct Capsule {
+    pub(super) p0: V3,
+    pub(super) p1: V3,
+    pub(super) radius: f32,
 }
 
 impl Capsule {
@@ -187,6 +187,41 @@ impl BoxShape {
 
     fn support_point(&self, index: i32) -> V3 {
         std::array::from_fn(|k| if index & (1 << k) != 0 { self.extents[k] } else { a::neg(self.extents[k]) })
+    }
+}
+
+/// The shape a sphere is swept against, in the shape's own frame, as the
+/// GJK, the penetration and the EPA read it: its support mapping (with the
+/// support index the penetration hands the EPA) and its three margins.
+/// Neither the box nor the convex hull is quadratic: their margin adds
+/// nothing to the surface points or the depth.
+pub(super) trait SweptShape {
+    fn support(&self, dir: V3) -> V3;
+    fn support_index(&self, dir: V3) -> (V3, i32);
+    fn support_point(&self, index: i32) -> V3;
+    fn margin(&self) -> f32;
+    fn min_margin(&self) -> f32;
+    fn sweep_margin(&self) -> f32;
+}
+
+impl SweptShape for BoxShape {
+    fn support(&self, dir: V3) -> V3 {
+        BoxShape::support(self, dir)
+    }
+    fn support_index(&self, dir: V3) -> (V3, i32) {
+        BoxShape::support_index(self, dir)
+    }
+    fn support_point(&self, index: i32) -> V3 {
+        BoxShape::support_point(self, index)
+    }
+    fn margin(&self) -> f32 {
+        self.margin
+    }
+    fn min_margin(&self) -> f32 {
+        self.min_margin
+    }
+    fn sweep_margin(&self) -> f32 {
+        self.sweep_margin
     }
 }
 
@@ -479,7 +514,7 @@ enum Status {
 /// `gjkRaycast` of the capsule against the box along `r` from `s`: the
 /// time of impact, the normal and the closest point on the capsule's
 /// surface, or no hit.
-fn gjk_raycast(cap: &Capsule, bx: &BoxShape, initial_dir: V3, s: V3, r: V3, inflation: f32)
+fn gjk_raycast<S: SweptShape>(cap: &Capsule, bx: &S, initial_dir: V3, s: V3, r: V3, inflation: f32)
     -> Result<Option<(f32, V3, V3)>, Refused> {
     let mut lambda = 0.0;
     let mut x = v3scale_add(r, lambda, s);
@@ -492,7 +527,7 @@ fn gjk_raycast(cap: &Capsule, bx: &BoxShape, initial_dir: V3, s: V3, r: V3, infl
     sx.b[0] = initial_b;
     sx.size = 1;
     let mut v = neg(sx.q[0]);
-    let min_margin = a::min(cap.sweep_margin(), bx.sweep_margin);
+    let min_margin = a::min(cap.sweep_margin(), bx.sweep_margin());
     let eps1 = a::mul(min_margin, 0.1);
     let inflation_plus_eps = a::add(eps1, inflation);
     let eps2 = a::mul(eps1, eps1);
@@ -569,11 +604,11 @@ impl WarmStart {
 
 /// `gjkPenetration` of the capsule and the box without a warm start, with
 /// the surface points (the core shapes on the mutant).
-fn gjk_penetration(cap: &Capsule, bx: &BoxShape, initial_dir: V3, contact_dist: f32, warm: &mut WarmStart)
+fn gjk_penetration<S: SweptShape>(cap: &Capsule, bx: &S, initial_dir: V3, contact_dist: f32, warm: &mut WarmStart)
     -> Result<(Status, Output), Refused> {
     let take_core = arms::on("boxPenetrationCoreShape");
     let mut out = Output::default();
-    let eps = a::mul(a::min(cap.radius, bx.min_margin), 0.1);
+    let eps = a::mul(a::min(cap.radius, bx.min_margin()), 0.1);
     let rel_dif = a::sub(1.0, 0.000225);
     // The capsule's margin is its radius and it is quadratic; the box is not.
     let (t_margin_a, t_margin_b) = (cap.radius, 0.0);
@@ -712,9 +747,9 @@ impl IdPool {
 }
 
 /// The EPA's state for one penetration query.
-struct Epa<'s> {
+struct Epa<'s, S: SweptShape> {
     cap: &'s Capsule,
-    bx: &'s BoxShape,
+    bx: &'s S,
     heap: Vec<usize>,
     abuf: [V3; MAX_SUPPORT_POINTS],
     bbuf: [V3; MAX_SUPPORT_POINTS],
@@ -728,7 +763,7 @@ fn inc_mod3(i: usize) -> usize {
     [1, 2, 0][i]
 }
 
-impl<'s> Epa<'s> {
+impl<'s, S: SweptShape> Epa<'s, S> {
     fn less(&self, x: usize, y: usize) -> bool {
         self.facets[x].dist < self.facets[y].dist
     }
@@ -977,7 +1012,7 @@ impl<'s> Epa<'s> {
         }
         // expandPoint and expandSegment set the count through
         // expandTriangle.
-        let eps = a::mul(a::min(self.cap.radius, self.bx.min_margin), 0.1);
+        let eps = a::mul(a::min(self.cap.radius, self.bx.min_margin()), 0.1);
         let mut facet;
         loop {
             self.pool.process_deferred()?;
@@ -1043,7 +1078,7 @@ impl<'s> Epa<'s> {
 }
 
 /// `epaPenetration` from the GJK's warm start, with the surface points.
-fn epa_penetration(cap: &Capsule, bx: &BoxShape, warm: &WarmStart) -> Result<(Status, Output), Refused> {
+fn epa_penetration<S: SweptShape>(cap: &Capsule, bx: &S, warm: &WarmStart) -> Result<(Status, Output), Refused> {
     if !(1..=4).contains(&warm.size) {
         return Err(Refused("an EPA start outside one to four points"));
     }
@@ -1070,7 +1105,7 @@ pub struct BoxSweepTrace {
 /// `gjkRaycastPenetration` with the initial-overlap resolution on: the
 /// time of impact (zero or the negative depth for an overlap), the normal
 /// and the closest point on the capsule, all in the box's frame.
-fn raycast_penetration(cap: &Capsule, bx: &BoxShape, initial_dir: V3, r: V3, inflation: f32,
+pub(super) fn raycast_penetration<S: SweptShape>(cap: &Capsule, bx: &S, initial_dir: V3, r: V3, inflation: f32,
     trace: &mut Option<&mut BoxSweepTrace>) -> Result<Option<(f32, V3, V3)>, Refused> {
     let mut note = |call: &'static str| {
         if let Some(t) = trace.as_deref_mut() {
@@ -1085,7 +1120,7 @@ fn raycast_penetration(cap: &Capsule, bx: &BoxShape, initial_dir: V3, r: V3, inf
     let mut toi = lambda;
     if lambda == 0.0 {
         // The sweep contact distance: a hundred times the summed margins.
-        let contact_dist = a::mul(a::add(cap.radius, bx.margin), 100.0);
+        let contact_dist = a::mul(a::add(cap.radius, bx.margin()), 100.0);
         let mut warm = WarmStart::default();
         note("penetration");
         let (status, out) = gjk_penetration(cap, bx, initial_dir, contact_dist, &mut warm)?;

@@ -27,14 +27,17 @@
 //! its cubic coefficients and the nested polynomial, then the multiplier.
 //! The module passes no cache, so the evaluation uses the one the curve
 //! object carries from lane to lane and call to call (the lanes past the end
-//! of the last four-lane group included). With key times strictly increasing
-//! that cache only ever answers a time with the segment the search from
-//! index 0 finds (a fresh cache), which is what this law computes; with keys
-//! out of order or sharing a time, a cached segment or the cached search hint
-//! can answer differently, so such curves are refused on this path, as are
-//! weighted keys, separate axes and the 3D size. The law reads the keys
-//! only, not the wrap fields of its curve type; the caller checks that the
-//! export's are the clamp.
+//! of the last four-lane group included). A weighted segment (the left key's
+//! out-weight bit or the right key's in-weight bit) takes the evaluation's
+//! weighted branch ([`crate::particle::curve::interpolate_keyframe`]), which
+//! writes only the search hint and leaves the cached window unmatchable. With
+//! key times strictly increasing that cache only ever answers a time with the
+//! segment the search from index 0 finds (a fresh cache), which is what this
+//! law computes; with keys out of order or sharing a time, a cached segment
+//! or the cached search hint can answer differently, so such curves are
+//! refused on this path, as are separate axes and the 3D size. The law reads
+//! the keys only, not the wrap fields of its curve type; the caller checks
+//! that the export's are the clamp.
 //!
 //! The size random (two constants, two curves) is one draw per lane, a pure
 //! function of the seed, read by the blend alone.
@@ -65,9 +68,6 @@ pub enum Refused {
     SeparateAxes,
     /// The 3D start size: three current-size components.
     Size3d,
-    /// A weighted key on a curve the module evaluates key by key: the
-    /// weighted segment form is not transcribed here.
-    WeightedKey,
     /// Key times not strictly increasing (or NaN) on a curve the module
     /// evaluates key by key: the value then depends on the cache the curve
     /// carries from earlier lanes and calls.
@@ -195,9 +195,6 @@ impl CurrentSizeLaw {
             return Err(Refused::Size3d);
         }
         let keyed = |curve: &Curve| -> Result<Vec<CurveKey>, Refused> {
-            if curve.keys.iter().any(|key| key.weighted_mode != 0) {
-                return Err(Refused::WeightedKey);
-            }
             if !curve.keys.windows(2).all(|pair| pair[0].time < pair[1].time) {
                 return Err(Refused::UnorderedKeys);
             }
@@ -431,6 +428,11 @@ fn evaluate(keys: &[CurveKey], t: f32) -> f32 {
         return cubic(&Segment { time: a::add(t, -1000.0), c: [0.0, 0.0, 0.0, keys[0].value] }, t);
     }
     let (lhs, rhs) = find_index(keys, 0, t);
+    // The weighted branch (see the module notes); the arm takes the cubic,
+    // a named wrong form for the replay.
+    if crate::particle::curve::weighted_segment(keys[lhs], keys[rhs]) && !arms::on("weightedAsCubic") {
+        return crate::particle::curve::interpolate_keyframe(keys[lhs], keys[rhs], t);
+    }
     cubic(&segment(keys, lhs, rhs), t)
 }
 

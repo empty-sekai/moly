@@ -18,10 +18,10 @@
 //!   display. The same overlay hides the balloon anchors and emote draws and
 //!   gives back their previous visibility. The instrument counts them.
 //! - Camera: `floor_edit_camera`.
-//! - Grid: the grid manager's `SetShowGrid(2)` draws the layout grid (line
-//!   meshes, tile faces, floating faces and light poles built from its own
-//!   prefabs and grid settings). It is not built here: the events are
-//!   recorded and nothing is drawn (named gap).
+//! - Grid: the grid manager's `SetShowGrid(2)` draws the layout grid and
+//!   `SetHide` removes it: `edit_grid` builds the floor grid's lines and tile
+//!   face on `ShowGrid` and despawns them on `HideGrid` (the floating faces,
+//!   the light poles and the wall grid are not built; named there).
 //! - Fog: the weather host disables the fog while the edit session is active
 //!   (it reads the session's active flag, which is set and cleared on the
 //!   same frames as this entry and exit); the flag here is the record.
@@ -50,7 +50,8 @@ pub(crate) struct EditGameState {
 pub(super) fn enter(world: &mut World) {
     info!("[edit-state] EditGameState.OnEnter: ChangeGameState(2) published");
     set(world, |state| state.grid = Some(SHOW_GRID_MODE));
-    info!("[edit-state] ShowGrid (event 15, ShowGridEventData({SHOW_GRID_MODE})): recorded; the layout grid is not drawn (grid manager not built)");
+    info!("[edit-state] ShowGrid (event 15, ShowGridEventData({SHOW_GRID_MODE})): the grid host draws the floor grid");
+    super::edit_grid::show(world, SHOW_GRID_MODE);
     info!("[edit-state] players Hide, NPCs HideAndCancelObjective: the edit actor overlay");
     set(world, |state| state.tweets_hidden = true);
     info!("[edit-state] HideTweets (event 27): tweet balloons and emotes under the edit actor overlay");
@@ -73,7 +74,8 @@ pub(super) fn exit(world: &mut World) {
     }
     info!("[edit-state] EditGameState.OnExit");
     set(world, |state| state.grid = None);
-    info!("[edit-state] HideGrid (event 16): recorded");
+    info!("[edit-state] HideGrid (event 16): the grid host removes the grid");
+    super::edit_grid::hide(world);
     info!("[edit-state] local player Show, NPCs Show: the edit actor overlay's restore");
     set(world, |state| state.tweets_hidden = false);
     info!("[edit-state] ShowTweets (event 26): the overlay gave back the balloons' visibility");
@@ -93,6 +95,7 @@ pub(super) fn exit_for_site_change(world: &mut World) {
         info!("[edit-state] EditGameState.OnExit for a site change");
         world.insert_resource(EditGameState::default());
     }
+    super::edit_grid::hide(world);
     crate::floor_edit_camera::leave_for_site_change(world);
 }
 

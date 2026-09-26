@@ -2,7 +2,10 @@
 //! quality: the query packs, the one broadphase overlap per call, the
 //! per-particle hit selection against the returned colliders, the hits back
 //! into simulation space, the response with the module's random advance, and
-//! the Collision sub-emitter events.
+//! the Collision sub-emitter events. The Planes type (the module's plane
+//! slots instead of the physics scene) finds its hits in `collision_planes`
+//! and shares everything from the response on
+//! ([`CollisionLaw::update_planes`]).
 //!
 //! Every operation follows the ARM rules in the engine's order. The scene side
 //! (the broadphase overlap, each collider's world bounds and the sphere sweep
@@ -38,6 +41,7 @@ use crate::particle::collision_response::{
     build_query, world_hit_to_simulation, CollisionQuery, CollisionRandom, CollisionResponse,
     QueryAffine, QueryInput, Refusal as ResponseRefusal,
 };
+use crate::particle::collision_planes::{plane_hits, CachedPlane};
 use crate::particle::schema::{CollisionMode, CollisionParams, CollisionQuality, CollisionType};
 
 /// Margin added to the broadphase box and to every collider's bounds.
@@ -302,9 +306,9 @@ pub struct UpdateInput<'a> {
     pub pending: f32,
 }
 
-/// The qualified module: World type, 3D mode, High quality, constant response
-/// curves in [0, 1], no collider force, no collision messages, no interior
-/// collisions.
+/// The qualified module: World or Planes type, 3D mode, High quality,
+/// constant response curves in [0, 1], no collider force, no collision
+/// messages, no interior collisions.
 #[derive(Clone, Copy, Debug)]
 pub struct CollisionLaw {
     response: CollisionResponse,
@@ -314,6 +318,9 @@ pub struct CollisionLaw {
     max_shapes: i32,
     world: bool,
     flags: ParticleFlags,
+    /// Planes type: the hits come from the cached plane slots
+    /// ([`CollisionLaw::update_planes`]), not from the physics scene.
+    planes: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -327,6 +334,20 @@ impl CollisionLaw {
         if params.kind != CollisionType::World {
             return Err(Refused::Unqualified("Planes collision type"));
         }
+        Self::qualified(params, world, flags)
+    }
+
+    /// A Planes-type module, for a host that supplies the world pose of every
+    /// plane slot's Transform each update (see [`CollisionLaw::update_planes`]);
+    /// every other qualification is the World type's.
+    pub fn planes_from_params(params: &CollisionParams, world: bool, flags: ParticleFlags) -> Result<Self, Refused> {
+        if params.kind != CollisionType::Planes {
+            return Err(Refused::Unqualified("World collision type"));
+        }
+        Self::qualified(params, world, flags)
+    }
+
+    fn qualified(params: &CollisionParams, world: bool, flags: ParticleFlags) -> Result<Self, Refused> {
         if params.mode != CollisionMode::ThreeDimensional {
             return Err(Refused::Unqualified("2D collision mode"));
         }
@@ -355,6 +376,7 @@ impl CollisionLaw {
             max_shapes,
             world,
             flags,
+            planes: params.kind == CollisionType::Planes,
         })
     }
 
@@ -362,7 +384,19 @@ impl CollisionLaw {
     #[allow(clippy::too_many_arguments)]
     pub fn from_words(response: CollisionResponse, radius_scale: f32, collides_with: u32, dynamic: bool,
         max_shapes: i32, world: bool, flags: ParticleFlags) -> Self {
-        Self { response, radius_scale, collides_with, dynamic, max_shapes, world, flags }
+        Self { response, radius_scale, collides_with, dynamic, max_shapes, world, flags, planes: false }
+    }
+
+    /// A Planes-type module for native rows whose module words are given
+    /// directly (the masks and the shape limit are not read on that path).
+    pub fn planes_from_words(response: CollisionResponse, radius_scale: f32, world: bool, flags: ParticleFlags) -> Self {
+        Self { response, radius_scale, collides_with: 0, dynamic: false, max_shapes: 0, world, flags, planes: true }
+    }
+
+    /// Planes type: the caller passes the cached planes to
+    /// [`CollisionLaw::update_planes`] instead of a physics scene.
+    pub fn is_planes(&self) -> bool {
+        self.planes
     }
 
     pub fn collides_with(&self) -> u32 {
@@ -386,28 +420,13 @@ impl CollisionLaw {
         scene: &mut dyn CollisionScene,
         mut trace: Option<&mut Trace>,
     ) -> Result<UpdateOutcome, Refused> {
+        if self.planes {
+            return Err(Refused::Unqualified("a Planes module queried against the physics scene"));
+        }
         let (from, to) = (input.from, input.to);
-        if to < from {
-            return Err(Refused::ReversedRange);
-        }
-        if to == from {
+        let Some((owner, mut next)) = self.call_head(state, input)? else {
             return Ok(UpdateOutcome::default());
-        }
-        if u32::try_from(to.saturating_add(3)).is_err() {
-            return Err(Refused::RangeTooLarge);
-        }
-        let owner = match (self.world, input.owner) {
-            (true, _) => None,
-            (false, Some(owner)) => Some(owner),
-            (false, None) => return Err(Refused::MissingOwner),
         };
-        let mut next = *state;
-        // Collision messages are refused at construction, so events stay off
-        // and the count is cleared when a previous state had them on.
-        if next.uses_events {
-            next.uses_events = false;
-            next.events = 0;
-        }
         let count = (to - from) as u64;
         let [s10, s18] = state.range_words;
         let marker = if (from as u64) <= s18 && s18 < to as u64 { s18 } else { from as u64 };
@@ -470,10 +489,75 @@ impl CollisionLaw {
         if dependent > 0 {
             return Err(Refused::OrderDependent { dependent, order_free });
         }
-        outcome.order_free = order_free;
         for hit in &mut hits {
             *hit = to_simulation(owner, *hit);
         }
+        self.respond_hits(state, next, random, particles, input, owner, hits, order_free, outcome)
+    }
+
+    /// One Planes-type `CollisionModule::Update` call over `[from, to)`
+    /// against `planes`, the module's cached planes of this update
+    /// ([`crate::particle::collision_planes::cache_planes`], already in the
+    /// system's simulation space): the plane test's hits, in particle order,
+    /// then the response, the random advance and the events as for the World
+    /// type. The range words are not rewritten on this path. Nothing is
+    /// committed on a refusal.
+    pub fn update_planes(
+        &self,
+        state: &mut CollisionState,
+        random: Option<&mut CollisionRandom>,
+        particles: &dyn CollisionParticles,
+        input: &UpdateInput<'_>,
+        planes: &[CachedPlane],
+    ) -> Result<UpdateOutcome, Refused> {
+        if !self.planes {
+            return Err(Refused::Unqualified("a World module updated against plane slots"));
+        }
+        let Some((owner, next)) = self.call_head(state, input)? else {
+            return Ok(UpdateOutcome::default());
+        };
+        let hits = plane_hits(planes, particles, self.flags, self.radius_scale, input.from, input.to, input.dt)?;
+        self.respond_hits(state, next, random, particles, input, owner, hits, 0, UpdateOutcome::default())
+    }
+
+    /// The head both types share: the range checks, the owner a Local
+    /// system needs, and the event flag the call clears. `None` for an empty
+    /// range, which changes nothing.
+    fn call_head(&self, state: &CollisionState, input: &UpdateInput<'_>)
+        -> Result<Option<(Option<OwnerPair>, CollisionState)>, Refused> {
+        let (from, to) = (input.from, input.to);
+        if to < from {
+            return Err(Refused::ReversedRange);
+        }
+        if to == from {
+            return Ok(None);
+        }
+        if u32::try_from(to.saturating_add(3)).is_err() {
+            return Err(Refused::RangeTooLarge);
+        }
+        let owner = match (self.world, input.owner) {
+            (true, _) => None,
+            (false, Some(owner)) => Some(owner),
+            (false, None) => return Err(Refused::MissingOwner),
+        };
+        let mut next = *state;
+        // Collision messages are refused at construction, so events stay off
+        // and the count is cleared when a previous state had them on.
+        if next.uses_events {
+            next.uses_events = false;
+            next.events = 0;
+        }
+        Ok(Some((owner, next)))
+    }
+
+    /// `PerformPlaneCollisions` over the call's hits (simulation space):
+    /// the random draws, the reverse-order response, the Collision events;
+    /// then the state is committed.
+    #[allow(clippy::too_many_arguments)]
+    fn respond_hits(&self, state: &mut CollisionState, next: CollisionState, random: Option<&mut CollisionRandom>,
+        particles: &dyn CollisionParticles, input: &UpdateInput<'_>, owner: Option<OwnerPair>, hits: Vec<HitRecord>,
+        order_free: usize, mut outcome: UpdateOutcome) -> Result<UpdateOutcome, Refused> {
+        outcome.order_free = order_free;
         if !hits.is_empty() {
             outcome.draws = hits.len().div_ceil(4) * 3;
         }

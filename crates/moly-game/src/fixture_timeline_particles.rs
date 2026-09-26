@@ -668,11 +668,10 @@ pub(crate) fn prepare_played_object(
         }
         let modules = ParticleSourceModules::from_system(&particle["system"])
             .map_err(|error| invalid(format!("{path}: {error}")))?;
-        if modules.enabled.iter().any(|name| name == "SubModule")
-            || particle["system"]["subEmitters"].as_array().is_some_and(|rows| !rows.is_empty())
-        {
-            return Err(invalid(format!("{path}: a played sub-emitter parent is not installed by this host")));
-        }
+        // A sub-emitter parent plays with its targets installed as its
+        // children at the first Play (see
+        // [`crate::weather_fx::fixture::link_targets`]); an edge with no
+        // system hands out no sub-emitter (the engine skips a null one).
         // A system whose Emission module is off never emits; Play leaves it empty.
         if !modules.enabled.iter().any(|name| name == "EmissionModule") {
             continue;
@@ -713,10 +712,15 @@ pub(crate) fn play_object(world: &mut World, binding: &ParticlePlayBinding) -> R
         }
         // Systems that played before: Play after Stop.
         let mut played = crate::weather_fx::fixture::play(world, binding.root)?;
+        let mut first = false;
         for &draw in &binding.draws {
             if world.get_entity(draw).is_ok() && crate::weather_fx::fixture::play_pending(world, draw)? {
                 played += 1;
+                first = true;
             }
+        }
+        if first {
+            crate::weather_fx::fixture::link_targets(world, &binding.draws);
         }
         prepared.stopped = false;
         Ok(played)
@@ -734,6 +738,94 @@ pub(crate) fn stop_object(world: &mut World, binding: &ParticlePlayBinding) -> u
         prepared.stopped = true;
     }
     stopped
+}
+
+/// What the seed pass of [`seed_played_object`] did.
+// Its caller is the cut-scene effect clip's player, which calls it from its
+// own module.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeedPass {
+    /// Listed systems that took `randomSeed = 0` alone (not playing).
+    pub seeded: usize,
+    /// Listed systems that were playing: stopped and cleared with their
+    /// subtree, seeded, and played again with it.
+    pub restarted: usize,
+    /// Listed systems this host does not simulate (not prepared: no Emission
+    /// module, or refused by admission); the seed they take shows nowhere.
+    pub unsimulated: usize,
+}
+
+/// The seed pass of `EffectBehaviour.SetEffectInstance` on a played object,
+/// unless the clip keeps its seeds (`isEnabledRandomSeed`). `listed` are the
+/// nodes of the systems `GetComponentsInChildren<ParticleSystem>()` lists on
+/// the instance, in that order; each is `object` or lies under it. In order,
+/// a listed system that is playing takes `Stop(withChildren: true,
+/// StopEmittingAndClear)`, `randomSeed = 0` and `Play()` (withChildren), and
+/// any other takes `randomSeed = 0` alone. The seed write makes the system a
+/// manual owner (useAutoRandomSeed false, even for an unchanged seed) and
+/// resets nothing (see [`crate::particle_runtime::set_random_seed`]), so the
+/// seed shows at the next seed reset: the Play after the stop and clear
+/// above, or the first Play of the activation that follows the pass. A
+/// system's Play reaches the systems below it, so in the playing branch a
+/// later listed system of the same subtree is playing again when its turn
+/// comes, and it restarts in turn.
+#[allow(dead_code)] // called by the cut-scene effect clip's player
+pub(crate) fn seed_played_object(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+    listed: &[Entity],
+) -> Result<SeedPass, String> {
+    let anchor_of = |world: &World, draw: Entity| world.get::<FixtureParticleLive>(draw).and_then(|live| live.0.anchor);
+    let mut pass = SeedPass::default();
+    for &node in listed {
+        if !instance_descends(world, node, binding.root) {
+            return Err("a listed system lies outside its played object".into());
+        }
+        let Some(draw) = binding.draws.iter().copied().find(|&draw| anchor_of(world, draw) == Some(node)) else {
+            pass.unsimulated += 1;
+            continue;
+        };
+        if !crate::weather_fx::fixture::system_playing(world, draw) {
+            crate::weather_fx::fixture::set_random_seed(world, draw, 0);
+            pass.seeded += 1;
+            continue;
+        }
+        let subtree: Vec<Entity> = binding.draws.iter().copied()
+            .filter(|&other| anchor_of(world, other).is_some_and(|anchor| instance_descends(world, anchor, node)))
+            .collect();
+        crate::weather_fx::fixture::stop_and_clear(world, &subtree);
+        crate::weather_fx::fixture::set_random_seed(world, draw, 0);
+        crate::weather_fx::fixture::play_draws(world, &subtree)?;
+        for &other in &subtree {
+            crate::weather_fx::fixture::play_pending(world, other)?;
+        }
+        crate::weather_fx::fixture::link_targets(world, &binding.draws);
+        pass.restarted += 1;
+    }
+    Ok(pass)
+}
+
+/// `ParticleSystem.Stop(withChildren: true, StopEmittingAndClear)` on the
+/// object's system (the looping matched-duration branch of
+/// `EffectBehaviour.OnBehaviourPause`): every system it reaches stops
+/// emitting and is cleared at once, and its play ends. Returns how many
+/// played systems it stopped.
+#[allow(dead_code)] // called by the cut-scene effect clip's player
+pub(crate) fn stop_and_clear_object(world: &mut World, binding: &ParticlePlayBinding) -> usize {
+    let stopped = crate::weather_fx::fixture::stop_and_clear(world, &binding.draws);
+    if let Some(mut prepared) = world.get_mut::<PreparedPlay>(binding.root) {
+        prepared.stopped = true;
+    }
+    stopped
+}
+
+/// A played object over draws a replay built itself (no document, no GPU
+/// preparation), already playing.
+#[cfg(test)]
+pub(crate) fn played_object_for_replay(world: &mut World, root: Entity, draws: Vec<Entity>) -> ParticlePlayBinding {
+    world.entity_mut(root).insert(PreparedPlay { draws: draws.clone(), stopped: false });
+    ParticlePlayBinding { root, draws }
 }
 
 /// The call a SignalReceiver reaction makes on a ParticleSystem: its
@@ -762,132 +854,6 @@ pub(crate) fn react(world: &mut World, reaction: &SignalReaction) -> Result<usiz
         SignalCall::Play => play_object(world, &reaction.target),
         SignalCall::Stop => Ok(stop_object(world, &reaction.target)),
     }
-}
-
-/// A director session's Signal reactions, sent as its time passes their
-/// markers. Stand-in dispatch: a marker is sent in the first sample whose
-/// time reaches it after a sample before it (the first sample includes its
-/// own time); a time that goes back (a loop) arms the markers again, and an
-/// `emit_once` marker is sent once per session. The notification pass of the
-/// source (its interval test, retroactive markers, restore on loop) is not
-/// ported.
-#[derive(Default)]
-pub(crate) struct SignalDispatch {
-    reactions: Vec<SignalReaction>,
-    sent: Vec<bool>,
-    last: Option<f64>,
-}
-
-impl SignalDispatch {
-    pub(crate) fn new(reactions: Vec<SignalReaction>) -> Self {
-        let sent = vec![false; reactions.len()];
-        Self { reactions, sent, last: None }
-    }
-
-    pub(crate) fn advance(&mut self, world: &mut World, time: f64) -> Result<(), String> {
-        let previous = self.last.replace(time);
-        let looped = previous.is_some_and(|previous| time < previous);
-        for (index, reaction) in self.reactions.iter().enumerate() {
-            if reaction.emit_once && self.sent[index] {
-                continue;
-            }
-            let due = match previous {
-                None => reaction.time <= time,
-                Some(_) if looped => reaction.time <= time,
-                Some(previous) => previous < reaction.time && reaction.time <= time,
-            };
-            if !due {
-                continue;
-            }
-            self.sent[index] = true;
-            let count = react(world, reaction)?;
-            info!(
-                "[prefab-director] Signal {} (marker {:.4} s) at director time {time:.4}: {:?} on {count} systems of {:?}",
-                reaction.signal,
-                reaction.time,
-                reaction.call,
-                world.get::<Name>(reaction.target.root).map(Name::as_str)
-            );
-        }
-        Ok(())
-    }
-}
-
-/// Developer stand-in (DevTools only) for the Signal markers and receiver
-/// reactions the timeline tables do not carry yet. It knows one Signal
-/// track: the dewdrop step item's, which the delivery flow binds to the
-/// site's delivery signal receiver. Its two markers (the tree effect's play
-/// at 0.6833 s, sent once, and its stop at 1.15 s) and that receiver (on the
-/// site tree's `fx_bdtree02`, whose reactions call `Play()` / `Stop()` on the
-/// same object's system) are read from the site package. Every other
-/// definition gets no reactions. The exported (time, signal, receiver)
-/// rows replace it.
-pub(crate) fn signal_stand_in(
-    world: &mut World,
-    definition: &crate::fixture_activity_timeline::TimelineDefinition,
-) -> Result<Vec<SignalReaction>, TimelineFailure> {
-    const DIRECTOR: &str = "-3154110674756471997";
-    const TRACK: &str = "-1252092068188085713";
-    const RECEIVER: i64 = 6653597469877562143;
-    const MARKERS: [(f64, bool, &str, SignalCall); 2] = [
-        (0.6833333333333335, true, "fx_bdtree02_effect_play", SignalCall::Play),
-        (1.1500000000000004, false, "fx_bdtree02_effect_stop", SignalCall::Stop),
-    ];
-    if !crate::dev_tools::installed()
-        || definition.director.path_id != DIRECTOR
-        || !definition
-            .tracks
-            .iter()
-            .any(|track| track.class == "SignalTrack" && track.identity.path_id == TRACK)
-    {
-        return Ok(Vec::new());
-    }
-    let file = definition.director.file.clone();
-    let hits: Vec<Entity> = world
-        .query::<(Entity, &moly_assets::source_navigation::SourceObjectIdentity)>()
-        .iter(world)
-        .filter(|(_, identity)| identity.file == file && identity.components.contains(&RECEIVER))
-        .map(|(entity, _)| entity)
-        .collect();
-    let [target] = hits.as_slice() else {
-        warn!(
-            "[prefab-director] {} spawned nodes carry the site's delivery signal receiver; the Signal stand-in sends nothing",
-            hits.len()
-        );
-        return Ok(Vec::new());
-    };
-    let mut owner = *target;
-    while world
-        .get::<moly_assets::coordinates::CanonicalCoordinates>(owner)
-        .is_none()
-    {
-        owner = world
-            .get::<ChildOf>(owner)
-            .map(ChildOf::parent)
-            .ok_or_else(|| invalid("the signal receiver has no coordinate-contract ancestor"))?;
-    }
-    let binding = match prepare_played_object(world, owner, *target, &definition.package) {
-        Ok(binding) => binding,
-        Err(error) if error.retryable => return Err(error),
-        Err(error) => {
-            warn!(
-                "[prefab-director] the Signal stand-in's receiver target {:?} is refused by the particle host: {}; no signal is sent",
-                world.get::<Name>(*target).map(Name::as_str),
-                error.message
-            );
-            return Ok(Vec::new());
-        }
-    };
-    Ok(MARKERS
-        .iter()
-        .map(|&(time, emit_once, signal, call)| SignalReaction {
-            time,
-            emit_once,
-            signal: signal.to_owned(),
-            call,
-            target: binding.clone(),
-        })
-        .collect())
 }
 
 /// Developer trace (DevTools only), once a second: the live and born counts

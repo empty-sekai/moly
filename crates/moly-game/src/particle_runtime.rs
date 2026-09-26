@@ -8,7 +8,7 @@ mod sub_events;
 mod trails;
 mod collision;
 pub(crate) mod collision_scene;
-pub(crate) use collision::{collision_eligible, current_size_source_gate};
+pub(crate) use collision::{collision_eligible, current_size_source_gate, is_planes};
 pub(crate) use trails::{
     attach_owner as attach_trail_owner, draw_eligible as trail_draw_eligible, owner_ready as trail_owner_ready,
     write_mesh as write_trail_mesh, TrailState,
@@ -525,6 +525,25 @@ pub(crate) fn play_after_stop(system: &mut Runtime, seeds: &mut seed::SystemSeed
         }
     }
     Ok(())
+}
+
+/// `ParticleSystem.randomSeed = value` (after its job sync): the system
+/// becomes a manual owner with `value`, useAutoRandomSeed going false even
+/// when the seed is unchanged, and nothing is reset: the live streams keep
+/// the words of the last reset, and the next seed reset (a Play with no
+/// particle alive, or a first Play) expands `value` without a shared-manager
+/// draw. The installed owners mirror the read-only state the setter writes:
+/// the birth owner, and Noise, which reads that state's seed.
+pub(crate) fn set_random_seed(system: &mut Runtime, value: u32) {
+    system.emitter.random_seed = Some(value);
+    system.emitter.auto_random_seed = Some(false);
+    if let Some(owner) = system.native_birth.as_mut().and_then(|native| native.owner.as_mut()) {
+        owner.set_manual_seed(value);
+    }
+    if let Some(noise) = system.noise.as_mut() {
+        noise.owner.set_manual_seed(value);
+        noise.owner_seed = value;
+    }
 }
 
 /// The start delay word ParticleSystem::Play writes when it restarts a
@@ -1679,6 +1698,14 @@ pub(crate) struct CollisionInstall {
     pub(crate) owner: Option<moly_law::particle::collision_query::OwnerPair>,
 }
 
+impl CollisionInstall {
+    /// A Planes-type module's install: it reads its plane slots and never
+    /// the physics scene; a Local system still needs its owner words.
+    pub(crate) fn planes(owner: Option<moly_law::particle::collision_query::OwnerPair>) -> Self {
+        Self { scene: Box::new(collision::NoScene), owner }
+    }
+}
+
 pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     route: &SourceRoute, collision: Option<CollisionInstall>)
     -> Result<BirthPath, seed::SeedError> {
@@ -1711,6 +1738,9 @@ pub(crate) fn install_native_birth(system: &mut Runtime, seeds: &mut seed::Syste
     let collision = match (system.emitter.collision.is_some(), collision) {
         (false, _) => None,
         (true, Some(install)) => Some(install),
+        // A Planes module reads no scene; without owner words a Local one
+        // is refused inside.
+        (true, None) if collision::is_planes(&system.emitter) => Some(CollisionInstall::planes(None)),
         (true, None) => return Ok(BirthPath::Legacy("CollisionModule without its ground scene".to_owned())),
     };
     let (owner, streams) = seeds.create_owner(system.emitter.random_seed, system.emitter.auto_random_seed)?;

@@ -61,6 +61,9 @@ enum Mode {
 enum Phase {
     Loading,
     WaitCharacters {
+        /// The linked timeout's delta-time timer: `Time.deltaTime` summed
+        /// from the frame after the one it was created on.
+        elapsed: f32,
         since_real: f64,
     },
     AwaitTransition {
@@ -250,6 +253,14 @@ fn join_blocker(world: &mut World) -> Option<String> {
 /// (the flag is sent once each NPC exists; here: its body is installed).
 fn characters_spawned(world: &mut World) -> bool {
     if !world.contains_resource::<crate::npc::Spawned>() {
+        return false;
+    }
+    // The room's appeared flag of each NPC is set after the gate's
+    // appearance has placed every visiting NPC.
+    if !world
+        .get_resource::<crate::npc_gate::GateAppearance>()
+        .is_some_and(|gate| gate.appeared())
+    {
         return false;
     }
     let Some(ids) = world
@@ -654,7 +665,10 @@ pub(crate) fn advance(world: &mut World) {
                             "site, fixtures and player ready: WaitCharacterSpawnedAsync",
                             None,
                         );
-                        seq.phase = Phase::WaitCharacters { since_real: real };
+                        seq.phase = Phase::WaitCharacters {
+                            elapsed: 0.0,
+                            since_real: real,
+                        };
                     }
                 }
                 Some(blocker) => {
@@ -683,12 +697,21 @@ pub(crate) fn advance(world: &mut World) {
                 }
             }
         },
-        Phase::WaitCharacters { since_real } => {
-            let spawned = characters_spawned(world);
-            let timed_out = real - since_real >= f64::from(law::CHARACTER_SPAWN_TIMEOUT);
+        Phase::WaitCharacters {
+            elapsed,
+            since_real,
+        } => {
+            // The timeout is a TimeoutController with the delta-time timer on
+            // Update, registered before WaitUntil: each frame the timer runs
+            // first, so the frame it reaches 3 s cancels the wait before the
+            // predicate is read. The app's clock is the engine's deltaTime
+            // (capped at maximumDeltaTime), not real time.
+            let elapsed = elapsed + dt;
+            let timed_out = elapsed >= law::CHARACTER_SPAWN_TIMEOUT;
+            let spawned = !timed_out && characters_spawned(world);
             if spawned || timed_out {
                 info!(
-                    "[entry] WaitCharacterSpawnedAsync done after {:.3}s real: {}",
+                    "[entry] WaitCharacterSpawnedAsync done after {elapsed:.3}s deltaTime ({:.3}s real): {}",
                     real - since_real,
                     if spawned {
                         "every NPC is spawned"
@@ -698,7 +721,10 @@ pub(crate) fn advance(world: &mut World) {
                 );
                 join_core(world, &mut seq, dt);
             } else {
-                seq.phase = Phase::WaitCharacters { since_real };
+                seq.phase = Phase::WaitCharacters {
+                    elapsed,
+                    since_real,
+                };
             }
         }
         Phase::AwaitTransition {

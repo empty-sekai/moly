@@ -378,6 +378,22 @@ impl PlayState {
         self.playing && !self.culled
     }
 
+    /// The play word alone (playing), which a parent's update reads when it
+    /// collects this system as a sub-emitter target.
+    pub(super) fn playing(&self) -> bool {
+        self.playing
+    }
+
+    /// A parent's update collected this target: scheduling its job plays it
+    /// again (and lists it in the manager when it was not), stops its
+    /// emission and stamps the stop time with the frame's time. Its own
+    /// emission never runs; its births come from its parents' commands.
+    pub(super) fn keep_updating(&mut self, now: f64) {
+        self.playing = true;
+        self.stop_emitting = true;
+        self.stop_time = now;
+    }
+
     fn cullable(&self) -> Option<&Cullable> {
         match &self.culling { Culling::Cullable(c) => Some(c), _ => None }
     }
@@ -428,6 +444,16 @@ impl PlayState {
         }
         self.clear(system);
         None
+    }
+
+    /// `Stop(StopEmittingAndClear)`: the same stop, then Clear whatever the
+    /// system holds (the engine's per-system stop block calls Clear on this
+    /// behaviour without looking at the live count or the emit-replay
+    /// records), so the play ends at once.
+    pub(super) fn stop_and_clear(&mut self, system: &mut Runtime, now: f64) {
+        self.stop_emitting = true;
+        self.stop_time = now;
+        self.clear(system);
     }
 
     /// Start of one incremental slice: a non-looping system whose time has

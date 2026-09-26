@@ -46,10 +46,12 @@
 //! does when the avatar has no step object. The tree's bloom is the place
 //! view's director (`bloom`).
 //!
-//! Named stand-ins and gaps: `BindSignalReceiver` binds the step item's
-//! Signal track to the site's delivery signal receiver; no exporter reads a
-//! Signal track's markers, so the two signals it sends (the tree effect's
-//! play and stop) are not emitted. The AutoMove state's run clip plays as
+//! `BindSignalReceiver` binds the step item's Signal track to the site's
+//! delivery signal receiver: the track's markers notify it on the director's
+//! clock, and its reactions (the tree effect's `ParticleSystem.Play()` and
+//! `Stop()`) run through the particle host.
+//!
+//! Named stand-ins and gaps: the AutoMove state's run clip plays as
 //! the locomotion's dash gait (the harvest AutoMove's stand-in). The
 //! joystick's forced reset and its GameState Delivery arm are the joystick's
 //! (not wired). `ExecuteHarvestSiteRefresh` (a refreshed reply) is a dialog
@@ -790,7 +792,7 @@ fn play_avatar_delivery_animation(world: &mut FlowWorld, objects: &DeliveryObjec
                     reaction.signal_name,
                     reaction.signal.file,
                     reaction.signal.path_id,
-                    reaction.calls.join(", ")
+                    reaction.calls_text()
                 );
             }
             step.bind_signal_receiver(receiver.clone());
