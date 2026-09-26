@@ -18,13 +18,14 @@
 //!   the master rank table; the talk list, the fixtures placed on the site and
 //!   the NPC list are the ones the other NPC lotteries read.
 //!
-//! Not ported yet (named): the change-site objective and the change-site
-//! state (walking to the house or room door, leaving, entering the other site
-//! through its door, the room-entry tweet). Until they are, the loop's move
-//! orders are withheld: an order would cancel the NPC's current objective and
-//! hand the decision a change-site interrupt that nothing here executes. The
-//! lottery, the list, the loop's timer and draws, and every order the source
-//! would give are computed and logged.
+//! `ChangeSiteAsync`: the rows in list order; a row whose NPC stands on its
+//! target is skipped; otherwise `MoveNPC` orders the NPC to its target (see
+//! `npc::change_site_state`), and the monitor waits while that NPC's current
+//! objective is the change-site one and it is not on the target, testing
+//! first in the same frame. As the ordered NPC's current objective is still
+//! the one the order cancelled, the monitor normally returns at once and every
+//! order goes out in one frame. The loop tests whether every NPC of the list
+//! stands on its target and waits again only after `ChangeSiteAsync` ends.
 
 use bevy::asset::LoadState;
 use bevy::prelude::*;
@@ -96,7 +97,16 @@ pub(crate) struct ChangeSiteController {
     stopped: Option<String>,
     last_entered: Option<String>,
     random: crate::npc_objective::MemberRng,
-    withheld_logged: bool,
+    /// `ChangeSiteAsync` in flight.
+    change: Option<ChangeAsync>,
+}
+
+/// `ChangeSiteAsync` over one list.
+struct ChangeAsync {
+    rows: Vec<law::ChangeSiteData>,
+    next: usize,
+    /// The monitor's NPC, its target and the frame of its last test.
+    waiting: Option<(Entity, i32, u32)>,
 }
 
 impl Default for ChangeSiteController {
@@ -112,7 +122,7 @@ impl Default for ChangeSiteController {
             stopped: None,
             last_entered: None,
             random: crate::npc_objective::MemberRng::from_platform(),
-            withheld_logged: false,
+            change: None,
         }
     }
 }
@@ -330,7 +340,9 @@ pub(crate) fn run(
                         rows.iter().map(|row| (row.unit, row.target_site)).collect::<Vec<_>>()
                     );
                     controller.list = Some(rows);
-                    controller.withheld_logged = false;
+                    if controller.change.take().is_some() {
+                        info!("[npc-change-site] Cancel(): ChangeSiteAsync in flight stops");
+                    }
                 }
                 law::LotteryOutcome::RefusedSiteType(t) => {
                     error!("[npc-change-site] LotteryChangeSiteCharacters: site type {t} is not home or a floor");
@@ -346,6 +358,10 @@ pub(crate) fn run(
     let Some(configs) = configs.as_deref() else {
         return;
     };
+    // The loop awaits ChangeSiteAsync before its next wait.
+    if controller.change.is_some() {
+        return;
+    }
     if controller.wait.is_none() {
         start_wait(controller, configs, frame);
     }
@@ -372,38 +388,100 @@ pub(crate) fn run(
         start_wait(controller, configs, frame);
         return;
     }
-    // ChangeSiteAsync: the orders the source would give (withheld here).
-    let orders: Vec<(i32, i32)> = rows
-        .iter()
-        .filter(|row| {
-            list_npcs
-                .iter()
-                .find(|npc| npc.unit == row.unit)
-                .is_some_and(|npc| npc.site != row.target_site)
-        })
-        .map(|row| (row.unit, row.target_site))
-        .collect();
     info!(
-        "[npc-change-site] loop: Range(0,100) = {draw}, rate {rate}: ChangeSiteAsync over {} rows, move orders (unit, target) {orders:?}{}",
+        "[npc-change-site] loop: Range(0,100) = {draw}, rate {rate}: ChangeSiteAsync over {} rows (unit, target) {:?}",
         rows.len(),
-        if controller.withheld_logged {
-            String::new()
-        } else {
-            "; withheld: the change-site objective and state are not ported, an order would cancel the NPC's objective for nothing".to_owned()
-        }
+        rows.iter().map(|row| (row.unit, row.target_site)).collect::<Vec<_>>()
     );
-    controller.withheld_logged = true;
-    let site_of = |unit: i32| {
-        list_npcs
-            .iter()
-            .find(|npc| npc.unit == unit)
-            .map_or(-1, |npc| npc.site)
+    controller.change = Some(ChangeAsync {
+        rows,
+        next: 0,
+        waiting: None,
+    });
+}
+
+/// Update, after [`run`]: `ChangeSiteAsync`'s orders and monitor; at its end
+/// the loop's arrival test and its next wait.
+pub(crate) fn change_site_async(world: &mut World) {
+    let Some(mut change) = world.resource_mut::<ChangeSiteController>().change.take() else {
+        return;
     };
-    if law::all_arrived(&rows, &site_of) {
-        controller.list = None;
-        info!("[npc-change-site] loop: every NPC of the list stands on its target: change list dropped");
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    let sites = npc_sites(world);
+    loop {
+        if let Some((actor, target, tested)) = change.waiting {
+            if frame == tested {
+                world.resource_mut::<ChangeSiteController>().change = Some(change);
+                return;
+            }
+            if world.get_entity(actor).is_ok()
+                && super::change_site_state::monitor_waits(world, actor, target)
+            {
+                change.waiting = Some((actor, target, frame));
+                world.resource_mut::<ChangeSiteController>().change = Some(change);
+                return;
+            }
+            change.waiting = None;
+        }
+        let Some(row) = change.rows.get(change.next).cloned() else {
+            break;
+        };
+        change.next += 1;
+        let Some(&(actor, site)) = sites.get(&row.unit) else {
+            info!(
+                "[npc-change-site] ChangeSiteAsync: unit {} has no NPC, row skipped",
+                row.unit
+            );
+            continue;
+        };
+        if site == row.target_site {
+            continue;
+        }
+        super::change_site_state::move_npc(world, actor, row.unit as u32, row.target_site, frame);
+        // Monitor: its first test runs now.
+        if super::change_site_state::monitor_waits(world, actor, row.target_site) {
+            change.waiting = Some((actor, row.target_site, frame));
+            world.resource_mut::<ChangeSiteController>().change = Some(change);
+            return;
+        }
     }
-    start_wait(controller, configs, frame);
+    info!(
+        "[npc-change-site] ChangeSiteAsync over {} rows ends at frame {frame}",
+        change.rows.len()
+    );
+    let sites = npc_sites(world);
+    let site_of = |unit: i32| sites.get(&unit).map_or(-1, |(_, site)| *site);
+    let arrived = law::all_arrived(&change.rows, &site_of);
+    world.resource_scope(|world, mut controller: Mut<ChangeSiteController>| {
+        if arrived {
+            controller.list = None;
+            info!("[npc-change-site] loop: every NPC of the list stands on its target: change list dropped");
+        }
+        if let Some(configs) = world.get_resource::<crate::client_config::ClientConfigs>() {
+            start_wait(&mut controller, configs, frame);
+        }
+    });
+}
+
+/// Every NPC's entity and site type value, by unit.
+fn npc_sites(world: &mut World) -> std::collections::HashMap<i32, (Entity, i32)> {
+    let mut query = world.query_filtered::<(
+        Entity,
+        &crate::npc::CharacterUnitId,
+        &crate::npc::NpcActions,
+    ), Without<crate::player::PlayerControlled>>();
+    query
+        .iter(world)
+        .map(|(entity, unit, actions)| {
+            (
+                unit.0 as i32,
+                (
+                    entity,
+                    residency::site_type_value(&actions.site_type).unwrap_or(-1),
+                ),
+            )
+        })
+        .collect()
 }
 
 fn start_wait(

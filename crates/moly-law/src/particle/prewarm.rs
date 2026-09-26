@@ -210,10 +210,17 @@ impl FrameStep {
     /// time earlier frames left below the loop threshold. The pending sum
     /// adds the scaled dt, never the step.
     pub fn plan(self, pending: f32, duration: f32) -> Result<PrewarmPlan, &'static str> {
+        self.plan_entry(pending, duration, IncrementalEntry::PerFrame)
+    }
+
+    /// [`FrameStep::plan`] for an update entered as `entry`: a script
+    /// `Simulate` time update slices without the backlog widening.
+    pub fn plan_entry(self, pending: f32, duration: f32, entry: IncrementalEntry)
+        -> Result<PrewarmPlan, &'static str> {
         if self.skips() {
             return Err("skipped frame has no incremental update");
         }
-        PrewarmPlan::from_incremental_input(self.scaled_dt + pending, self.step, IncrementalEntry::PerFrame, duration)
+        PrewarmPlan::from_incremental_input(self.scaled_dt + pending, self.step, entry, duration)
     }
 }
 
@@ -260,6 +267,36 @@ impl FirstPlayWarm {
         {
             return Err("Play/Compute branch outside qualified first-prewarm path");
         }
+        Self::compute(lifetime, time, play)
+    }
+
+    /// The warm of `ParticleSystem.Simulate`'s restart branch: after Clear
+    /// and `Play(false)` the restart calls ComputePrewarmStartParameters with
+    /// time zero and, when it succeeds, one update of its out value. Unlike
+    /// Play's own warm it is not gated on the looping flag or Play's bool
+    /// argument; a system with prewarm off gets an out value of zero there,
+    /// whose update skips, so only a prewarm system warms.
+    pub fn simulate_restart(
+        lifetime: Lifetime,
+        time: TimeManagerSnapshot,
+        play: PlayState,
+    ) -> Result<Self, &'static str> {
+        if !play.prewarm || play.live_count != 0 || play.elapsed.to_bits() != 0 {
+            return Err("Simulate restart outside the qualified prewarm path");
+        }
+        // A procedural system's restart warm carries flag 2 into the
+        // procedural update.
+        if !play.ordinary_incremental {
+            return Err("Simulate restart warm outside the ordinary incremental route");
+        }
+        Self::compute(lifetime, time, play)
+    }
+
+    fn compute(
+        lifetime: Lifetime,
+        time: TimeManagerSnapshot,
+        play: PlayState,
+    ) -> Result<Self, &'static str> {
         if !(play.duration.is_finite()
             && play.duration > 0.0
             && play.simulation_speed.is_finite()
@@ -328,7 +365,13 @@ impl PrewarmPlan {
         if !play.ordinary_incremental {
             return Err("Play/Compute branch outside qualified first-prewarm path");
         }
-        let warm = FirstPlayWarm::from_source(lifetime, time, play)?;
+        Self::from_warm(FirstPlayWarm::from_source(lifetime, time, play)?, time, play.duration)
+    }
+
+    /// The slices of a warm update on the ordinary route (Play's, or
+    /// [`FirstPlayWarm::simulate_restart`]'s, entered with flags 0): the
+    /// ordinary loop with the backlog widening, from the warm's clock.
+    pub fn from_warm(warm: FirstPlayWarm, time: TimeManagerSnapshot, duration: f32) -> Result<Self, &'static str> {
         let remaining = warm.total;
         // GetTimeStep nonfixed: total / ceil(total / maximum particle step),
         // f32 at each of its ARM fdiv, frintp and fdiv.
@@ -347,7 +390,7 @@ impl PrewarmPlan {
             return Err("unqualified nonfixed timestep");
         }
         let mut plan =
-            Self::from_incremental_input(remaining, base_step, IncrementalEntry::ExplicitDt, play.duration)?;
+            Self::from_incremental_input(remaining, base_step, IncrementalEntry::ExplicitDt, duration)?;
         plan.compute_out = warm.compute_out;
         plan.initial_clock = warm.initial_clock;
         Ok(plan)

@@ -453,8 +453,8 @@ pub(crate) fn with_arm<T>(arm: Option<&'static str>, f: impl FnOnce() -> T) -> T
 
 /// The harness emitter of a case that carries its own start block, module
 /// blocks (any of Velocity, CustomData, ClampVelocity, RotationOverLifetime,
-/// RotationBySpeed, in the export's shape) and emission bursts and looping in
-/// its config.
+/// RotationBySpeed, Force, in the export's shape) and emission bursts and
+/// looping in its config.
 fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Runtime {
     let mut runtime = harness_system(start, config);
     let space = if config["space"].as_u64() == Some(0) { "Local" } else { "World" };
@@ -473,7 +473,7 @@ fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Run
     });
     for (key, module) in [("velocityOverLifetime", "VelocityModule"), ("customData", "CustomDataModule"),
         ("limitVelocity", "ClampVelocityModule"), ("rotationOverLifetime", "RotationModule"),
-        ("rotationBySpeed", "RotationBySpeedModule")] {
+        ("rotationBySpeed", "RotationBySpeedModule"), ("forceOverLifetime", "ForceModule")] {
         if let Some(block) = modules.get(key).filter(|b| b.is_object()) {
             system[key] = block.clone();
             enabled.push(module);
@@ -495,6 +495,8 @@ fn harness_system_modules(start: &Value, config: &Value, modules: &Value) -> Run
         &p.magnitude, p.dampen, p.drag.as_ref(), p.multiply_drag_by_size, p.multiply_drag_by_velocity).unwrap());
     runtime.rol = emitter.rotation_over_lifetime.as_ref().map(|p|
         RotationOverLifetime::from_parts(p.separate_axes, p.x.as_ref(), p.y.as_ref(), &p.curve).unwrap());
+    runtime.force_law = emitter.force.as_ref()
+        .map(|p| moly_law::particle::force::ForceOverLifetime::from_params(p).unwrap());
     runtime.emitter = emitter;
     runtime
 }
@@ -516,7 +518,13 @@ fn run_module_case(receipt: &Value, case: &Value, tally: &mut Tally, rotation: &
         // The native stop byte before the frame (the non-looping end sets it
         // inside the incremental update); the host's play state stands in.
         let stopped = row.get("stoppedBefore").is_some_and(|v| v == true || v == 1);
-        let _ = advance_frame(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {});
+        // UpdateData flags 0 is the per-frame update; 4 a script Simulate
+        // chunk (a Director's), which the product runs through its own entry.
+        let _ = match input["flags"].as_u64() {
+            Some(0) => advance_frame(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {}),
+            Some(4) => director_chunk(&mut system, f(&input["dtBits"]), !stopped, &frame_context(input), |_| {}),
+            other => panic!("{name}: UpdateData flags {other:?} have no product entry here"),
+        };
         let label = format!("{name}#{index}");
         compare(&system, row, true, tally, &label);
         let particles = &row["particles"];
@@ -621,5 +629,220 @@ fn distance_module_controls_fail() {
         let (_, product, rotation) = replay_modules(&receipt, None);
         println!("control {path}: {} mismatched frames, {} rotation", product.mismatched_frames, rotation.1);
         assert!(product.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
+    }
+}
+
+/// Distance births with orbital, orbital-offset and radial Velocity terms
+/// (Local and World, per frame and on a Director clip's chunks), module
+/// curves at the stored age word (Velocity, ClampVelocity, Force), script
+/// Simulate chunks without the backlog widening and a delayed system on
+/// them: every native frame of the receipt through the product entries. The
+/// receipt's own controls must hold (the supportsProcedural byte changes no
+/// row and is not read on the per-frame path while the clock is; Velocity
+/// off, flags 0 and the cleared identity each change rows), and every
+/// one-rule arm must mismatch.
+#[test]
+#[ignore = "MOLY_BIRTHS_RECEIPT must identify the JP births receipt"]
+fn births_receipt_matches_native_rows() {
+    let receipt = read("MOLY_BIRTHS_RECEIPT");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "rotationFrames": rotation.0, "rotationMismatched": rotation.1,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_BIRTHS_RECEIPT_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0 && rotation.0 > 0, "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    let procedural = &receipt["procedural"];
+    assert_eq!(procedural["differingFrames"], 0);
+    assert!(procedural["readsOfState20to23"].as_object().unwrap().is_empty());
+    assert!(procedural["readsOfClock"].as_object().unwrap().values().any(|n| n.as_u64().unwrap() > 0));
+    for control in ["k3VersusO3DifferingFrames", "k20VersusS1DifferingFrames", "kfVersusA1DifferingFrames"] {
+        assert!(receipt[control].as_u64().unwrap() > 0, "{control}");
+    }
+    assert!(receipt["staticInitializers"]["o1VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    for arm in ["moduleAgeFromNormalized", "orbitalSkipsBirths", "scriptSimulateWidens"] {
+        let (_, tally, rotation) = replay_modules(&receipt, Some(arm));
+        println!("arm {arm}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "arm {arm} must mismatch");
+    }
+    if let Ok(paths) = std::env::var("MOLY_BIRTHS_RECEIPT_CONTROLS") {
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let (_, tally, rotation) = replay_modules(&control, None);
+            println!("control {path}: {} mismatched frames, {} rotation", tally.mismatched_frames, rotation.1);
+            assert!(tally.mismatched_frames + rotation.1 > 0, "control {path} must mismatch");
+        }
+    }
+}
+
+/// Play after Stop against the native bodies (the Play-after-Stop receipt): a
+/// walk-water sprash system walking at a fixed speed with Stop (StopEmitting)
+/// and Play every step, and Play with no particle alive after standing, with a
+/// manual and an automatic owner. Frames go through the product frame entry;
+/// Stop is the host's emitting flag (the runtime has no Stop state of its
+/// own); Play is [`play_after_stop`] or one of the arms below.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PlayArm {
+    Product,
+    /// What the foot consumer's restart writes alone: the clock and its
+    /// legacy emission fields.
+    ConsumerFields,
+    NoEmitterReset,
+    ClearCarry,
+    /// With none alive: the with-particles branch (no seed reset).
+    NoSeedReset,
+    KeepDelay,
+}
+
+fn play_arm(system: &mut Runtime, manager: &mut seed::SystemSeedManager, arm: PlayArm) {
+    if arm == PlayArm::ConsumerFields {
+        system.playback_head = 0.0;
+        system.previous_head = 0.0;
+        system.emission_started = false;
+        system.emission = Default::default();
+        system.prewarmed = false;
+        return;
+    }
+    let delay = system.native_birth.as_ref().map(|native| native.frame.start_delay);
+    if arm == PlayArm::NoSeedReset && system.pool.is_empty() {
+        system.playback_head = 0.0;
+        system.previous_head = 0.0;
+        system.pending = 0.0;
+        let word = play_start_delay(&system.emitter).unwrap();
+        let native = system.native_birth.as_mut().unwrap();
+        native.frame.reset_previous = true;
+        native.frame.start_delay = word;
+    } else {
+        play_after_stop(system, manager, &SourceRoute::Ordinary, None).unwrap();
+    }
+    let native = system.native_birth.as_mut().unwrap();
+    match arm {
+        PlayArm::NoEmitterReset => native.frame.reset_previous = false,
+        PlayArm::ClearCarry => {
+            native.emission.distribution.spacing = 0.0;
+            native.emission.distribution.offset = 0.0;
+        }
+        PlayArm::KeepDelay => native.frame.start_delay = delay.unwrap(),
+        _ => {}
+    }
+}
+
+/// The product state right after Play against the native state words Play
+/// left.
+fn compare_play(system: &Runtime, event: &Value, tally: &mut Tally, label: &str) {
+    let after = &event["after"];
+    let mut ok = true;
+    let Some(state) = system.native_birth.as_ref() else {
+        tally.check("play.nativeOwner", false, &mut ok, label);
+        tally.frames += 1;
+        tally.mismatched_frames += 1;
+        return;
+    };
+    tally.check("play.pending", same(system.pending, &after["pendingBits"]), &mut ok, label);
+    tally.check("play.clock", same(system.playback_head, &after["clockBits"]), &mut ok, label);
+    tally.check("play.startDelay", state.frame.start_delay.to_bits() == word(&after["delayBits"]), &mut ok, label);
+    tally.check("play.emitterReset", state.frame.reset_previous == (after["flag28"] == 1), &mut ok, label);
+    let velocity = &after["velBits"];
+    tally.check("play.emitterVelocity", same_x(state.frame.velocity[0], &velocity[0])
+        && (1..3).all(|a| same(state.frame.velocity[a], &velocity[a])), &mut ok, label);
+    let distribution = state.emission.distribution;
+    let carry = &after["emission"]["f"];
+    tally.check("play.emissionCarry", same(distribution.spacing, &carry[0]) && same(distribution.offset, &carry[1])
+        && same(distribution.burst_fraction, &carry[2]), &mut ok, label);
+    let rng = &after["emission"]["rng"];
+    tally.check("play.emissionRng", (0..4).all(|i| state.emission.random.words[i] == word(&rng[i])), &mut ok, label);
+    let initial = &after["initialRng"];
+    tally.check("play.initialRng", (0..16).all(|i| state.initial.words[i / 4][i % 4] == word(&initial[i])),
+        &mut ok, label);
+    tally.check("play.count", system.pool.len() as u64 == after["count"].as_u64().unwrap(), &mut ok, label);
+    if event["native"]["ResetSeeds"].as_u64().unwrap_or(0) > 0 {
+        tally.check("play.ownerSeed", state.owner.as_ref().is_some_and(|owner| owner.seed == word(&after["roSeed"])),
+            &mut ok, label);
+    }
+    tally.frames += 1;
+    if !ok {
+        tally.mismatched_frames += 1;
+    }
+}
+
+fn run_play_case(case: &Value, arm: PlayArm, tally: &mut Tally) {
+    let mut system = harness_system(&case["start"], &case["config"]);
+    system.emitter.random_seed = Some(word(&case["owner"]["randomSeed"]));
+    system.emitter.auto_random_seed = Some(case["owner"]["autoRandomSeed"].as_bool().unwrap());
+    let delay = case["config"]["start_delay"].as_f64().unwrap() as f32;
+    system.emitter.start_delay = moly_law::particle::MinMaxCurve::Constant(delay);
+    install(&mut system, &case["seeds"]);
+    // The receipt starts after the first Play, which wrote the delay word.
+    system.native_birth.as_mut().unwrap().frame.start_delay = delay;
+    let words: [u32; 4] = std::array::from_fn(|i| word(&case["owner"]["managerWords"][i]));
+    let mut manager = seed::SystemSeedManager::from_entropy_words(words);
+    let name = case["name"].as_str().unwrap();
+    let mut emitting = true;
+    for (index, event) in case["events"].as_array().unwrap().iter().enumerate() {
+        let label = format!("{name} event {index}");
+        match event["kind"].as_str().unwrap() {
+            "frame" => {
+                let ctx = frame_context(&event["input"]);
+                let _ = advance_frame(&mut system, f(&event["input"]["dtBits"]), emitting, &ctx, |_| {});
+                compare(&system, event, true, tally, &label);
+            }
+            "stop" => emitting = false,
+            "play" => {
+                emitting = true;
+                play_arm(&mut system, &mut manager, arm);
+                compare_play(&system, event, tally, &label);
+            }
+            other => panic!("{label}: event kind {other}"),
+        }
+    }
+}
+
+fn replay_play(receipt: &Value, arm: PlayArm) -> Tally {
+    assert_eq!(receipt["sourceSha256"], SOURCE_SHA256);
+    let mut tally = Tally::default();
+    for case in receipt["cases"].as_array().unwrap() {
+        run_play_case(case, arm, &mut tally);
+    }
+    tally
+}
+
+#[test]
+#[ignore = "MOLY_PLAY_AFTER_STOP_RECEIPT must identify the JP Play-after-Stop receipt"]
+fn play_after_stop_matches_native_rows() {
+    let receipt = read("MOLY_PLAY_AFTER_STOP_RECEIPT");
+    let product = replay_play(&receipt, PlayArm::Product);
+    let report = json!({"summary": receipt["summary"], "events": product.frames, "mismatched": product.mismatched_frames,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_PLAY_AFTER_STOP_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    // The positive arm has a signal to lose: Plays with particles alive and with
+    // none alive, and first frames after a Play whose emitter velocity the reset
+    // zeroed while the emitter moved.
+    let summary = receipt["summary"].as_array().unwrap();
+    let total = |key: &str| summary.iter().map(|s| s[key].as_u64().unwrap()).sum::<u64>();
+    assert!(total("plays") > total("playsWithNoneAlive") && total("playsWithNoneAlive") > 0, "{report}");
+    assert!(total("resetSeeds") == total("playsWithNoneAlive"), "{report}");
+    assert!(total("framesAfterPlayWithZeroVelocity") > 0, "{report}");
+    assert!(product.frames > 0, "{report}");
+    assert_eq!(product.mismatched_frames, 0, "{report}");
+    for arm in [PlayArm::ConsumerFields, PlayArm::NoEmitterReset, PlayArm::ClearCarry, PlayArm::NoSeedReset,
+        PlayArm::KeepDelay] {
+        let tally = replay_play(&receipt, arm);
+        println!("arm {arm:?}: {} mismatched of {}; first {:?}", tally.mismatched_frames, tally.frames,
+            tally.first.first());
+        assert!(tally.mismatched_frames > 0, "arm {arm:?} must mismatch");
+    }
+    if let Some(path) = std::env::var_os("MOLY_PLAY_AFTER_STOP_BITFLIP") {
+        let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let tally = replay_play(&control, PlayArm::Product);
+        println!("bitflip: {} mismatched", tally.mismatched_frames);
+        assert!(tally.mismatched_frames > 0, "the bit-flipped receipt must mismatch");
     }
 }

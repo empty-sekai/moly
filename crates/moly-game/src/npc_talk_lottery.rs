@@ -86,6 +86,7 @@
 
 use std::collections::HashSet;
 
+use moly_law::objective::random_fixture_action as fixture_action;
 use moly_law::objective::{ObjectiveType, TalkType};
 use moly_law::talk::select::{
     self as law, Candidate, GeneralPick, LotteryFault, LotteryWeights, UniformDraw, WeightedDraw,
@@ -503,18 +504,26 @@ fn can_play_multi_character_fixture_action(npc: &NpcView) -> bool {
         && !matches!(npc.state, 16 | 17 | 18 | 19 | 4 | 11 | 12 | 14)
 }
 
-/// The eight lottery gates of one talk for `seeker`. Gates are pure, so a
-/// gap in one gate is only reported when no later gate rejects the talk.
+/// The eight lottery gates of one talk for `seeker`, or (with `store`, every
+/// NPC of the avatar store as unit and site type) the nine filters of the
+/// fixture-action talk list. Gates are pure, so a gap in one gate is only
+/// reported when no later gate rejects the talk.
+///
+/// The fixture-action filters are the lottery's gates 1 to 7 (its first two
+/// in the other order; both are pure and raise nothing, so the order does
+/// not show), then the pre-action timeline test, then the sub-character site
+/// test; the lottery's gate-delay gate is not among them.
 fn matches_lottery_conditions(
     scene: &LotteryScene<'_>,
     seeker: &NpcView,
     talk: i32,
+    store: Option<&[(u32, Option<i32>)]>,
 ) -> Result<bool, Halt> {
     let conditions = scene.conditions(talk)?;
     let fixture_value = first_fixture_row(&conditions);
     let seeker_site = seeker.site_type;
     let mut pending_gap: Option<String> = None;
-    let mut gates: Vec<Box<dyn Fn() -> Result<bool, Halt> + '_>> = Vec::with_capacity(8);
+    let mut gates: Vec<Box<dyn Fn() -> Result<bool, Halt> + '_>> = Vec::with_capacity(9);
     // 1: the talk's first speaker is this character.
     gates.push(Box::new(move || Ok(scene.first_member(talk) == seeker.unit as i32)));
     // 2: not this character's previous talk.
@@ -610,20 +619,46 @@ fn matches_lottery_conditions(
     }));
     // 7: the site group holds this character's site type.
     gates.push(Box::new(move || scene.site_matches(talk, seeker_site)));
-    // 8: a talk naming the gate fixture waits for the gate delay.
-    gates.push(Box::new(move || {
-        let Some(id) = fixture_value else {
-            return Ok(true);
-        };
-        let Some(gate) = scene.fixtures.iter().find(|f| f.is_gate) else {
-            return Ok(false);
-        };
-        if gate.fixture_id != id {
-            return Ok(true);
+    match store {
+        // 8: a talk naming the gate fixture waits for the gate delay.
+        None => gates.push(Box::new(move || {
+            let Some(id) = fixture_value else {
+                return Ok(true);
+            };
+            let Some(gate) = scene.fixtures.iter().find(|f| f.is_gate) else {
+                return Ok(false);
+            };
+            if gate.fixture_id != id {
+                return Ok(true);
+            }
+            // The configured delay is an integer compared as a float.
+            Ok((scene.fixture_gates().gate_action_elapsed_seconds as f32) < seeker.since_initialized)
+        })),
+        Some(store) => {
+            // IsUseTimeline: the talk's pre-action exists and names a
+            // timeline group (a group id of 0 names none).
+            gates.push(Box::new(move || {
+                Ok(fixture_action::is_use_timeline(
+                    scene
+                        .tables
+                        .pre_action_of(talk)
+                        .map(|pre| pre.timeline_group_id.unwrap_or(0)),
+                ))
+            }));
+            // IsMatchedSubCharacterSite: when this character is one of the
+            // talk's speakers, every NPC of the store stands on this
+            // character's site type (an empty store passes); otherwise it
+            // passes.
+            gates.push(Box::new(move || {
+                let sites: Vec<Option<i32>> = store.iter().map(|(_, site)| *site).collect();
+                Ok(fixture_action::sub_character_site_matches(
+                    scene.members(talk)?.contains(&seeker.unit),
+                    seeker_site,
+                    &sites,
+                ))
+            }));
         }
-        // The configured delay is an integer compared as a float.
-        Ok((scene.fixture_gates().gate_action_elapsed_seconds as f32) < seeker.since_initialized)
-    }));
+    }
     for gate in gates {
         match gate() {
             Ok(true) => {}
@@ -666,7 +701,7 @@ pub(crate) fn lottery_fixture_talk_id(
         if !keep {
             continue;
         }
-        let passes_gates = matches_lottery_conditions(scene, seeker, row.talk_id)?;
+        let passes_gates = matches_lottery_conditions(scene, seeker, row.talk_id, None)?;
         let member_count = if passes_gates {
             scene.members(row.talk_id)?.len() as i32
         } else {
@@ -738,6 +773,37 @@ pub(crate) fn lottery_fixture_talk_id(
         }));
     }
     Ok(outcome?.talk_id)
+}
+
+/// `GetUnReadFixtureActionTalkId` for `seeker`: the unread rows of the talk
+/// list, in list order, that pass the fixture-action filters (see
+/// [`matches_lottery_conditions`]; `store` is every NPC of the avatar store
+/// as unit and site type), and of those the talks with a fixture-id
+/// condition row, as talk ids. An empty result draws nothing (the source
+/// returns null when no row passes the filters, and an empty list when rows
+/// pass but none has a fixture condition; its pick reads both as none).
+pub(crate) fn fixture_action_talk_ids(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    store: &[(u32, Option<i32>)],
+) -> Result<Vec<i32>, Halt> {
+    let mut ids = Vec::new();
+    for row in scene.talk_list.iter().filter(|row| !row.is_read) {
+        if !matches_lottery_conditions(scene, seeker, row.talk_id, Some(store))? {
+            continue;
+        }
+        // IsFixtureAction: any condition row of the fixture-id type (a row
+        // type outside the enum never equals it).
+        let kinds: Vec<i32> = scene
+            .conditions(row.talk_id)?
+            .iter()
+            .map(|(kind, _)| condition_kind(kind).unwrap_or(-1))
+            .collect();
+        if fixture_action::is_fixture_action(&kinds) {
+            ids.push(row.talk_id);
+        }
+    }
+    Ok(ids)
 }
 
 /// The admissibility pair of one placed fixture for the deciding character.

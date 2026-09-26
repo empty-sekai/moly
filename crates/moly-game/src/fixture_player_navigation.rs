@@ -2,8 +2,11 @@
 //!
 //! The bridge is deliberately explicit about fidelity: this is the same
 //! single-height grid and imported surface used by normal Moly movement, not
-//! Unity NavMeshAgent steering. Source locator identities, UID floor occupancy,
-//! query failure, animation selection and the shared Timeline remain intact.
+//! Unity NavMeshAgent steering. Each move is the engine's corridor move on the
+//! field's navigation cells (the cells the path corners come from); steering,
+//! avoidance and acceleration are the caller's. Source locator identities, UID
+//! floor occupancy, query failure, animation selection and the shared Timeline
+//! remain intact.
 use std::sync::Arc;
 use bevy::prelude::*;
 use crate::{
@@ -48,7 +51,7 @@ pub(crate) fn publish(world: &mut World) {
         |nav| nav.navigation_generation.saturating_add(1).max(field_generation));
     match fixture_scene_inputs::publish_navigation(world, stamp, geometry, generation, vec![
         "Moly carved single-height grid with imported surface heights; exact field paths, bounded sampling and real UID floor occupancy.".into(),
-        "Unity NavMeshAgent steering and layered navigation are not emulated by this host adapter.".into(),
+        "Moves follow the engine's corridor move (MoveAlongSurface) on the field's navigation cells; Unity NavMeshAgent steering and layered navigation are not emulated by this host adapter.".into(),
     ]) {
         Ok(()) => {
             world.insert_resource(InstalledGeometry { stamp, field_generation });

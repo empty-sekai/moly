@@ -62,43 +62,54 @@ async function bytesFrom(url, maximum, fetchImpl, signal) {
 }
 const parse = bytes => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 
+const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
 /** Validate the source before requesting/initializing WASM. Old immutable
- * releases keep their own old module; this module belongs only to the v1 engine. */
+ * releases keep their own old module; this module belongs only to the v1 engine.
+ * `releaseId` names the immutable release the page belongs to and
+ * `resourcePrefix` is the path its publication is mounted at on the page
+ * origin (the logical `/moly/`); both are the caller's, never guessed here. */
 export async function preflightCoordinates(options, { fetchImpl = fetch, signal } = {}) {
-  const { assets, region, version, packs, assetCatalog, stageUrl, resourceBase } = options;
-  const base = new URL(assets), stage = new URL(stageUrl);
-  const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(stage.pathname)?.[1];
-  const looseId = /^\/moly\/snapshots\/([a-z0-9][a-z0-9._-]{0,95})\/assets\/$/.exec(base.pathname)?.[1];
+  const { assets, region, version, packs, assetCatalog, pageUrl, resourceBase, resourcePrefix } = options;
+  if (typeof resourcePrefix !== "string" || !/^\/(?:[a-z0-9][a-z0-9._-]*\/)*$/.test(resourcePrefix))
+    throw new Error("Coordinate preflight requires an explicit resource prefix");
+  const base = new URL(assets), page = new URL(pageUrl);
+  const releaseId = options.releaseId ?? undefined;
+  if (releaseId !== undefined && !IDENTITY.test(releaseId)) throw new Error("Invalid coordinate release identity");
+  const looseId = base.pathname.startsWith(resourcePrefix)
+    ? /^snapshots\/([a-z0-9][a-z0-9._-]{0,95})\/assets\/$/.exec(base.pathname.slice(resourcePrefix.length))?.[1]
+    : undefined;
   const snapshotId = options.snapshotId || looseId;
   if (options.snapshotId && looseId && options.snapshotId !== looseId)
     throw new Error("Coordinate snapshot path differs from selected identity");
   let snapshot;
   if (snapshotId) {
-    if (!/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshotId)) throw new Error("Invalid coordinate snapshot identity");
-    const origin = options.resourceOrigin || stage.origin;
+    if (!IDENTITY.test(snapshotId)) throw new Error("Invalid coordinate snapshot identity");
+    if (!releaseId) throw new Error("Coordinate release is not an immutable stage path");
+    const origin = options.resourceOrigin || page.origin;
     const remoteBase = resourceBase ? new URL(resourceBase) : null;
     const [releaseBytes, snapshotBytes] = await Promise.all([
       bytesFrom(remoteBase
         ? new URL(`releases/${releaseId}/integrity.json`, remoteBase)
-        : new URL("./integrity.json", stage),
+        : new URL(`${resourcePrefix}releases/${releaseId}/integrity.json`, page.origin),
         1048576, fetchImpl, signal),
       bytesFrom(remoteBase
         ? new URL(`snapshots/${snapshotId}/snapshot.json`, remoteBase)
-        : new URL(`/moly/snapshots/${snapshotId}/snapshot.json`, origin),
+        : new URL(`${resourcePrefix}snapshots/${snapshotId}/snapshot.json`, origin),
         1048576, fetchImpl, signal),
     ]);
     snapshot = parse(snapshotBytes);
-    if (!releaseId) throw new Error("Coordinate release is not an immutable stage path");
     validateCoordinatePair(parse(releaseBytes), snapshot, { region, version, snapshotId, releaseId,
       ...(packs ? { assetCatalog } : {}) });
     const expectedAssets = packs
-      ? (remoteBase ? "asset-store/" : "/moly/asset-store/")
-      : (remoteBase ? `snapshots/${snapshotId}/assets/` : `/moly/snapshots/${snapshotId}/assets/`);
-    // Published descriptors keep their logical `/moly/` paths; below a
+      ? (remoteBase ? "asset-store/" : `${resourcePrefix}asset-store/`)
+      : (remoteBase ? `snapshots/${snapshotId}/assets/` : `${resourcePrefix}snapshots/${snapshotId}/assets/`);
+    // Published descriptors keep their logical prefixed paths; below a
     // resource base they resolve the way the host resolves them,
-    // `/moly/<tail>` -> `<base><tail>`.
+    // `<prefix><tail>` -> `<base><tail>`.
     const publishedAssets = remoteBase && typeof snapshot.assets === "string"
-      ? snapshot.assets.replace(/^\/(?:moly\/)?/, "")
+      ? snapshot.assets.startsWith(resourcePrefix)
+        ? snapshot.assets.slice(resourcePrefix.length)
+        : snapshot.assets.replace(/^\//, "")
       : snapshot.assets;
     if (publishedAssets !== expectedAssets || Boolean(snapshot.packs) !== Boolean(packs))
       throw new Error("Coordinate snapshot asset routing mismatch");

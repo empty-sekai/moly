@@ -40,6 +40,17 @@ fn parse_level(raw: Option<&str>, name: &str) -> Result<Option<u32>, String> {
     .transpose()
 }
 
+/// The browser game enters like the source: always on the home site, with no
+/// remembered site and no level or content overrides.
+pub fn game() -> SiteRequest {
+    SiteRequest {
+        site: DEFAULT_SITE.to_owned(),
+        room_level: None,
+        offline_home_level: None,
+        content: OfflineSceneContent::Compact,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve() -> Result<SiteRequest, String> {
     let env = |name: &str| -> Result<Option<String>, String> {

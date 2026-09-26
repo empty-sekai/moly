@@ -39,6 +39,71 @@ fn source_binding<'a>(
     Ok(binding)
 }
 
+/// Owners whose view leaves a Control clip's source object to the director's
+/// own exposed-reference table: a step item view (`PlayerAvatarItemTimelineView`
+/// serializes only its director) and a site prefab's director. The fixture
+/// timeline views bind theirs through their effect list instead.
+fn binds_through_director(kind: TimelineOwnerKind) -> bool {
+    matches!(
+        kind,
+        TimelineOwnerKind::StepItem | TimelineOwnerKind::SceneDirector
+    )
+}
+
+/// Why a director-bound Control clip is not driven here, by name. The source
+/// object is resolved first (`ExposedReference.Resolve` on the director), so
+/// the reason names what the clip controls.
+fn director_control_refusal(
+    world: &World,
+    request: &StartTimeline,
+    clip: &TimelineClip,
+    source: &ExposedSource,
+) -> String {
+    let name = clip.source_envelope["m_DisplayName"]
+        .as_str()
+        .unwrap_or("?");
+    let head = format!("Control clip {name} [{:.3}, {:.3})", clip.start, clip.end());
+    match source {
+        ExposedSource::Unreadable(reason) => format!("{head}: {reason}"),
+        ExposedSource::Null => {
+            format!("{head}: its source object resolves to nothing, so it controls nothing")
+        }
+        ExposedSource::Object(object) => {
+            let wanted = object.path_id.parse::<i64>().ok();
+            let mut stack = vec![request.fixture];
+            let mut found = None;
+            while let Some(entity) = stack.pop() {
+                if world
+                    .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)
+                    .is_some_and(|identity| {
+                        identity.file == object.file && Some(identity.game_object) == wanted
+                    })
+                {
+                    found = Some(entity);
+                    break;
+                }
+                if let Some(children) = world.get::<Children>(entity) {
+                    stack.extend(children.iter());
+                }
+            }
+            match found {
+                None => format!(
+                    "{head}: its source object (GameObject {}) is not in the spawned hierarchy",
+                    object.path_id
+                ),
+                Some(entity) => format!(
+                    "{head}: its source object {} (GameObject {}) resolves through the director's exposed-reference table; its particles are not driven: the particle host prepares a fixture's own particle archive, and {} has none",
+                    world
+                        .get::<Name>(entity)
+                        .map_or("?", |name| name.as_str()),
+                    object.path_id,
+                    request.definition.package
+                ),
+            }
+        }
+    }
+}
+
 pub(super) fn prepare(
     world: &mut World,
     request: &mut StartTimeline,
@@ -58,7 +123,22 @@ pub(super) fn prepare(
         .bindings
         .controls
         .retain(|key, _| selected_keys.contains(key));
+    request
+        .bindings
+        .refused_controls
+        .retain(|key, _| selected_keys.contains(key));
     for (clip, settings) in selected {
+        if binds_through_director(request.owner.kind) {
+            if let Some(source) = &clip.exposed_source {
+                let reason = director_control_refusal(world, request, &clip, source);
+                request.bindings.controls.remove(&clip.key);
+                request
+                    .bindings
+                    .refused_controls
+                    .insert(clip.key.clone(), reason);
+                continue;
+            }
+        }
         let binding = source_binding(&clip, &settings)?;
         let view = request
             .definition
@@ -124,6 +204,9 @@ pub(super) fn validate(
         let TimelinePayload::Control(settings) = &clip.payload else {
             continue;
         };
+        if request.bindings.refused_controls.contains_key(&clip.key) {
+            continue;
+        }
         source_binding(clip, settings)?;
         let binding = request
             .bindings
@@ -201,6 +284,9 @@ pub(super) fn claim(
         let TimelinePayload::Control(settings) = &clip.payload else {
             continue;
         };
+        if request.bindings.refused_controls.contains_key(&clip.key) {
+            continue;
+        }
         let binding = &request.bindings.controls[&clip.key];
         if owned.0.contains_key(&binding.root) {
             continue;

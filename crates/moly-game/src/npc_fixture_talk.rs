@@ -1222,6 +1222,13 @@ fn draft_members(world: &mut World, groups: &mut FixtureTalkGroups, group: &Grou
                     slot.set_current(data);
                 }
             }
+            // The cancelled objective's own ForceUpdateObjective ran inside
+            // the cancel, before this reset (it is not drawn here): nothing
+            // stays owed, so the member's next pass yields and decides on
+            // the handed data.
+            if let Some(mut mind) = world.get_mut::<ObjectiveMind>(draft.entity) {
+                mind.force_updates = 0;
+            }
         }
         if let Some(mut slot) = world.get_mut::<TalkSlot>(draft.entity) {
             slot.interrupt = Some(InterruptMarker {

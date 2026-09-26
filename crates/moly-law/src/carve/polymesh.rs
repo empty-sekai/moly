@@ -575,6 +575,287 @@ impl PolyMesh {
     }
 }
 
+// —— Agent movement on the cells ——
+
+/// `NavMeshQuery::MoveAlongSurface` pads its search circle's radius by this
+/// literal (the f32 nearest 0.001).
+const MOVE_SEARCH_PAD: f32 = 0.001;
+/// Its breadth-first queue holds at most this many nodes; a neighbour met
+/// while it is full still counts as reached but is not expanded.
+const MOVE_MAX_STACK: usize = 48;
+/// The query runs on the navigation query's small node pool (64 nodes); a
+/// neighbour that finds no free node is skipped.
+const MOVE_NODE_POOL: usize = 64;
+/// `PathCorridor::MovePosition` keeps at most this many visited cells.
+pub(crate) const MOVE_MAX_VISITED: usize = 16;
+
+/// One `MoveAlongSurface` answer: the reached point and the cells from the
+/// start cell to the one it lies on (at most the requested count; `truncated`
+/// when the chain was cut there).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceMove {
+    pub position: [f32; 3],
+    pub visited: Vec<u32>,
+    pub truncated: bool,
+}
+
+/// `SqrDistancePointSegment2D`: squared x/z distance from `p` to the segment
+/// `a`-`b`, and the parameter of the closest point, clamped to [0, 1] with the
+/// engine's max-then-min (0 for a zero-length segment).
+pub(crate) fn sqr_distance_point_segment_2d(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> (f32, f32) {
+    let pqx = b[0] - a[0];
+    let pqz = b[2] - a[2];
+    let mut dx = p[0] - a[0];
+    let mut dz = p[2] - a[2];
+    let d = pqx * pqx + pqz * pqz;
+    let mut t = 0.0;
+    if d != 0.0 {
+        t = engine_fmin(engine_fmax((pqx * dx + pqz * dz) / d, 0.0), 1.0);
+        dx = pqx * t - dx;
+        dz = pqz * t - dz;
+    }
+    (dx * dx + dz * dz, t)
+}
+
+/// The engine's single-precision max: NaN if either side is NaN, +0 over -0.
+fn engine_fmax(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else if a == b {
+        if a.is_sign_negative() {
+            b
+        } else {
+            a
+        }
+    } else if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The engine's single-precision min: NaN if either side is NaN, -0 under +0.
+fn engine_fmin(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else if a == b {
+        if a.is_sign_negative() {
+            a
+        } else {
+            b
+        }
+    } else if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The engine's point-in-polygon test inside `MoveAlongSurface`: for every
+/// edge `a`→`b` (the closing edge first), `(p.x−a.x)(b.z−a.z) ≥ (p.z−a.z)(b.x−a.x)`
+/// — the interior lies to the right of each edge, and a point on an edge is
+/// inside. An unordered comparison does not reject.
+fn engine_inside(verts: &[[f32; 3]; 3], p: [f32; 3]) -> bool {
+    let (last, first) = (verts[2], verts[0]);
+    if (p[0] - last[0]) * (first[2] - last[2]) < (p[2] - last[2]) * (first[0] - last[0]) {
+        return false;
+    }
+    for k in 1..3 {
+        let (a, b) = (verts[k - 1], verts[k]);
+        if (p[0] - a[0]) * (b[2] - a[2]) < (p[2] - a[2]) * (b[0] - a[0]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `NavMeshNodePool` as `MoveAlongSurface` uses it: one node per cell, handed
+/// out while the pool has room; the start node is the first.
+struct MoveNodes {
+    cell: Vec<u32>,
+    closed: Vec<bool>,
+    parent: Vec<Option<usize>>,
+    index: HashMap<u32, usize>,
+}
+
+impl MoveNodes {
+    fn get(&mut self, cell: u32) -> Option<usize> {
+        if let Some(node) = self.index.get(&cell) {
+            return Some(*node);
+        }
+        if self.cell.len() >= MOVE_NODE_POOL {
+            return None;
+        }
+        self.cell.push(cell);
+        self.closed.push(false);
+        self.parent.push(None);
+        self.index.insert(cell, self.cell.len() - 1);
+        Some(self.cell.len() - 1)
+    }
+}
+
+impl PolyMesh {
+    /// One cell as the engine's polygon queries read it: the vertices in the
+    /// engine's winding (the reverse of this mesh's counter-clockwise order,
+    /// so the interior is on the right of each edge), edge `j` running from
+    /// vertex `j` to vertex `j + 1`, and each edge's neighbour cell. The
+    /// single-layer field has no height, so y is 0; the movement query reads
+    /// x and z only, except for its search radius, which takes the two end
+    /// points' own heights.
+    pub(crate) fn engine_cell(&self, grid: &Grid, index: u32) -> ([[f32; 3]; 3], [u32; 3]) {
+        let [a, b, c] = self.tris[index as usize];
+        let at = |v: u32| {
+            let p = to_world(grid, self.verts[v as usize]);
+            [p[0], 0.0, p[1]]
+        };
+        let n = self.neighbours[index as usize];
+        ([at(a), at(c), at(b)], [n[2], n[1], n[0]])
+    }
+
+    /// Number of cells.
+    pub(crate) fn cell_count(&self) -> usize {
+        self.tris.len()
+    }
+
+    /// The cell an agent standing at `p` is on: the first cell (in cell order)
+    /// whose engine inside test holds, else the cell whose closest point is
+    /// nearest within the square of half-width `half_extent` around `p`
+    /// (`FindNearestPoly`). No walk-cell gate: an agent lives on the cells.
+    pub(crate) fn agent_cell(&self, grid: &Grid, p: [f32; 2], half_extent: f32) -> Option<u32> {
+        self.nearest_cell(grid, p, half_extent)
+            .map(|(index, _)| index)
+    }
+
+    /// [`Self::agent_cell`] with the point it gives: `p` itself on the cell
+    /// that contains it, else the closest point of the nearest cell.
+    pub(crate) fn nearest_cell(
+        &self,
+        grid: &Grid,
+        p: [f32; 2],
+        half_extent: f32,
+    ) -> Option<(u32, [f32; 2])> {
+        let point = [p[0], 0.0, p[1]];
+        if let Some(inside) = (0..self.tris.len() as u32)
+            .find(|index| engine_inside(&self.engine_cell(grid, *index).0, point))
+        {
+            return Some((inside, p));
+        }
+        let mut best: Option<(u32, [f32; 2], f32)> = None;
+        for index in 0..self.tris.len() as u32 {
+            let corners = self.tris[index as usize].map(|v| to_world(grid, self.verts[v as usize]));
+            let q = closest_on_triangle(p, corners);
+            if (q[0] - p[0]).abs() > half_extent || (q[1] - p[1]).abs() > half_extent {
+                continue;
+            }
+            let d = distance2(q, p);
+            if best.map_or(true, |(_, _, bd)| d < bd) {
+                best = Some((index, q, d));
+            }
+        }
+        best.map(|(index, q, _)| (index, q))
+    }
+
+    /// `NavMeshQuery::MoveAlongSurface` from `start` on cell `start_cell`
+    /// towards `end`, on this mesh (one tile without a tile transform; every
+    /// cell passes the filter).
+    ///
+    /// A breadth-first search from the start cell, limited to cells whose
+    /// shared edge comes within the circle around the move's midpoint of
+    /// radius `|end − start| / 2 + 0.001`. The first expanded cell that
+    /// contains `end` ends the search at `end`. Otherwise, per cell, every
+    /// edge that put no neighbour into the queue — a wall, or an edge to a
+    /// cell already reached or outside the circle — offers its closest point
+    /// to `end` (`t·vi + (1−t)·vj`); the strictly nearest one is kept, the
+    /// first found on ties. The visited chain runs from the start cell to the
+    /// cell the answer lies on, cut at `max_visited` (at least 1).
+    pub(crate) fn move_along_surface(
+        &self,
+        grid: &Grid,
+        start_cell: u32,
+        start: [f32; 3],
+        end: [f32; 3],
+        max_visited: usize,
+    ) -> SurfaceMove {
+        let mut nodes = MoveNodes {
+            cell: vec![start_cell],
+            closed: vec![true],
+            parent: vec![None],
+            index: HashMap::from([(start_cell, 0)]),
+        };
+        let search = [
+            start[0] * 0.5 + end[0] * 0.5,
+            start[1] * 0.5 + end[1] * 0.5,
+            start[2] * 0.5 + end[2] * 0.5,
+        ];
+        let (dx, dy, dz) = (end[0] - start[0], end[1] - start[1], end[2] - start[2]);
+        let radius = (dx * dx + dy * dy + dz * dz).sqrt() * 0.5 + MOVE_SEARCH_PAD;
+        let radius_sqr = radius * radius;
+        let mut best_position = start;
+        let mut best_distance = f32::MAX;
+        let mut best_node: Option<usize> = None;
+        let mut queue: Vec<usize> = vec![0];
+        'search: while !queue.is_empty() {
+            let current = queue.remove(0);
+            let (verts, neighbours) = self.engine_cell(grid, nodes.cell[current]);
+            if engine_inside(&verts, end) {
+                best_position = end;
+                best_node = Some(current);
+                break 'search;
+            }
+            let mut j = 2;
+            for i in 0..3 {
+                let (vj, vi) = (verts[j], verts[i]);
+                let mut reached = 0;
+                let neighbour = neighbours[j];
+                if neighbour != NO_NEIGHBOUR {
+                    if let Some(node) = nodes.get(neighbour) {
+                        if !nodes.closed[node] {
+                            let (d, _) = sqr_distance_point_segment_2d(search, vj, vi);
+                            if !(d > radius_sqr) {
+                                if queue.len() < MOVE_MAX_STACK {
+                                    nodes.parent[node] = Some(current);
+                                    nodes.closed[node] = true;
+                                    queue.push(node);
+                                }
+                                reached += 1;
+                            }
+                        }
+                    }
+                }
+                if reached == 0 {
+                    let (d, t) = sqr_distance_point_segment_2d(end, vj, vi);
+                    if d < best_distance {
+                        let u = 1.0 - t;
+                        best_position = [
+                            t * vi[0] + u * vj[0],
+                            vi[1] * t + vj[1] * u,
+                            vi[2] * t + vj[2] * u,
+                        ];
+                        best_distance = d;
+                        best_node = Some(current);
+                    }
+                }
+                j = i;
+            }
+        }
+        let mut chain = Vec::new();
+        let mut cursor = best_node;
+        while let Some(node) = cursor {
+            chain.push(nodes.cell[node]);
+            cursor = nodes.parent[node];
+        }
+        chain.reverse();
+        let keep = max_visited.max(1);
+        let truncated = chain.len() >= keep;
+        chain.truncate(keep);
+        SurfaceMove {
+            position: best_position,
+            visited: chain,
+            truncated,
+        }
+    }
+}
+
 /// 平面三角形上离 `p` 最近的点：`p` 在三角形内即原样返回，否则取三条边上
 /// 最近点中最近者。
 fn closest_on_triangle(p: [f32; 2], corners: [[f32; 2]; 3]) -> [f32; 2] {
@@ -664,5 +945,152 @@ mod tests {
         let inside = [0.35, 0.45];
         let own = polys.locate(&grid, &regions, inside, 0.0).unwrap();
         assert!(polys.contains(&grid, own, inside));
+    }
+
+    /// A mesh from recorded parts (vertices, cells, per-edge neighbours in this
+    /// module's order); only the cell geometry the movement query reads.
+    fn mesh_from_parts(
+        verts: Vec<[i32; 2]>,
+        tris: Vec<[u32; 3]>,
+        neighbours: Vec<[u32; 3]>,
+    ) -> PolyMesh {
+        let components = vec![0; tris.len()];
+        PolyMesh {
+            verts,
+            tris,
+            neighbours,
+            by_region: HashMap::new(),
+            components,
+            centres: Vec::new(),
+            centre_grid: None,
+        }
+    }
+
+    /// Research instrument: `NavMeshQuery::MoveAlongSurface` executed in an
+    /// ARMv8 emulator on the current engine library, over navigation meshes
+    /// baked by this module and queries of every kind: the approach loop's own
+    /// requests, random moves from 0.5 mm to 2.5 m with and without a height
+    /// change, vertex and edge starts, zero moves, far ends that exhaust the
+    /// node pool, starts off their cell, and visited budgets 0 to 5. Point
+    /// MOLY_NAV_MOVE_ROWS at the recorded word rows. Every mesh's engine view
+    /// must equal the recorded cells, and every row's answer (three f32
+    /// words), visited cells and truncation must match.
+    #[test]
+    #[ignore = "needs MOLY_NAV_MOVE_ROWS"]
+    fn move_along_surface_matches_native_rows() {
+        let path = std::env::var("MOLY_NAV_MOVE_ROWS").expect("MOLY_NAV_MOVE_ROWS");
+        let text = std::fs::read_to_string(&path).expect("read rows");
+        let word = |s: &str| s.parse::<u64>().expect("word") as u32;
+        let mut meshes: Vec<(
+            Grid,
+            Vec<[i32; 2]>,
+            Vec<[u32; 3]>,
+            Vec<[u32; 3]>,
+            Vec<Vec<u32>>,
+        )> = Vec::new();
+        let mut built: Vec<PolyMesh> = Vec::new();
+        let (mut rows, mut cells_checked, mut failures) = (0usize, 0usize, Vec::new());
+        let mut families: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut sha = None;
+        for line in text.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            match f.first().copied() {
+                Some("S") => sha = Some(f[1].to_owned()),
+                Some("M") => meshes.push((
+                    Grid {
+                        origin: [f32::from_bits(word(f[2])), f32::from_bits(word(f[3]))],
+                        voxel: f32::from_bits(word(f[4])),
+                        cols: 0,
+                        rows: 0,
+                        walkable: Vec::new(),
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )),
+                Some("V") => meshes
+                    .last_mut()
+                    .unwrap()
+                    .1
+                    .push([f[1].parse().unwrap(), f[2].parse().unwrap()]),
+                Some("T") => {
+                    let m = meshes.last_mut().unwrap();
+                    m.2.push([word(f[1]), word(f[2]), word(f[3])]);
+                    m.3.push([word(f[4]), word(f[5]), word(f[6])]);
+                }
+                Some("C") => meshes
+                    .last_mut()
+                    .unwrap()
+                    .4
+                    .push(f[1..].iter().map(|w| word(w)).collect()),
+                Some("R") => {
+                    while built.len() < meshes.len() {
+                        let (grid, verts, tris, neighbours, cells) = &meshes[built.len()];
+                        let mesh = mesh_from_parts(verts.clone(), tris.clone(), neighbours.clone());
+                        for (i, recorded) in cells.iter().enumerate() {
+                            let (v, n) = mesh.engine_cell(grid, i as u32);
+                            let view: Vec<u32> = v
+                                .iter()
+                                .flat_map(|p| p.map(f32::to_bits))
+                                .chain(n)
+                                .collect();
+                            assert_eq!(&view, recorded, "engine view of cell {i}");
+                            cells_checked += 1;
+                        }
+                        built.push(mesh);
+                    }
+                    let family = f[1].to_owned();
+                    let m = word(f[2]) as usize;
+                    let cell = word(f[3]);
+                    let v3 =
+                        |k: usize| [word(f[k]), word(f[k + 1]), word(f[k + 2])].map(f32::from_bits);
+                    let (start, end) = (v3(4), v3(7));
+                    let max_visited = word(f[10]) as usize;
+                    let status = word(f[11]);
+                    let position = [word(f[12]), word(f[13]), word(f[14])];
+                    let count = word(f[15]) as usize;
+                    let visited: Vec<u32> = f[16..16 + count].iter().map(|w| word(w)).collect();
+                    let got =
+                        built[m].move_along_surface(&meshes[m].0, cell, start, end, max_visited);
+                    let ok = status & 0x4000_0000 != 0
+                        && got.position.map(f32::to_bits) == position
+                        && got.visited == visited
+                        && got.truncated == (status & 0x10 != 0);
+                    let entry = families.entry(family.clone()).or_default();
+                    entry.0 += 1;
+                    if !ok {
+                        entry.1 += 1;
+                        if failures.len() < 12 {
+                            failures.push(format!(
+                                "{family} mesh {m} cell {cell} start {start:?} end {end:?}: native {:?} {visited:?} status {status:#x}, port {:?} {:?} {}",
+                                position.map(f32::from_bits),
+                                got.position,
+                                got.visited,
+                                got.truncated
+                            ));
+                        }
+                    }
+                    rows += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            sha.as_deref(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
+        );
+        let mismatched: usize = families.values().map(|(_, bad)| bad).sum();
+        let mut summary: Vec<_> = families.iter().collect();
+        summary.sort();
+        eprintln!(
+            "move along surface: {} meshes, {cells_checked} cells, {rows} rows, {mismatched} mismatched; per family {summary:?}",
+            meshes.len()
+        );
+        for failure in &failures {
+            eprintln!("  {failure}");
+        }
+        assert!(rows > 0 && cells_checked > 0);
+        assert_eq!(mismatched, 0);
     }
 }

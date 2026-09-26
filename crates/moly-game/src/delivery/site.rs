@@ -69,6 +69,8 @@ pub(crate) struct DeliveryObjects {
     pub(crate) arrive: Vec3,
     /// The place view's director (the bloom timeline's name).
     pub(crate) bloom_timeline: Option<String>,
+    /// The place view's `_playableDirector` (its component id).
+    pub(crate) place_director: Option<i64>,
 }
 
 #[derive(Resource, Default)]
@@ -243,6 +245,7 @@ fn read_objects(
         .as_array()
         .ok_or_else(|| fail("DeliverySiteView._deliveryCollisionObjects is missing".into()))?;
     let mut place = None;
+    let mut place_director = None;
     let mut board = None;
     for reference in refs {
         let class = reference["class"].as_str().unwrap_or("");
@@ -264,6 +267,7 @@ fn read_objects(
         let object_type = fields["_objectType"].as_i64();
         match (class, object_type) {
             ("DeliveryPlaceObjectView", Some(0)) => {
+                place_director = fields["_playableDirector"]["pathId"].as_i64();
                 place = Some((
                     position,
                     float(fields, class, "_radius").map_err(fail)?,
@@ -318,6 +322,7 @@ fn read_objects(
         // One site at a time, its origin at the world origin.
         arrive: offset,
         bloom_timeline,
+        place_director,
     })
 }
 

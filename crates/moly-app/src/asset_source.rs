@@ -1,5 +1,6 @@
 //! 资产根的解析——全树唯一允许的拒绝点。
-//! native 读 `MOLY_ASSET_ROOT`；web 没有 env，读页面的 `?assets=` URL 前缀。
+//! native 读 `MOLY_ASSET_ROOT`；web 没有 env，读页面的 `?assets=` URL 前缀，
+//! 浏览器游戏读启动种子里的同名字段，两条路走同一套准入。
 //!
 //! web 选「URL 参数」不选「同目录约定」：约定无法同步判「缺」——要探测就得
 //! 发请求，失败会散成逐资产 404，唯一拒绝点就没了；参数缺了当场拒绝。
@@ -20,14 +21,14 @@ fn validate_catalog_id(catalog: &Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Only immutable public snapshots and the content-addressed store may use CDN.
-fn is_public_asset_path(path: &str) -> bool {
-    if path == "/moly/asset-store/" || path == "/sekai-extra-assets/asset-store/" {
+/// Only immutable public snapshots and the content-addressed store may use
+/// CDN. `relative` is the path below the configured resource root.
+fn is_public_asset_directory(relative: &str) -> bool {
+    if relative == "asset-store/" {
         return true;
     }
-    let Some(id) = path
-        .strip_prefix("/moly/snapshots/")
-        .or_else(|| path.strip_prefix("/sekai-extra-assets/snapshots/"))
+    let Some(id) = relative
+        .strip_prefix("snapshots/")
         .and_then(|rest| rest.strip_suffix("/assets/"))
     else {
         return false;
@@ -59,45 +60,87 @@ fn public_asset_parts(base: &str) -> Option<(&str, &str)> {
     Some((&base[..offset], &base[offset..]))
 }
 
+fn is_canonical_directory(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && path.ends_with('/')
+        && !path
+            .bytes()
+            .any(|b| b <= b' ' || b == 0x7f || matches!(b, b'\\' | b'%' | b'?' | b'#'))
+        && !path.split('/').any(|part| matches!(part, "." | ".."))
+}
+
+/// An origin alone selects only the original `/moly/` deployment; any other
+/// prefix arrives as the complete `resource_base`.
+const ORIGIN_ONLY_ROOT: &str = "/moly/";
+
+/// The HTTPS origin and path prefix that remote assets must live below.
+fn resource_root<'a>(
+    configured_origin: Option<&'a str>,
+    configured_base: Option<&'a str>,
+) -> Result<Option<(&'a str, &'a str)>, String> {
+    let Some(base) = configured_base else {
+        return Ok(configured_origin.map(|origin| (origin, ORIGIN_ONLY_ROOT)));
+    };
+    let (origin, path) = public_asset_parts(base)
+        .filter(|(_, path)| is_canonical_directory(path))
+        .ok_or("resource_base must be a canonical HTTPS directory ending in /")?;
+    if configured_origin.is_some_and(|configured| configured != origin) {
+        return Err("resource_origin must match resource_base".into());
+    }
+    Ok(Some((origin, if path == "/" { ORIGIN_ONLY_ROOT } else { path })))
+}
+
 /// Asset roots are canonical paths, optionally on a configured HTTPS CDN.
-pub fn validate_asset_prefix(base: &str) -> Result<(), String> {
+fn validate_asset_prefix(base: &str, root: Option<(&str, &str)>) -> Result<(), String> {
     let path = if base.starts_with("https://") {
-        let (_, path) = public_asset_parts(base).ok_or("Invalid public Moly resource directory")?;
-        if !is_public_asset_path(path) {
+        let (origin, path) =
+            public_asset_parts(base).ok_or("Invalid public Moly resource directory")?;
+        let (root_origin, root_path) =
+            root.ok_or("Remote assets must match the configured resource_origin")?;
+        if origin != root_origin {
+            return Err("Remote assets must match the configured resource_origin".into());
+        }
+        if !path
+            .strip_prefix(root_path)
+            .is_some_and(is_public_asset_directory)
+        {
             return Err("Invalid public Moly resource directory".into());
         }
         path
     } else {
         base
     };
-    if !path.starts_with('/')
-        || path.starts_with("//")
-        || !path.ends_with('/')
-        || path
-            .bytes()
-            .any(|b| b <= b' ' || b == 0x7f || matches!(b, b'\\' | b'%' | b'?' | b'#'))
-        || path.split('/').any(|part| matches!(part, "." | ".."))
-    {
+    if !is_canonical_directory(path) {
         return Err("?assets= must be a canonical same-origin directory or trusted public resource root ending in /".into());
     }
     Ok(())
 }
 
-/// The selected remote assets must use the origin explicitly passed by the
-/// same-origin host. A second remote origin cannot arrive through assets alone.
-pub fn validate_asset_selection(base: &str, configured_origin: Option<&str>) -> Result<(), String> {
-    validate_asset_prefix(base)?;
-    if let Some((origin, _)) = public_asset_parts(base) {
-        if configured_origin != Some(origin) {
-            return Err("Remote assets must match the configured resource_origin".into());
-        }
-    }
-    Ok(())
+/// The selected remote assets must lie below the resource root explicitly
+/// passed by the same-origin host: its complete `resource_base`, or the
+/// original deployment of its `resource_origin`. A second remote origin
+/// cannot arrive through assets alone.
+pub fn validate_asset_selection(
+    base: &str,
+    configured_origin: Option<&str>,
+    configured_base: Option<&str>,
+) -> Result<(), String> {
+    validate_asset_prefix(base, resource_root(configured_origin, configured_base)?)
 }
 
 #[cfg(test)]
 mod public_resource_tests {
-    use super::{validate_asset_prefix, validate_asset_selection};
+    use super::{public_asset_parts, validate_asset_selection};
+
+    /// Each remote case is selected by its own origin; the provider prefix
+    /// arrives as its complete resource root.
+    fn validate_asset_prefix(value: &str) -> Result<(), String> {
+        let base = value
+            .contains("/sekai-extra-assets/")
+            .then_some("https://assets.pjsk.moe/sekai-extra-assets/");
+        validate_asset_selection(value, public_asset_parts(value).map(|(origin, _)| origin), base)
+    }
 
     #[test]
     fn public_immutable_roots_accept_different_configured_https_origins() {
@@ -130,11 +173,11 @@ mod public_resource_tests {
     fn remote_assets_require_the_selected_origin_without_a_baked_domain() {
         for origin in ["https://assets-one.example", "https://cdn-two.example:8443"] {
             let root = format!("{origin}/moly/asset-store/");
-            assert!(validate_asset_selection(&root, Some(origin)).is_ok());
-            assert!(validate_asset_selection(&root, None).is_err());
-            assert!(validate_asset_selection(&root, Some("https://unselected.example")).is_err());
+            assert!(validate_asset_selection(&root, Some(origin), None).is_ok());
+            assert!(validate_asset_selection(&root, None, None).is_err());
+            assert!(validate_asset_selection(&root, Some("https://unselected.example"), None).is_err());
         }
-        assert!(validate_asset_selection("/moly/sources/local/", None).is_ok());
+        assert!(validate_asset_selection("/moly/sources/local/", None, None).is_ok());
     }
 }
 
@@ -162,21 +205,24 @@ pub fn resolve() -> Result<AssetSource, String> {
     }
 }
 
+/// One admission for the page query and the game seed.
 #[cfg(target_arch = "wasm32")]
-pub fn resolve() -> Result<AssetSource, String> {
+fn resolve_selection(
+    base: String,
+    packs: bool,
+    catalog: Option<String>,
+    configured_origin: Option<&str>,
+    configured_base: Option<&str>,
+) -> Result<AssetSource, String> {
+    validate_asset_selection(&base, configured_origin, configured_base)?;
     let window =
         web_sys::window().ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
-    let search = window
-        .location()
-        .search()
-        .map_err(|e| format!("could not read the page query string: {e:?}"))?;
-    let params = web_sys::UrlSearchParams::new_with_str(&search)
-        .map_err(|e| format!("could not parse the query string {search:?}: {e:?}"))?;
-    let base = params.get("assets").ok_or_else(|| {
-        "missing ?assets=<url-prefix>/ — the HTTP base assets are fetched from".to_owned()
-    })?;
-    let configured_origin = params.get("resource_origin");
-    validate_asset_selection(&base, configured_origin.as_deref())?;
+    if let Some(root) = configured_base {
+        let url = web_sys::Url::new(root).map_err(|_| "Invalid resource_base")?;
+        if url.href() != root || !url.search().is_empty() || !url.hash().is_empty() {
+            return Err("resource_base must be its canonical HTTPS directory".into());
+        }
+    }
     let location = window.location();
     let page = location.href().map_err(|_| "Could not read page URL")?;
     let url = web_sys::Url::new_with_base(&base, &page).map_err(|_| "Invalid asset URL prefix")?;
@@ -194,12 +240,50 @@ pub fn resolve() -> Result<AssetSource, String> {
     {
         return Err("?assets= must resolve to its canonical trusted resource path".into());
     }
-    let catalog = params.get("asset_catalog");
     validate_catalog_id(&catalog)?;
-    match params.get("packs").as_deref() {
-        Some("1") => Ok(AssetSource::HttpPacks { url: base, catalog }),
-        None | Some("0") if catalog.is_none() => Ok(AssetSource::HttpBase { url: base }),
-        None | Some("0") => Err("asset_catalog requires packs=1".into()),
-        _ => Err("?packs= must be 0 or 1".into()),
+    match (packs, catalog) {
+        (true, catalog) => Ok(AssetSource::HttpPacks { url: base, catalog }),
+        (false, None) => Ok(AssetSource::HttpBase { url: base }),
+        (false, Some(_)) => Err("asset_catalog requires packs=1".into()),
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn resolve() -> Result<AssetSource, String> {
+    let window =
+        web_sys::window().ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
+    let search = window
+        .location()
+        .search()
+        .map_err(|e| format!("could not read the page query string: {e:?}"))?;
+    let params = web_sys::UrlSearchParams::new_with_str(&search)
+        .map_err(|e| format!("could not parse the query string {search:?}: {e:?}"))?;
+    let base = params.get("assets").ok_or_else(|| {
+        "missing ?assets=<url-prefix>/ — the HTTP base assets are fetched from".to_owned()
+    })?;
+    let packs = match params.get("packs").as_deref() {
+        Some("1") => true,
+        None | Some("0") => false,
+        _ => return Err("?packs= must be 0 or 1".into()),
+    };
+    resolve_selection(
+        base,
+        packs,
+        params.get("asset_catalog"),
+        params.get("resource_origin").as_deref(),
+        params.get("resource_base").as_deref(),
+    )
+}
+
+/// The browser game's asset source: the seed's fields mean what the
+/// same-named page parameters mean, and pass the same admission.
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_seed(seed: &moly_game::GameSeed) -> Result<AssetSource, String> {
+    resolve_selection(
+        seed.assets.clone(),
+        seed.packs,
+        seed.asset_catalog.clone(),
+        seed.resource_origin.as_deref(),
+        seed.resource_base.as_deref(),
+    )
 }

@@ -1375,7 +1375,14 @@ pub(crate) fn advance_fixture_particles(
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
         let ctx = Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera_transform };
         if let Some(mut clock) = clock {
-            crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant);
+            // The Director's ParticleControlPlayable: PrepareFrame and its
+            // Simulate calls. An inactive or retired system draws nothing.
+            if !crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant) {
+                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                }
+                continue;
+            }
         } else if let Some(mut played) = played {
             // Played (play on awake or an explicit Play): the weather host's
             // per-frame update with the birth owner installed at its Play.

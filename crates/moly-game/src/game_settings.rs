@@ -322,6 +322,7 @@ pub(crate) fn setup(
     mut settings: ResMut<GameSettings>,
     mut panel: ResMut<SettingsPanel>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    dev: Option<Res<crate::dev_tools::DevTools>>,
 ) {
     if let Some(document) = store.load() {
         // The source image-quality option applied its pair at startup; the
@@ -336,7 +337,8 @@ pub(crate) fn setup(
     } else {
         panel.status = "Storage unavailable. Changes will apply to this session.".into();
     }
-    if stage.is_some() { return; }
+    // The saved graphics above apply everywhere; the panel is developer UI.
+    if stage.is_some() || dev.is_none() { return; }
     let font = fonts.add(Font::try_from_bytes(FONT.to_vec()).expect("bundled open font is valid"));
     let camera = commands
         .spawn((

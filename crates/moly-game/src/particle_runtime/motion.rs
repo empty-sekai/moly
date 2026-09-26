@@ -50,13 +50,14 @@ pub(super) fn velocity_at_age(
     batch_seed: u32,
     simulation: SimulationSpace,
     owner: &GlobalTransform,
-    age: f32,
+    age_percent: f32,
     dt: f32,
+    newborn: bool,
 ) -> ([f32; 3], f32) {
     let reflect = crate::particle_geometry::reflect;
     let affine = owner.affine();
     let world = simulation == SimulationSpace::World;
-    let sampled = params.sample(side.seed, batch_seed, age * 100.0);
+    let sampled = params.sample(side.seed, batch_seed, age_percent);
     let linear = module_vector(sampled.linear, params.in_world_space, simulation, owner);
     let modifier = sampled.speed_modifier;
     let position = Vec3::from_array(particle.position);
@@ -66,6 +67,7 @@ pub(super) fn velocity_at_age(
     let delta = reflect(Vec3::from_array(orbit.displacement(reflect(local).to_array(), dt, modifier)));
     let delta = if world { affine.transform_vector3(delta) } else { delta };
     let orbital = Vec3::from_array(animated_velocity(delta.to_array(), dt, modifier));
+    let orbital = if newborn && super::child::arms::on("orbitalSkipsBirths") { Vec3::ZERO } else { orbital };
     ((linear + orbital).to_array(), modifier)
 }
 
@@ -134,9 +136,9 @@ mod tests {
         let mut params = params();
         for simulation in [SimulationSpace::Local, SimulationSpace::World] {
             params.in_world_space = false;
-            let local = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01);
+            let local = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01, false);
             params.in_world_space = true;
-            let world = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01);
+            let world = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01, false);
             assert_eq!(local, world);
             let expected = if simulation == SimulationSpace::World {
                 [1.9949831, 0.0, 1.0099609]
@@ -154,7 +156,7 @@ mod tests {
         params.z = MinMaxCurve::Constant(3.0);
         let particle = Particle::born([0.0; 3], [0.0; 3], 10.0);
         let (linear, modifier) = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, SimulationSpace::Local,
-            &GlobalTransform::IDENTITY, 0.0, 0.01);
+            &GlobalTransform::IDENTITY, 0.0, 0.01, false);
         assert_eq!(linear, [-1.0, 2.0, 3.0]);
         assert_eq!(modifier, 1.0);
     }

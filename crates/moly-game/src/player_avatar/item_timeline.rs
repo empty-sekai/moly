@@ -89,6 +89,8 @@ struct StepEntry {
     prefab: String,
     glb: String,
     clips: Arc<Value>,
+    /// The view's `_playableDirector` (the director the prefab root's view plays).
+    view_director: Option<timeline::SourceAssetId>,
 }
 
 enum ObjectState {
@@ -104,6 +106,10 @@ struct Director {
     lease: PlayerActionToken,
     /// The stop has been applied (`MoveEndTime` requested, or released).
     stopped: bool,
+    /// When the last trace line was written (seconds since start).
+    traced: f64,
+    /// The timeline's duration.
+    duration: f64,
 }
 
 struct StepItem {
@@ -217,6 +223,11 @@ impl PlayerStepItem {
 
     /// `WaitForTimelineEnd` waits while this holds: the director plays.
     pub(crate) fn is_playing(&self, world: &World) -> bool {
+        self.is_playing_on(world.get_resource::<FixtureActivityTimelines>())
+    }
+
+    /// [`Self::is_playing`] for a caller that holds the runner's resource.
+    pub(crate) fn is_playing_on(&self, timelines: Option<&FixtureActivityTimelines>) -> bool {
         let Some(item) = self.item.as_ref() else {
             return false;
         };
@@ -227,12 +238,19 @@ impl PlayerStepItem {
             // Play was called; the director starts once its object is ready.
             None => true,
             Some(director) => matches!(
-                world
-                    .get_resource::<FixtureActivityTimelines>()
-                    .and_then(|timelines| timelines.status(director.token)),
+                timelines.and_then(|timelines| timelines.status(director.token)),
                 Some(TimelineStatus::Preparing | TimelineStatus::Playing { .. })
             ),
         }
+    }
+
+    /// The director's last sampled time and its duration, once it has started.
+    pub(crate) fn director_time_on(
+        &self,
+        timelines: Option<&FixtureActivityTimelines>,
+    ) -> Option<(f64, f64)> {
+        let director = self.item.as_ref()?.director.as_ref()?;
+        Some((timelines?.sampled_time(director.token)?, director.duration))
     }
 }
 
@@ -301,14 +319,16 @@ fn step(
             .id();
         item.object = ObjectState::Spawned(object);
         info!(
-            "[step-item] {}.prefab instantiated under the avatar's Root bone as {object:?}",
-            item.file
+            "[step-item] {}.prefab instantiated as {object:?} under bone {root:?} {:?} (the avatar's Root), local position zero, rotation identity",
+            item.file,
+            world.get::<Name>(root).map(Name::as_str)
         );
     }
     let ObjectState::Spawned(object) = item.object else {
         return Ok(());
     };
     if let Some(director) = item.director.as_mut() {
+        trace(world, director, &item.file, object);
         let release = steer(
             world,
             item.on_stop,
@@ -345,6 +365,18 @@ fn step(
         Err(Pending::Wait) => return Ok(()),
         Err(Pending::Refused(reason)) => return Err(reason),
     };
+    if let Some(expected) = item
+        .entry
+        .as_ref()
+        .and_then(|entry| entry.view_director.as_ref())
+    {
+        if &request.definition.director != expected {
+            return Err(format!(
+                "the view's director {expected:?} is not the timeline's selected director {:?}",
+                request.definition.director
+            ));
+        }
+    }
     let lease = {
         let mut drivers = world.query_filtered::<&mut AvatarDriver, With<PlayerControlled>>();
         let mut driver = drivers
@@ -354,6 +386,21 @@ fn step(
             .acquire(PlayerActionOwner::StepItem)
             .map_err(|error| format!("the avatar's animator: {error}"))?
     };
+    let mut refused: Vec<_> = request
+        .bindings
+        .refused_controls
+        .values()
+        .cloned()
+        .collect();
+    refused.sort();
+    for reason in &refused {
+        warn!(
+            "[step-item] {}: {reason}; the rest of the timeline plays",
+            item.file
+        );
+    }
+    let duration = request.definition.duration;
+    let bound = request.bindings.animations.len();
     let token = world
         .resource_mut::<FixtureActivityTimelines>()
         .request_start(request);
@@ -362,8 +409,14 @@ fn step(
         token,
         lease,
         stopped: false,
+        traced: f64::NEG_INFINITY,
+        duration,
     });
-    info!("[step-item] {} Play: director {token:?} started", item.file);
+    info!(
+        "[step-item] {} Play: director {token:?} started (duration {duration:.4} s, {bound} animation clips bound, {} Control clips refused)",
+        item.file,
+        refused.len()
+    );
     Ok(())
 }
 
@@ -388,7 +441,13 @@ fn steer(
                 return Ok(false);
             }
             director.stopped = true;
-            info!("[step-item] {file} director reached its end and stopped (onStop {on_stop:?})");
+            let sampled = world
+                .resource::<FixtureActivityTimelines>()
+                .sampled_time(director.token)
+                .unwrap_or(f64::NAN);
+            info!(
+                "[step-item] {file} director reached its end at time {sampled:.4} and stopped (onStop {on_stop:?})"
+            );
             return Ok(on_stop != Some(StepItemOnStop::MoveEndTime));
         }
         Some(TimelineStatus::Preparing | TimelineStatus::Playing { .. }) => {}
@@ -470,11 +529,28 @@ fn read_entry(
             .map(str::to_owned)
             .ok_or_else(|| format!("{key}: {field} is not a plain name"))
     };
+    let view_director = row
+        .pointer("/view/director")
+        .filter(|value| !value.is_null())
+        .map(|value| -> Result<timeline::SourceAssetId, String> {
+            Ok(timeline::SourceAssetId {
+                file: value["file"]
+                    .as_str()
+                    .ok_or_else(|| format!("{key}: view director has no file"))?
+                    .to_owned(),
+                path_id: value["pathId"]
+                    .as_str()
+                    .ok_or_else(|| format!("{key}: view director has no pathId"))?
+                    .to_owned(),
+            })
+        })
+        .transpose()?;
     Ok(Some(StepEntry {
         package: text("package")?,
         prefab: text("prefab")?,
         glb: format!("{STEP_ITEM_ROOT}{}", text("glb")?),
         clips: Arc::new(row["clips"].clone()),
+        view_director,
     }))
 }
 
@@ -750,6 +826,97 @@ fn descends(world: &World, mut entity: Entity, root: Entity) -> bool {
         };
         entity = parent.parent();
     }
+}
+
+/// Every quarter second of a running or held director: its time, and what
+/// actually plays on the avatar's animator and on the step object's own
+/// animators (clip by name, its time and weight), read from the players.
+fn trace(world: &mut World, director: &mut Director, file: &str, object: Entity) {
+    let now = world
+        .get_resource::<Time>()
+        .map_or(0.0, Time::elapsed_secs_f64);
+    if now - director.traced < 0.25 {
+        return;
+    }
+    director.traced = now;
+    let mut animators = Vec::new();
+    let mut stack = vec![object];
+    while let Some(entity) = stack.pop() {
+        if world.get::<AnimationPlayer>(entity).is_some() {
+            animators.push(entity);
+        }
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    let mut drivers = world.query_filtered::<&AvatarDriver, With<PlayerControlled>>();
+    let timelines = world.resource::<FixtureActivityTimelines>();
+    let sampled = timelines.sampled_time(director.token);
+    let status = match timelines.status(director.token) {
+        Some(TimelineStatus::Playing {
+            loop_active: true, ..
+        }) => "playing (in its loop clip)",
+        Some(TimelineStatus::Playing { .. }) => "playing",
+        Some(TimelineStatus::Completed) => "held at its end",
+        Some(TimelineStatus::Preparing) => "preparing",
+        _ => "stopped",
+    };
+    let graphs = world.resource::<Assets<AnimationGraph>>();
+    let clip_of = |graph: &Handle<AnimationGraph>, node| -> Option<Handle<AnimationClip>> {
+        match &graphs.get(graph)?.get(node)?.node_type {
+            bevy::animation::graph::AnimationNodeType::Clip(handle) => Some(handle.clone()),
+            _ => None,
+        }
+    };
+    let mut avatar = Vec::new();
+    if let Ok(driver) = drivers.single(world) {
+        let (animator, graph) = driver.fixture_timeline_binding();
+        if let Some(player) = world.get::<AnimationPlayer>(animator) {
+            for (node, active) in player.playing_animations() {
+                let name = clip_of(&graph, *node)
+                    .and_then(|clip| {
+                        driver
+                            .clips()
+                            .0
+                            .values()
+                            .find(|body| body.handle == clip)
+                            .map(|body| body.name.clone())
+                    })
+                    .unwrap_or_else(|| "?".into());
+                avatar.push(format!(
+                    "{name} t {:.3} w {:.2}",
+                    active.seek_time(),
+                    active.weight()
+                ));
+            }
+        }
+    }
+    let mut props = Vec::new();
+    for entity in animators {
+        let (Some(player), Some(graph)) = (
+            world.get::<AnimationPlayer>(entity),
+            world.get::<AnimationGraphHandle>(entity),
+        ) else {
+            continue;
+        };
+        for (node, active) in player.playing_animations() {
+            let length = clip_of(&graph.0, *node)
+                .and_then(|clip| world.resource::<Assets<AnimationClip>>().get(&clip))
+                .map_or("?".into(), |clip| format!("{:.3} s", clip.duration()));
+            props.push(format!(
+                "{entity:?} {:?}: clip of {length} t {:.3} w {:.2}",
+                world.get::<Name>(entity).map(Name::as_str),
+                active.seek_time(),
+                active.weight()
+            ));
+        }
+    }
+    info!(
+        "[step-item-trace] {file} director {status} time {}: avatar [{}]; step object animators [{}]",
+        sampled.map_or("-".into(), |t| format!("{t:.4}")),
+        avatar.join(", "),
+        props.join(", ")
+    );
 }
 
 /// The director's session ends and the avatar's lease with it: locomotion

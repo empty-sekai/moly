@@ -17,9 +17,13 @@
 //! and plays the petal step item; `Dispose` stops and clears the step item
 //! and switches the camera back to its previous state.
 //!
+//! The petal is the step item `tl_site_prop_common_petal1` of the delivery
+//! site's bundle on the player's step item service: `Initialize` updates the
+//! step item, sets it up with no stop callback and plays it; `Dispose`
+//! stops its director and clears it.
+//!
 //! Named stand-ins: the two dialogs are the UI lane's; their close is a
-//! [`DeliveryDialogClosed`] message (the Y key, or the autoplay). The petal
-//! step item is the player-timeline lane's service: logged where it plays.
+//! [`DeliveryDialogClosed`] message (the Y key, or the autoplay).
 
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
@@ -30,6 +34,7 @@ use super::{
     DeliveryProgress,
 };
 use crate::player::PlayerControlled;
+use crate::player_avatar::item_timeline::PlayerStepItem;
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 use crate::site_move::timeline::Delay;
 
@@ -120,6 +125,7 @@ pub(crate) fn advance(
     site: Res<super::site::DeliverySite>,
     players: Query<(Entity, &Transform), With<PlayerControlled>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut step: Option<ResMut<PlayerStepItem>>,
 ) {
     let closed = closes.read().count() > 0;
     let frame = u64::from(frames.0);
@@ -206,11 +212,23 @@ pub(crate) fn advance(
                         face.0 = Some(tween);
                     }
                     commands.queue(crate::delivery_camera::enter);
-                    if let Some(objects) = site.objects.as_ref() {
-                        info!(
-                            "[delivery-timeline] UpdateStepItemObject(mysekai/site/field/{}, {PETAL_TIMELINE}) — would play here on the player's step-item service (player-timeline lane)",
-                            objects.bundle
-                        );
+                    match (site.objects.as_ref(), step.as_deref_mut()) {
+                        (Some(objects), Some(step)) => {
+                            let bundle = format!(
+                                "{}{}",
+                                super::flow::STEP_ITEM_BUNDLE_PREFIX,
+                                objects.bundle
+                            );
+                            step.update_step_item_object(&bundle, PETAL_TIMELINE);
+                            step.setup(None);
+                            step.play();
+                            info!(
+                                "[delivery-timeline] honor state StartAnimation: UpdateStepItemObject({bundle}, {PETAL_TIMELINE}), Setup (no stop callback), Play"
+                            );
+                        }
+                        _ => error!(
+                            "[delivery-timeline] honor state StartAnimation: no delivery site objects or no step item service; {PETAL_TIMELINE} is not played"
+                        ),
                     }
                     run.phase =
                         RewardPhase::HonorWait(Delay::new((wait_ms as f64 / 1000.0) as f32, frame));
@@ -239,8 +257,13 @@ pub(crate) fn advance(
                         commands.entity(entity).remove::<DeliveryHold>();
                     }
                     commands.queue(crate::delivery_camera::exit);
+                    let object = step.as_deref().and_then(PlayerStepItem::step_item_object);
+                    if let Some(step) = step.as_deref_mut() {
+                        step.stop();
+                        step.clear_step_item_object();
+                    }
                     info!(
-                        "[delivery] honor dialog closed: state Idle; SetInterceptFlag(true), player state {:?}; the honor state's Dispose: {PETAL_TIMELINE} Stop, ClearStepItemObject, camera back to its previous state",
+                        "[delivery] honor dialog closed: state Idle; SetInterceptFlag(true), player state {:?}; the honor state's Dispose: {PETAL_TIMELINE} Stop, ClearStepItemObject (step object {object:?}), camera back to its previous state",
                         states.current
                     );
                     true

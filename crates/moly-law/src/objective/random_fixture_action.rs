@@ -167,6 +167,38 @@ pub fn run_with_retry(
     }
 }
 
+/// `NavMesh.SamplePosition` radius of `ForceSetFixtureActionPointNearPosition`
+/// around the action point's StartLoc (only a hit places the character).
+pub const NEAR_ACTION_POINT_RADIUS: f32 = 0.25;
+
+/// The talk-condition type of a fixture-id row.
+pub const CONDITION_TYPE_FIXTURE_ID: i32 = 2;
+
+/// `IsFixtureAction`: any of the talk's condition rows has the fixture-id
+/// type.
+pub fn is_fixture_action(condition_types: &[i32]) -> bool {
+    condition_types
+        .iter()
+        .any(|kind| *kind == CONDITION_TYPE_FIXTURE_ID)
+}
+
+/// `IsUseTimeline`: the talk's pre-action exists (`Some`, its timeline group
+/// id, 0 for none) and names a timeline group.
+pub fn is_use_timeline(pre_action_timeline_group: Option<i32>) -> bool {
+    matches!(pre_action_timeline_group, Some(group) if group != 0)
+}
+
+/// `IsMatchedSubCharacterSite`: a character that is one of the talk's
+/// speakers passes only when every NPC of the store stands on its site type
+/// (an empty store passes); any other character passes.
+pub fn sub_character_site_matches(
+    is_speaker: bool,
+    own_site: Option<i32>,
+    store_sites: &[Option<i32>],
+) -> bool {
+    !is_speaker || store_sites.iter().all(|site| *site == own_site)
+}
+
 /// What one NPC's `ExecuteRandomFixtureAction` does, given which of its two
 /// candidates exist and (only when both do) the engine's `Random.value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

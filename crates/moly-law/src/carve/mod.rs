@@ -50,6 +50,14 @@
 //! 叠 `IfMoveTargetPosition` / `IfMoveTargetFixtureActionPosition` /
 //! `GeneratePath` 三个源方法的判定。
 //!
+//! Agent movement ([`WalkField::move_position`]) is the engine's per-frame
+//! corridor move, `PathCorridor::MovePosition` → `NavMeshQuery::MoveAlongSurface`,
+//! on the same navigation cells the path corners come from, so a step along a
+//! path segment is answered on the cells the path runs through. The walk-cell
+//! sweep [`WalkField::constrain_move`] is a different rule: a path corner lies
+//! on a simplified cell edge, which may run over walk cells that erosion
+//! removed, and the sweep rejects a step along it there.
+//!
 //! # 具名边界（未建模的东西，与为什么）
 //!
 //! * **瓦边豁免不建模**：源按瓦分区，连瓦边的小区不杀（真实面积跨瓦
@@ -83,6 +91,7 @@ mod region;
 
 use crate::fixture::position::{layout_type, TILE_SIZE};
 use crate::fixture::GridPosition;
+pub use polymesh::SurfaceMove;
 pub use query::SNAP_MAX_DISTANCE;
 
 /// 烘焙 agent 半径（米）：`"MysekaiCharacter"` agent 类型的表值。
@@ -116,6 +125,12 @@ pub const STATIC_QUERY_HALF_EXTENT: f32 = 0.5;
 /// (agentRadius, agentHeight, agentRadius)。查询盒的高度分量在单层格面上
 /// 没有可选的层，不参与。
 pub const AGENT_QUERY_HALF_EXTENT: f32 = AGENT_RADIUS;
+
+/// The crowd's re-location query box (`ValidateOrReconnectPath`) has the
+/// half-extents of the source literal pair (20, 15) times the agent's radius:
+/// 20 radii in x and z, 15 in height. Only the horizontal half-extent applies
+/// to this single-layer field.
+pub const RELOCATE_EXTENT_PER_RADIUS: f32 = 20.0;
 
 /// 家具动作点出发门里 `CanNavmeshMoveTargetPosition` 的阈值（源字面量）。
 pub const FIXTURE_ACTION_REACH_THRESHOLD: f32 = 0.01;
@@ -585,6 +600,81 @@ impl WalkField {
             }
         }
         best
+    }
+
+    /// `PathCorridor::MovePosition` for an agent at `start` asked to move to
+    /// `goal` (the engine's per-frame agent move): an unchanged request keeps
+    /// the position; otherwise `NavMeshQuery::MoveAlongSurface` from the cell
+    /// the agent stands on (see [`Self::agent_cell`]) gives the new x/z. The
+    /// answer lies on the navigation cells, the same cells the path corners
+    /// come from, and it is not checked against the walk cells: an agent
+    /// following a path along a cell edge stays on that edge even where the
+    /// simplified edge leaves the walk cells.
+    ///
+    /// The engine's corridor carries the start cell over from the previous
+    /// move (the cell that move ended on); here it is found again from the
+    /// position. The two agree when the position lies inside one cell only;
+    /// on an edge or vertex shared by several cells the search may start from
+    /// another of them, which can change the visited chain and, on ties, the
+    /// last bits of the answer. The height is the caller's (the engine's
+    /// `ProjectToPoly` reads a detail mesh this field does not have). A start
+    /// on no cell within the agent's query box stays where it is.
+    pub fn move_position(&self, start: [f32; 3], goal: [f32; 3]) -> [f32; 2] {
+        let held = [start[0], start[2]];
+        if !start.into_iter().chain(goal).all(f32::is_finite) || start == goal {
+            return held;
+        }
+        let Some(cell) = self.agent_cell(held) else {
+            return held;
+        };
+        let step = self.polys.move_along_surface(
+            &self.grid,
+            cell,
+            start,
+            goal,
+            polymesh::MOVE_MAX_VISITED,
+        );
+        [step.position[0], step.position[2]]
+    }
+
+    /// The navigation cell an agent standing at `p` is on: the first cell
+    /// containing `p` (the engine's inside test, edges included), else the
+    /// cell nearest within the agent's query box ([`AGENT_QUERY_HALF_EXTENT`]).
+    pub fn agent_cell(&self, p: [f32; 2]) -> Option<u32> {
+        self.polys
+            .agent_cell(&self.grid, p, AGENT_QUERY_HALF_EXTENT)
+    }
+
+    /// Where the engine's crowd keeps an agent standing at `p`
+    /// (`ValidateOrReconnectPath`, run when the agent's corridor no longer
+    /// starts on a live polygon). An agent on a navigation cell is not moved:
+    /// the answer is `p` itself, edges included, whatever the walk cells under
+    /// it say. Otherwise `FindNearestPoly` in the box of horizontal half-width
+    /// [`RELOCATE_EXTENT_PER_RADIUS`] × `agent_radius` gives the closest point
+    /// of the nearest cell, where the agent is put. `None` when no cell lies in
+    /// that box: the engine then leaves the agent where it is, off the mesh.
+    pub fn relocate(&self, p: [f32; 2], agent_radius: f32) -> Option<[f32; 2]> {
+        if !p.into_iter().all(f32::is_finite) || !agent_radius.is_finite() || agent_radius < 0.0 {
+            return None;
+        }
+        self.polys
+            .nearest_cell(&self.grid, p, RELOCATE_EXTENT_PER_RADIUS * agent_radius)
+            .map(|(_, point)| point)
+    }
+
+    /// `NavMeshQuery::MoveAlongSurface` from `start` on navigation cell `cell`
+    /// towards `end`, keeping at most `max_visited` visited cells.
+    pub fn move_along_surface(
+        &self,
+        cell: u32,
+        start: [f32; 3],
+        end: [f32; 3],
+        max_visited: usize,
+    ) -> Option<SurfaceMove> {
+        ((cell as usize) < self.polys.cell_count()).then(|| {
+            self.polys
+                .move_along_surface(&self.grid, cell, start, end, max_visited)
+        })
     }
 
     /// 烘焙账目。

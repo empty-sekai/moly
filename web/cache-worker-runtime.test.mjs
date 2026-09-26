@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createHash, webcrypto } from "node:crypto";
+import { bundleCacheWorkerFiles } from "./cache-worker-bundle.mjs";
 
 // Unit tests execute the shipped worker body with a controllable storage API.
 // Actual browser cache/online behavior is additionally exercised by QA scripts.
@@ -73,9 +74,7 @@ function worker(stores = new Map()) {
     skipWaiting: async () => {},
     addEventListener: (name, callback) => handlers.set(name, callback),
   });
-  const source = fs
-    .readFileSync(new URL("./cache-worker.mjs", import.meta.url), "utf8")
-    .replace(/^export /gm, "");
+  const source = bundleCacheWorkerFiles("./cache-worker.mjs");
   vm.runInNewContext(
     source,
     {
