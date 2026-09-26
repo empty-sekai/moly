@@ -543,6 +543,21 @@ fn log_bake(tag: &str, field: &WalkField, obstacles: usize) {
 #[derive(Component, Clone, Debug)]
 pub(crate) struct RuntimeObstacles(Vec<(ObstacleRecord, carve::obstacle::ObstacleState)>);
 
+impl RuntimeObstacles {
+    /// `NavMeshObstacle.enabled` for every obstacle on this node (e.g. a view
+    /// that turns a serialized-off obstacle on). Takes effect on the next
+    /// obstacle update; a re-enabled obstacle starts from a fresh snapshot.
+    #[allow(dead_code)] // for the object views that toggle their obstacles
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        for (record, state) in &mut self.0 {
+            if record.enabled != enabled {
+                record.enabled = enabled;
+                *state = carve::obstacle::ObstacleState::default();
+            }
+        }
+    }
+}
+
 /// One serialized NavMeshObstacle, centre in the moly frame (x reflected),
 /// extents as authored (a capsule's x is its radius, y its half height).
 #[derive(Clone, Debug)]
