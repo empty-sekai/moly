@@ -83,9 +83,12 @@
 //! meets its colliders in the pruner's visit order:
 //!
 //! - a collider adds itself when it wakes and leaves when its node is
-//!   deactivated; every physics step is one rebuild step and a commit, and
-//!   every query commits first. The fixed step is 0.02 s and a frame runs at
-//!   most 16 of them, before its scripts and its particle update;
+//!   deactivated; a moved static shape is marked dirty, and a query flushes
+//!   the dirty shapes and commits when anything changed. The project's
+//!   physics settings run the simulation in script mode and the game never
+//!   simulates, so no physics step (no rebuild step) ever runs: the first
+//!   flush builds the tree over the pool of that moment, and later adds stay
+//!   in the bucket;
 //! - the game instantiates a site prefab under an active parent (a prefab
 //!   clone wakes its colliders in ascending instance id of the originals,
 //!   the order the package's preload table first names them: the export's
@@ -108,13 +111,14 @@
 //!   the special floor cases, which follow a layout's normal rows, are not
 //!   told apart, and each load is taken to finish in its call (a package on
 //!   disk);
-//! - where the sequence has a frame between two calls (the instantiation and
-//!   the layout load at home; the hiding and the showing on entry at every
-//!   site), the number of physics steps there is the frame timing's, so the
-//!   scene holds one pruner per distinct outcome of every count until the
-//!   pruners settle and of a query's commit without a step, and an order is
-//!   known only where all of them agree; the showing may be committed by a
-//!   query of its frame before the next step, and both stand;
+//! - where the sequence has a gap between two calls, which game code queries
+//!   there (and so flushes) is not read, so the scene holds one pruner per
+//!   distinct outcome of a flush in each gap or none, and an order is known
+//!   only where all of them agree; the gaps and their order are the
+//!   product's own: its site scenes expanding stand for the instantiation,
+//!   its placed fixtures' collision scene for the layout load, its creating
+//!   and posing the local player for the avatar's clone, the player's model
+//!   attaching for the box's disable, and the entry for the showing;
 //! - a pruner box is what the engine hands the pruner for a static shape:
 //!   the shape's world bounds at inflation one, at the actor's pose composed
 //!   with the shape's identity local pose, grown on every side by a
@@ -124,16 +128,14 @@
 //!
 //! The engine's pool also holds, for a while, the local player's avatar box:
 //! the avatar's only collider, a BoxCollider with no body, which enters when
-//! the avatar is cloned, is posed once (a bounds update) and leaves when the
-//! game disables it once the avatar model has loaded. On the
-//! housing-competition entry both come before the site is instantiated
-//! (unless the model load outlasts the scene's five-second wait for the
-//! player); on the normal entry the clone follows the server's messages, at
-//! a frame not read. The pruner does not hold the box, so its order is
-//! claimed only while the pool with that box fits one leaf, on the
-//! assumption (read only for the housing-competition entry) that the box
-//! left before the site was shown; the scene still feeds and queries the
-//! pruners and logs how many queries they agree on.
+//! the avatar is cloned (at the prefab's pose; the pose the clone is given in
+//! the same run is a move, written at the next flush) and leaves when the
+//! game disables it once the avatar model has loaded. The scene feeds it at
+//! the product's own frames: on the normal entry the source's clone follows
+//! the server's messages, and the product's creating the player stands for
+//! it (the housing-competition entry clones and disables it before the site
+//! is instantiated). The avatar's moves between its clone and its model are
+//! not fed (the entry holds the player): a move there refuses.
 //!
 //! Where the pruner cannot give the order, the query falls back to the add
 //! order: while the scene holds at most four static shapes and no shape has
@@ -1120,6 +1122,9 @@ impl SiteScene {
     /// in for them until their collision scenes load).
     pub(crate) fn install_fixtures(&self, scene: Arc<GroundScene>) -> u64 {
         let mut entries = self.entries_mut();
+        if !scene.pending_layout {
+            entries.pruner.observe(Observed::Layout);
+        }
         let id = entries.push(scene);
         entries.pruner.fixtures = Some(id);
         entries.feed();
@@ -1163,8 +1168,19 @@ impl SiteScene {
         entries.pruner = PrunerScene::default();
     }
 
-    /// The frame's physics steps, before the frame's particle queries: one
-    /// pruner step per fixed step of the frame's delta time.
+    /// One product frame (see [`observe_product`]): the site's readiness and
+    /// the local player's avatar root pose and model.
+    pub(crate) fn frame(&self, site_ready: bool,
+        avatar: Result<Option<(([f32; 4], [f32; 3]), bool)>, &'static str>) {
+        let mut entries = self.entries_mut();
+        entries.pruner.frame(site_ready, avatar);
+        if !entries.pruner.fed {
+            entries.feed();
+        }
+    }
+
+    /// The frame's physics steps, before the frame's particle queries (none
+    /// while the simulation runs in script mode).
     pub(crate) fn advance(&self, dt: f32) {
         self.entries_mut().pruner.advance(dt);
     }
@@ -1175,51 +1191,77 @@ impl SiteScene {
     }
 }
 
-/// The fixed timestep (the time manager's Fixed Timestep).
-const FIXED_STEP: f64 = 0.02;
-/// The most fixed steps one frame runs: the time manager's Maximum Allowed
-/// Timestep (1/3 s) over the fixed timestep.
-const MAX_FIXED_STEPS: u32 = 16;
-/// The most physics steps a boundary is followed through before the
-/// pruners must have settled.
-const BOUNDARY_STEPS: usize = 64;
+/// The project's physics settings put the simulation in script mode, and
+/// the game never simulates: no frame runs a physics step, so the static
+/// pruner is never stepped and only the scene queries' flushes commit it.
+const SIMULATION_MODE: law::physics_steps::SimulationMode = law::physics_steps::SimulationMode::Script;
 
-/// The static shapes the engine's pool holds for a while beside the ones
-/// the scene feeds: the local player's avatar box. The avatar prefab's only
-/// collider is a BoxCollider on its avatar root with no body anywhere on the
-/// avatar (and the game adds none at run time), so a static shape; it enters
-/// the pool when the avatar is cloned, moves once when the clone is posed (a
-/// bounds update, which forces a rebuild), and leaves when the game disables
-/// it for the local player once the avatar model has loaded. On the
-/// housing-competition entry, where the scene creates the player itself, the
-/// clone and the disable come before the site is instantiated: the scene
-/// waits for the player (registered only after the disable), or five
-/// seconds, before it sets up the sites, and a model load past that wait
-/// moves the disable later. On the normal entry the clone follows the
-/// server's messages, at a frame not read. The pruner does not hold the box:
-/// its add and removal restart the rebuild, and a removal while shapes added
-/// after it are in the pool moves the pool's last shape into its slot. While
-/// one leaf holds the whole pool and the box has left before the site is
-/// shown, the visits keep the fed pool order; the scene claims the order
-/// only there, and on the normal entry that the box has left before the
-/// showing is an assumption (not read).
-const UNFED_TRANSIENT_SHAPES: usize = 1;
+/// The local player's avatar box: the avatar root's BoxCollider (size and
+/// centre on the root; no body anywhere on the avatar, so a static shape).
+/// Its actor stands at the root's transform of the centre with the root's
+/// rotation; the shape keeps the identity local pose.
+const AVATAR_BOX_SIZE: [f32; 3] = [0.65, 0.9, 0.65];
+const AVATAR_BOX_CENTER: [f32; 3] = [0.0, 0.5, 0.0];
 
-/// Why the pruner's order is not claimed while the pool is more than a leaf.
-const TRANSIENT_SHAPE: &str = "the local player's avatar box enters, moves once and leaves the engine's pool (before \
-    the site is instantiated on the housing-competition entry, at a frame the server's messages set on the normal \
-    entry), the pruner holds neither that box nor its move, and the pool is more than a leaf";
+/// The avatar root's pose in the avatar prefab (the prefab root and the
+/// avatar root at the origin, unrotated): the clone stands there when its
+/// box enters the pool, and is posed in the same run.
+const AVATAR_PREFAB_POSE: ([f32; 4], [f32; 3]) = ([0.0, 0.0, 0.0, 1.0], [0.0; 3]);
 
-/// The assumption the order stands on where it is claimed.
-const TRANSIENT_ASSUMED: &str = "orders claimed on the assumption that the local player's avatar box left the pool \
-    before the site was shown: so on the housing-competition entry when the avatar model loads within the \
-    five-second wait; on the normal entry the avatar's clone follows the server's messages (not read)";
+/// What the product did that changes the engine's pool, in the order it
+/// did it (events of one frame: the layout load first, then the site's
+/// readiness and the avatar's, as the product's systems run).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Observed {
+    /// The site's scenes are expanded: the site prefab's clone.
+    SiteReady,
+    /// The placed fixtures' collision scene is in: the home site's layout
+    /// load.
+    Layout,
+    /// The product created the local player at this root pose: the
+    /// avatar's clone, posed in the same run. The source's clone follows
+    /// the server's messages on the normal entry; the product's frame
+    /// stands for it.
+    Cloned(([f32; 4], [f32; 3])),
+    /// The avatar's model is attached: the game disables the local player's
+    /// box then.
+    Loaded,
+}
+
+/// The pruners after a gap between two calls: no physics step runs there,
+/// and whether a scene query's flush falls in it is not read, so both.
+fn boundary(pruners: Vec<StaticPruner>) -> Vec<StaticPruner> {
+    let mut out = Vec::new();
+    for p in pruners {
+        let mut flushed = p.clone();
+        flushed.flush_updates();
+        out.push(p);
+        out.push(flushed);
+    }
+    distinct(out)
+}
+
+/// The avatar box's pruner id (entry 0 holds no installed thing).
+fn avatar_id() -> u64 {
+    ShapeAt { list: ShapeAt::AVATAR, index: 0 }.id(0)
+}
+
+/// The avatar box's shape pose for an avatar root pose.
+fn avatar_shape(root: ([f32; 4], [f32; 3])) -> Result<Pose, String> {
+    let actor = box_pose(root, AVATAR_BOX_CENTER).ok_or("the avatar box at a pose the scene cannot hold")?;
+    law::shape_world_pose(&actor, [0.0, 0.0, 0.0, 1.0], [0.0; 3]).map_err(|refused| refused.0.to_owned())
+}
+
+fn avatar_half() -> [f32; 3] {
+    AVATAR_BOX_SIZE.map(|v| v * 0.5)
+}
 
 /// The engine's static pruner for the scene's static shapes, fed the
-/// engine's add and remove sequence for the site and the placed fixtures
-/// (see the module notes). Where that sequence has an unread number of
-/// physics steps between two calls, it holds one pruner per distinct
-/// outcome, and an order is known only where they all agree.
+/// engine's add, move and remove sequence for the site, the placed fixtures
+/// and the local player's avatar box, in the order the product did them
+/// (see the module notes). Where a gap between two calls may or may not
+/// hold a scene query's flush, it holds one pruner per distinct outcome,
+/// and an order is known only where they all agree.
 #[derive(Default)]
 struct PrunerScene {
     /// The installed site's entry, and whether it loads the player's layout.
@@ -1228,15 +1270,17 @@ struct PrunerScene {
     fixtures: Option<u64>,
     /// The placed fixtures the sequence was fed: slot, touch box, pool box.
     fed_fixtures: Option<Vec<(usize, bool, [u32; 6])>>,
-    /// One pruner per distinct outcome of the unread step counts.
+    /// What the product did, in order.
+    observed: Vec<Observed>,
+    /// The avatar root's pose when last seen, while its model is loading.
+    avatar_pose: Option<([f32; 4], [f32; 3])>,
+    /// One pruner per distinct outcome of the unread flushes.
     variants: Vec<StaticPruner>,
-    /// The unread boundaries the pruners span.
-    boundaries: Vec<String>,
     fed: bool,
     /// Why the pruner cannot give the order, for good.
     unmodeled: Option<String>,
-    /// Time toward the next fixed step.
-    clock: f64,
+    /// Why the sequence is not fed yet.
+    waiting: Option<&'static str>,
     /// The lines already reported to the log.
     reported: Vec<String>,
     /// Queries answered while fed; of them, the ones every pruner agreed on.
@@ -1254,38 +1298,6 @@ fn distinct(pruners: Vec<StaticPruner>) -> Vec<StaticPruner> {
         }
     }
     out
-}
-
-/// The pruners after a boundary whose physics step count is not read: every
-/// count from none until each pruner settles, and a query's commit without
-/// a step (the other queries of a frame without a fixed step).
-fn boundary(pruners: Vec<StaticPruner>, name: &str, spans: &mut Vec<String>) -> Result<Vec<StaticPruner>, String> {
-    let mut out = Vec::new();
-    let mut longest = 0usize;
-    for p in pruners {
-        let mut committed = p.clone();
-        committed.commit();
-        out.push(committed);
-        let mut stepped = p.clone();
-        out.push(p);
-        let mut settled = false;
-        for k in 1..=BOUNDARY_STEPS {
-            let before = stepped.clone();
-            stepped.step();
-            if stepped == before {
-                settled = true;
-                longest = longest.max(k - 1);
-                break;
-            }
-            out.push(stepped.clone());
-        }
-        if !settled {
-            return Err(format!("{name}: the pruner does not settle within {BOUNDARY_STEPS} physics steps"));
-        }
-    }
-    let out = distinct(out);
-    spans.push(format!("{name}: 0 to {longest} steps, {} distinct", out.len()));
-    Ok(out)
 }
 
 impl PrunerScene {
@@ -1306,23 +1318,64 @@ impl PrunerScene {
         }
     }
 
-    fn unfed(&mut self) {
+    fn unfed(&mut self, why: &'static str) {
         self.fed = false;
         self.variants.clear();
+        self.waiting = Some(why);
+    }
+
+    /// Records one of the product's events once.
+    fn observe(&mut self, event: Observed) {
+        let seen = self.observed.iter().any(|e| std::mem::discriminant(e) == std::mem::discriminant(&event));
+        if !seen {
+            self.observed.push(event);
+        }
+    }
+
+    /// One product frame, after its scripts: the site's readiness and the
+    /// local player's avatar (its root pose in source axes and whether its
+    /// model is attached).
+    fn frame(&mut self, site_ready: bool, avatar: Result<Option<(([f32; 4], [f32; 3]), bool)>, &'static str>) {
+        if self.unmodeled.is_some() {
+            return;
+        }
+        if site_ready {
+            self.observe(Observed::SiteReady);
+        }
+        match avatar {
+            Err(why) => self.refuse(why),
+            Ok(None) => {}
+            Ok(Some((pose, loaded))) => {
+                let cloned = self.observed.iter().any(|e| matches!(e, Observed::Cloned(_)));
+                let done = self.observed.contains(&Observed::Loaded);
+                if !cloned {
+                    self.observe(Observed::Cloned(pose));
+                    self.avatar_pose = Some(pose);
+                } else if !done && self.avatar_pose != Some(pose) {
+                    self.refuse("the local player's avatar moved before its model was attached: its moves before \
+                        that are not fed");
+                    return;
+                }
+                if loaded {
+                    self.observe(Observed::Loaded);
+                }
+            }
+        }
     }
 
     /// Feeds the engine's sequence once the site (and, at the home site, the
-    /// placed fixtures) are in the scene.
+    /// placed fixtures) are in the scene and the product has shown what the
+    /// sequence needs.
     fn feed(&mut self, entries: &[(u64, Arc<GroundScene>)]) {
         if self.unmodeled.is_some() {
             return;
         }
         let find = |id: u64| entries.iter().find(|(entry, _)| *entry == id).map(|(_, scene)| scene.clone());
         let Some((site_entry, layout)) = self.site else {
-            return self.unfed();
+            return self.unfed("no site is in the scene");
         };
         let Some(site) = find(site_entry) else {
-            return self.unfed();
+            return self.unfed("no site is in the scene");
         };
         let Some(site_order) = site.site_order.clone() else {
             return self.refuse("the site's colliders carry no preload-table or activation order");
@@ -1339,13 +1392,13 @@ impl PrunerScene {
         let mut fixture_shapes = Vec::new();
         if layout {
             let Some(entry) = self.fixtures else {
-                return self.unfed();
+                return self.unfed("the home site's placed fixtures are not in the scene");
             };
             let Some(placed) = find(entry) else {
-                return self.unfed();
+                return self.unfed("the home site's placed fixtures are not in the scene");
             };
             if placed.pending_layout {
-                return self.unfed();
+                return self.unfed("the home site's placed fixtures are not in the scene");
             }
             let Some(order) = placed.fixture_order.clone() else {
                 return self.refuse("a placed fixture collider whose fixture's place in the view's list is not known");
@@ -1371,105 +1424,135 @@ impl PrunerScene {
             return self.refuse("the placed fixtures changed after entry: a layout change's add and remove order \
                 is not read");
         }
+        if !self.observed.contains(&Observed::SiteReady) {
+            return self.unfed("the site's scenes are not expanded yet");
+        }
+        if layout && !self.observed.contains(&Observed::Layout) {
+            return self.unfed("the home site's layout is not loaded yet");
+        }
+        if !self.observed.contains(&Observed::Loaded) {
+            return self.unfed("the local player's avatar model is not attached yet");
+        }
         let mut by_preload = site_shapes.clone();
         by_preload.sort_by_key(|&(_, _, preload, _)| preload);
         let mut post_order = site_shapes;
         post_order.sort_by_key(|&(_, _, _, activation)| activation);
-        let mut spans = Vec::new();
         // The site prefab's clone under the active parent: its colliders in
-        // preload-table order.
+        // preload-table order; at a site without a layout the site hides in
+        // the same run.
         let mut first = StaticPruner::new();
         for &(id, pool, ..) in &by_preload {
             first.add(id, pool);
         }
+        if !layout {
+            for &(id, ..) in &post_order {
+                first.remove(id);
+            }
+        }
         let mut pruners = vec![first];
-        if layout {
-            pruners = match boundary(pruners, "from the site's instantiation to the layout load", &mut spans) {
-                Ok(p) => p,
-                Err(why) => return self.refuse(&why),
-            };
-            // Each fixture's load adds its own colliders at the prefab's
-            // saved root pose and removes them again at once; their boxes
-            // there are not read, so both the placed box and the same box
-            // about the world origin stand in.
-            let mut loaded = Vec::new();
-            for p in pruners {
-                for about_origin in [false, true] {
-                    let mut q = p.clone();
-                    for &(_, touch, at, _, pool) in &fixture_shapes {
-                        if touch {
-                            continue;
+        let mut sequence = vec!["site instantiated".to_owned()];
+        let events: Vec<Observed> =
+            self.observed.iter().copied().skip_while(|e| *e != Observed::SiteReady).skip(1).collect();
+        if events.len() + 1 != self.observed.len() {
+            return self.refuse("the product did part of the entry sequence before the site's scenes were expanded");
+        }
+        for event in events {
+            pruners = boundary(pruners);
+            match event {
+                Observed::SiteReady => {}
+                Observed::Layout if layout => {
+                    // Each fixture's load adds its own colliders at the
+                    // prefab's saved root pose and removes them at once;
+                    // their boxes there are not read, so both the placed box
+                    // and the same box about the world origin stand in. Then
+                    // the view shows the fixtures, and in the same run the
+                    // site hides.
+                    let mut loaded = Vec::new();
+                    for p in pruners {
+                        for about_origin in [false, true] {
+                            let mut q = p.clone();
+                            for &(_, touch, at, _, pool) in &fixture_shapes {
+                                if touch {
+                                    continue;
+                                }
+                                let id = ShapeAt { list: ShapeAt::TRANSIENT, ..at }.id(self.fixtures.unwrap_or(0));
+                                let pool = if about_origin {
+                                    let half: [f32; 3] = std::array::from_fn(|k| (pool[k + 3] - pool[k]) * 0.5);
+                                    [-half[0], -half[1], -half[2], half[0], half[1], half[2]]
+                                } else {
+                                    pool
+                                };
+                                q.add(id, pool);
+                                q.remove(id);
+                            }
+                            for &(_, _, _, id, pool) in &fixture_shapes {
+                                q.add(id, pool);
+                            }
+                            for &(id, ..) in &post_order {
+                                q.remove(id);
+                            }
+                            loaded.push(q);
                         }
-                        let id = ShapeAt { list: ShapeAt::TRANSIENT, ..at }.id(self.fixtures.unwrap_or(0));
-                        let pool = if about_origin {
-                            let half: [f32; 3] = std::array::from_fn(|k| (pool[k + 3] - pool[k]) * 0.5);
-                            [-half[0], -half[1], -half[2], half[0], half[1], half[2]]
-                        } else {
-                            pool
-                        };
-                        q.add(id, pool);
-                        q.remove(id);
                     }
-                    loaded.push(q);
+                    pruners = distinct(loaded);
+                    sequence.push("layout loaded".to_owned());
                 }
-            }
-            pruners = distinct(loaded);
-            // ShowFixtureAll, then in the same run the site hides.
-            for p in &mut pruners {
-                for &(_, _, _, id, pool) in &fixture_shapes {
-                    p.add(id, pool);
+                // A site without a layout loads none; the product's placed
+                // fixtures' scene there changes nothing in the pool.
+                Observed::Layout => {}
+                Observed::Cloned(pose) => {
+                    // The clone enters at the prefab's pose (the add's box),
+                    // and its pose in the same run marks it for the next
+                    // flush (the flush's box).
+                    let (saved, placed) = match (avatar_shape(AVATAR_PREFAB_POSE), avatar_shape(pose)) {
+                        (Ok(a), Ok(b)) => (a, b),
+                        (Err(why), _) | (_, Err(why)) => return self.refuse(&why),
+                    };
+                    let added = law::pool_bounds_box(avatar_half(), &saved);
+                    let moved = law::flush_bounds_box(avatar_half(), &placed);
+                    for p in &mut pruners {
+                        p.add(avatar_id(), added);
+                        p.mark(avatar_id(), moved);
+                    }
+                    sequence.push("the local player's avatar cloned (the product's frame stands for the server's)"
+                        .to_owned());
                 }
-                for &(id, ..) in &post_order {
-                    p.remove(id);
-                }
-            }
-        } else {
-            // The site hides in the same run as its instantiation.
-            for p in &mut pruners {
-                for &(id, ..) in &post_order {
-                    p.remove(id);
+                Observed::Loaded => {
+                    for p in &mut pruners {
+                        p.remove(avatar_id());
+                    }
+                    sequence.push("its model attached: its box disabled".to_owned());
                 }
             }
         }
-        pruners = match boundary(pruners, "from the site's hiding to its showing on entry", &mut spans) {
-            Ok(p) => p,
-            Err(why) => return self.refuse(&why),
-        };
-        // ShowSite: the colliders again, in hierarchy post-order; a query of
-        // the entry frame may commit them before the next physics step.
-        let mut shown = Vec::new();
-        for mut p in pruners {
+        // ShowSite on entry: the site's colliders again, in post-order.
+        pruners = boundary(pruners);
+        for p in &mut pruners {
             for &(id, pool, ..) in &post_order {
                 p.add(id, pool);
             }
-            let mut committed = p.clone();
-            committed.commit();
-            shown.push(p);
-            shown.push(committed);
         }
-        self.variants = distinct(shown);
-        self.boundaries = spans;
+        sequence.push("the site shown on entry".to_owned());
+        self.variants = distinct(pruners);
         self.fed_fixtures = Some(key);
         self.fed = true;
+        self.waiting = None;
         let pool: Vec<String> = self.variants[0].pool_order().iter().map(|id| format!("{id:x}")).collect();
-        self.report(format!("fed: {} site shapes, {} placed fixture shapes; {} pruners over {}; pool [{}]",
-            by_preload.len(), fixture_shapes.len(), self.variants.len(),
-            self.boundaries.join("; "), pool.join(", ")));
+        self.report(format!("fed: {} site shapes, {} placed fixture shapes, the avatar box; {} pruners over \
+            the flushes of the gaps between: {}; pool [{}]", by_preload.len(), fixture_shapes.len(),
+            self.variants.len(), sequence.join(", "), pool.join(", ")));
     }
 
+    /// The frame's physics steps, before the frame's particle queries (none
+    /// in script mode).
     fn advance(&mut self, dt: f32) {
         if !self.fed {
             return;
         }
-        self.clock += f64::from(dt);
-        let mut steps = 0;
-        while self.clock >= FIXED_STEP && steps < MAX_FIXED_STEPS {
-            self.clock -= FIXED_STEP;
-            steps += 1;
-        }
-        if steps == MAX_FIXED_STEPS {
-            self.clock = self.clock.min(FIXED_STEP);
-        }
+        let steps = match law::physics_steps::frame_steps(SIMULATION_MODE, dt) {
+            Ok(steps) => steps,
+            Err(why) => return self.refuse(why.0),
+        };
         if steps == 0 {
             return;
         }
@@ -1484,18 +1567,14 @@ impl PrunerScene {
     }
 
     /// The pruner's visit order of the touched shapes (pruner ids), or why
-    /// it cannot be given. Every pruner is queried, and so committed, as
-    /// the engine's query flushes the pruner first.
+    /// it cannot be given. Every pruner is queried, and so flushed, as the
+    /// engine's query flushes the pruner first.
     fn order(&mut self, touched: &[u64], center: [f32; 3], extents: [f32; 3]) -> Result<Vec<u64>, String> {
         if let Some(why) = &self.unmodeled {
             return Err(why.clone());
         }
         if !self.fed {
-            return Err(match self.site {
-                None => "no site is in the scene".to_owned(),
-                Some((_, true)) => "the home site's entry sequence waits for the placed fixtures".to_owned(),
-                Some(_) => "the site's entry sequence is not fed".to_owned(),
-            });
+            return Err(self.waiting.unwrap_or("the entry sequence is not fed").to_owned());
         }
         let mut agreed: Option<Vec<u64>> = None;
         let mut split = false;
@@ -1510,18 +1589,16 @@ impl PrunerScene {
         }
         self.queries += 1;
         self.agreed += u64::from(!split);
-        let beside = self.variants[0].pool_order().len() + UNFED_TRANSIENT_SHAPES > LEAF_SHAPES;
+        if self.variants.len() > 1 {
+            self.variants = distinct(std::mem::take(&mut self.variants));
+        }
         if self.queries.is_power_of_two() {
-            let line = format!("{} queries; the pruners agree on {}; {}", self.queries, self.agreed,
-                if beside { format!("no order claimed: {TRANSIENT_SHAPE}") } else { TRANSIENT_ASSUMED.to_owned() });
+            let line = format!("{} queries; the pruners agree on {} ({} pruners now)", self.queries, self.agreed,
+                self.variants.len());
             self.report(line);
         }
-        if beside {
-            return Err(TRANSIENT_SHAPE.to_owned());
-        }
         if split {
-            let why = format!("the pruners of the unread step counts disagree on this query ({})",
-                self.boundaries.join("; "));
+            let why = "the pruners of the unread flushes disagree on this query".to_owned();
             self.report(why.clone());
             return Err(why);
         }
@@ -1532,6 +1609,36 @@ impl PrunerScene {
         self.report(format!("orders given ({} pruners agree)", self.variants.len()));
         Ok(seq)
     }
+}
+
+/// PostUpdate, after the transforms propagate and before the weather
+/// particles' frame: the site's readiness and the local player's avatar,
+/// into the physics scene.
+#[allow(clippy::type_complexity)]
+pub(crate) fn observe_product(
+    retiring: bevy::prelude::Res<crate::weather_fx::WeatherFxRetirements>,
+    ready: Option<bevy::prelude::Res<crate::site::SiteScenesReady>>,
+    players: bevy::prelude::Query<
+        (&bevy::prelude::GlobalTransform, bevy::prelude::Has<crate::player_avatar::body::BodyAttached>),
+        bevy::prelude::With<crate::player::PlayerControlled>,
+    >,
+) {
+    let found: Vec<_> = players.iter().collect();
+    let avatar = match found.as_slice() {
+        [] => Ok(None),
+        [(world, loaded)] => {
+            let (scale, rotation, translation) = world.to_scale_rotation_translation();
+            if scale == bevy::prelude::Vec3::ONE {
+                // Source axes: the canonical frame's x reflected.
+                Ok(Some((([rotation.x, -rotation.y, -rotation.z, rotation.w],
+                    [-translation.x, translation.y, translation.z]), *loaded)))
+            } else {
+                Err("the local player's avatar root is scaled")
+            }
+        }
+        _ => Err("more than one local player"),
+    };
+    retiring.physics().frame(ready.is_some(), avatar);
 }
 
 /// Where a shape sits in its installed thing: which list, which index.
@@ -1547,6 +1654,8 @@ impl ShapeAt {
     const UNPORTED: u8 = 2;
     /// A fixture collider's add and removal at its load.
     const TRANSIENT: u8 = 3;
+    /// The local player's avatar box.
+    const AVATAR: u8 = 4;
 
     /// The pruner id of this shape of the installed thing `entry`.
     fn id(self, entry: u64) -> u64 {

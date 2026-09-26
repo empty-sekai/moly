@@ -33,13 +33,19 @@
 //! and half extents grown by 1.01, and a box meets it when on every axis the
 //! distance of the centres is at most the sum of the half extents.
 //!
-//! A static shape that moves reaches the pruner as a bounds update
-//! (`update`): the flush of the scene query's dirty shapes writes each new
-//! box into the pool first, then, over the dirty list in order, marks a
-//! shape in the main tree for the next refit or moves it within its bucket
-//! tree (in place when the new box still meets its leaf's box, else out and
-//! in again), notes it for the rebuilt tree while the rebuild maps or
-//! refits, and asks for a new tree.
+//! A static shape that moves is marked dirty (`mark`): the scene query
+//! keeps a list of dirty shapes (a shape already on it keeps its place) and
+//! a flag that anything changed, which adds, removals and marks set. A
+//! query flushes when the flag is set (the dirty shapes, then the commit),
+//! and a physics step flushes the dirty shapes before its build step and
+//! commits after it. The flush of the dirty shapes (`update`) writes each
+//! new box into the pool first, then, over the list in order, marks a shape
+//! in the main tree for the next refit or moves it within its bucket tree
+//! (in place when the new box still meets its leaf's box, else out and in
+//! again), notes it for the rebuilt tree while the rebuild maps, refits or
+//! waits its last frame,
+//! and asks for a new tree. A removal takes a dirty shape off the list, the
+//! list's last shape moving into its place.
 //!
 //! What the model does not hold refuses by name (`Unmodeled`) and keeps
 //! refusing: non-finite boxes, an object added twice, the removal or update
@@ -1128,10 +1134,29 @@ pub struct StaticPruner {
     uncommitted: bool,
     needs_new_tree: bool,
     fixups: Vec<(u32, u32)>,
-    /// Pool indices updated while the rebuild mapped or refitted, marked on
-    /// the rebuilt tree when it comes in (a release keeps them).
+    /// Pool indices updated while the rebuild mapped, refitted or waited its
+    /// last frame, marked on the rebuilt tree when it comes in (a release
+    /// keeps them).
     to_refit: Vec<u32>,
+    /// The scene query's dirty shapes in list order, the box the next flush
+    /// writes for each, and whether anything changed since the last flush.
+    dirty: Vec<u64>,
+    dirty_boxes: HashMap<u64, Bounds>,
+    sq_dirty: bool,
+    /// The shapes the flushes wrote since they were last taken, in order.
+    flushed: Vec<u64>,
     unmodeled: Option<Unmodeled>,
+}
+
+/// The scene query's words beside the pruner's, for comparison with the
+/// engine: the rebuild's refit list and removal fixups, the dirty list (as
+/// pruner handles) and the changed flag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneQuerySnapshot {
+    pub to_refit: u32,
+    pub fixups: u32,
+    pub dirty: Vec<u32>,
+    pub sq_dirty: bool,
 }
 
 impl Default for StaticPruner {
@@ -1160,6 +1185,10 @@ impl StaticPruner {
             needs_new_tree: false,
             fixups: Vec::new(),
             to_refit: Vec::new(),
+            dirty: Vec::new(),
+            dirty_boxes: HashMap::new(),
+            sq_dirty: false,
+            flushed: Vec::new(),
             unmodeled: None,
         }
     }
@@ -1179,6 +1208,7 @@ impl StaticPruner {
             self.refuse("an object added twice");
             return None;
         }
+        self.sq_dirty = true;
         self.uncommitted = true;
         let handle = self.pool.add(id, bounds);
         self.handles.insert(id, handle);
@@ -1196,6 +1226,17 @@ impl StaticPruner {
             self.refuse("the removal of an object the pruner does not hold");
             return;
         };
+        self.sq_dirty = true;
+        if !arms::on("dirty-removed-still-flushed") {
+            if let Some(at) = self.dirty.iter().position(|&d| d == id) {
+                if arms::on("dirty-remove-keeps-order") {
+                    self.dirty.remove(at);
+                } else {
+                    self.dirty.swap_remove(at);
+                }
+                self.dirty_boxes.remove(&id);
+            }
+        }
         self.uncommitted = true;
         let (index, relocated) = self.pool.remove(handle);
         let rebuilding = self.building.is_some() || self.built.is_some();
@@ -1221,6 +1262,48 @@ impl StaticPruner {
             self.release();
             self.uncommitted = true;
         }
+    }
+
+    /// A static shape moved: it goes on the dirty list (a shape already on it
+    /// keeps its place) with the box the next flush writes for it.
+    pub fn mark(&mut self, id: u64, bounds: Bounds) {
+        if !self.handles.contains_key(&id) {
+            self.refuse("the move of an object the pruner does not hold");
+            return;
+        }
+        self.sq_dirty = true;
+        if arms::on("update-at-mark") {
+            self.update(&[(id, bounds)]);
+            return;
+        }
+        if !self.dirty_boxes.contains_key(&id) || arms::on("dirty-no-dedupe") {
+            self.dirty.push(id);
+        }
+        self.dirty_boxes.insert(id, bounds);
+    }
+
+    /// The flush of the dirty shapes, in list order.
+    fn flush_shapes(&mut self) {
+        let list = std::mem::take(&mut self.dirty);
+        let shapes: Vec<(u64, Bounds)> = list.iter().filter_map(|id| {
+            self.dirty_boxes.get(id).map(|&b| (*id, b))
+        }).collect();
+        self.dirty_boxes.clear();
+        self.flushed.extend(shapes.iter().map(|&(id, _)| id));
+        self.update(&shapes);
+    }
+
+    /// A scene query's flush: when anything changed, the dirty shapes, then
+    /// the commit.
+    pub fn flush_updates(&mut self) {
+        // With the flag clear the dirty list is empty and the commit has
+        // nothing to do, so a flush that ignored the flag is no variant.
+        if !self.sq_dirty {
+            return;
+        }
+        self.flush_shapes();
+        self.commit();
+        self.sq_dirty = false;
     }
 
     /// The flush of dirty static shapes: every shape's new pruner box goes
@@ -1261,7 +1344,15 @@ impl StaticPruner {
             } else if !arms::on("update-bucket-skipped") && !self.bucket.update(index, &self.pool.boxes) {
                 self.unmodeled.get_or_insert(Unmodeled("an updated object in neither the tree nor the bucket"));
             }
-            if matches!(self.progress, Progress::NewMapping | Progress::FullRefit) && !arms::on("update-no-to-refit") {
+            // The engine's stage test is `progress - 3 <= 2` unsigned: the
+            // new mapping, the full refit and the last frame (the 4.1 source
+            // names only the first two).
+            let stages = if arms::on("update-to-refit-source-stages") {
+                matches!(self.progress, Progress::NewMapping | Progress::FullRefit)
+            } else {
+                matches!(self.progress, Progress::NewMapping | Progress::FullRefit | Progress::LastFrame)
+            };
+            if stages && !arms::on("update-no-to-refit") {
                 self.to_refit.push(index);
             }
         }
@@ -1352,11 +1443,20 @@ impl StaticPruner {
         true
     }
 
-    /// One physics step: a rebuild step, then the commit. True when the
-    /// rebuild finished on this step.
+    /// One physics step: the dirty shapes, a rebuild step, then the commit.
+    /// True when the rebuild finished on this step.
     pub fn step(&mut self) -> bool {
+        if arms::on("flush-after-build-step") {
+            let finished = self.build_step();
+            self.flush_shapes();
+            self.commit();
+            self.sq_dirty = false;
+            return finished;
+        }
+        self.flush_shapes();
         let finished = self.build_step();
         self.commit();
+        self.sq_dirty = false;
         finished
     }
 
@@ -1430,7 +1530,11 @@ impl StaticPruner {
     /// The shapes one box query meets, in the engine's visit order, or why
     /// the model cannot give it. Commits first, as the query's flush does.
     pub fn overlap(&mut self, centre: [f32; 3], half: [f32; 3]) -> Result<Vec<u64>, Unmodeled> {
-        self.commit();
+        if arms::on("query-no-flush") {
+            self.commit();
+        } else {
+            self.flush_updates();
+        }
         if let Some(e) = self.unmodeled {
             return Err(e);
         }
@@ -1458,6 +1562,21 @@ impl StaticPruner {
     /// The objects in pool order.
     pub fn pool_order(&self) -> &[u64] {
         &self.pool.objects[..self.pool.count]
+    }
+
+    /// The scene query's words (see [`SceneQuerySnapshot`]).
+    pub fn scene_query_snapshot(&self) -> SceneQuerySnapshot {
+        SceneQuerySnapshot {
+            to_refit: self.to_refit.len() as u32,
+            fixups: self.fixups.len() as u32,
+            dirty: self.dirty.iter().filter_map(|id| self.handles.get(id).copied()).collect(),
+            sq_dirty: self.sq_dirty,
+        }
+    }
+
+    /// The shapes the flushes since the last call wrote, in order.
+    pub fn take_flushed(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.flushed)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1493,6 +1612,15 @@ mod tests {
         "progressive-pos-first", "no-leaf-box-test", "hint-not-less-3", "no-adaptive-term",
         "query-not-inflated", "no-rebuild-fixups", "stale-box-cleared", "bucket-neg-first",
         "bucket-split-gt", "bucket-nearer-tie", "no-rotation", "rotation-ratio-2",
+    ];
+
+    /// The named variants of the bounds update and the scene query's flush;
+    /// the update rows must make each differ.
+    const UPDATE_ARMS: [&str; 12] = [
+        "update-keeps-tree", "update-no-refit-mark", "update-bucket-skipped", "update-no-to-refit",
+        "update-to-refit-source-stages",
+        "update-bucket-reinsert", "update-at-mark", "dirty-no-dedupe", "dirty-remove-keeps-order",
+        "dirty-removed-still-flushed", "flush-after-build-step", "query-no-flush",
     ];
 
     fn field<'v>(v: &'v Value, key: &str) -> &'v Value {
@@ -1560,11 +1688,15 @@ mod tests {
         m_visits: usize,
         m_state: usize,
         refused: usize,
+        updates: usize,
+        flushes: usize,
+        m_flushed: usize,
+        m_sq: usize,
     }
 
     impl Counts {
         fn mismatches(&self) -> usize {
-            self.m_handle + self.m_step + self.m_visits + self.m_state + self.refused
+            self.m_handle + self.m_step + self.m_visits + self.m_state + self.refused + self.m_flushed + self.m_sq
         }
     }
 
@@ -1599,7 +1731,18 @@ mod tests {
                         }
                     }
                     "remove" => p.remove(uint(field(op, "id"))),
+                    // The commit rows: a direct commit of the pruner, or the
+                    // scene query's flush in the rows that carry its words.
+                    "commit" if rec.get("state").and_then(|s| s.get("sqDirty")).is_some() => p.flush_updates(),
                     "commit" => p.commit(),
+                    "update" => {
+                        let b = items(field(op, "bounds"));
+                        let bounds: Bounds = std::array::from_fn(|k| bits(&b[k]));
+                        let id = uint(field(op, "id"));
+                        boxes.insert(id, bounds);
+                        n.updates += 1;
+                        p.mark(id, bounds);
+                    }
                     "step" => {
                         let got = p.step();
                         let want = field(rec, "finished").as_bool().expect("finished");
@@ -1642,6 +1785,29 @@ mod tests {
                     n.m_state += 1;
                     note("state", format!("model {got:?} native {want:?}"));
                 }
+                // The flush order and the scene query's words, where the rows
+                // carry them (the timestamp is not modelled).
+                let state = field(rec, "state");
+                if state.get("sqDirty").is_some() {
+                    let want_flushed: Vec<u64> = rec.get("flushed").map_or(Vec::new(), |f| items(f).iter().map(uint).collect());
+                    let got_flushed = p.take_flushed();
+                    n.flushes += usize::from(!want_flushed.is_empty());
+                    if got_flushed != want_flushed {
+                        n.m_flushed += 1;
+                        note("flushed", format!("model {got_flushed:?} native {want_flushed:?}"));
+                    }
+                    let want_sq = SceneQuerySnapshot {
+                        to_refit: uint(field(state, "toRefit")) as u32,
+                        fixups: uint(field(state, "fixups")) as u32,
+                        dirty: items(field(state, "dirty")).iter().map(|v| uint(v) as u32).collect(),
+                        sq_dirty: uint(field(state, "sqDirty")) != 0,
+                    };
+                    let got_sq = p.scene_query_snapshot();
+                    if got_sq != want_sq {
+                        n.m_sq += 1;
+                        note("scene query", format!("model {got_sq:?} native {want_sq:?}"));
+                    }
+                }
             }
         }
         n
@@ -1670,7 +1836,9 @@ mod tests {
         }
         println!("pruner replay {n:?} mismatches {}", n.mismatches());
         let mut red = Vec::new();
-        for arm in ARMS {
+        let update_rows = n.updates > 0;
+        let arms: Vec<&str> = ARMS.iter().chain(if update_rows { UPDATE_ARMS.as_slice() } else { &[] }).copied().collect();
+        for arm in arms {
             arms::set(Some(arm));
             let m = replay(&rows, &mut Vec::new());
             red.push((arm, m.mismatches(), m.m_visits, m.m_state));
