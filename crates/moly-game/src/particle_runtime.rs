@@ -1620,7 +1620,10 @@ pub(crate) fn arm(name: &str) -> bool {
 /// widening, and any other system's update has no time and skips, as does the
 /// restart's own zero-time update after it. The birth path is decided as at a
 /// first Play. The emitter velocity survives, as Play does not clear it.
-pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, ctx: &Context)
+/// A sub-emitter parent's birth events (`edges`) are installed with the
+/// owner, as Play installs them; the legacy step records none, so a parent
+/// the native installer leaves there is refused.
+pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, edges: Option<&EventEdges>, ctx: &Context)
     -> Result<BirthPath, String> {
     if system.emitter.auto_random_seed != Some(false) {
         return Err("Simulate restart needs the manual owner the playable's Initialize sets".into());
@@ -1636,6 +1639,14 @@ pub(crate) fn director_restart(system: &mut Runtime, route: &SourceRoute, ctx: &
     // shared manager, so an empty one stands in.
     let path = install_native_birth(system, &mut seed::SystemSeedManager::default(), route, None)
         .map_err(|error| error.to_string())?;
+    if let Some(edges) = edges {
+        match (&path, system.native_birth.as_mut()) {
+            (BirthPath::Native, Some(native)) => native.events = Some(BirthEvents::with_edges(edges.clone())),
+            (BirthPath::Legacy(reason), _) =>
+                return Err(format!("sub-emitter parent refused by the native birth installer: {reason}")),
+            (BirthPath::Native, None) => return Err("native birth owner missing after its install".into()),
+        }
+    }
     system.prewarmed = true;
     let mut warm_dt = None;
     if let Some(warm) = warm {

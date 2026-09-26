@@ -315,7 +315,7 @@ fn prepare(
                             .map_err(|reason| format!("{}: source particle control rejected {reason}", candidate.plan.node))?;
                     }
                     world.entity_mut(draw).insert((crate::uber_particle::FixtureParticleLive(system),
-                        DirectorRoute(candidate.plan.route.clone())));
+                        DirectorRoute(candidate.plan.route.clone(), candidate.plan.event_edges.clone())));
                 }
                 Stepping::Played => {
                     let played = world.resource_scope(|_, mut seeds: Mut<crate::particle_runtime::seed::SystemSeedManager>|
@@ -391,9 +391,11 @@ pub(crate) enum Stepping {
     Director,
 }
 
-/// The source route of a system a Director prepared, which its restarts read.
+/// The source route of a system a Director prepared and its birth events (a
+/// sub-emitter parent's), which its restarts read.
 #[derive(Component, Clone)]
-pub(crate) struct DirectorRoute(pub(crate) crate::particle_runtime::SourceRoute);
+pub(crate) struct DirectorRoute(pub(crate) crate::particle_runtime::SourceRoute,
+    pub(crate) Option<crate::particle_runtime::EventEdges>);
 
 /// emitterVelocityMode 1 reads a Rigidbody on the system's GameObject or a
 /// Transform ancestor (see [`resolve_velocity_mode`]). A fixture document
@@ -459,18 +461,16 @@ fn admit(
     if plan.trail.is_some() && plan.emitter.simulation_space == SimulationSpace::Local {
         trail_owner_admissible(package, nodes, &plan.node).map_err(refuse)?;
     }
+    // Noise, sub-emitter events and emission over distance run with the
+    // native birth owner this host installs. A sub-emitter target is refused
+    // by the judgement (its owner words exist only for a site effect on its
+    // authored chain; this host always judges with an instance anchor), so a
+    // parent's commands find no installed target and are dropped, counted,
+    // under either stepping. The Director's Simulate steps a system's
+    // sub-emitters before the system (see `fixture_timeline_particles::advance`),
+    // which with no target installed leaves the system's own update.
     if stepping == Stepping::Played {
-        // Noise, sub-emitter events and emission over distance run with the
-        // native birth owner this host installs (a sub-emitter target is
-        // refused by the judgement: its owner words exist only for a site
-        // effect on its authored chain, so a parent's commands find no
-        // installed target and are dropped, counted).
         return Ok(plan);
-    }
-    // The Director's Simulate simulates a system's sub-emitters before the
-    // system itself (SimulateChildrenRecursive), which this host does not run.
-    if plan.event_edges.is_some() {
-        return Err(refuse("sub-emitter events: the Director's Simulate steps sub-emitters first, which this host does not run".into()));
     }
     crate::particle_runtime::director_restart_warm(&plan.emitter, &plan.route, plan.sub_emitter_max_lifetime)
         .map_err(refuse)?;
@@ -1187,6 +1187,11 @@ impl Played {
     /// The source route its Play decided the birth path on.
     pub(crate) fn route(&self) -> &crate::particle_runtime::SourceRoute {
         &self.route
+    }
+
+    /// The birth events its Play installed (a sub-emitter parent's).
+    pub(crate) fn event_edges(&self) -> Option<&crate::particle_runtime::EventEdges> {
+        self.event_edges.as_ref()
     }
 
     pub(crate) fn birth_path(&self) -> String {
