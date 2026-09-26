@@ -24,7 +24,9 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 9] = [
+pub(crate) const PENDING_SECTIONS: [&str; 11] = [
+    super::music::SECTION,
+    super::avatar::SECTION,
     SECTION_GAMEDATA,
     SECTION_STAMINA,
     SECTION_PASS,
@@ -120,6 +122,8 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(
             }
         }
     }
+    super::music::check_records(&doc.music_settings, masters.music_records.as_deref())?;
+    super::avatar::check(&masters.avatar, &doc.avatar)?;
     if let Some((gates, skins)) = &masters.gates {
         if !gates.contains(&doc.gate.gate_id) {
             return Err(format!(
@@ -151,6 +155,15 @@ fn edit_path(
             Some(section) => Delivery::NextResponse(section),
             None => Delivery::Live,
         });
+    }
+    if let Some(result) = super::home_action::edit_path(&mut doc.home_action_reply, &parts, value) {
+        return result.map(|()| Delivery::Live);
+    }
+    if let Some(result) = super::music::edit_path(&mut doc.music_settings, &parts, value) {
+        return result.map(|()| Delivery::NextResponse(super::music::SECTION));
+    }
+    if let Some(result) = super::avatar::edit_path(&mut doc.avatar, &parts, path, value) {
+        return result.map(|()| Delivery::NextResponse(super::avatar::SECTION));
     }
     match parts.as_slice() {
         ["clock"] => {
@@ -550,6 +563,14 @@ fn masters_value(masters: &Masters) -> Value {
         "ranks": masters.ranks.as_ref().map(|rows| rows.iter().map(|(rank, exp)| json!({"mysekaiRank": rank, "totalExp": exp})).collect::<Vec<_>>()),
         "gates": masters.gates.as_ref().map(|(gates, _)| gates.clone()),
         "gateSkins": masters.gates.as_ref().map(|(_, skins)| skins.clone()),
+        "musicRecords": masters.music_records.as_ref().map(Vec::len),
+        "configs": masters.configs.as_ref().map(|configs| configs.len()),
+        "avatar": {
+            "costumes": masters.avatar.costumes.as_ref().map(|rows| rows.len()),
+            "accessories": masters.avatar.accessories.as_ref().map(|rows| rows.len()),
+            "skinColors": masters.avatar.skin_colors.as_ref().map(|rows| rows.len()),
+            "coordinates": masters.avatar.coordinates.as_ref().map(|rows| rows.len()),
+        },
         "missing": masters.missing,
     })
 }
@@ -653,6 +674,19 @@ fn policies() -> Value {
     ])
 }
 
+/// The document's sections: the core ones, the delivery's, the home
+/// actions', the music settings' and the avatar's.
+fn other_sections(core: Value, delivery: Value) -> Value {
+    [
+        delivery,
+        super::home_action::schema_sections(),
+        super::music::schema_sections(),
+        super::avatar::schema_sections(),
+    ]
+    .into_iter()
+    .fold(core, concat)
+}
+
 /// Two JSON arrays as one.
 fn concat(first: Value, second: Value) -> Value {
     let mut out = match first {
@@ -669,9 +703,9 @@ pub(crate) fn schema(model: &ServerModel) -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": concat(sections(&model.masters), super::delivery::schema_sections(Some(model))),
+        "sections": other_sections(sections(&model.masters), super::delivery::schema_sections(Some(model))),
         "actions": actions(),
-        "policies": concat(policies(), super::delivery::schema_policies()),
+        "policies": concat(concat(policies(), super::delivery::schema_policies()), super::home_action::schema_policies()),
         "masters": masters_value(&model.masters),
         "joined": model.joined,
     })
@@ -681,9 +715,9 @@ pub(crate) fn schema_without_model() -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": concat(sections(&Masters::default()), super::delivery::schema_sections(None)),
+        "sections": other_sections(sections(&Masters::default()), super::delivery::schema_sections(None)),
         "actions": actions(),
-        "policies": concat(policies(), super::delivery::schema_policies()),
+        "policies": concat(concat(policies(), super::delivery::schema_policies()), super::home_action::schema_policies()),
         "masters": null,
         "joined": false,
     })
