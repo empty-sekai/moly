@@ -14,13 +14,12 @@ pub struct DevTools;
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Every surface gated by [`dev_tools`], named in the game-mode startup line.
-pub(crate) const GATED: [&str; 9] = [
+pub(crate) const GATED: [&str; 8] = [
     "settings panel UI (F10 panel, its buttons and refresh)",
     "settings panel keys F10/F12",
     "content library F9 key and its QA auto-open",
     "fixture gallery preview rows",
     "player-data UI",
-    "frame capture",
     "site Tab key",
     "site digit keys",
     "weather C key",

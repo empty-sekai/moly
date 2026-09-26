@@ -244,10 +244,7 @@ pub fn install(app: &mut App) {
     crate::player_data::install(app);
     crate::fixture_colors::install(app);
     app.add_message::<crate::frame_capture::CaptureFrame>()
-        .add_systems(
-            PostUpdate,
-            crate::frame_capture::capture.run_if(crate::dev_tools::dev_tools),
-        );
+        .add_systems(PostUpdate, crate::frame_capture::capture);
     app.add_systems(
         Startup,
         crate::game_settings::setup

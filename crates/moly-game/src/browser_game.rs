@@ -453,40 +453,14 @@ fn check_source_region(
     }
 }
 
-fn cover_state(
-    covers: &Query<(&Sprite, &Visibility), With<crate::entry::cover::EntryCover>>,
-) -> &'static str {
-    match covers.iter().next() {
-        None => "gone",
-        Some((_, Visibility::Hidden)) => "gone",
-        Some((sprite, _)) => match sprite.color.alpha() {
-            alpha if alpha >= 1.0 => "opaque",
-            alpha if alpha > 0.0 => "fading",
-            _ => "gone",
-        },
-    }
-}
-
-/// The entry's source step names are only logged; the published step is
-/// derived from its public gates and cover.
-fn publish(
-    entry: Option<Res<crate::entry::EntrySequence>>,
-    covers: Query<(&Sprite, &Visibility), With<crate::entry::cover::EntryCover>>,
-    errors: Res<GameErrors>,
-) {
-    let cover = cover_state(&covers);
-    let started = entry.is_some();
-    let control_open = started && crate::entry::control_open(entry.as_deref());
-    let hud_open = started && crate::entry::hud_open(entry.as_deref());
-    let site_input_open = started && crate::entry::site_input_open(entry);
-    let step = match (started, control_open, hud_open, site_input_open) {
-        (false, ..) => "starting",
-        (true, false, false, false) if cover == "opaque" => "covered",
-        (true, false, false, false) => "joining",
-        (true, true, true, true) => "entered",
-        (true, true, false, _) => "control",
-        (true, _, _, _) => "hud",
-    };
+/// The cover and the await as the entry itself holds them; "starting" until
+/// the entry exists.
+fn publish(entry: Option<Res<crate::entry::EntrySequence>>, errors: Res<GameErrors>) {
+    let seq = entry.as_deref();
+    let cover = seq.map_or("opaque", crate::entry::EntrySequence::cover_state);
+    let step = seq.map_or("starting", crate::entry::EntrySequence::phase_name);
+    let control_open = seq.is_some() && crate::entry::control_open(seq);
+    let hud_open = seq.is_some() && crate::entry::hud_open(seq);
     let next = Published {
         cover,
         step,
