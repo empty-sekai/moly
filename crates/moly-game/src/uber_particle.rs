@@ -1419,7 +1419,7 @@ pub(crate) fn advance_fixture_particles(
         }
         // The renderer's second draw: the trail strip from this frame's
         // recorded points.
-        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.1)) {
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
             crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
         }
     }
@@ -1428,7 +1428,7 @@ pub(crate) fn advance_fixture_particles(
 
 /// Empty a fixture-host system's trail draw with its particle draw.
 fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
-    if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.1)) {
+    if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
         if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
     }
 }

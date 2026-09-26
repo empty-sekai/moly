@@ -57,7 +57,7 @@ pub(crate) fn discard_abandoned_controls(world: &mut World, now: f64) {
 /// The trail draw of a fixture-host system: the renderer's second draw, a
 /// child of the particle draw (so it goes with it), and its mesh.
 #[derive(Component)]
-pub(crate) struct FixtureTrailDraw(pub(crate) Entity, pub(crate) Handle<Mesh>);
+pub(crate) struct FixtureTrailDraw(pub(crate) Handle<Mesh>);
 
 /// The prefab of a placed fixture: the fixture interface package, whose root
 /// carries the FixtureView the placement writes.
@@ -331,7 +331,7 @@ fn prepare(
                 source.enabled = true;
                 source.follows = Some(draw);
                 world.entity_mut(trail).insert(source);
-                world.entity_mut(draw).insert(FixtureTrailDraw(trail, trail_mesh));
+                world.entity_mut(draw).insert(FixtureTrailDraw(trail_mesh));
             }
             draws.push(draw);
         }
@@ -1147,7 +1147,7 @@ pub(crate) fn spawn_when_ready(
                 trail_source.enabled = true;
                 trail_source.follows = Some(draw);
                 commands.entity(trail).try_insert(trail_source);
-                commands.entity(draw).try_insert(FixtureTrailDraw(trail, trail_mesh));
+                commands.entity(draw).try_insert(FixtureTrailDraw(trail_mesh));
             }
             // The prefab can be destroyed on the frame its draw turns ready (a
             // cannon's effects go with the cannon); its draw is gone then, and
