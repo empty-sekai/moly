@@ -1606,8 +1606,11 @@ fn volume_update_local(settings: &mut LocalVolumeSettings, draft: &[u8; 6]) {
     settings.system = draft_group(draft, Group::System);
 }
 
-/// `OptionDialog.Save`: every set-up page's UpdateLocalData, UpdateServerData,
-/// then both storage objects in one write of the local settings document.
+/// `OptionDialog.Save`: every set-up page's UpdateLocalData (each page's
+/// method returns while its Setup has not run; read natively), UpdateServerData,
+/// then both storage objects: the volumes through the audio module's own
+/// write, the other members and `LiveSettingData` in one more write of the
+/// local settings document.
 fn save(
     state: &mut OptionDialogState,
     settings: &mut LocalVolumeSettings,
@@ -1627,8 +1630,8 @@ fn save(
         app.hide_story_favorite_comment = selected(page.favorite) != 0;
     }
     update_server_data(state);
-    let mut sections: Vec<(&str, Value)> = crate::audio::settings_sections(settings).to_vec();
-    sections.extend(app.sections());
+    crate::audio::save_volume_settings(settings);
+    let mut sections: Vec<(&str, Value)> = app.sections();
     if let Some(data) = &state.live_data {
         sections.push((LIVE_SECTION, Value::Object(data.0.clone())));
     }
@@ -1638,7 +1641,7 @@ fn save(
                 .map(|document| sections.iter().all(|(key, value)| &document[*key] == value));
             match readback {
                 Ok(true) => info!(
-                    "[option] {cause}: Save wrote {} sections (volumes, ApplicationLocalSettings members, {LIVE_SECTION}) to {}; read back equal",
+                    "[option] {cause}: Save wrote {} sections (ApplicationLocalSettings members, {LIVE_SECTION}) to {}; read back equal",
                     sections.len(),
                     crate::settings_store::location()
                 ),
