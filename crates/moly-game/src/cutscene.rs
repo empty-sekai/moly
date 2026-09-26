@@ -44,10 +44,20 @@
 //!   stops; logged (named render gap: the ring dither is not drawn);
 //! - site expansion: `SetSiteExtension` each frame with the clip's centre,
 //!   colours and radius `start + t (end - start)`, and `ResetGlobalDissolve`
-//!   when the graph stops; logged (named render gap: the site shaders'
-//!   global dissolve is not drawn);
-//! - effect and control clips: refused by name with their source, bounds and
-//!   play and stop edges (the particle host has no API for them yet);
+//!   when the graph stops, through [`crate::site_extension`] (the site
+//!   shaders' global dissolve);
+//! - effect clips (`EffectTrack`, `EffectBehaviour`): the template prefab
+//!   is instantiated inactive with no parent (built from the package's
+//!   particle document), `SetEffectInstance` at graph build lists its
+//!   systems, takes the first as the root particle and activates the
+//!   instance, whose playOnAwake systems play; the clip's play edge places
+//!   it at the clip offset and plays the root particle, its end stops it
+//!   (`Stop()`, or stop and clear for a looping matched-duration clip), and
+//!   the graph's end destroys it; played and stopped through the particle
+//!   host;
+//! - control clips: driven by the runner through the particle host where
+//!   the director's exposed reference resolves to a spawned node, refused
+//!   by name otherwise;
 //! - SE: played by the runner; an SE with no audio route plays silent.
 //!
 //! Named differences: the cut-scene root's own pose is not in any package and
@@ -69,9 +79,10 @@ use crate::fixture_activity_provider::FixtureActivityProvider;
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner};
 use crate::fixture_activity_timeline::{
     self as timeline, CutScenePayload, ExpansionEffect, FixtureActivityTimelines, StartTimeline,
-    TimelineBindings, TimelineClipKey, TimelineDefinition, TimelineOwner, TimelineOwnerKind,
-    TimelinePayload, TimelineStatus, TimelineTimeoutBudget, TimelineToken,
+    TimelineBindings, TimelineClip, TimelineClipKey, TimelineDefinition, TimelineOwner,
+    TimelineOwnerKind, TimelinePayload, TimelineStatus, TimelineTimeoutBudget, TimelineToken,
 };
+use crate::fixture_timeline_particles::{self as particles, ParticlePlayBinding};
 use crate::game_state::{self, GameStateType};
 use crate::site::{HomeObstacleLevel, HomeObstacleRing, SiteActive, SiteSelection};
 use crate::site_expansion::law::SiteLevelRow;
@@ -89,9 +100,10 @@ const DEFAULT_LIMIT_LINE_WIDTH: f32 = 0.0;
 /// `FadePanelBehaviour.UpdateAlpha`: past this progress the clip holds its
 /// end value.
 const FADE_HOLD: f32 = 0.95;
-/// Product guard, not a source value: a load that has not resolved after
-/// this many real seconds is refused by name.
-const LOAD_WAIT_REAL: f64 = 30.0;
+/// Product report interval, not a source value: a load still waiting is
+/// named every this many real seconds (the source awaits it with no
+/// timeout).
+const LOAD_REPORT_REAL: f64 = 30.0;
 
 /// `ScreenLayerMysekaiHome.OnFinishStartAnimation`: the home screen became
 /// current (the entry's home setup, a door or cannon arrival at home).
@@ -116,8 +128,53 @@ struct VirtualCamera {
 #[derive(Clone, Debug)]
 struct EffectPrefab {
     name: String,
-    particle_systems: usize,
+    /// The prefab's serialized file and root GameObject.
+    file: String,
+    game_object: i64,
+    /// The GameObjects that carry a ParticleSystem, in the hierarchy's
+    /// depth-first order (children in their serialized order): the order
+    /// `GetComponentsInChildren<ParticleSystem>` lists them in.
+    particle_systems: Vec<i64>,
     root_scripts: Vec<String>,
+}
+
+/// An effect clip's template instance (`EffectTrack.CreateEffectObject`)
+/// and what `EffectBehaviour.SetEffectInstance` reads from it.
+struct EffectInstance {
+    /// The clip's display name.
+    name: String,
+    prefab: String,
+    /// The instance root (inactive until `SetEffectInstance` activates it).
+    root: Entity,
+    /// `rootParticle`: the first system the instance lists, by node path.
+    root_particle: String,
+    /// The root particle's subtrees the particle host plays, each prepared
+    /// as one object (`Play()` and `Stop()` on the root particle reach every
+    /// system below it), by node path.
+    played: Vec<(String, ParticlePlayBinding)>,
+    /// The listed systems below the root particle the host does not play,
+    /// each with the reason.
+    not_played: Vec<String>,
+    /// How many systems `GetComponentsInChildren<ParticleSystem>()` lists.
+    listed: usize,
+    /// The listed systems whose serialized seed is not the manual seed 0
+    /// (automatic, or another manual seed).
+    auto_seeded: Vec<String>,
+    /// How many systems the activation plays (playOnAwake, listed).
+    awake: usize,
+    included_loop: bool,
+    matched_duration: bool,
+    random_seed: bool,
+    /// `offset`, in the source frame.
+    offset: Vec3,
+}
+
+/// An effect clip's instance while it is being built and prepared.
+enum EffectSlot {
+    Pending(Option<Entity>),
+    Ready(Box<EffectInstance>),
+    /// Refused by name: the rest of the cut-scene plays.
+    Refused,
 }
 
 struct Load {
@@ -126,10 +183,18 @@ struct Load {
     package: String,
     prefab: String,
     tracks: Handle<JsonAsset>,
+    /// The particle index and the package's particle document the effect
+    /// clips' template prefabs are built from.
+    particle_index: Handle<JsonAsset>,
+    particle_document: Option<Handle<JsonAsset>>,
+    particles: Option<Arc<Value>>,
+    effects: HashMap<TimelineClipKey, EffectSlot>,
     root: Option<Entity>,
     draft: Option<TimelineBindings>,
     waiting: Option<String>,
     since_real: f64,
+    /// How many report intervals the wait has passed.
+    reported: u32,
 }
 
 struct Plan {
@@ -150,6 +215,8 @@ struct Plan {
     start: Vec3,
     /// SE clips that play silent.
     silent: HashSet<TimelineClipKey>,
+    /// The effect clips' prepared instances.
+    instances: HashMap<TimelineClipKey, EffectInstance>,
 }
 
 #[derive(Default)]
@@ -162,6 +229,11 @@ struct Play {
     dissolve: bool,
     camera_logged: f64,
     fade_logged: f64,
+    /// The graph's first frame ran (`SetEffectInstance` at graph build).
+    graph_built: bool,
+    /// The real time of the last live-particle sample of the effect
+    /// instances.
+    effect_sampled: f64,
 }
 
 enum Stage {
@@ -414,16 +486,22 @@ fn unlock_cutscene(world: &mut World, unlock: SiteLevelRow, rank: i32) -> Option
     let server = world.resource::<AssetServer>().clone();
     let tracks =
         server.load::<JsonAsset>(format!("moly://cutscene-timeline/tracks/{package}.json"));
+    let particle_index = server.load::<JsonAsset>("moly://fixture-particles-v2/index.json");
     Some(Load {
         unlock,
         rank,
         prefab: row.bundle.clone(),
         package,
         tracks,
+        particle_index,
+        particle_document: None,
+        particles: None,
+        effects: HashMap::new(),
         root: None,
         draft: None,
         waiting: None,
         since_real: now_real(world),
+        reported: 0,
     })
 }
 
@@ -643,9 +721,22 @@ fn read_prefab(
         if prefab.is_null() {
             continue;
         }
+        let game_object = |row: &Value| -> Result<i64, String> {
+            row["pathId"]
+                .as_str()
+                .and_then(|id| id.parse().ok())
+                .ok_or_else(|| format!("an effect prefab record has an unreadable pathId: {row}"))
+        };
         let effect = EffectPrefab {
             name: prefab["name"].as_str().unwrap_or("?").to_owned(),
-            particle_systems: prefab["particleSystems"].as_array().map_or(0, Vec::len),
+            file: prefab["asset"]["file"].as_str().unwrap_or("").to_owned(),
+            game_object: game_object(&prefab["asset"])?,
+            particle_systems: prefab["particleSystems"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|row| game_object(&row["gameObject"]))
+                .collect::<Result<_, _>>()?,
             root_scripts: prefab["rootScripts"]
                 .as_array()
                 .map(|rows| {
@@ -693,11 +784,19 @@ fn read_prefab(
 /// `FadeAndSetUpAsync`: the view is instantiated and placed, its assets and
 /// the director's tables load and the session is prepared.
 fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> {
-    if now_real(world) - load.since_real > LOAD_WAIT_REAL {
-        return Err(format!(
-            "still waiting after {LOAD_WAIT_REAL} s: {}",
+    // `LoadAssetAndSetUpAsync` is awaited with no timeout, and the fixtures
+    // stay hidden meanwhile, as in the source. Only the product's own
+    // preparation (the effect clips' particle programs) takes this long; a
+    // failed load refuses at once below.
+    let waited = now_real(world) - load.since_real;
+    if waited >= LOAD_REPORT_REAL * f64::from(load.reported + 1) {
+        load.reported += 1;
+        warn!(
+            "[cutscene] {}/{} still waiting after {waited:.0} s: {}",
+            load.package,
+            load.prefab,
             load.waiting.as_deref().unwrap_or("?")
-        ));
+        );
     }
     let server = world.resource::<AssetServer>().clone();
     if let LoadState::Failed(error) = server.load_state(&load.tracks) {
@@ -781,6 +880,9 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
     if let Err(error) = timeline::prepare_source_effects(world, &mut request) {
         return Err(error.to_string());
     }
+    if !prepare_effects(world, load, &definition, &effects, root) {
+        return Ok(None);
+    }
     if let Err(error) = timeline::validate_start(world, &request) {
         if error.retryable {
             wait(load, &error.to_string());
@@ -789,7 +891,7 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         return Err(error.to_string());
     }
     info!(
-        "[cutscene] {}/{}: Factory: view instantiated, CutSceneView.Setup(CutSceneRoot, the site transform at ({:.1},{:.1},{:.1})); director {} (duration {:.4} s, {} tracks, {} virtual cameras by exposed name, {} Control clips refused); CutScenePresenter: SetIsNeedLowHeightDither (logged only); LoadAssetAndSetUpAsync done",
+        "[cutscene] {}/{}: Factory: view instantiated, CutSceneView.Setup(CutSceneRoot, the site transform at ({:.1},{:.1},{:.1})); director {} (duration {:.4} s, {} tracks, {} virtual cameras by exposed name, {} Control clips driven, {} Control clips refused, {} effect clip instances prepared); CutScenePresenter: SetIsNeedLowHeightDither (logged only); LoadAssetAndSetUpAsync done",
         load.package,
         load.prefab,
         start.x,
@@ -799,10 +901,23 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         definition.duration,
         definition.tracks.len(),
         cameras.len(),
-        request.bindings.refused_controls.len()
+        request.bindings.controls.len(),
+        request.bindings.refused_controls.len(),
+        load.effects
+            .values()
+            .filter(|slot| matches!(slot, EffectSlot::Ready(_)))
+            .count()
     );
     let silent = request.bindings.silent_sounds.clone();
+    let instances = std::mem::take(&mut load.effects)
+        .into_iter()
+        .filter_map(|(key, slot)| match slot {
+            EffectSlot::Ready(instance) => Some((key, *instance)),
+            _ => None,
+        })
+        .collect();
     Ok(Some(Plan {
+        instances,
         silent,
         unlock: load.unlock.clone(),
         rank: load.rank,
@@ -827,6 +942,597 @@ fn wait(load: &mut Load, reason: &str) {
         );
         load.waiting = Some(reason.to_owned());
     }
+}
+
+/// The package's particle document; `Ok(None)` while it loads.
+fn particle_document(world: &mut World, load: &mut Load) -> Result<Option<Arc<Value>>, String> {
+    if let Some(document) = &load.particles {
+        return Ok(Some(document.clone()));
+    }
+    let server = world.resource::<AssetServer>().clone();
+    let json = |world: &World, handle: &Handle<JsonAsset>| -> Result<Option<Value>, String> {
+        if let LoadState::Failed(error) = server.load_state(handle) {
+            return Err(format!("{error}"));
+        }
+        let Some(asset) = world.resource::<Assets<JsonAsset>>().get(handle) else {
+            return Ok(None);
+        };
+        serde_json::from_str(&asset.0)
+            .map(Some)
+            .map_err(|error| format!("{error}"))
+    };
+    let handle = match &load.particle_document {
+        Some(handle) => handle.clone(),
+        None => {
+            let Some(index) = json(world, &load.particle_index)
+                .map_err(|error| format!("the particle index: {error}"))?
+            else {
+                return Ok(None);
+            };
+            let file = index["packages"][load.package.as_str()]["file"]
+                .as_str()
+                .filter(|file| {
+                    !file.contains('/') && !file.contains('\\') && file.ends_with(".json")
+                })
+                .ok_or_else(|| format!("the particle index has no document for {}", load.package))?
+                .to_owned();
+            let handle = server.load::<JsonAsset>(format!("moly://fixture-particles-v2/{file}"));
+            load.particle_document = Some(handle.clone());
+            handle
+        }
+    };
+    let Some(document) =
+        json(world, &handle).map_err(|error| format!("the particle document: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let document = Arc::new(document);
+    load.particles = Some(document.clone());
+    Ok(Some(document))
+}
+
+/// `EffectTrack.CreateTrackMixer` ahead of the graph: each effect clip's
+/// template prefab is instantiated (`CreateEffectObject`) and the systems
+/// its instance plays are prepared on the particle host. False while
+/// something loads or prepares. A clip whose instance cannot be built or
+/// prepared is refused by name and the rest of the cut-scene plays.
+fn prepare_effects(
+    world: &mut World,
+    load: &mut Load,
+    definition: &TimelineDefinition,
+    effects: &HashMap<String, EffectPrefab>,
+    root: Entity,
+) -> bool {
+    let clips: Vec<&TimelineClip> = definition
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .filter(|clip| {
+            matches!(
+                &clip.payload,
+                TimelinePayload::CutScene(CutScenePayload::Effect(template)) if template.prefab.is_some()
+            )
+        })
+        .collect();
+    if clips.iter().all(|clip| {
+        matches!(
+            load.effects.get(&clip.key),
+            Some(EffectSlot::Ready(_)) | Some(EffectSlot::Refused)
+        )
+    }) {
+        return true;
+    }
+    let document = match particle_document(world, load) {
+        Ok(Some(document)) => document,
+        Ok(None) => {
+            wait(load, "the effect clips' particle document is loading");
+            return false;
+        }
+        Err(reason) => {
+            for clip in &clips {
+                refuse_effect(world, load, clip, &reason);
+            }
+            return true;
+        }
+    };
+    let mut pending = false;
+    let mut prefabs_seen: HashSet<i64> = HashSet::new();
+    for clip in clips {
+        let TimelinePayload::CutScene(CutScenePayload::Effect(template)) = &clip.payload else {
+            continue;
+        };
+        let Some(prefab) = clip
+            .playable
+            .as_ref()
+            .and_then(|id| effects.get(&format!("{}/{}", id.file, id.path_id)))
+        else {
+            refuse_effect(
+                world,
+                load,
+                clip,
+                "the track table has no prefab record for its template",
+            );
+            continue;
+        };
+        // `CreateEffectObject` keys its instances by the prefab: a second
+        // clip of the same prefab shares the first one's instance, which is
+        // not handled here.
+        if !prefabs_seen.insert(prefab.game_object) {
+            refuse_effect(world, load, clip, "another effect clip of this cut-scene names the same prefab; a shared instance is not handled");
+            continue;
+        }
+        let spawned = match load.effects.get(&clip.key) {
+            Some(EffectSlot::Ready(_)) | Some(EffectSlot::Refused) => continue,
+            Some(EffectSlot::Pending(spawned)) => *spawned,
+            None => None,
+        };
+        let instance = match spawned {
+            Some(instance) => instance,
+            None => match instantiate_effect(world, &document, prefab, root) {
+                Ok(instance) => {
+                    load.effects
+                        .insert(clip.key.clone(), EffectSlot::Pending(Some(instance)));
+                    instance
+                }
+                Err(reason) => {
+                    refuse_effect(world, load, clip, &reason);
+                    continue;
+                }
+            },
+        };
+        let read = match read_effect_instance(world, &document, prefab, instance) {
+            Ok(read) => read,
+            Err(reason) => {
+                refuse_effect(world, load, clip, &reason);
+                continue;
+            }
+        };
+        let mut played = Vec::new();
+        let mut not_played = read.not_played.clone();
+        let mut waiting = false;
+        for (node, node_path) in &read.subtrees {
+            match particles::prepare_played_object(world, root, *node, &load.package) {
+                Ok(binding) => played.push((node_path.clone(), binding)),
+                Err(error) if error.retryable => waiting = true,
+                Err(error) => not_played.push(format!(
+                    "{node_path} and its subtree (refused by the particle host: {})",
+                    error.message
+                )),
+            }
+        }
+        if waiting {
+            pending = true;
+            continue;
+        }
+        if played.is_empty() {
+            refuse_effect(
+                world,
+                load,
+                clip,
+                &format!(
+                    "the particle host plays none of its systems: {}",
+                    not_played.join("; ")
+                ),
+            );
+            continue;
+        }
+        let name = clip.source_envelope["m_DisplayName"]
+            .as_str()
+            .unwrap_or("?")
+            .to_owned();
+        info!(
+            "[cutscene] {}/{}: EffectTrack.CreateEffectObject({}): the template is deactivated and instantiated with no parent ({} nodes); GetComponentsInChildren<ParticleSystem>() lists {} systems, rootParticle {}; prepared on the particle host: {}",
+            load.package,
+            load.prefab,
+            prefab.name,
+            read.nodes,
+            read.listed,
+            read.root_path,
+            played
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !not_played.is_empty() {
+            error!(
+                "[cutscene] {}/{}: EffectClip {name}: {} listed systems are not played (named gap; the others play): {}",
+                load.package,
+                load.prefab,
+                not_played.len(),
+                not_played.join("; ")
+            );
+        }
+        load.effects.insert(
+            clip.key.clone(),
+            EffectSlot::Ready(Box::new(EffectInstance {
+                name,
+                prefab: prefab.name.clone(),
+                root: instance,
+                root_particle: read.root_path,
+                played,
+                not_played,
+                listed: read.listed,
+                auto_seeded: read.auto_seeded,
+                awake: read.awake,
+                included_loop: read.included_loop,
+                matched_duration: template.matched_duration,
+                random_seed: template.random_seed,
+                offset: Vec3::new(
+                    template.offset[0] as f32,
+                    template.offset[1] as f32,
+                    template.offset[2] as f32,
+                ),
+            })),
+        );
+    }
+    if pending {
+        wait(load, "the effect clips' systems are preparing");
+    }
+    !pending
+}
+
+/// An effect clip refused by name: its instance (if built) is removed and
+/// the rest of the cut-scene plays.
+fn refuse_effect(world: &mut World, load: &mut Load, clip: &TimelineClip, reason: &str) {
+    if let Some(EffectSlot::Pending(Some(instance))) = load.effects.get(&clip.key) {
+        world.despawn(*instance);
+    }
+    load.effects.insert(clip.key.clone(), EffectSlot::Refused);
+    error!(
+        "[cutscene] {}/{}: EffectClip {} [{:.4}, {:.4}): refused: {reason}; it plays nothing",
+        load.package,
+        load.prefab,
+        clip.source_envelope["m_DisplayName"]
+            .as_str()
+            .unwrap_or("?"),
+        clip.start,
+        clip.end()
+    );
+}
+
+/// `Object.Instantiate(prefab, null)` of a template prefab deactivated
+/// first: the instance's nodes are the particle document's node records
+/// under the prefab root (authored local poses reflected into the product
+/// frame, each with its source GameObject), the root inactive at the prefab
+/// root's own pose. The cut-scene root stands for the world's frame.
+fn instantiate_effect(
+    world: &mut World,
+    document: &Value,
+    prefab: &EffectPrefab,
+    parent: Entity,
+) -> Result<Entity, String> {
+    if document["nodeCoordinates"] != "unity-lh-y-up-authored" {
+        return Err(format!(
+            "unsupported node coordinates {} in the particle document",
+            document["nodeCoordinates"]
+        ));
+    }
+    let nodes = document["nodes"]
+        .as_array()
+        .ok_or("the particle document has no node list")?;
+    let mut children: HashMap<i64, Vec<&Value>> = HashMap::new();
+    let mut root_node = None;
+    for node in nodes {
+        let id = node["gameObjectId"]
+            .as_i64()
+            .ok_or("a document node has no gameObjectId")?;
+        if id == prefab.game_object {
+            root_node = Some(node);
+        }
+        let parent_id = node["parentGameObjectId"]
+            .as_i64()
+            .ok_or("a document node has no parentGameObjectId")?;
+        children.entry(parent_id).or_default().push(node);
+    }
+    let root_node = root_node.ok_or_else(|| {
+        format!(
+            "its prefab root {} (GameObject {}) is not in the package's particle document",
+            prefab.name, prefab.game_object
+        )
+    })?;
+    let transform = |node: &Value| -> Result<Transform, String> {
+        let floats = |key: &str, len: usize| -> Result<Vec<f32>, String> {
+            let list = node[key]
+                .as_array()
+                .filter(|list| list.len() == len)
+                .ok_or_else(|| format!("node {} has no {key}", node["node"]))?;
+            list.iter()
+                .map(|v| v.as_f64().map(|v| v as f32))
+                .collect::<Option<Vec<f32>>>()
+                .ok_or_else(|| format!("node {} {key} is not numeric", node["node"]))
+        };
+        let p = floats("position", 3)?;
+        let r = floats("rotation", 4)?;
+        let q = floats("scale", 3)?;
+        Ok(Transform {
+            translation: moly_assets::coordinates::source_position(Vec3::new(p[0], p[1], p[2])),
+            rotation: moly_assets::coordinates::source_rotation(Quat::from_xyzw(
+                r[0], r[1], r[2], r[3],
+            )),
+            scale: Vec3::new(q[0], q[1], q[2]),
+        })
+    };
+    let identity = |node: &Value| moly_assets::source_navigation::SourceObjectIdentity {
+        file: prefab.file.clone(),
+        game_object: node["gameObjectId"].as_i64().unwrap_or(0),
+        // The document carries no Transform or component ids.
+        transform: 0,
+        components: Vec::new(),
+        child_order: Vec::new(),
+    };
+    let leaf = |node: &Value| -> String {
+        let path = node["node"].as_str().unwrap_or("?");
+        path.rsplit('/').next().unwrap_or(path).to_owned()
+    };
+    let root = world
+        .spawn((
+            Name::new(leaf(root_node)),
+            transform(root_node)?,
+            Visibility::Hidden,
+            identity(root_node),
+            ChildOf(parent),
+        ))
+        .id();
+    // (GameObject, its entity, active in the hierarchy below the root)
+    let mut stack = vec![(prefab.game_object, root, true)];
+    let mut count = 1;
+    while let Some((id, entity, active)) = stack.pop() {
+        for node in children.get(&id).into_iter().flatten() {
+            let child_id = node["gameObjectId"].as_i64().unwrap_or(0);
+            let child_active = active && node["active"].as_bool() == Some(true);
+            let local = match transform(node) {
+                Ok(local) => local,
+                Err(reason) => {
+                    world.despawn(root);
+                    return Err(reason);
+                }
+            };
+            let mut child = world.spawn((
+                Name::new(leaf(node)),
+                local,
+                if child_active {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
+                identity(node),
+                ChildOf(entity),
+            ));
+            if !child_active {
+                child.insert(moly_assets::scene_state::SourceInactive);
+            }
+            let child = child.id();
+            stack.push((child_id, child, child_active));
+            count += 1;
+            if count > nodes.len() {
+                world.despawn(root);
+                return Err("the particle document's node parents form a cycle".into());
+            }
+        }
+    }
+    Ok(root)
+}
+
+/// What `SetEffectInstance` reads from an instance.
+struct InstanceRead {
+    nodes: usize,
+    root_path: String,
+    /// The maximal subtrees below the root particle the host can play as
+    /// one object, by node, with their paths.
+    subtrees: Vec<(Entity, String)>,
+    /// The listed systems outside those subtrees, each with the reason.
+    not_played: Vec<String>,
+    listed: usize,
+    auto_seeded: Vec<String>,
+    awake: usize,
+    included_loop: bool,
+}
+
+/// `GetComponentsInChildren<ParticleSystem>()` (includeInactive false) on
+/// the inactive instance: the root's own components are always searched and
+/// a child only when it is active itself, so the list is the systems whose
+/// nodes below the root are all active, in the hierarchy's order;
+/// `rootParticle` is its first. The activation then plays each listed
+/// system whose playOnAwake is set; the particle host plays and stops the
+/// root particle with its subtree as one object, so the two sets must agree.
+fn read_effect_instance(
+    world: &World,
+    document: &Value,
+    prefab: &EffectPrefab,
+    instance: Entity,
+) -> Result<InstanceRead, String> {
+    let emitters = document["emitters"]
+        .as_array()
+        .ok_or("the particle document has no emitter list")?;
+    let by_id: HashMap<i64, &Value> = emitters
+        .iter()
+        .filter_map(|emitter| Some((emitter["gameObjectId"].as_i64()?, emitter)))
+        .collect();
+    // The instance's nodes by GameObject, with their activity.
+    let mut nodes: HashMap<i64, (Entity, bool)> = HashMap::new();
+    let mut stack = vec![instance];
+    while let Some(entity) = stack.pop() {
+        if let Some(identity) =
+            world.get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)
+        {
+            let inactive = world
+                .get::<moly_assets::scene_state::SourceInactive>(entity)
+                .is_some();
+            nodes.insert(identity.game_object, (entity, !inactive));
+        }
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    let mut listed = Vec::new();
+    for id in &prefab.particle_systems {
+        let (entity, active) = nodes.get(id).copied().ok_or_else(|| {
+            format!("its system on GameObject {id} is not in the package's particle document")
+        })?;
+        let emitter = by_id
+            .get(id)
+            .ok_or_else(|| format!("its system on GameObject {id} has no emitter record"))?;
+        if active {
+            listed.push((entity, *emitter));
+        }
+    }
+    let Some(&(root_particle, root_emitter)) = listed.first() else {
+        return Err("its instance lists no system, so it has no rootParticle; the systems its activation plays are not played by this host".into());
+    };
+    let path = |emitter: &Value| emitter["node"].as_str().unwrap_or("?").to_owned();
+    let under_root = |entity: Entity| {
+        let mut current = Some(entity);
+        while let Some(node) = current {
+            if node == root_particle {
+                return true;
+            }
+            current = world.get::<ChildOf>(node).map(ChildOf::parent);
+        }
+        false
+    };
+    let flag = |emitter: &Value, key: &str| -> Result<bool, String> {
+        emitter["system"][key]
+            .as_bool()
+            .ok_or_else(|| format!("{}: {key} is not in its record", path(emitter)))
+    };
+    let mut awake = 0;
+    let mut auto_seeded = Vec::new();
+    let mut included_loop = false;
+    for &(entity, emitter) in &listed {
+        match (flag(emitter, "playOnAwake")?, under_root(entity)) {
+            (true, true) => awake += 1,
+            (true, false) => {
+                return Err(format!(
+                    "{} plays on activation outside the root particle's subtree, which the particle host plays as one object",
+                    path(emitter)
+                ))
+            }
+            (false, true) => {
+                return Err(format!(
+                    "{} under the root particle does not play on awake, while the particle host plays the root particle's subtree as one object",
+                    path(emitter)
+                ))
+            }
+            (false, false) => {}
+        }
+        let seed = emitter["system"]["randomSeed"]
+            .as_u64()
+            .ok_or_else(|| format!("{}: randomSeed is not in its record", path(emitter)))?;
+        if flag(emitter, "autoRandomSeed")? || seed != 0 {
+            auto_seeded.push(path(emitter));
+        }
+        included_loop |= flag(emitter, "looping")?;
+    }
+    // The particle host plays an object's whole subtree and refuses a
+    // sub-emitter parent in it (its sub-emitters would be played by their
+    // parent's events, which it does not install); a sub-emitter played as
+    // its own object would emit without them. So the root particle is played
+    // as its maximal subtrees free of both; every other listed system is
+    // left unplayed by name, as the host leaves a refused system of a
+    // director owner undrawn while the others play.
+    let by_path: HashMap<&str, &Value> = emitters
+        .iter()
+        .filter_map(|emitter| Some((emitter["node"].as_str()?, emitter)))
+        .collect();
+    let mut targets: HashMap<String, String> = HashMap::new();
+    let mut parents: HashSet<String> = HashSet::new();
+    for emitter in emitters {
+        let system = &emitter["system"];
+        let rows = system["subEmitters"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let sub_module = system["sourceModules"]["enabled"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some("SubModule")));
+        if sub_module || !rows.is_empty() {
+            parents.insert(path(emitter));
+        }
+        for row in rows {
+            if let Some(target) = row["emitter"].as_str() {
+                targets.insert(target.to_owned(), path(emitter));
+            }
+        }
+    }
+    let node_path = |entity: Entity| -> Option<String> {
+        let id = world
+            .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)?
+            .game_object;
+        Some(path(by_id.get(&id)?))
+    };
+    let children_of = |entity: Entity| -> Vec<Entity> {
+        world
+            .get::<Children>(entity)
+            .map(|children| children.iter().collect())
+            .unwrap_or_default()
+    };
+    // Whether a node's subtree holds no sub-emitter parent or target.
+    fn clean(
+        entity: Entity,
+        node_path: &dyn Fn(Entity) -> Option<String>,
+        children_of: &dyn Fn(Entity) -> Vec<Entity>,
+        parents: &HashSet<String>,
+        targets: &HashMap<String, String>,
+    ) -> bool {
+        if let Some(path) = node_path(entity) {
+            if parents.contains(&path) || targets.contains_key(&path) {
+                return false;
+            }
+        }
+        children_of(entity)
+            .into_iter()
+            .all(|child| clean(child, node_path, children_of, parents, targets))
+    }
+    let mut subtrees = Vec::new();
+    let mut not_played = Vec::new();
+    let mut stack = vec![root_particle];
+    while let Some(entity) = stack.pop() {
+        let own = node_path(entity);
+        if own.is_some() && clean(entity, &node_path, &children_of, &parents, &targets) {
+            subtrees.push((entity, own.unwrap_or_default()));
+            continue;
+        }
+        if let Some(own) = own {
+            let emitter = by_path.get(own.as_str()).copied();
+            let emits = emitter.is_some_and(|emitter| {
+                emitter["system"]["sourceModules"]["enabled"]
+                    .as_array()
+                    .is_some_and(|names| {
+                        names
+                            .iter()
+                            .any(|name| name.as_str() == Some("EmissionModule"))
+                    })
+            });
+            let listed_here = listed
+                .iter()
+                .any(|&(listed_entity, _)| listed_entity == entity);
+            if listed_here {
+                not_played.push(if let Some(parent) = targets.get(&own) {
+                    format!("{own} (a sub-emitter of {parent})")
+                } else if parents.contains(&own) {
+                    format!("{own} (a sub-emitter parent)")
+                } else if !emits {
+                    format!("{own} (its Emission module is off: it emits nothing)")
+                } else {
+                    format!("{own} (above a sub-emitter parent)")
+                });
+            }
+        }
+        let mut children = children_of(entity);
+        children.reverse();
+        stack.extend(children);
+    }
+    Ok(InstanceRead {
+        nodes: nodes.len(),
+        root_path: path(root_emitter),
+        subtrees,
+        not_played,
+        listed: listed.len(),
+        auto_seeded,
+        awake,
+        included_loop,
+    })
 }
 
 /// `CutScenePresenter.FadeInAsync`: the cut-scene screen is pushed if it is
@@ -1022,6 +1728,12 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
     else {
         return false;
     };
+    if !play.graph_built {
+        play.graph_built = true;
+        set_effect_instances(world, plan, t);
+    } else {
+        sample_effects(world, plan, play, t);
+    }
     let definition = plan.definition.clone();
     let mut shot = None;
     let mut active = HashSet::new();
@@ -1082,8 +1794,23 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
                 TimelinePayload::CutScene(CutScenePayload::SiteExpansion(effect)) => {
                     if now {
                         play.dissolve = true;
+                        crate::site_extension::set_site_extension(
+                            world,
+                            crate::site_extension::SiteExtensionData::expansion_frame(
+                                effect.center,
+                                effect.start_radius,
+                                effect.end_radius,
+                                effect.min_radius,
+                                effect.max_radius,
+                                effect.gradient_range,
+                                effect.edge_color,
+                                effect.fade_color,
+                                local,
+                                clip.duration,
+                            ),
+                        );
                         info!(
-                            "[cutscene] t={t:.4} ShowExpansionEffectBehaviour.ProcessFrame {bounds}: SetSiteExtension({}) (not drawn: the site shaders' global dissolve is a named render gap)",
+                            "[cutscene] t={t:.4} ShowExpansionEffectBehaviour.ProcessFrame {bounds}: SetSiteExtension({})",
                             site_extension(effect, local, clip.duration)
                         );
                     }
@@ -1092,14 +1819,15 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
                     let name = clip.source_envelope["m_DisplayName"]
                         .as_str()
                         .unwrap_or("?");
+                    let instance = plan.instances.get(&clip.key);
                     if entered {
                         let prefab = clip.playable.as_ref().and_then(|id| {
                             plan.effects.get(&format!("{}/{}", id.file, id.path_id))
                         });
                         info!(
-                            "[cutscene] t={t:.4} EffectClip {name} {bounds} play: template prefab {:?} ({} particle systems, root scripts {:?}; parentMode {}, characterID {}, fixed starting point {}, offset {:?}, matched duration {}, random seed {}): refused, the particle host has no API for it yet",
+                            "[cutscene] t={t:.4} EffectClip {name} {bounds} OnBehaviourPlay: template prefab {:?} ({} particle systems, root scripts {:?}; parentMode {}, characterID {}, fixed starting point {}, offset {:?}, matched duration {}, random seed {})",
                             prefab.map(|p| p.name.as_str()).or(template.prefab.as_deref()),
-                            prefab.map_or(0, |p| p.particle_systems),
+                            prefab.map_or(0, |p| p.particle_systems.len()),
                             prefab.map(|p| p.root_scripts.clone()).unwrap_or_default(),
                             template.parent_mode,
                             template.character_id,
@@ -1108,8 +1836,15 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
                             template.matched_duration,
                             template.random_seed
                         );
+                        match instance {
+                            Some(instance) => effect_play(world, instance, t, local),
+                            None => info!("[cutscene] t={t:.4} EffectClip {name}: no instance (its template is null or it was refused at load): nothing plays"),
+                        }
                     } else if exited {
-                        info!("[cutscene] t={t:.4} EffectClip {name} {bounds} stop (refused, nothing to stop)");
+                        match instance {
+                            Some(instance) => effect_pause(world, instance, t),
+                            None => info!("[cutscene] t={t:.4} EffectClip {name} {bounds} OnBehaviourPause: no instance, nothing to stop"),
+                        }
                     }
                 }
                 TimelinePayload::Se { package, cue } => {
@@ -1202,6 +1937,138 @@ fn play_frame(world: &mut World, plan: &Plan, play: &mut Play) -> bool {
     matches!(status, Some(TimelineStatus::Completed)) || t >= definition.duration
 }
 
+/// `EffectClip.CreatePlayable` at graph build: `SetEffectInstance` on each
+/// clip's instance. Unless `isEnabledRandomSeed`, every listed system gets
+/// `randomSeed = 0` (one already playing is first stopped and cleared and
+/// played again; a fresh instance has none playing); the first is the root
+/// particle and is stopped; a looping system sets `isIncludedLoop`; then
+/// `SetActive(true)` activates the instance, and its playOnAwake systems
+/// play (the activation's Play, through the particle host).
+fn set_effect_instances(world: &mut World, plan: &Plan, t: f64) {
+    let mut instances: Vec<&EffectInstance> = plan.instances.values().collect();
+    instances.sort_by(|a, b| a.name.cmp(&b.name));
+    for instance in instances {
+        let seed = if instance.random_seed {
+            "isEnabledRandomSeed: the systems keep their seeds".to_owned()
+        } else if instance.auto_seeded.is_empty() {
+            "randomSeed = 0 on each: every listed system's serialized seed is already the manual seed 0".to_owned()
+        } else {
+            format!(
+                "randomSeed = 0 on each: not written (the particle host has no seed write; named gap): {} listed systems keep their own seed ({})",
+                instance.auto_seeded.len(),
+                instance.auto_seeded.join(", ")
+            )
+        };
+        if let Some(mut visibility) = world.get_mut::<Visibility>(instance.root) {
+            *visibility = Visibility::Inherited;
+        }
+        let played = play_subtrees(world, instance);
+        info!(
+            "[cutscene] t={t:.4} EffectClip {}: EffectClip.CreatePlayable -> SetEffectInstance({}): {} systems listed; {seed}; none playing; rootParticle {}: Stop(); isIncludedLoop {}; SetActive(true): {} playOnAwake systems play; the particle host plays {played} systems ({} listed systems not played)",
+            instance.name,
+            instance.prefab,
+            instance.listed,
+            instance.root_particle,
+            instance.included_loop,
+            instance.awake,
+            instance.not_played.len()
+        );
+    }
+}
+
+/// The live particles of the effect instances' played subtrees, four times
+/// a real second while they hold any (a trace of the particle host's
+/// state, read from its systems).
+fn sample_effects(world: &mut World, plan: &Plan, play: &mut Play, t: f64) {
+    if plan.instances.is_empty() || now_real(world) - play.effect_sampled < 0.25 {
+        return;
+    }
+    play.effect_sampled = now_real(world);
+    for instance in plan.instances.values() {
+        for (path, binding) in &instance.played {
+            let (systems, live, born) = timeline::played_particles(world, binding.root);
+            if live > 0 {
+                info!(
+                    "[cutscene] t={t:.4} EffectClip {}: {path}: systems {systems} live {live} born {born}",
+                    instance.name
+                );
+            }
+        }
+    }
+}
+
+/// `Play()` on the root particle: each subtree the particle host plays.
+/// Returns how many systems played; a refused Play is named.
+fn play_subtrees(world: &mut World, instance: &EffectInstance) -> usize {
+    let mut played = 0;
+    for (path, binding) in &instance.played {
+        match particles::play_object(world, binding) {
+            Ok(count) => played += count,
+            Err(error) => error!(
+                "[cutscene] EffectClip {}: {path}: Play refused by the particle host: {error}",
+                instance.name
+            ),
+        }
+    }
+    played
+}
+
+/// `EffectBehaviour.OnBehaviourPlay` at run time: no parent is set (the
+/// parent is looked up only outside play mode); a matched-duration clip
+/// without a looping system rewrites the systems' durations; the instance
+/// is placed at the clip's offset with the identity rotation; past 0.1 s of
+/// clip time the root particle is first simulated to it; then the root
+/// particle plays with its children.
+fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64) {
+    if instance.matched_duration && !instance.included_loop {
+        error!(
+            "[cutscene] t={t:.4} EffectClip {}: isMatchedDuration: the systems' main.duration writes are not in the particle host's API (named gap)",
+            instance.name
+        );
+    }
+    let position = moly_assets::coordinates::source_position(instance.offset);
+    if let Some(mut transform) = world.get_mut::<Transform>(instance.root) {
+        transform.translation = position;
+        transform.rotation = Quat::IDENTITY;
+    }
+    if local > 0.1 {
+        error!(
+            "[cutscene] t={t:.4} EffectClip {}: clip time {local:.4} > 0.1: rootParticle.Simulate({local:.4}, true, true) is not in the particle host's played API (named gap); the systems keep their clocks",
+            instance.name
+        );
+    }
+    let played = play_subtrees(world, instance);
+    info!(
+        "[cutscene] t={t:.4} EffectClip {}: localPosition = offset {:?} (product {:?}), localRotation = identity; clip time {local:.4}; rootParticle {}.Play(): {played} systems played (the particle host keeps a playing object as it is)",
+        instance.name,
+        instance.offset,
+        position,
+        instance.root_particle
+    );
+}
+
+/// `EffectBehaviour.OnBehaviourPause` on the clip's end (the playable is
+/// paused): a clip with a looping system and a matched duration stops and
+/// clears the root particle, any other stops its emission (`Stop()`).
+fn effect_pause(world: &mut World, instance: &EffectInstance, t: f64) {
+    if instance.included_loop && instance.matched_duration {
+        error!(
+            "[cutscene] t={t:.4} EffectClip {}: OnBehaviourPause: Stop(true, StopEmittingAndClear) is not in the particle host's API (named gap); not stopped",
+            instance.name
+        );
+        return;
+    }
+    let stopped: usize = instance
+        .played
+        .iter()
+        .map(|(_, binding)| particles::stop_object(world, binding))
+        .sum();
+    info!(
+        "[cutscene] t={t:.4} EffectClip {}: OnBehaviourPause: rootParticle {}.Stop() (isIncludedLoop {}, isMatchedDuration {}): {stopped} systems stop emitting",
+        instance.name, instance.root_particle, instance.included_loop, instance.matched_duration
+    );
+}
+
 /// A virtual camera's state in the product frame: the start transform is
 /// the loaded site's own origin, the x axis reflects.
 fn product_shot(camera: &VirtualCamera, start: Vec3) -> Shot {
@@ -1251,12 +2118,17 @@ fn end_async(world: &mut World, plan: &Plan, play: &Play) {
         );
     }
     if play.dissolve {
-        info!(
-            "[cutscene] ShowExpansionEffectBehaviour.OnGraphStop: ResetGlobalDissolve (not drawn)"
-        );
+        crate::site_extension::reset_global_dissolve(world);
+        info!("[cutscene] ShowExpansionEffectBehaviour.OnGraphStop: ResetGlobalDissolve");
     }
     if let Some(token) = play.token {
         timeline::cancel_and_release(world, token);
+    }
+    for instance in plan.instances.values() {
+        info!(
+            "[cutscene] EffectBehaviour.OnPlayableDestroy -> EffectClip.OnDestroyPlayable: Destroy({}) (EffectClip {})",
+            instance.prefab, instance.name
+        );
     }
     world.despawn(plan.root);
     info!("[cutscene] BGM restored (no cut-scene BGM); NPC Show; player Show");

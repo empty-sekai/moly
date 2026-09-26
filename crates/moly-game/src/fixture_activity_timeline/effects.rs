@@ -1,6 +1,10 @@
 //! Source-bound ControlPlayableAsset ownership. The particle adapter resolves
 //! the actual fixture instance and its capabilities; this owner supplies the
 //! Director clock, activation, exclusion and post-playback restoration.
+//! A director that binds its Control clips through its own exposed-reference
+//! table (a step item, a site prefab's director, a cut scene) controls the
+//! spawned node its clip resolves to, read from the director's package
+//! particle document.
 use super::*;
 use crate::fixture_timeline_particles::{self as particles, ParticleControlBinding};
 use moly_assets::scene_state::{SetSourceActive, SourceNodeActivity};
@@ -52,58 +56,54 @@ fn binds_through_director(kind: TimelineOwnerKind) -> bool {
     )
 }
 
-/// Why a director-bound Control clip is not driven here, by name. The source
-/// object is resolved first (`ExposedReference.Resolve` on the director), so
-/// the reason names what the clip controls.
-fn director_control_refusal(
-    world: &World,
-    request: &StartTimeline,
-    clip: &TimelineClip,
-    source: &ExposedSource,
-) -> String {
+fn clip_head(clip: &TimelineClip) -> String {
     let name = clip.source_envelope["m_DisplayName"]
         .as_str()
         .unwrap_or("?");
-    let head = format!("Control clip {name} [{:.3}, {:.3})", clip.start, clip.end());
+    format!("Control clip {name} [{:.3}, {:.3})", clip.start, clip.end())
+}
+
+/// The spawned node of the director's prefab a Control clip's resolved
+/// `sourceGameObject` names.
+fn exposed_object(
+    world: &World,
+    request: &StartTimeline,
+    object: &source::SourceAssetId,
+) -> Option<Entity> {
+    let wanted = object.path_id.parse::<i64>().ok()?;
+    let mut stack = vec![request.fixture];
+    while let Some(entity) = stack.pop() {
+        if world
+            .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)
+            .is_some_and(|identity| identity.file == object.file && identity.game_object == wanted)
+        {
+            return Some(entity);
+        }
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    None
+}
+
+/// Why a director-bound Control clip is not driven, by name, when its source
+/// object does not resolve to a spawned node.
+fn director_control_refusal(clip: &TimelineClip, source: &ExposedSource) -> String {
+    let head = clip_head(clip);
     match source {
         ExposedSource::Unreadable(reason) => format!("{head}: {reason}"),
         ExposedSource::Null => {
             format!("{head}: its source object resolves to nothing, so it controls nothing")
         }
-        ExposedSource::Object(object) => {
-            let wanted = object.path_id.parse::<i64>().ok();
-            let mut stack = vec![request.fixture];
-            let mut found = None;
-            while let Some(entity) = stack.pop() {
-                if world
-                    .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)
-                    .is_some_and(|identity| {
-                        identity.file == object.file && Some(identity.game_object) == wanted
-                    })
-                {
-                    found = Some(entity);
-                    break;
-                }
-                if let Some(children) = world.get::<Children>(entity) {
-                    stack.extend(children.iter());
-                }
-            }
-            match found {
-                None => format!(
-                    "{head}: its source object (GameObject {}) is not in the spawned hierarchy",
-                    object.path_id
-                ),
-                Some(entity) => format!(
-                    "{head}: its source object {} (GameObject {}) resolves through the director's exposed-reference table; its particles are not driven: the particle host prepares a fixture's own particle archive, and {} has none",
-                    world
-                        .get::<Name>(entity)
-                        .map_or("?", |name| name.as_str()),
-                    object.path_id,
-                    request.definition.package
-                ),
-            }
-        }
+        ExposedSource::Object(object) => format!(
+            "{head}: its source object (GameObject {}) is not in the spawned hierarchy",
+            object.path_id
+        ),
     }
+}
+
+fn director_bound(request: &StartTimeline, clip: &TimelineClip) -> bool {
+    binds_through_director(request.owner.kind) && clip.exposed_source.is_some()
 }
 
 pub(super) fn prepare(
@@ -129,15 +129,75 @@ pub(super) fn prepare(
         .bindings
         .refused_controls
         .retain(|key, _| selected_keys.contains(key));
+    // Director-bound clips already driven, by the object they control.
+    let mut driven: Vec<(Entity, TimelineClip)> = Vec::new();
     for (clip, settings) in selected {
         if binds_through_director(request.owner.kind) {
             if let Some(source) = &clip.exposed_source {
-                let reason = director_control_refusal(world, request, &clip, source);
-                request.bindings.controls.remove(&clip.key);
-                request
-                    .bindings
-                    .refused_controls
-                    .insert(clip.key.clone(), reason);
+                let object = match source {
+                    ExposedSource::Object(object) => exposed_object(world, request, object),
+                    _ => None,
+                };
+                let Some(object) = object else {
+                    let reason = director_control_refusal(&clip, source);
+                    request.bindings.controls.remove(&clip.key);
+                    request
+                        .bindings
+                        .refused_controls
+                        .insert(clip.key.clone(), reason);
+                    continue;
+                };
+                // Two ControlPlayables on one object over overlapping
+                // intervals each step the same systems every frame; which
+                // one's Simulate the frame keeps follows the order of their
+                // PrepareFrame calls, which is not read. The earlier clip
+                // plays alone and the later one is a named gap.
+                if let Some((_, other)) = driven.iter().find(|(root, other)| {
+                    *root == object && other.start < clip.end() && clip.start < other.end()
+                }) {
+                    let reason = format!(
+                        "{}: its source object {} is also controlled by {} over an overlapping interval; two ControlPlayables on one system are not driven together (the order of their PrepareFrame calls is not read), so the earlier clip plays alone",
+                        clip_head(&clip),
+                        world.get::<Name>(object).map_or("?", |name| name.as_str()),
+                        clip_head(other)
+                    );
+                    request.bindings.controls.remove(&clip.key);
+                    request
+                        .bindings
+                        .refused_controls
+                        .insert(clip.key.clone(), reason);
+                    continue;
+                }
+                // A preparation still loading is retried; one the particle
+                // host refuses leaves this clip a named gap and the rest of
+                // the timeline plays.
+                match particles::prepare_object(
+                    world,
+                    request.fixture,
+                    object,
+                    &request.definition.package,
+                    &settings,
+                ) {
+                    Ok(binding) => {
+                        request.bindings.refused_controls.remove(&clip.key);
+                        request.bindings.controls.insert(clip.key.clone(), binding);
+                        driven.push((object, clip));
+                    }
+                    Err(error) if error.retryable => return Err(error),
+                    Err(error) => {
+                        let reason = format!(
+                            "{}: its source object {} is refused by the particle host: {}",
+                            clip_head(&clip),
+                            world.get::<Name>(object).map_or("?", |name| name.as_str()),
+                            error.message
+                        );
+                        request.bindings.controls.remove(&clip.key);
+                        request
+                            .bindings
+                            .refused_controls
+                            .insert(clip.key.clone(), reason);
+                    }
+                }
                 continue;
             }
         }
@@ -209,7 +269,9 @@ pub(super) fn validate(
         if request.bindings.refused_controls.contains_key(&clip.key) {
             continue;
         }
-        source_binding(clip, settings)?;
+        if !director_bound(request, clip) {
+            source_binding(clip, settings)?;
+        }
         let binding = request
             .bindings
             .controls

@@ -46,8 +46,14 @@ use super::{
     CollisionEdge, DeliveryCollision, DeliveryDialogClosed, DeliveryModel, DeliveryObjectType,
     DeliveryRequest,
 };
-use crate::fixture_activity_timeline::{SignalReaction, SignalReceiverBinding, SourceAssetId};
+use crate::fixture_activity_timeline::{
+    ReceiverCall, SignalReaction, SignalReceiverBinding, SourceAssetId,
+};
+use crate::fixture_timeline_particles::SignalCall;
 use crate::player::PlayerControlled;
+
+/// A site's package: its bundle under the field prefix.
+const SITE_PACKAGE_PREFIX: &str = "mysekai__site__field__";
 
 /// The resolved scene objects of the current delivery site (product frame).
 #[derive(Clone, Debug)]
@@ -92,6 +98,8 @@ pub(crate) struct DeliverySite {
     inside: [bool; 2],
     /// The arrival (model setup, unclaimed drops) ran for this epoch.
     pub(crate) arrived: bool,
+    /// The delivery signal receiver's particle targets are prepared.
+    signals_prepared: bool,
 }
 
 impl DeliverySite {
@@ -136,6 +144,46 @@ fn float(fields: &Value, class: &str, name: &str) -> Result<f32, String> {
 enum Resolve {
     Pending,
     Failed(String),
+}
+
+/// Update (exclusive): the delivery signal receiver's particle targets are
+/// prepared on the particle host as soon as the site's objects resolve, so
+/// the step item that binds the receiver does not wait for them.
+pub(crate) fn prepare_signal_targets(world: &mut World) {
+    let Some(state) = world.get_resource::<DeliverySite>() else {
+        return;
+    };
+    if state.signals_prepared {
+        return;
+    }
+    let Some((receiver, bundle)) = state.objects.as_ref().and_then(|objects| {
+        objects
+            .signal_receiver
+            .as_ref()
+            .ok()
+            .map(|receiver| (receiver.clone(), objects.bundle.clone()))
+    }) else {
+        return;
+    };
+    let package = format!("{SITE_PACKAGE_PREFIX}{bundle}");
+    let started = crate::fixture_timeline_particles::realtime(world);
+    match crate::fixture_activity_timeline::prepare_receiver_targets(world, &receiver, &package) {
+        Ok(false) => {}
+        Ok(true) => {
+            world.resource_mut::<DeliverySite>().signals_prepared = true;
+            info!(
+                "[delivery] {}: its particle targets are prepared on the particle host ahead of the step item (real time {started:.3})",
+                receiver.receiver
+            );
+        }
+        Err(error) => {
+            world.resource_mut::<DeliverySite>().signals_prepared = true;
+            error!(
+                "[delivery] {}: its particle targets are not prepared ahead: {}",
+                receiver.receiver, error.message
+            );
+        }
+    }
 }
 
 /// Update: resolve the scene objects on each delivery-site arrival.
@@ -445,9 +493,10 @@ fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, S
         let calls = calls
             .iter()
             .map(|call| {
-                let type_name = call["m_TargetAssemblyTypeName"]
+                let full_type = call["m_TargetAssemblyTypeName"]
                     .as_str()
-                    .and_then(|name| name.split(',').next())
+                    .and_then(|name| name.split(',').next());
+                let type_name = full_type
                     .and_then(|name| name.rsplit('.').next())
                     .unwrap_or("?");
                 let target = follow(receiver, &call["m_Target"], "a persistent call's m_Target")
@@ -459,16 +508,37 @@ fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, S
                         None => format!("component {}", target.path_id),
                     }
                 });
-                let state = match call["m_CallState"].as_i64() {
+                // `UnityEventCallState`: Off 0, EditorAndRuntime 1,
+                // RuntimeOnly 2; an Off call gives no runtime call.
+                let call_state = call["m_CallState"].as_i64();
+                let state = match call_state {
                     Some(0) => ", off",
                     Some(1) => ", editor and runtime",
                     _ => "",
                 };
-                format!(
-                    "{type_name}.{}({}) on {on}{state}",
-                    call["m_MethodName"].as_str().unwrap_or("?"),
-                    call_argument(&call["m_Arguments"], call["m_Mode"].as_i64().unwrap_or(-1))
-                )
+                let method = call["m_MethodName"].as_str().unwrap_or("?");
+                let mode = call["m_Mode"].as_i64().unwrap_or(-1);
+                let runtime = matches!(call_state, Some(1) | Some(2));
+                // `PersistentListenerMode.Void` (1) finds the method with no
+                // parameter: `ParticleSystem.Play()` plays with its
+                // children, `Stop()` stops emitting with its children.
+                let particle = match (full_type, method, mode, &target) {
+                    (Some("UnityEngine.ParticleSystem"), "Play", 1, Some(target)) if runtime => {
+                        Some((SignalCall::Play, target.clone()))
+                    }
+                    (Some("UnityEngine.ParticleSystem"), "Stop", 1, Some(target)) if runtime => {
+                        Some((SignalCall::Stop, target.clone()))
+                    }
+                    _ => None,
+                };
+                ReceiverCall {
+                    text: format!(
+                        "{type_name}.{method}({}) on {on}{state}",
+                        call_argument(&call["m_Arguments"], mode)
+                    ),
+                    runtime,
+                    particle,
+                }
             })
             .collect();
         rows.push(SignalReaction {
