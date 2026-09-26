@@ -306,6 +306,25 @@ pub enum ButtonType {
 }
 
 impl ButtonType {
+    /// IsResetJoyStick: whether pressing this button lets the joystick go
+    /// first. A prefab that sets the button's own reset flag always does.
+    /// Otherwise the type decides, from two bit sets over the types below
+    /// 26: the types the check knows, and the ones among them that reset.
+    /// `None` is a type the check does not know; the source logs an error
+    /// and does not reset.
+    pub fn resets_joystick(self, reset_flag: bool) -> Option<bool> {
+        // The types the check knows: every type below 26 except 4, 13
+        // and 24 (the competition button).
+        const KNOWN: u32 = 0x02FF_DFEF;
+        // The ones that reset: the known types less None and Dash.
+        const RESETS: u32 = 0x02FE_DFEE;
+        if reset_flag {
+            return Some(true);
+        }
+        let bit = self as u32;
+        (bit < 26 && KNOWN >> bit & 1 == 1).then_some(RESETS >> bit & 1 == 1)
+    }
+
     /// 源把家具的动作类别换算成按钮类型。整张表照抄，包括两处会让人
     /// 想「顺手补齐」的地方：`Home` 与 `Entrance` 落在同一个按钮上，
     /// 而 `WarpPoint` 在源的跳转表里**没有条目**，落到默认分支抛异常。

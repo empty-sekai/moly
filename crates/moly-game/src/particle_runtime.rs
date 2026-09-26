@@ -2082,7 +2082,8 @@ pub(crate) fn write_geometry(
                         }
                     }
                     crate::source_billboard::write(mesh, draw, &instances, &frame,
-                        system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect, simulation)
+                        system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect, simulation,
+                        reflect(basis.velocity))
                 }
                 _ => unreachable!(),
             }

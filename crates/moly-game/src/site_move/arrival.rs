@@ -250,6 +250,12 @@ impl DeliveryArrival {
 fn jump_offset(text: &str) -> Result<Vec3, String> {
     let doc: Value = serde_json::from_str(text)
         .map_err(|error| format!("the delivery site's scene document is unreadable: {error}"))?;
+    jump_offset_of(delivery_site_view(&doc)?)
+}
+
+/// The one `DeliverySiteView` instance of a delivery scene document (the
+/// delivery controller reads one).
+pub(crate) fn delivery_site_view(doc: &Value) -> Result<&Value, String> {
     let instances = doc["components"]["DeliverySiteView"]["instances"]
         .as_array()
         .ok_or("the delivery site's scene has no DeliverySiteView")?;
@@ -259,6 +265,11 @@ fn jump_offset(text: &str) -> Result<Vec3, String> {
             instances.len()
         ));
     };
+    Ok(view)
+}
+
+/// `_playerJumpOffsetPosition` of a `DeliverySiteView` instance, reflected.
+pub(crate) fn jump_offset_of(view: &Value) -> Result<Vec3, String> {
     let offset = &view["fields"]["_playerJumpOffsetPosition"];
     let axis = |name: &str| {
         offset[name].as_f64().map(|value| value as f32).ok_or_else(|| {

@@ -16,6 +16,18 @@ pub(crate) enum Mode {
     Billboard,
     Horizontal,
     Vertical,
+    /// The stretched billboard (freeform stretching off); its quad is
+    /// `moly_law::particle::stretch_geometry`.
+    Stretch(Stretch),
+}
+
+/// The Stretch renderer's own inputs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Stretch {
+    pub velocity_scale: f32,
+    pub length_scale: f32,
+    pub camera_velocity_scale: f32,
+    pub normal_direction: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +151,7 @@ fn vertices_sized(
                 .cross(offsets[1].normalize_or_zero());
             (offsets, normal)
         }
+        Mode::Stretch(_) => unreachable!("the Stretch quad has its own writer (write_stretch)"),
         Mode::Horizontal | Mode::Vertical => {
             // One geometry body serves both modes; they differ only in the
             // two world spans the quad is laid on.
@@ -189,10 +202,79 @@ pub(crate) fn screen_limited(size: Vec3, minimum: f32, maximum: f32) -> Vec3 {
     Vec3::new(size.x * factor, size.y * factor, size.z)
 }
 
+/// The camera as the Stretch body reads it, in the source basis: the world to
+/// camera matrix (rows right, up and minus forward, the camera looking down its
+/// -Z), its inverse, and the camera's velocity in camera axes.
+fn stretch_view(frame: &Frame, camera_velocity: Vec3) -> moly_law::particle::stretch_geometry::StretchView {
+    let r = frame.camera_rotation;
+    let inverse3 = Mat3::from_cols(r.x_axis, r.y_axis, -r.z_axis);
+    let view3 = inverse3.transpose();
+    let inverse = Mat4::from_cols(
+        inverse3.x_axis.extend(0.0),
+        inverse3.y_axis.extend(0.0),
+        inverse3.z_axis.extend(0.0),
+        frame.camera_position.extend(1.0),
+    );
+    let view = Mat4::from_cols(
+        view3.x_axis.extend(0.0),
+        view3.y_axis.extend(0.0),
+        view3.z_axis.extend(0.0),
+        (-(view3 * frame.camera_position)).extend(1.0),
+    );
+    moly_law::particle::stretch_geometry::StretchView {
+        view: view.to_cols_array(),
+        inverse_view: inverse.to_cols_array(),
+        camera_velocity: (view3 * camera_velocity).to_array(),
+    }
+}
+
+/// The Stretch mode's vertices: per particle four corners with a normal each
+/// (the writer bends each corner's normal toward its own edge), in the shared
+/// reflected world space. The screen limits use the billboards' coefficient
+/// (far-plane width over far distance, divided by renderer scale X) on the
+/// camera-space depth coordinate, which is negative in front of the camera.
+/// `camera_velocity` is the camera's world velocity in the source basis.
+fn write_stretch(
+    stretch: Stretch,
+    draw: &Draw,
+    particles: &[Instance],
+    frame: &Frame,
+    fov_y: f32,
+    aspect: f32,
+    camera_velocity: Vec3,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+) {
+    use moly_law::particle::stretch_geometry as law;
+    let view = stretch_view(frame, camera_velocity);
+    let coefficient = (2.0 * (fov_y * 0.5).tan() * aspect) / frame.scale.x.max(0.00001);
+    let renderer = law::StretchRenderer {
+        velocity_scale: stretch.velocity_scale,
+        length_scale: stretch.length_scale,
+        camera_velocity_scale: stretch.camera_velocity_scale,
+        scale: frame.scale.to_array(),
+        limits: [-(draw.screen_size.x * coefficient), -(draw.screen_size.y * coefficient), 0.0, 0.0],
+        normal_bend: law::normal_bend(stretch.normal_direction),
+    };
+    for p in particles {
+        let quad = law::stretch_quad(&view, &renderer, &law::StretchParticle {
+            position: p.position.to_array(),
+            velocity: p.velocity.to_array(),
+            size: [p.size.x, p.size.y],
+            age_percent: p.age_percent,
+        });
+        positions.extend(quad.positions.map(|v| reflect(Vec3::from_array(v)).to_array()));
+        normals.extend(quad.normals.map(|v| reflect(Vec3::from_array(v)).to_array()));
+    }
+}
+
 /// Preserve source UVs and custom streams. Geometry is stored in the shared
 /// reflected world space; the source-program upload restores source coordinates.
 /// `simulation` is the simulation space's rotation to world; with the Velocity
 /// alignment each instance's velocity is read in the simulation space.
+/// `camera_velocity` (the camera's world velocity, source basis) is read by the
+/// Stretch mode only.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write(
     mesh: &mut Mesh,
     draw: &Draw,
@@ -202,6 +284,7 @@ pub(crate) fn write(
     fov_y: f32,
     aspect: f32,
     simulation: Mat3,
+    camera_velocity: Vec3,
 ) {
     let mut positions = Vec::with_capacity(particles.len() * 4);
     let mut normals = Vec::with_capacity(particles.len() * 4);
@@ -210,8 +293,21 @@ pub(crate) fn write(
     let mut custom1 = Vec::with_capacity(particles.len() * 4);
     let mut custom2 = Vec::with_capacity(particles.len() * 4);
     let mut indices = Vec::with_capacity(particles.len() * 6);
+    if let Mode::Stretch(stretch) = draw.mode {
+        write_stretch(stretch, draw, particles, frame, fov_y, aspect, camera_velocity, &mut positions, &mut normals);
+    }
     for p in particles {
-        let base = positions.len() as u32;
+        // Four UVs per particle in every mode (the Stretch positions are
+        // already written).
+        let base = uv.len() as u32;
+        if matches!(draw.mode, Mode::Stretch(_)) {
+            uv.extend(moly_law::particle::stretch_geometry::UV);
+            colours.extend([p.colour.to_array(); 4]);
+            custom1.extend([p.custom1.to_array(); 4]);
+            custom2.extend([p.custom2.to_array(); 4]);
+            indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+            continue;
+        }
         let depth = frame
             .camera_rotation
             .z_axis

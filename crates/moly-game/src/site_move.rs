@@ -37,7 +37,7 @@
 //! millisecond-rounded delays that skip their creation frame; tweens and
 //! animation clocks advance from the frame they start.
 
-mod arrival;
+pub(crate) mod arrival;
 pub(crate) mod camera;
 mod cannon;
 pub(crate) mod door;
@@ -248,6 +248,7 @@ pub(crate) struct SiteMove {
 }
 
 pub(crate) fn install(app: &mut App) {
+    effects::install(app);
     speed_lines::install(app);
     wipe::install(app);
     room_door::install(app);
@@ -277,6 +278,9 @@ pub(crate) fn install(app: &mut App) {
                 advance
                     .after(crate::site::read_switch)
                     .before(crate::site::plan)
+                    // The NPC side answers the door's await before the door
+                    // reads it, so an answer lets the door go on that frame.
+                    .after(crate::npc::DoorAnswerSet)
                     .run_if(
                         resource_exists::<SiteMove>
                             .or(resource_exists::<SiteMoveRequest>)
@@ -305,10 +309,12 @@ pub(crate) fn install(app: &mut App) {
         );
 }
 
-/// The effect pools: built before any move, as `EffectManager.Setup` runs
-/// in the field scene's setup, and outliving each move (the landing effect
-/// keeps playing after the move has returned to Normal). Present only when
-/// the release root lists the site-move products (`products`).
+/// The move's effects, played from the `EffectManager` pools
+/// ([`effects::EffectPools`], built before any move, as `EffectManager.Setup`
+/// runs in the field scene's setup, and outliving each move: the landing
+/// effect keeps playing after the move has returned to Normal), with the
+/// flying copy the camera carries. Present only when the release root lists
+/// the site-move products (`products`).
 #[derive(Resource)]
 pub(crate) struct SiteMoveEffects(effects::Effects);
 
@@ -806,9 +812,8 @@ impl SiteMove {
                 true
             }
         };
-        let effects = world
-            .get_resource::<SiteMoveEffects>()
-            .is_none_or(|effects| effects.0.settled(&server));
+        let effects =
+            !world.contains_resource::<SiteMoveEffects>() || effects::move_pools_settled(world);
         let arrival = self.arrival.poll(world);
         site && cannon && effects && arrival
     }
