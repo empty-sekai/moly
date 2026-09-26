@@ -17,16 +17,30 @@
 //! 输入，不能因没有离线瓦片而改用带陡壁与底面的渲染地表。室内按等级
 //! 选择导航面，只有该等级未提供独立几何时才用模块地板。
 //!
-//! 站点几何是 site-local 的，世界偏移（sitePosition）归消费侧施加。本仓
-//! 一次装载一站且以站为世界原点：广场格位锚定的摆放 mock 与取景数学都
-//! 系在这一口径上，施加偏移会把锚点整体挪走。sitePosition 只入账与锚行，
-//! 不施加；多站同屏的共存装载未接，挂账。
+//! 站点几何是 site-local 的，世界偏移（sitePosition）归消费侧施加。当前站
+//! 是世界原点：广场格位锚定的摆放 mock 与取景数学都系在这一口径上。
+//!
+//! Residency ([`ResidentSites`], the source's `SiteManager.SiteList`): the
+//! source keeps several sites loaded, each at its master `SitePosition`
+//! (home to its nearest outdoor site is 283 m, to the farthest 849 m).
+//! `Initialize` adds home and first_floor; every
+//! `OnEnterSite` calls `HideOtherSite`, which runs `HideSite`
+//! (`SetActive(false)`) on every other listed site; `CanRemoveSite` is
+//! false for home and for the loaded floor (`_currentLoadedFloorType`), so
+//! those stay listed, hidden, when the player leaves them, and a harvest or
+//! delivery site is removed when it is left. Entering a floor unloads the
+//! other floor (`UpdateLoadedFloor`). Here a listed site that is not the
+//! current one keeps its handles and, once it has been shown, its scene
+//! entities, hidden at `SitePosition - current SitePosition`; coming back
+//! to it shows the same entities again. A cannon move's origin stays shown
+//! at its offset until the move's end action ([`queue_cannon_swap`],
+//! [`end_departure`]).
 //!
 //! 切换：Tab 循环、数字键直选（支持集内的站），或 `MOLY_SITE_TOUR_SECS`
-//! 冒烟巡游仪表（无人值守逐站装载，末站驻留毕干净退出）。切换即拆站：
-//! 场景实体连子树撤、站点域资源全清、写新选择让装载计划重走。名册与玩
-//! 家实体保留（角色装配链不参与换站），新地面定案后由 npc/player 域的
-//! 重播种面落位。
+//! 冒烟巡游仪表（无人值守逐站装载，末站驻留毕干净退出）。切换时当前站
+//! 按上面的驻留律退场（移除，或隐藏留在名单里）、站点域资源全清、写新
+//! 选择让装载计划重走。名册与玩家实体保留（角色装配链不参与换站），新
+//! 地面定案后由 npc/player 域的重播种面落位。
 
 use crate::inactive_nodes::{self, SiteSettled};
 use crate::site_material;
@@ -673,8 +687,9 @@ pub struct RoomInfo {
 
 /// 已请求装载的站点资产族。字段随站点类别而异：房间站多模块与寻路面，
 /// 户外站多 navmesh 面。主 glTF 字段开放给同 crate 的换装系统读
-/// `named_materials`。
-#[derive(Resource)]
+/// `named_materials`。A listed site ([`ResidentSites`]) holds a clone of its
+/// family, which keeps the site loaded while it is not the current one.
+#[derive(Resource, Clone)]
 pub struct SiteAssets {
     pub(crate) gltf: Handle<Gltf>,
     /// 场景包站的地表网格名（逐站对账，见 `GROUND`/`GROUND_BY_SCENE`）；
@@ -709,9 +724,15 @@ pub(crate) struct HomeObstacleLevel(pub(crate) u32);
 pub struct GroundMeshes(pub Vec<Handle<Mesh>>);
 
 /// 玩家可行走面（navmesh 约束面）的网格 primitive；与 [`GroundMeshes`]
-/// 同批展开，消费在 `walk_face` 域。户外站来自站点包清单解析出的面源
-/// （高度网格或烘焙输入面），居住类站与地表同源（authored 无 navmesh，
-/// 真源运行时烘——地表即面的替身）。
+/// 同批展开，消费在 `walk_face` 域。The source's `NavMeshField` adds a
+/// `NavMeshSurface` at run time and builds it over a volume from the physics
+/// colliders on the `MysekaiNavMeshBuildTarget` layer. The face here
+/// is that bake's walkable input: the site package's `walkableGround`
+/// collider (home, and the outdoor sites without the grasslands height
+/// mesh), which is the one site collider on that layer in home; a room takes
+/// its level's navigation collider, or the module floor where that collider
+/// ships no mesh. The bake itself (voxelisation, volume, fixture colliders)
+/// is the `walk_face` domain's.
 #[derive(Resource)]
 pub struct WalkFaceMeshes(pub Vec<Handle<Mesh>>);
 
@@ -745,6 +766,431 @@ pub(crate) struct SiteScenePending(usize);
 /// Update 侧等不到（时机全解在 inactive_nodes 模块注释）。
 #[derive(Clone, Copy, Resource)]
 pub struct GroundEpoch(pub u64);
+
+/// A scene root that only navigation reads: spawned hidden, never revealed.
+#[derive(Component)]
+pub(crate) struct SiteNavigationRoot;
+
+/// A scene root of a listed site that is not the current one: the origin of
+/// a cannon move until its end action, or a site `HideSite` has hidden.
+#[derive(Component)]
+pub(crate) struct ResidentSiteRoot {
+    pub(crate) site_type: String,
+    /// The root's local transform while its site is current (it is placed
+    /// at `SitePosition - current SitePosition` meanwhile).
+    local: Transform,
+    /// It carried the site's [`crate::fixture_scene_inputs::SiteCoordinateOrigin`].
+    origin: bool,
+}
+
+/// The sites `Initialize` adds before the join: `LoadHousingSits` awaits
+/// `AddSite(home_site)`, then `AddSite(first_floor)`.
+const BOOT_SITES: [&str; 2] = ["home_site", "first_floor"];
+
+/// `SiteManager.SiteList` with the floor it keeps loaded. Every site in it
+/// holds its asset family (and so stays loaded); the current one is the
+/// loader's, the others are hidden at their `SitePosition` offset, or, when
+/// they were never shown, only loaded.
+#[derive(Resource)]
+pub(crate) struct ResidentSites {
+    sites: Vec<Resident>,
+    /// `_currentLoadedFloorType`. The constructor and `Initialize` set it to
+    /// first_floor; `UpdateLoadedFloor` sets it to the floor entered, after
+    /// removing the floor loaded before. (`_lastVisitedFloorType`, the floor
+    /// `UpdateLoadedFloor` requires from home or an outdoor site, is the
+    /// same floor on every path: both start at first_floor and both are set
+    /// to a floor when it is entered.)
+    loaded_floor: String,
+    /// `Initialize`'s adds have been made.
+    booted: bool,
+}
+
+impl Default for ResidentSites {
+    fn default() -> Self {
+        Self {
+            sites: Vec::new(),
+            loaded_floor: "first_floor".to_owned(),
+            booted: false,
+        }
+    }
+}
+
+struct Resident {
+    site_type: String,
+    level: u32,
+    /// `SitePosition` in the runtime frame.
+    origin: Vec3,
+    /// Asset path prefixes of the family (the GPU estimate groups by them).
+    prefixes: Vec<String>,
+    /// Strong handles: the family stays loaded while the site is listed.
+    _family: SiteAssets,
+    /// The scene document the sidecar readers request at each entry.
+    _sidecar: (Handle<JsonAsset>, Handle<moly_assets::sidecar::MolyJson>),
+    view: ResidentView,
+}
+
+enum ResidentView {
+    /// Listed, never instantiated (`Initialize`'s first_floor).
+    Loaded,
+    /// The current site: its roots are the loader's [`SiteRoot`]s.
+    Current,
+    /// A cannon move's origin, still shown until the move's end action.
+    Departing(Vec<Entity>),
+    /// `HideSite`: instantiated and hidden.
+    Hidden(Vec<Entity>),
+}
+
+impl ResidentView {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Current => "current",
+            Self::Departing(_) => "departing",
+            Self::Hidden(_) => "hidden",
+        }
+    }
+
+    fn roots(&self) -> &[Entity] {
+        match self {
+            Self::Departing(roots) | Self::Hidden(roots) => roots,
+            Self::Loaded | Self::Current => &[],
+        }
+    }
+}
+
+impl ResidentSites {
+    /// `CanRemoveSite`: false for home and for the loaded floor.
+    fn can_remove(&self, site_type: &str) -> bool {
+        site_type != "home_site" && !(is_room(site_type) && site_type == self.loaded_floor)
+    }
+
+    fn position(&self, site_type: &str) -> Option<usize> {
+        self.sites
+            .iter()
+            .position(|site| site.site_type == site_type)
+    }
+
+    fn resident(
+        server: &AssetServer,
+        planned: &SitePlanned,
+        placement: Option<SitePlacement>,
+        view: ResidentView,
+    ) -> Resident {
+        let active = &planned.active;
+        let mut prefixes = vec![format!("site/scenes/{}/", active.scene)];
+        if let Some(room) = &active.room {
+            prefixes.push(format!("site/indoor/modules/lv_{:02}/", room.level));
+            if let Some(file) = &room.walkable_file {
+                prefixes.push(format!("site/indoor/navigation/navigation_mesh/{file}"));
+            }
+        }
+        let json = moly_assets::site_scene_json(&active.scene);
+        Resident {
+            site_type: active.site_type.clone(),
+            level: active.level,
+            origin: placement.map_or(Vec3::ZERO, |p| p.product_origin()),
+            prefixes,
+            _family: planned.assets.clone(),
+            _sidecar: (server.load(json.clone()), server.load(json)),
+            view,
+        }
+    }
+
+    /// `Initialize`'s `AddSite` calls, once: the boot sites other than the
+    /// one entered are listed with their family loaded. A level that cannot
+    /// be resolved yet leaves that site to be listed when it is entered.
+    fn boot(
+        &mut self,
+        server: &AssetServer,
+        sites: &Sites,
+        selection: &SiteSelection,
+        layouts: &crate::fixture::layouts::SiteFixtureLayouts,
+        region: Option<NavMeshSourceRegion>,
+    ) {
+        if std::mem::replace(&mut self.booted, true) {
+            return;
+        }
+        for site in BOOT_SITES {
+            if site == selection.site || self.position(site).is_some() {
+                continue;
+            }
+            let mut probe = selection.clone();
+            probe.site = site.to_owned();
+            let level = match probe.resolve_level(sites, layouts, region) {
+                Ok(level) => level,
+                Err(error) => {
+                    warn!(
+                        "[site] Initialize AddSite({site}): its level is not resolved ({error}); listed when entered"
+                    );
+                    continue;
+                }
+            };
+            let planned = plan_family(server, sites, site, level);
+            self.sites.push(Self::resident(
+                server,
+                &planned,
+                sites.placement(site),
+                ResidentView::Loaded,
+            ));
+            info!(
+                "[site] Initialize AddSite({site}): listed and loading, level {level}, not shown"
+            );
+        }
+    }
+
+    /// The loader enters `planned`: `UpdateLoadedFloor` for a floor, then the
+    /// site is listed as the current one. Returns the hidden roots to show
+    /// again when the listed entry has the same level.
+    fn enter(
+        &mut self,
+        commands: &mut Commands,
+        server: &AssetServer,
+        sites: &Sites,
+        planned: &SitePlanned,
+        temporary: bool,
+    ) -> Option<Vec<Entity>> {
+        let site = planned.active.site_type.as_str();
+        if is_room(site) && self.loaded_floor != site {
+            let old = std::mem::replace(&mut self.loaded_floor, site.to_owned());
+            if let Some(index) = self.position(&old) {
+                let entry = self.sites.remove(index);
+                despawn_roots(commands, entry.view.roots());
+                info!("[site] UpdateLoadedFloor({site}): RemoveSite({old})");
+            }
+        }
+        let mut reuse = None;
+        if let Some(index) = self.position(site) {
+            let entry = self.sites.remove(index);
+            let same = !temporary && entry.level == planned.active.level;
+            match entry.view {
+                ResidentView::Hidden(roots) | ResidentView::Departing(roots) if same => {
+                    reuse = Some(roots);
+                }
+                view => despawn_roots(commands, view.roots()),
+            }
+        }
+        // A preview is a fresh, unsaved scene: never listed, never kept.
+        if !temporary {
+            self.sites.push(Self::resident(
+                server,
+                planned,
+                sites.placement(site),
+                ResidentView::Current,
+            ));
+        }
+        reuse
+    }
+
+    /// Every listed site's roots at `SitePosition - current SitePosition`.
+    fn place(&self, world: &mut World, current: Vec3) {
+        for site in &self.sites {
+            let offset = site.origin - current;
+            for &root in site.view.roots() {
+                let Ok(mut entity) = world.get_entity_mut(root) else {
+                    continue;
+                };
+                let Some(local) = entity.get::<ResidentSiteRoot>().map(|r| r.local) else {
+                    continue;
+                };
+                entity.insert(Transform {
+                    translation: local.translation + offset,
+                    ..local
+                });
+            }
+        }
+    }
+}
+
+/// The hidden roots of the site being entered, shown again by
+/// [`spawn_when_ready`] instead of a new instance.
+#[derive(Resource)]
+pub(crate) struct SiteReuse(Vec<Entity>);
+
+fn despawn_roots(commands: &mut Commands, roots: &[Entity]) {
+    for &root in roots {
+        if let Ok(mut entity) = commands.get_entity(root) {
+            entity.despawn();
+        }
+    }
+}
+
+/// How the current site leaves at a switch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// `OnExitSite`, then `RemoveSite` when `CanRemoveSite`, else it is
+    /// hidden (the next site's `OnEnterSite` runs `HideOtherSite`).
+    Now,
+    /// A cannon move's swap: the origin stays shown until the end action.
+    Departing,
+}
+
+/// The current site leaves (see [`Exit`]); every listed site is then placed
+/// in the next site's frame.
+fn exit_current(world: &mut World, roots: Vec<Entity>, next: &str, exit: Exit) {
+    // A listed site entered but left before its roots were shown again.
+    if let Some(reuse) = world.remove_resource::<SiteReuse>() {
+        despawn_now(world, &reuse.0);
+    }
+    let current = world
+        .get_resource::<SiteActive>()
+        .map(|active| active.site_type.clone());
+    let ready = world.contains_resource::<SiteScenesReady>();
+    let next_origin = world
+        .get_resource::<Sites>()
+        .and_then(|sites| sites.placement(next))
+        .map(|placement| placement.product_origin());
+    world.resource_scope(|world, mut residents: Mut<ResidentSites>| {
+        let listed = current.as_deref().and_then(|site| {
+            residents
+                .position(site)
+                .filter(|&index| matches!(residents.sites[index].view, ResidentView::Current))
+        });
+        match listed {
+            // Not listed: a preview's scene.
+            None => despawn_now(world, &roots),
+            Some(index) => {
+                let site = residents.sites[index].site_type.clone();
+                let removable = residents.can_remove(&site);
+                if site == next {
+                    // The same site again (a new level, a reload): the loader
+                    // lists it anew.
+                    despawn_now(world, &roots);
+                    residents.sites.remove(index);
+                } else if !ready {
+                    // Left before its scenes were ready: nothing to keep shown.
+                    despawn_now(world, &roots);
+                    if removable {
+                        residents.sites.remove(index);
+                    } else {
+                        residents.sites[index].view = ResidentView::Loaded;
+                    }
+                } else if exit == Exit::Departing {
+                    detach(world, &roots, &site, false);
+                    residents.sites[index].view = ResidentView::Departing(roots);
+                    info!("[site] {site} -> {next}: the origin stays shown at its offset until the move's end action");
+                } else if removable {
+                    despawn_now(world, &roots);
+                    residents.sites.remove(index);
+                    info!("[site] OnExitSite({site}); RemoveSite({site})");
+                } else {
+                    detach(world, &roots, &site, true);
+                    residents.sites[index].view = ResidentView::Hidden(roots);
+                    info!("[site] OnExitSite({site}): CanRemoveSite false, kept listed; HideSite at {next}'s OnEnterSite");
+                }
+            }
+        }
+        if let Some(origin) = next_origin {
+            residents.place(world, origin);
+        }
+    });
+}
+
+fn despawn_now(world: &mut World, roots: &[Entity]) {
+    for &root in roots {
+        if let Ok(entity) = world.get_entity_mut(root) {
+            entity.despawn();
+        }
+    }
+}
+
+/// The roots stop being the loader's: tagged with their site, kept shown or
+/// hidden (`HideSite`).
+fn detach(world: &mut World, roots: &[Entity], site: &str, hide: bool) {
+    for &root in roots {
+        let Ok(mut entity) = world.get_entity_mut(root) else {
+            continue;
+        };
+        let local = entity.get::<Transform>().copied().unwrap_or_default();
+        let origin = entity.contains::<crate::fixture_scene_inputs::SiteCoordinateOrigin>();
+        entity.remove::<(
+            SiteRoot,
+            SiteVisualPending,
+            crate::fixture_scene_inputs::SiteCoordinateOrigin,
+        )>();
+        entity.insert(ResidentSiteRoot {
+            site_type: site.to_owned(),
+            local,
+            origin,
+        });
+    }
+    if hide {
+        hide_site(world, roots);
+    }
+}
+
+/// `MysekaiSiteView.HideSite`: `SetActive(false)` on the site's object, so
+/// nothing under it renders or sounds. The loader's sound sources are put on
+/// again when the site is entered.
+fn hide_site(world: &mut World, roots: &[Entity]) {
+    let mut stack: Vec<Entity> = roots.to_vec();
+    while let Some(entity) = stack.pop() {
+        let Ok(mut node) = world.get_entity_mut(entity) else {
+            continue;
+        };
+        node.remove::<crate::audio::SoundObject>();
+        if let Some(children) = node.get::<Children>() {
+            stack.extend(children.iter());
+        }
+    }
+    for &root in roots {
+        if let Ok(mut entity) = world.get_entity_mut(root) {
+            entity.insert(Visibility::Hidden);
+        }
+    }
+}
+
+/// `OnSiteMoveEndAction` of a cannon move: the origin's `OnExitSite`, then
+/// `RemoveSite` when `CanRemoveSite` (a harvest or delivery site), else it
+/// stays listed and the destination's `OnEnterSite` hides it
+/// (`HideOtherSite`).
+pub(crate) fn end_departure(world: &mut World) {
+    if !world.contains_resource::<ResidentSites>() {
+        return;
+    }
+    world.resource_scope(|world, mut residents: Mut<ResidentSites>| {
+        let mut index = 0;
+        while index < residents.sites.len() {
+            let ResidentView::Departing(roots) = &residents.sites[index].view else {
+                index += 1;
+                continue;
+            };
+            let roots = roots.clone();
+            let site = residents.sites[index].site_type.clone();
+            if residents.can_remove(&site) {
+                despawn_now(world, &roots);
+                residents.sites.remove(index);
+                info!("[site] end action: OnExitSite({site}); RemoveSite({site})");
+                continue;
+            }
+            hide_site(world, &roots);
+            residents.sites[index].view = ResidentView::Hidden(roots);
+            info!("[site] end action: OnExitSite({site}), CanRemoveSite false, kept listed; hidden by HideOtherSite");
+            index += 1;
+        }
+    });
+}
+
+/// Update: a cannon move's origin left shown after the move has returned
+/// to Normal (a move that ended without reaching [`end_departure`]) takes
+/// the end action's exit now.
+fn settle_departures(
+    mut commands: Commands,
+    residents: Res<ResidentSites>,
+    moving: Option<Res<crate::site_move::SiteMoveActive>>,
+) {
+    if moving.is_some()
+        || !residents
+            .sites
+            .iter()
+            .any(|site| matches!(site.view, ResidentView::Departing(_)))
+    {
+        return;
+    }
+    commands.queue(|world: &mut World| {
+        warn!("[site] a cannon move's origin was still shown after the move returned to Normal; its end action exit runs now");
+        end_departure(world);
+    });
+}
 
 /// Startup：请求快照身份、主表、室内导航包与站点包清单。站点 glTF 待主
 /// 表解析后由 [`plan`] 按选择请求。
@@ -849,6 +1295,7 @@ pub(crate) fn plan(
     mut last_input_error: Local<Option<String>>,
     source_region: Option<Res<NavMeshSourceRegion>>,
     level_hold: Option<Res<crate::site_expansion::LevelHold>>,
+    mut residents: ResMut<ResidentSites>,
 ) {
     // A rank change is delivered before the first site: the housing sites'
     // displayed levels follow it.
@@ -882,7 +1329,25 @@ pub(crate) fn plan(
             return;
         }
     };
+    residents.boot(
+        &server,
+        &sites,
+        &selection,
+        &layouts,
+        source_region.as_deref().copied(),
+    );
     let planned = plan_family(&server, &sites, &selection.site, site_level);
+    // AddSite: a listed site is reused (its family is still loaded; its
+    // hidden scene is shown again), an unlisted one is loaded.
+    if let Some(roots) = residents.enter(
+        &mut commands,
+        &server,
+        &sites,
+        &planned,
+        temporary.is_some(),
+    ) {
+        commands.insert_resource(SiteReuse(roots));
+    }
     let scene = planned.active.scene.clone();
     commands.insert_resource(planned.active);
     commands.insert_resource(planned.assets);
@@ -1054,6 +1519,8 @@ pub fn spawn_when_ready(
     gltf_meshes: Res<Assets<GltfMesh>>,
     assets: Option<Res<SiteAssets>>,
     spawned: Option<Res<GroundMeshes>>,
+    reuse: Option<Res<SiteReuse>>,
+    hidden_roots: Query<(&ResidentSiteRoot, Has<SiteNavigationRoot>)>,
 ) {
     if spawned.is_some() {
         return;
@@ -1187,6 +1654,50 @@ pub fn spawn_when_ready(
     }
     // 未提供独立导航输入时，地表网格兼可行走面；室内模块地板也走此臂。
     let face = face.unwrap_or_else(|| ground.clone());
+    if let Some(reuse) = reuse {
+        commands.remove_resource::<SiteReuse>();
+        // `ShowSite` on the listed site: the same instance, already expanded
+        // and swapped to its source materials, becomes the loader's again.
+        // Its presentation is withheld until the material pass has run over
+        // it once more, as for a new instance.
+        let kept: Vec<_> = reuse
+            .0
+            .iter()
+            .filter_map(|&root| hidden_roots.get(root).ok().map(|found| (root, found)))
+            .collect();
+        if kept.len() == scenes.len() {
+            for (root, (resident, navigation)) in kept {
+                let mut entity = commands.entity(root);
+                entity.remove::<ResidentSiteRoot>().insert((
+                    SiteRoot,
+                    resident.local,
+                    Visibility::Hidden,
+                ));
+                if resident.origin {
+                    entity.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin);
+                }
+                if !navigation {
+                    entity.insert(SiteVisualPending);
+                }
+            }
+            info!(
+                "[site] AddSite: {} roots of the listed site shown again (no new instance)",
+                scenes.len()
+            );
+            commands.insert_resource(GroundMeshes(ground));
+            commands.insert_resource(WalkFaceMeshes(face));
+            // No `SceneInstanceReady` comes for an instance that exists.
+            commands.insert_resource(SiteReady);
+            commands.insert_resource(SiteScenesReady);
+            return;
+        }
+        warn!(
+            "[site] the listed site's {} kept roots do not match its {} scenes; a new instance replaces them",
+            reuse.0.len(),
+            scenes.len()
+        );
+        despawn_roots(&mut commands, &reuse.0);
+    }
     let pending = scenes.len();
     for (scene_index, (scene, hidden)) in scenes.into_iter().enumerate() {
         let mut root = commands.spawn((SceneRoot(scene), SiteRoot, Visibility::Hidden));
@@ -1196,7 +1707,9 @@ pub fn spawn_when_ready(
         if let Some((_, level)) = rings.iter().find(|(index, _)| *index == scene_index) {
             root.insert(HomeObstacleRing { level: *level });
         }
-        if !hidden {
+        if hidden {
+            root.insert(SiteNavigationRoot);
+        } else {
             root.insert(SiteVisualPending);
         }
     }
@@ -1495,7 +2008,21 @@ fn via_home(
 }
 
 /// Queue the shared scene teardown before publishing a new site selection.
+/// The current site leaves by the residency rule: removed, or kept listed
+/// and hidden (see the module notes).
 pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection) {
+    queue_exit(commands, roots, next, Exit::Now);
+}
+
+/// A cannon move's swap (the end of the player's flight): the teardown of
+/// [`queue_transition`], except that the origin stays shown, placed at its
+/// offset in the destination's frame, until the move's end action
+/// ([`end_departure`]) removes or hides it.
+pub(crate) fn queue_cannon_swap(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection) {
+    queue_exit(commands, roots, next, Exit::Departing);
+}
+
+fn queue_exit(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection, exit: Exit) {
     // Release furniture ownership and detach the logical player before any
     // scene subtree disappears or the next site reseeds that same player.
     commands.queue(crate::player_fixture_action::cancel_for_site_change);
@@ -1505,9 +2032,9 @@ pub(crate) fn queue_transition(commands: &mut Commands, roots: Vec<Entity>, next
     commands.queue(crate::fixture::clear_for_site_change);
     commands.queue(crate::harvest::clear_for_site_change);
     commands.queue(crate::delivery::clear_for_site_change);
-    for root in roots {
-        commands.entity(root).despawn();
-    }
+    // Before the site ledger is removed: the exit reads which site leaves.
+    let next_site = next.site.clone();
+    commands.queue(move |world: &mut World| exit_current(world, roots, &next_site, exit));
     commands.remove_resource::<SiteAssets>();
     commands.remove_resource::<HomeObstacleLevel>();
     commands.remove_resource::<GroundMeshes>();
@@ -1716,6 +2243,120 @@ pub fn report_anchor(
     );
 }
 
+/// Update (once per settled site, next to the anchor row): the site list as
+/// the residency keeps it, with each site's retained entities and an
+/// estimate of the GPU memory its loaded family holds. The estimate sums the
+/// vertex and index buffers of every mesh asset and the mip chain of every
+/// image asset whose path lies in the family's directories (a hidden site's
+/// assets stay uploaded; hiding only stops drawing). A family whose site was
+/// never shown has not requested its sidecar-listed textures yet.
+#[allow(clippy::too_many_arguments)]
+fn report_residency(
+    epoch: Option<Res<GroundEpoch>>,
+    mut last: Local<u64>,
+    residents: Res<ResidentSites>,
+    current_roots: Query<Entity, With<SiteRoot>>,
+    children: Query<&Children>,
+    meshes: Query<(), With<Mesh3d>>,
+    (server, mesh_assets, images): (Res<AssetServer>, Res<Assets<Mesh>>, Res<Assets<Image>>),
+    entities: &bevy::ecs::entity::Entities,
+) {
+    let Some(epoch) = epoch else {
+        return;
+    };
+    if epoch.0 == *last {
+        return;
+    }
+    *last = epoch.0;
+    let mut per_prefix: Vec<(usize, u64, u64, usize, usize)> =
+        vec![(0, 0, 0, 0, 0); residents.sites.len()];
+    let owner = |path: &AssetPath| {
+        let path = path.path().to_string_lossy().replace('\\', "/");
+        residents.sites.iter().position(|site| {
+            site.prefixes
+                .iter()
+                .any(|prefix| path.starts_with(prefix.as_str()))
+        })
+    };
+    for (id, mesh) in mesh_assets.iter() {
+        if !mesh
+            .asset_usage
+            .contains(bevy::asset::RenderAssetUsages::MAIN_WORLD)
+        {
+            continue;
+        }
+        let Some(index) = server.get_path(id).as_ref().and_then(owner) else {
+            continue;
+        };
+        let bytes = mesh.get_vertex_buffer_size() as u64
+            + mesh.get_index_buffer_bytes().map_or(0, |b| b.len() as u64);
+        per_prefix[index].1 += bytes;
+        per_prefix[index].3 += 1;
+    }
+    for (id, image) in images.iter() {
+        let Some(index) = server.get_path(id).as_ref().and_then(owner) else {
+            continue;
+        };
+        per_prefix[index].2 += image_bytes(image);
+        per_prefix[index].4 += 1;
+    }
+    let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let (mut total, mut away) = (0u64, 0u64);
+    let mut rows = Vec::new();
+    for (index, site) in residents.sites.iter().enumerate() {
+        let roots: Vec<Entity> = match site.view {
+            ResidentView::Current => current_roots.iter().collect(),
+            _ => site.view.roots().to_vec(),
+        };
+        let (mut n, mut m) = (0usize, 0usize);
+        for root in roots {
+            let (a, b) = subtree_stats(root, &children, &meshes);
+            n += a;
+            m += b;
+        }
+        let (_, mesh_bytes, image_bytes, mesh_count, image_count) = per_prefix[index];
+        total += mesh_bytes + image_bytes;
+        if !matches!(site.view, ResidentView::Current) {
+            away += mesh_bytes + image_bytes;
+        }
+        rows.push(format!(
+            "{} ({}, level {}, {n} entities, {m} mesh entities; GPU est. meshes {:.1} MiB in {mesh_count}, textures {:.1} MiB in {image_count})",
+            site.site_type,
+            site.view.name(),
+            site.level,
+            mib(mesh_bytes),
+            mib(image_bytes)
+        ));
+    }
+    info!(
+        "[site-resident] SiteList: {}; GPU est. {:.1} MiB listed, {:.1} MiB of it for sites not current; world entities {}",
+        rows.join(", "),
+        mib(total),
+        mib(away),
+        entities.count_spawned()
+    );
+}
+
+/// An image's GPU size: every mip level of every layer, by its format's
+/// block size.
+fn image_bytes(image: &Image) -> u64 {
+    let descriptor = &image.texture_descriptor;
+    let format = descriptor.format;
+    let (block_w, block_h) = format.block_dimensions();
+    let Some(block) = format.block_copy_size(None) else {
+        return 0;
+    };
+    let layers = u64::from(descriptor.size.depth_or_array_layers.max(1));
+    (0..descriptor.mip_level_count.max(1))
+        .map(|mip| {
+            let w = (descriptor.size.width >> mip).max(1);
+            let h = (descriptor.size.height >> mip).max(1);
+            u64::from(w.div_ceil(block_w)) * u64::from(h.div_ceil(block_h)) * u64::from(block)
+        })
+        .sum::<u64>()
+        * layers
+}
+
 /// 子树统计：(保留实体数, 保留网格实体数)，包括休眠节点。
 fn subtree_stats(
     root: Entity,
@@ -1756,6 +2397,8 @@ pub struct SitePlugin(pub SiteRequest);
 impl Plugin for SitePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SiteSelection::from(self.0.clone()))
+            .init_resource::<ResidentSites>()
+            .add_systems(Update, (settle_departures, report_residency))
             .add_observer(on_scene_ready);
     }
 }
