@@ -539,6 +539,9 @@ fn force_no_talk_action(
         slot.interrupt = Some(TALK_INTERRUPT);
     }
     if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
+        // The cancelled objective's own ForceUpdateObjective ran inside the
+        // cancel, before this reset: nothing stays owed.
+        mind.force_updates = 0;
         // ImmediatelyExecuteNextObjective.
         mind.skip_next_rest = true;
     }

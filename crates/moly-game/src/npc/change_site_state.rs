@@ -169,6 +169,9 @@ pub(crate) fn move_npc(
         slot.interrupt = Some(CHANGE_SITE_INTERRUPT);
     }
     if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
+        // The cancelled objective's own ForceUpdateObjective ran inside the
+        // cancel, before this reset: nothing stays owed.
+        mind.force_updates = 0;
         mind.skip_next_rest = true;
     }
     world.resource_mut::<ChangeSiteRuns>().runs.insert(
