@@ -1612,7 +1612,8 @@ impl PrunerScene {
             }
             let visits = self.variants[0].overlap(center, extents).map_err(|why| why.0.to_owned())?;
             seq = visits.into_iter().filter(|id| touched.contains(id)).collect();
-            self.report("diagnostic: the order of the pruner with no flush before the showing taken where the pruners                 disagree".to_owned());
+            self.report("diagnostic: the pruner with no flush before the showing gives the order where they disagree"
+                .to_owned());
         }
         if seq.len() != touched.len() {
             return Err("a collider the query meets that the pruner does not visit".to_owned());
