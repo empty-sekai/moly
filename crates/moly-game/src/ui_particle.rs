@@ -26,6 +26,18 @@
 //! (`m_StencilValue >= 1`) and a copy only for a sprite texture or animatable
 //! properties.
 //!
+//! Plain Transform nodes: `BakeMesh` reads every system node through the
+//! Transform API alone (`position`, `rotation`, `lossyScale`,
+//! `InverseTransformPoint`), so a system on a plain Transform below the
+//! UIParticle node is baked from its local position, rotation and scale as
+//! any Transform is. The document places a node's component by the node
+//! table (when it has one) and exports a plain Transform's local TRS only as
+//! its glTF node's TRS (position and rotation reflected through x, scale as
+//! is), so a host whose systems sit on plain Transforms loads the root's
+//! glTF scene once and reads those nodes there. A RectTransform below a
+//! plain Transform (its anchors would resolve against a parent that has no
+//! rect) is refused by name; no packaged UIParticle has one.
+//!
 //! Masking: a maskable UIParticle below a `Mask` is refused here (the
 //! stencil material is not ported); none of the packaged UIParticles is
 //! below one. The UI-Uber program has no clip-rect term, so a `RectMask2D`
@@ -69,12 +81,13 @@ pub(crate) mod bake;
 #[cfg(test)]
 mod bake_samples;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bevy::asset::uuid::Uuid;
 use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
+use bevy::gltf::{Gltf, GltfNode};
 use bevy::mesh::{MeshVertexBufferLayoutRef, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
@@ -145,8 +158,33 @@ struct Fields {
 
 #[derive(Component)]
 enum HostState {
+    /// The root's glTF scene is loading: some system sits on a plain
+    /// Transform, whose local TRS only the scene carries.
+    AwaitingScene(Handle<Gltf>),
     Installed(Installed),
     Refused,
+}
+
+/// A node's local position, rotation and scale in the source basis.
+type Trs = (Vec3, Quat, Vec3);
+
+/// Why a host is not installed this frame.
+enum NotInstalled {
+    /// These plain Transform nodes need the root's glTF scene, at this path.
+    NeedsScene(String),
+    Refused(String),
+}
+
+impl From<String> for NotInstalled {
+    fn from(reason: String) -> Self {
+        NotInstalled::Refused(reason)
+    }
+}
+
+impl From<&str> for NotInstalled {
+    fn from(reason: &str) -> Self {
+        NotInstalled::Refused(reason.to_owned())
+    }
 }
 
 struct Installed {
@@ -291,18 +329,79 @@ fn quat(value: &Value) -> Option<Quat> {
 }
 
 /// One document root: its scene index (the particle rows of its systems
-/// carry it) and its RectTransforms by node path. RectTransform instances are
-/// listed root by root, each root holding `nodes` of them. Node paths repeat
-/// across roots (two roots can both hold `cloud/cloud (1)`), so a component
-/// is placed in a root by a link, never by its path alone.
-fn document_root<'a>(
-    doc: &'a Value,
-    root: &str,
-) -> Result<(u64, HashMap<&'a str, &'a Value>), String> {
+/// carry it), its RectTransforms by node path and its plain Transform nodes.
+/// Node paths repeat across roots (two roots can both hold
+/// `cloud/cloud (1)`), so a component is placed in a root by a link, never by
+/// its path alone: the node table's (serialized file, path id) of the node's
+/// Transform when the document has one; otherwise the instances are listed
+/// root by root, each root holding `nodes` of them, and every node is a
+/// RectTransform.
+type RootNodes<'a> = (u64, HashMap<&'a str, &'a Value>, HashSet<&'a str>);
+
+/// A path id as the document writes it (a number or a decimal string).
+fn path_id_of(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+fn document_root<'a>(doc: &'a Value, root: &str) -> Result<RootNodes<'a>, String> {
     let roots = doc["roots"].as_array().ok_or("document has no roots")?;
     let rects = doc["components"]["RectTransform"]["instances"]
         .as_array()
         .ok_or("document has no RectTransform instances")?;
+    if let Some(table) = doc["nodeTable"].as_array() {
+        let mut named = roots.iter().filter(|r| r["name"].as_str() == Some(root));
+        let entry = named
+            .next()
+            .ok_or_else(|| format!("document has no root {root}"))?;
+        if named.next().is_some() {
+            return Err(format!("two roots named {root}"));
+        }
+        let scene = entry["scene"]
+            .as_u64()
+            .ok_or_else(|| format!("root {root} has no scene index"))?;
+        let count = entry["nodes"].as_u64().ok_or("root without a node count")? as usize;
+        let mut map = HashMap::new();
+        let mut plain = HashSet::new();
+        let mut seen = 0usize;
+        for node in table.iter().filter(|n| n["root"].as_str() == Some(root)) {
+            seen += 1;
+            let path = node["node"]
+                .as_str()
+                .ok_or("node table entry without a node path")?;
+            let archive = node["archive"]
+                .as_str()
+                .ok_or_else(|| format!("node table entry {path} without a serialized file"))?;
+            let transform = node["components"]
+                .as_array()
+                .and_then(|list| {
+                    list.iter()
+                        .find(|c| matches!(c["type"].as_str(), Some("Transform" | "RectTransform")))
+                })
+                .ok_or_else(|| format!("node {path} has no Transform"))?;
+            if transform["type"].as_str() == Some("Transform") {
+                plain.insert(path);
+                continue;
+            }
+            let id = path_id_of(&transform["pathId"])
+                .ok_or_else(|| format!("node {path}'s RectTransform has no path id"))?;
+            let instance = rects
+                .iter()
+                .find(|inst| {
+                    inst["file"].as_str() == Some(archive)
+                        && path_id_of(&inst["pathId"]) == Some(id)
+                })
+                .ok_or_else(|| format!("node {path}'s RectTransform is not exported"))?;
+            map.insert(path, &instance["fields"]);
+        }
+        if seen != count {
+            return Err(format!(
+                "root {root}: {seen} node table entries for {count} nodes"
+            ));
+        }
+        return Ok((scene, map, plain));
+    }
     let mut at = 0usize;
     let mut found = None;
     for r in roots {
@@ -318,7 +417,7 @@ fn document_root<'a>(
                 .iter()
                 .map(|inst| (inst["node"].as_str().unwrap_or(""), &inst["fields"]))
                 .collect();
-            if found.replace((scene, map)).is_some() {
+            if found.replace((scene, map, HashSet::new())).is_some() {
                 return Err(format!("two roots named {root}"));
             }
         }
@@ -358,13 +457,41 @@ fn rect(fields: &Value, node: &str) -> Result<Rect, String> {
     })
 }
 
-/// The local TRS of each node from below `from` down to `to`, from their
-/// RectTransforms: the local position is the anchor reference point in the
+/// The node paths from below `from` down to `to`.
+fn chain_paths(from: &str, to: &str) -> Result<Vec<String>, String> {
+    if to == from {
+        return Ok(Vec::new());
+    }
+    let rest = if from.is_empty() {
+        to
+    } else {
+        to.strip_prefix(from)
+            .and_then(|r| r.strip_prefix('/'))
+            .ok_or_else(|| format!("system node {to} is not below the UIParticle node {from}"))?
+    };
+    let mut path = from.to_owned();
+    Ok(rest
+        .split('/')
+        .map(|part| {
+            path = if path.is_empty() {
+                part.to_owned()
+            } else {
+                format!("{path}/{part}")
+            };
+            path.clone()
+        })
+        .collect())
+}
+
+/// The local TRS of each node from below `from` down to `to`. A plain
+/// Transform takes its local TRS from `plain` (read from the glTF scene). A
+/// RectTransform's local position is the anchor reference point in the
 /// parent's rect plus the anchored position (x, y) and the serialized z. Only
 /// point anchors are read (a stretched anchor's size needs the parent's
 /// resolved rect).
 fn rect_chain(
     rects: &HashMap<&str, &Value>,
+    plain: &HashMap<String, Trs>,
     from: &str,
     to: &str,
 ) -> Result<Vec<(Vec3, Quat, Vec3)>, String> {
@@ -386,6 +513,16 @@ fn rect_chain(
         } else {
             format!("{parent_path}/{part}")
         };
+        if let Some(trs) = plain.get(&path) {
+            out.push(*trs);
+            parent_path = path;
+            continue;
+        }
+        if plain_parent(rects, &parent_path) {
+            return Err(format!(
+                "RectTransform {path} is below the plain Transform {parent_path}, whose rect is not read here"
+            ));
+        }
         let parent = rect(
             rects
                 .get(parent_path.as_str())
@@ -393,9 +530,9 @@ fn rect_chain(
             &parent_path,
         )?;
         let child = rect(
-            rects.get(path.as_str()).ok_or_else(|| {
-                format!("no RectTransform for {path} (a plain Transform is not read here)")
-            })?,
+            rects
+                .get(path.as_str())
+                .ok_or_else(|| format!("no RectTransform for {path}"))?,
             &path,
         )?;
         for (name, r) in [(&parent_path, &parent), (&path, &child)] {
@@ -413,6 +550,63 @@ fn rect_chain(
     Ok(out)
 }
 
+/// Whether `path` is a node without a RectTransform (a plain Transform).
+fn plain_parent(rects: &HashMap<&str, &Value>, path: &str) -> bool {
+    !rects.contains_key(path)
+}
+
+/// The local TRS of `wanted` (paths in `root`) from the root's glTF scene:
+/// the scene's root node is named after the document root, and each path
+/// part names one child. The glTF node carries the Transform's local position
+/// and rotation reflected through x (`(-x, y, z)`, `(x, -y, -z, w)`) and its
+/// scale as is; this reflects them back. `Ok(None)` while a node is loading.
+fn scene_trs(
+    gltf: &Gltf,
+    nodes: &Assets<GltfNode>,
+    root: &str,
+    wanted: &[String],
+) -> Result<Option<HashMap<String, Trs>>, String> {
+    let Some(top) = gltf.named_nodes.get(root) else {
+        return Err(format!("the glTF scene has no node named {root}"));
+    };
+    let mut out = HashMap::new();
+    for path in wanted {
+        let mut handle = top.clone();
+        for part in path.split('/').filter(|part| !part.is_empty()) {
+            let Some(node) = nodes.get(&handle) else {
+                return Ok(None);
+            };
+            let mut matching = Vec::new();
+            for child in &node.children {
+                let Some(child_node) = nodes.get(child) else {
+                    return Ok(None);
+                };
+                if child_node.name == part {
+                    matching.push(child.clone());
+                }
+            }
+            handle = match matching.as_slice() {
+                [one] => one.clone(),
+                other => {
+                    return Err(format!(
+                        "{} glTF children named {part} on the way to {path}",
+                        other.len()
+                    ))
+                }
+            };
+        }
+        let Some(node) = nodes.get(&handle) else {
+            return Ok(None);
+        };
+        let t = node.transform;
+        let position = Vec3::new(-t.translation.x, t.translation.y, t.translation.z);
+        let r = t.rotation;
+        let rotation = Quat::from_xyzw(r.x, -r.y, -r.z, r.w);
+        out.insert(path.clone(), (position, rotation, t.scale));
+    }
+    Ok(Some(out))
+}
+
 /// Update: resolve each visible host once and install its systems (the Play
 /// of its play-on-awake systems); clear them when it is hidden, and clear the
 /// draws of a despawned host.
@@ -428,6 +622,7 @@ fn install(
     live: Query<(), With<UiParticleHost>>,
     systems: Query<(Entity, &UiParticleSystem)>,
     json: Res<Assets<JsonAsset>>,
+    (gltfs, gltf_nodes): (Res<Assets<Gltf>>, Res<Assets<GltfNode>>),
     server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<UiUberMaterial>>,
@@ -441,6 +636,8 @@ fn install(
         }
     }
     for (entity, host, visible, host_state) in &mut hosts {
+        // The glTF scene of an awaiting host, once its nodes are there.
+        let mut plain = HashMap::new();
         match (visible.get(), host_state) {
             (false, Some(host_state)) => {
                 if let HostState::Installed(installed) = &*host_state {
@@ -449,6 +646,65 @@ fn install(
                     }
                 }
                 commands.entity(entity).remove::<HostState>();
+            }
+            (true, Some(host_state)) => {
+                let HostState::AwaitingScene(scene) = &*host_state else {
+                    continue;
+                };
+                if let bevy::asset::LoadState::Failed(err) = server.load_state(scene) {
+                    warn!(root = %host.root, node = %host.node, "[ui-particle] refused: the root's glTF scene did not load ({err})");
+                    commands.entity(entity).insert(HostState::Refused);
+                    continue;
+                }
+                let Some(gltf) = gltfs.get(scene) else {
+                    continue;
+                };
+                let Some(doc) = documents.get(&host.document.id()).cloned() else {
+                    continue;
+                };
+                let wanted = match plain_nodes_needed(host, &doc) {
+                    Ok(wanted) => wanted,
+                    Err(reason) => {
+                        warn!(root = %host.root, node = %host.node, "[ui-particle] refused: {reason}");
+                        commands.entity(entity).insert(HostState::Refused);
+                        continue;
+                    }
+                };
+                match scene_trs(gltf, &gltf_nodes, &host.root, &wanted) {
+                    Ok(Some(trs)) => plain = trs,
+                    Ok(None) => continue,
+                    Err(reason) => {
+                        warn!(root = %host.root, node = %host.node, "[ui-particle] refused: {reason}");
+                        commands.entity(entity).insert(HostState::Refused);
+                        continue;
+                    }
+                }
+                match install_host(
+                    &mut commands,
+                    entity,
+                    host,
+                    &doc,
+                    &plain,
+                    &server,
+                    &mut meshes,
+                    &mut materials,
+                    &mut seeds,
+                    ordinal,
+                ) {
+                    Ok(installed) => {
+                        commands
+                            .entity(entity)
+                            .insert(HostState::Installed(installed));
+                    }
+                    Err(NotInstalled::NeedsScene(_)) => {
+                        warn!(root = %host.root, node = %host.node, "[ui-particle] refused: plain Transform nodes are not in the glTF scene");
+                        commands.entity(entity).insert(HostState::Refused);
+                    }
+                    Err(NotInstalled::Refused(reason)) => {
+                        warn!(root = %host.root, node = %host.node, "[ui-particle] refused: {reason}");
+                        commands.entity(entity).insert(HostState::Refused);
+                    }
+                }
             }
             (true, None) => {
                 let id = host.document.id();
@@ -471,6 +727,7 @@ fn install(
                     entity,
                     host,
                     &doc,
+                    &plain,
                     &server,
                     &mut meshes,
                     &mut materials,
@@ -482,15 +739,57 @@ fn install(
                             .entity(entity)
                             .insert(HostState::Installed(installed));
                     }
-                    Err(reason) => {
+                    Err(NotInstalled::NeedsScene(path)) => {
+                        info!(root = %host.root, node = %host.node, "[ui-particle] systems on plain Transforms: loading the root's glTF scene {path}");
+                        commands
+                            .entity(entity)
+                            .insert(HostState::AwaitingScene(server.load(path)));
+                    }
+                    Err(NotInstalled::Refused(reason)) => {
                         warn!(root = %host.root, node = %host.node, "[ui-particle] refused: {reason}");
                         commands.entity(entity).insert(HostState::Refused);
                     }
                 }
             }
-            _ => {}
+            (false, None) => {}
         }
     }
+}
+
+/// The plain Transform nodes on the way from the host's UIParticle node down
+/// to each of its systems.
+fn plain_nodes_needed(host: &UiParticleHost, doc: &Value) -> Result<Vec<String>, String> {
+    let (_, _, plain) = document_root(doc, &host.root)?;
+    let rows = doc["particles"]
+        .as_array()
+        .ok_or("document has no particles")?;
+    let mut wanted = Vec::new();
+    let instances = doc["components"]["UIParticle"]["instances"]
+        .as_array()
+        .ok_or("document has no UIParticle instances")?;
+    for inst in instances
+        .iter()
+        .filter(|inst| inst["node"].as_str() == Some(host.node.as_str()))
+    {
+        for reference in inst["fields"]["m_Particles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let Some(row) = path_id_of(&reference["pathId"])
+                .and_then(|id| rows.iter().find(|row| row["pathId"].as_i64() == Some(id)))
+            else {
+                continue;
+            };
+            let node = row["node"].as_str().unwrap_or("");
+            for path in chain_paths(&host.node, node).unwrap_or_default() {
+                if plain.contains(path.as_str()) && !wanted.contains(&path) {
+                    wanted.push(path);
+                }
+            }
+        }
+    }
+    Ok(wanted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -499,13 +798,31 @@ fn install_host(
     entity: Entity,
     host: &UiParticleHost,
     doc: &Value,
+    plain_trs: &HashMap<String, Trs>,
     server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<UiUberMaterial>,
     seeds: &mut crate::particle_runtime::seed::SystemSeedManager,
     ordinal: &mut u64,
-) -> Result<Installed, String> {
-    let (scene, rects) = document_root(doc, &host.root)?;
+) -> Result<Installed, NotInstalled> {
+    let (scene, rects, plain) = document_root(doc, &host.root)?;
+    if plain.contains(host.node.as_str()) {
+        return Err(format!(
+            "the UIParticle node {} is a plain Transform (a Graphic has a RectTransform)",
+            host.node
+        )
+        .into());
+    }
+    let needed = plain_nodes_needed(host, doc)?;
+    if needed.iter().any(|path| !plain_trs.contains_key(path)) {
+        let file = doc["geometry"]["file"]
+            .as_str()
+            .ok_or("systems on plain Transforms, and the document names no glTF scene")?;
+        return Err(NotInstalled::NeedsScene(format!(
+            "moly://{}/{}",
+            host.directory, file
+        )));
+    }
     let rows = doc["particles"]
         .as_array()
         .ok_or("document has no particles")?;
@@ -543,7 +860,8 @@ fn install_host(
             matching.len(),
             host.root,
             host.node
-        ));
+        )
+        .into());
     };
     let f = &instance["fields"];
     if f["m_Enabled"].as_i64() != Some(1) {
@@ -601,7 +919,7 @@ fn install_host(
             .as_i64()
             .ok_or("m_Particles entry without a pathId")?;
         if reference["fileId"].as_i64() != Some(0) {
-            return Err(format!("m_Particles[{order}] is outside the prefab"));
+            return Err(format!("m_Particles[{order}] is outside the prefab").into());
         }
         let row = rows
             .iter()
@@ -613,11 +931,12 @@ fn install_host(
             report.push(format!("{order}:{node} (no material)"));
             continue;
         }
-        let chain = rect_chain(&rects, &host.node, node)?;
+        let chain = rect_chain(&rects, plain_trs, &host.node, node)?;
         if chain.is_empty() && row["system"]["scalingMode"].as_u64() == Some(1) {
             return Err(format!(
                 "m_Particles[{order}] {node}: a system on the UIParticle node under the Local scaling mode reads the node's driven scale, which is not wired"
-            ));
+            )
+            .into());
         }
         let local_scale = chain.last().map_or(fields.local_scale, |(_, _, s)| *s);
         let mesh = meshes.add(crate::billboard::empty_mesh());
