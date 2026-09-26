@@ -89,6 +89,7 @@ pub(crate) mod edit;
 pub(crate) mod home_action;
 pub(crate) mod local;
 pub(crate) mod music;
+pub(crate) mod music_play;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -207,6 +208,8 @@ pub(crate) enum ResponseKind {
     HomeActionCraft,
     HomeActionCanvas,
     HomeActionSketch,
+    MusicPlaySet,
+    MusicPlayEject,
 }
 
 impl ResponseKind {
@@ -227,6 +230,8 @@ impl ResponseKind {
             Self::BirthdayPartySeat => {
                 "user data (the rows of the birthday parties now in session)"
             }
+            Self::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
+            Self::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
         }
     }
 }
@@ -249,6 +254,8 @@ pub(crate) struct ServerResponse {
     pub(crate) music: Option<Vec<client::music::MusicPlaySetting>>,
     /// `userAvatar` when it carries it.
     pub(crate) avatar: Option<client::avatar::UserAvatar>,
+    /// `userMysekaiMusicRecords` when it carries them.
+    pub(crate) music_records: Option<Vec<client::music_play::OwnedMusicRecord>>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -424,6 +431,8 @@ pub(crate) struct ServerModel {
     pub(super) home_action_replies: [u64; 3],
     /// The native avatar instrument, applied once the masters resolve.
     pub(super) avatar_instrument: avatar::AvatarInstrument,
+    /// Music player requests answered (set, eject).
+    pub(super) music_play_replies: [u64; 2],
 }
 
 static MODEL: Mutex<Option<ServerModel>> = Mutex::new(None);
@@ -473,6 +482,7 @@ impl ServerModel {
             party_masters: Vec::new(),
             home_action_replies: [0; 3],
             avatar_instrument: avatar::AvatarInstrument::default(),
+            music_play_replies: [0; 2],
         }
     }
 
@@ -652,6 +662,7 @@ impl ServerModel {
             delivery: self.delivery_update(&sections),
             music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
             avatar: has(avatar::SECTION).then_some(self.doc.avatar),
+            music_records: has(music_play::RECORDS_SECTION).then(|| self.doc.music_records.clone()),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -690,6 +701,7 @@ impl ServerModel {
         let mut carries = vec![SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
         carries.extend(delivery::SECTIONS);
         carries.extend([music::SECTION, avatar::SECTION]);
+        carries.push(music_play::RECORDS_SECTION);
         self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
@@ -836,6 +848,7 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
             doc.music_settings.len()
         );
     }
+    music_play::native_overlay(doc);
     let text = |name: &str| {
         instrument_env(name)
             .map(|raw| raw.trim().to_owned())
@@ -1330,6 +1343,7 @@ fn deliver(
     mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
     mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
     mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
+    mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1352,6 +1366,9 @@ fn deliver(
         }
         if let Some(avatar) = response.avatar.take() {
             avatar_copy.apply(avatar);
+        }
+        if let Some(rows) = response.music_records.take() {
+            records_copy.apply(rows);
         }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
@@ -1447,6 +1464,7 @@ fn deliver(
         "birthdayParty": birthday.view(),
         "userMysekaiMusicPlayFixtureSettings": music_copy.view(),
         "userAvatar": client::avatar::value(&avatar_copy.avatar),
+        "userMysekaiMusicRecords": records_copy.view(),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1523,6 +1541,7 @@ impl Plugin for ServerPlugin {
             .init_resource::<delivery::ClientBirthdayPartyData>()
             .init_resource::<client::music::ClientMusicPlaySettings>()
             .init_resource::<client::avatar::ClientUserAvatar>()
+            .init_resource::<client::music_play::ClientMusicRecords>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(
@@ -1540,6 +1559,8 @@ impl Plugin for ServerPlugin {
             .add_systems(Last, persist_local);
         let endpoint = app.world_mut().register_system(home_action::handle);
         app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
+        let endpoint = app.world_mut().register_system(music_play::handle);
+        app.insert_resource(client::music_play::MusicPlayEndpoint(endpoint));
     }
 }
 
@@ -1565,6 +1586,10 @@ pub(crate) fn document_view() -> String {
                 "craft": model.home_action_replies[0],
                 "canvas": model.home_action_replies[1],
                 "sketch": model.home_action_replies[2],
+            },
+            "musicPlayReplies": {
+                "set": model.music_play_replies[0],
+                "eject": model.music_play_replies[1],
             },
             "errors": model.errors,
         })
