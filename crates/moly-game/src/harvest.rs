@@ -645,11 +645,7 @@ fn on_scene_ready(
 /// the target and the button go with the site; the next arrival rebuilds.
 pub(crate) fn clear_for_site_change(world: &mut World) {
     let roots: Vec<Entity> = world
-        .query_filtered::<Entity, Or<(
-            With<HarvestRoot>,
-            With<HarvestDropItem>,
-            With<effects::HarvestEffectRoot>,
-        )>>()
+        .query_filtered::<Entity, Or<(With<HarvestRoot>, With<HarvestDropItem>)>>()
         .iter(world)
         .collect();
     let count = roots.len();
@@ -658,8 +654,9 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
             entity.despawn();
         }
     }
+    // The effect copies stay in their pools (the source's effect root
+    // outlives the site); a kept copy stays with its emitter.
     action::cancel_for_site_change(world);
-    effects::clear_for_site_change(world);
     world.remove_resource::<HarvestScenesReady>();
     world.remove_resource::<crate::harvest_material::HarvestMaterialsSwapped>();
     world.resource_mut::<HarvestScenesReadyCount>().0 = 0;
@@ -756,7 +753,7 @@ impl Plugin for HarvestPlugin {
             .add_message::<learn::LearnPhenomenaDialogClosed>()
             .add_systems(
                 Startup,
-                (catalog::load, clips::load, tool_model::load, effects::load),
+                (catalog::load, clips::load, tool_model::load),
             )
             .add_observer(on_scene_ready)
             .add_systems(
