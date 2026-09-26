@@ -38,7 +38,9 @@
 //!   fixture material path reads from glTF extras the skin glb does not
 //!   carry: the door is drawn with the imported base-colour material. The
 //!   stencil mesh writes no colour (`_ColorMask` 0) and the shadow mesh is
-//!   off (`_Show` 0): both are hidden; the product has no stencil pass.
+//!   off (`_Show` 0): both are hidden. The door parts carry their source
+//!   shader attribute ([`SourceStencilAttribute`]), and the character
+//!   silhouette's stencil replay draws the stencil mesh from it.
 //! - The clip's binding path is `Loc_door/root/joint_door1` (the animation
 //!   file's hierarchy); under the prefab's Animator the joint is
 //!   `root/joint_door1`. The release glb binds the channel to the prefab's
@@ -53,6 +55,7 @@ use moly_assets::json::JsonAsset;
 use serde_json::Value;
 
 use super::{InstanceReady, PendingInstance};
+use crate::character_silhouette::{door_part_attribute, SourceStencilAttribute};
 
 /// `SetUpDoor`'s search: a Transform named exactly this under the wall.
 const DOOR_ANCHOR: &str = "Loc_door";
@@ -144,6 +147,8 @@ struct DoorPrefab {
     close_length: f32,
     /// Material names the product does not draw (stencil-only, shadow off).
     hidden: Vec<String>,
+    /// Material names with the source shader attribute of their program.
+    attributes: Vec<(String, u8)>,
 }
 
 /// The rooms this port refused a door for, so the refusal is named once.
@@ -447,6 +452,15 @@ impl RoomDoor {
                     .collect()
             })
             .unwrap_or_default();
+        let attributes = doc["materials"]
+            .as_array()
+            .map(|materials| {
+                materials
+                    .iter()
+                    .filter_map(|m| Some((m["name"].as_str()?.to_owned(), door_part_attribute(m)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(DoorPrefab {
             scene,
             open,
@@ -454,6 +468,7 @@ impl RoomDoor {
             open_length,
             close_length,
             hidden,
+            attributes,
         })
     }
 
@@ -475,6 +490,24 @@ impl RoomDoor {
             if hide {
                 world.entity_mut(*entity).insert(Visibility::Hidden);
                 hidden += 1;
+            }
+        }
+        // The parts' source shader attributes, read by the silhouette's
+        // stencil replay (a hidden stencil mesh is replayed all the same).
+        let mut marked = 0;
+        for entity in &entities {
+            let attribute = world.get::<GltfMaterialName>(*entity).and_then(|name| {
+                prefab
+                    .attributes
+                    .iter()
+                    .find(|(material, _)| *material == name.0)
+                    .map(|(_, attribute)| *attribute)
+            });
+            if let Some(attribute) = attribute {
+                world
+                    .entity_mut(*entity)
+                    .insert(SourceStencilAttribute(attribute));
+                marked += 1;
             }
         }
         let animator = entities
@@ -501,7 +534,7 @@ impl RoomDoor {
             }
         };
         info!(
-            "[room-door] {}: door prefab bound {} (scene {}, clips {} {:.4}s / {} {:.4}s, {hidden} stencil/shadow meshes hidden)",
+            "[room-door] {}: door prefab bound {} (scene {}, clips {} {:.4}s / {} {:.4}s, {hidden} stencil/shadow meshes hidden, {marked} parts with a source shader attribute)",
             self.skin,
             if bound.is_some() { "with its animator" } else { "without an animator" },
             prefab.scene,
