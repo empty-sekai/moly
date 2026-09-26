@@ -252,6 +252,14 @@ fn characters_spawned(world: &mut World) -> bool {
     if !world.contains_resource::<crate::npc::Spawned>() {
         return false;
     }
+    // The room's appeared flag of each NPC is set after the gate's
+    // appearance has placed every visiting NPC.
+    if !world
+        .get_resource::<crate::npc_gate::GateAppearance>()
+        .is_some_and(|gate| gate.appeared())
+    {
+        return false;
+    }
     let Some(ids) = world
         .get_resource::<crate::npc::Registry>()
         .map(|registry| registry.character_unit_ids.clone())

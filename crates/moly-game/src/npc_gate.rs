@@ -122,6 +122,14 @@ pub(crate) struct GateAppearance {
     state: State,
 }
 
+impl GateAppearance {
+    /// Whether the appearance has placed every visiting NPC (the room's
+    /// appeared flags the player's entry waits for).
+    pub(crate) fn appeared(&self) -> bool {
+        matches!(self.state, State::Done)
+    }
+}
+
 fn emit(value: serde_json::Value) {
     info!("[npc-gate] {value}");
 }
