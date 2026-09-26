@@ -37,7 +37,11 @@
 //!
 //! ## Save and close
 //!
-//! OK and a tap outside run `Save`: every set-up page's `UpdateLocalData`,
+//! The dialog shows through the screen manager (`DialogType.OptionDialog`,
+//! 82); its back key is `Common1ButtonDialog.OnHardwareBackKeyProcess`, which
+//! is `OnClickOK`, like `OnCloseExternal`.
+//!
+//! OK, a tap outside and the back key run `Save`: every set-up page's `UpdateLocalData`,
 //! `UpdateServerData`, `LiveSettingData.SaveToStorage` and
 //! `ApplicationLocalSettings.SaveToStorage`. The close button closes without
 //! saving; the application settings object is the session's cached one, so a
@@ -81,6 +85,12 @@ use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::info::referenced_component;
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
+use crate::ui_layers::{
+    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, UiLayerStack,
+};
+
+/// `Show1ButtonDialog(DialogType.OptionDialog)`.
+const OPTION_DIALOG: DialogType = DialogType(82);
 
 /// The dialog's layout document.
 const KEY: &str = "Option";
@@ -1208,6 +1218,8 @@ pub(crate) struct OptionDialogState {
     scroll: [f32; 5],
     /// A drag moving a page's content: (page, start y, start offset).
     scrolling: Option<(Page, f32, f32)>,
+    /// The screen manager's handle of this dialog.
+    dialog_id: Option<DialogId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2000,17 +2012,34 @@ pub(crate) fn place(
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     layouts: Res<crate::ui_layout::UiLayouts>,
     bindings: Option<Res<OptionBindings>>,
+    mut stack: ResMut<UiLayerStack>,
 ) {
     let Some(bindings) = bindings else {
         return;
     };
     let open_now = dialog.option_open;
     match (*was_open, open_now) {
-        (false, true) => open(&mut state, &settings, &app, &bindings),
+        (false, true) => {
+            open(&mut state, &settings, &app, &bindings);
+            // Shown without an open animation here. The dialog's back key is
+            // Common1ButtonDialog's OnClickOK (Save, then close).
+            match stack.show_dialog(OPTION_DIALOG, DisplayLayerType::LayerDialog, DialogBackKey::Close, "settings panel (OptionDialog.Setup)") {
+                Ok(id) => {
+                    stack.open_dialog(id);
+                    stack.dialog_open_finished(id);
+                    state.dialog_id = Some(id);
+                }
+                Err(error) => warn!("[option] {error}; the dialog shows outside the screen manager and the back key does not reach it"),
+            }
+        }
         (true, false) => {
             state.dragging = None;
             state.scrolling = None;
             state.current = None;
+            if let Some(id) = state.dialog_id.take() {
+                stack.close_dialog(id);
+                stack.dialog_destroyed(id);
+            }
         }
         _ => {}
     }
@@ -2587,7 +2616,17 @@ pub(crate) fn click(
     bindings: Option<Res<OptionBindings>>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    mut back_keys: MessageReader<DialogBackKeyEvent>,
 ) {
+    // Common1ButtonDialog.OnHardwareBackKeyProcess: OnClickOK.
+    let back = back_keys
+        .read()
+        .any(|event| state.dialog_id == Some(event.id));
+    if back && dialog.option_open {
+        save(&mut state, &mut settings, &mut app, "back key");
+        dialog.option_open = false;
+        return;
+    }
     let events: Vec<GestureEvent> = gestures.read().cloned().collect();
     if events.is_empty() || !dialog.option_open {
         return;
