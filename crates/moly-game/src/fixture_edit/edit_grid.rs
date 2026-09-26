@@ -90,10 +90,9 @@ use moly_law::fixture::GridPosition;
 use serde_json::Value;
 
 use super::assets::FixtureAreas;
-use super::placement::TileBox;
-use super::{validation, EditSession, FixtureEditSystems, PutStatus};
+use super::tile_rules::TileBox;
+use super::{EditSession, FixtureEditSystems, PutStatus};
 use crate::fixture::{EditableFixture, FixturePlacements};
-use crate::site::FloorGridLayout;
 
 const GRID: &str = "moly://layout-grid/grid.json";
 const PHENOMENA: &str = "moly://phenomena/index.json";
@@ -1256,7 +1255,7 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
     let offset = Vec3::new(0.0, 2.0 * doc.position_y, 0.0);
     let transform = Transform::from_translation(origin + offset);
     let profile = profile_of(grid, &doc);
-    let can_place = can_place(selected.as_ref(), &rows, floor);
+    let can_place = can_place(world);
     let colours = match colours(&doc, &profile, can_place) {
         Ok(colours) => colours,
         Err(error) => {
@@ -1418,13 +1417,16 @@ fn profile_of(grid: &EditGrid, doc: &GridDoc) -> Result<Profile, String> {
     }
 }
 
-/// `CanPlaceFixture`: true on entry, else the selection's put check.
-fn can_place(
-    selected: Option<&EditableFixture>,
-    rows: &[EditableFixture],
-    floor: FloorGridLayout,
-) -> bool {
-    selected.is_none_or(|item| validation::put(item, rows, Some(floor)) == PutStatus::Ok)
+/// `CanPlaceFixture`: true on entry, else the selection's put check
+/// (`SiteLayoutUtility.CanPutFloor`, the one `SetFocus` is given).
+fn can_place(world: &World) -> bool {
+    let Some(session) = world.get_resource::<EditSession>() else {
+        return true;
+    };
+    session
+        .selected
+        .as_ref()
+        .is_none_or(|selection| super::put_status(world, session, selection) == PutStatus::Ok)
 }
 
 /// Rewrite the fill and the colours when the session or the profile changed.
@@ -1446,15 +1448,16 @@ fn refresh(world: &mut World, grid: &mut EditGrid) {
     }
     let rows = session.rows.clone();
     let selected = session.selected.as_ref().map(|s| s.item.clone());
-    let Some(floor) = world
+    if world
         .get_resource::<FixturePlacements>()
         .and_then(FixturePlacements::floor_grid)
-    else {
+        .is_none()
+    {
         return;
-    };
+    }
     let profile_changed = shown.written.is_none_or(|(_, g)| g != generation);
     shown.written = Some((revision, generation));
-    let can_place = can_place(selected.as_ref(), &rows, floor);
+    let can_place = can_place(world);
     let Ok(colours) = colours(&doc, &profile, can_place) else {
         return;
     };
