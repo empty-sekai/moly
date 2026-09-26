@@ -50,7 +50,9 @@ mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod learn;
+mod notice;
 mod obstacles;
+mod possession;
 mod tone;
 mod tool_model;
 mod ui;
@@ -745,6 +747,9 @@ impl Plugin for HarvestPlugin {
             .init_resource::<tool_model::HarvestToolModels>()
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
+            .init_resource::<pickup::HarvestDropManager>()
+            .init_resource::<possession::PossessionMock>()
+            .add_message::<notice::CollectNotice>()
             .init_resource::<effects::HarvestEffects>()
             .init_resource::<prop_animator::PropAnimatorCalls>()
             .init_resource::<damage::HarvestStartHides>()
@@ -757,13 +762,19 @@ impl Plugin for HarvestPlugin {
             .add_message::<learn::LearnPhenomenaDialogClosed>()
             .add_systems(
                 Startup,
-                (catalog::load, clips::load, tool_model::load),
+                (
+                    catalog::load,
+                    clips::load,
+                    tool_model::load,
+                    possession::load,
+                ),
             )
             .add_observer(on_scene_ready)
             .add_systems(
                 Update,
                 (
                     catalog::build,
+                    possession::build,
                     clips::parse,
                     tool_model::parse,
                     arrival::place,
