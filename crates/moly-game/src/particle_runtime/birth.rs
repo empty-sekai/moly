@@ -1214,14 +1214,22 @@ fn validate_emitter(
         NoiseLaw::from_params(noise)
             .map_err(|_| BirthRefused::Unsupported("unqualified Noise configuration"))?;
     }
-    if !matches!(emitter.start.speed, moly_law::particle::MinMaxCurve::Constant(v) if v.is_finite())
-        && !matches!(emitter.start.speed, moly_law::particle::MinMaxCurve::TwoConstants{min,max}
-            if min.is_finite() && max.is_finite() && (max-min).is_finite() && ((max-min)+min).is_finite())
-    {
+    // StartVelocity evaluates the start speed through the engine's
+    // MinMaxCurve evaluation in every mode (the sampler is built per command);
+    // a non-finite scalar is refused.
+    if !match emitter.start.speed {
+        moly_law::particle::MinMaxCurve::Constant(v) => v.is_finite(),
+        moly_law::particle::MinMaxCurve::TwoConstants { min, max } =>
+            min.is_finite() && max.is_finite() && (max - min).is_finite() && ((max - min) + min).is_finite(),
+        moly_law::particle::MinMaxCurve::Curve { multiplier, .. }
+        | moly_law::particle::MinMaxCurve::TwoCurves { multiplier, .. } => multiplier.is_finite(),
+    } {
         return Err(BirthRefused::Unsupported(
             "initial speed curve outside qualified subset",
         ));
     }
+    CurveSampler::new(&emitter.start.speed, moly_law::particle::curve::CurveTime::Normalized)
+        .map_err(BirthRefused::Unsupported)?;
     if !matches!(
         emitter.simulation_space,
         SimulationSpace::Local | SimulationSpace::World
@@ -1270,9 +1278,11 @@ fn validate_unshaped_owner(
     let speeds = match emitter.start.speed {
         moly_law::particle::MinMaxCurve::Constant(v) => [v, v],
         moly_law::particle::MinMaxCurve::TwoConstants { min, max } => [min, (max - min) + min],
+        // The endpoint check reads the two constant endpoints; a curve's
+        // range over the cycle is not bounded here.
         _ => {
             return Err(BirthRefused::Unsupported(
-                "initial speed curve outside qualified subset",
+                "curve-mode start speed of a World-space system without a Shape: its finite range is not bounded",
             ))
         }
     };

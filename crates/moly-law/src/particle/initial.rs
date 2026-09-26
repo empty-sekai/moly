@@ -5,9 +5,11 @@
 //! all four random lanes, including discarded tail lanes. This law excludes
 //! Shape, StartVelocity, module updates and the game seed/lifecycle owner.
 //!
-//! Admission is deliberately bounded to constant/two-constant scalar curves,
-//! all five start-colour modes over Blend/Fixed gradients, and an autonomous
-//! initial context. Inherited initial multipliers/offsets, the perceptual
+//! Admission covers every scalar curve mode (constant, two constants, curve
+//! and two curves, each through the engine's MinMaxCurve evaluation at the
+//! broadcast curve time with the lane's draw, the scalars as the load clamps
+//! them), all five start-colour modes over Blend/Fixed gradients, and an
+//! autonomous initial context. Inherited initial multipliers/offsets, the perceptual
 //! gradient kernel and generic curve preparation need their own evidence.
 //! Nonzero randomize-rotation-direction remains unqualified. The native entry
 //! uses the included ARM FRECPE/FRECPS law; host division is not a bit-equivalent
@@ -315,6 +317,12 @@ fn prepare_axis(curve: Option<&MinMaxCurve>, field: InitialField) -> Result<Curv
     prepare(curve.ok_or(Refused::MissingAxis(field))?, field)
 }
 
+/// InitialModule::Start evaluates each start curve through the engine's
+/// MinMaxCurve evaluation (the one [`CurveSampler`] transcribes) at the
+/// broadcast curve time with the lane's draw, in every mode: a curve-mode
+/// scalar is the multiplier the load clamped (see the schema's start block).
+/// A non-finite scalar is refused; a curve the sampler cannot build (keys,
+/// wraps or weights it does not transcribe) is unsupported.
 fn prepare(curve: &MinMaxCurve, field: InitialField) -> Result<CurveSampler, Refused> {
     let valid = match curve {
         MinMaxCurve::Constant(value) => {
@@ -323,7 +331,7 @@ fn prepare(curve: &MinMaxCurve, field: InitialField) -> Result<CurveSampler, Ref
         MinMaxCurve::TwoConstants { min, max } => {
             min.is_finite() && max.is_finite() && (max - min).is_finite()
         }
-        _ => return Err(Refused::UnsupportedCurve(field)),
+        MinMaxCurve::Curve { multiplier, .. } | MinMaxCurve::TwoCurves { multiplier, .. } => multiplier.is_finite(),
     };
     if !valid {
         return Err(Refused::InvalidCurve(field));
@@ -551,11 +559,16 @@ mod tests {
 
     #[test]
     fn unsupported_curve_and_context_refuse_without_rng_commit() {
+        // Four keys leave the curve to the engine evaluator, which needs the
+        // serialized wraps this curve lacks.
+        let key = |time: f32, value: f32| crate::particle::value::CurveKey {
+            time, value, in_slope: 0.0, out_slope: 0.0, weighted_mode: 0, in_weight: 1.0 / 3.0, out_weight: 1.0 / 3.0,
+        };
         let mut invalid = source(MinMaxCurve::Curve {
             multiplier: 1.0,
             max: crate::particle::value::Curve {
                 multiplier: 1.0,
-                keys: Vec::new(),
+                keys: vec![key(0.0, 1.0), key(0.3, 2.0), key(0.6, 0.5), key(1.0, 1.5)],
                 pre_wrap: None,
                 post_wrap: None,
             },

@@ -312,6 +312,14 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     if !scalar(&emitter.start.speed) {
         return unsupported("target start speed curve mode");
     }
+    // The target's Initial curves read the time the child Emit passes, which
+    // only a constant ignores; the curve modes were executed for an
+    // emitter's own births only.
+    let start = &emitter.start;
+    if ![Some(&start.lifetime), Some(&start.size), start.size_y.as_ref(), start.size_z.as_ref(), Some(&start.rotation),
+        start.rotation_x.as_ref(), start.rotation_y.as_ref()].into_iter().flatten().all(scalar) {
+        return unsupported("target start lifetime, size or rotation curve mode");
+    }
     let inherit = match &emitter.inherit_velocity {
         None => None,
         Some(params) => match params.mode {

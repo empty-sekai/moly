@@ -542,22 +542,26 @@ impl StartParams {
                 unmapped.push(k.clone());
             }
         }
+        // The serialized scalars, as InitialModule's load clamps them.
+        let (life, speed, size, rotation) = (StartClamp::Lifetime, StartClamp::Speed, StartClamp::Size, StartClamp::Rotation);
         Ok(Self {
-            lifetime: lifetime_curve(obj_get(obj, "lifetime"), &format!("{ctx}.start.lifetime"))?,
-            speed: min_max_curve(obj_get(obj, "speed"), &format!("{ctx}.start.speed"))?,
-            size: min_max_curve(obj_get(obj, "size"), &format!("{ctx}.start.size"))?,
+            lifetime: life.apply(lifetime_curve(obj_get(obj, "lifetime"), &format!("{ctx}.start.lifetime"))?),
+            speed: speed.apply(min_max_curve(obj_get(obj, "speed"), &format!("{ctx}.start.speed"))?),
+            size: size.apply(min_max_curve(obj_get(obj, "size"), &format!("{ctx}.start.size"))?),
             size_y: obj_get(obj, "sizeY")
-                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeY")))
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeY")).map(|c| size.apply(c)))
                 .transpose()?,
             size_z: obj_get(obj, "sizeZ")
-                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeZ")))
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeZ")).map(|c| size.apply(c)))
                 .transpose()?,
             size3d: bool_of(obj_get(obj, "size3D"), &format!("{ctx}.start.size3D"))?,
-            rotation: min_max_curve(obj_get(obj, "rotation"), &format!("{ctx}.start.rotation"))?,
+            rotation: rotation.apply(min_max_curve(obj_get(obj, "rotation"), &format!("{ctx}.start.rotation"))?),
             rotation_x: obj_get(obj, "rotationX")
-                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationX"))).transpose()?,
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationX")).map(|c| rotation.apply(c)))
+                .transpose()?,
             rotation_y: obj_get(obj, "rotationY")
-                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationY"))).transpose()?,
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationY")).map(|c| rotation.apply(c)))
+                .transpose()?,
             rotation3d: bool_of(obj_get(obj, "rotation3D"), &format!("{ctx}.start.rotation3D"))?,
             color: start_color(obj_get(obj, "color"), &format!("{ctx}.start.color"))?,
             gravity_modifier: min_max_curve(
@@ -565,6 +569,51 @@ impl StartParams {
                 &format!("{ctx}.start.gravityModifier"),
             )?,
         })
+    }
+}
+
+/// The ranges InitialModule's load (its Transfer) clamps the start curves'
+/// scalars into: first the scalar the curve's polynomial is built with (the
+/// constant, the two-constant maximum or the curve multiplier), then the
+/// two-constant minimum. The lifetime is at least 1e-4 (`fmax`); the speed
+/// lies within +-1e5; each size axis within [0, 1e5], a negative value
+/// becoming +0; each rotation axis within +-1745.3293 (1e5 degrees in
+/// radians). Each bounded clamp is a compare against the lower bound and an
+/// `fmin` against the upper, so a NaN scalar stays NaN, as through `fmax`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StartClamp {
+    Lifetime,
+    Speed,
+    Size,
+    Rotation,
+}
+
+impl StartClamp {
+    pub(crate) fn scalar(self, v: f32) -> f32 {
+        let fmin = |a: f32, b: f32| if a.is_nan() { a } else { a.min(b) };
+        let bounded = |v: f32, lo: u32, hi: u32| {
+            if v < f32::from_bits(lo) { f32::from_bits(lo) } else { fmin(v, f32::from_bits(hi)) }
+        };
+        match self {
+            Self::Lifetime => if v.is_nan() { v } else { v.max(f32::from_bits(0x38d1_b717)) },
+            Self::Speed => bounded(v, 0xc7c3_5000, 0x47c3_5000),
+            Self::Size => if v < 0.0 { 0.0 } else { fmin(v, f32::from_bits(0x47c3_5000)) },
+            Self::Rotation => bounded(v, 0xc4da_2a89, 0x44da_2a89),
+        }
+    }
+
+    pub(crate) fn apply(self, curve: MinMaxCurve) -> MinMaxCurve {
+        match curve {
+            MinMaxCurve::Constant(v) => MinMaxCurve::Constant(self.scalar(v)),
+            MinMaxCurve::TwoConstants { min, max } => {
+                let max = self.scalar(max);
+                MinMaxCurve::TwoConstants { min: self.scalar(min), max }
+            }
+            MinMaxCurve::Curve { multiplier, max } => MinMaxCurve::Curve { multiplier: self.scalar(multiplier), max },
+            MinMaxCurve::TwoCurves { multiplier, min, max } => {
+                MinMaxCurve::TwoCurves { multiplier: self.scalar(multiplier), min, max }
+            }
+        }
     }
 }
 
@@ -1577,4 +1626,42 @@ mod tests {
         assert!(ShapeControls::from_value(&value,"shape").unwrap_err().0.contains("shape.arcMode"));
     }
 
+    /// InitialModule's load clamps against the native instructions (rows
+    /// `field input output`: 0 lifetime maximum, 1 lifetime minimum, 2 speed
+    /// maximum, 3 speed minimum, 4 size, 5 rotation), NaN as a class. Each
+    /// plausible misreading must mismatch somewhere on the same rows.
+    #[test]
+    #[ignore = "MOLY_INITIAL_CLAMP_ROWS must identify the native load clamp rows"]
+    fn start_load_clamps_match_native_transfer() {
+        let text = std::fs::read_to_string(std::env::var_os("MOLY_INITIAL_CLAMP_ROWS").expect("MOLY_INITIAL_CLAMP_ROWS")).unwrap();
+        let rows: Vec<[u32; 3]> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+            let v: Vec<u32> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        }).collect();
+        let rule = |field: u32| match field {
+            0 | 1 => StartClamp::Lifetime,
+            2 | 3 => StartClamp::Speed,
+            4 => StartClamp::Size,
+            5 => StartClamp::Rotation,
+            other => panic!("field {other}"),
+        };
+        let mismatches = |clamp: &dyn Fn(u32, f32) -> f32| rows.iter().filter(|&&[field, input, native]| {
+            let ours = clamp(field, f32::from_bits(input));
+            !(ours.to_bits() == native || (ours.is_nan() && f32::from_bits(native).is_nan()))
+        }).count();
+        let product = mismatches(&|field, v| rule(field).scalar(v));
+        println!("load clamp rows {}, mismatched {product}", rows.len());
+        assert!(rows.len() > 6 && product == 0);
+        let arms: [(&str, &dyn Fn(u32, f32) -> f32); 4] = [
+            ("lifetimeFloorIsStartMinimum", &|field, v| if field < 2 { v.max(f32::from_bits(0x3727_c5ac)) } else { rule(field).scalar(v) }),
+            ("negativeSizeKept", &|field, v| if field == 4 { v.min(f32::from_bits(0x47c3_5000)) } else { rule(field).scalar(v) }),
+            ("speedUnclamped", &|field, v| if field == 2 || field == 3 { v } else { rule(field).scalar(v) }),
+            ("rotationInDegrees", &|field, v| if field == 5 { v.clamp(-1.0e5, 1.0e5) } else { rule(field).scalar(v) }),
+        ];
+        for (name, arm) in arms {
+            let red = mismatches(arm);
+            println!("arm {name}: mismatched {red}");
+            assert!(red > 0, "arm {name} stays green");
+        }
+    }
 }

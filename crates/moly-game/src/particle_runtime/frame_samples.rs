@@ -199,6 +199,12 @@ fn compare(system: &Runtime, row: &Value, frame_state: bool, tally: &mut Tally, 
         tally.check("position", position, &mut ok, label);
         tally.check("velocity", velocity, &mut ok, label);
         tally.check("ageLifetimeSeedColour", scalars, &mut ok, label);
+        // The start size arrays, where the receipt records them (X, and Y and
+        // Z with 3D size storage).
+        if let Some(size) = particles.get("size").and_then(Value::as_array) {
+            let sizes = (0..count).all(|i| size.iter().enumerate().all(|(a, axis)| same(system.side[i].size[a], &axis[i])));
+            tally.check("startSize", sizes, &mut ok, label);
+        }
         // The modules receipt also records the animated velocity and the
         // first custom stream of every particle at the frame end.
         if let (Some(anim), Some(custom)) = (particles.get("anim"), particles.get("custom1")) {
@@ -704,6 +710,38 @@ fn emission_curve_receipt_matches_native_rows() {
     assert!(receipt["k1VersusE1DifferingFrames"].as_u64().unwrap() > 0);
     assert!(receipt["staticInitializers"]["e1VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
     if let Some(path) = std::env::var_os("MOLY_EMISSION_CURVE_BITFLIP") {
+        let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let (_, tally, rotation) = replay_modules(&control, None);
+        println!("bitflip: {} mismatched frames", tally.mismatched_frames + rotation.1);
+        assert!(tally.mismatched_frames + rotation.1 > 0, "the bit-flipped receipt must mismatch");
+    }
+}
+
+/// Curve-mode start lifetime, size, rotation and speed against the native
+/// Update1b rows (the curve-mode start receipt): every case through the
+/// product frame entry, per frame and on Director chunk schedules with a start
+/// delay, each frame compared with the start size arrays. The positive
+/// control (the curves as constants) must change the rows, the static
+/// initializer control too, and a bit-flipped receipt must mismatch.
+#[test]
+#[ignore = "MOLY_INITIAL_CURVES_RECEIPT must identify the JP curve-mode start receipt"]
+fn initial_curves_receipt_matches_native_rows() {
+    let receipt = read("MOLY_INITIAL_CURVES_RECEIPT");
+    let (cases, product, rotation) = replay_modules(&receipt, None);
+    let report = json!({"cases": cases, "frames": product.frames, "mismatchedFrames": product.mismatched_frames,
+        "rotationFrames": rotation.0, "rotationMismatched": rotation.1,
+        "fields": product.fields.iter().map(|(k, (n, bad))| (k.to_string(), json!([n, bad])))
+            .collect::<serde_json::Map<_, _>>(), "firstMismatches": product.first});
+    println!("{report}");
+    if let Some(path) = std::env::var_os("MOLY_INITIAL_CURVES_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(cases > 0 && product.frames > 0, "{report}");
+    assert!(product.fields.get("startSize").is_some_and(|(n, _)| *n > 0), "{report}");
+    assert_eq!((product.mismatched_frames, rotation.1), (0, 0), "{report}");
+    assert!(receipt["k1VersusC0DifferingFrames"].as_u64().unwrap() > 0);
+    assert!(receipt["staticInitializers"]["c0VersusIdentityClearedDifferingFrames"].as_u64().unwrap() > 0);
+    if let Some(path) = std::env::var_os("MOLY_INITIAL_CURVES_BITFLIP") {
         let control: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let (_, tally, rotation) = replay_modules(&control, None);
         println!("bitflip: {} mismatched frames", tally.mismatched_frames + rotation.1);
