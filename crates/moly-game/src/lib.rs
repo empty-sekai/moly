@@ -21,6 +21,7 @@ pub mod camera;
 pub mod canvas;
 pub mod character;
 pub mod character_material;
+mod character_silhouette;
 pub mod client_config;
 pub mod cloth_runtime;
 mod content_library;
@@ -227,6 +228,7 @@ pub fn app(
         fixture_material::FixtureMaterialPlugin,
         fixture_emission::FixtureEmissionPlugin,
     ));
+    app.add_plugins(character_silhouette::CharacterSilhouettePlugin);
     app.add_plugins(fixture_edit::FixtureEditPlugin);
     app.add_plugins((source_color::SourceColorPlugin, source_particle_render::SourceParticlePlugin));
     app.add_plugins((

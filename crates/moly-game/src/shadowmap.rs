@@ -172,12 +172,12 @@ const CHARACTER_RASTER_BIAS: DepthBiasState = DepthBiasState {
 
 /// Joints one palette window holds (the engine's skinning limit), and the
 /// window's byte size: the dynamic uniform binding of the skinned entry point.
-const MAX_JOINTS: usize = 256;
-const PALETTE_WINDOW: u64 = (MAX_JOINTS * 64) as u64;
+pub(crate) const MAX_JOINTS: usize = 256;
+pub(crate) const PALETTE_WINDOW: u64 = (MAX_JOINTS * 64) as u64;
 
 /// Palettes start at this alignment (the dynamic-offset alignment that every
 /// device supports).
-const PALETTE_ALIGN: usize = 256;
+pub(crate) const PALETTE_ALIGN: usize = 256;
 
 /// 消费块（`SiteShadow`）的 GPU 字节数：4×4 + 两个 vec4。
 const CONSUMER_BYTES: usize = 96;
@@ -650,37 +650,23 @@ fn extract_skinned_casters(
         let (palette_offset, palette_index) = match palettes.get(&key) {
             Some(found) => *found,
             None => {
-                let Some(inverse) = bindposes.get(&skin.inverse_bindposes) else {
-                    continue;
-                };
-                if skin.joints.len() > MAX_JOINTS {
-                    if !*too_many_warned {
-                        *too_many_warned = true;
-                        warn!(
-                            "主光阴影：蒙皮网格关节数 {} 超过调色板上限 {MAX_JOINTS}，该网格不投影（仅告警一次）",
-                            skin.joints.len()
-                        );
+                let matrices = match joint_palette(skin, &joints, &bindposes) {
+                    Ok(matrices) => matrices,
+                    Err(PaletteRefusal::TooManyJoints(count)) => {
+                        if !*too_many_warned {
+                            *too_many_warned = true;
+                            warn!(
+                                "主光阴影：蒙皮网格关节数 {count} 超过调色板上限 {MAX_JOINTS}，该网格不投影（仅告警一次）"
+                            );
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                let mut matrices = Vec::with_capacity(skin.joints.len());
-                for (joint, inverse_bindpose) in skin.joints.iter().zip(inverse.iter()) {
-                    let Ok(global) = joints.get(*joint) else {
-                        break;
-                    };
-                    matrices.push(Mat4::from(global.affine()) * *inverse_bindpose);
-                }
-                if matrices.is_empty() || matrices.len() != skin.joints.len() {
-                    continue;
-                }
-                let offset = list.palette_bytes.len().next_multiple_of(PALETTE_ALIGN);
-                list.palette_bytes.resize(offset, 0);
-                for matrix in &matrices {
-                    mat4_bytes(*matrix, &mut list.palette_bytes);
-                }
+                    Err(PaletteRefusal::Unavailable) => continue,
+                };
+                let offset = push_palette(&mut list.palette_bytes, &matrices);
                 tally.palettes += 1;
                 tally.joints += matrices.len();
-                let entry = (offset as u32, palette_matrices.len());
+                let entry = (offset, palette_matrices.len());
                 palette_matrices.push(matrices);
                 palettes.insert(key, entry);
                 entry
@@ -731,6 +717,53 @@ fn extract_skinned_casters(
             other_names.join(", ")
         );
     }
+}
+
+/// Why a skin has no joint palette this frame.
+pub(crate) enum PaletteRefusal {
+    /// More joints than a palette window holds.
+    TooManyJoints(usize),
+    /// The inverse bind poses are not loaded, a joint entity is gone, or the
+    /// skin names more joints than it has inverse bind poses.
+    Unavailable,
+}
+
+/// A skin's joint matrices of this frame, joint by joint: the joint's world
+/// transform times its inverse bind pose, as the colour pass builds them, so
+/// the blended matrix maps a bind-pose vertex straight to world space.
+pub(crate) fn joint_palette(
+    skin: &SkinnedMesh,
+    joints: &Query<&GlobalTransform>,
+    bindposes: &Assets<SkinnedMeshInverseBindposes>,
+) -> Result<Vec<Mat4>, PaletteRefusal> {
+    let Some(inverse) = bindposes.get(&skin.inverse_bindposes) else {
+        return Err(PaletteRefusal::Unavailable);
+    };
+    if skin.joints.len() > MAX_JOINTS {
+        return Err(PaletteRefusal::TooManyJoints(skin.joints.len()));
+    }
+    let mut matrices = Vec::with_capacity(skin.joints.len());
+    for (joint, inverse_bindpose) in skin.joints.iter().zip(inverse.iter()) {
+        let Ok(global) = joints.get(*joint) else {
+            break;
+        };
+        matrices.push(Mat4::from(global.affine()) * *inverse_bindpose);
+    }
+    if matrices.is_empty() || matrices.len() != skin.joints.len() {
+        return Err(PaletteRefusal::Unavailable);
+    }
+    Ok(matrices)
+}
+
+/// Appends a palette at the next [`PALETTE_ALIGN`]-aligned offset of `bytes`
+/// and returns that offset, the dynamic offset of its window.
+pub(crate) fn push_palette(bytes: &mut Vec<u8>, matrices: &[Mat4]) -> u32 {
+    let offset = bytes.len().next_multiple_of(PALETTE_ALIGN);
+    bytes.resize(offset, 0);
+    for matrix in matrices {
+        mat4_bytes(*matrix, bytes);
+    }
+    offset as u32
 }
 
 /// 光源向正交的一对矩阵：深度 pass 用裁剪矩阵，消费侧用采样矩阵
