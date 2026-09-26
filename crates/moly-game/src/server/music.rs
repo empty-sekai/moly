@@ -3,29 +3,18 @@
 //! the vocal version and whether it plays instrumental). The BGM reads the
 //! setting of the site it plays on; the setting is user data, so it lives in
 //! the server document and reaches the client as its copy
-//! ([`ClientMusicPlaySettings`]).
+//! ([`super::client::music::ClientMusicPlaySettings`]).
 //!
 //! Named default: no row (no site has a setting; the default BGM choice
 //! plays). The record master (`mysekai-music-records.json`) checks the record
 //! ids when it is present; its absence is a named missing master.
 
-use std::collections::BTreeMap;
-
-use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
+use super::client::music::MusicPlaySetting;
 use super::document::{int32, object, only};
 
 pub(crate) const SECTION: &str = "userMysekaiMusicPlayFixtureSettings";
-
-/// `UserMysekaiMusicPlayFixtureSetting`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MusicPlaySetting {
-    pub(crate) mysekai_site_id: i32,
-    pub(crate) mysekai_music_record_id: i32,
-    pub(crate) music_vocal_id: i32,
-    pub(crate) is_instrumental: bool,
-}
 
 pub(crate) fn parse_rows(value: &Value) -> Result<Vec<MusicPlaySetting>, String> {
     let rows = value
@@ -67,21 +56,6 @@ pub(crate) fn parse_rows(value: &Value) -> Result<Vec<MusicPlaySetting>, String>
 /// The section from a document (no row when absent).
 pub(crate) fn parse(doc: &Map<String, Value>) -> Result<Vec<MusicPlaySetting>, String> {
     doc.get(SECTION).map_or(Ok(Vec::new()), parse_rows)
-}
-
-pub(crate) fn rows_value(rows: &[MusicPlaySetting]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiSiteId": row.mysekai_site_id,
-                    "mysekaiMusicRecordId": row.mysekai_music_record_id,
-                    "musicVocalId": row.music_vocal_id,
-                    "isInstrumental": row.is_instrumental,
-                })
-            })
-            .collect(),
-    )
 }
 
 /// A `server.edit` of the section (next response); `None` for another path.
@@ -161,49 +135,6 @@ pub(crate) fn parse_instrument(name: &str, raw: &str) -> Vec<MusicPlaySetting> {
     rows
 }
 
-/// The client's copy (`UserDataManager.UserMysekaiMusicPlayFixtureSettings`),
-/// set by responses only.
-#[derive(Resource, Debug, Clone, Default)]
-pub(crate) struct ClientMusicPlaySettings {
-    per_site: BTreeMap<u32, MusicPlaySetting>,
-    /// Responses that carried the section.
-    pub(crate) revision: u64,
-}
-
-#[allow(dead_code)] // Read by the BGM owner's seam.
-impl ClientMusicPlaySettings {
-    /// The setting of a site: (record id, vocal id).
-    pub(crate) fn setting(&self, site_id: u32) -> Option<(i64, i64)> {
-        self.per_site.get(&site_id).map(|row| {
-            (
-                i64::from(row.mysekai_music_record_id),
-                i64::from(row.music_vocal_id),
-            )
-        })
-    }
-
-    /// The whole row of a site.
-    pub(crate) fn row(&self, site_id: u32) -> Option<&MusicPlaySetting> {
-        self.per_site.get(&site_id)
-    }
-
-    pub(crate) fn apply(&mut self, rows: Vec<MusicPlaySetting>) {
-        self.per_site = rows
-            .into_iter()
-            .filter_map(|row| {
-                u32::try_from(row.mysekai_site_id)
-                    .ok()
-                    .map(|site| (site, row))
-            })
-            .collect();
-        self.revision += 1;
-    }
-
-    pub(crate) fn view(&self) -> Value {
-        rows_value(&self.per_site.values().copied().collect::<Vec<_>>())
-    }
-}
-
 pub(crate) fn schema_sections() -> Value {
     json!([{
         "key": SECTION,
@@ -220,6 +151,7 @@ pub(crate) fn schema_sections() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::client::music::rows_value;
     use super::*;
 
     #[test]
@@ -237,9 +169,5 @@ mod tests {
             .unwrap_err()
             .contains("mysekaiMusicRecordId = 1"));
         assert!(check_records(&rows, None).is_ok());
-        let mut client = ClientMusicPlaySettings::default();
-        client.apply(rows);
-        assert_eq!(client.setting(5), Some((12, 3)));
-        assert_eq!(client.setting(6), None);
     }
 }

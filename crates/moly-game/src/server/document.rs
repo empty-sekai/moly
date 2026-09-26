@@ -151,9 +151,9 @@ pub(crate) struct ServerDocument {
     /// `policies.homeActionReply` ([`super::home_action`]).
     pub(crate) home_action_reply: super::home_action::HomeActionReplyPolicy,
     /// `userMysekaiMusicPlayFixtureSettings` ([`super::music`]).
-    pub(crate) music_settings: Vec<super::music::MusicPlaySetting>,
+    pub(crate) music_settings: Vec<super::client::music::MusicPlaySetting>,
     /// `userAvatar` ([`super::avatar`]).
-    pub(crate) avatar: super::avatar::UserAvatar,
+    pub(crate) avatar: super::client::avatar::UserAvatar,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -890,11 +890,11 @@ impl ServerDocument {
             super::home_action::write(self.home_action_reply, &mut policies);
             top.insert(
                 super::music::SECTION.into(),
-                super::music::rows_value(&self.music_settings),
+                super::client::music::rows_value(&self.music_settings),
             );
             top.insert(
                 super::avatar::SECTION.into(),
-                super::avatar::value(&self.avatar),
+                super::client::avatar::value(&self.avatar),
             );
             top.insert("policies".into(), Value::Object(policies));
         }

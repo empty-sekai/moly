@@ -6,7 +6,9 @@
 //! (`SuiteUser`); the client starts the world sequence once the reply
 //! succeeds, and builds the result dialogs from its own copies (the craft
 //! result's first-craft bonus is the master `mysekaiRankObtainedExps` row, the
-//! sketch result's blueprint is the one it asked for).
+//! sketch result's blueprint is the one it asked for). The client sends a
+//! request through [`super::client::home_action::post`]; the server plugin
+//! installs [`handle`] as its endpoint.
 //!
 //! **Named policy** (the server's rules are not on disk):
 //! `policies.homeActionReply`: `success` (the product default) answers every
@@ -21,38 +23,26 @@
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
+use super::client::home_action::{HomeActionApi, HomeActionPost, HomeActionReply};
 use super::{ResponseKind, ServerModel};
 
 pub(crate) const POLICY_KEY: &str = "homeActionReply";
 pub(crate) const REPLY_SUCCESS: &str = "success";
 pub(crate) const REPLY_FAILURE: &str = "failure";
 
-/// Which home-action API a request goes to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HomeActionApi {
-    /// `PostUserMysekaiCraftApi` from the craft screen.
-    Craft,
-    /// `PostUserMysekaiCraftApi` from the canvas screen (a canvas blueprint).
-    Canvas,
-    /// `PostUserMysekaiHousingSketchApi` from the sketch screen.
-    Sketch,
+fn index(api: HomeActionApi) -> usize {
+    match api {
+        HomeActionApi::Craft => 0,
+        HomeActionApi::Canvas => 1,
+        HomeActionApi::Sketch => 2,
+    }
 }
 
-impl HomeActionApi {
-    fn index(self) -> usize {
-        match self {
-            Self::Craft => 0,
-            Self::Canvas => 1,
-            Self::Sketch => 2,
-        }
-    }
-
-    fn kind(self) -> ResponseKind {
-        match self {
-            Self::Craft => ResponseKind::HomeActionCraft,
-            Self::Canvas => ResponseKind::HomeActionCanvas,
-            Self::Sketch => ResponseKind::HomeActionSketch,
-        }
+fn kind(api: HomeActionApi) -> ResponseKind {
+    match api {
+        HomeActionApi::Craft => ResponseKind::HomeActionCraft,
+        HomeActionApi::Canvas => ResponseKind::HomeActionCanvas,
+        HomeActionApi::Sketch => ResponseKind::HomeActionSketch,
     }
 }
 
@@ -62,12 +52,6 @@ pub(crate) enum HomeActionReplyPolicy {
     #[default]
     Success,
     Failure,
-}
-
-/// The reply the client reads before it starts the world sequence.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HomeActionReply {
-    pub(crate) success: bool,
 }
 
 pub(crate) fn parse_policy(value: &Value) -> Result<HomeActionReplyPolicy, String> {
@@ -111,14 +95,14 @@ pub(crate) fn edit_path(
 
 impl ServerModel {
     fn home_action(&mut self, api: HomeActionApi, target: Option<&str>) -> HomeActionReply {
-        let count = &mut self.home_action_replies[api.index()];
+        let count = &mut self.home_action_replies[index(api)];
         *count += 1;
         let count = *count;
         match self.doc.home_action_reply {
             HomeActionReplyPolicy::Failure => {
                 info!(
                     "[server] {} for {}: refused (policies.{POLICY_KEY} = {REPLY_FAILURE}; request {count})",
-                    api.kind().name(),
+                    kind(api).name(),
                     target.unwrap_or("no fixture")
                 );
                 HomeActionReply { success: false }
@@ -126,24 +110,27 @@ impl ServerModel {
             HomeActionReplyPolicy::Success => {
                 info!(
                     "[server] {} for {}: success (request {count}); the reply carries the pending sections; material spend, fixture inventory, experience and the sketch blueprint are not modelled (the request carries no blueprint)",
-                    api.kind().name(),
+                    kind(api).name(),
                     target.unwrap_or("no fixture")
                 );
-                self.respond(api.kind(), false, &[]);
+                self.respond(kind(api), false, &[]);
                 HomeActionReply { success: true }
             }
         }
     }
 }
 
-/// A home action's request; the reply. Refused while no server has joined
+/// The endpoint the server plugin installs for the client's requests
+/// ([`super::client::home_action::post`]). Refused while no server has joined
 /// the client.
-pub(crate) fn post(api: HomeActionApi, target: Option<&str>) -> HomeActionReply {
+pub(super) fn handle(In(request): In<HomeActionPost>) -> HomeActionReply {
+    let HomeActionPost { api, target } = request;
+    let target = target.as_deref();
     super::with_model(|model| {
         if !model.joined {
             warn!(
                 "[server] {} refused: the server has not joined the client yet",
-                api.kind().name()
+                kind(api).name()
             );
             return HomeActionReply { success: false };
         }
@@ -152,7 +139,7 @@ pub(crate) fn post(api: HomeActionApi, target: Option<&str>) -> HomeActionReply 
     .unwrap_or_else(|| {
         warn!(
             "[server] {} refused: the server model is not installed",
-            api.kind().name()
+            kind(api).name()
         );
         HomeActionReply { success: false }
     })

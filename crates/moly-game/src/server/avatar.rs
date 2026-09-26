@@ -1,10 +1,10 @@
 //! The player's avatar wear (`userAvatar`, `UserAvatar`: four nullable ids,
 //! `avatarCostumeId`, `avatarAccessoryId`, `avatarSkinColorId`,
 //! `avatarCoordinateId`). The wear is user data, so it lives in the server
-//! document and reaches the client as its copy ([`ClientUserAvatar`]); the
-//! client resolves the ids through the avatar masters (`AvatarData.Build`),
-//! which the server model reads and hands to the client as
-//! [`AvatarMasters`].
+//! document and reaches the client as its copy
+//! ([`super::client::avatar::ClientUserAvatar`]); the client resolves the ids
+//! through the avatar masters (`AvatarData.Build`), which the server model
+//! reads and hands to the client as [`AvatarMasters`].
 //!
 //! Named default: every id null (the source's unset wear: the "default" skin
 //! bundle, white skin, no accessory). The four masters check the ids when
@@ -12,46 +12,21 @@
 
 use std::collections::BTreeMap;
 
-use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
+use super::client::avatar::{AvatarMasters, CoordinateRow, UserAvatar, FIELDS};
 use super::document::object;
 
 pub(crate) const SECTION: &str = "userAvatar";
-const FIELDS: [&str; 4] = [
-    "avatarCostumeId",
-    "avatarAccessoryId",
-    "avatarSkinColorId",
-    "avatarCoordinateId",
-];
 
-/// `UserAvatar`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) struct UserAvatar {
-    pub(crate) costume: Option<i32>,
-    pub(crate) accessory: Option<i32>,
-    pub(crate) skin_color: Option<i32>,
-    pub(crate) coordinate: Option<i32>,
-}
-
-impl UserAvatar {
-    fn slot(&mut self, field: &str) -> Option<&mut Option<i32>> {
-        match field {
-            "avatarCostumeId" => Some(&mut self.costume),
-            "avatarAccessoryId" => Some(&mut self.accessory),
-            "avatarSkinColorId" => Some(&mut self.skin_color),
-            "avatarCoordinateId" => Some(&mut self.coordinate),
-            _ => None,
-        }
-    }
-
-    fn values(&self) -> [(&'static str, Option<i32>); 4] {
-        [
-            (FIELDS[0], self.costume),
-            (FIELDS[1], self.accessory),
-            (FIELDS[2], self.skin_color),
-            (FIELDS[3], self.coordinate),
-        ]
+/// The slot of a field name.
+fn slot<'a>(avatar: &'a mut UserAvatar, field: &str) -> Option<&'a mut Option<i32>> {
+    match field {
+        "avatarCostumeId" => Some(&mut avatar.costume),
+        "avatarAccessoryId" => Some(&mut avatar.accessory),
+        "avatarSkinColorId" => Some(&mut avatar.skin_color),
+        "avatarCoordinateId" => Some(&mut avatar.coordinate),
+        _ => None,
     }
 }
 
@@ -73,7 +48,7 @@ pub(crate) fn parse_value(value: &Value) -> Result<UserAvatar, String> {
     for field in FIELDS {
         let at = format!("{SECTION}.{field}");
         let id = nullable_id(row.get(field).unwrap_or(&Value::Null), &at)?;
-        *avatar.slot(field).expect("a known field") = id;
+        *slot(&mut avatar, field).expect("a known field") = id;
     }
     Ok(avatar)
 }
@@ -82,16 +57,6 @@ pub(crate) fn parse_value(value: &Value) -> Result<UserAvatar, String> {
 pub(crate) fn parse(doc: &Map<String, Value>) -> Result<UserAvatar, String> {
     doc.get(SECTION)
         .map_or(Ok(UserAvatar::default()), parse_value)
-}
-
-pub(crate) fn value(avatar: &UserAvatar) -> Value {
-    Value::Object(
-        avatar
-            .values()
-            .into_iter()
-            .map(|(field, id)| (field.to_owned(), json!(id)))
-            .collect(),
-    )
 }
 
 /// A `server.edit` of the section (next response); `None` for another path.
@@ -103,7 +68,7 @@ pub(crate) fn edit_path(
 ) -> Option<Result<(), String>> {
     match parts {
         [SECTION] => Some(parse_value(value).map(|parsed| *avatar = parsed)),
-        [SECTION, field] => Some(match avatar.slot(field) {
+        [SECTION, field] => Some(match slot(avatar, field) {
             Some(slot) => nullable_id(value, path).map(|id| *slot = id),
             None => Err(format!("{path} is not a UserAvatar field")),
         }),
@@ -115,62 +80,37 @@ pub(crate) fn edit_path(
 // Masters
 // ---------------------------------------------------------------------------
 
-/// `MasterAvatarCoordinate`, the columns the player chain reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CoordinateRow {
-    pub(crate) costume_assetbundle_name: Option<String>,
-    pub(crate) accessory_assetbundle_name: Option<String>,
-    pub(crate) skin_color_code: Option<String>,
-}
-
-/// The avatar wear masters (`avatar-costumes.json`, `avatar-accessories.json`,
-/// `avatar-skin-colors.json`, `avatar-coordinates.json`). Each map is `None`
-/// until its master resolves, and stays `None` when the root lacks it.
-#[derive(Resource, Clone, Debug, Default)]
-pub(crate) struct AvatarMasters {
-    /// id -> `assetbundleName`.
-    pub(crate) costumes: Option<BTreeMap<i32, String>>,
-    /// id -> `assetbundleName`.
-    pub(crate) accessories: Option<BTreeMap<i32, String>>,
-    /// id -> `colorCode`.
-    pub(crate) skin_colors: Option<BTreeMap<i32, String>>,
-    pub(crate) coordinates: Option<BTreeMap<i32, CoordinateRow>>,
-}
-
-impl AvatarMasters {
-    /// The ids the present masters do not hold.
-    pub(crate) fn check(&self, avatar: &UserAvatar) -> Result<(), String> {
-        let known = |map: &Option<BTreeMap<i32, String>>, id: Option<i32>| {
-            id.is_none_or(|id| map.as_ref().is_none_or(|map| map.contains_key(&id)))
-        };
-        for (field, ok) in [
-            (FIELDS[0], known(&self.costumes, avatar.costume)),
-            (FIELDS[1], known(&self.accessories, avatar.accessory)),
-            (FIELDS[2], known(&self.skin_colors, avatar.skin_color)),
-            (
-                FIELDS[3],
-                avatar.coordinate.is_none_or(|id| {
-                    self.coordinates
-                        .as_ref()
-                        .is_none_or(|map| map.contains_key(&id))
-                }),
-            ),
-        ] {
-            if !ok {
-                return Err(format!("{SECTION}.{field} names no master row"));
-            }
+/// The ids the present masters do not hold.
+pub(crate) fn check(masters: &AvatarMasters, avatar: &UserAvatar) -> Result<(), String> {
+    let known = |map: &Option<BTreeMap<i32, String>>, id: Option<i32>| {
+        id.is_none_or(|id| map.as_ref().is_none_or(|map| map.contains_key(&id)))
+    };
+    let coordinate_known = avatar.coordinate.is_none_or(|id| {
+        masters
+            .coordinates
+            .as_ref()
+            .is_none_or(|map| map.contains_key(&id))
+    });
+    for (field, ok) in [
+        (FIELDS[0], known(&masters.costumes, avatar.costume)),
+        (FIELDS[1], known(&masters.accessories, avatar.accessory)),
+        (FIELDS[2], known(&masters.skin_colors, avatar.skin_color)),
+        (FIELDS[3], coordinate_known),
+    ] {
+        if !ok {
+            return Err(format!("{SECTION}.{field} names no master row"));
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    /// The master row whose value equals `wanted` (the native instrument's
-    /// reverse lookup from a bundle name or colour code).
-    fn id_of(map: &Option<BTreeMap<i32, String>>, wanted: &str) -> Option<i32> {
-        map.as_ref()?
-            .iter()
-            .find(|(_, value)| value.as_str() == wanted)
-            .map(|(id, _)| *id)
-    }
+/// The master row whose value equals `wanted` (the native instrument's
+/// reverse lookup from a bundle name or colour code).
+fn id_of(map: &Option<BTreeMap<i32, String>>, wanted: &str) -> Option<i32> {
+    map.as_ref()?
+        .iter()
+        .find(|(_, value)| value.as_str() == wanted)
+        .map(|(id, _)| *id)
 }
 
 fn string_rows(text: &str, table: &str, column: &str) -> Result<BTreeMap<i32, String>, String> {
@@ -279,7 +219,7 @@ impl AvatarInstrument {
             ),
         ] {
             if let Some(value) = value {
-                match AvatarMasters::id_of(map, value) {
+                match id_of(map, value) {
                     Some(id) => *slot = Some(id),
                     None => unresolved.push(format!("{name}={value:?} names no master row")),
                 }
@@ -290,23 +230,8 @@ impl AvatarInstrument {
 }
 
 // ---------------------------------------------------------------------------
-// Client copy and schema
+// Schema
 // ---------------------------------------------------------------------------
-
-/// The client's copy (`UserDataManager.UserAvatar`), set by responses only.
-#[derive(Resource, Debug, Clone, Default)]
-pub(crate) struct ClientUserAvatar {
-    pub(crate) avatar: UserAvatar,
-    /// Responses that carried the section.
-    pub(crate) revision: u64,
-}
-
-impl ClientUserAvatar {
-    pub(crate) fn apply(&mut self, avatar: UserAvatar) {
-        self.avatar = avatar;
-        self.revision += 1;
-    }
-}
 
 pub(crate) fn schema_sections() -> Value {
     json!([{
@@ -324,6 +249,7 @@ pub(crate) fn schema_sections() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::client::avatar::value;
     use super::*;
 
     fn masters() -> AvatarMasters {
@@ -370,13 +296,12 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
-        assert!(masters().check(&edited).is_ok());
+        assert!(check(&masters(), &edited).is_ok());
         edited.accessory = Some(7);
-        assert!(masters()
-            .check(&edited)
+        assert!(check(&masters(), &edited)
             .unwrap_err()
             .contains("avatarAccessoryId"));
-        assert!(AvatarMasters::default().check(&edited).is_ok());
+        assert!(check(&AvatarMasters::default(), &edited).is_ok());
     }
 
     #[test]

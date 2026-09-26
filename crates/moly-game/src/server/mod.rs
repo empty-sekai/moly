@@ -3,7 +3,11 @@
 //! server's values to the client's copies.
 //!
 //! **What is server and what is client.** The document (schemaVersion 2,
-//! [`document`]) holds only server-decided values. The client's copies are
+//! [`document`]) holds only server-decided values. The client side of the
+//! newer sections ([`client`]: the music record settings, the avatar wear and
+//! its masters, the home actions' requests, the native instruments) depends
+//! on no server internals, so it can sit below the server in the crate
+//! graph; the model here is its only writer. The client's copies are
 //! [`ClientUserData`] (`UserDataManager`'s `UserMysekaiGamedata`,
 //! `UserMysekaiStamina`, `UserMysekaiColorfulPass` and the server date it
 //! last got) and the application's local lists (the local document,
@@ -77,6 +81,7 @@
 //! environment variable ([`instrument_env`]).
 
 pub(crate) mod avatar;
+pub(crate) mod client;
 pub(crate) mod clock;
 pub(crate) mod delivery;
 pub(crate) mod document;
@@ -158,7 +163,7 @@ pub(crate) struct Masters {
     /// The music record ids (`mysekai-music-records.json`).
     pub(crate) music_records: Option<Vec<i32>>,
     /// The avatar wear masters.
-    pub(crate) avatar: avatar::AvatarMasters,
+    pub(crate) avatar: client::avatar::AvatarMasters,
     pub(crate) missing: Vec<String>,
 }
 
@@ -241,9 +246,9 @@ pub(crate) struct ServerResponse {
     /// The birthday-party delivery sections it carries.
     pub(crate) delivery: delivery::DeliveryUpdate,
     /// `userMysekaiMusicPlayFixtureSettings` when it carries them.
-    pub(crate) music: Option<Vec<music::MusicPlaySetting>>,
+    pub(crate) music: Option<Vec<client::music::MusicPlaySetting>>,
     /// `userAvatar` when it carries it.
-    pub(crate) avatar: Option<avatar::UserAvatar>,
+    pub(crate) avatar: Option<client::avatar::UserAvatar>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -736,6 +741,8 @@ pub(crate) fn check_seed_local(text: &str) -> Result<(), String> {
 /// The browser game: the seed's documents (checked by the seed parser),
 /// persisted through the page backend.
 pub(crate) fn install_from_seed(server: Option<String>, local_text: Option<String>) {
+    // The page's game mode: every native instrument is off from here on.
+    client::enter_game_mode();
     let model = match server {
         Some(text) => {
             let (doc, pending) = document::parse_v2(&text).unwrap_or_else(|reason| {
@@ -760,22 +767,10 @@ pub(crate) fn installed() -> bool {
     with_model(|_| ()).is_some()
 }
 
-/// The environment variable of a native instrument. Game mode reads none:
-/// every instrument is off there, and the one document is the only input.
-pub(crate) fn instrument_env(name: &str) -> Option<String> {
-    if crate::browser_game::game_mode_active() {
-        return None;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = name;
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::env::var(name).ok()
-    }
-}
+/// The native instruments' environment variables (read by the owners'
+/// seams as `crate::server::instrument_env`; the function lives with the
+/// client side).
+pub(crate) use client::instrument_env;
 
 /// The native overlay of the groups' instruments onto the document; the
 /// avatar instrument names bundles and a colour, so it waits for the masters.
@@ -868,12 +863,6 @@ pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<
             .npc_slice(&live.schedules, client.gamedata.refreshed_at)
             .to_string()
     })
-}
-
-/// Whether the model's masters have all resolved (present or named missing).
-#[allow(dead_code)] // Read by the owners' seams.
-pub(crate) fn masters_resolved() -> bool {
-    with_model(|model| model.masters_ready).unwrap_or(false)
 }
 
 /// The server clock's epoch millisecond, once a model is installed.
@@ -1339,8 +1328,8 @@ fn deliver(
     mut local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>,
     mut total_exp: Option<ResMut<crate::mysekai_rank::UserTotalExp>>,
     mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
-    mut music_copy: ResMut<music::ClientMusicPlaySettings>,
-    mut avatar_copy: ResMut<avatar::ClientUserAvatar>,
+    mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
+    mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1457,7 +1446,7 @@ fn deliver(
         "currentTimestamp": copy.current_timestamp(realtime),
         "birthdayParty": birthday.view(),
         "userMysekaiMusicPlayFixtureSettings": music_copy.view(),
-        "userAvatar": avatar::value(&avatar_copy.avatar),
+        "userAvatar": client::avatar::value(&avatar_copy.avatar),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1532,8 +1521,8 @@ impl Plugin for ServerPlugin {
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()
             .init_resource::<delivery::ClientBirthdayPartyData>()
-            .init_resource::<music::ClientMusicPlaySettings>()
-            .init_resource::<avatar::ClientUserAvatar>()
+            .init_resource::<client::music::ClientMusicPlaySettings>()
+            .init_resource::<client::avatar::ClientUserAvatar>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(
@@ -1549,6 +1538,8 @@ impl Plugin for ServerPlugin {
                     .chain(),
             )
             .add_systems(Last, persist_local);
+        let endpoint = app.world_mut().register_system(home_action::handle);
+        app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
     }
 }
 

@@ -123,7 +123,7 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(
         }
     }
     super::music::check_records(&doc.music_settings, masters.music_records.as_deref())?;
-    masters.avatar.check(&doc.avatar)?;
+    super::avatar::check(&masters.avatar, &doc.avatar)?;
     if let Some((gates, skins)) = &masters.gates {
         if !gates.contains(&doc.gate.gate_id) {
             return Err(format!(
