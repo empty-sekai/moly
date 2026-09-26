@@ -39,12 +39,41 @@
 //! the reply, then state Gather while the stack still holds items, else Idle
 //! (published).
 //!
+//! `CanCollectResource(dropItem)`: a drop is the party's reward material,
+//! `ResourceType.mysekai_material` (41), whose arm of the method's switch is
+//! `CanCollectMaterial(resourceId, quantity)`. That answers yes at once when
+//! `IsMaterialReceivableOverPossessionLimit`: the material's master row has
+//! `MysekaiMaterialType` game_character (4) or birthday_party (7); a missing
+//! row is a LogError and a no. Otherwise it sums the quantity of every
+//! Gather stack of the harvest user data, the quantity and the user's
+//! material possession and compares them with the possession limit of the
+//! user's possession level. A no leaves the drop where it is and runs
+//! `HarvestUtility.NoticeCollectItem` instead of the gather.
+//!
+//! `ShowRareDropEffect(rarity)` right after the view's `Init`: rarity_1,
+//! rarity_2 and rarity_3 play `_normalDropEffect`, `_rareDropEffect` and
+//! `_ultraRareDropEffect` (`ParticleSystem.Play()`, children included) and
+//! keep it as the current effect; rarity_4 plays nothing; a larger value
+//! throws. The hop's sequence starts with `StopAllDropEffect` (the three
+//! stop and clear) and ends with `ResumeCurrentDropEffect`.
+//!
 //! Named stand-ins and gaps: the landing height is the walk field's height,
-//! else the highest ground vertex within 2 m (the harvest drops' stand-in
-//! for the downward raycast); `CanCollectResource` (inventory capacity) is
-//! always yes; the collection notice and `ShowRareDropEffect` /
-//! `StopAllDropEffect` (particles) are not drawn; the view appears when its
-//! package has loaded (it is requested on the arrival).
+//! else the highest ground vertex within 2 m, the harvest drops' stand-in
+//! for `PlayDeliveryDropAnimationAsync`'s `Physics.Raycast` down onto the
+//! colliders: the product has no ray query on the site's colliders (they
+//! are cooked only in the weather collision scene, which answers sphere
+//! sweeps). The possession branch of `CanCollectMaterial` is not ported
+//! (every party's reward material in the master is birthday_party, so no
+//! delivery drop reaches it; one that does is answered yes and logged as
+//! WARN). The collection notices (`NoticeCollectItem`, the gather's) are
+//! not drawn. The drop effects are not drawn: in the drop documents the
+//! three view fields reference one system, `fx_stay_dropitem_birthday_rare_01
+//! /root` with five child rows, all drawn with `Mysekai/Effect/UberUnlit`;
+//! the prop documents carry no program catalogue for that shader and their
+//! rows carry no `useUnscaledTime`, so the site prop particle host (the
+//! harvest stay particles) refuses them, and the play is logged here only.
+//! The view appears when its package has loaded (it is requested on the
+//! arrival).
 
 use bevy::diagnostic::FrameCount;
 use bevy::gltf::Gltf;
@@ -413,6 +442,24 @@ pub(crate) fn spawn(
                 Visibility::default(),
             ))
             .id();
+        let effect = match rarity {
+            0 => "_normalDropEffect",
+            1 => "_rareDropEffect",
+            2 => "_ultraRareDropEffect",
+            3 => "nothing",
+            other => panic!(
+                "[delivery-drop] ShowRareDropEffect: rarity {other} is out of range (the source throws ArgumentOutOfRangeException)"
+            ),
+        };
+        info!(
+            "[delivery-drop] view uid {}: ShowRareDropEffect(rarity {rarity}) plays {effect}{} (not drawn: the prop particle host refuses the UberUnlit rows)",
+            model.uid,
+            if item.with_animation {
+                "; the hop starts with StopAllDropEffect and ends with ResumeCurrentDropEffect"
+            } else {
+                ""
+            }
+        );
         if item.with_animation {
             play_drop_item_se(rarity, &mut se);
             let distance = start.distance(landing);
@@ -690,16 +737,26 @@ pub(crate) fn advance(
 
 /// Update: `OnUpdateGatherDropItem` (the controller's Update on the delivery
 /// site).
-pub(crate) fn gather(mut model: ResMut<DeliveryModel>, mut drops: Query<&mut DeliveryDropItem>) {
+pub(crate) fn gather(
+    mut model: ResMut<DeliveryModel>,
+    catalog: Option<Res<crate::harvest::catalog::HarvestCatalog>>,
+    mut warned: Local<bool>,
+    mut drops: Query<&mut DeliveryDropItem>,
+) {
     if model.site_id.is_none() || model.collision_drops.is_empty() {
         return;
     }
     let uids = std::mem::take(&mut model.collision_drops);
     for uid in uids {
-        if model.drop_model(uid).is_none() {
+        let Some(drop) = model.drop_model(uid) else {
+            continue;
+        };
+        if !can_collect_resource(catalog.as_deref(), &drop, &mut warned) {
+            info!(
+                "[delivery-drop] uid {uid}: CanCollectResource no: HarvestUtility.NoticeCollectItem (not drawn); the drop stays"
+            );
             continue;
         }
-        // CanCollectResource: the mock's yes.
         if let Some(mut item) = drops.iter_mut().find(|item| item.model.uid == uid) {
             if matches!(item.phase, DropPhase::Rest) {
                 item.phase = DropPhase::Fly {
@@ -710,6 +767,38 @@ pub(crate) fn gather(mut model: ResMut<DeliveryModel>, mut drops: Query<&mut Del
             }
         }
     }
+}
+
+/// `HarvestUserDataManager.CanCollectResource` for a drop (resource type
+/// `mysekai_material`, quantity 1): `CanCollectMaterial`'s
+/// `IsMaterialReceivableOverPossessionLimit` arm.
+fn can_collect_resource(
+    catalog: Option<&crate::harvest::catalog::HarvestCatalog>,
+    drop: &DropModel,
+    warned: &mut bool,
+) -> bool {
+    const GAME_CHARACTER: i32 = 4;
+    const BIRTHDAY_PARTY: i32 = 7;
+    let Some(material) = catalog.and_then(|catalog| catalog.materials.get(&drop.material_id))
+    else {
+        error!(
+            "[delivery-drop] IsMaterialReceivableOverPossessionLimit: no MasterMysekaiMaterial row for id {} (the source's LogError){}; CanCollectResource no",
+            drop.material_id,
+            if catalog.is_none() { ", the mysekai material master is not loaded" } else { "" }
+        );
+        return false;
+    };
+    if matches!(material.material_type, GAME_CHARACTER | BIRTHDAY_PARTY) {
+        return true;
+    }
+    if !*warned {
+        *warned = true;
+        warn!(
+            "[delivery-drop] CanCollectMaterial({}, 1): material type {} is not receivable over the possession limit; the possession check (Gather stacks, UserMysekaiMaterialPossession, the possession level's limit) is not ported: answered yes",
+            drop.material_id, material.material_type
+        );
+    }
+    true
 }
 
 /// `ScheduleExecuteSendGatherData`.
