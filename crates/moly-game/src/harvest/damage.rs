@@ -156,6 +156,7 @@ pub(crate) fn on_damage(
     frames: Res<FrameCount>,
     mut animator_calls: ResMut<PropAnimatorCalls>,
     clips: Option<Res<super::clips::HarvestClips>>,
+    mut particles: ResMut<super::particles::HarvestParticleCalls>,
 ) {
     let Some(configs) = configs else {
         return;
@@ -200,6 +201,7 @@ pub(crate) fn on_damage(
             &mut effects,
             &mut se,
             &mut animator_calls,
+            &mut particles,
             "harvest-hit",
         );
         // DamageAnimation on every kind.
@@ -257,6 +259,11 @@ pub(crate) fn on_damage(
                 ActionInterface::Multi => stats.multi_final += 1,
                 ActionInterface::Single => stats.single_hits += 1,
             }
+            // GetHarvestActionTime(null, tone): the listen clip's length.
+            let listen_length = clips
+                .as_deref()
+                .and_then(|clips| clips.get("mov_u000_site_listen01_o"))
+                .map_or(0.0, |clip| clip.length);
             change_after_object(
                 &mut commands,
                 hit.target,
@@ -267,11 +274,14 @@ pub(crate) fn on_damage(
                 &mut node_visibility,
                 &mut effects,
                 u64::from(frames.0),
-                // GetHarvestActionTime(null, tone): the listen clip's length.
-                clips
-                    .as_deref()
-                    .and_then(|clips| clips.get("mov_u000_site_listen01_o"))
-                    .map_or(0.0, |clip| clip.length),
+                listen_length,
+            );
+            super::particles::change_after_object(
+                &mut particles,
+                hit.target,
+                object.class,
+                listen_length,
+                u64::from(frames.0),
             );
             object.collision = false;
             tail.push_str(" -> ChangeAfterObject + RemoveCollisionObject");
@@ -361,6 +371,12 @@ fn change_after_object(
             effects.pending.push(EffectHook::at(131, position));
         }
         "MysekaiAreadDriftageView" | "MysekaiAreaToolBoxView" => {
+            // The driftage view first disables `_navmeshObstacle`.
+            if object.class == "MysekaiAreadDriftageView" {
+                commands.queue(move |world: &mut World| {
+                    super::obstacles::switch(world, root, "_navmeshObstacle", false, "ChangeAfterObject");
+                });
+            }
             commands.entity(root).insert(HarvestAfterForm::DelayedHide {
                 delay: Delay::new(DELAYED_HIDE, frame),
             });
@@ -369,7 +385,7 @@ fn change_after_object(
         // waits 2.0 s and stops the cut particle: the opened box stays.
         // PlayDamageEffect stopped the field effect (its node hides here);
         // ChangeAfterObject waits the listen clip's length, then stops the
-        // SE and fades the BGM back (the fade is not ported).
+        // SE and fades the BGM back.
         "MysekaiAreaToneView" => {
             hide(object_node, root_visibility, node_visibility);
             commands.entity(root).insert(HarvestAfterForm::ToneStop {
@@ -377,8 +393,11 @@ fn change_after_object(
             });
         }
         "MysekaiAreaTreasureBoxView" => {
+            commands.queue(move |world: &mut World| {
+                super::obstacles::switch(world, root, "_treasureBoxLidNavMeshObstacle", true, "ChangeAfterObject");
+            });
             info!(
-                "[harvest] {}#{} ChangeAfterObject: the opened box stays (lid obstacle and cut particle not modelled)",
+                "[harvest] {}#{} ChangeAfterObject: the opened box stays (lid obstacle enabled; the cut particle stops after 2.0 s)",
                 object.leaf, object.fixture_id
             );
         }
@@ -554,9 +573,15 @@ pub(crate) fn advance_after_forms(
                     let owner = entity;
                     commands.queue(move |world: &mut World| {
                         crate::audio::dispose_scoped_se(world, owner);
+                        match world.get_resource_mut::<crate::audio::MysekaiBgmFade>() {
+                            Some(mut fade) => {
+                                fade.start_fade(crate::audio::BgmFadeTarget::Initial)
+                            }
+                            None => error!("[harvest-tone] ChangeAfterObject: the BGM manager fade is not installed; StartFade(InitialVolume) not run"),
+                        }
                     });
                     info!(
-                        "[harvest-tone] {}#{} ChangeAfterObject: the listen time passed; the tone SE stopped (the BGM fade back is not ported)",
+                        "[harvest-tone] {}#{} ChangeAfterObject: the listen time passed; the tone SE stopped, MysekaiBGMManager.StartFade(InitialVolume)",
                         object.leaf, object.fixture_id
                     );
                     commands.entity(entity).remove::<HarvestAfterForm>();
@@ -596,6 +621,7 @@ fn damage_effect(
     effects: &mut HarvestEffectHooks,
     se: &mut SeRequests,
     animator_calls: &mut PropAnimatorCalls,
+    particles: &mut super::particles::HarvestParticleCalls,
     label: &'static str,
 ) -> (Vec<&'static str>, Vec<u16>) {
     // The multi effects stand 0.2 m back toward the player and 0.35 m up.
@@ -639,11 +665,28 @@ fn damage_effect(
             match object.class {
                 "MysekaiAreaPlantView" => hooks.push(101),
                 "MysekaiAreadDriftageView" => hooks.push(133),
-                // PlayDamageEffect: the cut particle plays (not drawn) and
-                // the Animator opens.
-                "MysekaiAreaTreasureBoxView" => animator_calls
-                    .0
-                    .push((target, PropCall::SetBool("open", true))),
+                // PlayDamageEffect: the cut particle plays and the Animator
+                // opens.
+                "MysekaiAreaTreasureBoxView" => {
+                    particles.queue(
+                        target,
+                        "_treasureBoxNormalCutEffect",
+                        super::particles::ParticleOp::Play,
+                        super::particles::NullRef::Unchecked,
+                        "PlayDamageEffect",
+                    );
+                    animator_calls
+                        .0
+                        .push((target, PropCall::SetBool("open", true)))
+                }
+                // PlayDamageEffect: the field effect stops.
+                "MysekaiAreaToneView" => particles.queue(
+                    target,
+                    "_toneFieldEffect",
+                    super::particles::ParticleOp::Stop,
+                    super::particles::NullRef::Unchecked,
+                    "PlayDamageEffect",
+                ),
                 _ => {}
             }
             if is_boost
@@ -701,6 +744,7 @@ pub(crate) fn on_effect_only(
     mut se: ResMut<SeRequests>,
     mut effects: ResMut<HarvestEffectHooks>,
     mut animator_calls: ResMut<PropAnimatorCalls>,
+    mut particles: ResMut<super::particles::HarvestParticleCalls>,
 ) {
     let player = players.single().ok().map(|transform| transform.translation);
     for request in std::mem::take(&mut requests.0) {
@@ -718,6 +762,7 @@ pub(crate) fn on_effect_only(
             &mut effects,
             &mut se,
             &mut animator_calls,
+            &mut particles,
             "harvest-effect-only",
         );
         let punched = matches!(object.interface, ActionInterface::Multi);

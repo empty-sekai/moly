@@ -67,7 +67,6 @@ mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
 mod home_action;
-mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
@@ -263,7 +262,6 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
-        harvest_particles::HarvestParticlePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
     app.add_plugins(ui_particle::UiParticlePlugin);

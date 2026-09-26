@@ -37,16 +37,54 @@
 //! The menu's camera reset while this state is current (`ResetCameraSetting`,
 //! a 0.5 s tween back to the model OnEnter copied) is the camera module's.
 //!
-//! Named gaps: the BGM fade inside the tone's radius (`StartFade(0)` on enter, back to
-//! the initial volume on exit and after the listen) is not ported: the BGM
-//! channel has no manager fade; the field effect's particles are not drawn;
-//! the SE plays through the ordinary one-shot path (the environment SE's own
-//! parameters are logged).
+//! The tone view's presence: the player's collision owner dispatches a
+//! harvest-type object's enter and exit to the view
+//! (`ISingleActionObject.OnCollisionEnter / OnCollisionExit`); the tone view
+//! answers with `MysekaiBGMManager.StartFade(0)` on enter and
+//! `StartFade(InitialVolume)` on exit. An object removed from the collision
+//! manager after its last attack gets no exit (the manager skips its remove
+//! targets), so after a harvest the BGM comes back with `ChangeAfterObject`.
+//!
+//! Named gaps: the field effect's particles (stopped through
+//! [`super::particles`]) are not drawn until the package's archive is
+//! exported; the SE plays through the ordinary one-shot path (the
+//! environment SE's own parameters are logged).
 
 use bevy::prelude::*;
 
+use crate::audio::{BgmFadeTarget, MysekaiBgmFade};
 use crate::camera::{CameraStateType, FieldCameraModel, FieldCameraState};
 use crate::player::PlayerControlled;
+
+use super::HarvestObject;
+
+/// `MysekaiAreaToneView.OnCollisionEnter` (`StartFade(0)`) and
+/// `OnCollisionExit` (`StartFade(InitialVolume)`); other views ignore it here.
+pub(crate) fn on_collision(object: &HarvestObject, enter: bool, fade: Option<&mut MysekaiBgmFade>) {
+    if object.class != "MysekaiAreaToneView" {
+        return;
+    }
+    let target = if enter {
+        BgmFadeTarget::Volume(0.0)
+    } else {
+        BgmFadeTarget::Initial
+    };
+    match fade {
+        Some(fade) => {
+            fade.start_fade(target);
+            info!(
+                "[harvest-tone] {}#{} OnCollision{}: MysekaiBGMManager.StartFade({target:?})",
+                object.leaf,
+                object.fixture_id,
+                if enter { "Enter" } else { "Exit" }
+            );
+        }
+        None => error!(
+            "[harvest-tone] {}#{}: the BGM manager fade is not installed; StartFade({target:?}) not run",
+            object.leaf, object.fixture_id
+        ),
+    }
+}
 
 /// `CAMERA_ANIMATION_TIME`.
 const FORWARD: f32 = 4.5;
