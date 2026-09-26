@@ -547,7 +547,6 @@ impl RuntimeObstacles {
     /// `NavMeshObstacle.enabled` for every obstacle on this node (e.g. a view
     /// that turns a serialized-off obstacle on). Takes effect on the next
     /// obstacle update; a re-enabled obstacle starts from a fresh snapshot.
-    #[allow(dead_code)] // for the object views that toggle their obstacles
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
         for (record, state) in &mut self.0 {
             if record.enabled != enabled {
@@ -555,6 +554,27 @@ impl RuntimeObstacles {
                 *state = carve::obstacle::ObstacleState::default();
             }
         }
+    }
+
+    /// The number of obstacle records on this node.
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `NavMeshObstacle::SetRadius(radius(current))` on record `index`: the
+    /// value floored at 1e-5 becomes the extents' x and z; returns the radius
+    /// before and after. The setter marks the obstacle dirty, so its next
+    /// update snapshots it again; the state restarts from a fresh snapshot,
+    /// which is that dirty update for an obstacle that has not moved (the
+    /// harvest views call it in their Setup).
+    pub(crate) fn set_radius(&mut self, index: usize, radius: impl FnOnce(f32) -> f32) -> Option<(f32, f32)> {
+        let (record, state) = self.0.get_mut(index)?;
+        let before = record.extents[0];
+        let after = radius(before).max(1e-5);
+        record.extents[0] = after;
+        record.extents[2] = after;
+        *state = carve::obstacle::ObstacleState::default();
+        Some((before, after))
     }
 }
 
