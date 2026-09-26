@@ -1096,15 +1096,16 @@ fn source_emission_disabled(system: &Value) -> bool {
         .is_ok_and(|source| source.enabled.len() == 1 && source.enabled[0] == "InitialModule")
 }
 
-/// Shapes whose kernels exist only on the native birth path: Box, the
-/// BurstSpread circle and single-sided edge, and the cone in its Loop,
-/// PingPong and BurstSpread arc modes. Their births read the accepted count
-/// of the StartParticles call, the lane index within it or the arc clock,
-/// none of which the legacy step carries.
+/// Shapes whose kernels exist only on the native birth path: Box, BoxShell
+/// and BoxEdge, the BurstSpread circle and single-sided edge, and the cone in
+/// its Loop, PingPong and BurstSpread arc modes. Their births read the
+/// accepted count of the StartParticles call, the lane index within it or the
+/// arc clock, none of which the legacy step carries (the three boxes have no
+/// legacy kernel at all).
 fn shape_needs_native_birth(shape: &moly_law::particle::schema::ShapeParams) -> bool {
     use moly_law::particle::schema::ShapeMode;
     match shape.shape_type.as_str() {
-        "Box" => true,
+        "Box" | "BoxShell" | "BoxEdge" => true,
         "Circle" => shape.controls.arc_mode == Some(ShapeMode::BurstSpread),
         "SingleSidedEdge" => shape.controls.radius_mode == Some(ShapeMode::BurstSpread),
         "Cone" => matches!(shape.controls.arc_mode, Some(ShapeMode::Loop | ShapeMode::PingPong | ShapeMode::BurstSpread)),
@@ -1126,7 +1127,7 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
         return Some("missing/invalid authored shape scale".into());
     }
     let mode = if kind == "SingleSidedEdge" { "radiusMode" } else { "arcMode" };
-    // Box reads no mode. The BurstSpread circle and edge and the cone's Loop,
+    // The three boxes read no mode. The BurstSpread circle and edge and the cone's Loop,
     // PingPong and BurstSpread modes have native kernels; they are admitted
     // only on the native birth path, which the judge checks once the route is
     // known.
@@ -1135,7 +1136,8 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
         ("Circle", Some("BurstSpread")) | ("SingleSidedEdge", Some("BurstSpread"))
             | ("Cone", Some("Loop" | "PingPong" | "BurstSpread"))
     );
-    if !matches!(kind, "Mesh" | "Box") && !native_only_mode && shape.get(mode).and_then(Value::as_str) != Some("Random") {
+    if !matches!(kind, "Mesh" | "Box" | "BoxShell" | "BoxEdge") && !native_only_mode
+        && shape.get(mode).and_then(Value::as_str) != Some("Random") {
         return Some(format!("{mode} {:?} consumer pending", shape.get(mode)));
     }
     if shape.get("alignToDirection").and_then(Value::as_bool) != Some(false) {
@@ -1984,7 +1986,8 @@ fn judge_in_host(
             return None;
         }
         let shape_type = shape.get("type").and_then(Value::as_str).unwrap_or("");
-        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut" | "Mesh" | "Box") {
+        if !matches!(shape_type, "Circle" | "Cone" | "ConeVolume" | "Sphere" | "Hemisphere" | "SingleSidedEdge" | "Donut" | "Mesh"
+            | "Box" | "BoxShell" | "BoxEdge") {
             tally.shape.push(shape_type.to_owned()); return None;
         }
         if let Some(reason) = source_shape_admission(shape) {

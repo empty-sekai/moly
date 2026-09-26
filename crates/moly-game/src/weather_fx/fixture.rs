@@ -962,7 +962,7 @@ mod tests {
                 let kind = shape["type"].as_str().unwrap_or("");
                 let mode = if kind == "SingleSidedEdge" { &shape["radiusMode"] } else { &shape["arcMode"] };
                 let native_only = system["shapeEnabled"] == true && match (kind, mode.as_str()) {
-                    ("Box", _) => true,
+                    ("Box" | "BoxShell" | "BoxEdge", _) => true,
                     ("Circle" | "SingleSidedEdge", Some("BurstSpread")) => true,
                     ("Cone", Some("Loop" | "PingPong" | "BurstSpread")) => true,
                     _ => false,
