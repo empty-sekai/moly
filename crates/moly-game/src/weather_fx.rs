@@ -3384,6 +3384,66 @@ pub(crate) fn refresh_effect_visible(
     }
 }
 
+/// How the engine updates one installed system in a frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FrameUpdate {
+    /// Neither listed in the manager nor collected by a parent's update.
+    Skipped,
+    /// Listed and not a target of an updated parent: it updates itself with
+    /// the frame's delta.
+    Root,
+    /// A target of an updated parent: that update collects it, listed or not,
+    /// with the frame's delta when its parent or itself was playing at the
+    /// end of the last frame and with none otherwise.
+    Collected { delta: bool },
+}
+
+/// Each system's update this frame. The engine marks, from every listed
+/// system, the sub-emitter targets below it; the update roots are the listed
+/// systems left unmarked, and each root's update collects its targets (and
+/// theirs) whether they are listed or not, reading both play words before
+/// anything of this frame changes them. Scheduling a collected target's job
+/// plays it again and lists it; the frame's end unlists any system that holds
+/// no particle once its emission has stopped. So a target runs whenever its
+/// parent runs, and after its parent leaves the manager it runs on its own
+/// until its last particle dies. A system refused this frame is not updated,
+/// and neither is what only its update would collect.
+fn frame_updates(systems: &[(&mut LiveWeatherEmitter, bool)], refused: &[Entity]) -> Vec<FrameUpdate> {
+    // Each target has one parent in its effect instance.
+    let parents: Vec<Option<usize>> = systems.iter().enumerate().map(|(index, (live, _))| {
+        if !live.native_birth.as_ref().is_some_and(|birth| birth.target.is_some()) {
+            return None;
+        }
+        systems.iter().enumerate().position(|(other, (parent, _))| other != index
+            && Arc::ptr_eq(&parent.effect_clock, &live.effect_clock)
+            && direct_targets(&parent.runtime).iter().any(|target| *target == live.node))
+    }).collect();
+    fn resolve(index: usize, systems: &[(&mut LiveWeatherEmitter, bool)], refused: &[Entity],
+        parents: &[Option<usize>], memo: &mut [Option<FrameUpdate>], depth: usize) -> FrameUpdate {
+        if let Some(update) = memo[index] {
+            return update;
+        }
+        let live = &systems[index].0;
+        let update = if refused.contains(&live.draw) {
+            FrameUpdate::Skipped
+        } else {
+            // A chain longer than the systems is a cycle, which the edges
+            // never form; it is read as no parent.
+            let parent = parents[index].filter(|_| depth < systems.len())
+                .filter(|&parent| resolve(parent, systems, refused, parents, memo, depth + 1) != FrameUpdate::Skipped);
+            match parent {
+                Some(parent) => FrameUpdate::Collected { delta: systems[parent].0.play.playing() || live.play.playing() },
+                None if live.play.managed() => FrameUpdate::Root,
+                None => FrameUpdate::Skipped,
+            }
+        };
+        memo[index] = Some(update);
+        update
+    }
+    let mut memo = vec![None; systems.len()];
+    (0..systems.len()).map(|index| resolve(index, systems, refused, &parents, &mut memo, 0)).collect()
+}
+
 /// Marks every birth edge whose child is an installed target of the same
 /// effect instance (the instance's shared clock) delivered.
 fn link_sub_emitter_targets(live: &mut [LiveWeatherEmitter]) {
@@ -3844,7 +3904,12 @@ pub(crate) fn advance(
             first_play_warm(&mut systems, index, &ctx, &mut refused);
         }
     }
-    for (live, emitting) in systems.iter_mut() {
+    // Which systems the engine updates this frame, and how (frame_updates).
+    let updates = frame_updates(&systems, &refused);
+    // Collected targets whose frame end and culling pass wait for this
+    // frame's commands (see below).
+    let mut collected_ends = Vec::new();
+    for (index, (live, emitting)) in systems.iter_mut().enumerate() {
         let emitting = *emitting;
         let LiveWeatherEmitter { draw, runtime: system, effect_animator, animated_chain, frame_clock, play, .. } = &mut **live;
         let draw = *draw;
@@ -3861,16 +3926,26 @@ pub(crate) fn advance(
             system.node_affine = chain.affine(|path| animator.rotation(path));
         }
         play.played_bounds(system, &compose_to_world(system, &ctx));
-        // A culled or stopped system is out of the manager: no update, no
-        // bounds, no play-state transition; it keeps its particles.
-        if play.managed() {
+        // A culled or stopped system that no parent's update collects is out
+        // of the manager: no update, no bounds, no play-state transition; it
+        // keeps its particles.
+        let delta = match updates[index] {
+            FrameUpdate::Skipped => None,
+            FrameUpdate::Root => Some(true),
+            FrameUpdate::Collected { delta } => {
+                play.keep_updating(now);
+                Some(delta)
+            }
+        };
+        if let Some(delta) = delta {
             let frame_dt = match frame_clock {
                 crate::particle_runtime::FrameClock::Scaled => Some(dt),
                 crate::particle_runtime::FrameClock::Unscaled => unscaled.as_deref().map(|clock| clock.delta()),
             };
             match frame_dt {
                 Some(frame_dt) => {
-                    match crate::particle_runtime::advance_frame(system, frame_dt, emitting, &ctx, |s| play.slice_start(s, now)) {
+                    let step_dt = if delta { frame_dt } else { 0.0 };
+                    match crate::particle_runtime::advance_frame(system, step_dt, emitting, &ctx, |s| play.slice_start(s, now)) {
                         Ok(true) => play.update_bounds(system, &compose_to_world(system, &ctx)),
                         Ok(false) => {}
                         Err(reason) => {
@@ -3886,10 +3961,19 @@ pub(crate) fn advance(
                     error!(effect=%system.effect, node=%system.node, "useUnscaledTime system has no unscaled clock this frame");
                 }
             }
-            // Every managed system is stepped in this frame, the frame its
+            // Every updated system is stepped in this frame, the frame its
             // update job is scheduled in; Update2 then needs a non-zero delta
-            // of the system's clock. Without a clock no update ran.
-            play.end_update(system, now, frame_dt.is_some_and(|delta| delta != 0.0));
+            // of the system's clock (the clock's, not the collected one's).
+            // Without a clock no update ran.
+            let update2 = frame_dt.is_some_and(|delta| delta != 0.0);
+            // A collected target ends its frame after its parents' commands of
+            // this frame reached it: the engine's frame end counts the births
+            // they gave it.
+            if matches!(updates[index], FrameUpdate::Collected { .. }) {
+                collected_ends.push((index, update2));
+                continue;
+            }
+            play.end_update(system, now, update2);
         }
         // The frame's culling pass: the renderer's world box from the last
         // bounds and the camera's planes, before this frame's geometry (the
@@ -3903,6 +3987,11 @@ pub(crate) fn advance(
     // Every target's own frame has run: the parents' commands of this frame
     // now reach their targets, and the geometry below shows their births.
     deliver_sub_emitter_commands(&mut systems, dt);
+    for (index, update2) in collected_ends {
+        let LiveWeatherEmitter { runtime: system, play, .. } = &mut *systems[index].0;
+        play.end_update(system, now, update2);
+        play.render_pass(system, &compose_to_world(system, &ctx), &pass, now);
+    }
     for (live, _) in systems.iter_mut() {
         // A system refused this frame is retired below and draws nothing.
         if refused.contains(&live.draw) {

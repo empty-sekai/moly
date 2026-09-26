@@ -378,6 +378,22 @@ impl PlayState {
         self.playing && !self.culled
     }
 
+    /// The play word alone (playing), which a parent's update reads when it
+    /// collects this system as a sub-emitter target.
+    pub(super) fn playing(&self) -> bool {
+        self.playing
+    }
+
+    /// A parent's update collected this target: scheduling its job plays it
+    /// again (and lists it in the manager when it was not), stops its
+    /// emission and stamps the stop time with the frame's time. Its own
+    /// emission never runs; its births come from its parents' commands.
+    pub(super) fn keep_updating(&mut self, now: f64) {
+        self.playing = true;
+        self.stop_emitting = true;
+        self.stop_time = now;
+    }
+
     fn cullable(&self) -> Option<&Cullable> {
         match &self.culling { Culling::Cullable(c) => Some(c), _ => None }
     }
