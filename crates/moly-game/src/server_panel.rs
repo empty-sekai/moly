@@ -1052,6 +1052,7 @@ impl Plugin for ServerPanelPlugin {
                     load,
                     crate::fixture::region::load,
                     crate::fixture_activity_data::load_together,
+                    crate::npc_talk_lottery::load_talk_extras,
                 ),
             )
             .add_systems(
@@ -1059,6 +1060,7 @@ impl Plugin for ServerPanelPlugin {
                 (
                     crate::fixture::region::install,
                     crate::fixture_activity_data::parse_together,
+                    crate::npc_talk_lottery::parse_talk_extras,
                 ),
             )
             // The group fixture talks (types 3 and 6) after the frame's
