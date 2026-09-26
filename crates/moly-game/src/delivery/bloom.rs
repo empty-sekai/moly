@@ -25,11 +25,13 @@
 //! its rig files next to the manifest, and the site package's timeline
 //! tables in `site-timeline/`.
 //!
-//! Named gaps: the Control clips (the tree's particle effects) resolve their
-//! objects through the director's exposed-reference table and are refused by
-//! name (the particle host drives a fixture's own archive only); the flower
-//! Animators' own controller is not modelled (the director's evaluation is
-//! what the source shows while it is paused or held).
+//! The Control clips (the tree's particle effects) resolve their objects
+//! through the director's exposed-reference table and drive the site's own
+//! systems from the site package's particle document; the second of the two
+//! overlapping clips on one object is refused by name (see the effects
+//! owner). Named gap: the flower Animators' own controller is not modelled
+//! (the director's evaluation is what the source shows while it is paused or
+//! held).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -192,11 +194,12 @@ fn step(world: &mut World, bloom: &mut DeliveryBloom) {
                 }
                 let duration = request.definition.duration;
                 let bound = request.bindings.animations.len();
+                let controls = request.bindings.controls.len();
                 let mut timelines = world.resource_mut::<FixtureActivityTimelines>();
                 let token = timelines.request_start(request);
                 timelines.set_paused(token, true);
                 info!(
-                    "[delivery-bloom] ResetView: the place view's director {} of {} (duration {duration:.4} s) prepared on {} flowers, {bound} animation clips bound, {} Control clips refused; paused, held at time 0",
+                    "[delivery-bloom] ResetView: the place view's director {} of {} (duration {duration:.4} s) prepared on {} flowers, {bound} animation clips bound, {controls} Control clips driven, {} Control clips refused; paused, held at time 0",
                     plan.director,
                     plan.prefab,
                     flowers.len(),
@@ -532,6 +535,9 @@ fn try_prepare(
     if let Some(previous) = plan.draft.take() {
         request.bindings.silent_sounds = previous.silent_sounds;
         request.bindings.sounds = previous.sounds;
+        // The Control clips an earlier attempt prepared stay prepared: a
+        // dropped binding releases its systems.
+        request.bindings.controls = previous.controls;
     }
     let mut flowers = Vec::new();
     for rig in &plan.rigs {
@@ -605,7 +611,9 @@ fn try_prepare(
     silence(world, &mut request);
     plan.draft = Some(request.bindings.clone());
     sounds.map_err(pending)?;
-    timeline::prepare_source_effects(world, &mut request).map_err(pending)?;
+    let effects = timeline::prepare_source_effects(world, &mut request);
+    plan.draft = Some(request.bindings.clone());
+    effects.map_err(pending)?;
     timeline::validate_start(world, &request).map_err(pending)?;
     Ok((request, flowers))
 }
