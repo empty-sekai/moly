@@ -7,9 +7,10 @@
 //! any of them is requested: the fixture-particles-v2 index must list the
 //! cannon package and the three effect packages.
 //!
-//! - Listed: the effect pools and the speed-line prefab are requested at
-//!   once (the source builds its effect pools in the field scene's setup,
-//!   before any move), and each move requests the cannon's particle
+//! - Listed: the moves play their effects from the effect pools (built
+//!   from the effect table at startup, as the source builds them in the
+//!   field scene's setup, before any move), the speed-line prefab is
+//!   requested at once, and each move requests the cannon's particle
 //!   document. A listed product whose file is missing is a release defect
 //!   and fails loudly (the asset server's own ERROR lines).
 //! - Not listed: one WARN naming the missing packages and no request at
@@ -93,10 +94,7 @@ pub(crate) fn resolve(world: &mut World) {
     if missing.is_empty() {
         info!("[site-move] the release root lists the site-move effect products {:?}; requesting them", packages());
         world.insert_resource(SiteMoveProducts::Present);
-        let server = world.resource::<AssetServer>().clone();
-        world.insert_resource(super::SiteMoveEffects(super::effects::Effects::request(
-            &server,
-        )));
+        world.insert_resource(super::SiteMoveEffects(super::effects::Effects::default()));
         super::speed_lines::request(world);
     } else {
         warn!(
