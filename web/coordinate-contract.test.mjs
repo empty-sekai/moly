@@ -48,7 +48,7 @@ test("latest engine refuses old pinned descriptors and mixed release/snapshot ev
 test("preflight checks exact immutable descriptor pair and bytes before engine admission", async () => {
   const documents = sourceDocuments(), {release,snapshot} = descriptors(documents), calls = [];
   const options = { ...identity, assets:"https://cdn.test" + snapshot.assets, snapshotId:snapshot.id,
-    stageUrl:"https://host.test/moly/releases/new/stage.html", resourceOrigin:"https://cdn.test" };
+    pageUrl:"https://host.test/moly/releases/new/stage.html", releaseId:"new", resourcePrefix:"/moly/", resourceOrigin:"https://cdn.test" };
   const fetchImpl = async url => {
     const address = new URL(url); calls.push(address.href);
     const value = address.pathname.endsWith("integrity.json") ? release : address.pathname.endsWith("snapshot.json") ? snapshot : documents[address.pathname.split("/assets/")[1]];
@@ -75,7 +75,9 @@ test("preflight resolves snapshots below the explicit S3 resource base", async (
     assets: root + `snapshots/${snapshot.id}/assets/`,
     resourceBase: root,
     snapshotId: snapshot.id,
-    stageUrl: "https://host.test/moly/releases/new/stage.html",
+    pageUrl: "https://host.test/moly/releases/new/stage.html",
+    releaseId: "new",
+    resourcePrefix: "/moly/",
     resourceOrigin: "https://assets.pjsk.moe",
   };
   const fetchImpl = async url => {

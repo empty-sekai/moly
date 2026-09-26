@@ -306,11 +306,13 @@ async function loadEngine() {
       configuredBase ?? publicOrigin,
     );
     configuredResourceBase = configuredBase;
+    const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
     try {
       await preflightCoordinates({
         assets: new URL(params.get("assets"), location.href).href, region, version,
         packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
-        snapshotId: params.get("snapshot") ?? undefined, stageUrl: location.href,
+        snapshotId: params.get("snapshot") ?? undefined, pageUrl: location.href,
+        releaseId, resourcePrefix: "/moly/",
         resourceOrigin: publicOrigin, resourceBase: configuredBase,
       }, { signal: abort.signal });
       lastChunk = performance.now();
@@ -347,7 +349,6 @@ async function loadEngine() {
     backend = renderer.backend;
     mark("backendSelected");
     const localPath = new URL(`./pkg/${backend}/moly-app.js`, import.meta.url);
-    const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
     let path;
     if (configuredBase) {
       if (!releaseId) throw new Error("Invalid immutable stage path");
