@@ -18,10 +18,11 @@
 //! The MySekai scene starts with the cover already white, so the systems are
 //! installed paused with the 2 s they ran before the pause
 //! ([`crate::ui_particle::UiParticleHeadStart`]), stepped frame by frame at
-//! the default target frame rate. Named differences: the outgame's real frame
-//! times are not known, so every head-start step is 1/60 s (the systems seed
-//! themselves at random, as the source's `autoRandomSeed` ones do); the transitioner canvas is a screen-space
-//! overlay canvas with its own scaler (1920 x 1080, match width), and the
+//! the outgame's target frame rate. Named differences: the outgame's real
+//! frame times are not known, so every head-start step is 1/60 s (the
+//! systems seed themselves at random, as the source's `autoRandomSeed` ones
+//! do); the transitioner canvas is a screen-space overlay canvas with its
+//! own scaler (1920 x 1080, match width), and the
 //! particle bakes against the root canvas as every UIParticle host here does.
 //! Named gaps, both the host's (its warn line names the first): its document
 //! reader wants a RectTransform on every node of the root, and three of this
@@ -76,10 +77,17 @@ const CONTENT_ROOT_SCALE: f32 = 0.999;
 /// fade-in whose `onDone` pauses the particle.
 const PLAY_FADE_DELAY: f32 = 1.0;
 const PLAY_FADE_DURATION: f32 = 1.0;
-/// The frame dt the head start is stepped in (120 steps to the pause):
-/// `FramerateUtility.SetFrameRate` targets 60 frames a second, or 120 with
-/// the user's live setting `Use120FPS`, fitted to the display's refresh
-/// rate; the default 60 is taken. Real frame times vary around the target.
+/// The frame dt the head start is stepped in (120 steps to the pause). The
+/// start particle plays in the outgame scene, whose `OutGameController.Awake`
+/// calls `FramerateUtility.SetFrameRate(60)`: a target of 60 or more is kept
+/// when the display's refresh rate is a multiple of it (else a feasible rate
+/// derived from the refresh rate). The MySekai fps setting (normal 30, high
+/// 60, `MysekaiQualitySettings.SetFpsQuality`) is applied only in
+/// `SceneMysekai.Start`, after the particle is paused, so it does not govern
+/// these frames; after `Finish` the systems step at the product's own frame
+/// time, which follows that setting. Named: the refresh-rate fit is not
+/// ported (a refresh rate that is a multiple of 60 is assumed), and real
+/// frame times vary around the target.
 const HEAD_START_FRAME: f32 = 1.0 / 60.0;
 /// `ContentRoot`'s CanvasGroup alpha times the root's (both serialized 1).
 const START_PARTICLE_ALPHA: f32 = 1.0;
